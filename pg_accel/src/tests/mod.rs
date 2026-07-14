@@ -1582,15 +1582,10 @@ mod tests {
     fn test_adapter_postgis_raster_structure() {
         let a = crate::adapters::postgis_raster::adapter();
         assert_eq!(a.name, "postgis_raster");
-        let expected = a.functions.len();
-        assert!(expected >= 9, "expected full GPU raster adapter surface");
-
-        let gpu_count = a
-            .functions
-            .iter()
-            .filter(|f| f.strategy == crate::engine::registry::AccelStrategy::GpuRaster)
-            .count();
-        assert_eq!(gpu_count, expected);
+        assert!(
+            a.functions.is_empty(),
+            "raster overloads require the exact catalog/OID planner"
+        );
     }
 
     #[pg_test]

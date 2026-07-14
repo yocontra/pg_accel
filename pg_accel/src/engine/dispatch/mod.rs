@@ -123,29 +123,10 @@ pub enum RasterDispatchOp {
     Value,
 }
 
-impl RasterDispatchOp {
-    #[must_use]
-    fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "st_mapalgebra" => Some(Self::MapAlgebra),
-            "st_clip" => Some(Self::Clip),
-            "st_reclass" => Some(Self::Reclass),
-            "st_summarystats" => Some(Self::SummaryStats),
-            "st_resample" => Some(Self::Resample),
-            "st_slope" => Some(Self::Slope),
-            "st_aspect" => Some(Self::Aspect),
-            "st_hillshade" => Some(Self::Hillshade),
-            "st_value" => Some(Self::Value),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchOperation {
     Spatial(SpatialDispatchOp),
     H3(H3DispatchOp),
-    Raster(RasterDispatchOp),
     Dedicated,
     Deferred,
 }
@@ -194,9 +175,10 @@ fn resolve_dispatch_operation(
         AccelStrategy::GpuH3 => entry
             .and_then(|e| H3DispatchOp::from_name(e.name))
             .map_or(DispatchOperation::Deferred, DispatchOperation::H3),
-        AccelStrategy::GpuRaster => entry
-            .and_then(|e| RasterDispatchOp::from_name(e.name))
-            .map_or(DispatchOperation::Deferred, DispatchOperation::Raster),
+        // Raster is owned by its replacement-sensitive exact-OID planner.
+        // The generic registry/dispatcher must never recognize a same-name
+        // overload or user replacement.
+        AccelStrategy::GpuRaster => DispatchOperation::Deferred,
         AccelStrategy::GpuExpr
         | AccelStrategy::GpuSort
         | AccelStrategy::GpuReduce
@@ -301,10 +283,6 @@ pub unsafe fn dispatch(
         DispatchOperation::H3(op) => {
             // SAFETY: Caller guarantees main backend thread.
             unsafe { h3::dispatch_gpu_h3(batch, fn_info, is_strict, op, qual_datums) }
-        }
-        DispatchOperation::Raster(op) => {
-            // SAFETY: Caller guarantees main backend thread.
-            unsafe { raster::dispatch_gpu_raster(batch, fn_info, is_strict, op, qual_datums) }
         }
         DispatchOperation::Dedicated | DispatchOperation::Deferred => DispatchResult::Deferred,
     }

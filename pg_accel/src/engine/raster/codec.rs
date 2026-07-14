@@ -2,13 +2,12 @@
 
 use super::spec::{
     MAX_RASTER_CATALOG_FINGERPRINT_WORDS, MAX_RASTER_RECLASS_RULES, RASTER_QUERY_SPEC_VERSION,
-    RasterOperation, RasterOverload, RasterPixelType, RasterQuerySpec, RasterReclassRule,
-    RasterReclassSpec, RasterSpecError,
+    RasterPixelType, RasterQuerySpec, RasterReclassRule, RasterReclassSpec, RasterSpecError,
 };
 
-pub const RASTER_QUERY_SPEC_WIRE_MAGIC: i32 = 0x5251_5331; // "RQS1"
+pub const RASTER_QUERY_SPEC_WIRE_MAGIC: i32 = 0x5251_5332; // "RQS2"
 const RASTER_QUERY_SPEC_HEADER_WORDS: usize = 3;
-const RASTER_QUERY_SPEC_FIXED_WORDS: usize = 5;
+const RASTER_QUERY_SPEC_FIXED_WORDS: usize = 4;
 const RASTER_RECLASS_FIXED_WORDS: usize = 2;
 const RASTER_RECLASS_RULE_WORDS: usize = 4;
 
@@ -161,15 +160,6 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
-    fn bool(&mut self, context: &'static str) -> Result<bool, RasterSpecCodecError> {
-        let index = self.index;
-        match self.next(context)? {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(RasterSpecCodecError::InvalidValue { index, context }),
-        }
-    }
-
     fn i64(&mut self, context: &'static str) -> Result<i64, RasterSpecCodecError> {
         let high = self.next(context)? as u32 as u64;
         let low = self.next(context)? as u32 as u64;
@@ -196,29 +186,13 @@ impl RasterQuerySpec {
         encoder.push(self.raster_attno);
         encoder.push_u32(self.raster_type_oid);
         encoder.push_u32(self.function_oid);
-        encoder.push(match self.overload {
-            RasterOverload::ReclassTextText => 0,
-            RasterOverload::SummaryStatsBand => 1,
-            RasterOverload::SummaryStatsDefaultBand => 2,
-        });
         encoder.push_len(self.catalog_fingerprint.len())?;
         encoder.words.extend_from_slice(&self.catalog_fingerprint);
-        match &self.operation {
-            RasterOperation::Reclass(spec) => {
-                encoder.push_u32(spec.output_pixel_type.tag());
-                encoder.push_len(spec.rules.len())?;
-                for rule in &spec.rules {
-                    encoder.push_i64(rule.source);
-                    encoder.push_i64(rule.destination);
-                }
-            }
-            RasterOperation::SummaryStats {
-                band,
-                exclude_nodata,
-            } => {
-                encoder.push_u32(*band);
-                encoder.push(i32::from(*exclude_nodata));
-            }
+        encoder.push_u32(self.reclass.output_pixel_type.tag());
+        encoder.push_len(self.reclass.rules.len())?;
+        for rule in &self.reclass.rules {
+            encoder.push_i64(rule.source);
+            encoder.push_i64(rule.destination);
         }
         encoder.finish()
     }
@@ -259,18 +233,6 @@ impl RasterQuerySpec {
         let raster_attno = reader.next("raster attribute number")?;
         let raster_type_oid = reader.u32("raster type OID")?;
         let function_oid = reader.u32("function OID")?;
-        let overload_index = reader.index;
-        let overload = match reader.next("overload")? {
-            0 => RasterOverload::ReclassTextText,
-            1 => RasterOverload::SummaryStatsBand,
-            2 => RasterOverload::SummaryStatsDefaultBand,
-            _ => {
-                return Err(RasterSpecCodecError::InvalidValue {
-                    index: overload_index,
-                    context: "overload",
-                });
-            }
-        };
         let fingerprint_len = reader.len(
             "catalog fingerprint words",
             MAX_RASTER_CATALOG_FINGERPRINT_WORDS,
@@ -297,48 +259,37 @@ impl RasterQuerySpec {
         catalog_fingerprint.extend_from_slice(fingerprint);
         reader.index = fingerprint_end;
 
-        let operation = match overload {
-            RasterOverload::ReclassTextText => {
-                let pixel_index = reader.index;
-                let output_pixel_type = RasterPixelType::from_tag(reader.u32("output pixel tag")?)
-                    .ok_or(RasterSpecCodecError::InvalidValue {
-                        index: pixel_index,
-                        context: "output pixel tag",
-                    })?;
-                let rule_count = reader.len("reclass rule count", MAX_RASTER_RECLASS_RULES)?;
-                let mut rules = Vec::new();
-                rules.try_reserve_exact(rule_count).map_err(|_| {
-                    RasterSpecCodecError::AllocationFailed {
-                        context: "reclass rules",
-                    }
-                })?;
-                for _ in 0..rule_count {
-                    rules.push(RasterReclassRule {
-                        source: reader.i64("reclass source")?,
-                        destination: reader.i64("reclass destination")?,
-                    });
-                }
-                RasterOperation::Reclass(RasterReclassSpec {
-                    output_pixel_type,
-                    rules: rules.into_boxed_slice(),
-                })
+        let pixel_index = reader.index;
+        let output_pixel_type = RasterPixelType::from_tag(reader.u32("output pixel tag")?).ok_or(
+            RasterSpecCodecError::InvalidValue {
+                index: pixel_index,
+                context: "output pixel tag",
+            },
+        )?;
+        let rule_count = reader.len("reclass rule count", MAX_RASTER_RECLASS_RULES)?;
+        let mut rules = Vec::new();
+        rules.try_reserve_exact(rule_count).map_err(|_| {
+            RasterSpecCodecError::AllocationFailed {
+                context: "reclass rules",
             }
-            RasterOverload::SummaryStatsBand | RasterOverload::SummaryStatsDefaultBand => {
-                RasterOperation::SummaryStats {
-                    band: reader.u32("summary band")?,
-                    exclude_nodata: reader.bool("exclude nodata")?,
-                }
-            }
-        };
+        })?;
+        for _ in 0..rule_count {
+            rules.push(RasterReclassRule {
+                source: reader.i64("reclass source")?,
+                destination: reader.i64("reclass destination")?,
+            });
+        }
         reader.finish()?;
         let spec = Self {
             relation_oid,
             raster_attno,
             raster_type_oid,
             function_oid,
-            overload,
             catalog_fingerprint: catalog_fingerprint.into_boxed_slice(),
-            operation,
+            reclass: RasterReclassSpec {
+                output_pixel_type,
+                rules: rules.into_boxed_slice(),
+            },
         };
         spec.validate()?;
         if spec.encode_words()?.as_slice() != words {
@@ -358,9 +309,8 @@ mod tests {
             raster_attno: 2,
             raster_type_oid: 22,
             function_oid: 33,
-            overload: RasterOverload::ReclassTextText,
             catalog_fingerprint: vec![i32::MIN, 0, i32::MAX].into_boxed_slice(),
-            operation: RasterOperation::Reclass(RasterReclassSpec {
+            reclass: RasterReclassSpec {
                 output_pixel_type: RasterPixelType::Int16,
                 rules: vec![
                     RasterReclassRule {
@@ -373,39 +323,15 @@ mod tests {
                     },
                 ]
                 .into_boxed_slice(),
-            }),
-        }
-    }
-
-    fn summary_spec(overload: RasterOverload) -> RasterQuerySpec {
-        RasterQuerySpec {
-            relation_oid: 44,
-            raster_attno: 1,
-            raster_type_oid: 55,
-            function_oid: 66,
-            overload,
-            catalog_fingerprint: vec![7, 8].into_boxed_slice(),
-            operation: RasterOperation::SummaryStats {
-                band: if overload == RasterOverload::SummaryStatsDefaultBand {
-                    1
-                } else {
-                    3
-                },
-                exclude_nodata: false,
             },
         }
     }
 
     #[test]
-    fn every_supported_overload_roundtrips_canonically() {
-        for spec in [
-            reclass_spec(),
-            summary_spec(RasterOverload::SummaryStatsBand),
-            summary_spec(RasterOverload::SummaryStatsDefaultBand),
-        ] {
-            let words = spec.encode_words().expect("valid encoding");
-            assert_eq!(RasterQuerySpec::decode_words(&words), Ok(spec));
-        }
+    fn rqs2_reclass_roundtrips_canonically() {
+        let spec = reclass_spec();
+        let words = spec.encode_words().expect("valid encoding");
+        assert_eq!(RasterQuerySpec::decode_words(&words), Ok(spec));
     }
 
     #[test]
@@ -420,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_tags_lengths_bools_and_noncanonical_rules_decline() {
+    fn invalid_tags_lengths_and_noncanonical_rules_decline() {
         let mut words = reclass_spec().encode_words().expect("valid encoding");
         words[0] = 0;
         assert!(matches!(
@@ -443,14 +369,9 @@ mod tests {
         ));
 
         let mut words = reclass_spec().encode_words().expect("valid encoding");
-        words[7] = 99;
+        let pixel_tag_index = 8 + reclass_spec().catalog_fingerprint.len();
+        words[pixel_tag_index] = 99;
         assert!(RasterQuerySpec::decode_words(&words).is_err());
-
-        let mut summary = summary_spec(RasterOverload::SummaryStatsBand)
-            .encode_words()
-            .expect("valid encoding");
-        *summary.last_mut().expect("bool word") = 2;
-        assert!(RasterQuerySpec::decode_words(&summary).is_err());
 
         let mut unsorted = reclass_spec().encode_words().expect("valid encoding");
         let first_source = unsorted.len() - 8;
@@ -473,11 +394,9 @@ mod tests {
 
     #[test]
     fn fingerprint_length_has_one_bounded_canonical_encoding() {
-        let mut empty = summary_spec(RasterOverload::SummaryStatsBand)
-            .encode_words()
-            .expect("valid encoding");
-        empty.drain(9..11);
-        empty[8] = 0;
+        let mut empty = reclass_spec().encode_words().expect("valid encoding");
+        empty.drain(8..11);
+        empty[7] = 0;
         empty[2] = i32::try_from(empty.len()).expect("short test wire");
         assert!(matches!(
             RasterQuerySpec::decode_words(&empty),
@@ -486,10 +405,8 @@ mod tests {
             ))
         ));
 
-        let mut negative = summary_spec(RasterOverload::SummaryStatsBand)
-            .encode_words()
-            .expect("valid encoding");
-        negative[8] = -1;
+        let mut negative = reclass_spec().encode_words().expect("valid encoding");
+        negative[7] = -1;
         assert!(matches!(
             RasterQuerySpec::decode_words(&negative),
             Err(RasterSpecCodecError::InvalidValue {
@@ -498,10 +415,8 @@ mod tests {
             })
         ));
 
-        let mut oversized = summary_spec(RasterOverload::SummaryStatsBand)
-            .encode_words()
-            .expect("valid encoding");
-        oversized[8] = 4_097;
+        let mut oversized = reclass_spec().encode_words().expect("valid encoding");
+        oversized[7] = 4_097;
         assert!(matches!(
             RasterQuerySpec::decode_words(&oversized),
             Err(RasterSpecCodecError::LimitExceeded {
@@ -530,10 +445,7 @@ mod tests {
     #[test]
     fn declared_schema_maximum_is_exact_for_largest_reclass_spec() {
         let mut spec = reclass_spec();
-        let RasterOperation::Reclass(reclass) = &mut spec.operation else {
-            unreachable!();
-        };
-        reclass.rules = (0..MAX_RASTER_RECLASS_RULES)
+        spec.reclass.rules = (0..MAX_RASTER_RECLASS_RULES)
             .map(|source| RasterReclassRule {
                 source: source as i64,
                 destination: 0,
@@ -545,5 +457,16 @@ mod tests {
             spec.encode_words().expect("maximum spec encodes").len(),
             RASTER_QUERY_SPEC_MAX_WORDS
         );
+    }
+
+    #[test]
+    fn legacy_rqs1_wire_is_not_decodable_as_rqs2() {
+        let mut words = reclass_spec().encode_words().expect("valid RQS2");
+        words[0] = 0x5251_5331;
+        words[1] = 1;
+        assert!(matches!(
+            RasterQuerySpec::decode_words(&words),
+            Err(RasterSpecCodecError::InvalidMagic(0x5251_5331))
+        ));
     }
 }

@@ -34,9 +34,8 @@ use crate::engine::registry::AccelStrategy;
 ///   double-precision lat/lng (`h3_latlng_to_cell`); `false` for pure
 ///   integer/bit-twiddling cell ops (`h3_grid_distance`, `h3_cell_to_parent`,
 ///   `h3_get_resolution`).
-/// - **PostGIS raster** (`GpuRaster`): `false` — raster map-algebra kernels
-///   operate on the raster's native pixel type (uint8/uint16/float32);
-///   the adapter does not advertise any fp64 raster functions today.
+/// - **PostGIS raster** (`GpuRaster`): `false` — raster calls are not exposed
+///   through the generic adapter; the exact-OID planner owns classification.
 /// - Other strategies (`GpuSort` / `GpuReduce` / `GpuHashAgg` / `GpuHashJoin`
 ///   / `GpuWindow` / `GpuExpr`): these are op-level, not function-level — the
 ///   planner hooks classify `uses_fp64` from the actual key/accumulator Oid

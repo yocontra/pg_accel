@@ -343,7 +343,7 @@ fn dispatch_routing_gpu_spatial_is_not_deferred() {
 }
 
 #[test]
-fn dispatch_resolution_maps_registered_names_to_typed_ops() {
+fn dispatch_resolution_maps_only_proved_generic_names_to_typed_ops() {
     let h3_entry = FunctionAccelEntry::scalar("public", "h3_grid_disk", AccelStrategy::GpuH3);
     assert!(matches!(
         resolve_dispatch_operation(AccelStrategy::GpuH3, Some(&h3_entry)),
@@ -354,7 +354,7 @@ fn dispatch_resolution_maps_registered_names_to_typed_ops() {
         FunctionAccelEntry::scalar("public", "st_summarystats", AccelStrategy::GpuRaster);
     assert!(matches!(
         resolve_dispatch_operation(AccelStrategy::GpuRaster, Some(&raster_entry)),
-        DispatchOperation::Raster(RasterDispatchOp::SummaryStats)
+        DispatchOperation::Deferred
     ));
 
     let spatial_entry =

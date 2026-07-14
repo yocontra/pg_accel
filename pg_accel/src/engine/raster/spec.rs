@@ -1,19 +1,10 @@
 //! Planner-neutral resident raster specification.
 
-pub const RASTER_QUERY_SPEC_VERSION: u32 = 1;
+pub const RASTER_QUERY_SPEC_VERSION: u32 = 2;
 pub const MAX_RASTER_RECLASS_RULES: usize = 64;
 pub const MAX_RASTER_CATALOG_FINGERPRINT_WORDS: usize = 4_096;
-const MAX_POSTGRES_INT4: u32 = 2_147_483_647;
 const MIN_RASTER_INTEGER_VALUE: i64 = -2_147_483_648;
 const MAX_RASTER_INTEGER_VALUE: i64 = 4_294_967_295;
-
-/// Exact public PostGIS Raster overload proved before admission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RasterOverload {
-    ReclassTextText,
-    SummaryStatsBand,
-    SummaryStatsDefaultBand,
-}
 
 /// Literal PostGIS `rt_pixtype` tag. Value 9 is intentionally absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -173,22 +164,15 @@ impl RasterReclassSemantics {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RasterOperation {
-    Reclass(RasterReclassSpec),
-    SummaryStats { band: u32, exclude_nodata: bool },
-}
-
-/// Complete replacement-sensitive childless raster plan contract.
+/// Complete replacement-sensitive childless RQS2 Reclass plan contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RasterQuerySpec {
     pub relation_oid: u32,
     pub raster_attno: i32,
     pub raster_type_oid: u32,
     pub function_oid: u32,
-    pub overload: RasterOverload,
     pub catalog_fingerprint: Box<[i32]>,
-    pub operation: RasterOperation,
+    pub reclass: RasterReclassSpec,
 }
 
 /// Fixed scan semantics the planner must prove before encoding a spec.
@@ -243,10 +227,9 @@ pub struct RasterExplainSpec {
     pub relation_oid: u32,
     pub raster_attno: i32,
     pub result_contract: &'static str,
-    pub band: Option<u32>,
-    pub exclude_nodata: Option<bool>,
-    pub reclass_rule_count: Option<usize>,
-    pub output_pixel_type: Option<&'static str>,
+    pub band: u32,
+    pub reclass_rule_count: usize,
+    pub output_pixel_type: &'static str,
     pub catalog_proof_words: usize,
 }
 
@@ -258,9 +241,6 @@ pub enum RasterSpecError {
     MissingFunctionOid,
     EmptyCatalogFingerprint,
     CatalogFingerprintTooLong(usize),
-    OverloadOperationMismatch,
-    InvalidSummaryBand(u32),
-    DefaultBandMustBeOne(u32),
     EmptyReclassRules,
     TooManyReclassRules(usize),
     FloatingReclassOutputUnsupported(RasterPixelType),
@@ -302,27 +282,7 @@ impl RasterQuerySpec {
                 self.catalog_fingerprint.len(),
             ));
         }
-        match (&self.overload, &self.operation) {
-            (RasterOverload::ReclassTextText, RasterOperation::Reclass(spec)) => spec.validate(),
-            (RasterOverload::SummaryStatsBand, RasterOperation::SummaryStats { band, .. }) => {
-                if (1..=MAX_POSTGRES_INT4).contains(band) {
-                    Ok(())
-                } else {
-                    Err(RasterSpecError::InvalidSummaryBand(*band))
-                }
-            }
-            (
-                RasterOverload::SummaryStatsDefaultBand,
-                RasterOperation::SummaryStats { band, .. },
-            ) => {
-                if *band == 1 {
-                    Ok(())
-                } else {
-                    Err(RasterSpecError::DefaultBandMustBeOne(*band))
-                }
-            }
-            _ => Err(RasterSpecError::OverloadOperationMismatch),
-        }
+        self.reclass.validate()
     }
 
     #[must_use]
@@ -332,39 +292,15 @@ impl RasterQuerySpec {
 
     #[must_use]
     pub fn explain(&self) -> RasterExplainSpec {
-        let (operation, band, exclude_nodata, rule_count, output_type) = match &self.operation {
-            RasterOperation::Reclass(spec) => (
-                "Reclass",
-                None,
-                None,
-                Some(spec.rules.len()),
-                Some(spec.output_pixel_type.postgis_name()),
-            ),
-            RasterOperation::SummaryStats {
-                band,
-                exclude_nodata,
-            } => (
-                "SummaryStats",
-                Some(*band),
-                Some(*exclude_nodata),
-                None,
-                None,
-            ),
-        };
         RasterExplainSpec {
-            operation,
-            overload: match self.overload {
-                RasterOverload::ReclassTextText => "st_reclass(raster,text,text)",
-                RasterOverload::SummaryStatsBand => "st_summarystats(raster,int4,bool)",
-                RasterOverload::SummaryStatsDefaultBand => "st_summarystats(raster,bool)",
-            },
+            operation: "Reclass",
+            overload: "st_reclass(raster,text,text)",
             relation_oid: self.relation_oid,
             raster_attno: self.raster_attno,
             result_contract: "one output row per visible raster row",
-            band,
-            exclude_nodata,
-            reclass_rule_count: rule_count,
-            output_pixel_type: output_type,
+            band: RasterReclassSemantics::POSTGIS_3_6_4_TEXT_TEXT.band,
+            reclass_rule_count: self.reclass.rules.len(),
+            output_pixel_type: self.reclass.output_pixel_type.postgis_name(),
             catalog_proof_words: self.catalog_fingerprint.len(),
         }
     }
@@ -628,31 +564,21 @@ mod tests {
         assert!(!RasterReclassSemantics::singular_rule_matches(7, f64::NAN));
     }
 
-    fn summary_spec(overload: RasterOverload, band: u32) -> RasterQuerySpec {
+    fn reclass_query_spec() -> RasterQuerySpec {
         RasterQuerySpec {
             relation_oid: 10,
             raster_attno: 2,
             raster_type_oid: 20,
             function_oid: 30,
-            overload,
             catalog_fingerprint: vec![1, 2, 3].into_boxed_slice(),
-            operation: RasterOperation::SummaryStats {
-                band,
-                exclude_nodata: true,
-            },
+            reclass: parse_exact_reclass_spec("0:1", "8BUI").expect("canonical reclass"),
         }
     }
 
     #[test]
-    fn overload_and_row_contracts_are_exact() {
-        summary_spec(RasterOverload::SummaryStatsBand, 2)
-            .validate()
-            .expect("explicit band is valid");
-        assert_eq!(
-            summary_spec(RasterOverload::SummaryStatsDefaultBand, 2).validate(),
-            Err(RasterSpecError::DefaultBandMustBeOne(2))
-        );
-        let spec = summary_spec(RasterOverload::SummaryStatsDefaultBand, 1);
+    fn reclass_only_row_contract_is_exact() {
+        let spec = reclass_query_spec();
+        spec.validate().expect("RQS2 Reclass spec is valid");
         assert_eq!(spec.scan_contract(), RasterScanContract::EXACT);
         assert_eq!(
             spec.scan_contract().relation,
@@ -672,15 +598,12 @@ mod tests {
         );
         assert_eq!(spec.scan_contract().order, RasterOrderContract::Unspecified);
         let explain = spec.explain();
-        assert_eq!(explain.operation, "SummaryStats");
-        assert_eq!(explain.overload, "st_summarystats(raster,bool)");
+        assert_eq!(explain.operation, "Reclass");
+        assert_eq!(explain.overload, "st_reclass(raster,text,text)");
+        assert_eq!(explain.band, 1);
         assert_eq!(
             explain.result_contract,
             "one output row per visible raster row"
-        );
-        assert_eq!(
-            summary_spec(RasterOverload::SummaryStatsBand, 2_147_483_648).validate(),
-            Err(RasterSpecError::InvalidSummaryBand(2_147_483_648))
         );
     }
 
