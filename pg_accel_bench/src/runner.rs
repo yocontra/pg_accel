@@ -1752,202 +1752,16 @@ fn workload_is_resident_lane(name: &str) -> bool {
     !resident_pin_specs(name).is_empty()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResidentPinSpec {
+fn resident_pin_specs(name: &str) -> &'static [crate::workloads::ResidentPinSpec] {
+    crate::workloads::workload_metadata(name).map_or(&[], |metadata| metadata.resident_pins)
+}
+
+#[cfg(test)]
+fn resident_pin(
     table: &'static str,
-    columns: Vec<&'static str>,
-}
-
-fn resident_pin(table: &'static str, columns: &[&'static str]) -> ResidentPinSpec {
-    ResidentPinSpec {
-        table,
-        columns: columns.to_vec(),
-    }
-}
-
-fn ssbm_resident_pin_specs(name: &str) -> Vec<ResidentPinSpec> {
-    const Q1_FACT: &[&str] = &[
-        "lo_orderdate",
-        "lo_extendedprice",
-        "lo_discount",
-        "lo_quantity",
-    ];
-    const Q2_FACT: &[&str] = &["lo_orderdate", "lo_partkey", "lo_suppkey", "lo_revenue"];
-    const Q3_FACT: &[&str] = &["lo_orderdate", "lo_custkey", "lo_suppkey", "lo_revenue"];
-    const Q4_FACT: &[&str] = &[
-        "lo_orderdate",
-        "lo_custkey",
-        "lo_suppkey",
-        "lo_partkey",
-        "lo_revenue",
-        "lo_supplycost",
-    ];
-
-    match name {
-        "ssbm_q1_1" => vec![
-            resident_pin("ssbm_lineorder", Q1_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
-        ],
-        "ssbm_q1_2" => vec![
-            resident_pin("ssbm_lineorder", Q1_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_yearmonthnum"]),
-        ],
-        "ssbm_q1_3" => vec![
-            resident_pin("ssbm_lineorder", Q1_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_weeknuminyear", "d_year"]),
-        ],
-        "ssbm_q2_1" => vec![
-            resident_pin("ssbm_lineorder", Q2_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
-            resident_pin("ssbm_part", &["p_partkey", "p_category", "p_brand1"]),
-            resident_pin("ssbm_supplier", &["s_suppkey", "s_region"]),
-        ],
-        "ssbm_q2_2" | "ssbm_q2_3" => vec![
-            resident_pin("ssbm_lineorder", Q2_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
-            resident_pin("ssbm_part", &["p_partkey", "p_brand1"]),
-            resident_pin("ssbm_supplier", &["s_suppkey", "s_region"]),
-        ],
-        "ssbm_q3_1" => vec![
-            resident_pin("ssbm_lineorder", Q3_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
-            resident_pin("ssbm_customer", &["c_custkey", "c_nation", "c_region"]),
-            resident_pin("ssbm_supplier", &["s_suppkey", "s_nation", "s_region"]),
-        ],
-        "ssbm_q3_2" => vec![
-            resident_pin("ssbm_lineorder", Q3_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
-            resident_pin("ssbm_customer", &["c_custkey", "c_city", "c_nation"]),
-            resident_pin("ssbm_supplier", &["s_suppkey", "s_city", "s_nation"]),
-        ],
-        "ssbm_q3_3" => vec![
-            resident_pin("ssbm_lineorder", Q3_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
-            resident_pin("ssbm_customer", &["c_custkey", "c_city"]),
-            resident_pin("ssbm_supplier", &["s_suppkey", "s_city"]),
-        ],
-        "ssbm_q3_4" => vec![
-            resident_pin("ssbm_lineorder", Q3_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year", "d_yearmonth"]),
-            resident_pin("ssbm_customer", &["c_custkey", "c_city"]),
-            resident_pin("ssbm_supplier", &["s_suppkey", "s_city"]),
-        ],
-        "ssbm_q4_1" => vec![
-            resident_pin("ssbm_lineorder", Q4_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
-            resident_pin("ssbm_customer", &["c_custkey", "c_nation", "c_region"]),
-            resident_pin("ssbm_supplier", &["s_suppkey", "s_region"]),
-            resident_pin("ssbm_part", &["p_partkey", "p_mfgr"]),
-        ],
-        "ssbm_q4_2" => vec![
-            resident_pin("ssbm_lineorder", Q4_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
-            resident_pin("ssbm_customer", &["c_custkey", "c_region"]),
-            resident_pin("ssbm_supplier", &["s_suppkey", "s_nation", "s_region"]),
-            resident_pin("ssbm_part", &["p_partkey", "p_category", "p_mfgr"]),
-        ],
-        "ssbm_q4_3" => vec![
-            resident_pin("ssbm_lineorder", Q4_FACT),
-            resident_pin("ssbm_date", &["d_datekey", "d_year"]),
-            resident_pin("ssbm_customer", &["c_custkey", "c_region"]),
-            resident_pin("ssbm_supplier", &["s_suppkey", "s_city", "s_nation"]),
-            resident_pin("ssbm_part", &["p_partkey", "p_brand1", "p_category"]),
-        ],
-        _ => Vec::new(),
-    }
-}
-
-fn resident_pin_specs(name: &str) -> Vec<ResidentPinSpec> {
-    let ssbm = ssbm_resident_pin_specs(name);
-    if !ssbm.is_empty() {
-        return ssbm;
-    }
-
-    match name {
-        "hashagg_10g" | "hashagg_100g" | "hashagg_256g" | "hashagg_1kg" | "hashagg_10kg" => {
-            vec![resident_pin("bench_hagg_sweep", &["grp", "val"])]
-        }
-        "gpu_hashagg_med_card" => {
-            vec![resident_pin("bench_hashagg_med", &["user_id", "val"])]
-        }
-        "filtered_grouped_agg" => vec![resident_pin(
-            "bench_employees",
-            &["dept", "salary", "active"],
-        )],
-        "grouped_agg" => vec![resident_pin("bench_employees_agg", &["dept", "salary"])],
-        "grouped_agg_high_card" => vec![resident_pin("bench_events_agg", &["user_id", "val"])],
-        "timeseries_sensor_rollup" => {
-            vec![resident_pin("sensor_data", &["sensor_id", "value"])]
-        }
-        "dictionary_grouped_agg" => vec![resident_pin(
-            "bench_dictionary_sales",
-            &["region", "amount"],
-        )],
-        "expression_grouped_agg" => vec![resident_pin(
-            "bench_expression_sales",
-            &["product_id", "price", "discount"],
-        )],
-        "predicate_filter_expression_grouped_agg" => vec![resident_pin(
-            "bench_predicate_expression_sales",
-            &["product_id", "price", "discount", "active"],
-        )],
-        "case_when_expression_grouped_agg" => vec![resident_pin(
-            "bench_case_when_expression_sales",
-            &["product_id", "price", "discount", "active"],
-        )],
-        "case_when_range_expression_grouped_agg" => vec![resident_pin(
-            "bench_case_when_range_expression_sales",
-            &["product_id", "price", "discount", "active"],
-        )],
-        "case_when_value_predicate_expression_grouped_agg" => vec![resident_pin(
-            "bench_case_when_value_predicate_expression_sales",
-            &["product_id", "price", "discount", "active"],
-        )],
-        "case_when_null_predicate_expression_grouped_agg" => vec![resident_pin(
-            "bench_case_when_null_predicate_expression_sales",
-            &["product_id", "price", "discount", "active"],
-        )],
-        "case_when_or_expression_grouped_agg" => vec![resident_pin(
-            "bench_case_when_or_expression_sales",
-            &["product_id", "price", "discount", "active"],
-        )],
-        "case_when_in_expression_grouped_agg" => vec![resident_pin(
-            "bench_case_when_in_expression_sales",
-            &["product_id", "price", "discount", "active"],
-        )],
-        "case_when_not_expression_grouped_agg" => vec![resident_pin(
-            "bench_case_when_not_expression_sales",
-            &["product_id", "price", "discount", "active"],
-        )],
-        "hashagg_f64_aggs" => vec![resident_pin("bench_fp64_num", &["gk", "v_f64", "w_f64"])],
-        "reduce_f64_sum" | "reduce_f64_minmax" | "reduce_f64_stats" => {
-            vec![resident_pin("bench_fp64_num", &["v_f64"])]
-        }
-        "h3_cell_to_parent" => vec![resident_pin("bench_h3_parent", &["cell"])],
-        "hash_join" => vec![
-            resident_pin("bench_orders", &["customer_id"]),
-            resident_pin("bench_customers", &["customer_id"]),
-        ],
-        "hashjoin_100_1m" | "hashjoin_1k_1m" | "hashjoin_10k_1m" | "hashjoin_100k_1m" => {
-            vec![
-                resident_pin("bench_hj_outer", &["key"]),
-                resident_pin("bench_hj_inner", &["key"]),
-            ]
-        }
-        "gpu_hashjoin_large_build" => vec![
-            resident_pin("bench_hj_left", &["key"]),
-            resident_pin("bench_hj_right", &["key"]),
-        ],
-        "gpu_hashjoin_filter" => vec![
-            resident_pin("bench_hjf_fact", &["dim_id", "amount"]),
-            resident_pin("bench_hjf_dim", &["id", "category", "name"]),
-        ],
-        "mixed_join_agg" => vec![
-            resident_pin("bench_mixed_facts", &["dim_id", "amount"]),
-            resident_pin("bench_mixed_dims", &["id", "label"]),
-        ],
-        _ => Vec::new(),
-    }
+    columns: &'static [&'static str],
+) -> crate::workloads::ResidentPinSpec {
+    crate::workloads::ResidentPinSpec { table, columns }
 }
 fn i64_to_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
@@ -3223,7 +3037,11 @@ fn capture_benchmark_sanity_checks(
     connection: &str,
     workload: &dyn Workload,
 ) -> Result<Vec<report::SanityCheck>, Box<dyn std::error::Error>> {
-    if workload.category() != "ssbm" {
+    let is_star_schema =
+        crate::workloads::workload_metadata(workload.name()).is_some_and(|metadata| {
+            metadata.category == crate::workloads::WorkloadCategory::StarSchemaSsbm
+        });
+    if !is_star_schema {
         return Ok(Vec::new());
     }
 
@@ -4177,10 +3995,14 @@ fn ensure_extensions_for_names(
     let mut required: Vec<&str> = vec!["pg_accel"];
 
     // Collect unique extensions required by selected workloads.
-    let ext_reqs = crate::workloads::extension_requirements();
-    for (wl, ext) in &ext_reqs {
-        if workload_names.contains(wl) && !required.contains(ext) {
-            required.push(ext);
+    for name in workload_names {
+        if let Some(metadata) = crate::workloads::workload_metadata(name) {
+            for extension in metadata.required_extensions {
+                let extension = extension.as_str();
+                if !required.contains(&extension) {
+                    required.push(extension);
+                }
+            }
         }
     }
 

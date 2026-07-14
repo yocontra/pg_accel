@@ -34,24 +34,8 @@ pub const FP64_DEFAULT_ROW_SCALES: &[usize] = &[100_000];
 const FP64_GROUPED_STATS_ROW_SCALES: &[usize] = &[100_000, 1_000_000];
 
 // ---------------------------------------------------------------------------
-// Immutable workload name set.
-//
-// These eight identifiers are pinned by the fp64-unlock plan. Changing, adding,
-// or removing a name here is a protocol violation. If a kernel is retired,
-// escalate — do not silently rename.
+// Immutable workload identity is declared in the parent workload registry.
 // ---------------------------------------------------------------------------
-
-/// The eight canonical workload names for the fp64 matrix.
-pub const FP64_MATRIX_WORKLOAD_NAMES: [&str; 8] = [
-    "reduce_f64_sum",
-    "reduce_f64_minmax",
-    "reduce_f64_stats",
-    "sort_f64_keys",
-    "hashagg_f64_keys",
-    "hashagg_f64_aggs",
-    "spatial_fp64_recheck",
-    "h3_fp64_ops",
-];
 
 /// The five canonical row-count sizes, in ascending order.
 pub const FP64_MATRIX_SIZES: [usize; 5] =
@@ -701,20 +685,25 @@ impl Workload for H3Fp64Ops {
     }
 }
 
+/// Return the exact registry names eligible for fp64 calibration.
+#[must_use]
+pub fn fp64_matrix_workload_names() -> Vec<&'static str> {
+    super::registry::WORKLOAD_REGISTRY
+        .iter()
+        .filter_map(|entry| entry.evidence.fp64_calibration().then_some(entry.name))
+        .collect()
+}
+
 /// Return every workload in the immutable fp64 matrix, boxed for trait-object use.
-/// Order matches [`FP64_MATRIX_WORKLOAD_NAMES`].
 #[must_use]
 pub fn fp64_matrix_workloads() -> Vec<Box<dyn Workload>> {
-    vec![
-        Box::new(ReduceF64Sum),
-        Box::new(ReduceF64MinMax),
-        Box::new(ReduceF64Stats),
-        Box::new(SortF64Keys),
-        Box::new(HashaggF64Keys),
-        Box::new(HashaggF64Aggs),
-        Box::new(SpatialFp64Recheck),
-        Box::new(H3Fp64Ops),
-    ]
+    super::all_workloads()
+        .into_iter()
+        .filter(|workload| {
+            super::workload_metadata(workload.name())
+                .is_some_and(|metadata| metadata.evidence.fp64_calibration())
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -744,8 +733,8 @@ mod tests {
         let names: Vec<&str> = workloads.iter().map(|w| w.name()).collect();
         assert_eq!(
             names,
-            FP64_MATRIX_WORKLOAD_NAMES.to_vec(),
-            "workload order must match FP64_MATRIX_WORKLOAD_NAMES"
+            fp64_matrix_workload_names(),
+            "workload order must match the declarative registry"
         );
     }
 

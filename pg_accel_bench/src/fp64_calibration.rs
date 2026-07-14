@@ -474,13 +474,9 @@ fn summarize_cell(workload: &WorkloadResult) -> Fp64CalibrationCell {
 }
 
 fn expected_matrix_for_sizes(sizes: &[usize]) -> BTreeSet<(String, usize)> {
-    workloads::fp64_matrix::FP64_MATRIX_WORKLOAD_NAMES
-        .iter()
-        .flat_map(|workload| {
-            sizes
-                .iter()
-                .map(move |rows| ((*workload).to_owned(), *rows))
-        })
+    workloads::fp64_matrix::fp64_matrix_workload_names()
+        .into_iter()
+        .flat_map(|workload| sizes.iter().map(move |rows| (workload.to_owned(), *rows)))
         .collect()
 }
 

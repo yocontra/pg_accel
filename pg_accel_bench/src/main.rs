@@ -985,7 +985,9 @@ fn validate_supported_repro_rows(
     rows: usize,
     context: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if workload.category() != "gpu_h3" || workload.row_scales().contains(&rows) {
+    let is_h3 = workloads::workload_metadata(workload.name())
+        .is_some_and(|metadata| metadata.category == workloads::WorkloadCategory::GpuH3);
+    if !is_h3 || workload.row_scales().contains(&rows) {
         return Ok(());
     }
 
@@ -1013,7 +1015,11 @@ fn resolve_workloads(
         let mut wls = workloads::all_workloads();
         if let Some(cats) = category {
             let allowed: Vec<&str> = cats.split(',').map(str::trim).collect();
-            wls.retain(|w| allowed.iter().any(|c| w.category() == *c));
+            wls.retain(|w| {
+                let category = workloads::workload_metadata(w.name())
+                    .map_or_else(|| w.category(), |metadata| metadata.category.as_str());
+                allowed.contains(&category)
+            });
             if wls.is_empty() {
                 return Err(format!("no workloads match category filter: {cats}").into());
             }
@@ -1028,7 +1034,6 @@ fn cmd_validate(
     rows: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let wls = resolve_workloads(workload_name, category)?;
-    let ext_reqs = workloads::extension_requirements();
     let mut total_issues = 0;
 
     for w in &wls {
@@ -1036,11 +1041,13 @@ fn cmd_validate(
         let name = w.name();
 
         // Check extension requirements
-        let required_exts: Vec<&str> = ext_reqs
-            .iter()
-            .filter(|(wl, _)| *wl == name)
-            .map(|(_, ext)| *ext)
-            .collect();
+        let required_exts = workloads::workload_metadata(name).map_or_else(Vec::new, |metadata| {
+            metadata
+                .required_extensions
+                .iter()
+                .map(|extension| extension.as_str())
+                .collect::<Vec<_>>()
+        });
 
         if issues.is_empty() && required_exts.is_empty() {
             eprintln!("[validate] {name}: OK");
@@ -1070,7 +1077,6 @@ fn cmd_dry_run(
     category: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let wls = resolve_workloads(workload_name, category)?;
-    let ext_reqs = workloads::extension_requirements();
     let sample_rows = runner::ROW_SCALES[0];
 
     // First validate
@@ -1099,11 +1105,13 @@ fn cmd_dry_run(
     );
     for w in &wls {
         let name = w.name();
-        let required_exts: Vec<&str> = ext_reqs
-            .iter()
-            .filter(|(wl, _)| *wl == name)
-            .map(|(_, ext)| *ext)
-            .collect();
+        let required_exts = workloads::workload_metadata(name).map_or_else(Vec::new, |metadata| {
+            metadata
+                .required_extensions
+                .iter()
+                .map(|extension| extension.as_str())
+                .collect::<Vec<_>>()
+        });
 
         println!("Workload: {name}");
         println!("  Description: {}", w.description());

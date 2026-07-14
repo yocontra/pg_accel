@@ -1333,6 +1333,12 @@ pub fn is_function_kernel_candidate(
     kernel_class: &str,
     description: &str,
 ) -> bool {
+    if let Some(metadata) = crate::workloads::workload_metadata(name) {
+        return metadata.evidence.function_kernel();
+    }
+
+    // Preserve classification for reports produced by older binaries whose
+    // workload is no longer present in the current exact-name registry.
     let name = name.to_ascii_lowercase();
     let category = category.to_ascii_lowercase();
     let kernel = kernel_class.to_ascii_lowercase();
@@ -2346,7 +2352,10 @@ fn native_decline_evidence_label(w: &WorkloadResult) -> String {
 }
 
 fn operation_cache_gate_required(name: &str) -> bool {
-    name.starts_with("h3_") || name.starts_with("raster_")
+    crate::workloads::workload_metadata(name).map_or_else(
+        || name.starts_with("h3_") || name.starts_with("raster_"),
+        |metadata| metadata.evidence.requires_cache_mode_both(),
+    )
 }
 
 /// Verifies the h3_/raster_ cache-mode-both requirement. Requires both that

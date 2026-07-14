@@ -127,7 +127,7 @@ pub use parallel_stress::{
 };
 pub use predicate_filter_expression_grouped_agg::PredicateFilterExpressionGroupedAgg;
 pub use proximity::Proximity;
-pub use registry::workload_metadata;
+pub use registry::{H3LaneClass, ResidentPinSpec, WorkloadCategory, workload_metadata};
 pub use small_table::SmallTable;
 pub use spatial_agg::SpatialAgg;
 pub use spatial_complex_poly::SpatialComplexPoly;
@@ -497,62 +497,18 @@ pub fn find_workload(name: &str) -> Option<Box<dyn Workload>> {
 
 /// Extensions required by specific workloads.
 /// Returns `(workload_name, extension_name)` pairs.
+#[cfg(test)]
 #[must_use]
 pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
-    vec![
-        // GPU Spatial (original)
-        ("spatial_join", "postgis"),
-        ("proximity", "postgis"),
-        ("index_recheck", "postgis"),
-        ("spatial_filter", "postgis"),
-        ("spatial_contains", "postgis"),
-        ("spatial_multi_pred", "postgis"),
-        ("spatial_complex_poly", "postgis"),
-        ("spatial_selectivity", "postgis"),
-        ("spatial_fp64_recheck", "postgis"),
-        // GPU Spatial (megapoly — collapsed to one representative, W7)
-        ("spatial_mega_1kv", "postgis"),
-        // Vertex sweep (collapsed from 17 to 4 reps, W6/W10)
-        ("vsweep_low", "postgis"),
-        ("vsweep_mid", "postgis"),
-        ("vsweep_high", "postgis"),
-        ("vsweep_pathological", "postgis"),
-        // GPU Spatial (shapes)
-        ("spatial_concentric", "postgis"),
-        ("spatial_star_1kv", "postgis"),
-        ("spatial_multihole", "postgis"),
-        ("spatial_zigzag", "postgis"),
-        // GPU Spatial (selectivity sweep)
-        ("spatial_sel_1pct", "postgis"),
-        ("spatial_sel_10pct", "postgis"),
-        ("spatial_sel_50pct", "postgis"),
-        ("spatial_sel_90pct", "postgis"),
-        // GPU Spatial (100K repro matrix)
-        // Scale sweep retired (action_items W9).
-        // Mixed spatial
-        ("spatial_agg", "postgis"),
-        ("spatial_sort", "postgis"),
-        ("mixed_megapoly_agg", "postgis"),
-        ("mixed_spatial_sort", "postgis"),
-        // GPU H3 (original)
-        ("h3_bulk", "h3"),
-        ("h3_cell_to_parent", "h3"),
-        ("h3_grid_distance", "h3"),
-        ("h3_resolution_sweep", "h3"),
-        ("h3_srf_grid_disk", "h3"),
-        // GPU H3 (variants)
-        // h3_latlng_res3 / h3_latlng_res9 retired per action_items.md W8.
-        ("h3_latlng_res15", "h3"),
-        ("h3_dist_near", "h3"),
-        ("h3_dist_far", "h3"),
-        ("h3_parent_deep", "h3"),
-        ("h3_fp64_ops", "h3"),
-        // GPU Raster
-        ("raster_ndvi", "postgis_raster"),
-        ("raster_slope", "postgis_raster"),
-        ("raster_reclass", "postgis_raster"),
-        ("raster_algebra_deep", "postgis_raster"),
-    ]
+    registry::WORKLOAD_REGISTRY
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .required_extensions
+                .iter()
+                .map(move |extension| (entry.name, extension.as_str()))
+        })
+        .collect()
 }
 
 /// Validate a workload's SQL structure without executing against a database.
@@ -725,34 +681,6 @@ fn check_balanced_parens(sql: &str, label: &str, issues: &mut Vec<String>) {
 // updating this map fails the unit tests below.
 // ---------------------------------------------------------------------------
 
-/// Lane classification for an H3 workload.
-///
-/// `Winning` ops are expected to dispatch a GPU kernel and beat the PG-parallel
-/// baseline on warm runs at the canonical scales documented in
-/// `TODO.md` Phase 5. `Parity` ops are intentionally not registered for GPU
-/// dispatch and must run through stock h3-pg on both sides of the bench.
-///
-/// Derives `PartialEq` but not `Eq` because `min_warm_speedup` is an `f64`.
-/// Tests use match-destructuring against the variants rather than
-/// `assert_eq!` on the enum value.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum H3LaneClass {
-    /// Winning lane — must dispatch GPU kernel and meet `min_warm_speedup`.
-    Winning {
-        /// Minimum acceptable median speedup vs PG parallel on warm runs.
-        ///
-        /// Set conservatively below the lowest 2026-05-14 measurement so a
-        /// transient regression of the win still fails the gate; chosen
-        /// per-op to reflect the canonical baseline (`h3_bulk @ 10M` ~15x,
-        /// `h3_resolution_sweep @ 1M` ~26x — thresholds are well below).
-        min_warm_speedup: f64,
-    },
-    /// Parity / quarantined lane — must NOT dispatch a GPU kernel under normal
-    /// planner exposure. Speedup is expected to be ~1.0x; the gate is "no
-    /// dispatch" rather than "no regression".
-    Parity,
-}
-
 /// Return the H3 lane class for `name`, or `None` if the workload is not a
 /// known H3 workload.
 ///
@@ -761,51 +689,7 @@ pub enum H3LaneClass {
 /// here will fail `test_h3_lane_class_covers_every_h3_workload` below.
 #[must_use]
 pub fn h3_lane_class(name: &str) -> Option<H3LaneClass> {
-    // Winning grouped-count lanes. LatLngToCell workloads share the H3 point
-    // kernel and keep the historical 1.5x floor. `h3_cell_to_parent` is the
-    // resident resolution-zero capability lane. It must select and dispatch,
-    // but carries no performance claim until Phase 7 re-baselines it.
-    // (`h3_bulk @ 10M` ~15x, `h3_resolution_sweep @ 1M` ~26x,
-    // `h3_latlng_res15 @ 10M` ~5x in the historical grouped point shape).
-    // Threshold is well below the lowest scale measurement
-    // (`h3_bulk @ 10K` ~8ms vs 51-64ms gives 6x, not 1.5x) so measurement
-    // noise alone does not flip the gate.
-    const H3_LATLNG_GROUPED_COUNT_WINNERS: &[&str] =
-        &["h3_bulk", "h3_resolution_sweep", "h3_latlng_res15"];
-    // Parity / quarantined lanes. The h3 adapter intentionally does not
-    // register these names for normal planner exposure (see
-    // `pg_accel/src/adapters/h3.rs` /
-    // `cheap_scalar_h3_ops_are_quarantined_from_normal_registry`). Both the
-    // accel side and the baseline side run stock h3-pg C; the bench keeps
-    // these workloads to catch accidental re-registration.
-    const PARITY_LANES: &[&str] = &[
-        "h3_grid_distance",
-        "h3_dist_near",
-        "h3_dist_far",
-        "h3_parent_deep",
-        // `h3_fp64_ops` is part of the separate fp64 calibration matrix. Its
-        // current count(h3_latlng_to_cell(point(lng,lat), 15)) SQL has no
-        // normal planner dispatch path, so do not credit it as an H3 winner.
-        "h3_fp64_ops",
-        // Target-list SRF expansion returns a large row set to PostgreSQL.
-        // Keep it native until downstream aggregate/sort work can stay
-        // GPU-resident; the executor/kernel remain covered by focused tests.
-        "h3_srf_grid_disk",
-    ];
-
-    if H3_LATLNG_GROUPED_COUNT_WINNERS.contains(&name) {
-        Some(H3LaneClass::Winning {
-            min_warm_speedup: 1.5,
-        })
-    } else if name == "h3_cell_to_parent" {
-        Some(H3LaneClass::Winning {
-            min_warm_speedup: 1.0,
-        })
-    } else if PARITY_LANES.contains(&name) {
-        Some(H3LaneClass::Parity)
-    } else {
-        None
-    }
+    workload_metadata(name).and_then(|metadata| metadata.h3_lane)
 }
 
 /// Per-Winner advisory threshold extracted from [`h3_lane_class`].
@@ -835,15 +719,12 @@ pub fn h3_winner_min_warm_speedup(name: &str) -> Option<f64> {
 /// [`h3_lane_class`] so the two stay in sync.
 #[must_use]
 pub fn h3_winning_lane_names() -> Vec<&'static str> {
-    // Lifted from the match arms in `h3_lane_class` so the canonical list
-    // and the classifier are stitched together programmatically; a divergence
-    // is caught by `test_h3_lane_class_winning_names_are_complete`.
-    vec![
-        "h3_bulk",
-        "h3_resolution_sweep",
-        "h3_latlng_res15",
-        "h3_cell_to_parent",
-    ]
+    registry::WORKLOAD_REGISTRY
+        .iter()
+        .filter_map(|entry| {
+            matches!(entry.h3_lane, Some(H3LaneClass::Winning { .. })).then_some(entry.name)
+        })
+        .collect()
 }
 
 /// Canonical list of H3 parity-lane workload names.
@@ -852,14 +733,10 @@ pub fn h3_winning_lane_names() -> Vec<&'static str> {
 /// dispatch a GPU kernel under normal planner exposure.
 #[must_use]
 pub fn h3_parity_lane_names() -> Vec<&'static str> {
-    vec![
-        "h3_grid_distance",
-        "h3_dist_near",
-        "h3_dist_far",
-        "h3_parent_deep",
-        "h3_fp64_ops",
-        "h3_srf_grid_disk",
-    ]
+    registry::WORKLOAD_REGISTRY
+        .iter()
+        .filter_map(|entry| (entry.h3_lane == Some(H3LaneClass::Parity)).then_some(entry.name))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -943,91 +820,25 @@ pub fn benchmark_threshold_matrix_entry(
 #[cfg(test)]
 #[must_use]
 pub fn benchmark_expected_winner_names() -> Vec<&'static str> {
-    vec![
-        "h3_bulk",
-        "h3_resolution_sweep",
-        "h3_latlng_res15",
-        "h3_cell_to_parent",
-        "raster_ndvi",
-        "raster_slope",
-        "raster_reclass",
-        "raster_algebra_deep",
-        "grouped_agg",
-        "grouped_agg_high_card",
-        "gpu_hashagg_med_card",
-        "timeseries_sensor_rollup",
-        "dictionary_grouped_agg",
-        "expression_grouped_agg",
-        "predicate_filter_expression_grouped_agg",
-        "case_when_expression_grouped_agg",
-        "case_when_range_expression_grouped_agg",
-        "case_when_value_predicate_expression_grouped_agg",
-        "case_when_null_predicate_expression_grouped_agg",
-        "case_when_or_expression_grouped_agg",
-        "case_when_in_expression_grouped_agg",
-        "case_when_not_expression_grouped_agg",
-        "hashagg_10g",
-        "hashagg_100g",
-        "hashagg_256g",
-        "hashagg_1kg",
-        "hashagg_10kg",
-        "filtered_grouped_agg",
-        "reduce_f64_sum",
-        "reduce_f64_minmax",
-        "reduce_f64_stats",
-        "hash_join",
-        "hashjoin_10k_1m",
-        "ssbm_q1_1",
-        "ssbm_q1_2",
-        "ssbm_q1_3",
-        "ssbm_q2_1",
-        "ssbm_q2_2",
-        "ssbm_q2_3",
-        "ssbm_q3_1",
-        "ssbm_q3_2",
-        "ssbm_q3_3",
-        "ssbm_q3_4",
-        "ssbm_q4_1",
-        "ssbm_q4_2",
-        "ssbm_q4_3",
-    ]
+    registry::WORKLOAD_REGISTRY
+        .iter()
+        .filter_map(|entry| {
+            (entry.evidence.threshold == registry::ThresholdEvidenceEligibility::GpuWinner)
+                .then_some(entry.name)
+        })
+        .collect()
 }
 
 #[cfg(test)]
 #[must_use]
 pub fn benchmark_native_decline_names() -> Vec<&'static str> {
-    vec![
-        "h3_grid_distance",
-        "h3_dist_near",
-        "h3_dist_far",
-        "h3_parent_deep",
-        "h3_fp64_ops",
-        "h3_srf_grid_disk",
-        "gpu_sort_multikey",
-        "large_sort",
-        "gpu_sort_topk_wide",
-        "sort_int4",
-        "sort_int8",
-        "sort_float4",
-        "sort_float8",
-        "topk_wide",
-        "mergejoin_decline",
-        "numeric_agg_decline",
-        "bitmap_heap_gpuexpr_decline",
-        "parallel_hashjoin_rebuild_decline",
-        "gpu_nlj_between",
-        "spatial_filter",
-        "spatial_selectivity",
-        "spatial_mega_1kv",
-        "vsweep_low",
-        "vsweep_mid",
-        "vsweep_high",
-        "vsweep_pathological",
-        "spatial_sel_1pct",
-        "spatial_sel_10pct",
-        "spatial_sel_50pct",
-        "spatial_sel_90pct",
-    ]
+    registry::WORKLOAD_REGISTRY
+        .iter()
+        .filter_map(|entry| {
+            (entry.evidence.threshold == registry::ThresholdEvidenceEligibility::NativeDeclineOnly)
+                .then_some(entry.name)
+        })
+        .collect()
 }
 
 const REDUCE_F32_BREAK_EVEN_ROWS: usize = 25_000;
@@ -1621,10 +1432,7 @@ fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresho
 
 #[must_use]
 fn h3_resident_rollup_required(name: &str) -> bool {
-    matches!(
-        name,
-        "h3_bulk" | "h3_resolution_sweep" | "h3_latlng_res15" | "h3_cell_to_parent"
-    )
+    workload_metadata(name).is_some_and(|metadata| metadata.evidence.h3_resident_rollup())
 }
 
 #[derive(Clone, Copy)]
