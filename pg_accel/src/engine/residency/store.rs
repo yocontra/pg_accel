@@ -10,7 +10,9 @@ use pgrx::{default, name, pg_sys, prelude::*};
 use crate::engine::gucs;
 use crate::gpu::{ExprDeviceBuffer, GpuError};
 
-use super::domain::{ResidentByteAccounting, RetainedExactValues};
+use super::domain::{
+    ResidentByteAccounting, ResidentRasterBand, ResidentRasterRow, RetainedExactValues,
+};
 use super::geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
 use super::ledger::{self, GenerationStamp, LedgerCharge};
 use super::loader::{self, ColumnRequest, StagedRelation};
@@ -73,6 +75,15 @@ pub enum ResidentColumn {
         type_oid: pg_sys::Oid,
         data: ResidentGeometryColumn,
     },
+    Raster {
+        type_oid: pg_sys::Oid,
+        pixels: Option<ExprDeviceBuffer<u8>>,
+        band_offsets: ExprDeviceBuffer<u64>,
+        rows: ExprDeviceBuffer<ResidentRasterRow>,
+        bands: Option<ExprDeviceBuffer<ResidentRasterBand>>,
+        nulls: Option<ExprDeviceBuffer<u8>>,
+        exact: RetainedExactValues,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: ExprDeviceBuffer<f32>,
@@ -101,6 +112,7 @@ impl ResidentColumn {
             | Self::I64 { type_oid, .. }
             | Self::H3 { type_oid, .. }
             | Self::Geometry { type_oid, .. }
+            | Self::Raster { type_oid, .. }
             | Self::F32 { type_oid, .. }
             | Self::F64 { type_oid, .. }
             | Self::TextDictionary { type_oid, .. } => *type_oid,
@@ -116,6 +128,7 @@ impl ResidentColumn {
             Self::I64 { values, .. } => values.len(),
             Self::H3 { values, .. } => values.len(),
             Self::Geometry { data, .. } => data.view().row_count,
+            Self::Raster { rows, .. } => rows.len(),
             Self::F32 { values, .. } => values.len(),
             Self::F64 { values, .. } => values.len(),
             Self::TextDictionary { codes, .. } => codes.len(),
@@ -157,6 +170,37 @@ impl ResidentColumn {
                 nulls.as_ref().map_or(0, ExprDeviceBuffer::len),
             ),
             Self::Geometry { data, .. } => Some(data.accounting().device_bytes),
+            Self::Raster {
+                pixels,
+                band_offsets,
+                rows,
+                bands,
+                nulls,
+                ..
+            } => pixels
+                .as_ref()
+                .map_or(Some(0), |values| checked(values.len(), 1, 0))
+                .and_then(|bytes| {
+                    checked(band_offsets.len(), std::mem::size_of::<u64>(), 0)
+                        .and_then(|offsets| bytes.checked_add(offsets))
+                })
+                .and_then(|bytes| {
+                    checked(rows.len(), std::mem::size_of::<ResidentRasterRow>(), 0)
+                        .and_then(|rows| bytes.checked_add(rows))
+                })
+                .and_then(|bytes| {
+                    bands
+                        .as_ref()
+                        .map_or(Some(0), |bands| {
+                            checked(bands.len(), std::mem::size_of::<ResidentRasterBand>(), 0)
+                        })
+                        .and_then(|bands| bytes.checked_add(bands))
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        u64::try_from(nulls.as_ref().map_or(0, ExprDeviceBuffer::len)).ok()?,
+                    )
+                }),
             Self::F32 { values, nulls, .. } => checked(
                 values.len(),
                 4,
@@ -179,6 +223,15 @@ impl ResidentColumn {
     pub fn accounting(&self) -> Option<ResidentByteAccounting> {
         match self {
             Self::Geometry { data, .. } => Some(data.accounting()),
+            Self::Raster { exact, .. } => Some(ResidentByteAccounting {
+                device_bytes: self.device_bytes()?,
+                retained_host_exact_bytes: exact
+                    .offsets
+                    .len()
+                    .checked_mul(std::mem::size_of::<u64>())
+                    .and_then(|offsets| offsets.checked_add(exact.bytes.len()))
+                    .and_then(|bytes| u64::try_from(bytes).ok())?,
+            }),
             _ => Some(ResidentByteAccounting {
                 device_bytes: self.device_bytes()?,
                 retained_host_exact_bytes: 0,
@@ -231,6 +284,23 @@ impl ResidentColumn {
             Self::Geometry { type_oid, data } => ResidentColumnView::Geometry {
                 type_oid: *type_oid,
                 data: data.view(),
+            },
+            Self::Raster {
+                type_oid,
+                pixels,
+                band_offsets,
+                rows,
+                bands,
+                nulls,
+                exact,
+            } => ResidentColumnView::Raster {
+                type_oid: *type_oid,
+                pixels: pixels.as_ref(),
+                band_offsets,
+                rows,
+                bands: bands.as_ref(),
+                nulls: nulls.as_ref(),
+                exact,
             },
             Self::F32 {
                 type_oid,
@@ -295,6 +365,15 @@ pub enum ResidentColumnView<'a> {
         type_oid: pg_sys::Oid,
         data: ResidentGeometryColumnView<'a>,
     },
+    Raster {
+        type_oid: pg_sys::Oid,
+        pixels: Option<&'a ExprDeviceBuffer<u8>>,
+        band_offsets: &'a ExprDeviceBuffer<u64>,
+        rows: &'a ExprDeviceBuffer<ResidentRasterRow>,
+        bands: Option<&'a ExprDeviceBuffer<ResidentRasterBand>>,
+        nulls: Option<&'a ExprDeviceBuffer<u8>>,
+        exact: &'a RetainedExactValues,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: &'a ExprDeviceBuffer<f32>,
@@ -323,6 +402,7 @@ impl ResidentColumnView<'_> {
             | Self::I64 { type_oid, .. }
             | Self::H3 { type_oid, .. }
             | Self::Geometry { type_oid, .. }
+            | Self::Raster { type_oid, .. }
             | Self::F32 { type_oid, .. }
             | Self::F64 { type_oid, .. }
             | Self::TextDictionary { type_oid, .. } => *type_oid,
@@ -338,6 +418,7 @@ impl ResidentColumnView<'_> {
             Self::I64 { values, .. } => values.len(),
             Self::H3 { values, .. } => values.len(),
             Self::Geometry { data, .. } => data.row_count,
+            Self::Raster { rows, .. } => rows.len(),
             Self::F32 { values, .. } => values.len(),
             Self::F64 { values, .. } => values.len(),
             Self::TextDictionary { codes, .. } => codes.len(),
@@ -1618,7 +1699,7 @@ pub fn estimate_selected_relation(
 ) -> Result<ResidentLoadEstimate, ResidentLoadError> {
     process_invalidations();
     let columns = required_columns_for(request)?;
-    let estimated_bytes = loader::estimate_device_bytes(request.relid, &columns)
+    let estimated_bytes = loader::estimate_resident_bytes(request.relid, &columns)
         .map_err(ResidentLoadError::Loader)?;
     let (loaded, pinned, last_load_ms) = STORE.with(|store| {
         let store = store.borrow();
