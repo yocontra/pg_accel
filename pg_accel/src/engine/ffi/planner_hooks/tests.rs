@@ -2026,12 +2026,12 @@ mod append_inject {
 // Phase 0: planner-hook overhead audit (TODO.md 2026-05-14)
 // =====================================================================
 //
-// The 2026-05-14 SSBM Q2.3 diagnosis found planning time inflated to
+// A 2026-05-14 four-way star-schema diagnosis found planning time inflated to
 // 37-40 ms with pg_accel hooks installed versus ~0.2 ms with
 // `pg_accel.enabled=off`, even though the query selected no pg_accel
 // path and dispatched zero GPU kernels. The upper-paths fast-decline gate
 // for `UPPERREL_GROUP_AGG` (unsupported GROUP BY type) must still produce a
-// measurable jump in the fast-decline counter for SSBM-shaped queries so the
+// measurable jump in the fast-decline counter for star-schema queries so the
 // bench harness can confirm the audit fired without re-parsing planning time
 // strings. Join-pathlist now has an INT32/INT64 hash-join kernel and must
 // inspect equi-join key shape before declining.
@@ -2040,7 +2040,7 @@ mod phase0_overhead_audit {
     mod tests {
         use pgrx::prelude::{Spi, pg_test};
 
-        /// SSBM Q2.3-shape regression. A 4-way join with GROUP BY on a
+        /// Generic star-schema regression. A 4-way join with GROUP BY on a
         /// text column (`p_brand1`) is the canonical no-dispatch shape:
         ///
         /// - join hook fires once per join order considered and key-shape /
@@ -2055,8 +2055,8 @@ mod phase0_overhead_audit {
         /// assert on `Planning Time:` from EXPLAIN ANALYZE because it
         /// varies too much with test-host noise to be a stable signal.
         #[pg_test]
-        fn ssbm_shape_query_fast_declines_in_planner_hooks() {
-            // Build a small SSBM-shape schema: 4-way join, text GROUP BY.
+        fn star_schema_query_fast_declines_in_planner_hooks() {
+            // Build a small star schema: 4-way join, text GROUP BY.
             Spi::run("DROP TABLE IF EXISTS pgaccel_p0_lineorder").expect("drop l");
             Spi::run("DROP TABLE IF EXISTS pgaccel_p0_part").expect("drop p");
             Spi::run("DROP TABLE IF EXISTS pgaccel_p0_supplier").expect("drop s");
@@ -2128,7 +2128,7 @@ mod phase0_overhead_audit {
             let before_rejected = crate::engine::stats::read_planner_rejected();
             let before_total_us = crate::engine::stats::read_planner_hook_total_us();
 
-            // Run the SSBM Q2.3-shape query. p_brand1 is text -> upper_paths
+            // Run the star-schema query. p_brand1 is text -> upper_paths
             // fast-decline. Join-pathlist may inspect integer equi-joins now
             // that a narrow hash-join kernel exists.
             let row_count = Spi::get_one::<i64>(
@@ -2143,13 +2143,13 @@ mod phase0_overhead_audit {
                    GROUP BY d_year, p_brand1 \
                  ) q",
             )
-            .expect("ssbm-shape select")
+            .expect("star-schema select")
             .expect("row_count non-NULL");
             // Result correctness — count is small but the query must run
             // to completion without crashing the planner.
             assert!(
                 row_count >= 0,
-                "SSBM-shape 4-way join + grouped agg should return a row count"
+                "star-schema 4-way join + grouped agg should return a row count"
             );
 
             let after_fast = crate::engine::stats::read_planner_fast_decline();
@@ -2163,12 +2163,12 @@ mod phase0_overhead_audit {
             assert!(
                 after_fast > before_fast,
                 "Phase 0 audit: planner_fast_decline counter must \
-                 increase after a no-dispatch SSBM-shape query \
+                 increase after a no-dispatch star-schema query \
                  (before={before_fast}, after={after_fast})"
             );
             assert!(
                 after_rejected > before_rejected,
-                "SSBM Q2.3-shape text GROUP BY should record a precise \
+                "star-schema text GROUP BY should record a precise \
                  planner_rejected blocker for the PreAgg/GpuAgg hashagg path \
                  (before={before_rejected}, after={after_rejected})"
             );

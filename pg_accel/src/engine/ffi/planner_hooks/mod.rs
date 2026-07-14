@@ -83,7 +83,7 @@ pub(in crate::engine::ffi::planner_hooks) fn planner_hooks_suspended() -> bool {
 /// microseconds into the `PLANNER_HOOK_TOTAL_US` counter via
 /// [`stats::record_planner_hook_elapsed`]. The bench harness reads
 /// `pg_accel_planner_overhead_us()` to assert that no-dispatch queries
-/// (SSBM star joins, expression-only filters, native aggregates) stay
+/// (multi-dimension star joins, expression-only filters, native aggregates) stay
 /// near zero overhead.
 ///
 /// Costs ~50 ns (one `Instant::now`, one atomic add, one tracing event at

@@ -1,14 +1,14 @@
-//! Resident OLAP aggregate executor for pg_accel Custom Scan nodes.
+//! Resident descriptor aggregate executor for pg_accel Custom Scan nodes.
 //!
-//! [`AggExecState`] adapts both the legacy resident OLAP executor and the
-//! strict neutral AQS2/AOP2 descriptor executor to the Custom Scan FFI layer.
+//! [`AggExecState`] adapts the strict neutral AQS2/AOP2 contract to the Custom
+//! Scan FFI layer.
 //!
 //! # Lifecycle
 //!
-//! 1. **`begin_custom_scan`** — allocates `AggExecState` from the plan's
-//!    OLAP spec.
-//! 2. **`exec_custom_scan`** (repeated) — dispatches the resident OLAP
-//!    aggregate and emits result tuples.
+//! 1. **`begin_custom_scan`** — validates the plan descriptor and allocates
+//!    `AggExecState`.
+//! 2. **`exec_custom_scan`** (repeated) — dispatches the resident aggregate
+//!    descriptor and emits result tuples.
 //! 3. **`end_custom_scan`** — reclaims via `Box::from_raw`.
 
 mod artifact;

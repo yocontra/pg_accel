@@ -511,8 +511,8 @@ impl DeviceLimits {
             // so the injection ratio is set above 1.0 to compensate — the
             // GPU kernel's real-world batched throughput makes up the
             // paper-cost gap.
-            // 2026-04-12: lowered from 2.00 to 0.80. At 2.0, SSBM q1_1
-            // dispatched GPU reduce and scored 0.30x@10M. At 0.80 the planner
+            // 2026-04-12: lowered from 2.00 to 0.80 after a filtered integer
+            // aggregate scored 0.30x@10M. At 0.80 the planner
             // rejects GPU agg unless estimated cheaper than 80% of PG serial.
             gpu_agg_cost_ratio: 0.80,
             gpu_window_cost_ratio: 1.50,

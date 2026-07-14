@@ -77,41 +77,6 @@ pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>
     status.is_ok().then_some(parents)
 }
 
-/// GPU-resident H3 parent-cell grouped COUNT(*).
-///
-/// The input cells live in device memory owned by the resident OLAP cache.
-/// The C++ side computes parent keys on-device and feeds them directly into
-/// the device hash-count aggregate.
-pub fn h3_cell_to_parent_count_resident(
-    cells: &ExprDeviceBuffer<u64>,
-    parent_res: i32,
-) -> Option<HashAggResult> {
-    if cells.len() == 0 {
-        return None;
-    }
-
-    let mut state: *mut PgaccelAggState = std::ptr::null_mut();
-    crate::ensure_backend_exit_callback();
-    let status = unsafe {
-        bridge::pgaccel_h3_cell_to_parent_count_bulk(
-            cells.as_ptr(),
-            cells.len(),
-            parent_res,
-            std::ptr::addr_of_mut!(state),
-        )
-    };
-    if !status.is_ok() {
-        if !state.is_null() {
-            // SAFETY: state was allocated by the C++ hashagg layer.
-            unsafe { bridge::pgaccel_agg_free(state) };
-        }
-        return None;
-    }
-
-    // SAFETY: state is either null or an owned pgaccel_agg_state allocation.
-    unsafe { HashAggResult::from_raw(state) }
-}
-
 /// GPU-accelerated bulk H3 cell-to-center-child.
 ///
 /// For each input cell, returns the canonical center child at the
@@ -183,8 +148,8 @@ pub fn h3_lat_lng_to_cell_bulk(lats: &[f64], lngs: &[f64], resolution: i32) -> O
 
 /// GPU-resident H3 lat/lng grouped COUNT(*).
 ///
-/// Exact f64 and fast f32 coordinate columns live in device memory owned by
-/// the resident OLAP cache. The C++ side computes H3 keys on-device and feeds
+/// Exact f64 and fast f32 coordinate columns live in resident relation buffers.
+/// The C++ side computes H3 keys on-device and feeds
 /// them directly into the device hash-count aggregate.
 #[allow(dead_code)] // reason: resident H3 SQL admission is still gated above this GPU-ready wrapper.
 pub fn h3_lat_lng_count_resident(

@@ -11,8 +11,6 @@ pub mod ffi;
 pub mod function_matcher;
 pub mod gucs;
 pub mod materialize;
-pub mod olap_cache;
-
 pub mod otel;
 pub mod panic_hook;
 pub mod pg_compat;

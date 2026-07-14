@@ -12,22 +12,8 @@ use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
 use crate::engine::executor::agg::{
     AggOp, GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE, is_h3_synthetic_group_key,
 };
-use crate::engine::executor::olap::{
-    OlapAggSpec, RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES,
-    ResidentDenseGroupedF64FilterMode, ResidentDenseGroupedF64Layout,
-    ResidentDenseGroupedF64MeasurePredicate, ResidentDenseGroupedF64MeasurePredicateOp,
-    ResidentDenseGroupedF64MeasurePredicateSource, ResidentDenseGroupedF64Source,
-    ResidentDenseGroupedF64Spec, ResidentGroupAggLogicalSpec, ResidentH3GroupedCountSpec,
-    ResidentStarDimGroupedF64Spec, SsbmQ1RevenueSpec, SsbmQ2GroupedRevenueSpec,
-    SsbmQ3GroupedRevenueSpec, SsbmQ4GroupedProfitSpec,
-};
 use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSpec};
-use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 use crate::engine::gucs;
-use crate::engine::olap_cache::{
-    ResidentH3GroupedCountKind, ResidentMeasureOp, ResidentStarDimGroupAggCacheShape,
-    SsbmQ1DatePredicate, SsbmQ2Variant, SsbmQ3Variant, SsbmQ4Variant,
-};
 use crate::engine::registry::AccelStrategy;
 use crate::engine::residency::{
     CpuBoundaryReason, ResidentMaterializationKind, ResidentOperatorClass, ResidentProofSnapshot,
@@ -409,9 +395,6 @@ impl PlanPrivate {
 #[cfg(test)]
 mod typed_private_tests {
     use super::*;
-    use crate::engine::executor::olap::{
-        ResidentGroupAggFilterExpr, ResidentGroupAggGroupKeyExpr, ResidentGroupAggMeasureExpr,
-    };
     use crate::engine::residency::ResidentOperatorStage;
     use crate::engine::spec::{
         AggOutputProjection, AggOutputSlot, AggOutputSource, AggregateKind, AggregateOutput,
@@ -486,24 +469,6 @@ mod typed_private_tests {
         frame(words, GpuStrategy::Agg, PlanExecMethod::Agg)
     }
 
-    fn legacy_h3_agg_frame() -> Vec<i32> {
-        let mut words = header(GpuStrategy::Agg, AccelStrategy::GpuReduce);
-        words.extend([
-            1,
-            AggOp::Count.to_i32(),
-            0,
-            pg_sys::INT8OID.to_u32() as i32,
-            0,
-            42,
-            AGG_OLAP_SENTINEL,
-            OLAP_KIND_RESIDENT_H3_GROUPED_COUNT,
-            42,
-            ResidentH3GroupedCountKind::LatLngToCell.to_i32(),
-            9,
-        ]);
-        frame(words, GpuStrategy::Agg, PlanExecMethod::Agg)
-    }
-
     fn valid_plan_frames() -> Vec<(PlanExecMethod, Vec<i32>)> {
         let scan = frame(
             header(GpuStrategy::Scan, AccelStrategy::GpuSpatial),
@@ -513,7 +478,7 @@ mod typed_private_tests {
 
         let mut join = header(GpuStrategy::Join, AccelStrategy::GpuHashJoin);
         join[4] = 1;
-        join.extend([2, 0, 0, 0, 0, 0]);
+        join.extend([2, 0, 0]);
         let join = frame(join, GpuStrategy::Join, PlanExecMethod::Join);
 
         let mut window = header(GpuStrategy::Window, AccelStrategy::GpuWindow);
@@ -601,17 +566,10 @@ mod typed_private_tests {
     }
 
     #[test]
-    fn v2_frame_preserves_strict_legacy_h3_aggregate_compatibility() {
-        let words = legacy_h3_agg_frame();
-        validate_plan_wire_slice(&words, PlanExecMethod::Agg)
-            .unwrap_or_else(|error| panic!("legacy H3 aggregate frame failed: {error}"));
-
-        for end in 0..words.len() {
-            assert!(
-                validate_plan_wire_slice(&words[..end], PlanExecMethod::Agg).is_err(),
-                "legacy H3 aggregate word prefix {end} unexpectedly decoded"
-            );
-        }
+    fn retired_olap_aggregate_contract_is_rejected() {
+        let mut words = generic_agg_frame();
+        words[PLAN_PAYLOAD_START + 3] = i32::from_be_bytes(*b"OLAP");
+        assert!(validate_plan_wire_slice(&words, PlanExecMethod::Agg).is_err());
     }
 
     #[test]
@@ -1058,233 +1016,6 @@ mod typed_private_tests {
             assert!(proof.cpu_boundary.blocks_resident_pipeline());
         }
     }
-
-    #[test]
-    fn agg_payload_decodes_group_key2_before_packed_h3_tlist_and_relid() {
-        const H3_TLIST_POS: i32 = 2;
-        const H3_RESOLUTION: i32 = 9;
-        let packed_tlist_pos = H3_TLIST_POS | (H3_RESOLUTION << 16);
-        let raw = [
-            GpuStrategy::Agg as c_int,
-            256,
-            1,
-            0,
-            0,
-            AccelStrategy::GpuReduce as c_int,
-            1,
-            AggOp::Count.to_i32(),
-            0,
-            u32::from(pg_sys::INT8OID) as c_int,
-            1,
-            2,
-            u32::from(pg_sys::INT8OID) as c_int,
-            H3_LATLNG_GROUP_KEY_TYPE,
-            0,
-            packed_tlist_pos,
-            42,
-            0,
-        ];
-        let fields = IntListReader::from_slice(&raw);
-        let payload = PlanPayloadReader::new(&fields);
-
-        assert_eq!(payload.agg_count(), 1);
-        // The trailer walker must still skip the full group-key block
-        // (has_gk + 5 ints, tlist pos packed with the H3 resolution) to land
-        // on self_scan_relid — that offset math is what keeps the OLAP
-        // trailer reachable for the surviving resident agg decode.
-        let _ = packed_tlist_pos;
-        let (self_scan_relid, agg_scan_expr, partial, olap) =
-            payload.agg_self_scan_relid_and_trailers(1);
-        assert_eq!(self_scan_relid, 42);
-        assert!(agg_scan_expr.is_none());
-        assert!(partial.is_none());
-        assert!(olap.is_none());
-    }
-
-    #[test]
-    fn resident_dense_grouped_logical_payload_decodes_v8() {
-        let layout = ResidentDenseGroupedF64Layout::GroupSumCount;
-        let mut raw = vec![
-            OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL,
-            123,
-            layout.to_i32(),
-            ResidentMeasureOp::Mul.to_i32(),
-            1,
-            ResidentDenseGroupedF64FilterMode::MeasurePredicate.to_i32(),
-            ResidentDenseGroupedF64MeasurePredicateOp::BoolOnly.to_i32(),
-            ResidentDenseGroupedF64MeasurePredicateSource::Value.to_i32(),
-            0,
-        ];
-        raw.extend([0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES * 4]);
-        raw.extend([
-            ResidentGroupAggGroupKeyExpr::ResidentI32.to_i32(),
-            ResidentGroupAggMeasureExpr::BinaryMul.to_i32(),
-            ResidentGroupAggFilterExpr::CaseBool.to_i32(),
-            layout.aggregate_mask() as c_int,
-        ]);
-        let fields = IntListReader::from_slice(&raw);
-
-        let (spec, next_idx) = deserialize_olap_agg_spec_from_reader(&fields, 0)
-            .expect("v8 resident dense grouped payload should decode");
-
-        assert_eq!(next_idx, raw.len());
-        let OlapAggSpec::ResidentDenseGroupedF64(spec) = spec else {
-            panic!("expected resident dense grouped f64 spec");
-        };
-        assert_eq!(u32::from(spec.rel_oid), 123);
-        assert_eq!(
-            spec.logical.group_key_expr,
-            ResidentGroupAggGroupKeyExpr::ResidentI32
-        );
-        assert_eq!(
-            spec.logical.measure_expr,
-            ResidentGroupAggMeasureExpr::BinaryMul
-        );
-        assert_eq!(
-            spec.logical.filter_expr,
-            ResidentGroupAggFilterExpr::CaseBool
-        );
-        assert_eq!(spec.logical.aggregate_lane_mask, layout.aggregate_mask());
-        assert_eq!(spec.source, ResidentDenseGroupedF64Source::UNKNOWN);
-    }
-
-    #[test]
-    fn resident_dense_grouped_logical_source_payload_decodes_v9() {
-        let layout = ResidentDenseGroupedF64Layout::GroupSumCount;
-        let source = ResidentDenseGroupedF64Source {
-            group_attno: 2,
-            value_attno: 3,
-            value_rhs_attno: 4,
-            filter_attno: 5,
-        };
-        let mut raw = vec![
-            OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE,
-            123,
-            source.group_attno,
-            source.value_attno,
-            source.value_rhs_attno,
-            source.filter_attno,
-            layout.to_i32(),
-            ResidentMeasureOp::Mul.to_i32(),
-            1,
-            ResidentDenseGroupedF64FilterMode::MeasurePredicate.to_i32(),
-            ResidentDenseGroupedF64MeasurePredicateOp::BoolOnly.to_i32(),
-            ResidentDenseGroupedF64MeasurePredicateSource::Value.to_i32(),
-            0,
-        ];
-        raw.extend([0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES * 4]);
-        raw.extend([
-            ResidentGroupAggGroupKeyExpr::ResidentI32.to_i32(),
-            ResidentGroupAggMeasureExpr::BinaryMul.to_i32(),
-            ResidentGroupAggFilterExpr::CaseBool.to_i32(),
-            layout.aggregate_mask() as c_int,
-        ]);
-        let fields = IntListReader::from_slice(&raw);
-
-        let (spec, next_idx) = deserialize_olap_agg_spec_from_reader(&fields, 0)
-            .expect("v9 resident dense grouped payload should decode");
-
-        assert_eq!(next_idx, raw.len());
-        let OlapAggSpec::ResidentDenseGroupedF64(spec) = spec else {
-            panic!("expected resident dense grouped f64 spec");
-        };
-        assert_eq!(u32::from(spec.rel_oid), 123);
-        assert_eq!(spec.source, source);
-        assert_eq!(
-            spec.logical.measure_expr,
-            ResidentGroupAggMeasureExpr::BinaryMul
-        );
-        assert_eq!(
-            spec.logical.filter_expr,
-            ResidentGroupAggFilterExpr::CaseBool
-        );
-    }
-
-    #[test]
-    fn resident_dense_grouped_logical_payload_rejects_bad_logical_values() {
-        let layout = ResidentDenseGroupedF64Layout::GroupSumCount;
-        let mut raw = vec![
-            OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL,
-            123,
-            layout.to_i32(),
-            ResidentMeasureOp::Mul.to_i32(),
-            1,
-            ResidentDenseGroupedF64FilterMode::MeasurePredicate.to_i32(),
-            ResidentDenseGroupedF64MeasurePredicateOp::BoolOnly.to_i32(),
-            ResidentDenseGroupedF64MeasurePredicateSource::Value.to_i32(),
-            0,
-        ];
-        raw.extend([0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES * 4]);
-        let logical_start = raw.len();
-        raw.extend([
-            ResidentGroupAggGroupKeyExpr::ResidentI32.to_i32(),
-            ResidentGroupAggMeasureExpr::BinaryMul.to_i32(),
-            ResidentGroupAggFilterExpr::CaseBool.to_i32(),
-            layout.aggregate_mask() as c_int,
-        ]);
-
-        for offset in 0..3 {
-            let mut bad = raw.clone();
-            bad[logical_start + offset] = 999;
-            let fields = IntListReader::from_slice(&bad);
-            assert!(
-                deserialize_olap_agg_spec_from_reader(&fields, 0).is_none(),
-                "bad logical discriminant at offset {offset} should reject"
-            );
-        }
-
-        let mut bad_mask = raw;
-        bad_mask[logical_start + 3] = ResidentDenseGroupedF64Layout::GroupMinMaxAvg
-            .aggregate_mask()
-            .try_into()
-            .expect("mask fits");
-        let fields = IntListReader::from_slice(&bad_mask);
-        assert!(
-            deserialize_olap_agg_spec_from_reader(&fields, 0).is_none(),
-            "logical aggregate mask must match layout"
-        );
-    }
-
-    #[test]
-    fn resident_dense_grouped_source_payload_infers_logical_spec() {
-        let layout = ResidentDenseGroupedF64Layout::GroupSumAvgCount;
-        let mut raw = vec![
-            OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE,
-            456,
-            layout.to_i32(),
-            ResidentMeasureOp::Column.to_i32(),
-            0,
-            ResidentDenseGroupedF64FilterMode::AggregateFilter.to_i32(),
-            ResidentDenseGroupedF64MeasurePredicateOp::BoolOnly.to_i32(),
-            ResidentDenseGroupedF64MeasurePredicateSource::Value.to_i32(),
-            0,
-        ];
-        raw.extend([0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES * 4]);
-        let fields = IntListReader::from_slice(&raw);
-
-        let (spec, next_idx) = deserialize_olap_agg_spec_from_reader(&fields, 0)
-            .expect("v7 resident dense grouped payload should decode");
-
-        assert_eq!(next_idx, raw.len());
-        let OlapAggSpec::ResidentDenseGroupedF64(spec) = spec else {
-            panic!("expected resident dense grouped f64 spec");
-        };
-        assert_eq!(u32::from(spec.rel_oid), 456);
-        assert_eq!(
-            spec.logical.group_key_expr,
-            ResidentGroupAggGroupKeyExpr::ResidentI32
-        );
-        assert_eq!(
-            spec.logical.measure_expr,
-            ResidentGroupAggMeasureExpr::DirectColumn
-        );
-        assert_eq!(
-            spec.logical.filter_expr,
-            ResidentGroupAggFilterExpr::AggregateFilterBool
-        );
-        assert_eq!(spec.logical.aggregate_lane_mask, layout.aggregate_mask());
-        assert_eq!(spec.source, ResidentDenseGroupedF64Source::UNKNOWN);
-    }
 }
 
 /// Deserialized acceleration metadata from `custom_private`.
@@ -1301,12 +1032,6 @@ pub(super) struct CustomPrivateData {
     pub(super) hash_key_type: i32,
     /// True for the fused `COUNT(*)` over `GpuHashJoin` path.
     pub(super) hash_count_only: bool,
-    /// True when count-only hashjoin reads preloaded device-resident key buffers.
-    pub(super) hash_resident_count: bool,
-    /// Expected outer relation OID for the resident hashjoin cache.
-    pub(super) hash_outer_rel_oid: pg_sys::Oid,
-    /// Expected inner relation OID for the resident hashjoin cache.
-    pub(super) hash_inner_rel_oid: pg_sys::Oid,
     /// NLJ predicate shape. `2` = BETWEEN/range-containment.
     pub(super) nlj_shape: i32,
     /// NLJ key type (0=i32 promoted to i64, 1=i64, 2=f64).
@@ -1324,9 +1049,6 @@ pub(super) struct CustomPrivateData {
     /// Scan relation index for direct heap scan (Window vectorized path).
     /// 0 means use child plan; > 0 means open this relation directly.
     pub(super) window_scan_relid: pg_sys::Index,
-    /// Optional resident OLAP aggregate payload. Only meaningful for
-    /// `gpu_strategy == Agg`; executor must not pull a child plan in this mode.
-    pub(super) olap_agg: Option<OlapAggSpec>,
     /// Neutral grouped-aggregate query contract carried by the v2 wire.
     /// Residency resolves its relation/column references after decode.
     #[allow(dead_code)] // consumed by the descriptor executor landing in Phase 5D
@@ -1351,16 +1073,6 @@ impl CustomPrivateData {
         }
         if !matches!(self.hash_key_type, 0..=2) {
             return Some("join key type is unsupported");
-        }
-        if self.hash_resident_count {
-            if !self.hash_count_only {
-                return Some("resident hash join requires count-only mode");
-            }
-            if self.hash_outer_rel_oid == pg_sys::InvalidOid
-                || self.hash_inner_rel_oid == pg_sys::InvalidOid
-            {
-                return Some("resident hash join requires relation OIDs");
-            }
         }
         None
     }
@@ -1391,16 +1103,11 @@ struct PlanPayloadReader<'reader, 'source> {
 }
 
 impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
-    const AGG_COUNT: usize = PLAN_PAYLOAD_START;
-    const AGGS: usize = Self::AGG_COUNT + 1;
     const WINDOW_COUNT: usize = PLAN_PAYLOAD_START;
     const WINDOW_SPECS: usize = Self::WINDOW_COUNT + 1;
     const HASH_INNER_ATTNO: usize = PLAN_PAYLOAD_START;
     const HASH_KEY_TYPE: usize = PLAN_PAYLOAD_START + 1;
     const HASH_COUNT_ONLY: usize = PLAN_PAYLOAD_START + 2;
-    const HASH_RESIDENT_COUNT: usize = PLAN_PAYLOAD_START + 3;
-    const HASH_OUTER_REL_OID: usize = PLAN_PAYLOAD_START + 4;
-    const HASH_INNER_REL_OID: usize = PLAN_PAYLOAD_START + 5;
     const NLJ_SHAPE: usize = PLAN_PAYLOAD_START;
     const NLJ_KEY_TYPE: usize = PLAN_PAYLOAD_START + 1;
     const NLJ_OP: usize = PLAN_PAYLOAD_START + 2;
@@ -1410,67 +1117,6 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     #[must_use]
     const fn new(fields: &'reader IntListReader<'source>) -> Self {
         PlanPayloadReader { fields }
-    }
-
-    #[must_use]
-    fn agg_count(&self) -> usize {
-        self.fields.int_at(Self::AGG_COUNT) as usize
-    }
-
-    #[must_use]
-    fn agg_self_scan_relid_and_trailers(
-        &self,
-        agg_count: usize,
-    ) -> (
-        u32,
-        Option<CompiledExpr>,
-        Option<PartialAggSpec>,
-        Option<OlapAggSpec>,
-    ) {
-        let relid_idx = self.agg_self_scan_relid_index(agg_count);
-        let relid = self.fields.int_at(relid_idx) as pg_sys::Index;
-        let mut scan_expr = None;
-        let mut partial = None;
-        let mut olap = None;
-        let mut trailer_idx = relid_idx + 1;
-        while trailer_idx < self.fields.len() {
-            match self.fields.int_at(trailer_idx) {
-                AGG_SCAN_EXPR_SENTINEL => {
-                    let Some((expr, next_idx)) =
-                        deserialize_agg_scan_expr_from_reader(self.fields, trailer_idx + 1)
-                    else {
-                        break;
-                    };
-                    scan_expr = Some(expr);
-                    trailer_idx = next_idx;
-                }
-                AGG_OLAP_SENTINEL => {
-                    let Some((spec, next_idx)) =
-                        deserialize_olap_agg_spec_from_reader(self.fields, trailer_idx + 1)
-                    else {
-                        break;
-                    };
-                    olap = Some(spec);
-                    trailer_idx = next_idx;
-                }
-                PARTIAL_SENTINEL => {
-                    partial = deserialize_partial_spec_from_reader(self.fields, trailer_idx + 1);
-                    break;
-                }
-                _ => break,
-            }
-        }
-        (relid, scan_expr, partial, olap)
-    }
-
-    #[must_use]
-    fn agg_self_scan_relid_index(&self, agg_count: usize) -> usize {
-        let group_key_base = Self::AGGS + agg_count * 3;
-        let has_group_key = self.fields.int_at(group_key_base);
-        if has_group_key == 0 {
-            return group_key_base + 1;
-        }
-        group_key_base + 6
     }
 
     #[must_use]
@@ -1508,14 +1154,11 @@ impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
     }
 
     #[must_use]
-    fn hash_join_info(&self) -> (i32, i32, bool, bool, pg_sys::Oid, pg_sys::Oid) {
+    fn hash_join_info(&self) -> (i32, i32, bool) {
         (
             self.fields.int_at(Self::HASH_INNER_ATTNO),
             self.fields.int_at(Self::HASH_KEY_TYPE),
             self.fields.int_at(Self::HASH_COUNT_ONLY) == 1,
-            self.fields.int_at(Self::HASH_RESIDENT_COUNT) == 1,
-            pg_sys::Oid::from(self.fields.int_at(Self::HASH_OUTER_REL_OID) as u32),
-            pg_sys::Oid::from(self.fields.int_at(Self::HASH_INNER_REL_OID) as u32),
         )
     }
 
@@ -2039,38 +1682,20 @@ fn validate_join_payload(
 ) -> Result<(), DecodeError> {
     match plan.accel_strategy {
         AccelStrategy::GpuHashJoin => {
-            if payload_end.saturating_sub(start) != 6 {
+            if payload_end.saturating_sub(start) != 3 {
                 return Err(DecodeError::LengthMismatch {
-                    declared: 6,
+                    declared: 3,
                     actual: payload_end.saturating_sub(start),
                 });
             }
             let inner_attno = strict_word(fields, start, "hash inner attno")?;
             let key_type = strict_word(fields, start + 1, "hash key type")?;
-            let count_only = strict_bool(fields, start + 2, "hash count-only flag")?;
-            let resident = strict_bool(fields, start + 3, "hash resident-count flag")?;
-            let outer_oid = strict_word(fields, start + 4, "hash outer relation OID")? as u32;
-            let inner_oid = strict_word(fields, start + 5, "hash inner relation OID")? as u32;
+            strict_bool(fields, start + 2, "hash count-only flag")?;
             if plan.target_attno <= 0 || inner_attno <= 0 || !matches!(key_type, 0..=2) {
                 return Err(DecodeError::InvalidValue {
                     index: start,
                     field: "hash join payload",
                     raw: inner_attno,
-                });
-            }
-            if resident {
-                if !count_only || outer_oid == 0 || inner_oid == 0 {
-                    return Err(DecodeError::InvalidValue {
-                        index: start + 3,
-                        field: "resident hash join payload",
-                        raw: 1,
-                    });
-                }
-            } else if outer_oid != 0 || inner_oid != 0 {
-                return Err(DecodeError::InvalidValue {
-                    index: start + 4,
-                    field: "nonresident hash relation OIDs",
-                    raw: outer_oid as i32,
                 });
             }
             Ok(())
@@ -2107,196 +1732,6 @@ fn validate_join_payload(
             accel: plan.accel_strategy,
         }),
     }
-}
-
-fn legacy_olap_payload_words(kind: c_int) -> Option<usize> {
-    match kind {
-        OLAP_KIND_SSBM_Q1_REVENUE => Some(10),
-        OLAP_KIND_SSBM_Q2_GROUPED_REVENUE | OLAP_KIND_SSBM_Q3_GROUPED_REVENUE => Some(6),
-        OLAP_KIND_SSBM_Q4_GROUPED_PROFIT => Some(7),
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64 => Some(24),
-        OLAP_KIND_RESIDENT_H3_GROUPED_COUNT => Some(4),
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE => Some(25),
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL => Some(29),
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE => Some(33),
-        OLAP_KIND_RESIDENT_STAR_DIM_GROUPED_F64 => Some(18),
-        _ => None,
-    }
-}
-
-#[allow(clippy::too_many_lines)] // fixed legacy variants are quarantined here until Phase 5E deletion
-fn validate_legacy_olap_payload(
-    fields: &IntListReader<'_>,
-    start: usize,
-    payload_end: usize,
-) -> Result<usize, DecodeError> {
-    let kind = strict_word(fields, start, "legacy OLAP kind")?;
-    let words = legacy_olap_payload_words(kind).ok_or(DecodeError::InvalidValue {
-        index: start,
-        field: "legacy OLAP kind",
-        raw: kind,
-    })?;
-    let end = start.checked_add(words).ok_or(DecodeError::LimitExceeded {
-        index: start,
-        field: "legacy OLAP payload",
-        declared: words,
-        maximum: MAX_PLAN_WIRE_INTS,
-    })?;
-    if end > payload_end {
-        return Err(DecodeError::Truncated {
-            index: payload_end,
-            field: "legacy OLAP payload",
-        });
-    }
-    let decoded_end = deserialize_olap_agg_spec_from_reader(fields, start)
-        .map(|(_, next)| next)
-        .ok_or(DecodeError::InvalidValue {
-            index: start,
-            field: "legacy OLAP payload",
-            raw: kind,
-        })?;
-    if decoded_end != end {
-        return Err(DecodeError::LengthMismatch {
-            declared: end,
-            actual: decoded_end,
-        });
-    }
-    let relation_indices: &[usize] = match kind {
-        OLAP_KIND_SSBM_Q1_REVENUE => &[1, 2],
-        OLAP_KIND_SSBM_Q2_GROUPED_REVENUE | OLAP_KIND_SSBM_Q3_GROUPED_REVENUE => &[1, 2, 3, 4],
-        OLAP_KIND_SSBM_Q4_GROUPED_PROFIT => &[1, 2, 3, 4, 5],
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64
-        | OLAP_KIND_RESIDENT_H3_GROUPED_COUNT
-        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE
-        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL
-        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE => &[1],
-        OLAP_KIND_RESIDENT_STAR_DIM_GROUPED_F64 => &[1, 2],
-        _ => &[],
-    };
-    for offset in relation_indices {
-        if strict_word(fields, start + offset, "legacy OLAP relation OID")? == 0 {
-            return Err(DecodeError::InvalidValue {
-                index: start + offset,
-                field: "legacy OLAP relation OID",
-                raw: 0,
-            });
-        }
-    }
-    let requires_rhs_index = match kind {
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64
-        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE
-        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL => Some(start + 4),
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE => Some(start + 8),
-        _ => None,
-    };
-    if let Some(index) = requires_rhs_index {
-        strict_bool(fields, index, "legacy OLAP requires-rhs flag")?;
-    }
-    if kind == OLAP_KIND_SSBM_Q1_REVENUE {
-        let date_kind = strict_word(fields, start + 3, "SSBM date predicate")?;
-        if !matches!(
-            date_kind,
-            OLAP_DATE_YEAR | OLAP_DATE_YEARMONTHNUM | OLAP_DATE_YEAR_WEEK
-        ) {
-            return Err(DecodeError::InvalidValue {
-                index: start + 3,
-                field: "SSBM date predicate",
-                raw: date_kind,
-            });
-        }
-        if date_kind != OLAP_DATE_YEAR_WEEK
-            && strict_word(fields, start + 5, "SSBM unused date argument")? != 0
-        {
-            return Err(DecodeError::InvalidValue {
-                index: start + 5,
-                field: "SSBM unused date argument",
-                raw: strict_word(fields, start + 5, "SSBM unused date argument")?,
-            });
-        }
-        for (lo_offset, hi_offset) in [(6, 7), (8, 9)] {
-            let lo = strict_word(fields, start + lo_offset, "SSBM range lower bound")?;
-            let hi = strict_word(fields, start + hi_offset, "SSBM range upper bound")?;
-            if lo > hi {
-                return Err(DecodeError::InvalidValue {
-                    index: start + lo_offset,
-                    field: "SSBM range",
-                    raw: lo,
-                });
-            }
-        }
-    }
-    if kind == OLAP_KIND_RESIDENT_H3_GROUPED_COUNT {
-        let resolution = strict_word(fields, start + 3, "resident H3 resolution")?;
-        if !(0..=15).contains(&resolution) {
-            return Err(DecodeError::InvalidValue {
-                index: start + 3,
-                field: "resident H3 resolution",
-                raw: resolution,
-            });
-        }
-    }
-    let range_layout = match kind {
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64 => Some((start + 7, start + 8)),
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE
-        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL => Some((start + 8, start + 9)),
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE => Some((start + 12, start + 13)),
-        _ => None,
-    };
-    if let Some((count_index, ranges_start)) = range_layout {
-        let range_count_raw = strict_word(fields, count_index, "legacy OLAP range count")?;
-        let range_count =
-            usize::try_from(range_count_raw).map_err(|_| DecodeError::InvalidValue {
-                index: count_index,
-                field: "legacy OLAP range count",
-                raw: range_count_raw,
-            })?;
-        for range in 0..RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES {
-            let range_start = ranges_start + range * 4;
-            let lo = strict_f64_at(fields, range_start, "legacy OLAP range lower bound")?;
-            let hi = strict_f64_at(fields, range_start + 2, "legacy OLAP range upper bound")?;
-            if range < range_count {
-                if lo.is_nan() || hi.is_nan() || lo > hi {
-                    return Err(DecodeError::InvalidValue {
-                        index: range_start,
-                        field: "legacy OLAP range",
-                        raw: 0,
-                    });
-                }
-            } else if lo.to_bits() != 0 || hi.to_bits() != 0 {
-                return Err(DecodeError::InvalidValue {
-                    index: range_start,
-                    field: "unused legacy OLAP range",
-                    raw: strict_word(fields, range_start, "unused legacy OLAP range")?,
-                });
-            }
-        }
-    }
-    if kind == OLAP_KIND_RESIDENT_STAR_DIM_GROUPED_F64 {
-        for index in [start + 8, start + 11] {
-            let opcode = strict_word(fields, index, "legacy star comparison opcode")?;
-            if !(i32::from(crate::engine::expr_compiler::opcode::EQ)
-                ..=i32::from(crate::engine::expr_compiler::opcode::ALWAYS_TRUE))
-                .contains(&opcode)
-            {
-                return Err(DecodeError::InvalidValue {
-                    index,
-                    field: "legacy star comparison opcode",
-                    raw: opcode,
-                });
-            }
-        }
-        for index in [start + 9, start + 12] {
-            let value = strict_f64_at(fields, index, "legacy star comparison constant")?;
-            if value.is_nan() {
-                return Err(DecodeError::InvalidValue {
-                    index,
-                    field: "legacy star comparison constant",
-                    raw: 0,
-                });
-            }
-        }
-    }
-    Ok(end)
 }
 
 fn validate_partial_payload(
@@ -2502,12 +1937,6 @@ fn validate_agg_payload(
         index += width;
     }
 
-    let mut legacy_olap = false;
-    if fields.get(index) == Some(AGG_OLAP_SENTINEL) {
-        legacy_olap = true;
-        index = validate_legacy_olap_payload(fields, index + 1, payload_end)?;
-    }
-
     let mut agg_query_spec = None;
     let mut agg_output_projection = None;
     if let Some((spec, projection, end)) = decode_agg_query_contract_at(fields, index)? {
@@ -2521,21 +1950,13 @@ fn validate_agg_payload(
         agg_output_projection = Some(projection);
         index = end;
     }
-    if legacy_olap && agg_query_spec.is_some() {
-        return Err(DecodeError::InvalidValue {
-            index,
-            field: "duplicate aggregate execution contracts",
-            raw: AGG_QUERY_SPEC_SENTINEL,
-        });
-    }
-
     let mut legacy_partial = false;
     if fields.get(index) == Some(PARTIAL_SENTINEL) {
         legacy_partial = true;
         index = validate_partial_payload(fields, index + 1, payload_end)?;
     }
     require_payload_end(index, payload_end)?;
-    if !legacy_olap && agg_query_spec.is_none() {
+    if agg_query_spec.is_none() {
         return Err(DecodeError::InvalidValue {
             index,
             field: "aggregate execution contract",
@@ -2899,18 +2320,6 @@ pub(super) unsafe fn deserialize_custom_private(
     let target_attno = plan_private.target_attno;
     let accel_strategy = plan_private.accel_strategy;
 
-    // For Agg strategy, read the aggregate descriptor count at index 6. The
-    // count is still load-bearing for wire offsets: the OLAP trailer that the
-    // resident agg executor consumes sits after the descriptor + group-key
-    // blocks. The descriptors/group-key themselves fed only the retired
-    // host-staged agg executors and are no longer materialized.
-    // Layout: [num_aggs, op0, attno0, rtype0, op1, attno1, rtype1, ...]
-    let agg_count = if matches!(gpu_strategy, GpuStrategy::Agg) {
-        payload.agg_count()
-    } else {
-        0
-    };
-
     // For Window strategy, read window function specs starting at index 6.
     // Layout: [num_specs, func0, part_attno0, order_attno0, value_attno0,
     //   offset0, default_bits0, result_type0, ...]
@@ -2930,18 +2339,12 @@ pub(super) unsafe fn deserialize_custom_private(
 
     // For Join strategy with GpuHashJoin accel, read hash join info at index 6+.
     // Layout: [...base 6 fields..., inner_attno, key_type]
-    let (
-        hash_inner_attno,
-        hash_key_type,
-        hash_count_only,
-        hash_resident_count,
-        hash_outer_rel_oid,
-        hash_inner_rel_oid,
-    ) = if accel_strategy == AccelStrategy::GpuHashJoin {
-        payload.hash_join_info()
-    } else {
-        (0, 0, false, false, pg_sys::InvalidOid, pg_sys::InvalidOid)
-    };
+    let (hash_inner_attno, hash_key_type, hash_count_only) =
+        if accel_strategy == AccelStrategy::GpuHashJoin {
+            payload.hash_join_info()
+        } else {
+            (0, 0, false)
+        };
 
     // For Join strategy with GpuNestedLoopIneq accel, read NLJ info at index 6+.
     // Layout: [...base 6 fields..., shape, key_type, op, inner_lo_attno, inner_hi_attno]
@@ -2951,24 +2354,6 @@ pub(super) unsafe fn deserialize_custom_private(
         } else {
             (0, 0, 0, 0, 0)
         };
-
-    // For Agg strategy, walk past `self_scan_relid` (immediately after the
-    // group-key block) to the sentinel trailers and keep the OLAP spec — the
-    // only trailer the surviving resident agg executor consumes. The scan-expr
-    // and partial trailers fed retired host-staged executors; they are still
-    // parsed for wire compatibility but discarded.
-    //
-    // Layout (Agg):
-    //   [..., num_aggs, (op,attno,rtype)*N,
-    //    has_gk, (gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos)?,
-    //    self_scan_relid, sentinel trailers...]
-    let olap_agg = if matches!(gpu_strategy, GpuStrategy::Agg) {
-        let (_self_scan_relid, _agg_scan_expr, _partial, olap_agg) =
-            payload.agg_self_scan_relid_and_trailers(agg_count);
-        olap_agg
-    } else {
-        None
-    };
 
     CustomPrivateData {
         gpu_strategy,
@@ -2980,9 +2365,6 @@ pub(super) unsafe fn deserialize_custom_private(
         hash_inner_attno,
         hash_key_type,
         hash_count_only,
-        hash_resident_count,
-        hash_outer_rel_oid,
-        hash_inner_rel_oid,
         nlj_shape,
         nlj_key_type,
         nlj_op,
@@ -2990,7 +2372,6 @@ pub(super) unsafe fn deserialize_custom_private(
         nlj_inner_hi_attno,
         window_specs,
         window_scan_relid,
-        olap_agg,
         agg_query_spec: validated.agg_query_spec,
         agg_output_projection: validated.agg_output_projection,
         resident_proof,
@@ -3009,24 +2390,6 @@ pub(in crate::engine::ffi) const PARTIAL_SENTINEL: c_int = 0x5041_4147; // b"PAA
 /// Magic marker preceding an aggregate self-scan template expression in
 /// `custom_private`.
 pub(in crate::engine::ffi) const AGG_SCAN_EXPR_SENTINEL: c_int = 0x4147_5850; // b"AGXP"
-
-/// Magic marker preceding an aggregate OLAP submode payload.
-pub(in crate::engine::ffi) const AGG_OLAP_SENTINEL: c_int = 0x4F4C_4150; // b"OLAP"
-/// Path-level marker for the childless resident `COUNT(*)` hashjoin payload.
-pub(in crate::engine::ffi) const HASH_JOIN_RESIDENT_COUNT_SENTINEL: c_int = 0x484A_5243; // b"HJRC"
-const OLAP_KIND_SSBM_Q1_REVENUE: c_int = 1;
-const OLAP_KIND_SSBM_Q2_GROUPED_REVENUE: c_int = 2;
-const OLAP_KIND_SSBM_Q3_GROUPED_REVENUE: c_int = 3;
-const OLAP_KIND_SSBM_Q4_GROUPED_PROFIT: c_int = 4;
-const OLAP_KIND_RESIDENT_DENSE_GROUPED_F64: c_int = 5;
-const OLAP_KIND_RESIDENT_H3_GROUPED_COUNT: c_int = 6;
-const OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE: c_int = 7;
-const OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL: c_int = 8;
-const OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE: c_int = 9;
-const OLAP_KIND_RESIDENT_STAR_DIM_GROUPED_F64: c_int = 10;
-const OLAP_DATE_YEAR: c_int = 1;
-const OLAP_DATE_YEARMONTHNUM: c_int = 2;
-const OLAP_DATE_YEAR_WEEK: c_int = 3;
 
 /// Append the neutral aggregate query and ordered output contracts consumed by
 /// the Phase 5 descriptor executor. Both blocks own independent v2 framing.
@@ -3093,337 +2456,6 @@ pub(super) unsafe fn append_plan_wire_footer(
     writer.push_int(total_len);
     writer.push_int(method as c_int);
     writer.into_list()
-}
-
-fn deserialize_olap_agg_spec_from_reader(
-    fields: &IntListReader<'_>,
-    start_idx: usize,
-) -> Option<(OlapAggSpec, usize)> {
-    if !fields.contains_range(start_idx, 1) {
-        return None;
-    }
-    let mut cursor = fields.cursor_at(start_idx);
-    let kind = cursor.read_int();
-    match kind {
-        OLAP_KIND_SSBM_Q1_REVENUE => {
-            if !fields.contains_range(start_idx, 10) {
-                return None;
-            }
-            let fact_rel_oid = cursor.read_oid();
-            let date_rel_oid = cursor.read_oid();
-            let date_kind = cursor.read_int();
-            let date_arg1 = cursor.read_int();
-            let date_arg2 = cursor.read_int();
-            let date_predicate = match date_kind {
-                OLAP_DATE_YEAR => SsbmQ1DatePredicate::Year(date_arg1),
-                OLAP_DATE_YEARMONTHNUM => SsbmQ1DatePredicate::YearMonthNum(date_arg1),
-                OLAP_DATE_YEAR_WEEK => SsbmQ1DatePredicate::YearWeek {
-                    year: date_arg1,
-                    week: date_arg2,
-                },
-                _ => return None,
-            };
-            let discount_lo = cursor.read_int();
-            let discount_hi = cursor.read_int();
-            let quantity_lo = cursor.read_int();
-            let quantity_hi = cursor.read_int();
-            Some((
-                OlapAggSpec::SsbmQ1Revenue(SsbmQ1RevenueSpec {
-                    fact_rel_oid,
-                    date_rel_oid,
-                    date_predicate,
-                    discount_lo,
-                    discount_hi,
-                    quantity_lo,
-                    quantity_hi,
-                }),
-                cursor.position(),
-            ))
-        }
-        OLAP_KIND_SSBM_Q2_GROUPED_REVENUE => {
-            if !fields.contains_range(start_idx, 6) {
-                return None;
-            }
-            let fact_rel_oid = cursor.read_oid();
-            let date_rel_oid = cursor.read_oid();
-            let part_rel_oid = cursor.read_oid();
-            let supplier_rel_oid = cursor.read_oid();
-            let variant = SsbmQ2Variant::from_i32(cursor.read_int())?;
-            Some((
-                OlapAggSpec::SsbmQ2GroupedRevenue(SsbmQ2GroupedRevenueSpec {
-                    fact_rel_oid,
-                    date_rel_oid,
-                    part_rel_oid,
-                    supplier_rel_oid,
-                    variant,
-                }),
-                cursor.position(),
-            ))
-        }
-        OLAP_KIND_SSBM_Q3_GROUPED_REVENUE => {
-            if !fields.contains_range(start_idx, 6) {
-                return None;
-            }
-            let fact_rel_oid = cursor.read_oid();
-            let date_rel_oid = cursor.read_oid();
-            let customer_rel_oid = cursor.read_oid();
-            let supplier_rel_oid = cursor.read_oid();
-            let variant = SsbmQ3Variant::from_i32(cursor.read_int())?;
-            Some((
-                OlapAggSpec::SsbmQ3GroupedRevenue(SsbmQ3GroupedRevenueSpec {
-                    fact_rel_oid,
-                    date_rel_oid,
-                    customer_rel_oid,
-                    supplier_rel_oid,
-                    variant,
-                }),
-                cursor.position(),
-            ))
-        }
-        OLAP_KIND_SSBM_Q4_GROUPED_PROFIT => {
-            if !fields.contains_range(start_idx, 7) {
-                return None;
-            }
-            let fact_rel_oid = cursor.read_oid();
-            let date_rel_oid = cursor.read_oid();
-            let part_rel_oid = cursor.read_oid();
-            let customer_rel_oid = cursor.read_oid();
-            let supplier_rel_oid = cursor.read_oid();
-            let variant = SsbmQ4Variant::from_i32(cursor.read_int())?;
-            Some((
-                OlapAggSpec::SsbmQ4GroupedProfit(SsbmQ4GroupedProfitSpec {
-                    fact_rel_oid,
-                    date_rel_oid,
-                    part_rel_oid,
-                    customer_rel_oid,
-                    supplier_rel_oid,
-                    variant,
-                }),
-                cursor.position(),
-            ))
-        }
-        OLAP_KIND_RESIDENT_DENSE_GROUPED_F64
-        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_WITH_SOURCE
-        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL
-        | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE => {
-            let has_predicate_source = kind != OLAP_KIND_RESIDENT_DENSE_GROUPED_F64;
-            let has_logical = matches!(
-                kind,
-                OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL
-                    | OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE
-            );
-            let has_source_attnos = kind == OLAP_KIND_RESIDENT_DENSE_GROUPED_F64_LOGICAL_SOURCE;
-            let expected_ints = if has_source_attnos {
-                33
-            } else if has_logical {
-                29
-            } else if has_predicate_source {
-                25
-            } else {
-                24
-            };
-            if !fields.contains_range(start_idx, expected_ints) {
-                return None;
-            }
-            let rel_oid = cursor.read_oid();
-            let source = if has_source_attnos {
-                ResidentDenseGroupedF64Source {
-                    group_attno: cursor.read_int(),
-                    value_attno: cursor.read_int(),
-                    value_rhs_attno: cursor.read_int(),
-                    filter_attno: cursor.read_int(),
-                }
-            } else {
-                ResidentDenseGroupedF64Source::UNKNOWN
-            };
-            let layout = ResidentDenseGroupedF64Layout::from_i32(cursor.read_int())?;
-            let measure_op = ResidentMeasureOp::from_i32(cursor.read_int())?;
-            let requires_rhs = cursor.read_int() != 0;
-            let filter_mode = ResidentDenseGroupedF64FilterMode::from_i32(cursor.read_int())?;
-            if has_source_attnos {
-                let group_attno_valid = if layout.is_single_group() {
-                    source.group_attno == 0
-                } else {
-                    source.group_attno > 0
-                };
-                if !group_attno_valid
-                    || source.value_attno <= 0
-                    || source.value_rhs_attno < 0
-                    || source.filter_attno < 0
-                    || (source.value_rhs_attno > 0) != requires_rhs
-                    || (filter_mode != ResidentDenseGroupedF64FilterMode::None
-                        && source.filter_attno <= 0)
-                {
-                    return None;
-                }
-            }
-            let predicate_op =
-                ResidentDenseGroupedF64MeasurePredicateOp::from_i32(cursor.read_int())?;
-            let predicate_source = if has_predicate_source {
-                ResidentDenseGroupedF64MeasurePredicateSource::from_i32(cursor.read_int())?
-            } else if predicate_op == ResidentDenseGroupedF64MeasurePredicateOp::BoolOnly {
-                ResidentDenseGroupedF64MeasurePredicateSource::Value
-            } else {
-                ResidentDenseGroupedF64MeasurePredicateSource::Rhs
-            };
-            let predicate_range_count = cursor.read_int();
-            let predicate_range_count = u8::try_from(predicate_range_count).ok()?;
-            if usize::from(predicate_range_count)
-                > RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES
-            {
-                return None;
-            }
-            let mut predicate_range_los =
-                [0.0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES];
-            let mut predicate_range_his =
-                [0.0; RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES];
-            for idx in 0..RESIDENT_DENSE_GROUPED_F64_MEASURE_PREDICATE_MAX_RANGES {
-                predicate_range_los[idx] = cursor.read_f64_halves();
-                predicate_range_his[idx] = cursor.read_f64_halves();
-            }
-            match predicate_op {
-                ResidentDenseGroupedF64MeasurePredicateOp::BoolOnly => {
-                    if predicate_source != ResidentDenseGroupedF64MeasurePredicateSource::Value
-                        || predicate_range_count != 0
-                    {
-                        return None;
-                    }
-                }
-                ResidentDenseGroupedF64MeasurePredicateOp::BoolAndRhsBetween => {
-                    if predicate_range_count != 1 {
-                        return None;
-                    }
-                }
-                ResidentDenseGroupedF64MeasurePredicateOp::BoolAndRhsRanges => {
-                    if predicate_range_count == 0 {
-                        return None;
-                    }
-                }
-            }
-            for idx in 0..usize::from(predicate_range_count) {
-                if predicate_range_los[idx].is_nan()
-                    || predicate_range_his[idx].is_nan()
-                    || predicate_range_los[idx] > predicate_range_his[idx]
-                {
-                    return None;
-                }
-            }
-            let measure_predicate = ResidentDenseGroupedF64MeasurePredicate {
-                op: predicate_op,
-                source: predicate_source,
-                range_count: predicate_range_count,
-                range_los: predicate_range_los,
-                range_his: predicate_range_his,
-            };
-            let logical = if has_logical {
-                let logical = ResidentGroupAggLogicalSpec::from_wire_values(
-                    cursor.read_int(),
-                    cursor.read_int(),
-                    cursor.read_int(),
-                    cursor.read_int(),
-                )?;
-                if logical.aggregate_lane_mask != layout.aggregate_mask() {
-                    return None;
-                }
-                logical
-            } else {
-                ResidentGroupAggLogicalSpec::for_dense_grouped_f64(
-                    layout,
-                    measure_op,
-                    requires_rhs,
-                    filter_mode,
-                    measure_predicate,
-                )?
-            };
-            Some((
-                OlapAggSpec::ResidentDenseGroupedF64(ResidentDenseGroupedF64Spec {
-                    rel_oid,
-                    source,
-                    layout,
-                    logical,
-                    measure_op,
-                    requires_rhs,
-                    filter_mode,
-                    measure_predicate,
-                }),
-                cursor.position(),
-            ))
-        }
-        OLAP_KIND_RESIDENT_STAR_DIM_GROUPED_F64 => {
-            if !fields.contains_range(start_idx, 18) {
-                return None;
-            }
-            let fact_rel_oid = cursor.read_oid();
-            let dim_rel_oid = cursor.read_oid();
-            let fact_key_attno = cursor.read_int();
-            let fact_value_attno = cursor.read_int();
-            let dim_key_attno = cursor.read_int();
-            let dim_group_attno = cursor.read_int();
-            let dim_filter_attno = cursor.read_int();
-            if fact_rel_oid == pg_sys::InvalidOid
-                || dim_rel_oid == pg_sys::InvalidOid
-                || fact_key_attno <= 0
-                || fact_value_attno <= 0
-                || dim_key_attno <= 0
-                || dim_group_attno <= 0
-                || dim_filter_attno <= 0
-            {
-                return None;
-            }
-            let fact_value_cmp_opcode = u16::try_from(cursor.read_int()).ok()?;
-            let fact_value_cmp_const = cursor.read_f64_halves();
-            let dim_filter_cmp_opcode = u16::try_from(cursor.read_int()).ok()?;
-            let dim_filter_cmp_const = cursor.read_f64_halves();
-            if fact_value_cmp_const.is_nan() || dim_filter_cmp_const.is_nan() {
-                return None;
-            }
-            let logical = ResidentGroupAggLogicalSpec::from_wire_values(
-                cursor.read_int(),
-                cursor.read_int(),
-                cursor.read_int(),
-                cursor.read_int(),
-            )?;
-            if logical != ResidentGroupAggLogicalSpec::for_star_dim_grouped_f64() {
-                return None;
-            }
-            Some((
-                OlapAggSpec::ResidentStarDimGroupedF64(ResidentStarDimGroupedF64Spec {
-                    shape: ResidentStarDimGroupAggCacheShape {
-                        fact_rel_oid,
-                        dim_rel_oid,
-                        fact_key_attno,
-                        fact_value_attno,
-                        dim_key_attno,
-                        dim_group_attno,
-                        dim_filter_attno,
-                        fact_value_cmp_opcode,
-                        fact_value_cmp_const,
-                        dim_filter_cmp_opcode,
-                        dim_filter_cmp_const,
-                    },
-                    logical,
-                }),
-                cursor.position(),
-            ))
-        }
-        OLAP_KIND_RESIDENT_H3_GROUPED_COUNT => {
-            if !fields.contains_range(start_idx, 4) {
-                return None;
-            }
-            let rel_oid = cursor.read_oid();
-            let kind = ResidentH3GroupedCountKind::from_i32(cursor.read_int())?;
-            let resolution = cursor.read_int();
-            Some((
-                OlapAggSpec::ResidentH3GroupedCount(ResidentH3GroupedCountSpec {
-                    rel_oid,
-                    kind,
-                    resolution,
-                }),
-                cursor.position(),
-            ))
-        }
-        _ => None,
-    }
 }
 
 /// Magic marker preceding a serialized [`ResidentProofSnapshot`] trailer.
@@ -3577,61 +2609,6 @@ pub(in crate::engine::ffi) unsafe fn deserialize_partial_spec(
     deserialize_partial_spec_from_reader(&fields, start_idx)
 }
 
-#[must_use]
-fn deserialize_agg_scan_expr_from_reader(
-    fields: &IntListReader<'_>,
-    start_idx: usize,
-) -> Option<(CompiledExpr, usize)> {
-    let template_type = fields.get(start_idx)?;
-    let mut cursor = fields.cursor_at(start_idx + 1);
-    match template_type {
-        1 => {
-            if !fields.contains_range(start_idx + 1, 4) {
-                return None;
-            }
-            Some((
-                CompiledExpr::Template(TemplateKernel::CmpConst {
-                    col_idx: cursor.read_u32(),
-                    cmp_opcode: cursor.read_int() as u16,
-                    const_val: cursor.read_f64_halves(),
-                }),
-                start_idx + 5,
-            ))
-        }
-        2 => {
-            if !fields.contains_range(start_idx + 1, 5) {
-                return None;
-            }
-            Some((
-                CompiledExpr::Template(TemplateKernel::Between {
-                    col_idx: cursor.read_u32(),
-                    lo: cursor.read_f64_halves(),
-                    hi: cursor.read_f64_halves(),
-                }),
-                start_idx + 6,
-            ))
-        }
-        3 => {
-            if !fields.contains_range(start_idx + 1, 8) {
-                return None;
-            }
-            Some((
-                CompiledExpr::Template(TemplateKernel::TwoPredAnd {
-                    col1_idx: cursor.read_u32(),
-                    cmp1_opcode: cursor.read_int() as u16,
-                    const1_val: cursor.read_f64_halves(),
-                    col2_idx: cursor.read_u32(),
-                    cmp2_opcode: cursor.read_int() as u16,
-                    const2_val: cursor.read_f64_halves(),
-                }),
-                start_idx + 9,
-            ))
-        }
-        _ => None,
-    }
-}
-
-#[must_use]
 fn deserialize_partial_spec_from_reader(
     fields: &IntListReader<'_>,
     start_idx: usize,

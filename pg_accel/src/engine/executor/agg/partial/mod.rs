@@ -2,8 +2,8 @@
 //!
 //! The worker-side partial *emission* machinery (`ColumnAccumulator`,
 //! `PartialEmitter` and its implementations) was retired with the host-staged
-//! aggregate executors — only the resident OLAP aggregate survives, and it is
-//! never planned under a parallel Gather. The spec types below remain because
+//! aggregate executors. The descriptor aggregate is never planned under a
+//! parallel Gather. The spec types below remain because
 //! the private-data codec (`ffi/custom_scan/private_data.rs`) still parses
 //! and serializes the sentinel-prefixed partial block for wire-format
 //! compatibility; Phase 5 owns the full codec break.

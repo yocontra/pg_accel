@@ -10,12 +10,6 @@ use pgrx::pg_sys;
 use super::{GpuAccelScanState, GpuStrategy, dsm, function_scan, srf_target_list};
 use crate::engine::executor::agg::AggExecState;
 use crate::engine::executor::join::JoinExecState;
-use crate::engine::executor::olap::{
-    OlapAggSpec, ResidentDenseGroupedF64MeasurePredicate,
-    ResidentDenseGroupedF64MeasurePredicateOp, ResidentDenseGroupedF64MeasurePredicateSource,
-    ResidentGroupAggFilterExpr, ResidentGroupAggGroupKeyExpr, ResidentGroupAggMeasureExpr,
-    ResidentGroupAggPredicateGuard, ResidentGroupAggValuePredicate,
-};
 use crate::engine::executor::scan::ScanExecState;
 use crate::engine::registry::AccelStrategy;
 use crate::engine::residency::{
@@ -87,7 +81,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
         explain_resident_operator_class(resident_proof, es);
         if strategy == GpuStrategy::Agg && !(*state).accel.executor.is_null() {
             let agg_state = &*(*state).accel.executor.cast::<AggExecState>();
-            explain_resident_groupagg_logical_spec(agg_state, es);
             explain_descriptor_agg(agg_state, es);
         }
         pg_sys::ExplainPropertyInteger(
@@ -341,7 +334,6 @@ unsafe fn gpu_kernel_dispatched_for_explain(
     }
 
     match strategy {
-        GpuStrategy::Agg => unsafe { (*executor.cast::<AggExecState>()).gpu_dispatched },
         // GpuSort retired: begin_custom_scan rejects the strategy before an
         // executor exists, so EXPLAIN can never reach this arm.
         GpuStrategy::Sort => false,
@@ -350,7 +342,7 @@ unsafe fn gpu_kernel_dispatched_for_explain(
         // GpuPreAgg retired: begin_custom_scan rejects the strategy before an
         // executor exists, so EXPLAIN can never reach this arm.
         GpuStrategy::PreAgg => false,
-        GpuStrategy::Scan | GpuStrategy::Join | GpuStrategy::Window => unsafe {
+        GpuStrategy::Scan | GpuStrategy::Join | GpuStrategy::Agg | GpuStrategy::Window => unsafe {
             (*state).accel.batches_executed > 0
         },
     }
@@ -803,246 +795,6 @@ unsafe fn explain_descriptor_agg(agg_state: &AggExecState, es: *mut pg_sys::Expl
     }
 }
 
-unsafe fn explain_resident_groupagg_logical_spec(
-    agg_state: &AggExecState,
-    es: *mut pg_sys::ExplainState,
-) {
-    let Some((logical, dense_measure_predicate)) = (match agg_state.olap_spec() {
-        Some(OlapAggSpec::SsbmQ1Revenue(_)) => Some((
-            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_ssbm_q1_revenue(),
-            None,
-        )),
-        Some(OlapAggSpec::SsbmQ2GroupedRevenue(_)) => Some((
-            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_ssbm_q2_grouped_revenue(
-            ),
-            None,
-        )),
-        Some(OlapAggSpec::SsbmQ3GroupedRevenue(_)) => Some((
-            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_ssbm_q3_grouped_revenue(
-            ),
-            None,
-        )),
-        Some(OlapAggSpec::SsbmQ4GroupedProfit(_)) => Some((
-            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_ssbm_q4_grouped_profit(
-            ),
-            None,
-        )),
-        Some(OlapAggSpec::ResidentDenseGroupedF64(spec)) => {
-            Some((spec.logical, Some(spec.measure_predicate)))
-        }
-        Some(OlapAggSpec::ResidentStarDimGroupedF64(spec)) => Some((spec.logical, None)),
-        Some(OlapAggSpec::ResidentH3GroupedCount(_)) => Some((
-            crate::engine::executor::olap::ResidentGroupAggLogicalSpec::for_h3_grouped_count(),
-            None,
-        )),
-        _ => None,
-    }) else {
-        return;
-    };
-    unsafe {
-        pg_sys::ExplainPropertyText(
-            c"GPU Resident GroupAgg Key".as_ptr(),
-            resident_groupagg_key_expr_label(logical.group_key_expr).as_ptr(),
-            es,
-        );
-        pg_sys::ExplainPropertyText(
-            c"GPU Resident GroupAgg Measure".as_ptr(),
-            resident_groupagg_measure_expr_label(logical.measure_expr).as_ptr(),
-            es,
-        );
-        pg_sys::ExplainPropertyText(
-            c"GPU Resident GroupAgg Filter".as_ptr(),
-            resident_groupagg_filter_expr_label(logical.filter_expr).as_ptr(),
-            es,
-        );
-        let predicate = logical.predicate_spec();
-        pg_sys::ExplainPropertyText(
-            c"GPU Resident GroupAgg Predicate Guard".as_ptr(),
-            resident_groupagg_predicate_guard_label(predicate.guard).as_ptr(),
-            es,
-        );
-        pg_sys::ExplainPropertyText(
-            c"GPU Resident GroupAgg Value Predicate".as_ptr(),
-            resident_groupagg_value_predicate_label(predicate.value_predicate).as_ptr(),
-            es,
-        );
-        let predicate_ir =
-            resident_groupagg_predicate_ir_label(logical.filter_expr, dense_measure_predicate);
-        pg_sys::ExplainPropertyText(
-            c"GPU Resident GroupAgg Predicate IR".as_ptr(),
-            predicate_ir.as_ptr(),
-            es,
-        );
-        pg_sys::ExplainPropertyInteger(
-            c"GPU Resident GroupAgg Aggregate Mask".as_ptr(),
-            std::ptr::null(),
-            i64::from(logical.aggregate_lane_mask),
-            es,
-        );
-    }
-}
-
-const fn resident_groupagg_key_expr_label(expr: ResidentGroupAggGroupKeyExpr) -> &'static CStr {
-    match expr {
-        ResidentGroupAggGroupKeyExpr::ResidentI32 => c"resident_i32",
-        ResidentGroupAggGroupKeyExpr::H3Index => c"h3index",
-        ResidentGroupAggGroupKeyExpr::SingleGroup => c"single_group",
-        ResidentGroupAggGroupKeyExpr::SsbmYearBrand => c"ssbm_year_brand",
-        ResidentGroupAggGroupKeyExpr::SsbmCustomerSupplierYear => c"ssbm_customer_supplier_year",
-        ResidentGroupAggGroupKeyExpr::SsbmYearGeoPart => c"ssbm_year_geo_part",
-        ResidentGroupAggGroupKeyExpr::StarDimension => c"star_dimension",
-    }
-}
-
-const fn resident_groupagg_measure_expr_label(expr: ResidentGroupAggMeasureExpr) -> &'static CStr {
-    match expr {
-        ResidentGroupAggMeasureExpr::DirectColumn => c"direct_column",
-        ResidentGroupAggMeasureExpr::BinaryMul => c"binary_mul",
-        ResidentGroupAggMeasureExpr::BinarySub => c"binary_sub",
-        ResidentGroupAggMeasureExpr::CountStar => c"count_star",
-        ResidentGroupAggMeasureExpr::SsbmDiscountedRevenue => c"ssbm_discounted_revenue",
-        ResidentGroupAggMeasureExpr::SsbmRevenueColumn => c"ssbm_revenue_column",
-        ResidentGroupAggMeasureExpr::SsbmProfitRevenueMinusSupplycost => {
-            c"ssbm_profit_revenue_minus_supplycost"
-        }
-        ResidentGroupAggMeasureExpr::TwoMeasureStats => c"two_measure_stats",
-    }
-}
-
-const fn resident_groupagg_filter_expr_label(expr: ResidentGroupAggFilterExpr) -> &'static CStr {
-    match expr {
-        ResidentGroupAggFilterExpr::None => c"none",
-        ResidentGroupAggFilterExpr::WhereBool => c"where_bool",
-        ResidentGroupAggFilterExpr::AggregateFilterBool => c"aggregate_filter_bool",
-        ResidentGroupAggFilterExpr::CaseBool => c"case_bool",
-        ResidentGroupAggFilterExpr::CaseBoolAndValueRanges => c"case_bool_and_value_ranges",
-        ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges => c"case_bool_and_rhs_ranges",
-        ResidentGroupAggFilterExpr::SsbmDateFactPredicate => c"ssbm_date_fact_predicate",
-        ResidentGroupAggFilterExpr::SsbmStarJoinMembership => c"ssbm_star_join_membership",
-        ResidentGroupAggFilterExpr::WhereBoolAndValueRanges => c"where_bool_and_value_ranges",
-        ResidentGroupAggFilterExpr::WhereBoolAndRhsRanges => c"where_bool_and_rhs_ranges",
-        ResidentGroupAggFilterExpr::AggregateFilterBoolAndValueRanges => {
-            c"aggregate_filter_bool_and_value_ranges"
-        }
-        ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges => {
-            c"aggregate_filter_bool_and_rhs_ranges"
-        }
-        ResidentGroupAggFilterExpr::StarJoinMembership => c"star_join_membership",
-    }
-}
-
-const fn resident_groupagg_predicate_guard_label(
-    guard: ResidentGroupAggPredicateGuard,
-) -> &'static CStr {
-    match guard {
-        ResidentGroupAggPredicateGuard::None => c"none",
-        ResidentGroupAggPredicateGuard::ResidentBoolColumn => c"resident_bool_column",
-        ResidentGroupAggPredicateGuard::SsbmDateFactPredicate => c"ssbm_date_fact_predicate",
-        ResidentGroupAggPredicateGuard::SsbmStarJoinMembership => c"ssbm_star_join_membership",
-        ResidentGroupAggPredicateGuard::StarJoinMembership => c"star_join_membership",
-    }
-}
-
-const fn resident_groupagg_value_predicate_label(
-    predicate: ResidentGroupAggValuePredicate,
-) -> &'static CStr {
-    match predicate {
-        ResidentGroupAggValuePredicate::None => c"none",
-        ResidentGroupAggValuePredicate::ValueRanges => c"value_ranges",
-        ResidentGroupAggValuePredicate::RhsRanges => c"rhs_ranges",
-    }
-}
-
-fn resident_groupagg_predicate_ir_label(
-    filter_expr: ResidentGroupAggFilterExpr,
-    dense_measure_predicate: Option<ResidentDenseGroupedF64MeasurePredicate>,
-) -> CString {
-    let label = match filter_expr {
-        ResidentGroupAggFilterExpr::None => "guard=none;value=none".to_owned(),
-        ResidentGroupAggFilterExpr::WhereBool => {
-            "guard=resident_bool_column;scope=row;value=none".to_owned()
-        }
-        ResidentGroupAggFilterExpr::AggregateFilterBool => {
-            "guard=resident_bool_column;scope=aggregate_filter;value=none".to_owned()
-        }
-        ResidentGroupAggFilterExpr::CaseBool => {
-            "guard=resident_bool_column;scope=measure;value=none".to_owned()
-        }
-        ResidentGroupAggFilterExpr::WhereBoolAndValueRanges
-        | ResidentGroupAggFilterExpr::WhereBoolAndRhsRanges => {
-            resident_groupagg_range_predicate_ir_label("row", filter_expr, dense_measure_predicate)
-        }
-        ResidentGroupAggFilterExpr::AggregateFilterBoolAndValueRanges
-        | ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges => {
-            resident_groupagg_range_predicate_ir_label(
-                "aggregate_filter",
-                filter_expr,
-                dense_measure_predicate,
-            )
-        }
-        ResidentGroupAggFilterExpr::CaseBoolAndValueRanges
-        | ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges => {
-            resident_groupagg_range_predicate_ir_label(
-                "measure",
-                filter_expr,
-                dense_measure_predicate,
-            )
-        }
-        ResidentGroupAggFilterExpr::SsbmDateFactPredicate => {
-            "guard=ssbm_date_fact_predicate;value=none".to_owned()
-        }
-        ResidentGroupAggFilterExpr::SsbmStarJoinMembership => {
-            "guard=ssbm_star_join_membership;value=none".to_owned()
-        }
-        ResidentGroupAggFilterExpr::StarJoinMembership => {
-            "guard=star_join_membership;value=none".to_owned()
-        }
-    };
-    CString::new(label).expect("resident groupagg predicate IR labels never contain NUL")
-}
-
-fn resident_groupagg_range_predicate_ir_label(
-    scope: &str,
-    filter_expr: ResidentGroupAggFilterExpr,
-    dense_measure_predicate: Option<ResidentDenseGroupedF64MeasurePredicate>,
-) -> String {
-    let source = match filter_expr {
-        ResidentGroupAggFilterExpr::CaseBoolAndValueRanges
-        | ResidentGroupAggFilterExpr::WhereBoolAndValueRanges
-        | ResidentGroupAggFilterExpr::AggregateFilterBoolAndValueRanges => {
-            ResidentDenseGroupedF64MeasurePredicateSource::Value
-        }
-        ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges
-        | ResidentGroupAggFilterExpr::WhereBoolAndRhsRanges
-        | ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges => {
-            ResidentDenseGroupedF64MeasurePredicateSource::Rhs
-        }
-        _ => unreachable!("range predicate IR label called for non-range filter"),
-    };
-    let range_count = dense_measure_predicate
-        .filter(|predicate| {
-            matches!(
-                predicate.op,
-                ResidentDenseGroupedF64MeasurePredicateOp::BoolAndRhsBetween
-                    | ResidentDenseGroupedF64MeasurePredicateOp::BoolAndRhsRanges
-            ) && predicate.source == source
-        })
-        .map_or(0, |predicate| predicate.range_count);
-    format!(
-        "guard=resident_bool_column;scope={scope};value={};ranges={range_count}",
-        resident_groupagg_predicate_source_label(source),
-    )
-}
-
-const fn resident_groupagg_predicate_source_label(
-    source: ResidentDenseGroupedF64MeasurePredicateSource,
-) -> &'static str {
-    match source {
-        ResidentDenseGroupedF64MeasurePredicateSource::Value => "value_ranges",
-        ResidentDenseGroupedF64MeasurePredicateSource::Rhs => "rhs_ranges",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1278,217 +1030,8 @@ mod tests {
     }
 
     #[test]
-    fn resident_groupagg_logical_labels_are_explain_stable() {
-        for (expr, label) in [
-            (ResidentGroupAggGroupKeyExpr::ResidentI32, c"resident_i32"),
-            (ResidentGroupAggGroupKeyExpr::H3Index, c"h3index"),
-            (ResidentGroupAggGroupKeyExpr::SingleGroup, c"single_group"),
-            (
-                ResidentGroupAggGroupKeyExpr::SsbmYearBrand,
-                c"ssbm_year_brand",
-            ),
-            (
-                ResidentGroupAggGroupKeyExpr::SsbmCustomerSupplierYear,
-                c"ssbm_customer_supplier_year",
-            ),
-            (
-                ResidentGroupAggGroupKeyExpr::SsbmYearGeoPart,
-                c"ssbm_year_geo_part",
-            ),
-            (
-                ResidentGroupAggGroupKeyExpr::StarDimension,
-                c"star_dimension",
-            ),
-        ] {
-            assert_eq!(resident_groupagg_key_expr_label(expr), label);
-        }
-
-        for (expr, label) in [
-            (ResidentGroupAggMeasureExpr::DirectColumn, c"direct_column"),
-            (ResidentGroupAggMeasureExpr::BinaryMul, c"binary_mul"),
-            (ResidentGroupAggMeasureExpr::BinarySub, c"binary_sub"),
-            (ResidentGroupAggMeasureExpr::CountStar, c"count_star"),
-            (
-                ResidentGroupAggMeasureExpr::SsbmDiscountedRevenue,
-                c"ssbm_discounted_revenue",
-            ),
-            (
-                ResidentGroupAggMeasureExpr::SsbmRevenueColumn,
-                c"ssbm_revenue_column",
-            ),
-            (
-                ResidentGroupAggMeasureExpr::SsbmProfitRevenueMinusSupplycost,
-                c"ssbm_profit_revenue_minus_supplycost",
-            ),
-            (
-                ResidentGroupAggMeasureExpr::TwoMeasureStats,
-                c"two_measure_stats",
-            ),
-        ] {
-            assert_eq!(resident_groupagg_measure_expr_label(expr), label);
-        }
-
-        for (expr, label) in [
-            (ResidentGroupAggFilterExpr::None, c"none"),
-            (ResidentGroupAggFilterExpr::WhereBool, c"where_bool"),
-            (
-                ResidentGroupAggFilterExpr::AggregateFilterBool,
-                c"aggregate_filter_bool",
-            ),
-            (ResidentGroupAggFilterExpr::CaseBool, c"case_bool"),
-            (
-                ResidentGroupAggFilterExpr::CaseBoolAndValueRanges,
-                c"case_bool_and_value_ranges",
-            ),
-            (
-                ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges,
-                c"case_bool_and_rhs_ranges",
-            ),
-            (
-                ResidentGroupAggFilterExpr::SsbmDateFactPredicate,
-                c"ssbm_date_fact_predicate",
-            ),
-            (
-                ResidentGroupAggFilterExpr::SsbmStarJoinMembership,
-                c"ssbm_star_join_membership",
-            ),
-            (
-                ResidentGroupAggFilterExpr::WhereBoolAndValueRanges,
-                c"where_bool_and_value_ranges",
-            ),
-            (
-                ResidentGroupAggFilterExpr::WhereBoolAndRhsRanges,
-                c"where_bool_and_rhs_ranges",
-            ),
-            (
-                ResidentGroupAggFilterExpr::AggregateFilterBoolAndValueRanges,
-                c"aggregate_filter_bool_and_value_ranges",
-            ),
-            (
-                ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges,
-                c"aggregate_filter_bool_and_rhs_ranges",
-            ),
-            (
-                ResidentGroupAggFilterExpr::StarJoinMembership,
-                c"star_join_membership",
-            ),
-        ] {
-            assert_eq!(resident_groupagg_filter_expr_label(expr), label);
-        }
-
-        for (guard, label) in [
-            (ResidentGroupAggPredicateGuard::None, c"none"),
-            (
-                ResidentGroupAggPredicateGuard::ResidentBoolColumn,
-                c"resident_bool_column",
-            ),
-            (
-                ResidentGroupAggPredicateGuard::SsbmDateFactPredicate,
-                c"ssbm_date_fact_predicate",
-            ),
-            (
-                ResidentGroupAggPredicateGuard::SsbmStarJoinMembership,
-                c"ssbm_star_join_membership",
-            ),
-            (
-                ResidentGroupAggPredicateGuard::StarJoinMembership,
-                c"star_join_membership",
-            ),
-        ] {
-            assert_eq!(resident_groupagg_predicate_guard_label(guard), label);
-        }
-
-        for (predicate, label) in [
-            (ResidentGroupAggValuePredicate::None, c"none"),
-            (ResidentGroupAggValuePredicate::ValueRanges, c"value_ranges"),
-            (ResidentGroupAggValuePredicate::RhsRanges, c"rhs_ranges"),
-        ] {
-            assert_eq!(resident_groupagg_value_predicate_label(predicate), label);
-        }
-
-        assert_eq!(
-            resident_groupagg_predicate_ir_label(ResidentGroupAggFilterExpr::None, None)
-                .to_str()
-                .expect("predicate IR label is utf8"),
-            "guard=none;value=none"
-        );
-        assert_eq!(
-            resident_groupagg_predicate_ir_label(
-                ResidentGroupAggFilterExpr::CaseBoolAndRhsRanges,
-                Some(
-                    crate::engine::executor::olap::ResidentDenseGroupedF64MeasurePredicate::bool_and_rhs_ranges(
-                        &[(1.0, 2.0), (4.0, 8.0)],
-                    )
-                    .expect("valid rhs ranges"),
-                ),
-            )
-            .to_str()
-            .expect("predicate IR label is utf8"),
-            "guard=resident_bool_column;scope=measure;value=rhs_ranges;ranges=2"
-        );
-        assert_eq!(
-            resident_groupagg_predicate_ir_label(
-                ResidentGroupAggFilterExpr::WhereBoolAndValueRanges,
-                Some(
-                    crate::engine::executor::olap::ResidentDenseGroupedF64MeasurePredicate::bool_and_value_ranges(
-                        &[(10.0, 20.0)],
-                    )
-                    .expect("valid value ranges"),
-                ),
-            )
-            .to_str()
-            .expect("predicate IR label is utf8"),
-            "guard=resident_bool_column;scope=row;value=value_ranges;ranges=1"
-        );
-        assert_eq!(
-            resident_groupagg_predicate_ir_label(
-                ResidentGroupAggFilterExpr::AggregateFilterBoolAndRhsRanges,
-                Some(
-                    crate::engine::executor::olap::ResidentDenseGroupedF64MeasurePredicate::bool_and_rhs_ranges(
-                        &[(0.1, 0.2), (0.4, 0.5)],
-                    )
-                    .expect("valid rhs ranges"),
-                ),
-            )
-            .to_str()
-            .expect("predicate IR label is utf8"),
-            "guard=resident_bool_column;scope=aggregate_filter;value=rhs_ranges;ranges=2"
-        );
-        assert_eq!(
-            resident_groupagg_predicate_ir_label(
-                ResidentGroupAggFilterExpr::SsbmStarJoinMembership,
-                None,
-            )
-            .to_str()
-            .expect("predicate IR label is utf8"),
-            "guard=ssbm_star_join_membership;value=none"
-        );
-        assert_eq!(
-            resident_groupagg_predicate_ir_label(
-                ResidentGroupAggFilterExpr::StarJoinMembership,
-                None,
-            )
-            .to_str()
-            .expect("predicate IR label is utf8"),
-            "guard=star_join_membership;value=none"
-        );
-    }
-
-    #[test]
     fn explain_dispatch_flag_uses_strategy_specific_state() {
-        let mut agg = AggExecState::new_olap(OlapAggSpec::SsbmQ1Revenue(
-            crate::engine::executor::olap::SsbmQ1RevenueSpec {
-                fact_rel_oid: pg_sys::Oid::from(1u32),
-                date_rel_oid: pg_sys::Oid::from(2u32),
-                date_predicate: crate::engine::olap_cache::SsbmQ1DatePredicate::Year(1993),
-                discount_lo: 1,
-                discount_hi: 3,
-                quantity_lo: 0,
-                quantity_hi: 25,
-            },
-        ));
-        agg.gpu_dispatched = true;
-        let state = GpuAccelScanState {
+        let mut state = GpuAccelScanState {
             css: unsafe { std::mem::zeroed() },
             accel: super::super::GpuAccelState {
                 strategy: GpuStrategy::Agg as i32,
@@ -1508,13 +1051,13 @@ mod tests {
                 parallel_agg_batches_executed: 0,
                 parallel_agg_dispatch_time_us: 0,
                 resident_proof: ResidentProofSnapshot::not_proven(),
-                executor: (&raw mut agg).cast(),
+                executor: std::ptr::dangling_mut::<u8>().cast(),
             },
         };
 
-        assert!(unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Agg, &raw const state) });
-        agg.gpu_dispatched = false;
         assert!(!unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Agg, &raw const state) });
+        state.accel.batches_executed = 1;
+        assert!(unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Agg, &raw const state) });
     }
 
     #[test]

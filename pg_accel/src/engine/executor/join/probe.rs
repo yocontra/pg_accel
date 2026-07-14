@@ -5,7 +5,6 @@ use pgrx::pg_sys;
 use crate::adapters::extractors::geometry::extract_geometry;
 use crate::engine::gucs;
 use crate::engine::materialize::tuple_extract::{self, AttExtractInfo};
-use crate::engine::olap_cache;
 use crate::engine::registry::{self, AccelStrategy};
 use crate::engine::stats;
 use crate::gpu::{GpuHashTable, PgaccelKeyType, three_layer};
@@ -892,73 +891,6 @@ impl JoinExecState {
             pgrx::error!("pg_accel: hash-join COUNT(*) result exceeds int8");
         }
         unsafe { Self::emit_hash_join_count(result_slot, total_matches as i64) };
-        result_slot
-    }
-
-    /// GPU-resident count-only hash join: cached device columns feed the build
-    /// and probe kernels directly, and only the final scalar count crosses back
-    /// to PostgreSQL.
-    ///
-    /// # Safety
-    ///
-    /// Must be called on the main backend thread.
-    pub(super) unsafe fn next_resident_hash_join_count(
-        &mut self,
-        result_slot: *mut pg_sys::TupleTableSlot,
-    ) -> *mut pg_sys::TupleTableSlot {
-        if self.hash_count_returned {
-            return std::ptr::null_mut();
-        }
-
-        self.record_hash_join_worker_metadata(unsafe { pg_sys::ParallelWorkerNumber });
-        let start = std::time::Instant::now();
-
-        let Some((shape, maybe_count)) = olap_cache::with_resident_hashjoin_count_cache(
-            self.hash_outer_rel_oid,
-            self.hash_outer_attno,
-            self.hash_inner_rel_oid,
-            self.hash_inner_attno,
-            self.hash_key_type,
-            |cache| (cache.shape(), cache.count_matches()),
-        ) else {
-            pgrx::error!(
-                "pg_accel: resident hashjoin cache is not loaded for outer_oid={}, outer_attno={}, inner_oid={}, inner_attno={}, key_type={:?}",
-                u32::from(self.hash_outer_rel_oid),
-                self.hash_outer_attno,
-                u32::from(self.hash_inner_rel_oid),
-                self.hash_inner_attno,
-                self.hash_key_type,
-            );
-        };
-        let Some(match_count) = maybe_count else {
-            pgrx::error!(
-                "pg_accel: resident hashjoin count kernel failed for outer_rows={}, inner_rows={}; refusing CPU fallback",
-                shape.outer_rows,
-                shape.inner_rows,
-            );
-        };
-
-        let hash_table_capacity = hash_join_table_capacity(shape.inner_rows).unwrap_or(0);
-        self.record_hash_join_build_metadata(
-            shape.inner_rows,
-            shape.inner_rows,
-            hash_table_capacity,
-        );
-        self.record_hash_join_probe_metadata(shape.outer_rows, 0, 0);
-        self.record_hash_join_probe_result(match_count);
-        self.rows_dispatched = self.rows_dispatched.saturating_add(shape.outer_rows as u64);
-
-        let elapsed_us = start.elapsed().as_micros() as u64;
-        self.dispatch_time_us = self.dispatch_time_us.saturating_add(elapsed_us);
-        self.batches_executed = self.batches_executed.saturating_add(1);
-        stats::record_batch(shape.outer_rows as u64, elapsed_us);
-        stats::record_gpu_batch(shape.outer_rows as u64, 0);
-
-        self.hash_count_returned = true;
-        if match_count > i64::MAX as usize {
-            pgrx::error!("pg_accel: resident hash-join COUNT(*) result exceeds int8");
-        }
-        unsafe { Self::emit_hash_join_count(result_slot, match_count as i64) };
         result_slot
     }
 

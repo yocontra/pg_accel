@@ -10,8 +10,6 @@ mod loader;
 mod proof;
 mod store;
 
-pub mod legacy;
-
 pub use proof::*;
 pub use store::{
     ArtifactEnsureOutcome, DerivedArtifact, DerivedArtifactIdentity, PreparedDerived,
@@ -33,6 +31,5 @@ pub fn init_shmem() {
 /// Release this backend's byte-ledger slot during `before_shmem_exit`.
 pub fn cleanup_backend() {
     store::cleanup_backend();
-    legacy::cleanup_backend_caches();
     ledger::cleanup_backend();
 }

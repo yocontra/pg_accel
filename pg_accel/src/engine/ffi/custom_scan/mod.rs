@@ -36,11 +36,10 @@ mod srf_target_list;
 use explain::{explain_custom_scan, resolve_thread_count};
 #[cfg(feature = "pg_test")]
 use private_data::CustomPrivateData;
-pub(in crate::engine::ffi) use private_data::HASH_JOIN_RESIDENT_COUNT_SENTINEL;
 use private_data::deserialize_agg_query_path_contract;
 pub(super) use private_data::{
-    AGG_OLAP_SENTINEL, AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_agg_query_plan,
-    append_partial_spec, deserialize_partial_spec,
+    AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_agg_query_plan, append_partial_spec,
+    deserialize_partial_spec,
 };
 pub use private_data::{
     FUNCTIONSCAN_SENTINEL, FunctionScanPrivData, append_functionscan_priv,
@@ -623,38 +622,10 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
             }
             trailer_idx += trailer_len;
         }
-        let has_olap_block = trailer_idx < path_len
-            && list_int_at(path_priv, trailer_idx as c_int) == AGG_OLAP_SENTINEL;
-        if has_olap_block {
-            let olap_trailer_ints = if trailer_idx + 1 < path_len {
-                match list_int_at(path_priv, (trailer_idx + 1) as c_int) {
-                    1 => 11,  // sentinel + Q1 payload
-                    2 => 7,   // sentinel + Q2 payload
-                    3 => 7,   // sentinel + Q3 payload
-                    4 => 8,   // sentinel + Q4 payload
-                    5 => 25,  // sentinel + legacy resident dense grouped f64 payload
-                    6 => 5,   // sentinel + resident H3 grouped-count payload
-                    7 => 26,  // sentinel + source-aware resident dense grouped f64 payload
-                    8 => 30,  // sentinel + logical resident dense grouped f64 payload
-                    9 => 34,  // sentinel + logical/source resident dense grouped f64 payload
-                    10 => 19, // sentinel + resident star dimension grouped f64 payload
-                    _ => pgrx::error!("pg_accel: malformed aggregate OLAP trailer kind"),
-                }
-            } else {
-                pgrx::error!("pg_accel: truncated aggregate OLAP trailer");
-            };
-            if trailer_idx + olap_trailer_ints > path_len {
-                pgrx::error!("pg_accel: truncated aggregate OLAP trailer");
-            }
-            trailer_idx += olap_trailer_ints;
-        }
         let agg_query_contract = deserialize_agg_query_path_contract(path_priv, trailer_idx)
             .unwrap_or_else(|error| {
                 pgrx::error!("pg_accel: malformed aggregate AQS2/AOP2 path contract: {error}")
             });
-        if has_olap_block && agg_query_contract.is_some() {
-            pgrx::error!("pg_accel: aggregate path carries duplicate execution contracts");
-        }
         let sentinel_idx = agg_query_contract
             .as_ref()
             .map_or(trailer_idx, |(_, _, end)| *end);
@@ -1433,19 +1404,6 @@ unsafe fn make_custom_scan_plan(
                 } else {
                     0
                 };
-                let (resident_count, resident_outer_rel_oid, resident_inner_rel_oid) =
-                    if path_priv_len > 11
-                        && list_int_at(path_priv, 8) == HASH_JOIN_RESIDENT_COUNT_SENTINEL
-                    {
-                        (
-                            list_int_at(path_priv, 9),
-                            list_int_at(path_priv, 10),
-                            list_int_at(path_priv, 11),
-                        )
-                    } else {
-                        (0, 0, 0)
-                    };
-
                 // Read original varnos for disambiguating attno matches
                 // in multi-table child outputs (e.g., nested CustomScans).
                 let outer_varno = if path_priv_len > 5 {
@@ -1534,9 +1492,6 @@ unsafe fn make_custom_scan_plan(
                 list = pg_sys::lappend(list, pg_sys::makeInteger(remapped_inner).cast());
                 list = pg_sys::lappend(list, pg_sys::makeInteger(key_type).cast());
                 list = pg_sys::lappend(list, pg_sys::makeInteger(count_only).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(resident_count).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(resident_outer_rel_oid).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(resident_inner_rel_oid).cast());
             }
         }
 
@@ -2656,10 +2611,9 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             // private-data reader rejects PreAgg payloads before this point.
             pgrx::error!("pg_accel: GpuPreAgg strategy retired; no planner path-creator emits it");
         } else if privdata.gpu_strategy == GpuStrategy::Agg {
-            if let (Some(spec), Some(projection)) = (
-                privdata.agg_query_spec.clone(),
-                privdata.agg_output_projection.clone(),
-            ) {
+            if let (Some(spec), Some(projection)) =
+                (privdata.agg_query_spec, privdata.agg_output_projection)
+            {
                 let explain_only = (eflags as u32 & pg_sys::EXEC_FLAG_EXPLAIN_ONLY) != 0;
                 pgrx::debug1!("pg_accel: begin_custom_scan: generic descriptor Agg");
                 let executor = AggExecState::new_descriptor(spec, projection, explain_only)
@@ -2669,13 +2623,8 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                         )
                     });
                 Box::into_raw(Box::new(executor)).cast()
-            } else if let Some(olap_spec) = privdata.olap_agg {
-                pgrx::debug1!("pg_accel: begin_custom_scan: resident OLAP Agg");
-                Box::into_raw(Box::new(AggExecState::new_olap(olap_spec))).cast()
             } else {
-                pgrx::error!(
-                    "pg_accel: aggregate plan carries neither OLAP nor AQS2/AOP2 execution contract"
-                );
+                pgrx::error!("pg_accel: aggregate plan is missing its AQS2/AOP2 contract");
             }
         } else if privdata.accel_strategy == AccelStrategy::GpuHashJoin {
             // Hash join: create a JoinExecState with hash join context.
@@ -2705,29 +2654,20 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 key_type,
             );
             exec.set_hash_join_count_mode(privdata.hash_count_only);
-            exec.set_hash_join_resident_count_context(
-                privdata.hash_resident_count,
-                privdata.hash_outer_rel_oid,
-                privdata.hash_inner_rel_oid,
-            );
 
             // Initialize tlist mapping and temp slots for combined output.
             let custom_ps = (*node).custom_ps;
-            if !privdata.hash_resident_count
-                && !custom_ps.is_null()
-                && pg_sys::list_length(custom_ps) >= 2
-            {
+            if !custom_ps.is_null() && pg_sys::list_length(custom_ps) >= 2 {
                 let outer_ps = pg_sys::list_nth(custom_ps, 0).cast::<pg_sys::PlanState>();
                 let inner_ps = pg_sys::list_nth(custom_ps, 1).cast::<pg_sys::PlanState>();
                 exec.init_hash_join_slots(cscan, outer_ps, inner_ps);
             }
 
             pgrx::debug1!(
-                "pg_accel: begin_custom_scan: GpuHashJoin outer_attno={}, inner_attno={}, key_type={}, resident_count={}, tlist_map={}",
+                "pg_accel: begin_custom_scan: GpuHashJoin outer_attno={}, inner_attno={}, key_type={}, tlist_map={}",
                 privdata.target_attno,
                 privdata.hash_inner_attno,
                 privdata.hash_key_type,
-                privdata.hash_resident_count,
                 exec.tlist_map.len(),
             );
             Box::into_raw(exec).cast()
@@ -3185,7 +3125,7 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     );
                 } else if gpu_strategy == GpuStrategy::Agg {
                     // SAFETY: executor was Box::into_raw'd as AggExecState.
-                    // The resident OLAP agg owns no heap scan descriptors.
+                    // The descriptor aggregate owns no heap scan descriptors.
                     let agg = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
                     drop(agg);
                 } else if gpu_strategy == GpuStrategy::Window {

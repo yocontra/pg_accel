@@ -6,14 +6,8 @@ use super::descriptor::{
     DescriptorAggExecutionError, DescriptorAggPlan, DescriptorResidencyReport,
 };
 use super::output::DescriptorAggOutput;
-use crate::engine::executor::olap::{OlapAggExecState, OlapAggSpec};
 use crate::engine::residency::{ArtifactEnsureOutcome, ResidentRelationEvidence};
 use crate::engine::spec::{AggOutputProjection, AggQuerySpec};
-
-enum AggExecMode {
-    Legacy(Box<OlapAggExecState>),
-    Descriptor(Box<DescriptorAggExecState>),
-}
 
 struct DescriptorAggExecState {
     plan: DescriptorAggPlan,
@@ -50,8 +44,7 @@ fn raise_descriptor_execution_error(error: DescriptorAggExecutionError) -> ! {
     }
 }
 
-/// Rust-side aggregate executor state shared by the legacy OLAP and neutral
-/// descriptor contracts. Both modes are childless and read only resident data.
+/// Rust-side childless aggregate executor for the neutral descriptor contract.
 pub struct AggExecState {
     /// Whether a device aggregate dispatch completed (for EXPLAIN ANALYZE).
     pub gpu_dispatched: bool,
@@ -64,22 +57,10 @@ pub struct AggExecState {
     /// Cumulative microseconds in dispatch.
     pub dispatch_time_us: u64,
 
-    mode: AggExecMode,
+    descriptor: Box<DescriptorAggExecState>,
 }
 
 impl AggExecState {
-    /// Create a legacy resident OLAP aggregate executor.
-    #[must_use]
-    pub fn new_olap(spec: OlapAggSpec) -> Self {
-        Self {
-            gpu_dispatched: false,
-            rows_dispatched: 0,
-            batches_executed: 0,
-            dispatch_time_us: 0,
-            mode: AggExecMode::Legacy(Box::new(OlapAggExecState::new(spec))),
-        }
-    }
-
     /// Validate a strict neutral contract and prepare its dependency-stamped
     /// derived artifact during BeginCustomScan.
     pub fn new_descriptor(
@@ -96,105 +77,76 @@ impl AggExecState {
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
-            mode: AggExecMode::Descriptor(Box::new(DescriptorAggExecState {
+            descriptor: Box::new(DescriptorAggExecState {
                 plan,
                 output: None,
                 explain_only,
                 residency,
-            })),
+            }),
         })
-    }
-
-    /// Legacy logical spec used by the existing EXPLAIN renderer.
-    #[must_use]
-    pub fn olap_spec(&self) -> Option<OlapAggSpec> {
-        match &self.mode {
-            AggExecMode::Legacy(olap) => Some(olap.spec()),
-            AggExecMode::Descriptor(_) => None,
-        }
     }
 
     /// Borrow the neutral logical contract for generic EXPLAIN rendering.
     #[must_use]
     pub fn descriptor_contract(&self) -> Option<(&AggQuerySpec, &AggOutputProjection)> {
-        match &self.mode {
-            AggExecMode::Legacy(_) => None,
-            AggExecMode::Descriptor(descriptor) => {
-                Some((descriptor.plan.spec(), descriptor.plan.projection()))
-            }
-        }
+        Some((
+            self.descriptor.plan.spec(),
+            self.descriptor.plan.projection(),
+        ))
     }
 
     /// Exact dependency evidence captured while preparing a descriptor plan.
     #[must_use]
     pub fn descriptor_residency_evidence(&self) -> Option<&[ResidentRelationEvidence]> {
-        match &self.mode {
-            AggExecMode::Legacy(_) => None,
-            AggExecMode::Descriptor(descriptor) => descriptor
-                .residency
-                .as_ref()
-                .map(|residency| residency.relations.as_slice()),
-        }
+        self.descriptor
+            .residency
+            .as_ref()
+            .map(|residency| residency.relations.as_slice())
     }
 
     /// Derived-artifact cache outcome observed by the descriptor executor.
     #[must_use]
     pub fn descriptor_artifact_outcome(&self) -> Option<ArtifactEnsureOutcome> {
-        match &self.mode {
-            AggExecMode::Legacy(_) => None,
-            AggExecMode::Descriptor(descriptor) => descriptor
-                .residency
-                .as_ref()
-                .map(|residency| residency.artifact_outcome),
-        }
+        self.descriptor
+            .residency
+            .as_ref()
+            .map(|residency| residency.artifact_outcome)
     }
 
     /// Exact byte charge for this descriptor's derived artifact.
     #[must_use]
     pub fn descriptor_artifact_bytes(&self) -> Option<u64> {
-        match &self.mode {
-            AggExecMode::Legacy(_) => None,
-            AggExecMode::Descriptor(descriptor) => descriptor
-                .residency
-                .as_ref()
-                .map(|residency| residency.artifact_bytes),
-        }
+        self.descriptor
+            .residency
+            .as_ref()
+            .map(|residency| residency.artifact_bytes)
     }
 
     /// Relations loaded or reloaded while preparing this descriptor.
     #[must_use]
     pub fn descriptor_loaded_relations(&self) -> Option<&[pg_sys::Oid]> {
-        match &self.mode {
-            AggExecMode::Legacy(_) => None,
-            AggExecMode::Descriptor(descriptor) => descriptor
-                .residency
-                .as_ref()
-                .map(|residency| residency.loaded_relations.as_slice()),
-        }
+        self.descriptor
+            .residency
+            .as_ref()
+            .map(|residency| residency.loaded_relations.as_slice())
     }
 
     /// Raw relation staging time charged to this descriptor's first use.
     #[must_use]
     pub fn descriptor_raw_load_ms(&self) -> Option<f64> {
-        match &self.mode {
-            AggExecMode::Legacy(_) => None,
-            AggExecMode::Descriptor(descriptor) => descriptor
-                .residency
-                .as_ref()
-                .map(|residency| residency.raw_load_ms),
-        }
+        self.descriptor
+            .residency
+            .as_ref()
+            .map(|residency| residency.raw_load_ms)
     }
 
     /// Total begin-time residency and derived-artifact preparation time.
     #[must_use]
     pub fn descriptor_preparation_time_us(&self) -> Option<u64> {
-        match &self.mode {
-            AggExecMode::Legacy(_) => None,
-            AggExecMode::Descriptor(descriptor) => descriptor
-                .residency
-                .as_ref()
-                .map(|residency| residency.preparation_time_us),
-        }
+        self.descriptor
+            .residency
+            .as_ref()
+            .map(|residency| residency.preparation_time_us)
     }
 
     /// Reset cursor/device state for PostgreSQL ExecReScan.
@@ -203,21 +155,18 @@ impl AggExecState {
         self.rows_dispatched = 0;
         self.batches_executed = 0;
         self.dispatch_time_us = 0;
-        match &mut self.mode {
-            AggExecMode::Legacy(olap) => {
-                **olap = OlapAggExecState::new(olap.spec());
-            }
-            AggExecMode::Descriptor(descriptor) => {
-                descriptor.output = None;
-                if !descriptor.explain_only {
-                    let residency = descriptor.plan.ensure_artifact().unwrap_or_else(|error| {
-                        pgrx::error!(
-                            "pg_accel: generic aggregate rescan preparation failed ({error}); refusing CPU fallback"
-                        )
-                    });
-                    merge_residency_report(&mut descriptor.residency, residency);
-                }
-            }
+        self.descriptor.output = None;
+        if !self.descriptor.explain_only {
+            let residency = self
+                .descriptor
+                .plan
+                .ensure_artifact()
+                .unwrap_or_else(|error| {
+                    pgrx::error!(
+                        "pg_accel: generic aggregate rescan preparation failed ({error}); refusing CPU fallback"
+                    )
+                });
+            merge_residency_report(&mut self.descriptor.residency, residency);
         }
     }
 
@@ -229,51 +178,36 @@ impl AggExecState {
         &mut self,
         result_slot: *mut pg_sys::TupleTableSlot,
     ) -> *mut pg_sys::TupleTableSlot {
-        match &mut self.mode {
-            AggExecMode::Legacy(olap) => {
-                let was_dispatched = olap.gpu_dispatched();
-                // SAFETY: caller upholds the slot/main-thread contract.
-                let result = unsafe { olap.next(result_slot) };
-                if !was_dispatched && olap.gpu_dispatched() {
-                    self.rows_dispatched = olap.rows_dispatched();
-                    self.batches_executed = olap.batches_executed();
-                    self.dispatch_time_us = olap.dispatch_time_us();
-                    self.gpu_dispatched = true;
-                }
-                result
+        if self.descriptor.explain_only {
+            return std::ptr::null_mut();
+        }
+        if self.descriptor.output.is_none() {
+            let dispatch = self
+                .descriptor
+                .plan
+                .execute()
+                .unwrap_or_else(|error| raise_descriptor_execution_error(error));
+            self.dispatch_time_us = dispatch.dispatch_time_us;
+            self.rows_dispatched = u64::try_from(dispatch.fact_rows).unwrap_or_else(|_| {
+                pgrx::error!(
+                    "pg_accel: generic aggregate fact row count exceeds EXPLAIN counter capacity"
+                )
+            });
+            self.batches_executed = 1;
+            self.gpu_dispatched = true;
+            if let Some(latest) = dispatch.residency {
+                merge_residency_report(&mut self.descriptor.residency, latest);
             }
-            AggExecMode::Descriptor(descriptor) => {
-                if descriptor.explain_only {
-                    return std::ptr::null_mut();
-                }
-                if descriptor.output.is_none() {
-                    let dispatch = descriptor
-                        .plan
-                        .execute()
-                        .unwrap_or_else(|error| raise_descriptor_execution_error(error));
-                    self.dispatch_time_us = dispatch.dispatch_time_us;
-                    self.rows_dispatched = u64::try_from(dispatch.fact_rows).unwrap_or_else(|_| {
-                        pgrx::error!(
-                            "pg_accel: generic aggregate fact row count exceeds EXPLAIN counter capacity"
-                        )
-                    });
-                    self.batches_executed = 1;
-                    self.gpu_dispatched = true;
-                    if let Some(latest) = dispatch.residency {
-                        merge_residency_report(&mut descriptor.residency, latest);
-                    }
-                    descriptor.output = Some(dispatch.output);
-                }
-                // SAFETY: output was synchronously detached from the device
-                // call and caller supplies the initialized result slot.
-                unsafe {
-                    descriptor
-                        .output
-                        .as_mut()
-                        .expect("descriptor output assigned above")
-                        .next(result_slot)
-                }
-            }
+            self.descriptor.output = Some(dispatch.output);
+        }
+        // SAFETY: output was synchronously detached from the device call and
+        // caller supplies the initialized result slot.
+        unsafe {
+            self.descriptor
+                .output
+                .as_mut()
+                .expect("descriptor output assigned above")
+                .next(result_slot)
         }
     }
 }

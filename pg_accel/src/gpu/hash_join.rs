@@ -59,38 +59,6 @@ impl GpuHashTable {
         }
     }
 
-    /// Build a count-only hash table from device-resident inner keys.
-    pub fn build_device_count(
-        device_keys: *const std::ffi::c_void,
-        device_null_mask: *const u8,
-        count: usize,
-        key_type: PgaccelKeyType,
-    ) -> Option<Self> {
-        if device_keys.is_null() || count == 0 {
-            return None;
-        }
-
-        crate::ensure_backend_exit_callback();
-        let ht = unsafe {
-            // SAFETY: device_keys and optional null mask point at device
-            // buffers owned by the resident cache for at least the lifetime
-            // of the returned hash table.
-            bridge::pgaccel_hash_join_build_device_count(
-                device_keys,
-                device_null_mask,
-                count,
-                key_type,
-            )
-        };
-
-        if ht.is_null() {
-            None
-        } else {
-            crate::note_backend_gpu_owner_acquired();
-            Some(Self { ht })
-        }
-    }
-
     /// Probe the hash table with outer relation keys.
     ///
     /// Returns matched `(outer_idx, inner_idx)` pairs, or `None` on failure.
@@ -153,36 +121,6 @@ impl GpuHashTable {
                 self.ht,
                 outer_keys,
                 outer_null_mask.as_ptr(),
-                outer_count,
-                std::ptr::addr_of_mut!(match_count),
-            )
-        };
-
-        status.is_ok().then_some(match_count)
-    }
-
-    /// Count matches for a device-resident outer key column.
-    pub fn count_matches_device(
-        &self,
-        device_outer_keys: *const std::ffi::c_void,
-        device_outer_null_mask: *const u8,
-        outer_count: usize,
-    ) -> Option<usize> {
-        if self.ht.is_null() || device_outer_keys.is_null() {
-            return None;
-        }
-        if outer_count == 0 {
-            return Some(0);
-        }
-        let mut match_count: usize = 0;
-
-        let status = unsafe {
-            // SAFETY: ht is non-null (checked above). Pointers refer to
-            // resident cache buffers with outer_count elements.
-            bridge::pgaccel_hash_join_count_device(
-                self.ht,
-                device_outer_keys,
-                device_outer_null_mask,
                 outer_count,
                 std::ptr::addr_of_mut!(match_count),
             )

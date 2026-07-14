@@ -47,26 +47,6 @@ impl JoinExecState {
         );
     }
 
-    /// Configure resident count-only hash join over preloaded device key columns.
-    pub fn set_hash_join_resident_count_context(
-        &mut self,
-        resident_count: bool,
-        outer_rel_oid: pg_sys::Oid,
-        inner_rel_oid: pg_sys::Oid,
-    ) {
-        self.hash_resident_count = resident_count;
-        self.hash_outer_rel_oid = outer_rel_oid;
-        self.hash_inner_rel_oid = inner_rel_oid;
-        tracing::debug!(
-            target: "pg_accel::hash_join",
-            phase = "context",
-            resident_count,
-            outer_rel_oid = u32::from(outer_rel_oid),
-            inner_rel_oid = u32::from(inner_rel_oid),
-            "exec.hash_join_resident_count_context"
-        );
-    }
-
     /// Configure the one-column BETWEEN/range-containment NLJ context.
     ///
     /// The supported shape is:

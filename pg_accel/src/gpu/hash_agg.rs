@@ -3,7 +3,7 @@ use super::{ExprDeviceBuffer, PgaccelAggState, bridge};
 // ---------------------------------------------------------------------------
 // Hash aggregation wrappers
 //
-// Only the resident grouped-count lanes survive the Phase 3 demolition: the
+// Only the device-buffer grouped-count lanes survive the Phase 3 demolition: the
 // host-staged grouped aggregate executors that drove `hash_agg_execute` /
 // `hash_agg_execute_partial` were deleted with their planner injectors, and
 // those wrappers (plus their `results`/`partial_results` accessors and
@@ -42,7 +42,8 @@ impl HashAggResult {
         Some(Self { state })
     }
 
-    /// Number of distinct groups.
+    /// Number of distinct groups. Retained for the Phase 6 spatial cutover.
+    #[allow(dead_code)]
     #[must_use]
     pub fn group_count(&self) -> usize {
         // SAFETY: state is a valid PgaccelAggState pointer (or null, handled by C).
@@ -53,6 +54,7 @@ impl HashAggResult {
     ///
     /// The buffer contains `group_count` keys packed according to `key_type`.
     #[must_use]
+    #[allow(dead_code)]
     pub fn group_keys_ptr(&self) -> *const std::ffi::c_void {
         // SAFETY: state is a valid PgaccelAggState pointer.
         unsafe { bridge::pgaccel_agg_get_group_keys(self.state) }
@@ -62,6 +64,7 @@ impl HashAggResult {
     ///
     /// Returns `None` if the pointer is null.
     #[must_use]
+    #[allow(dead_code)]
     pub fn counts(&self) -> Option<&[i64]> {
         let count = self.group_count();
         if count == 0 {
@@ -85,7 +88,7 @@ impl HashAggResult {
 /// The input buffer must be device-accessible and remains owned by the caller.
 /// The C++ side copies compacted group keys/counts into the returned aggregate
 /// state, so the result is independent of the input buffer lifetime.
-#[allow(dead_code)] // reason: resident OLAP lanes may still need bounded hash-count when keys are not pre-sorted.
+#[allow(dead_code)] // Phase 6 spatial grouping will consume this device-buffer path.
 pub fn hash_count_i64_device_bounded(
     keys: &ExprDeviceBuffer<i64>,
     max_distinct_hint: usize,
@@ -100,19 +103,6 @@ pub fn hash_count_i64_device_bounded(
             keys.len(),
             max_distinct_hint,
         )
-    };
-    // SAFETY: state is either null or an owned pgaccel_agg_state allocation.
-    unsafe { HashAggResult::from_raw(state) }
-}
-
-/// Execute grouped COUNT(*) over an already-sorted resident int64 key column.
-pub fn hash_count_i64_sorted_device(keys: &ExprDeviceBuffer<i64>) -> Option<HashAggResult> {
-    if keys.len() == 0 {
-        return None;
-    }
-    crate::ensure_backend_exit_callback();
-    let state = unsafe {
-        bridge::pgaccel_hash_count_i64_sorted_device_execute(keys.as_mut_ptr(), keys.len())
     };
     // SAFETY: state is either null or an owned pgaccel_agg_state allocation.
     unsafe { HashAggResult::from_raw(state) }

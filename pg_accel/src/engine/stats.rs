@@ -78,7 +78,7 @@ static GPU_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 /// time once, regardless of whether a CustomPath was injected or the hook
 /// fast-declined. Read via `pg_accel_planner_overhead_us()` from SQL; the
 /// bench harness uses it to detect Phase 0 regressions in planner-hook
-/// overhead on no-dispatch queries (SSBM-shaped joins, expression-only
+/// overhead on no-dispatch queries (multi-dimension star joins, expression-only
 /// filters, native aggregates).
 static PLANNER_HOOK_TOTAL_US: AtomicU64 = AtomicU64::new(0);
 
@@ -476,7 +476,7 @@ fn pg_accel_planner_overhead_us() -> i64 {
 
 /// Returns the count of planner hook invocations that hit the Phase 0
 /// O(1) early-decline fast path. Used together with
-/// `pg_accel_planner_overhead_us()` to verify SSBM-shaped queries take
+/// `pg_accel_planner_overhead_us()` to verify star-schema queries take
 /// the cheap decline path. Higher fast-decline count + lower total
 /// microseconds is the success signal.
 #[pg_extern]

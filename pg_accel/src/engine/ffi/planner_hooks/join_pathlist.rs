@@ -44,7 +44,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
 
     // Phase 0 planner-hook overhead audit: time every invocation so the
     // bench harness can detect no-dispatch queries that pay
-    // disproportionate hook overhead (TODO.md 2026-05-14 SSBM Q2.3
+    // disproportionate hook overhead (TODO.md 2026-05-14 star-schema
     // diagnosis: 37-40 ms planning vs 0.2 ms with `pg_accel.enabled=off`).
     let _hook_finish = HookElapsedGuard::new("join_pathlist");
 

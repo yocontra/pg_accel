@@ -458,9 +458,6 @@ fn custom_private_data_typed_fields() {
         hash_inner_attno: 0,
         hash_key_type: 0,
         hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
         nlj_shape: 0,
         nlj_key_type: 0,
         nlj_op: 0,
@@ -468,7 +465,6 @@ fn custom_private_data_typed_fields() {
         nlj_inner_hi_attno: 0,
         window_specs: vec![],
         window_scan_relid: 0,
-        olap_agg: None,
         agg_query_spec: None,
         agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
@@ -503,9 +499,6 @@ fn custom_private_data_hash_join_fields() {
         hash_inner_attno: 3,
         hash_key_type: 1, // Int64
         hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
         nlj_shape: 0,
         nlj_key_type: 0,
         nlj_op: 0,
@@ -513,7 +506,6 @@ fn custom_private_data_hash_join_fields() {
         nlj_inner_hi_attno: 0,
         window_specs: vec![],
         window_scan_relid: 0,
-        olap_agg: None,
         agg_query_spec: None,
         agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
@@ -537,9 +529,6 @@ fn custom_private_data_hash_join_validation_rejects_malformed_layout() {
         hash_inner_attno: 3,
         hash_key_type: 1,
         hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
         nlj_shape: 0,
         nlj_key_type: 0,
         nlj_op: 0,
@@ -547,7 +536,6 @@ fn custom_private_data_hash_join_validation_rejects_malformed_layout() {
         nlj_inner_hi_attno: 0,
         window_specs: vec![],
         window_scan_relid: 0,
-        olap_agg: None,
         agg_query_spec: None,
         agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
@@ -619,9 +607,6 @@ fn custom_private_data_with_window_specs() {
         hash_inner_attno: 0,
         hash_key_type: 0,
         hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
         nlj_shape: 0,
         nlj_key_type: 0,
         nlj_op: 0,
@@ -629,7 +614,6 @@ fn custom_private_data_with_window_specs() {
         nlj_inner_hi_attno: 0,
         window_specs: specs,
         window_scan_relid: 0,
-        olap_agg: None,
         agg_query_spec: None,
         agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
@@ -653,9 +637,6 @@ fn custom_private_data_empty_window_specs_for_non_window() {
         hash_inner_attno: 0,
         hash_key_type: 0,
         hash_count_only: false,
-        hash_resident_count: false,
-        hash_outer_rel_oid: pg_sys::InvalidOid,
-        hash_inner_rel_oid: pg_sys::InvalidOid,
         nlj_shape: 0,
         nlj_key_type: 0,
         nlj_op: 0,
@@ -663,7 +644,6 @@ fn custom_private_data_empty_window_specs_for_non_window() {
         nlj_inner_hi_attno: 0,
         window_specs: vec![],
         window_scan_relid: 0,
-        olap_agg: None,
         agg_query_spec: None,
         agg_output_projection: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
@@ -852,10 +832,6 @@ fn every_manually_registered_postgres_callback_is_pg_guarded() {
             "unsafe extern \"C-unwind\" fn resident_relcache_callback(",
         ),
         (
-            include_str!("../../residency/legacy.rs"),
-            "unsafe extern \"C-unwind\" fn resident_cache_relcache_callback(",
-        ),
-        (
             include_str!("../../../lib.rs"),
             "unsafe extern \"C-unwind\" fn pgaccel_shmem_exit(",
         ),
@@ -992,8 +968,8 @@ fn backend_resource_paths_arm_cleanup_after_postmaster_fork() {
         .split_once("pub fn build(")
         .expect("host hash-table allocator exists")
         .1
-        .split_once("pub fn build_device_count(")
-        .expect("device hash-table allocator exists")
+        .split_once("pub fn probe(")
+        .expect("host hash-table allocator boundary exists")
         .0;
     assert_armed_before(
         hash_join_host,
@@ -1001,37 +977,15 @@ fn backend_resource_paths_arm_cleanup_after_postmaster_fork() {
         "host hash table",
     );
     assert_owner_marked_after(hash_join_host, "if ht.is_null()", "host hash table");
-    let hash_join_device = hash_join
-        .split_once("pub fn build_device_count(")
-        .expect("device hash-table allocator exists")
-        .1;
-    assert_armed_before(
-        hash_join_device,
-        "bridge::pgaccel_hash_join_build_device_count(",
-        "device hash table",
-    );
-    assert_owner_marked_after(hash_join_device, "if ht.is_null()", "device hash table");
     let hash_agg = include_str!("../../../gpu/hash_agg.rs");
     let hash_count_bounded = hash_agg
         .split_once("pub fn hash_count_i64_device_bounded(")
         .expect("bounded hash-count allocator exists")
-        .1
-        .split_once("pub fn hash_count_i64_sorted_device(")
-        .expect("sorted hash-count allocator exists")
-        .0;
+        .1;
     assert_armed_before(
         hash_count_bounded,
         "bridge::pgaccel_hash_count_i64_device_hash_execute_bounded(",
         "bounded device hash-count state",
-    );
-    let hash_count_sorted = hash_agg
-        .split_once("pub fn hash_count_i64_sorted_device(")
-        .expect("sorted hash-count allocator exists")
-        .1;
-    assert_armed_before(
-        hash_count_sorted,
-        "bridge::pgaccel_hash_count_i64_sorted_device_execute(",
-        "sorted device hash-count state",
     );
     let hash_state_owner = hash_agg
         .split_once("pub(crate) unsafe fn from_raw(state: *mut PgaccelAggState)")
@@ -1046,18 +1000,6 @@ fn backend_resource_paths_arm_cleanup_after_postmaster_fork() {
         "hash aggregate state",
     );
     let h3 = include_str!("../../../gpu/h3.rs");
-    let h3_parent_count = h3
-        .split_once("pub fn h3_cell_to_parent_count_resident(")
-        .expect("H3 parent-count allocator exists")
-        .1
-        .split_once("pub fn h3_cell_to_center_child_bulk(")
-        .expect("H3 parent-count allocator boundary exists")
-        .0;
-    assert_armed_before(
-        h3_parent_count,
-        "bridge::pgaccel_h3_cell_to_parent_count_bulk(",
-        "H3 parent-count state",
-    );
     let h3_lat_lng_count = h3
         .split_once("pub fn h3_lat_lng_count_resident(")
         .expect("H3 lat/lng-count allocator exists")
@@ -1076,15 +1018,6 @@ fn backend_resource_paths_arm_cleanup_after_postmaster_fork() {
         include_str!("../../otel.rs"),
         "catch_unwind(try_init)",
         "tracing runtime",
-    );
-    let legacy_load_guard = include_str!("../../residency/legacy.rs")
-        .split_once("impl ResidentCacheLoadGuard")
-        .expect("legacy cache load guard exists")
-        .1;
-    assert_armed_before(
-        legacy_load_guard,
-        "RESIDENT_CACHE_LOAD_IN_PROGRESS.set(true)",
-        "legacy residency cache",
     );
 
     let registration = crate_root

@@ -249,15 +249,6 @@ pub struct JoinExecState {
     /// should emit a single aggregate row instead of joined heap tuples.
     hash_count_only: bool,
 
-    /// True when count-only hashjoin consumes device-resident cached key columns.
-    hash_resident_count: bool,
-
-    /// Expected outer relation OID for the resident hashjoin count cache.
-    hash_outer_rel_oid: pg_sys::Oid,
-
-    /// Expected inner relation OID for the resident hashjoin count cache.
-    hash_inner_rel_oid: pg_sys::Oid,
-
     /// Whether the count-only row has already been emitted.
     hash_count_returned: bool,
 
@@ -322,9 +313,6 @@ impl JoinExecState {
             hash_inner_slot: std::ptr::null_mut(),
             hash_join_telemetry: HashJoinTelemetry::default(),
             hash_count_only: false,
-            hash_resident_count: false,
-            hash_outer_rel_oid: pg_sys::InvalidOid,
-            hash_inner_rel_oid: pg_sys::InvalidOid,
             hash_count_returned: false,
             nlj_shape: 0,
             nlj_outer_value_attno: 0,
@@ -475,11 +463,7 @@ impl JoinExecState {
             AccelStrategy::GpuHashJoin => {
                 // SAFETY: Caller guarantees main backend thread.
                 if self.hash_count_only {
-                    if self.hash_resident_count {
-                        unsafe { self.next_resident_hash_join_count(result_slot) }
-                    } else {
-                        unsafe { self.next_hash_join_count(outer_ps, inner_ps, result_slot) }
-                    }
+                    unsafe { self.next_hash_join_count(outer_ps, inner_ps, result_slot) }
                 } else {
                     unsafe { self.next_hash_join(outer_ps, inner_ps, result_slot) }
                 }

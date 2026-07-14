@@ -151,12 +151,6 @@ impl IntListCursor<'_, '_> {
         let lo = self.read_u32();
         (((hi as u64) << 32) | lo as u64) as i64
     }
-
-    pub(super) fn read_f64_halves(&mut self) -> f64 {
-        let hi = self.read_u32();
-        let lo = self.read_u32();
-        f64::from_bits(((hi as u64) << 32) | lo as u64)
-    }
 }
 
 /// Builder for PostgreSQL `List *` integer layouts.
