@@ -59,6 +59,8 @@ fn plan_shape_tests_do_not_expect_superseded_generic_rejection_codes() {
         ["parallel_fused_count_", "disabled"].concat(),
         ["standalone_gpuexpr_", "no_gpu_pipeline"].concat(),
         ["no_gpu_resident_", "pipeline"].concat(),
+        ["nlj_between_host_boundary_", "unsafe"].concat(),
+        ["nestloop_scalar_", "no_gpu_kernel"].concat(),
     ];
     for retired in retired {
         assert!(
@@ -1395,7 +1397,7 @@ fn plan_shape_grouped_hashagg_100k_declines_gpu() {
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_nlj_between_host_boundary_stays_native() {
+fn plan_shape_nlj_between_unsupported_predicate_stays_native() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     ensure_nlj_between_fixture(&mut c);
@@ -1431,11 +1433,8 @@ fn plan_shape_nlj_between_host_boundary_stays_native() {
     }
     assert_rejection_reason_observed(
         &mut c,
-        &[
-            "nlj_between_host_boundary_unsafe",
-            "nestloop_scalar_no_gpu_kernel",
-        ],
-        &format!("NLJ BETWEEN should expose a native-decline gate; plan:\n{plan}"),
+        &["shape_unsupported_predicate"],
+        &format!("NLJ BETWEEN should expose its generic predicate decline; plan:\n{plan}"),
     );
 
     let before = kernel_executions(&mut c);

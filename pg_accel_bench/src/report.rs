@@ -7174,7 +7174,7 @@ mod tests {
             "Aggregate\n  ->  Seq Scan on bench_raster_tiles",
         );
         workload.native_decline_evidence = Some(NativeDeclineEvidence {
-            reason: "raster_rows_below_standalone_min".to_owned(),
+            reason: "shape_unsupported_rte".to_owned(),
             source: DeclineReasonSource::PlannerReported,
         });
         let report = mock_report(vec![workload]);

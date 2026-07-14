@@ -1558,7 +1558,11 @@ fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresho
     let profile = h3_matrix_profile(name)?;
     let class = h3_lane_class(name)?;
     let resident_rollup = h3_resident_rollup_required(name);
+    let current_generic_rte_decline = name == "h3_bulk" && rows == 100_000;
     let expectation = match class {
+        _ if current_generic_rte_decline => BenchmarkLaneExpectation::NativeDecline {
+            reason: "shape_unsupported_rte",
+        },
         H3LaneClass::Winning { min_warm_speedup } if rows >= H3_GROUPED_WINNER_MIN_ROWS => {
             BenchmarkLaneExpectation::GpuWinner { min_warm_speedup }
         }
@@ -1605,7 +1609,11 @@ fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresho
                 "native or below-floor lane; no GPU cold-start cost admitted"
             }
         },
-        threshold_basis: profile.threshold_basis,
+        threshold_basis: if current_generic_rte_decline {
+            "current generic RTE preflight keeps the measured 100K H3 bulk cell native"
+        } else {
+            profile.threshold_basis
+        },
         expectation,
     })
 }
@@ -1753,7 +1761,12 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
 fn raster_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = raster_matrix_profile(name)?;
     let pixels = raster_total_pixels(rows);
-    let expectation = if rows >= RASTER_STANDALONE_MIN_ROWS {
+    let current_generic_rte_decline = name == "raster_reclass" && rows == 100;
+    let expectation = if current_generic_rte_decline {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "shape_unsupported_rte",
+        }
+    } else if rows >= RASTER_STANDALONE_MIN_ROWS {
         BenchmarkLaneExpectation::GpuWinner {
             min_warm_speedup: profile.min_warm_speedup,
         }
@@ -1789,7 +1802,11 @@ fn raster_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
         },
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
         cache_gate: "warm median threshold plus cache-mode both raster artifact before release promotion",
-        threshold_basis: profile.threshold_basis,
+        threshold_basis: if current_generic_rte_decline {
+            "current generic RTE preflight precedes the raster standalone row floor"
+        } else {
+            profile.threshold_basis
+        },
         expectation,
     })
 }
@@ -2152,15 +2169,15 @@ fn nlj_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresh
         ),
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
-        batch_count: "host child collection path is crash-gated".to_owned(),
+        batch_count: "generic BETWEEN predicate descriptor is not admitted".to_owned(),
         row_width: "12-byte event row + 20-byte window row",
         output_size: "one count row after join output",
         dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
         cache_gate: GENERIC_CACHE_GATE,
-        threshold_basis: "2026-06-09 release-harness crash gate until NLJ host boundary is replaced or reproven",
+        threshold_basis: "generic predicate descriptor preflight; selected unsafe host boundary remains unavailable",
         expectation: BenchmarkLaneExpectation::NativeDecline {
-            reason: "nlj_between_host_boundary_unsafe",
+            reason: "shape_unsupported_predicate",
         },
     })
 }
@@ -2186,7 +2203,7 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "LIMIT 1000 exceeds standalone top-k bound",
             "~120-byte heap row",
             "1000 heap rows",
-            "sort_heap_topk_wide_output",
+            "no_gpu_resident_pipeline",
         ),
         "topk_wide" => (
             "float4 single key",
@@ -2241,7 +2258,11 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
         dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
         cache_gate: GENERIC_CACHE_GATE,
-        threshold_basis: "single-key bounded top-k only; no full-output or wide standalone heap sort",
+        threshold_basis: if name == "gpu_sort_topk_wide" {
+            "wide top-k has no GPU-resident producing pipeline"
+        } else {
+            "single-key bounded top-k only; no full-output or wide standalone heap sort"
+        },
         expectation: BenchmarkLaneExpectation::NativeDecline { reason },
     })
 }
@@ -2252,12 +2273,19 @@ fn spatial_threshold_matrix_entry(
 ) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = spatial_matrix_profile(name)?;
     let work_product = (profile.vertices as u64).saturating_mul(rows as u64);
-    let expectation = spatial_matrix_expectation(
-        rows,
-        profile.vertices,
-        profile.selectivity_pct,
-        profile.registered_gpu_predicate,
-    );
+    let current_generic_predicate_decline = name == "spatial_filter" && rows == 100_000;
+    let expectation = if current_generic_predicate_decline {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "shape_unsupported_predicate",
+        }
+    } else {
+        spatial_matrix_expectation(
+            rows,
+            profile.vertices,
+            profile.selectivity_pct,
+            profile.registered_gpu_predicate,
+        )
+    };
     Some(BenchmarkThresholdMatrixEntry {
         lane: profile.lane,
         workload: static_workload_name(name),
@@ -2279,7 +2307,11 @@ fn spatial_threshold_matrix_entry(
         },
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
         cache_gate: GENERIC_CACHE_GATE,
-        threshold_basis: spatial_threshold_basis(&profile, work_product),
+        threshold_basis: if current_generic_predicate_decline {
+            "current generic predicate descriptor preflight keeps the measured 100K cell native"
+        } else {
+            spatial_threshold_basis(&profile, work_product)
+        },
         expectation,
     })
 }
@@ -2934,9 +2966,16 @@ mod tests {
             assert_eq!(workload.row_scales(), &[100], "{}", workload.name());
             let entry = benchmark_threshold_matrix_entry(workload.name(), 100)
                 .expect("raster threshold matrix entry");
+            let expected_reason = if workload.name() == "raster_reclass" {
+                "shape_unsupported_rte"
+            } else {
+                "raster_rows_below_standalone_min"
+            };
             assert_eq!(
                 entry.expectation.decline_reason(),
-                Some("raster_rows_below_standalone_min")
+                Some(expected_reason),
+                "{}",
+                workload.name()
             );
         }
     }
@@ -2944,6 +2983,30 @@ mod tests {
     // -----------------------------------------------------------------------
     // Phase 7 benchmark threshold matrix
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_metal_stress_cells_pin_current_generic_planner_contracts() {
+        for (name, rows, reason) in [
+            (
+                "gpu_reduce_sum",
+                100_000,
+                "shape_floating_accumulator_semantics",
+            ),
+            ("gpu_nlj_between", 50_000, "shape_unsupported_predicate"),
+            ("gpu_sort_topk_wide", 100_000, "no_gpu_resident_pipeline"),
+            ("h3_bulk", 100_000, "shape_unsupported_rte"),
+            ("spatial_filter", 100_000, "shape_unsupported_predicate"),
+            ("raster_reclass", 100, "shape_unsupported_rte"),
+        ] {
+            let entry = benchmark_threshold_matrix_entry(name, rows)
+                .unwrap_or_else(|| panic!("{name}/{rows} threshold entry"));
+            assert_eq!(
+                entry.expectation.decline_reason(),
+                Some(reason),
+                "{name}/{rows}"
+            );
+        }
+    }
 
     #[test]
     fn test_threshold_matrix_pins_generic_reduce_preflight_reasons() {
@@ -2979,6 +3042,7 @@ mod tests {
             ["standalone_gpuexpr_", "no_gpu_pipeline"].concat(),
             ["parallel_fused_count_", "unstable"].concat(),
             ["parallel_fused_count_", "disabled"].concat(),
+            ["nlj_between_host_boundary_", "unsafe"].concat(),
         ];
         for reason in superseded {
             assert!(
@@ -3255,9 +3319,9 @@ mod tests {
         assert_eq!(entry.lane, "nested_loop_between");
         assert_eq!(
             entry.expectation.decline_reason(),
-            Some("nlj_between_host_boundary_unsafe")
+            Some("shape_unsupported_predicate")
         );
-        assert!(entry.threshold_basis.contains("crash gate"));
+        assert!(entry.threshold_basis.contains("generic predicate"));
     }
 
     #[test]
