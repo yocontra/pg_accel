@@ -147,6 +147,9 @@ target_link_libraries(test_expr_templates PRIVATE pgaccel_kernels_shared)
 add_executable(test_raster test/test_raster.cpp)
 target_link_libraries(test_raster PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_raster_resident test/test_raster_resident.cpp)
+target_link_libraries(test_raster_resident PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_correctness test/test_correctness.cpp)
 target_link_libraries(test_correctness PRIVATE pgaccel_kernels_shared)
 
@@ -278,6 +281,7 @@ add_pgaccel_gpu_test(test_spatial_pairwise_boundary TIMEOUT 1800)
 add_pgaccel_gpu_test(test_spatial_resident TIMEOUT 1800)
 add_pgaccel_gpu_test(test_h3)
 add_pgaccel_gpu_test(test_raster)
+add_pgaccel_gpu_test(test_raster_resident TIMEOUT 600)
 add_pgaccel_gpu_test(test_correctness)
 add_pgaccel_gpu_test(test_exec_gpu)
 add_pgaccel_gpu_test(test_fork)

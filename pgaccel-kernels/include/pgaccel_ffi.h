@@ -958,6 +958,157 @@ pgaccel_status pgaccel_raster_reclass(const void* input_pixels, size_t pixel_cou
                                       const pgaccel_reclass_rule* rules, size_t rule_count,
                                       int output_type, void* output_pixels);
 
+/* Exact resident PostGIS 3.6.4 ST_Reclass(raster,text,text) ABI.
+ *
+ * This is intentionally a Reclass-only surface. There is no resident summary-
+ * statistics operation tag or entry point: PostGIS' sequential fp64/Welford
+ * accumulation and host sqrt result are not proven bit-identical on every
+ * supported device backend.
+ *
+ * Every non-empty pointer/span pair below names a current-context DEVICE or
+ * SHARED_USM allocation. Span byte counts are exact, not lower bounds. Pixel
+ * lanes use the literal PostGIS rt_pixtype tags and one native little-endian
+ * element per pixel (1BB/2BUI/4BUI each occupy one byte in PostGIS WKB).
+ * The descriptor itself remains host-owned for this synchronous call.
+ */
+#define PGACCEL_RESIDENT_RASTER_ABI_VERSION 1u
+#define PGACCEL_RESIDENT_RASTER_MAX_RECLASS_RULES 64u
+#define PGACCEL_RESIDENT_RASTER_ROWS_PER_VALIDATION_LAUNCH 65536u
+#define PGACCEL_RESIDENT_RASTER_MAX_LAUNCH_CHUNKS 4096u
+
+typedef enum {
+  PGACCEL_RESIDENT_RASTER_BOOL = 0,
+  PGACCEL_RESIDENT_RASTER_UINT2 = 1,
+  PGACCEL_RESIDENT_RASTER_UINT4 = 2,
+  PGACCEL_RESIDENT_RASTER_INT8 = 3,
+  PGACCEL_RESIDENT_RASTER_UINT8 = 4,
+  PGACCEL_RESIDENT_RASTER_INT16 = 5,
+  PGACCEL_RESIDENT_RASTER_UINT16 = 6,
+  PGACCEL_RESIDENT_RASTER_INT32 = 7,
+  PGACCEL_RESIDENT_RASTER_UINT32 = 8,
+  PGACCEL_RESIDENT_RASTER_FLOAT32 = 10,
+  PGACCEL_RESIDENT_RASTER_FLOAT64 = 11,
+} pgaccel_resident_raster_pixel_type;
+
+typedef enum {
+  PGACCEL_RESIDENT_RASTER_BAND_HAS_NODATA = 1u << 0,
+  PGACCEL_RESIDENT_RASTER_BAND_IS_NODATA = 1u << 1,
+} pgaccel_resident_raster_band_flags;
+
+typedef struct {
+  uint32_t width;
+  uint32_t height;
+  uint32_t first_band;
+  uint32_t band_count;
+  int32_t srid;
+  uint32_t flags;
+  double scale_x;
+  double scale_y;
+  double ip_x;
+  double ip_y;
+  double skew_x;
+  double skew_y;
+} pgaccel_resident_raster_row;
+
+typedef struct {
+  uint32_t pixel_type;
+  uint32_t flags;
+  double nodata;
+} pgaccel_resident_raster_band;
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  const uint8_t* pixels;
+  size_t pixels_bytes;
+  const uint64_t* band_offsets; /* [band_count + 1], byte offsets */
+  size_t band_offsets_bytes;
+  const pgaccel_resident_raster_row* rows; /* [row_count] */
+  size_t rows_bytes;
+  const pgaccel_resident_raster_band* bands; /* [band_count] */
+  size_t bands_bytes;
+  const uint8_t* nulls; /* optional [row_count], canonical 0/1 */
+  size_t nulls_bytes;
+  size_t row_count;
+  size_t band_count;
+} pgaccel_resident_raster_view;
+
+typedef struct {
+  int64_t source;
+  int64_t destination;
+} pgaccel_resident_raster_reclass_rule;
+
+typedef enum {
+  PGACCEL_RASTER_ROW_NULL = 0,
+  PGACCEL_RASTER_ROW_PASSTHROUGH = 1,
+  PGACCEL_RASTER_ROW_RECLASSIFIED = 2,
+} pgaccel_resident_raster_row_action;
+
+typedef enum {
+  PGACCEL_RASTER_DETAIL_NONE = 0,
+  PGACCEL_RASTER_DETAIL_CONTRACT = 1,
+  PGACCEL_RASTER_DETAIL_VIEW = 2,
+  PGACCEL_RASTER_DETAIL_RULES = 3,
+  PGACCEL_RASTER_DETAIL_OFFSETS = 4,
+  PGACCEL_RASTER_DETAIL_CAPACITY = 5,
+  PGACCEL_RASTER_DETAIL_BYTE_BUDGET = 6,
+  PGACCEL_RASTER_DETAIL_NUMERIC_OVERFLOW = 7,
+} pgaccel_resident_raster_detail;
+
+typedef enum {
+  PGACCEL_RASTER_VALIDATION_VIEW = 1u << 0,
+  PGACCEL_RASTER_VALIDATION_RULES = 1u << 1,
+  PGACCEL_RASTER_VALIDATION_OFFSETS = 1u << 2,
+  PGACCEL_RASTER_VALIDATION_CAPACITY = 1u << 3,
+  PGACCEL_RASTER_VALIDATION_BYTE_BUDGET = 1u << 4,
+  PGACCEL_RASTER_VALIDATION_NUMERIC_OVERFLOW = 1u << 5,
+} pgaccel_resident_raster_validation_failure;
+
+/* Caller-owned device scratch. It is output-only and may be reused after the
+ * synchronous call returns. Keeping this allocation outside the helper is
+ * required by the resident-store borrow contract. */
+typedef struct {
+  uint32_t failures;
+  uint32_t pad;
+  uint64_t first_output_offset;
+  uint64_t last_output_offset;
+} pgaccel_resident_raster_validation_scratch;
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  pgaccel_resident_raster_view input;
+  size_t first_row;
+  size_t count;
+  uint32_t output_pixel_type; /* integer resident pixel tags 0..8 only */
+  uint32_t pad;
+  const pgaccel_resident_raster_reclass_rule* rules; /* [rule_count] */
+  size_t rules_bytes;
+  size_t rule_count;
+  const uint64_t* output_offsets; /* [count + 1], global output byte offsets */
+  size_t output_offsets_bytes;
+  uint8_t* output_pixels;
+  size_t output_pixels_bytes;
+  uint8_t* row_actions; /* [count] */
+  size_t row_actions_bytes;
+  pgaccel_resident_raster_validation_scratch* validation_scratch; /* [1] */
+  size_t validation_scratch_bytes;
+  size_t max_total_pixels; /* exact selected pixels and defensive work cap */
+  size_t max_chunk_pixels; /* maximum pixels in one device launch */
+} pgaccel_raster_reclass_resident_request;
+
+/* Exact output_offsets deltas are zero for NULL/passthrough rows and
+ * width*height*output_pixel_width for reclassified rows. Offsets are caller-
+ * owned and read-only. The function writes only output_pixels and row_actions;
+ * Host descriptor/allocation failures are hard non-OK statuses. Device-view,
+ * rule, offset, capacity, and budget failures are written to validation_scratch
+ * and make every ordered output kernel a no-op. The caller reads/maps that
+ * scratch only after releasing its resident-input borrow; no failed result may
+ * be reconstructed or published. */
+pgaccel_status
+pgaccel_raster_reclass_resident_ex(const pgaccel_raster_reclass_resident_request* request,
+                                   int32_t* detail);
+
 /* ── BEGIN raster-extensions (Agent 3A insertion zone) ──────────────
  * Agent 3A appends here:
  *   - pgaccel_raster_resample (bilinear)
@@ -1026,36 +1177,101 @@ pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, size_t row_
  * numbers must hold across the fp64-unlock rename (2026-04-22).
  */
 #ifdef __cplusplus
-static_assert(sizeof(pgaccel_platform_caps) == 88,
-              "pgaccel_platform_caps ABI pinned at 88 bytes (fp64-unlock plan)");
-static_assert(sizeof(pgaccel_device_info) == 216,
-              "pgaccel_device_info ABI pinned at 216 bytes (fp64-unlock plan)");
-static_assert(sizeof(pgaccel_geometry) == 48,
-              "pgaccel_geometry ABI pinned at 48 bytes (Rust mirror: gpu/types.rs)");
-static_assert(offsetof(pgaccel_geometry, bbox) == 8, "pgaccel_geometry.bbox at offset 8");
-static_assert(offsetof(pgaccel_geometry, coords) == 16, "pgaccel_geometry.coords at offset 16");
-static_assert(offsetof(pgaccel_geometry, coord_count) == 24,
-              "pgaccel_geometry.coord_count at offset 24");
-static_assert(offsetof(pgaccel_geometry, ring_offsets) == 32,
-              "pgaccel_geometry.ring_offsets at offset 32");
-static_assert(offsetof(pgaccel_geometry, ring_count) == 40,
-              "pgaccel_geometry.ring_count at offset 40");
+#define PGACCEL_ABI_ASSERT(condition, message) static_assert(condition, message)
 #else
-_Static_assert(sizeof(pgaccel_platform_caps) == 88,
-               "pgaccel_platform_caps ABI pinned at 88 bytes (fp64-unlock plan)");
-_Static_assert(sizeof(pgaccel_device_info) == 216,
-               "pgaccel_device_info ABI pinned at 216 bytes (fp64-unlock plan)");
-_Static_assert(sizeof(pgaccel_geometry) == 48,
-               "pgaccel_geometry ABI pinned at 48 bytes (Rust mirror: gpu/types.rs)");
-_Static_assert(offsetof(pgaccel_geometry, bbox) == 8, "pgaccel_geometry.bbox at offset 8");
-_Static_assert(offsetof(pgaccel_geometry, coords) == 16, "pgaccel_geometry.coords at offset 16");
-_Static_assert(offsetof(pgaccel_geometry, coord_count) == 24,
-               "pgaccel_geometry.coord_count at offset 24");
-_Static_assert(offsetof(pgaccel_geometry, ring_offsets) == 32,
-               "pgaccel_geometry.ring_offsets at offset 32");
-_Static_assert(offsetof(pgaccel_geometry, ring_count) == 40,
-               "pgaccel_geometry.ring_count at offset 40");
+#define PGACCEL_ABI_ASSERT(condition, message) _Static_assert(condition, message)
 #endif
+
+#define PGACCEL_ABI_OFFSET(type, field, offset) \
+  PGACCEL_ABI_ASSERT(offsetof(type, field) == offset, #type "." #field " ABI offset drifted")
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_platform_caps) == 88,
+                   "pgaccel_platform_caps ABI pinned at 88 bytes (fp64-unlock plan)");
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_device_info) == 216,
+                   "pgaccel_device_info ABI pinned at 216 bytes (fp64-unlock plan)");
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_geometry) == 48,
+                   "pgaccel_geometry ABI pinned at 48 bytes (Rust mirror: gpu/types.rs)");
+PGACCEL_ABI_OFFSET(pgaccel_geometry, bbox, 8);
+PGACCEL_ABI_OFFSET(pgaccel_geometry, coords, 16);
+PGACCEL_ABI_OFFSET(pgaccel_geometry, coord_count, 24);
+PGACCEL_ABI_OFFSET(pgaccel_geometry, ring_offsets, 32);
+PGACCEL_ABI_OFFSET(pgaccel_geometry, ring_count, 40);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_row) == 72,
+                   "resident raster row ABI pinned at 72 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, width, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, height, 4);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, first_band, 8);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, band_count, 12);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, srid, 16);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, flags, 20);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, scale_x, 24);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, scale_y, 32);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, ip_x, 40);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, ip_y, 48);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, skew_x, 56);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_row, skew_y, 64);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_band) == 16,
+                   "resident raster band ABI pinned at 16 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_band, pixel_type, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_band, flags, 4);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_band, nodata, 8);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_view) == 104,
+                   "resident raster view ABI pinned at 104 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, abi_version, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, flags, 4);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, pixels, 8);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, pixels_bytes, 16);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, band_offsets, 24);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, band_offsets_bytes, 32);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, rows, 40);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, rows_bytes, 48);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, bands, 56);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, bands_bytes, 64);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, nulls, 72);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, nulls_bytes, 80);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, row_count, 88);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_view, band_count, 96);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_reclass_rule) == 16,
+                   "resident raster rule ABI pinned at 16 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_reclass_rule, source, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_reclass_rule, destination, 8);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_resident_raster_validation_scratch) == 24,
+                   "resident raster validation scratch ABI pinned at 24 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_validation_scratch, failures, 0);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_validation_scratch, pad, 4);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_validation_scratch, first_output_offset, 8);
+PGACCEL_ABI_OFFSET(pgaccel_resident_raster_validation_scratch, last_output_offset, 16);
+
+PGACCEL_ABI_ASSERT(sizeof(pgaccel_raster_reclass_resident_request) == 240,
+                   "resident raster request ABI pinned at 240 bytes");
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, abi_version, 0);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, flags, 4);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, input, 8);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, first_row, 112);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, count, 120);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_pixel_type, 128);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, pad, 132);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, rules, 136);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, rules_bytes, 144);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, rule_count, 152);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_offsets, 160);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_offsets_bytes, 168);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_pixels, 176);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, output_pixels_bytes, 184);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, row_actions, 192);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, row_actions_bytes, 200);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, validation_scratch, 208);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, validation_scratch_bytes, 216);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, max_total_pixels, 224);
+PGACCEL_ABI_OFFSET(pgaccel_raster_reclass_resident_request, max_chunk_pixels, 232);
+
+#undef PGACCEL_ABI_OFFSET
+#undef PGACCEL_ABI_ASSERT
 
 #ifdef __cplusplus
 #define PGACCEL_RESIDENT_ABI_PIN(condition) static_assert(condition, #condition)
