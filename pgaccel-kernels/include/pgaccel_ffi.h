@@ -18,6 +18,7 @@ typedef enum {
   /* Aliases used by Phase 6 kernels */
   PGACCEL_ERROR_INIT = -1,
   PGACCEL_ERROR_NO_DEVICE = -5,
+  PGACCEL_INVALID_ARGUMENT = -6,
   PGACCEL_ERROR_OOM = -3,
   PGACCEL_ERROR_TIMEOUT = -4,
   PGACCEL_ERROR_UNSUPPORTED = -2,
@@ -543,6 +544,16 @@ pgaccel_status pgaccel_h3_is_res_class_iii_bulk(const uint64_t* cells, size_t co
 
 pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, size_t count, int parent_res,
                                               uint64_t* parents);
+
+/* Resident cell-to-parent transform. `cells`, optional canonical 0/1 `nulls`,
+ * and caller-reserved `parents` are current-context DEVICE/SHARED_USM pointers.
+ * Null rows write a canonical zero value and retain nullness in the unchanged
+ * caller-owned sidecar. Invalid sidecars, cells, or ancestor resolutions fail
+ * the whole call with PGACCEL_INVALID_ARGUMENT. No row buffers are allocated,
+ * staged through host/shared memory, or copied back to the host. */
+pgaccel_status pgaccel_h3_cell_to_parent_resident(const uint64_t* cells, const uint8_t* nulls,
+                                                  size_t count, int32_t parent_res,
+                                                  uint64_t* parents);
 
 pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* cells, size_t count,
                                                     int parent_res,

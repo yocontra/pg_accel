@@ -3,14 +3,68 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
+#include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
 #include "pgaccel_hash_agg.h"
 
 static int g_pass = 0;
 static int g_fail = 0;
+
+template <typename T>
+class SharedResidentArray {
+ public:
+  explicit SharedResidentArray(const std::vector<T>& values) : count_(values.size()) {
+    if (count_ == 0)
+      return;
+    void* allocation = nullptr;
+    if (pgaccel_expr_shared_alloc(count_ * sizeof(T), &allocation) != PGACCEL_OK ||
+        allocation == nullptr)
+      throw std::runtime_error("shared resident allocation failed");
+    values_ = static_cast<T*>(allocation);
+    std::copy(values.begin(), values.end(), values_);
+  }
+
+  SharedResidentArray(const SharedResidentArray&) = delete;
+  SharedResidentArray& operator=(const SharedResidentArray&) = delete;
+  ~SharedResidentArray() { pgaccel_expr_shared_free(values_); }
+
+  T* data() { return values_; }
+  const T* data() const { return values_; }
+  T& operator[](size_t index) { return values_[index]; }
+  const T& operator[](size_t index) const { return values_[index]; }
+  size_t size() const { return count_; }
+
+ private:
+  T* values_ = nullptr;
+  size_t count_ = 0;
+};
+
+class DeviceResidentAllocation {
+ public:
+  DeviceResidentAllocation(const void* initial, size_t bytes) : bytes_(bytes) {
+    const pgaccel_status status = initial == nullptr
+                                      ? pgaccel_expr_device_alloc(bytes, &pointer_)
+                                      : pgaccel_expr_device_alloc_copy(initial, bytes, &pointer_);
+    if (status != PGACCEL_OK || (bytes != 0 && pointer_ == nullptr))
+      throw std::runtime_error("device resident allocation failed");
+  }
+
+  DeviceResidentAllocation(const DeviceResidentAllocation&) = delete;
+  DeviceResidentAllocation& operator=(const DeviceResidentAllocation&) = delete;
+  ~DeviceResidentAllocation() { pgaccel_expr_device_free(pointer_); }
+
+  void* data() { return pointer_; }
+  const void* data() const { return pointer_; }
+  size_t bytes() const { return bytes_; }
+
+ private:
+  void* pointer_ = nullptr;
+  size_t bytes_ = 0;
+};
 
 #define ASSERT_EQ(desc, actual, expected)                                                    \
   do {                                                                                       \
@@ -315,6 +369,129 @@ static void test_cell_to_parent() {
   ASSERT_EQ("bulk parent[0]", parents[0], make_cell(5, 1, p0));
   ASSERT_EQ("bulk parent[1]", parents[1], make_cell(5, 1, p1));
   ASSERT_EQ("bulk parent[2]", parents[2], make_cell(5, 1, p2));
+}
+
+static void test_cell_to_parent_resident() {
+  printf("--- test_cell_to_parent_resident ---\n");
+  constexpr uint64_t sentinel = UINT64_C(0xfedcba9876543210);
+  int digits_a[15] = {2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  int digits_b[15] = {6, 5, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  const uint64_t cell_a = make_cell(10, 5, digits_a);
+  const uint64_t cell_b = make_cell(20, 3, digits_b);
+
+  std::vector<uint64_t> input = {cell_a, cell_b, 0, cell_a | (UINT64_C(1) << 63)};
+  std::vector<uint8_t> input_nulls = {0, 0, 1, 1};
+  SharedResidentArray<uint64_t> cells(input);
+  SharedResidentArray<uint8_t> nulls(input_nulls);
+  SharedResidentArray<uint64_t> parents(std::vector<uint64_t>(input.size(), sentinel));
+  uint64_t expected_a = 0;
+  ASSERT_STATUS_OK("resident oracle parent status",
+                   pgaccel_h3_cell_to_parent_bulk(&cell_a, 1, 3, &expected_a));
+
+  pgaccel_reset_gpu_exec_count();
+  pgaccel_status status = pgaccel_h3_cell_to_parent_resident(cells.data(), nulls.data(),
+                                                             cells.size(), 3, parents.data());
+  ASSERT_STATUS_OK("resident shared parent status", status);
+  ASSERT_TRUE("resident parent dispatched", pgaccel_gpu_exec_count() > 0);
+  ASSERT_EQ("resident parent transformed", parents[0], expected_a);
+  ASSERT_EQ("resident parent identity", parents[1], cell_b);
+  ASSERT_EQ("resident null zero[0]", parents[2], 0ULL);
+  ASSERT_EQ("resident null zero[1]", parents[3], 0ULL);
+  ASSERT_TRUE("resident input values unchanged",
+              std::equal(input.begin(), input.end(), cells.data()));
+  ASSERT_TRUE("resident null sidecar unchanged",
+              std::equal(input_nulls.begin(), input_nulls.end(), nulls.data()));
+
+  std::vector<uint64_t> device_input = {cell_a, cell_b, cell_a};
+  std::vector<uint64_t> device_expected(device_input.size(), 0);
+  ASSERT_STATUS_OK("device resident oracle status",
+                   pgaccel_h3_cell_to_parent_bulk(device_input.data(), device_input.size(), 2,
+                                                  device_expected.data()));
+  DeviceResidentAllocation device_cells(device_input.data(),
+                                        device_input.size() * sizeof(uint64_t));
+  DeviceResidentAllocation device_parents(nullptr, device_input.size() * sizeof(uint64_t));
+  std::vector<uint64_t> device_initial(device_input.size(), sentinel);
+  ASSERT_STATUS_OK("device resident output initialize",
+                   pgaccel_expr_device_copy_from_host(device_parents.data(), device_initial.data(),
+                                                      device_parents.bytes()));
+  status = pgaccel_h3_cell_to_parent_resident(static_cast<const uint64_t*>(device_cells.data()),
+                                              nullptr, device_input.size(), 2,
+                                              static_cast<uint64_t*>(device_parents.data()));
+  ASSERT_STATUS_OK("resident device parent status", status);
+  std::vector<uint64_t> device_actual(device_input.size(), 0);
+  ASSERT_STATUS_OK("device resident output read",
+                   pgaccel_expr_device_copy_to_host(device_actual.data(), device_parents.data(),
+                                                    device_parents.bytes()));
+  ASSERT_TRUE("resident device output matches oracle", device_actual == device_expected);
+
+  const uint64_t reserved_bits = cell_a | (UINT64_C(1) << 56);
+  const uint64_t wrong_mode = (cell_a & ~(UINT64_C(0xf) << 59)) | (UINT64_C(2) << 59);
+  const uint64_t invalid_base = (cell_a & ~(UINT64_C(0x7f) << 45)) | (UINT64_C(122) << 45);
+  int invalid_digit_values[15] = {7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  const uint64_t invalid_used_digit = make_cell(10, 5, invalid_digit_values);
+  const uint64_t invalid_unused_digit = cell_a & ~(UINT64_C(7) << ((15 - 6) * 3));
+  int deleted_pentagon_values[15] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  const uint64_t deleted_pentagon = make_cell(4, 1, deleted_pentagon_values);
+  int coarse_values[15] = {2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  const uint64_t too_coarse = make_cell(10, 2, coarse_values);
+  std::vector<uint64_t> malformed = {0,
+                                     cell_a | (UINT64_C(1) << 63),
+                                     reserved_bits,
+                                     wrong_mode,
+                                     invalid_base,
+                                     invalid_used_digit,
+                                     invalid_unused_digit,
+                                     deleted_pentagon,
+                                     too_coarse};
+  SharedResidentArray<uint64_t> malformed_cells(malformed);
+  SharedResidentArray<uint64_t> rejected_output(std::vector<uint64_t>(malformed.size(), sentinel));
+  status = pgaccel_h3_cell_to_parent_resident(malformed_cells.data(), nullptr, malformed.size(), 3,
+                                              rejected_output.data());
+  ASSERT_EQ("resident malformed cells fail", status, PGACCEL_INVALID_ARGUMENT);
+  bool rejected_unchanged = true;
+  for (size_t i = 0; i < malformed.size(); ++i)
+    rejected_unchanged = rejected_unchanged && rejected_output[i] == sentinel;
+  ASSERT_TRUE("resident malformed call publishes nothing", rejected_unchanged);
+
+  SharedResidentArray<uint8_t> malformed_nulls(std::vector<uint8_t>({0, 2, 0, 0}));
+  SharedResidentArray<uint64_t> malformed_null_output(
+      std::vector<uint64_t>(input.size(), sentinel));
+  status = pgaccel_h3_cell_to_parent_resident(cells.data(), malformed_nulls.data(), cells.size(), 3,
+                                              malformed_null_output.data());
+  ASSERT_EQ("resident malformed null sidecar fails", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_TRUE("resident malformed null publishes nothing",
+              std::all_of(malformed_null_output.data(),
+                          malformed_null_output.data() + malformed_null_output.size(),
+                          [=](uint64_t value) { return value == sentinel; }));
+
+  SharedResidentArray<uint64_t> null_only_cells(
+      std::vector<uint64_t>({0, UINT64_C(0xffffffffffffffff)}));
+  SharedResidentArray<uint8_t> null_only_sidecar(std::vector<uint8_t>({1, 1}));
+  SharedResidentArray<uint64_t> null_only_output(
+      std::vector<uint64_t>(null_only_cells.size(), sentinel));
+  status = pgaccel_h3_cell_to_parent_resident(null_only_cells.data(), null_only_sidecar.data(),
+                                              null_only_cells.size(), 15, null_only_output.data());
+  ASSERT_STATUS_OK("resident null rows skip cell validation", status);
+  ASSERT_EQ("resident all-null output[0]", null_only_output[0], 0ULL);
+  ASSERT_EQ("resident all-null output[1]", null_only_output[1], 0ULL);
+
+  ASSERT_EQ("resident invalid resolution fails",
+            pgaccel_h3_cell_to_parent_resident(cells.data(), nulls.data(), cells.size(), 16,
+                                               parents.data()),
+            PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ(
+      "resident aliased value/output fails",
+      pgaccel_h3_cell_to_parent_resident(cells.data(), nulls.data(), cells.size(), 3, cells.data()),
+      PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident host pointers fail",
+            pgaccel_h3_cell_to_parent_resident(input.data(), input_nulls.data(), input.size(), 3,
+                                               device_expected.data()),
+            PGACCEL_INVALID_ARGUMENT);
+  ASSERT_STATUS_OK("resident empty input",
+                   pgaccel_h3_cell_to_parent_resident(nullptr, nullptr, 0, 3, nullptr));
+  ASSERT_EQ("resident empty still validates resolution",
+            pgaccel_h3_cell_to_parent_resident(nullptr, nullptr, 0, -1, nullptr),
+            PGACCEL_INVALID_ARGUMENT);
 }
 
 // ---------------------------------------------------------------------------
@@ -1949,6 +2126,7 @@ int main(int argc, char** argv) {
   RUN_TEST(test_is_pentagon);
   RUN_TEST(test_is_res_class_iii);
   RUN_TEST(test_cell_to_parent);
+  RUN_TEST(test_cell_to_parent_resident);
   RUN_TEST(test_cell_to_center_child);
   RUN_TEST(test_grid_distance);
   RUN_TEST(test_lat_lng_to_cell);

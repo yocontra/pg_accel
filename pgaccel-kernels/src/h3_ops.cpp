@@ -3,13 +3,14 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <new>
 #include <stdexcept>
 #include <vector>
 
 #include "pgaccel_ffi.h"
-#include "pgaccel_queue.h"
 #include "pgaccel_hash_agg.h"
+#include "pgaccel_queue.h"
 
 #include "h3_exact_device.hpp"
 #include "h3_float_device.hpp"
@@ -49,6 +50,12 @@ static constexpr uint64_t H3_RES_MASK = 0xFULL << 52;
 static constexpr uint64_t H3_BASE_MASK = 0x7FULL << 45;
 static constexpr uint64_t H3_DIGIT_MASK = 7ULL;
 static constexpr uint64_t H3_UNUSED_DIGIT = 7ULL;
+// H3 v4 pentagon base cells: {4, 14, 24, 38, 49, 58, 63, 72, 83, 97, 107, 117}.
+static constexpr uint64_t H3_PENTAGON_BASE_LOW = (1ULL << 4) | (1ULL << 14) | (1ULL << 24) |
+                                                 (1ULL << 38) | (1ULL << 49) | (1ULL << 58) |
+                                                 (1ULL << 63);
+static constexpr uint64_t H3_PENTAGON_BASE_HIGH =
+    (1ULL << 8) | (1ULL << 19) | (1ULL << 33) | (1ULL << 43) | (1ULL << 53);
 
 static inline bool h3_needs_exact_latlng_fixup(int resolution, uint8_t valid_flag) {
   // High resolutions need exact correction for every row. Lower resolutions
@@ -386,6 +393,11 @@ static inline int32_t h3_get_digit(uint64_t cell, int res) {
   return static_cast<int32_t>((cell >> shift) & H3_DIGIT_MASK);
 }
 
+static inline bool h3_is_pentagon_base(int32_t base) {
+  return base < 64 ? ((H3_PENTAGON_BASE_LOW >> base) & 1ULL) != 0
+                   : ((H3_PENTAGON_BASE_HIGH >> (base - 64)) & 1ULL) != 0;
+}
+
 static inline bool h3_is_valid_cell(uint64_t cell) {
   if (cell == 0)
     return false;
@@ -405,6 +417,17 @@ static inline bool h3_is_valid_cell(uint64_t cell) {
   int base = h3_get_base_cell(cell);
   if (base < 0 || base > 121)
     return false;
+  bool found_nonzero_digit = false;
+  const bool pentagon_base = h3_is_pentagon_base(base);
+  for (int r = 1; r <= res; r++) {
+    const int digit = h3_get_digit(cell, r);
+    if (digit == H3_UNUSED_DIGIT)
+      return false;
+    // H3's deleted K-axis subsequence is invalid beneath a pentagon base.
+    if (pentagon_base && !found_nonzero_digit && digit == 1)
+      return false;
+    found_nonzero_digit = found_nonzero_digit || digit != 0;
+  }
   // Digits beyond resolution must be 7 (unused)
   for (int r = res + 1; r <= H3_MAX_RESOLUTION; r++) {
     if (h3_get_digit(cell, r) != 7)
@@ -727,19 +750,6 @@ extern "C" pgaccel_status pgaccel_h3_is_valid_cell_bulk(const uint64_t* cells, s
   return pgaccel_kernel_failure("pgaccel_h3_is_valid_cell_bulk", nullptr);
 }
 
-// Pentagon base cells: 12 of the 122 base cells form pentagon hierarchies.
-// Source: H3 v4 reference (baseCells.c). Encoded as a 128-bit bitset split
-// into two uint64_t halves so the kernel can test membership with a shift +
-// AND, no host loop. Indices 0..63 -> low; 64..127 -> high.
-//   set: {4, 14, 24, 38, 49, 58, 63, 72, 83, 97, 107, 117}
-//   low  bits set: 4, 14, 24, 38, 49, 58, 63
-//   high bits set: 72-64=8, 83-64=19, 97-64=33, 107-64=43, 117-64=53
-static constexpr uint64_t H3_PENTAGON_BASE_LOW = (1ULL << 4) | (1ULL << 14) | (1ULL << 24) |
-                                                 (1ULL << 38) | (1ULL << 49) | (1ULL << 58) |
-                                                 (1ULL << 63);
-static constexpr uint64_t H3_PENTAGON_BASE_HIGH =
-    (1ULL << 8) | (1ULL << 19) | (1ULL << 33) | (1ULL << 43) | (1ULL << 53);
-
 extern "C" pgaccel_status pgaccel_h3_is_pentagon_bulk(const uint64_t* cells, size_t count,
                                                       uint8_t* is_pent) try {
   if (count == 0)
@@ -954,6 +964,137 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, 
   return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_bulk", &e);
 } catch (...) {
   return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_bulk", nullptr);
+}
+
+struct H3ResidentSpan {
+  uintptr_t begin;
+  uintptr_t end;
+};
+
+static bool h3_resident_span(const void* pointer, size_t count, size_t width,
+                             H3ResidentSpan* span) {
+  if (pointer == nullptr || count == 0 || width == 0 ||
+      count > std::numeric_limits<size_t>::max() / width)
+    return false;
+  const size_t bytes = count * width;
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(pointer);
+  if (begin > std::numeric_limits<uintptr_t>::max() - bytes)
+    return false;
+  *span = {begin, begin + bytes};
+  return true;
+}
+
+static bool h3_spans_overlap(const H3ResidentSpan& lhs, const H3ResidentSpan& rhs) {
+  return lhs.begin < rhs.end && rhs.begin < lhs.end;
+}
+
+static bool h3_current_device_pointer(sycl::queue& queue, const void* pointer) {
+  if (pointer == nullptr)
+    return false;
+  try {
+    const sycl::usm::alloc allocation = sycl::get_pointer_type(pointer, queue.get_context());
+    return (allocation == sycl::usm::alloc::device || allocation == sycl::usm::alloc::shared) &&
+           sycl::get_pointer_device(pointer, queue.get_context()) == queue.get_device();
+  } catch (...) {
+    return false;
+  }
+}
+
+class H3ResidentStatusOwner {
+ public:
+  H3ResidentStatusOwner(sycl::queue& queue, uint32_t* status) : queue_(queue), status_(status) {}
+  H3ResidentStatusOwner(const H3ResidentStatusOwner&) = delete;
+  H3ResidentStatusOwner& operator=(const H3ResidentStatusOwner&) = delete;
+  ~H3ResidentStatusOwner() {
+    if (status_ != nullptr)
+      sycl::free(status_, queue_);
+  }
+
+ private:
+  sycl::queue& queue_;
+  uint32_t* status_;
+};
+
+class H3CellToParentResidentValidateKernel;
+class H3CellToParentResidentTransformKernel;
+
+extern "C" pgaccel_status pgaccel_h3_cell_to_parent_resident(const uint64_t* cells,
+                                                             const uint8_t* nulls, size_t count,
+                                                             int32_t parent_res,
+                                                             uint64_t* parents) try {
+  if (parent_res < 0 || parent_res > H3_MAX_RESOLUTION)
+    return PGACCEL_INVALID_ARGUMENT;
+  if (count == 0)
+    return PGACCEL_OK;
+  if (cells == nullptr || parents == nullptr)
+    return PGACCEL_INVALID_ARGUMENT;
+
+  H3ResidentSpan cells_span{};
+  H3ResidentSpan parents_span{};
+  H3ResidentSpan nulls_span{};
+  if (!h3_resident_span(cells, count, sizeof(uint64_t), &cells_span) ||
+      !h3_resident_span(parents, count, sizeof(uint64_t), &parents_span) ||
+      h3_spans_overlap(cells_span, parents_span) ||
+      (nulls != nullptr &&
+       (!h3_resident_span(nulls, count, sizeof(uint8_t), &nulls_span) ||
+        h3_spans_overlap(nulls_span, cells_span) || h3_spans_overlap(nulls_span, parents_span))))
+    return PGACCEL_INVALID_ARGUMENT;
+
+  sycl::queue& queue = get_queue();
+  if (!h3_current_device_pointer(queue, cells) || !h3_current_device_pointer(queue, parents) ||
+      (nulls != nullptr && !h3_current_device_pointer(queue, nulls)))
+    return PGACCEL_INVALID_ARGUMENT;
+
+  uint32_t* invalid = sycl::malloc_shared<uint32_t>(1, queue);
+  if (invalid == nullptr)
+    return PGACCEL_OOM;
+  H3ResidentStatusOwner status_owner(queue, invalid);
+  *invalid = 0;
+
+  const int32_t target_resolution = parent_res;
+  queue.parallel_for<H3CellToParentResidentValidateKernel>(
+      sycl::range<1>(count), [=](sycl::id<1> id) {
+        const size_t row = id[0];
+        const uint8_t null_byte = nulls == nullptr ? 0 : nulls[row];
+        bool row_invalid = null_byte > 1;
+        if (!row_invalid && null_byte == 0) {
+          const uint64_t cell = cells[row];
+          row_invalid = !h3_is_valid_cell(cell) || target_resolution > h3_get_resolution(cell);
+        }
+        if (row_invalid) {
+          sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                           sycl::access::address_space::global_space>
+              invalid_ref(*invalid);
+          invalid_ref.fetch_or(1u);
+        }
+      });
+  queue.wait_and_throw();
+  if (*invalid != 0) {
+    pgaccel_record_gpu_exec();
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+
+  const uint64_t unused_digit_mask = h3_unused_digit_mask_after(parent_res);
+  queue.parallel_for<H3CellToParentResidentTransformKernel>(
+      sycl::range<1>(count), [=](sycl::id<1> id) {
+        const size_t row = id[0];
+        if (nulls != nullptr && nulls[row] != 0) {
+          parents[row] = 0;
+          return;
+        }
+        parents[row] = h3_cell_to_parent_masked(cells[row], target_resolution, unused_digit_mask);
+      });
+  queue.wait_and_throw();
+  pgaccel_record_gpu_exec();
+  return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::bad_alloc&) {
+  return PGACCEL_OOM;
+} catch (const std::exception& error) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_resident", &error);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_resident", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* cells, size_t count,

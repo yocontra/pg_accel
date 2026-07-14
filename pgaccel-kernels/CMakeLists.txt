@@ -165,6 +165,9 @@ target_link_libraries(test_reduce_minimal PRIVATE pgaccel_kernels_shared)
 add_executable(test_grouped_agg test/test_grouped_agg.cpp)
 target_link_libraries(test_grouped_agg PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_grouped_agg_hash test/test_grouped_agg_hash.cpp)
+target_link_libraries(test_grouped_agg_hash PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_grouped_agg_workspace test/test_grouped_agg_workspace.cpp)
 target_link_libraries(test_grouped_agg_workspace PRIVATE pgaccel_kernels_shared)
 
@@ -278,6 +281,7 @@ add_pgaccel_gpu_test(test_sycl_basic)
 add_pgaccel_gpu_test(test_reduce_stats)
 add_pgaccel_gpu_test(test_reduce_bool_bit)
 add_pgaccel_gpu_test(test_grouped_agg)
+add_pgaccel_gpu_test(test_grouped_agg_hash)
 add_pgaccel_gpu_test(test_grouped_agg_workspace)
 add_pgaccel_gpu_test(test_hash_agg_partial)
 add_pgaccel_gpu_test(test_hash_agg_keys)

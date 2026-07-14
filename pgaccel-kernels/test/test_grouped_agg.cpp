@@ -1100,7 +1100,7 @@ void test_error_and_unsupported_statuses() {
     set_count_star(desc, 0);
     pgaccel_status status = PGACCEL_ERROR;
     workspace_req(desc, &status);
-    CHECK(status == PGACCEL_UNSUPPORTED);
+    CHECK(status == PGACCEL_OK);
   }
 }
 

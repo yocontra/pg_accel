@@ -24,6 +24,12 @@ namespace {
 
 constexpr size_t kWorkspaceAlignment = 8;
 constexpr size_t kNoOffset = std::numeric_limits<size_t>::max();
+constexpr uint32_t kHashEmptyOwner = UINT32_MAX;
+constexpr size_t kHashMaxRows = UINT32_MAX;
+constexpr size_t kHashMaxGroupCapacity = size_t{1} << 30;
+constexpr uint32_t kFailureInvalid = 1u << 0;
+constexpr uint32_t kFailureNumericOverflow = 1u << 1;
+constexpr uint32_t kFailureCapacity = 1u << 2;
 constexpr uint16_t kOpEq = PGACCEL_EXPR_OP_EQ;
 constexpr uint16_t kOpNe = PGACCEL_EXPR_OP_NE;
 constexpr uint16_t kOpLt = PGACCEL_EXPR_OP_LT;
@@ -135,9 +141,12 @@ struct DeviceMeta {
   size_t emitted;
   uint64_t selected;
   uint64_t uncertain;
-  int32_t error;
+  uint32_t failure_flags;
   uint32_t _pad;
 };
+
+static_assert(kFailureInvalid == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+static_assert(kFailureNumericOverflow == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
 
 struct KernelParams {
   size_t row_count;
@@ -145,7 +154,9 @@ struct KernelParams {
   uint32_t key_count;
   uint32_t measure_count;
   uint32_t dim_count;
+  int32_t grouping_mode;
   int32_t output_mode;
+  size_t hash_slot_count;
   pgaccel_grouped_agg_key keys[PGACCEL_GROUPED_AGG_MAX_KEYS];
   pgaccel_grouped_agg_measure measures[PGACCEL_GROUPED_AGG_MAX_MEASURES];
   pgaccel_grouped_agg_filter where_filter;
@@ -154,8 +165,11 @@ struct KernelParams {
   uint8_t* active;
   DeviceMeasureBuffers buffers[PGACCEL_GROUPED_AGG_MAX_MEASURES];
   size_t* staged_group_codes;
-  int32_t* staged_key_values[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  uint8_t* staged_key_values[PGACCEL_GROUPED_AGG_MAX_KEYS];
   uint8_t* staged_key_nulls[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  uint32_t* hash_owners;
+  uint32_t* hash_counts;
+  uint32_t* hash_group_count;
   DeviceMeta* meta;
 };
 
@@ -179,6 +193,10 @@ struct WorkspaceLayout {
   size_t staged_group_codes = kNoOffset;
   size_t staged_key_values[PGACCEL_GROUPED_AGG_MAX_KEYS] = {kNoOffset, kNoOffset, kNoOffset};
   size_t staged_key_nulls[PGACCEL_GROUPED_AGG_MAX_KEYS] = {kNoOffset, kNoOffset, kNoOffset};
+  size_t hash_slot_count = 0;
+  size_t hash_owners = kNoOffset;
+  size_t hash_counts = kNoOffset;
+  size_t hash_group_count = kNoOffset;
   size_t meta = kNoOffset;
 };
 
@@ -241,6 +259,20 @@ int32_t materialized_key_type(const pgaccel_grouped_agg_desc& desc,
   return PGACCEL_VAL_INT32;
 }
 
+bool hash_slot_capacity(size_t group_capacity, size_t* slot_count) {
+  size_t required = 0;
+  if (!checked_mul_size(group_capacity, 2, &required))
+    return false;
+  size_t slots = 1;
+  while (slots < required) {
+    if (slots > std::numeric_limits<size_t>::max() / 2)
+      return false;
+    slots *= 2;
+  }
+  *slot_count = slots;
+  return true;
+}
+
 bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) {
   ArenaSizer arena;
   if (!arena.add<KernelParams>(1, &layout->params) ||
@@ -286,10 +318,22 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
   if (!arena.add<size_t>(desc.group_capacity, &layout->staged_group_codes))
     return false;
   for (size_t i = 0; i < desc.key_count; ++i) {
-    if (!arena.add<int32_t>(desc.group_capacity, &layout->staged_key_values[i]))
+    const size_t key_width = val_tag_width(materialized_key_type(desc, desc.keys[i]));
+    if ((key_width == sizeof(uint32_t) &&
+         !arena.add<uint32_t>(desc.group_capacity, &layout->staged_key_values[i])) ||
+        (key_width == sizeof(uint64_t) &&
+         !arena.add<uint64_t>(desc.group_capacity, &layout->staged_key_values[i])) ||
+        (key_width != sizeof(uint32_t) && key_width != sizeof(uint64_t)))
       return false;
     if (key_nullable(desc, desc.keys[i]) &&
         !arena.add<uint8_t>(desc.group_capacity, &layout->staged_key_nulls[i]))
+      return false;
+  }
+  if (desc.grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
+    if (!hash_slot_capacity(desc.group_capacity, &layout->hash_slot_count) ||
+        !arena.add<uint32_t>(layout->hash_slot_count, &layout->hash_owners) ||
+        !arena.add<uint32_t>(layout->hash_slot_count, &layout->hash_counts) ||
+        !arena.add<uint32_t>(1, &layout->hash_group_count))
       return false;
   }
   if (!arena.add<DeviceMeta>(1, &layout->meta))
@@ -566,9 +610,6 @@ pgaccel_status validate_desc(const pgaccel_grouped_agg_desc* desc, Validation* v
       ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) == 0 && desc->row_count != 0))
     return PGACCEL_ERROR;
 
-  if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH)
-    validation->supported = false;
-
   size_t expected_capacity = 1;
   for (size_t i = 0; i < desc->key_count; ++i) {
     const pgaccel_grouped_agg_key& key = desc->keys[i];
@@ -645,11 +686,23 @@ pgaccel_status validate_desc(const pgaccel_grouped_agg_desc* desc, Validation* v
       return PGACCEL_ERROR;
   }
 
-  if (!make_layout(*desc, layout))
-    return PGACCEL_ERROR;
+  if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
+    const bool minimal_hash_slice =
+        desc->key_count == 1 && desc->keys[0].source == PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT &&
+        desc->keys[0].values.type == PGACCEL_VAL_INT64 && desc->measure_count == 1 &&
+        desc->measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR && desc->dim_count == 0 &&
+        desc->row_count <= kHashMaxRows && desc->group_capacity <= kHashMaxGroupCapacity &&
+        canonical_disabled_filter(desc->where_filter) &&
+        canonical_disabled_filter(desc->measure_filters[0]);
+    if (!minimal_hash_slice)
+      validation->supported = false;
+  }
+
   if (desc->execution_flags != PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN)
     validation->supported = false;
-  return validation->supported ? PGACCEL_OK : PGACCEL_UNSUPPORTED;
+  if (!validation->supported)
+    return PGACCEL_UNSUPPORTED;
+  return make_layout(*desc, layout) ? PGACCEL_OK : PGACCEL_ERROR;
 }
 
 inline bool add_u64(uint64_t lhs, uint64_t rhs, uint64_t* out) {
@@ -1104,10 +1157,181 @@ inline void stage_keys(KernelParams& params, size_t dense_group, size_t output_g
     const size_t digit = remainder % key.cardinality;
     remainder /= key.cardinality;
     const int32_t code = static_cast<int32_t>(static_cast<int64_t>(key.code_min) + digit);
-    params.staged_key_values[key_index][output_group] = code;
+    reinterpret_cast<int32_t*>(params.staged_key_values[key_index])[output_group] = code;
     if (params.staged_key_nulls[key_index] != nullptr)
       params.staged_key_nulls[key_index][output_group] = code == key.null_code ? 1 : 0;
   }
+}
+
+template <typename T>
+using DeviceAtomic = sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                      sycl::access::address_space::global_space>;
+
+inline void record_failure(DeviceMeta& meta, uint32_t failure) {
+  DeviceAtomic<uint32_t> failures(meta.failure_flags);
+  failures.fetch_or(failure);
+}
+
+inline bool atomic_increment_u32(uint32_t* value) {
+  DeviceAtomic<uint32_t> count(*value);
+  uint32_t current = count.load();
+  while (current != UINT32_MAX) {
+    if (count.compare_exchange_weak(current, current + 1))
+      return true;
+  }
+  return false;
+}
+
+inline uint64_t hash_u64_key(uint64_t value, bool is_null) {
+  uint64_t mixed = is_null ? UINT64_C(0x6a09e667f3bcc909) : value;
+  mixed += UINT64_C(0x9e3779b97f4a7c15);
+  mixed = (mixed ^ (mixed >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+  mixed = (mixed ^ (mixed >> 27)) * UINT64_C(0x94d049bb133111eb);
+  return mixed ^ (mixed >> 31);
+}
+
+inline void run_hash_row(KernelParams* params_ptr, size_t row) {
+  KernelParams& params = *params_ptr;
+  DeviceMeta& meta = *params.meta;
+  const pgaccel_grouped_agg_key& key = params.keys[0];
+  bool row_null = false;
+  if (!null_at(key.values.nulls, row, &row_null)) {
+    record_failure(meta, kFailureInvalid);
+    return;
+  }
+  const uint64_t row_key = row_null ? 0 : static_cast<const uint64_t*>(key.values.values)[row];
+  const size_t mask = params.hash_slot_count - 1;
+  const size_t start = static_cast<size_t>(hash_u64_key(row_key, row_null)) & mask;
+
+  size_t count_slot = params.hash_slot_count;
+  for (size_t probe = 0; probe < params.hash_slot_count; ++probe) {
+    const size_t slot = (start + probe) & mask;
+    DeviceAtomic<uint32_t> owner(params.hash_owners[slot]);
+    uint32_t expected = kHashEmptyOwner;
+    if (owner.compare_exchange_strong(expected, static_cast<uint32_t>(row))) {
+      DeviceAtomic<uint32_t> emitted(*params.hash_group_count);
+      const uint32_t ordinal = emitted.fetch_add(1);
+      if (ordinal >= params.group_capacity)
+        record_failure(meta, kFailureCapacity);
+      count_slot = slot;
+      break;
+    }
+
+    const uint32_t owner_row = expected;
+    if (owner_row >= params.row_count) {
+      record_failure(meta, kFailureInvalid);
+      return;
+    }
+    bool owner_null = false;
+    if (!null_at(key.values.nulls, static_cast<size_t>(owner_row), &owner_null)) {
+      record_failure(meta, kFailureInvalid);
+      return;
+    }
+    if (row_null != owner_null)
+      continue;
+    if (row_null || static_cast<const uint64_t*>(key.values.values)[owner_row] == row_key) {
+      count_slot = slot;
+      break;
+    }
+  }
+
+  if (count_slot == params.hash_slot_count) {
+    record_failure(meta, kFailureCapacity);
+    return;
+  }
+  if (!atomic_increment_u32(&params.hash_counts[count_slot]))
+    record_failure(meta, kFailureNumericOverflow);
+}
+
+inline bool hash_tuple_less(const uint64_t* keys, const uint8_t* nulls, size_t lhs, size_t rhs) {
+  const bool lhs_null = nulls != nullptr && nulls[lhs] != 0;
+  const bool rhs_null = nulls != nullptr && nulls[rhs] != 0;
+  if (lhs_null != rhs_null)
+    return lhs_null;
+  return keys[lhs] < keys[rhs];
+}
+
+inline void swap_hash_tuple(uint64_t* keys, uint8_t* nulls, uint64_t* counts, size_t lhs,
+                            size_t rhs) {
+  const uint64_t key = keys[lhs];
+  keys[lhs] = keys[rhs];
+  keys[rhs] = key;
+  if (nulls != nullptr) {
+    const uint8_t is_null = nulls[lhs];
+    nulls[lhs] = nulls[rhs];
+    nulls[rhs] = is_null;
+  }
+  const uint64_t count = counts[lhs];
+  counts[lhs] = counts[rhs];
+  counts[rhs] = count;
+}
+
+inline void sift_hash_heap(uint64_t* keys, uint8_t* nulls, uint64_t* counts, size_t root,
+                           size_t heap_size) {
+  for (;;) {
+    if (root >= heap_size / 2)
+      return;
+    size_t child = root * 2 + 1;
+    if (child + 1 < heap_size && hash_tuple_less(keys, nulls, child, child + 1))
+      ++child;
+    if (!hash_tuple_less(keys, nulls, root, child))
+      return;
+    swap_hash_tuple(keys, nulls, counts, root, child);
+    root = child;
+  }
+}
+
+inline void sort_hash_output(uint64_t* keys, uint8_t* nulls, uint64_t* counts, size_t count) {
+  if (count < 2)
+    return;
+  for (size_t root = count / 2; root != 0; --root)
+    sift_hash_heap(keys, nulls, counts, root - 1, count);
+  for (size_t heap_size = count; heap_size > 1; --heap_size) {
+    swap_hash_tuple(keys, nulls, counts, 0, heap_size - 1);
+    sift_hash_heap(keys, nulls, counts, 0, heap_size - 1);
+  }
+}
+
+inline void run_hash_compact_kernel(KernelParams* params_ptr) {
+  KernelParams& params = *params_ptr;
+  DeviceMeta& meta = *params.meta;
+  uint64_t* staged_keys = reinterpret_cast<uint64_t*>(params.staged_key_values[0]);
+  uint8_t* staged_nulls = params.staged_key_nulls[0];
+  uint64_t* staged_counts = params.buffers[0].count;
+  const pgaccel_grouped_agg_key& key = params.keys[0];
+  const size_t emitted = *params.hash_group_count;
+  meta.emitted = emitted;
+  size_t output = 0;
+
+  for (size_t slot = 0; slot < params.hash_slot_count; ++slot) {
+    const uint32_t owner = params.hash_owners[slot];
+    if (owner == kHashEmptyOwner)
+      continue;
+    if (owner >= params.row_count || output >= params.group_capacity) {
+      meta.failure_flags |= kFailureInvalid;
+      return;
+    }
+    bool is_null = false;
+    if (!null_at(key.values.nulls, static_cast<size_t>(owner), &is_null)) {
+      meta.failure_flags |= kFailureInvalid;
+      return;
+    }
+    if (is_null && staged_nulls == nullptr) {
+      meta.failure_flags |= kFailureInvalid;
+      return;
+    }
+    staged_keys[output] =
+        is_null ? 0 : static_cast<const uint64_t*>(key.values.values)[static_cast<size_t>(owner)];
+    if (staged_nulls != nullptr)
+      staged_nulls[output] = is_null ? 1 : 0;
+    staged_counts[output] = static_cast<uint64_t>(params.hash_counts[slot]);
+    ++output;
+  }
+  if (output != emitted) {
+    meta.failure_flags |= kFailureInvalid;
+    return;
+  }
+  sort_hash_output(staged_keys, staged_nulls, staged_counts, output);
 }
 
 inline void run_dense_kernel(KernelParams* params_ptr) {
@@ -1141,7 +1365,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
   if (params.key_count == 0)
     params.active[0] = 1;
 
-  for (size_t row = 0; row < params.row_count && meta.error == 0; ++row) {
+  for (size_t row = 0; row < params.row_count && meta.failure_flags == 0; ++row) {
     size_t dim_indexes[PGACCEL_GROUPED_AGG_MAX_DIMS] = {};
     uint64_t weight = 1;
     bool rejected = false;
@@ -1149,7 +1373,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       const pgaccel_grouped_agg_dim& dim = params.dims[d];
       bool is_null = false;
       if (!null_at(dim.fact_key.nulls, row, &is_null)) {
-        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+        meta.failure_flags = kFailureInvalid;
         break;
       }
       if (is_null) {
@@ -1166,7 +1390,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       if (dim.match_by_key != nullptr) {
         const uint8_t match = dim.match_by_key[digit];
         if (match > 1) {
-          meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+          meta.failure_flags = kFailureInvalid;
           break;
         }
         if (match == 0) {
@@ -1181,11 +1405,11 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
         break;
       }
       if (!mul_u64(weight, multiplicity, &weight)) {
-        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
+        meta.failure_flags = kFailureNumericOverflow;
         break;
       }
     }
-    if (meta.error != 0 || rejected)
+    if (meta.failure_flags != 0 || rejected)
       continue;
 
     size_t group = 0;
@@ -1195,7 +1419,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       if (key.source == PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT) {
         bool is_null = false;
         if (!null_at(key.values.nulls, row, &is_null)) {
-          meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+          meta.failure_flags = kFailureInvalid;
           break;
         }
         raw = is_null ? key.null_code : static_cast<const int32_t*>(key.values.values)[row];
@@ -1204,36 +1428,36 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
         const pgaccel_grouped_agg_dim& source_dim = params.dims[dim];
         if (source_dim.multiplicity_by_key != nullptr &&
             source_dim.multiplicity_by_key[dim_indexes[dim]] != 1) {
-          meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+          meta.failure_flags = kFailureInvalid;
           break;
         }
         raw = key.lookup_by_key[dim_indexes[dim]];
       }
       const int64_t digit = static_cast<int64_t>(raw) - key.code_min;
       if (digit < 0 || static_cast<uint64_t>(digit) >= key.cardinality) {
-        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+        meta.failure_flags = kFailureInvalid;
         break;
       }
       // Descriptor validation proves the complete radix product fits size_t.
       group = group * key.cardinality + static_cast<size_t>(digit);
     }
-    if (meta.error != 0)
+    if (meta.failure_flags != 0)
       break;
 
     const FilterResult where = evaluate_filter(params.where_filter, params, row);
     if (where == FilterResult::Error) {
-      meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+      meta.failure_flags = kFailureInvalid;
       break;
     }
     if (where == FilterResult::Uncertain) {
       if (!add_u64(meta.uncertain, 1, &meta.uncertain))
-        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
+        meta.failure_flags = kFailureNumericOverflow;
       continue;
     }
     if (where == FilterResult::Reject)
       continue;
     if (!add_u64(meta.selected, weight, &meta.selected)) {
-      meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
+      meta.failure_flags = kFailureNumericOverflow;
       break;
     }
     params.active[group] = 1;
@@ -1242,7 +1466,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
     for (size_t m = 0; m < params.measure_count; ++m) {
       const FilterResult filter = evaluate_filter(params.measure_filters[m], params, row);
       if (filter == FilterResult::Error) {
-        meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+        meta.failure_flags = kFailureInvalid;
         break;
       }
       if (filter == FilterResult::Uncertain) {
@@ -1254,7 +1478,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       const pgaccel_grouped_agg_measure& measure = params.measures[m];
       DeviceMeasureBuffers& buffers = params.buffers[m];
       if (measure.op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR) {
-        meta.error = accumulate_count(buffers.count, group, weight);
+        meta.failure_flags = accumulate_count(buffers.count, group, weight);
         continue;
       }
       const uint32_t primary_mask = PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
@@ -1271,15 +1495,15 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
            (PGACCEL_GROUPED_AGG_LANE_RHS_SUM | PGACCEL_GROUPED_AGG_LANE_RHS_COUNT)) != 0)
         measure_error = accumulate_rhs(measure, buffers, row, group, weight);
       if (measure_error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE) {
-        meta.error = measure_error;
+        meta.failure_flags = measure_error;
         break;
       }
     }
     if (row_uncertain && !add_u64(meta.uncertain, 1, &meta.uncertain))
-      meta.error = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
+      meta.failure_flags = kFailureNumericOverflow;
   }
 
-  if (meta.error != 0)
+  if (meta.failure_flags != 0)
     return;
   for (size_t group = 0; group < params.group_capacity; ++group) {
     if (params.output_mode == PGACCEL_GROUPED_AGG_OUTPUT_DENSE)
@@ -1311,7 +1535,9 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   params->key_count = desc.key_count;
   params->measure_count = desc.measure_count;
   params->dim_count = desc.dim_count;
+  params->grouping_mode = desc.grouping_mode;
   params->output_mode = desc.output_mode;
+  params->hash_slot_count = layout.hash_slot_count;
   std::memcpy(params->keys, desc.keys, sizeof(params->keys));
   std::memcpy(params->measures, desc.measures, sizeof(params->measures));
   params->where_filter = desc.where_filter;
@@ -1319,9 +1545,12 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   std::memcpy(params->dims, desc.dims, sizeof(params->dims));
   params->active = arena_ptr<uint8_t>(scratch, layout.active);
   params->staged_group_codes = arena_ptr<size_t>(scratch, layout.staged_group_codes);
+  params->hash_owners = arena_ptr<uint32_t>(scratch, layout.hash_owners);
+  params->hash_counts = arena_ptr<uint32_t>(scratch, layout.hash_counts);
+  params->hash_group_count = arena_ptr<uint32_t>(scratch, layout.hash_group_count);
   params->meta = arena_ptr<DeviceMeta>(scratch, layout.meta);
   for (size_t k = 0; k < desc.key_count; ++k) {
-    params->staged_key_values[k] = arena_ptr<int32_t>(scratch, layout.staged_key_values[k]);
+    params->staged_key_values[k] = arena_ptr<uint8_t>(scratch, layout.staged_key_values[k]);
     params->staged_key_nulls[k] = arena_ptr<uint8_t>(scratch, layout.staged_key_nulls[k]);
   }
   for (size_t m = 0; m < desc.measure_count; ++m) {
@@ -1641,8 +1870,9 @@ void publish_output(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
   enqueue_copy(queue, out->group_codes, arena_ptr<size_t>(scratch, layout.staged_group_codes),
                count, sizeof(size_t));
   for (size_t k = 0; k < desc.key_count; ++k) {
+    const size_t width = val_tag_width(materialized_key_type(desc, desc.keys[k]));
     enqueue_copy(queue, out->keys[k].values,
-                 arena_ptr<int32_t>(scratch, layout.staged_key_values[k]), count, sizeof(int32_t));
+                 arena_ptr<uint8_t>(scratch, layout.staged_key_values[k]), count, width);
     enqueue_copy(queue, out->keys[k].nulls, arena_ptr<uint8_t>(scratch, layout.staged_key_nulls[k]),
                  count, sizeof(uint8_t));
   }
@@ -1672,6 +1902,8 @@ void publish_output(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
 }
 
 class GroupedAggDenseKernel;
+class GroupedAggHashKernel;
+class GroupedAggHashCompactKernel;
 
 class ScratchOwner {
  public:
@@ -1723,6 +1955,8 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
     *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     return descriptor_status;
   }
+  if (descriptor_status == PGACCEL_UNSUPPORTED)
+    return descriptor_status;
   if (!validate_scratch_shape(*desc, layout)) {
     *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     return PGACCEL_ERROR;
@@ -1733,9 +1967,6 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
       return PGACCEL_ERROR;
     }
   }
-  if (descriptor_status == PGACCEL_UNSUPPORTED)
-    return descriptor_status;
-
   try {
     sycl::queue& queue = pgaccel_require_queue();
     if (!validate_input_usm(queue, *desc) || !validate_scratch_usm(queue, *desc) ||
@@ -1757,17 +1988,51 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
     bind_params(*desc, layout, scratch, &host_params);
     KernelParams* device_params = arena_ptr<KernelParams>(scratch, layout.params);
     queue.memcpy(device_params, &host_params, sizeof(host_params));
-    queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
-    queue.wait_and_throw();
-    pgaccel_record_gpu_exec();
-
     DeviceMeta meta{};
-    queue.memcpy(&meta, arena_ptr<DeviceMeta>(scratch, layout.meta), sizeof(meta)).wait_and_throw();
-    if (meta.error != PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE) {
-      *detail = meta.error == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW
-                    ? PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW
-                    : PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+
+    if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
+      meta.selected = desc->row_count;
+      queue.memcpy(host_params.meta, &meta, sizeof(meta));
+      queue.fill(host_params.hash_owners, kHashEmptyOwner, layout.hash_slot_count);
+      queue.fill(host_params.hash_counts, uint32_t{0}, layout.hash_slot_count);
+      queue.fill(host_params.hash_group_count, uint32_t{0}, size_t{1});
+      if (desc->row_count != 0) {
+        queue.parallel_for<GroupedAggHashKernel>(
+            sycl::range<1>(desc->row_count),
+            [=](sycl::id<1> id) { run_hash_row(device_params, id[0]); });
+      }
+      queue.wait_and_throw();
+      pgaccel_record_gpu_exec();
+      queue.memcpy(&meta, host_params.meta, sizeof(meta)).wait_and_throw();
+    } else {
+      queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
+      queue.wait_and_throw();
+      pgaccel_record_gpu_exec();
+      queue.memcpy(&meta, host_params.meta, sizeof(meta)).wait_and_throw();
+    }
+
+    const uint32_t known_failures = kFailureInvalid | kFailureNumericOverflow | kFailureCapacity;
+    if ((meta.failure_flags & ~known_failures) != 0 ||
+        (meta.failure_flags & kFailureInvalid) != 0) {
+      *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
       return PGACCEL_ERROR;
+    }
+    if ((meta.failure_flags & kFailureNumericOverflow) != 0) {
+      *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
+      return PGACCEL_ERROR;
+    }
+    if ((meta.failure_flags & kFailureCapacity) != 0)
+      return PGACCEL_UNSUPPORTED;
+
+    if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
+      queue.single_task<GroupedAggHashCompactKernel>(
+          [=]() { run_hash_compact_kernel(device_params); });
+      queue.wait_and_throw();
+      queue.memcpy(&meta, host_params.meta, sizeof(meta)).wait_and_throw();
+      if (meta.failure_flags != 0) {
+        *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+        return PGACCEL_ERROR;
+      }
     }
     publish_output(queue, *desc, layout, scratch, meta, out);
     return PGACCEL_OK;
