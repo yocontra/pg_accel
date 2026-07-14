@@ -1551,10 +1551,10 @@ fn build_and_execute_h3(
     let dispatch_started = Instant::now();
     let outcome = execute_grouped_agg_one_shot(&plan, &mut storage)
         .map_err(|error| gpu_execution_error("H3 grouped kernel failed", error))?;
-    validate_h3_compact_outcome(outcome, &storage, inputs.artifact.fact_rows)
-        .map_err(DescriptorAggExecutionError::Failure)?;
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    validate_h3_compact_outcome(outcome, &storage, inputs.artifact.fact_rows)
+        .map_err(DescriptorAggExecutionError::Failure)?;
     let output = DescriptorAggOutput::new(
         storage,
         outcome,
