@@ -13,6 +13,7 @@ mod proof;
 mod store;
 
 pub use domain::*;
+pub(crate) use geometry::validate_resident_geometry_value;
 pub use geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
 pub use proof::*;
 pub use store::{

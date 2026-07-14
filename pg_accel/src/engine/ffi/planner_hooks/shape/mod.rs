@@ -46,6 +46,7 @@ pub unsafe fn preflight_base_relations(root: *mut pg_sys::PlannerInfo) -> Result
 pub struct PlannerColumn {
     pub varno: pg_sys::Index,
     pub column: ColumnRef,
+    pub type_modifier: i32,
     pub collation_oid: u32,
     pub collation_is_deterministic: bool,
 }
@@ -279,6 +280,9 @@ pub struct DescriptorMeasurePlan {
     /// SQL boolean column whose resident values/nulls must be converted to a
     /// tri-state descriptor mask at Begin time (`NULL` does not select).
     pub derived_fact_mask: Option<ColumnRef>,
+    /// The fact filter is a spatial producer that publishes the descriptor
+    /// tri-state mask after exact rechecks.
+    pub derived_spatial_mask: bool,
 }
 
 /// Complete output of the shared shape pass.
@@ -319,6 +323,7 @@ pub enum ShapeDecline {
     TableSample,
     UnsupportedOuterJoin,
     UnsupportedPredicate,
+    PostgisCatalog(String),
     UnsupportedFilterType {
         type_oid: u32,
     },
@@ -451,6 +456,7 @@ impl ShapeDecline {
             Self::TableSample => "shape_table_sample",
             Self::UnsupportedOuterJoin => "shape_outer_join",
             Self::UnsupportedPredicate => "shape_unsupported_predicate",
+            Self::PostgisCatalog(_) => "shape_postgis_catalog",
             Self::UnsupportedFilterType { .. } => "shape_unsupported_filter_type",
             Self::UnsupportedAggregate { .. } => "shape_unsupported_aggregate",
             Self::NumericAccumulatorUnavailable { .. } => "shape_numeric_accumulator_unavailable",

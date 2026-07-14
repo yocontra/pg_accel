@@ -574,6 +574,7 @@ fn fact_filter_binding(
                 descriptor_measure_count: projected_measure_count,
                 fact_filter: None,
                 derived_fact_mask: None,
+                derived_spatial_mask: false,
             });
         }
         FilterSpec::Mask {
@@ -585,6 +586,7 @@ fn fact_filter_binding(
                 descriptor_measure_count: projected_measure_count,
                 fact_filter: None,
                 derived_fact_mask: Some(*input),
+                derived_spatial_mask: false,
             });
         }
         FilterSpec::Ranges { input, .. }
@@ -597,7 +599,16 @@ fn fact_filter_binding(
                 type_oid: input.type_oid,
             });
         }
-        FilterSpec::Bytecode { .. } | FilterSpec::Spatial { .. } => {
+        FilterSpec::Spatial { .. } => {
+            return Ok(DescriptorMeasurePlan {
+                projected_measure_count,
+                descriptor_measure_count: projected_measure_count,
+                fact_filter: None,
+                derived_fact_mask: None,
+                derived_spatial_mask: true,
+            });
+        }
+        FilterSpec::Bytecode { .. } => {
             return Err(ShapeDecline::UnsupportedPredicate);
         }
     };
@@ -645,6 +656,7 @@ fn fact_filter_binding(
             hidden,
         }),
         derived_fact_mask: None,
+        derived_spatial_mask: false,
     })
 }
 

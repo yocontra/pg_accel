@@ -1,7 +1,7 @@
 //! DeviceLimits-derived costing for neutral aggregate shapes.
 
 use crate::engine::cost::{GPU_LAUNCH_OVERHEAD, PgCost, Rows, TypedCostModel};
-use crate::engine::spec::{AggQuerySpec, ColumnRef, GroupKeySource, MeasureExpr};
+use crate::engine::spec::{AggQuerySpec, ColumnRef, FilterSpec, GroupKeySource, MeasureExpr};
 
 use super::{ResidencyEstimate, ShapeInput};
 
@@ -11,6 +11,8 @@ pub struct ShapeCost {
     pub fact_scan: PgCost,
     pub dimension_setup: PgCost,
     pub join_probe: PgCost,
+    pub spatial_filter: PgCost,
+    pub spatial_recheck_reserve: PgCost,
     pub aggregate: PgCost,
     pub output_materialization: PgCost,
     pub amortized_auto_load: PgCost,
@@ -24,6 +26,8 @@ pub enum ShapeCostGate {
     Eligible,
     FactRowsBelowDeviceMinimum { estimated: Rows, required: Rows },
     H3RowsBelowDeviceMinimum { estimated: Rows, required: Rows },
+    SpatialRowsBelowDeviceMinimum { estimated: Rows, required: Rows },
+    SpatialOutputRowsExceedDeviceMaximum { estimated: Rows, maximum: Rows },
     DimensionRowsExceedDeviceMaximum { estimated: Rows, maximum: Rows },
     GroupsExceedDeviceMaximum { estimated: Rows, maximum: Rows },
 }
@@ -87,6 +91,32 @@ fn h3_transform_chunks(fact_rows: u64, max_chunk_rows: Rows) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn has_spatial_filter(spec: &AggQuerySpec) -> bool {
+    matches!(spec.fact_filter, FilterSpec::Spatial { .. })
+        || spec
+            .measures
+            .iter()
+            .any(|measure| matches!(measure.filter, FilterSpec::Spatial { .. }))
+        || spec
+            .star_dims
+            .iter()
+            .any(|dimension| matches!(dimension.filter, FilterSpec::Spatial { .. }))
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn maximum_fraction_rows(input_rows: u64, fraction: f64) -> u64 {
+    let maximum = (input_rows as f64 * fraction).floor();
+    if maximum >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        maximum as u64
+    }
+}
+
 /// Cost one normalized shape exclusively from typed device coefficients.
 #[must_use]
 pub fn estimate_shape_cost(
@@ -130,6 +160,33 @@ pub fn estimate_shape_cost(
     );
     let join_probe =
         mul_cost(fact_rows, model.coefficients.preagg_probe_cost) * spec.star_dims.len() as f64;
+    let has_spatial = has_spatial_filter(spec);
+    let spatial_fp64_multiplier = if has_spatial && !model.hardware.has_native_fp64 {
+        model.coefficients.soft_fp64_cost_multiplier
+    } else {
+        1.0
+    };
+    let spatial_filter = if has_spatial {
+        let operation =
+            mul_cost(fact_rows, model.coefficients.gpu_op_cost_filter) * spatial_fp64_multiplier;
+        let launches =
+            h3_transform_chunks(fact_rows, model.executor.gpu_spatial_pairwise_chunk_rows) as f64
+                * GPU_LAUNCH_OVERHEAD;
+        operation + launches
+    } else {
+        0.0
+    };
+    // The planner cannot know the exact-predicate uncertainty count before
+    // execution. Reserve the configured maximum fraction at the same typed
+    // per-row coefficient so a spatial path never gets costed as bbox-only.
+    let spatial_recheck_reserve = if has_spatial {
+        fact_rows as f64
+            * model.planner.gpu_spatial_max_recheck_fraction
+            * model.coefficients.gpu_op_cost_filter.get()
+            * spatial_fp64_multiplier
+    } else {
+        0.0
+    };
     let aggregate_coefficient = if spec.group_keys.is_empty() {
         model.coefficients.gpu_op_cost_reduce
     } else {
@@ -157,6 +214,8 @@ pub fn estimate_shape_cost(
     let total = fact_scan
         + dimension_setup
         + join_probe
+        + spatial_filter
+        + spatial_recheck_reserve
         + aggregate
         + output_materialization
         + amortized_auto_load;
@@ -165,13 +224,17 @@ pub fn estimate_shape_cost(
         fact_scan: PgCost::new(fact_scan),
         dimension_setup: PgCost::new(dimension_setup),
         join_probe: PgCost::new(join_probe),
+        spatial_filter: PgCost::new(spatial_filter),
+        spatial_recheck_reserve: PgCost::new(spatial_recheck_reserve),
         aggregate: PgCost::new(aggregate),
         output_materialization: PgCost::new(output_materialization),
         amortized_auto_load: PgCost::new(amortized_auto_load),
         total: PgCost::new(total),
     };
 
-    let required_fact_rows = if h3_resolution.is_some() {
+    let required_fact_rows = if has_spatial {
+        model.planner.gpu_reduce_min_rows
+    } else if h3_resolution.is_some() {
         model.planner.gpu_h3_group_min_rows
     } else if !spec.star_dims.is_empty() {
         model.planner.gpu_preagg_min_fact_rows
@@ -182,7 +245,12 @@ pub fn estimate_shape_cost(
     };
     let estimated_fact_rows = Rows::new(rows(fact_rows));
     let gate = if estimated_fact_rows < required_fact_rows {
-        if h3_resolution.is_some() {
+        if has_spatial {
+            ShapeCostGate::SpatialRowsBelowDeviceMinimum {
+                estimated: estimated_fact_rows,
+                required: required_fact_rows,
+            }
+        } else if h3_resolution.is_some() {
             ShapeCostGate::H3RowsBelowDeviceMinimum {
                 estimated: estimated_fact_rows,
                 required: required_fact_rows,
@@ -192,6 +260,17 @@ pub fn estimate_shape_cost(
                 estimated: estimated_fact_rows,
                 required: required_fact_rows,
             }
+        }
+    } else if has_spatial
+        && input.estimated_output_rows
+            > maximum_fraction_rows(fact_rows, model.planner.gpu_spatial_max_output_fraction)
+    {
+        ShapeCostGate::SpatialOutputRowsExceedDeviceMaximum {
+            estimated: Rows::new(rows(input.estimated_output_rows)),
+            maximum: Rows::new(rows(maximum_fraction_rows(
+                fact_rows,
+                model.planner.gpu_spatial_max_output_fraction,
+            ))),
         }
     } else if let Some(too_large) = spec.star_dims.iter().find_map(|dimension| {
         let relation = input

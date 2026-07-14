@@ -459,14 +459,11 @@ fn validate_h3_column_type(type_oid: pg_sys::Oid) -> Result<(), String> {
 
 fn validate_geometry_column_type(type_oid: pg_sys::Oid) -> Result<(), String> {
     // SAFETY: residency resolution runs synchronously on the backend main
-    // thread. The complete PostGIS function/type fingerprint is revalidated by
-    // planner admission; the loader independently proves extension ownership
-    // and the exact geometry type before interpreting a varlena payload.
-    let is_member = unsafe { syscache::type_is_extension_member(type_oid, "postgis") };
-    let name = unsafe { syscache::type_name(type_oid) };
-    if !is_member || name.as_deref() != Some("geometry") {
+    // thread before interpreting any extension-owned varlena payload.
+    let catalog = unsafe { syscache::resolve_postgis_catalog() }?;
+    if type_oid != catalog.geometry_type_oid {
         return Err(format!(
-            "type OID {} is not the extension-owned PostGIS geometry type",
+            "type OID {} is not the catalog-proved PostGIS geometry type",
             u32::from(type_oid)
         ));
     }
@@ -533,7 +530,10 @@ impl ColumnBuilder {
                 values: Vec::new(),
             }),
             _ => {
-                if validate_geometry_column_type(type_oid).is_ok() {
+                // SAFETY: catalog membership is inspected on the backend main
+                // thread before selecting an extension-specific Datum reader.
+                if unsafe { syscache::type_is_extension_member(type_oid, "postgis") } {
+                    validate_geometry_column_type(type_oid)?;
                     Ok(Self::Geometry {
                         type_oid,
                         builder: ResidentGeometryBuilder::new(
@@ -1083,7 +1083,10 @@ pub(super) fn estimate_device_bytes(
                 8
             }
             _ => {
-                if validate_geometry_column_type(request.type_oid).is_ok() {
+                // SAFETY: estimate_device_bytes runs synchronously in the
+                // backend planner/loader catalog context.
+                if unsafe { syscache::type_is_extension_member(request.type_oid, "postgis") } {
+                    validate_geometry_column_type(request.type_oid)?;
                     // Geometry retains the exact varlena and publishes fp64
                     // coordinates plus fixed row metadata. PostgreSQL's
                     // analyzed average width is the best available pre-scan

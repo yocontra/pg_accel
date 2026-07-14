@@ -14,7 +14,9 @@ const GSERIALIZED_FLAG_Z: u8 = 1 << 0;
 const GSERIALIZED_FLAG_M: u8 = 1 << 1;
 const GSERIALIZED_FLAG_BBOX: u8 = 1 << 2;
 const GSERIALIZED_FLAG_GEODETIC: u8 = 1 << 3;
-const GSERIALIZED_SUPPORTED_FLAGS: u8 = GSERIALIZED_FLAG_BBOX;
+const GSERIALIZED_FLAG_EXTENDED: u8 = 1 << 4;
+const GSERIALIZED_FLAG_VERSION_2: u8 = 1 << 6;
+const GSERIALIZED_SUPPORTED_FLAGS: u8 = GSERIALIZED_FLAG_BBOX | GSERIALIZED_FLAG_VERSION_2;
 
 #[derive(Debug)]
 struct ParsedGeometry {
@@ -22,6 +24,12 @@ struct ParsedGeometry {
     srid: i32,
     coordinates: Vec<f64>,
     ring_offsets: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidentGeometryValueMetadata {
+    pub geom_type: u32,
+    pub srid: i32,
 }
 
 impl ParsedGeometry {
@@ -130,7 +138,12 @@ fn parse_gserialized(bytes: &[u8], max_exact_value_bytes: usize) -> Result<Parse
     let flags = *bytes
         .get(7)
         .ok_or_else(|| "geometry is shorter than the GSERIALIZED header".to_owned())?;
-    if flags & (GSERIALIZED_FLAG_Z | GSERIALIZED_FLAG_M | GSERIALIZED_FLAG_GEODETIC) != 0
+    if flags
+        & (GSERIALIZED_FLAG_Z
+            | GSERIALIZED_FLAG_M
+            | GSERIALIZED_FLAG_GEODETIC
+            | GSERIALIZED_FLAG_EXTENDED)
+        != 0
         || flags & !GSERIALIZED_SUPPORTED_FLAGS != 0
     {
         return Err(format!(
@@ -203,9 +216,17 @@ fn parse_gserialized(bytes: &[u8], max_exact_value_bytes: usize) -> Result<Parse
                     .ok_or_else(|| "polygon coordinate count overflow".to_owned())?;
                 point_counts.push(point_count);
             }
-            let coordinates_offset = ring_count
+            let ring_count_bytes = ring_count
                 .checked_mul(std::mem::size_of::<u32>())
-                .and_then(|bytes| ring_counts_offset.checked_add(bytes))
+                .ok_or_else(|| "polygon ring-count byte length overflow".to_owned())?;
+            let padding = if ring_count % 2 == 0 {
+                0
+            } else {
+                std::mem::size_of::<u32>()
+            };
+            let coordinates_offset = ring_counts_offset
+                .checked_add(ring_count_bytes)
+                .and_then(|offset| offset.checked_add(padding))
                 .ok_or_else(|| "polygon coordinate offset overflow".to_owned())?;
             let (coordinates, end) =
                 read_coordinate_pairs(bytes, coordinates_offset, total_points)?;
@@ -253,6 +274,17 @@ fn parse_gserialized(bytes: &[u8], max_exact_value_bytes: usize) -> Result<Parse
         srid,
         coordinates,
         ring_offsets,
+    })
+}
+
+pub fn validate_resident_geometry_value(
+    bytes: &[u8],
+    max_exact_value_bytes: usize,
+) -> Result<ResidentGeometryValueMetadata, String> {
+    let parsed = parse_gserialized(bytes, max_exact_value_bytes)?;
+    Ok(ResidentGeometryValueMetadata {
+        geom_type: parsed.geom_type,
+        srid: parsed.srid,
     })
 }
 
@@ -545,6 +577,9 @@ mod tests {
         for ring in rings {
             bytes.extend_from_slice(&(ring.len() as u32).to_le_bytes());
         }
+        if rings.len() % 2 == 1 {
+            bytes.extend_from_slice(&0_u32.to_le_bytes());
+        }
         for ring in rings {
             for (x, y) in *ring {
                 bytes.extend_from_slice(&x.to_le_bytes());
@@ -556,8 +591,9 @@ mod tests {
 
     #[test]
     fn parser_preserves_fp64_point_and_canonical_empty() {
-        let parsed =
-            parse_gserialized(&point(4_326, Some((1.25, -2.5))), 1_024).expect("point parses");
+        let mut encoded = point(4_326, Some((1.25, -2.5)));
+        encoded[7] = GSERIALIZED_FLAG_VERSION_2;
+        let parsed = parse_gserialized(&encoded, 1_024).expect("version-2 point parses");
         assert_eq!(parsed.geom_type, RESIDENT_GEOMETRY_POINT);
         assert_eq!(parsed.srid, 4_326);
         assert_eq!(parsed.coordinates, [1.25, -2.5]);
@@ -577,6 +613,11 @@ mod tests {
         assert_eq!(parsed.ring_offsets, [0, 4]);
         assert_eq!(parsed.coordinate_pairs(), 8);
 
+        let single = parse_gserialized(&polygon(&[&outer]), 4_096)
+            .expect("odd ring count includes serializer alignment padding");
+        assert_eq!(single.ring_offsets, [0]);
+        assert_eq!(single.coordinate_pairs(), 4);
+
         let open = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (1.0, 1.0)];
         assert!(parse_gserialized(&polygon(&[&open]), 4_096).is_err());
     }
@@ -587,6 +628,7 @@ mod tests {
             GSERIALIZED_FLAG_Z,
             GSERIALIZED_FLAG_M,
             GSERIALIZED_FLAG_GEODETIC,
+            GSERIALIZED_FLAG_EXTENDED,
             1 << 7,
         ] {
             let mut bytes = point(4_326, Some((1.0, 2.0)));

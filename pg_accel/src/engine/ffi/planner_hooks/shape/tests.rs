@@ -7,6 +7,7 @@ use crate::engine::cost::{DeviceLimits, TypedCostModel};
 use crate::engine::spec::{
     AggOutputProjection, AggregateKind, AggregateOutput, AggregateSource, BinaryMeasureOp,
     ColumnRef, FilterSpec, GroupKeySource, JoinMultiplicity, MeasureExpr, ScalarRange, ScalarValue,
+    SpatialOperand, SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
 };
 
 use super::*;
@@ -34,6 +35,7 @@ fn column(varno: pg_sys::Index, relation_oid: u32, attno: i32, type_oid: u32) ->
             attno,
             type_oid,
         },
+        type_modifier: -1,
         collation_oid: 0,
         collation_is_deterministic: true,
     }
@@ -622,6 +624,175 @@ fn sql_boolean_fact_filter_requires_begin_time_null_aware_mask() {
     assert_eq!(
         plan.descriptor_measures.derived_fact_mask,
         Some(filter_column)
+    );
+}
+
+#[test]
+fn spatial_fact_filter_requires_postgis_mask_and_both_geometry_columns() {
+    let mut input = single_table_input();
+    let metadata = SpatialValueMetadata {
+        kind: SpatialValueKind::Geometry,
+        typmod: (4_326 << 8) | (crate::engine::residency::RESIDENT_GEOMETRY_POINT as i32) << 2,
+        srid: Some(4_326),
+    };
+    let left = ColumnRef {
+        relation_oid: 100,
+        attno: 3,
+        type_oid: 60_001,
+    };
+    let right = ColumnRef {
+        relation_oid: 100,
+        attno: 5,
+        type_oid: 60_001,
+    };
+    input.relations[0].column_widths.insert(3, 64);
+    input.relations[0].column_widths.insert(5, 96);
+    input.relation_filters.push((
+        100,
+        FilterSpec::Spatial {
+            predicate: SpatialPredicateKind::Intersects,
+            left: SpatialOperand::Column {
+                column: left,
+                metadata,
+            },
+            right: SpatialOperand::Column {
+                column: right,
+                metadata,
+            },
+            distance: None,
+        },
+    ));
+    let plan = build_shape(input, &model()).expect("spatial fact filter should build");
+    assert!(matches!(plan.spec.fact_filter, FilterSpec::Spatial { .. }));
+    assert!(plan.descriptor_measures.derived_spatial_mask);
+    assert_eq!(plan.descriptor_measures.derived_fact_mask, None);
+    assert_eq!(plan.required_relations[0].attnos, vec![2, 3, 5]);
+}
+
+#[test]
+fn postgis_typmod_adapter_requires_known_2d_supported_shape_and_srid() {
+    let point_4326 = (4_326 << 8) | (crate::engine::residency::RESIDENT_GEOMETRY_POINT as i32) << 2;
+    assert_eq!(
+        super::postgres::postgis_geometry_typmod_metadata(point_4326),
+        Some(SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: point_4326,
+            srid: Some(4_326),
+        })
+    );
+    assert!(super::postgres::postgis_geometry_typmod_metadata(-1).is_none());
+    assert!(super::postgres::postgis_geometry_typmod_metadata(4_326 << 8).is_none());
+    assert!(super::postgres::postgis_geometry_typmod_metadata(point_4326 | 1).is_none());
+    let unsupported = (4_326 << 8) | 6 << 2;
+    assert!(super::postgres::postgis_geometry_typmod_metadata(unsupported).is_none());
+}
+
+#[test]
+fn ordinary_funcexpr_declines_before_postgis_catalog_resolution() {
+    assert_eq!(
+        super::postgres::require_postgis_function_member(false),
+        Err(ShapeDecline::UnsupportedPredicate),
+    );
+}
+
+#[test]
+fn same_name_impostor_declines_without_postgis_catalog_resolution() {
+    assert_eq!(
+        super::postgres::require_postgis_function_member(false),
+        Err(ShapeDecline::UnsupportedPredicate),
+    );
+    assert_eq!(
+        super::postgres::require_postgis_function_member(true),
+        Ok(())
+    );
+}
+
+fn add_test_spatial_filter(input: &mut ShapeInput) {
+    let metadata = SpatialValueMetadata {
+        kind: SpatialValueKind::Geometry,
+        typmod: (4_326 << 8) | (crate::engine::residency::RESIDENT_GEOMETRY_POINT as i32) << 2,
+        srid: Some(4_326),
+    };
+    input.relation_filters.push((
+        100,
+        FilterSpec::Spatial {
+            predicate: SpatialPredicateKind::Intersects,
+            left: SpatialOperand::Column {
+                column: ColumnRef {
+                    relation_oid: 100,
+                    attno: 3,
+                    type_oid: 60_001,
+                },
+                metadata,
+            },
+            right: SpatialOperand::Column {
+                column: ColumnRef {
+                    relation_oid: 100,
+                    attno: 5,
+                    type_oid: 60_001,
+                },
+                metadata,
+            },
+            distance: None,
+        },
+    ));
+    input.relations[0].column_widths.insert(3, 64);
+    input.relations[0].column_widths.insert(5, 64);
+}
+
+#[test]
+fn spatial_cost_charges_pairwise_chunks_and_reserves_exact_rechecks() {
+    let mut input = single_table_input();
+    add_test_spatial_filter(&mut input);
+    let mut limits = DeviceLimits::cpu_only();
+    limits.has_native_fp64 = true;
+    limits.gpu_reduce_min_rows = 1;
+    limits.gpu_spatial_pairwise_chunk_rows = 100_000;
+    limits.gpu_spatial_max_recheck_fraction = 0.10;
+    let plan = build_shape(input, &TypedCostModel::from_limits(&limits))
+        .expect("spatial shape should retain its explicit costs");
+    let expected_filter = 1_000_000.0_f64.mul_add(
+        limits.gpu_op_cost_filter,
+        10.0 * crate::engine::cost::GPU_LAUNCH_OVERHEAD,
+    );
+    let expected_recheck = 100_000.0 * limits.gpu_op_cost_filter;
+    assert!((plan.cost.spatial_filter.get() - expected_filter).abs() < 1.0e-12);
+    assert!((plan.cost.spatial_recheck_reserve.get() - expected_recheck).abs() < 1.0e-12);
+    assert_eq!(plan.cost_gate, ShapeCostGate::Eligible);
+}
+
+#[test]
+fn spatial_cost_uses_distinct_row_floor_and_output_fraction_gates() {
+    let mut limits = DeviceLimits::cpu_only();
+    limits.gpu_reduce_min_rows = 100;
+
+    let mut below_floor = single_table_input();
+    below_floor.relations[0].estimated_rows = 99;
+    add_test_spatial_filter(&mut below_floor);
+    let plan = build_shape(below_floor, &TypedCostModel::from_limits(&limits))
+        .expect("spatial shape should preserve a typed row-floor decline");
+    assert_eq!(
+        plan.cost_gate,
+        ShapeCostGate::SpatialRowsBelowDeviceMinimum {
+            estimated: crate::engine::cost::Rows::new(99),
+            required: crate::engine::cost::Rows::new(100),
+        },
+    );
+
+    limits.gpu_reduce_min_rows = 1;
+    limits.gpu_spatial_max_output_fraction = 0.50;
+    let mut output_heavy = single_table_input();
+    output_heavy.relations[0].estimated_rows = 100;
+    output_heavy.estimated_output_rows = 51;
+    add_test_spatial_filter(&mut output_heavy);
+    let plan = build_shape(output_heavy, &TypedCostModel::from_limits(&limits))
+        .expect("spatial shape should preserve a typed output-fraction decline");
+    assert_eq!(
+        plan.cost_gate,
+        ShapeCostGate::SpatialOutputRowsExceedDeviceMaximum {
+            estimated: crate::engine::cost::Rows::new(51),
+            maximum: crate::engine::cost::Rows::new(50),
+        },
     );
 }
 
