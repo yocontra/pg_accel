@@ -456,6 +456,32 @@ pub struct StagedDerivedPreflight<P> {
     pub accounting: ResidentByteAccounting,
 }
 
+/// Exact persistent and transient accounting established before a staged
+/// workspace allocates any buffers.
+pub struct StagedTransformPreflight<P> {
+    pub prepared: P,
+    pub published_accounting: ResidentByteAccounting,
+    pub transient_accounting: ResidentByteAccounting,
+}
+
+/// A non-publishable transform workspace that reports its complete physical
+/// footprint. Host bytes include snapshots, layouts, and preallocated D2H
+/// destinations, regardless of whether they contain exact source values.
+pub trait StagedTransformWorkspace {
+    fn device_bytes(&self) -> u64;
+
+    fn host_bytes(&self) -> u64;
+}
+
+fn workspace_accounting<W: StagedTransformWorkspace + ?Sized>(
+    workspace: &W,
+) -> ResidentByteAccounting {
+    ResidentByteAccounting {
+        device_bytes: workspace.device_bytes(),
+        retained_host_exact_bytes: workspace.host_bytes(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactEnsureOutcome {
     Hit,
@@ -1061,6 +1087,10 @@ pub enum ResidentLoadError {
         declared: ResidentByteAccounting,
         actual: ResidentByteAccounting,
     },
+    TransformWorkspaceAccountingMismatch {
+        declared: ResidentByteAccounting,
+        actual: ResidentByteAccounting,
+    },
 }
 
 impl From<String> for ResidentLoadError {
@@ -1124,6 +1154,14 @@ impl fmt::Display for ResidentLoadError {
             Self::ArtifactAccountingMismatch { declared, actual } => write!(
                 f,
                 "resident derived artifact accounting mismatch: declared {} device + {} retained host bytes, actual {} device + {} retained host bytes",
+                declared.device_bytes,
+                declared.retained_host_exact_bytes,
+                actual.device_bytes,
+                actual.retained_host_exact_bytes
+            ),
+            Self::TransformWorkspaceAccountingMismatch { declared, actual } => write!(
+                f,
+                "resident transform workspace accounting mismatch: declared {} device + {} host bytes, actual {} device + {} host bytes",
                 declared.device_bytes,
                 declared.retained_host_exact_bytes,
                 actual.device_bytes,
@@ -1233,8 +1271,33 @@ fn process_invalidations() {
 #[cfg(test)]
 fn process_invalidations() {
     // Plain Rust unit tests install synthetic relation entries without a live
-    // PostgreSQL catalog. Production and pg_test builds always use the
-    // relcache/generation implementation above.
+    // PostgreSQL catalog. A one-shot generation bump lets lifecycle tests
+    // model invalidations precisely between immutable-borrow stages.
+    let pending = TEST_PENDING_GENERATION_BUMP.with(Cell::take);
+    if let Some(relid) = pending {
+        STORE.with(|store| {
+            if let Some(relation) = store
+                .borrow_mut()
+                .entries
+                .iter_mut()
+                .find(|entry| entry.relid == relid)
+            {
+                relation.generation.relation += 1;
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_PENDING_GENERATION_BUMP: Cell<Option<pg_sys::Oid>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn schedule_test_generation_bump(relid: pg_sys::Oid) {
+    TEST_PENDING_GENERATION_BUMP.with(|pending| {
+        assert!(pending.replace(Some(relid)).is_none());
+    });
 }
 
 pub(super) fn cleanup_backend() {
@@ -1285,6 +1348,44 @@ fn reserve_with_local_eviction_excluding(
                 .is_some()
         })
     })
+}
+
+fn reserve_transform_charges_excluding(
+    protected: &BTreeSet<u32>,
+    persistent_bytes: u64,
+    transient_bytes: u64,
+) -> Result<(LedgerCharge, LedgerCharge), ResidentLoadError> {
+    crate::ensure_backend_exit_callback();
+    #[cfg(test)]
+    let budget = u64::MAX;
+    #[cfg(not(test))]
+    let budget = gucs::resident_memory_budget_bytes();
+    reserve_transform_charges(
+        persistent_bytes,
+        transient_bytes,
+        budget,
+        LedgerCharge::reserve,
+        || {
+            STORE.with(|store| {
+                store
+                    .borrow_mut()
+                    .evict_one_for_budget_excluding(protected)
+                    .is_some()
+            })
+        },
+    )
+}
+
+fn reserve_transform_charges<T>(
+    persistent_bytes: u64,
+    transient_bytes: u64,
+    budget: u64,
+    mut reserve: impl FnMut(u64, u64) -> Result<T, u64>,
+    mut evict: impl FnMut() -> bool,
+) -> Result<(T, T), ResidentLoadError> {
+    let persistent = reserve_with_eviction(persistent_bytes, budget, &mut reserve, &mut evict)?;
+    let transient = reserve_with_eviction(transient_bytes, budget, &mut reserve, &mut evict)?;
+    Ok((persistent, transient))
 }
 
 fn reserve_with_eviction<T>(
@@ -2302,6 +2403,200 @@ pub fn ensure_staged_device_derived_artifact<T: DerivedArtifact, P, S>(
     })
 }
 
+/// Build one dependency-stamped artifact through an exactly charged transient
+/// workspace.
+///
+/// `preflight` declares the final published footprint and the complete
+/// physical footprint of `W`. The store reserves those as distinct persistent
+/// and transient ledger charges before `snapshot_prepare` allocates or copies
+/// host state. `build_workspace` must preallocate every workspace-owned device
+/// buffer and host destination, and the store rejects it unless its reported
+/// accounting exactly matches the transient declaration.
+///
+/// `dispatch` runs under the checked raw-input borrow and therefore must be a
+/// nonallocating raw launch. `finalize` consumes `W` outside that borrow while
+/// both charges remain held; it may fill preallocated host destinations and
+/// construct `T`, but it must not introduce an unaccounted allocation
+/// category. The transient charge is released only after `T` exactly matches
+/// the published declaration, then one final dependency check publishes `T`
+/// with the persistent charge alone.
+#[allow(clippy::too_many_arguments)]
+pub fn ensure_staged_device_transform_artifact<
+    T: DerivedArtifact,
+    W: StagedTransformWorkspace,
+    P,
+    S,
+>(
+    owner_relid: pg_sys::Oid,
+    identity: &DerivedArtifactIdentity,
+    dependency_relids: &[pg_sys::Oid],
+    columns: &[ResidentColumnRef],
+    preflight: impl FnOnce(
+        ResidentInputBundle<'_>,
+    ) -> Result<StagedTransformPreflight<P>, ResidentLoadError>,
+    snapshot_prepare: impl FnOnce(P, ResidentInputBundle<'_>) -> Result<S, ResidentLoadError>,
+    build_workspace: impl FnOnce(S) -> Result<W, ResidentLoadError>,
+    dispatch: impl FnOnce(&mut W, ResidentDispatchBundle<'_>) -> Result<(), ResidentLoadError>,
+    finalize: impl FnOnce(W) -> Result<T, ResidentLoadError>,
+) -> Result<ArtifactEnsureOutcome, ResidentLoadError> {
+    if identity.canonical_words().is_empty() {
+        return Err(ResidentLoadError::InvalidArtifactDependencies(
+            "canonical artifact identity is empty".to_owned(),
+        ));
+    }
+    process_invalidations();
+    let protected = canonical_dependency_relids(owner_relid, dependency_relids, columns)?;
+
+    let mut replacing_stale = false;
+    let hit = STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        let owner_index = store
+            .entries
+            .iter()
+            .position(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        let exact_index = store.entries[owner_index]
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity));
+        let Some(exact_index) = exact_index else {
+            return Ok(false);
+        };
+        let stored_dependencies = &store.entries[owner_index].derived[exact_index].dependencies;
+        let stale = !dependency_relids_match(stored_dependencies, &protected)
+            || first_dependency_mismatch(&store, stored_dependencies).is_some();
+        if stale {
+            store.entries[owner_index].remove_derived(exact_index);
+            replacing_stale = true;
+            return Ok(false);
+        }
+        if !store.entries[owner_index].derived[exact_index]
+            .artifact
+            .as_any()
+            .is::<T>()
+        {
+            return Err(ResidentLoadError::ArtifactTypeMismatch {
+                digest: identity.digest(),
+            });
+        }
+        Ok(true)
+    })?;
+    if hit {
+        for raw_relid in &protected {
+            STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+        }
+        return Ok(ArtifactEnsureOutcome::Hit);
+    }
+
+    for raw_relid in &protected {
+        STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+    }
+    let (preflight, captured_dependencies) = STORE.with(|store| {
+        let store = store.borrow();
+        let captured_dependencies = dependency_stamps(&store, &protected)?;
+        let columns = resolve_column_views(&store, columns)?;
+        let evidence = dependency_evidence(&store, &captured_dependencies)?;
+        let preflight = preflight(ResidentInputBundle { columns, evidence })?;
+        Ok::<_, ResidentLoadError>((preflight, captured_dependencies))
+    })?;
+    let published_declared = preflight.published_accounting;
+    let transient_declared = preflight.transient_accounting;
+    let published_total = published_declared
+        .checked_total()
+        .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
+    let transient_total = transient_declared
+        .checked_total()
+        .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
+    published_total
+        .checked_add(transient_total)
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+    let (persistent_charge, transient_charge) =
+        reserve_transform_charges_excluding(&protected, published_total, transient_total)?;
+
+    process_invalidations();
+    let snapshot = STORE.with(|store| {
+        let store = store.borrow();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let columns = resolve_column_views(&store, columns)?;
+        let evidence = dependency_evidence(&store, &captured_dependencies)?;
+        snapshot_prepare(
+            preflight.prepared,
+            ResidentInputBundle { columns, evidence },
+        )
+    })?;
+    let mut workspace = build_workspace(snapshot)?;
+    let workspace_actual = workspace_accounting(&workspace);
+    if workspace_actual != transient_declared {
+        drop(workspace);
+        return Err(ResidentLoadError::TransformWorkspaceAccountingMismatch {
+            declared: transient_declared,
+            actual: workspace_actual,
+        });
+    }
+
+    process_invalidations();
+    STORE.with(|store| {
+        let store = store.borrow();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        dispatch(
+            &mut workspace,
+            ResidentDispatchBundle {
+                store: &store,
+                columns,
+                dependencies: &captured_dependencies,
+            },
+        )
+    })?;
+    let artifact = finalize(workspace)?;
+    let artifact_actual = artifact_accounting(&artifact);
+    if artifact_actual != published_declared {
+        drop(artifact);
+        return Err(ResidentLoadError::ArtifactAccountingMismatch {
+            declared: published_declared,
+            actual: artifact_actual,
+        });
+    }
+
+    drop(transient_charge);
+    process_invalidations();
+    STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let owner = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        if let Some(index) = owner
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity))
+        {
+            owner.remove_derived(index);
+            replacing_stale = true;
+        }
+        owner.derived.push(DerivedEntry {
+            digest: identity.digest(),
+            canonical_words: identity.canonical_words().to_vec().into_boxed_slice(),
+            dependencies: captured_dependencies,
+            artifact: Box::new(artifact),
+            charge: persistent_charge,
+        });
+        Ok(())
+    })?;
+    Ok(if replacing_stale {
+        ArtifactEnsureOutcome::Rebuilt
+    } else {
+        ArtifactEnsureOutcome::Built
+    })
+}
+
 /// Resolve an exact dependency-stamped artifact and all requested raw inputs
 /// under one immutable store borrow. Stale artifacts are removed before this
 /// function returns an error, so callers may rebuild and retry once.
@@ -3236,6 +3531,21 @@ mod tests {
         }
     }
 
+    struct AccountedWorkspace {
+        device_bytes: u64,
+        host_bytes: u64,
+    }
+
+    impl StagedTransformWorkspace for AccountedWorkspace {
+        fn device_bytes(&self) -> u64 {
+            self.device_bytes
+        }
+
+        fn host_bytes(&self) -> u64 {
+            self.host_bytes
+        }
+    }
+
     struct CompositeAccountedArtifact {
         base: AccountedArtifact,
         spatial: AccountedArtifact,
@@ -3613,6 +3923,131 @@ mod tests {
             assert!(store.entries.iter().any(|entry| entry.relid == evictable));
         });
         STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn transform_charges_evict_without_removing_protected_dependencies_and_release_on_failure() {
+        struct ModeledCharge {
+            bytes: u64,
+            live: Rc<Cell<u64>>,
+        }
+
+        impl Drop for ModeledCharge {
+            fn drop(&mut self) {
+                self.live.set(
+                    self.live
+                        .get()
+                        .checked_sub(self.bytes)
+                        .expect("modeled charge is live"),
+                );
+            }
+        }
+
+        let owner = pg_sys::Oid::from(914_u32);
+        let dimension = pg_sys::Oid::from(915_u32);
+        let unrelated = pg_sys::Oid::from(916_u32);
+        install_test_relations(&[914, 915, 916]);
+        STORE.with(|store| {
+            for (index, relation) in store.borrow_mut().entries.iter_mut().enumerate() {
+                relation.derived.push(DerivedEntry {
+                    digest: 200 + index as u64,
+                    canonical_words: vec![index as i32 + 1].into_boxed_slice(),
+                    dependencies: Box::default(),
+                    artifact: Box::new(SizedArtifact(8)),
+                    charge: LedgerCharge::reserve(0, 0).expect("modeled artifact charge"),
+                });
+            }
+        });
+        let protected = canonical_dependency_relids(owner, &[dimension], &[]).expect("valid");
+        let live = Rc::new(Cell::new(24_u64));
+        let reserve_live = Rc::clone(&live);
+        let evict_live = Rc::clone(&live);
+        let charges = reserve_transform_charges(
+            8,
+            8,
+            32,
+            move |requested, budget| {
+                let Some(next) = reserve_live.get().checked_add(requested) else {
+                    return Err(reserve_live.get());
+                };
+                if next > budget {
+                    return Err(reserve_live.get());
+                }
+                reserve_live.set(next);
+                Ok(ModeledCharge {
+                    bytes: requested,
+                    live: Rc::clone(&reserve_live),
+                })
+            },
+            || {
+                let evicted = STORE.with(|store| {
+                    store
+                        .borrow_mut()
+                        .evict_one_for_budget_excluding(&protected)
+                        .is_some()
+                });
+                if evicted {
+                    evict_live.set(
+                        evict_live
+                            .get()
+                            .checked_sub(8)
+                            .expect("modeled evicted charge is live"),
+                    );
+                }
+                evicted
+            },
+        )
+        .expect("one eviction makes room for both transform charges");
+        assert_eq!(live.get(), 32);
+        STORE.with(|store| {
+            let store = store.borrow();
+            assert!(store.entries.iter().any(|entry| entry.relid == owner));
+            assert!(store.entries.iter().any(|entry| entry.relid == dimension));
+            assert!(store.entries.iter().any(|entry| entry.relid == unrelated));
+            assert_eq!(
+                store
+                    .entries
+                    .iter()
+                    .map(|entry| entry.derived.len())
+                    .sum::<usize>(),
+                2
+            );
+        });
+        drop(charges);
+        assert_eq!(live.get(), 16);
+        STORE.with(|store| store.borrow_mut().entries.clear());
+
+        let failed_live = Rc::new(Cell::new(0_u64));
+        let failed_reserve_live = Rc::clone(&failed_live);
+        let result = reserve_transform_charges(
+            8,
+            1,
+            8,
+            move |requested, budget| {
+                let next = failed_reserve_live
+                    .get()
+                    .checked_add(requested)
+                    .ok_or(failed_reserve_live.get())?;
+                if next > budget {
+                    return Err(failed_reserve_live.get());
+                }
+                failed_reserve_live.set(next);
+                Ok(ModeledCharge {
+                    bytes: requested,
+                    live: Rc::clone(&failed_reserve_live),
+                })
+            },
+            || false,
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::BudgetExceeded {
+                requested: 1,
+                live: 8,
+                budget: 8,
+            })
+        ));
+        assert_eq!(failed_live.get(), 0);
     }
 
     #[test]
@@ -4013,6 +4448,331 @@ mod tests {
         assert_eq!(finalize_calls.get(), 1);
         STORE.with(|store| store.borrow_mut().entries.clear());
         assert_eq!(ledger::total_bytes(), before);
+    }
+
+    #[test]
+    fn staged_transform_lifecycle_holds_distinct_exact_charges_and_publishes_only_persistent() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        install_test_relations(&[1_164]);
+        let owner = pg_sys::Oid::from(1_164_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 164]);
+        let published = ResidentByteAccounting {
+            device_bytes: 7,
+            retained_host_exact_bytes: 11,
+        };
+        let transient = ResidentByteAccounting {
+            device_bytes: 13,
+            retained_host_exact_bytes: 17,
+        };
+        let before = ledger::total_bytes();
+        let preflight_calls = Cell::new(0_u32);
+        let snapshot_calls = Cell::new(0_u32);
+        let build_calls = Cell::new(0_u32);
+        let dispatch_calls = Cell::new(0_u32);
+        let finalize_calls = Cell::new(0_u32);
+        let build = || {
+            ensure_staged_device_transform_artifact(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                |inputs| {
+                    preflight_calls.set(preflight_calls.get() + 1);
+                    assert_eq!(inputs.evidence.len(), 1);
+                    assert!(STORE.with(|store| store.try_borrow_mut().is_err()));
+                    Ok(StagedTransformPreflight {
+                        prepared: (),
+                        published_accounting: published,
+                        transient_accounting: transient,
+                    })
+                },
+                |(), inputs| {
+                    snapshot_calls.set(snapshot_calls.get() + 1);
+                    assert_eq!(inputs.evidence.len(), 1);
+                    assert_eq!(ledger::total_bytes(), before.saturating_add(48));
+                    assert!(STORE.with(|store| store.try_borrow_mut().is_err()));
+                    Ok(())
+                },
+                |()| {
+                    build_calls.set(build_calls.get() + 1);
+                    assert_eq!(ledger::total_bytes(), before.saturating_add(48));
+                    STORE.with(|store| {
+                        let _borrow = store
+                            .try_borrow_mut()
+                            .expect("workspace build must run outside STORE borrow");
+                    });
+                    Ok(AccountedWorkspace {
+                        device_bytes: 13,
+                        host_bytes: 17,
+                    })
+                },
+                |workspace, inputs| {
+                    dispatch_calls.set(dispatch_calls.get() + 1);
+                    assert_eq!(workspace.device_bytes, 13);
+                    assert_eq!(inputs.dependency_count(), 1);
+                    assert_eq!(ledger::total_bytes(), before.saturating_add(48));
+                    assert!(STORE.with(|store| store.try_borrow_mut().is_err()));
+                    Ok(())
+                },
+                |workspace| {
+                    finalize_calls.set(finalize_calls.get() + 1);
+                    assert_eq!(workspace.host_bytes, 17);
+                    assert_eq!(ledger::total_bytes(), before.saturating_add(48));
+                    STORE.with(|store| {
+                        let _borrow = store
+                            .try_borrow_mut()
+                            .expect("transform finalize must run outside STORE borrow");
+                    });
+                    Ok(AccountedArtifact {
+                        device_bytes: 7,
+                        retained_host_exact_bytes: 11,
+                    })
+                },
+            )
+        };
+
+        assert_eq!(
+            build().expect("first transform build"),
+            ArtifactEnsureOutcome::Built
+        );
+        assert_eq!(ledger::total_bytes(), before.saturating_add(18));
+        assert_eq!(
+            build().expect("second transform hit"),
+            ArtifactEnsureOutcome::Hit
+        );
+        assert_eq!(preflight_calls.get(), 1);
+        assert_eq!(snapshot_calls.get(), 1);
+        assert_eq!(build_calls.get(), 1);
+        assert_eq!(dispatch_calls.get(), 1);
+        assert_eq!(finalize_calls.get(), 1);
+        STORE.with(|store| store.borrow_mut().entries[0].generation.relation += 1);
+        assert_eq!(
+            build().expect("stale transform rebuild"),
+            ArtifactEnsureOutcome::Rebuilt
+        );
+        assert_eq!(ledger::total_bytes(), before.saturating_add(18));
+        assert_eq!(preflight_calls.get(), 2);
+        assert_eq!(snapshot_calls.get(), 2);
+        assert_eq!(build_calls.get(), 2);
+        assert_eq!(dispatch_calls.get(), 2);
+        assert_eq!(finalize_calls.get(), 2);
+        STORE.with(|store| {
+            let store = store.borrow();
+            assert_eq!(store.entries[0].derived.len(), 1);
+            assert_eq!(store.entries[0].derived[0].bytes(), 18);
+        });
+        STORE.with(|store| store.borrow_mut().entries.clear());
+        assert_eq!(ledger::total_bytes(), before);
+    }
+
+    #[test]
+    fn staged_transform_failures_release_both_charges_without_publication() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+
+        fn assert_clean(owner_raw: u32, identity_word: i32, fail_stage: u8) {
+            install_test_relations(&[owner_raw]);
+            let owner = pg_sys::Oid::from(owner_raw);
+            let identity = DerivedArtifactIdentity::from_canonical_words(vec![identity_word]);
+            let before = ledger::total_bytes();
+            let snapshot_called = Cell::new(false);
+            let build_called = Cell::new(false);
+            let dispatch_called = Cell::new(false);
+            let finalize_called = Cell::new(false);
+            let result = ensure_staged_device_transform_artifact(
+                owner,
+                &identity,
+                &[owner],
+                &[],
+                |_| {
+                    if fail_stage == 6 {
+                        schedule_test_generation_bump(owner);
+                    }
+                    Ok(StagedTransformPreflight {
+                        prepared: (),
+                        published_accounting: ResidentByteAccounting {
+                            device_bytes: 17,
+                            retained_host_exact_bytes: 19,
+                        },
+                        transient_accounting: ResidentByteAccounting {
+                            device_bytes: 23,
+                            retained_host_exact_bytes: 29,
+                        },
+                    })
+                },
+                |(), _| {
+                    snapshot_called.set(true);
+                    if fail_stage == 0 {
+                        Err(ResidentLoadError::Loader("snapshot failure".to_owned()))
+                    } else {
+                        if fail_stage == 7 {
+                            schedule_test_generation_bump(owner);
+                        }
+                        Ok(())
+                    }
+                },
+                |()| {
+                    build_called.set(true);
+                    if fail_stage == 1 {
+                        Err(ResidentLoadError::Loader("workspace failure".to_owned()))
+                    } else {
+                        Ok(AccountedWorkspace {
+                            device_bytes: if fail_stage == 2 { 24 } else { 23 },
+                            host_bytes: 29,
+                        })
+                    }
+                },
+                |_, _| {
+                    dispatch_called.set(true);
+                    if fail_stage == 3 {
+                        Err(ResidentLoadError::Loader("dispatch failure".to_owned()))
+                    } else {
+                        if fail_stage == 8 {
+                            schedule_test_generation_bump(owner);
+                        }
+                        Ok(())
+                    }
+                },
+                |_| {
+                    finalize_called.set(true);
+                    if fail_stage == 4 {
+                        return Err(ResidentLoadError::Loader("finalize failure".to_owned()));
+                    }
+                    Ok(AccountedArtifact {
+                        device_bytes: if fail_stage == 5 { 18 } else { 17 },
+                        retained_host_exact_bytes: 19,
+                    })
+                },
+            );
+            match fail_stage {
+                0 | 1 | 3 | 4 => {
+                    assert!(matches!(result, Err(ResidentLoadError::Loader(_))));
+                }
+                2 => assert!(matches!(
+                    result,
+                    Err(ResidentLoadError::TransformWorkspaceAccountingMismatch { .. })
+                )),
+                5 => assert!(matches!(
+                    result,
+                    Err(ResidentLoadError::ArtifactAccountingMismatch { .. })
+                )),
+                6..=8 => assert!(matches!(
+                    result,
+                    Err(ResidentLoadError::ArtifactDependencyChanged { relid }) if relid == owner
+                )),
+                _ => unreachable!("unknown failure stage"),
+            }
+            if matches!(fail_stage, 2 | 6 | 7) {
+                assert!(!dispatch_called.get());
+            }
+            if fail_stage == 6 {
+                assert!(!snapshot_called.get());
+                assert!(!build_called.get());
+                assert!(!finalize_called.get());
+            } else if fail_stage == 7 {
+                assert!(snapshot_called.get());
+                assert!(build_called.get());
+                assert!(!finalize_called.get());
+            } else if fail_stage == 8 {
+                assert!(snapshot_called.get());
+                assert!(build_called.get());
+                assert!(dispatch_called.get());
+                assert!(finalize_called.get());
+            }
+            assert_eq!(ledger::total_bytes(), before);
+            STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+            STORE.with(|store| store.borrow_mut().entries.clear());
+        }
+
+        assert_clean(1_165, 165, 0);
+        assert_clean(1_166, 166, 1);
+        assert_clean(1_167, 167, 2);
+        assert_clean(1_168, 168, 3);
+        assert_clean(1_169, 169, 4);
+        assert_clean(1_170, 170, 5);
+        assert_clean(1_171, 171, 6);
+        assert_clean(1_172, 172, 7);
+        assert_clean(1_173, 173, 8);
+    }
+
+    #[test]
+    fn staged_transform_accounting_overflow_prevents_reservation_and_callbacks() {
+        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        install_test_relations(&[1_174]);
+        let owner = pg_sys::Oid::from(1_174_u32);
+        let before = ledger::total_bytes();
+        let snapshot_called = Cell::new(false);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![174, 1]);
+        let result = ensure_staged_device_transform_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            |_| {
+                Ok(StagedTransformPreflight {
+                    prepared: (),
+                    published_accounting: ResidentByteAccounting {
+                        device_bytes: u64::MAX,
+                        retained_host_exact_bytes: 0,
+                    },
+                    transient_accounting: ResidentByteAccounting {
+                        device_bytes: 1,
+                        retained_host_exact_bytes: 0,
+                    },
+                })
+            },
+            |(), _| {
+                snapshot_called.set(true);
+                Ok(())
+            },
+            |()| {
+                Ok(AccountedWorkspace {
+                    device_bytes: 1,
+                    host_bytes: 0,
+                })
+            },
+            |_, _| Ok(()),
+            |_| Ok(EmptyArtifact),
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactAccountingOverflow)
+        ));
+        assert!(!snapshot_called.get());
+        assert_eq!(ledger::total_bytes(), before);
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![174, 2]);
+        let result = ensure_staged_device_transform_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            |_| {
+                Ok(StagedTransformPreflight {
+                    prepared: (),
+                    published_accounting: ResidentByteAccounting::default(),
+                    transient_accounting: ResidentByteAccounting {
+                        device_bytes: u64::MAX,
+                        retained_host_exact_bytes: 1,
+                    },
+                })
+            },
+            |(), _| Ok(()),
+            |()| {
+                Ok(AccountedWorkspace {
+                    device_bytes: 0,
+                    host_bytes: 0,
+                })
+            },
+            |_, _| Ok(()),
+            |_| Ok(EmptyArtifact),
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactAccountingOverflow)
+        ));
+        assert_eq!(ledger::total_bytes(), before);
+        STORE.with(|store| store.borrow_mut().entries.clear());
     }
 
     #[test]
