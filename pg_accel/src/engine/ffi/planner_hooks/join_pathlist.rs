@@ -71,6 +71,11 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
+    // Preserve operator-specific evidence before the generic resident-pipeline
+    // decline. The benchmark runner confirms this reason from the per-reason
+    // counter, so later planner observations cannot erase the MergePath signal.
+    unsafe { observe_mergejoin_opportunity(joinrel) };
+
     // Observability (NestedLoop scalar inequality): runs BEFORE the early
     // max-output gate AND before the fast-decline. NLJ inequality joins
     // typically produce O(n*m) rows and almost always exceed
@@ -124,6 +129,53 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
             joinrel,
         );
     }
+}
+
+/// Record when PostgreSQL has produced at least one viable MergePath.
+///
+/// This is observation-only: no GPU merge-join kernel or CustomPath is
+/// exposed. The generic resident-pipeline decline still runs afterward.
+///
+/// # Safety
+///
+/// `joinrel` must be a valid planner-owned `RelOptInfo` pointer.
+unsafe fn observe_mergejoin_opportunity(joinrel: *mut RelOptInfo) {
+    if joinrel.is_null() {
+        return;
+    }
+    // SAFETY: caller passed a planner-owned RelOptInfo pointer.
+    let joinrel_ref = unsafe { &*joinrel };
+    let pathlist = joinrel_ref.pathlist;
+    if pathlist.is_null() {
+        return;
+    }
+
+    // SAFETY: pathlist is a planner-owned List.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    let mut merge_count = 0;
+    for i in 0..len {
+        // SAFETY: i is in [0, len), and each entry is a planner Path pointer.
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if !path.is_null()
+            && unsafe { (*path.cast::<pg_sys::Node>()).type_ } == NodeTag::T_MergePath
+        {
+            merge_count += 1;
+        }
+    }
+    if merge_count == 0 {
+        return;
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    let rows = joinrel_ref.rows.max(0.0) as u64;
+    stats::increment_planner_rejected(
+        super::RejectionReason::MergeJoinNoGpuKernel.stats_key(),
+        rows,
+    );
+    pgrx::debug1!(
+        "pg_accel join: observed {merge_count} viable MergePath candidate(s); no GPU merge-join \
+         kernel exists"
+    );
 }
 
 /// Whether the selected `outer BETWEEN inner.lo AND inner.hi` NestedLoop

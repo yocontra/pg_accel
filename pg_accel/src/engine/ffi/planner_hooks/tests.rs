@@ -1316,13 +1316,13 @@ mod mergejoin_detect {
                  (before={before}, after={after})"
             );
             let mergejoin_declines = Spi::get_one::<i64>(
-                "SELECT pg_accel_planner_rejection_count('no_gpu_resident_pipeline')",
+                "SELECT pg_accel_planner_rejection_count('mergejoin_no_gpu_kernel')",
             )
             .expect("rejection count query should succeed")
             .expect("rejection count should not be NULL");
             assert!(
                 mergejoin_declines > 0,
-                "mergejoin-shaped query should expose the resident-only gate"
+                "mergejoin-shaped query should expose the exact missing-kernel reason"
             );
 
             Spi::run("DROP TABLE pgaccel_mj_ctr_l").expect("drop l");
