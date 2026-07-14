@@ -486,12 +486,12 @@ fn h3_grid_distance_stays_native_under_accel_on() {
     );
 }
 
-/// Small `h3_grid_disk` target-list SRF shapes stay native until expanded SRF
-/// output can remain GPU-resident. This preserves NULL-as-empty SRF semantics
-/// while proving the hard resident-only gate blocks host-staged CustomScans.
+/// Small `h3_grid_disk` target-list SRF shapes stay native because the generic
+/// descriptor preflight rejects the expanded subquery RTE. This preserves
+/// NULL-as-empty SRF semantics without relying on the deleted legacy SRF gate.
 #[cfg(feature = "integration_tests")]
 #[test]
-fn h3_srf_grid_disk_small_shape_stays_native_until_resident() {
+fn h3_srf_grid_disk_small_shape_stays_native_at_generic_rte_gate() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     c.simple_query("SET pg_accel.enabled = on")
@@ -524,8 +524,8 @@ fn h3_srf_grid_disk_small_shape_stays_native_until_resident() {
     );
     assert_eq!(
         last_planner_rejection_reason(&mut c).as_deref(),
-        Some("no_gpu_resident_pipeline"),
-        "small h3_grid_disk SRF shape should expose hard resident-only planner decline; \
+        Some("shape_unsupported_rte"),
+        "small h3_grid_disk SRF subquery should expose the generic unsupported-RTE decline; \
          plan:\n{plan}"
     );
 

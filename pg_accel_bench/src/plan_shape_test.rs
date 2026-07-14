@@ -53,11 +53,17 @@ fn plan_shape_cost_multiplier_settings_respect_documented_floor() {
 
 #[test]
 fn plan_shape_tests_do_not_expect_retired_runtime_rejection_codes() {
-    let retired = ["partial_agg_no_gpu_", "producing_child"].concat();
-    assert!(
-        !include_str!("plan_shape_test.rs").contains(&retired),
-        "plan-shape suite still expects retired runtime rejection `{retired}`"
-    );
+    let retired = [
+        ["partial_agg_no_gpu_", "producing_child"].concat(),
+        ["parallel_fused_count_", "unstable"].concat(),
+        ["parallel_fused_count_", "disabled"].concat(),
+    ];
+    for retired in retired {
+        assert!(
+            !include_str!("plan_shape_test.rs").contains(&retired),
+            "plan-shape suite still expects retired runtime rejection `{retired}`"
+        );
+    }
 }
 
 fn connect() -> Client {
@@ -1777,7 +1783,7 @@ fn plan_shape_fused_gpuexpr_count_bigint_exact_constants_stay_native_until_resid
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_parallel_fused_gpuexpr_count_guc_on_fails_closed_while_unstable() {
+fn plan_shape_parallel_filtered_count_guc_on_stays_native_at_generic_predicate_gate() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     let table = ensure_gpuexpr_direct_isolated_fixture(&mut c, "parallel_fused_count");
@@ -1805,17 +1811,17 @@ fn plan_shape_parallel_fused_gpuexpr_count_guc_on_fails_closed_while_unstable() 
     for needle in ["gather", "partial aggregate", "parallel seq scan"] {
         assert!(
             plan.contains(needle),
-            "crash-gated parallel fused count should stay on PostgreSQL `{needle}` path:\n{plan}"
+            "generic predicate gate should keep the filtered count on PostgreSQL `{needle}` path:\n{plan}"
         );
     }
     assert!(
         !plan.contains("custom scan"),
-        "GUC-on parallel fused count must fail closed while unstable:\n{plan}"
+        "the legacy GUC must not bypass generic descriptor predicate validation:\n{plan}"
     );
     assert_rejection_reason_observed(
         &mut c,
-        &["parallel_fused_count_unstable"],
-        "parallel fused count GUC-on crash gate",
+        &["shape_unsupported_predicate"],
+        "parallel filtered count GUC-on generic predicate gate",
     );
 
     c.simple_query("SELECT pg_accel_reset_stats()")
@@ -1825,11 +1831,11 @@ fn plan_shape_parallel_fused_gpuexpr_count_guc_on_fails_closed_while_unstable() 
     let after = kernel_executions(&mut c);
     assert!(
         !analyzed.contains("custom scan"),
-        "EXPLAIN ANALYZE must stay native while the parallel fused-count path is unstable:\n{analyzed}"
+        "EXPLAIN ANALYZE must stay native after generic predicate rejection:\n{analyzed}"
     );
     assert_eq!(
         after, before,
-        "crash-gated GUC-on native fallback must not dispatch GPU kernels \
+        "generic-predicate GUC-on native fallback must not dispatch GPU kernels \
          (before={before}, after={after})"
     );
     assert_eq!(pg_accel_stat_i64(&mut c, "stock_exec_count"), 0);
@@ -1838,7 +1844,7 @@ fn plan_shape_parallel_fused_gpuexpr_count_guc_on_fails_closed_while_unstable() 
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_parallel_fused_gpuexpr_count_default_off_stays_native() {
+fn plan_shape_parallel_filtered_count_guc_off_stays_native_at_generic_predicate_gate() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     let table = ensure_gpuexpr_direct_isolated_fixture(&mut c, "parallel_fused_count_default");
@@ -1874,17 +1880,17 @@ fn plan_shape_parallel_fused_gpuexpr_count_default_off_stays_native() {
     for needle in ["gather", "partial aggregate", "parallel seq scan"] {
         assert!(
             plan.contains(needle),
-            "GUC-disabled fused count should fall back to PostgreSQL parallel `{needle}` path:\n{plan}"
+            "generic predicate gate should keep the GUC-off filtered count on PostgreSQL `{needle}` path:\n{plan}"
         );
     }
     assert!(
         !plan.contains("custom scan"),
-        "GUC-disabled parallel fused count must not select a GPU Custom Scan:\n{plan}"
+        "GUC-off filtered count must not bypass generic descriptor predicate validation:\n{plan}"
     );
     assert_rejection_reason_observed(
         &mut c,
-        &["parallel_fused_count_disabled"],
-        "parallel fused count GUC-off gate",
+        &["shape_unsupported_predicate"],
+        "parallel filtered count GUC-off generic predicate gate",
     );
 
     c.simple_query("SELECT pg_accel_reset_stats()")
@@ -1898,7 +1904,7 @@ fn plan_shape_parallel_fused_gpuexpr_count_default_off_stays_native() {
     );
     assert_eq!(
         after, before,
-        "GUC-disabled native fallback must not dispatch GPU kernels \
+        "generic-predicate GUC-off native fallback must not dispatch GPU kernels \
          (before={before}, after={after})"
     );
     assert_eq!(pg_accel_stat_i64(&mut c, "stock_exec_count"), 0);
@@ -1907,7 +1913,7 @@ fn plan_shape_parallel_fused_gpuexpr_count_default_off_stays_native() {
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_parallel_fused_gpuexpr_count_bounded_crash_gate() {
+fn plan_shape_parallel_filtered_count_bounded_stays_native_at_generic_predicate_gate() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     let rows = 1_000_000;
@@ -1933,31 +1939,31 @@ fn plan_shape_parallel_fused_gpuexpr_count_bounded_crash_gate() {
     for needle in ["gather", "partial aggregate", "parallel seq scan"] {
         assert!(
             accel_plan.contains(needle),
-            "bounded crash-gated parallel count should stay on `{needle}`:\n{accel_plan}"
+            "bounded generic-predicate decline should stay on `{needle}`:\n{accel_plan}"
         );
     }
     assert!(
         !accel_plan.contains("custom scan"),
-        "bounded GUC-on parallel count must not select the crash-gated CustomScan:\n{accel_plan}"
+        "bounded GUC-on parallel count must not bypass generic predicate validation:\n{accel_plan}"
     );
     assert_rejection_reason_observed(
         &mut c,
-        &["parallel_fused_count_unstable"],
-        "bounded parallel fused count crash gate",
+        &["shape_unsupported_predicate"],
+        "bounded parallel filtered count generic predicate gate",
     );
 
     c.simple_query("SELECT pg_accel_reset_stats()")
-        .expect("reset stats before bounded crash-gate execution");
+        .expect("reset stats before bounded generic-predicate execution");
     let before = kernel_executions(&mut c);
     let analyzed = explain_analyze(&mut c, &sql);
     let after = kernel_executions(&mut c);
     assert!(
         !analyzed.contains("custom scan"),
-        "bounded crash-gate execution must stay native:\n{analyzed}"
+        "bounded generic-predicate execution must stay native:\n{analyzed}"
     );
     assert_eq!(
         after, before,
-        "bounded crash-gated count must not dispatch a GPU kernel"
+        "bounded generic-predicate decline must not dispatch a GPU kernel"
     );
     assert_eq!(pg_accel_stat_i64(&mut c, "stock_exec_count"), 0);
     assert_eq!(scalar_i64(&mut c, &sql), native_count);
