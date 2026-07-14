@@ -17,7 +17,7 @@ pub use execution::{
     RasterExecutionAccounting, RasterExecutionError, RasterExecutionLayout,
     RasterExecutionPreflight, RasterExecutionSizing, RasterExecutionSnapshot,
     RasterReconstructedOutput, preflight_raster_execution, reconstruct_raster_output,
-    size_raster_execution,
+    size_empty_raster_execution, size_raster_execution,
 };
 pub use planner::{
     RasterCallShape, RasterCatalogContract, RasterCommandShape, RasterPlannerCandidate,

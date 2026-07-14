@@ -614,6 +614,45 @@ pub fn size_raster_execution(
     })
 }
 
+/// Compute the exact zero-row lifecycle charges without constructing owned
+/// empty snapshot lanes. This is the typed-empty branch of the first
+/// resident borrow and must remain allocation-free.
+pub fn size_empty_raster_execution(
+    spec: &RasterQuerySpec,
+) -> Result<RasterExecutionSizing, RasterExecutionError> {
+    spec.validate().map_err(RasterExecutionError::InvalidSpec)?;
+    let output_width = pixel_width(spec.reclass.output_pixel_type).ok_or(
+        RasterExecutionError::InvalidSnapshot("floating raster output reached execution"),
+    )?;
+    let exact_offsets_bytes = bytes_for_len::<u64>(1)?;
+    let layout_host_bytes = checked_sum(&[bytes_for_len::<u64>(1)?, bytes_for_len::<u64>(1)?])?;
+    let reconstructed_output_bytes = exact_offsets_bytes;
+    let prelaunch_reserved_bytes = exact_offsets_bytes
+        .checked_add(layout_host_bytes)
+        .ok_or(RasterExecutionError::ByteCountOverflow)?;
+    let peak_reserved_bytes = prelaunch_reserved_bytes
+        .checked_add(reconstructed_output_bytes)
+        .ok_or(RasterExecutionError::ByteCountOverflow)?;
+    Ok(RasterExecutionSizing {
+        accounting: RasterExecutionAccounting {
+            snapshot_host_bytes: exact_offsets_bytes,
+            layout_host_bytes,
+            device_artifact_bytes: 0,
+            post_launch_host_bytes: 0,
+            reconstructed_output_bytes,
+            prelaunch_reserved_bytes,
+            peak_reserved_bytes,
+        },
+        output_pixel_type: spec.reclass.output_pixel_type,
+        output_pixel_width: output_width,
+        row_count: 0,
+        total_pixels: 0,
+        output_pixels_bytes: 0,
+        output_wkb_bytes: 0,
+        null_rows: 0,
+    })
+}
+
 /// Allocate and fill the owned launch layout only after the caller has
 /// reserved the exact charges returned by [`size_raster_execution`].
 pub fn preflight_raster_execution(

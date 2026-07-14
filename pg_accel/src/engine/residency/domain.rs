@@ -517,6 +517,22 @@ pub struct ResidentRasterStats {
 }
 
 impl ResidentRasterStats {
+    /// Canonical work metadata for a typed raster column with zero rows.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            row_count: 0,
+            non_null_rows: 0,
+            total_grid_pixels: 0,
+            total_band_pixels: 0,
+            input_wkb_bytes: 0,
+            band_pixels: Box::default(),
+            band_rows: Box::default(),
+            reclass_output_wkb_bytes: [0; 3],
+            work_rows: Box::default(),
+        }
+    }
+
     #[must_use]
     pub fn selected_band_pixels(&self, band: u32) -> Option<u64> {
         let index = usize::try_from(band.checked_sub(1)?).ok()?;

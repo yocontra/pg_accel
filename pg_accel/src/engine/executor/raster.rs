@@ -1,12 +1,18 @@
 //! Store-neutral artifact boundary for childless resident raster execution.
 
 use crate::engine::raster::{
-    RasterExecutionError, RasterExecutionPreflight, RasterQuerySpec, RasterReclassRule,
-    RasterReconstructedOutput, RasterSpecCodecError, reconstruct_raster_output,
+    RasterExecutionError, RasterExecutionPreflight, RasterExecutionSizing, RasterExecutionSnapshot,
+    RasterQuerySpec, RasterReclassRule, RasterReconstructedOutput, RasterSpecCodecError,
+    preflight_raster_execution, reconstruct_raster_output, revalidate_raster_catalog,
+    size_empty_raster_execution, size_raster_execution,
 };
 use crate::engine::residency::{
-    DerivedArtifact, DerivedArtifactIdentity, ResidentByteAccounting, ResidentColumnView,
-    ResidentLoadError, ResidentRasterBand, ResidentRasterRow,
+    ArtifactEnsureOutcome, DerivedArtifact, DerivedArtifactIdentity, ResidentByteAccounting,
+    ResidentColumnRef, ResidentColumnView, ResidentInputBundle, ResidentLoadError,
+    ResidentRasterBand, ResidentRasterRow, ResidentRasterStats, RetainedExactValues,
+    SelectedRelation, SelectedRelationsEnsureOutcome, StagedTransformPreflight,
+    StagedTransformWorkspace, ensure_selected_relations, ensure_staged_device_transform_artifact,
+    with_derived_artifact_inputs,
 };
 use crate::gpu::{
     ExprDeviceBuffer, GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail,
@@ -66,6 +72,217 @@ assert_abi_field_offset!(ResidentRasterRow, PgaccelResidentRasterRow, skew_y);
 assert_abi_field_offset!(ResidentRasterBand, PgaccelResidentRasterBand, pixel_type);
 assert_abi_field_offset!(ResidentRasterBand, PgaccelResidentRasterBand, flags);
 assert_abi_field_offset!(ResidentRasterBand, PgaccelResidentRasterBand, nodata);
+
+/// Fully decoded childless raster execution contract. The canonical RQS2
+/// words are also the complete derived-artifact cache identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RasterExecPlan {
+    spec: RasterQuerySpec,
+    identity: DerivedArtifactIdentity,
+    selected_relation: SelectedRelation,
+    column: ResidentColumnRef,
+}
+
+impl RasterExecPlan {
+    pub fn decode_words(words: &[i32]) -> Result<Self, RasterSpecCodecError> {
+        Self::from_spec(RasterQuerySpec::decode_words(words)?)
+    }
+
+    pub fn from_spec(spec: RasterQuerySpec) -> Result<Self, RasterSpecCodecError> {
+        let identity = raster_artifact_identity(&spec)?;
+        let relid = pgrx::pg_sys::Oid::from(spec.relation_oid);
+        let attno = i16::try_from(spec.raster_attno).map_err(|_| {
+            RasterSpecCodecError::InvalidSpec(
+                crate::engine::raster::RasterSpecError::InvalidRasterAttno(spec.raster_attno),
+            )
+        })?;
+        Ok(Self {
+            selected_relation: SelectedRelation {
+                relid,
+                columns: vec![attno],
+            },
+            column: ResidentColumnRef { relid, attno },
+            spec,
+            identity,
+        })
+    }
+
+    #[must_use]
+    pub const fn spec(&self) -> &RasterQuerySpec {
+        &self.spec
+    }
+
+    #[must_use]
+    pub const fn identity(&self) -> &DerivedArtifactIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn selected_relation(&self) -> &SelectedRelation {
+        &self.selected_relation
+    }
+
+    #[must_use]
+    pub const fn column(&self) -> ResidentColumnRef {
+        self.column
+    }
+
+    /// Begin/rescan boundary: reprove the replacement-sensitive catalog,
+    /// ensure the exact resident relation generation, and build or resolve
+    /// the generation-stamped output artifact.
+    ///
+    /// # Safety
+    /// Must run on the PostgreSQL backend main thread.
+    pub unsafe fn ensure_ready(&self) -> Result<RasterExecReady, ResidentLoadError> {
+        unsafe { revalidate_raster_catalog(&self.spec) }.map_err(|error| {
+            ResidentLoadError::Loader(format!("raster catalog revalidation failed: {error}"))
+        })?;
+        let selected = ensure_selected_relations(std::slice::from_ref(&self.selected_relation))?;
+        let artifact = self.ensure_artifact()?;
+        let (row_count, accounting) = with_derived_artifact_inputs::<RasterOutputArtifact, _>(
+            self.selected_relation.relid,
+            &self.identity,
+            std::slice::from_ref(&self.column),
+            |resolved| (resolved.artifact.row_count(), resolved.accounting),
+        )?;
+        Ok(RasterExecReady {
+            selected,
+            artifact,
+            row_count,
+            accounting,
+        })
+    }
+
+    fn ensure_artifact(&self) -> Result<ArtifactEnsureOutcome, ResidentLoadError> {
+        let owner = self.selected_relation.relid;
+        let columns = std::slice::from_ref(&self.column);
+        ensure_staged_device_transform_artifact(
+            owner,
+            &self.identity,
+            std::slice::from_ref(&owner),
+            columns,
+            |inputs| {
+                let sizing = size_from_inputs(&self.spec, inputs)?;
+                transform_preflight(sizing)
+            },
+            |sizing, inputs| {
+                let snapshot = snapshot_from_inputs(&self.spec, inputs)?;
+                let preflight =
+                    preflight_raster_execution(&self.spec, snapshot).map_err(execution_error)?;
+                if preflight.accounting != sizing.accounting {
+                    return Err(ResidentLoadError::Loader(
+                        "resident raster sizing changed while preparing its charged snapshot"
+                            .to_owned(),
+                    ));
+                }
+                Ok(PreparedRasterArtifact::new(preflight))
+            },
+            |prepared| RasterLaunchWorkspace::build(&self.spec, prepared),
+            |workspace, dispatch| {
+                let column = dispatch.column(0)?;
+                let _ = workspace.launch(&column);
+                Ok(())
+            },
+            |workspace| {
+                let artifact = workspace.finalize()?;
+                unsafe { revalidate_raster_catalog(&self.spec) }.map_err(|error| {
+                    ResidentLoadError::Loader(format!(
+                        "raster catalog changed before artifact publication: {error}"
+                    ))
+                })?;
+                Ok(artifact)
+            },
+        )
+    }
+}
+
+/// Evidence returned at both BeginCustomScan and ReScanCustomScan.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RasterExecReady {
+    pub selected: SelectedRelationsEnsureOutcome,
+    pub artifact: ArtifactEnsureOutcome,
+    pub row_count: usize,
+    pub accounting: ResidentByteAccounting,
+}
+
+fn canonical_empty_snapshot() -> RasterExecutionSnapshot {
+    RasterExecutionSnapshot {
+        stats: ResidentRasterStats::empty(),
+        exact: RetainedExactValues {
+            offsets: vec![0].into_boxed_slice(),
+            bytes: Box::default(),
+        },
+    }
+}
+
+fn input_parts<'a>(
+    spec: &RasterQuerySpec,
+    inputs: &'a ResidentInputBundle<'a>,
+) -> Result<Option<(&'a ResidentRasterStats, &'a RetainedExactValues)>, ResidentLoadError> {
+    let column = inputs.columns.first().ok_or_else(|| {
+        ResidentLoadError::Loader("resident raster lifecycle resolved no input column".to_owned())
+    })?;
+    match column {
+        ResidentColumnView::Raster {
+            type_oid,
+            stats,
+            exact,
+            ..
+        } if u32::from(*type_oid) == spec.raster_type_oid => Ok(Some((stats, exact))),
+        ResidentColumnView::Empty { type_oid } if u32::from(*type_oid) == spec.raster_type_oid => {
+            Ok(None)
+        }
+        _ => Err(ResidentLoadError::Loader(
+            "resident raster lifecycle resolved a different column type".to_owned(),
+        )),
+    }
+}
+
+fn size_from_inputs(
+    spec: &RasterQuerySpec,
+    inputs: ResidentInputBundle<'_>,
+) -> Result<RasterExecutionSizing, ResidentLoadError> {
+    match input_parts(spec, &inputs)? {
+        Some((stats, exact)) => size_raster_execution(spec, stats, exact),
+        None => size_empty_raster_execution(spec),
+    }
+    .map_err(execution_error)
+}
+
+fn snapshot_from_inputs(
+    spec: &RasterQuerySpec,
+    inputs: ResidentInputBundle<'_>,
+) -> Result<RasterExecutionSnapshot, ResidentLoadError> {
+    Ok(match input_parts(spec, &inputs)? {
+        Some((stats, exact)) => RasterExecutionSnapshot {
+            stats: stats.clone(),
+            exact: exact.clone(),
+        },
+        None => canonical_empty_snapshot(),
+    })
+}
+
+fn transform_preflight(
+    sizing: RasterExecutionSizing,
+) -> Result<StagedTransformPreflight<RasterExecutionSizing>, ResidentLoadError> {
+    let transient_host_bytes = sizing
+        .accounting
+        .snapshot_host_bytes
+        .checked_add(sizing.accounting.layout_host_bytes)
+        .and_then(|bytes| bytes.checked_add(sizing.accounting.post_launch_host_bytes))
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+    Ok(StagedTransformPreflight {
+        published_accounting: ResidentByteAccounting {
+            device_bytes: 0,
+            retained_host_exact_bytes: sizing.accounting.reconstructed_output_bytes,
+        },
+        transient_accounting: ResidentByteAccounting {
+            device_bytes: sizing.accounting.device_artifact_bytes,
+            retained_host_exact_bytes: transient_host_bytes,
+        },
+        prepared: sizing,
+    })
+}
 
 /// Prepared transient state. It is never publishable by itself: native output
 /// and row actions must reconstruct successfully before it can become a
@@ -794,6 +1011,18 @@ impl RasterLaunchWorkspace {
     }
 }
 
+impl StagedTransformWorkspace for RasterLaunchWorkspace {
+    fn device_bytes(&self) -> u64 {
+        self.accounting()
+            .map_or(u64::MAX, |accounting| accounting.device_bytes)
+    }
+
+    fn host_bytes(&self) -> u64 {
+        self.accounting()
+            .map_or(u64::MAX, |accounting| accounting.retained_host_exact_bytes)
+    }
+}
+
 /// Final generation-stamped derived result retained by the residency store.
 /// It owns no launch buffer or duplicate source WKB.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1127,6 +1356,111 @@ mod tests {
             first.canonical_words(),
             spec(7).encode_words().expect("canonical RQS2")
         );
+    }
+
+    #[test]
+    fn begin_plan_decode_binds_exact_identity_relation_and_column() {
+        let expected = spec(7);
+        let words = expected.encode_words().expect("canonical RQS2");
+        let plan = RasterExecPlan::decode_words(&words).expect("executor plan");
+        assert_eq!(plan.spec(), &expected);
+        assert_eq!(plan.identity().canonical_words(), words);
+        assert_eq!(
+            plan.selected_relation(),
+            &SelectedRelation {
+                relid: pgrx::pg_sys::Oid::from(expected.relation_oid),
+                columns: vec![i16::try_from(expected.raster_attno).expect("test attno")],
+            }
+        );
+        assert_eq!(
+            plan.column(),
+            ResidentColumnRef {
+                relid: pgrx::pg_sys::Oid::from(expected.relation_oid),
+                attno: i16::try_from(expected.raster_attno).expect("test attno"),
+            }
+        );
+    }
+
+    #[test]
+    fn rescan_reuses_the_canonical_plan_identity_and_rewinds_output_only() {
+        let plan = RasterExecPlan::from_spec(spec(7)).expect("executor plan");
+        let identity = plan.identity().clone();
+        let relation = plan.selected_relation().clone();
+        let mut cursor = RasterOutputCursor { next_row: 9 };
+        cursor.reset();
+        assert_eq!(cursor.position(), 0);
+        assert_eq!(plan.identity(), &identity);
+        assert_eq!(plan.selected_relation(), &relation);
+    }
+
+    #[test]
+    fn staged_lifecycle_accounting_separates_output_from_transient_workspace() {
+        let spec = spec(7);
+        let snapshot = snapshot(&[None, Some(raster(1)), Some(raster(2))]);
+        let sizing = size_raster_execution(&spec, &snapshot.stats, &snapshot.exact)
+            .expect("nonowning sizing");
+        let expected = sizing.accounting;
+        let staged = transform_preflight(sizing).expect("accounting fits");
+        assert_eq!(
+            staged.published_accounting,
+            ResidentByteAccounting {
+                device_bytes: 0,
+                retained_host_exact_bytes: expected.reconstructed_output_bytes,
+            }
+        );
+        assert_eq!(
+            staged.transient_accounting,
+            ResidentByteAccounting {
+                device_bytes: expected.device_artifact_bytes,
+                retained_host_exact_bytes: expected.snapshot_host_bytes
+                    + expected.layout_host_bytes
+                    + expected.post_launch_host_bytes,
+            }
+        );
+        assert_eq!(
+            staged
+                .published_accounting
+                .checked_total()
+                .expect("published total")
+                + staged
+                    .transient_accounting
+                    .checked_total()
+                    .expect("transient total"),
+            expected.peak_reserved_bytes
+        );
+    }
+
+    #[test]
+    fn first_borrow_sizing_allocates_nothing_for_nonempty_and_typed_empty_inputs() {
+        let spec = spec(7);
+        let snapshot = snapshot(&[None, Some(raster(1))]);
+        let mut nonempty = None;
+        let nonempty_allocations = allocation_count(|| {
+            nonempty = Some(size_raster_execution(
+                &spec,
+                &snapshot.stats,
+                &snapshot.exact,
+            ));
+        });
+        assert_eq!(nonempty_allocations, 0);
+        assert!(nonempty.expect("sizing ran").is_ok());
+
+        let inputs = ResidentInputBundle {
+            columns: vec![ResidentColumnView::Empty {
+                type_oid: pgrx::pg_sys::Oid::from(spec.raster_type_oid),
+            }],
+            evidence: Vec::new(),
+        };
+        let mut empty = None;
+        let empty_allocations = allocation_count(|| {
+            empty = Some(size_from_inputs(&spec, inputs));
+        });
+        assert_eq!(empty_allocations, 0);
+        let empty = empty.expect("typed-empty sizing ran").expect("sizing");
+        assert_eq!(empty.row_count(), 0);
+        assert_eq!(empty.accounting.snapshot_host_bytes, 8);
+        assert_eq!(empty.accounting.prelaunch_reserved_bytes, 24);
+        assert_eq!(empty.accounting.peak_reserved_bytes, 32);
     }
 
     #[test]
