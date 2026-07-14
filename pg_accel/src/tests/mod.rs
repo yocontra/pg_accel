@@ -1813,53 +1813,61 @@ mod tests {
         )
         .expect("PostGIS ST_Intersects shape-gate fixtures should be created");
 
-        for (label, sql) in [
+        for (label, sql, expected_reason) in [
             (
                 "generic geometry point column",
                 "SELECT count(*) FROM _postgis_intersects_generic \
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+                "shape_unsupported_predicate",
             ),
             (
                 "LineString column",
                 "SELECT count(*) FROM _postgis_intersects_line \
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+                "shape_spatial_work_shape_unproved",
             ),
             (
                 "unknown-SRID Point typmod",
                 "SELECT count(*) FROM _postgis_intersects_unknown_srid \
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+                "shape_unsupported_predicate",
             ),
             (
                 "missing-SRID polygon constant",
                 "SELECT count(*) FROM _postgis_intersects_dynamic \
                  WHERE ST_Intersects(geom, \
                    'POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+                "shape_unsupported_predicate",
             ),
             (
                 "wrong-SRID polygon constant",
                 "SELECT count(*) FROM _postgis_intersects_dynamic \
                  WHERE ST_Intersects(geom, \
                    'SRID=3857;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+                "shape_unsupported_predicate",
             ),
             (
                 "dynamic polygon argument",
                 "SELECT count(*) FROM _postgis_intersects_dynamic \
                  WHERE ST_Intersects(geom, poly)",
+                "shape_spatial_work_shape_unproved",
             ),
             (
                 "polygon with hole",
                 "SELECT count(*) FROM _postgis_intersects_dynamic \
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0),(2 2,18 2,18 18,2 18,2 2))'::geometry)",
+                "generic_descriptor_capability",
             ),
             (
                 "self-intersecting polygon",
                 "SELECT count(*) FROM _postgis_intersects_dynamic \
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,20 20,0 20,20 0,0 0))'::geometry)",
+                "shape_invalid_spatial_constant",
             ),
             (
                 "extra top-level AND qual",
@@ -1867,6 +1875,7 @@ mod tests {
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry) \
                    AND id < 0",
+                "shape_multi_filter_relation",
             ),
             (
                 "OR wrapper",
@@ -1874,12 +1883,14 @@ mod tests {
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry) \
                    OR id < 0",
+                "shape_unsupported_predicate",
             ),
             (
                 "negated predicate",
                 "SELECT count(*) FROM _postgis_intersects_dynamic \
                  WHERE NOT ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry)",
+                "shape_unsupported_predicate",
             ),
             (
                 "boolean-test wrapper",
@@ -1887,6 +1898,7 @@ mod tests {
                  WHERE ST_Intersects(geom, \
                    'SRID=4326;POLYGON((0 0,0 20,20 20,20 0,0 0))'::geometry) \
                    IS TRUE",
+                "shape_unsupported_predicate",
             ),
         ] {
             Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
@@ -1903,8 +1915,8 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .unwrap_or_else(|| panic!("{label} should record a planner decline"));
             assert_eq!(
-                rejection, "shape_unsupported_predicate",
-                "{label} should expose the exact generic predicate decline; plan:\n{plan}"
+                rejection, expected_reason,
+                "{label} should expose its exact shape-pass decline; plan:\n{plan}"
             );
         }
 
@@ -1923,8 +1935,9 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("structurally covered ST_Intersects should record a planner decline");
         assert_eq!(
-            rejection, "shape_unsupported_predicate",
-            "structurally covered ST_Intersects should expose the generic predicate decline; plan:\n{plan}"
+            rejection, "generic_descriptor_capability",
+            "structurally covered ST_Intersects proves its shape but must decline at the \
+             dark spatial descriptor executor until Phase 7 calibration flips it live; plan:\n{plan}"
         );
     }
 
