@@ -745,10 +745,17 @@ static_assert(sizeof(pgaccel_resident_geometry_row) == 24);
 static_assert(alignof(pgaccel_resident_geometry_row) == 8);
 static_assert(offsetof(pgaccel_resident_geometry_row, first_ring) == 8);
 
-static constexpr size_t SPATIAL_RESIDENT_MAX_CHUNK_ROWS = 65'536;
+static constexpr size_t SPATIAL_RESIDENT_MAX_CHUNK_ROWS = PGACCEL_SPATIAL_MAX_CHUNK_ROWS;
 static constexpr uint32_t SPATIAL_RESIDENT_FAILURE_GEOMETRY = 1u << 0;
 static constexpr uint32_t SPATIAL_RESIDENT_FAILURE_SRID = 1u << 1;
 static constexpr uint32_t SPATIAL_RESIDENT_FAILURE_BUDGET = 1u << 2;
+static constexpr uint32_t SPATIAL_RESIDENT_FAILURE_TRISTATE = 1u << 3;
+static constexpr uint32_t SPATIAL_RESIDENT_FAILURE_RECHECK_INDEX = 1u << 4;
+static constexpr uint32_t SPATIAL_RESIDENT_FAILURE_RECHECK_PATCH = 1u << 5;
+static constexpr uint32_t SPATIAL_RESIDENT_FAILURE_MASK =
+    SPATIAL_RESIDENT_FAILURE_GEOMETRY | SPATIAL_RESIDENT_FAILURE_SRID |
+    SPATIAL_RESIDENT_FAILURE_BUDGET | SPATIAL_RESIDENT_FAILURE_TRISTATE |
+    SPATIAL_RESIDENT_FAILURE_RECHECK_INDEX | SPATIAL_RESIDENT_FAILURE_RECHECK_PATCH;
 
 struct SpatialResidentGeometry {
   const pgaccel_resident_geometry_view* view;
@@ -1236,9 +1243,8 @@ static SpatialResidentDistance resident_point_segment_distance(double px, double
   const double denominator = unit_x * unit_x + unit_y * unit_y;
   const double numerator = offset_x * unit_x + offset_y * unit_y;
   double projection = numerator / denominator;
-  if (!sycl::isfinite(offset_x) || !sycl::isfinite(offset_y) ||
-      !sycl::isfinite(denominator) || !sycl::isfinite(numerator) ||
-      !sycl::isfinite(projection)) {
+  if (!sycl::isfinite(offset_x) || !sycl::isfinite(offset_y) || !sycl::isfinite(denominator) ||
+      !sycl::isfinite(numerator) || !sycl::isfinite(projection)) {
     return {0.0, 1};
   }
   projection = resident_max(0.0, resident_min(1.0, projection));
@@ -1263,18 +1269,17 @@ static SpatialResidentDistance resident_distance_min(SpatialResidentDistance lef
 static SpatialResidentDistance resident_segment_distance(double a0x, double a0y, double a1x,
                                                          double a1y, double b0x, double b0y,
                                                          double b1x, double b1y) {
-  SpatialResidentDistance minimum =
-      resident_point_segment_distance(a0x, a0y, b0x, b0y, b1x, b1y);
-  minimum = resident_distance_min(
-      minimum, resident_point_segment_distance(a1x, a1y, b0x, b0y, b1x, b1y));
-  minimum = resident_distance_min(
-      minimum, resident_point_segment_distance(b0x, b0y, a0x, a0y, a1x, a1y));
-  return resident_distance_min(
-      minimum, resident_point_segment_distance(b1x, b1y, a0x, a0y, a1x, a1y));
+  SpatialResidentDistance minimum = resident_point_segment_distance(a0x, a0y, b0x, b0y, b1x, b1y);
+  minimum =
+      resident_distance_min(minimum, resident_point_segment_distance(a1x, a1y, b0x, b0y, b1x, b1y));
+  minimum =
+      resident_distance_min(minimum, resident_point_segment_distance(b0x, b0y, a0x, a0y, a1x, a1y));
+  return resident_distance_min(minimum,
+                               resident_point_segment_distance(b1x, b1y, a0x, a0y, a1x, a1y));
 }
 
-static SpatialResidentDistance resident_point_geometry_distance(
-    const double* point, const SpatialResidentGeometry& geometry) {
+static SpatialResidentDistance
+resident_point_geometry_distance(const double* point, const SpatialResidentGeometry& geometry) {
   if (geometry.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
     const double* other = geometry.view->coordinates + geometry.coordinate_begin * 2;
     return resident_point_distance(point[0], point[1], other[0], other[1]);
@@ -1286,7 +1291,7 @@ static SpatialResidentDistance resident_point_geometry_distance(
       const double* second = geometry.view->coordinates + (index + 1) * 2;
       minimum = resident_distance_min(
           minimum, resident_point_segment_distance(point[0], point[1], first[0], first[1],
-                                                    second[0], second[1]));
+                                                   second[0], second[1]));
     }
     return minimum;
   }
@@ -1298,7 +1303,7 @@ static SpatialResidentDistance resident_point_geometry_distance(
       const double* second = geometry.view->coordinates + (edge + 1) * 2;
       minimum = resident_distance_min(
           minimum, resident_point_segment_distance(point[0], point[1], first[0], first[1],
-                                                    second[0], second[1]));
+                                                   second[0], second[1]));
     }
   }
   return minimum;
@@ -1315,9 +1320,9 @@ static SpatialResidentDistance resident_linear_distance(const SpatialResidentGeo
       for (size_t b = right.coordinate_begin; b + 1 < right.coordinate_end; ++b) {
         const double* b0 = right.view->coordinates + b * 2;
         const double* b1 = right.view->coordinates + (b + 1) * 2;
-        minimum = resident_distance_min(
-            minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1], b0[0], b0[1], b1[0],
-                                                b1[1]));
+        minimum =
+            resident_distance_min(minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1],
+                                                                     b0[0], b0[1], b1[0], b1[1]));
       }
     }
     return minimum;
@@ -1339,7 +1344,7 @@ static SpatialResidentDistance resident_linear_distance(const SpatialResidentGeo
         const double* poly_b = polygon.view->coordinates + (edge + 1) * 2;
         minimum = resident_distance_min(
             minimum, resident_segment_distance(line_a[0], line_a[1], line_b[0], line_b[1],
-                                                poly_a[0], poly_a[1], poly_b[0], poly_b[1]));
+                                               poly_a[0], poly_a[1], poly_b[0], poly_b[1]));
       }
     }
   }
@@ -1361,9 +1366,9 @@ static SpatialResidentDistance resident_polygon_distance(const SpatialResidentGe
         for (size_t b = right_begin; b + 1 < right_end; ++b) {
           const double* b0 = right.view->coordinates + b * 2;
           const double* b1 = right.view->coordinates + (b + 1) * 2;
-          minimum = resident_distance_min(
-              minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1], b0[0], b0[1], b1[0],
-                                                  b1[1]));
+          minimum =
+              resident_distance_min(minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1],
+                                                                       b0[0], b0[1], b1[0], b1[1]));
         }
       }
     }
@@ -1431,6 +1436,13 @@ struct SpatialResidentSpan {
   uintptr_t end;
 };
 
+static constexpr size_t SPATIAL_RESIDENT_MAX_INPUT_SPANS = 12;
+
+struct SpatialResidentSpans {
+  SpatialResidentSpan values[SPATIAL_RESIDENT_MAX_INPUT_SPANS];
+  size_t count;
+};
+
 static bool resident_span(const void* pointer, size_t bytes, size_t alignment,
                           SpatialResidentSpan* span) {
   if (pointer == nullptr || span == nullptr || bytes == 0 || alignment == 0 ||
@@ -1466,8 +1478,7 @@ static bool resident_declared_span_shape(const void* pointer, size_t declared_by
   size_t required_bytes = 0;
   if (width == 0 || declared_bytes % width != 0 ||
       !spatial_checked_mul(required_count, width, &required_bytes) ||
-      required_bytes > declared_bytes ||
-      (pointer == nullptr) != (declared_bytes == 0)) {
+      required_bytes > declared_bytes || (pointer == nullptr) != (declared_bytes == 0)) {
     return false;
   }
   return declared_bytes != 0 || required_bytes == 0;
@@ -1485,23 +1496,46 @@ static bool resident_validate_declared_span(sycl::queue& queue, const void* poin
          resident_current_device_pointer(queue, pointer);
 }
 
+static bool resident_validate_exact_span(sycl::queue& queue, const void* pointer,
+                                         size_t declared_bytes, size_t required_count, size_t width,
+                                         size_t alignment, SpatialResidentSpan* span) {
+  size_t required_bytes = 0;
+  return spatial_checked_mul(required_count, width, &required_bytes) &&
+         declared_bytes == required_bytes &&
+         resident_validate_declared_span(queue, pointer, declared_bytes, required_count, width,
+                                         alignment, span);
+}
+
 static bool resident_add_span(sycl::queue& queue, const void* pointer, size_t declared_bytes,
                               size_t required_count, size_t width, size_t alignment,
-                              std::vector<SpatialResidentSpan>* spans) {
+                              SpatialResidentSpans* spans) {
   SpatialResidentSpan span{};
-  if (spans == nullptr ||
+  if (spans == nullptr || spans->count >= SPATIAL_RESIDENT_MAX_INPUT_SPANS ||
       !resident_validate_declared_span(queue, pointer, declared_bytes, required_count, width,
                                        alignment, &span)) {
     return false;
   }
   if (declared_bytes != 0)
-    spans->push_back(span);
+    spans->values[spans->count++] = span;
+  return true;
+}
+
+static bool resident_add_exact_span(sycl::queue& queue, const void* pointer, size_t declared_bytes,
+                                    size_t required_count, size_t width, size_t alignment,
+                                    SpatialResidentSpans* spans) {
+  SpatialResidentSpan span{};
+  if (spans == nullptr || spans->count >= SPATIAL_RESIDENT_MAX_INPUT_SPANS ||
+      !resident_validate_exact_span(queue, pointer, declared_bytes, required_count, width,
+                                    alignment, &span)) {
+    return false;
+  }
+  if (declared_bytes != 0)
+    spans->values[spans->count++] = span;
   return true;
 }
 
 static bool resident_validate_view_pointers(const pgaccel_resident_geometry_view& view,
-                                            sycl::queue& queue,
-                                            std::vector<SpatialResidentSpan>* spans) {
+                                            sycl::queue& queue, SpatialResidentSpans* spans) {
   if (view.abi_version != PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION || view.flags != 0 ||
       view.row_count == 0 || spans == nullptr ||
       view.row_count == std::numeric_limits<size_t>::max()) {
@@ -1546,10 +1580,20 @@ static bool resident_validate_operand_range(const pgaccel_resident_geometry_oper
 }
 
 static bool resident_output_does_not_overlap(const SpatialResidentSpan& output,
-                                             const std::vector<SpatialResidentSpan>& inputs) {
-  for (const SpatialResidentSpan& input : inputs) {
-    if (resident_spans_overlap(output, input))
+                                             const SpatialResidentSpans& inputs) {
+  for (size_t index = 0; index < inputs.count; ++index) {
+    if (resident_spans_overlap(output, inputs.values[index]))
       return false;
+  }
+  return true;
+}
+
+static bool resident_spans_are_pairwise_disjoint(const SpatialResidentSpans& spans) {
+  for (size_t left = 0; left < spans.count; ++left) {
+    for (size_t right = left + 1; right < spans.count; ++right) {
+      if (resident_spans_overlap(spans.values[left], spans.values[right]))
+        return false;
+    }
   }
   return true;
 }
@@ -1668,34 +1712,26 @@ resident_load_geometry(const pgaccel_resident_geometry_operand& operand, size_t 
 
 struct SpatialResidentKernelArgs {
   pgaccel_spatial_resident_request request;
-  size_t chunk_first;
-  uint32_t failure_flags;
 };
 
-class SpatialResidentArgsOwner {
- public:
-  SpatialResidentArgsOwner(sycl::queue& queue, SpatialResidentKernelArgs* args)
-      : queue_(queue), args_(args) {}
-  SpatialResidentArgsOwner(const SpatialResidentArgsOwner&) = delete;
-  SpatialResidentArgsOwner& operator=(const SpatialResidentArgsOwner&) = delete;
-  ~SpatialResidentArgsOwner() {
-    if (args_ != nullptr)
-      sycl::free(args_, queue_);
-  }
+static_assert(sizeof(SpatialResidentKernelArgs) == PGACCEL_SPATIAL_CONTROL_BYTES);
 
- private:
-  sycl::queue& queue_;
-  SpatialResidentKernelArgs* args_;
-};
-
-static void resident_record_failure(SpatialResidentKernelArgs* args, uint32_t failure) {
+static void resident_record_failure(uint32_t* failure_flags, uint32_t failure) {
   sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
                    sycl::access::address_space::global_space>
-      flags(args->failure_flags);
+      flags(*failure_flags);
   flags.fetch_or(failure);
 }
 
-static void resident_check_operand_budget(SpatialResidentKernelArgs* args, uint64_t bytes,
+static bool resident_has_failure(uint32_t* failure_flags) {
+  sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                   sycl::access::address_space::global_space>
+      flags(*failure_flags);
+  return flags.load() != 0;
+}
+
+static void resident_check_operand_budget(const SpatialResidentKernelArgs* args,
+                                          uint32_t* failure_flags, uint64_t bytes,
                                           bool left_operand, size_t row_stride) {
   /* Metal has no device atomic64 fetch-add. Split the cap into two operand
    * proofs instead: constants consume at most their half once, while every
@@ -1707,15 +1743,64 @@ static void resident_check_operand_budget(SpatialResidentKernelArgs* args, uint6
   if (row_stride != 0)
     operand_budget /= static_cast<uint64_t>(args->request.count);
   if (bytes > operand_budget)
-    resident_record_failure(args, SPATIAL_RESIDENT_FAILURE_BUDGET);
+    resident_record_failure(failure_flags, SPATIAL_RESIDENT_FAILURE_BUDGET);
+}
+
+static bool resident_validate_workspace(sycl::queue& queue,
+                                        const pgaccel_spatial_workspace* workspace,
+                                        const SpatialResidentSpans& protected_spans,
+                                        const SpatialResidentSpan* extra_spans,
+                                        size_t extra_span_count) {
+  if (workspace == nullptr || workspace->abi_version != PGACCEL_SPATIAL_WORKSPACE_ABI_VERSION ||
+      workspace->flags != 0 || workspace->control_bytes != PGACCEL_SPATIAL_CONTROL_BYTES ||
+      workspace->failure_flags_bytes != sizeof(uint32_t)) {
+    return false;
+  }
+  SpatialResidentSpan control{};
+  SpatialResidentSpan failure{};
+  if (!resident_validate_declared_span(queue, workspace->control, workspace->control_bytes,
+                                       PGACCEL_SPATIAL_CONTROL_BYTES, sizeof(uint8_t),
+                                       alignof(SpatialResidentKernelArgs), &control) ||
+      !resident_validate_declared_span(queue, workspace->failure_flags,
+                                       workspace->failure_flags_bytes, 1, sizeof(uint32_t),
+                                       alignof(uint32_t), &failure) ||
+      resident_spans_overlap(control, failure) ||
+      !resident_output_does_not_overlap(control, protected_spans) ||
+      !resident_output_does_not_overlap(failure, protected_spans)) {
+    return false;
+  }
+  if (extra_span_count != 0 && extra_spans == nullptr)
+    return false;
+  for (size_t index = 0; index < extra_span_count; ++index) {
+    if (resident_spans_overlap(control, extra_spans[index]) ||
+        resident_spans_overlap(failure, extra_spans[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename Request>
+static void resident_stage_control(sycl::queue& queue, const pgaccel_spatial_workspace& workspace,
+                                   const Request& request, bool begin_chain) {
+  static_assert(sizeof(Request) <= PGACCEL_SPATIAL_CONTROL_BYTES);
+  alignas(SpatialResidentKernelArgs) uint8_t control[PGACCEL_SPATIAL_CONTROL_BYTES]{};
+  const uint32_t zero = 0;
+  std::memcpy(control, &request, sizeof(request));
+  queue.memcpy(workspace.control, control, sizeof(control));
+  if (begin_chain)
+    queue.memcpy(workspace.failure_flags, &zero, sizeof(zero));
+  queue.wait_and_throw();
 }
 
 class SpatialResidentValidateKernel;
 class SpatialResidentEvaluateKernel;
+class SpatialResidentCompactKernel;
+class SpatialResidentPatchKernel;
 
-extern "C" pgaccel_status
-pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request,
-                                 int32_t* detail) try {
+static pgaccel_status
+resident_validate_request_contract(const pgaccel_spatial_resident_request* request,
+                                   int32_t* detail) {
   if (detail == nullptr)
     return PGACCEL_INVALID_ARGUMENT;
   *detail = PGACCEL_SPATIAL_DETAIL_NONE;
@@ -1723,6 +1808,7 @@ pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request
       request->flags != 0 || request->pad != 0 ||
       request->predicate < PGACCEL_SPATIAL_PREDICATE_INTERSECTS ||
       request->predicate > PGACCEL_SPATIAL_PREDICATE_DISTANCE ||
+      request->count > SPATIAL_RESIDENT_MAX_CHUNK_ROWS ||
       request->output_capacity < request->count) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
@@ -1733,8 +1819,7 @@ pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request
       (request->predicate != PGACCEL_SPATIAL_PREDICATE_DWITHIN &&
        request->distance_threshold != 0.0) ||
       (!distance_operation &&
-       (!resident_declared_span_shape(request->predicate_results,
-                                      request->predicate_results_bytes,
+       (!resident_declared_span_shape(request->predicate_results, request->predicate_results_bytes,
                                       request->output_capacity, sizeof(int8_t)) ||
         request->distances != nullptr || request->distances_bytes != 0 ||
         request->distance_uncertain != nullptr || request->distance_uncertain_bytes != 0)) ||
@@ -1743,8 +1828,8 @@ pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request
         !resident_declared_span_shape(request->distances, request->distances_bytes,
                                       request->output_capacity, sizeof(double)) ||
         !resident_declared_span_shape(request->distance_uncertain,
-                                      request->distance_uncertain_bytes,
-                                      request->output_capacity, sizeof(uint8_t))))) {
+                                      request->distance_uncertain_bytes, request->output_capacity,
+                                      sizeof(uint8_t))))) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
   }
@@ -1756,12 +1841,22 @@ pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request
     return PGACCEL_INVALID_ARGUMENT;
   }
 
+  return PGACCEL_OK;
+}
+
+extern "C" pgaccel_status
+pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* request,
+                                     const pgaccel_spatial_workspace* workspace,
+                                     int32_t* detail) try {
+  const pgaccel_status contract = resident_validate_request_contract(request, detail);
+  if (contract != PGACCEL_OK || request->count == 0)
+    return contract;
+
   sycl::queue* queue_pointer = pgaccel_get_queue();
   if (queue_pointer == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
   sycl::queue& queue = *queue_pointer;
-  std::vector<SpatialResidentSpan> input_spans;
-  input_spans.reserve(12);
+  SpatialResidentSpans input_spans{};
   if (!resident_validate_view_pointers(request->left.view, queue, &input_spans) ||
       !resident_validate_view_pointers(request->right.view, queue, &input_spans)) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
@@ -1771,148 +1866,140 @@ pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request
   SpatialResidentSpan predicate_span{};
   SpatialResidentSpan distance_span{};
   SpatialResidentSpan uncertain_span{};
+  SpatialResidentSpan output_spans[3]{};
+  size_t output_span_count = 0;
+  const bool distance_operation = request->predicate == PGACCEL_SPATIAL_PREDICATE_DISTANCE;
   if (!distance_operation) {
     if (!resident_validate_declared_span(queue, request->predicate_results,
-                                         request->predicate_results_bytes,
-                                         request->output_capacity, sizeof(int8_t), alignof(int8_t),
-                                         &predicate_span) ||
+                                         request->predicate_results_bytes, request->output_capacity,
+                                         sizeof(int8_t), alignof(int8_t), &predicate_span) ||
         !resident_output_does_not_overlap(predicate_span, input_spans)) {
       *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
       return PGACCEL_INVALID_ARGUMENT;
     }
-  } else if (!resident_validate_declared_span(queue, request->distances,
-                                               request->distances_bytes,
-                                               request->output_capacity, sizeof(double),
-                                               alignof(double), &distance_span) ||
-             !resident_validate_declared_span(queue, request->distance_uncertain,
-                                               request->distance_uncertain_bytes,
-                                               request->output_capacity, sizeof(uint8_t),
-                                               alignof(uint8_t), &uncertain_span) ||
+    output_spans[output_span_count++] = predicate_span;
+  } else if (!resident_validate_declared_span(queue, request->distances, request->distances_bytes,
+                                              request->output_capacity, sizeof(double),
+                                              alignof(double), &distance_span) ||
+             !resident_validate_declared_span(
+                 queue, request->distance_uncertain, request->distance_uncertain_bytes,
+                 request->output_capacity, sizeof(uint8_t), alignof(uint8_t), &uncertain_span) ||
              resident_spans_overlap(distance_span, uncertain_span) ||
              !resident_output_does_not_overlap(distance_span, input_spans) ||
              !resident_output_does_not_overlap(uncertain_span, input_spans)) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
+  } else {
+    output_spans[output_span_count++] = distance_span;
+    output_spans[output_span_count++] = uncertain_span;
   }
 
-  SpatialResidentKernelArgs* args = sycl::malloc_shared<SpatialResidentKernelArgs>(1, queue);
-  if (args == nullptr)
-    return PGACCEL_OOM;
-  SpatialResidentArgsOwner args_owner(queue, args);
-  args->request = *request;
-  args->chunk_first = 0;
-  args->failure_flags = 0;
-
-  for (size_t first = 0; first < request->count; first += SPATIAL_RESIDENT_MAX_CHUNK_ROWS) {
-    const size_t remaining = request->count - first;
-    const size_t chunk_count =
-        remaining < SPATIAL_RESIDENT_MAX_CHUNK_ROWS ? remaining : SPATIAL_RESIDENT_MAX_CHUNK_ROWS;
-    args->chunk_first = first;
-    queue
-        .parallel_for<SpatialResidentValidateKernel>(
-            sycl::range<1>(chunk_count),
-            [=](sycl::id<1> id) {
-              const size_t output_index = args->chunk_first + id[0];
-              uint64_t left_bytes = 0;
-              uint64_t right_bytes = 0;
-              uint32_t failure = 0;
-              if (args->request.left.row_stride != 0 || output_index == 0) {
-                const size_t left_index =
-                    args->request.left.first_row + output_index * args->request.left.row_stride;
-                failure |=
-                    resident_validate_geometry(args->request.left.view, left_index, &left_bytes);
-              }
-              if (args->request.right.row_stride != 0 || output_index == 0) {
-                const size_t right_index =
-                    args->request.right.first_row + output_index * args->request.right.row_stride;
-                failure |=
-                    resident_validate_geometry(args->request.right.view, right_index, &right_bytes);
-              }
-              if (output_index == 0 &&
-                  (args->request.left.view.geometry_offsets[0] != 0 ||
-                   args->request.left.view.geometry_offsets[args->request.left.view.row_count] !=
-                       args->request.left.view.coordinate_pair_count ||
-                   args->request.right.view.geometry_offsets[0] != 0 ||
-                   args->request.right.view.geometry_offsets[args->request.right.view.row_count] !=
-                       args->request.right.view.coordinate_pair_count)) {
-                failure |= SPATIAL_RESIDENT_FAILURE_GEOMETRY;
-              }
-              const size_t left_index =
-                  args->request.left.first_row + output_index * args->request.left.row_stride;
-              const size_t right_index =
-                  args->request.right.first_row + output_index * args->request.right.row_stride;
-              const uint8_t left_null = args->request.left.view.nulls == nullptr
-                                            ? 0
-                                            : args->request.left.view.nulls[left_index];
-              const uint8_t right_null = args->request.right.view.nulls == nullptr
-                                             ? 0
-                                             : args->request.right.view.nulls[right_index];
-              if (left_null == 0 && right_null == 0 &&
-                  args->request.left.view.rows[left_index].srid !=
-                      args->request.right.view.rows[right_index].srid) {
-                failure |= SPATIAL_RESIDENT_FAILURE_SRID;
-              }
-              if (failure != 0)
-                resident_record_failure(args, failure);
-              if (left_bytes != 0)
-                resident_check_operand_budget(args, left_bytes, true,
-                                              args->request.left.row_stride);
-              if (right_bytes != 0)
-                resident_check_operand_budget(args, right_bytes, false,
-                                              args->request.right.row_stride);
-            })
-        .wait_and_throw();
-  }
-
-  if (args->failure_flags != 0) {
-    pgaccel_record_gpu_exec();
-    if ((args->failure_flags & SPATIAL_RESIDENT_FAILURE_GEOMETRY) != 0)
-      *detail = PGACCEL_SPATIAL_DETAIL_GEOMETRY;
-    else if ((args->failure_flags & SPATIAL_RESIDENT_FAILURE_SRID) != 0)
-      *detail = PGACCEL_SPATIAL_DETAIL_SRID_MISMATCH;
-    else
-      *detail = PGACCEL_SPATIAL_DETAIL_BYTE_BUDGET;
+  if (!resident_validate_workspace(queue, workspace, input_spans, output_spans,
+                                   output_span_count)) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
   }
 
+  resident_stage_control(queue, *workspace, *request, true);
+  auto* args = reinterpret_cast<SpatialResidentKernelArgs*>(workspace->control);
+  uint32_t* failure_flags = workspace->failure_flags;
+
   for (size_t first = 0; first < request->count; first += SPATIAL_RESIDENT_MAX_CHUNK_ROWS) {
     const size_t remaining = request->count - first;
     const size_t chunk_count =
         remaining < SPATIAL_RESIDENT_MAX_CHUNK_ROWS ? remaining : SPATIAL_RESIDENT_MAX_CHUNK_ROWS;
-    args->chunk_first = first;
-    queue
-        .parallel_for<SpatialResidentEvaluateKernel>(
-            sycl::range<1>(chunk_count),
-            [=](sycl::id<1> id) {
-              const size_t output_index = args->chunk_first + id[0];
-              const SpatialResidentGeometry left =
-                  resident_load_geometry(args->request.left, output_index);
-              const SpatialResidentGeometry right =
-                  resident_load_geometry(args->request.right, output_index);
-              switch (args->request.predicate) {
-                case PGACCEL_SPATIAL_PREDICATE_INTERSECTS:
-                  args->request.predicate_results[output_index] = resident_intersects(left, right);
-                  break;
-                case PGACCEL_SPATIAL_PREDICATE_CONTAINS:
-                  args->request.predicate_results[output_index] = resident_contains(left, right);
-                  break;
-                case PGACCEL_SPATIAL_PREDICATE_WITHIN:
-                  args->request.predicate_results[output_index] = resident_contains(right, left);
-                  break;
-                case PGACCEL_SPATIAL_PREDICATE_DWITHIN:
-                  args->request.predicate_results[output_index] =
-                      resident_dwithin(left, right, args->request.distance_threshold);
-                  break;
-                case PGACCEL_SPATIAL_PREDICATE_DISTANCE: {
-                  const SpatialResidentDistance distance = resident_distance(left, right);
-                  args->request.distances[output_index] = distance.value;
-                  args->request.distance_uncertain[output_index] = distance.uncertain;
-                  break;
-                }
-              }
-            })
-        .wait_and_throw();
+    queue.parallel_for<SpatialResidentValidateKernel>(
+        sycl::range<1>(chunk_count), [=](sycl::id<1> id) {
+          const size_t output_index = first + id[0];
+          uint64_t left_bytes = 0;
+          uint64_t right_bytes = 0;
+          uint32_t failure = 0;
+          if (args->request.left.row_stride != 0 || output_index == 0) {
+            const size_t left_index =
+                args->request.left.first_row + output_index * args->request.left.row_stride;
+            failure |= resident_validate_geometry(args->request.left.view, left_index, &left_bytes);
+          }
+          if (args->request.right.row_stride != 0 || output_index == 0) {
+            const size_t right_index =
+                args->request.right.first_row + output_index * args->request.right.row_stride;
+            failure |=
+                resident_validate_geometry(args->request.right.view, right_index, &right_bytes);
+          }
+          if (output_index == 0 &&
+              (args->request.left.view.geometry_offsets[0] != 0 ||
+               args->request.left.view.geometry_offsets[args->request.left.view.row_count] !=
+                   args->request.left.view.coordinate_pair_count ||
+               args->request.right.view.geometry_offsets[0] != 0 ||
+               args->request.right.view.geometry_offsets[args->request.right.view.row_count] !=
+                   args->request.right.view.coordinate_pair_count)) {
+            failure |= SPATIAL_RESIDENT_FAILURE_GEOMETRY;
+          }
+          const size_t left_index =
+              args->request.left.first_row + output_index * args->request.left.row_stride;
+          const size_t right_index =
+              args->request.right.first_row + output_index * args->request.right.row_stride;
+          const uint8_t left_null = args->request.left.view.nulls == nullptr
+                                        ? 0
+                                        : args->request.left.view.nulls[left_index];
+          const uint8_t right_null = args->request.right.view.nulls == nullptr
+                                         ? 0
+                                         : args->request.right.view.nulls[right_index];
+          if (left_null == 0 && right_null == 0 &&
+              args->request.left.view.rows[left_index].srid !=
+                  args->request.right.view.rows[right_index].srid) {
+            failure |= SPATIAL_RESIDENT_FAILURE_SRID;
+          }
+          if (failure != 0)
+            resident_record_failure(failure_flags, failure);
+          if (left_bytes != 0)
+            resident_check_operand_budget(args, failure_flags, left_bytes, true,
+                                          args->request.left.row_stride);
+          if (right_bytes != 0)
+            resident_check_operand_budget(args, failure_flags, right_bytes, false,
+                                          args->request.right.row_stride);
+        });
   }
+
+  /* g_queue is in-order: every validation chunk completes before any
+   * evaluation chunk. Each evaluation item checks the shared failure word,
+   * so a failure anywhere suppresses every output write. */
+  for (size_t first = 0; first < request->count; first += SPATIAL_RESIDENT_MAX_CHUNK_ROWS) {
+    const size_t remaining = request->count - first;
+    const size_t chunk_count =
+        remaining < SPATIAL_RESIDENT_MAX_CHUNK_ROWS ? remaining : SPATIAL_RESIDENT_MAX_CHUNK_ROWS;
+    queue.parallel_for<SpatialResidentEvaluateKernel>(
+        sycl::range<1>(chunk_count), [=](sycl::id<1> id) {
+          if (resident_has_failure(failure_flags))
+            return;
+          const size_t output_index = first + id[0];
+          const SpatialResidentGeometry left =
+              resident_load_geometry(args->request.left, output_index);
+          const SpatialResidentGeometry right =
+              resident_load_geometry(args->request.right, output_index);
+          switch (args->request.predicate) {
+            case PGACCEL_SPATIAL_PREDICATE_INTERSECTS:
+              args->request.predicate_results[output_index] = resident_intersects(left, right);
+              break;
+            case PGACCEL_SPATIAL_PREDICATE_CONTAINS:
+              args->request.predicate_results[output_index] = resident_contains(left, right);
+              break;
+            case PGACCEL_SPATIAL_PREDICATE_WITHIN:
+              args->request.predicate_results[output_index] = resident_contains(right, left);
+              break;
+            case PGACCEL_SPATIAL_PREDICATE_DWITHIN:
+              args->request.predicate_results[output_index] =
+                  resident_dwithin(left, right, args->request.distance_threshold);
+              break;
+            case PGACCEL_SPATIAL_PREDICATE_DISTANCE: {
+              const SpatialResidentDistance distance = resident_distance(left, right);
+              args->request.distances[output_index] = distance.value;
+              args->request.distance_uncertain[output_index] = distance.uncertain;
+              break;
+            }
+          }
+        });
+  }
+  queue.wait_and_throw();
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 } catch (const std::bad_alloc&) {
@@ -1920,9 +2007,220 @@ pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& error) {
-  return pgaccel_kernel_failure("pgaccel_spatial_eval_resident_ex", &error);
+  return pgaccel_kernel_failure("pgaccel_spatial_eval_resident_launch", &error);
 } catch (...) {
-  return pgaccel_kernel_failure("pgaccel_spatial_eval_resident_ex", nullptr);
+  return pgaccel_kernel_failure("pgaccel_spatial_eval_resident_launch", nullptr);
+}
+
+extern "C" pgaccel_status
+pgaccel_spatial_workspace_finish(const pgaccel_spatial_workspace* workspace, int32_t* detail) try {
+  if (detail == nullptr)
+    return PGACCEL_INVALID_ARGUMENT;
+  *detail = PGACCEL_SPATIAL_DETAIL_NONE;
+  sycl::queue* queue_pointer = pgaccel_get_queue();
+  if (queue_pointer == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  SpatialResidentSpans no_spans{};
+  if (!resident_validate_workspace(*queue_pointer, workspace, no_spans, nullptr, 0)) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+  uint32_t failure_flags = 0;
+  pgaccel_d2h(*queue_pointer, &failure_flags, workspace->failure_flags, 1);
+  if (failure_flags == 0)
+    return PGACCEL_OK;
+  if ((failure_flags & ~SPATIAL_RESIDENT_FAILURE_MASK) != 0) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+  } else if ((failure_flags & SPATIAL_RESIDENT_FAILURE_GEOMETRY) != 0) {
+    *detail = PGACCEL_SPATIAL_DETAIL_GEOMETRY;
+  } else if ((failure_flags & SPATIAL_RESIDENT_FAILURE_SRID) != 0) {
+    *detail = PGACCEL_SPATIAL_DETAIL_SRID_MISMATCH;
+  } else if ((failure_flags & SPATIAL_RESIDENT_FAILURE_BUDGET) != 0) {
+    *detail = PGACCEL_SPATIAL_DETAIL_BYTE_BUDGET;
+  } else if ((failure_flags & SPATIAL_RESIDENT_FAILURE_TRISTATE) != 0) {
+    *detail = PGACCEL_SPATIAL_DETAIL_TRISTATE;
+  } else if ((failure_flags & SPATIAL_RESIDENT_FAILURE_RECHECK_INDEX) != 0) {
+    *detail = PGACCEL_SPATIAL_DETAIL_RECHECK_INDEX;
+  } else {
+    *detail = PGACCEL_SPATIAL_DETAIL_RECHECK_PATCH;
+  }
+  return PGACCEL_INVALID_ARGUMENT;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& error) {
+  return pgaccel_kernel_failure("pgaccel_spatial_workspace_finish", &error);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_spatial_workspace_finish", nullptr);
+}
+
+extern "C" pgaccel_status
+pgaccel_spatial_recheck_compact_launch(const pgaccel_spatial_recheck_compact_request* request,
+                                       const pgaccel_spatial_workspace* workspace,
+                                       int32_t* detail) try {
+  if (detail == nullptr)
+    return PGACCEL_INVALID_ARGUMENT;
+  *detail = PGACCEL_SPATIAL_DETAIL_NONE;
+  if (request == nullptr || request->abi_version != PGACCEL_SPATIAL_RECHECK_ABI_VERSION ||
+      request->flags != 0 || request->row_count > SPATIAL_RESIDENT_MAX_CHUNK_ROWS ||
+      request->uncertain_capacity != request->row_count) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+  if (request->row_count == 0) {
+    if (request->tri_state != nullptr || request->tri_state_bytes != 0 ||
+        request->final_mask != nullptr || request->final_mask_bytes != 0 ||
+        request->uncertain_indices != nullptr || request->uncertain_indices_bytes != 0 ||
+        request->uncertain_count != nullptr || request->uncertain_count_bytes != 0 ||
+        request->uncertain_capacity != 0) {
+      *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+      return PGACCEL_INVALID_ARGUMENT;
+    }
+    return PGACCEL_OK;
+  }
+  sycl::queue* queue_pointer = pgaccel_get_queue();
+  if (queue_pointer == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  sycl::queue& queue = *queue_pointer;
+  SpatialResidentSpans spans{};
+  if (!resident_add_exact_span(queue, request->tri_state, request->tri_state_bytes,
+                               request->row_count, sizeof(int8_t), alignof(int8_t), &spans) ||
+      !resident_add_exact_span(queue, request->final_mask, request->final_mask_bytes,
+                               request->row_count, sizeof(int8_t), alignof(int8_t), &spans) ||
+      !resident_add_exact_span(queue, request->uncertain_indices, request->uncertain_indices_bytes,
+                               request->uncertain_capacity, sizeof(uint64_t), alignof(uint64_t),
+                               &spans) ||
+      !resident_add_exact_span(queue, request->uncertain_count, request->uncertain_count_bytes, 1,
+                               sizeof(uint64_t), alignof(uint64_t), &spans) ||
+      !resident_spans_are_pairwise_disjoint(spans) ||
+      !resident_validate_workspace(queue, workspace, spans, nullptr, 0)) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+  /* Compaction is the second half of the evaluation chain. Preserve a sticky
+   * evaluation failure so malformed input cannot be hidden by the helper. */
+  resident_stage_control(queue, *workspace, *request, false);
+  const auto* args =
+      reinterpret_cast<const pgaccel_spatial_recheck_compact_request*>(workspace->control);
+  uint32_t* failure_flags = workspace->failure_flags;
+  queue.single_task<SpatialResidentCompactKernel>([=]() {
+    if (resident_has_failure(failure_flags))
+      return;
+    for (size_t row = 0; row < args->row_count; ++row) {
+      const int8_t value = args->tri_state[row];
+      if (value != -1 && value != 0 && value != 1) {
+        resident_record_failure(failure_flags, SPATIAL_RESIDENT_FAILURE_TRISTATE);
+        return;
+      }
+    }
+    uint64_t uncertain_count = 0;
+    for (size_t row = 0; row < args->row_count; ++row) {
+      const int8_t value = args->tri_state[row];
+      args->final_mask[row] = value == 1 ? 1 : -1;
+      if (value == 0)
+        args->uncertain_indices[uncertain_count++] = static_cast<uint64_t>(row);
+    }
+    *args->uncertain_count = uncertain_count;
+  });
+  queue.wait_and_throw();
+  pgaccel_record_gpu_exec();
+  return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& error) {
+  return pgaccel_kernel_failure("pgaccel_spatial_recheck_compact_launch", &error);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_spatial_recheck_compact_launch", nullptr);
+}
+
+extern "C" pgaccel_status
+pgaccel_spatial_recheck_patch_launch(const pgaccel_spatial_recheck_patch_request* request,
+                                     const pgaccel_spatial_workspace* workspace,
+                                     int32_t* detail) try {
+  if (detail == nullptr)
+    return PGACCEL_INVALID_ARGUMENT;
+  *detail = PGACCEL_SPATIAL_DETAIL_NONE;
+  if (request == nullptr || request->abi_version != PGACCEL_SPATIAL_RECHECK_ABI_VERSION ||
+      request->flags != 0 || request->row_count > SPATIAL_RESIDENT_MAX_CHUNK_ROWS ||
+      request->patch_count > request->row_count ||
+      request->patch_count > SPATIAL_RESIDENT_MAX_CHUNK_ROWS) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+  if (request->row_count == 0 || request->patch_count == 0) {
+    if (request->row_count == 0 && (request->indices != nullptr || request->indices_bytes != 0 ||
+                                    request->results != nullptr || request->results_bytes != 0 ||
+                                    request->final_mask != nullptr ||
+                                    request->final_mask_bytes != 0 || request->patch_count != 0)) {
+      *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+      return PGACCEL_INVALID_ARGUMENT;
+    }
+    return PGACCEL_OK;
+  }
+  sycl::queue* queue_pointer = pgaccel_get_queue();
+  if (queue_pointer == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  sycl::queue& queue = *queue_pointer;
+  SpatialResidentSpans spans{};
+  if (!resident_add_exact_span(queue, request->indices, request->indices_bytes,
+                               request->patch_count, sizeof(uint64_t), alignof(uint64_t), &spans) ||
+      !resident_add_exact_span(queue, request->results, request->results_bytes,
+                               request->patch_count, sizeof(int8_t), alignof(int8_t), &spans) ||
+      !resident_add_exact_span(queue, request->final_mask, request->final_mask_bytes,
+                               request->row_count, sizeof(int8_t), alignof(int8_t), &spans) ||
+      !resident_spans_are_pairwise_disjoint(spans) ||
+      !resident_validate_workspace(queue, workspace, spans, nullptr, 0)) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+  resident_stage_control(queue, *workspace, *request, true);
+  const auto* args =
+      reinterpret_cast<const pgaccel_spatial_recheck_patch_request*>(workspace->control);
+  uint32_t* failure_flags = workspace->failure_flags;
+  queue.single_task<SpatialResidentPatchKernel>([=]() {
+    if (resident_has_failure(failure_flags))
+      return;
+    uint64_t previous = 0;
+    for (size_t patch = 0; patch < args->patch_count; ++patch) {
+      const uint64_t index = args->indices[patch];
+      if (index >= args->row_count || (patch != 0 && index <= previous)) {
+        resident_record_failure(failure_flags, SPATIAL_RESIDENT_FAILURE_RECHECK_INDEX);
+        return;
+      }
+      const int8_t value = args->results[patch];
+      if (value != -1 && value != 1) {
+        resident_record_failure(failure_flags, SPATIAL_RESIDENT_FAILURE_RECHECK_PATCH);
+        return;
+      }
+      previous = index;
+    }
+    for (size_t patch = 0; patch < args->patch_count; ++patch)
+      args->final_mask[args->indices[patch]] = args->results[patch];
+  });
+  queue.wait_and_throw();
+  pgaccel_record_gpu_exec();
+  return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::exception& error) {
+  return pgaccel_kernel_failure("pgaccel_spatial_recheck_patch_launch", &error);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_spatial_recheck_patch_launch", nullptr);
+}
+
+extern "C" pgaccel_status
+pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request, int32_t* detail) {
+  if (detail == nullptr)
+    return PGACCEL_INVALID_ARGUMENT;
+  *detail = PGACCEL_SPATIAL_DETAIL_NONE;
+  if (request == nullptr) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+  if (request->count != 0) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+    return PGACCEL_UNSUPPORTED;
+  }
+  return resident_validate_request_contract(request, detail);
 }
 
 extern "C" pgaccel_status pgaccel_spatial_intersects_pairwise(const pgaccel_geometry* geoms_a,

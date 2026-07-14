@@ -573,6 +573,9 @@ typedef enum {
   PGACCEL_SPATIAL_DETAIL_GEOMETRY = 2,
   PGACCEL_SPATIAL_DETAIL_SRID_MISMATCH = 3,
   PGACCEL_SPATIAL_DETAIL_BYTE_BUDGET = 4,
+  PGACCEL_SPATIAL_DETAIL_TRISTATE = 5,
+  PGACCEL_SPATIAL_DETAIL_RECHECK_INDEX = 6,
+  PGACCEL_SPATIAL_DETAIL_RECHECK_PATCH = 7,
 } pgaccel_spatial_detail;
 
 typedef struct {
@@ -585,14 +588,61 @@ typedef struct {
   size_t max_referenced_bytes; /* defensive per-call geometry work cap */
   pgaccel_resident_geometry_operand left;
   pgaccel_resident_geometry_operand right;
-  int8_t* predicate_results;        /* device [output_capacity], boolean predicates */
-  size_t predicate_results_bytes;   /* writable bytes from predicate_results */
-  double* distances;                /* device [output_capacity], Distance only */
-  size_t distances_bytes;           /* writable bytes from distances */
-  uint8_t* distance_uncertain;      /* device [output_capacity], Distance only */
-  size_t distance_uncertain_bytes;  /* writable bytes from distance_uncertain */
+  int8_t* predicate_results;       /* device [output_capacity], boolean predicates */
+  size_t predicate_results_bytes;  /* writable bytes from predicate_results */
+  double* distances;               /* device [output_capacity], Distance only */
+  size_t distances_bytes;          /* writable bytes from distances */
+  uint8_t* distance_uncertain;     /* device [output_capacity], Distance only */
+  size_t distance_uncertain_bytes; /* writable bytes from distance_uncertain */
   size_t output_capacity;
 } pgaccel_spatial_resident_request;
+
+/* Caller-owned device scratch shared by the resident evaluation and exact
+ * recheck helpers. `control_bytes` and `failure_flags_bytes` are exact spans,
+ * not capacities or upper bounds. Launch functions only copy control metadata
+ * H2D and execute device work; the finish function performs the sole D2H
+ * status read after resident input borrows have been released. */
+#define PGACCEL_SPATIAL_WORKSPACE_ABI_VERSION 1u
+#define PGACCEL_SPATIAL_RECHECK_ABI_VERSION 1u
+#define PGACCEL_SPATIAL_CONTROL_BYTES 384u
+#define PGACCEL_SPATIAL_MAX_CHUNK_ROWS 65536u
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  uint8_t* control;
+  size_t control_bytes;
+  uint32_t* failure_flags;
+  size_t failure_flags_bytes;
+} pgaccel_spatial_workspace;
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  const int8_t* tri_state; /* device [row_count], exactly {-1,0,+1} */
+  size_t tri_state_bytes;
+  int8_t* final_mask; /* device [row_count], SQL {-1,+1} */
+  size_t final_mask_bytes;
+  uint64_t* uncertain_indices; /* device [uncertain_capacity] */
+  size_t uncertain_indices_bytes;
+  uint64_t* uncertain_count; /* device scalar */
+  size_t uncertain_count_bytes;
+  size_t row_count;
+  size_t uncertain_capacity;
+} pgaccel_spatial_recheck_compact_request;
+
+typedef struct {
+  uint32_t abi_version;
+  uint32_t flags;
+  const uint64_t* indices; /* device [patch_count], strictly increasing */
+  size_t indices_bytes;
+  const int8_t* results; /* device [patch_count], exactly {-1,+1} */
+  size_t results_bytes;
+  int8_t* final_mask; /* device [row_count] */
+  size_t final_mask_bytes;
+  size_t row_count;
+  size_t patch_count;
+} pgaccel_spatial_recheck_patch_request;
 
 /* Evaluate one resident column/column or column/constant spatial operation.
  * Successful boolean rows write exactly {-1,0,+1}; zero is reserved for a
@@ -601,7 +651,31 @@ typedef struct {
  * Distance uses its dedicated fp64 output and uncertainty sidecar. Descriptor,
  * pointer, geometry-shape, SRID, byte-budget, device, allocation, and runtime
  * failures are hard non-OK statuses and never synthesize UNCERTAIN rows. */
+/* Legacy synchronous entry point retained for link compatibility. Non-empty
+ * requests return PGACCEL_UNSUPPORTED without dispatch or output writes. */
 pgaccel_status pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request,
+                                                int32_t* detail);
+
+/* Evaluation begins a launch chain and clears failure_flags. Compaction must
+ * immediately follow evaluation on the same workspace: it preserves a sticky
+ * evaluation failure and performs no writes when that failure is set. Call
+ * workspace_finish after compaction and after releasing resident borrows.
+ * Patching begins a separate chain after that finish and clears failure_flags;
+ * call workspace_finish again after patching. Every non-empty launch is
+ * limited to PGACCEL_SPATIAL_MAX_CHUNK_ROWS rows. */
+pgaccel_status pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* request,
+                                                    const pgaccel_spatial_workspace* workspace,
+                                                    int32_t* detail);
+
+pgaccel_status
+pgaccel_spatial_recheck_compact_launch(const pgaccel_spatial_recheck_compact_request* request,
+                                       const pgaccel_spatial_workspace* workspace, int32_t* detail);
+
+pgaccel_status
+pgaccel_spatial_recheck_patch_launch(const pgaccel_spatial_recheck_patch_request* request,
+                                     const pgaccel_spatial_workspace* workspace, int32_t* detail);
+
+pgaccel_status pgaccel_spatial_workspace_finish(const pgaccel_spatial_workspace* workspace,
                                                 int32_t* detail);
 
 /* Deprecated cross-product ABI retained for link compatibility. Non-empty
@@ -1031,12 +1105,52 @@ PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, max_referenc
 PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, left) == 40);
 PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, right) == 184);
 PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, predicate_results) == 328);
-PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, predicate_results_bytes) == 336);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, predicate_results_bytes) ==
+                         336);
 PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distances) == 344);
 PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distances_bytes) == 352);
 PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distance_uncertain) == 360);
-PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distance_uncertain_bytes) == 368);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distance_uncertain_bytes) ==
+                         368);
 PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, output_capacity) == 376);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_spatial_workspace) == 40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, control) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, control_bytes) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, failure_flags) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_workspace, failure_flags_bytes) == 32);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_spatial_recheck_compact_request) == 88);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, tri_state) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, tri_state_bytes) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, final_mask) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, final_mask_bytes) == 32);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, uncertain_indices) ==
+                         40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request,
+                                  uncertain_indices_bytes) == 48);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, uncertain_count) == 56);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, uncertain_count_bytes) ==
+                         64);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, row_count) == 72);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_compact_request, uncertain_capacity) ==
+                         80);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_spatial_recheck_patch_request) == 72);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, indices) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, indices_bytes) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, results) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, results_bytes) == 32);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, final_mask) == 40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, final_mask_bytes) == 48);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, row_count) == 56);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_recheck_patch_request, patch_count) == 64);
 
 #undef PGACCEL_RESIDENT_ABI_PIN
 
