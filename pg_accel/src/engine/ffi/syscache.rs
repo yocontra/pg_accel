@@ -231,10 +231,13 @@ pub unsafe fn type_oid_in_schema(schema: &str, type_name: &str) -> Option<pg_sys
 const H3_EXTENSION_NAME: &str = "h3";
 const H3_TYPE_NAME: &str = "h3index";
 const H3_PARENT_FUNCTION_NAME: &str = "h3_cell_to_parent";
+const H3_EQUALITY_FUNCTION_NAME: &str = "h3index_eq";
+const H3_EQUALITY_OPERATOR_NAME: &str = "=";
 const H3_LANGUAGE_NAME: &str = "c";
 // h3-pg declares `AS 'h3'`; PostgreSQL stores that C library token verbatim.
 const H3_LIBRARY_NAME: &str = "h3";
-const H3_FINGERPRINT_VERSION: u32 = 2;
+const PG_OPERATOR_KIND_BINARY: u8 = b'b';
+const H3_FINGERPRINT_VERSION: u32 = 3;
 
 /// Exact catalog identity accepted by the H3 acceleration path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +246,8 @@ pub struct H3CatalogIdentity {
     pub schema_oid: pg_sys::Oid,
     pub type_oid: pg_sys::Oid,
     pub parent_fn_oid: pg_sys::Oid,
+    pub equality_op_oid: pg_sys::Oid,
+    pub equality_fn_oid: pg_sys::Oid,
     pub fingerprint_words: Vec<i32>,
 }
 
@@ -288,6 +293,24 @@ struct H3FunctionShape {
     argument_types: Vec<pg_sys::Oid>,
     source: String,
     binary: Option<String>,
+    tuple_xmin: u32,
+    tuple_block: u32,
+    tuple_offset: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct H3OperatorShape {
+    operator_oid: pg_sys::Oid,
+    name: String,
+    schema_oid: pg_sys::Oid,
+    kind: u8,
+    can_merge: bool,
+    can_hash: bool,
+    left_type: pg_sys::Oid,
+    right_type: pg_sys::Oid,
+    result_type: pg_sys::Oid,
+    commutator_oid: pg_sys::Oid,
+    function_oid: pg_sys::Oid,
     tuple_xmin: u32,
     tuple_block: u32,
     tuple_offset: u16,
@@ -368,52 +391,117 @@ fn validate_h3_type_shape(shape: &H3TypeShape, schema_oid: pg_sys::Oid) -> Resul
     Ok(())
 }
 
+fn validate_h3_c_function_shape(
+    shape: &H3FunctionShape,
+    schema_oid: pg_sys::Oid,
+    expected_name: &str,
+    expected_arguments: &[pg_sys::Oid],
+    expected_return_type: pg_sys::Oid,
+) -> Result<(), String> {
+    if shape.name != expected_name || shape.schema_oid != schema_oid {
+        return Err(format!(
+            "function OID {} is not extension-schema {expected_name}",
+            u32::from(shape.fn_oid),
+        ));
+    }
+    if shape.kind != pg_sys::PROKIND_FUNCTION {
+        return Err(format!("H3 {expected_name} must be an ordinary function"));
+    }
+    if shape.language_name != H3_LANGUAGE_NAME {
+        return Err(format!("H3 {expected_name} must use the C language"));
+    }
+    if shape.source != expected_name || shape.binary.as_deref() != Some(H3_LIBRARY_NAME) {
+        return Err(format!(
+            "H3 {expected_name} must use canonical C symbol {expected_name} from library h3"
+        ));
+    }
+    if shape.argument_types != expected_arguments || shape.return_type != expected_return_type {
+        return Err(format!("H3 {expected_name} has a noncanonical signature"));
+    }
+    if shape.argument_defaults != 0 {
+        return Err(format!(
+            "H3 {expected_name} must not declare argument defaults"
+        ));
+    }
+    if shape.security_definer {
+        return Err(format!("H3 {expected_name} must not be security definer"));
+    }
+    if shape.support_function != pg_sys::InvalidOid {
+        return Err(format!(
+            "H3 {expected_name} must not declare a planner support function"
+        ));
+    }
+    if shape.variadic_type != pg_sys::InvalidOid || shape.returns_set {
+        return Err(format!("H3 {expected_name} must be scalar and nonvariadic"));
+    }
+    if !shape.strict {
+        return Err(format!("H3 {expected_name} must be strict"));
+    }
+    if shape.volatility != pg_sys::PROVOLATILE_IMMUTABLE {
+        return Err(format!("H3 {expected_name} must be immutable"));
+    }
+    if shape.parallel != pg_sys::PROPARALLEL_SAFE {
+        return Err(format!("H3 {expected_name} must be parallel safe"));
+    }
+    Ok(())
+}
+
 fn validate_h3_function_shape(
     shape: &H3FunctionShape,
     schema_oid: pg_sys::Oid,
     type_oid: pg_sys::Oid,
 ) -> Result<(), String> {
-    if shape.name != H3_PARENT_FUNCTION_NAME || shape.schema_oid != schema_oid {
+    validate_h3_c_function_shape(
+        shape,
+        schema_oid,
+        H3_PARENT_FUNCTION_NAME,
+        &[type_oid, pg_sys::INT4OID],
+        type_oid,
+    )
+}
+
+fn validate_h3_equality_function_shape(
+    shape: &H3FunctionShape,
+    schema_oid: pg_sys::Oid,
+    type_oid: pg_sys::Oid,
+) -> Result<(), String> {
+    validate_h3_c_function_shape(
+        shape,
+        schema_oid,
+        H3_EQUALITY_FUNCTION_NAME,
+        &[type_oid, type_oid],
+        pg_sys::BOOLOID,
+    )
+}
+
+fn validate_h3_equality_operator_shape(
+    shape: &H3OperatorShape,
+    schema_oid: pg_sys::Oid,
+    type_oid: pg_sys::Oid,
+) -> Result<(), String> {
+    if shape.name != H3_EQUALITY_OPERATOR_NAME || shape.schema_oid != schema_oid {
         return Err(format!(
-            "function OID {} is not extension-schema {H3_PARENT_FUNCTION_NAME}",
-            u32::from(shape.fn_oid)
+            "operator OID {} is not the extension-schema H3 equality operator",
+            u32::from(shape.operator_oid)
         ));
     }
-    if shape.kind != pg_sys::PROKIND_FUNCTION {
-        return Err("H3 parent catalog object must be an ordinary function".to_owned());
-    }
-    if shape.language_name != H3_LANGUAGE_NAME {
-        return Err("H3 parent function must use the C language".to_owned());
-    }
-    if shape.source != H3_PARENT_FUNCTION_NAME || shape.binary.as_deref() != Some(H3_LIBRARY_NAME) {
+    if shape.kind != PG_OPERATOR_KIND_BINARY
+        || shape.left_type != type_oid
+        || shape.right_type != type_oid
+        || shape.result_type != pg_sys::BOOLOID
+    {
         return Err(
-            "H3 parent function must use canonical C symbol h3_cell_to_parent from library h3"
-                .to_owned(),
+            "H3 equality operator must have signature (h3index, h3index) -> bool".to_owned(),
         );
     }
-    if shape.argument_types != [type_oid, pg_sys::INT4OID] || shape.return_type != type_oid {
-        return Err("H3 parent function must have signature (h3index, int4) -> h3index".to_owned());
+    if !shape.can_hash || !shape.can_merge {
+        return Err("H3 equality operator must be hashable and mergeable".to_owned());
     }
-    if shape.argument_defaults != 0 {
-        return Err("H3 parent function must not declare argument defaults".to_owned());
+    if shape.commutator_oid != shape.operator_oid {
+        return Err("H3 equality operator must be its own commutator".to_owned());
     }
-    if shape.security_definer {
-        return Err("H3 parent function must not be security definer".to_owned());
-    }
-    if shape.support_function != pg_sys::InvalidOid {
-        return Err("H3 parent function must not declare a planner support function".to_owned());
-    }
-    if shape.variadic_type != pg_sys::InvalidOid || shape.returns_set {
-        return Err("H3 parent function must be scalar and nonvariadic".to_owned());
-    }
-    if !shape.strict {
-        return Err("H3 parent function must be strict".to_owned());
-    }
-    if shape.volatility != pg_sys::PROVOLATILE_IMMUTABLE {
-        return Err("H3 parent function must be immutable".to_owned());
-    }
-    if shape.parallel != pg_sys::PROPARALLEL_SAFE {
-        return Err("H3 parent function must be parallel safe".to_owned());
+    if shape.function_oid == pg_sys::InvalidOid {
+        return Err("H3 equality operator has no implementation function".to_owned());
     }
     Ok(())
 }
@@ -462,6 +550,27 @@ fn function_fingerprint(shape: &H3FunctionShape) -> Vec<i32> {
     ];
     words.extend(shape.argument_types.iter().copied().map(oid_word));
     words
+}
+
+fn operator_fingerprint(shape: &H3OperatorShape) -> Vec<i32> {
+    let [name_hash_low, name_hash_high] = u64_words(fnv1a64(&[shape.name.as_bytes()]));
+    vec![
+        oid_word(shape.operator_oid),
+        oid_word(shape.schema_oid),
+        u32_word(shape.tuple_xmin),
+        u32_word(shape.tuple_block),
+        i32::from(shape.tuple_offset),
+        i32::from(shape.kind),
+        i32::from(shape.can_merge),
+        i32::from(shape.can_hash),
+        oid_word(shape.left_type),
+        oid_word(shape.right_type),
+        oid_word(shape.result_type),
+        oid_word(shape.commutator_oid),
+        oid_word(shape.function_oid),
+        name_hash_low,
+        name_hash_high,
+    ]
 }
 
 unsafe fn extension_identity() -> Result<(pg_sys::Oid, pg_sys::Oid), String> {
@@ -615,6 +724,71 @@ unsafe fn find_h3_parent_function(
     Ok(fn_oid)
 }
 
+unsafe fn default_h3_equality_operator(type_oid: pg_sys::Oid) -> Result<pg_sys::Oid, String> {
+    let entry = unsafe {
+        pg_sys::lookup_type_cache(type_oid, pg_sys::TYPECACHE_EQ_OPR as ::core::ffi::c_int)
+    };
+    if entry.is_null() || unsafe { (*entry).type_id } != type_oid {
+        return Err(format!(
+            "type cache has no entry for H3 type OID {}",
+            u32::from(type_oid)
+        ));
+    }
+    let equality_op_oid = unsafe { (*entry).eq_opr };
+    if equality_op_oid == pg_sys::InvalidOid {
+        return Err(format!(
+            "H3 type OID {} has no default equality operator",
+            u32::from(type_oid)
+        ));
+    }
+    Ok(equality_op_oid)
+}
+
+unsafe fn read_h3_operator_shape(operator_oid: pg_sys::Oid) -> Result<H3OperatorShape, String> {
+    let tuple = unsafe {
+        pg_sys::SearchSysCache1(
+            pg_sys::SysCacheIdentifier::OPEROID as ::core::ffi::c_int,
+            pg_sys::ObjectIdGetDatum(operator_oid),
+        )
+    };
+    if tuple.is_null() {
+        return Err(format!(
+            "operator OID {} does not exist",
+            u32::from(operator_oid)
+        ));
+    }
+    let result = (|| unsafe {
+        let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_operator>();
+        let name = std::ffi::CStr::from_ptr((*form).oprname.data.as_ptr())
+            .to_str()
+            .map_err(|_| {
+                format!(
+                    "operator OID {} has an invalid name",
+                    u32::from(operator_oid)
+                )
+            })?
+            .to_owned();
+        Ok(H3OperatorShape {
+            operator_oid: (*form).oid,
+            name,
+            schema_oid: (*form).oprnamespace,
+            kind: (*form).oprkind as u8,
+            can_merge: (*form).oprcanmerge,
+            can_hash: (*form).oprcanhash,
+            left_type: (*form).oprleft,
+            right_type: (*form).oprright,
+            result_type: (*form).oprresult,
+            commutator_oid: (*form).oprcom,
+            function_oid: (*form).oprcode,
+            tuple_xmin: pg_sys::htup::HeapTupleHeaderGetRawXmin((*tuple).t_data).into(),
+            tuple_block: pg_sys::ItemPointerGetBlockNumber(&raw const (*tuple).t_self),
+            tuple_offset: pg_sys::ItemPointerGetOffsetNumber(&raw const (*tuple).t_self),
+        })
+    })();
+    unsafe { pg_sys::ReleaseSysCache(tuple) };
+    result
+}
+
 unsafe fn proc_text_attr(tuple: pg_sys::HeapTuple, attnum: i16) -> Result<Option<String>, String> {
     let mut isnull = false;
     let datum = unsafe {
@@ -730,6 +904,39 @@ pub unsafe fn validate_h3_parent_function(
     Ok(function_fingerprint(&shape))
 }
 
+unsafe fn resolve_h3_equality_catalog(
+    type_proof: &H3TypeProof,
+) -> Result<(H3OperatorShape, H3FunctionShape), String> {
+    let type_oid = type_proof.shape.type_oid;
+    let equality_op_oid = unsafe { default_h3_equality_operator(type_oid)? };
+    let operator = unsafe { read_h3_operator_shape(equality_op_oid)? };
+    validate_h3_equality_operator_shape(&operator, type_proof.shape.schema_oid, type_oid)?;
+    if unsafe { pg_sys::getExtensionOfObject(pg_sys::OperatorRelationId, equality_op_oid) }
+        != type_proof.extension_oid
+    {
+        return Err(format!(
+            "equality operator OID {} is not owned by extension h3",
+            u32::from(equality_op_oid)
+        ));
+    }
+
+    let equality_fn_oid = unsafe { pg_sys::get_opcode(equality_op_oid) };
+    if equality_fn_oid == pg_sys::InvalidOid || equality_fn_oid != operator.function_oid {
+        return Err("H3 equality operator implementation changed during validation".to_owned());
+    }
+    let function = unsafe { read_h3_function_shape(equality_fn_oid)? };
+    validate_h3_equality_function_shape(&function, type_proof.shape.schema_oid, type_oid)?;
+    if unsafe { pg_sys::getExtensionOfObject(pg_sys::ProcedureRelationId, equality_fn_oid) }
+        != type_proof.extension_oid
+    {
+        return Err(format!(
+            "equality function OID {} is not owned by extension h3",
+            u32::from(equality_fn_oid)
+        ));
+    }
+    Ok((operator, function))
+}
+
 /// Resolve and prove the relocatable H3 extension catalog identity.
 ///
 /// # Safety
@@ -742,14 +949,20 @@ pub unsafe fn resolve_h3_catalog() -> Result<H3CatalogIdentity, String> {
         return Err("extension h3 catalog identity changed during validation".to_owned());
     }
     let parent_fn_oid = unsafe { find_h3_parent_function(schema_oid, type_oid)? };
+    let (equality_operator, equality_function) =
+        unsafe { resolve_h3_equality_catalog(&type_proof)? };
     let mut fingerprint_words = vec![u32_word(H3_FINGERPRINT_VERSION), oid_word(extension_oid)];
     fingerprint_words.extend(type_fingerprint(&type_proof.shape));
     fingerprint_words.extend(unsafe { validate_h3_parent_function(parent_fn_oid, type_oid)? });
+    fingerprint_words.extend(operator_fingerprint(&equality_operator));
+    fingerprint_words.extend(function_fingerprint(&equality_function));
     Ok(H3CatalogIdentity {
         extension_oid,
         schema_oid,
         type_oid,
         parent_fn_oid,
+        equality_op_oid: equality_operator.operator_oid,
+        equality_fn_oid: equality_function.fn_oid,
         fingerprint_words,
     })
 }
@@ -811,6 +1024,37 @@ mod h3_tests {
         }
     }
 
+    fn valid_equality_function() -> H3FunctionShape {
+        let mut shape = valid_function();
+        shape.fn_oid = oid(50_004);
+        shape.name = H3_EQUALITY_FUNCTION_NAME.to_owned();
+        shape.argument_types = vec![oid(50_001), oid(50_001)];
+        shape.return_type = pg_sys::BOOLOID;
+        shape.source = H3_EQUALITY_FUNCTION_NAME.to_owned();
+        shape.tuple_xmin = 13;
+        shape.tuple_offset = 4;
+        shape
+    }
+
+    fn valid_equality_operator() -> H3OperatorShape {
+        H3OperatorShape {
+            operator_oid: oid(50_003),
+            name: H3_EQUALITY_OPERATOR_NAME.to_owned(),
+            schema_oid: oid(50_000),
+            kind: PG_OPERATOR_KIND_BINARY,
+            can_merge: true,
+            can_hash: true,
+            left_type: oid(50_001),
+            right_type: oid(50_001),
+            result_type: pg_sys::BOOLOID,
+            commutator_oid: oid(50_003),
+            function_oid: oid(50_004),
+            tuple_xmin: 14,
+            tuple_block: 9,
+            tuple_offset: 5,
+        }
+    }
+
     #[test]
     fn exact_h3_type_shape_is_required() {
         let valid = valid_type();
@@ -862,6 +1106,68 @@ mod h3_tests {
         let mut invalid = valid.clone();
         invalid.support_function = oid(50_003);
         assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
+    }
+
+    #[test]
+    fn exact_h3_equality_shapes_are_required() {
+        let function = valid_equality_function();
+        assert_eq!(
+            validate_h3_equality_function_shape(&function, function.schema_oid, oid(50_001)),
+            Ok(())
+        );
+        let mut invalid_function = function.clone();
+        invalid_function.source = H3_PARENT_FUNCTION_NAME.to_owned();
+        assert!(
+            validate_h3_equality_function_shape(
+                &invalid_function,
+                invalid_function.schema_oid,
+                oid(50_001)
+            )
+            .is_err()
+        );
+
+        let operator = valid_equality_operator();
+        assert_eq!(
+            validate_h3_equality_operator_shape(&operator, operator.schema_oid, oid(50_001)),
+            Ok(())
+        );
+        let mut invalid_operator = operator.clone();
+        invalid_operator.can_hash = false;
+        assert!(
+            validate_h3_equality_operator_shape(
+                &invalid_operator,
+                invalid_operator.schema_oid,
+                oid(50_001)
+            )
+            .is_err()
+        );
+        let mut invalid_operator = operator.clone();
+        invalid_operator.right_type = pg_sys::INT8OID;
+        assert!(
+            validate_h3_equality_operator_shape(
+                &invalid_operator,
+                invalid_operator.schema_oid,
+                oid(50_001)
+            )
+            .is_err()
+        );
+        let mut invalid_operator = operator.clone();
+        invalid_operator.commutator_oid = pg_sys::InvalidOid;
+        assert!(
+            validate_h3_equality_operator_shape(
+                &invalid_operator,
+                invalid_operator.schema_oid,
+                oid(50_001)
+            )
+            .is_err()
+        );
+
+        let mut replacement = operator.clone();
+        replacement.function_oid = oid(50_005);
+        assert_ne!(
+            operator_fingerprint(&operator),
+            operator_fingerprint(&replacement)
+        );
     }
 
     #[test]
