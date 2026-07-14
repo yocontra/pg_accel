@@ -1,4 +1,7 @@
-use super::{ExprDeviceBuffer, HashAggResult, PgaccelAggState, bridge};
+use super::{
+    ExprDeviceBuffer, GpuErrorDomain, GpuOperation, GpuResult, HashAggResult, PgaccelAggState,
+    bridge, status_to_result,
+};
 
 // ---------------------------------------------------------------------------
 // H3 wrappers
@@ -75,6 +78,31 @@ pub fn h3_cell_to_parent_bulk(cells: &[u64], parent_res: i32) -> Option<Vec<u64>
         )
     };
     status.is_ok().then_some(parents)
+}
+
+/// Transform one already-resident H3 lane into an already-allocated device
+/// output lane. No host staging or device copies occur in this wrapper.
+///
+/// # Safety
+/// `cells` and `parents` must address `count` device `u64` elements in the
+/// active pg_accel context. A non-NULL `nulls` pointer must address `count`
+/// canonical bytes in the same context. The buffers must not overlap.
+pub unsafe fn h3_cell_to_parent_resident(
+    cells: *const u64,
+    nulls: *const u8,
+    count: usize,
+    parent_res: i32,
+    parents: *mut u64,
+) -> GpuResult<()> {
+    // SAFETY: caller upholds the resident pointer/count contract above.
+    let status = unsafe {
+        bridge::pgaccel_h3_cell_to_parent_resident(cells, nulls, count, parent_res, parents)
+    };
+    status_to_result(
+        status,
+        GpuErrorDomain::H3,
+        GpuOperation::Kernel("h3_cell_to_parent_resident"),
+    )
 }
 
 /// GPU-accelerated bulk H3 cell-to-center-child.

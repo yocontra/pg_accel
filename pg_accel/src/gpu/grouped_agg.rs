@@ -1420,6 +1420,7 @@ mod tests {
             PgaccelStatus::ErrorOom,
             PgaccelStatus::ErrorTimeout,
             PgaccelStatus::ErrorNoDevice,
+            PgaccelStatus::InvalidArgument,
         ] {
             assert!(status_poisons_workspace(status), "{status:?}");
         }

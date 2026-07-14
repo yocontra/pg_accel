@@ -89,6 +89,7 @@ pub enum GpuStatusDetail {
     OutOfMemory,
     Timeout,
     NoDevice,
+    InvalidArgument,
     InvalidDescriptor,
     ShapeMismatch,
     CapacityOverflow,
@@ -113,6 +114,7 @@ impl From<PgaccelStatus> for GpuStatusDetail {
             PgaccelStatus::ErrorOom => Self::OutOfMemory,
             PgaccelStatus::ErrorTimeout => Self::Timeout,
             PgaccelStatus::ErrorNoDevice => Self::NoDevice,
+            PgaccelStatus::InvalidArgument => Self::InvalidArgument,
         }
     }
 }
@@ -126,6 +128,7 @@ impl fmt::Display for GpuStatusDetail {
             Self::OutOfMemory => "out_of_memory",
             Self::Timeout => "timeout",
             Self::NoDevice => "no_device",
+            Self::InvalidArgument => "invalid_argument",
             Self::InvalidDescriptor => "invalid_descriptor",
             Self::ShapeMismatch => "shape_mismatch",
             Self::CapacityOverflow => "capacity_overflow",
@@ -248,6 +251,10 @@ mod tests {
         assert_eq!(
             GpuStatusDetail::from(PgaccelStatus::ErrorNoDevice),
             GpuStatusDetail::NoDevice
+        );
+        assert_eq!(
+            GpuStatusDetail::from(PgaccelStatus::InvalidArgument),
+            GpuStatusDetail::InvalidArgument
         );
         assert_eq!(
             GpuStatusDetail::NumericOverflow.to_string(),

@@ -238,6 +238,12 @@ impl HostColumn {
                 nulls: copy_nulls(nulls)?,
                 labels: labels.to_vec(),
             },
+            ResidentColumnView::H3 { type_oid, .. } => {
+                return Err(format!(
+                    "resident H3 type OID {} cannot enter dense host dictionary preparation",
+                    u32::from(type_oid)
+                ));
+            }
         };
         result.validate_nulls()?;
         Ok(result)
@@ -505,9 +511,10 @@ pub(super) fn artifact_column_refs(spec: &AggQuerySpec) -> Result<Vec<ResidentCo
             GroupKeySource::StarDimension { group_column, .. } => {
                 insert_column_ref(&mut columns, *group_column)?;
             }
-            GroupKeySource::Expression { .. }
-            | GroupKeySource::H3CellToParent { .. }
-            | GroupKeySource::H3LatLngToCell { .. } => {
+            GroupKeySource::H3CellToParent { cell, .. } => {
+                insert_column_ref(&mut columns, *cell)?;
+            }
+            GroupKeySource::Expression { .. } | GroupKeySource::H3LatLngToCell { .. } => {
                 return Err("Phase 5D supports only column group keys".to_owned());
             }
         }
@@ -786,6 +793,9 @@ pub(crate) fn estimate_descriptor_artifact_bytes_upper_bound(
                 let dimension = spec.star_dims.get(usize::try_from(*dim_index).ok()?)?;
                 add(*relation_rows.get(&dimension.relation_oid)?, 4)?;
             }
+            GroupKeySource::H3CellToParent { cell, .. } if cell.relation_oid == spec.fact_rel => {
+                add(fact_rows()?, 8)?;
+            }
             GroupKeySource::FactColumn(_)
             | GroupKeySource::Expression { .. }
             | GroupKeySource::H3CellToParent { .. }
@@ -998,6 +1008,57 @@ pub(super) struct DescriptorAggArtifact {
     device_bytes: u64,
 }
 
+/// Device-derived H3 parent lane for the exact HASH/COMPACT grouped path.
+///
+/// The raw source column owns the NULL sidecar. This artifact owns only the
+/// transformed parent values and therefore charges exactly eight bytes per
+/// fact row.
+pub(super) struct H3ParentArtifact {
+    pub resolved_spec: AggQuerySpec,
+    pub fact_rows: usize,
+    pub group_capacity: usize,
+    pub parents: Option<ExprDeviceBuffer<u64>>,
+    device_bytes: u64,
+}
+
+impl H3ParentArtifact {
+    pub(super) fn new(
+        resolved_spec: AggQuerySpec,
+        fact_rows: usize,
+        group_capacity: usize,
+        parents: Option<ExprDeviceBuffer<u64>>,
+    ) -> Result<Self, String> {
+        if parents.as_ref().map_or(0, ExprDeviceBuffer::len) != fact_rows {
+            return Err("derived H3 parent lane length does not match fact rows".to_owned());
+        }
+        let device_bytes = fact_rows
+            .checked_mul(std::mem::size_of::<u64>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| "derived H3 parent byte count overflow".to_owned())?;
+        Ok(Self {
+            resolved_spec,
+            fact_rows,
+            group_capacity,
+            parents,
+            device_bytes,
+        })
+    }
+}
+
+impl DerivedArtifact for H3ParentArtifact {
+    fn device_bytes(&self) -> u64 {
+        self.device_bytes
+    }
+
+    fn retained_host_exact_bytes(&self) -> u64 {
+        0
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 impl DescriptorAggArtifact {
     pub(super) fn build(prepared: PreparedAggArtifact) -> Result<Self, String> {
         let mut keys = Vec::with_capacity(prepared.keys.len());
@@ -1156,6 +1217,29 @@ mod tests {
             estimate_descriptor_artifact_bytes_upper_bound(&count_star_spec(), &BTreeMap::new()),
             Some(0)
         );
+    }
+
+    #[test]
+    fn h3_parent_artifact_estimator_charges_exactly_eight_bytes_per_fact_row() {
+        const H3OID: u32 = 90_001;
+        let mut spec = count_star_spec();
+        spec.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::H3CellToParent {
+                cell: column(100, H3OID),
+                resolution: 7,
+            },
+            type_oid: H3OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(&spec, &BTreeMap::from([(100, 123)])),
+            Some(984)
+        );
+        let refs = artifact_column_refs(&spec).expect("H3 source should be resident");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(u32::from(refs[0].relid), 100);
+        assert_eq!(refs[0].attno, 1);
     }
 
     #[test]

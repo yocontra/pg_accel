@@ -38,6 +38,7 @@ pub enum PgaccelStatus {
     ErrorOom = -3,
     ErrorTimeout = -4,
     ErrorNoDevice = -5,
+    InvalidArgument = -6,
 }
 
 impl PgaccelStatus {
@@ -62,6 +63,7 @@ impl PgaccelStatus {
             -3 => Ok(Self::ErrorOom),
             -4 => Ok(Self::ErrorTimeout),
             -5 => Ok(Self::ErrorNoDevice),
+            -6 => Ok(Self::InvalidArgument),
             other => Err(other),
         }
     }

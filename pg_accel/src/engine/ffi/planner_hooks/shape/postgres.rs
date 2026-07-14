@@ -8,7 +8,7 @@ use pgrx::pg_sys::{self, Node, NodeTag};
 
 use crate::engine::spec::{
     AggregateKind, AggregateOutput, AggregateSource, BinaryMeasureOp, ColumnRef, FilterSpec,
-    MaskKind, MeasureExpr, ScalarRange, ScalarValue,
+    GroupKeySource, MaskKind, MeasureExpr, ScalarRange, ScalarValue,
 };
 
 use super::{
@@ -183,6 +183,98 @@ unsafe fn direct_const(node: *mut Node) -> Option<pg_sys::Const> {
     Some(unsafe { *node.cast::<pg_sys::Const>() })
 }
 
+#[derive(Clone)]
+struct H3ParentGroup {
+    key: PlannerGroupKey,
+    source_column: PlannerColumn,
+}
+
+/// Recognize only the catalog-proved `h3_cell_to_parent(h3index, int4)`
+/// grouping expression with a direct base-table cell and a plan-time
+/// resolution constant.
+unsafe fn h3_parent_group_key(node: *mut Node, query: &pg_sys::Query) -> Option<H3ParentGroup> {
+    if node.is_null() {
+        return None;
+    }
+    // SAFETY: node is planner-owned and coercion stripping preserves that
+    // lifetime. Explicit CollateExpr is intentionally not stripped here.
+    let node = unsafe { pg_sys::strip_implicit_coercions(node) };
+    if node.is_null() || unsafe { (*node).type_ } != NodeTag::T_FuncExpr {
+        return None;
+    }
+    // SAFETY: the NodeTag check proves the FuncExpr layout.
+    let function = unsafe { &*node.cast::<pg_sys::FuncExpr>() };
+    if function.funcid == pg_sys::InvalidOid
+        || function.funcretset
+        || function.funcvariadic
+        || function.funccollid != pg_sys::InvalidOid
+        || function.inputcollid != pg_sys::InvalidOid
+        || list_len(function.args) != 2
+    {
+        return None;
+    }
+    // SAFETY: planner extraction runs on PostgreSQL's main backend thread.
+    let catalog = unsafe { crate::engine::ffi::syscache::resolve_h3_catalog() }.ok()?;
+    if function.funcid != catalog.parent_fn_oid
+        || function.funcresulttype != catalog.type_oid
+        // SAFETY: the canonical type/function pair is resolved above; this
+        // validates the analyzed function OID against its exact signature.
+        || unsafe {
+            crate::engine::ffi::syscache::validate_h3_parent_function(
+                function.funcid,
+                catalog.type_oid,
+            )
+        }
+        .is_err()
+    {
+        return None;
+    }
+    // SAFETY: the two-item length check bounds both argument reads.
+    let cell_node = unsafe { list_item::<Node>(function.args, 0) }?;
+    // SAFETY: cell_node belongs to this analyzed Query.
+    let source_column = unsafe { direct_var(cell_node, query) }?;
+    if pg_sys::Oid::from(source_column.column.type_oid) != catalog.type_oid
+        || source_column.collation_oid != 0
+    {
+        return None;
+    }
+    // SAFETY: the two-item length check bounds the constant argument read.
+    let resolution_node = unsafe { list_item::<Node>(function.args, 1) }?;
+    // SAFETY: resolution_node belongs to the active planner expression.
+    let resolution = unsafe { direct_const(resolution_node) }?;
+    if resolution.consttype != pg_sys::INT4OID
+        || resolution.consttypmod != -1
+        || resolution.constcollid != pg_sys::InvalidOid
+        || resolution.constlen != 4
+        || !resolution.constbyval
+        || resolution.constisnull
+    {
+        return None;
+    }
+    // SAFETY: the exact non-NULL INT4 Const contract was checked above.
+    let resolution = unsafe { pg_sys::DatumGetInt32(resolution.constvalue) };
+    if !(0..=15).contains(&resolution)
+        // SAFETY: node is the analyzed function expression.
+        || unsafe { pg_sys::exprType(node) } != catalog.type_oid
+        // SAFETY: h3index is noncollatable and the canonical expression has no collation.
+        || unsafe { pg_sys::exprCollation(node) } != pg_sys::InvalidOid
+    {
+        return None;
+    }
+    Some(H3ParentGroup {
+        key: PlannerGroupKey::Expression {
+            source: GroupKeySource::H3CellToParent {
+                cell: source_column.column,
+                resolution,
+            },
+            type_oid: u32::from(catalog.type_oid),
+            collation_oid: 0,
+            collation_is_deterministic: true,
+        },
+        source_column,
+    })
+}
+
 unsafe fn default_equality_operator(type_oid: pg_sys::Oid) -> Option<pg_sys::Oid> {
     // SAFETY: type_oid comes from a catalog-validated analyzed expression and
     // the type cache lookup runs on PostgreSQL's main backend thread.
@@ -224,7 +316,7 @@ unsafe fn group_keys(query: &pg_sys::Query) -> Result<Vec<PlannerGroupKey>, Shap
         // SAFETY: clause is a valid SortGroupClause from groupClause.
         let clause = unsafe { &*clause };
         let sort_ref = clause.tleSortGroupRef;
-        let mut found = None;
+        let mut found: Option<PlannerGroupKey> = None;
         for target_index in 0..list_len(query.targetList) {
             // SAFETY: target_index is bounded by list_len(targetList).
             let (target, expr) = unsafe { target_entry_expr(query.targetList, target_index) }
@@ -232,35 +324,51 @@ unsafe fn group_keys(query: &pg_sys::Query) -> Result<Vec<PlannerGroupKey>, Shap
             // SAFETY: target_entry_expr returned a valid TargetEntry.
             if unsafe { (*target).ressortgroupref } == sort_ref {
                 // SAFETY: expr belongs to this Query's target list.
-                if let Some(column) = unsafe { direct_var(expr, query) } {
+                let parsed = if let Some(column) = unsafe { direct_var(expr, query) } {
+                    Some((
+                        PlannerGroupKey::Column(column),
+                        column.column.type_oid,
+                        column.collation_oid,
+                    ))
+                } else {
+                    // SAFETY: expr belongs to this analyzed target list.
+                    unsafe { h3_parent_group_key(expr, query) }.map(|group| {
+                        let PlannerGroupKey::Expression {
+                            type_oid,
+                            collation_oid,
+                            ..
+                        } = &group.key
+                        else {
+                            unreachable!("H3 parser always returns an expression key")
+                        };
+                        (group.key.clone(), *type_oid, *collation_oid)
+                    })
+                };
+                if let Some((group, type_oid, collation_oid)) = parsed {
                     // SAFETY: expr is a non-null analyzed target expression.
                     let expression_collation = unsafe { pg_sys::exprCollation(expr) };
-                    // SAFETY: the column type is catalog-validated by direct_var.
-                    let ordinary = unsafe {
-                        default_equality_operator(pg_sys::Oid::from(column.column.type_oid))
-                    }
-                    .ok_or(ShapeDecline::UnsupportedGroupExpression)?;
+                    // SAFETY: the type is catalog-validated by direct_var or
+                    // the exact H3 catalog proof.
+                    let ordinary =
+                        unsafe { default_equality_operator(pg_sys::Oid::from(type_oid)) }
+                            .ok_or(ShapeDecline::UnsupportedGroupExpression)?;
                     // SAFETY: clause.eqop and the validated type OID came from
                     // this analyzed SortGroupClause.
                     let hashable = unsafe {
-                        pg_sys::op_hashjoinable(
-                            clause.eqop,
-                            pg_sys::Oid::from(column.column.type_oid),
-                        )
+                        pg_sys::op_hashjoinable(clause.eqop, pg_sys::Oid::from(type_oid))
                     };
-                    if pg_sys::Oid::from(column.collation_oid) != expression_collation
+                    if pg_sys::Oid::from(collation_oid) != expression_collation
                         || !clause.hashable
                         || !is_ordinary_hash_equality(clause.eqop, ordinary, hashable)
                     {
                         return Err(ShapeDecline::UnsupportedGroupExpression);
                     }
-                    found = Some(column);
+                    found = Some(group);
                 }
                 break;
             }
         }
         let group = found.ok_or(ShapeDecline::UnsupportedGroupExpression)?;
-        let group = PlannerGroupKey::Column(group);
         if groups.contains(&group) {
             return Err(ShapeDecline::UnsupportedGroupExpression);
         }
@@ -503,6 +611,23 @@ unsafe fn projections_and_aggregates(
                 output: unsafe {
                     output_metadata(expression, group.column.type_oid, column_is_nullable(group))
                 },
+            });
+            continue;
+        }
+        // SAFETY: expression belongs to this Query target list.
+        if let Some(group) = unsafe { h3_parent_group_key(expression, query) } {
+            let source_type_oid = match &group.key {
+                PlannerGroupKey::Expression { type_oid, .. } => *type_oid,
+                PlannerGroupKey::Column(_) => {
+                    unreachable!("H3 parser always returns an expression key")
+                }
+            };
+            // SAFETY: the source is a catalog-validated direct base-table Var.
+            let nullable = unsafe { column_is_nullable(group.source_column) };
+            projections.push(InputProjection::Group {
+                key: group.key,
+                // SAFETY: expression is the active analyzed H3 expression.
+                output: unsafe { output_metadata(expression, source_type_oid, nullable) },
             });
             continue;
         }

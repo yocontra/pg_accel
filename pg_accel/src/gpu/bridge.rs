@@ -383,6 +383,15 @@ bridge_status_fns! {
         parents: *mut u64,
     ) -> PgaccelStatus;
 
+    /// Transform a resident H3 lane directly into a resident parent lane.
+    pub fn pgaccel_h3_cell_to_parent_resident(
+        cells: *const u64,
+        nulls: *const u8,
+        count: usize,
+        parent_res: i32,
+        parents: *mut u64,
+    ) -> PgaccelStatus;
+
     pub fn pgaccel_h3_cell_to_parent_count_bulk(
         cells: *const u64,
         count: usize,
@@ -1393,6 +1402,7 @@ mod tests {
         assert_eq!(PgaccelStatus::ErrorOom as i32, -3);
         assert_eq!(PgaccelStatus::ErrorTimeout as i32, -4);
         assert_eq!(PgaccelStatus::ErrorUnsupported as i32, -2);
+        assert_eq!(PgaccelStatus::InvalidArgument as i32, -6);
     }
 
     #[test]
@@ -1403,6 +1413,16 @@ mod tests {
         assert!(!PgaccelStatus::ErrorOom.is_ok());
         assert!(!PgaccelStatus::ErrorTimeout.is_ok());
         assert!(!PgaccelStatus::ErrorUnsupported.is_ok());
+        assert!(!PgaccelStatus::InvalidArgument.is_ok());
+    }
+
+    #[test]
+    fn raw_invalid_argument_status_is_typed() {
+        assert_eq!(
+            PgaccelStatus::from_raw(-6),
+            Ok(PgaccelStatus::InvalidArgument)
+        );
+        assert_eq!(PgaccelStatus::from_raw(-7), Err(-7));
     }
 
     // -----------------------------------------------------------------------

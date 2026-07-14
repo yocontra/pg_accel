@@ -46,11 +46,15 @@ fn from_raw_maps_every_known_discriminant() {
         PgaccelStatus::from_raw(-5),
         Ok(PgaccelStatus::ErrorNoDevice)
     );
+    assert_eq!(
+        PgaccelStatus::from_raw(-6),
+        Ok(PgaccelStatus::InvalidArgument)
+    );
 }
 
 #[test]
 fn from_raw_rejects_out_of_range_values_with_raw_payload() {
-    for raw in [1, 2, -6, -100, i32::MIN, i32::MAX] {
+    for raw in [1, 2, -7, -100, i32::MIN, i32::MAX] {
         assert_eq!(
             PgaccelStatus::from_raw(raw),
             Err(raw),
@@ -68,6 +72,7 @@ fn from_raw_round_trips_every_variant_discriminant() {
         PgaccelStatus::ErrorOom,
         PgaccelStatus::ErrorTimeout,
         PgaccelStatus::ErrorNoDevice,
+        PgaccelStatus::InvalidArgument,
     ] {
         assert_eq!(PgaccelStatus::from_raw(status as i32), Ok(status));
     }
