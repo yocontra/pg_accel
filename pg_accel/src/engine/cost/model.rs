@@ -292,12 +292,6 @@ pub struct KernelHealthRegistry {
     pub gpu_hash_agg_unsafe_input_rows: Rows,
     /// Maximum output rows for GPU hash join injection.
     pub gpu_join_max_output_rows: Rows,
-    /// Lower bound of the spatial polygon unsafe row band.
-    pub gpu_spatial_unsafe_band_min_rows: Rows,
-    /// Upper bound of the spatial polygon unsafe row band.
-    pub gpu_spatial_unsafe_band_max_rows: Rows,
-    /// Minimum polygon vertex count for the spatial unsafe row band.
-    pub gpu_spatial_unsafe_band_min_vertices: usize,
     /// Maximum inner-side rows for GPU hash join build phase.
     pub gpu_hash_join_build_max_rows: Rows,
     /// Maximum vertex-by-row point-in-ring work product.
@@ -309,9 +303,6 @@ impl From<&DeviceLimits> for KernelHealthRegistry {
         Self {
             gpu_hash_agg_unsafe_input_rows: Rows::new(limits.gpu_hash_agg_unsafe_input_rows),
             gpu_join_max_output_rows: Rows::new(limits.gpu_join_max_output_rows),
-            gpu_spatial_unsafe_band_min_rows: Rows::new(limits.gpu_spatial_unsafe_band_min_rows),
-            gpu_spatial_unsafe_band_max_rows: Rows::new(limits.gpu_spatial_unsafe_band_max_rows),
-            gpu_spatial_unsafe_band_min_vertices: limits.gpu_spatial_unsafe_band_min_vertices,
             gpu_hash_join_build_max_rows: Rows::new(limits.gpu_hash_join_build_max_rows),
             spatial_point_in_ring_max_verts_x_rows: WorkProduct::new(
                 limits.spatial_point_in_ring_max_verts_x_rows,
@@ -559,18 +550,6 @@ mod tests {
         assert_eq!(
             model.kernel_health.gpu_join_max_output_rows.get(),
             limits.gpu_join_max_output_rows,
-        );
-        assert_eq!(
-            model.kernel_health.gpu_spatial_unsafe_band_min_rows.get(),
-            limits.gpu_spatial_unsafe_band_min_rows,
-        );
-        assert_eq!(
-            model.kernel_health.gpu_spatial_unsafe_band_max_rows.get(),
-            limits.gpu_spatial_unsafe_band_max_rows,
-        );
-        assert_eq!(
-            model.kernel_health.gpu_spatial_unsafe_band_min_vertices,
-            limits.gpu_spatial_unsafe_band_min_vertices,
         );
         assert_eq!(
             model.kernel_health.gpu_hash_join_build_max_rows.get(),

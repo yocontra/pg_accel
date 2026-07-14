@@ -509,22 +509,6 @@ pub fn sort_limit_present(limit_tuples: f64) -> bool {
     limit_tuples.is_finite() && limit_tuples > 0.0
 }
 
-/// Whether a spatial polygon predicate avoids the narrow 100K-row crash band.
-///
-/// This only applies after the planner has confirmed a constant polygon
-/// vertex count; H3/raster/generic expression paths do not use it.
-#[must_use]
-#[inline]
-pub fn spatial_polygon_rows_safe(
-    input_rows: usize,
-    polygon_vertices: usize,
-    limits: &DeviceLimits,
-) -> bool {
-    !(input_rows >= limits.gpu_spatial_unsafe_band_min_rows
-        && input_rows <= limits.gpu_spatial_unsafe_band_max_rows
-        && polygon_vertices >= limits.gpu_spatial_unsafe_band_min_vertices)
-}
-
 /// Estimated fraction of a spatial scan's input rows that would be yielded
 /// from the heap-backed Custom Scan path.
 #[must_use]

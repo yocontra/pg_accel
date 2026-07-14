@@ -6,7 +6,7 @@
 
 use pg_accel::adapters::extractors::geometry;
 use pg_accel::adapters::extractors::raster::{self, PixelType};
-use pg_accel::adapters::{h3, postgis, postgis_raster};
+use pg_accel::adapters::{h3, postgis};
 use pg_accel::engine::registry::{AccelStrategy, AdapterRegistry, ExtensionAdapter};
 use std::collections::HashSet;
 
@@ -237,12 +237,39 @@ fn make_gserialized_with_bbox(
 
 // ===========================================================================
 // RASTER EXTRACTOR TESTS (20+)
+//
+// Ported from the deleted `parse_header`/`parse_band_info`/`extract_pixels_f64`
+// scalar-dispatch API (removed with the legacy raster pipeline, a1ed9b5) to the
+// resident-lane `parse_resident_raster` entry point. Oracle values unchanged;
+// bare-`None` failures are strengthened to exact typed parse errors.
 // ===========================================================================
+
+/// Decode a resident band's little-endian normalized pixel bytes to f64,
+/// mirroring the deleted `extract_pixels_f64` oracle exactly.
+fn pixels_f64(band: &raster::ResidentRasterBandInput) -> Vec<f64> {
+    band.pixels
+        .chunks_exact(band.pixel_type.byte_size())
+        .map(|px| match band.pixel_type {
+            PixelType::Bool | PixelType::UInt2 | PixelType::UInt4 | PixelType::UInt8 => {
+                f64::from(px[0])
+            }
+            PixelType::Int8 => f64::from(i8::from_le_bytes([px[0]])),
+            PixelType::Int16 => f64::from(i16::from_le_bytes([px[0], px[1]])),
+            PixelType::UInt16 => f64::from(u16::from_le_bytes([px[0], px[1]])),
+            PixelType::Int32 => f64::from(i32::from_le_bytes([px[0], px[1], px[2], px[3]])),
+            PixelType::UInt32 => f64::from(u32::from_le_bytes([px[0], px[1], px[2], px[3]])),
+            PixelType::Float32 => f64::from(f32::from_le_bytes([px[0], px[1], px[2], px[3]])),
+            PixelType::Float64 => {
+                f64::from_le_bytes([px[0], px[1], px[2], px[3], px[4], px[5], px[6], px[7]])
+            }
+        })
+        .collect()
+}
 
 #[test]
 fn raster_parse_header_le_basic() {
     let data = build_raster_le(4, 3, 4326, PixelType::UInt8, 0.0, 1.0);
-    let hdr = raster::parse_header(&data).unwrap();
+    let hdr = raster::parse_resident_raster(&data).unwrap().header;
     assert_eq!(hdr.width, 4);
     assert_eq!(hdr.height, 3);
     assert_eq!(hdr.num_bands, 1);
@@ -252,7 +279,7 @@ fn raster_parse_header_le_basic() {
 #[test]
 fn raster_parse_header_be() {
     let data = build_raster_be(5, 7, 3857, PixelType::Float32, -9999.0, 0.0);
-    let hdr = raster::parse_header(&data).unwrap();
+    let hdr = raster::parse_resident_raster(&data).unwrap().header;
     assert_eq!(hdr.width, 5);
     assert_eq!(hdr.height, 7);
     assert_eq!(hdr.num_bands, 1);
@@ -264,9 +291,10 @@ fn raster_parse_header_be() {
 #[test]
 fn raster_parse_header_zero_bands() {
     let data = build_raster_le_nbands(2, 2, 0, &[]);
-    let hdr = raster::parse_header(&data).unwrap();
-    assert_eq!(hdr.num_bands, 0);
-    assert_eq!(hdr.width, 2);
+    let parsed = raster::parse_resident_raster(&data).unwrap();
+    assert_eq!(parsed.header.num_bands, 0);
+    assert_eq!(parsed.header.width, 2);
+    assert!(parsed.bands.is_empty());
 }
 
 #[test]
@@ -280,14 +308,10 @@ fn raster_multi_band_two_bands() {
             (PixelType::Float32, -1.0, 7.5),
         ],
     );
-    let hdr = raster::parse_header(&data).unwrap();
-    assert_eq!(hdr.num_bands, 2);
-
-    let band0 = raster::parse_band_info(&data, 0).unwrap();
-    assert_eq!(band0.pixel_type, PixelType::UInt8);
-
-    let band1 = raster::parse_band_info(&data, 1).unwrap();
-    assert_eq!(band1.pixel_type, PixelType::Float32);
+    let parsed = raster::parse_resident_raster(&data).unwrap();
+    assert_eq!(parsed.header.num_bands, 2);
+    assert_eq!(parsed.bands[0].pixel_type, PixelType::UInt8);
+    assert_eq!(parsed.bands[1].pixel_type, PixelType::Float32);
 }
 
 #[test]
@@ -302,162 +326,161 @@ fn raster_multi_band_three_bands_pixels() {
             (PixelType::Float64, 0.0, 300.0),
         ],
     );
-    let hdr = raster::parse_header(&data).unwrap();
-    assert_eq!(hdr.num_bands, 3);
-
-    let px0 = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert_eq!(px0, vec![100.0]);
-
-    let px1 = raster::extract_pixels_f64(&data, 1).unwrap();
-    assert_eq!(px1, vec![200.0]);
-
-    let px2 = raster::extract_pixels_f64(&data, 2).unwrap();
-    assert!((px2[0] - 300.0).abs() < f64::EPSILON);
+    let parsed = raster::parse_resident_raster(&data).unwrap();
+    assert_eq!(parsed.header.num_bands, 3);
+    assert_eq!(pixels_f64(&parsed.bands[0]), vec![100.0]);
+    assert_eq!(pixels_f64(&parsed.bands[1]), vec![200.0]);
+    assert!((pixels_f64(&parsed.bands[2])[0] - 300.0).abs() < f64::EPSILON);
 }
 
 #[test]
 fn raster_band_pixel_type_bool() {
     let data = build_raster_le(2, 1, 0, PixelType::Bool, 0.0, 1.0);
-    let band = raster::parse_band_info(&data, 0).unwrap();
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
     assert_eq!(band.pixel_type, PixelType::Bool);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert_eq!(px, vec![1.0, 1.0]);
+    assert_eq!(pixels_f64(band), vec![1.0, 1.0]);
 }
 
 #[test]
 fn raster_band_pixel_type_int8() {
     let data = build_raster_le(1, 1, 0, PixelType::Int8, 0.0, -42.0);
-    let band = raster::parse_band_info(&data, 0).unwrap();
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
     assert_eq!(band.pixel_type, PixelType::Int8);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert_eq!(px, vec![-42.0]);
+    assert_eq!(pixels_f64(band), vec![-42.0]);
 }
 
 #[test]
 fn raster_band_pixel_type_uint8() {
     let data = build_raster_le(1, 1, 0, PixelType::UInt8, 255.0, 128.0);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert_eq!(px, vec![128.0]);
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
+    assert_eq!(pixels_f64(band), vec![128.0]);
 }
 
 #[test]
 fn raster_band_pixel_type_int16() {
     let data = build_raster_le(1, 1, 0, PixelType::Int16, 0.0, -1000.0);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert_eq!(px, vec![-1000.0]);
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
+    assert_eq!(pixels_f64(band), vec![-1000.0]);
 }
 
 #[test]
 fn raster_band_pixel_type_uint16() {
     let data = build_raster_le(1, 1, 0, PixelType::UInt16, 0.0, 60000.0);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert_eq!(px, vec![60000.0]);
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
+    assert_eq!(pixels_f64(band), vec![60000.0]);
 }
 
 #[test]
 fn raster_band_pixel_type_int32() {
     let data = build_raster_le(1, 1, 0, PixelType::Int32, 0.0, -100_000.0);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert_eq!(px, vec![-100_000.0]);
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
+    assert_eq!(pixels_f64(band), vec![-100_000.0]);
 }
 
 #[test]
 fn raster_band_pixel_type_uint32() {
     let data = build_raster_le(1, 1, 0, PixelType::UInt32, 0.0, 3_000_000.0);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert_eq!(px, vec![3_000_000.0]);
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
+    assert_eq!(pixels_f64(band), vec![3_000_000.0]);
 }
 
 #[test]
 fn raster_band_pixel_type_float32() {
     let data = build_raster_le(1, 1, 0, PixelType::Float32, -9999.0, 1.5);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert!((px[0] - f64::from(1.5_f32)).abs() < 1e-5);
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
+    assert!((pixels_f64(band)[0] - f64::from(1.5_f32)).abs() < 1e-5);
 }
 
 #[test]
 fn raster_band_pixel_type_float64() {
     let data = build_raster_le(1, 1, 0, PixelType::Float64, 0.0, 123.456_789);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert!((px[0] - 123.456_789).abs() < f64::EPSILON);
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
+    assert!((pixels_f64(band)[0] - 123.456_789).abs() < f64::EPSILON);
 }
 
 #[test]
 fn raster_zero_width() {
     let data = build_raster_le(0, 5, 0, PixelType::UInt8, 0.0, 0.0);
-    let hdr = raster::parse_header(&data).unwrap();
-    assert_eq!(hdr.width, 0);
-    assert_eq!(hdr.height, 5);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert!(px.is_empty());
+    let parsed = raster::parse_resident_raster(&data).unwrap();
+    assert_eq!(parsed.header.width, 0);
+    assert_eq!(parsed.header.height, 5);
+    assert!(parsed.bands[0].pixels.is_empty());
 }
 
 #[test]
 fn raster_zero_height() {
     let data = build_raster_le(5, 0, 0, PixelType::UInt8, 0.0, 0.0);
-    let hdr = raster::parse_header(&data).unwrap();
-    assert_eq!(hdr.height, 0);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
-    assert!(px.is_empty());
+    let parsed = raster::parse_resident_raster(&data).unwrap();
+    assert_eq!(parsed.header.height, 0);
+    assert!(parsed.bands[0].pixels.is_empty());
 }
 
 #[test]
 fn raster_large_dimensions_header_only() {
-    // Header claims large dimensions but we only test header parsing.
+    // Header claims large dimensions but carries zero bands, so no pixel
+    // payload is required and the parse must still succeed.
     let data = build_raster_le_nbands(10_000, 10_000, 0, &[]);
-    let hdr = raster::parse_header(&data).unwrap();
-    assert_eq!(hdr.width, 10_000);
-    assert_eq!(hdr.height, 10_000);
-    assert_eq!(hdr.num_bands, 0);
+    let parsed = raster::parse_resident_raster(&data).unwrap();
+    assert_eq!(parsed.header.width, 10_000);
+    assert_eq!(parsed.header.height, 10_000);
+    assert_eq!(parsed.header.num_bands, 0);
 }
 
 #[test]
-fn raster_truncated_data_returns_none() {
+fn raster_truncated_data_rejected() {
     let full = build_raster_le(2, 2, 0, PixelType::UInt8, 0.0, 1.0);
     // Truncate the pixel data mid-way.
     let truncated = &full[..full.len() - 2];
-    assert!(raster::extract_pixels_f64(truncated, 0).is_none());
+    assert_eq!(
+        raster::parse_resident_raster(truncated),
+        Err(raster::ResidentRasterParseError::Truncated)
+    );
 }
 
 #[test]
-fn raster_header_too_short_returns_none() {
-    assert!(raster::parse_header(&[1u8; 10]).is_none());
-    assert!(raster::parse_header(&[]).is_none());
+fn raster_header_too_short_rejected() {
+    assert_eq!(
+        raster::parse_resident_raster(&[1u8; 10]),
+        Err(raster::ResidentRasterParseError::Truncated)
+    );
+    assert_eq!(
+        raster::parse_resident_raster(&[]),
+        Err(raster::ResidentRasterParseError::Truncated)
+    );
 }
 
 #[test]
-fn raster_invalid_endianness_returns_none() {
+fn raster_invalid_endianness_rejected() {
     let mut data = build_raster_le(1, 1, 0, PixelType::UInt8, 0.0, 0.0);
     data[0] = 0xFF;
-    assert!(raster::parse_header(&data).is_none());
+    assert_eq!(
+        raster::parse_resident_raster(&data),
+        Err(raster::ResidentRasterParseError::InvalidEndian)
+    );
 }
 
 #[test]
-fn raster_band_index_out_of_range() {
+fn raster_single_band_parses_exactly_one_band() {
     let data = build_raster_le(1, 1, 0, PixelType::UInt8, 0.0, 0.0);
-    assert!(raster::parse_band_info(&data, 1).is_none());
-    assert!(raster::parse_band_info(&data, 100).is_none());
-    assert!(raster::extract_pixels_f64(&data, 1).is_none());
+    let parsed = raster::parse_resident_raster(&data).unwrap();
+    assert_eq!(parsed.bands.len(), 1);
 }
 
 #[test]
-fn raster_offline_band_extract_pixels_returns_none() {
+fn raster_offline_band_rejected() {
+    // Offline bands cannot enter residency: the parser must fail loudly
+    // rather than return a band whose pixels live outside the WKB.
     let data = build_raster_offline_band(2, 2);
-    assert!(raster::extract_pixels_f64(&data, 0).is_none());
-}
-
-#[test]
-fn raster_offline_band_parse_band_info() {
-    let data = build_raster_offline_band(2, 2);
-    let band = raster::parse_band_info(&data, 0).unwrap();
-    assert!(band.is_offline);
-    assert_eq!(band.pixel_type, PixelType::UInt8);
+    assert_eq!(
+        raster::parse_resident_raster(&data),
+        Err(raster::ResidentRasterParseError::OfflineBand)
+    );
 }
 
 #[test]
 fn raster_nodata_value_read_correctly() {
     let data = build_raster_le(1, 1, 0, PixelType::Float64, -9999.5, 0.0);
-    let band = raster::parse_band_info(&data, 0).unwrap();
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
     assert!(band.has_nodata);
     assert!((band.nodata - (-9999.5)).abs() < f64::EPSILON);
 }
@@ -476,9 +499,10 @@ fn raster_pixel_type_byte_sizes() {
 }
 
 #[test]
-fn raster_be_extract_pixels() {
+fn raster_be_pixels_normalized_to_le() {
     let data = build_raster_be(2, 2, 0, PixelType::UInt8, 0.0, 99.0);
-    let px = raster::extract_pixels_f64(&data, 0).unwrap();
+    let band = &raster::parse_resident_raster(&data).unwrap().bands[0];
+    let px = pixels_f64(band);
     assert_eq!(px.len(), 4);
     for &v in &px {
         assert!((v - 99.0).abs() < f64::EPSILON);
@@ -610,7 +634,7 @@ fn geometry_has_bbox_with_has_z_has_m_bits() {
 
 /// Collect all GPU adapters.
 fn all_adapters() -> Vec<ExtensionAdapter> {
-    vec![h3::adapter(), postgis::adapter(), postgis_raster::adapter()]
+    vec![h3::adapter(), postgis::adapter()]
 }
 
 #[test]
@@ -623,12 +647,6 @@ fn adapter_h3_no_panic() {
 fn adapter_postgis_no_panic() {
     let a = postgis::adapter();
     assert_eq!(a.name, "postgis");
-}
-
-#[test]
-fn adapter_postgis_raster_no_panic() {
-    let a = postgis_raster::adapter();
-    assert_eq!(a.name, "postgis_raster");
 }
 
 #[test]
@@ -744,28 +762,20 @@ fn adapter_postgis_recheck_dependent_functions_denied() {
 }
 
 #[test]
-fn adapter_postgis_raster_gpu_strategy() {
-    let a = postgis_raster::adapter();
-    for entry in &a.functions {
-        assert_eq!(
-            entry.strategy,
-            AccelStrategy::GpuRaster,
-            "raster function '{}' must use GpuRaster",
-            entry.name
-        );
-    }
-}
-
-#[test]
 fn adapter_combined_function_count() {
     let total: usize = all_adapters().iter().map(|a| a.functions.len()).sum();
-    let expected = h3::adapter().functions.len()
-        + postgis::adapter().functions.len()
-        + postgis_raster::adapter().functions.len();
+    let expected = h3::adapter().functions.len() + postgis::adapter().functions.len();
     assert_eq!(total, expected);
-    assert!(
-        total >= 15,
-        "adapter surface unexpectedly shrank; expected at least 15 GPU-only registered functions"
+    // Exact pin of the intentional GPU-only adapter surface: h3 registers one
+    // scalar winner (h3_latlng_to_cell) plus five var-len SRF lanes; postgis
+    // registers st_intersects behind the planner point/polygon shape gate.
+    // Raster deliberately registers no scalar adapter functions — it routes
+    // through the planner-observed resident lane instead (see
+    // engine/ffi/planner_hooks/raster.rs). Any change to this number must be
+    // an audited adapter-surface decision, not drift.
+    assert_eq!(
+        total, 7,
+        "GPU-only adapter surface changed; audit the h3/postgis allowlists"
     );
 }
 
@@ -831,7 +841,9 @@ fn registry_register_all_adapters() {
     for adapter in all_adapters() {
         reg.register_adapter(adapter);
     }
-    assert_eq!(reg.adapter_count(), 3);
+    // h3 + postgis; the raster adapter was deleted with the legacy
+    // scalar-dispatch pipeline (raster is planner-observed, not adapter-driven).
+    assert_eq!(reg.adapter_count(), 2);
 }
 
 #[test]
@@ -843,5 +855,4 @@ fn registry_adapters_iterable() {
     let names: Vec<&str> = reg.adapters().iter().map(|a| a.name).collect();
     assert!(names.contains(&"h3"));
     assert!(names.contains(&"postgis"));
-    assert!(names.contains(&"postgis_raster"));
 }

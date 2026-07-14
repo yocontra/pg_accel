@@ -472,37 +472,6 @@ fn scan_cost_formula_gpu_spatial_cheaper_than_base() {
 }
 
 #[test]
-fn spatial_unsafe_band_rejects_80k_to_150k_when_vertices_meet_threshold() {
-    let limits = cost::DeviceLimits::cpu_only();
-    let vertices = limits.gpu_spatial_unsafe_band_min_vertices;
-
-    assert!(cost::spatial_polygon_rows_safe(79_999, vertices, &limits));
-    assert!(!cost::spatial_polygon_rows_safe(80_000, vertices, &limits));
-    assert!(!cost::spatial_polygon_rows_safe(100_000, vertices, &limits));
-    assert!(!cost::spatial_polygon_rows_safe(150_000, vertices, &limits));
-    assert!(cost::spatial_polygon_rows_safe(150_001, vertices, &limits));
-}
-
-#[test]
-fn spatial_unsafe_band_allows_below_vertex_threshold() {
-    let limits = cost::DeviceLimits::cpu_only();
-    let vertices_below_threshold = limits
-        .gpu_spatial_unsafe_band_min_vertices
-        .saturating_sub(1);
-
-    assert!(cost::spatial_polygon_rows_safe(
-        80_000,
-        vertices_below_threshold,
-        &limits
-    ));
-    assert!(cost::spatial_polygon_rows_safe(
-        150_000,
-        vertices_below_threshold,
-        &limits
-    ));
-}
-
-#[test]
 fn spatial_output_fraction_rejects_high_output_heap_scans() {
     let limits = cost::DeviceLimits::cpu_only();
 

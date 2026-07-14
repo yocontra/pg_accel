@@ -477,15 +477,6 @@ fn sort_admission_internal_uses_pipeline_materialization_fraction_without_limit(
 }
 
 #[test]
-fn spatial_unsafe_band_rejects_100k_polygon_only() {
-    let l = DeviceLimits::cpu_only();
-    assert!(spatial_polygon_rows_safe(10_000, 500, &l));
-    assert!(!spatial_polygon_rows_safe(100_000, 500, &l));
-    assert!(spatial_polygon_rows_safe(100_000, 99, &l));
-    assert!(spatial_polygon_rows_safe(1_000_000, 500, &l));
-}
-
-#[test]
 fn batch_zero_rows() {
     assert!(!should_batch(0, 1.0, 256));
 }

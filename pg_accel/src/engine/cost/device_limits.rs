@@ -78,13 +78,6 @@ pub struct DeviceLimits {
     pub gpu_h3_group_min_rows: usize,
     /// Maximum rows in one H3 key-generation/grouping dispatch.
     pub gpu_h3_max_chunk_rows: usize,
-    /// Lower bound of the 100K-row spatial polygon crash band.
-    pub gpu_spatial_unsafe_band_min_rows: usize,
-    /// Upper bound of the 100K-row spatial polygon crash band.
-    pub gpu_spatial_unsafe_band_max_rows: usize,
-    /// Minimum constant polygon vertex count for the 100K-row spatial crash
-    /// band. H3 and simple non-polygon predicates do not use this gate.
-    pub gpu_spatial_unsafe_band_min_vertices: usize,
     /// Minimum polygon vertex count for GPU spatial dispatch.
     /// Below this threshold, the GPU kernel overhead exceeds PG parallel's
     /// per-row cost, so we defer to standard PostGIS evaluation.
@@ -526,9 +519,6 @@ impl DeviceLimits {
             // 2026-05-13 safety band: many polygon/selectivity fixtures crash
             // at the 100K scale, while adjacent 10K/1M cells do not show the
             // same monotonic memory profile. Keep this row-band gate narrow.
-            gpu_spatial_unsafe_band_min_rows: 80_000,
-            gpu_spatial_unsafe_band_max_rows: 150_000,
-            gpu_spatial_unsafe_band_min_vertices: 100,
             // Spatial vertex threshold: GPU kernel overhead is constant
             // (~19ms for geom deser + seq scan), while PG parallel scales
             // linearly with vertex count. This gate rejects the obviously
@@ -736,9 +726,6 @@ impl DeviceLimits {
             gpu_join_max_output_rows: 100_000,
             gpu_h3_group_min_rows: 100_000,
             gpu_h3_max_chunk_rows: 1_000_000,
-            gpu_spatial_unsafe_band_min_rows: 80_000,
-            gpu_spatial_unsafe_band_max_rows: 150_000,
-            gpu_spatial_unsafe_band_min_vertices: 100,
             gpu_spatial_min_vertices: 50_000,
             gpu_spatial_max_vertices_per_row: 1_000_000,
             gpu_spatial_max_output_fraction: 0.80,
@@ -864,9 +851,6 @@ impl DeviceLimits {
             gpu_join_max_output_rows,
             gpu_h3_group_min_rows,
             gpu_h3_max_chunk_rows,
-            gpu_spatial_unsafe_band_min_rows,
-            gpu_spatial_unsafe_band_max_rows,
-            gpu_spatial_unsafe_band_min_vertices,
             gpu_spatial_min_vertices,
             gpu_spatial_max_vertices_per_row,
             gpu_spatial_pairwise_chunk_rows,
@@ -905,10 +889,6 @@ impl DeviceLimits {
             resident_memory_budget_bytes
         );
         require_ordered!(gpu_h3_group_min_rows, gpu_h3_max_chunk_rows);
-        require_ordered!(
-            gpu_spatial_unsafe_band_min_rows,
-            gpu_spatial_unsafe_band_max_rows
-        );
         require_ordered!(gpu_spatial_min_vertices, gpu_spatial_max_vertices_per_row);
         require_ordered!(gpu_raster_min_pixels, gpu_raster_max_chunk_pixels);
         require_ordered!(optimal_batch_min, optimal_batch_max);
@@ -1080,17 +1060,6 @@ mod tests {
             Err(DeviceLimitsValidationError::InvertedRange {
                 lower_field: "gpu_h3_group_min_rows",
                 upper_field: "gpu_h3_max_chunk_rows",
-                ..
-            })
-        ));
-
-        let mut limits = DeviceLimits::cpu_only();
-        limits.gpu_spatial_unsafe_band_min_rows = limits.gpu_spatial_unsafe_band_max_rows + 1;
-        assert!(matches!(
-            limits.validate(),
-            Err(DeviceLimitsValidationError::InvertedRange {
-                lower_field: "gpu_spatial_unsafe_band_min_rows",
-                upper_field: "gpu_spatial_unsafe_band_max_rows",
                 ..
             })
         ));

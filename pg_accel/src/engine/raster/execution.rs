@@ -1003,8 +1003,8 @@ mod tests {
                 ..ResidentRasterRow::default()
             });
             for band in parsed.bands {
-                let flags = u32::from(band.has_nodata) * RESIDENT_RASTER_BAND_HAS_NODATA
-                    | u32::from(band.is_nodata) * RESIDENT_RASTER_BAND_IS_NODATA;
+                let flags = (u32::from(band.has_nodata) * RESIDENT_RASTER_BAND_HAS_NODATA)
+                    | (u32::from(band.is_nodata) * RESIDENT_RASTER_BAND_IS_NODATA);
                 bands.push(ResidentRasterBand {
                     pixel_type: u32::from(band.pixel_type.code()),
                     flags,
@@ -1258,8 +1258,7 @@ mod tests {
         bad_work.stats.work_rows[0].grid_pixels = u64::MAX;
         assert!(matches!(
             preflight_raster_execution(&spec(RasterPixelType::UInt32), bad_work),
-            Err(RasterExecutionError::InvalidRow { .. })
-                | Err(RasterExecutionError::ByteCountOverflow)
+            Err(RasterExecutionError::InvalidRow { .. } | RasterExecutionError::ByteCountOverflow)
         ));
 
         assert_eq!(

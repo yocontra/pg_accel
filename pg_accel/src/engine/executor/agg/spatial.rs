@@ -792,7 +792,7 @@ impl SpatialWorkspace {
             } else {
                 (constant_operand, column_operand)
             };
-            let max_referenced_bytes = match checked_sum([
+            let Some(max_referenced_bytes) = checked_sum([
                 POINT_COORDINATE_BYTES,
                 GEOMETRY_ROW_BYTES,
                 GEOMETRY_BBOX_BYTES,
@@ -810,15 +810,11 @@ impl SpatialWorkspace {
                     .max(column_bytes)
                     .checked_mul(2)
             })
-            .and_then(|bytes| usize::try_from(bytes).ok())
-            {
-                Some(bytes) => bytes,
-                None => {
-                    self.borrow_failure = Some(SpatialBorrowFailure::RequestConstruction);
-                    return;
-                }
+            .and_then(|bytes| usize::try_from(bytes).ok()) else {
+                self.borrow_failure = Some(SpatialBorrowFailure::RequestConstruction);
+                return;
             };
-            let request = match PgaccelSpatialResidentRequest::boolean_device(
+            let Ok(request) = PgaccelSpatialResidentRequest::boolean_device(
                 plan.predicate,
                 plan.distance_threshold,
                 chunk.row_count,
@@ -826,12 +822,9 @@ impl SpatialWorkspace {
                 left,
                 right,
                 &chunk.tri_state,
-            ) {
-                Ok(request) => request,
-                Err(_) => {
-                    self.borrow_failure = Some(SpatialBorrowFailure::RequestConstruction);
-                    return;
-                }
+            ) else {
+                self.borrow_failure = Some(SpatialBorrowFailure::RequestConstruction);
+                return;
             };
             // SAFETY: every pointer is owned by this workspace or the active
             // resident input borrow; the queue was prepared by `build`.
@@ -864,6 +857,10 @@ impl SpatialWorkspace {
         // SAFETY: the catalog identity proves the exact strict PostGIS OID and
         // both Datums point at complete retained GSERIALIZED values.
         let result = if plan.predicate == ResidentSpatialPredicate::DWithin {
+            // SAFETY: verify_catalog proved this is the exact strict 3-arg DWithin C
+            // function; both geometry Datums are complete retained GSERIALIZED values and
+            // the threshold is a by-value float8 bit pattern. Runs on the main backend
+            // thread per this function's caller.
             unsafe {
                 pg_sys::OidFunctionCall3Coll(
                     plan.exact_fn_oid,
@@ -874,6 +871,9 @@ impl SpatialWorkspace {
                 )
             }
         } else {
+            // SAFETY: verify_catalog proved this is the exact strict 2-arg predicate C
+            // function and both Datums are complete retained GSERIALIZED values. Runs on
+            // the main backend thread per this function's caller.
             unsafe {
                 pg_sys::OidFunctionCall2Coll(plan.exact_fn_oid, pg_sys::InvalidOid, left, right)
             }

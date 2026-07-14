@@ -291,7 +291,9 @@ fn build_matrix() -> Vec<AuditRow> {
             setup: vec![],
             query: "workload=spatial_sel_repro_simple_s90_b64k_w4_jiton rows=100000",
             expectation: RatchetExpectation::Quarantined(
-                "100K spatial crash band: do not EXPLAIN or dispatch until fixed",
+                "legacy 100K crash-band repro: band fixed by chunked resident \
+                 dispatch (PGACCEL_SPATIAL_MAX_CHUNK_ROWS); row awaits the \
+                 Phase 7 registry re-baseline before flipping live",
             ),
         },
         AuditRow {
@@ -300,7 +302,9 @@ fn build_matrix() -> Vec<AuditRow> {
             setup: vec![],
             query: "workload=spatial_sel_repro_coop1024_s90_b64k_w4_jiton rows=100000",
             expectation: RatchetExpectation::Quarantined(
-                "100K spatial crash band: do not EXPLAIN or dispatch until fixed",
+                "legacy 100K crash-band repro: band fixed by chunked resident \
+                 dispatch (PGACCEL_SPATIAL_MAX_CHUNK_ROWS); row awaits the \
+                 Phase 7 registry re-baseline before flipping live",
             ),
         },
     ]

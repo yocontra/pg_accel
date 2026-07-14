@@ -75,6 +75,8 @@ struct CompositeTypeShape {
 
 unsafe fn extension_text_attr(tuple: pg_sys::HeapTuple, attnum: i16) -> Result<String, String> {
     let mut isnull = false;
+    // SAFETY: `tuple` is the live, pinned EXTENSIONOID syscache entry passed by our
+    // caller and `isnull` is a valid out-pointer for the duration of the call.
     let datum = unsafe {
         pg_sys::SysCacheGetAttr(
             pg_sys::SysCacheIdentifier::EXTENSIONOID as ::core::ffi::c_int,
@@ -86,6 +88,8 @@ unsafe fn extension_text_attr(tuple: pg_sys::HeapTuple, attnum: i16) -> Result<S
     if isnull {
         return Err("PostGIS Raster extension version is NULL".to_owned());
     }
+    // SAFETY: `isnull` was checked false above, so `datum` is a valid text datum
+    // read from the pinned extension tuple.
     unsafe { String::from_datum(datum, false) }
         .ok_or_else(|| "could not decode PostGIS Raster extension version".to_owned())
 }
@@ -93,10 +97,14 @@ unsafe fn extension_text_attr(tuple: pg_sys::HeapTuple, attnum: i16) -> Result<S
 unsafe fn postgis_raster_extension_shape() -> Result<PostgisRasterExtensionShape, String> {
     let name = std::ffi::CString::new(POSTGIS_RASTER_EXTENSION_NAME)
         .map_err(|_| "invalid PostGIS Raster extension name".to_owned())?;
+    // SAFETY: `name` is a valid NUL-terminated CString and this catalog lookup runs
+    // on the backend main thread per this function's contract.
     let extension_oid = unsafe { pg_sys::get_extension_oid(name.as_ptr(), true) };
     if extension_oid == pg_sys::InvalidOid {
         return Err("extension postgis_raster is not installed".to_owned());
     }
+    // SAFETY: main-thread syscache lookup per this function's contract; the result
+    // is NULL-checked below and released via ReleaseSysCache on every path.
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::EXTENSIONOID as ::core::ffi::c_int,
@@ -106,6 +114,9 @@ unsafe fn postgis_raster_extension_shape() -> Result<PostgisRasterExtensionShape
     if tuple.is_null() {
         return Err("extension postgis_raster disappeared during validation".to_owned());
     }
+    // SAFETY: `tuple` was NULL-checked above and stays pinned until the
+    // ReleaseSysCache below; GETSTRUCT of an EXTENSIONOID entry is a
+    // FormData_pg_extension whose extname is NUL-terminated NameData.
     let result = (|| unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_extension>();
         let actual_name = std::ffi::CStr::from_ptr((*form).extname.data.as_ptr())
@@ -132,12 +143,17 @@ unsafe fn postgis_raster_extension_shape() -> Result<PostgisRasterExtensionShape
             tuple_offset: pg_sys::ItemPointerGetOffsetNumber(&raw const (*tuple).t_self),
         })
     })();
+    // SAFETY: releases the pin taken by SearchSysCache1 exactly once, after all
+    // tuple reads above.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     result
 }
 
 unsafe fn find_type_oid(schema_oid: pg_sys::Oid, name: &str) -> Result<pg_sys::Oid, String> {
     let name = std::ffi::CString::new(name).map_err(|_| "invalid catalog type name".to_owned())?;
+    // SAFETY: `name` is a valid NUL-terminated CString outliving the call; the
+    // TYPENAMENSP lookup runs on the backend main thread per this function's
+    // contract.
     let tuple = unsafe {
         pg_sys::SearchSysCache2(
             pg_sys::SysCacheIdentifier::TYPENAMENSP as ::core::ffi::c_int,
@@ -151,10 +167,14 @@ unsafe fn find_type_oid(schema_oid: pg_sys::Oid, name: &str) -> Result<pg_sys::O
             u32::from(schema_oid)
         ));
     }
+    // SAFETY: `tuple` was NULL-checked above and remains pinned; GETSTRUCT of a
+    // TYPENAMENSP entry is a FormData_pg_type.
     let type_oid = unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_type>();
         (*form).oid
     };
+    // SAFETY: releases the SearchSysCache2 pin exactly once, after the oid was
+    // copied out.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     Ok(type_oid)
 }
@@ -162,6 +182,8 @@ unsafe fn find_type_oid(schema_oid: pg_sys::Oid, name: &str) -> Result<pg_sys::O
 unsafe fn read_postgis_raster_type_shape(
     type_oid: pg_sys::Oid,
 ) -> Result<PostgisRasterTypeShape, String> {
+    // SAFETY: main-thread TYPEOID syscache lookup per this function's contract;
+    // NULL-checked below and released on every path.
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::TYPEOID as ::core::ffi::c_int,
@@ -171,6 +193,9 @@ unsafe fn read_postgis_raster_type_shape(
     if tuple.is_null() {
         return Err(format!("type OID {} does not exist", u32::from(type_oid)));
     }
+    // SAFETY: `tuple` was NULL-checked above and stays pinned until the
+    // ReleaseSysCache below; GETSTRUCT of a TYPEOID entry is a FormData_pg_type
+    // whose typname is NUL-terminated NameData.
     let result = (|| unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_type>();
         let name = std::ffi::CStr::from_ptr((*form).typname.data.as_ptr())
@@ -204,6 +229,8 @@ unsafe fn read_postgis_raster_type_shape(
             send_fn: (*form).typsend,
         })
     })();
+    // SAFETY: releases the SearchSysCache1 pin exactly once, after the closure
+    // finished all tuple reads.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     result
 }
@@ -243,10 +270,14 @@ fn validate_postgis_raster_type_shape(
 }
 
 unsafe fn read_composite_type_shape(type_oid: pg_sys::Oid) -> Result<CompositeTypeShape, String> {
+    // SAFETY: delegated syscache read with the same main-backend-thread contract
+    // as this function.
     let base = unsafe { read_h3_type_shape(type_oid)? };
     if base.typtype != pg_sys::TYPTYPE_COMPOSITE || base.typrelid == pg_sys::InvalidOid {
         return Err(format!("type OID {} is not composite", u32::from(type_oid)));
     }
+    // SAFETY: main-thread RELOID syscache lookup per this function's contract;
+    // NULL-checked below and released after the field count is read.
     let relation_tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::RELOID as ::core::ffi::c_int,
@@ -259,6 +290,8 @@ unsafe fn read_composite_type_shape(type_oid: pg_sys::Oid) -> Result<CompositeTy
             u32::from(type_oid)
         ));
     }
+    // SAFETY: `relation_tuple` was NULL-checked above and remains pinned;
+    // GETSTRUCT of a RELOID entry is a FormData_pg_class.
     let field_count = unsafe {
         let form = pg_sys::GETSTRUCT(relation_tuple).cast::<pg_sys::FormData_pg_class>();
         usize::try_from((*form).relnatts).map_err(|_| {
@@ -268,6 +301,8 @@ unsafe fn read_composite_type_shape(type_oid: pg_sys::Oid) -> Result<CompositeTy
             )
         })
     };
+    // SAFETY: releases the RELOID pin exactly once, after relnatts was copied
+    // out.
     unsafe { pg_sys::ReleaseSysCache(relation_tuple) };
     let field_count = field_count?;
     let mut fields = Vec::new();
@@ -277,6 +312,9 @@ unsafe fn read_composite_type_shape(type_oid: pg_sys::Oid) -> Result<CompositeTy
     for index in 0..field_count {
         let attno = i16::try_from(index + 1)
             .map_err(|_| "composite attribute number exceeds int16".to_owned())?;
+        // SAFETY: main-thread ATTNUM syscache lookup per this function's contract,
+        // keyed by the composite's validated typrelid; NULL-checked below and released
+        // every iteration.
         let tuple = unsafe {
             pg_sys::SearchSysCache2(
                 pg_sys::SysCacheIdentifier::ATTNUM as ::core::ffi::c_int,
@@ -290,6 +328,9 @@ unsafe fn read_composite_type_shape(type_oid: pg_sys::Oid) -> Result<CompositeTy
                 u32::from(type_oid)
             ));
         }
+        // SAFETY: `tuple` was NULL-checked above and stays pinned until the
+        // ReleaseSysCache below; GETSTRUCT of an ATTNUM entry is a
+        // FormData_pg_attribute whose attname is NUL-terminated NameData.
         let field = (|| unsafe {
             let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_attribute>();
             if (*form).attisdropped || (*form).attnum != attno {
@@ -313,6 +354,8 @@ unsafe fn read_composite_type_shape(type_oid: pg_sys::Oid) -> Result<CompositeTy
                 tuple_offset: pg_sys::ItemPointerGetOffsetNumber(&raw const (*tuple).t_self),
             })
         })();
+        // SAFETY: releases this iteration's ATTNUM pin exactly once, after the
+        // closure finished all tuple reads.
         unsafe { pg_sys::ReleaseSysCache(tuple) };
         fields.push(field?);
     }
@@ -408,6 +451,8 @@ fn normalized_catalog_source(source: &str) -> String {
 }
 
 unsafe fn namespace_name(schema_oid: pg_sys::Oid) -> Result<String, String> {
+    // SAFETY: main-thread catalog lookup per this function's contract; returns a
+    // palloc'd C string or NULL, checked below.
     let name = unsafe { pg_sys::get_namespace_name(schema_oid) };
     if name.is_null() {
         return Err(format!(
@@ -415,6 +460,8 @@ unsafe fn namespace_name(schema_oid: pg_sys::Oid) -> Result<String, String> {
             u32::from(schema_oid)
         ));
     }
+    // SAFETY: `name` was NULL-checked above and points at the NUL-terminated
+    // palloc'd string returned by get_namespace_name.
     let result = unsafe { std::ffi::CStr::from_ptr(name) }
         .to_str()
         .map(str::to_owned)
@@ -424,6 +471,8 @@ unsafe fn namespace_name(schema_oid: pg_sys::Oid) -> Result<String, String> {
                 u32::from(schema_oid)
             )
         });
+    // SAFETY: `name` was palloc'd by get_namespace_name and is freed exactly once,
+    // after its contents were copied into an owned String.
     unsafe { pg_sys::pfree(name.cast()) };
     result
 }
@@ -434,6 +483,8 @@ unsafe fn find_function_oid(
     argument_types: &[pg_sys::Oid],
 ) -> Result<pg_sys::Oid, String> {
     let name = std::ffi::CString::new(name).map_err(|_| "invalid function name".to_owned())?;
+    // SAFETY: `argument_types.as_ptr()` is valid for `argument_types.len()` OIDs;
+    // buildoidvector copies them into a fresh palloc'd oidvector.
     let vector = unsafe {
         pg_sys::buildoidvector(
             argument_types.as_ptr(),
@@ -443,6 +494,9 @@ unsafe fn find_function_oid(
     if vector.is_null() {
         return Err("could not build function signature".to_owned());
     }
+    // SAFETY: `name` and `vector` are valid pointers outliving the call; the
+    // PROCNAMEARGSNSP lookup runs on the backend main thread per this function's
+    // contract.
     let tuple = unsafe {
         pg_sys::SearchSysCache3(
             pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as ::core::ffi::c_int,
@@ -451,14 +505,20 @@ unsafe fn find_function_oid(
             pg_sys::ObjectIdGetDatum(schema_oid),
         )
     };
+    // SAFETY: `vector` was palloc'd by buildoidvector (NULL-checked above) and is
+    // freed exactly once, before any early return below.
     unsafe { pg_sys::pfree(vector.cast()) };
     if tuple.is_null() {
         return Err("PostGIS Raster exact function overload is missing".to_owned());
     }
+    // SAFETY: `tuple` was NULL-checked above and remains pinned; GETSTRUCT of a
+    // PROCNAMEARGSNSP entry is a FormData_pg_proc.
     let oid = unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_proc>();
         (*form).oid
     };
+    // SAFETY: releases the SearchSysCache3 pin exactly once, after the oid was
+    // copied out.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     Ok(oid)
 }
@@ -589,6 +649,9 @@ fn require_extension_member(
     object_oid: pg_sys::Oid,
     label: &str,
 ) -> Result<(), String> {
+    // SAFETY: getExtensionOfObject only reads the pg_depend catalog; every caller
+    // is one of the unsafe raster catalog resolvers whose contract pins execution
+    // to the backend main thread.
     if unsafe { pg_sys::getExtensionOfObject(class_oid, object_oid) } != extension_oid {
         return Err(format!(
             "{label} OID {} is not owned by extension postgis_raster",
@@ -614,7 +677,11 @@ fn raster_type_fingerprint(shape: &PostgisRasterTypeShape) -> Vec<i32> {
 /// # Safety
 /// Must be called on the PostgreSQL backend main thread.
 pub unsafe fn validate_postgis_raster_type(type_oid: pg_sys::Oid) -> Result<Vec<i32>, String> {
+    // SAFETY: delegated syscache reads with the same main-backend-thread contract
+    // as this function.
     let extension = unsafe { postgis_raster_extension_shape()? };
+    // SAFETY: delegated syscache read of `type_oid` under the same
+    // main-backend-thread contract as this function.
     let shape = unsafe { read_postgis_raster_type_shape(type_oid)? };
     validate_postgis_raster_type_shape(&shape, extension.schema_oid)?;
     require_extension_member(
@@ -623,6 +690,8 @@ pub unsafe fn validate_postgis_raster_type(type_oid: pg_sys::Oid) -> Result<Vec<
         type_oid,
         "raster type",
     )?;
+    // SAFETY: main-thread syscache read of the raster type's input function, per
+    // this function's contract.
     let input = unsafe { read_h3_function_shape(shape.input_fn)? };
     validate_raster_c_function(
         &input,
@@ -640,6 +709,8 @@ pub unsafe fn validate_postgis_raster_type(type_oid: pg_sys::Oid) -> Result<Vec<
         shape.input_fn,
         "raster input function",
     )?;
+    // SAFETY: main-thread syscache read of the raster type's output function, per
+    // this function's contract.
     let output = unsafe { read_h3_function_shape(shape.output_fn)? };
     validate_raster_c_function(
         &output,
@@ -668,11 +739,19 @@ pub unsafe fn validate_postgis_raster_type(type_oid: pg_sys::Oid) -> Result<Vec<
 /// # Safety
 /// Must be called on the PostgreSQL backend main thread.
 pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIdentity, String> {
+    // SAFETY: delegated syscache reads with the same main-backend-thread contract
+    // as this function.
     let extension = unsafe { postgis_raster_extension_shape()? };
+    // SAFETY: main-thread syscache lookup in the proven extension schema, per this
+    // function's contract.
     let raster_type_oid = unsafe { find_type_oid(extension.schema_oid, POSTGIS_RASTER_TYPE_NAME)? };
     let summary_stats_type_oid =
+        // SAFETY: main-thread syscache lookup in the proven extension schema, per this
+        // function's contract.
         unsafe { find_type_oid(extension.schema_oid, POSTGIS_RASTER_SUMMARY_TYPE_NAME)? };
     let reclass_arg_type_oid =
+        // SAFETY: main-thread syscache lookup in the proven extension schema, per this
+        // function's contract.
         unsafe { find_type_oid(extension.schema_oid, POSTGIS_RASTER_RECLASS_ARG_TYPE_NAME)? };
     require_extension_member(
         extension.extension_oid,
@@ -686,6 +765,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
         reclass_arg_type_oid,
         "reclassarg type",
     )?;
+    // SAFETY: main-thread composite-type syscache read of the OID resolved above,
+    // per this function's contract.
     let summary_type = unsafe { read_composite_type_shape(summary_stats_type_oid)? };
     validate_composite_type_shape(
         &summary_type,
@@ -700,6 +781,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
             ("max", pg_sys::FLOAT8OID),
         ],
     )?;
+    // SAFETY: main-thread composite-type syscache read of the OID resolved above,
+    // per this function's contract.
     let reclass_arg_type = unsafe { read_composite_type_shape(reclass_arg_type_oid)? };
     validate_composite_type_shape(
         &reclass_arg_type,
@@ -712,11 +795,17 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
             ("nodataval", pg_sys::FLOAT8OID),
         ],
     )?;
+    // SAFETY: get_array_type is a syscache lookup running on the backend main
+    // thread per this function's contract.
     let reclass_arg_array_oid = unsafe { pg_sys::get_array_type(reclass_arg_type_oid) };
     if reclass_arg_array_oid == pg_sys::InvalidOid {
         return Err("PostGIS Raster reclassarg has no array type".to_owned());
     }
+    // SAFETY: main-thread catalog read of the proven extension schema OID, per
+    // this function's contract.
     let schema_name = unsafe { namespace_name(extension.schema_oid)? };
+    // SAFETY: main-thread overload resolution in the proven extension schema, per
+    // this function's contract.
     let reclass_fn_oid = unsafe {
         find_function_oid(
             extension.schema_oid,
@@ -724,6 +813,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
             &[raster_type_oid, pg_sys::TEXTOID, pg_sys::TEXTOID],
         )?
     };
+    // SAFETY: main-thread overload resolution in the proven extension schema, per
+    // this function's contract.
     let summary_stats_fn_oid = unsafe {
         find_function_oid(
             extension.schema_oid,
@@ -731,6 +822,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
             &[raster_type_oid, pg_sys::INT4OID, pg_sys::BOOLOID],
         )?
     };
+    // SAFETY: main-thread overload resolution in the proven extension schema, per
+    // this function's contract.
     let summary_stats_default_band_fn_oid = unsafe {
         find_function_oid(
             extension.schema_oid,
@@ -738,6 +831,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
             &[raster_type_oid, pg_sys::BOOLOID],
         )?
     };
+    // SAFETY: main-thread overload resolution in the proven extension schema, per
+    // this function's contract.
     let reclass_variadic_fn_oid = unsafe {
         find_function_oid(
             extension.schema_oid,
@@ -745,6 +840,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
             &[raster_type_oid, reclass_arg_array_oid],
         )?
     };
+    // SAFETY: main-thread overload resolution in the proven extension schema, per
+    // this function's contract.
     let reclass_impl_fn_oid = unsafe {
         find_function_oid(
             extension.schema_oid,
@@ -752,6 +849,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
             &[raster_type_oid, reclass_arg_array_oid],
         )?
     };
+    // SAFETY: main-thread overload resolution in the proven extension schema, per
+    // this function's contract.
     let summary_stats_impl_fn_oid = unsafe {
         find_function_oid(
             extension.schema_oid,
@@ -764,6 +863,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
             ],
         )?
     };
+    // SAFETY: main-thread syscache read of the pg_proc OID resolved above, per
+    // this function's contract.
     let reclass = unsafe { read_h3_function_shape(reclass_fn_oid)? };
     validate_raster_sql_function(
         &reclass,
@@ -777,6 +878,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
     if reclass.variadic_type != pg_sys::InvalidOid {
         return Err("PostGIS Raster st_reclass(raster,text,text) became variadic".to_owned());
     }
+    // SAFETY: main-thread syscache read of the pg_proc OID resolved above, per
+    // this function's contract.
     let reclass_variadic = unsafe { read_h3_function_shape(reclass_variadic_fn_oid)? };
     validate_raster_plpgsql_function(
         &reclass_variadic,
@@ -800,6 +903,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
              END;"
         ),
     )?;
+    // SAFETY: main-thread syscache read of the pg_proc OID resolved above, per
+    // this function's contract.
     let reclass_impl = unsafe { read_h3_function_shape(reclass_impl_fn_oid)? };
     validate_raster_c_function(
         &reclass_impl,
@@ -814,6 +919,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
     if reclass_impl.variadic_type != reclass_arg_type_oid {
         return Err("PostGIS Raster _st_reclass has a noncanonical variadic type".to_owned());
     }
+    // SAFETY: main-thread syscache read of the pg_proc OID resolved above, per
+    // this function's contract.
     let summary = unsafe { read_h3_function_shape(summary_stats_fn_oid)? };
     validate_raster_sql_function(
         &summary,
@@ -827,6 +934,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
     if summary.variadic_type != pg_sys::InvalidOid {
         return Err("PostGIS Raster st_summarystats(raster,int4,bool) became variadic".to_owned());
     }
+    // SAFETY: main-thread syscache read of the pg_proc OID resolved above, per
+    // this function's contract.
     let summary_default = unsafe { read_h3_function_shape(summary_stats_default_band_fn_oid)? };
     validate_raster_sql_function(
         &summary_default,
@@ -840,6 +949,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
     if summary_default.variadic_type != pg_sys::InvalidOid {
         return Err("PostGIS Raster st_summarystats(raster,bool) became variadic".to_owned());
     }
+    // SAFETY: main-thread syscache read of the pg_proc OID resolved above, per
+    // this function's contract.
     let summary_impl = unsafe { read_h3_function_shape(summary_stats_impl_fn_oid)? };
     validate_raster_c_function(
         &summary_impl,
@@ -878,6 +989,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
         )?;
     }
 
+    // SAFETY: same main-backend-thread contract as this function; the validation
+    // only performs syscache reads.
     let type_words = unsafe { validate_postgis_raster_type(raster_type_oid)? };
     let [extension_hash_low, extension_hash_high] =
         u64_words(fnv1a64(&[extension.version.as_bytes()]));
@@ -925,6 +1038,9 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
 pub unsafe fn resolve_postgis_raster_function(
     fn_oid: pg_sys::Oid,
 ) -> Result<(PostgisRasterCatalogIdentity, PostgisRasterFunction), String> {
+    // SAFETY: the caller upholds this function's main-backend-thread contract,
+    // which is what resolve_postgis_raster_catalog requires for its syscache
+    // reads.
     let identity = unsafe { resolve_postgis_raster_catalog()? };
     let function = if fn_oid == identity.reclass_fn_oid {
         PostgisRasterFunction::Reclass

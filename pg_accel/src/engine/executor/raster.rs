@@ -134,6 +134,9 @@ impl RasterExecPlan {
     /// # Safety
     /// Must run on the PostgreSQL backend main thread.
     pub unsafe fn ensure_ready(&self) -> Result<RasterExecReady, ResidentLoadError> {
+        // SAFETY: ensure_ready's contract puts us on the PostgreSQL backend main
+        // thread at the Begin/ReScan boundary, which is exactly
+        // revalidate_raster_catalog's requirement.
         unsafe { revalidate_raster_catalog(&self.spec) }.map_err(|error| {
             ResidentLoadError::Loader(format!("raster catalog revalidation failed: {error}"))
         })?;
@@ -185,6 +188,9 @@ impl RasterExecPlan {
             },
             |workspace| {
                 let artifact = workspace.finalize()?;
+                // SAFETY: ensure_artifact is only reached from ensure_ready (backend main
+                // thread contract), and ensure_staged_device_transform_artifact runs this
+                // finalize closure synchronously on the calling thread.
                 unsafe { revalidate_raster_catalog(&self.spec) }.map_err(|error| {
                     ResidentLoadError::Loader(format!(
                         "raster catalog changed before artifact publication: {error}"

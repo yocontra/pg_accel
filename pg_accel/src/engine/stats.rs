@@ -645,18 +645,6 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.gpu_h3_max_chunk_rows.to_string(),
         ),
         (
-            "gpu_spatial_unsafe_band_min_rows".into(),
-            limits.gpu_spatial_unsafe_band_min_rows.to_string(),
-        ),
-        (
-            "gpu_spatial_unsafe_band_max_rows".into(),
-            limits.gpu_spatial_unsafe_band_max_rows.to_string(),
-        ),
-        (
-            "gpu_spatial_unsafe_band_min_vertices".into(),
-            limits.gpu_spatial_unsafe_band_min_vertices.to_string(),
-        ),
-        (
             "gpu_spatial_min_vertices".into(),
             limits.gpu_spatial_min_vertices.to_string(),
         ),
@@ -1189,7 +1177,7 @@ mod tests {
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM pg_accel_device_limits()")
             .expect("pg_accel_device_limits() should succeed")
             .expect("pg_accel_device_limits() should return a row count");
-        assert_eq!(count, 75, "expected one SRF row per DeviceLimits field");
+        assert_eq!(count, 72, "expected one SRF row per DeviceLimits field");
 
         let phase6_count = Spi::get_one::<i64>(
             "SELECT COUNT(*) FROM pg_accel_device_limits() WHERE name IN (\
@@ -1198,17 +1186,11 @@ mod tests {
              'gpu_spatial_max_vertices_per_row', \
              'gpu_spatial_max_recheck_fraction', 'gpu_raster_min_pixels', \
              'gpu_raster_max_chunk_pixels', \
-             'resident_domain_max_exact_value_bytes', \
-             'gpu_spatial_unsafe_band_min_rows', \
-             'gpu_spatial_unsafe_band_max_rows', \
-             'gpu_spatial_unsafe_band_min_vertices')",
+             'resident_domain_max_exact_value_bytes')",
         )
         .expect("Phase 6 device-limit lookup should succeed")
         .expect("Phase 6 device-limit lookup should return a count");
-        assert_eq!(
-            phase6_count, 11,
-            "Phase 6 domain and legacy unsafe-band limits must be exposed"
-        );
+        assert_eq!(phase6_count, 8, "Phase 6 domain limits must be exposed");
 
         let source = Spi::get_one::<String>("SELECT source FROM pg_accel_device_limits() LIMIT 1")
             .expect("source column query should succeed")
