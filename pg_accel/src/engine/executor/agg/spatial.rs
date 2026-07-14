@@ -6,9 +6,7 @@ use std::any::Any;
 
 use pgrx::pg_sys;
 
-use super::artifact::{
-    DescriptorAggArtifact, PreparedAggArtifact, prepare_spatial_base_artifact,
-};
+use super::artifact::{DescriptorAggArtifact, PreparedAggArtifact, prepare_spatial_base_artifact};
 use crate::engine::ffi::syscache::{PostgisCatalogIdentity, resolve_postgis_catalog};
 use crate::engine::residency::{
     DerivedArtifact, ResidentByteAccounting, ResidentColumnRef, ResidentColumnView,
@@ -52,8 +50,7 @@ pub(super) struct SpatialBaseShape {
     pub fact_rows: usize,
     pub fact_group_key_count: usize,
     pub dimension_count: usize,
-    pub dimensions:
-        [SpatialDimensionShape; crate::engine::spec::abi::PGACCEL_GROUPED_AGG_MAX_DIMS],
+    pub dimensions: [SpatialDimensionShape; crate::engine::spec::abi::PGACCEL_GROUPED_AGG_MAX_DIMS],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,14 +263,12 @@ impl SpatialTransformPlan {
             return Err("spatial transform plan requires a spatial fact filter".to_owned());
         };
         let (column, constant_bytes, column_is_left) = match (left, right) {
-            (
-                SpatialOperand::Column { column, .. },
-                SpatialOperand::Constant { bytes, .. },
-            ) => (*column, bytes.as_ref(), true),
-            (
-                SpatialOperand::Constant { bytes, .. },
-                SpatialOperand::Column { column, .. },
-            ) => (*column, bytes.as_ref(), false),
+            (SpatialOperand::Column { column, .. }, SpatialOperand::Constant { bytes, .. }) => {
+                (*column, bytes.as_ref(), true)
+            }
+            (SpatialOperand::Constant { bytes, .. }, SpatialOperand::Column { column, .. }) => {
+                (*column, bytes.as_ref(), false)
+            }
             _ => {
                 return Err(
                     "spatial aggregate requires exactly one column and one constant".to_owned(),
@@ -283,7 +278,9 @@ impl SpatialTransformPlan {
         if column.relation_oid != spec.fact_rel
             || column.type_oid != u32::from(catalog.geometry_type_oid)
         {
-            return Err("spatial aggregate column does not match the proved PostGIS type".to_owned());
+            return Err(
+                "spatial aggregate column does not match the proved PostGIS type".to_owned(),
+            );
         }
         let limits = crate::engine::cost::device_limits();
         let parsed = crate::engine::residency::validate_resident_geometry_value(
@@ -419,7 +416,9 @@ impl SpatialTransformPlan {
             },
             PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
         )
-        .map_err(|error| ResidentLoadError::Loader(format!("spatial preflight failed: {error:?}")))?;
+        .map_err(|error| {
+            ResidentLoadError::Loader(format!("spatial preflight failed: {error:?}"))
+        })?;
         Ok(StagedTransformPreflight {
             prepared: preflight,
             published_accounting: preflight.published_accounting,
@@ -446,13 +445,8 @@ impl SpatialTransformPlan {
         )?;
         let mut base_spec = spec.clone();
         base_spec.fact_filter = FilterSpec::None;
-        let prepared = prepare_spatial_base_artifact(
-            &base_spec,
-            requests,
-            inputs,
-            self.max_groups,
-        )
-        .map_err(ResidentLoadError::Loader)?;
+        let prepared = prepare_spatial_base_artifact(&base_spec, requests, inputs, self.max_groups)
+            .map_err(ResidentLoadError::Loader)?;
         let expected_base_bytes = preflight
             .published_accounting
             .device_bytes
@@ -590,7 +584,10 @@ fn allocation_error(detail: &'static str) -> ResidentLoadError {
     ResidentLoadError::Loader(detail.to_owned())
 }
 
-fn device_buffer<T>(len: usize, detail: &'static str) -> Result<ExprDeviceBuffer<T>, ResidentLoadError> {
+fn device_buffer<T>(
+    len: usize,
+    detail: &'static str,
+) -> Result<ExprDeviceBuffer<T>, ResidentLoadError> {
     ExprDeviceBuffer::new(len).ok_or_else(|| allocation_error(detail))
 }
 
@@ -633,7 +630,9 @@ impl SpatialWorkspace {
     ) -> Result<Self, ResidentLoadError> {
         prepare_spatial_resident().map_err(ResidentLoadError::Gpu)?;
         let constant_bytes = spatial_constant_bytes(spec).ok_or_else(|| {
-            ResidentLoadError::Loader("spatial constant disappeared before workspace build".to_owned())
+            ResidentLoadError::Loader(
+                "spatial constant disappeared before workspace build".to_owned(),
+            )
         })?;
         let limits = crate::engine::cost::device_limits();
         let constant = materialize_resident_geometry_constant(
@@ -643,7 +642,9 @@ impl SpatialWorkspace {
         )
         .map_err(ResidentLoadError::Loader)?;
         let constant_view = geometry_view(constant.view()).map_err(|_| {
-            ResidentLoadError::Loader("materialized spatial constant has an invalid device shape".to_owned())
+            ResidentLoadError::Loader(
+                "materialized spatial constant has an invalid device shape".to_owned(),
+            )
         })?;
         if constant_view.row_count != 1
             || constant_view.coordinate_pair_count != plan.constant.coordinate_pairs
@@ -659,29 +660,23 @@ impl SpatialWorkspace {
             .try_reserve_exact(snapshot.preflight.chunk_count)
             .map_err(|_| allocation_error("spatial chunk layout allocation failed"))?;
         for first_row in (0..snapshot.preflight.fact_rows).step_by(snapshot.preflight.chunk_limit) {
-            let row_count = (snapshot.preflight.fact_rows - first_row)
-                .min(snapshot.preflight.chunk_limit);
+            let row_count =
+                (snapshot.preflight.fact_rows - first_row).min(snapshot.preflight.chunk_limit);
             let control = device_buffer::<u8>(
                 PGACCEL_SPATIAL_CONTROL_BYTES,
                 "spatial control allocation failed",
             )?;
-            let failure_flags =
-                device_buffer::<u32>(1, "spatial failure-word allocation failed")?;
-            let tri_state =
-                device_buffer::<i8>(row_count, "spatial tri-state allocation failed")?;
+            let failure_flags = device_buffer::<u32>(1, "spatial failure-word allocation failed")?;
+            let tri_state = device_buffer::<i8>(row_count, "spatial tri-state allocation failed")?;
             let final_mask =
                 device_buffer::<i8>(row_count, "spatial chunk-mask allocation failed")?;
-            let uncertain_indices = device_buffer::<u64>(
-                row_count,
-                "spatial uncertainty-index allocation failed",
-            )?;
+            let uncertain_indices =
+                device_buffer::<u64>(row_count, "spatial uncertainty-index allocation failed")?;
             let uncertain_count =
                 device_buffer::<u64>(1, "spatial uncertainty-count allocation failed")?;
-            let native_workspace = PgaccelSpatialWorkspace::from_device_buffers(
-                &control,
-                &failure_flags,
-            )
-            .map_err(ResidentLoadError::Gpu)?;
+            let native_workspace =
+                PgaccelSpatialWorkspace::from_device_buffers(&control, &failure_flags)
+                    .map_err(ResidentLoadError::Gpu)?;
             let compact_request = PgaccelSpatialRecheckCompactRequest::from_device_buffers(
                 &tri_state,
                 &final_mask,
@@ -726,7 +721,9 @@ impl SpatialWorkspace {
             )?,
             borrow_failure: None,
         };
-        let actual = workspace.accounting().ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
+        let actual = workspace
+            .accounting()
+            .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
         if actual != workspace.preflight.transient_accounting {
             return Err(ResidentLoadError::TransformWorkspaceAccountingMismatch {
                 declared: workspace.preflight.transient_accounting,
@@ -787,10 +784,8 @@ impl SpatialWorkspace {
             }
         };
         for chunk in &mut self.chunks {
-            let column_operand = PgaccelResidentGeometryOperand::column(
-                column_view,
-                chunk.first_row,
-            );
+            let column_operand =
+                PgaccelResidentGeometryOperand::column(column_view, chunk.first_row);
             let constant_operand = PgaccelResidentGeometryOperand::constant(self.constant_view);
             let (left, right) = if plan.column_is_left {
                 (column_operand, constant_operand)
@@ -840,15 +835,11 @@ impl SpatialWorkspace {
             };
             // SAFETY: every pointer is owned by this workspace or the active
             // resident input borrow; the queue was prepared by `build`.
-            chunk.eval_outcome = Some(unsafe {
-                spatial_eval_resident_launch(&request, &chunk.native_workspace)
-            });
+            chunk.eval_outcome =
+                Some(unsafe { spatial_eval_resident_launch(&request, &chunk.native_workspace) });
             // SAFETY: compaction is the ordered second half of the same chain.
             chunk.compact_outcome = Some(unsafe {
-                spatial_recheck_compact_launch(
-                    &chunk.compact_request,
-                    &chunk.native_workspace,
-                )
+                spatial_recheck_compact_launch(&chunk.compact_request, &chunk.native_workspace)
             });
         }
     }
@@ -859,7 +850,9 @@ impl SpatialWorkspace {
         row: &[u8],
     ) -> Result<i8, ResidentLoadError> {
         let constant = spatial_constant_bytes(spec).ok_or_else(|| {
-            ResidentLoadError::Loader("spatial constant disappeared before exact recheck".to_owned())
+            ResidentLoadError::Loader(
+                "spatial constant disappeared before exact recheck".to_owned(),
+            )
         })?;
         let row_datum = pg_sys::Datum::from(row.as_ptr());
         let constant_datum = pg_sys::Datum::from(constant.as_ptr());
@@ -882,12 +875,7 @@ impl SpatialWorkspace {
             }
         } else {
             unsafe {
-                pg_sys::OidFunctionCall2Coll(
-                    plan.exact_fn_oid,
-                    pg_sys::InvalidOid,
-                    left,
-                    right,
-                )
+                pg_sys::OidFunctionCall2Coll(plan.exact_fn_oid, pg_sys::InvalidOid, left, right)
             }
         };
         Ok(if result.value() == 0 { -1 } else { 1 })
@@ -938,8 +926,14 @@ impl SpatialWorkspace {
                 .map_err(ResidentLoadError::Gpu)?;
             let mut previous = None;
             for index in host_indices.iter().copied().take(uncertain_count) {
-                let index = usize::try_from(index).ok().filter(|index| *index < chunk.row_count)
-                    .ok_or_else(|| ResidentLoadError::Loader("spatial uncertainty index is out of range".to_owned()))?;
+                let index = usize::try_from(index)
+                    .ok()
+                    .filter(|index| *index < chunk.row_count)
+                    .ok_or_else(|| {
+                        ResidentLoadError::Loader(
+                            "spatial uncertainty index is out of range".to_owned(),
+                        )
+                    })?;
                 if previous.is_some_and(|previous| index <= previous) {
                     return Err(ResidentLoadError::Loader(
                         "spatial uncertainty indices are not strictly ordered".to_owned(),
@@ -960,9 +954,10 @@ impl SpatialWorkspace {
                     let local_row = usize::try_from(local_row).map_err(|_| {
                         ResidentLoadError::Loader("spatial recheck row exceeds usize".to_owned())
                     })?;
-                    let global_row = chunk.first_row.checked_add(local_row).ok_or(
-                        ResidentLoadError::ArtifactAccountingOverflow,
-                    )?;
+                    let global_row = chunk
+                        .first_row
+                        .checked_add(local_row)
+                        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
                     let exact = self.exact.exact_value(global_row).ok_or_else(|| {
                         ResidentLoadError::Loader(
                             "spatial uncertain row has no exact GSERIALIZED snapshot".to_owned(),
@@ -1013,8 +1008,8 @@ impl SpatialWorkspace {
                     .ok_or_else(|| allocation_error("spatial final-mask upload failed"))?,
             )
         };
-        let mut base = DescriptorAggArtifact::build(self.prepared_base)
-            .map_err(ResidentLoadError::Loader)?;
+        let mut base =
+            DescriptorAggArtifact::build(self.prepared_base).map_err(ResidentLoadError::Loader)?;
         base.resolved_spec = spec.clone();
         let artifact = SpatialAggArtifact::new(base, final_mask)
             .map_err(|detail| ResidentLoadError::Loader(detail.to_owned()))?;
@@ -1025,7 +1020,8 @@ impl SpatialWorkspace {
 
 impl StagedTransformWorkspace for SpatialWorkspace {
     fn device_bytes(&self) -> u64 {
-        self.accounting().map_or(u64::MAX, |value| value.device_bytes)
+        self.accounting()
+            .map_or(u64::MAX, |value| value.device_bytes)
     }
 
     fn host_bytes(&self) -> u64 {
@@ -1177,14 +1173,11 @@ mod tests {
             fact_rows: usize::MAX,
             fact_group_key_count: usize::MAX,
             dimension_count: 0,
-            dimensions: [
-                SpatialDimensionShape {
-                    row_count: 0,
-                    group_key_count: 0,
-                    counted: false,
-                };
-                crate::engine::spec::abi::PGACCEL_GROUPED_AGG_MAX_DIMS
-            ],
+            dimensions: [SpatialDimensionShape {
+                row_count: 0,
+                group_key_count: 0,
+                counted: false,
+            }; crate::engine::spec::abi::PGACCEL_GROUPED_AGG_MAX_DIMS],
         };
         assert_eq!(
             spatial_preflight(
