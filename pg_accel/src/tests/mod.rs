@@ -2238,13 +2238,13 @@ mod tests {
         assert_eq!(pinned, 1_000_000);
         assert_eq!(
             Spi::get_one::<bool>(
-                "SELECT raw_bytes > 0 AND loaded_at IS NOT NULL \
+                "SELECT pinned \
                  FROM pg_accel_resident_status() \
                  WHERE relid = '_h3_parent_groupagg'::regclass"
             )
             .expect("H3 fixture resident status should be readable"),
             Some(true),
-            "pin must publish a material resident snapshot before accelerated planning"
+            "H3 fixture must retain explicit pin intent before accelerated planning"
         );
         let plan = explain_text(query);
         assert!(
@@ -2266,6 +2266,16 @@ mod tests {
         assert_eq!(
             accelerated, native,
             "accelerated H3 parent grouped count must equal native"
+        );
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT pinned AND raw_bytes > 0 AND loaded_at IS NOT NULL \
+                 FROM pg_accel_resident_status() \
+                 WHERE relid = '_h3_parent_groupagg'::regclass"
+            )
+            .expect("accelerated H3 fixture resident status should be readable"),
+            Some(true),
+            "accelerated H3 execution must publish a current material resident snapshot"
         );
 
         let analyzed = explain_analyze_text(query);
@@ -2374,13 +2384,13 @@ mod tests {
         assert_eq!(all_null_pinned, 1_000_000);
         assert_eq!(
             Spi::get_one::<bool>(
-                "SELECT raw_bytes > 0 AND loaded_at IS NOT NULL \
+                "SELECT pinned \
                  FROM pg_accel_resident_status() \
                  WHERE relid = '_h3_parent_all_null'::regclass"
             )
             .expect("all-NULL H3 fixture resident status should be readable"),
             Some(true),
-            "all-NULL pin must publish a material resident snapshot"
+            "all-NULL H3 fixture must retain explicit pin intent before accelerated planning"
         );
         let all_null_plan = explain_text(all_null_query);
         assert!(
@@ -2398,6 +2408,16 @@ mod tests {
             all_null_accelerated,
             vec![(None, 1_000_000)],
             "all-NULL H3 input must emit one NULL group containing every row"
+        );
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT pinned AND raw_bytes > 0 AND loaded_at IS NOT NULL \
+                 FROM pg_accel_resident_status() \
+                 WHERE relid = '_h3_parent_all_null'::regclass"
+            )
+            .expect("accelerated all-NULL H3 fixture resident status should be readable"),
+            Some(true),
+            "accelerated all-NULL H3 execution must publish a current material snapshot"
         );
 
         Spi::run(
@@ -2422,13 +2442,13 @@ mod tests {
         assert_eq!(empty_pinned, 0);
         assert_eq!(
             Spi::get_one::<bool>(
-                "SELECT raw_bytes = 0 AND loaded_at IS NOT NULL \
+                "SELECT pinned \
                  FROM pg_accel_resident_status() \
                  WHERE relid = '_h3_parent_empty'::regclass"
             )
             .expect("empty H3 fixture resident status should be readable"),
             Some(true),
-            "empty pin must publish a loaded zero-row resident snapshot"
+            "empty H3 fixture must retain explicit pin intent before accelerated planning"
         );
         let empty_plan = explain_text(empty_query);
         assert!(
@@ -2445,6 +2465,16 @@ mod tests {
         assert!(
             empty_accelerated.is_empty(),
             "keyed aggregation over empty H3 input must emit no groups"
+        );
+        assert_eq!(
+            Spi::get_one::<bool>(
+                "SELECT pinned AND raw_bytes = 0 AND loaded_at IS NOT NULL \
+                 FROM pg_accel_resident_status() \
+                 WHERE relid = '_h3_parent_empty'::regclass"
+            )
+            .expect("accelerated empty H3 fixture resident status should be readable"),
+            Some(true),
+            "accelerated empty H3 execution must publish a loaded zero-row snapshot"
         );
 
         let assert_structural_decline = |label: &str, sql: &str| {
