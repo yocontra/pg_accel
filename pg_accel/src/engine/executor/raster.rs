@@ -908,8 +908,6 @@ impl RasterOutputCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
 
     use crate::adapters::extractors::raster::parse_resident_raster;
     use crate::engine::raster::{
@@ -920,67 +918,23 @@ mod tests {
         ResidentRasterBand, ResidentRasterData, ResidentRasterRow, RetainedExactValues,
     };
 
-    thread_local! {
-        static COUNT_ALLOCATIONS: Cell<bool> = const { Cell::new(false) };
-        static ALLOCATION_COUNT: Cell<usize> = const { Cell::new(0) };
-    }
-
-    struct CountingAllocator;
-
-    #[global_allocator]
-    static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
-
-    unsafe impl GlobalAlloc for CountingAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            if COUNT_ALLOCATIONS.try_with(Cell::get).unwrap_or(false) {
-                let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
-            }
-            // SAFETY: this allocator transparently delegates the same layout.
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            if COUNT_ALLOCATIONS.try_with(Cell::get).unwrap_or(false) {
-                let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
-            }
-            // SAFETY: this allocator transparently delegates the same layout.
-            unsafe { System.alloc_zeroed(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            // SAFETY: `ptr` was returned by the delegated system allocator.
-            unsafe { System.dealloc(ptr, layout) };
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            if COUNT_ALLOCATIONS.try_with(Cell::get).unwrap_or(false) {
-                let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
-            }
-            // SAFETY: the allocation and layouts are delegated unchanged.
-            unsafe { System.realloc(ptr, layout, new_size) }
-        }
-    }
-
     fn allocation_count(f: impl FnOnce()) -> usize {
-        struct CountingGuard;
+        struct CountingGuard(bool);
 
         impl Drop for CountingGuard {
             fn drop(&mut self) {
-                COUNT_ALLOCATIONS.with(|enabled| enabled.set(false));
+                if self.0 {
+                    let _ = crate::engine::residency::finish_test_allocation_count();
+                }
             }
         }
 
-        ALLOCATION_COUNT.with(|count| count.set(0));
-        COUNT_ALLOCATIONS.with(|enabled| {
-            assert!(
-                !enabled.replace(true),
-                "allocation counter is not reentrant"
-            );
-        });
-        let guard = CountingGuard;
+        crate::engine::residency::begin_test_allocation_count();
+        let mut guard = CountingGuard(true);
         f();
+        guard.0 = false;
         drop(guard);
-        ALLOCATION_COUNT.with(Cell::get)
+        crate::engine::residency::finish_test_allocation_count()
     }
 
     const HEADER_BYTES: usize = 61;
