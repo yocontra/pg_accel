@@ -1437,7 +1437,10 @@ pub fn run_with_timing_and_cache(
         let mut result = WorkloadResult::from_iterations(
             workload.name().to_owned(),
             workload.description().to_owned(),
-            workload.category().to_owned(),
+            crate::workloads::workload_metadata(workload.name()).map_or_else(
+                || workload.category().to_owned(),
+                |metadata| metadata.category.as_str().to_owned(),
+            ),
             crate::report::classify_kernel(workload.name()),
             0,
             merged,
@@ -1641,7 +1644,10 @@ pub fn run_with_timing_and_cache(
     let mut result = WorkloadResult::from_iterations(
         workload.name().to_owned(),
         workload.description().to_owned(),
-        workload.category().to_owned(),
+        crate::workloads::workload_metadata(workload.name()).map_or_else(
+            || workload.category().to_owned(),
+            |metadata| metadata.category.as_str().to_owned(),
+        ),
         crate::report::classify_kernel(workload.name()),
         0,
         results,

@@ -57,6 +57,7 @@ mod gpu_expr_filter;
 mod gpu_expr_null_heavy;
 // --- GPU Raster ---
 mod raster_variants;
+mod registry;
 // --- GPU Window ---
 mod window_analytics;
 mod window_variants;
@@ -126,6 +127,7 @@ pub use parallel_stress::{
 };
 pub use predicate_filter_expression_grouped_agg::PredicateFilterExpressionGroupedAgg;
 pub use proximity::Proximity;
+pub use registry::workload_metadata;
 pub use small_table::SmallTable;
 pub use spatial_agg::SpatialAgg;
 pub use spatial_complex_poly::SpatialComplexPoly;

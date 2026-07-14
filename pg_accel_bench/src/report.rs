@@ -1075,110 +1075,13 @@ impl WorkloadResult {
     }
 }
 
-/// Map a workload name to a kernel class (action_items W11 / Reviewer 1
-/// Sin #17). Reviewer 1 counts at most 9 distinct GPU kernels across 127
-/// workloads.
-///
-/// This is intentionally a hardcoded table — the mapping is load-bearing
-/// benchmark documentation, and individual workload authors shouldn't be
-/// able to mislabel themselves into a friendlier kernel class. When a new
-/// kernel lands, add it here.
+/// Map an exact workload name to its declarative kernel class.
 #[must_use]
 pub fn classify_kernel(name: &str) -> String {
-    const TABLE: &[(&str, &str)] = &[
-        // point_in_ring (ST_Intersects, ST_Contains, vertex sweeps, megapoly)
-        ("vsweep_", "point_in_ring"),
-        ("spatial_mega_", "point_in_ring"),
-        ("spatial_filter", "point_in_ring"),
-        ("spatial_complex_poly", "point_in_ring"),
-        ("spatial_contains", "point_in_ring"),
-        ("spatial_multi_pred", "point_in_ring"),
-        ("spatial_selectivity", "point_in_ring"),
-        ("spatial_sel_", "point_in_ring"),
-        ("spatial_concentric", "point_in_ring"),
-        ("spatial_star_", "point_in_ring"),
-        ("spatial_multihole", "point_in_ring"),
-        ("spatial_zigzag", "point_in_ring"),
-        ("spatial_shapes", "point_in_ring"),
-        ("proximity", "point_in_ring"),
-        ("spatial_join", "point_in_ring"),
-        ("index_recheck", "point_in_ring"),
-        // H3 parent grouped-count has its own resident descriptor path.
-        ("h3_cell_to_parent", "h3_cell_to_parent"),
-        // h3 latlng / distance / parent variants (shared H3 family)
-        ("h3_", "h3_latlng"),
-        // reduce kernels
-        ("gpu_reduce", "reduce"),
-        ("reduce_sum_f32", "reduce"),
-        ("reduce_sum_f64", "reduce"),
-        ("reduce_f64_sum", "resident_f64_reduce"),
-        ("reduce_f64_minmax", "resident_f64_reduce"),
-        ("reduce_f64_stats", "resident_f64_reduce"),
-        ("reduce_sum_i64", "reduce"),
-        ("reduce_min_", "reduce"),
-        ("reduce_max_", "reduce"),
-        ("reduce_multi", "reduce"),
-        // hash aggregation
-        ("hashagg_f64_aggs", "resident_f64_grouped_stats"),
-        ("gpu_hashagg", "hash_agg"),
-        ("hashagg_", "hash_agg"),
-        ("grouped_agg", "hash_agg"),
-        ("case_when_expression_grouped_agg", "hash_agg"),
-        ("case_when_range_expression_grouped_agg", "hash_agg"),
-        (
-            "case_when_value_predicate_expression_grouped_agg",
-            "hash_agg",
-        ),
-        (
-            "case_when_null_predicate_expression_grouped_agg",
-            "hash_agg",
-        ),
-        ("case_when_or_expression_grouped_agg", "hash_agg"),
-        ("case_when_in_expression_grouped_agg", "hash_agg"),
-        ("case_when_not_expression_grouped_agg", "hash_agg"),
-        ("expression_grouped_agg", "hash_agg"),
-        ("predicate_filter_expression_grouped_agg", "hash_agg"),
-        ("filtered_grouped_agg", "hash_agg"),
-        ("timeseries_sensor_rollup", "hash_agg"),
-        // sort
-        ("large_sort", "sort"),
-        ("gpu_sort", "sort"),
-        ("sort_int", "sort"),
-        ("sort_float", "sort"),
-        ("spatial_sort", "sort"),
-        ("topk_wide", "sort"),
-        // hash join
-        ("gpu_hashjoin_filter", "resident_star_groupagg"),
-        ("gpu_hashjoin", "hash_join"),
-        ("gpu_nlj", "nested_loop_ineq"),
-        ("hashjoin_", "hash_join"),
-        ("hash_join", "hash_join"),
-        // expression eval
-        ("gpu_expr", "expr"),
-        ("expr_", "expr"),
-        // window functions
-        ("window_", "window"),
-        // raster
-        ("raster_", "raster"),
-        // mixed, small/oltp — split by common target
-        ("mixed_megapoly", "point_in_ring"),
-        ("mixed_expr", "expr"),
-        ("mixed_join", "resident_star_groupagg"),
-        ("mixed_spatial_sort", "sort"),
-        ("spatial_agg", "hash_agg"),
-        ("oltp_point", "point_in_ring"),
-        ("small_table", "unclassified"),
-        // SSBM — star-schema resident grouped aggregation over shared proof gates.
-        ("ssbm_", "resident_star_groupagg"),
-    ];
-
-    let lower = name.to_lowercase();
-    for (prefix, class) in TABLE {
-        if lower.starts_with(prefix) {
-            return (*class).to_owned();
-        }
-    }
-    "unclassified".to_owned()
+    crate::workloads::workload_metadata(name).map_or_else(
+        || "unclassified".to_owned(),
+        |metadata| metadata.kernel_class.as_str().to_owned(),
+    )
 }
 
 impl HardwareProfile {
