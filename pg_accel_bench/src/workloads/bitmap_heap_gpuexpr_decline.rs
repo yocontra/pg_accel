@@ -13,7 +13,7 @@ impl Workload for BitmapHeapGpuExprDecline {
 
     fn description(&self) -> &'static str {
         "BitmapHeapScan-prefiltered scalar expressions - native planner decline \
-         (`bitmap_heap_gpuexpr_no_gpu_pipeline`) until GpuExpr fuses with scan batches"
+         (`shape_unsupported_predicate`) until generic predicate descriptors are supported"
     }
 
     fn category(&self) -> &'static str {

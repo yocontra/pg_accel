@@ -52,11 +52,13 @@ fn plan_shape_cost_multiplier_settings_respect_documented_floor() {
 }
 
 #[test]
-fn plan_shape_tests_do_not_expect_retired_runtime_rejection_codes() {
+fn plan_shape_tests_do_not_expect_superseded_generic_rejection_codes() {
     let retired = [
         ["partial_agg_no_gpu_", "producing_child"].concat(),
         ["parallel_fused_count_", "unstable"].concat(),
         ["parallel_fused_count_", "disabled"].concat(),
+        ["standalone_gpuexpr_", "no_gpu_pipeline"].concat(),
+        ["no_gpu_resident_", "pipeline"].concat(),
     ];
     for retired in retired {
         assert!(
@@ -600,7 +602,7 @@ fn assert_fused_gpuexpr_count_matches_native(
     );
     assert_rejection_reason_observed(
         c,
-        &["no_gpu_resident_pipeline"],
+        &["shape_unsupported_predicate"],
         &format!("{label} fused count"),
     );
     let before = kernel_executions(c);
@@ -663,7 +665,7 @@ fn assert_fused_gpuexpr_float4_reduce_matches_native(
     );
     assert_rejection_reason_observed(
         c,
-        &["no_gpu_resident_pipeline"],
+        &["shape_unsupported_predicate"],
         &format!("{label} filtered f32 reduce"),
     );
     let before = kernel_executions(c);
@@ -723,7 +725,7 @@ fn assert_fused_gpuexpr_int8_reduce_matches_native(
     );
     assert_rejection_reason_observed(
         c,
-        &["no_gpu_resident_pipeline"],
+        &["shape_unsupported_predicate"],
         &format!("{label} filtered i64 reduce"),
     );
     let before = kernel_executions(c);
@@ -1575,7 +1577,7 @@ fn plan_shape_direct_gpuexpr_template_scan_stays_native_until_resident() {
     );
     assert_rejection_reason_observed(
         &mut c,
-        &["no_gpu_resident_pipeline"],
+        &["shape_unsupported_predicate"],
         "direct GpuExpr template scan",
     );
 
@@ -1670,7 +1672,7 @@ fn plan_shape_gpu_only_declines_host_staged_fused_reduce() {
     );
     assert_rejection_reason_observed(
         &mut c,
-        &["no_gpu_resident_pipeline"],
+        &["shape_unsupported_predicate"],
         "GPU-only fused reduce",
     );
 

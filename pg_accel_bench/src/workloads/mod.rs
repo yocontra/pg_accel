@@ -1931,21 +1931,22 @@ fn reduce_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
         ),
         _ => return None,
     };
-    let (expectation, threshold_basis) = if rows >= floor {
-        (
-            BenchmarkLaneExpectation::NativeDecline {
-                reason: "typed_reduce_no_gpu_resident_pipeline",
-            },
-            "typed reduce break-even reached, but legacy path is host-staged and blocked by resident-only admission",
-        )
-    } else {
-        (
-            BenchmarkLaneExpectation::NativeDecline {
-                reason: "rows_below_typed_reduce_break_even",
-            },
-            "DeviceLimits reduce_*_break_even_rows matrix",
-        )
-    };
+    let (expectation, threshold_basis) =
+        if rows < floor && matches!(name, "reduce_min_f64" | "reduce_max_f64") {
+            (
+                BenchmarkLaneExpectation::NativeDecline {
+                    reason: "generic_fact_rows_below_device_minimum",
+                },
+                "generic descriptor device-minimum row gate",
+            )
+        } else {
+            let reason = typed_reduce_structural_decline_reason(name)
+                .expect("recognized typed reduce workload has a structural or cost decline");
+            (
+                BenchmarkLaneExpectation::NativeDecline { reason },
+                "generic descriptor preflight or cost gate keeps the workload native",
+            )
+        };
     Some(BenchmarkThresholdMatrixEntry {
         lane: "typed_reduce",
         workload: static_workload_name(name),
@@ -1968,6 +1969,18 @@ fn reduce_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
         threshold_basis,
         expectation,
     })
+}
+
+fn typed_reduce_structural_decline_reason(name: &str) -> Option<&'static str> {
+    match name {
+        "gpu_reduce_sum" | "reduce_sum_f64" | "reduce_multi" => {
+            Some("shape_floating_accumulator_semantics")
+        }
+        "reduce_sum_f32" => Some("shape_unsupported_measure_type"),
+        "reduce_sum_i64" => Some("shape_numeric_accumulator_unavailable"),
+        "reduce_min_f64" | "reduce_max_f64" => Some("generic_cost_not_competitive"),
+        _ => None,
+    }
 }
 
 fn hashjoin_threshold_matrix_entry(
@@ -2525,7 +2538,7 @@ fn regression_decline_matrix_entry(
             "bitmap predicate plus scalar expression",
             "heap row after bitmap prefilter",
             "filtered aggregate row",
-            "bitmap_heap_gpuexpr_no_gpu_pipeline",
+            "shape_unsupported_predicate",
         ),
         _ => return None,
     };
@@ -2799,6 +2812,12 @@ mod tests {
         let wl = find_workload("bitmap_heap_gpuexpr_decline")
             .expect("registered bitmap_heap_gpuexpr_decline");
         assert_eq!(wl.row_scales(), &[10_000, 100_000]);
+        let entry = benchmark_threshold_matrix_entry("bitmap_heap_gpuexpr_decline", 100_000)
+            .expect("bitmap heap GpuExpr threshold entry");
+        assert_eq!(
+            entry.expectation.decline_reason(),
+            Some("shape_unsupported_predicate")
+        );
     }
 
     #[test]
@@ -2927,25 +2946,82 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_threshold_matrix_marks_reduce_above_break_even_as_native_until_resident() {
-        let entry = benchmark_threshold_matrix_entry("reduce_sum_i64", 100_000)
-            .expect("reduce_sum_i64 threshold entry");
-        assert_eq!(entry.lane, "typed_reduce");
-        assert_eq!(
-            entry.expectation.decline_reason(),
-            Some("typed_reduce_no_gpu_resident_pipeline")
-        );
-        assert!(entry.threshold_basis.contains("host-staged"));
+    fn test_threshold_matrix_pins_generic_reduce_preflight_reasons() {
+        for (name, reason) in [
+            ("gpu_reduce_sum", "shape_floating_accumulator_semantics"),
+            ("reduce_sum_f32", "shape_unsupported_measure_type"),
+            ("reduce_sum_f64", "shape_floating_accumulator_semantics"),
+            ("reduce_sum_i64", "shape_numeric_accumulator_unavailable"),
+            ("reduce_min_f64", "generic_cost_not_competitive"),
+            ("reduce_max_f64", "generic_cost_not_competitive"),
+            ("reduce_multi", "shape_floating_accumulator_semantics"),
+        ] {
+            let entry = benchmark_threshold_matrix_entry(name, 100_000)
+                .unwrap_or_else(|| panic!("{name} threshold entry"));
+            assert_eq!(entry.lane, "typed_reduce", "{name}");
+            assert_eq!(entry.expectation.decline_reason(), Some(reason), "{name}");
+            assert!(
+                entry.threshold_basis.contains("generic descriptor"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
-    fn test_threshold_matrix_marks_reduce_below_break_even_as_decline() {
+    fn benchmark_metadata_omits_superseded_generic_preflight_reasons() {
+        let sources = [
+            include_str!("mod.rs"),
+            include_str!("bitmap_heap_gpuexpr_decline.rs"),
+        ];
+        let superseded = [
+            ["typed_reduce_no_gpu_", "resident_pipeline"].concat(),
+            ["bitmap_heap_gpuexpr_", "no_gpu_pipeline"].concat(),
+            ["standalone_gpuexpr_", "no_gpu_pipeline"].concat(),
+            ["parallel_fused_count_", "unstable"].concat(),
+            ["parallel_fused_count_", "disabled"].concat(),
+        ];
+        for reason in superseded {
+            assert!(
+                sources.iter().all(|source| !source.contains(&reason)),
+                "benchmark metadata still references superseded generic preflight reason `{reason}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_threshold_matrix_keeps_structural_reduce_reason_below_break_even() {
         let entry = benchmark_threshold_matrix_entry("reduce_sum_i64", 10_000)
             .expect("reduce_sum_i64 threshold entry");
         assert_eq!(
             entry.expectation.decline_reason(),
-            Some("rows_below_typed_reduce_break_even")
+            Some("shape_numeric_accumulator_unavailable")
         );
+
+        for name in ["reduce_min_f64", "reduce_max_f64"] {
+            let entry = benchmark_threshold_matrix_entry(name, 10_000)
+                .unwrap_or_else(|| panic!("{name} threshold entry"));
+            assert_eq!(
+                entry.expectation.decline_reason(),
+                Some("generic_fact_rows_below_device_minimum"),
+                "{name}"
+            );
+            assert!(entry.threshold_basis.contains("device-minimum"), "{name}");
+        }
+    }
+
+    #[test]
+    fn test_threshold_matrix_keeps_minmax_cost_decline_at_registered_large_scales() {
+        for name in ["reduce_min_f64", "reduce_max_f64"] {
+            for rows in [100_000, 1_000_000, 10_000_000] {
+                let entry = benchmark_threshold_matrix_entry(name, rows)
+                    .unwrap_or_else(|| panic!("{name}/{rows} threshold entry"));
+                assert_eq!(
+                    entry.expectation.decline_reason(),
+                    Some("generic_cost_not_competitive"),
+                    "{name}/{rows}"
+                );
+            }
+        }
     }
 
     #[test]
