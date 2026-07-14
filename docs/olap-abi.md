@@ -30,6 +30,9 @@ ABI v1 has these hard rules:
 - `PGACCEL_UNSUPPORTED` means the descriptor is well formed but the running
   kernel version does not implement that capability. It is not success and a
   selected Custom Scan must report it loudly.
+- `PGACCEL_INVALID_ARGUMENT` (`-6`) reports an invalid resident-kernel call or
+  resident H3 value/NULL sidecar. It is a typed hard error, not an invitation
+  to retry a selected plan on the CPU.
 - `PGACCEL_ERROR_NO_DEVICE`, `PGACCEL_OOM`, and `PGACCEL_TIMEOUT` retain their
   real statuses. No status may be converted into empty output.
 
@@ -86,11 +89,15 @@ input and result type OIDs must be the same catalog-proved h3index type; the
 wire cannot reinterpret the raw u64 lane as bigint or another SQL type. Both
 variants remain HASH keys after their Begin-time derived lanes are resolved.
 
-The PostgreSQL shape extractor does not yet construct expression or H3 group
-keys: it accepts direct `Var` keys only and structurally declines function
-expressions. AQS3 freezes the semantic producer contract; it does not admit an
-H3 path before catalog identity checks, u64 resident-lane production, and the
-generic HASH executor are wired together.
+The PostgreSQL shape extractor constructs `H3CellToParent` only for the exact
+extension-owned `h3_cell_to_parent(h3index, integer)` catalog function, a direct
+base-table h3index `Var`, and a direct non-NULL int4 constant in `[0,15]`. The
+one-argument overload, Params, nonconstant/NULL/out-of-range resolutions, and
+same-signature functions in earlier `search_path` schemas are structural
+declines. The admitted runtime shape is exactly that one group key plus one
+unfiltered `COUNT(*)`, with no joins, fact filter, HAVING, or extra projection.
+`H3LatLngToCell` remains a wire-level producer variant and is not admitted by
+this route.
 
 Spatial filters likewise carry a stable predicate tag (`Intersects`,
 `Contains`, `Within`, `DWithin`, `Disjoint`, `Equals`, `Touches`, `Crosses`, or
@@ -227,7 +234,10 @@ artifact set remains unresolved.
 The Phase 6 resident layouts are explicit staging contracts, not PostgreSQL
 objects:
 
-- H3 is a u64 value lane plus an optional canonical u8 NULL sidecar.
+- H3 is the catalog-proved h3index Datum bit pattern in a raw u64 value lane,
+  plus an optional canonical u8 NULL sidecar. A NULL row's value payload is
+  canonical zero; non-NULL high-bit patterns are never reinterpreted as signed
+  bigint values.
 - Geometry is flattened fp64 x/y coordinates, one fp64
   `[min_x,min_y,max_x,max_y]` bbox per row, row coordinate offsets, polygon
   ring starts, fixed 24-byte row metadata, a NULL sidecar, and retained exact
@@ -262,6 +272,17 @@ device-to-device producer reserves that total before borrowing raw resident
 inputs, builds synchronously while those inputs are pinned, verifies both
 categories exactly, rechecks dependency generations, and only then publishes.
 The build callback may not re-enter residency or execute SPI/catalog work.
+
+`pgaccel_h3_cell_to_parent_resident` is a device-to-device producer. Its input
+u64 lane, optional NULL sidecar, and output u64 lane must be nonoverlapping
+device or shared-USM allocations in the current AdaptiveCpp context/device.
+For nonempty input it first validates the complete batch, including canonical
+zero/one NULL bytes, valid non-NULL cells, and an ancestor resolution no finer
+than each source cell. Only a successful validation pass launches the transform
+pass, so invalid input returns `PGACCEL_INVALID_ARGUMENT` without publishing a
+partial parent lane. NULL parents are written as u64 zero. Executor chunking
+advances the value, NULL, and output pointers by the same row offset and keeps
+all three allocations borrowed through the synchronous calls.
 
 Retained exact offsets and bytes are canonical boxed slices, so their reported
 length is their requested allocation rather than an undercounted `Vec`
@@ -433,17 +454,27 @@ dimension attribute.
 
 ### Hash and H3
 
-HASH accepts typed fact key lanes, including INT64 H3 indexes, and always uses
-COMPACT output. `group_capacity` is a hard maximum; exceeding it returns
-`PGACCEL_UNSUPPORTED`. HASH has no stable mixed-radix code, so
-`out.group_codes` must be NULL and typed `out.keys` are mandatory.
+The implemented HASH route is deliberately exact: one nullable or nonnullable
+FACT key with `PGACCEL_VAL_INT64`, one `COUNT_STAR` measure with only the COUNT
+lane, I64 accumulation, and eight-byte state, no dimensions or filters,
+`EXEC_ALL_KNOWN`, and COMPACT output. This is the runtime target for the
+catalog-proved H3 parent grouping above. Every other HASH shape remains a
+well-formed but unsupported capability for later phases.
 
-The descriptor represents HASH now. Phase 4B must implement dense radix for
-the v9/star parity gate. The existing H3 grouped-count implementation may
-populate the HASH CountStar route during Phase 6. Phase 9 broadens HASH to
-generic high-cardinality keys and measures. Until a particular HASH shape is
-implemented, a valid descriptor returns `PGACCEL_UNSUPPORTED`; no layout
-change is needed.
+HASH has no stable mixed-radix code, so `out.group_codes` and `active_groups`
+must be NULL and the typed key output lane is mandatory. A nullable input also
+requires its output NULL sidecar. COMPACT publication writes NULL first with a
+canonical zero value payload, then non-NULL raw u64 keys in unsigned ascending
+order; COUNT lanes remain paired with those keys.
+
+The current kernel requires `row_count <= UINT32_MAX` and
+`group_capacity <= 2^30`. `group_capacity` is a hard maximum, not a growth hint:
+an oversized descriptor or a runtime distinct-group overflow returns
+`PGACCEL_UNSUPPORTED` without publishing output. The planner/executor further
+bounds H3 capacity by the fact row count, the exact `120 * 7^resolution + 3`
+universe including the NULL group, and the configured group limit. Capacity,
+descriptor, resident-transform, device, allocation, and output-contract errors
+after Custom Scan selection are hard query errors; none permits CPU fallback.
 
 ### Active groups
 

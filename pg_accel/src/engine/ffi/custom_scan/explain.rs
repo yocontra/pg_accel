@@ -985,6 +985,80 @@ mod tests {
     }
 
     #[test]
+    fn h3_hash_count_star_summary_is_explicit() {
+        const H3INDEXOID: u32 = 90_001;
+        let cell = ColumnRef {
+            relation_oid: 10,
+            attno: 1,
+            type_oid: H3INDEXOID,
+        };
+        let spec = AggQuerySpec {
+            fact_rel: 10,
+            group_keys: vec![GroupKeyRef {
+                source: GroupKeySource::H3CellToParent {
+                    cell,
+                    resolution: 7,
+                },
+                type_oid: H3INDEXOID,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            }],
+            measures: vec![MeasureSpec {
+                expression: MeasureExpr::CountStar,
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+                filter: FilterSpec::None,
+            }],
+            fact_filter: FilterSpec::None,
+            star_dims: Vec::new(),
+            having: None,
+        };
+        let projection = AggOutputProjection {
+            slots: vec![
+                AggOutputSlot {
+                    source: AggOutputSource::GroupKey { key_index: 0 },
+                    source_type_oid: H3INDEXOID,
+                    result_type_oid: H3INDEXOID,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: true,
+                },
+                AggOutputSlot {
+                    source: AggOutputSource::Aggregate {
+                        measure_index: 0,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    },
+                    source_type_oid: 0,
+                    result_type_oid: u32::from(pg_sys::INT8OID),
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: false,
+                },
+            ],
+        };
+
+        let summary = descriptor_explain_summary(&spec, &projection);
+        assert_eq!(summary.strategy, "descriptor_grouped_aggregate");
+        assert_eq!(
+            summary.group_keys,
+            "k0:h3_cell_to_parent(10.1:type=90001, resolution=7) type=90001 collation=0 encoding=hash"
+        );
+        assert_eq!(summary.aggregates, "m0:count_star -> value.count");
+        assert_eq!(
+            summary.filter,
+            "fact=none; measures=[m0=none]; dimensions=[none]"
+        );
+        assert_eq!(summary.star_dimensions, "none");
+        assert_eq!(
+            summary.output,
+            "slot0:group[k0] source_type=90001 result_type=90001 typmod=-1 collation=0 nullable=true; slot1:aggregate[m0].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false"
+        );
+    }
+
+    #[test]
     fn descriptor_ungrouped_strategy_and_empty_shape_labels_are_stable() {
         let (mut spec, mut projection) = descriptor_contract();
         spec.group_keys.clear();

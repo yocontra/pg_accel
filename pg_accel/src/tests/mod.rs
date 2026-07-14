@@ -39,6 +39,25 @@ mod tests {
         })
     }
 
+    fn explain_analyze_text(query: &str) -> String {
+        Spi::connect(|client| {
+            let mut lines = Vec::new();
+            let table = client
+                .select(
+                    &format!("EXPLAIN (ANALYZE, FORMAT TEXT) {query}"),
+                    None,
+                    &[],
+                )
+                .expect("EXPLAIN ANALYZE should succeed");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        })
+    }
+
     fn ensure_extension(name: &str) -> bool {
         let create_sql = format!("CREATE EXTENSION IF NOT EXISTS {name} CASCADE");
         if Spi::run(&create_sql).is_err() {
@@ -2122,6 +2141,381 @@ mod tests {
              DROP FUNCTION public.st_buffer(integer, double precision)",
         )
         .expect("public overload cleanup should succeed");
+    }
+
+    #[pg_test]
+    fn test_h3_parent_grouped_count_dispatches_matches_and_declines_impostors() {
+        if !ensure_extension("h3") {
+            return;
+        }
+        if !gpu_device_available() {
+            pgrx::notice!("skipping H3 parent grouped-count dispatch test: no GPU device");
+            return;
+        }
+        serialize_gpu_tests();
+        Spi::run(
+            "SET pg_accel.enabled = on; \
+             SET pg_accel.gpu_enabled = on; \
+             SET pg_accel.auto_load = off; \
+             CREATE TEMP TABLE _h3_parent_groupagg( \
+               cell h3index, resolution int4 NOT NULL); \
+             WITH seeds AS ( \
+               SELECT array_agg(cell) AS cells \
+               FROM h3_grid_disk( \
+                 h3_cell_to_parent('8928308280fffff'::h3index, 2), 2 \
+               ) AS disk(cell) \
+             ) \
+             INSERT INTO _h3_parent_groupagg \
+             SELECT CASE WHEN i % 97 = 0 \
+                         THEN NULL::h3index \
+                         ELSE cells[1 + ((i - 1) % cardinality(cells))] \
+                    END, \
+                    0::int4 \
+             FROM generate_series(1, 1000000) AS g(i) CROSS JOIN seeds; \
+             ANALYZE _h3_parent_groupagg",
+        )
+        .expect("create nullable H3 parent grouped-count fixture");
+        let pinned = Spi::get_one::<i64>(
+            "SELECT pg_accel_pin('_h3_parent_groupagg'::regclass, ARRAY['cell'])",
+        )
+        .expect("H3 fixture pin should succeed")
+        .expect("H3 fixture pin should return its row count");
+        assert_eq!(pinned, 1_000_000);
+
+        let query = "SELECT h3_cell_to_parent(cell, 0) AS parent, \
+                            count(*) AS row_count \
+                     FROM _h3_parent_groupagg GROUP BY 1";
+        Spi::run("SET pg_accel.enabled = off").expect("disable acceleration for native result");
+        Spi::run(&format!("CREATE TEMP TABLE _h3_parent_native AS {query}"))
+            .expect("capture native H3 grouped count");
+
+        Spi::run("SET pg_accel.enabled = on").expect("enable acceleration for H3 result");
+        let plan = explain_text(query);
+        assert!(
+            plan.contains("Custom Scan (GpuAccelAgg)"),
+            "eligible resident H3 parent grouped count must choose Custom Scan:\n{plan}"
+        );
+        assert!(
+            plan.contains("GPU Descriptor Group Keys:")
+                && plan.contains("h3_cell_to_parent(")
+                && plan.contains("resolution=0")
+                && plan.contains("encoding=hash")
+                && plan.contains("GPU Descriptor Aggregates: m0:count_star -> value.count"),
+            "selected plan must expose the exact H3 HASH/COUNT_STAR descriptor:\n{plan}"
+        );
+
+        crate::gpu::reset_gpu_exec_count();
+        Spi::run(&format!(
+            "CREATE TEMP TABLE _h3_parent_accelerated AS {query}"
+        ))
+        .expect("capture accelerated H3 grouped count");
+        crate::gpu::assert_gpu_executed(2);
+
+        let symmetric_difference_count = |left: &str, right: &str| {
+            Spi::get_one::<i64>(&format!(
+                "SELECT count(*) FROM ( \
+                   (SELECT parent, row_count FROM {left} \
+                    EXCEPT ALL \
+                    SELECT parent, row_count FROM {right}) \
+                   UNION ALL \
+                   (SELECT parent, row_count FROM {right} \
+                    EXCEPT ALL \
+                    SELECT parent, row_count FROM {left}) \
+                 ) AS delta"
+            ))
+            .expect("H3 symmetric-difference query should succeed")
+            .expect("H3 symmetric-difference count should not be NULL")
+        };
+        let symmetric_difference =
+            symmetric_difference_count("_h3_parent_accelerated", "_h3_parent_native");
+        assert_eq!(
+            symmetric_difference, 0,
+            "accelerated H3 parent grouped count must equal native in both directions"
+        );
+
+        let analyzed = explain_analyze_text(query);
+        for field in [
+            "Custom Scan (GpuAccelAgg)",
+            "GPU Resident Pipeline: true",
+            "GPU Resident Operator Class: resident_groupagg",
+            "GPU Descriptor Strategy: descriptor_grouped_aggregate",
+            "GPU Descriptor Residency State: resident",
+            "GPU Descriptor Artifact:",
+            "GPU Descriptor Generations: rel=",
+            "GPU Descriptor Bytes: raw=",
+            "GPU Kernel Dispatched: true",
+            "Rows Dispatched: 1000000",
+            "Batches: 1",
+            "Dispatch Time:",
+            "Counter Scope: Local Backend",
+            "GPU Dispatched: true",
+            "Raw Relation Load Time:",
+            "Total Residency Preparation Time:",
+        ] {
+            assert!(
+                analyzed.contains(field),
+                "EXPLAIN ANALYZE must report {field:?}:\n{analyzed}"
+            );
+        }
+        let resident_stage_mask = analyzed
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("GPU Resident Stage Mask: ")?
+                    .parse::<u32>()
+                    .ok()
+            })
+            .expect("EXPLAIN ANALYZE must expose a numeric resident stage mask");
+        assert_ne!(
+            resident_stage_mask & crate::engine::residency::ResidentOperatorStage::H3.bit(),
+            0,
+            "resident proof must include the H3 transform stage: {analyzed}"
+        );
+        assert_ne!(
+            resident_stage_mask
+                & crate::engine::residency::ResidentOperatorStage::GroupedAggregate.bit(),
+            0,
+            "resident proof must include grouped aggregation: {analyzed}"
+        );
+
+        let mismatch_query = "SELECT h3_cell_to_parent(cell, 3) AS parent, \
+                                     count(*) AS row_count \
+                              FROM _h3_parent_groupagg GROUP BY 1";
+        let mismatch_plan = explain_text(mismatch_query);
+        assert!(
+            mismatch_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "resolution mismatch must reach the selected GPU path before failing:\n{mismatch_plan}"
+        );
+        Spi::run(
+            "CREATE TEMP TABLE _h3_parent_error_state( \
+               mode text PRIMARY KEY, sqlstate text NOT NULL)",
+        )
+        .expect("create H3 error-state observation table");
+        for (mode, enabled) in [("native", "off"), ("accelerated", "on")] {
+            if mode == "accelerated" {
+                crate::gpu::reset_gpu_exec_count();
+            }
+            Spi::run(&format!(
+                "SET pg_accel.enabled = {enabled}; \
+                 DO $h3_error$ \
+                 BEGIN \
+                   PERFORM mismatch.parent, mismatch.row_count \
+                   FROM ({mismatch_query}) AS mismatch; \
+                   INSERT INTO _h3_parent_error_state \
+                   VALUES ('{mode}', 'no_error'); \
+                 EXCEPTION WHEN OTHERS THEN \
+                   INSERT INTO _h3_parent_error_state \
+                   VALUES ('{mode}', SQLSTATE); \
+                 END \
+                 $h3_error$"
+            ))
+            .unwrap_or_else(|_| panic!("capture {mode} H3 resolution-mismatch SQLSTATE"));
+        }
+        crate::gpu::assert_gpu_executed(1);
+        let native_sqlstate = Spi::get_one::<String>(
+            "SELECT sqlstate FROM _h3_parent_error_state WHERE mode = 'native'",
+        )
+        .expect("native H3 SQLSTATE query should succeed")
+        .expect("native H3 SQLSTATE should exist");
+        let accelerated_sqlstate = Spi::get_one::<String>(
+            "SELECT sqlstate FROM _h3_parent_error_state WHERE mode = 'accelerated'",
+        )
+        .expect("accelerated H3 SQLSTATE query should succeed")
+        .expect("accelerated H3 SQLSTATE should exist");
+        assert_ne!(
+            accelerated_sqlstate, "no_error",
+            "selected H3 resolution mismatch must be a hard error, not a zero/NULL result"
+        );
+        assert_eq!(
+            accelerated_sqlstate, native_sqlstate,
+            "selected H3 resolution mismatch must preserve native SQLSTATE"
+        );
+
+        Spi::run(
+            "CREATE TEMP TABLE _h3_parent_all_null(cell h3index); \
+             INSERT INTO _h3_parent_all_null \
+             SELECT NULL::h3index FROM generate_series(1, 1000000); \
+             ANALYZE _h3_parent_all_null",
+        )
+        .expect("create all-NULL H3 fixture");
+        let all_null_pinned = Spi::get_one::<i64>(
+            "SELECT pg_accel_pin('_h3_parent_all_null'::regclass, ARRAY['cell'])",
+        )
+        .expect("all-NULL H3 fixture pin should succeed")
+        .expect("all-NULL H3 fixture pin should return its row count");
+        assert_eq!(all_null_pinned, 1_000_000);
+        let all_null_query = "SELECT h3_cell_to_parent(cell, 0) AS parent, \
+                                     count(*) AS row_count \
+                              FROM _h3_parent_all_null GROUP BY 1";
+        Spi::run("SET pg_accel.enabled = off").expect("disable H3 all-NULL acceleration");
+        Spi::run(&format!(
+            "CREATE TEMP TABLE _h3_parent_all_null_native AS {all_null_query}"
+        ))
+        .expect("capture native all-NULL H3 grouped count");
+        Spi::run("SET pg_accel.enabled = on").expect("enable H3 all-NULL acceleration");
+        let all_null_plan = explain_text(all_null_query);
+        assert!(
+            all_null_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "all-NULL H3 fixture must retain the selected GPU path:\n{all_null_plan}"
+        );
+        crate::gpu::reset_gpu_exec_count();
+        Spi::run(&format!(
+            "CREATE TEMP TABLE _h3_parent_all_null_accelerated AS {all_null_query}"
+        ))
+        .expect("capture accelerated all-NULL H3 grouped count");
+        crate::gpu::assert_gpu_executed(2);
+        assert_eq!(
+            symmetric_difference_count(
+                "_h3_parent_all_null_accelerated",
+                "_h3_parent_all_null_native"
+            ),
+            0,
+            "all-NULL H3 grouped count must match native in both directions"
+        );
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT row_count FROM _h3_parent_all_null_accelerated \
+                 WHERE parent IS NULL"
+            )
+            .expect("all-NULL H3 output query should succeed"),
+            Some(1_000_000),
+            "all-NULL H3 input must emit one NULL group containing every row"
+        );
+
+        Spi::run(
+            "CREATE TEMP TABLE _h3_parent_empty(cell h3index); \
+             INSERT INTO _h3_parent_empty \
+             SELECT h3_cell_to_parent('8928308280fffff'::h3index, 2) \
+             FROM generate_series(1, 1000000); \
+             ANALYZE _h3_parent_empty; \
+             DELETE FROM _h3_parent_empty",
+        )
+        .expect("create empty H3 fixture with retained planner statistics");
+        let empty_pinned =
+            Spi::get_one::<i64>("SELECT pg_accel_pin('_h3_parent_empty'::regclass, ARRAY['cell'])")
+                .expect("empty H3 fixture pin should succeed")
+                .expect("empty H3 fixture pin should return its row count");
+        assert_eq!(empty_pinned, 0);
+        let empty_query = "SELECT h3_cell_to_parent(cell, 0) AS parent, \
+                                  count(*) AS row_count \
+                           FROM _h3_parent_empty GROUP BY 1";
+        Spi::run("SET pg_accel.enabled = off").expect("disable H3 empty acceleration");
+        Spi::run(&format!(
+            "CREATE TEMP TABLE _h3_parent_empty_native AS {empty_query}"
+        ))
+        .expect("capture native empty H3 grouped count");
+        Spi::run("SET pg_accel.enabled = on").expect("enable H3 empty acceleration");
+        let empty_plan = explain_text(empty_query);
+        assert!(
+            empty_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "stale-cardinality empty H3 fixture must select Custom Scan:\n{empty_plan}"
+        );
+        crate::gpu::reset_gpu_exec_count();
+        Spi::run(&format!(
+            "CREATE TEMP TABLE _h3_parent_empty_accelerated AS {empty_query}"
+        ))
+        .expect("capture accelerated empty H3 grouped count");
+        crate::gpu::assert_gpu_executed(1);
+        assert_eq!(
+            symmetric_difference_count("_h3_parent_empty_accelerated", "_h3_parent_empty_native"),
+            0,
+            "empty H3 grouped count must match native in both directions"
+        );
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT count(*) FROM _h3_parent_empty_accelerated")
+                .expect("empty H3 output count should succeed"),
+            Some(0),
+            "keyed aggregation over empty H3 input must emit no groups"
+        );
+
+        let assert_structural_decline = |label: &str, sql: &str| {
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset planner decline stats");
+            let declined_plan = explain_text(sql);
+            assert!(
+                !declined_plan.contains("Custom Scan (GpuAccelAgg)"),
+                "{label} must stay native:\n{declined_plan}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("planner rejection query should succeed")
+                    .unwrap_or_else(|| panic!("{label} should record a structural decline"));
+            assert_eq!(
+                rejection, "shape_group_expression",
+                "{label} must fail the exact H3 group-expression gate; plan:\n{declined_plan}"
+            );
+        };
+
+        for (label, sql) in [
+            (
+                "nonconstant H3 parent resolution",
+                "SELECT h3_cell_to_parent(cell, resolution), count(*) \
+                 FROM _h3_parent_groupagg GROUP BY 1",
+            ),
+            (
+                "NULL H3 parent resolution",
+                "SELECT h3_cell_to_parent(cell, NULL::int4), count(*) \
+                 FROM _h3_parent_groupagg GROUP BY 1",
+            ),
+            (
+                "out-of-range H3 parent resolution",
+                "SELECT h3_cell_to_parent(cell, 16), count(*) \
+                 FROM _h3_parent_groupagg GROUP BY 1",
+            ),
+            (
+                "one-argument H3 parent overload",
+                "SELECT h3_cell_to_parent(cell), count(*) \
+                 FROM _h3_parent_groupagg GROUP BY 1",
+            ),
+        ] {
+            assert_structural_decline(label, sql);
+        }
+
+        Spi::run(
+            "CREATE SCHEMA _h3_parent_spoof; \
+             CREATE FUNCTION _h3_parent_spoof.h3_cell_to_parent(h3index, integer) \
+             RETURNS h3index LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE \
+             AS $$ SELECT $1 $$; \
+             SET search_path = _h3_parent_spoof, public",
+        )
+        .expect("create preceding-schema exact-signature H3 spoof");
+        assert_structural_decline(
+            "preceding-schema exact-signature H3 spoof",
+            "SELECT h3_cell_to_parent(cell, 0), count(*) \
+             FROM _h3_parent_groupagg GROUP BY 1",
+        );
+        Spi::run("SET search_path = public; DROP SCHEMA _h3_parent_spoof CASCADE")
+            .expect("restore H3 extension search path and drop spoof schema");
+
+        Spi::run(
+            "SET plan_cache_mode = force_generic_plan; \
+             PREPARE _h3_parent_param(int4) AS \
+             SELECT h3_cell_to_parent(cell, $1), count(*) \
+             FROM _h3_parent_groupagg GROUP BY 1",
+        )
+        .expect("prepare generic H3 parent resolution query");
+        assert_structural_decline(
+            "generic-plan H3 parent resolution Param",
+            "EXECUTE _h3_parent_param(0)",
+        );
+        Spi::run("DEALLOCATE _h3_parent_param; RESET plan_cache_mode")
+            .expect("clean up generic H3 prepared query");
+        Spi::run(
+            "DROP TABLE _h3_parent_groupagg, \
+                        _h3_parent_native, \
+                        _h3_parent_accelerated, \
+                        _h3_parent_error_state, \
+                        _h3_parent_all_null, \
+                        _h3_parent_all_null_native, \
+                        _h3_parent_all_null_accelerated, \
+                        _h3_parent_empty, \
+                        _h3_parent_empty_native, \
+                        _h3_parent_empty_accelerated; \
+             RESET pg_accel.enabled; \
+             RESET pg_accel.gpu_enabled; \
+             RESET pg_accel.auto_load; \
+             RESET search_path",
+        )
+        .expect("clean up H3 grouped-count fixtures and session settings");
     }
 
     #[pg_test]
