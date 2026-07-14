@@ -244,18 +244,21 @@ unnecessary for the release semantics. A future consumer that needs IEEE
 status flags must add an explicit output-buffer contract and regression tests
 before planner dispatch can depend on those flags.
 
-**Cost model integration.** `DeviceLimits::soft_fp64_cost_multiplier`
-(`pg_accel/src/engine/cost/device_limits.rs:167-175`, default `32.0` on Metal
-and `1.0` where fp64 is native) is threaded through every planner site via
-`cost::apply_fp64_penalty`
-(`pg_accel/src/engine/cost/formulas.rs:17`). Specifically:
-
-| Site | File:line |
-|---|---|
-| Scan paths  | `pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:220-221` |
-| HashJoin    | `pg_accel/src/engine/ffi/planner_hooks/hashjoin.rs:43-49, :64, :74` |
-| Window      | `pg_accel/src/engine/ffi/planner_hooks/mod.rs:591-597` |
-| Full agg    | `pg_accel/src/engine/ffi/planner_hooks/mod.rs` (resident recognizer waterfall) |
+**Cost model integration.** The selected SQL path centralizes soft-fp64
+costing in the generic resident-aggregate shape model. Admission builds a
+`TypedCostModel` from the active `DeviceLimits`
+(`pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:525-530`); shape
+costing detects fp64 measure expressions and applies
+`soft_fp64_cost_multiplier` only to the aggregate kernel component when the
+device lacks native fp64
+(`pg_accel/src/engine/ffi/planner_hooks/shape/cost.rs:38-104`). That cost then
+gates childless-path injection
+(`pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:550-558`), and the
+descriptor executor maps float measures to its f64 accumulator before
+synchronous dispatch (`pg_accel/src/engine/executor/agg/descriptor.rs:1019-1029`,
+`pg_accel/src/engine/executor/agg/execute.rs:245-265`). The former standalone
+scan, HashJoin, and Window planner paths are not selected under the
+GPU-resident-only policy, so they no longer have separate soft-fp64 cost sites.
 
 ## Thread Model
 
