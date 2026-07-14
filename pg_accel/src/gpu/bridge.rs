@@ -4,7 +4,10 @@
 //! exactly. The kernel library is linked unconditionally; there is no
 //! no-GPU build and no CPU fallback.
 
-pub use super::spatial::PgaccelSpatialResidentRequest;
+pub use super::spatial::{
+    PgaccelSpatialRecheckCompactRequest, PgaccelSpatialRecheckPatchRequest,
+    PgaccelSpatialResidentRequest, PgaccelSpatialWorkspace,
+};
 pub use super::types::{
     PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExprInstruction, PgaccelExprProgram,
     PgaccelExprUsmCol, PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType,
@@ -983,6 +986,48 @@ mod resident_raster_raw {
     }
 }
 
+/// Raw resident spatial entry points kept outside [`bridge_status_fns!`].
+/// Launch callers retain these statuses while a resident-store borrow is
+/// active, so conversion/tracing must wait until the borrow is released.
+mod resident_spatial_raw {
+    use super::{
+        PgaccelSpatialRecheckCompactRequest, PgaccelSpatialRecheckPatchRequest,
+        PgaccelSpatialResidentRequest, PgaccelSpatialWorkspace,
+    };
+
+    unsafe extern "C" {
+        #[allow(dead_code)]
+        // reason: raw borrow-safe caller lands in the spatial executor checkpoint
+        pub fn pgaccel_spatial_eval_resident_launch(
+            request: *const PgaccelSpatialResidentRequest,
+            workspace: *const PgaccelSpatialWorkspace,
+            detail: *mut i32,
+        ) -> i32;
+
+        #[allow(dead_code)]
+        // reason: raw borrow-safe caller lands in the spatial executor checkpoint
+        pub fn pgaccel_spatial_recheck_compact_launch(
+            request: *const PgaccelSpatialRecheckCompactRequest,
+            workspace: *const PgaccelSpatialWorkspace,
+            detail: *mut i32,
+        ) -> i32;
+
+        #[allow(dead_code)]
+        // reason: raw borrow-safe caller lands in the spatial executor checkpoint
+        pub fn pgaccel_spatial_recheck_patch_launch(
+            request: *const PgaccelSpatialRecheckPatchRequest,
+            workspace: *const PgaccelSpatialWorkspace,
+            detail: *mut i32,
+        ) -> i32;
+
+        #[allow(dead_code)] // reason: post-borrow caller lands in the spatial executor checkpoint
+        pub fn pgaccel_spatial_workspace_finish(
+            workspace: *const PgaccelSpatialWorkspace,
+            detail: *mut i32,
+        ) -> i32;
+    }
+}
+
 /// Submit the exact resident PostGIS Reclass launch without converting its
 /// raw status. This function performs no allocation, tracing, counter updates,
 /// or validation-scratch copy.
@@ -1001,6 +1046,82 @@ pub(super) unsafe fn pgaccel_raster_reclass_resident_ex_raw(
     // SAFETY: forwards verbatim to the C symbol; the caller upholds its
     // documented request and queue contract.
     unsafe { resident_raster_raw::pgaccel_raster_reclass_resident_ex(request, detail) }
+}
+
+/// Submit resident spatial evaluation without converting its raw status.
+///
+/// # Safety
+///
+/// The caller must uphold the native request/workspace span contract and
+/// prepare the process queue before entering the resident-store borrow.
+#[must_use]
+#[inline]
+#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
+pub(super) unsafe fn pgaccel_spatial_eval_resident_launch_raw(
+    request: *const PgaccelSpatialResidentRequest,
+    workspace: *const PgaccelSpatialWorkspace,
+    detail: *mut i32,
+) -> i32 {
+    // SAFETY: forwards verbatim under the caller's native pointer contract.
+    unsafe {
+        resident_spatial_raw::pgaccel_spatial_eval_resident_launch(request, workspace, detail)
+    }
+}
+
+/// Submit ordered uncertainty compaction without converting its raw status.
+///
+/// # Safety
+///
+/// The caller must uphold the native request/workspace span and launch-chain
+/// contract.
+#[must_use]
+#[inline]
+#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
+pub(super) unsafe fn pgaccel_spatial_recheck_compact_launch_raw(
+    request: *const PgaccelSpatialRecheckCompactRequest,
+    workspace: *const PgaccelSpatialWorkspace,
+    detail: *mut i32,
+) -> i32 {
+    // SAFETY: forwards verbatim under the caller's native pointer contract.
+    unsafe {
+        resident_spatial_raw::pgaccel_spatial_recheck_compact_launch(request, workspace, detail)
+    }
+}
+
+/// Submit ordered exact-result patching without converting its raw status.
+///
+/// # Safety
+///
+/// The caller must uphold the native request/workspace span contract.
+#[must_use]
+#[inline]
+#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
+pub(super) unsafe fn pgaccel_spatial_recheck_patch_launch_raw(
+    request: *const PgaccelSpatialRecheckPatchRequest,
+    workspace: *const PgaccelSpatialWorkspace,
+    detail: *mut i32,
+) -> i32 {
+    // SAFETY: forwards verbatim under the caller's native pointer contract.
+    unsafe {
+        resident_spatial_raw::pgaccel_spatial_recheck_patch_launch(request, workspace, detail)
+    }
+}
+
+/// Copy the sticky resident spatial status to host without converting it.
+///
+/// # Safety
+///
+/// The workspace must remain alive and satisfy the native exact-span
+/// contract. Call this only after releasing resident input borrows.
+#[must_use]
+#[inline]
+#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
+pub(super) unsafe fn pgaccel_spatial_workspace_finish_raw(
+    workspace: *const PgaccelSpatialWorkspace,
+    detail: *mut i32,
+) -> i32 {
+    // SAFETY: forwards verbatim under the caller's native pointer contract.
+    unsafe { resident_spatial_raw::pgaccel_spatial_workspace_finish(workspace, detail) }
 }
 
 // Non-status externs: entry points returning pointers, scalars, structs, or

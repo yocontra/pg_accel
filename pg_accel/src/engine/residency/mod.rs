@@ -12,6 +12,9 @@ mod loader;
 mod proof;
 mod store;
 
+#[cfg(test)]
+pub(crate) use store::tests::{begin_test_allocation_count, finish_test_allocation_count};
+
 pub use domain::*;
 pub(crate) use geometry::validate_resident_geometry_value;
 pub use geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
