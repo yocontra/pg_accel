@@ -2,9 +2,10 @@
 //!
 //! These types freeze buffer shapes, validation, and ledger accounting without
 //! teaching the loader or executor to produce them yet. `device_bytes` counts
-//! only buffers that survive as GPU-readable lanes. `retained_host_exact_bytes`
-//! counts original varlena bytes and their offsets retained for exact spatial
-//! recheck or raster reconstruction. Both categories must be charged to the
+//! only buffers that survive as GPU-readable lanes. The legacy-named
+//! `retained_host_exact_bytes` counts original varlena bytes, their offsets,
+//! and minimal host-only prefix metadata needed to construct exact domain
+//! requests without device readback. Both categories must be charged to the
 //! residency ledger for the full lifetime of a resident domain column.
 
 use std::fmt;
@@ -39,6 +40,8 @@ const RESIDENT_RASTER_BAND_ALL_FLAGS: u32 =
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ResidentByteAccounting {
     pub device_bytes: u64,
+    /// All store-owned host bytes retained alongside a resident domain lane.
+    /// The field name predates small host-only request metadata.
     pub retained_host_exact_bytes: u64,
 }
 

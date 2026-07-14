@@ -12,7 +12,7 @@ use crate::engine::spec::{
     MeasureSpec,
 };
 
-use super::cost::estimate_shape_cost;
+use super::cost::{estimate_shape_cost, spatial_point_polygon_vertices};
 use super::{
     DerivedGroupKeyRequirement, DescriptorFilterBinding, DescriptorGroupingMode,
     DescriptorMeasurePlan, DescriptorResolution, DictionaryJoinRequirement,
@@ -114,6 +114,9 @@ fn validate_measure_descriptor_capability(
     const INT4OID: u32 = 23;
     const INT8OID: u32 = 20;
     const FLOAT8OID: u32 = 701;
+    if matches!(aggregate.filter, FilterSpec::Spatial { .. }) {
+        return Err(ShapeDecline::SpatialFilterOutsideFactRelation);
+    }
     if aggregate.filter != FilterSpec::None || aggregate.output.source != AggregateSource::Value {
         return Err(ShapeDecline::UnsupportedAggregateModifier);
     }
@@ -479,9 +482,8 @@ fn validate_dimension_filter(filter: &FilterSpec) -> Result<(), ShapeDecline> {
                 type_oid: input.type_oid,
             })
         }
-        FilterSpec::Bytecode { .. } | FilterSpec::Spatial { .. } => {
-            Err(ShapeDecline::UnsupportedPredicate)
-        }
+        FilterSpec::Spatial { .. } => Err(ShapeDecline::SpatialFilterOutsideFactRelation),
+        FilterSpec::Bytecode { .. } => Err(ShapeDecline::UnsupportedPredicate),
     }
 }
 
@@ -984,6 +986,11 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
     }
 
     let fact_filter = relation_filter(&input, fact.relation_oid)?;
+    if matches!(fact_filter, FilterSpec::Spatial { .. })
+        && spatial_point_polygon_vertices(&fact_filter).is_none()
+    {
+        return Err(ShapeDecline::SpatialWorkShapeUnproved);
+    }
     let descriptor_measures = fact_filter_binding(&mut measures, &fact_filter)?;
     let spec = AggQuerySpec {
         fact_rel: fact.relation_oid,

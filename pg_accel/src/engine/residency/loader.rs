@@ -14,7 +14,9 @@ use crate::engine::gucs;
 use crate::gpu::ExprDeviceBuffer;
 
 use super::domain::{ResidentByteAccounting, ResidentGeometryData};
-use super::geometry::{ResidentGeometryBuilder, ResidentGeometryColumn};
+use super::geometry::{
+    ResidentGeometryBuilder, ResidentGeometryColumn, ResidentGeometryReferencedBytes,
+};
 use super::ledger::{self, GenerationStamp, LedgerCharge};
 use super::store::{ResidentColumn, ResidentRelation};
 
@@ -50,16 +52,21 @@ impl FromDatum for RawGeometryDatum {
         }
         // SAFETY: SPI supplied a non-NULL Datum of the catalog-proved PostGIS
         // varlena type on the backend main thread.
-        let detoasted =
-            unsafe { pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pg_sys::varlena>()) };
+        let original = datum.cast_mut_ptr::<pg_sys::varlena>();
+        let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
         if detoasted.is_null() {
             return Some(Self(Vec::new()));
         }
         // SAFETY: pg_detoast_datum returned a flat varlena whose complete
         // allocation is readable for VARSIZE bytes during this SPI callback.
         let length = unsafe { pgrx::varsize(detoasted.cast()) };
-        let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), length) };
-        Some(Self(bytes.to_vec()))
+        let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), length) }.to_vec();
+        if detoasted != original {
+            // SAFETY: a distinct pg_detoast_datum result is a palloc-owned
+            // flat copy; the owned Vec above no longer borrows it.
+            unsafe { pg_sys::pfree(detoasted.cast()) };
+        }
+        Some(Self(bytes))
     }
 }
 
@@ -130,6 +137,7 @@ enum StagedColumn {
     Geometry {
         type_oid: pg_sys::Oid,
         data: ResidentGeometryData,
+        referenced_bytes: ResidentGeometryReferencedBytes,
         accounting: ResidentByteAccounting,
         max_exact_value_bytes: usize,
     },
@@ -228,11 +236,17 @@ impl StagedColumn {
             Self::Geometry {
                 type_oid,
                 data,
+                referenced_bytes,
                 max_exact_value_bytes,
                 ..
             } => Ok(ResidentColumn::Geometry {
                 type_oid,
-                data: ResidentGeometryColumn::materialize(data, max_exact_value_bytes, label)?,
+                data: ResidentGeometryColumn::materialize(
+                    data,
+                    referenced_bytes,
+                    max_exact_value_bytes,
+                    label,
+                )?,
             }),
             Self::F32 {
                 type_oid,
@@ -534,11 +548,12 @@ impl ColumnBuilder {
                 // thread before selecting an extension-specific Datum reader.
                 if unsafe { syscache::type_is_extension_member(type_oid, "postgis") } {
                     validate_geometry_column_type(type_oid)?;
+                    let limits = crate::engine::cost::device_limits();
                     Ok(Self::Geometry {
                         type_oid,
                         builder: ResidentGeometryBuilder::new(
-                            crate::engine::cost::device_limits()
-                                .resident_domain_max_exact_value_bytes,
+                            limits.resident_domain_max_exact_value_bytes,
+                            limits.gpu_spatial_max_vertices_per_row,
                         ),
                     })
                 } else {
@@ -746,12 +761,18 @@ impl ColumnBuilder {
                 let max_exact_value_bytes =
                     crate::engine::cost::device_limits().resident_domain_max_exact_value_bytes;
                 let data = builder.finish()?;
-                let accounting = data
+                let referenced_bytes = ResidentGeometryReferencedBytes::build(&data)?;
+                let mut accounting = data
                     .accounting(max_exact_value_bytes)
                     .map_err(|error| error.to_string())?;
+                accounting.retained_host_exact_bytes = accounting
+                    .retained_host_exact_bytes
+                    .checked_add(referenced_bytes.accounting_bytes()?)
+                    .ok_or_else(|| "geometry retained-host accounting overflow".to_owned())?;
                 StagedColumn::Geometry {
                     type_oid,
                     data,
+                    referenced_bytes,
                     accounting,
                     max_exact_value_bytes,
                 }

@@ -112,6 +112,8 @@ pub struct CostCoefficients {
     pub gpu_op_cost_window: PgCost,
     /// GPU filter per-row operation cost.
     pub gpu_op_cost_filter: PgCost,
+    /// CPU PostGIS exact-recheck cost per uncertain row.
+    pub cpu_spatial_recheck_per_row: PgCost,
     /// Resident H3 cell-to-parent device transform per-row cost.
     pub gpu_op_cost_h3_parent_resident: PgCost,
     /// GPU hash-join build-side per-row cost.
@@ -139,6 +141,7 @@ impl From<&DeviceLimits> for CostCoefficients {
             gpu_op_cost_sort: PgCost::new(limits.gpu_op_cost_sort),
             gpu_op_cost_window: PgCost::new(limits.gpu_op_cost_window),
             gpu_op_cost_filter: PgCost::new(limits.gpu_op_cost_filter),
+            cpu_spatial_recheck_per_row: PgCost::new(limits.cpu_spatial_recheck_per_row),
             gpu_op_cost_h3_parent_resident: PgCost::new(limits.gpu_op_cost_h3_parent_resident),
             gpu_hashjoin_build_per_row: PgCost::new(limits.gpu_hashjoin_build_per_row),
             gpu_hashjoin_probe_per_row: PgCost::new(limits.gpu_hashjoin_probe_per_row),
@@ -384,6 +387,10 @@ mod tests {
         assert_eq!(
             model.coefficients.gpu_op_cost_filter.get(),
             limits.gpu_op_cost_filter,
+        );
+        assert_eq!(
+            model.coefficients.cpu_spatial_recheck_per_row.get(),
+            limits.cpu_spatial_recheck_per_row,
         );
         assert_eq!(
             model.coefficients.gpu_op_cost_h3_parent_resident.get(),

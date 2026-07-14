@@ -18,6 +18,17 @@ use super::{
     RelationResidency, RelationShape, ShapeDecline, ShapeInput, ShapeModifiers,
 };
 
+const MAX_QUAL_CONJUNCTS: usize = 64;
+
+pub(super) fn bounded_qual_conjunct_indices(
+    count: usize,
+) -> Result<std::ops::Range<usize>, ShapeDecline> {
+    if count == 0 || count > MAX_QUAL_CONJUNCTS {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
+    Ok(0..count)
+}
+
 #[derive(Default)]
 struct ExpressionInventory {
     aggregate_nodes: Vec<*mut pg_sys::Aggref>,
@@ -868,6 +879,12 @@ pub(super) fn postgis_geometry_typmod_metadata(typmod: i32) -> Option<SpatialVal
     })
 }
 
+pub(super) fn require_valid_spatial_constant(is_valid: bool) -> Result<(), ShapeDecline> {
+    is_valid
+        .then_some(())
+        .ok_or(ShapeDecline::InvalidSpatialConstant)
+}
+
 unsafe fn spatial_constant_operand(
     constant: &pg_sys::Const,
     catalog: &PostgisCatalogIdentity,
@@ -883,33 +900,58 @@ unsafe fn spatial_constant_operand(
     }
     // SAFETY: this is a non-NULL pass-by-reference Const of the exact
     // catalog-proved PostGIS geometry type in the active planner context.
-    let detoasted =
-        unsafe { pg_sys::pg_detoast_datum(constant.constvalue.cast_mut_ptr::<pg_sys::varlena>()) };
+    let original = constant.constvalue.cast_mut_ptr::<pg_sys::varlena>();
+    let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
     if detoasted.is_null() {
         return Err(ShapeDecline::UnsupportedPredicate);
     }
     // SAFETY: pg_detoast_datum returned a flat varlena readable for VARSIZE
     // bytes until the planner context is released.
     let byte_count = unsafe { pgrx::varsize(detoasted.cast()) };
-    let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), byte_count) };
-    let maximum = crate::engine::cost::device_limits()
+    let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), byte_count) }.to_vec();
+    if detoasted != original {
+        // SAFETY: a distinct pg_detoast_datum result is palloc-owned; bytes
+        // now owns the complete copy used by every validation path below.
+        unsafe { pg_sys::pfree(detoasted.cast()) };
+    }
+    let limits = crate::engine::cost::device_limits();
+    let maximum = limits
         .resident_domain_max_exact_value_bytes
         .min(crate::engine::spec::MAX_SPATIAL_CONSTANT_BYTES);
-    let parsed = crate::engine::residency::validate_resident_geometry_value(bytes, maximum)
+    let parsed = crate::engine::residency::validate_resident_geometry_value(&bytes, maximum)
         .map_err(|_| ShapeDecline::UnsupportedPredicate)?;
+    if parsed.coordinate_pairs > limits.gpu_spatial_max_vertices_per_row {
+        return Err(ShapeDecline::UnsupportedPredicate);
+    }
     if let Some(typmod) = postgis_geometry_typmod_metadata(constant.consttypmod)
         && (typmod.srid != Some(parsed.srid)
             || u32::try_from((constant.consttypmod & 0xfc) >> 2).ok() != Some(parsed.geom_type))
     {
         return Err(ShapeDecline::UnsupportedPredicate);
     }
+    // Run GEOS only after the strict byte, dimensionality, type, SRID, and
+    // device-cap checks above. The original planner Const remains alive even
+    // when pg_detoast_datum returned and freed a distinct flat copy.
+    // SAFETY: the catalog identity proves this exact extension-owned OID is
+    // canonical strict ST_IsValid(geometry), and constvalue is the exact
+    // non-NULL catalog-proved geometry Datum checked above.
+    let valid = unsafe {
+        pg_sys::OidFunctionCall1Coll(
+            catalog.is_valid_fn_oid,
+            pg_sys::InvalidOid,
+            constant.constvalue,
+        )
+    }
+    .value()
+        != 0;
+    require_valid_spatial_constant(valid)?;
     Ok(SpatialOperand::Constant {
         metadata: SpatialValueMetadata {
             kind: SpatialValueKind::Geometry,
             typmod: constant.consttypmod,
             srid: Some(parsed.srid),
         },
-        bytes: bytes.to_vec().into_boxed_slice(),
+        bytes: bytes.into_boxed_slice(),
     })
 }
 
@@ -1257,13 +1299,25 @@ unsafe fn parse_qual(
     let node = unsafe { pg_sys::strip_implicit_coercions(node) };
     // SAFETY: node is non-null planner memory here.
     match unsafe { (*node).type_ } {
+        NodeTag::T_List => {
+            let list = node.cast::<pg_sys::List>();
+            for index in bounded_qual_conjunct_indices(list_len(list))? {
+                // SAFETY: index is bounded by list_len(list), and the implicit
+                // AND list contains planner-owned expression pointers.
+                let child = unsafe { list_item::<Node>(list, index) }
+                    .ok_or(ShapeDecline::UnsupportedPredicate)?;
+                // SAFETY: child and query belong to the same qualifier tree.
+                unsafe { parse_qual(child, query, joins, filters) }?;
+            }
+            Ok(())
+        }
         NodeTag::T_BoolExpr => {
             // SAFETY: the NodeTag arm proves the BoolExpr layout.
             let boolean = unsafe { &*node.cast::<pg_sys::BoolExpr>() };
             if boolean.boolop != pg_sys::BoolExprType::AND_EXPR {
                 return Err(ShapeDecline::UnsupportedPredicate);
             }
-            for index in 0..list_len(boolean.args) {
+            for index in bounded_qual_conjunct_indices(list_len(boolean.args))? {
                 // SAFETY: index is bounded by list_len(boolean.args).
                 let child = unsafe { list_item::<Node>(boolean.args, index) }
                     .ok_or(ShapeDecline::UnsupportedPredicate)?;

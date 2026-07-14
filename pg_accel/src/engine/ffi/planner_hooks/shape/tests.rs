@@ -627,46 +627,161 @@ fn sql_boolean_fact_filter_requires_begin_time_null_aware_mask() {
     );
 }
 
-#[test]
-fn spatial_fact_filter_requires_postgis_mask_and_both_geometry_columns() {
-    let mut input = single_table_input();
-    let metadata = SpatialValueMetadata {
-        kind: SpatialValueKind::Geometry,
-        typmod: (4_326 << 8) | (crate::engine::residency::RESIDENT_GEOMETRY_POINT as i32) << 2,
-        srid: Some(4_326),
+fn point_operand() -> SpatialOperand {
+    SpatialOperand::Column {
+        column: ColumnRef {
+            relation_oid: 100,
+            attno: 3,
+            type_oid: 60_001,
+        },
+        metadata: SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: (4_326 << 8) | (crate::engine::residency::RESIDENT_GEOMETRY_POINT as i32) << 2,
+            srid: Some(4_326),
+        },
+    }
+}
+
+fn polygon_bytes(points: &[(f64, f64)]) -> Box<[u8]> {
+    let mut bytes = vec![0, 0, 0, 0, 0, 0x10, 0xe6, 0];
+    bytes.extend_from_slice(&crate::engine::residency::RESIDENT_GEOMETRY_POLYGON.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(
+        &u32::try_from(points.len())
+            .expect("test polygon count fits u32")
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    for (x, y) in points {
+        bytes.extend_from_slice(&x.to_le_bytes());
+        bytes.extend_from_slice(&y.to_le_bytes());
+    }
+    bytes.into_boxed_slice()
+}
+
+fn polygon_operand(coordinate_pairs: usize) -> SpatialOperand {
+    assert!(coordinate_pairs >= 4);
+    let unique = coordinate_pairs - 1;
+    let unique_f64 = f64::from(u32::try_from(unique).expect("test vertex count fits u32"));
+    let mut points = (0..unique)
+        .map(|index| {
+            let index = f64::from(u32::try_from(index).expect("test vertex index fits u32"));
+            let angle = std::f64::consts::TAU * index / unique_f64;
+            (angle.cos(), angle.sin())
+        })
+        .collect::<Vec<_>>();
+    points.push(points[0]);
+    SpatialOperand::Constant {
+        metadata: SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: -1,
+            srid: Some(4_326),
+        },
+        bytes: polygon_bytes(&points),
+    }
+}
+
+fn test_spatial_filter(
+    predicate: SpatialPredicateKind,
+    polygon_left: bool,
+    coordinate_pairs: usize,
+) -> FilterSpec {
+    let point = point_operand();
+    let polygon = polygon_operand(coordinate_pairs);
+    let (left, right) = if polygon_left {
+        (polygon, point)
+    } else {
+        (point, polygon)
     };
-    let left = ColumnRef {
-        relation_oid: 100,
-        attno: 3,
-        type_oid: 60_001,
-    };
-    let right = ColumnRef {
-        relation_oid: 100,
-        attno: 5,
-        type_oid: 60_001,
-    };
+    FilterSpec::Spatial {
+        predicate,
+        left,
+        right,
+        distance: (predicate == SpatialPredicateKind::DWithin).then_some(ScalarValue::F64(1.0)),
+    }
+}
+
+fn add_test_spatial_filter(input: &mut ShapeInput, coordinate_pairs: usize) {
+    input.relation_filters.push((
+        100,
+        test_spatial_filter(SpatialPredicateKind::Intersects, false, coordinate_pairs),
+    ));
     input.relations[0].column_widths.insert(3, 64);
-    input.relations[0].column_widths.insert(5, 96);
+}
+
+#[test]
+fn spatial_fact_filter_requires_postgis_mask_and_exact_point_polygon_work() {
+    let mut input = single_table_input();
+    add_test_spatial_filter(&mut input, 4);
+    let plan = build_shape(input, &model()).expect("proved spatial fact filter should build");
+    assert!(matches!(plan.spec.fact_filter, FilterSpec::Spatial { .. }));
+    assert!(plan.descriptor_measures.derived_spatial_mask);
+    assert_eq!(plan.descriptor_measures.derived_fact_mask, None);
+    assert_eq!(plan.required_relations[0].attnos, vec![2, 3]);
+}
+
+#[test]
+fn column_by_column_spatial_work_declines_without_vertex_statistics() {
+    let metadata = match point_operand() {
+        SpatialOperand::Column { metadata, .. } => metadata,
+        SpatialOperand::Constant { .. } => unreachable!(),
+    };
+    let mut input = single_table_input();
     input.relation_filters.push((
         100,
         FilterSpec::Spatial {
             predicate: SpatialPredicateKind::Intersects,
-            left: SpatialOperand::Column {
-                column: left,
-                metadata,
-            },
+            left: point_operand(),
             right: SpatialOperand::Column {
-                column: right,
+                column: ColumnRef {
+                    relation_oid: 100,
+                    attno: 5,
+                    type_oid: 60_001,
+                },
                 metadata,
             },
             distance: None,
         },
     ));
-    let plan = build_shape(input, &model()).expect("spatial fact filter should build");
-    assert!(matches!(plan.spec.fact_filter, FilterSpec::Spatial { .. }));
-    assert!(plan.descriptor_measures.derived_spatial_mask);
-    assert_eq!(plan.descriptor_measures.derived_fact_mask, None);
-    assert_eq!(plan.required_relations[0].attnos, vec![2, 3, 5]);
+    assert_eq!(
+        build_shape(input, &model()),
+        Err(ShapeDecline::SpatialWorkShapeUnproved),
+    );
+}
+
+#[test]
+fn spatial_orientation_is_part_of_the_admission_proof() {
+    for (predicate, polygon_left) in [
+        (SpatialPredicateKind::Intersects, false),
+        (SpatialPredicateKind::Intersects, true),
+        (SpatialPredicateKind::DWithin, false),
+        (SpatialPredicateKind::DWithin, true),
+        (SpatialPredicateKind::Contains, true),
+        (SpatialPredicateKind::Within, false),
+    ] {
+        let mut input = single_table_input();
+        input
+            .relation_filters
+            .push((100, test_spatial_filter(predicate, polygon_left, 4)));
+        input.relations[0].column_widths.insert(3, 64);
+        assert!(
+            build_shape(input, &model()).is_ok(),
+            "{predicate:?} orientation"
+        );
+    }
+    for (predicate, polygon_left) in [
+        (SpatialPredicateKind::Contains, false),
+        (SpatialPredicateKind::Within, true),
+    ] {
+        let mut input = single_table_input();
+        input
+            .relation_filters
+            .push((100, test_spatial_filter(predicate, polygon_left, 4)));
+        assert_eq!(
+            build_shape(input, &model()),
+            Err(ShapeDecline::SpatialWorkShapeUnproved),
+        );
+    }
 }
 
 #[test]
@@ -707,68 +822,100 @@ fn same_name_impostor_declines_without_postgis_catalog_resolution() {
     );
 }
 
-fn add_test_spatial_filter(input: &mut ShapeInput) {
-    let metadata = SpatialValueMetadata {
-        kind: SpatialValueKind::Geometry,
-        typmod: (4_326 << 8) | (crate::engine::residency::RESIDENT_GEOMETRY_POINT as i32) << 2,
-        srid: Some(4_326),
-    };
-    input.relation_filters.push((
-        100,
-        FilterSpec::Spatial {
-            predicate: SpatialPredicateKind::Intersects,
-            left: SpatialOperand::Column {
-                column: ColumnRef {
-                    relation_oid: 100,
-                    attno: 3,
-                    type_oid: 60_001,
-                },
-                metadata,
-            },
-            right: SpatialOperand::Column {
-                column: ColumnRef {
-                    relation_oid: 100,
-                    attno: 5,
-                    type_oid: 60_001,
-                },
-                metadata,
-            },
-            distance: None,
-        },
-    ));
-    input.relations[0].column_widths.insert(3, 64);
-    input.relations[0].column_widths.insert(5, 64);
+#[test]
+fn self_intersecting_bowtie_constant_declines_after_postgis_validity_check() {
+    let bowtie = polygon_bytes(&[(0.0, 0.0), (2.0, 2.0), (0.0, 2.0), (2.0, 0.0), (0.0, 0.0)]);
+    let parsed = crate::engine::residency::validate_resident_geometry_value(
+        &bowtie,
+        crate::engine::spec::MAX_SPATIAL_CONSTANT_BYTES,
+    )
+    .expect("bowtie is structurally valid GSERIALIZED");
+    assert_eq!(parsed.coordinate_pairs, 5);
+    assert_eq!(
+        super::postgres::require_valid_spatial_constant(false),
+        Err(ShapeDecline::InvalidSpatialConstant),
+    );
+}
+
+#[test]
+fn spatial_filter_outside_fact_filter_declines_explicitly() {
+    let mut input = single_table_input();
+    input.aggregates[0].filter = test_spatial_filter(SpatialPredicateKind::Intersects, false, 4);
+    assert_eq!(
+        build_shape(input, &model()),
+        Err(ShapeDecline::SpatialFilterOutsideFactRelation),
+    );
 }
 
 #[test]
 fn spatial_cost_charges_pairwise_chunks_and_reserves_exact_rechecks() {
     let mut input = single_table_input();
-    add_test_spatial_filter(&mut input);
+    add_test_spatial_filter(&mut input, 4);
     let mut limits = DeviceLimits::cpu_only();
     limits.has_native_fp64 = true;
     limits.gpu_reduce_min_rows = 1;
     limits.gpu_spatial_pairwise_chunk_rows = 100_000;
     limits.gpu_spatial_max_recheck_fraction = 0.10;
+    limits.gpu_spatial_min_vertices = 4;
+    limits.gpu_spatial_max_vertices_per_row = 100;
+    limits.spatial_point_in_ring_break_even_verts_x_rows = 1;
+    limits.spatial_point_in_ring_max_verts_x_rows = 10_000_000;
     let plan = build_shape(input, &TypedCostModel::from_limits(&limits))
         .expect("spatial shape should retain its explicit costs");
     let expected_filter = 1_000_000.0_f64.mul_add(
         limits.gpu_op_cost_filter,
         10.0 * crate::engine::cost::GPU_LAUNCH_OVERHEAD,
     );
-    let expected_recheck = 100_000.0 * limits.gpu_op_cost_filter;
+    let expected_recheck = 100_000.0 * limits.cpu_spatial_recheck_per_row;
     assert!((plan.cost.spatial_filter.get() - expected_filter).abs() < 1.0e-12);
     assert!((plan.cost.spatial_recheck_reserve.get() - expected_recheck).abs() < 1.0e-12);
+    assert!(plan.cost.spatial_recheck_reserve.get() > plan.cost.spatial_filter.get());
     assert_eq!(plan.cost_gate, ShapeCostGate::Eligible);
 }
 
 #[test]
-fn spatial_cost_uses_distinct_row_floor_and_output_fraction_gates() {
+fn spatial_vertex_cost_never_undercuts_the_generic_filter_baseline() {
+    let mut limits = DeviceLimits::cpu_only();
+    limits.has_native_fp64 = true;
+    limits.gpu_reduce_min_rows = 1;
+    limits.gpu_spatial_min_vertices = 4;
+    limits.gpu_spatial_max_vertices_per_row = 100;
+    limits.gpu_spatial_pairwise_chunk_rows = 1_000_000;
+    limits.spatial_point_in_ring_break_even_verts_x_rows = 1;
+    limits.spatial_point_in_ring_max_verts_x_rows = 10_000_000;
+
+    let plan_for = |coordinate_pairs| {
+        let mut input = single_table_input();
+        add_test_spatial_filter(&mut input, coordinate_pairs);
+        build_shape(input, &TypedCostModel::from_limits(&limits)).expect("spatial shape builds")
+    };
+    let baseline = plan_for(4).cost.spatial_filter.get();
+    let twice_the_vertices = plan_for(8).cost.spatial_filter.get();
+    let generic_floor = 1_000_000.0_f64.mul_add(
+        limits.gpu_op_cost_filter,
+        crate::engine::cost::GPU_LAUNCH_OVERHEAD,
+    );
+    assert!(baseline >= generic_floor);
+    let expected_twice = (2.0_f64 * 1_000_000.0).mul_add(
+        limits.gpu_op_cost_filter,
+        crate::engine::cost::GPU_LAUNCH_OVERHEAD,
+    );
+    assert!((twice_the_vertices - expected_twice).abs() < 1.0e-12);
+    assert!(twice_the_vertices > baseline);
+}
+
+#[test]
+fn spatial_cost_uses_distinct_row_vertex_and_work_gates() {
     let mut limits = DeviceLimits::cpu_only();
     limits.gpu_reduce_min_rows = 100;
+    limits.gpu_spatial_min_vertices = 4;
+    limits.gpu_spatial_max_vertices_per_row = 100;
+    limits.spatial_point_in_ring_break_even_verts_x_rows = 1;
+    limits.spatial_point_in_ring_max_verts_x_rows = 10_000;
 
     let mut below_floor = single_table_input();
     below_floor.relations[0].estimated_rows = 99;
-    add_test_spatial_filter(&mut below_floor);
+    add_test_spatial_filter(&mut below_floor, 4);
     let plan = build_shape(below_floor, &TypedCostModel::from_limits(&limits))
         .expect("spatial shape should preserve a typed row-floor decline");
     assert_eq!(
@@ -780,18 +927,62 @@ fn spatial_cost_uses_distinct_row_floor_and_output_fraction_gates() {
     );
 
     limits.gpu_reduce_min_rows = 1;
-    limits.gpu_spatial_max_output_fraction = 0.50;
-    let mut output_heavy = single_table_input();
-    output_heavy.relations[0].estimated_rows = 100;
-    output_heavy.estimated_output_rows = 51;
-    add_test_spatial_filter(&mut output_heavy);
-    let plan = build_shape(output_heavy, &TypedCostModel::from_limits(&limits))
-        .expect("spatial shape should preserve a typed output-fraction decline");
+    limits.gpu_spatial_min_vertices = 5;
+    let mut too_few_vertices = single_table_input();
+    too_few_vertices.relations[0].estimated_rows = 100;
+    add_test_spatial_filter(&mut too_few_vertices, 4);
+    let plan = build_shape(too_few_vertices, &TypedCostModel::from_limits(&limits))
+        .expect("spatial shape should preserve a typed vertex-floor decline");
     assert_eq!(
         plan.cost_gate,
-        ShapeCostGate::SpatialOutputRowsExceedDeviceMaximum {
-            estimated: crate::engine::cost::Rows::new(51),
-            maximum: crate::engine::cost::Rows::new(50),
+        ShapeCostGate::SpatialVerticesBelowDeviceMinimum {
+            estimated: crate::engine::cost::Rows::new(4),
+            required: crate::engine::cost::Rows::new(5),
+        },
+    );
+
+    limits.gpu_spatial_min_vertices = 4;
+    limits.gpu_spatial_max_vertices_per_row = 5;
+    let mut too_many_vertices = single_table_input();
+    too_many_vertices.relations[0].estimated_rows = 100;
+    add_test_spatial_filter(&mut too_many_vertices, 6);
+    let plan = build_shape(too_many_vertices, &TypedCostModel::from_limits(&limits))
+        .expect("spatial shape should preserve a typed vertex-maximum decline");
+    assert_eq!(
+        plan.cost_gate,
+        ShapeCostGate::SpatialVerticesExceedDeviceMaximum {
+            estimated: crate::engine::cost::Rows::new(6),
+            maximum: crate::engine::cost::Rows::new(5),
+        },
+    );
+
+    limits.gpu_spatial_max_vertices_per_row = 100;
+    limits.spatial_point_in_ring_break_even_verts_x_rows = 401;
+    let mut below_work = single_table_input();
+    below_work.relations[0].estimated_rows = 100;
+    add_test_spatial_filter(&mut below_work, 4);
+    let plan = build_shape(below_work, &TypedCostModel::from_limits(&limits))
+        .expect("spatial shape should preserve a typed work-floor decline");
+    assert_eq!(
+        plan.cost_gate,
+        ShapeCostGate::SpatialWorkBelowDeviceMinimum {
+            estimated: crate::engine::cost::WorkProduct::new(400),
+            required: crate::engine::cost::WorkProduct::new(401),
+        },
+    );
+
+    limits.spatial_point_in_ring_break_even_verts_x_rows = 1;
+    limits.spatial_point_in_ring_max_verts_x_rows = 399;
+    let mut above_work = single_table_input();
+    above_work.relations[0].estimated_rows = 100;
+    add_test_spatial_filter(&mut above_work, 4);
+    let plan = build_shape(above_work, &TypedCostModel::from_limits(&limits))
+        .expect("spatial shape should preserve a typed maximum-work decline");
+    assert_eq!(
+        plan.cost_gate,
+        ShapeCostGate::SpatialWorkExceedsDeviceMaximum {
+            estimated: crate::engine::cost::WorkProduct::new(400),
+            maximum: crate::engine::cost::WorkProduct::new(399),
         },
     );
 }
@@ -2054,6 +2245,39 @@ fn only_default_hashable_equality_is_normalized() {
         pg_sys::InvalidOid,
         true
     ));
+}
+
+#[test]
+fn qualifier_conjunct_bound_accepts_nonempty_ordered_lists() {
+    use super::postgres::bounded_qual_conjunct_indices;
+
+    assert_eq!(
+        bounded_qual_conjunct_indices(1)
+            .expect("one conjunct")
+            .collect::<Vec<_>>(),
+        [0]
+    );
+    assert_eq!(
+        bounded_qual_conjunct_indices(3)
+            .expect("multiple conjuncts")
+            .collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    assert!(bounded_qual_conjunct_indices(64).is_ok());
+}
+
+#[test]
+fn qualifier_conjunct_bound_rejects_empty_and_oversized_lists() {
+    use super::postgres::bounded_qual_conjunct_indices;
+
+    assert_eq!(
+        bounded_qual_conjunct_indices(0),
+        Err(ShapeDecline::UnsupportedPredicate)
+    );
+    assert_eq!(
+        bounded_qual_conjunct_indices(65),
+        Err(ShapeDecline::UnsupportedPredicate)
+    );
 }
 
 #[test]

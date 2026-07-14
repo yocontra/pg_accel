@@ -30,6 +30,7 @@ struct ParsedGeometry {
 pub struct ResidentGeometryValueMetadata {
     pub geom_type: u32,
     pub srid: i32,
+    pub coordinate_pairs: usize,
 }
 
 impl ParsedGeometry {
@@ -285,6 +286,7 @@ pub fn validate_resident_geometry_value(
     Ok(ResidentGeometryValueMetadata {
         geom_type: parsed.geom_type,
         srid: parsed.srid,
+        coordinate_pairs: parsed.coordinate_pairs(),
     })
 }
 
@@ -300,10 +302,11 @@ pub(super) struct ResidentGeometryBuilder {
     exact_bytes: Vec<u8>,
     saw_null: bool,
     max_exact_value_bytes: usize,
+    max_vertices_per_row: usize,
 }
 
 impl ResidentGeometryBuilder {
-    pub(super) fn new(max_exact_value_bytes: usize) -> Self {
+    pub(super) fn new(max_exact_value_bytes: usize, max_vertices_per_row: usize) -> Self {
         Self {
             coordinates: Vec::new(),
             bboxes: Vec::new(),
@@ -315,6 +318,7 @@ impl ResidentGeometryBuilder {
             exact_bytes: Vec::new(),
             saw_null: false,
             max_exact_value_bytes,
+            max_vertices_per_row,
         }
     }
 
@@ -347,6 +351,13 @@ impl ResidentGeometryBuilder {
         };
 
         let parsed = parse_gserialized(&exact, self.max_exact_value_bytes)?;
+        if parsed.coordinate_pairs() > self.max_vertices_per_row {
+            return Err(format!(
+                "resident geometry has {} coordinate pairs; device maximum is {}",
+                parsed.coordinate_pairs(),
+                self.max_vertices_per_row,
+            ));
+        }
         let bbox = parsed.bbox()?;
         let coordinate_base = self.coordinates.len() / 2;
         let ring_base = self.ring_offsets.len();
@@ -426,6 +437,60 @@ fn copy_optional<T>(values: &[T], label: &str) -> Result<Option<ExprDeviceBuffer
     }
 }
 
+/// Host-only prefix sums of the native per-row referenced-byte charge.
+/// Keeping this alongside the exact values avoids device-to-host reads while
+/// constructing a request budget for a resident row slice.
+pub(super) struct ResidentGeometryReferencedBytes {
+    prefix: Box<[u64]>,
+}
+
+impl ResidentGeometryReferencedBytes {
+    pub(super) fn build(data: &ResidentGeometryData) -> Result<Self, String> {
+        let mut prefix = Vec::new();
+        prefix
+            .try_reserve_exact(data.rows.len().saturating_add(1))
+            .map_err(|error| format!("geometry byte-prefix allocation failed: {error}"))?;
+        prefix.push(0_u64);
+        let has_null_sidecar = data.nulls.is_some();
+        for (index, row) in data.rows.iter().enumerate() {
+            let coordinate_pairs = data.geometry_offsets[index + 1]
+                .checked_sub(data.geometry_offsets[index])
+                .ok_or_else(|| "geometry byte-prefix offsets are not ordered".to_owned())?;
+            let row_bytes = referenced_geometry_bytes(
+                coordinate_pairs,
+                u64::from(row.ring_count),
+                1,
+                has_null_sidecar,
+            )
+            .ok_or_else(|| "geometry referenced-byte prefix overflow".to_owned())?;
+            let total = prefix
+                .last()
+                .copied()
+                .and_then(|total| total.checked_add(row_bytes))
+                .ok_or_else(|| "geometry referenced-byte prefix overflow".to_owned())?;
+            prefix.push(total);
+        }
+        Ok(Self {
+            prefix: prefix.into_boxed_slice(),
+        })
+    }
+
+    pub(super) fn accounting_bytes(&self) -> Result<u64, String> {
+        self.prefix
+            .len()
+            .checked_mul(std::mem::size_of::<u64>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| "geometry byte-prefix accounting overflow".to_owned())
+    }
+
+    fn referenced_bytes(&self, first_row: usize, row_count: usize) -> Option<u64> {
+        let end_row = first_row.checked_add(row_count)?;
+        self.prefix
+            .get(end_row)?
+            .checked_sub(*self.prefix.get(first_row)?)
+    }
+}
+
 /// Store-owned device buffers plus exact host values for a geometry column.
 pub struct ResidentGeometryColumn {
     coordinates: Option<ExprDeviceBuffer<f64>>,
@@ -435,6 +500,7 @@ pub struct ResidentGeometryColumn {
     rows: Option<ExprDeviceBuffer<ResidentGeometryRow>>,
     nulls: Option<ExprDeviceBuffer<u8>>,
     exact: RetainedExactValues,
+    referenced_bytes: ResidentGeometryReferencedBytes,
     accounting: ResidentByteAccounting,
     row_count: usize,
     coordinate_pair_count: usize,
@@ -444,12 +510,17 @@ pub struct ResidentGeometryColumn {
 impl ResidentGeometryColumn {
     pub(super) fn materialize(
         data: ResidentGeometryData,
+        referenced_bytes: ResidentGeometryReferencedBytes,
         max_exact_value_bytes: usize,
         label: &str,
     ) -> Result<Self, String> {
-        let accounting = data
+        let mut accounting = data
             .accounting(max_exact_value_bytes)
             .map_err(|error| error.to_string())?;
+        accounting.retained_host_exact_bytes = accounting
+            .retained_host_exact_bytes
+            .checked_add(referenced_bytes.accounting_bytes()?)
+            .ok_or_else(|| "geometry retained-host accounting overflow".to_owned())?;
         let row_count = data.rows.len();
         let coordinate_pair_count = data.coordinates.len() / 2;
         let ring_count = data.ring_offsets.len();
@@ -473,6 +544,7 @@ impl ResidentGeometryColumn {
             rows,
             nulls,
             exact: data.exact,
+            referenced_bytes,
             accounting,
             row_count,
             coordinate_pair_count,
@@ -495,6 +567,7 @@ impl ResidentGeometryColumn {
             rows: self.rows.as_ref(),
             nulls: self.nulls.as_ref(),
             exact: &self.exact,
+            referenced_byte_prefix: &self.referenced_bytes,
             accounting: self.accounting,
             row_count: self.row_count,
             coordinate_pair_count: self.coordinate_pair_count,
@@ -513,6 +586,7 @@ pub struct ResidentGeometryColumnView<'a> {
     pub rows: Option<&'a ExprDeviceBuffer<ResidentGeometryRow>>,
     pub nulls: Option<&'a ExprDeviceBuffer<u8>>,
     pub exact: &'a RetainedExactValues,
+    referenced_byte_prefix: &'a ResidentGeometryReferencedBytes,
     pub accounting: ResidentByteAccounting,
     pub row_count: usize,
     pub coordinate_pair_count: usize,
@@ -527,19 +601,28 @@ impl ResidentGeometryColumnView<'_> {
 
     #[must_use]
     pub fn referenced_bytes(&self, first_row: usize, row_count: usize) -> Option<u64> {
-        let end_row = first_row.checked_add(row_count)?;
-        if end_row > self.row_count {
-            return None;
-        }
-        let offsets = self.geometry_offsets.copy_to_vec().ok()?;
-        let coordinate_start = *offsets.get(first_row)?;
-        let coordinate_end = *offsets.get(end_row)?;
-        let coordinate_pairs = coordinate_end.checked_sub(coordinate_start)?;
-        let rows = u64::try_from(row_count).ok()?;
-        coordinate_pairs
-            .checked_mul(2 * u64::try_from(std::mem::size_of::<f64>()).ok()?)?
-            .checked_add(rows.checked_mul(32 + 8 + 24 + 1)?)
+        self.referenced_byte_prefix
+            .referenced_bytes(first_row, row_count)
     }
+}
+
+fn referenced_geometry_bytes(
+    coordinate_pairs: u64,
+    ring_count: u64,
+    row_count: u64,
+    has_null_sidecar: bool,
+) -> Option<u64> {
+    let coordinate_bytes = coordinate_pairs
+        .checked_mul(2_u64.checked_mul(u64::try_from(std::mem::size_of::<f64>()).ok()?)?)?;
+    let ring_bytes = ring_count.checked_mul(u64::try_from(std::mem::size_of::<u64>()).ok()?)?;
+    let fixed_per_row = u64::try_from(std::mem::size_of::<ResidentGeometryRow>())
+        .ok()?
+        .checked_add(4_u64.checked_mul(u64::try_from(std::mem::size_of::<f64>()).ok()?)?)?
+        .checked_add(2_u64.checked_mul(u64::try_from(std::mem::size_of::<u64>()).ok()?)?)?
+        .checked_add(u64::from(has_null_sidecar))?;
+    coordinate_bytes
+        .checked_add(ring_bytes)?
+        .checked_add(row_count.checked_mul(fixed_per_row)?)
 }
 
 #[cfg(test)]
@@ -645,7 +728,7 @@ mod tests {
     fn builder_retains_exact_values_and_canonical_nulls() {
         let first = point(4_326, Some((1.0, 2.0)));
         let empty = point(4_326, None);
-        let mut builder = ResidentGeometryBuilder::new(1_024);
+        let mut builder = ResidentGeometryBuilder::new(1_024, 16);
         builder.push(Some(first.clone())).expect("first point");
         builder.push(None).expect("NULL point");
         builder.push(Some(empty.clone())).expect("empty point");
@@ -658,5 +741,48 @@ mod tests {
         assert_eq!(data.rows[1], ResidentGeometryRow::default());
         assert_eq!(data.bboxes[1], [0.0; 4]);
         assert_eq!(data.bboxes[2], [0.0; 4]);
+    }
+
+    #[test]
+    fn builder_rejects_a_row_above_the_device_vertex_limit() {
+        let outer = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 0.0)];
+        let mut builder = ResidentGeometryBuilder::new(1_024, 3);
+        let error = builder
+            .push(Some(polygon(&[&outer])))
+            .expect_err("four coordinate pairs exceed the per-row limit");
+        assert!(error.contains("device maximum is 3"));
+    }
+
+    #[test]
+    fn referenced_byte_budget_matches_native_row_accounting() {
+        assert_eq!(
+            referenced_geometry_bytes(4, 1, 1, false),
+            Some(24 + 32 + 16 + 64 + 8),
+        );
+        assert_eq!(
+            referenced_geometry_bytes(9, 3, 2, true),
+            Some(2 * (24 + 32 + 16 + 1) + 9 * 16 + 3 * 8),
+        );
+        assert_eq!(referenced_geometry_bytes(u64::MAX, 0, 1, false), None);
+    }
+
+    #[test]
+    fn referenced_byte_slices_use_host_prefix_without_device_readback() {
+        let outer = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 0.0)];
+        let mut builder = ResidentGeometryBuilder::new(4_096, 16);
+        builder.push(Some(polygon(&[&outer]))).expect("polygon row");
+        builder.push(None).expect("NULL row");
+        builder
+            .push(Some(point(4_326, Some((1.0, 2.0)))))
+            .expect("point row");
+        let data = builder.finish().expect("valid geometry data");
+        let referenced = ResidentGeometryReferencedBytes::build(&data)
+            .expect("host prefix builds before materialization");
+
+        assert_eq!(referenced.prefix.as_ref(), [0, 145, 218, 307]);
+        assert_eq!(referenced.referenced_bytes(0, 2), Some(218));
+        assert_eq!(referenced.referenced_bytes(1, 2), Some(162));
+        assert_eq!(referenced.referenced_bytes(3, 1), None);
+        assert_eq!(referenced.accounting_bytes(), Ok(32));
     }
 }

@@ -112,9 +112,18 @@ impl AdmissionDecline {
             Self::DeviceCostGate(ShapeCostGate::SpatialRowsBelowDeviceMinimum { .. }) => {
                 "postgis_rows_below_device_minimum"
             }
-            Self::DeviceCostGate(ShapeCostGate::SpatialOutputRowsExceedDeviceMaximum {
-                ..
-            }) => "postgis_output_rows_exceed_device_maximum",
+            Self::DeviceCostGate(ShapeCostGate::SpatialVerticesBelowDeviceMinimum { .. }) => {
+                "postgis_vertices_below_device_minimum"
+            }
+            Self::DeviceCostGate(ShapeCostGate::SpatialVerticesExceedDeviceMaximum { .. }) => {
+                "postgis_vertices_exceed_device_maximum"
+            }
+            Self::DeviceCostGate(ShapeCostGate::SpatialWorkBelowDeviceMinimum { .. }) => {
+                "postgis_work_below_device_minimum"
+            }
+            Self::DeviceCostGate(ShapeCostGate::SpatialWorkExceedsDeviceMaximum { .. }) => {
+                "postgis_work_exceeds_device_maximum"
+            }
             Self::DeviceCostGate(ShapeCostGate::DimensionRowsExceedDeviceMaximum { .. }) => {
                 "generic_dimension_rows_exceed_device_maximum"
             }

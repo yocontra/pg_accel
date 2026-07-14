@@ -266,6 +266,7 @@ pub struct PostgisCatalogIdentity {
     pub within_fn_oid: pg_sys::Oid,
     pub dwithin_fn_oid: pg_sys::Oid,
     pub distance_fn_oid: pg_sys::Oid,
+    pub is_valid_fn_oid: pg_sys::Oid,
     pub fingerprint_words: Vec<i32>,
 }
 
@@ -1477,6 +1478,7 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
     let dwithin_args = [geometry_type_oid, geometry_type_oid, pg_sys::FLOAT8OID];
     let dwithin_fn_oid = unsafe { find_exact_function(schema_oid, "st_dwithin", &dwithin_args)? };
     let distance_fn_oid = unsafe { find_exact_function(schema_oid, "st_distance", &binary_args)? };
+    let is_valid_fn_oid = unsafe { find_exact_function(schema_oid, "st_isvalid", &geometry_args)? };
     for (fn_oid, contract) in [
         (
             intersects_fn_oid,
@@ -1528,6 +1530,16 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
                 pg_sys::InvalidOid,
             ),
         ),
+        (
+            is_valid_fn_oid,
+            postgis_contract(
+                "st_isvalid",
+                "isvalid",
+                &geometry_args,
+                pg_sys::BOOLOID,
+                pg_sys::InvalidOid,
+            ),
+        ),
     ] {
         function_shapes.push(unsafe {
             validate_postgis_function(extension_oid, schema_oid, fn_oid, contract)?
@@ -1553,6 +1565,7 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
         within_fn_oid,
         dwithin_fn_oid,
         distance_fn_oid,
+        is_valid_fn_oid,
         fingerprint_words,
     })
 }
@@ -1931,6 +1944,57 @@ mod postgis_tests {
     }
 
     #[test]
+    fn geometry_validity_contract_is_exact_and_replacement_sensitive() {
+        let geometry_oid = oid(60_001);
+        let mut valid = valid_intersects();
+        valid.name = "st_isvalid".to_owned();
+        valid.source = "isvalid".to_owned();
+        valid.argument_types = vec![geometry_oid];
+        valid.support_function = pg_sys::InvalidOid;
+        let arguments = [geometry_oid];
+        let contract = postgis_contract(
+            "st_isvalid",
+            "isvalid",
+            &arguments,
+            pg_sys::BOOLOID,
+            pg_sys::InvalidOid,
+        );
+        assert_eq!(
+            validate_postgis_function_shape(&valid, valid.schema_oid, contract),
+            Ok(())
+        );
+
+        let mut replacement = valid.clone();
+        replacement.source = "replacement_isvalid".to_owned();
+        assert!(
+            validate_postgis_function_shape(&replacement, replacement.schema_oid, contract)
+                .is_err()
+        );
+        assert_ne!(
+            function_fingerprint(&valid),
+            function_fingerprint(&replacement)
+        );
+
+        let mut same_signature_impostor = valid.clone();
+        same_signature_impostor.fn_oid = oid(60_099);
+        same_signature_impostor.tuple_offset += 1;
+        assert_eq!(
+            validate_postgis_function_shape(
+                &same_signature_impostor,
+                same_signature_impostor.schema_oid,
+                contract,
+            ),
+            Ok(()),
+            "shape validation alone cannot prove extension ownership",
+        );
+        assert_ne!(
+            function_fingerprint(&valid),
+            function_fingerprint(&same_signature_impostor),
+            "the catalog identity must change for a same-signature replacement",
+        );
+    }
+
+    #[test]
     fn catalog_classification_is_oid_exact() {
         let catalog = PostgisCatalogIdentity {
             extension_oid: oid(1),
@@ -1941,6 +2005,7 @@ mod postgis_tests {
             within_fn_oid: oid(12),
             dwithin_fn_oid: oid(13),
             distance_fn_oid: oid(14),
+            is_valid_fn_oid: oid(15),
             fingerprint_words: Vec::new(),
         };
         assert_eq!(
@@ -1955,6 +2020,7 @@ mod postgis_tests {
             catalog.classify_function(oid(14)),
             Some(PostgisSpatialFunction::Distance)
         );
+        assert_eq!(catalog.classify_function(oid(15)), None);
         assert_eq!(catalog.classify_function(oid(99)), None);
     }
 }
