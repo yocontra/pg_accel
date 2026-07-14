@@ -3172,7 +3172,7 @@ fn pg_accel_residency_invalidate<'a>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::rc::Rc;
 
@@ -3228,12 +3228,12 @@ mod tests {
     #[global_allocator]
     static TEST_COUNTING_ALLOCATOR: TestCountingAllocator = TestCountingAllocator;
 
-    fn begin_test_allocation_count() {
+    pub fn begin_test_allocation_count() {
         TEST_ALLOCATION_COUNT.with(|count| count.set(0));
         COUNT_TEST_ALLOCATIONS.with(|enabled| enabled.set(true));
     }
 
-    fn finish_test_allocation_count() -> usize {
+    pub fn finish_test_allocation_count() -> usize {
         COUNT_TEST_ALLOCATIONS.with(|enabled| enabled.set(false));
         TEST_ALLOCATION_COUNT.with(Cell::get)
     }
@@ -4855,7 +4855,7 @@ mod tests {
             &[],
             |inputs| {
                 Ok(StagedDerivedPreflight {
-                    prepared: inputs.evidence[0].clone(),
+                    prepared: inputs.evidence[0],
                     accounting: ResidentByteAccounting {
                         device_bytes: 0,
                         retained_host_exact_bytes: 0,
