@@ -51,6 +51,15 @@ fn plan_shape_cost_multiplier_settings_respect_documented_floor() {
     assert!(setting_count > 0, "plan-shape suite has no cost settings");
 }
 
+#[test]
+fn plan_shape_tests_do_not_expect_retired_runtime_rejection_codes() {
+    let retired = ["partial_agg_no_gpu_", "producing_child"].concat();
+    assert!(
+        !include_str!("plan_shape_test.rs").contains(&retired),
+        "plan-shape suite still expects retired runtime rejection `{retired}`"
+    );
+}
+
 fn connect() -> Client {
     let connection = test_connection();
     let mut client = Client::connect(&connection, NoTls).expect("connect to bench PG");
@@ -115,6 +124,22 @@ fn pg_accel_stat_i64(c: &mut Client, column: &str) -> i64 {
     c.query_one(&format!("SELECT {column} FROM pg_accel_stats()"), &[])
         .unwrap_or_else(|e| panic!("pg_accel_stats column `{column}` failed: {e}"))
         .get::<_, i64>(0)
+}
+
+fn device_limit_i64(c: &mut Client, name: &str) -> i64 {
+    c.query_one(
+        "SELECT value::bigint FROM pg_accel_device_limits() WHERE name = $1",
+        &[&name],
+    )
+    .unwrap_or_else(|e| panic!("pg_accel device limit `{name}` failed: {e}"))
+    .get::<_, i64>(0)
+}
+
+fn descriptor_groupagg_fixture_rows(c: &mut Client) -> i64 {
+    let minimum = device_limit_i64(c, "gpu_hash_agg_min_rows");
+    minimum
+        .saturating_add((minimum / 4).max(1_024))
+        .max(250_000)
 }
 
 fn explain_metric_i64(plan: &str, metric: &str) -> Option<i64> {
@@ -754,15 +779,20 @@ struct GroupIntSumCountRow {
 }
 
 fn ensure_descriptor_groupagg_renamed_direct_fixture(c: &mut Client) {
+    let rows = descriptor_groupagg_fixture_rows(c);
     for stmt in [
         "DROP TABLE IF EXISTS pg_accel_rg_rename_direct",
         "DROP TABLE IF EXISTS bench_employees_agg",
         "CREATE UNLOGGED TABLE bench_employees_agg (             id serial PRIMARY KEY,             dept int4 NOT NULL,             salary int4 NOT NULL          )",
-        "INSERT INTO bench_employees_agg (dept, salary)          SELECT (g % 64)::int4, (1000 + (g % 1000))::int4          FROM generate_series(1, 100000) AS g",
-        "ANALYZE bench_employees_agg",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
+    c.simple_query(&format!(
+        "INSERT INTO bench_employees_agg (dept, salary)          SELECT (g % 64)::int4, (1000 + (g % 1000))::int4          FROM generate_series(1, {rows}) AS g"
+    ))
+    .expect("populate direct descriptor aggregate fixture");
+    c.simple_query("ANALYZE bench_employees_agg")
+        .expect("analyze direct descriptor aggregate fixture");
     c.simple_query("SELECT pg_accel_pin('bench_employees_agg'::regclass, ARRAY['dept', 'salary'])")
         .expect("pin grouped aggregate inputs");
     for stmt in [
@@ -776,15 +806,20 @@ fn ensure_descriptor_groupagg_renamed_direct_fixture(c: &mut Client) {
 }
 
 fn ensure_descriptor_groupagg_renamed_expression_fixture(c: &mut Client) {
+    let rows = descriptor_groupagg_fixture_rows(c);
     for stmt in [
         "DROP TABLE IF EXISTS pg_accel_rg_rename_expr",
         "DROP TABLE IF EXISTS bench_expression_sales",
         "CREATE UNLOGGED TABLE bench_expression_sales (             id serial PRIMARY KEY,             product_id int4 NOT NULL,             price int4 NOT NULL,             discount int4 NOT NULL          )",
-        "INSERT INTO bench_expression_sales (product_id, price, discount)          SELECT (g % 128)::int4,                 (1 + (g % 997))::int4,                 (1 + (g % 49))::int4          FROM generate_series(1, 100000) AS g",
-        "ANALYZE bench_expression_sales",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
+    c.simple_query(&format!(
+        "INSERT INTO bench_expression_sales (product_id, price, discount)          SELECT (g % 128)::int4,                 (1 + (g % 997))::int4,                 (1 + (g % 49))::int4          FROM generate_series(1, {rows}) AS g"
+    ))
+    .expect("populate expression descriptor aggregate fixture");
+    c.simple_query("ANALYZE bench_expression_sales")
+        .expect("analyze expression descriptor aggregate fixture");
     c.simple_query(
         "SELECT pg_accel_pin(
             'bench_expression_sales'::regclass,
@@ -878,6 +913,7 @@ fn plan_shape_descriptor_groupagg_survives_table_and_column_rename() {
         "SET pg_accel.auto_load = on",
         "SET pg_accel.cost_multiplier = 0.1",
         "SET pg_accel.min_batch_size = 65536",
+        "SET max_parallel_workers_per_gather = 0",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
@@ -915,6 +951,7 @@ fn plan_shape_descriptor_expression_groupagg_survives_rename() {
         "SET pg_accel.auto_load = on",
         "SET pg_accel.cost_multiplier = 0.1",
         "SET pg_accel.min_batch_size = 65536",
+        "SET max_parallel_workers_per_gather = 0",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
@@ -981,7 +1018,7 @@ fn plan_shape_aggregate_filter_has_precise_structural_decline() {
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_parallel_agg_declines_without_gpu_child() {
+fn plan_shape_parallel_unsupported_float_agg_stays_native() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     ensure_fixtures(&mut c);
@@ -1005,8 +1042,8 @@ fn plan_shape_parallel_agg_declines_without_gpu_child() {
     }
     assert_rejection_reason_observed(
         &mut c,
-        &["partial_agg_no_gpu_producing_child"],
-        "parallel aggregate should expose the partial-agg native-decline gate",
+        &["shape_unsupported_measure_type"],
+        "parallel float aggregate should expose the generic measure-type decline",
     );
 }
 
@@ -1174,10 +1211,7 @@ fn plan_shape_postgis_point_polygon_intersects_declines_until_exact_semantics() 
         );
         assert_rejection_reason_observed(
             &mut c,
-            &[
-                "postgis_intersects_unsupported_shape",
-                "partial_agg_no_gpu_producing_child",
-            ],
+            &["postgis_intersects_unsupported_shape"],
             &format!("{label} ST_Intersects should expose a native-decline gate; plan:\n{plan}"),
         );
     }
@@ -1220,10 +1254,7 @@ fn plan_shape_postgis_intersects_unsupported_shape_stays_native() {
     );
     assert_rejection_reason_observed(
         &mut c,
-        &[
-            "postgis_intersects_unsupported_shape",
-            "partial_agg_no_gpu_producing_child",
-        ],
+        &["postgis_intersects_unsupported_shape"],
         &format!(
             "generic geometry ST_Intersects should expose a native-decline gate; plan:\n{plan}"
         ),
