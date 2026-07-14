@@ -974,8 +974,8 @@ static int8_t resident_linestring_linestring(const SpatialResidentGeometry& left
   return uncertain ? 0 : -1;
 }
 
-static int8_t resident_linestring_polygon(const SpatialResidentGeometry& line,
-                                          const SpatialResidentGeometry& polygon) {
+static int8_t resident_linestring_polygon_boundaries(const SpatialResidentGeometry& line,
+                                                     const SpatialResidentGeometry& polygon) {
   if (!resident_polygon_algorithm_supported(polygon))
     return 0;
   bool uncertain = false;
@@ -997,6 +997,15 @@ static int8_t resident_linestring_polygon(const SpatialResidentGeometry& line,
       }
     }
   }
+  return uncertain ? 0 : -1;
+}
+
+static int8_t resident_linestring_polygon(const SpatialResidentGeometry& line,
+                                          const SpatialResidentGeometry& polygon) {
+  const int8_t boundary_relation = resident_linestring_polygon_boundaries(line, polygon);
+  if (boundary_relation > 0)
+    return 1;
+  bool uncertain = boundary_relation == 0;
   for (size_t index = line.coordinate_begin; index < line.coordinate_end; ++index) {
     const double* point = line.view->coordinates + index * 2;
     const int8_t relation = resident_point_polygon(point[0], point[1], polygon);
@@ -1007,8 +1016,8 @@ static int8_t resident_linestring_polygon(const SpatialResidentGeometry& line,
   return uncertain ? 0 : -1;
 }
 
-static int8_t resident_polygon_polygon(const SpatialResidentGeometry& left,
-                                       const SpatialResidentGeometry& right) {
+static int8_t resident_polygon_polygon_boundaries(const SpatialResidentGeometry& left,
+                                                  const SpatialResidentGeometry& right) {
   if (!resident_polygon_algorithm_supported(left) || !resident_polygon_algorithm_supported(right))
     return 0;
   bool uncertain = false;
@@ -1033,6 +1042,15 @@ static int8_t resident_polygon_polygon(const SpatialResidentGeometry& left,
       }
     }
   }
+  return uncertain ? 0 : -1;
+}
+
+static int8_t resident_polygon_polygon(const SpatialResidentGeometry& left,
+                                       const SpatialResidentGeometry& right) {
+  const int8_t boundary_relation = resident_polygon_polygon_boundaries(left, right);
+  if (boundary_relation > 0)
+    return 1;
+  bool uncertain = boundary_relation == 0;
   const double* left_point = left.view->coordinates + resident_ring_start(left, 0) * 2;
   const int8_t left_in_right = resident_point_polygon(left_point[0], left_point[1], right);
   if (left_in_right > 0)
@@ -1123,8 +1141,10 @@ static int8_t resident_polygon_contains(const SpatialResidentGeometry& polygon,
     uncertain = uncertain || relation == 0;
   }
   const int8_t boundary_relation = inner.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING
-                                       ? resident_linestring_polygon(inner, polygon)
-                                       : resident_polygon_polygon(inner, polygon);
+                                       ? resident_linestring_polygon_boundaries(inner, polygon)
+                                       : resident_polygon_polygon_boundaries(inner, polygon);
+  if (boundary_relation > 0)
+    return -1;
   if (boundary_relation == 0)
     uncertain = true;
   return uncertain ? 0 : 1;

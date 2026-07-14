@@ -325,6 +325,14 @@ void test_holes_boundaries_and_predicates() {
       run_predicate(square, true, contain_lines, false, 2, PGACCEL_SPATIAL_PREDICATE_CONTAINS),
       {1, -1});
 
+  const DeviceLane concave =
+      make_lane({polygon({0, 0, 4, 0, 4, 4, 3, 4, 3, 1, 1, 1, 1, 4, 0, 4, 0, 0})});
+  const DeviceLane exits_concavity = make_lane({line({0.5, 3.5, 3.5, 3.5})});
+  check_results(
+      "Contains rejects edge leaving concavity",
+      run_predicate(concave, true, exits_concavity, true, 1, PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+      {-1});
+
   const DeviceLane origins = make_lane({point(0, 0), point(0, 0), point(0, 0)});
   const DeviceLane targets = make_lane({point(1, 0), point(3, 0), point(2, 0)});
   check_results(
