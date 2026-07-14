@@ -68,6 +68,57 @@ pub struct RasterExecutionAccounting {
     pub peak_reserved_bytes: u64,
 }
 
+/// Inline result of the first, non-owning resident-store sizing pass. Creating
+/// this value performs no allocation and copies no retained WKB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasterExecutionSizing {
+    pub accounting: RasterExecutionAccounting,
+    output_pixel_type: RasterPixelType,
+    output_pixel_width: usize,
+    row_count: usize,
+    total_pixels: usize,
+    output_pixels_bytes: usize,
+    output_wkb_bytes: usize,
+    null_rows: usize,
+}
+
+impl RasterExecutionSizing {
+    #[must_use]
+    pub const fn output_pixel_type(self) -> RasterPixelType {
+        self.output_pixel_type
+    }
+
+    #[must_use]
+    pub const fn output_pixel_width(self) -> usize {
+        self.output_pixel_width
+    }
+
+    #[must_use]
+    pub const fn row_count(self) -> usize {
+        self.row_count
+    }
+
+    #[must_use]
+    pub const fn total_pixels(self) -> usize {
+        self.total_pixels
+    }
+
+    #[must_use]
+    pub const fn output_pixels_bytes(self) -> usize {
+        self.output_pixels_bytes
+    }
+
+    #[must_use]
+    pub const fn output_wkb_bytes(self) -> usize {
+        self.output_wkb_bytes
+    }
+
+    #[must_use]
+    pub const fn null_rows(self) -> usize {
+        self.null_rows
+    }
+}
+
 /// Canonical full-column layout consumed by the resident native ABI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RasterExecutionLayout {
@@ -381,64 +432,53 @@ fn checked_row_layout(
     }
 }
 
-/// Validate an owned metadata snapshot and compute every exact allocation size
-/// before the resident input is borrowed for launch.
-pub fn preflight_raster_execution(
+/// Validate borrowed resident metadata and compute exact persistent and peak
+/// charges without allocating or copying retained WKB.
+pub fn size_raster_execution(
     spec: &RasterQuerySpec,
-    snapshot: RasterExecutionSnapshot,
-) -> Result<RasterExecutionPreflight, RasterExecutionError> {
+    stats: &ResidentRasterStats,
+    exact: &RetainedExactValues,
+) -> Result<RasterExecutionSizing, RasterExecutionError> {
     spec.validate().map_err(RasterExecutionError::InvalidSpec)?;
     let output_width = pixel_width(spec.reclass.output_pixel_type).ok_or(
         RasterExecutionError::InvalidSnapshot("floating raster output reached execution"),
     )?;
-    let row_count = usize::try_from(snapshot.stats.row_count)
-        .map_err(|_| RasterExecutionError::ByteCountOverflow)?;
-    if snapshot.stats.work_rows.len() != row_count
-        || snapshot.exact.offsets.len()
+    let row_count =
+        usize::try_from(stats.row_count).map_err(|_| RasterExecutionError::ByteCountOverflow)?;
+    if stats.work_rows.len() != row_count
+        || exact.offsets.len()
             != row_count
                 .checked_add(1)
                 .ok_or(RasterExecutionError::ByteCountOverflow)?
-        || snapshot.exact.offsets.first() != Some(&0)
-        || snapshot
-            .exact
+        || exact.offsets.first() != Some(&0)
+        || exact
             .offsets
             .windows(2)
             .any(|offsets| offsets[0] > offsets[1])
-        || snapshot.exact.offsets.last().copied() != u64::try_from(snapshot.exact.bytes.len()).ok()
-        || snapshot.stats.input_wkb_bytes
-            != u64::try_from(snapshot.exact.bytes.len()).unwrap_or(u64::MAX)
+        || exact.offsets.last().copied() != u64::try_from(exact.bytes.len()).ok()
+        || stats.input_wkb_bytes != u64::try_from(exact.bytes.len()).unwrap_or(u64::MAX)
     {
         return Err(RasterExecutionError::InvalidSnapshot(
             "resident raster snapshot lengths or offsets are invalid",
         ));
     }
 
-    let mut output_offsets = try_vec_with_capacity(row_count + 1, "raster output offsets")?;
-    let mut output_wkb_offsets = try_vec_with_capacity(row_count + 1, "raster WKB output offsets")?;
-    output_offsets.push(0_u64);
-    output_wkb_offsets.push(0_u64);
+    let mut output_pixels_bytes = 0_u64;
+    let mut output_wkb_bytes = 0_u64;
     let mut total_pixels = 0_u64;
     let mut non_null_rows = 0_u64;
     let mut total_grid_pixels = 0_u64;
     let mut selected_band_rows = 0_u64;
     let mut null_rows = 0_usize;
-    for (row, work) in snapshot.stats.work_rows.iter().copied().enumerate() {
-        let exact_wkb = exact_row(&snapshot.exact, row)?;
+    for (row, work) in stats.work_rows.iter().copied().enumerate() {
+        let exact_wkb = exact_row(exact, row)?;
         let (pixel_bytes, wkb_bytes) = checked_row_layout(row, work, exact_wkb, output_width)?;
-        output_offsets.push(
-            output_offsets
-                .last()
-                .copied()
-                .and_then(|offset| offset.checked_add(pixel_bytes))
-                .ok_or(RasterExecutionError::ByteCountOverflow)?,
-        );
-        output_wkb_offsets.push(
-            output_wkb_offsets
-                .last()
-                .copied()
-                .and_then(|offset| offset.checked_add(wkb_bytes))
-                .ok_or(RasterExecutionError::ByteCountOverflow)?,
-        );
+        output_pixels_bytes = output_pixels_bytes
+            .checked_add(pixel_bytes)
+            .ok_or(RasterExecutionError::ByteCountOverflow)?;
+        output_wkb_bytes = output_wkb_bytes
+            .checked_add(wkb_bytes)
+            .ok_or(RasterExecutionError::ByteCountOverflow)?;
         match work.action {
             RESIDENT_RASTER_WORK_NULL => {
                 null_rows = null_rows
@@ -470,20 +510,16 @@ pub fn preflight_raster_execution(
             _ => unreachable!("checked_row_layout rejects unknown actions"),
         }
     }
-    let output_pixels_bytes = output_offsets.last().copied().unwrap_or(0);
-    let output_wkb_bytes = output_wkb_offsets.last().copied().unwrap_or(0);
     let expected_output_pixels = total_pixels
         .checked_mul(
             u64::try_from(output_width).map_err(|_| RasterExecutionError::ByteCountOverflow)?,
         )
         .ok_or(RasterExecutionError::ByteCountOverflow)?;
-    if snapshot.stats.non_null_rows != non_null_rows
-        || snapshot.stats.total_grid_pixels != total_grid_pixels
-        || snapshot.stats.selected_band_pixels(1) != Some(total_pixels)
-        || snapshot.stats.selected_band_rows(1) != Some(selected_band_rows)
-        || snapshot
-            .stats
-            .reclass_output_wkb_bytes(spec.reclass.output_pixel_type.tag())
+    if stats.non_null_rows != non_null_rows
+        || stats.total_grid_pixels != total_grid_pixels
+        || stats.selected_band_pixels(1) != Some(total_pixels)
+        || stats.selected_band_rows(1) != Some(selected_band_rows)
+        || stats.reclass_output_wkb_bytes(spec.reclass.output_pixel_type.tag())
             != Some(output_wkb_bytes)
         || output_pixels_bytes != expected_output_pixels
     {
@@ -498,21 +534,22 @@ pub fn preflight_raster_execution(
         usize::try_from(total_pixels).map_err(|_| RasterExecutionError::ByteCountOverflow)?;
     let output_wkb_bytes =
         usize::try_from(output_wkb_bytes).map_err(|_| RasterExecutionError::ByteCountOverflow)?;
-    let output_offsets = output_offsets.into_boxed_slice();
-    let output_wkb_offsets = output_wkb_offsets.into_boxed_slice();
 
-    let exact_offsets_bytes = bytes_for_len::<u64>(snapshot.exact.offsets.len())?;
-    let exact_bytes = u64::try_from(snapshot.exact.bytes.len())
-        .map_err(|_| RasterExecutionError::ByteCountOverflow)?;
+    let offset_count = row_count
+        .checked_add(1)
+        .ok_or(RasterExecutionError::ByteCountOverflow)?;
+    let exact_offsets_bytes = bytes_for_len::<u64>(exact.offsets.len())?;
+    let exact_bytes =
+        u64::try_from(exact.bytes.len()).map_err(|_| RasterExecutionError::ByteCountOverflow)?;
     let stats_bytes = checked_sum(&[
-        bytes_for_len::<u64>(snapshot.stats.band_pixels.len())?,
-        bytes_for_len::<u64>(snapshot.stats.band_rows.len())?,
-        bytes_for_len::<ResidentRasterWorkRow>(snapshot.stats.work_rows.len())?,
+        bytes_for_len::<u64>(stats.band_pixels.len())?,
+        bytes_for_len::<u64>(stats.band_rows.len())?,
+        bytes_for_len::<ResidentRasterWorkRow>(stats.work_rows.len())?,
     ])?;
     let snapshot_host_bytes = checked_sum(&[exact_offsets_bytes, exact_bytes, stats_bytes])?;
     let layout_host_bytes = checked_sum(&[
-        bytes_for_len::<u64>(output_offsets.len())?,
-        bytes_for_len::<u64>(output_wkb_offsets.len())?,
+        bytes_for_len::<u64>(offset_count)?,
+        bytes_for_len::<u64>(offset_count)?,
     ])?;
     let (device_artifact_bytes, post_launch_host_bytes) = if row_count == 0 {
         (0, 0)
@@ -521,7 +558,7 @@ pub fn preflight_raster_execution(
             .ok()
             .and_then(|count| count.checked_mul(NATIVE_RECLASS_RULE_BYTES))
             .ok_or(RasterExecutionError::ByteCountOverflow)?;
-        let offsets_bytes = bytes_for_len::<u64>(output_offsets.len())?;
+        let offsets_bytes = bytes_for_len::<u64>(offset_count)?;
         let output_bytes = u64::try_from(output_pixels_bytes)
             .map_err(|_| RasterExecutionError::ByteCountOverflow)?;
         let actions_bytes =
@@ -539,7 +576,7 @@ pub fn preflight_raster_execution(
     };
     let reconstructed_output_bytes = checked_sum(&[
         u64::try_from(output_wkb_bytes).map_err(|_| RasterExecutionError::ByteCountOverflow)?,
-        bytes_for_len::<u64>(output_wkb_offsets.len())?,
+        bytes_for_len::<u64>(offset_count)?,
         if null_rows == 0 {
             0
         } else {
@@ -557,17 +594,7 @@ pub fn preflight_raster_execution(
         reconstructed_output_bytes,
     ])?;
 
-    Ok(RasterExecutionPreflight {
-        snapshot,
-        layout: RasterExecutionLayout {
-            output_pixel_type: spec.reclass.output_pixel_type,
-            output_pixel_width: output_width,
-            output_offsets,
-            output_wkb_offsets,
-            total_pixels,
-            output_pixels_bytes,
-            null_rows,
-        },
+    Ok(RasterExecutionSizing {
         accounting: RasterExecutionAccounting {
             snapshot_host_bytes,
             layout_host_bytes,
@@ -577,6 +604,66 @@ pub fn preflight_raster_execution(
             prelaunch_reserved_bytes,
             peak_reserved_bytes,
         },
+        output_pixel_type: spec.reclass.output_pixel_type,
+        output_pixel_width: output_width,
+        row_count,
+        total_pixels,
+        output_pixels_bytes,
+        output_wkb_bytes,
+        null_rows,
+    })
+}
+
+/// Allocate and fill the owned launch layout only after the caller has
+/// reserved the exact charges returned by [`size_raster_execution`].
+pub fn preflight_raster_execution(
+    spec: &RasterQuerySpec,
+    snapshot: RasterExecutionSnapshot,
+) -> Result<RasterExecutionPreflight, RasterExecutionError> {
+    let sizing = size_raster_execution(spec, &snapshot.stats, &snapshot.exact)?;
+    let mut output_offsets = try_vec_with_capacity(sizing.row_count + 1, "raster output offsets")?;
+    let mut output_wkb_offsets =
+        try_vec_with_capacity(sizing.row_count + 1, "raster WKB output offsets")?;
+    output_offsets.push(0_u64);
+    output_wkb_offsets.push(0_u64);
+    for (row, work) in snapshot.stats.work_rows.iter().copied().enumerate() {
+        let exact_wkb = exact_row(&snapshot.exact, row)?;
+        let (pixel_bytes, wkb_bytes) =
+            checked_row_layout(row, work, exact_wkb, sizing.output_pixel_width)?;
+        output_offsets.push(
+            output_offsets
+                .last()
+                .copied()
+                .and_then(|offset| offset.checked_add(pixel_bytes))
+                .ok_or(RasterExecutionError::ByteCountOverflow)?,
+        );
+        output_wkb_offsets.push(
+            output_wkb_offsets
+                .last()
+                .copied()
+                .and_then(|offset| offset.checked_add(wkb_bytes))
+                .ok_or(RasterExecutionError::ByteCountOverflow)?,
+        );
+    }
+    if output_offsets.last().copied() != u64::try_from(sizing.output_pixels_bytes).ok()
+        || output_wkb_offsets.last().copied() != u64::try_from(sizing.output_wkb_bytes).ok()
+    {
+        return Err(RasterExecutionError::InvalidSnapshot(
+            "owned raster layout changed after non-owning sizing",
+        ));
+    }
+    Ok(RasterExecutionPreflight {
+        snapshot,
+        layout: RasterExecutionLayout {
+            output_pixel_type: spec.reclass.output_pixel_type,
+            output_pixel_width: sizing.output_pixel_width,
+            output_offsets: output_offsets.into_boxed_slice(),
+            output_wkb_offsets: output_wkb_offsets.into_boxed_slice(),
+            total_pixels: sizing.total_pixels,
+            output_pixels_bytes: sizing.output_pixels_bytes,
+            null_rows: sizing.null_rows,
+        },
+        accounting: sizing.accounting,
     })
 }
 
@@ -1069,11 +1156,22 @@ mod tests {
     fn accounting_separates_persistent_and_peak_bytes_exactly() {
         let zero_band = wkb(true, 2, 1, &[]);
         let band = wkb(true, 2, 1, &[(4, 0, vec![0], vec![1, 2])]);
-        let preflight = preflight_raster_execution(
-            &spec(RasterPixelType::UInt16),
-            snapshot(&[None, Some(zero_band), Some(band)]),
-        )
-        .expect("accounting preflight");
+        let spec = spec(RasterPixelType::UInt16);
+        let snapshot = snapshot(&[None, Some(zero_band), Some(band)]);
+        let sizing = size_raster_execution(&spec, &snapshot.stats, &snapshot.exact)
+            .expect("non-owning sizing");
+        let preflight = preflight_raster_execution(&spec, snapshot).expect("accounting preflight");
+        assert_eq!(sizing.accounting, preflight.accounting);
+        assert_eq!(sizing.output_pixel_type(), RasterPixelType::UInt16);
+        assert_eq!(sizing.output_pixel_width(), 2);
+        assert_eq!(sizing.row_count(), 3);
+        assert_eq!(sizing.total_pixels(), 2);
+        assert_eq!(sizing.output_pixels_bytes(), 4);
+        assert_eq!(
+            sizing.output_wkb_bytes(),
+            preflight.layout.output_wkb_bytes()
+        );
+        assert_eq!(sizing.null_rows(), 1);
         assert_eq!(preflight.accounting.snapshot_host_bytes, 246);
         assert_eq!(preflight.accounting.layout_host_bytes, 64);
         assert_eq!(preflight.accounting.device_artifact_bytes, 79);

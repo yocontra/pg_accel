@@ -15,8 +15,9 @@ pub use cost::{
 };
 pub use execution::{
     RasterExecutionAccounting, RasterExecutionError, RasterExecutionLayout,
-    RasterExecutionPreflight, RasterExecutionSnapshot, RasterReconstructedOutput,
-    preflight_raster_execution, reconstruct_raster_output,
+    RasterExecutionPreflight, RasterExecutionSizing, RasterExecutionSnapshot,
+    RasterReconstructedOutput, preflight_raster_execution, reconstruct_raster_output,
+    size_raster_execution,
 };
 pub use planner::{
     RasterCallShape, RasterCatalogContract, RasterCommandShape, RasterPlannerCandidate,

@@ -114,6 +114,7 @@ impl RasterPixelType {
 /// Rules are sorted by source and unique, so PostGIS first-match precedence
 /// cannot change the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct RasterReclassRule {
     pub source: i64,
     pub destination: i64,
@@ -632,5 +633,13 @@ mod tests {
             );
         }
         assert_eq!(RasterPixelType::from_tag(9), None);
+    }
+
+    #[test]
+    fn reclass_rule_has_native_abi_layout() {
+        assert_eq!(std::mem::size_of::<RasterReclassRule>(), 16);
+        assert_eq!(std::mem::align_of::<RasterReclassRule>(), 8);
+        assert_eq!(std::mem::offset_of!(RasterReclassRule, source), 0);
+        assert_eq!(std::mem::offset_of!(RasterReclassRule, destination), 8);
     }
 }
