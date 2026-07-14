@@ -8,7 +8,7 @@
 //! 3. **stderr** — compact human-readable format for PG log / terminal
 //!
 //! Controlled by `pg_accel.log_level` GUC (debug/info/notice/warning/error).
-//! Call [`init`] once from `_PG_init` after GUCs are registered.
+//! Call [`init`] lazily in a backend after GUCs are registered.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -74,6 +74,7 @@ pub fn init() {
         return;
     }
 
+    crate::ensure_backend_exit_callback();
     let result = std::panic::catch_unwind(try_init);
     match result {
         Ok(Ok(())) => {}

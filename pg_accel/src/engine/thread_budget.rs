@@ -4,8 +4,8 @@
 //! memory. Each backend that needs worker threads calls [`request_threads`],
 //! which atomically checks the budget (governed by `pg_accel.max_workers_total`)
 //! and grants up to the requested count. [`release_threads`] returns threads to
-//! the pool. [`cleanup_backend`] is registered via `before_shmem_exit` to
-//! reclaim any threads leaked by a crashing backend.
+//! the pool. [`request_threads`] lazily registers [`cleanup_backend`] via
+//! `before_shmem_exit` to reclaim any threads leaked by a crashing backend.
 
 use crate::engine::gucs;
 use pgrx::lwlock::PgLwLock;
@@ -122,6 +122,7 @@ pub fn request_threads(n: i32) -> i32 {
         return 0;
     }
 
+    crate::ensure_backend_exit_callback();
     warn_if_backends_exceed_capacity();
 
     let max = gucs::max_workers_total();

@@ -38,6 +38,7 @@ impl GpuHashTable {
             return None;
         }
 
+        crate::ensure_backend_exit_callback();
         let ht = unsafe {
             // SAFETY: keys points to `count` elements of the specified type.
             // null_mask and indices are valid slices with at least `count` elements.
@@ -53,6 +54,7 @@ impl GpuHashTable {
         if ht.is_null() {
             None
         } else {
+            crate::note_backend_gpu_owner_acquired();
             Some(Self { ht })
         }
     }
@@ -68,6 +70,7 @@ impl GpuHashTable {
             return None;
         }
 
+        crate::ensure_backend_exit_callback();
         let ht = unsafe {
             // SAFETY: device_keys and optional null mask point at device
             // buffers owned by the resident cache for at least the lifetime
@@ -83,6 +86,7 @@ impl GpuHashTable {
         if ht.is_null() {
             None
         } else {
+            crate::note_backend_gpu_owner_acquired();
             Some(Self { ht })
         }
     }

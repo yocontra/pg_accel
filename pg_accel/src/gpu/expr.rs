@@ -86,6 +86,7 @@ impl<T> ExprDeviceBuffer<T> {
     /// pointer.
     pub fn new(len: usize) -> Option<Self> {
         let bytes = checked_allocation_bytes::<T>(len)?;
+        crate::ensure_backend_exit_callback();
         let mut raw = std::ptr::null_mut::<c_void>();
         // SAFETY: `raw` is a valid out pointer. The C++ side initializes the
         // GPU queue and writes a device allocation pointer on success.
@@ -93,8 +94,10 @@ impl<T> ExprDeviceBuffer<T> {
         if !status.is_ok() {
             return None;
         }
+        let ptr = NonNull::new(raw.cast::<T>())?;
+        crate::note_backend_gpu_owner_acquired();
         Some(Self {
-            ptr: NonNull::new(raw.cast::<T>())?,
+            ptr,
             len,
             _not_send_sync: PhantomData,
         })
@@ -106,6 +109,7 @@ impl<T> ExprDeviceBuffer<T> {
     /// allocation failure, or device-copy failure.
     pub fn copy_from_slice(values: &[T]) -> Option<Self> {
         let bytes = checked_allocation_bytes::<T>(values.len())?;
+        crate::ensure_backend_exit_callback();
         let mut raw = std::ptr::null_mut::<c_void>();
         // SAFETY: source slice is valid for `bytes` and `raw` is an out pointer.
         let status = unsafe {
@@ -118,8 +122,10 @@ impl<T> ExprDeviceBuffer<T> {
         if !status.is_ok() {
             return None;
         }
+        let ptr = NonNull::new(raw.cast::<T>())?;
+        crate::note_backend_gpu_owner_acquired();
         Some(Self {
-            ptr: NonNull::new(raw.cast::<T>())?,
+            ptr,
             len: values.len(),
             _not_send_sync: PhantomData,
         })

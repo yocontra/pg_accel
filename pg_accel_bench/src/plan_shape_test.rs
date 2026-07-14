@@ -973,6 +973,280 @@ fn plan_shape_descriptor_expression_groupagg_survives_rename() {
 
 #[cfg(feature = "integration_tests")]
 #[test]
+fn resident_descriptor_backend_exit_releases_ledger_without_postmaster_restart() {
+    let _live_pg_guard = live_pg_test_lock();
+    let mut monitor = connect();
+    monitor
+        .batch_execute("SET pg_accel.gpu_enabled = off")
+        .expect("keep monitor backend GPU-idle");
+    monitor
+        .batch_execute("DROP TABLE IF EXISTS pg_accel_backend_exit_lifecycle")
+        .expect("remove stale backend-exit fixture");
+    let postmaster_started_at = monitor
+        .query_one("SELECT pg_postmaster_start_time()::text", &[])
+        .expect("read postmaster start time")
+        .get::<_, String>(0);
+    let mut worker = connect();
+    let rows = descriptor_groupagg_fixture_rows(&mut worker);
+    worker
+        .batch_execute(
+            "CREATE UNLOGGED TABLE pg_accel_backend_exit_lifecycle (
+                 id serial PRIMARY KEY,
+                 grp int4 NOT NULL,
+                 measure int4 NOT NULL
+             )",
+        )
+        .expect("create backend-exit fixture");
+    worker
+        .simple_query(&format!(
+            "INSERT INTO pg_accel_backend_exit_lifecycle (grp, measure)
+             SELECT (g % 64)::int4, (1000 + (g % 1000))::int4
+             FROM generate_series(1, {rows}) AS g"
+        ))
+        .expect("populate backend-exit fixture");
+    worker
+        .batch_execute("ANALYZE pg_accel_backend_exit_lifecycle")
+        .expect("analyze backend-exit fixture");
+
+    let sql = "SELECT grp, SUM(measure), MIN(measure), MAX(measure), COUNT(*)
+               FROM pg_accel_backend_exit_lifecycle
+               GROUP BY grp
+               ORDER BY grp";
+    worker
+        .batch_execute("SET pg_accel.enabled = off")
+        .expect("disable pg_accel for native reference");
+    let native = direct_groupagg_rows(&mut worker, sql);
+
+    worker
+        .batch_execute(
+            "SELECT pg_accel_pin(
+                 'pg_accel_backend_exit_lifecycle'::regclass,
+                 ARRAY['grp', 'measure']
+             );
+             SET pg_accel.enabled = on;
+             SET pg_accel.auto_load = on;
+             SET pg_accel.cost_multiplier = 0.1;
+             SET pg_accel.min_batch_size = 65536;
+             SET max_parallel_workers_per_gather = 0;
+             SELECT pg_accel_reset_stats();",
+        )
+        .expect("pin and configure backend-exit fixture");
+    let plan = explain_query(&mut worker, "EXPLAIN (VERBOSE, COSTS OFF)", sql);
+    assert_descriptor_groupagg_plan(&plan, "backend-exit descriptor groupagg");
+
+    let before = kernel_executions(&mut worker);
+    let accelerated = direct_groupagg_rows(&mut worker, sql);
+    let after = kernel_executions(&mut worker);
+    assert!(
+        after > before,
+        "backend-exit fixture must dispatch a GPU kernel"
+    );
+    assert_eq!(accelerated, native);
+
+    let status = worker
+        .query_one(
+            "SELECT COUNT(*)::bigint,
+                    COALESCE(SUM(raw_bytes), 0)::bigint,
+                    COALESCE(SUM(derived_bytes), 0)::bigint
+             FROM pg_accel_resident_status()",
+            &[],
+        )
+        .expect("read worker resident status");
+    let status_rows = status.get::<_, i64>(0);
+    let raw_bytes = status.get::<_, i64>(1);
+    let derived_bytes = status.get::<_, i64>(2);
+    let worker_bytes = raw_bytes
+        .checked_add(derived_bytes)
+        .expect("worker resident bytes fit bigint");
+    assert_eq!(status_rows, 1);
+    assert!(raw_bytes > 0, "pinned fixture must own raw resident bytes");
+    assert!(
+        derived_bytes > 0,
+        "executed descriptor must own a derived resident artifact"
+    );
+
+    let cluster_live = worker
+        .query_one("SELECT pg_accel_resident_live_bytes()", &[])
+        .expect("read live resident ledger")
+        .get::<_, i64>(0);
+    let other_backend_bytes = cluster_live
+        .checked_sub(worker_bytes)
+        .expect("worker status cannot exceed cluster ledger");
+
+    // Closing libpq makes PostgreSQL run before_shmem_exit. The monitor is a
+    // separate backend: a postmaster crash would terminate it, while a missed
+    // cleanup would leave worker_bytes in the shared ledger.
+    drop(worker);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let state = monitor.query_one(
+            "SELECT pg_postmaster_start_time()::text,
+                    pg_is_in_recovery(),
+                    pg_accel_resident_live_bytes(),
+                    EXISTS (SELECT 1 FROM pg_accel_resident_status())",
+            &[],
+        );
+        let row = state.unwrap_or_else(|error| {
+            panic!("monitor backend was lost while resident worker exited: {error}")
+        });
+        assert_eq!(row.get::<_, String>(0), postmaster_started_at);
+        assert!(!row.get::<_, bool>(1), "server entered crash recovery");
+        let live = row.get::<_, i64>(2);
+        assert!(!row.get::<_, bool>(3), "monitor has no local residency");
+        if live == other_backend_bytes {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "exited backend retained {live} ledger bytes; expected {other_backend_bytes}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+
+    monitor
+        .batch_execute("DROP TABLE pg_accel_backend_exit_lifecycle")
+        .expect("drop backend-exit fixture");
+
+    // Observe the monitor's own exit too. Its GPU is disabled so it remains a
+    // pure watchdog; this catches teardown faults after the final SQL command
+    // has already returned successfully to libpq.
+    let monitor_pid = monitor
+        .query_one("SELECT pg_backend_pid()", &[])
+        .expect("read monitor backend PID")
+        .get::<_, i32>(0);
+    let mut watchdog = connect();
+    watchdog
+        .batch_execute("SET pg_accel.gpu_enabled = off")
+        .expect("keep watchdog backend GPU-idle");
+    drop(monitor);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let row = watchdog
+            .query_one(
+                "SELECT pg_postmaster_start_time()::text,
+                        pg_is_in_recovery(),
+                        EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+                &[&monitor_pid],
+            )
+            .unwrap_or_else(|error| panic!("watchdog was lost while monitor exited: {error}"));
+        assert_eq!(row.get::<_, String>(0), postmaster_started_at);
+        assert!(!row.get::<_, bool>(1), "server entered crash recovery");
+        if !row.get::<_, bool>(2) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "monitor backend {monitor_pid} did not exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let row = watchdog
+            .query_one(
+                "SELECT pg_postmaster_start_time()::text, pg_is_in_recovery()",
+                &[],
+            )
+            .expect("watchdog remains connected after monitor teardown");
+        assert_eq!(row.get::<_, String>(0), postmaster_started_at);
+        assert!(!row.get::<_, bool>(1), "server entered crash recovery");
+    }
+}
+
+#[cfg(feature = "integration_tests")]
+#[test]
+fn planner_only_gpu_init_backend_exit_does_not_restart_postmaster() {
+    let _live_pg_guard = live_pg_test_lock();
+    let mut monitor = connect();
+    monitor
+        .batch_execute("SET pg_accel.gpu_enabled = off")
+        .expect("keep monitor backend GPU-idle");
+    let postmaster_started_at = monitor
+        .query_one("SELECT pg_postmaster_start_time()::text", &[])
+        .expect("read postmaster start time")
+        .get::<_, String>(0);
+    let resident_baseline = monitor
+        .query_one("SELECT pg_accel_resident_live_bytes()", &[])
+        .expect("read cluster resident ledger baseline")
+        .get::<_, i64>(0);
+
+    let mut worker = connect();
+    worker
+        .batch_execute(
+            "SET pg_accel.enabled = on;
+             SET pg_accel.gpu_enabled = on;
+             SELECT pg_accel_reset_stats();",
+        )
+        .expect("configure planner-only GPU probe");
+    let worker_pid = worker
+        .query_one("SELECT pg_backend_pid()", &[])
+        .expect("read worker backend PID")
+        .get::<_, i32>(0);
+    worker
+        .query_one(
+            "SELECT gpu_device_name FROM pg_accel_device_info() LIMIT 1",
+            &[],
+        )
+        .expect("initialize GPU runtime without dispatch");
+    assert_eq!(
+        kernel_executions(&mut worker),
+        0,
+        "device capability probe must not dispatch a kernel"
+    );
+    assert_eq!(
+        worker
+            .query_one("SELECT pg_accel_resident_live_bytes()", &[])
+            .expect("read resident ledger after planner-only initialization")
+            .get::<_, i64>(0),
+        resident_baseline,
+        "planner-only runtime initialization changed the resident ledger"
+    );
+
+    drop(worker);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let row = monitor
+            .query_one(
+                "SELECT pg_postmaster_start_time()::text,
+                        pg_is_in_recovery(),
+                        pg_accel_resident_live_bytes(),
+                        EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)",
+                &[&worker_pid],
+            )
+            .unwrap_or_else(|error| {
+                panic!("monitor was lost while planner-only GPU backend exited: {error}")
+            });
+        assert_eq!(row.get::<_, String>(0), postmaster_started_at);
+        assert!(!row.get::<_, bool>(1), "server entered crash recovery");
+        assert_eq!(
+            row.get::<_, i64>(2),
+            resident_baseline,
+            "planner probe changed the resident ledger"
+        );
+        if !row.get::<_, bool>(3) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "planner-only backend {worker_pid} did not exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    for _ in 0..4 {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let row = monitor
+            .query_one(
+                "SELECT pg_postmaster_start_time()::text, pg_is_in_recovery()",
+                &[],
+            )
+            .expect("monitor remains connected after planner-only teardown");
+        assert_eq!(row.get::<_, String>(0), postmaster_started_at);
+        assert!(!row.get::<_, bool>(1), "server entered crash recovery");
+    }
+}
+
+#[cfg(feature = "integration_tests")]
+#[test]
 fn plan_shape_aggregate_filter_has_precise_structural_decline() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();

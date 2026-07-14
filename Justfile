@@ -779,7 +779,7 @@ sql-test pg="":
 # Run the opt-in plan-shape + parallel-stress integration tests (gated behind
 # the `integration_tests` cargo feature, so excluded from the default hermetic
 # `cargo test -p pg_accel_bench`). Installs pg_accel into the pgrx-managed
-# cluster, ensures the extension exists, then runs the live suite against it.
+# cluster, refreshes the extension SQL, then runs the live suite against it.
 # `pg_accel_bench/src/integration_connection.rs` reads PG_ACCEL_TEST_CONNECTION,
 # so we point it at the resolved pgrx port explicitly.
 plan-shape-tests pg="":
@@ -806,7 +806,13 @@ plan-shape-tests pg="":
     fi
     port="$(pg_accel_pgrx_port_for_pg "$pg")"
     connection="host=localhost port=$port dbname=postgres"
-    "$psql_bin" "$connection" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS pg_accel;"
+    # The pgrx database persists across runs, and same-version installs do not
+    # make newly generated SQL visible to an existing extension. Recreate only
+    # pg_accel; CASCADE removes its dependent residency triggers while leaving
+    # PostGIS and H3 extensions installed.
+    "$psql_bin" "$connection" -v ON_ERROR_STOP=1 \
+        -c "DROP EXTENSION IF EXISTS pg_accel CASCADE;" \
+        -c "CREATE EXTENSION pg_accel;"
     PG_ACCEL_TEST_CONNECTION="$connection" PG_ACCEL_TEST_PG_MAJOR="$pg" \
         cargo test -p pg_accel_bench --features integration_tests -- --nocapture
 

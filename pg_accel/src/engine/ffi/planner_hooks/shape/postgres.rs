@@ -1113,23 +1113,18 @@ unsafe fn relation_shapes(
         )?;
         // SAFETY: list_item returned a non-null RangeTblEntry.
         let rte_ref = unsafe { &*rte };
-        // Join RTEs only alias base-relation Vars. PostgreSQL can also append
-        // synthetic RESULT and GROUP RTEs while building aggregate paths;
-        // neither represents another base input.
-        if matches!(
-            rte_ref.rtekind,
-            pg_sys::RTEKind::RTE_JOIN | pg_sys::RTEKind::RTE_RESULT | pg_sys::RTEKind::RTE_GROUP
-        ) {
-            continue;
-        }
-        reject_table_sample(!rte_ref.tablesample.is_null())?;
         let varno = u32::try_from(index + 1).unwrap_or(u32::MAX);
-        if rte_ref.rtekind != pg_sys::RTEKind::RTE_RELATION
-            || rte_ref.relid == pg_sys::InvalidOid
-            || rte_ref.inh
-            || rte_ref.relkind != pg_sys::RELKIND_RELATION as i8
-        {
-            return Err(ShapeDecline::UnsupportedRangeTableEntry { varno });
+        if !preflight_range_table_entry(
+            varno,
+            PreflightRangeTableEntry {
+                kind: preflight_kind(rte_ref.rtekind),
+                eligible_base_relation: rte_ref.relid != pg_sys::InvalidOid
+                    && !rte_ref.inh
+                    && rte_ref.relkind == pg_sys::RELKIND_RELATION as i8,
+                has_table_sample: !rte_ref.tablesample.is_null(),
+            },
+        )? {
+            continue;
         }
         // SAFETY: planner_relation checks simple_rel_array bounds.
         let planner_rel = unsafe { planner_relation(root, varno) };
@@ -1196,6 +1191,86 @@ pub(super) fn reject_table_sample(has_table_sample: bool) -> Result<(), ShapeDec
     } else {
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PreflightRangeTableKind {
+    BaseRelation,
+    Synthetic,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PreflightRangeTableEntry {
+    pub kind: PreflightRangeTableKind,
+    pub eligible_base_relation: bool,
+    pub has_table_sample: bool,
+}
+
+fn preflight_kind(rtekind: pg_sys::RTEKind::Type) -> PreflightRangeTableKind {
+    match rtekind {
+        pg_sys::RTEKind::RTE_RELATION => PreflightRangeTableKind::BaseRelation,
+        pg_sys::RTEKind::RTE_JOIN | pg_sys::RTEKind::RTE_RESULT | pg_sys::RTEKind::RTE_GROUP => {
+            PreflightRangeTableKind::Synthetic
+        }
+        _ => PreflightRangeTableKind::Unsupported,
+    }
+}
+
+/// Pure structural RTE gate shared by the cheap preflight and full extractor.
+pub(super) fn preflight_range_table_entry(
+    varno: pg_sys::Index,
+    entry: PreflightRangeTableEntry,
+) -> Result<bool, ShapeDecline> {
+    if entry.kind == PreflightRangeTableKind::Synthetic {
+        return Ok(false);
+    }
+    reject_table_sample(entry.has_table_sample)?;
+    if entry.kind != PreflightRangeTableKind::BaseRelation || !entry.eligible_base_relation {
+        return Err(ShapeDecline::UnsupportedRangeTableEntry { varno });
+    }
+    Ok(true)
+}
+
+/// Reject structurally unsupported range-table inputs without catalog access,
+/// device discovery, residency inspection, or SPI.
+///
+/// # Safety
+///
+/// `root` must be null or a planner-owned pointer for the current invocation.
+pub(super) unsafe fn preflight_base_relations(
+    root: *mut pg_sys::PlannerInfo,
+) -> Result<(), ShapeDecline> {
+    if root.is_null() || unsafe { (*root).parse }.is_null() {
+        return Err(ShapeDecline::NoAggregate);
+    }
+    // SAFETY: root and parse were checked above and are planner-owned.
+    let query = unsafe { &*(*root).parse };
+    if query.commandType != pg_sys::CmdType::CMD_SELECT {
+        return Err(ShapeDecline::NotSelect);
+    }
+    if !query.hasAggs {
+        return Err(ShapeDecline::NoAggregate);
+    }
+    for index in 0..list_len(query.rtable) {
+        let varno = u32::try_from(index + 1).unwrap_or(u32::MAX);
+        // SAFETY: index is bounded by list_len(query.rtable).
+        let rte = unsafe { list_item::<pg_sys::RangeTblEntry>(query.rtable, index) }
+            .ok_or(ShapeDecline::UnsupportedRangeTableEntry { varno })?;
+        // SAFETY: list_item returned a non-null planner-owned RTE.
+        let rte = unsafe { &*rte };
+        preflight_range_table_entry(
+            varno,
+            PreflightRangeTableEntry {
+                kind: preflight_kind(rte.rtekind),
+                eligible_base_relation: rte.relid != pg_sys::InvalidOid
+                    && !rte.inh
+                    && rte.relkind == pg_sys::RELKIND_RELATION as i8,
+                has_table_sample: !rte.tablesample.is_null(),
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Adapt planner-owned PostgreSQL nodes into the pure [`ShapeInput`].

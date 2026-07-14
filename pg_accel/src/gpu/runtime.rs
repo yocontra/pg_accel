@@ -25,6 +25,7 @@ pub fn ensure_init() {
         return;
     }
 
+    crate::ensure_backend_exit_callback();
     let status = init();
     if status != PgaccelStatus::Ok {
         pgrx::warning!(

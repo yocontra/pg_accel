@@ -420,6 +420,16 @@ impl DerivedEntry {
         self.digest == identity.digest
             && self.canonical_words.as_ref() == identity.canonical_words()
     }
+
+    fn release(self) {
+        let Self {
+            artifact,
+            mut charge,
+            ..
+        } = self;
+        drop(artifact);
+        charge.release();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -512,6 +522,18 @@ impl ResidentRelation {
                 .expect("derived charges exceed cluster u64 ledger")
         })
     }
+
+    fn remove_derived(&mut self, index: usize) {
+        self.derived.remove(index).release();
+    }
+
+    fn release(mut self) {
+        for entry in self.derived.drain(..) {
+            entry.release();
+        }
+        self.columns.clear();
+        self.raw_charge.release();
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -543,9 +565,12 @@ impl RelationStore {
     }
 
     fn remove_relation(&mut self, relid: pg_sys::Oid) -> bool {
-        let old_len = self.entries.len();
-        self.entries.retain(|entry| entry.relid != relid);
-        self.entries.len() != old_len
+        let mut removed = false;
+        while let Some(index) = self.entries.iter().position(|entry| entry.relid == relid) {
+            self.entries.remove(index).release();
+            removed = true;
+        }
+        removed
     }
 
     fn evict_lru_unpinned(&mut self, protected: &BTreeSet<u32>) -> bool {
@@ -557,7 +582,7 @@ impl RelationStore {
             .min_by_key(|(_, entry)| entry.last_used_tick)
             .map(|(index, _)| index);
         candidate.is_some_and(|index| {
-            self.entries.remove(index);
+            self.entries.remove(index).release();
             true
         })
     }
@@ -571,7 +596,7 @@ impl RelationStore {
             .min_by_key(|(_, entry)| entry.last_used_tick)
             .map(|(index, _)| index);
         candidate.is_some_and(|index| {
-            self.entries[index].derived.remove(0);
+            self.entries[index].remove_derived(0);
             true
         })
     }
@@ -592,6 +617,12 @@ impl RelationStore {
             Some(EvictionKind::RawRelation)
         } else {
             None
+        }
+    }
+
+    fn release_all(&mut self) {
+        for entry in self.entries.drain(..) {
+            entry.release();
         }
     }
 }
@@ -798,16 +829,24 @@ fn prune_invalid_relations(
     mut generation_stamp: impl FnMut(pg_sys::Oid) -> GenerationStamp,
     mut current_relfilenode: impl FnMut(pg_sys::Oid) -> Option<pg_sys::Oid>,
 ) {
-    store.entries.retain(|entry| {
-        if clear_all || pending.contains(u32::from(entry.relid)) {
-            return false;
+    let mut index = 0;
+    while index < store.entries.len() {
+        let keep = {
+            let entry = &store.entries[index];
+            !clear_all
+                && !pending.contains(u32::from(entry.relid))
+                && entry.generation == generation_stamp(entry.relid)
+                && current_relfilenode(entry.relid) == Some(entry.relfilenode)
+                && entry
+                    .first_use_scope
+                    .is_none_or(|scope| scope == command_scope)
+        };
+        if keep {
+            index += 1;
+        } else {
+            store.entries.remove(index).release();
         }
-        entry.generation == generation_stamp(entry.relid)
-            && current_relfilenode(entry.relid) == Some(entry.relfilenode)
-            && entry
-                .first_use_scope
-                .is_none_or(|scope| scope == command_scope)
-    });
+    }
 }
 
 #[cfg(not(test))]
@@ -839,7 +878,7 @@ fn process_invalidations() {
 pub(super) fn cleanup_backend() {
     STORE.with(|store| {
         let mut store = store.borrow_mut();
-        store.entries.clear();
+        store.release_all();
         store.pins.clear();
     });
 }
@@ -871,6 +910,7 @@ fn reserve_with_local_eviction_excluding(
     protected: &BTreeSet<u32>,
     bytes: u64,
 ) -> Result<LedgerCharge, ResidentLoadError> {
+    crate::ensure_backend_exit_callback();
     #[cfg(test)]
     let budget = u64::MAX;
     #[cfg(not(test))]
@@ -1201,6 +1241,13 @@ pub fn resident_live_bytes() -> u64 {
     ledger::total_bytes()
 }
 
+/// SQL-visible cluster ledger total for lifecycle and operations diagnostics.
+#[pg_extern]
+fn pg_accel_resident_live_bytes() -> i64 {
+    i64::try_from(resident_live_bytes())
+        .unwrap_or_else(|_| pgrx::error!("resident byte ledger exceeds SQL bigint"))
+}
+
 /// Borrow one resident column without allowing its device pointer to escape.
 pub fn with_resident_column<R>(
     relid: pg_sys::Oid,
@@ -1395,7 +1442,7 @@ pub fn ensure_derived_artifact<T: DerivedArtifact, P>(
         let stale = !dependency_relids_match(stored_dependencies, &protected)
             || first_dependency_mismatch(&store, stored_dependencies).is_some();
         if stale {
-            store.entries[owner_index].derived.remove(exact_index);
+            store.entries[owner_index].remove_derived(exact_index);
             replacing_stale = true;
             return Ok(false);
         }
@@ -1457,7 +1504,7 @@ pub fn ensure_derived_artifact<T: DerivedArtifact, P>(
             .iter()
             .position(|entry| entry.has_identity(identity))
         {
-            owner.derived.remove(index);
+            owner.remove_derived(index);
             replacing_stale = true;
         }
         owner.derived.push(DerivedEntry {
@@ -1522,7 +1569,7 @@ pub fn with_derived_artifact_inputs<T: Any, R>(
                     .iter()
                     .position(|entry| entry.has_identity(identity))
             {
-                owner.derived.remove(index);
+                owner.remove_derived(index);
             }
         });
         return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
@@ -1580,26 +1627,26 @@ pub fn register_derived_artifact<T: DerivedArtifact>(
     build: impl FnOnce() -> Result<T, String>,
 ) -> Result<(), ResidentLoadError> {
     process_invalidations();
-    let old = STORE.with(|store| {
+    STORE.with(|store| {
         let mut store = store.borrow_mut();
         let relation = store
             .entries
             .iter_mut()
             .find(|entry| entry.relid == owner_relid)
             .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
-        Ok::<_, ResidentLoadError>(
-            relation
-                .derived
-                .iter()
-                .position(|entry| entry.digest == digest && entry.canonical_words.is_empty())
-                .map(|index| relation.derived.remove(index)),
-        )
+        let index = relation
+            .derived
+            .iter()
+            .position(|entry| entry.digest == digest && entry.canonical_words.is_empty());
+        if let Some(index) = index {
+            relation.remove_derived(index);
+        }
+        Ok::<_, ResidentLoadError>(())
     })?;
-    // Drop the old buffers and their charge before reserving the replacement.
+    // Drop the old buffers and release their charge before reserving the replacement.
     // Holding both would require charging old+new transiently and can reject an
     // otherwise valid same-size refresh. A failed rebuild therefore leaves a
     // cache miss, never an unaccounted allocation or stale artifact.
-    drop(old);
     let charge = reserve_with_local_eviction(owner_relid, declared_bytes)?;
     let artifact = build().map_err(ResidentLoadError::Loader)?;
     let actual = artifact.device_bytes();

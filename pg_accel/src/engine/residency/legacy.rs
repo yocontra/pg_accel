@@ -2406,6 +2406,7 @@ unsafe extern "C-unwind" fn resident_cache_relcache_callback(
 /// `_PG_init`) so this module stays self-contained. PostgreSQL keeps the
 /// registration for the life of the backend; there is no unregister API.
 fn ensure_relcache_invalidation_callback_registered() {
+    crate::ensure_backend_exit_callback();
     if RELCACHE_CALLBACK_REGISTERED.get() {
         return;
     }
@@ -2591,6 +2592,7 @@ struct ResidentCacheLoadGuard;
 
 impl ResidentCacheLoadGuard {
     fn begin() -> Self {
+        crate::ensure_backend_exit_callback();
         RESIDENT_CACHE_LOAD_IN_PROGRESS.set(true);
         Self
     }

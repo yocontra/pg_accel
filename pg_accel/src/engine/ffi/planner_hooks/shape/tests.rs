@@ -652,6 +652,47 @@ fn table_sample_is_a_structural_decline() {
 }
 
 #[test]
+fn range_table_preflight_rejects_function_inputs_without_device_discovery() {
+    use super::postgres::{
+        PreflightRangeTableEntry, PreflightRangeTableKind, preflight_range_table_entry,
+    };
+
+    assert_eq!(
+        preflight_range_table_entry(
+            3,
+            PreflightRangeTableEntry {
+                kind: PreflightRangeTableKind::Unsupported,
+                eligible_base_relation: false,
+                has_table_sample: false,
+            },
+        ),
+        Err(ShapeDecline::UnsupportedRangeTableEntry { varno: 3 })
+    );
+    assert_eq!(
+        preflight_range_table_entry(
+            1,
+            PreflightRangeTableEntry {
+                kind: PreflightRangeTableKind::BaseRelation,
+                eligible_base_relation: true,
+                has_table_sample: false,
+            },
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        preflight_range_table_entry(
+            2,
+            PreflightRangeTableEntry {
+                kind: PreflightRangeTableKind::Synthetic,
+                eligible_base_relation: false,
+                has_table_sample: false,
+            },
+        ),
+        Ok(false)
+    );
+}
+
+#[test]
 fn dimension_filter_capability_matches_begin_time_sidecar_builder() {
     let mut ranged = single_table_input();
     add_dimension(&mut ranged, 2, 200, false);

@@ -308,6 +308,7 @@ fn workspace_query_descriptor(plan: &ResolvedGroupedAggPlan<'_>) -> abi::Pgaccel
 
 impl GroupedAggWorkspace {
     pub fn allocate(plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<Self> {
+        crate::ensure_backend_exit_callback();
         let query_desc = workspace_query_descriptor(plan);
         let mut requirement = abi::PgaccelGroupedAggWorkspaceReq {
             abi_version: abi::PGACCEL_OLAP_ABI_VERSION,
@@ -374,6 +375,7 @@ impl GroupedAggWorkspace {
             ));
         }
 
+        crate::note_backend_gpu_owner_acquired();
         Ok(Self {
             ptr: Some(ptr),
             requirement,

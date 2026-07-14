@@ -27,6 +27,16 @@ pub use crate::engine::spec::{
 pub use builder::build_shape;
 pub use cost::{ShapeCost, ShapeCostGate, estimate_shape_cost};
 
+/// Reject non-base range-table inputs before GPU capability discovery.
+///
+/// # Safety
+///
+/// `root` must be null or a planner-owned pointer for the current invocation.
+pub unsafe fn preflight_base_relations(root: *mut pg_sys::PlannerInfo) -> Result<(), ShapeDecline> {
+    // SAFETY: forwarded unchanged under this function's planner-pointer contract.
+    unsafe { postgres::preflight_base_relations(root) }
+}
+
 /// Planner range-table identity paired with a catalog column identity.
 ///
 /// `varno` disambiguates planner relations while extraction is in progress.

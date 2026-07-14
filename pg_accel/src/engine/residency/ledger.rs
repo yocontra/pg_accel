@@ -230,27 +230,63 @@ impl LedgerCharge {
     pub(super) const fn bytes(&self) -> u64 {
         self.bytes
     }
+
+    /// Release this charge while PostgreSQL shared memory is still attached.
+    ///
+    /// Store-owned charges use this explicit path before their device buffers
+    /// are destroyed. [`Drop`] remains a backstop for early-return paths, but
+    /// must not touch an LWLock once PostgreSQL has cleared `MyProc` during
+    /// backend teardown.
+    pub(super) fn release(&mut self) {
+        if !backend_can_access_shared_memory() {
+            return;
+        }
+        let pid = current_pid();
+        self.release_with(true, |bytes| {
+            shared::with_mut(|ledger| {
+                if let Some(index) = ledger.backends.iter().position(|slot| slot.pid == pid) {
+                    let released = bytes.min(ledger.backends[index].bytes);
+                    ledger.backends[index].bytes -= released;
+                    ledger.total_bytes = ledger
+                        .total_bytes
+                        .checked_sub(released)
+                        .expect("resident backend charge exceeds cluster ledger during release");
+                    if ledger.backends[index].bytes == 0 {
+                        ledger.backends[index].pid = 0;
+                    }
+                }
+            });
+        });
+    }
+
+    fn release_with(&mut self, can_access_shared_memory: bool, release: impl FnOnce(u64)) -> bool {
+        if self.bytes == 0 || !can_access_shared_memory {
+            return false;
+        }
+        let bytes = std::mem::take(&mut self.bytes);
+        release(bytes);
+        true
+    }
 }
 
 impl Drop for LedgerCharge {
     fn drop(&mut self) {
-        if self.bytes == 0 {
-            return;
-        }
-        let pid = current_pid();
-        shared::with_mut(|ledger| {
-            if let Some(index) = ledger.backends.iter().position(|slot| slot.pid == pid) {
-                let released = self.bytes.min(ledger.backends[index].bytes);
-                ledger.backends[index].bytes -= released;
-                ledger.total_bytes = ledger
-                    .total_bytes
-                    .checked_sub(released)
-                    .expect("resident backend charge exceeds cluster ledger during drop");
-                if ledger.backends[index].bytes == 0 {
-                    ledger.backends[index].pid = 0;
-                }
-            }
-        });
+        self.release();
+    }
+}
+
+fn backend_can_access_shared_memory() -> bool {
+    #[cfg(any(test, feature = "pg_test"))]
+    {
+        true
+    }
+    #[cfg(all(not(test), not(feature = "pg_test")))]
+    {
+        // PostgreSQL's LWLock assertion requires a live PGPROC in postmaster
+        // children. Rust TLS destructors can run after ProcKill has cleared
+        // MyProc, so they must leave the dead backend's ledger slot for the
+        // next reservation's reclaim_dead_backends sweep.
+        unsafe { !pg_sys::IsUnderPostmaster || !pg_sys::MyProc.is_null() }
     }
 }
 
@@ -430,6 +466,37 @@ mod tests {
         drop(charge);
         assert_eq!(total_bytes(), 0);
         assert_eq!(byte_snapshot(), (0, 0));
+    }
+
+    #[test]
+    fn explicit_charge_release_updates_the_ledger_exactly_once() {
+        let _guard = test_guard();
+        cleanup_backend();
+        let mut charge = LedgerCharge::reserve(311, 1024).expect("reserve");
+        assert_eq!(total_bytes(), 311);
+
+        charge.release();
+        assert_eq!(charge.bytes(), 0);
+        assert_eq!(total_bytes(), 0);
+
+        charge.release();
+        drop(charge);
+        assert_eq!(total_bytes(), 0);
+    }
+
+    #[test]
+    fn teardown_backstop_defers_release_until_shared_memory_is_accessible() {
+        let mut charge = LedgerCharge { bytes: 419 };
+        let released = Cell::new(0_u64);
+
+        assert!(!charge.release_with(false, |bytes| released.set(bytes)));
+        assert_eq!(charge.bytes(), 419);
+        assert_eq!(released.get(), 0);
+
+        assert!(charge.release_with(true, |bytes| released.set(bytes)));
+        assert_eq!(charge.bytes(), 0);
+        assert_eq!(released.get(), 419);
+        assert!(!charge.release_with(true, |_| panic!("release repeated")));
     }
 
     #[test]

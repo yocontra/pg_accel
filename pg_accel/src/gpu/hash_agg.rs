@@ -35,7 +35,11 @@ impl HashAggResult {
     /// `state` must either be null or point to a live `PgaccelAggState`
     /// allocation whose ownership is transferred to the returned wrapper.
     pub(crate) unsafe fn from_raw(state: *mut PgaccelAggState) -> Option<Self> {
-        (!state.is_null()).then_some(Self { state })
+        if state.is_null() {
+            return None;
+        }
+        crate::note_backend_gpu_owner_acquired();
+        Some(Self { state })
     }
 
     /// Number of distinct groups.
@@ -89,6 +93,7 @@ pub fn hash_count_i64_device_bounded(
     if keys.len() == 0 {
         return None;
     }
+    crate::ensure_backend_exit_callback();
     let state = unsafe {
         bridge::pgaccel_hash_count_i64_device_hash_execute_bounded(
             keys.as_mut_ptr(),
@@ -105,6 +110,7 @@ pub fn hash_count_i64_sorted_device(keys: &ExprDeviceBuffer<i64>) -> Option<Hash
     if keys.len() == 0 {
         return None;
     }
+    crate::ensure_backend_exit_callback();
     let state = unsafe {
         bridge::pgaccel_hash_count_i64_sorted_device_execute(keys.as_mut_ptr(), keys.len())
     };

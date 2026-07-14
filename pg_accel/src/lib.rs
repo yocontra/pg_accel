@@ -63,6 +63,75 @@ use pgrx::prelude::*;
 
 pg_module_magic!();
 
+#[cfg(not(test))]
+thread_local! {
+    static BACKEND_EXIT_CALLBACK_REGISTERED_PID: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
+
+thread_local! {
+    // Fail closed: GPU shutdown is unsafe until every TLS device owner has
+    // been destroyed successfully by the residency exit phase.
+    static BACKEND_RESIDENCY_CLEANUP_COMPLETE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    // Planner capability probes initialize an otherwise idle Metal runtime.
+    // Explicit queue teardown is only needed after this backend successfully
+    // created a long-lived GPU owner; idle runtimes are left to process exit.
+    static BACKEND_GPU_OWNER_PID: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
+
+const fn backend_exit_callback_is_current(registered_pid: u32, current_pid: u32) -> bool {
+    registered_pid != 0 && registered_pid == current_pid
+}
+
+const fn backend_gpu_shutdown_allowed(
+    cleanup_complete: bool,
+    owner_pid: u32,
+    current_pid: u32,
+) -> bool {
+    cleanup_complete && owner_pid != 0 && owner_pid == current_pid
+}
+
+/// Arm cleanup after PostgreSQL has initialized this postmaster child.
+///
+/// `_PG_init` runs in the postmaster for a shared-preloaded extension, but
+/// `InitPostmasterChild()` subsequently calls `on_exit_reset()`. Consequently
+/// an exit callback registered by `_PG_init` is deliberately absent from
+/// ordinary backends. Resource-owning backend paths must call this lazy,
+/// idempotent registration point before acquiring shared or device resources.
+pub(crate) fn ensure_backend_exit_callback() {
+    #[cfg(not(test))]
+    BACKEND_EXIT_CALLBACK_REGISTERED_PID.with(|registered_pid| {
+        let pid = std::process::id();
+        if backend_exit_callback_is_current(registered_pid.get(), pid) {
+            return;
+        }
+        BACKEND_RESIDENCY_CLEANUP_COMPLETE.with(|complete| complete.set(false));
+        BACKEND_GPU_OWNER_PID.with(|owner_pid| owner_pid.set(0));
+        // SAFETY: called on the initialized backend main thread. PostgreSQL
+        // owns the callback list and invokes these functions before detaching
+        // the backend from shared memory. Callbacks run LIFO, so register in
+        // reverse dependency order: device owners, GPU, budget, tracing.
+        unsafe {
+            let arg = pgrx::pg_sys::Datum::from(0);
+            pgrx::pg_sys::before_shmem_exit(Some(pgaccel_otel_shmem_exit), arg);
+            pgrx::pg_sys::before_shmem_exit(Some(pgaccel_thread_budget_shmem_exit), arg);
+            pgrx::pg_sys::before_shmem_exit(Some(pgaccel_gpu_shmem_exit), arg);
+            pgrx::pg_sys::before_shmem_exit(Some(pgaccel_shmem_exit), arg);
+        }
+        registered_pid.set(pid);
+    });
+}
+
+/// Record that a guarded allocation path successfully created a GPU owner.
+///
+/// Callers must arm backend cleanup before entering the allocating FFI call,
+/// then call this only after ownership has transferred to Rust.
+pub(crate) fn note_backend_gpu_owner_acquired() {
+    BACKEND_GPU_OWNER_PID.with(|owner_pid| owner_pid.set(std::process::id()));
+}
+
 // ---------------------------------------------------------------------------
 // Local GUCs registered in `_PG_init` below.
 // ---------------------------------------------------------------------------
@@ -208,7 +277,9 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     // Planner-declined native queries must not pay the OTel subscriber/file
     // setup cost just because the extension was loaded in the backend.
 
-    // 2–3. Shared memory + exit callback.
+    // 2–3. Shared memory registration. Backend exit cleanup is registered
+    // lazily after fork by `ensure_backend_exit_callback`; PostgreSQL resets
+    // the postmaster's inherited on-exit callback list in every child.
     // Gated out of the test binary because PG server symbols
     // (shmem_request_hook, before_shmem_exit, etc.) are unavailable at link
     // time in the standalone test runner.
@@ -216,12 +287,6 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     {
         engine::thread_budget::init_shmem();
         engine::residency::init_shmem();
-
-        // SAFETY: `before_shmem_exit` is a PostgreSQL API that registers a
-        // callback invoked when the backend detaches from shared memory.
-        unsafe {
-            pgrx::pg_sys::before_shmem_exit(Some(pgaccel_shmem_exit), pgrx::pg_sys::Datum::from(0));
-        }
     }
 
     // 4. Register Custom Scan Provider and install planner hooks.
@@ -248,28 +313,83 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     );
 }
 
-/// `before_shmem_exit` callback: release thread budget before the process exits.
+fn run_backend_exit_phase(label: &str, phase: impl FnOnce()) -> bool {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(phase)).is_err() {
+        // PostgreSQL's report machinery and tracing subscriber may already
+        // be unwinding. stderr is the only dependable diagnostic sink.
+        backend_exit_diagnostic(format_args!(
+            "pg_accel: backend-exit phase `{label}` panicked; continuing cleanup"
+        ));
+        return false;
+    }
+    true
+}
+
+fn backend_exit_diagnostic(message: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+
+    // A failed stderr write must not turn best-effort exit diagnostics into a
+    // second unwind while PostgreSQL is already tearing the backend down.
+    let _ = writeln!(std::io::stderr(), "{message}");
+}
+
+/// First `before_shmem_exit` phase: destroy every backend-local device owner
+/// while shared memory and the GPU runtime are both still available.
 ///
 /// # Safety
 ///
 /// Called by PostgreSQL's shmem-exit machinery. The `_arg` parameter is unused.
 #[cfg(not(test))]
-#[pg_guard]
+#[pgrx::pg_guard]
 unsafe extern "C-unwind" fn pgaccel_shmem_exit(_code: i32, _arg: pgrx::pg_sys::Datum) {
-    // Resident device owners must drop before the queue/runtime is shut down.
-    engine::residency::cleanup_backend();
-    let gpu_status = crate::gpu::shutdown();
-    if !gpu_status.is_ok() {
-        pgrx::warning!(
-            "pg_accel: GPU runtime shutdown failed during backend exit (status={:?})",
-            gpu_status,
-        );
-    }
+    let complete = run_backend_exit_phase("residency", engine::residency::cleanup_backend);
+    let _ = BACKEND_RESIDENCY_CLEANUP_COMPLETE.try_with(|state| state.set(complete));
+}
 
-    engine::thread_budget::cleanup_backend();
-    // Flush tracing writers so the trace JSONL is durable on disk before
-    // the process exits — helps post-mortem inspection of clean exits too.
-    engine::otel::flush_tracing();
+/// Second `before_shmem_exit` phase: stop the GPU after device owners drop.
+#[cfg(not(test))]
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn pgaccel_gpu_shmem_exit(_code: i32, _arg: pgrx::pg_sys::Datum) {
+    let owners_released = BACKEND_RESIDENCY_CLEANUP_COMPLETE
+        .try_with(std::cell::Cell::get)
+        .unwrap_or(false);
+    if !owners_released {
+        backend_exit_diagnostic(format_args!(
+            "pg_accel: GPU runtime shutdown skipped because resident device-owner cleanup did not complete"
+        ));
+        return;
+    }
+    let owner_pid = BACKEND_GPU_OWNER_PID
+        .try_with(std::cell::Cell::get)
+        .unwrap_or(0);
+    if !backend_gpu_shutdown_allowed(owners_released, owner_pid, std::process::id()) {
+        return;
+    }
+    run_backend_exit_phase("GPU runtime", || {
+        let status = crate::gpu::shutdown();
+        if !status.is_ok() {
+            backend_exit_diagnostic(format_args!(
+                "pg_accel: GPU runtime shutdown failed during backend exit: {status:?}"
+            ));
+        }
+    });
+}
+
+/// Third `before_shmem_exit` phase: return this backend's worker allocation.
+#[cfg(not(test))]
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn pgaccel_thread_budget_shmem_exit(
+    _code: i32,
+    _arg: pgrx::pg_sys::Datum,
+) {
+    run_backend_exit_phase("thread budget", engine::thread_budget::cleanup_backend);
+}
+
+/// Final `before_shmem_exit` phase: make tracing output durable.
+#[cfg(not(test))]
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn pgaccel_otel_shmem_exit(_code: i32, _arg: pgrx::pg_sys::Datum) {
+    run_backend_exit_phase("tracing flush", engine::otel::flush_tracing);
 }
 
 /// Returns the current version of the pg_accel extension.
@@ -395,5 +515,56 @@ mod soft_fp64_cap_tests {
         assert!((clamp_soft_fp64_cost_multiplier(f64::NEG_INFINITY) - d).abs() < f64::EPSILON);
         // Sanity: the result is always finite regardless of input.
         assert!(clamp_soft_fp64_cost_multiplier(f64::NAN).is_finite());
+    }
+}
+
+#[cfg(test)]
+mod backend_exit_phase_tests {
+    use std::cell::Cell;
+
+    use super::{
+        BACKEND_RESIDENCY_CLEANUP_COMPLETE, backend_exit_callback_is_current,
+        backend_gpu_shutdown_allowed, run_backend_exit_phase,
+    };
+
+    #[test]
+    fn callback_registration_pid_rearms_after_fork() {
+        assert!(!backend_exit_callback_is_current(0, 101));
+        assert!(backend_exit_callback_is_current(101, 101));
+        assert!(!backend_exit_callback_is_current(101, 202));
+    }
+
+    #[test]
+    fn gpu_shutdown_gate_defaults_fail_closed() {
+        BACKEND_RESIDENCY_CLEANUP_COMPLETE.with(|complete| {
+            complete.set(false);
+            assert!(!complete.get());
+            complete.set(true);
+            assert!(complete.get());
+            complete.set(false);
+        });
+        assert!(!backend_gpu_shutdown_allowed(false, 0, 101));
+        assert!(!backend_gpu_shutdown_allowed(false, 101, 101));
+        assert!(!backend_gpu_shutdown_allowed(true, 0, 101));
+        assert!(!backend_gpu_shutdown_allowed(true, 101, 202));
+        assert!(backend_gpu_shutdown_allowed(true, 101, 101));
+    }
+
+    #[test]
+    fn failed_allocation_or_probe_only_init_does_not_enable_gpu_shutdown() {
+        assert!(!backend_gpu_shutdown_allowed(true, 0, 101));
+    }
+
+    #[test]
+    fn a_panicking_exit_phase_does_not_prevent_the_next_phase() {
+        assert!(!run_backend_exit_phase("test panic", || {
+            panic!("synthetic backend-exit panic")
+        }));
+
+        let next_ran = Cell::new(false);
+        assert!(run_backend_exit_phase("test continuation", || {
+            next_ran.set(true);
+        }));
+        assert!(next_ran.get());
     }
 }

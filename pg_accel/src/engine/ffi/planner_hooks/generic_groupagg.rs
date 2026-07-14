@@ -515,7 +515,14 @@ pub(super) unsafe fn try_inject(
     root: *mut pg_sys::PlannerInfo,
     output_rel: *mut RelOptInfo,
 ) -> bool {
-    if !gucs::gpu_enabled() || !cost::gpu_is_usable() {
+    if !gucs::gpu_enabled() {
+        return false;
+    }
+    if let Err(decline) = unsafe { super::shape::preflight_base_relations(root) } {
+        record_decline(&AdmissionDecline::Shape(decline), output_rel);
+        return false;
+    }
+    if !cost::gpu_is_usable() {
         return false;
     }
     let model = TypedCostModel::from_limits(cost::device_limits());

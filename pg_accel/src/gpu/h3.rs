@@ -91,6 +91,7 @@ pub fn h3_cell_to_parent_count_resident(
     }
 
     let mut state: *mut PgaccelAggState = std::ptr::null_mut();
+    crate::ensure_backend_exit_callback();
     let status = unsafe {
         bridge::pgaccel_h3_cell_to_parent_count_bulk(
             cells.as_ptr(),
@@ -203,6 +204,7 @@ pub fn h3_lat_lng_count_resident(
     }
 
     let mut state: *mut PgaccelAggState = std::ptr::null_mut();
+    crate::ensure_backend_exit_callback();
     let status = unsafe {
         bridge::pgaccel_h3_lat_lng_count_resident_bulk(
             lats_exact.as_ptr(),

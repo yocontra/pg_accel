@@ -855,9 +855,296 @@ fn every_manually_registered_postgres_callback_is_pg_guarded() {
             include_str!("../../residency/legacy.rs"),
             "unsafe extern \"C-unwind\" fn resident_cache_relcache_callback(",
         ),
+        (
+            include_str!("../../../lib.rs"),
+            "unsafe extern \"C-unwind\" fn pgaccel_shmem_exit(",
+        ),
+        (
+            include_str!("../../../lib.rs"),
+            "unsafe extern \"C-unwind\" fn pgaccel_gpu_shmem_exit(",
+        ),
+        (
+            include_str!("../../../lib.rs"),
+            "unsafe extern \"C-unwind\" fn pgaccel_thread_budget_shmem_exit(",
+        ),
+        (
+            include_str!("../../../lib.rs"),
+            "unsafe extern \"C-unwind\" fn pgaccel_otel_shmem_exit(",
+        ),
     ] {
         assert_guarded(source, signature);
     }
+}
+
+#[test]
+fn backend_resource_paths_arm_cleanup_after_postmaster_fork() {
+    fn assert_armed_before(source: &str, acquisition: &str, owner: &str) {
+        let armed = source
+            .find("crate::ensure_backend_exit_callback();")
+            .unwrap_or_else(|| panic!("{owner} does not arm backend cleanup"));
+        let acquired = source
+            .find(acquisition)
+            .unwrap_or_else(|| panic!("{owner} acquisition marker is missing: {acquisition}"));
+        assert!(
+            armed < acquired,
+            "{owner} arms backend cleanup after acquiring its resource"
+        );
+    }
+
+    fn assert_owner_marked_after(source: &str, success: &str, owner: &str) {
+        let success = source
+            .find(success)
+            .unwrap_or_else(|| panic!("{owner} success marker is missing: {success}"));
+        let marked = source
+            .find("crate::note_backend_gpu_owner_acquired();")
+            .unwrap_or_else(|| panic!("{owner} does not mark successful ownership"));
+        assert!(
+            success < marked,
+            "{owner} enables GPU shutdown before allocation success is known"
+        );
+    }
+
+    let crate_root = include_str!("../../../lib.rs");
+    assert!(crate_root.contains("InitPostmasterChild()"));
+    assert!(crate_root.contains("on_exit_reset()"));
+    assert!(crate_root.contains("fn ensure_backend_exit_callback()"));
+    assert!(crate_root.contains("BACKEND_EXIT_CALLBACK_REGISTERED_PID"));
+    assert!(crate_root.contains("let pid = std::process::id();"));
+    assert!(crate_root.contains("registered_pid.set(pid);"));
+    assert!(crate_root.contains("BACKEND_GPU_OWNER_PID"));
+    assert!(crate_root.contains("owner_pid.set(std::process::id())"));
+
+    let pg_init = crate_root
+        .split_once("pub unsafe extern \"C-unwind\" fn _PG_init()")
+        .expect("_PG_init exists")
+        .1
+        .split_once("unsafe extern \"C-unwind\" fn pgaccel_shmem_exit(")
+        .expect("backend exit callback exists")
+        .0;
+    assert!(
+        !pg_init.contains("pgrx::pg_sys::before_shmem_exit("),
+        "_PG_init callback registration is lost when PostgreSQL resets child exit state"
+    );
+
+    assert_armed_before(
+        include_str!("../../residency/store.rs"),
+        "reserve_with_eviction(bytes, budget, LedgerCharge::reserve",
+        "residency store",
+    );
+    assert_armed_before(
+        include_str!("../../thread_budget.rs"),
+        "BUDGET.exclusive()",
+        "thread budget",
+    );
+    assert_armed_before(
+        include_str!("../../../gpu/runtime.rs"),
+        "let status = init();",
+        "GPU runtime",
+    );
+    let expr_buffers = include_str!("../../../gpu/expr.rs");
+    let expr_new = expr_buffers
+        .split_once("pub fn new(len: usize)")
+        .expect("expression device-buffer allocator exists")
+        .1
+        .split_once("pub fn copy_from_slice(values: &[T])")
+        .expect("expression device-buffer copy allocator exists")
+        .0;
+    assert_armed_before(
+        expr_new,
+        "bridge::pgaccel_expr_device_alloc(bytes",
+        "expression device buffer",
+    );
+    assert_owner_marked_after(
+        expr_new,
+        "let ptr = NonNull::new(raw.cast::<T>())?;",
+        "expression device buffer",
+    );
+    let expr_copy = expr_buffers
+        .split_once("pub fn copy_from_slice(values: &[T])")
+        .expect("expression device-buffer copy allocator exists")
+        .1;
+    assert_armed_before(
+        expr_copy,
+        "bridge::pgaccel_expr_device_alloc_copy(",
+        "expression copied device buffer",
+    );
+    assert_owner_marked_after(
+        expr_copy,
+        "let ptr = NonNull::new(raw.cast::<T>())?;",
+        "expression copied device buffer",
+    );
+    let grouped_workspace = include_str!("../../../gpu/grouped_agg.rs")
+        .split_once("pub fn allocate(plan: &ResolvedGroupedAggPlan<'_>)")
+        .expect("grouped-aggregate workspace allocator exists")
+        .1;
+    assert_armed_before(
+        grouped_workspace,
+        "bridge::pgaccel_grouped_agg_workspace_alloc(",
+        "grouped-aggregate workspace",
+    );
+    assert_owner_marked_after(
+        grouped_workspace,
+        "if !(ptr.as_ptr() as usize).is_multiple_of(requirement.alignment)",
+        "grouped-aggregate workspace",
+    );
+    let hash_join = include_str!("../../../gpu/hash_join.rs");
+    let hash_join_host = hash_join
+        .split_once("pub fn build(")
+        .expect("host hash-table allocator exists")
+        .1
+        .split_once("pub fn build_device_count(")
+        .expect("device hash-table allocator exists")
+        .0;
+    assert_armed_before(
+        hash_join_host,
+        "bridge::pgaccel_hash_join_build(",
+        "host hash table",
+    );
+    assert_owner_marked_after(hash_join_host, "if ht.is_null()", "host hash table");
+    let hash_join_device = hash_join
+        .split_once("pub fn build_device_count(")
+        .expect("device hash-table allocator exists")
+        .1;
+    assert_armed_before(
+        hash_join_device,
+        "bridge::pgaccel_hash_join_build_device_count(",
+        "device hash table",
+    );
+    assert_owner_marked_after(hash_join_device, "if ht.is_null()", "device hash table");
+    let hash_agg = include_str!("../../../gpu/hash_agg.rs");
+    let hash_count_bounded = hash_agg
+        .split_once("pub fn hash_count_i64_device_bounded(")
+        .expect("bounded hash-count allocator exists")
+        .1
+        .split_once("pub fn hash_count_i64_sorted_device(")
+        .expect("sorted hash-count allocator exists")
+        .0;
+    assert_armed_before(
+        hash_count_bounded,
+        "bridge::pgaccel_hash_count_i64_device_hash_execute_bounded(",
+        "bounded device hash-count state",
+    );
+    let hash_count_sorted = hash_agg
+        .split_once("pub fn hash_count_i64_sorted_device(")
+        .expect("sorted hash-count allocator exists")
+        .1;
+    assert_armed_before(
+        hash_count_sorted,
+        "bridge::pgaccel_hash_count_i64_sorted_device_execute(",
+        "sorted device hash-count state",
+    );
+    let hash_state_owner = hash_agg
+        .split_once("pub(crate) unsafe fn from_raw(state: *mut PgaccelAggState)")
+        .expect("hash aggregate state owner exists")
+        .1
+        .split_once("/// Number of distinct groups")
+        .expect("hash aggregate state owner boundary exists")
+        .0;
+    assert_owner_marked_after(
+        hash_state_owner,
+        "if state.is_null()",
+        "hash aggregate state",
+    );
+    let h3 = include_str!("../../../gpu/h3.rs");
+    let h3_parent_count = h3
+        .split_once("pub fn h3_cell_to_parent_count_resident(")
+        .expect("H3 parent-count allocator exists")
+        .1
+        .split_once("pub fn h3_cell_to_center_child_bulk(")
+        .expect("H3 parent-count allocator boundary exists")
+        .0;
+    assert_armed_before(
+        h3_parent_count,
+        "bridge::pgaccel_h3_cell_to_parent_count_bulk(",
+        "H3 parent-count state",
+    );
+    let h3_lat_lng_count = h3
+        .split_once("pub fn h3_lat_lng_count_resident(")
+        .expect("H3 lat/lng-count allocator exists")
+        .1
+        .split_once(
+            "// ---------------------------------------------------------------------------",
+        )
+        .expect("H3 lat/lng-count allocator boundary exists")
+        .0;
+    assert_armed_before(
+        h3_lat_lng_count,
+        "bridge::pgaccel_h3_lat_lng_count_resident_bulk(",
+        "H3 lat/lng-count state",
+    );
+    assert_armed_before(
+        include_str!("../../otel.rs"),
+        "catch_unwind(try_init)",
+        "tracing runtime",
+    );
+    let legacy_load_guard = include_str!("../../residency/legacy.rs")
+        .split_once("impl ResidentCacheLoadGuard")
+        .expect("legacy cache load guard exists")
+        .1;
+    assert_armed_before(
+        legacy_load_guard,
+        "RESIDENT_CACHE_LOAD_IN_PROGRESS.set(true)",
+        "legacy residency cache",
+    );
+
+    let registration = crate_root
+        .split_once("fn ensure_backend_exit_callback()")
+        .expect("lazy registration exists")
+        .1
+        .split_once("// Local GUCs registered")
+        .expect("registration boundary exists")
+        .0;
+    let ordered_callbacks = [
+        "Some(pgaccel_otel_shmem_exit)",
+        "Some(pgaccel_thread_budget_shmem_exit)",
+        "Some(pgaccel_gpu_shmem_exit)",
+        "Some(pgaccel_shmem_exit)",
+    ]
+    .map(|callback| {
+        registration
+            .find(callback)
+            .unwrap_or_else(|| panic!("backend cleanup callback is not registered: {callback}"))
+    });
+    assert!(
+        ordered_callbacks.windows(2).all(|pair| pair[0] < pair[1]),
+        "callbacks must be registered in reverse order for LIFO owner-before-runtime cleanup"
+    );
+
+    let upper_hook = include_str!("../planner_hooks/mod.rs");
+    let group_agg_arm = upper_hook
+        .split_once("pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG")
+        .expect("generic aggregate upper-hook arm exists")
+        .1
+        .split_once("pg_sys::UpperRelationKind::UPPERREL_WINDOW")
+        .expect("generic aggregate upper-hook boundary exists")
+        .0;
+    assert!(
+        !group_agg_arm.contains("gpu_is_usable"),
+        "outer upper-hook guard must not discover hardware before structural preflight"
+    );
+    let generic_admission = include_str!("../planner_hooks/generic_groupagg.rs")
+        .split_once("pub(super) unsafe fn try_inject(")
+        .expect("generic aggregate admission exists")
+        .1;
+    let preflight = generic_admission
+        .find("preflight_base_relations(root)")
+        .expect("generic admission has a cheap RTE preflight");
+    let hardware = generic_admission
+        .find("cost::gpu_is_usable()")
+        .expect("generic admission has a GPU capability gate");
+    let model = generic_admission
+        .find("TypedCostModel::from_limits(cost::device_limits())")
+        .expect("generic admission builds its typed device model");
+    let extraction = generic_admission
+        .find("extract_shape(root, output_rel, &model)")
+        .expect("generic admission performs full shape extraction");
+    let residency = generic_admission
+        .find("exact_residency_estimates(&shape)")
+        .expect("generic admission performs exact residency estimation");
+    assert!(
+        preflight < hardware && hardware < model && model < extraction && extraction < residency,
+        "generic admission must preflight before hardware/model/full extraction/residency work"
+    );
 }
 
 #[test]

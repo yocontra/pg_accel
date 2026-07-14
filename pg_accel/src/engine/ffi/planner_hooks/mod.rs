@@ -200,11 +200,9 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             );
             return;
         }
-        // Generic resident aggregate admission. Both the GUC and a usable GPU
-        // are required before catalog/residency work begins.
-        pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG
-            if gucs::gpu_enabled() && cost::gpu_is_usable() =>
-        {
+        // Generic resident aggregate admission performs its structural
+        // preflight before device discovery, then applies GPU/residency gates.
+        pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG if gucs::gpu_enabled() => {
             let _ = unsafe { generic_groupagg::try_inject(root, output_rel) };
         }
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
