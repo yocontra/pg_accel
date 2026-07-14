@@ -52,6 +52,9 @@ pub enum KernelClass {
     HashAgg,
     Sort,
     HashJoin,
+    MergeJoin,
+    SetOp,
+    RecursiveUnion,
     NestedLoopInequality,
     PointInRing,
     H3LatLng,
@@ -73,6 +76,9 @@ impl KernelClass {
             Self::HashAgg => "hash_agg",
             Self::Sort => "sort",
             Self::HashJoin => "hash_join",
+            Self::MergeJoin => "merge_join",
+            Self::SetOp => "set_op",
+            Self::RecursiveUnion => "recursive_union",
             Self::NestedLoopInequality => "nested_loop_ineq",
             Self::PointInRing => "point_in_ring",
             Self::H3LatLng => "h3_latlng",
@@ -689,6 +695,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("window_running_sum", C::GpuWindow, K::Window),
     workload("window_lag", C::GpuWindow, K::Window),
     workload("window_lead", C::GpuWindow, K::Window),
+    workload("window_full_output_decline", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
     workload("ssbm_q1_1", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q1_1)
         .evidence(WINNER),
@@ -765,7 +772,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         K::Unclassified,
     )
     .evidence(NATIVE_DECLINE),
-    workload("mergejoin_decline", C::Regression, K::Unclassified).evidence(NATIVE_DECLINE),
+    workload("mergejoin_decline", C::Regression, K::MergeJoin).evidence(NATIVE_DECLINE),
     workload("numeric_agg_decline", C::Regression, K::Unclassified).evidence(NATIVE_DECLINE),
     workload(
         "parallel_hashjoin_rebuild_decline",
@@ -773,6 +780,8 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         K::Unclassified,
     )
     .evidence(NATIVE_DECLINE),
+    workload("recursive_union_decline", C::Regression, K::RecursiveUnion).evidence(NATIVE_DECLINE),
+    workload("setop_intersect_decline", C::Regression, K::SetOp).evidence(NATIVE_DECLINE),
     workload("small_table_scan", C::Regression, K::Unclassified),
     workload("topk_wide", C::Regression, K::Sort).evidence(NATIVE_DECLINE),
     workload("reduce_f64_sum", C::Fp64Matrix, K::ResidentF64Reduce)

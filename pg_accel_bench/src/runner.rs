@@ -2940,25 +2940,30 @@ fn run_workload_with_config(
     // feeds the dispatch classification (action_items C8 / Reviewer 1
     // Sin #5). The full-plans file (plans.txt) is still written if
     // plans_capture_path is set.
-    let plan_snippet = capture_plan_snippet(connection, workload, BenchMode::Accel).ok();
-    let baseline_plan_snippet =
-        capture_plan_snippet(connection, workload, BenchMode::PgParallel).ok();
-    if let (Some(artifact_writer), Some(snippet)) = (artifacts, plan_snippet.as_deref())
-        && let Err(e) = artifact_writer.write_plan_snippet(workload.name(), rows, snippet)
+    let accel_plan = capture_plan_snippet(connection, workload, rows, BenchMode::Accel).ok();
+    let baseline_plan =
+        capture_plan_snippet(connection, workload, rows, BenchMode::PgParallel).ok();
+    if let (Some(artifact_writer), Some(capture)) = (artifacts, accel_plan.as_ref())
+        && let Err(e) = artifact_writer.write_plan_snippet(workload.name(), rows, &capture.text)
     {
         eprintln!(
             "[artifacts] plan snippet write failed for {} @ {rows}: {e}",
             workload.name()
         );
     }
-    let plan_selected = plan_snippet
-        .as_deref()
+    let plan_selected = accel_plan
+        .as_ref()
+        .map(|capture| capture.text.as_str())
         .is_some_and(plan_contains_custom_scan);
-    let plan_text_dispatched = plan_snippet
-        .as_deref()
+    let plan_text_dispatched = accel_plan
+        .as_ref()
+        .map(|capture| capture.text.as_str())
         .is_some_and(plan_indicates_gpu_dispatch);
-    let plan_explicitly_not_dispatched =
-        plan_snippet.as_deref().and_then(explicit_gpu_dispatched) == Some(false);
+    let plan_explicitly_not_dispatched = accel_plan
+        .as_ref()
+        .map(|capture| capture.text.as_str())
+        .and_then(explicit_gpu_dispatched)
+        == Some(false);
     if let Some(path) = &config.plans_capture_path
         && let Err(e) = capture_plan(connection, workload, rows, path)
     {
@@ -3013,10 +3018,12 @@ fn run_workload_with_config(
         workload.name(),
         rows,
         plan_selected,
-        plan_snippet.as_deref(),
+        accel_plan
+            .as_ref()
+            .and_then(|capture| capture.planner_rejection_reason.as_deref()),
     );
-    result.plan_snippet = plan_snippet;
-    result.baseline_plan_snippet = baseline_plan_snippet;
+    result.plan_snippet = accel_plan.map(|capture| capture.text);
+    result.baseline_plan_snippet = baseline_plan.map(|capture| capture.text);
     result.correctness_diff_artifact = correctness_diff_artifact;
     result.thermal = thermal;
     // Cold-honesty tag: if the workload fixture fits within shared_buffers,
@@ -3675,16 +3682,23 @@ fn capture_and_write_pre_risk_context(
 /// truncation is the renderer's job, not the capture's.
 ///
 /// On the accel side, a real `pg_accel planner rejection reason: <reason>`
-/// line sourced from `pg_accel_last_planner_rejection_reason()` is appended
-/// as legitimate decline evidence. The runner never synthesizes decline-reason
-/// text of its own — an expected-but-unconfirmed decline is carried separately
-/// in `WorkloadResult::native_decline_evidence` tagged `ExpectedUnconfirmed`,
-/// never laundered into the plan text.
+/// line is appended only after the reset-session per-reason counter proves the
+/// planner emitted it. The lane's expected exact reason is preferred when its
+/// counter is positive, so a later generic decline cannot erase structural
+/// evidence. An expected-but-unconfirmed decline is carried separately in
+/// `WorkloadResult::native_decline_evidence` tagged `ExpectedUnconfirmed` and
+/// is never laundered into plan text.
+struct CapturedPlanSnippet {
+    text: String,
+    planner_rejection_reason: Option<String>,
+}
+
 fn capture_plan_snippet(
     connection: &str,
     workload: &dyn Workload,
+    rows: usize,
     mode: BenchMode,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<CapturedPlanSnippet, Box<dyn std::error::Error>> {
     let mut client = Client::connect(connection, NoTls)?;
     apply_benchmark_safety_settings(&mut client)?;
     match mode {
@@ -3699,7 +3713,7 @@ fn capture_plan_snippet(
         client.batch_execute(&sql)?;
     }
     if matches!(mode, BenchMode::Accel) {
-        let _ = client.simple_query("SELECT pg_accel_reset_stats()");
+        client.simple_query("SELECT pg_accel_reset_stats()")?;
     }
     let query = match mode {
         BenchMode::Accel => workload.query_sql(),
@@ -3715,47 +3729,72 @@ fn capture_plan_snippet(
         buf.push_str(line);
         buf.push('\n');
     }
-    if matches!(mode, BenchMode::Accel)
-        && let Some(reason) = capture_last_planner_rejection_reason(&mut client)
-    {
+    let planner_rejection_reason = if matches!(mode, BenchMode::Accel) {
+        let preferred_reason = benchmark_threshold_decline_reason(workload.name(), rows);
+        let last_reason = capture_last_planner_rejection_reason(&mut client);
+        select_source_verified_planner_rejection_reason(
+            preferred_reason,
+            last_reason.as_deref(),
+            |reason| capture_planner_rejection_count(&mut client, reason),
+        )
+    } else {
+        None
+    };
+    if let Some(reason) = planner_rejection_reason.as_deref() {
         buf.push_str("pg_accel planner rejection reason: ");
-        buf.push_str(&reason);
+        buf.push_str(reason);
         buf.push('\n');
     }
-    Ok(buf)
+    Ok(CapturedPlanSnippet {
+        text: buf,
+        planner_rejection_reason,
+    })
 }
 
-/// Extract the real planner rejection reason from an accel-side plan snippet
-/// captured by [`capture_plan_snippet`], if present. Only matches the
-/// `pg_accel planner rejection reason: ` prefix, i.e. a reason the planner
-/// itself reported — never a synthesized line.
-fn plan_snippet_planner_rejection_reason(plan: &str) -> Option<String> {
-    plan.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("pg_accel planner rejection reason: ")
-            .map(str::to_owned)
-    })
+/// Prefer the lane-specific reason, but only when its planner counter is
+/// positive. Otherwise retain the planner's last reason when that reason is
+/// independently backed by a positive counter.
+fn select_source_verified_planner_rejection_reason<F>(
+    preferred_reason: Option<&str>,
+    last_reason: Option<&str>,
+    mut rejection_count: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> Option<i64>,
+{
+    if let Some(reason) = preferred_reason
+        && rejection_count(reason).is_some_and(|count| count > 0)
+    {
+        return Some(reason.to_owned());
+    }
+    if let Some(reason) = last_reason
+        && Some(reason) != preferred_reason
+        && rejection_count(reason).is_some_and(|count| count > 0)
+    {
+        return Some(reason.to_owned());
+    }
+    None
 }
 
 /// Compute the tagged native-decline evidence for a benchmark row.
 ///
-/// A real planner rejection (from `pg_accel_last_planner_rejection_reason()`,
-/// surfaced in the accel plan snippet) is `PlannerReported`. Otherwise, if the
-/// static benchmark-threshold matrix expected a decline and no Custom Scan was
-/// selected, the expectation is carried as `ExpectedUnconfirmed`. When a
-/// Custom Scan WAS selected there is no decline to report.
+/// A real planner rejection, verified from a positive reset-session per-reason
+/// counter, is `PlannerReported`. Otherwise, if the static benchmark-threshold
+/// matrix expected a decline and no Custom Scan was selected, the expectation
+/// is carried as `ExpectedUnconfirmed`. When a Custom Scan WAS selected there
+/// is no decline to report.
 fn native_decline_evidence(
     workload_name: &str,
     rows: usize,
     plan_selected: bool,
-    plan_snippet: Option<&str>,
+    verified_planner_rejection_reason: Option<&str>,
 ) -> Option<report::NativeDeclineEvidence> {
     if plan_selected {
         return None;
     }
-    if let Some(reason) = plan_snippet.and_then(plan_snippet_planner_rejection_reason) {
+    if let Some(reason) = verified_planner_rejection_reason {
         return Some(report::NativeDeclineEvidence {
-            reason,
+            reason: reason.to_owned(),
             source: report::DeclineReasonSource::PlannerReported,
         });
     }
@@ -3810,6 +3849,13 @@ fn capture_last_planner_rejection_reason(client: &mut Client) -> Option<String> 
         .query_one("SELECT pg_accel_last_planner_rejection_reason()", &[])
         .ok()
         .and_then(|row| row.get::<_, Option<String>>(0))
+}
+
+fn capture_planner_rejection_count(client: &mut Client, reason: &str) -> Option<i64> {
+    client
+        .query_one("SELECT pg_accel_planner_rejection_count($1)", &[&reason])
+        .ok()
+        .map(|row| row.get(0))
 }
 
 /// Return true if a plan text snippet contains a Custom Scan node (which
@@ -4421,10 +4467,13 @@ mod tests {
 
     #[test]
     fn test_native_decline_evidence_prefers_planner_reported() {
-        let plan = "Aggregate\n  Seq Scan on t\n\
-                    pg_accel planner rejection reason: sort_multikey_no_gpu_kernel\n";
-        let evidence = native_decline_evidence("gpu_sort_multikey", 100_000, false, Some(plan))
-            .expect("planner-reported evidence present");
+        let evidence = native_decline_evidence(
+            "gpu_sort_multikey",
+            100_000,
+            false,
+            Some("sort_multikey_no_gpu_kernel"),
+        )
+        .expect("planner-reported evidence present");
         assert_eq!(evidence.reason, "sort_multikey_no_gpu_kernel");
         assert_eq!(
             evidence.source,
@@ -4433,24 +4482,93 @@ mod tests {
     }
 
     #[test]
+    fn test_phase9_structural_declines_are_unconfirmed_without_planner_evidence() {
+        for (name, rows, reason) in [
+            ("setop_intersect_decline", 10_000, "setop_no_gpu_kernel"),
+            (
+                "recursive_union_decline",
+                10_000,
+                "recursiveunion_no_gpu_kernel",
+            ),
+            ("mergejoin_decline", 10_000, "mergejoin_no_gpu_kernel"),
+            ("gpu_sort_multikey", 10_000, "sort_multikey_no_gpu_kernel"),
+            (
+                "window_full_output_decline",
+                10_000,
+                "no_gpu_resident_pipeline",
+            ),
+        ] {
+            let expected_only = native_decline_evidence(name, rows, false, None)
+                .unwrap_or_else(|| panic!("threshold expectation for {name}"));
+            assert_eq!(expected_only.reason, reason, "{name}");
+            assert_eq!(
+                expected_only.source,
+                report::DeclineReasonSource::ExpectedUnconfirmed,
+                "{name}"
+            );
+
+            let planner_reported = native_decline_evidence(name, rows, false, Some(reason))
+                .unwrap_or_else(|| panic!("planner evidence for {name}"));
+            assert_eq!(planner_reported.reason, reason, "{name}");
+            assert_eq!(
+                planner_reported.source,
+                report::DeclineReasonSource::PlannerReported,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn test_native_decline_evidence_none_when_custom_scan_selected() {
-        let plan = "Custom Scan (GpuReduce)\n  GPU Dispatched: true\n";
-        assert!(native_decline_evidence("reduce_f64_sum", 1_000_000, true, Some(plan)).is_none());
+        assert!(
+            native_decline_evidence(
+                "reduce_f64_sum",
+                1_000_000,
+                true,
+                Some("rows_below_min_batch")
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn test_native_decline_evidence_absent_without_reason_or_expectation() {
         // A workload name with no threshold-matrix decline entry and no planner
         // rejection line yields no fabricated evidence.
-        assert!(
-            native_decline_evidence(
-                "no_such_workload_xyz",
-                12_345,
-                false,
-                Some("Seq Scan on t\n")
-            )
-            .is_none()
+        assert!(native_decline_evidence("no_such_workload_xyz", 12_345, false, None).is_none());
+    }
+
+    #[test]
+    fn test_planner_rejection_reason_preference_requires_positive_counter() {
+        let preferred = "mergejoin_no_gpu_kernel";
+        let generic = "no_gpu_resident_pipeline";
+
+        let selected = select_source_verified_planner_rejection_reason(
+            Some(preferred),
+            Some(generic),
+            |reason| Some(i64::from(reason == preferred)),
         );
+        assert_eq!(selected.as_deref(), Some(preferred));
+
+        let selected = select_source_verified_planner_rejection_reason(
+            Some(preferred),
+            Some(generic),
+            |reason| Some(i64::from(reason == generic)),
+        );
+        assert_eq!(selected.as_deref(), Some(generic));
+
+        let selected =
+            select_source_verified_planner_rejection_reason(Some(preferred), Some(generic), |_| {
+                Some(0)
+            });
+        assert_eq!(selected, None);
+
+        let selected = select_source_verified_planner_rejection_reason(
+            Some(preferred),
+            Some(preferred),
+            |_| None,
+        );
+        assert_eq!(selected, None);
     }
 
     #[test]

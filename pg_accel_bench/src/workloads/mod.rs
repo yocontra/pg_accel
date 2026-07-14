@@ -83,8 +83,11 @@ mod mergejoin_decline;
 mod numeric_agg_decline;
 mod oltp_point;
 mod parallel_hashjoin_rebuild_decline;
+mod recursive_union_decline;
+mod setop_decline;
 mod small_table;
 mod topk_wide;
+mod window_full_output_decline;
 
 pub use bitmap_heap_gpuexpr_decline::BitmapHeapGpuExprDecline;
 pub use case_when_expression_grouped_agg::CaseWhenExpressionGroupedAgg;
@@ -127,7 +130,9 @@ pub use parallel_stress::{
 };
 pub use predicate_filter_expression_grouped_agg::PredicateFilterExpressionGroupedAgg;
 pub use proximity::Proximity;
+pub use recursive_union_decline::RecursiveUnionDecline;
 pub use registry::{H3LaneClass, ResidentPinSpec, WorkloadCategory, workload_metadata};
+pub use setop_decline::SetOpDecline;
 pub use small_table::SmallTable;
 pub use spatial_agg::SpatialAgg;
 pub use spatial_complex_poly::SpatialComplexPoly;
@@ -144,6 +149,7 @@ pub use ssbm::{
 pub use timeseries_sensor_rollup::TimeseriesSensorRollup;
 pub use topk_wide::TopkWide;
 pub use window_analytics::WindowAnalytics;
+pub use window_full_output_decline::WindowFullOutputDecline;
 
 /// A benchmark workload that can set up tables, run a query, and clean up.
 pub trait Workload: Send + Sync {
@@ -428,6 +434,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(window_variants::WINDOW_RUNNING_SUM),
         Box::new(window_variants::WINDOW_LAG),
         Box::new(window_variants::WINDOW_LEAD),
+        Box::new(WindowFullOutputDecline),
         // --- SSBM (Star Schema Benchmark — PG-Strom comparison) ---
         Box::new(SsbmQ1_1),
         Box::new(SsbmQ1_2),
@@ -476,6 +483,8 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(MergeJoinDecline),
         Box::new(NumericAggDecline),
         Box::new(ParallelHashJoinRebuildDecline),
+        Box::new(RecursiveUnionDecline),
+        Box::new(SetOpDecline),
         Box::new(SmallTable),
         Box::new(TopkWide),
         // --- fp64 matrix (Phase 1 calibration grid) ---
@@ -816,6 +825,7 @@ pub fn benchmark_threshold_matrix_entry(
         .or_else(|| hashjoin_threshold_matrix_entry(name, rows))
         .or_else(|| nlj_threshold_matrix_entry(name, rows))
         .or_else(|| sort_threshold_matrix_entry(name, rows))
+        .or_else(|| window_decline_matrix_entry(name, rows))
         .or_else(|| spatial_threshold_matrix_entry(name, rows))
         .or_else(|| regression_decline_matrix_entry(name, rows))
 }
@@ -2079,6 +2089,33 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
     })
 }
 
+fn window_decline_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
+    if name != "window_full_output_decline" {
+        return None;
+    }
+    Some(BenchmarkThresholdMatrixEntry {
+        lane: "window_partitioned_full_output",
+        workload: static_workload_name(name),
+        rows,
+        data_type: "int4 partition/order keys + int8 measure",
+        cardinality: "256 partitions with multi-key peer ordering",
+        selectivity: "100% input rows enter and leave WindowAgg",
+        result_count: format_matrix_rows(rows),
+        index_pruning_shape: "n/a",
+        prepared_geometry: "n/a",
+        batch_count: "n/a".to_owned(),
+        row_width: "20-byte input plus row_number/running-sum outputs",
+        output_size: "full row-proportional window relation",
+        dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
+        correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
+        cache_gate: GENERIC_CACHE_GATE,
+        threshold_basis: "full-output WindowAgg is outside the GPU-resident reducing-shape contract",
+        expectation: BenchmarkLaneExpectation::NativeDecline {
+            reason: "no_gpu_resident_pipeline",
+        },
+    })
+}
+
 fn spatial_threshold_matrix_entry(
     name: &str,
     rows: usize,
@@ -2384,6 +2421,24 @@ fn regression_decline_matrix_entry(
             "filtered aggregate row",
             "shape_unsupported_predicate",
         ),
+        "setop_intersect_decline" => (
+            "setop_intersect_full_output",
+            "int4 equality pair",
+            "two equal-size relations with approximately 50% overlap",
+            "INTERSECT distinct over the full inputs",
+            "8-byte SetOp row",
+            "approximately half of one input relation",
+            "setop_no_gpu_kernel",
+        ),
+        "recursive_union_decline" => (
+            "recursive_union_linear_output",
+            "int4 recursive state",
+            "one seed expanding to the requested row count",
+            "linear UNION ALL recursion",
+            "4-byte emitted state row",
+            "full row-proportional recursive relation",
+            "recursiveunion_no_gpu_kernel",
+        ),
         _ => return None,
     };
     Some(BenchmarkThresholdMatrixEntry {
@@ -2545,6 +2600,9 @@ fn static_workload_name(name: &str) -> &'static str {
         "mergejoin_decline" => "mergejoin_decline",
         "numeric_agg_decline" => "numeric_agg_decline",
         "bitmap_heap_gpuexpr_decline" => "bitmap_heap_gpuexpr_decline",
+        "setop_intersect_decline" => "setop_intersect_decline",
+        "recursive_union_decline" => "recursive_union_decline",
+        "window_full_output_decline" => "window_full_output_decline",
         _ => "unknown",
     }
 }
@@ -2643,6 +2701,76 @@ mod tests {
     fn test_mergejoin_decline_caps_default_scales() {
         let wl = find_workload("mergejoin_decline").expect("registered mergejoin_decline");
         assert_eq!(wl.row_scales(), &[10_000, 100_000]);
+    }
+
+    #[test]
+    fn test_phase9_documented_decline_workload_contracts() {
+        let cases: [(&str, &[usize], &str, &str, &str); 5] = [
+            (
+                "setop_intersect_decline",
+                &[10_000, 100_000],
+                "INTERSECT",
+                "setop_no_gpu_kernel",
+                "set_op",
+            ),
+            (
+                "recursive_union_decline",
+                &[10_000],
+                "WITH RECURSIVE r",
+                "recursiveunion_no_gpu_kernel",
+                "recursive_union",
+            ),
+            (
+                "mergejoin_decline",
+                &[10_000, 100_000],
+                "JOIN bench_mergejoin_r",
+                "mergejoin_no_gpu_kernel",
+                "merge_join",
+            ),
+            (
+                "gpu_sort_multikey",
+                &[10_000, 100_000],
+                "ORDER BY key1, key2, id",
+                "sort_multikey_no_gpu_kernel",
+                "sort",
+            ),
+            (
+                "window_full_output_decline",
+                &[10_000, 100_000],
+                "row_number() OVER",
+                "no_gpu_resident_pipeline",
+                "window",
+            ),
+        ];
+
+        for (name, scales, query_fragment, reason, kernel) in cases {
+            let workload = find_workload(name).unwrap_or_else(|| panic!("registered {name}"));
+            assert_eq!(workload.row_scales(), scales, "{name}");
+            assert!(workload.query_sql().contains(query_fragment), "{name}");
+            let entry = benchmark_threshold_matrix_entry(name, scales[0])
+                .unwrap_or_else(|| panic!("threshold metadata for {name}"));
+            assert_eq!(entry.expectation.decline_reason(), Some(reason), "{name}");
+            let metadata = workload_metadata(name).unwrap_or_else(|| panic!("metadata for {name}"));
+            assert_eq!(metadata.kernel_class.as_str(), kernel, "{name}");
+            assert_eq!(
+                metadata.evidence.threshold,
+                registry::ThresholdEvidenceEligibility::NativeDeclineOnly,
+                "{name}"
+            );
+        }
+
+        let merge = find_workload("mergejoin_decline").expect("merge workload");
+        assert_eq!(
+            merge.pre_query_sql(),
+            ["SET enable_hashjoin = off", "SET enable_nestloop = off"]
+        );
+        let multikey = find_workload("gpu_sort_multikey").expect("multikey workload");
+        assert!(!multikey.query_sql().contains("LIMIT"));
+        assert_eq!(multikey.row_scales(), &[10_000, 100_000]);
+        let window = find_workload("window_full_output_decline").expect("window workload");
+        assert_eq!(window.row_scales(), &[10_000, 100_000]);
+        assert!(window.query_sql().trim_start().starts_with("SELECT"));
+        assert!(!window.query_sql().contains("SELECT count("));
     }
 
     #[test]

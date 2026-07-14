@@ -1,5 +1,7 @@
 use super::Workload;
 
+const GPU_SORT_MULTIKEY_ROW_SCALES: &[usize] = &[10_000, 100_000];
+
 /// Tests GPU sort with composite (multi-key) ORDER BY on wide rows.
 pub struct GpuSortMultikey;
 
@@ -55,7 +57,11 @@ impl Workload for GpuSortMultikey {
     }
 
     fn query_sql(&self) -> String {
-        "SELECT * FROM bench_sort_multi ORDER BY key1, key2, id LIMIT 1000".to_owned()
+        "SELECT * FROM bench_sort_multi ORDER BY key1, key2, id".to_owned()
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        GPU_SORT_MULTIKEY_ROW_SCALES
     }
 
     fn cleanup_sql(&self) -> Vec<String> {

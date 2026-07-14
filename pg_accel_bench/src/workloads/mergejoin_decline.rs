@@ -44,6 +44,13 @@ impl Workload for MergeJoinDecline {
             .to_owned()
     }
 
+    fn pre_query_sql(&self) -> Vec<String> {
+        vec![
+            "SET enable_hashjoin = off".to_owned(),
+            "SET enable_nestloop = off".to_owned(),
+        ]
+    }
+
     fn row_scales(&self) -> &'static [usize] {
         MERGEJOIN_DECLINE_ROW_SCALES
     }

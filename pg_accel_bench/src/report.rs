@@ -30,8 +30,9 @@ const FUNCTION_SRF_GPU_FUNCTIONS: &[&str] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclineReasonSource {
-    /// Sourced from `pg_accel_last_planner_rejection_reason()` — the planner
-    /// itself reported why it declined. This is confirmed evidence.
+    /// Sourced from a positive reset-session
+    /// `pg_accel_planner_rejection_count(reason)` value. This is confirmed
+    /// planner evidence.
     PlannerReported,
     /// The static benchmark-threshold matrix expected a decline (no Custom
     /// Scan appeared) but the planner surfaced no reason. Unconfirmed: the
@@ -2311,9 +2312,9 @@ fn gpu_winner_evidence_verified(
 
 /// Whether native-decline evidence for this row is *verified* — i.e. safe to
 /// pass a ship gate. Reads `WorkloadResult::native_decline_evidence` only:
-/// only `DeclineReasonSource::PlannerReported` (a real
-/// `pg_accel_last_planner_rejection_reason()` decline captured by the
-/// runner) counts as verified. `DeclineReasonSource::ExpectedUnconfirmed`
+/// only `DeclineReasonSource::PlannerReported` (a real planner decline backed
+/// by a positive reset-session per-reason counter captured by the runner)
+/// counts as verified. `DeclineReasonSource::ExpectedUnconfirmed`
 /// (the static benchmark-threshold matrix expected a decline but the
 /// planner surfaced no reason) must never pass — the report renders it as
 /// "expected, unconfirmed" instead (see `native_decline_evidence_label`).
@@ -6538,6 +6539,53 @@ mod tests {
                 .to_markdown()
                 .contains("### Benchmark Ship Gate Failures")
         );
+    }
+
+    #[test]
+    fn test_phase9_structural_decline_cells_require_planner_confirmation() {
+        for (name, rows, reason) in [
+            ("setop_intersect_decline", 10_000, "setop_no_gpu_kernel"),
+            (
+                "recursive_union_decline",
+                10_000,
+                "recursiveunion_no_gpu_kernel",
+            ),
+            ("mergejoin_decline", 10_000, "mergejoin_no_gpu_kernel"),
+            ("gpu_sort_multikey", 10_000, "sort_multikey_no_gpu_kernel"),
+            (
+                "window_full_output_decline",
+                10_000,
+                "no_gpu_resident_pipeline",
+            ),
+        ] {
+            let mut workload = mark_no_dispatch(
+                mock_workload_result(name, rows, 10.0, 10.0),
+                "PostgreSQL native plan",
+                "PostgreSQL native plan",
+            );
+            workload.native_decline_evidence = Some(NativeDeclineEvidence {
+                reason: reason.to_owned(),
+                source: DeclineReasonSource::ExpectedUnconfirmed,
+            });
+            let failures = mock_report(vec![workload.clone()]).evaluate_benchmark_ship_gate();
+            assert_eq!(failures.len(), 1, "{name}");
+            assert_eq!(
+                failures[0].kind,
+                BenchmarkShipGateFailureKind::NativeDeclineReasonMissing,
+                "{name}"
+            );
+
+            workload.native_decline_evidence = Some(NativeDeclineEvidence {
+                reason: reason.to_owned(),
+                source: DeclineReasonSource::PlannerReported,
+            });
+            assert!(
+                mock_report(vec![workload])
+                    .evaluate_benchmark_ship_gate()
+                    .is_empty(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
