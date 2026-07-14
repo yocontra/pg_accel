@@ -8,13 +8,15 @@ use std::time::Instant;
 use pgrx::pg_sys;
 
 use super::artifact::{
-    ArtifactKeyInput, DescriptorAggArtifact, artifact_column_refs, prepare_agg_artifact,
+    ArtifactKeyInput, DescriptorAggArtifact, H3ParentArtifact, artifact_column_refs,
+    prepare_agg_artifact,
 };
 use super::output::DescriptorAggOutput;
 use crate::engine::residency::{
-    ArtifactEnsureOutcome, DerivedArtifactIdentity, ResidentColumnRef, ResidentColumnView,
-    ResidentLoadError, ResidentRelationEvidence, ResolvedDerivedInputs, SelectedRelation,
-    ensure_derived_artifact, ensure_selected_relations, with_derived_artifact_inputs,
+    ArtifactEnsureOutcome, DerivedArtifactIdentity, ResidentByteAccounting, ResidentColumnRef,
+    ResidentColumnView, ResidentLoadError, ResidentRelationEvidence, ResolvedDerivedInputs,
+    SelectedRelation, ensure_derived_artifact, ensure_device_derived_artifact,
+    ensure_selected_relations, with_derived_artifact_inputs,
 };
 use crate::engine::spec::abi;
 use crate::engine::spec::{
@@ -177,6 +179,83 @@ fn validate_measure_outputs(
     }
 }
 
+fn h3_parent_group(spec: &AggQuerySpec) -> Option<(ColumnRef, i32, u32)> {
+    let [key] = spec.group_keys.as_slice() else {
+        return None;
+    };
+    let GroupKeySource::H3CellToParent { cell, resolution } = key.source else {
+        return None;
+    };
+    Some((cell, resolution, key.type_oid))
+}
+
+fn validate_h3_runtime_capability(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+) -> Result<(), String> {
+    let Some((cell, resolution, result_type_oid)) = h3_parent_group(spec) else {
+        return Err("only one H3 cell-to-parent group key is supported".to_owned());
+    };
+    if cell.relation_oid != spec.fact_rel
+        || cell.type_oid != result_type_oid
+        || !(0..=15).contains(&resolution)
+        || spec.group_keys[0].encoding != GroupKeyEncoding::Hash
+        || spec.group_keys[0].collation_oid != 0
+    {
+        return Err("H3 parent group key metadata is not canonical".to_owned());
+    }
+    if !spec.star_dims.is_empty()
+        || !matches!(spec.fact_filter, FilterSpec::None)
+        || spec.having.is_some()
+    {
+        return Err("H3 parent grouping does not support joins, filters, or HAVING".to_owned());
+    }
+    let [measure] = spec.measures.as_slice() else {
+        return Err("H3 parent grouping requires exactly one COUNT(*) measure".to_owned());
+    };
+    if !matches!(measure.expression, MeasureExpr::CountStar)
+        || !matches!(measure.filter, FilterSpec::None)
+        || measure.outputs.len() != 1
+        || measure.outputs[0].source != AggregateSource::Value
+        || measure.outputs[0].kind != AggregateKind::Count
+    {
+        return Err("H3 parent grouping requires exactly one unfiltered COUNT(*)".to_owned());
+    }
+    if projection.slots.len() != 2
+        || projection
+            .slots
+            .iter()
+            .filter(|slot| {
+                matches!(
+                    slot.source,
+                    crate::engine::spec::AggOutputSource::GroupKey { key_index: 0 }
+                )
+            })
+            .count()
+            != 1
+        || projection
+            .slots
+            .iter()
+            .filter(|slot| {
+                matches!(
+                    slot.source,
+                    crate::engine::spec::AggOutputSource::Aggregate {
+                        measure_index: 0,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    }
+                )
+            })
+            .count()
+            != 1
+    {
+        return Err(
+            "H3 parent grouping projection must contain its key and COUNT(*) once".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn validate_runtime_capability(
     spec: &AggQuerySpec,
     projection: &AggOutputProjection,
@@ -186,6 +265,14 @@ pub(super) fn validate_runtime_capability(
     projection
         .validate(spec)
         .map_err(|error| format!("invalid aggregate output projection: {error}"))?;
+    if spec.group_keys.iter().any(|key| {
+        matches!(
+            key.source,
+            GroupKeySource::H3CellToParent { .. } | GroupKeySource::H3LatLngToCell { .. }
+        )
+    }) {
+        return validate_h3_runtime_capability(spec, projection);
+    }
     if spec.having.is_some() {
         return Err("HAVING is not implemented by the Phase 5D descriptor executor".into());
     }
@@ -322,9 +409,30 @@ fn validate_catalog_contract(
                 group_column: column,
                 ..
             } => validate_column(column, key.collation_oid)?,
-            GroupKeySource::Expression { .. }
-            | GroupKeySource::H3CellToParent { .. }
-            | GroupKeySource::H3LatLngToCell { .. } => -1,
+            GroupKeySource::H3CellToParent { cell, .. } => {
+                let typmod = validate_column(cell, 0)?;
+                if typmod != -1 || cell.type_oid != key.type_oid || key.collation_oid != 0 {
+                    return Err("H3 parent column/result catalog metadata is not canonical".into());
+                }
+                // SAFETY: executor Begin runs on PostgreSQL's main backend thread.
+                let catalog = unsafe { crate::engine::ffi::syscache::resolve_h3_catalog() }?;
+                if u32::from(catalog.type_oid) != key.type_oid {
+                    return Err(format!(
+                        "planned H3 type OID {} is not the canonical h3index OID {}",
+                        key.type_oid,
+                        u32::from(catalog.type_oid)
+                    ));
+                }
+                // SAFETY: both OIDs were resolved from the canonical catalog proof.
+                unsafe {
+                    crate::engine::ffi::syscache::validate_h3_parent_function(
+                        catalog.parent_fn_oid,
+                        catalog.type_oid,
+                    )
+                }?;
+                typmod
+            }
+            GroupKeySource::Expression { .. } | GroupKeySource::H3LatLngToCell { .. } => -1,
         };
         key_typmods.push(typmod);
     }
@@ -475,6 +583,9 @@ fn dispatch_column_refs(spec: &AggQuerySpec) -> Result<Vec<ResidentColumnRef>, S
             }
         }
     }
+    if let Some((cell, ..)) = h3_parent_group(spec) {
+        insert(cell)?;
+    }
     if let FilterSpec::Ranges { input, .. } = &spec.fact_filter {
         insert(*input)?;
     }
@@ -501,6 +612,16 @@ fn dependency_relids(spec: &AggQuerySpec) -> Vec<pg_sys::Oid> {
 }
 
 /// Begin-time plan for a generic childless aggregate.
+#[derive(Debug, Clone, Copy)]
+enum DescriptorArtifactKind {
+    Dense,
+    H3Parent {
+        cell: ColumnRef,
+        resolution: i32,
+        max_chunk_rows: usize,
+    },
+}
+
 pub(super) struct DescriptorAggPlan {
     spec: AggQuerySpec,
     projection: AggOutputProjection,
@@ -510,6 +631,7 @@ pub(super) struct DescriptorAggPlan {
     artifact_columns: Vec<ResidentColumnRef>,
     dispatch_columns: Vec<ResidentColumnRef>,
     max_groups: usize,
+    artifact_kind: DescriptorArtifactKind,
 }
 
 pub(super) struct DescriptorResidencyReport {
@@ -563,6 +685,43 @@ impl DescriptorResidencyReport {
     }
 }
 
+fn h3_group_capacity(
+    fact_rows: usize,
+    resolution: i32,
+    max_groups: usize,
+) -> Result<usize, String> {
+    let resolution = u32::try_from(resolution)
+        .ok()
+        .filter(|resolution| *resolution <= 15)
+        .ok_or_else(|| "H3 parent resolution is outside 0..=15".to_owned())?;
+    let possible_nonnull = 7_usize
+        .checked_pow(resolution)
+        .and_then(|cells| cells.checked_mul(120))
+        .and_then(|cells| cells.checked_add(2))
+        .ok_or_else(|| "H3 group bound overflows usize".to_owned())?;
+    let possible_with_null = possible_nonnull
+        .checked_add(1)
+        .ok_or_else(|| "H3 NULL group bound overflows usize".to_owned())?;
+    let kernel_max_groups = 1_usize << 30;
+    Ok(fact_rows
+        .max(1)
+        .min(possible_with_null)
+        .min(max_groups.min(kernel_max_groups))
+        .max(1))
+}
+
+fn selected_fact_rows(
+    selected: &[ResidentRelationEvidence],
+    fact_rel: u32,
+) -> Result<usize, String> {
+    let rows = selected
+        .iter()
+        .find(|evidence| u32::from(evidence.relid) == fact_rel)
+        .ok_or_else(|| format!("resident evidence is missing fact relation OID {fact_rel}"))?
+        .row_count;
+    usize::try_from(rows).map_err(|_| format!("fact row count {rows} exceeds usize"))
+}
+
 impl DescriptorAggPlan {
     pub(super) fn new(spec: AggQuerySpec, projection: AggOutputProjection) -> Result<Self, String> {
         validate_runtime_capability(&spec, &projection)?;
@@ -575,10 +734,27 @@ impl DescriptorAggPlan {
                 .encode_i32(&spec)
                 .map_err(|error| format!("could not encode aggregate projection: {error}"))?,
         );
+        if let Some((cell, _, result_type_oid)) = h3_parent_group(&spec) {
+            // SAFETY: executor Begin runs on PostgreSQL's main backend thread.
+            let catalog = unsafe { crate::engine::ffi::syscache::resolve_h3_catalog() }?;
+            if u32::from(catalog.type_oid) != cell.type_oid || cell.type_oid != result_type_oid {
+                return Err("H3 catalog identity changed after validation".to_owned());
+            }
+            identity_words.extend(catalog.fingerprint_words);
+        }
         let selected = selected_relations(&spec)?;
         let dependencies = dependency_relids(&spec);
         let artifact_columns = artifact_column_refs(&spec)?;
         let dispatch_columns = dispatch_column_refs(&spec)?;
+        let limits = crate::engine::cost::device_limits();
+        let artifact_kind = h3_parent_group(&spec).map_or(
+            DescriptorArtifactKind::Dense,
+            |(cell, resolution, _)| DescriptorArtifactKind::H3Parent {
+                cell,
+                resolution,
+                max_chunk_rows: limits.gpu_h3_max_chunk_rows,
+            },
+        );
         Ok(Self {
             spec,
             projection,
@@ -587,7 +763,8 @@ impl DescriptorAggPlan {
             dependencies,
             artifact_columns,
             dispatch_columns,
-            max_groups: crate::engine::cost::device_limits().gpu_hash_agg_max_groups,
+            max_groups: limits.gpu_hash_agg_max_groups,
+            artifact_kind,
         })
     }
 
@@ -603,24 +780,144 @@ impl DescriptorAggPlan {
         let preparation_started = Instant::now();
         let selected =
             ensure_selected_relations(&self.selected).map_err(|error| error.to_string())?;
-        let artifact_outcome = ensure_derived_artifact(
-            pg_sys::Oid::from(self.spec.fact_rel),
-            &self.identity,
-            &self.dependencies,
-            &self.artifact_columns,
-            |bundle| {
-                prepare_agg_artifact(&self.spec, &self.artifact_columns, bundle, self.max_groups)
-            },
-            DescriptorAggArtifact::build,
-        )
-        .map_err(|error| error.to_string())?;
-        let (relations, artifact_bytes) = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
-            pg_sys::Oid::from(self.spec.fact_rel),
-            &self.identity,
-            &[],
-            |inputs| (inputs.evidence, inputs.device_bytes),
-        )
-        .map_err(|error| error.to_string())?;
+        let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
+        let (artifact_outcome, relations, artifact_bytes) = match self.artifact_kind {
+            DescriptorArtifactKind::Dense => {
+                let outcome = ensure_derived_artifact(
+                    owner_relid,
+                    &self.identity,
+                    &self.dependencies,
+                    &self.artifact_columns,
+                    |bundle| {
+                        prepare_agg_artifact(
+                            &self.spec,
+                            &self.artifact_columns,
+                            bundle,
+                            self.max_groups,
+                        )
+                    },
+                    DescriptorAggArtifact::build,
+                )
+                .map_err(|error| error.to_string())?;
+                let (relations, bytes) = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
+                    owner_relid,
+                    &self.identity,
+                    &[],
+                    |inputs| (inputs.evidence, inputs.device_bytes),
+                )
+                .map_err(|error| error.to_string())?;
+                (outcome, relations, bytes)
+            }
+            DescriptorArtifactKind::H3Parent {
+                cell,
+                resolution,
+                max_chunk_rows,
+            } => {
+                let fact_rows = selected_fact_rows(&selected.evidence, self.spec.fact_rel)?;
+                if fact_rows > u32::MAX as usize {
+                    return Err(format!(
+                        "H3 grouped aggregation row count {fact_rows} exceeds the kernel u32 domain"
+                    ));
+                }
+                let device_bytes = fact_rows
+                    .checked_mul(std::mem::size_of::<u64>())
+                    .and_then(|bytes| u64::try_from(bytes).ok())
+                    .ok_or_else(|| "derived H3 parent byte count overflow".to_owned())?;
+                let group_capacity = h3_group_capacity(fact_rows, resolution, self.max_groups)?;
+                let declared = ResidentByteAccounting {
+                    device_bytes,
+                    retained_host_exact_bytes: 0,
+                };
+                let outcome = ensure_device_derived_artifact(
+                    owner_relid,
+                    &self.identity,
+                    &self.dependencies,
+                    &self.artifact_columns,
+                    declared,
+                    |bundle| {
+                        let view = find_view(&self.artifact_columns, &bundle.columns, cell)?;
+                        let (cells, nulls) = match view {
+                            ResidentColumnView::Empty { type_oid }
+                                if fact_rows == 0 && u32::from(*type_oid) == cell.type_oid =>
+                            {
+                                (std::ptr::null(), std::ptr::null())
+                            }
+                            ResidentColumnView::H3 {
+                                type_oid,
+                                values,
+                                nulls,
+                            } if u32::from(*type_oid) == cell.type_oid
+                                && values.len() == fact_rows =>
+                            {
+                                (values.as_ptr(), null_ptr(*nulls))
+                            }
+                            _ => {
+                                return Err(
+                                    "resident H3 source does not match the planned raw lane"
+                                        .to_owned(),
+                                );
+                            }
+                        };
+                        let parents = if fact_rows == 0 {
+                            None
+                        } else {
+                            Some(
+                                crate::gpu::ExprDeviceBuffer::<u64>::new(fact_rows).ok_or_else(
+                                    || {
+                                        "could not allocate derived H3 parent device lane"
+                                            .to_owned()
+                                    },
+                                )?,
+                            )
+                        };
+                        if fact_rows != 0 {
+                            if max_chunk_rows == 0 {
+                                return Err("H3 device chunk limit is zero".to_owned());
+                            }
+                            let output = parents.as_ref().ok_or_else(|| {
+                                "nonempty H3 parent artifact has no output".to_owned()
+                            })?;
+                            for offset in (0..fact_rows).step_by(max_chunk_rows) {
+                                let count = (fact_rows - offset).min(max_chunk_rows);
+                                // SAFETY: the matched resident/output buffers each have
+                                // `fact_rows` elements and this chunk stays in bounds.
+                                let chunk_cells = unsafe { cells.add(offset) };
+                                let chunk_nulls = if nulls.is_null() {
+                                    std::ptr::null()
+                                } else {
+                                    // SAFETY: the resident NULL sidecar has one byte per row.
+                                    unsafe { nulls.add(offset) }
+                                };
+                                // SAFETY: output has `fact_rows` u64 elements.
+                                let chunk_parents = unsafe { output.as_mut_ptr().add(offset) };
+                                // SAFETY: all pointers/counts were bounded above and the
+                                // synchronous call cannot outlive the residency borrow.
+                                unsafe {
+                                    crate::gpu::h3_cell_to_parent_resident(
+                                        chunk_cells,
+                                        chunk_nulls,
+                                        count,
+                                        resolution,
+                                        chunk_parents,
+                                    )
+                                }
+                                .map_err(|error| error.to_string())?;
+                            }
+                        }
+                        H3ParentArtifact::new(self.spec.clone(), fact_rows, group_capacity, parents)
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                let (relations, bytes) = with_derived_artifact_inputs::<H3ParentArtifact, _>(
+                    owner_relid,
+                    &self.identity,
+                    &[],
+                    |inputs| (inputs.evidence, inputs.device_bytes),
+                )
+                .map_err(|error| error.to_string())?;
+                (outcome, relations, bytes)
+            }
+        };
         Ok(DescriptorResidencyReport {
             artifact_outcome,
             relations,
@@ -635,12 +932,26 @@ impl DescriptorAggPlan {
     fn execute_once(
         &self,
     ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
-        with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
-            pg_sys::Oid::from(self.spec.fact_rel),
-            &self.identity,
-            &self.dispatch_columns,
-            |inputs| build_and_execute(inputs, &self.dispatch_columns, &self.projection),
-        )
+        match self.artifact_kind {
+            DescriptorArtifactKind::Dense => {
+                with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
+                    pg_sys::Oid::from(self.spec.fact_rel),
+                    &self.identity,
+                    &self.dispatch_columns,
+                    |inputs| build_and_execute(inputs, &self.dispatch_columns, &self.projection),
+                )
+            }
+            DescriptorArtifactKind::H3Parent { cell, .. } => {
+                with_derived_artifact_inputs::<H3ParentArtifact, _>(
+                    pg_sys::Oid::from(self.spec.fact_rel),
+                    &self.identity,
+                    &self.dispatch_columns,
+                    |inputs| {
+                        build_and_execute_h3(inputs, &self.dispatch_columns, cell, &self.projection)
+                    },
+                )
+            }
+        }
     }
 
     pub(super) fn execute(&self) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
@@ -1108,6 +1419,86 @@ fn build_descriptor(
     Ok(desc)
 }
 
+fn build_h3_descriptor(
+    artifact: &H3ParentArtifact,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+    cell: ColumnRef,
+) -> Result<abi::PgaccelGroupedAggDesc, String> {
+    let source = find_view(requests, views, cell)?;
+    let source_nulls = match source {
+        ResidentColumnView::Empty { type_oid }
+            if artifact.fact_rows == 0 && u32::from(*type_oid) == cell.type_oid =>
+        {
+            std::ptr::null()
+        }
+        ResidentColumnView::H3 {
+            type_oid,
+            values,
+            nulls,
+        } if u32::from(*type_oid) == cell.type_oid && values.len() == artifact.fact_rows => {
+            null_ptr(*nulls)
+        }
+        _ => {
+            return Err("H3 descriptor source is not the planned resident h3index lane".to_owned());
+        }
+    };
+    if artifact
+        .parents
+        .as_ref()
+        .map_or(0, crate::gpu::ExprDeviceBuffer::len)
+        != artifact.fact_rows
+    {
+        return Err("H3 parent artifact length changed before dispatch".to_owned());
+    }
+
+    // SAFETY: all-zero is canonical for every inactive ABI slot.
+    let mut desc: abi::PgaccelGroupedAggDesc = unsafe { std::mem::zeroed() };
+    desc.abi_version = abi::PGACCEL_OLAP_ABI_VERSION;
+    desc.size_bytes = std::mem::size_of::<abi::PgaccelGroupedAggDesc>() as u32;
+    desc.row_count = artifact.fact_rows;
+    desc.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+    desc.output_mode = abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+    desc.key_count = 1;
+    desc.group_capacity = artifact.group_capacity;
+    desc.keys[0] = abi::PgaccelGroupedAggKey {
+        values: PgaccelExprUsmCol {
+            values: artifact
+                .parents
+                .as_ref()
+                .map_or(std::ptr::null(), |parents| {
+                    parents.as_ptr().cast::<c_void>()
+                }),
+            nulls: source_nulls,
+            tag: PgaccelValTag::Int64,
+        },
+        lookup_by_key: std::ptr::null(),
+        source: abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT,
+        code_min: 0,
+        cardinality: 0,
+        null_code: abi::PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE,
+        flags: 0,
+        pad0: 0,
+    };
+    desc.measure_count = 1;
+    desc.measures[0] = abi::PgaccelGroupedAggMeasure {
+        // SAFETY: COUNT(*) has no input columns.
+        value: unsafe { std::mem::zeroed() },
+        rhs: unsafe { std::mem::zeroed() },
+        op: abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR,
+        agg_mask: abi::PGACCEL_GROUPED_AGG_LANE_COUNT,
+        accumulator_kind: abi::PGACCEL_GROUPED_AGG_ACCUM_I64,
+        state_bytes: 8,
+        flags: 0,
+        pad0: 0,
+    };
+    desc.where_filter = disabled_filter();
+    for filter in &mut desc.measure_filters {
+        *filter = disabled_filter();
+    }
+    Ok(desc)
+}
+
 fn build_and_execute(
     inputs: ResolvedDerivedInputs<'_, DescriptorAggArtifact>,
     requests: &[ResidentColumnRef],
@@ -1141,6 +1532,121 @@ fn build_and_execute(
         dispatch_time_us,
         residency: None,
     })
+}
+
+fn build_and_execute_h3(
+    inputs: ResolvedDerivedInputs<'_, H3ParentArtifact>,
+    requests: &[ResidentColumnRef],
+    cell: ColumnRef,
+    projection: &AggOutputProjection,
+) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
+    let desc = build_h3_descriptor(inputs.artifact, requests, &inputs.columns, cell)
+        .map_err(DescriptorAggExecutionError::Failure)?;
+    // SAFETY: every active pointer remains pinned by the residency callback
+    // through the synchronous grouped-aggregate lifecycle below.
+    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
+        .map_err(|error| gpu_execution_error("H3 grouped descriptor rejected", error))?;
+    let mut storage = GroupedAggOutputStorage::new(&plan)
+        .map_err(|error| gpu_execution_error("H3 grouped output allocation failed", error))?;
+    let dispatch_started = Instant::now();
+    let outcome = execute_grouped_agg_one_shot(&plan, &mut storage)
+        .map_err(|error| gpu_execution_error("H3 grouped kernel failed", error))?;
+    validate_h3_compact_outcome(outcome, &storage, inputs.artifact.fact_rows)
+        .map_err(DescriptorAggExecutionError::Failure)?;
+    let dispatch_time_us =
+        u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let output = DescriptorAggOutput::new(
+        storage,
+        outcome,
+        std::rc::Rc::from(Vec::<super::artifact::GroupDomain>::new()),
+        inputs.artifact.resolved_spec.clone(),
+        projection.clone(),
+    )
+    .map_err(DescriptorAggExecutionError::Failure)?;
+    Ok(DescriptorAggDispatch {
+        output,
+        fact_rows: inputs.artifact.fact_rows,
+        dispatch_time_us,
+        residency: None,
+    })
+}
+
+fn validate_h3_compact_outcome(
+    outcome: GroupedAggOutcome,
+    storage: &GroupedAggOutputStorage,
+    fact_rows: usize,
+) -> Result<(), String> {
+    let result = match outcome {
+        GroupedAggOutcome::Complete(result) => result,
+        GroupedAggOutcome::NeedsRecheck(result) => {
+            return Err(format!(
+                "H3 grouped aggregate returned {} uncertain rows",
+                result.uncertain_count
+            ));
+        }
+    };
+    if result.uncertain_count != 0 {
+        return Err(format!(
+            "complete H3 grouped aggregate contains {} uncertain rows",
+            result.uncertain_count
+        ));
+    }
+    let expected_selected = u64::try_from(fact_rows)
+        .map_err(|_| "H3 fact row count exceeds the u64 result domain".to_owned())?;
+    if result.selected_count != expected_selected {
+        return Err(format!(
+            "H3 grouped aggregate selected {} rows, expected {expected_selected}",
+            result.selected_count
+        ));
+    }
+    if result.emitted_group_count > result.group_capacity {
+        return Err("H3 emitted group count exceeds group capacity".to_owned());
+    }
+    let counts = storage
+        .measure_count(0)
+        .ok_or_else(|| "H3 compact output is missing its COUNT(*) lane".to_owned())?;
+    validate_h3_count_partition(
+        counts,
+        result.group_capacity,
+        result.emitted_group_count,
+        result.selected_count,
+    )
+}
+
+fn validate_h3_count_partition(
+    counts: &[u64],
+    group_capacity: usize,
+    emitted_group_count: usize,
+    selected_count: u64,
+) -> Result<(), String> {
+    if counts.len() != group_capacity {
+        return Err(format!(
+            "H3 COUNT(*) lane has length {}, expected {}",
+            counts.len(),
+            group_capacity
+        ));
+    }
+    if emitted_group_count > group_capacity {
+        return Err("H3 emitted group count exceeds group capacity".to_owned());
+    }
+    let (emitted, unused) = counts.split_at(emitted_group_count);
+    if emitted.contains(&0) {
+        return Err("H3 compact output contains an emitted zero-count group".to_owned());
+    }
+    let counted_rows = emitted.iter().try_fold(0_u64, |total, count| {
+        total
+            .checked_add(*count)
+            .ok_or_else(|| "H3 compact output COUNT(*) sum overflows u64".to_owned())
+    })?;
+    if counted_rows != selected_count {
+        return Err(format!(
+            "H3 compact output counts sum to {counted_rows}, expected {selected_count} selected rows"
+        ));
+    }
+    if unused.iter().any(|count| *count != 0) {
+        return Err("H3 compact output contains nonzero unused COUNT(*) state".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1195,6 +1701,87 @@ mod tests {
             star_dims: Vec::new(),
             having: None,
         }
+    }
+
+    fn h3_count_shape() -> (AggQuerySpec, AggOutputProjection) {
+        const H3OID: u32 = 90_001;
+        let mut spec = spec(MeasureExpr::CountStar, AggregateKind::Count);
+        spec.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::H3CellToParent {
+                cell: column(H3OID),
+                resolution: 7,
+            },
+            type_oid: H3OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        let projection = AggOutputProjection {
+            slots: vec![
+                AggOutputSlot {
+                    source: AggOutputSource::GroupKey { key_index: 0 },
+                    source_type_oid: H3OID,
+                    result_type_oid: H3OID,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: true,
+                },
+                AggOutputSlot {
+                    source: AggOutputSource::Aggregate {
+                        measure_index: 0,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    },
+                    source_type_oid: 0,
+                    result_type_oid: INT8OID,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: false,
+                },
+            ],
+        };
+        (spec, projection)
+    }
+
+    #[test]
+    fn runtime_backstop_accepts_only_exact_h3_parent_count_shape() {
+        let (spec, projection) = h3_count_shape();
+        validate_runtime_capability(&spec, &projection).expect("exact H3 COUNT(*) shape");
+
+        let mut wrong = spec.clone();
+        wrong.measures[0].outputs[0].kind = AggregateKind::Sum;
+        assert!(validate_runtime_capability(&wrong, &projection).is_err());
+
+        let mut wrong = spec;
+        let GroupKeySource::H3CellToParent { resolution, .. } = &mut wrong.group_keys[0].source
+        else {
+            unreachable!()
+        };
+        *resolution = 16;
+        assert!(validate_runtime_capability(&wrong, &projection).is_err());
+    }
+
+    #[test]
+    fn h3_group_capacity_obeys_universe_and_runtime_bounds() {
+        assert_eq!(h3_group_capacity(0, 0, usize::MAX), Ok(1));
+        assert_eq!(h3_group_capacity(1_000, 0, usize::MAX), Ok(123));
+        assert_eq!(h3_group_capacity(7, 15, usize::MAX), Ok(7));
+        assert_eq!(h3_group_capacity(1_000, 15, 19), Ok(19));
+        assert_eq!(
+            h3_group_capacity((1_usize << 30) + 1, 15, usize::MAX),
+            Ok(1_usize << 30)
+        );
+        assert!(h3_group_capacity(1, -1, usize::MAX).is_err());
+        assert!(h3_group_capacity(1, 16, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn h3_count_partition_rejects_invalid_compact_state() {
+        validate_h3_count_partition(&[2, 3, 0], 3, 2, 5)
+            .expect("valid emitted counts with a zero tail");
+        assert!(validate_h3_count_partition(&[2, 0, 0], 3, 2, 2).is_err());
+        assert!(validate_h3_count_partition(&[u64::MAX, 1], 2, 2, u64::MAX).is_err());
+        assert!(validate_h3_count_partition(&[2, 3, 0], 3, 2, 6).is_err());
+        assert!(validate_h3_count_partition(&[2, 3, 1], 3, 2, 5).is_err());
     }
 
     #[test]

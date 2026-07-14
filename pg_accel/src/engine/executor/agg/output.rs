@@ -8,9 +8,9 @@ use pgrx::pg_sys;
 use super::artifact::{GroupDatum, GroupDomain};
 use crate::engine::spec::{
     AggOutputProjection, AggOutputSlot, AggOutputSource, AggQuerySpec, AggregateKind,
-    AggregateSource, GroupKeyEncoding,
+    AggregateSource, GroupKeyEncoding, GroupKeySource,
 };
-use crate::gpu::{GroupedAggOutcome, GroupedAggOutputStorage, GroupedAggStateLane};
+use crate::gpu::{GroupedAggOutcome, GroupedAggOutputStorage, GroupedAggStateLane, PgaccelValTag};
 
 const BOOLOID: u32 = 16;
 const INT8OID: u32 = 20;
@@ -37,10 +37,15 @@ impl MaterializeError {
     }
 }
 
-/// Owns one complete device result and emits its active dense groups.
+enum GroupDecoder {
+    Dense(Rc<[GroupDomain]>),
+    H3Compact { type_oid: u32 },
+}
+
+/// Owns one complete device result and emits its materialized groups.
 pub(super) struct DescriptorAggOutput {
     storage: GroupedAggOutputStorage,
-    domains: Rc<[GroupDomain]>,
+    decoder: GroupDecoder,
     projection: AggOutputProjection,
     active_groups: Vec<usize>,
     cursor: usize,
@@ -73,71 +78,105 @@ impl DescriptorAggOutput {
                 result.uncertain_count
             ));
         }
-        if domains.len() != resolved_spec.group_keys.len() {
-            return Err(format!(
-                "group decoder count {} does not match query key count {}",
-                domains.len(),
-                resolved_spec.group_keys.len()
-            ));
-        }
-
-        let mut expected_capacity = 1_usize;
-        for (key_index, (key, domain)) in resolved_spec
-            .group_keys
-            .iter()
-            .zip(domains.iter())
-            .enumerate()
-        {
-            if key.type_oid != domain.type_oid || key.collation_oid != domain.collation_oid {
+        let compact_h3 = match resolved_spec.group_keys.as_slice() {
+            [key]
+                if key.encoding == GroupKeyEncoding::Hash
+                    && matches!(key.source, GroupKeySource::H3CellToParent { .. }) =>
+            {
+                Some(key.type_oid)
+            }
+            _ => None,
+        };
+        let (decoder, active_groups) = if let Some(type_oid) = compact_h3 {
+            if !domains.is_empty() {
+                return Err("compact H3 output must not carry a host dictionary".to_owned());
+            }
+            if storage.active_groups().is_some() {
+                return Err("compact H3 output unexpectedly returned a dense bitmap".to_owned());
+            }
+            if storage.key_type(0) != Some(PgaccelValTag::Int64 as i32) {
+                return Err(
+                    "compact H3 output key is not an unsigned 64-bit physical lane".to_owned(),
+                );
+            }
+            let key_values = storage
+                .key_values(0)
+                .ok_or_else(|| "compact H3 output key buffer is missing".to_owned())?;
+            validate_h3_compact_key_buffers(
+                key_values,
+                storage.key_nulls(0),
+                result.group_capacity,
+            )?;
+            (
+                GroupDecoder::H3Compact { type_oid },
+                (0..result.emitted_group_count).collect(),
+            )
+        } else {
+            if domains.len() != resolved_spec.group_keys.len() {
                 return Err(format!(
-                    "group decoder {key_index} type/collation does not match the resolved query spec"
+                    "group decoder count {} does not match query key count {}",
+                    domains.len(),
+                    resolved_spec.group_keys.len()
                 ));
             }
-            let domain_cardinality = domain.cardinality()?;
-            match key.encoding {
-                GroupKeyEncoding::DictionaryI32 {
-                    cardinality,
-                    null_code,
-                } if cardinality == domain_cardinality && null_code == domain.null_code => {}
-                _ => {
+            let mut expected_capacity = 1_usize;
+            for (key_index, (key, domain)) in resolved_spec
+                .group_keys
+                .iter()
+                .zip(domains.iter())
+                .enumerate()
+            {
+                if key.type_oid != domain.type_oid || key.collation_oid != domain.collation_oid {
                     return Err(format!(
-                        "group decoder {key_index} does not match its resolved dictionary encoding"
+                        "group decoder {key_index} type/collation does not match the resolved query spec"
                     ));
                 }
+                let domain_cardinality = domain.cardinality()?;
+                match key.encoding {
+                    GroupKeyEncoding::DictionaryI32 {
+                        cardinality,
+                        null_code,
+                    } if cardinality == domain_cardinality && null_code == domain.null_code => {}
+                    _ => {
+                        return Err(format!(
+                            "group decoder {key_index} does not match its resolved dictionary encoding"
+                        ));
+                    }
+                }
+                expected_capacity = expected_capacity
+                    .checked_mul(domain_cardinality as usize)
+                    .ok_or_else(|| "group decoder radix product overflows usize".to_owned())?;
             }
-            expected_capacity = expected_capacity
-                .checked_mul(domain_cardinality as usize)
-                .ok_or_else(|| "group decoder radix product overflows usize".to_owned())?;
-        }
-        if expected_capacity != result.group_capacity {
-            return Err(format!(
-                "group decoder capacity {expected_capacity} does not match kernel capacity {}",
-                result.group_capacity
-            ));
-        }
-
-        let active = storage.active_groups().ok_or_else(|| {
-            "generic grouped aggregate did not return dense active groups".to_owned()
-        })?;
-        if active.len() != result.group_capacity || active.iter().any(|value| *value > 1) {
-            return Err("dense active-group bitmap has an invalid shape/value".to_owned());
-        }
-        let active_groups = active
-            .iter()
-            .enumerate()
-            .filter_map(|(group, active)| (*active != 0).then_some(group))
-            .collect::<Vec<_>>();
-        if active_groups.len() != result.emitted_group_count {
-            return Err(format!(
-                "dense active-group count {} does not match emitted group count {}",
-                active_groups.len(),
-                result.emitted_group_count
-            ));
-        }
+            if expected_capacity != result.group_capacity {
+                return Err(format!(
+                    "group decoder capacity {expected_capacity} does not match kernel capacity {}",
+                    result.group_capacity
+                ));
+            }
+            let active = storage.active_groups().ok_or_else(|| {
+                "generic grouped aggregate did not return dense active groups".to_owned()
+            })?;
+            if active.len() != result.group_capacity || active.iter().any(|value| *value > 1) {
+                return Err("dense active-group bitmap has an invalid shape/value".to_owned());
+            }
+            let active_groups = active
+                .iter()
+                .enumerate()
+                .filter_map(|(group, active)| (*active != 0).then_some(group))
+                .collect::<Vec<_>>();
+            if active_groups.len() != result.emitted_group_count {
+                return Err(format!(
+                    "dense active-group count {} does not match emitted group count {}",
+                    active_groups.len(),
+                    result.emitted_group_count
+                ));
+            }
+            (GroupDecoder::Dense(domains), active_groups)
+        };
 
         Ok(Self {
             storage,
-            domains,
+            decoder,
             projection,
             active_groups,
             cursor: 0,
@@ -186,9 +225,11 @@ impl DescriptorAggOutput {
         }
 
         let group = self.active_groups[self.cursor];
-        let group_codes = decode_group_codes(&self.domains, group).unwrap_or_else(|error| {
-            raise_materialize_error(MaterializeError::invalid(error));
-        });
+        let group_codes = match &self.decoder {
+            GroupDecoder::Dense(domains) => decode_group_codes(domains, group)
+                .unwrap_or_else(|error| raise_materialize_error(MaterializeError::invalid(error))),
+            GroupDecoder::H3Compact { .. } => Vec::new(),
+        };
 
         // SAFETY: caller guarantees result_slot is a valid initialized slot.
         unsafe { pg_sys::ExecClearTuple(result_slot) };
@@ -219,12 +260,23 @@ impl DescriptorAggOutput {
                 let key_index = usize::try_from(key_index).map_err(|_| {
                     MaterializeError::invalid("group-key projection index exceeds usize")
                 })?;
+                if let GroupDecoder::H3Compact { type_oid } = &self.decoder {
+                    if key_index != 0 {
+                        return Err(MaterializeError::invalid(format!(
+                            "compact H3 projection references missing group key {key_index}"
+                        )));
+                    }
+                    return self.h3_group_datum(projection, *type_oid, group);
+                }
                 let code = *group_codes.get(key_index).ok_or_else(|| {
                     MaterializeError::invalid(format!(
                         "projection references missing group key {key_index}"
                     ))
                 })?;
-                let domain = self.domains.get(key_index).ok_or_else(|| {
+                let GroupDecoder::Dense(domains) = &self.decoder else {
+                    unreachable!("compact H3 output returned above")
+                };
+                let domain = domains.get(key_index).ok_or_else(|| {
                     MaterializeError::invalid(format!(
                         "group decoder is missing domain {key_index}"
                     ))
@@ -251,6 +303,28 @@ impl DescriptorAggOutput {
                 )
             }
         }
+    }
+
+    fn h3_group_datum(
+        &self,
+        projection: &AggOutputSlot,
+        type_oid: u32,
+        group: usize,
+    ) -> Result<(pg_sys::Datum, bool), MaterializeError> {
+        if projection.result_type_oid != type_oid
+            || projection.source_type_oid != type_oid
+            || projection.result_typmod != -1
+            || projection.result_collation_oid != 0
+        {
+            return Err(MaterializeError::invalid(
+                "compact H3 projection does not match the catalog-proved h3index type",
+            ));
+        }
+        let values = self
+            .storage
+            .key_values(0)
+            .ok_or_else(|| MaterializeError::invalid("compact H3 key buffer is missing"))?;
+        decode_h3_key(values, self.storage.key_nulls(0), group)
     }
 
     fn aggregate_datum(
@@ -360,6 +434,67 @@ impl DescriptorAggOutput {
             ))),
         }
     }
+}
+
+fn validate_h3_compact_key_buffers(
+    values: &[u8],
+    nulls: Option<&[u8]>,
+    group_capacity: usize,
+) -> Result<(), String> {
+    let expected_key_bytes = group_capacity
+        .checked_mul(std::mem::size_of::<u64>())
+        .ok_or_else(|| "compact H3 key byte count overflows usize".to_owned())?;
+    if values.len() != expected_key_bytes {
+        return Err("compact H3 output key buffer has an invalid shape".to_owned());
+    }
+    let Some(nulls) = nulls else {
+        return Ok(());
+    };
+    if nulls.len() != group_capacity || nulls.iter().any(|value| *value > 1) {
+        return Err("compact H3 output NULL sidecar has an invalid shape/value".to_owned());
+    }
+    if nulls
+        .iter()
+        .zip(values.chunks_exact(std::mem::size_of::<u64>()))
+        .any(|(is_null, payload)| *is_null == 1 && payload.iter().any(|byte| *byte != 0))
+    {
+        return Err("compact H3 NULL key payload is not canonical zero".to_owned());
+    }
+    Ok(())
+}
+
+fn decode_h3_key(
+    values: &[u8],
+    nulls: Option<&[u8]>,
+    group: usize,
+) -> Result<(pg_sys::Datum, bool), MaterializeError> {
+    if let Some(nulls) = nulls {
+        match nulls.get(group).copied() {
+            Some(1) => return Ok((pg_sys::Datum::from(0_usize), true)),
+            Some(0) => {}
+            Some(value) => {
+                return Err(MaterializeError::invalid(format!(
+                    "compact H3 NULL sidecar contains noncanonical value {value}"
+                )));
+            }
+            None => {
+                return Err(MaterializeError::invalid(
+                    "compact H3 NULL sidecar is shorter than emitted groups",
+                ));
+            }
+        }
+    }
+    let offset = group
+        .checked_mul(std::mem::size_of::<u64>())
+        .ok_or_else(|| MaterializeError::invalid("compact H3 key offset overflow"))?;
+    let end = offset
+        .checked_add(std::mem::size_of::<u64>())
+        .ok_or_else(|| MaterializeError::invalid("compact H3 key end overflow"))?;
+    let bytes: [u8; 8] = values
+        .get(offset..end)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| MaterializeError::invalid("compact H3 key index is out of bounds"))?;
+    Ok((pg_sys::Datum::from(u64::from_ne_bytes(bytes)), false))
 }
 
 fn decode_group_codes(domains: &[GroupDomain], group: usize) -> Result<Vec<i32>, String> {
@@ -524,5 +659,44 @@ mod tests {
     fn zero_key_global_group_has_one_decoder_value() {
         assert_eq!(decode_group_codes(&[], 0), Ok(Vec::new()));
         assert!(decode_group_codes(&[], 1).is_err());
+    }
+
+    #[test]
+    fn h3_decoder_roundtrips_unsigned_high_bits() {
+        let mut values = Vec::new();
+        values.extend_from_slice(&(1_u64 << 63).to_ne_bytes());
+        values.extend_from_slice(&u64::MAX.to_ne_bytes());
+
+        for (group, expected) in [(0, 1_u64 << 63), (1, u64::MAX)] {
+            let (datum, is_null) =
+                decode_h3_key(&values, None, group).expect("valid compact H3 key");
+            assert!(!is_null);
+            assert_eq!(datum.value() as u64, expected);
+        }
+    }
+
+    #[test]
+    fn h3_decoder_honors_sql_null_before_payload() {
+        let (datum, is_null) =
+            decode_h3_key(&u64::MAX.to_ne_bytes(), Some(&[1]), 0).expect("canonical NULL marker");
+        assert!(is_null);
+        assert_eq!(datum.value(), 0);
+    }
+
+    #[test]
+    fn h3_decoder_rejects_noncanonical_null_byte() {
+        assert!(decode_h3_key(&0_u64.to_ne_bytes(), Some(&[2]), 0).is_err());
+    }
+
+    #[test]
+    fn h3_decoder_rejects_short_key_and_null_buffers() {
+        assert!(decode_h3_key(&[0; 7], None, 0).is_err());
+        assert!(decode_h3_key(&0_u64.to_ne_bytes(), Some(&[]), 0).is_err());
+    }
+
+    #[test]
+    fn h3_compact_boundary_requires_zero_null_payload() {
+        assert!(validate_h3_compact_key_buffers(&0_u64.to_ne_bytes(), Some(&[1]), 1).is_ok());
+        assert!(validate_h3_compact_key_buffers(&u64::MAX.to_ne_bytes(), Some(&[1]), 1).is_err());
     }
 }
