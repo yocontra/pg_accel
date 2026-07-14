@@ -1066,7 +1066,7 @@ mod h3_tests {
         let mut invalid = valid.clone();
         invalid.typelem = oid(23);
         assert!(validate_h3_type_shape(&invalid, invalid.schema_oid).is_err());
-        let mut invalid = valid.clone();
+        let mut invalid = valid;
         invalid.typcollation = oid(100);
         assert!(validate_h3_type_shape(&invalid, invalid.schema_oid).is_err());
     }
@@ -1103,7 +1103,7 @@ mod h3_tests {
         let mut invalid = valid.clone();
         invalid.security_definer = true;
         assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
-        let mut invalid = valid.clone();
+        let mut invalid = valid;
         invalid.support_function = oid(50_003);
         assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
     }
@@ -1115,7 +1115,7 @@ mod h3_tests {
             validate_h3_equality_function_shape(&function, function.schema_oid, oid(50_001)),
             Ok(())
         );
-        let mut invalid_function = function.clone();
+        let mut invalid_function = function;
         invalid_function.source = H3_PARENT_FUNCTION_NAME.to_owned();
         assert!(
             validate_h3_equality_function_shape(

@@ -1089,9 +1089,10 @@ fn h3_grouping_uses_its_device_floor_and_resident_transform_cost() {
             required: crate::engine::cost::Rows::new(100),
         }
     );
-    let expected_aggregate = 99.0 * limits.gpu_op_cost_hash_agg
-        + 99.0 * limits.gpu_op_cost_h3_parent_resident
-        + crate::engine::cost::GPU_LAUNCH_OVERHEAD;
+    let expected_aggregate = 99.0_f64.mul_add(
+        limits.gpu_op_cost_hash_agg,
+        99.0 * limits.gpu_op_cost_h3_parent_resident,
+    ) + crate::engine::cost::GPU_LAUNCH_OVERHEAD;
     assert!((plan.cost.aggregate.get() - expected_aggregate).abs() < 1.0e-12);
     let observed_per_row =
         (plan.cost.aggregate.get() - crate::engine::cost::GPU_LAUNCH_OVERHEAD) / 99.0;
@@ -1113,7 +1114,10 @@ fn h3_parent_cost_charges_each_transform_chunk_launch() {
     limits.gpu_hash_agg_min_rows = 1;
     limits.gpu_h3_max_chunk_rows = 100;
     let per_row_cost = |rows: f64| {
-        rows * limits.gpu_op_cost_hash_agg + rows * limits.gpu_op_cost_h3_parent_resident
+        rows.mul_add(
+            limits.gpu_op_cost_hash_agg,
+            rows * limits.gpu_op_cost_h3_parent_resident,
+        )
     };
 
     let at_boundary = build_shape(
@@ -1129,7 +1133,10 @@ fn h3_parent_cost_charges_each_transform_chunk_launch() {
         &TypedCostModel::from_limits(&limits),
     )
     .expect("a partial second H3 transform chunk should build");
-    let expected = per_row_cost(101.0) + 2.0 * crate::engine::cost::GPU_LAUNCH_OVERHEAD;
+    let expected = 2.0_f64.mul_add(
+        crate::engine::cost::GPU_LAUNCH_OVERHEAD,
+        per_row_cost(101.0),
+    );
     assert!((over_boundary.cost.aggregate.get() - expected).abs() < 1.0e-12);
 }
 
@@ -1190,8 +1197,10 @@ fn h3_parent_output_cost_caps_postgres_group_estimate_to_exact_universe() {
     // Reproduce the PG18 admission miss: the raw expression-group estimate
     // alone exceeded the required native-path margin before applying the bound.
     let required_cost = 22_879.0 * limits.gpu_agg_cost_ratio;
-    let unbounded_total =
-        plan.cost.total.get() - bounded_output_cost + 1_000_000.0 * limits.preagg_yield_cost;
+    let unbounded_total = 1_000_000.0_f64.mul_add(
+        limits.preagg_yield_cost,
+        plan.cost.total.get() - bounded_output_cost,
+    );
     assert!(unbounded_total > required_cost);
     assert!(
         crate::engine::cost::GPU_LAUNCH_OVERHEAD + plan.cost.total.get() <= required_cost,
