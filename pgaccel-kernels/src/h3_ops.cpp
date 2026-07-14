@@ -1018,16 +1018,26 @@ class H3ResidentStatusOwner {
 class H3CellToParentResidentValidateKernel;
 class H3CellToParentResidentTransformKernel;
 
-extern "C" pgaccel_status pgaccel_h3_cell_to_parent_resident(const uint64_t* cells,
-                                                             const uint8_t* nulls, size_t count,
-                                                             int32_t parent_res,
-                                                             uint64_t* parents) try {
-  if (parent_res < 0 || parent_res > H3_MAX_RESOLUTION)
+static constexpr uint32_t H3_RESIDENT_FAILURE_CONTRACT = 1u << 0;
+static constexpr uint32_t H3_RESIDENT_FAILURE_INVALID_CELL = 1u << 1;
+static constexpr uint32_t H3_RESIDENT_FAILURE_RES_MISMATCH = 1u << 2;
+
+extern "C" pgaccel_status
+pgaccel_h3_cell_to_parent_resident_ex(const uint64_t* cells, const uint8_t* nulls, size_t count,
+                                      int32_t parent_res, uint64_t* parents, int32_t* detail) try {
+  if (detail == nullptr)
     return PGACCEL_INVALID_ARGUMENT;
+  *detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  if (parent_res < 0 || parent_res > H3_MAX_RESOLUTION) {
+    *detail = PGACCEL_H3_PARENT_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
   if (count == 0)
     return PGACCEL_OK;
-  if (cells == nullptr || parents == nullptr)
+  if (cells == nullptr || parents == nullptr) {
+    *detail = PGACCEL_H3_PARENT_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
+  }
 
   H3ResidentSpan cells_span{};
   H3ResidentSpan parents_span{};
@@ -1037,40 +1047,53 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_resident(const uint64_t* cel
       h3_spans_overlap(cells_span, parents_span) ||
       (nulls != nullptr &&
        (!h3_resident_span(nulls, count, sizeof(uint8_t), &nulls_span) ||
-        h3_spans_overlap(nulls_span, cells_span) || h3_spans_overlap(nulls_span, parents_span))))
+        h3_spans_overlap(nulls_span, cells_span) || h3_spans_overlap(nulls_span, parents_span)))) {
+    *detail = PGACCEL_H3_PARENT_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
+  }
 
   sycl::queue& queue = get_queue();
   if (!h3_current_device_pointer(queue, cells) || !h3_current_device_pointer(queue, parents) ||
-      (nulls != nullptr && !h3_current_device_pointer(queue, nulls)))
+      (nulls != nullptr && !h3_current_device_pointer(queue, nulls))) {
+    *detail = PGACCEL_H3_PARENT_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
+  }
 
-  uint32_t* invalid = sycl::malloc_shared<uint32_t>(1, queue);
-  if (invalid == nullptr)
+  uint32_t* failure_flags = sycl::malloc_shared<uint32_t>(1, queue);
+  if (failure_flags == nullptr)
     return PGACCEL_OOM;
-  H3ResidentStatusOwner status_owner(queue, invalid);
-  *invalid = 0;
+  H3ResidentStatusOwner status_owner(queue, failure_flags);
+  *failure_flags = 0;
 
   const int32_t target_resolution = parent_res;
   queue.parallel_for<H3CellToParentResidentValidateKernel>(
       sycl::range<1>(count), [=](sycl::id<1> id) {
         const size_t row = id[0];
         const uint8_t null_byte = nulls == nullptr ? 0 : nulls[row];
-        bool row_invalid = null_byte > 1;
-        if (!row_invalid && null_byte == 0) {
+        uint32_t row_failure = null_byte > 1 ? H3_RESIDENT_FAILURE_CONTRACT : 0;
+        if (row_failure == 0 && null_byte == 0) {
           const uint64_t cell = cells[row];
-          row_invalid = !h3_is_valid_cell(cell) || target_resolution > h3_get_resolution(cell);
+          if (!h3_is_valid_cell(cell))
+            row_failure = H3_RESIDENT_FAILURE_INVALID_CELL;
+          else if (target_resolution > h3_get_resolution(cell))
+            row_failure = H3_RESIDENT_FAILURE_RES_MISMATCH;
         }
-        if (row_invalid) {
+        if (row_failure != 0) {
           sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
                            sycl::access::address_space::global_space>
-              invalid_ref(*invalid);
-          invalid_ref.fetch_or(1u);
+              failure_ref(*failure_flags);
+          failure_ref.fetch_or(row_failure);
         }
       });
   queue.wait_and_throw();
-  if (*invalid != 0) {
+  if (*failure_flags != 0) {
     pgaccel_record_gpu_exec();
+    if ((*failure_flags & H3_RESIDENT_FAILURE_CONTRACT) != 0)
+      *detail = PGACCEL_H3_PARENT_DETAIL_CONTRACT;
+    else if ((*failure_flags & H3_RESIDENT_FAILURE_INVALID_CELL) != 0)
+      *detail = PGACCEL_H3_PARENT_DETAIL_INVALID_CELL;
+    else
+      *detail = PGACCEL_H3_PARENT_DETAIL_RES_MISMATCH;
     return PGACCEL_INVALID_ARGUMENT;
   }
 
@@ -1092,9 +1115,17 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_resident(const uint64_t* cel
 } catch (const std::bad_alloc&) {
   return PGACCEL_OOM;
 } catch (const std::exception& error) {
-  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_resident", &error);
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_resident_ex", &error);
 } catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_resident", nullptr);
+  return pgaccel_kernel_failure("pgaccel_h3_cell_to_parent_resident_ex", nullptr);
+}
+
+extern "C" pgaccel_status pgaccel_h3_cell_to_parent_resident(const uint64_t* cells,
+                                                             const uint8_t* nulls, size_t count,
+                                                             int32_t parent_res,
+                                                             uint64_t* parents) {
+  int32_t detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  return pgaccel_h3_cell_to_parent_resident_ex(cells, nulls, count, parent_res, parents, &detail);
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* cells, size_t count,

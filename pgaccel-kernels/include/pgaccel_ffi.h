@@ -545,12 +545,29 @@ pgaccel_status pgaccel_h3_is_res_class_iii_bulk(const uint64_t* cells, size_t co
 pgaccel_status pgaccel_h3_cell_to_parent_bulk(const uint64_t* cells, size_t count, int parent_res,
                                               uint64_t* parents);
 
+/* Detailed validation failures returned by cell_to_parent_resident_ex. These
+ * refine PGACCEL_INVALID_ARGUMENT only; other status values leave detail as
+ * NONE. CONTRACT identifies caller-owned pointer, shape, or null-sidecar
+ * faults. INVALID_CELL and RES_MISMATCH identify H3 algorithm errors. */
+typedef enum {
+  PGACCEL_H3_PARENT_DETAIL_NONE = 0,
+  PGACCEL_H3_PARENT_DETAIL_CONTRACT = 1,
+  PGACCEL_H3_PARENT_DETAIL_INVALID_CELL = 2,
+  PGACCEL_H3_PARENT_DETAIL_RES_MISMATCH = 3,
+} pgaccel_h3_parent_detail;
+
 /* Resident cell-to-parent transform. `cells`, optional canonical 0/1 `nulls`,
  * and caller-reserved `parents` are current-context DEVICE/SHARED_USM pointers.
  * Null rows write a canonical zero value and retain nullness in the unchanged
  * caller-owned sidecar. Invalid sidecars, cells, or ancestor resolutions fail
  * the whole call with PGACCEL_INVALID_ARGUMENT. No row buffers are allocated,
  * staged through host/shared memory, or copied back to the host. */
+pgaccel_status pgaccel_h3_cell_to_parent_resident_ex(const uint64_t* cells, const uint8_t* nulls,
+                                                     size_t count, int32_t parent_res,
+                                                     uint64_t* parents, int32_t* detail);
+
+/* Legacy ABI retained for existing callers. Equivalent to resident_ex with an
+ * internal detail result. */
 pgaccel_status pgaccel_h3_cell_to_parent_resident(const uint64_t* cells, const uint8_t* nulls,
                                                   size_t count, int32_t parent_res,
                                                   uint64_t* parents);

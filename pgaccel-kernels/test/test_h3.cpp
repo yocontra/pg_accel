@@ -14,6 +14,11 @@
 static int g_pass = 0;
 static int g_fail = 0;
 
+static_assert(PGACCEL_H3_PARENT_DETAIL_NONE == 0);
+static_assert(PGACCEL_H3_PARENT_DETAIL_CONTRACT == 1);
+static_assert(PGACCEL_H3_PARENT_DETAIL_INVALID_CELL == 2);
+static_assert(PGACCEL_H3_PARENT_DETAIL_RES_MISMATCH == 3);
+
 template <typename T>
 class SharedResidentArray {
  public:
@@ -402,6 +407,12 @@ static void test_cell_to_parent_resident() {
   ASSERT_TRUE("resident null sidecar unchanged",
               std::equal(input_nulls.begin(), input_nulls.end(), nulls.data()));
 
+  int32_t detail = PGACCEL_H3_PARENT_DETAIL_CONTRACT;
+  status = pgaccel_h3_cell_to_parent_resident_ex(cells.data(), nulls.data(), cells.size(), 3,
+                                                 parents.data(), &detail);
+  ASSERT_STATUS_OK("resident ex success status", status);
+  ASSERT_EQ("resident ex success detail", detail, PGACCEL_H3_PARENT_DETAIL_NONE);
+
   std::vector<uint64_t> device_input = {cell_a, cell_b, cell_a};
   std::vector<uint64_t> device_expected(device_input.size(), 0);
   ASSERT_STATUS_OK("device resident oracle status",
@@ -453,6 +464,33 @@ static void test_cell_to_parent_resident() {
     rejected_unchanged = rejected_unchanged && rejected_output[i] == sentinel;
   ASSERT_TRUE("resident malformed call publishes nothing", rejected_unchanged);
 
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  status = pgaccel_h3_cell_to_parent_resident_ex(
+      malformed_cells.data(), nullptr, malformed.size() - 1, 3, rejected_output.data(), &detail);
+  ASSERT_EQ("resident ex invalid cell status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex invalid cell detail", detail, PGACCEL_H3_PARENT_DETAIL_INVALID_CELL);
+
+  SharedResidentArray<uint64_t> coarse_cell(std::vector<uint64_t>({too_coarse}));
+  SharedResidentArray<uint64_t> coarse_output(std::vector<uint64_t>({sentinel}));
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  status = pgaccel_h3_cell_to_parent_resident_ex(coarse_cell.data(), nullptr, coarse_cell.size(), 3,
+                                                 coarse_output.data(), &detail);
+  ASSERT_EQ("resident ex resolution mismatch status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex resolution mismatch detail", detail,
+            PGACCEL_H3_PARENT_DETAIL_RES_MISMATCH);
+  ASSERT_EQ("resident ex resolution mismatch publishes nothing", coarse_output[0], sentinel);
+
+  SharedResidentArray<uint64_t> invalid_and_coarse_cells(
+      std::vector<uint64_t>({wrong_mode, too_coarse}));
+  SharedResidentArray<uint64_t> invalid_and_coarse_output(std::vector<uint64_t>(2, sentinel));
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  status = pgaccel_h3_cell_to_parent_resident_ex(invalid_and_coarse_cells.data(), nullptr,
+                                                 invalid_and_coarse_cells.size(), 3,
+                                                 invalid_and_coarse_output.data(), &detail);
+  ASSERT_EQ("resident ex mixed invalid cell status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex mixed invalid cell precedence", detail,
+            PGACCEL_H3_PARENT_DETAIL_INVALID_CELL);
+
   SharedResidentArray<uint8_t> malformed_nulls(std::vector<uint8_t>({0, 2, 0, 0}));
   SharedResidentArray<uint64_t> malformed_null_output(
       std::vector<uint64_t>(input.size(), sentinel));
@@ -463,6 +501,21 @@ static void test_cell_to_parent_resident() {
               std::all_of(malformed_null_output.data(),
                           malformed_null_output.data() + malformed_null_output.size(),
                           [=](uint64_t value) { return value == sentinel; }));
+
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  status = pgaccel_h3_cell_to_parent_resident_ex(cells.data(), malformed_nulls.data(), cells.size(),
+                                                 3, malformed_null_output.data(), &detail);
+  ASSERT_EQ("resident ex malformed null status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex malformed null detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
+
+  SharedResidentArray<uint64_t> mixed_cells(std::vector<uint64_t>({too_coarse, 0}));
+  SharedResidentArray<uint8_t> mixed_nulls(std::vector<uint8_t>({0, 2}));
+  SharedResidentArray<uint64_t> mixed_output(std::vector<uint64_t>(2, sentinel));
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  status = pgaccel_h3_cell_to_parent_resident_ex(
+      mixed_cells.data(), mixed_nulls.data(), mixed_cells.size(), 3, mixed_output.data(), &detail);
+  ASSERT_EQ("resident ex mixed contract status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex mixed contract precedence", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
 
   SharedResidentArray<uint64_t> null_only_cells(
       std::vector<uint64_t>({0, UINT64_C(0xffffffffffffffff)}));
@@ -483,15 +536,39 @@ static void test_cell_to_parent_resident() {
       "resident aliased value/output fails",
       pgaccel_h3_cell_to_parent_resident(cells.data(), nulls.data(), cells.size(), 3, cells.data()),
       PGACCEL_INVALID_ARGUMENT);
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  ASSERT_EQ("resident ex aliased value/output fails",
+            pgaccel_h3_cell_to_parent_resident_ex(cells.data(), nulls.data(), cells.size(), 3,
+                                                  cells.data(), &detail),
+            PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex aliased value/output detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
   ASSERT_EQ("resident host pointers fail",
             pgaccel_h3_cell_to_parent_resident(input.data(), input_nulls.data(), input.size(), 3,
                                                device_expected.data()),
             PGACCEL_INVALID_ARGUMENT);
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  ASSERT_EQ("resident ex host pointers fail",
+            pgaccel_h3_cell_to_parent_resident_ex(input.data(), input_nulls.data(), input.size(), 3,
+                                                  device_expected.data(), &detail),
+            PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex host pointer detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
   ASSERT_STATUS_OK("resident empty input",
                    pgaccel_h3_cell_to_parent_resident(nullptr, nullptr, 0, 3, nullptr));
+  detail = PGACCEL_H3_PARENT_DETAIL_CONTRACT;
+  ASSERT_STATUS_OK("resident ex empty input",
+                   pgaccel_h3_cell_to_parent_resident_ex(nullptr, nullptr, 0, 3, nullptr, &detail));
+  ASSERT_EQ("resident ex empty detail", detail, PGACCEL_H3_PARENT_DETAIL_NONE);
+  ASSERT_EQ("resident ex null detail fails",
+            pgaccel_h3_cell_to_parent_resident_ex(nullptr, nullptr, 0, 3, nullptr, nullptr),
+            PGACCEL_INVALID_ARGUMENT);
   ASSERT_EQ("resident empty still validates resolution",
             pgaccel_h3_cell_to_parent_resident(nullptr, nullptr, 0, -1, nullptr),
             PGACCEL_INVALID_ARGUMENT);
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  ASSERT_EQ("resident ex invalid resolution status",
+            pgaccel_h3_cell_to_parent_resident_ex(nullptr, nullptr, 0, -1, nullptr, &detail),
+            PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex invalid resolution detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
 }
 
 // ---------------------------------------------------------------------------
