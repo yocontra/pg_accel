@@ -1,7 +1,43 @@
 use super::{
-    ExprDeviceBuffer, GpuErrorDomain, GpuOperation, GpuResult, HashAggResult, PgaccelAggState,
-    bridge, status_to_result,
+    ExprDeviceBuffer, GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail,
+    HashAggResult, PgaccelAggState, PgaccelStatus, bridge, status_to_result,
 };
+
+const H3_PARENT_DETAIL_NONE: i32 = 0;
+const H3_PARENT_DETAIL_CONTRACT: i32 = 1;
+const H3_PARENT_DETAIL_INVALID_CELL: i32 = 2;
+const H3_PARENT_DETAIL_RES_MISMATCH: i32 = 3;
+const H3_PARENT_RESIDENT_OPERATION: GpuOperation =
+    GpuOperation::Kernel("h3_cell_to_parent_resident");
+
+fn h3_parent_resident_result(status: PgaccelStatus, detail: i32) -> GpuResult<()> {
+    if status.is_ok() {
+        return if detail == H3_PARENT_DETAIL_NONE {
+            Ok(())
+        } else {
+            Err(GpuError::with_detail(
+                GpuErrorDomain::H3,
+                H3_PARENT_RESIDENT_OPERATION,
+                GpuStatusDetail::InvalidDescriptor,
+                "successful resident H3 parent transform returned an error detail",
+            ))
+        };
+    }
+    if status != PgaccelStatus::InvalidArgument {
+        return status_to_result(status, GpuErrorDomain::H3, H3_PARENT_RESIDENT_OPERATION);
+    }
+    let mapped = match detail {
+        H3_PARENT_DETAIL_INVALID_CELL => GpuStatusDetail::InvalidArgument,
+        H3_PARENT_DETAIL_RES_MISMATCH => GpuStatusDetail::ShapeMismatch,
+        H3_PARENT_DETAIL_NONE | H3_PARENT_DETAIL_CONTRACT => GpuStatusDetail::InvalidDescriptor,
+        _ => GpuStatusDetail::InvalidDescriptor,
+    };
+    Err(GpuError::new(
+        GpuErrorDomain::H3,
+        H3_PARENT_RESIDENT_OPERATION,
+        mapped,
+    ))
+}
 
 // ---------------------------------------------------------------------------
 // H3 wrappers
@@ -95,14 +131,18 @@ pub unsafe fn h3_cell_to_parent_resident(
     parents: *mut u64,
 ) -> GpuResult<()> {
     // SAFETY: caller upholds the resident pointer/count contract above.
+    let mut detail = H3_PARENT_DETAIL_NONE;
     let status = unsafe {
-        bridge::pgaccel_h3_cell_to_parent_resident(cells, nulls, count, parent_res, parents)
+        bridge::pgaccel_h3_cell_to_parent_resident_ex(
+            cells,
+            nulls,
+            count,
+            parent_res,
+            parents,
+            std::ptr::from_mut(&mut detail),
+        )
     };
-    status_to_result(
-        status,
-        GpuErrorDomain::H3,
-        GpuOperation::Kernel("h3_cell_to_parent_resident"),
-    )
+    h3_parent_resident_result(status, detail)
 }
 
 /// GPU-accelerated bulk H3 cell-to-center-child.
@@ -523,4 +563,57 @@ pub fn h3_cells_to_multi_polygon_bulk(cells: &[u64]) -> Option<H3VarOutCoords> {
         offsets: ring_offsets,
         coords: out_coords,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resident_parent_detail_mapping_separates_contract_and_algorithmic_errors() {
+        assert!(h3_parent_resident_result(PgaccelStatus::Ok, H3_PARENT_DETAIL_NONE).is_ok());
+
+        let contract =
+            h3_parent_resident_result(PgaccelStatus::InvalidArgument, H3_PARENT_DETAIL_CONTRACT)
+                .expect_err("contract failure must be an error");
+        assert_eq!(contract.status, GpuStatusDetail::InvalidDescriptor);
+
+        let invalid_cell = h3_parent_resident_result(
+            PgaccelStatus::InvalidArgument,
+            H3_PARENT_DETAIL_INVALID_CELL,
+        )
+        .expect_err("invalid H3 cell must be an error");
+        assert_eq!(invalid_cell.status, GpuStatusDetail::InvalidArgument);
+
+        let mismatch = h3_parent_resident_result(
+            PgaccelStatus::InvalidArgument,
+            H3_PARENT_DETAIL_RES_MISMATCH,
+        )
+        .expect_err("H3 resolution mismatch must be an error");
+        assert_eq!(mismatch.status, GpuStatusDetail::ShapeMismatch);
+    }
+
+    #[test]
+    fn resident_parent_unclassified_invalid_argument_stays_internal() {
+        for detail in [H3_PARENT_DETAIL_NONE, 99] {
+            let error = h3_parent_resident_result(PgaccelStatus::InvalidArgument, detail)
+                .expect_err("unclassified invalid argument must be an error");
+            assert_eq!(error.status, GpuStatusDetail::InvalidDescriptor);
+        }
+    }
+
+    #[test]
+    fn resident_parent_non_argument_status_keeps_its_original_classification() {
+        let error = h3_parent_resident_result(PgaccelStatus::ErrorNoDevice, H3_PARENT_DETAIL_NONE)
+            .expect_err("no-device status must be an error");
+        assert_eq!(error.status, GpuStatusDetail::NoDevice);
+
+        let inconsistent_success =
+            h3_parent_resident_result(PgaccelStatus::Ok, H3_PARENT_DETAIL_CONTRACT)
+                .expect_err("successful status with an error detail must be rejected");
+        assert_eq!(
+            inconsistent_success.status,
+            GpuStatusDetail::InvalidDescriptor
+        );
+    }
 }

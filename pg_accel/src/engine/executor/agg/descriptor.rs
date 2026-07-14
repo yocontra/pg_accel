@@ -25,8 +25,9 @@ use crate::engine::spec::{
     ScalarValue,
 };
 use crate::gpu::{
-    GpuError, GpuStatusDetail, GroupedAggOutcome, GroupedAggOutputStorage, PgaccelExprUsmCol,
-    PgaccelVal, PgaccelValTag, ResolvedGroupedAggPlan, execute_grouped_agg_one_shot,
+    GpuError, GpuErrorDomain, GpuOperation, GpuStatusDetail, GroupedAggOutcome,
+    GroupedAggOutputStorage, PgaccelExprUsmCol, PgaccelVal, PgaccelValTag, ResolvedGroupedAggPlan,
+    execute_grouped_agg_one_shot,
 };
 
 const BOOLOID: u32 = 16;
@@ -646,6 +647,7 @@ pub(super) struct DescriptorResidencyReport {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum DescriptorAggExecutionError {
     NumericOverflow,
+    ExternalRoutineException(String),
     Failure(String),
 }
 
@@ -653,7 +655,33 @@ impl fmt::Display for DescriptorAggExecutionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NumericOverflow => formatter.write_str("numeric value out of range"),
-            Self::Failure(message) => formatter.write_str(message),
+            Self::ExternalRoutineException(message) | Self::Failure(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+impl From<String> for DescriptorAggExecutionError {
+    fn from(message: String) -> Self {
+        Self::Failure(message)
+    }
+}
+
+impl From<ResidentLoadError> for DescriptorAggExecutionError {
+    fn from(error: ResidentLoadError) -> Self {
+        match error {
+            ResidentLoadError::Gpu(error)
+                if error.domain == GpuErrorDomain::H3
+                    && error.operation == GpuOperation::Kernel("h3_cell_to_parent_resident")
+                    && matches!(
+                        error.status,
+                        GpuStatusDetail::InvalidArgument | GpuStatusDetail::ShapeMismatch
+                    ) =>
+            {
+                Self::ExternalRoutineException(error.to_string())
+            }
+            error => Self::Failure(error.to_string()),
         }
     }
 }
@@ -776,10 +804,11 @@ impl DescriptorAggPlan {
         &self.projection
     }
 
-    pub(super) fn ensure_artifact(&self) -> Result<DescriptorResidencyReport, String> {
+    pub(super) fn ensure_artifact(
+        &self,
+    ) -> Result<DescriptorResidencyReport, DescriptorAggExecutionError> {
         let preparation_started = Instant::now();
-        let selected =
-            ensure_selected_relations(&self.selected).map_err(|error| error.to_string())?;
+        let selected = ensure_selected_relations(&self.selected)?;
         let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
         let (artifact_outcome, relations, artifact_bytes) = match self.artifact_kind {
             DescriptorArtifactKind::Dense => {
@@ -797,15 +826,13 @@ impl DescriptorAggPlan {
                         )
                     },
                     DescriptorAggArtifact::build,
-                )
-                .map_err(|error| error.to_string())?;
+                )?;
                 let (relations, bytes) = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
                     owner_relid,
                     &self.identity,
                     &[],
                     |inputs| (inputs.evidence, inputs.device_bytes),
-                )
-                .map_err(|error| error.to_string())?;
+                )?;
                 (outcome, relations, bytes)
             }
             DescriptorArtifactKind::H3Parent {
@@ -817,7 +844,8 @@ impl DescriptorAggPlan {
                 if fact_rows > u32::MAX as usize {
                     return Err(format!(
                         "H3 grouped aggregation row count {fact_rows} exceeds the kernel u32 domain"
-                    ));
+                    )
+                    .into());
                 }
                 let device_bytes = fact_rows
                     .checked_mul(std::mem::size_of::<u64>())
@@ -852,10 +880,10 @@ impl DescriptorAggPlan {
                                 (values.as_ptr(), null_ptr(*nulls))
                             }
                             _ => {
-                                return Err(
+                                return Err(ResidentLoadError::Loader(
                                     "resident H3 source does not match the planned raw lane"
                                         .to_owned(),
-                                );
+                                ));
                             }
                         };
                         let parents = if fact_rows == 0 {
@@ -872,7 +900,9 @@ impl DescriptorAggPlan {
                         };
                         if fact_rows != 0 {
                             if max_chunk_rows == 0 {
-                                return Err("H3 device chunk limit is zero".to_owned());
+                                return Err(ResidentLoadError::Loader(
+                                    "H3 device chunk limit is zero".to_owned(),
+                                ));
                             }
                             let output = parents.as_ref().ok_or_else(|| {
                                 "nonempty H3 parent artifact has no output".to_owned()
@@ -901,20 +931,23 @@ impl DescriptorAggPlan {
                                         chunk_parents,
                                     )
                                 }
-                                .map_err(|error| error.to_string())?;
+                                .map_err(ResidentLoadError::Gpu)?;
                             }
                         }
-                        H3ParentArtifact::new(self.spec.clone(), fact_rows, group_capacity, parents)
+                        Ok(H3ParentArtifact::new(
+                            self.spec.clone(),
+                            fact_rows,
+                            group_capacity,
+                            parents,
+                        )?)
                     },
-                )
-                .map_err(|error| error.to_string())?;
+                )?;
                 let (relations, bytes) = with_derived_artifact_inputs::<H3ParentArtifact, _>(
                     owner_relid,
                     &self.identity,
                     &[],
                     |inputs| (inputs.evidence, inputs.device_bytes),
-                )
-                .map_err(|error| error.to_string())?;
+                )?;
                 (outcome, relations, bytes)
             }
         };
@@ -955,23 +988,18 @@ impl DescriptorAggPlan {
     }
 
     pub(super) fn execute(&self) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
-        let mut residency = self
-            .ensure_artifact()
-            .map_err(DescriptorAggExecutionError::Failure)?;
+        let mut residency = self.ensure_artifact()?;
         let mut result = match self.execute_once() {
             Ok(result) => result?,
             Err(
                 ResidentLoadError::ArtifactDependencyChanged { .. }
                 | ResidentLoadError::ArtifactNotFound { .. },
             ) => {
-                residency.merge(
-                    self.ensure_artifact()
-                        .map_err(DescriptorAggExecutionError::Failure)?,
-                );
+                residency.merge(self.ensure_artifact()?);
                 self.execute_once()
-                    .map_err(|error| DescriptorAggExecutionError::Failure(error.to_string()))??
+                    .map_err(DescriptorAggExecutionError::from)??
             }
-            Err(error) => return Err(DescriptorAggExecutionError::Failure(error.to_string())),
+            Err(error) => return Err(DescriptorAggExecutionError::from(error)),
         };
         result.residency = Some(residency);
         Ok(result)
@@ -1952,5 +1980,51 @@ mod tests {
         };
         assert!(message.contains("kernel failed"));
         assert!(message.contains("execution_failed"));
+    }
+
+    #[test]
+    fn only_algorithmic_h3_parent_errors_are_external_routine_exceptions() {
+        for status in [
+            GpuStatusDetail::InvalidArgument,
+            GpuStatusDetail::ShapeMismatch,
+        ] {
+            let error = DescriptorAggExecutionError::from(ResidentLoadError::Gpu(GpuError::new(
+                GpuErrorDomain::H3,
+                GpuOperation::Kernel("h3_cell_to_parent_resident"),
+                status,
+            )));
+            assert!(matches!(
+                error,
+                DescriptorAggExecutionError::ExternalRoutineException(_)
+            ));
+        }
+
+        for error in [
+            GpuError::new(
+                GpuErrorDomain::H3,
+                GpuOperation::Kernel("h3_cell_to_parent_resident"),
+                GpuStatusDetail::NoDevice,
+            ),
+            GpuError::new(
+                GpuErrorDomain::H3,
+                GpuOperation::Kernel("another_h3_kernel"),
+                GpuStatusDetail::InvalidArgument,
+            ),
+            GpuError::new(
+                GpuErrorDomain::H3,
+                GpuOperation::Kernel("h3_cell_to_parent_resident"),
+                GpuStatusDetail::InvalidDescriptor,
+            ),
+            GpuError::new(
+                GpuErrorDomain::GroupedAgg,
+                GpuOperation::Kernel("h3_cell_to_parent_resident"),
+                GpuStatusDetail::InvalidArgument,
+            ),
+        ] {
+            assert!(matches!(
+                DescriptorAggExecutionError::from(ResidentLoadError::Gpu(error)),
+                DescriptorAggExecutionError::Failure(_)
+            ));
+        }
     }
 }

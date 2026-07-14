@@ -8,7 +8,7 @@ use std::fmt;
 use pgrx::{default, name, pg_sys, prelude::*};
 
 use crate::engine::gucs;
-use crate::gpu::ExprDeviceBuffer;
+use crate::gpu::{ExprDeviceBuffer, GpuError};
 
 use super::domain::ResidentByteAccounting;
 use super::ledger::{self, GenerationStamp, LedgerCharge};
@@ -784,6 +784,7 @@ pub enum ResidentLoadError {
         live: u64,
         budget: u64,
     },
+    Gpu(GpuError),
     Loader(String),
     InvalidArtifactDependencies(String),
     ArtifactNotFound {
@@ -800,6 +801,12 @@ pub enum ResidentLoadError {
         declared: ResidentByteAccounting,
         actual: ResidentByteAccounting,
     },
+}
+
+impl From<String> for ResidentLoadError {
+    fn from(detail: String) -> Self {
+        Self::Loader(detail)
+    }
 }
 
 impl fmt::Display for ResidentLoadError {
@@ -821,6 +828,7 @@ impl fmt::Display for ResidentLoadError {
                 f,
                 "resident allocation of {requested} bytes exceeds cluster budget {budget} bytes ({live} bytes live); evict/unpin entries or raise pg_accel.resident_memory_budget_mb"
             ),
+            Self::Gpu(error) => error.fmt(f),
             Self::Loader(detail) => f.write_str(detail),
             Self::InvalidArtifactDependencies(detail) => {
                 write!(f, "invalid resident artifact dependencies: {detail}")
@@ -1616,6 +1624,8 @@ pub fn ensure_derived_artifact<T: DerivedArtifact, P>(
 /// host memory. `declared` must include both device allocations and retained
 /// exact host values; the store charges their checked total before invoking
 /// `build` and verifies both categories before publication.
+/// Device failures stay typed as [`ResidentLoadError::Gpu`] so executor
+/// boundaries can preserve domain-specific SQL error semantics.
 ///
 /// The callback must not re-enter residency APIs or execute SPI/catalog work.
 pub fn ensure_device_derived_artifact<T: DerivedArtifact>(
@@ -1624,7 +1634,7 @@ pub fn ensure_device_derived_artifact<T: DerivedArtifact>(
     dependency_relids: &[pg_sys::Oid],
     columns: &[ResidentColumnRef],
     declared: ResidentByteAccounting,
-    build: impl FnOnce(ResidentInputBundle<'_>) -> Result<T, String>,
+    build: impl FnOnce(ResidentInputBundle<'_>) -> Result<T, ResidentLoadError>,
 ) -> Result<ArtifactEnsureOutcome, ResidentLoadError> {
     if identity.canonical_words().is_empty() {
         return Err(ResidentLoadError::InvalidArtifactDependencies(
@@ -1688,8 +1698,7 @@ pub fn ensure_device_derived_artifact<T: DerivedArtifact>(
         let captured_dependencies = dependency_stamps(&store, &protected)?;
         let columns = resolve_column_views(&store, columns)?;
         let evidence = dependency_evidence(&store, &captured_dependencies)?;
-        let artifact =
-            build(ResidentInputBundle { columns, evidence }).map_err(ResidentLoadError::Loader)?;
+        let artifact = build(ResidentInputBundle { columns, evidence })?;
         Ok::<_, ResidentLoadError>((artifact, captured_dependencies))
     })?;
     let actual = artifact_accounting(&artifact);

@@ -36,6 +36,13 @@ fn raise_descriptor_execution_error(error: DescriptorAggExecutionError) -> ! {
                 "pg_accel: generic aggregate numeric value is out of range; refusing CPU fallback"
             );
         }
+        DescriptorAggExecutionError::ExternalRoutineException(message) => {
+            pgrx::ereport!(
+                ERROR,
+                pgrx::PgSqlErrorCode::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION,
+                format!("pg_accel: H3 parent transform failed ({message}); refusing CPU fallback")
+            );
+        }
         DescriptorAggExecutionError::Failure(message) => {
             pgrx::error!(
                 "pg_accel: generic aggregate dispatch failed ({message}); refusing CPU fallback"
@@ -69,9 +76,10 @@ impl AggExecState {
         explain_only: bool,
     ) -> Result<Self, String> {
         let plan = DescriptorAggPlan::new(spec, projection)?;
-        let residency = (!explain_only)
-            .then(|| plan.ensure_artifact())
-            .transpose()?;
+        let residency = (!explain_only).then(|| {
+            plan.ensure_artifact()
+                .unwrap_or_else(|error| raise_descriptor_execution_error(error))
+        });
         Ok(Self {
             gpu_dispatched: false,
             rows_dispatched: 0,
@@ -161,11 +169,7 @@ impl AggExecState {
                 .descriptor
                 .plan
                 .ensure_artifact()
-                .unwrap_or_else(|error| {
-                    pgrx::error!(
-                        "pg_accel: generic aggregate rescan preparation failed ({error}); refusing CPU fallback"
-                    )
-                });
+                .unwrap_or_else(|error| raise_descriptor_execution_error(error));
             merge_residency_report(&mut self.descriptor.residency, residency);
         }
     }

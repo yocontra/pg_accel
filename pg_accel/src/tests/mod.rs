@@ -2354,6 +2354,10 @@ mod tests {
         )
         .expect("accelerated H3 SQLSTATE query should succeed")
         .expect("accelerated H3 SQLSTATE should exist");
+        assert_eq!(
+            native_sqlstate, "38000",
+            "h3-pg resolution mismatch should be an external routine exception"
+        );
         assert_ne!(
             accelerated_sqlstate, "no_error",
             "selected H3 resolution mismatch must be a hard error, not a zero/NULL result"

@@ -392,6 +392,16 @@ bridge_status_fns! {
         parents: *mut u64,
     ) -> PgaccelStatus;
 
+    /// Transform a resident H3 lane and classify invalid input precisely.
+    pub fn pgaccel_h3_cell_to_parent_resident_ex(
+        cells: *const u64,
+        nulls: *const u8,
+        count: usize,
+        parent_res: i32,
+        parents: *mut u64,
+        detail: *mut i32,
+    ) -> PgaccelStatus;
+
     pub fn pgaccel_h3_cell_to_parent_count_bulk(
         cells: *const u64,
         count: usize,
