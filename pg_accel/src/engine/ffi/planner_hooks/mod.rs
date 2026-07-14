@@ -25,6 +25,7 @@ mod decision;
 mod gate;
 mod generic_groupagg;
 mod join_pathlist;
+mod raster;
 mod rel_pathlist;
 pub mod shape;
 

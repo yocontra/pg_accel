@@ -61,6 +61,13 @@ pub(super) enum RejectionReason {
     PostgisIntersectsUnsupportedShape,
     PostgisDistanceNoGpuKernel,
     PostgisGeometryConstructorNoGpuOutputProtocol,
+    RasterUnsupportedShape,
+    RasterCatalogProofFailed,
+    RasterSummaryStatsBitExactUnavailable,
+    RasterResidentMetadataUnavailable,
+    RasterSelectedBandMissing,
+    RasterCostUncalibrated,
+    RasterRuntimeUnavailable,
     SortIncrementalOpportunity,
     SortMultiKeyNoGpuKernel,
     SortHeapFullOutput,
@@ -128,6 +135,15 @@ impl RejectionReason {
             Self::PostgisGeometryConstructorNoGpuOutputProtocol => {
                 "postgis_geometry_constructor_no_gpu_output_protocol"
             }
+            Self::RasterUnsupportedShape => "raster_unsupported_shape",
+            Self::RasterCatalogProofFailed => "raster_catalog_proof_failed",
+            Self::RasterSummaryStatsBitExactUnavailable => {
+                "raster_summarystats_bit_exact_unavailable"
+            }
+            Self::RasterResidentMetadataUnavailable => "raster_resident_metadata_unavailable",
+            Self::RasterSelectedBandMissing => "raster_selected_band_missing",
+            Self::RasterCostUncalibrated => "raster_cost_uncalibrated",
+            Self::RasterRuntimeUnavailable => "raster_runtime_unavailable",
             Self::SortIncrementalOpportunity => "sort_incremental_opportunity",
             Self::SortMultiKeyNoGpuKernel => "sort_multikey_no_gpu_kernel",
             Self::SortHeapFullOutput => "sort_heap_full_output",
