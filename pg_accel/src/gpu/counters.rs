@@ -72,7 +72,7 @@ impl GpuFailureDomain {
         // Order matters: check the more specific prefixes first.
         if func.starts_with("pgaccel_h3_") {
             Self::H3
-        } else if func.starts_with("pgaccel_raster_") || func.starts_with("pgaccel_map_algebra") {
+        } else if func.starts_with("pgaccel_raster_") {
             Self::Raster
         } else if func.starts_with("pgaccel_sort_") || func.starts_with("pgaccel_topk_") {
             Self::Sort

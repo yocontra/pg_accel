@@ -74,13 +74,13 @@ fn dispatch_result_accelerated_variant() {
 
 #[test]
 fn dispatch_result_accelerated_record_variant() {
-    // ST_SummaryStats returns 6 fields per input row: count, sum, mean,
-    // stddev, min, max. Two input rows ⇒ 12 datums.
-    let datums: Vec<(pgrx::pg_sys::Datum, bool)> = (0..12)
+    // H3 boundary coordinates use two fields per emitted vertex. Two input
+    // rows with one vertex each produce four datums.
+    let datums: Vec<(pgrx::pg_sys::Datum, bool)> = (0..4)
         .map(|i| (pgrx::pg_sys::Datum::from(i), false))
         .collect();
     let result = DispatchResult::AcceleratedRecord {
-        fields_per_row: 6,
+        fields_per_row: 2,
         datums,
     };
     if let DispatchResult::AcceleratedRecord {
@@ -88,11 +88,11 @@ fn dispatch_result_accelerated_record_variant() {
         datums,
     } = result
     {
-        assert_eq!(fields_per_row, 6);
-        assert_eq!(datums.len(), 12);
-        // Layout: rows are contiguous 6-Datum blocks.
+        assert_eq!(fields_per_row, 2);
+        assert_eq!(datums.len(), 4);
+        // Layout: rows are contiguous 2-Datum blocks.
         assert_eq!(datums[0].0.value(), 0);
-        assert_eq!(datums[6].0.value(), 6);
+        assert_eq!(datums[2].0.value(), 2);
     } else {
         panic!("expected AcceleratedRecord variant");
     }
@@ -398,10 +398,14 @@ fn spatial_dispatch_op_from_name_is_exact_allowlist() {
 }
 
 #[test]
-fn dispatch_resolution_unknown_non_spatial_defers() {
+fn generic_raster_strategy_is_not_registry_dispatched() {
     let entry = FunctionAccelEntry::scalar("public", "st_clip", AccelStrategy::GpuRaster);
     assert!(matches!(
-        resolve_dispatch_operation(AccelStrategy::GpuH3, Some(&entry)),
+        resolve_dispatch_operation(AccelStrategy::GpuRaster, Some(&entry)),
+        DispatchOperation::Deferred
+    ));
+    assert!(matches!(
+        resolve_dispatch_operation(AccelStrategy::GpuRaster, None),
         DispatchOperation::Deferred
     ));
 }
@@ -451,7 +455,7 @@ fn dispatch_result_debug_format() {
     assert!(dbg.contains("Deferred"));
 }
 
-// -- Multi-arg carrier (Phase II Agent F1) ---------------------------------
+// -- Multi-arg carrier ------------------------------------------------------
 //
 // Pure-Rust shape tests for the new `qual_datums: &[(Datum, bool, Oid)]`
 // dispatch interface. End-to-end GPU dispatch lives behind `#[pg_test]`
@@ -460,8 +464,8 @@ fn dispatch_result_debug_format() {
 //
 //   - Empty slice + multi-arg op → Deferred (not a panic, not "use
 //     zeros for missing args").
-//   - Missing trailing arg (e.g. only 1 of 2 cell sizes) → Deferred.
-//   - Non-finite f64 args (NaN / inf cell sizes) → Deferred.
+//   - Missing trailing args → Deferred.
+//   - Non-finite f64 args → Deferred.
 //
 // We avoid invoking `dispatch_gpu_*` directly because they need a valid
 // FmgrInfo + PG memory context; the shape checks here exercise the
@@ -470,8 +474,7 @@ fn dispatch_result_debug_format() {
 #[test]
 fn dispatch_result_carrier_signature_is_slice_of_triples() {
     // Compile-time assertion that the new dispatch signature accepts
-    // `&[(Datum, bool, Oid)]`. If the dispatch_gpu_raster signature
-    // regresses to `Option<(Datum, bool)>`, this test fails to compile.
+    // `&[(Datum, bool, Oid)]`.
     let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![
         (
             pgrx::pg_sys::Datum::from(256_u64),
@@ -487,70 +490,6 @@ fn dispatch_result_carrier_signature_is_slice_of_triples() {
     // Slice of triples — the dispatch signature.
     let _: &[(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)] = &qual_datums;
     assert_eq!(qual_datums.len(), 2);
-}
-
-#[test]
-fn st_resample_carrier_arg_layout_int4_pair() {
-    // Plan-time argument layout for ST_Resample(rast, target_w, target_h):
-    // qual_datums[0] = i32 width, qual_datums[1] = i32 height.
-    // The dispatcher reads `Datum::value() as i32`. Verify a small int
-    // round-trips through that decoding.
-    let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![
-        (
-            pgrx::pg_sys::Datum::from(256_u64),
-            false,
-            pgrx::pg_sys::Oid::from(23_u32),
-        ),
-        (
-            pgrx::pg_sys::Datum::from(128_u64),
-            false,
-            pgrx::pg_sys::Oid::from(23_u32),
-        ),
-    ];
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let w = qual_datums[0].0.value() as i32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let h = qual_datums[1].0.value() as i32;
-    assert_eq!(w, 256);
-    assert_eq!(h, 128);
-}
-
-#[test]
-fn st_hillshade_carrier_arg_layout_f64_quad() {
-    // ST_Hillshade(rast, cell_x, cell_y, sun_az, sun_alt) — 4 f64 args.
-    // Layout-critical: swapping qual_datums[2] and [3] silently produces
-    // wrong shading (sun azimuth and altitude have different ranges and
-    // semantics). Verify each f64 round-trips bit-exactly.
-    let cx = 30.0_f64;
-    let cy = 30.0_f64;
-    let az = 315.0_f64;
-    let alt = 45.0_f64;
-    let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![
-        (
-            pgrx::pg_sys::Datum::from(cx.to_bits()),
-            false,
-            pgrx::pg_sys::Oid::from(701_u32),
-        ),
-        (
-            pgrx::pg_sys::Datum::from(cy.to_bits()),
-            false,
-            pgrx::pg_sys::Oid::from(701_u32),
-        ),
-        (
-            pgrx::pg_sys::Datum::from(az.to_bits()),
-            false,
-            pgrx::pg_sys::Oid::from(701_u32),
-        ),
-        (
-            pgrx::pg_sys::Datum::from(alt.to_bits()),
-            false,
-            pgrx::pg_sys::Oid::from(701_u32),
-        ),
-    ];
-    assert_eq!(f64::from_bits(qual_datums[0].0.value() as u64), cx);
-    assert_eq!(f64::from_bits(qual_datums[1].0.value() as u64), cy);
-    assert_eq!(f64::from_bits(qual_datums[2].0.value() as u64), az);
-    assert_eq!(f64::from_bits(qual_datums[3].0.value() as u64), alt);
 }
 
 #[test]
@@ -587,8 +526,8 @@ fn carrier_empty_slice_compiles() {
 
 #[test]
 fn carrier_first_helper_works_for_one_arg_ops() {
-    // The h3.rs / raster.rs dispatchers package qual_datums[0] as an
-    // `Option<(Datum, bool)>` for arms that only consume one const.
+    // The H3 dispatcher packages qual_datums[0] as an `Option<(Datum, bool)>`
+    // for arms that consume one constant.
     let qual_datums: Vec<(pgrx::pg_sys::Datum, bool, pgrx::pg_sys::Oid)> = vec![(
         pgrx::pg_sys::Datum::from(42_u64),
         false,

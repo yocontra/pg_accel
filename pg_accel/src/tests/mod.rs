@@ -1579,16 +1579,6 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_adapter_postgis_raster_structure() {
-        let a = crate::adapters::postgis_raster::adapter();
-        assert_eq!(a.name, "postgis_raster");
-        assert!(
-            a.functions.is_empty(),
-            "raster overloads require the exact catalog/OID planner"
-        );
-    }
-
-    #[pg_test]
     fn test_postgis_oid_resolution_when_installed() {
         if !ensure_extension("postgis") {
             return;

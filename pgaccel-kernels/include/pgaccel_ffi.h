@@ -900,64 +900,6 @@ pgaccel_status pgaccel_h3_cells_to_multi_polygon_emit(const uint64_t* cells, siz
 
 /* ── Raster Operations ───────────────────────────────────────────── */
 
-typedef enum {
-  PGACCEL_PT_INT8 = 0,
-  PGACCEL_PT_INT16 = 1,
-  PGACCEL_PT_INT32 = 2,
-  PGACCEL_PT_FLOAT32 = 3,
-  PGACCEL_PT_FLOAT64 = 4,
-} pgaccel_pixel_type;
-
-typedef enum {
-  PGACCEL_OP_LOAD_BAND = 0,
-  PGACCEL_OP_LOAD_CONST = 1,
-  PGACCEL_OP_ADD = 2,
-  PGACCEL_OP_SUB = 3,
-  PGACCEL_OP_MUL = 4,
-  PGACCEL_OP_DIV = 5,
-  PGACCEL_OP_SQRT = 6,
-  PGACCEL_OP_ABS = 7,
-  PGACCEL_OP_LOG = 8,
-  PGACCEL_OP_POW = 9,
-  PGACCEL_OP_GT = 10,
-  PGACCEL_OP_LT = 11,
-  PGACCEL_OP_EQ = 12,
-  PGACCEL_OP_SELECT = 13,
-} pgaccel_op;
-
-typedef struct {
-  pgaccel_op op;
-  union {
-    int band_index;
-    double constant;
-  } arg;
-} pgaccel_expr_inst;
-
-typedef struct {
-  pgaccel_expr_inst* instructions;
-  size_t inst_count;
-  size_t band_count;
-} pgaccel_expr;
-
-typedef struct {
-  double min_val;
-  double max_val;
-  double new_val;
-} pgaccel_reclass_rule;
-
-pgaccel_status pgaccel_map_algebra(const void* const* band_pixels, size_t pixel_count,
-                                   int pixel_type, const pgaccel_expr* expr, void* output_pixels,
-                                   uint8_t* nodata_mask);
-
-pgaccel_status pgaccel_raster_clip(const void* rast_pixels, size_t width, size_t height,
-                                   double origin_x, double origin_y, double scale_x, double scale_y,
-                                   int pixel_type, const float* clip_ring_xy, size_t vertex_count,
-                                   void* output_pixels, uint8_t* nodata_mask);
-
-pgaccel_status pgaccel_raster_reclass(const void* input_pixels, size_t pixel_count, int input_type,
-                                      const pgaccel_reclass_rule* rules, size_t rule_count,
-                                      int output_type, void* output_pixels);
-
 /* Exact resident PostGIS 3.6.4 ST_Reclass(raster,text,text) ABI.
  *
  * This is intentionally a Reclass-only surface. There is no resident summary-
@@ -1108,60 +1050,6 @@ typedef struct {
 pgaccel_status
 pgaccel_raster_reclass_resident_ex(const pgaccel_raster_reclass_resident_request* request,
                                    int32_t* detail);
-
-/* ── BEGIN raster-extensions (Agent 3A insertion zone) ──────────────
- * Agent 3A appends here:
- *   - pgaccel_raster_resample (bilinear)
- *   - pgaccel_raster_slope (Horn's method)
- *   - pgaccel_raster_aspect (3×3 gradient → compass)
- *   - pgaccel_raster_hillshade (slope + aspect + sun)
- *   - pgaccel_raster_value (single-pixel lookup at point geometry)
- *   - pgaccel_raster_summarystats (count/sum/mean/stddev/min/max)
- * Keep declarations in this block so dispatch wiring stays grouped.
- */
-
-/* Bilinear-interpolate src_pixels (W×H, fp32) to dst_pixels (new_W×new_H,
- * fp32). Out-of-range neighbours clamp to nearest edge. */
-pgaccel_status pgaccel_raster_resample(const float* src_pixels, size_t src_w, size_t src_h,
-                                       size_t dst_w, size_t dst_h, float* dst_pixels);
-
-/* Per-pixel slope angle in degrees via Horn's 3×3 gradient. Edge pixels
- * (1-pixel border) get 0 — the stencil is undefined there. cell_size_x/y
- * are world units per pixel. Output is fp32 degrees [0, 90]. */
-pgaccel_status pgaccel_raster_slope(const float* src_pixels, size_t width, size_t height,
-                                    double cell_size_x, double cell_size_y, float* slope_out);
-
-/* Per-pixel aspect (compass direction of steepest descent) in degrees
- * [0, 360). N=0, E=90, S=180, W=270. Flat areas and edge pixels get -1. */
-pgaccel_status pgaccel_raster_aspect(const float* src_pixels, size_t width, size_t height,
-                                     float* aspect_out);
-
-/* Per-pixel shaded relief value [0, 255]. sun_azimuth_deg is compass
- * (N=0 CW); sun_altitude_deg is degrees above horizon. z_factor scales
- * pixel-value height units to match cell_size units. Edge pixels get 0. */
-pgaccel_status pgaccel_raster_hillshade(const float* src_pixels, size_t width, size_t height,
-                                        double cell_size_x, double cell_size_y,
-                                        double sun_azimuth_deg, double sun_altitude_deg,
-                                        double z_factor, float* shade_out);
-
-/* Per-point pixel-value lookup. Translates each (x, y) in `point_xy` to
- * (col, row) via the raster's affine, bounds-checks, writes the pixel
- * value into `output[i]`. Out-of-bounds points get NaN. Pixel buffer is
- * fp32, output is fp64. */
-pgaccel_status pgaccel_raster_value(const float* rast_pixels, size_t width, size_t height,
-                                    double origin_x, double origin_y, double scale_x,
-                                    double scale_y, const double* point_xy, size_t point_count,
-                                    double* output);
-
-/* Per-row 6-scalar summary stats over fp32 raster pixels. Output layout
- * is `[count, sum, mean, stddev, min, max]` per row × `row_count` rows
- * (`6 * sizeof(double) * row_count` total). When `nodata_masks` is non-
- * null, mask byte `1` skips that pixel. NaN/inf pixels are skipped.
- * Coordinates with `OutputShape::Record { field_count: 6 }` in Rust. */
-pgaccel_status pgaccel_raster_summarystats(const float* rast_pixels, size_t row_count,
-                                           size_t pixels_per_row, const uint8_t* nodata_masks,
-                                           double* output);
-/* ── END raster-extensions ─────────────────────────────────────────── */
 
 /* Window-function declarations live in pgaccel_window.h (separate header
  * so the dispatcher can include just the window API without the rest of

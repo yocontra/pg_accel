@@ -13,12 +13,11 @@
 //!   3. **Uncertain bucket** — unsupported or ambiguous rows are rejected by
 //!      selected pg_accel plans instead of rechecked on CPU.
 //!
-//! This module is split into per-strategy files (spatial, h3, raster).
+//! This module is split into per-strategy files (spatial and H3).
 
 use crate::engine::registry::{AccelStrategy, DispatchOp, FunctionAccelEntry};
 
 pub mod h3;
-pub mod raster;
 pub mod spatial;
 
 #[cfg(feature = "pg_test")]
@@ -109,20 +108,6 @@ impl H3DispatchOp {
     }
 }
 
-/// Raster operations understood by the per-batch dispatcher.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RasterDispatchOp {
-    MapAlgebra,
-    Clip,
-    Reclass,
-    SummaryStats,
-    Resample,
-    Slope,
-    Aspect,
-    Hillshade,
-    Value,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchOperation {
     Spatial(SpatialDispatchOp),
@@ -198,7 +183,7 @@ fn resolve_dispatch_operation(
 ///
 /// Three accelerated shapes mirror [`crate::engine::registry::OutputShape`]:
 /// `Accelerated` for 1-Datum-per-row scalars, `AcceleratedRecord` for
-/// multi-scalar / record returns (e.g. `ST_SummaryStats` → 6 fields per row),
+/// multi-scalar / record returns (e.g. an H3 boundary coordinate pair),
 /// and `AcceleratedVarLen` for CSR-style variable-length outputs (e.g. H3
 /// `grid_disk`, `polyfill`, `cell_to_boundary` where each input row produces
 /// a different number of output cells/coords).
@@ -211,8 +196,7 @@ pub enum DispatchResult {
     ///
     /// `datums.len()` MUST equal `input_row_count * fields_per_row`. The
     /// executor is responsible for repacking the flat Datum vec into PG
-    /// record/composite tuples. Used by record-returning kernels (the only
-    /// current user is `ST_SummaryStats(rast)` with `fields_per_row = 6`).
+    /// record/composite tuples. Used by record-returning H3 kernels.
     AcceleratedRecord {
         /// Number of scalar Datums emitted per input row.
         fields_per_row: u32,
@@ -253,8 +237,7 @@ pub enum DispatchResult {
 /// site in positional source-list order. The first element is the original
 /// 2-arg predicate's constant (e.g. the constant geometry); subsequent
 /// elements are the additional args required by multi-arg ops
-/// (`ST_DWithin` threshold, `ST_Resample` target dims,
-/// `ST_Hillshade` sun angles, etc.). Each entry is
+/// (`ST_DWithin` threshold and H3 operation arguments). Each entry is
 /// `(datum, is_null, type_oid)`.
 ///
 /// # Safety

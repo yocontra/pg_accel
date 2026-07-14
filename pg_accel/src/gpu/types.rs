@@ -121,8 +121,7 @@ const _: () = assert!(std::mem::size_of::<PgaccelDeviceInfo>() == 216);
 //   - `pgaccel_expr.h`     — pgaccel_val, pgaccel_expr_instruction,
 //                            pgaccel_expr_program, pgaccel_batch,
 //                            pgaccel_expr_usm_col, resident batch fabric
-//   - `pgaccel_ffi.h`      — pgaccel_geometry, pgaccel_expr_inst,
-//                            pgaccel_expr, pgaccel_reclass_rule
+//   - `pgaccel_ffi.h`      — pgaccel_geometry and resident raster ABI
 //   - `pgaccel_hash_agg.h` — pgaccel_agg_col
 //   - `pgaccel_fused.h`    — pgaccel_reduce_col
 // If one fires, the two sides drifted — fix the drift, never the number.
@@ -153,14 +152,6 @@ mod abi_size_pins {
 
     // pgaccel_ffi.h — geom_type(4) + pad(4) + 2 ptr + size_t + ptr + size_t = 48.
     const _: () = assert!(std::mem::size_of::<PgaccelGeometry>() == 48);
-    // op(4) + pad(4) + union{int, double}(8) = 16.
-    const _: () = assert!(std::mem::size_of::<PgaccelExprInst>() == 16);
-    // ptr + size_t + size_t = 24.
-    const _: () = assert!(std::mem::size_of::<PgaccelExpr>() == 24);
-    // 3 × f64 = 24.
-    const _: () = assert!(std::mem::size_of::<PgaccelReclassRule>() == 24);
-    const _: () = assert!(std::mem::align_of::<PgaccelReclassRule>() == 8);
-
     // Exact resident raster Reclass ABI (pgaccel_ffi.h, LP64).
     const _: () = assert!(std::mem::size_of::<PgaccelResidentRasterRow>() == 72);
     const _: () = assert!(std::mem::align_of::<PgaccelResidentRasterRow>() == 8);
@@ -525,20 +516,8 @@ pub struct PgaccelGeometry {
 }
 
 // ---------------------------------------------------------------------------
-// Raster types for map algebra and reclassification.
+// Exact resident raster Reclass ABI.
 // ---------------------------------------------------------------------------
-
-/// Pixel type tag (mirrors `pgaccel_pixel_type` in `pgaccel_ffi.h`).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reason: ABI mirror of pgaccel_pixel_type; discriminants must match the C enum
-pub enum PgaccelPixelType {
-    Int8 = 0,
-    Int16 = 1,
-    Int32 = 2,
-    Float32 = 3,
-    Float64 = 4,
-}
 
 /// ABI version for the exact resident PostGIS Reclass descriptor.
 pub const PGACCEL_RESIDENT_RASTER_ABI_VERSION: u32 = 1;
@@ -738,61 +717,6 @@ impl Default for PgaccelRasterReclassResidentRequest {
             max_chunk_pixels: 0,
         }
     }
-}
-
-/// Map-algebra opcode (mirrors `pgaccel_op` in `pgaccel_ffi.h`).
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reason: ABI mirror of pgaccel_op; discriminants must match the C enum
-pub enum PgaccelOp {
-    LoadBand = 0,
-    LoadConst = 1,
-    Add = 2,
-    Sub = 3,
-    Mul = 4,
-    Div = 5,
-    Sqrt = 6,
-    Abs = 7,
-    Log = 8,
-    Pow = 9,
-    Gt = 10,
-    Lt = 11,
-    Eq = 12,
-    Select = 13,
-}
-
-// ---------------------------------------------------------------------------
-// Fused filter+reduce types (mirrors pgaccel_fused.h).
-// ---------------------------------------------------------------------------
-
-/// Single instruction in a map-algebra expression
-/// (mirrors `pgaccel_expr_inst` in `pgaccel_ffi.h`).
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct PgaccelExprInst {
-    pub op: PgaccelOp,
-    /// Union: `band_index` (i32) or `constant` (f64). Use the larger
-    /// type so the struct size matches the C layout.
-    pub arg: f64,
-}
-
-/// Map-algebra expression program (mirrors `pgaccel_expr` in `pgaccel_ffi.h`).
-#[repr(C)]
-pub struct PgaccelExpr {
-    pub instructions: *mut PgaccelExprInst,
-    pub inst_count: usize,
-    pub band_count: usize,
-}
-
-/// Reclassification rule (mirrors `pgaccel_reclass_rule` in `pgaccel_ffi.h`).
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-#[allow(clippy::struct_field_names)]
-#[allow(dead_code)] // reason: ABI mirror of pgaccel_reclass_rule; struct layout load-bearing
-pub struct PgaccelReclassRule {
-    pub min_val: f64,
-    pub max_val: f64,
-    pub new_val: f64,
 }
 
 #[cfg(test)]

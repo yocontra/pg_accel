@@ -9,7 +9,6 @@
 pub mod extractors;
 pub mod h3;
 pub mod postgis;
-pub mod postgis_raster;
 
 // Phase 2 dispatch-correctness `#[pg_test]`s (Agent 2B). Included here — a file
 // this agent owns — via `#[path]` so `src/tests/mod.rs` (owned by another agent
@@ -83,7 +82,7 @@ mod uses_fp64_tests {
 
     #[test]
     fn raster_does_not_use_fp64() {
-        assert!(!uses_fp64(AccelStrategy::GpuRaster, "rt_mapalgebra"));
+        assert!(!uses_fp64(AccelStrategy::GpuRaster, "st_reclass"));
     }
 
     #[test]

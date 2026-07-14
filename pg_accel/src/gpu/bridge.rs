@@ -6,11 +6,10 @@
 
 pub use super::spatial::PgaccelSpatialResidentRequest;
 pub use super::types::{
-    PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr, PgaccelExprInst,
-    PgaccelExprInstruction, PgaccelExprProgram, PgaccelExprUsmCol, PgaccelGeomType,
-    PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelOp, PgaccelPixelType,
-    PgaccelPlatformCaps, PgaccelRasterReclassResidentRequest, PgaccelReclassRule, PgaccelStatus,
-    PgaccelVal, PgaccelValTag,
+    PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExprInstruction, PgaccelExprProgram,
+    PgaccelExprUsmCol, PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType,
+    PgaccelPlatformCaps, PgaccelRasterReclassResidentRequest, PgaccelStatus, PgaccelVal,
+    PgaccelValTag,
 };
 
 // ---------------------------------------------------------------------------
@@ -584,114 +583,6 @@ bridge_status_fns! {
         ring_offsets: *const u32,
         ring_count: u32,
         out_coords: *mut f64,
-    ) -> PgaccelStatus;
-
-    // -- Raster operations --
-
-    pub fn pgaccel_map_algebra(
-        band_pixels: *const *const std::ffi::c_void,
-        pixel_count: usize,
-        pixel_type: i32,
-        expr: *const PgaccelExpr,
-        output_pixels: *mut std::ffi::c_void,
-        nodata_mask: *mut u8,
-    ) -> PgaccelStatus;
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_raster_clip(
-        rast_pixels: *const std::ffi::c_void,
-        width: usize,
-        height: usize,
-        origin_x: f64,
-        origin_y: f64,
-        scale_x: f64,
-        scale_y: f64,
-        pixel_type: i32,
-        clip_ring_xy: *const f32,
-        vertex_count: usize,
-        output_pixels: *mut std::ffi::c_void,
-        nodata_mask: *mut u8,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_raster_reclass(
-        input_pixels: *const std::ffi::c_void,
-        pixel_count: usize,
-        input_type: i32,
-        rules: *const PgaccelReclassRule,
-        rule_count: usize,
-        output_type: i32,
-        output_pixels: *mut std::ffi::c_void,
-    ) -> PgaccelStatus;
-
-    // -- Raster extension kernels (Agent 3A) --
-
-    /// Bilinear-interpolate `src` (`src_w` × `src_h`, fp32) to
-    /// `dst` (`dst_w` × `dst_h`, fp32). Edge-clamped neighbours.
-    pub fn pgaccel_raster_resample(
-        src_pixels: *const f32,
-        src_w: usize,
-        src_h: usize,
-        dst_w: usize,
-        dst_h: usize,
-        dst_pixels: *mut f32,
-    ) -> PgaccelStatus;
-
-    /// Per-pixel slope angle (degrees) via Horn's 3×3 gradient.
-    pub fn pgaccel_raster_slope(
-        src_pixels: *const f32,
-        width: usize,
-        height: usize,
-        cell_size_x: f64,
-        cell_size_y: f64,
-        slope_out: *mut f32,
-    ) -> PgaccelStatus;
-
-    /// Per-pixel aspect (compass direction of steepest descent, degrees).
-    pub fn pgaccel_raster_aspect(
-        src_pixels: *const f32,
-        width: usize,
-        height: usize,
-        aspect_out: *mut f32,
-    ) -> PgaccelStatus;
-
-    /// Per-pixel hillshade (shaded relief value [0, 255]).
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_raster_hillshade(
-        src_pixels: *const f32,
-        width: usize,
-        height: usize,
-        cell_size_x: f64,
-        cell_size_y: f64,
-        sun_azimuth_deg: f64,
-        sun_altitude_deg: f64,
-        z_factor: f64,
-        shade_out: *mut f32,
-    ) -> PgaccelStatus;
-
-    /// Per-point pixel-value lookup (`(x, y)` world coords → `f64`).
-    /// Out-of-bounds points get NaN.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_raster_value(
-        rast_pixels: *const f32,
-        width: usize,
-        height: usize,
-        origin_x: f64,
-        origin_y: f64,
-        scale_x: f64,
-        scale_y: f64,
-        point_xy: *const f64,
-        point_count: usize,
-        output: *mut f64,
-    ) -> PgaccelStatus;
-
-    /// Per-row 6-scalar summary stats (`count`, `sum`, `mean`, `stddev`,
-    /// `min`, `max`). Output buffer = `6 * sizeof(f64) * row_count`.
-    pub fn pgaccel_raster_summarystats(
-        rast_pixels: *const f32,
-        row_count: usize,
-        pixels_per_row: usize,
-        nodata_masks: *const u8,
-        output: *mut f64,
     ) -> PgaccelStatus;
 
     // -- Expression evaluator kernels --
@@ -1558,32 +1449,6 @@ mod tests {
     }
 
     #[test]
-    fn reclass_rule_size_is_three_f64s() {
-        // min_val + max_val + new_val = 3 * 8 = 24 bytes
-        assert_eq!(mem::size_of::<PgaccelReclassRule>(), 24);
-    }
-
-    #[test]
-    fn reclass_rule_alignment() {
-        assert_eq!(
-            mem::align_of::<PgaccelReclassRule>(),
-            mem::align_of::<f64>()
-        );
-    }
-
-    #[test]
-    fn expr_inst_size_and_alignment() {
-        let size = mem::size_of::<PgaccelExprInst>();
-        let align = mem::align_of::<PgaccelExprInst>();
-        // op (repr(C) enum, at least 4 bytes) + arg (f64, 8 bytes) + padding
-        assert!(size >= 12, "PgaccelExprInst too small: {size}");
-        assert!(
-            align >= mem::align_of::<f64>(),
-            "alignment too small: {align}"
-        );
-    }
-
-    #[test]
     fn batch_struct_nonzero_size() {
         let size = mem::size_of::<PgaccelBatch>();
         // 2 usizes + 3 pointers
@@ -1615,16 +1480,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn expr_struct_nonzero_size() {
-        let size = mem::size_of::<PgaccelExpr>();
-        // 1 pointer + 2 usizes
-        assert!(
-            size >= 3 * mem::size_of::<usize>(),
-            "PgaccelExpr too small: {size}"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // Enum variant values match expected C constants
     // -----------------------------------------------------------------------
@@ -1650,33 +1505,6 @@ mod tests {
         // sent to kernel — see PgaccelKeyType doc comment).
         assert_eq!(PgaccelKeyType::Uuid as i32, 4);
         assert_eq!(PgaccelKeyType::Inet as i32, 5);
-    }
-
-    #[test]
-    fn pixel_type_discriminant_values_match_c() {
-        assert_eq!(PgaccelPixelType::Int8 as i32, 0);
-        assert_eq!(PgaccelPixelType::Int16 as i32, 1);
-        assert_eq!(PgaccelPixelType::Int32 as i32, 2);
-        assert_eq!(PgaccelPixelType::Float32 as i32, 3);
-        assert_eq!(PgaccelPixelType::Float64 as i32, 4);
-    }
-
-    #[test]
-    fn op_discriminant_values_match_c() {
-        assert_eq!(PgaccelOp::LoadBand as i32, 0);
-        assert_eq!(PgaccelOp::LoadConst as i32, 1);
-        assert_eq!(PgaccelOp::Add as i32, 2);
-        assert_eq!(PgaccelOp::Sub as i32, 3);
-        assert_eq!(PgaccelOp::Mul as i32, 4);
-        assert_eq!(PgaccelOp::Div as i32, 5);
-        assert_eq!(PgaccelOp::Sqrt as i32, 6);
-        assert_eq!(PgaccelOp::Abs as i32, 7);
-        assert_eq!(PgaccelOp::Log as i32, 8);
-        assert_eq!(PgaccelOp::Pow as i32, 9);
-        assert_eq!(PgaccelOp::Gt as i32, 10);
-        assert_eq!(PgaccelOp::Lt as i32, 11);
-        assert_eq!(PgaccelOp::Eq as i32, 12);
-        assert_eq!(PgaccelOp::Select as i32, 13);
     }
 
     // -----------------------------------------------------------------------
@@ -1786,39 +1614,6 @@ mod tests {
         assert_eq!(cloned.compute_units, 16);
         let dbg = format!("{caps:?}");
         assert!(dbg.contains("PgaccelPlatformCaps"));
-    }
-
-    #[test]
-    fn reclass_rule_debug_clone() {
-        let rule = PgaccelReclassRule {
-            min_val: -10.0,
-            max_val: 10.0,
-            new_val: 0.0,
-        };
-        let cloned = rule;
-        assert!((cloned.min_val - (-10.0)).abs() < f64::EPSILON);
-        let dbg = format!("{rule:?}");
-        assert!(dbg.contains("PgaccelReclassRule"));
-    }
-
-    #[test]
-    fn pixel_type_clone_debug_partial_eq() {
-        let a = PgaccelPixelType::Float32;
-        let b = a;
-        assert_eq!(a, b);
-        assert_ne!(a, PgaccelPixelType::Int8);
-        let dbg = format!("{a:?}");
-        assert!(dbg.contains("Float32"));
-    }
-
-    #[test]
-    fn op_clone_debug_partial_eq() {
-        let a = PgaccelOp::Sqrt;
-        let b = a;
-        assert_eq!(a, b);
-        assert_ne!(a, PgaccelOp::Add);
-        let dbg = format!("{a:?}");
-        assert!(dbg.contains("Sqrt"));
     }
 
     #[test]
