@@ -3,6 +3,7 @@
 mod catalog;
 mod codec;
 mod cost;
+mod execution;
 mod planner;
 mod spec;
 
@@ -11,6 +12,11 @@ pub use codec::{RASTER_QUERY_SPEC_MAX_WORDS, RASTER_QUERY_SPEC_WIRE_MAGIC, Raste
 pub use cost::{
     RasterCost, RasterCostGate, RasterCostInput, RasterResidentWork, RasterWorkEstimate,
     estimate_raster_cost,
+};
+pub use execution::{
+    RasterExecutionAccounting, RasterExecutionError, RasterExecutionLayout,
+    RasterExecutionPreflight, RasterExecutionSnapshot, RasterReconstructedOutput,
+    preflight_raster_execution, reconstruct_raster_output,
 };
 pub use planner::{
     RasterCallShape, RasterCatalogContract, RasterCommandShape, RasterPlannerCandidate,
