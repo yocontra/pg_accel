@@ -536,6 +536,15 @@ fn current_command_scope() -> CommandScope {
     }
 }
 
+fn first_use_scope_for_load(
+    trigger: loader::TriggerInstall,
+    pinned: bool,
+    auto_load: bool,
+) -> Option<CommandScope> {
+    (auto_load && !pinned && matches!(trigger, loader::TriggerInstall::New))
+        .then(current_command_scope)
+}
+
 impl ResidentRelation {
     fn evidence(&self) -> ResidentRelationEvidence {
         ResidentRelationEvidence {
@@ -1115,8 +1124,7 @@ fn ensure_one_after_invalidations(
     let staged =
         loader::stage_relation(request.relid, &columns).map_err(ResidentLoadError::Loader)?;
     let pinned = STORE.with(|store| store.borrow().pins.contains_key(&u32::from(request.relid)));
-    let first_use_scope =
-        matches!(trigger, loader::TriggerInstall::New).then(current_command_scope);
+    let first_use_scope = first_use_scope_for_load(trigger, pinned, !force);
     install_staged(staged, pinned, first_use_scope, protected)?;
     let evidence = STORE.with(|store| {
         store
@@ -1141,7 +1149,7 @@ fn finalize_batch_first_use(relids: &[pg_sys::Oid], scope: CommandScope) {
     STORE.with(|store| {
         let mut store = store.borrow_mut();
         for entry in &mut store.entries {
-            if relids.contains(&entry.relid) {
+            if !entry.pinned && relids.contains(&entry.relid) {
                 entry.first_use_scope = Some(scope);
             }
         }
@@ -2050,8 +2058,7 @@ fn refresh_relation(relid: pg_sys::Oid) -> Result<u64, ResidentLoadError> {
     let staged = loader::stage_relation(relid, &columns).map_err(ResidentLoadError::Loader)?;
     let rows = staged.row_count();
     let pinned = STORE.with(|store| store.borrow().pins.contains_key(&u32::from(relid)));
-    let first_use_scope =
-        matches!(trigger, loader::TriggerInstall::New).then(current_command_scope);
+    let first_use_scope = first_use_scope_for_load(trigger, pinned, false);
     let protected = BTreeSet::from([u32::from(relid)]);
     install_staged(staged, pinned, first_use_scope, &protected)?;
     if update_pin {
@@ -2279,6 +2286,64 @@ mod tests {
         }
         assert!(pending.contains(1));
         assert!(!pending.contains(10_000));
+    }
+
+    #[test]
+    fn new_trigger_scope_is_only_selected_for_unpinned_auto_load() {
+        let scope = current_command_scope();
+        assert_eq!(
+            first_use_scope_for_load(loader::TriggerInstall::New, false, true),
+            Some(scope),
+        );
+        assert_eq!(
+            first_use_scope_for_load(loader::TriggerInstall::Existing, false, true),
+            None,
+        );
+        assert_eq!(
+            first_use_scope_for_load(loader::TriggerInstall::New, true, true),
+            None,
+        );
+        assert_eq!(
+            first_use_scope_for_load(loader::TriggerInstall::New, false, false),
+            None,
+        );
+        assert_eq!(
+            first_use_scope_for_load(loader::TriggerInstall::New, true, false),
+            None,
+        );
+    }
+
+    #[test]
+    fn next_command_prunes_scoped_auto_load_but_preserves_durable_pin() {
+        let first_scope = CommandScope {
+            xid: 7,
+            command_id: 3,
+        };
+        let mut store = RelationStore::default();
+        let mut auto_loaded = empty_relation(80, false, 1);
+        auto_loaded.first_use_scope = Some(first_scope);
+        store.entries.push(auto_loaded);
+        store.entries.push(empty_relation(90, true, 2));
+
+        prune_invalid_relations(
+            &mut store,
+            false,
+            &PendingRelcacheInvalidations::empty(),
+            CommandScope {
+                xid: first_scope.xid,
+                command_id: first_scope.command_id + 1,
+            },
+            |_| GenerationStamp {
+                global: 1,
+                relation: 1,
+            },
+            |relid| Some(pg_sys::Oid::from(u32::from(relid) + 100)),
+        );
+
+        assert_eq!(store.entries.len(), 1);
+        assert_eq!(store.entries[0].relid, pg_sys::Oid::from(90_u32));
+        assert!(store.entries[0].pinned);
+        assert_eq!(store.entries[0].first_use_scope, None);
     }
 
     #[test]
@@ -3195,8 +3260,10 @@ mod tests {
                 xid: 8,
                 command_id: 11,
             });
+            let pinned = empty_relation(600, true, 3);
             store.entries.push(fact);
             store.entries.push(dimension);
+            store.entries.push(pinned);
         });
 
         let final_scope = CommandScope {
@@ -3204,19 +3271,25 @@ mod tests {
             command_id: 12,
         };
         finalize_batch_first_use(
-            &[pg_sys::Oid::from(400_u32), pg_sys::Oid::from(500_u32)],
+            &[
+                pg_sys::Oid::from(400_u32),
+                pg_sys::Oid::from(500_u32),
+                pg_sys::Oid::from(600_u32),
+            ],
             final_scope,
         );
 
         STORE.with(|store| {
-            assert_eq!(store.borrow().entries.len(), 2);
+            assert_eq!(store.borrow().entries.len(), 3);
             assert!(
                 store
                     .borrow()
                     .entries
                     .iter()
+                    .filter(|entry| !entry.pinned)
                     .all(|entry| entry.first_use_scope == Some(final_scope))
             );
+            assert_eq!(store.borrow().entries[2].first_use_scope, None);
             store.borrow_mut().entries.clear();
         });
     }
