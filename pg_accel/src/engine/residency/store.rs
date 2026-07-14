@@ -11,6 +11,7 @@ use crate::engine::gucs;
 use crate::gpu::{ExprDeviceBuffer, GpuError};
 
 use super::domain::ResidentByteAccounting;
+use super::geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
 use super::ledger::{self, GenerationStamp, LedgerCharge};
 use super::loader::{self, ColumnRequest, StagedRelation};
 
@@ -68,6 +69,10 @@ pub enum ResidentColumn {
         values: ExprDeviceBuffer<u64>,
         nulls: Option<ExprDeviceBuffer<u8>>,
     },
+    Geometry {
+        type_oid: pg_sys::Oid,
+        data: ResidentGeometryColumn,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: ExprDeviceBuffer<f32>,
@@ -95,6 +100,7 @@ impl ResidentColumn {
             | Self::I32 { type_oid, .. }
             | Self::I64 { type_oid, .. }
             | Self::H3 { type_oid, .. }
+            | Self::Geometry { type_oid, .. }
             | Self::F32 { type_oid, .. }
             | Self::F64 { type_oid, .. }
             | Self::TextDictionary { type_oid, .. } => *type_oid,
@@ -109,6 +115,7 @@ impl ResidentColumn {
             Self::I32 { values, .. } => values.len(),
             Self::I64 { values, .. } => values.len(),
             Self::H3 { values, .. } => values.len(),
+            Self::Geometry { data, .. } => data.view().row_count,
             Self::F32 { values, .. } => values.len(),
             Self::F64 { values, .. } => values.len(),
             Self::TextDictionary { codes, .. } => codes.len(),
@@ -149,6 +156,7 @@ impl ResidentColumn {
                 8,
                 nulls.as_ref().map_or(0, ExprDeviceBuffer::len),
             ),
+            Self::Geometry { data, .. } => Some(data.accounting().device_bytes),
             Self::F32 { values, nulls, .. } => checked(
                 values.len(),
                 4,
@@ -164,6 +172,17 @@ impl ResidentColumn {
                 4,
                 nulls.as_ref().map_or(0, ExprDeviceBuffer::len),
             ),
+        }
+    }
+
+    #[must_use]
+    pub fn accounting(&self) -> Option<ResidentByteAccounting> {
+        match self {
+            Self::Geometry { data, .. } => Some(data.accounting()),
+            _ => Some(ResidentByteAccounting {
+                device_bytes: self.device_bytes()?,
+                retained_host_exact_bytes: 0,
+            }),
         }
     }
 
@@ -208,6 +227,10 @@ impl ResidentColumn {
                 type_oid: *type_oid,
                 values,
                 nulls: nulls.as_ref(),
+            },
+            Self::Geometry { type_oid, data } => ResidentColumnView::Geometry {
+                type_oid: *type_oid,
+                data: data.view(),
             },
             Self::F32 {
                 type_oid,
@@ -268,6 +291,10 @@ pub enum ResidentColumnView<'a> {
         values: &'a ExprDeviceBuffer<u64>,
         nulls: Option<&'a ExprDeviceBuffer<u8>>,
     },
+    Geometry {
+        type_oid: pg_sys::Oid,
+        data: ResidentGeometryColumnView<'a>,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: &'a ExprDeviceBuffer<f32>,
@@ -295,6 +322,7 @@ impl ResidentColumnView<'_> {
             | Self::I32 { type_oid, .. }
             | Self::I64 { type_oid, .. }
             | Self::H3 { type_oid, .. }
+            | Self::Geometry { type_oid, .. }
             | Self::F32 { type_oid, .. }
             | Self::F64 { type_oid, .. }
             | Self::TextDictionary { type_oid, .. } => *type_oid,
@@ -309,6 +337,7 @@ impl ResidentColumnView<'_> {
             Self::I32 { values, .. } => values.len(),
             Self::I64 { values, .. } => values.len(),
             Self::H3 { values, .. } => values.len(),
+            Self::Geometry { data, .. } => data.row_count,
             Self::F32 { values, .. } => values.len(),
             Self::F64 { values, .. } => values.len(),
             Self::TextDictionary { codes, .. } => codes.len(),
@@ -481,6 +510,7 @@ pub struct ResidentRelationEvidence {
     pub relfilenode: pg_sys::Oid,
     pub row_count: u64,
     pub raw_bytes: u64,
+    pub raw_accounting: ResidentByteAccounting,
     pub derived_bytes: u64,
     pub loaded_at_us: i64,
     pub last_used_us: i64,
@@ -505,6 +535,7 @@ pub(super) struct ResidentRelation {
     pub(super) last_used_tick: u64,
     pub(super) pinned: bool,
     pub(super) raw_charge: LedgerCharge,
+    pub(super) raw_accounting: ResidentByteAccounting,
     pub(super) first_use_scope: Option<CommandScope>,
     pub(super) derived: Vec<DerivedEntry>,
 }
@@ -567,6 +598,7 @@ impl ResidentRelation {
             relfilenode: self.relfilenode,
             row_count: self.row_count,
             raw_bytes: self.raw_bytes(),
+            raw_accounting: self.raw_accounting,
             derived_bytes: self.derived_bytes(),
             loaded_at_us: self.loaded_at_us,
             last_used_us: self.last_used_us,
@@ -710,6 +742,7 @@ pub struct ResidentRelationStatus {
     pub relid: pg_sys::Oid,
     pub columns: Vec<i16>,
     pub raw_bytes: u64,
+    pub raw_accounting: ResidentByteAccounting,
     pub derived_bytes: u64,
     pub pinned: bool,
     pub generation: u64,
@@ -1041,13 +1074,16 @@ fn install_staged(
     first_use_scope: Option<CommandScope>,
     protected: &BTreeSet<u32>,
 ) -> Result<(), ResidentLoadError> {
-    let bytes = staged.device_bytes().map_err(ResidentLoadError::Loader)?;
+    let accounting = staged.accounting().map_err(ResidentLoadError::Loader)?;
+    let bytes = accounting
+        .checked_total()
+        .map_err(|error| ResidentLoadError::Loader(error.to_string()))?;
     STORE.with(|store| {
         store.borrow_mut().remove_relation(staged.relid());
     });
     let charge = reserve_with_local_eviction_excluding(protected, bytes)?;
     let mut relation = staged
-        .materialize(charge)
+        .materialize(charge, accounting)
         .map_err(ResidentLoadError::Loader)?;
     relation.pinned = pinned;
     relation.first_use_scope = first_use_scope;
@@ -2668,6 +2704,7 @@ mod tests {
             last_used_tick,
             pinned,
             raw_charge: LedgerCharge::reserve(0, 0).expect("zero-byte charge"),
+            raw_accounting: ResidentByteAccounting::default(),
             first_use_scope: None,
             derived: Vec::new(),
         }
@@ -3474,6 +3511,7 @@ mod pg_tests {
                     last_used_tick: tick,
                     pinned: false,
                     raw_charge: LedgerCharge::reserve(0, 0).expect("zero-byte charge"),
+                    raw_accounting: super::super::ResidentByteAccounting::default(),
                     first_use_scope: None,
                     derived: Vec::new(),
                 });

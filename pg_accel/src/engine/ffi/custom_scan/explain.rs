@@ -1085,6 +1085,10 @@ mod tests {
                 relfilenode: pg_sys::Oid::from(110u32),
                 row_count: 100,
                 raw_bytes: 100,
+                raw_accounting: crate::engine::residency::ResidentByteAccounting {
+                    device_bytes: 100,
+                    retained_host_exact_bytes: 0,
+                },
                 derived_bytes: 30,
                 loaded_at_us: 1,
                 last_used_us: 2,
@@ -1097,6 +1101,10 @@ mod tests {
                 relfilenode: pg_sys::Oid::from(220u32),
                 row_count: 10,
                 raw_bytes: 50,
+                raw_accounting: crate::engine::residency::ResidentByteAccounting {
+                    device_bytes: 50,
+                    retained_host_exact_bytes: 0,
+                },
                 derived_bytes: 0,
                 loaded_at_us: 1,
                 last_used_us: 2,

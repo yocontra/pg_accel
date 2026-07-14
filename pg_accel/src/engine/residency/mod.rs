@@ -6,12 +6,14 @@
 //! proof types used by planner/executor boundaries remain in [`proof`].
 
 mod domain;
+mod geometry;
 mod ledger;
 mod loader;
 mod proof;
 mod store;
 
 pub use domain::*;
+pub use geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
 pub use proof::*;
 pub use store::{
     ArtifactEnsureOutcome, DerivedArtifact, DerivedArtifactIdentity, PreparedDerived,

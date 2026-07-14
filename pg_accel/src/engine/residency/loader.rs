@@ -13,6 +13,8 @@ use crate::engine::ffi::syscache;
 use crate::engine::gucs;
 use crate::gpu::ExprDeviceBuffer;
 
+use super::domain::{ResidentByteAccounting, ResidentGeometryData};
+use super::geometry::{ResidentGeometryBuilder, ResidentGeometryColumn};
 use super::ledger::{self, GenerationStamp, LedgerCharge};
 use super::store::{ResidentColumn, ResidentRelation};
 
@@ -30,6 +32,48 @@ impl FromDatum for RawH3Datum {
         _type_oid: pg_sys::Oid,
     ) -> Option<Self> {
         (!is_null).then(|| Self(datum.value() as u64))
+    }
+}
+
+/// Owned detoasted GSERIALIZED bytes. The dynamic type is proved before this
+/// wrapper is ever requested from SPI.
+struct RawGeometryDatum(Vec<u8>);
+
+impl FromDatum for RawGeometryDatum {
+    unsafe fn from_polymorphic_datum(
+        datum: pg_sys::Datum,
+        is_null: bool,
+        _type_oid: pg_sys::Oid,
+    ) -> Option<Self> {
+        if is_null {
+            return None;
+        }
+        // SAFETY: SPI supplied a non-NULL Datum of the catalog-proved PostGIS
+        // varlena type on the backend main thread.
+        let detoasted =
+            unsafe { pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pg_sys::varlena>()) };
+        if detoasted.is_null() {
+            return Some(Self(Vec::new()));
+        }
+        // SAFETY: pg_detoast_datum returned a flat varlena whose complete
+        // allocation is readable for VARSIZE bytes during this SPI callback.
+        let length = unsafe { pgrx::varsize(detoasted.cast()) };
+        let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), length) };
+        Some(Self(bytes.to_vec()))
+    }
+}
+
+impl IntoDatum for RawGeometryDatum {
+    fn into_datum(self) -> Option<pg_sys::Datum> {
+        None
+    }
+
+    fn type_oid() -> pg_sys::Oid {
+        pg_sys::InvalidOid
+    }
+
+    fn is_compatible_with(_other: pg_sys::Oid) -> bool {
+        true
     }
 }
 
@@ -83,6 +127,12 @@ enum StagedColumn {
         values: Vec<u64>,
         nulls: Option<Vec<u8>>,
     },
+    Geometry {
+        type_oid: pg_sys::Oid,
+        data: ResidentGeometryData,
+        accounting: ResidentByteAccounting,
+        max_exact_value_bytes: usize,
+    },
     F32 {
         type_oid: pg_sys::Oid,
         values: Vec<f32>,
@@ -126,6 +176,7 @@ impl StagedColumn {
             Self::H3 { values, nulls, .. } => {
                 checked(values.len(), 8, nulls.as_ref().map_or(0, Vec::len))
             }
+            Self::Geometry { accounting, .. } => Ok(accounting.device_bytes),
             Self::F64 { values, nulls, .. } => {
                 checked(values.len(), 8, nulls.as_ref().map_or(0, Vec::len))
             }
@@ -174,6 +225,15 @@ impl StagedColumn {
                 values: copy_buffer(&values, label)?,
                 nulls: copy_optional_nulls(nulls, label)?,
             }),
+            Self::Geometry {
+                type_oid,
+                data,
+                max_exact_value_bytes,
+                ..
+            } => Ok(ResidentColumn::Geometry {
+                type_oid,
+                data: ResidentGeometryColumn::materialize(data, max_exact_value_bytes, label)?,
+            }),
             Self::F32 {
                 type_oid,
                 values,
@@ -202,6 +262,16 @@ impl StagedColumn {
                 codes: copy_buffer(&codes, label)?,
                 nulls: copy_optional_nulls(nulls, label)?,
                 labels,
+            }),
+        }
+    }
+
+    fn accounting(&self) -> Result<ResidentByteAccounting, String> {
+        match self {
+            Self::Geometry { accounting, .. } => Ok(*accounting),
+            _ => Ok(ResidentByteAccounting {
+                device_bytes: self.device_bytes()?,
+                retained_host_exact_bytes: 0,
             }),
         }
     }
@@ -240,15 +310,35 @@ impl StagedRelation {
         self.row_count
     }
 
-    pub(super) fn device_bytes(&self) -> Result<u64, String> {
-        self.columns.values().try_fold(0_u64, |total, column| {
-            total
-                .checked_add(column.device_bytes()?)
-                .ok_or_else(|| "resident relation byte count overflow".to_owned())
-        })
+    pub(super) fn accounting(&self) -> Result<ResidentByteAccounting, String> {
+        let accounting = self.columns.values().try_fold(
+            ResidentByteAccounting::default(),
+            |mut total, column| {
+                let column = column.accounting()?;
+                total.device_bytes = total
+                    .device_bytes
+                    .checked_add(column.device_bytes)
+                    .ok_or_else(|| "resident relation device byte count overflow".to_owned())?;
+                total.retained_host_exact_bytes = total
+                    .retained_host_exact_bytes
+                    .checked_add(column.retained_host_exact_bytes)
+                    .ok_or_else(|| {
+                        "resident relation retained-host byte count overflow".to_owned()
+                    })?;
+                Ok::<_, String>(total)
+            },
+        )?;
+        accounting
+            .checked_total()
+            .map_err(|error| error.to_string())?;
+        Ok(accounting)
     }
 
-    pub(super) fn materialize(self, charge: LedgerCharge) -> Result<ResidentRelation, String> {
+    pub(super) fn materialize(
+        self,
+        charge: LedgerCharge,
+        accounting: ResidentByteAccounting,
+    ) -> Result<ResidentRelation, String> {
         let mut columns = BTreeMap::new();
         for (attno, staged) in self.columns {
             let label = format!(
@@ -256,6 +346,30 @@ impl StagedRelation {
                 u32::from(self.relid)
             );
             columns.insert(attno, staged.materialize(&label)?);
+        }
+        let actual_accounting =
+            columns
+                .values()
+                .try_fold(ResidentByteAccounting::default(), |mut total, column| {
+                    let column = column
+                        .accounting()
+                        .ok_or_else(|| "resident column byte count overflow".to_owned())?;
+                    total.device_bytes = total
+                        .device_bytes
+                        .checked_add(column.device_bytes)
+                        .ok_or_else(|| "resident relation device byte count overflow".to_owned())?;
+                    total.retained_host_exact_bytes = total
+                        .retained_host_exact_bytes
+                        .checked_add(column.retained_host_exact_bytes)
+                        .ok_or_else(|| {
+                            "resident relation retained-host byte count overflow".to_owned()
+                        })?;
+                    Ok::<_, String>(total)
+                })?;
+        if actual_accounting != accounting {
+            return Err(format!(
+                "resident relation accounting mismatch: staged={accounting:?}, materialized={actual_accounting:?}"
+            ));
         }
         let now = now_us();
         Ok(ResidentRelation {
@@ -270,6 +384,7 @@ impl StagedRelation {
             last_used_tick: 0,
             pinned: false,
             raw_charge: charge,
+            raw_accounting: accounting,
             first_use_scope: None,
             derived: Vec::new(),
         })
@@ -300,6 +415,10 @@ enum ColumnBuilder {
         values: Vec<u64>,
         nulls: Vec<u8>,
         saw_null: bool,
+    },
+    Geometry {
+        type_oid: pg_sys::Oid,
+        builder: ResidentGeometryBuilder,
     },
     F32 {
         type_oid: pg_sys::Oid,
@@ -338,7 +457,45 @@ fn validate_h3_column_type(type_oid: pg_sys::Oid) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_geometry_column_type(type_oid: pg_sys::Oid) -> Result<(), String> {
+    // SAFETY: residency resolution runs synchronously on the backend main
+    // thread. The complete PostGIS function/type fingerprint is revalidated by
+    // planner admission; the loader independently proves extension ownership
+    // and the exact geometry type before interpreting a varlena payload.
+    let is_member = unsafe { syscache::type_is_extension_member(type_oid, "postgis") };
+    let name = unsafe { syscache::type_name(type_oid) };
+    if !is_member || name.as_deref() != Some("geometry") {
+        return Err(format!(
+            "type OID {} is not the extension-owned PostGIS geometry type",
+            u32::from(type_oid)
+        ));
+    }
+    Ok(())
+}
+
 impl ColumnBuilder {
+    fn type_oid(&self) -> pg_sys::Oid {
+        match self {
+            Self::Bool { type_oid, .. }
+            | Self::I32 { type_oid, .. }
+            | Self::I64 { type_oid, .. }
+            | Self::H3 { type_oid, .. }
+            | Self::Geometry { type_oid, .. }
+            | Self::F32 { type_oid, .. }
+            | Self::F64 { type_oid, .. }
+            | Self::Text { type_oid, .. } => *type_oid,
+        }
+    }
+
+    fn finish_empty(self) -> Result<StagedColumn, String> {
+        let type_oid = self.type_oid();
+        if matches!(&self, Self::Geometry { .. }) {
+            self.finish()
+        } else {
+            Ok(StagedColumn::Empty { type_oid })
+        }
+    }
+
     fn for_type(type_oid: pg_sys::Oid) -> Result<Self, String> {
         match type_oid {
             pg_sys::BOOLOID => Ok(Self::Bool {
@@ -376,13 +533,23 @@ impl ColumnBuilder {
                 values: Vec::new(),
             }),
             _ => {
-                validate_h3_column_type(type_oid)?;
-                Ok(Self::H3 {
-                    type_oid,
-                    values: Vec::new(),
-                    nulls: Vec::new(),
-                    saw_null: false,
-                })
+                if validate_geometry_column_type(type_oid).is_ok() {
+                    Ok(Self::Geometry {
+                        type_oid,
+                        builder: ResidentGeometryBuilder::new(
+                            crate::engine::cost::device_limits()
+                                .resident_domain_max_exact_value_bytes,
+                        ),
+                    })
+                } else {
+                    validate_h3_column_type(type_oid)?;
+                    Ok(Self::H3 {
+                        type_oid,
+                        values: Vec::new(),
+                        nulls: Vec::new(),
+                        saw_null: false,
+                    })
+                }
             }
         }
     }
@@ -408,6 +575,7 @@ impl ColumnBuilder {
                 reserve(values.try_reserve(additional))?;
                 reserve(nulls.try_reserve(additional))
             }
+            Self::Geometry { builder, .. } => builder.try_reserve_rows(additional),
             Self::F32 { values, nulls, .. } => {
                 reserve(values.try_reserve(additional))?;
                 reserve(nulls.try_reserve(additional))
@@ -490,6 +658,12 @@ impl ColumnBuilder {
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
             }
+            Self::Geometry { builder, .. } => {
+                let value = row
+                    .get::<RawGeometryDatum>(ordinal)
+                    .map_err(|error| format!("column {ordinal} geometry read failed: {error:?}"))?;
+                builder.push(value.map(|value| value.0))?;
+            }
             Self::F32 {
                 values,
                 nulls,
@@ -568,6 +742,20 @@ impl ColumnBuilder {
                 values,
                 nulls: saw_null.then_some(nulls),
             },
+            Self::Geometry { type_oid, builder } => {
+                let max_exact_value_bytes =
+                    crate::engine::cost::device_limits().resident_domain_max_exact_value_bytes;
+                let data = builder.finish()?;
+                let accounting = data
+                    .accounting(max_exact_value_bytes)
+                    .map_err(|error| error.to_string())?;
+                StagedColumn::Geometry {
+                    type_oid,
+                    data,
+                    accounting,
+                    max_exact_value_bytes,
+                }
+            }
             Self::F32 {
                 type_oid,
                 values,
@@ -895,8 +1083,25 @@ pub(super) fn estimate_device_bytes(
                 8
             }
             _ => {
-                validate_h3_column_type(request.type_oid)?;
-                8
+                if validate_geometry_column_type(request.type_oid).is_ok() {
+                    // Geometry retains the exact varlena and publishes fp64
+                    // coordinates plus fixed row metadata. PostgreSQL's
+                    // analyzed average width is the best available pre-scan
+                    // estimate; the exact post-scan accounting remains the
+                    // authoritative reservation.
+                    // SAFETY: relation/attribute identities were read from the
+                    // active catalog on the backend main thread.
+                    let average_width = unsafe { pg_sys::get_attavgwidth(relid, request.attno) };
+                    let average_width = u64::try_from(average_width.max(32))
+                        .map_err(|_| "geometry average width exceeds u64".to_owned())?;
+                    average_width
+                        .checked_mul(2)
+                        .and_then(|bytes| bytes.checked_add(72))
+                        .ok_or_else(|| "resident geometry width estimate overflow".to_owned())?
+                } else {
+                    validate_h3_column_type(request.type_oid)?;
+                    8
+                }
             }
         };
         let width = width + u64::from(!not_null.get(&request.attno).copied().unwrap_or(false));
@@ -1040,15 +1245,10 @@ pub(super) fn stage_relation(
         let columns = if row_count == 0 {
             requests
                 .iter()
-                .map(|request| {
-                    (
-                        request.attno,
-                        StagedColumn::Empty {
-                            type_oid: request.type_oid,
-                        },
-                    )
-                })
-                .collect()
+                .map(|request| request.attno)
+                .zip(builders.into_iter().map(ColumnBuilder::finish_empty))
+                .map(|(attno, column)| column.map(|column| (attno, column)))
+                .collect::<Result<BTreeMap<_, _>, _>>()?
         } else {
             requests
                 .iter()
