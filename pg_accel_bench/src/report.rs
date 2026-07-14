@@ -1103,7 +1103,7 @@ pub fn classify_kernel(name: &str) -> String {
         ("proximity", "point_in_ring"),
         ("spatial_join", "point_in_ring"),
         ("index_recheck", "point_in_ring"),
-        // h3 parent grouped-count has its own fused parent + device-hash path.
+        // H3 parent grouped-count has its own resident descriptor path.
         ("h3_cell_to_parent", "h3_cell_to_parent"),
         // h3 latlng / distance / parent variants (shared H3 family)
         ("h3_", "h3_latlng"),
@@ -6902,8 +6902,8 @@ mod tests {
         workload.accel_output_rows_consumed = 32;
         workload.pg_accel_stock_exec_delta = 0;
         workload.plan_snippet = Some(
-            "Custom Scan (GpuAgg)\n  Output: (h3_cell_to_parent(cell, 4)), count(*)\n  \
-             Group Key: h3_cell_to_parent(bench_h3_parent.cell, 4)\n  \
+            "Custom Scan (GpuAgg)\n  Output: (h3_cell_to_parent(cell, 0)), count(*)\n  \
+             Group Key: h3_cell_to_parent(bench_h3_parent.cell, 0)\n  \
              GPU Kernel Dispatched: true\n"
                 .to_owned(),
         );
@@ -7214,8 +7214,8 @@ mod tests {
             wl.accel_output_rows_consumed = 10;
             wl.pg_accel_stock_exec_delta = 0;
             wl.plan_snippet = Some(if name == "h3_cell_to_parent" {
-                "Custom Scan (GpuAgg)\n  Output: (h3_cell_to_parent(cell, 4)), count(*)\n  \
-                 Group Key: h3_cell_to_parent(bench_h3_parent.cell, 4)\n"
+                "Custom Scan (GpuAgg)\n  Output: (h3_cell_to_parent(cell, 0)), count(*)\n  \
+                 Group Key: h3_cell_to_parent(bench_h3_parent.cell, 0)\n"
                     .to_owned()
             } else {
                 "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n  \

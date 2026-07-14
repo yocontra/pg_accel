@@ -1711,6 +1711,30 @@ fn prime_workload_accel_backend(
             )
             .into());
         }
+        let material: bool = client
+            .query_one(
+                "SELECT COALESCE(bool_or(raw_bytes > 0 AND loaded_at IS NOT NULL), false) \
+                 FROM pg_accel_resident_status() WHERE relid = $1::regclass::oid",
+                &[&pin.table],
+            )?
+            .get(0);
+        if !material {
+            let refreshed_rows: i64 = client
+                .query_one(
+                    "SELECT pg_accel_refresh($1::regclass)::bigint",
+                    &[&pin.table],
+                )?
+                .get(0);
+            if refreshed_rows != loaded_rows {
+                return Err(format!(
+                    "pg_accel_refresh loaded {refreshed_rows} rows after the one-time pin loaded \
+                     {loaded_rows} rows from {} for {}",
+                    pin.table,
+                    workload.name(),
+                )
+                .into());
+            }
+        }
     }
     Ok(resident_lane.then(|| resident_load_start.elapsed().as_secs_f64() * 1000.0))
 }
@@ -1893,6 +1917,7 @@ fn resident_pin_specs(name: &str) -> Vec<ResidentPinSpec> {
         "reduce_f64_sum" | "reduce_f64_minmax" | "reduce_f64_stats" => {
             vec![resident_pin("bench_fp64_num", &["v_f64"])]
         }
+        "h3_cell_to_parent" => vec![resident_pin("bench_h3_parent", &["cell"])],
         "hash_join" => vec![
             resident_pin("bench_orders", &["customer_id"]),
             resident_pin("bench_customers", &["customer_id"]),
@@ -4796,22 +4821,26 @@ mod tests {
     }
 
     #[test]
-    fn test_h3_workloads_have_no_phase5_resident_pins() {
-        for name in [
-            "h3_bulk",
-            "h3_resolution_sweep",
-            "h3_latlng_res15",
-            "h3_cell_to_parent",
-        ] {
+    fn test_generic_h3_workloads_have_no_resident_pins() {
+        for name in ["h3_bulk", "h3_resolution_sweep", "h3_latlng_res15"] {
             assert!(
                 resident_pin_specs(name).is_empty(),
-                "{name} must remain unpinned until Phase 6 supports H3 inputs"
+                "{name} must remain unpinned until its generic H3 input is resident"
             );
             assert!(
                 !workload_is_resident_lane(name),
-                "{name} must not be classified as a Phase 5 resident lane"
+                "{name} must not be classified as a resident lane"
             );
         }
+    }
+
+    #[test]
+    fn test_h3_parent_workload_pins_exact_resident_input() {
+        assert_eq!(
+            resident_pin_specs("h3_cell_to_parent"),
+            vec![resident_pin("bench_h3_parent", &["cell"])]
+        );
+        assert!(workload_is_resident_lane("h3_cell_to_parent"));
     }
 
     #[test]

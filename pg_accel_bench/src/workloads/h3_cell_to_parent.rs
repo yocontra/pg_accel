@@ -4,10 +4,11 @@ use super::Workload;
 ///
 /// This scalar H3 operation remains near parity as a standalone GPU path, so
 /// the adapter must not expose it to normal scalar planning. The benchmarked
-/// shape is narrower and cardinality-reducing:
-/// `h3_cell_to_parent(cell, const), COUNT(*) GROUP BY 1`.
+/// shape is the Phase 6 resident capability lane:
+/// `h3_cell_to_parent(cell, 0), COUNT(*) GROUP BY 1`.
 /// The baseline keeps `pg_accel.enabled = off` and schema-qualifies the
-/// native h3-pg call.
+/// native h3-pg call. Performance is intentionally left for Phase 7
+/// re-baselining; this workload currently proves dispatch and correctness.
 pub struct H3CellToParent;
 
 impl Workload for H3CellToParent {
@@ -16,10 +17,10 @@ impl Workload for H3CellToParent {
     }
 
     fn description(&self) -> &'static str {
-        "h3_cell_to_parent fused grouped COUNT(*) — standalone scalar H3 stays \
-         quarantined, but parent-cell grouping can dispatch a cardinality-\
-         reducing GPU aggregate. Baseline uses stock h3-pg via \
-         `public.h3_cell_to_parent`."
+        "h3_cell_to_parent resident grouped COUNT(*) at parent resolution 0 — \
+         standalone scalar H3 stays quarantined. This Phase 6 capability lane \
+         proves selected GPU dispatch and native equality; Phase 7 will \
+         re-baseline performance."
     }
 
     fn category(&self) -> &'static str {
@@ -52,31 +53,15 @@ impl Workload for H3CellToParent {
     }
 
     fn query_sql(&self) -> String {
-        "SELECT count(*) AS group_count, \
-                sum(n)::bigint AS input_rows, \
-                min(parent_cell::text) AS min_cell, \
-                max(parent_cell::text) AS max_cell, \
-                sum(hashtextextended(parent_cell::text || ':' || n::text, 0)::numeric) \
-                  AS cell_count_checksum \
-         FROM (\
-           SELECT h3_cell_to_parent(cell, 4) AS parent_cell, COUNT(*) AS n \
-           FROM bench_h3_parent GROUP BY 1\
-         ) grouped"
+        "SELECT h3_cell_to_parent(cell, 0) AS parent_cell, COUNT(*) AS n \
+         FROM bench_h3_parent GROUP BY 1"
             .to_owned()
     }
 
     fn baseline_query_sql(&self) -> Option<String> {
         Some(
-            "SELECT count(*) AS group_count, \
-                    sum(n)::bigint AS input_rows, \
-                    min(parent_cell::text) AS min_cell, \
-                    max(parent_cell::text) AS max_cell, \
-                    sum(hashtextextended(parent_cell::text || ':' || n::text, 0)::numeric) \
-                      AS cell_count_checksum \
-             FROM (\
-               SELECT public.h3_cell_to_parent(cell, 4) AS parent_cell, COUNT(*) AS n \
-               FROM bench_h3_parent GROUP BY 1\
-             ) grouped"
+            "SELECT public.h3_cell_to_parent(cell, 0) AS parent_cell, COUNT(*) AS n \
+             FROM bench_h3_parent GROUP BY 1"
                 .to_owned(),
         )
     }

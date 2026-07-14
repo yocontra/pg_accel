@@ -760,10 +760,9 @@ pub enum H3LaneClass {
 #[must_use]
 pub fn h3_lane_class(name: &str) -> Option<H3LaneClass> {
     // Winning grouped-count lanes. LatLngToCell workloads share the H3 point
-    // kernel and keep the historical 1.5x floor. `h3_cell_to_parent` uses a
-    // fused parent-cell + device-hash COUNT(*) path; h3-pg's scalar parent
-    // operator is already cheap, so its release gate is tied to the measured
-    // 2026-06-10 device-hash lane instead of the lat/lng conversion floor.
+    // kernel and keep the historical 1.5x floor. `h3_cell_to_parent` is the
+    // resident resolution-zero capability lane. It must select and dispatch,
+    // but carries no performance claim until Phase 7 re-baselines it.
     // (`h3_bulk @ 10M` ~15x, `h3_resolution_sweep @ 1M` ~26x,
     // `h3_latlng_res15 @ 10M` ~5x in the historical grouped point shape).
     // Threshold is well below the lowest scale measurement
@@ -798,7 +797,7 @@ pub fn h3_lane_class(name: &str) -> Option<H3LaneClass> {
         })
     } else if name == "h3_cell_to_parent" {
         Some(H3LaneClass::Winning {
-            min_warm_speedup: 1.1,
+            min_warm_speedup: 1.0,
         })
     } else if PARITY_LANES.contains(&name) {
         Some(H3LaneClass::Parity)
@@ -1707,15 +1706,15 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             decline_reason: "h3_fp64_expression_aggregate_no_dispatch_path",
         },
         "h3_cell_to_parent" => H3MatrixProfile {
-            lane: "h3_cell_to_parent_grouped_count_res7_to_res4",
+            lane: "h3_cell_to_parent_grouped_count_res7_to_res0",
             data_type: "h3index -> h3index",
-            cardinality: "resolution 7 to parent resolution 4",
+            cardinality: "resolution 7 to parent resolution 0",
             selectivity: "100% input cells converted to parent cells and grouped",
             result_count: grouped_result,
             batch_count: "backend-local resident H3 cell cache consumed by one parent grouped-count kernel",
             row_width: "8-byte h3index input and output",
             output_size: "parent h3index group key plus count rows",
-            threshold_basis: "H3 fused parent grouped-count device-hash warm winner matrix",
+            threshold_basis: "Phase 6 resident parent/count capability gate; performance re-baseline deferred to Phase 7",
             decline_reason: "h3_parent_grouped_count_unexpected_native_decline",
         },
         "h3_grid_distance" | "h3_dist_near" | "h3_dist_far" => H3MatrixProfile {
@@ -3402,14 +3401,14 @@ mod tests {
 
         let parent = benchmark_threshold_matrix_entry("h3_cell_to_parent", 1_000_000)
             .expect("h3_cell_to_parent threshold entry");
-        assert_eq!(parent.lane, "h3_cell_to_parent_grouped_count_res7_to_res4");
+        assert_eq!(parent.lane, "h3_cell_to_parent_grouped_count_res7_to_res0");
         assert_eq!(
             parent.expectation,
             BenchmarkLaneExpectation::GpuWinner {
-                min_warm_speedup: 1.1,
+                min_warm_speedup: 1.0,
             }
         );
-        assert!(parent.threshold_basis.contains("device-hash"));
+        assert!(parent.threshold_basis.contains("Phase 7"));
 
         let srf = benchmark_threshold_matrix_entry("h3_srf_grid_disk", 10_000)
             .expect("h3_srf_grid_disk threshold entry");

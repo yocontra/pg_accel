@@ -1,11 +1,12 @@
-//! H3 integration assertions across the Phase 5E legacy cut-over.
+//! H3 integration assertions across the resident descriptor cut-over.
 //!
 //! These tests guard the H3 wins documented in `TODO.md` Phase 5 against
 //! silent regression by exercising the running pgrx PostgreSQL backend:
 //!
-//! 1. **Plan-shape guards** - grouped H3 workloads remain unpinned and native
-//!    with a visible generic-shape decline and zero GPU dispatch until Phase 6
-//!    implements descriptor H3 grouping and H3 input residency.
+//! 1. **Plan-shape guards** - the exact resident
+//!    `h3_cell_to_parent(cell, const), COUNT(*)` shape dispatches after one
+//!    explicit pin, while generic grouped H3 expressions and unsupported parent
+//!    variants retain visible native declines.
 //! 2. **Parity-lane guards** — standalone `h3_cell_to_parent` and
 //!    `h3_grid_distance` must NOT increment the GPU kernel counter, since the
 //!    h3 adapter intentionally does not register them for normal scalar
@@ -20,7 +21,7 @@
 //!    protected while it executes through native PostgreSQL.
 //! 5. **Grouped-count resolution matrix** - deterministic res7 coordinates
 //!    that need fp64 exact fixup, plus poles/antimeridian/city points, must
-//!    match h3-pg under the Phase 5E structural decline.
+//!    match h3-pg under the generic expression decline.
 //!
 //! Operation-specific thresholds — the bench classifier in
 //! `pg_accel_bench/src/workloads/mod.rs` (`h3_lane_class`) is the source of
@@ -47,6 +48,7 @@ use crate::workloads::{
 // classification, result diff), not to reproduce the headline speedup.
 const SETUP_ROWS: usize = 10_000;
 const H3_GROUPED_DISPATCH_ROWS: usize = 100_000;
+const H3_PARENT_RESIDENT_DISPATCH_ROWS: usize = 1_000_000;
 const H3_DIFF_ROWS: usize = 5_000;
 const H3_DIFF_EDGE_ROWS: usize = 15;
 const H3_DIFF_RESOLUTIONS: [i32; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
@@ -79,8 +81,8 @@ const H3_GROUPED_COUNT_MATRIX_POINTS_SQL: &str = "\
   (37.6173::float8, 55.7558::float8), \
   (18.4241::float8, -33.9249::float8)";
 
-// The Phase 5 historical warm budget remains intentionally generous while the
-// grouped lane runs native; Phase 6 will restore its device interpretation.
+// The historical warm budget remains intentionally generous while generic
+// point-to-cell grouping runs native.
 const WARM_GROUPED_FALLBACK_BUDGET: Duration = Duration::from_secs(16);
 
 /// Open a fresh libpq connection to the bench database and trigger pg_accel
@@ -241,7 +243,8 @@ fn apply_setup(c: &mut Client, wl: &dyn Workload, rows: usize) {
     }
 }
 
-const H3_GROUPED_PHASE5E_DECLINE: &str = "shape_group_expression";
+const H3_GROUP_EXPRESSION_DECLINE: &str = "shape_group_expression";
+const H3_PARENT_CAPACITY_DECLINE: &str = "generic_groups_exceed_device_maximum";
 
 /// Apply the workload's cleanup statements. Tolerates errors so a previous
 /// failed run leaves the fixture in a recoverable state.
@@ -252,8 +255,8 @@ fn apply_cleanup(c: &mut Client, wl: &dyn Workload) {
     }
 }
 
-/// Phase 5E keeps grouped H3 execution native after removing the legacy H3
-/// CustomScan. Phase 6 will flip this helper back to descriptor dispatch.
+/// Generic grouped point-to-cell execution remains native until its input and
+/// expression shapes have resident descriptor support.
 #[cfg(feature = "integration_tests")]
 fn assert_grouped_h3_declines_and_matches_native(name: &str, rows: usize) {
     let wl = find_workload(name).unwrap_or_else(|| panic!("workload `{name}` not registered"));
@@ -272,12 +275,12 @@ fn assert_grouped_h3_declines_and_matches_native(name: &str, rows: usize) {
     let plan_lc = plan.to_lowercase();
     assert!(
         !plan_lc.contains("custom scan") && !plan_lc.contains("gpuaccelagg"),
-        "{name}: grouped H3 must stay native until Phase 6:\n{plan}"
+        "{name}: generic grouped H3 expression must stay native:\n{plan}"
     );
     assert_planner_rejection_observed(
         &mut c,
-        H3_GROUPED_PHASE5E_DECLINE,
-        &format!("{name}: grouped H3 Phase 5E structural decline"),
+        H3_GROUP_EXPRESSION_DECLINE,
+        &format!("{name}: grouped H3 structural decline"),
     );
 
     let before = kernel_executions(&mut c);
@@ -285,12 +288,250 @@ fn assert_grouped_h3_declines_and_matches_native(name: &str, rows: usize) {
     let after = kernel_executions(&mut c);
     assert_eq!(
         after, before,
-        "{name}: Phase 5E grouped H3 decline must not dispatch a GPU kernel"
+        "{name}: grouped H3 structural decline must not dispatch a GPU kernel"
     );
     assert_eq!(
         enabled, native,
         "{name}: native pg_accel wrapper output differs from stock h3-pg"
     );
+
+    apply_cleanup(&mut c, wl.as_ref());
+}
+
+/// Protect the exact Phase 6 resident parent/count shape and the adjacent
+/// native declines with one explicit pin of the source H3 column.
+#[cfg(feature = "integration_tests")]
+fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
+    let wl = find_workload("h3_cell_to_parent").expect("H3 parent workload registered");
+    let selected_query = wl.query_sql();
+    let selected_native_query = wl
+        .baseline_query_sql()
+        .expect("H3 parent workload has a native baseline");
+    let mut setup = connect();
+    apply_setup(&mut setup, wl.as_ref(), rows);
+
+    setup
+        .simple_query("SET pg_accel.enabled = off")
+        .expect("disable pg_accel for stock H3 parent baselines");
+    let mut selected_native =
+        execute_to_rows(&mut setup, &selected_native_query, H3_EXPLAIN_ROW_CAP);
+    selected_native.sort_unstable();
+    let mut capacity_cases = Vec::new();
+    for resolution in [4, 5] {
+        let query = format!(
+            "SELECT h3_cell_to_parent(cell, {resolution}) AS parent_cell, COUNT(*) AS n \
+             FROM bench_h3_parent GROUP BY 1"
+        );
+        let native_query = format!(
+            "SELECT public.h3_cell_to_parent(cell, {resolution}) AS parent_cell, COUNT(*) AS n \
+             FROM bench_h3_parent GROUP BY 1"
+        );
+        let mut native = execute_to_rows(&mut setup, &native_query, rows);
+        native.sort_unstable();
+        capacity_cases.push((resolution, query, native));
+    }
+
+    // Match the benchmark runner: setup and baselines use a different backend
+    // from the measured resident lane, so DDL invalidations cannot consume its
+    // one explicit pin.
+    drop(setup);
+    let mut c = connect();
+
+    c.simple_query(
+        "SET pg_accel.enabled = on; \
+         SET pg_accel.gpu_enabled = on; \
+         SET pg_accel.auto_load = off",
+    )
+    .expect("enable exact pinned H3 parent planning");
+    let pinned = c
+        .query_one(
+            "SELECT pg_accel_pin('bench_h3_parent'::regclass, ARRAY['cell'])",
+            &[],
+        )
+        .expect("pin H3 parent source column")
+        .get::<_, i64>(0);
+    assert_eq!(
+        pinned,
+        i64::try_from(rows).expect("H3 protection row count fits i64"),
+        "one explicit H3 parent pin must observe every fixture row"
+    );
+    let refreshed = c
+        .query_one(
+            "SELECT pg_accel_refresh('bench_h3_parent'::regclass)::bigint",
+            &[],
+        )
+        .expect("refresh H3 parent snapshot after first-pin trigger installation")
+        .get::<_, i64>(0);
+    assert_eq!(
+        refreshed, pinned,
+        "refresh after the one-time pin must preserve the fixture row count"
+    );
+    let resident_status = c
+        .query_one(
+            "SELECT pinned, raw_bytes, loaded_at IS NOT NULL \
+             FROM pg_accel_resident_status() \
+             WHERE relid = 'bench_h3_parent'::regclass",
+            &[],
+        )
+        .expect("read H3 parent pin intent");
+    let retains_pin = resident_status.get::<_, bool>(0);
+    let pinned_raw_bytes = resident_status.get::<_, i64>(1);
+    let pinned_loaded = resident_status.get::<_, bool>(2);
+    assert!(
+        retains_pin,
+        "H3 parent fixture must retain explicit pin intent"
+    );
+
+    c.simple_query("SELECT pg_accel_reset_stats()")
+        .expect("reset H3 parent selection stats");
+    let selected_plan = explain_text(&mut c, &selected_query);
+    let selected_plan_lc = selected_plan.to_lowercase();
+    let selected_rejection = last_planner_rejection_reason(&mut c);
+    for marker in [
+        "custom scan (gpuaccelagg)",
+        "gpu resident pipeline: true",
+        "gpu descriptor group keys:",
+        "h3_cell_to_parent(",
+        "resolution=0",
+        "encoding=hash",
+        "gpu descriptor aggregates: m0:count_star -> value.count",
+    ] {
+        assert!(
+            selected_plan_lc.contains(marker),
+            "supported H3 parent plan must contain `{marker}`: \
+             pinned_raw_bytes={pinned_raw_bytes}, pinned_loaded={pinned_loaded}, \
+             rejection={selected_rejection:?}\n{selected_plan}"
+        );
+    }
+    assert_eq!(
+        planner_rejection_count(&mut c, H3_GROUP_EXPRESSION_DECLINE),
+        0,
+        "the exact H3 parent/count shape must pass the expression gate"
+    );
+
+    let before = kernel_executions(&mut c);
+    let mut selected = execute_to_rows(&mut c, &selected_query, H3_EXPLAIN_ROW_CAP);
+    let after = kernel_executions(&mut c);
+    selected.sort_unstable();
+    assert!(
+        after > before,
+        "selected H3 parent/count must increment the GPU kernel counter: before={before}, after={after}"
+    );
+    assert_eq!(
+        selected, selected_native,
+        "resident H3 parent/count output differs from stock h3-pg"
+    );
+    let selected_input_rows = selected
+        .iter()
+        .map(|row| {
+            row.rsplit_once('|')
+                .unwrap_or_else(|| panic!("malformed H3 grouped row `{row}`"))
+                .1
+                .parse::<usize>()
+                .unwrap_or_else(|error| panic!("invalid H3 grouped count in `{row}`: {error}"))
+        })
+        .sum::<usize>();
+    assert_eq!(
+        selected_input_rows, rows,
+        "selected H3 parent/count must consume every input row"
+    );
+    let material = c
+        .query_one(
+            "SELECT pinned AND raw_bytes > 0 AND loaded_at IS NOT NULL \
+             FROM pg_accel_resident_status() \
+             WHERE relid = 'bench_h3_parent'::regclass",
+            &[],
+        )
+        .expect("read material H3 parent residency")
+        .get::<_, bool>(0);
+    assert!(
+        material,
+        "selected H3 parent execution must leave the one-pin snapshot material"
+    );
+
+    for (resolution, capacity_query, capacity_native) in capacity_cases {
+        c.simple_query("SELECT pg_accel_reset_stats()")
+            .expect("reset H3 parent capacity-decline stats");
+        let capacity_plan = explain_text(&mut c, &capacity_query);
+        let capacity_plan_lc = capacity_plan.to_lowercase();
+        assert!(
+            !capacity_plan_lc.contains("custom scan") && !capacity_plan_lc.contains("gpuaccelagg"),
+            "res7-to-res{resolution} must respect the exact group-capacity gate:\n{capacity_plan}"
+        );
+        assert_eq!(
+            last_planner_rejection_reason(&mut c).as_deref(),
+            Some(H3_PARENT_CAPACITY_DECLINE),
+            "res7-to-res{resolution} must record the exact capacity decline; plan:\n{capacity_plan}"
+        );
+        assert!(
+            planner_rejection_count(&mut c, H3_PARENT_CAPACITY_DECLINE) > 0,
+            "res7-to-res{resolution} must increment the capacity-decline counter"
+        );
+
+        let before = kernel_executions(&mut c);
+        let mut capacity = execute_to_rows(&mut c, &capacity_query, rows);
+        let after = kernel_executions(&mut c);
+        capacity.sort_unstable();
+        assert_eq!(
+            after, before,
+            "capacity-declined res7-to-res{resolution} must not dispatch"
+        );
+        assert_eq!(
+            capacity, capacity_native,
+            "capacity-declined res7-to-res{resolution} output differs from stock h3-pg"
+        );
+        let capacity_input_rows = capacity
+            .iter()
+            .map(|row| {
+                row.rsplit_once('|')
+                    .unwrap_or_else(|| panic!("malformed H3 capacity row `{row}`"))
+                    .1
+                    .parse::<usize>()
+                    .unwrap_or_else(|error| panic!("invalid H3 capacity count in `{row}`: {error}"))
+            })
+            .sum::<usize>();
+        assert_eq!(
+            capacity_input_rows, rows,
+            "capacity-declined res7-to-res{resolution} must consume every input row"
+        );
+    }
+
+    for (label, sql) in [
+        (
+            "nonconstant H3 parent resolution",
+            "SELECT h3_cell_to_parent(cell, (id % 4)::int4), count(*) \
+             FROM bench_h3_parent GROUP BY 1",
+        ),
+        (
+            "NULL H3 parent resolution",
+            "SELECT h3_cell_to_parent(cell, NULL::int4), count(*) \
+             FROM bench_h3_parent GROUP BY 1",
+        ),
+        (
+            "out-of-range H3 parent resolution",
+            "SELECT h3_cell_to_parent(cell, 16), count(*) \
+             FROM bench_h3_parent GROUP BY 1",
+        ),
+        (
+            "one-argument H3 parent overload",
+            "SELECT h3_cell_to_parent(cell), count(*) \
+             FROM bench_h3_parent GROUP BY 1",
+        ),
+    ] {
+        c.simple_query("SELECT pg_accel_reset_stats()")
+            .expect("reset unsupported H3 parent stats");
+        let declined_plan = explain_text(&mut c, sql);
+        let declined_plan_lc = declined_plan.to_lowercase();
+        assert!(
+            !declined_plan_lc.contains("custom scan") && !declined_plan_lc.contains("gpuaccelagg"),
+            "{label} must stay native:\n{declined_plan}"
+        );
+        assert_planner_rejection_observed(
+            &mut c,
+            H3_GROUP_EXPRESSION_DECLINE,
+            &format!("{label} structural decline"),
+        );
+    }
 
     apply_cleanup(&mut c, wl.as_ref());
 }
@@ -363,8 +604,8 @@ fn h3_protection_canonical_parity_names_registered() {
 // Plan-shape / dispatch-counter tests (live PG)
 // ---------------------------------------------------------------------------
 
-/// The canonical resolution-7 grouped lane remains correctness-protected
-/// while its generic descriptor implementation is deferred to Phase 6.
+/// The canonical resolution-7 grouped lane remains correctness-protected while
+/// its generic point-to-cell expression lacks resident descriptor support.
 #[cfg(feature = "integration_tests")]
 #[test]
 fn h3_bulk_grouped_shape_declines_and_matches_native() {
@@ -372,7 +613,7 @@ fn h3_bulk_grouped_shape_declines_and_matches_native() {
     assert_grouped_h3_declines_and_matches_native("h3_bulk", H3_GROUPED_DISPATCH_ROWS);
 }
 
-/// Same Phase 5E contract for the canonical resolution-9 lane.
+/// Same generic-expression decline contract for the resolution-9 lane.
 #[cfg(feature = "integration_tests")]
 #[test]
 fn h3_resolution_sweep_grouped_shape_declines_and_matches_native() {
@@ -389,13 +630,13 @@ fn h3_high_resolution_grouped_shape_declines_and_matches_native() {
     assert_grouped_h3_declines_and_matches_native("h3_latlng_res15", H3_GROUPED_DISPATCH_ROWS);
 }
 
-/// Parent-cell grouping also stays native until Phase 6; the standalone scalar
-/// quarantine below remains a separate invariant.
+/// The exact resolution-zero parent/count shape dispatches through the resident
+/// descriptor, while res4/res5 capacity and expression impostors remain native.
 #[cfg(feature = "integration_tests")]
 #[test]
-fn h3_cell_to_parent_grouped_shape_declines_and_matches_native() {
+fn h3_cell_to_parent_res0_dispatches_and_res4_res5_capacity_decline() {
     let _live_pg_guard = live_pg_test_lock();
-    assert_grouped_h3_declines_and_matches_native("h3_cell_to_parent", H3_GROUPED_DISPATCH_ROWS);
+    assert_h3_parent_resident_selection_and_declines(H3_PARENT_RESIDENT_DISPATCH_ROWS);
 }
 
 /// `h3_fp64_ops` belongs to the fp64 calibration matrix, but its current
@@ -812,12 +1053,12 @@ fn assert_h3_grouped_count_resolution_matches_native(
     let plan_lc = plan.to_lowercase();
     assert!(
         !plan_lc.contains("custom scan") && !plan_lc.contains("gpuaccelagg"),
-        "res {resolution}: grouped H3 must stay native until Phase 6:\n{plan}"
+        "res {resolution}: generic grouped H3 expression must stay native:\n{plan}"
     );
     assert_planner_rejection_observed(
         c,
-        H3_GROUPED_PHASE5E_DECLINE,
-        &format!("res {resolution}: grouped H3 Phase 5E decline"),
+        H3_GROUP_EXPRESSION_DECLINE,
+        &format!("res {resolution}: grouped H3 expression decline"),
     );
 
     let before = kernel_executions(c);
@@ -869,9 +1110,8 @@ fn h3_grouped_count_resolution_matrix_matches_native_h3() {
 // Warm native-fallback latency budget (live PG)
 // ---------------------------------------------------------------------------
 
-/// Preserve the former warm-lane budget as a bounded Phase 5E native fallback
-/// check. Phase 6 will restore device-dispatch timing when grouped H3 becomes
-/// descriptor-compatible.
+/// Preserve the former warm-lane budget as a bounded native fallback check
+/// while generic grouped point-to-cell H3 remains unsupported.
 #[cfg(feature = "integration_tests")]
 #[test]
 fn h3_warm_grouped_fallback_latency_bounded() {
@@ -893,11 +1133,11 @@ fn h3_warm_grouped_fallback_latency_bounded() {
     let plan = explain_text(&mut c, &query);
     assert!(
         !plan.to_lowercase().contains("custom scan"),
-        "Phase 5E grouped H3 fallback must stay native:\n{plan}"
+        "generic grouped H3 fallback must stay native:\n{plan}"
     );
     assert_planner_rejection_observed(
         &mut c,
-        H3_GROUPED_PHASE5E_DECLINE,
+        H3_GROUP_EXPRESSION_DECLINE,
         "h3_bulk warm grouped fallback",
     );
 
@@ -914,7 +1154,7 @@ fn h3_warm_grouped_fallback_latency_bounded() {
     assert_eq!(measured, native);
     assert_eq!(
         after, before,
-        "Phase 5E grouped H3 fallback must not dispatch a GPU kernel"
+        "generic grouped H3 fallback must not dispatch a GPU kernel"
     );
     assert!(
         elapsed <= WARM_GROUPED_FALLBACK_BUDGET,
