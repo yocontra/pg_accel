@@ -17,7 +17,7 @@ use crate::engine::residency::{
 };
 use crate::engine::spec::{
     AggQuerySpec, ColumnRef, FilterSpec, GroupKeySource, JoinMultiplicity, ScalarValue,
-    SpatialOperand, SpatialPredicateKind,
+    SpatialOperand, SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
 };
 use crate::gpu::{
     ExprDeviceBuffer, PGACCEL_SPATIAL_CONTROL_BYTES, PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
@@ -90,7 +90,6 @@ impl SpatialConstantShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SpatialSnapshotLayout {
     pub exact_snapshot_words: usize,
-    pub prepared_base_host_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +121,18 @@ fn checked_sum<const N: usize>(terms: [u64; N]) -> Option<u64> {
     terms
         .into_iter()
         .try_fold(0_u64, |total, term| total.checked_add(term))
+}
+
+fn geometry_typmod_shape(metadata: SpatialValueMetadata) -> Option<(u32, i32)> {
+    if metadata.kind != SpatialValueKind::Geometry
+        || metadata.typmod < 0
+        || metadata.typmod & 3 != 0
+    {
+        return None;
+    }
+    let geometry_type = u32::try_from((metadata.typmod & 0xfc) >> 2).ok()?;
+    let srid = ((metadata.typmod & 0x0fff_ff00) - (metadata.typmod & 0x1000_0000)) >> 8;
+    Some((geometry_type, srid))
 }
 
 fn padded_base_device_bytes(shape: &SpatialBaseShape) -> Option<u64> {
@@ -177,12 +188,15 @@ pub(super) fn spatial_preflight(
         chunk_device_bytes(0).and_then(|bytes| bytes.checked_mul(u64::try_from(chunk_count).ok()?));
     let row_chunk_scratch = checked_mul(base.fact_rows, 10);
     let chunk_scratch = fixed_chunk_scratch.and_then(|fixed| fixed.checked_add(row_chunk_scratch?));
-    let transient_device_bytes = constant
-        .device_bytes()
+    let transient_device_bytes = base_device_bytes
+        .checked_add(
+            constant
+                .device_bytes()
+                .ok_or(SpatialPreflightError::AccountingOverflow)?,
+        )
         .and_then(|bytes| bytes.checked_add(chunk_scratch?))
         .ok_or(SpatialPreflightError::AccountingOverflow)?;
     let transient_host_bytes = checked_sum([
-        snapshot.prepared_base_host_bytes,
         checked_mul(snapshot.exact_snapshot_words, std::mem::size_of::<u64>())
             .ok_or(SpatialPreflightError::AccountingOverflow)?,
         constant
@@ -262,19 +276,34 @@ impl SpatialTransformPlan {
         else {
             return Err("spatial transform plan requires a spatial fact filter".to_owned());
         };
-        let (column, constant_bytes, column_is_left) = match (left, right) {
-            (SpatialOperand::Column { column, .. }, SpatialOperand::Constant { bytes, .. }) => {
-                (*column, bytes.as_ref(), true)
-            }
-            (SpatialOperand::Constant { bytes, .. }, SpatialOperand::Column { column, .. }) => {
-                (*column, bytes.as_ref(), false)
-            }
-            _ => {
-                return Err(
-                    "spatial aggregate requires exactly one column and one constant".to_owned(),
-                );
-            }
-        };
+        let (column, column_metadata, constant_metadata, constant_bytes, column_is_left) =
+            match (left, right) {
+                (
+                    SpatialOperand::Column { column, metadata },
+                    SpatialOperand::Constant {
+                        metadata: constant_metadata,
+                        bytes,
+                    },
+                ) => (*column, *metadata, *constant_metadata, bytes.as_ref(), true),
+                (
+                    SpatialOperand::Constant {
+                        metadata: constant_metadata,
+                        bytes,
+                    },
+                    SpatialOperand::Column { column, metadata },
+                ) => (
+                    *column,
+                    *metadata,
+                    *constant_metadata,
+                    bytes.as_ref(),
+                    false,
+                ),
+                _ => {
+                    return Err(
+                        "spatial aggregate requires exactly one column and one constant".to_owned(),
+                    );
+                }
+            };
         if column.relation_oid != spec.fact_rel
             || column.type_oid != u32::from(catalog.geometry_type_oid)
         {
@@ -287,11 +316,41 @@ impl SpatialTransformPlan {
             constant_bytes,
             limits.resident_domain_max_exact_value_bytes,
         )?;
-        if parsed.geom_type != crate::engine::residency::RESIDENT_GEOMETRY_POLYGON
+        let point_type = crate::engine::residency::RESIDENT_GEOMETRY_POINT;
+        let polygon_type = crate::engine::residency::RESIDENT_GEOMETRY_POLYGON;
+        if geometry_typmod_shape(column_metadata) != Some((point_type, parsed.srid))
+            || column_metadata.srid != Some(parsed.srid)
+            || parsed.srid == 0
+            || constant_metadata.kind != SpatialValueKind::Geometry
+            || constant_metadata.srid != Some(parsed.srid)
+            || (constant_metadata.typmod != -1
+                && geometry_typmod_shape(constant_metadata) != Some((polygon_type, parsed.srid)))
+        {
+            return Err(
+                "spatial aggregate requires a same-SRID geometry POINT column and POLYGON constant"
+                    .to_owned(),
+            );
+        }
+        if parsed.geom_type != polygon_type
             || parsed.coordinate_pairs == 0
             || parsed.coordinate_pairs > limits.gpu_spatial_max_vertices_per_row
         {
             return Err("spatial aggregate constant is not a covered polygon".to_owned());
+        }
+        let covered_orientation = match predicate {
+            SpatialPredicateKind::Intersects | SpatialPredicateKind::DWithin => true,
+            SpatialPredicateKind::Contains => !column_is_left,
+            SpatialPredicateKind::Within => column_is_left,
+            SpatialPredicateKind::Disjoint
+            | SpatialPredicateKind::Equals
+            | SpatialPredicateKind::Touches
+            | SpatialPredicateKind::Crosses
+            | SpatialPredicateKind::Overlaps => false,
+        };
+        if !covered_orientation {
+            return Err(
+                "spatial aggregate predicate orientation is outside the proved lane".to_owned(),
+            );
         }
         let predicate = match predicate {
             SpatialPredicateKind::Intersects => ResidentSpatialPredicate::Intersects,
@@ -410,9 +469,6 @@ impl SpatialTransformPlan {
             self.constant,
             SpatialSnapshotLayout {
                 exact_snapshot_words,
-                // Generic descriptor host preparation is ephemeral and is not
-                // retained as an exact source snapshot or publishable artifact.
-                prepared_base_host_bytes: 0,
             },
             PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
         )
@@ -447,19 +503,7 @@ impl SpatialTransformPlan {
         base_spec.fact_filter = FilterSpec::None;
         let prepared = prepare_spatial_base_artifact(&base_spec, requests, inputs, self.max_groups)
             .map_err(ResidentLoadError::Loader)?;
-        let expected_base_bytes = preflight
-            .published_accounting
-            .device_bytes
-            .checked_sub(
-                u64::try_from(preflight.fact_rows)
-                    .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?,
-            )
-            .ok_or(ResidentLoadError::ArtifactAccountingOverflow)?;
-        if prepared.device_bytes != expected_base_bytes {
-            return Err(ResidentLoadError::Loader(
-                "padded spatial base artifact does not match preflight accounting".to_owned(),
-            ));
-        }
+        validate_prepared_base_device_bytes(&preflight, prepared.device_bytes)?;
         Ok(SpatialPreparedSnapshot {
             preflight,
             prepared_base: prepared.prepared,
@@ -485,6 +529,28 @@ pub(super) struct SpatialPreparedSnapshot {
     preflight: SpatialPreflight,
     prepared_base: PreparedAggArtifact,
     exact: ResidentGeometryExactSnapshot,
+}
+
+fn expected_base_device_bytes(preflight: &SpatialPreflight) -> Result<u64, ResidentLoadError> {
+    let final_mask_bytes = u64::try_from(preflight.fact_rows)
+        .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
+    preflight
+        .published_accounting
+        .device_bytes
+        .checked_sub(final_mask_bytes)
+        .ok_or(ResidentLoadError::ArtifactAccountingOverflow)
+}
+
+fn validate_prepared_base_device_bytes(
+    preflight: &SpatialPreflight,
+    actual: u64,
+) -> Result<(), ResidentLoadError> {
+    if actual != expected_base_device_bytes(preflight)? {
+        return Err(ResidentLoadError::Loader(
+            "padded spatial base artifact does not match preflight accounting".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn try_zeroed_box<T: Clone + Default>(
@@ -569,7 +635,7 @@ enum SpatialBorrowFailure {
 /// are allocated after both ledger charges and before the raw store borrow.
 pub(super) struct SpatialWorkspace {
     preflight: SpatialPreflight,
-    prepared_base: PreparedAggArtifact,
+    base: DescriptorAggArtifact,
     exact: ResidentGeometryExactSnapshot,
     constant: ResidentGeometryColumn,
     constant_view: PgaccelResidentGeometryView,
@@ -628,7 +694,16 @@ impl SpatialWorkspace {
         spec: &AggQuerySpec,
         snapshot: SpatialPreparedSnapshot,
     ) -> Result<Self, ResidentLoadError> {
+        let SpatialPreparedSnapshot {
+            preflight,
+            prepared_base,
+            exact,
+        } = snapshot;
         prepare_spatial_resident().map_err(ResidentLoadError::Gpu)?;
+        let mut base =
+            DescriptorAggArtifact::build(prepared_base).map_err(ResidentLoadError::Loader)?;
+        base.resolved_spec = spec.clone();
+        validate_prepared_base_device_bytes(&preflight, base.device_bytes())?;
         let constant_bytes = spatial_constant_bytes(spec).ok_or_else(|| {
             ResidentLoadError::Loader(
                 "spatial constant disappeared before workspace build".to_owned(),
@@ -657,11 +732,10 @@ impl SpatialWorkspace {
 
         let mut chunks = Vec::new();
         chunks
-            .try_reserve_exact(snapshot.preflight.chunk_count)
+            .try_reserve_exact(preflight.chunk_count)
             .map_err(|_| allocation_error("spatial chunk layout allocation failed"))?;
-        for first_row in (0..snapshot.preflight.fact_rows).step_by(snapshot.preflight.chunk_limit) {
-            let row_count =
-                (snapshot.preflight.fact_rows - first_row).min(snapshot.preflight.chunk_limit);
+        for first_row in (0..preflight.fact_rows).step_by(preflight.chunk_limit) {
+            let row_count = (preflight.fact_rows - first_row).min(preflight.chunk_limit);
             let control = device_buffer::<u8>(
                 PGACCEL_SPATIAL_CONTROL_BYTES,
                 "spatial control allocation failed",
@@ -700,23 +774,24 @@ impl SpatialWorkspace {
                 compact_outcome: None,
             });
         }
+        let fact_rows = preflight.fact_rows;
         let workspace = Self {
-            preflight: snapshot.preflight,
-            prepared_base: snapshot.prepared_base,
-            exact: snapshot.exact,
+            preflight,
+            base,
+            exact,
             constant,
             constant_view,
             chunks: chunks.into_boxed_slice(),
             host_final_mask: try_zeroed_box(
-                snapshot.preflight.fact_rows,
+                fact_rows,
                 "spatial final-mask readback allocation failed",
             )?,
             host_uncertain_indices: try_zeroed_box(
-                snapshot.preflight.fact_rows,
+                fact_rows,
                 "spatial uncertainty-index readback allocation failed",
             )?,
             host_exact_results: try_zeroed_box(
-                snapshot.preflight.fact_rows,
+                fact_rows,
                 "spatial exact-result staging allocation failed",
             )?,
             borrow_failure: None,
@@ -747,7 +822,6 @@ impl SpatialWorkspace {
             total.checked_add(bytes)
         })?;
         let host_bytes = checked_sum([
-            self.preflight.snapshot.prepared_base_host_bytes,
             self.exact.retained_host_bytes()?,
             constant.retained_host_exact_bytes,
             checked_mul(self.host_final_mask.len(), std::mem::size_of::<i8>())?,
@@ -758,7 +832,11 @@ impl SpatialWorkspace {
             checked_mul(self.host_exact_results.len(), std::mem::size_of::<i8>())?,
         ])?;
         Some(ResidentByteAccounting {
-            device_bytes: constant.device_bytes.checked_add(chunk_device_bytes)?,
+            device_bytes: self
+                .base
+                .device_bytes()
+                .checked_add(constant.device_bytes)?
+                .checked_add(chunk_device_bytes)?,
             retained_host_exact_bytes: host_bytes,
         })
     }
@@ -837,7 +915,18 @@ impl SpatialWorkspace {
         }
     }
 
-    unsafe fn exact_result(
+    fn caught_error_message(caught: &pg_sys::panic::CaughtError) -> String {
+        use pg_sys::panic::CaughtError;
+
+        match caught {
+            CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => {
+                error.message().to_owned()
+            }
+            CaughtError::RustPanic { ereport, .. } => ereport.message().to_owned(),
+        }
+    }
+
+    fn exact_result(
         plan: &SpatialTransformPlan,
         spec: &AggQuerySpec,
         row: &[u8],
@@ -854,30 +943,39 @@ impl SpatialWorkspace {
         } else {
             (constant_datum, row_datum)
         };
-        // SAFETY: the catalog identity proves the exact strict PostGIS OID and
-        // both Datums point at complete retained GSERIALIZED values.
-        let result = if plan.predicate == ResidentSpatialPredicate::DWithin {
-            // SAFETY: verify_catalog proved this is the exact strict 3-arg DWithin C
-            // function; both geometry Datums are complete retained GSERIALIZED values and
-            // the threshold is a by-value float8 bit pattern. Runs on the main backend
-            // thread per this function's caller.
-            unsafe {
-                pg_sys::OidFunctionCall3Coll(
-                    plan.exact_fn_oid,
-                    pg_sys::InvalidOid,
-                    left,
-                    right,
-                    pg_sys::Datum::from(plan.distance_threshold.to_bits() as usize),
-                )
-            }
-        } else {
-            // SAFETY: verify_catalog proved this is the exact strict 2-arg predicate C
-            // function and both Datums are complete retained GSERIALIZED values. Runs on
-            // the main backend thread per this function's caller.
-            unsafe {
-                pg_sys::OidFunctionCall2Coll(plan.exact_fn_oid, pg_sys::InvalidOid, left, right)
-            }
-        };
+        let result = pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            let result = if plan.predicate == ResidentSpatialPredicate::DWithin {
+                // SAFETY: the catalog identity proves the exact strict three-argument
+                // PostGIS OID. Both geometry Datums reference complete retained
+                // GSERIALIZED values, the float8 threshold is passed by value, and this
+                // callback runs synchronously on the main backend thread.
+                unsafe {
+                    pg_sys::OidFunctionCall3Coll(
+                        plan.exact_fn_oid,
+                        pg_sys::InvalidOid,
+                        left,
+                        right,
+                        pg_sys::Datum::from(plan.distance_threshold.to_bits() as usize),
+                    )
+                }
+            } else {
+                // SAFETY: the catalog identity proves the exact strict two-argument
+                // PostGIS OID. Both geometry Datums reference complete retained
+                // GSERIALIZED values and this callback runs synchronously on the main
+                // backend thread.
+                unsafe {
+                    pg_sys::OidFunctionCall2Coll(plan.exact_fn_oid, pg_sys::InvalidOid, left, right)
+                }
+            };
+            Ok::<_, ResidentLoadError>(result)
+        }))
+        .catch_others(|caught| {
+            Err(ResidentLoadError::Loader(format!(
+                "PostGIS exact spatial recheck raised an error: {}",
+                Self::caught_error_message(&caught)
+            )))
+        })
+        .execute()?;
         Ok(if result.value() == 0 { -1 } else { 1 })
     }
 
@@ -963,8 +1061,7 @@ impl SpatialWorkspace {
                             "spatial uncertain row has no exact GSERIALIZED snapshot".to_owned(),
                         )
                     })?;
-                    // SAFETY: finalize runs on the PostgreSQL main backend thread.
-                    exact_results[patch] = unsafe { Self::exact_result(plan, spec, exact) }?;
+                    exact_results[patch] = Self::exact_result(plan, spec, exact)?;
                 }
                 chunk
                     .tri_state
@@ -1008,10 +1105,7 @@ impl SpatialWorkspace {
                     .ok_or_else(|| allocation_error("spatial final-mask upload failed"))?,
             )
         };
-        let mut base =
-            DescriptorAggArtifact::build(self.prepared_base).map_err(ResidentLoadError::Loader)?;
-        base.resolved_spec = spec.clone();
-        let artifact = SpatialAggArtifact::new(base, final_mask)
+        let artifact = SpatialAggArtifact::new(self.base, final_mask)
             .map_err(|detail| ResidentLoadError::Loader(detail.to_owned()))?;
         plan.verify_catalog()?;
         Ok(artifact)
@@ -1033,6 +1127,111 @@ impl StagedTransformWorkspace for SpatialWorkspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_GEOMETRY_OID: u32 = 60_001;
+    const TEST_SRID: i32 = 4_326;
+
+    fn geometry_typmod(geometry_type: u32, srid: i32) -> i32 {
+        (srid << 8) | i32::try_from(geometry_type).expect("geometry tag fits i32") << 2
+    }
+
+    fn polygon_bytes(srid: i32) -> Box<[u8]> {
+        let srid = u32::try_from(srid).expect("test SRID is nonnegative");
+        let mut bytes = vec![
+            0,
+            0,
+            0,
+            0,
+            ((srid >> 16) & 0xff) as u8,
+            ((srid >> 8) & 0xff) as u8,
+            (srid & 0xff) as u8,
+            0,
+        ];
+        bytes.extend_from_slice(&crate::engine::residency::RESIDENT_GEOMETRY_POLYGON.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        for (x, y) in [(0.0_f64, 0.0_f64), (4.0, 0.0), (0.0, 4.0), (0.0, 0.0)] {
+            bytes.extend_from_slice(&x.to_le_bytes());
+            bytes.extend_from_slice(&y.to_le_bytes());
+        }
+        bytes.into_boxed_slice()
+    }
+
+    fn spatial_spec(
+        predicate: SpatialPredicateKind,
+        column_is_left: bool,
+        column_geometry_type: u32,
+        srid: i32,
+        constant_typmod: i32,
+    ) -> AggQuerySpec {
+        let column = SpatialOperand::Column {
+            column: ColumnRef {
+                relation_oid: 10,
+                attno: 1,
+                type_oid: TEST_GEOMETRY_OID,
+            },
+            metadata: SpatialValueMetadata {
+                kind: SpatialValueKind::Geometry,
+                typmod: geometry_typmod(column_geometry_type, srid),
+                srid: Some(srid),
+            },
+        };
+        let constant = SpatialOperand::Constant {
+            metadata: SpatialValueMetadata {
+                kind: SpatialValueKind::Geometry,
+                typmod: constant_typmod,
+                srid: Some(srid),
+            },
+            bytes: polygon_bytes(srid),
+        };
+        let (left, right) = if column_is_left {
+            (column, constant)
+        } else {
+            (constant, column)
+        };
+        AggQuerySpec {
+            fact_rel: 10,
+            group_keys: Vec::new(),
+            measures: vec![crate::engine::spec::MeasureSpec {
+                expression: crate::engine::spec::MeasureExpr::CountStar,
+                outputs: vec![crate::engine::spec::AggregateOutput {
+                    source: crate::engine::spec::AggregateSource::Value,
+                    kind: crate::engine::spec::AggregateKind::Count,
+                }],
+                filter: FilterSpec::None,
+            }],
+            fact_filter: FilterSpec::Spatial {
+                predicate,
+                left,
+                right,
+                distance: (predicate == SpatialPredicateKind::DWithin)
+                    .then_some(ScalarValue::F64(1.0)),
+            },
+            star_dims: Vec::new(),
+            having: None,
+        }
+    }
+
+    fn decoded(spec: &AggQuerySpec) -> AggQuerySpec {
+        let words = spec.encode_i32().expect("test spec encodes");
+        AggQuerySpec::decode_i32(&words).expect("test spec decodes")
+    }
+
+    fn catalog() -> PostgisCatalogIdentity {
+        PostgisCatalogIdentity {
+            extension_oid: pg_sys::Oid::from(1_u32),
+            schema_oid: pg_sys::Oid::from(2_u32),
+            geometry_type_oid: pg_sys::Oid::from(TEST_GEOMETRY_OID),
+            intersects_fn_oid: pg_sys::Oid::from(10_u32),
+            contains_fn_oid: pg_sys::Oid::from(11_u32),
+            within_fn_oid: pg_sys::Oid::from(12_u32),
+            dwithin_fn_oid: pg_sys::Oid::from(13_u32),
+            distance_fn_oid: pg_sys::Oid::from(14_u32),
+            is_valid_fn_oid: pg_sys::Oid::from(15_u32),
+            fingerprint_words: vec![1, 2, 3],
+        }
+    }
 
     fn shape(fact_rows: usize) -> SpatialBaseShape {
         SpatialBaseShape {
@@ -1079,7 +1278,6 @@ mod tests {
             constant(),
             SpatialSnapshotLayout {
                 exact_snapshot_words: 40,
-                prepared_base_host_bytes: 128,
             },
             PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
         )
@@ -1097,7 +1295,6 @@ mod tests {
             constant(),
             SpatialSnapshotLayout {
                 exact_snapshot_words: 1,
-                prepared_base_host_bytes: 0,
             },
             10,
         )
@@ -1113,7 +1310,6 @@ mod tests {
             large_constant,
             SpatialSnapshotLayout {
                 exact_snapshot_words: 1,
-                prepared_base_host_bytes: 0,
             },
             1,
         )
@@ -1129,17 +1325,19 @@ mod tests {
         let base = shape(4);
         let snapshot = SpatialSnapshotLayout {
             exact_snapshot_words: 10,
-            prepared_base_host_bytes: 20,
         };
         let preflight = spatial_preflight(&base, constant(), snapshot, 3).expect("preflight");
         // Base: fact key 16 + dimension key 28 + fact join 16 + match 7 + multiplicity 56.
         assert_eq!(preflight.published_accounting.device_bytes, 123 + 4);
-        // Constant device 160; chunks are (384 + 4 + 8) + 10*n each.
-        assert_eq!(preflight.transient_accounting.device_bytes, 160 + 426 + 406);
-        // Base prep 20 + snapshot 80 + constant host 128 + full mask/index/result 40.
+        // W owns the padded base 123, constant 160, and chunks (384 + 4 + 8) + 10*n.
+        assert_eq!(
+            preflight.transient_accounting.device_bytes,
+            123 + 160 + 426 + 406
+        );
+        // Snapshot 80 + constant host 128 + full mask/index/result 40.
         assert_eq!(
             preflight.transient_accounting.retained_host_exact_bytes,
-            268
+            248
         );
     }
 
@@ -1151,7 +1349,6 @@ mod tests {
                 constant(),
                 SpatialSnapshotLayout {
                     exact_snapshot_words: 1,
-                    prepared_base_host_bytes: 0,
                 },
                 0,
             ),
@@ -1163,7 +1360,6 @@ mod tests {
                 constant(),
                 SpatialSnapshotLayout {
                     exact_snapshot_words: 1,
-                    prepared_base_host_bytes: 0,
                 },
                 PGACCEL_SPATIAL_MAX_CHUNK_ROWS + 1,
             ),
@@ -1185,7 +1381,6 @@ mod tests {
                 constant(),
                 SpatialSnapshotLayout {
                     exact_snapshot_words: 0,
-                    prepared_base_host_bytes: 0,
                 },
                 PGACCEL_SPATIAL_MAX_CHUNK_ROWS,
             ),
@@ -1199,12 +1394,81 @@ mod tests {
         let constant = constant();
         let snapshot = SpatialSnapshotLayout {
             exact_snapshot_words: 10,
-            prepared_base_host_bytes: 20,
         };
         crate::engine::residency::begin_test_allocation_count();
         let result = spatial_preflight(&base, constant, snapshot, 4);
         let allocation_count = crate::engine::residency::finish_test_allocation_count();
         assert!(result.is_ok());
         assert_eq!(allocation_count, 0);
+    }
+
+    #[test]
+    fn prepared_base_accounting_mismatch_is_a_hard_error() {
+        let preflight = spatial_preflight(
+            &shape(4),
+            constant(),
+            SpatialSnapshotLayout {
+                exact_snapshot_words: 0,
+            },
+            4,
+        )
+        .expect("preflight");
+        let expected = expected_base_device_bytes(&preflight).expect("base accounting");
+        assert!(validate_prepared_base_device_bytes(&preflight, expected).is_ok());
+        let error = validate_prepared_base_device_bytes(&preflight, expected + 1)
+            .expect_err("mismatch must fail closed");
+        assert!(matches!(error, ResidentLoadError::Loader(_)));
+    }
+
+    #[test]
+    fn decoded_spatial_plan_rejects_nonpoint_zero_srid_and_hostile_orientation() {
+        let point = crate::engine::residency::RESIDENT_GEOMETRY_POINT;
+        let polygon = crate::engine::residency::RESIDENT_GEOMETRY_POLYGON;
+        let valid = decoded(&spatial_spec(
+            SpatialPredicateKind::Intersects,
+            true,
+            point,
+            TEST_SRID,
+            -1,
+        ));
+        assert!(SpatialTransformPlan::new(&valid, &catalog(), 1_024).is_ok());
+
+        let nonpoint = decoded(&spatial_spec(
+            SpatialPredicateKind::Intersects,
+            true,
+            polygon,
+            TEST_SRID,
+            -1,
+        ));
+        assert!(SpatialTransformPlan::new(&nonpoint, &catalog(), 1_024).is_err());
+
+        let zero_srid = decoded(&spatial_spec(
+            SpatialPredicateKind::Intersects,
+            true,
+            point,
+            0,
+            -1,
+        ));
+        assert!(SpatialTransformPlan::new(&zero_srid, &catalog(), 1_024).is_err());
+
+        let hostile_orientation = decoded(&spatial_spec(
+            SpatialPredicateKind::Contains,
+            true,
+            point,
+            TEST_SRID,
+            -1,
+        ));
+        assert!(SpatialTransformPlan::new(&hostile_orientation, &catalog(), 1_024).is_err());
+
+        let contradictory_constant_typmod = decoded(&spatial_spec(
+            SpatialPredicateKind::Intersects,
+            true,
+            point,
+            TEST_SRID,
+            geometry_typmod(point, TEST_SRID),
+        ));
+        assert!(
+            SpatialTransformPlan::new(&contradictory_constant_typmod, &catalog(), 1_024).is_err()
+        );
     }
 }
