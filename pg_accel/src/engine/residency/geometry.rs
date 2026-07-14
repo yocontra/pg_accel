@@ -606,6 +606,27 @@ impl ResidentGeometryColumnView<'_> {
     }
 }
 
+/// Materialize one already-validated exact geometry constant into the same
+/// frozen resident lane layout used by relation columns.
+#[cfg(test)]
+pub(super) fn materialize_resident_geometry_constant(
+    exact: &[u8],
+    max_exact_value_bytes: usize,
+    max_vertices_per_row: usize,
+) -> Result<ResidentGeometryColumn, String> {
+    let mut builder = ResidentGeometryBuilder::new(max_exact_value_bytes, max_vertices_per_row);
+    builder.try_reserve_rows(1)?;
+    builder.push(Some(exact.to_vec()))?;
+    let data = builder.finish()?;
+    let referenced_bytes = ResidentGeometryReferencedBytes::build(&data)?;
+    ResidentGeometryColumn::materialize(
+        data,
+        referenced_bytes,
+        max_exact_value_bytes,
+        "spatial constant",
+    )
+}
+
 fn referenced_geometry_bytes(
     coordinate_pairs: u64,
     ring_count: u64,
