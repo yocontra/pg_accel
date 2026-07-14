@@ -17,6 +17,8 @@ const HEADER_SIZE: usize = 1 + 2 + 2 + (6 * 8) + 4 + 2 + 2;
 /// Parsed raster header.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RasterHeader {
+    pub version: u16,
+    pub little_endian: bool,
     pub width: u16,
     pub height: u16,
     pub num_bands: u16,
@@ -24,6 +26,8 @@ pub struct RasterHeader {
     pub scale_y: f64,
     pub ip_x: f64,
     pub ip_y: f64,
+    pub skew_x: f64,
+    pub skew_y: f64,
     pub srid: i32,
 }
 
@@ -33,8 +37,63 @@ pub struct BandInfo {
     pub pixel_type: PixelType,
     pub nodata: f64,
     pub has_nodata: bool,
+    pub is_nodata: bool,
     pub is_offline: bool,
 }
+
+/// One fully validated in-database raster band prepared for residency.
+///
+/// `pixels` retains the PostGIS pixel type but is normalized to native
+/// little-endian byte order. The untouched WKB remains a separate retained
+/// value and is the source of truth for exact output reconstruction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentRasterBandInput {
+    pub pixel_type: PixelType,
+    pub nodata: f64,
+    pub has_nodata: bool,
+    pub is_nodata: bool,
+    pub pixels: Vec<u8>,
+}
+
+/// One fully validated raster value prepared for the resident domain layout.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResidentRasterInput {
+    pub header: RasterHeader,
+    pub bands: Vec<ResidentRasterBandInput>,
+}
+
+/// Structural reason a raster value cannot enter the resident lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentRasterParseError {
+    Truncated,
+    InvalidEndian,
+    UnsupportedVersion,
+    InvalidMetadata,
+    UnknownPixelType,
+    InvalidBandFlags,
+    OfflineBand,
+    TrailingBytes,
+    ByteCountOverflow,
+}
+
+impl std::fmt::Display for ResidentRasterParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let detail = match self {
+            Self::Truncated => "raster WKB is truncated",
+            Self::InvalidEndian => "raster WKB has an invalid endian marker",
+            Self::UnsupportedVersion => "raster WKB version is unsupported",
+            Self::InvalidMetadata => "raster WKB metadata is invalid",
+            Self::UnknownPixelType => "raster WKB contains an unknown pixel type",
+            Self::InvalidBandFlags => "raster WKB contains invalid band flags",
+            Self::OfflineBand => "offline raster bands cannot enter residency",
+            Self::TrailingBytes => "raster WKB contains trailing bytes",
+            Self::ByteCountOverflow => "raster WKB byte count overflows usize",
+        };
+        f.write_str(detail)
+    }
+}
+
+impl std::error::Error for ResidentRasterParseError {}
 
 /// Pixel data type stored in a raster band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +142,7 @@ impl PixelType {
     /// PostGIS 3.x. Getting this table wrong silently shifts
     /// every wider type (real 8BUI reads as UInt16, 32BF is rejected, etc.),
     /// so it is pinned by `pixel_type_code_tests`.
-    fn from_code(code: u8) -> Option<Self> {
+    pub const fn from_code(code: u8) -> Option<Self> {
         match code {
             0 => Some(Self::Bool),
             1 => Some(Self::UInt2),
@@ -102,6 +161,24 @@ impl PixelType {
             10 => Some(Self::Float32),
             11 => Some(Self::Float64),
             _ => None,
+        }
+    }
+
+    /// Literal PostGIS `rt_pixtype` tag used by the resident ABI.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Bool => 0,
+            Self::UInt2 => 1,
+            Self::UInt4 => 2,
+            Self::Int8 => 3,
+            Self::UInt8 => 4,
+            Self::Int16 => 5,
+            Self::UInt16 => 6,
+            Self::Int32 => 7,
+            Self::UInt32 => 8,
+            Self::Float32 => 10,
+            Self::Float64 => 11,
         }
     }
 }
@@ -243,19 +320,21 @@ pub fn parse_header(data: &[u8]) -> Option<RasterHeader> {
     // Skip endianness byte (already parsed).
     r.set_position(1);
 
-    let _version = r.read_u16()?;
+    let version = r.read_u16()?;
     let num_bands = r.read_u16()?;
     let scale_x = r.read_f64()?;
     let scale_y = r.read_f64()?;
     let ip_x = r.read_f64()?;
     let ip_y = r.read_f64()?;
-    let _skew_x = r.read_f64()?;
-    let _skew_y = r.read_f64()?;
+    let skew_x = r.read_f64()?;
+    let skew_y = r.read_f64()?;
     let srid = r.read_i32()?;
     let width = r.read_u16()?;
     let height = r.read_u16()?;
 
     Some(RasterHeader {
+        version,
+        little_endian: endian == Endian::Little,
         width,
         height,
         num_bands,
@@ -263,6 +342,8 @@ pub fn parse_header(data: &[u8]) -> Option<RasterHeader> {
         scale_y,
         ip_x,
         ip_y,
+        skew_x,
+        skew_y,
         srid,
     })
 }
@@ -329,6 +410,7 @@ pub fn parse_band_info(data: &[u8], band_index: usize) -> Option<BandInfo> {
     // flags live in the high bits (OFFDB 1<<7, HASNODATA 1<<6, ISNODATA 1<<5).
     let pix_code = flags_byte & 0x0F;
     let has_nodata = (flags_byte & 0x40) != 0;
+    let is_nodata = (flags_byte & 0x20) != 0;
     let is_offline = (flags_byte & 0x80) != 0;
     let pixel_type = PixelType::from_code(pix_code)?;
 
@@ -338,8 +420,92 @@ pub fn parse_band_info(data: &[u8], band_index: usize) -> Option<BandInfo> {
         pixel_type,
         nodata,
         has_nodata,
+        is_nodata,
         is_offline,
     })
+}
+
+/// Parse and validate a complete in-database PostGIS raster value.
+///
+/// Unlike the legacy per-band helpers, this rejects unsupported versions,
+/// reserved flags, offline bands, integer overflow, truncation, and trailing
+/// bytes in one pass. Multi-byte pixels are normalized to little endian for
+/// the resident device contract; callers retain `data` unchanged alongside
+/// the returned value for exact reconstruction.
+pub fn parse_resident_raster(data: &[u8]) -> Result<ResidentRasterInput, ResidentRasterParseError> {
+    if data.len() < HEADER_SIZE {
+        return Err(ResidentRasterParseError::Truncated);
+    }
+    let endian = Endian::from_byte(data[0]).ok_or(ResidentRasterParseError::InvalidEndian)?;
+    let header = parse_header(data).ok_or(ResidentRasterParseError::Truncated)?;
+    if header.version != 0 {
+        return Err(ResidentRasterParseError::UnsupportedVersion);
+    }
+    if !(0..=999_999).contains(&header.srid)
+        || !header.scale_x.is_finite()
+        || !header.scale_y.is_finite()
+        || !header.ip_x.is_finite()
+        || !header.ip_y.is_finite()
+        || !header.skew_x.is_finite()
+        || !header.skew_y.is_finite()
+    {
+        return Err(ResidentRasterParseError::InvalidMetadata);
+    }
+
+    let pixel_count = usize::from(header.width)
+        .checked_mul(usize::from(header.height))
+        .ok_or(ResidentRasterParseError::ByteCountOverflow)?;
+    let mut reader = WkbReader::new(data, endian);
+    reader.set_position(HEADER_SIZE);
+    let mut bands = Vec::new();
+    bands
+        .try_reserve_exact(usize::from(header.num_bands))
+        .map_err(|_| ResidentRasterParseError::ByteCountOverflow)?;
+
+    for _ in 0..header.num_bands {
+        let flags = reader
+            .read_u8()
+            .ok_or(ResidentRasterParseError::Truncated)?;
+        if flags & 0x10 != 0 {
+            return Err(ResidentRasterParseError::InvalidBandFlags);
+        }
+        let pixel_type =
+            PixelType::from_code(flags & 0x0f).ok_or(ResidentRasterParseError::UnknownPixelType)?;
+        let is_offline = flags & 0x80 != 0;
+        let has_nodata = flags & 0x40 != 0;
+        let is_nodata = flags & 0x20 != 0;
+        if is_offline {
+            return Err(ResidentRasterParseError::OfflineBand);
+        }
+        if is_nodata && !has_nodata {
+            return Err(ResidentRasterParseError::InvalidBandFlags);
+        }
+
+        let nodata =
+            read_nodata(&mut reader, pixel_type).ok_or(ResidentRasterParseError::Truncated)?;
+        let pixel_bytes = pixel_count
+            .checked_mul(pixel_type.byte_size())
+            .ok_or(ResidentRasterParseError::ByteCountOverflow)?;
+        let mut pixels = reader
+            .read_bytes(pixel_bytes)
+            .ok_or(ResidentRasterParseError::Truncated)?;
+        if endian == Endian::Big && pixel_type.byte_size() > 1 {
+            for pixel in pixels.chunks_exact_mut(pixel_type.byte_size()) {
+                pixel.reverse();
+            }
+        }
+        bands.push(ResidentRasterBandInput {
+            pixel_type,
+            nodata: if has_nodata { nodata } else { 0.0 },
+            has_nodata,
+            is_nodata,
+            pixels,
+        });
+    }
+    if reader.position() != data.len() {
+        return Err(ResidentRasterParseError::TrailingBytes);
+    }
+    Ok(ResidentRasterInput { header, bands })
 }
 
 /// Read the nodata value for the given pixel type, returning it as `f64`.
@@ -1494,5 +1660,121 @@ mod tests {
         // No band data at all — should fail on parse_band_info
         assert!(parse_band_info(&buf, 0).is_none());
         assert!(extract_pixels_f64(&buf, 0).is_none());
+    }
+
+    #[test]
+    fn resident_parser_accepts_every_postgis_pixel_tag() {
+        let types = [
+            PixelType::Bool,
+            PixelType::UInt2,
+            PixelType::UInt4,
+            PixelType::Int8,
+            PixelType::UInt8,
+            PixelType::Int16,
+            PixelType::UInt16,
+            PixelType::Int32,
+            PixelType::UInt32,
+            PixelType::Float32,
+            PixelType::Float64,
+        ];
+        for pixel_type in types {
+            let wkb = build_test_raster(2, 1, 4_326, pixel_type, 0.0, 1.0);
+            let parsed = parse_resident_raster(&wkb).expect("valid resident raster");
+            assert_eq!(parsed.header.version, 0);
+            assert!(parsed.header.little_endian);
+            assert_eq!(parsed.bands.len(), 1);
+            assert_eq!(parsed.bands[0].pixel_type.code(), pixel_type.code());
+            assert_eq!(parsed.bands[0].pixels.len(), 2 * pixel_type.byte_size());
+        }
+    }
+
+    #[test]
+    fn resident_parser_preserves_multiband_metadata_and_nan_nodata() {
+        let mut wkb = build_multiband_raster(1, 1, 2, PixelType::Float64, f64::NAN, 7.0);
+        let second_band_offset = HEADER_SIZE + 1 + 8 + 8;
+        wkb[second_band_offset] |= 0x20;
+        let parsed = parse_resident_raster(&wkb).expect("valid multi-band raster");
+        assert_eq!(parsed.bands.len(), 2);
+        assert!(parsed.bands[0].nodata.is_nan());
+        assert!(!parsed.bands[0].is_nodata);
+        assert!(parsed.bands[1].is_nodata);
+        assert_eq!(parsed.bands[1].pixels, 7.0_f64.to_le_bytes());
+    }
+
+    #[test]
+    fn resident_parser_normalizes_big_endian_pixels() {
+        let mut wkb = Vec::new();
+        wkb.push(0);
+        wkb.extend_from_slice(&0_u16.to_be_bytes());
+        wkb.extend_from_slice(&1_u16.to_be_bytes());
+        for value in [1.0_f64, -1.0, 10.0, 20.0, 0.25, -0.5] {
+            wkb.extend_from_slice(&value.to_be_bytes());
+        }
+        wkb.extend_from_slice(&4_326_i32.to_be_bytes());
+        wkb.extend_from_slice(&2_u16.to_be_bytes());
+        wkb.extend_from_slice(&1_u16.to_be_bytes());
+        wkb.push(6 | 0x40);
+        wkb.extend_from_slice(&65_535_u16.to_be_bytes());
+        wkb.extend_from_slice(&1_u16.to_be_bytes());
+        wkb.extend_from_slice(&50_000_u16.to_be_bytes());
+
+        let parsed = parse_resident_raster(&wkb).expect("valid big-endian raster");
+        assert!(!parsed.header.little_endian);
+        assert_eq!(parsed.header.skew_x, 0.25);
+        assert_eq!(parsed.header.skew_y, -0.5);
+        assert_eq!(parsed.bands[0].nodata, 65_535.0);
+        assert_eq!(
+            parsed.bands[0].pixels,
+            [1_u16.to_le_bytes(), 50_000_u16.to_le_bytes()].concat()
+        );
+    }
+
+    #[test]
+    fn resident_parser_accepts_empty_rasters() {
+        let wkb = build_test_raster(0, 0, 0, PixelType::UInt8, 0.0, 0.0);
+        let parsed = parse_resident_raster(&wkb).expect("empty raster remains a value");
+        assert_eq!(parsed.bands.len(), 1);
+        assert!(parsed.bands[0].pixels.is_empty());
+
+        let mut no_bands = wkb;
+        no_bands[3..5].copy_from_slice(&0_u16.to_le_bytes());
+        no_bands.truncate(HEADER_SIZE);
+        assert!(
+            parse_resident_raster(&no_bands)
+                .expect("zero-band raster remains a value")
+                .bands
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn resident_parser_returns_stable_structural_declines() {
+        let mut offline = build_test_raster(1, 1, 0, PixelType::UInt8, 0.0, 1.0);
+        offline[HEADER_SIZE] |= 0x80;
+        assert_eq!(
+            parse_resident_raster(&offline),
+            Err(ResidentRasterParseError::OfflineBand)
+        );
+
+        let mut reserved_flag = build_test_raster(1, 1, 0, PixelType::UInt8, 0.0, 1.0);
+        reserved_flag[HEADER_SIZE] |= 0x10;
+        assert_eq!(
+            parse_resident_raster(&reserved_flag),
+            Err(ResidentRasterParseError::InvalidBandFlags)
+        );
+
+        let mut bad_version = build_test_raster(1, 1, 0, PixelType::UInt8, 0.0, 1.0);
+        bad_version[1..3].copy_from_slice(&1_u16.to_le_bytes());
+        assert_eq!(
+            parse_resident_raster(&bad_version),
+            Err(ResidentRasterParseError::UnsupportedVersion)
+        );
+
+        let mut trailing = build_test_raster(1, 1, 0, PixelType::UInt8, 0.0, 1.0);
+        trailing.push(0);
+        assert_eq!(
+            parse_resident_raster(&trailing),
+            Err(ResidentRasterParseError::TrailingBytes)
+        );
     }
 }
