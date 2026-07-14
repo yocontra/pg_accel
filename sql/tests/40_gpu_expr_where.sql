@@ -35,10 +35,9 @@ BEGIN
             plan_text;
     END IF;
     SELECT pg_accel_last_planner_rejection_reason() INTO rejection_reason;
-    IF rejection_reason IS DISTINCT FROM 'standalone_gpuexpr_no_gpu_pipeline'
-       AND rejection_reason IS DISTINCT FROM 'no_gpu_resident_pipeline' THEN
+    IF rejection_reason IS DISTINCT FROM 'shape_unsupported_predicate' THEN
         RAISE EXCEPTION
-            '40_gpu_expr_where FAILED: expected standalone/resident GpuExpr decline, got %',
+            '40_gpu_expr_where FAILED: expected generic predicate decline, got %',
             rejection_reason;
     END IF;
 END $$;
