@@ -730,6 +730,13 @@ bridge_status_fns! {
         out: *mut *mut std::ffi::c_void,
     ) -> PgaccelStatus;
 
+    /// Copy caller-owned host bytes into an existing device allocation.
+    pub fn pgaccel_expr_device_copy_from_host(
+        dst: *mut std::ffi::c_void,
+        src: *const std::ffi::c_void,
+        bytes: usize,
+    ) -> PgaccelStatus;
+
     /// Copy device-resident bytes into caller-owned host memory.
     pub fn pgaccel_expr_device_copy_to_host(
         dst: *mut std::ffi::c_void,

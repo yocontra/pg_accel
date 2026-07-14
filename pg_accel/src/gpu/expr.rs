@@ -114,6 +114,80 @@ impl<T> ExprDeviceBuffer<T> {
         self.len
     }
 
+    /// Copy the complete device buffer into preallocated host memory.
+    pub fn copy_to_slice(&self, output: &mut [T]) -> GpuResult<()>
+    where
+        T: Copy,
+    {
+        if output.len() != self.len {
+            return Err(GpuError::with_detail(
+                GpuErrorDomain::Memory,
+                GpuOperation::ValidateDeviceOutput,
+                GpuStatusDetail::ShapeMismatch,
+                "device-to-host output length does not match device buffer",
+            ));
+        }
+        let bytes = checked_allocation_bytes::<T>(self.len).ok_or_else(|| {
+            GpuError::with_detail(
+                GpuErrorDomain::Memory,
+                GpuOperation::ValidateDeviceOutput,
+                GpuStatusDetail::CapacityOverflow,
+                "device-to-host copy size overflow",
+            )
+        })?;
+        // SAFETY: the equal-length check makes output valid for `bytes`, and
+        // self owns a live device allocation of the same byte length.
+        let status = unsafe {
+            bridge::pgaccel_expr_device_copy_to_host(
+                output.as_mut_ptr().cast::<c_void>(),
+                self.ptr.as_ptr().cast::<c_void>(),
+                bytes,
+            )
+        };
+        status_to_result(
+            status,
+            GpuErrorDomain::Memory,
+            GpuOperation::Kernel("pgaccel_expr_device_copy_to_host"),
+        )
+    }
+
+    /// Copy a complete caller-owned host slice into this device allocation.
+    pub fn write_from_slice(&self, input: &[T]) -> GpuResult<()>
+    where
+        T: Copy,
+    {
+        if input.len() != self.len {
+            return Err(GpuError::with_detail(
+                GpuErrorDomain::Memory,
+                GpuOperation::ValidateDeviceInput,
+                GpuStatusDetail::ShapeMismatch,
+                "host-to-device input length does not match device buffer",
+            ));
+        }
+        let bytes = checked_allocation_bytes::<T>(self.len).ok_or_else(|| {
+            GpuError::with_detail(
+                GpuErrorDomain::Memory,
+                GpuOperation::ValidateDeviceInput,
+                GpuStatusDetail::CapacityOverflow,
+                "host-to-device copy size overflow",
+            )
+        })?;
+        // SAFETY: the equal-length check makes input valid for `bytes`, and
+        // self owns a live device allocation of the same byte length.
+        let status = unsafe {
+            bridge::pgaccel_expr_device_copy_from_host(
+                self.ptr.as_ptr().cast::<c_void>(),
+                input.as_ptr().cast::<c_void>(),
+                bytes,
+            )
+        };
+        status_to_result(
+            status,
+            GpuErrorDomain::Memory,
+            GpuOperation::Kernel("pgaccel_expr_device_copy_from_host"),
+        )
+    }
+
     /// Copy the complete device buffer into owned host memory.
     pub fn copy_to_vec(&self) -> GpuResult<Vec<T>>
     where
@@ -137,20 +211,8 @@ impl<T> ExprDeviceBuffer<T> {
             )
         })?;
         output.resize(self.len, T::default());
-        // SAFETY: output is initialized for `bytes`, and self owns a live
-        // device allocation of the same byte length.
-        let status = unsafe {
-            bridge::pgaccel_expr_device_copy_to_host(
-                output.as_mut_ptr().cast::<c_void>(),
-                self.ptr.as_ptr().cast::<c_void>(),
-                bytes,
-            )
-        };
-        status_to_result(
-            status,
-            GpuErrorDomain::Memory,
-            GpuOperation::Kernel("pgaccel_expr_device_copy_to_host"),
-        )?;
+        debug_assert_eq!(bytes, output.len() * std::mem::size_of::<T>());
+        self.copy_to_slice(&mut output)?;
         Ok(output)
     }
 }
@@ -307,5 +369,28 @@ mod tests {
             None
         );
         assert_eq!(checked_allocation_bytes::<u32>(4), Some(16));
+    }
+
+    #[test]
+    fn preallocated_copies_reject_mismatched_lengths_before_ffi() {
+        let buffer = std::mem::ManuallyDrop::new(ExprDeviceBuffer::<u8> {
+            ptr: NonNull::dangling(),
+            len: 2,
+            _not_send_sync: PhantomData,
+        });
+        assert_eq!(
+            buffer
+                .copy_to_slice(&mut [0_u8; 1])
+                .expect_err("short D2H destination must fail")
+                .status,
+            GpuStatusDetail::ShapeMismatch
+        );
+        assert_eq!(
+            buffer
+                .write_from_slice(&[0_u8; 1])
+                .expect_err("short H2D source must fail")
+                .status,
+            GpuStatusDetail::ShapeMismatch
+        );
     }
 }
