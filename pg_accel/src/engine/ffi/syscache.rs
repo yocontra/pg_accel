@@ -231,7 +231,10 @@ pub unsafe fn type_oid_in_schema(schema: &str, type_name: &str) -> Option<pg_sys
 const H3_EXTENSION_NAME: &str = "h3";
 const H3_TYPE_NAME: &str = "h3index";
 const H3_PARENT_FUNCTION_NAME: &str = "h3_cell_to_parent";
-const H3_FINGERPRINT_VERSION: u32 = 1;
+const H3_LANGUAGE_NAME: &str = "c";
+// h3-pg declares `AS 'h3'`; PostgreSQL stores that C library token verbatim.
+const H3_LIBRARY_NAME: &str = "h3";
+const H3_FINGERPRINT_VERSION: u32 = 2;
 
 /// Exact catalog identity accepted by the H3 acceleration path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,7 +274,11 @@ struct H3FunctionShape {
     name: String,
     schema_oid: pg_sys::Oid,
     language_oid: pg_sys::Oid,
+    language_name: String,
     kind: u8,
+    argument_defaults: i16,
+    security_definer: bool,
+    support_function: pg_sys::Oid,
     strict: bool,
     returns_set: bool,
     volatility: u8,
@@ -375,8 +382,26 @@ fn validate_h3_function_shape(
     if shape.kind != pg_sys::PROKIND_FUNCTION {
         return Err("H3 parent catalog object must be an ordinary function".to_owned());
     }
+    if shape.language_name != H3_LANGUAGE_NAME {
+        return Err("H3 parent function must use the C language".to_owned());
+    }
+    if shape.source != H3_PARENT_FUNCTION_NAME || shape.binary.as_deref() != Some(H3_LIBRARY_NAME) {
+        return Err(
+            "H3 parent function must use canonical C symbol h3_cell_to_parent from library h3"
+                .to_owned(),
+        );
+    }
     if shape.argument_types != [type_oid, pg_sys::INT4OID] || shape.return_type != type_oid {
         return Err("H3 parent function must have signature (h3index, int4) -> h3index".to_owned());
+    }
+    if shape.argument_defaults != 0 {
+        return Err("H3 parent function must not declare argument defaults".to_owned());
+    }
+    if shape.security_definer {
+        return Err("H3 parent function must not be security definer".to_owned());
+    }
+    if shape.support_function != pg_sys::InvalidOid {
+        return Err("H3 parent function must not declare a planner support function".to_owned());
     }
     if shape.variadic_type != pg_sys::InvalidOid || shape.returns_set {
         return Err("H3 parent function must be scalar and nonvariadic".to_owned());
@@ -409,20 +434,34 @@ fn type_fingerprint(shape: &H3TypeShape) -> Vec<i32> {
 fn function_fingerprint(shape: &H3FunctionShape) -> Vec<i32> {
     let implementation_hash = fnv1a64(&[
         shape.name.as_bytes(),
+        shape.language_name.as_bytes(),
         shape.source.as_bytes(),
         shape.binary.as_deref().unwrap_or_default().as_bytes(),
     ]);
     let [hash_low, hash_high] = u64_words(implementation_hash);
-    vec![
+    let mut words = vec![
         oid_word(shape.fn_oid),
         oid_word(shape.schema_oid),
         oid_word(shape.language_oid),
         u32_word(shape.tuple_xmin),
         u32_word(shape.tuple_block),
         i32::from(shape.tuple_offset),
+        i32::from(shape.kind),
+        i32::from(shape.argument_defaults),
+        i32::from(shape.security_definer),
+        oid_word(shape.support_function),
+        i32::from(shape.strict),
+        i32::from(shape.returns_set),
+        i32::from(shape.volatility),
+        i32::from(shape.parallel),
+        oid_word(shape.variadic_type),
+        oid_word(shape.return_type),
+        i32::try_from(shape.argument_types.len()).unwrap_or(i32::MAX),
         hash_low,
         hash_high,
-    ]
+    ];
+    words.extend(shape.argument_types.iter().copied().map(oid_word));
+    words
 }
 
 unsafe fn extension_identity() -> Result<(pg_sys::Oid, pg_sys::Oid), String> {
@@ -594,6 +633,29 @@ unsafe fn proc_text_attr(tuple: pg_sys::HeapTuple, attnum: i16) -> Result<Option
         .ok_or_else(|| "could not decode pg_proc implementation text".to_owned())
 }
 
+unsafe fn language_name(language_oid: pg_sys::Oid) -> Result<String, String> {
+    let name_ptr = unsafe { pg_sys::get_language_name(language_oid, true) };
+    if name_ptr.is_null() {
+        return Err(format!(
+            "function language OID {} does not exist",
+            u32::from(language_oid)
+        ));
+    }
+    let result = (|| unsafe {
+        std::ffi::CStr::from_ptr(name_ptr)
+            .to_str()
+            .map(str::to_owned)
+            .map_err(|_| {
+                format!(
+                    "function language OID {} has an invalid name",
+                    u32::from(language_oid)
+                )
+            })
+    })();
+    unsafe { pg_sys::pfree(name_ptr.cast()) };
+    result
+}
+
 unsafe fn read_h3_function_shape(fn_oid: pg_sys::Oid) -> Result<H3FunctionShape, String> {
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
@@ -613,6 +675,7 @@ unsafe fn read_h3_function_shape(fn_oid: pg_sys::Oid) -> Result<H3FunctionShape,
         let argument_count = usize::try_from((*form).pronargs)
             .map_err(|_| format!("function OID {} has invalid pronargs", u32::from(fn_oid)))?;
         let argument_types = (*form).proargtypes.values.as_slice(argument_count).to_vec();
+        let language_name = language_name((*form).prolang)?;
         let source = proc_text_attr(tuple, pg_sys::Anum_pg_proc_prosrc as i16)?
             .ok_or_else(|| format!("function OID {} has NULL prosrc", u32::from(fn_oid)))?;
         let binary = proc_text_attr(tuple, pg_sys::Anum_pg_proc_probin as i16)?;
@@ -621,7 +684,11 @@ unsafe fn read_h3_function_shape(fn_oid: pg_sys::Oid) -> Result<H3FunctionShape,
             name,
             schema_oid: (*form).pronamespace,
             language_oid: (*form).prolang,
+            language_name,
             kind: (*form).prokind as u8,
+            argument_defaults: (*form).pronargdefaults,
+            security_definer: (*form).prosecdef,
+            support_function: (*form).prosupport,
             strict: (*form).proisstrict,
             returns_set: (*form).proretset,
             volatility: (*form).provolatile as u8,
@@ -724,7 +791,11 @@ mod h3_tests {
             name: H3_PARENT_FUNCTION_NAME.to_owned(),
             schema_oid: oid(50_000),
             language_oid: oid(13),
+            language_name: H3_LANGUAGE_NAME.to_owned(),
             kind: pg_sys::PROKIND_FUNCTION,
+            argument_defaults: 0,
+            security_definer: false,
+            support_function: pg_sys::InvalidOid,
             strict: true,
             returns_set: false,
             volatility: pg_sys::PROVOLATILE_IMMUTABLE,
@@ -732,8 +803,8 @@ mod h3_tests {
             variadic_type: pg_sys::InvalidOid,
             return_type: oid(50_001),
             argument_types: vec![oid(50_001), pg_sys::INT4OID],
-            source: "h3_cell_to_parent".to_owned(),
-            binary: Some("$libdir/h3".to_owned()),
+            source: H3_PARENT_FUNCTION_NAME.to_owned(),
+            binary: Some(H3_LIBRARY_NAME.to_owned()),
             tuple_xmin: 12,
             tuple_block: 8,
             tuple_offset: 3,
@@ -773,6 +844,24 @@ mod h3_tests {
         let mut invalid = valid.clone();
         invalid.parallel = pg_sys::PROPARALLEL_RESTRICTED;
         assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
+        let mut invalid = valid.clone();
+        invalid.language_name = "sql".to_owned();
+        assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
+        let mut invalid = valid.clone();
+        invalid.source = "spoofed_parent".to_owned();
+        assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
+        let mut invalid = valid.clone();
+        invalid.binary = Some("$libdir/h3".to_owned());
+        assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
+        let mut invalid = valid.clone();
+        invalid.argument_defaults = 1;
+        assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
+        let mut invalid = valid.clone();
+        invalid.security_definer = true;
+        assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
+        let mut invalid = valid.clone();
+        invalid.support_function = oid(50_003);
+        assert!(validate_h3_function_shape(&invalid, invalid.schema_oid, oid(50_001)).is_err());
     }
 
     #[test]
@@ -797,6 +886,13 @@ mod h3_tests {
         assert_ne!(
             function_fingerprint(&original),
             function_fingerprint(&implementation_change)
+        );
+
+        let mut flag_change = original.clone();
+        flag_change.security_definer = true;
+        assert_ne!(
+            function_fingerprint(&original),
+            function_fingerprint(&flag_change)
         );
     }
 }
