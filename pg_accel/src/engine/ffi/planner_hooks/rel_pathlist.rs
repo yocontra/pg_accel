@@ -11,7 +11,6 @@ use pgrx::pg_sys::{
 use super::super::custom_scan;
 use super::{PREV_SET_REL_PATHLIST_HOOK, find_cheapest_path, unwrap_var};
 use crate::engine::cost;
-use crate::engine::executor::agg::AggOp;
 use crate::engine::executor::sort::SortKeyDesc;
 use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
 use crate::engine::gucs;

@@ -16,7 +16,7 @@ use std::ffi::c_int;
 use pgrx::pg_sys;
 
 use super::super::gucs;
-use crate::engine::executor::agg::{AggExecState, AggOp, GroupKeyInfo, is_h3_synthetic_group_key};
+use crate::engine::executor::agg::AggExecState;
 use crate::engine::executor::join::JoinExecState;
 use crate::engine::executor::scan::ScanExecState;
 use crate::engine::executor::window::{
@@ -36,11 +36,8 @@ mod srf_target_list;
 use explain::{explain_custom_scan, resolve_thread_count};
 #[cfg(feature = "pg_test")]
 use private_data::CustomPrivateData;
+pub(super) use private_data::append_agg_query_plan;
 use private_data::deserialize_agg_query_path_contract;
-pub(super) use private_data::{
-    AGG_SCAN_EXPR_SENTINEL, PARTIAL_SENTINEL, append_agg_query_plan, append_partial_spec,
-    deserialize_partial_spec,
-};
 pub use private_data::{
     FUNCTIONSCAN_SENTINEL, FunctionScanPrivData, append_functionscan_priv,
     deserialize_functionscan_priv,
@@ -483,48 +480,15 @@ unsafe fn seal_custom_scan_private(
     });
 }
 
-/// Return the planned child `SeqScan` range-table index when an agg wraps a
-/// direct heap scan.
+/// Convert a strict childless descriptor aggregate path into a `CustomScan`.
 ///
-/// # Safety
-///
-/// Called by the PostgreSQL planner on the main backend thread.
-unsafe fn planned_child_seqscan_relid(custom_plans: *mut pg_sys::List) -> Option<c_int> {
-    if custom_plans.is_null() || unsafe { pg_sys::list_length(custom_plans) } <= 0 {
-        return None;
-    }
-    let child_plan = unsafe { pg_sys::list_nth(custom_plans, 0).cast::<pg_sys::Plan>() };
-    if child_plan.is_null() {
-        return None;
-    }
-    if unsafe { (*child_plan).type_ } != pg_sys::NodeTag::T_SeqScan {
-        return None;
-    }
-    let scanrelid = unsafe { (*child_plan.cast::<pg_sys::Scan>()).scanrelid };
-    c_int::try_from(scanrelid)
-        .ok()
-        .filter(|scanrelid| *scanrelid > 0)
-}
-
-/// Shared helper: build a `CustomScan` plan from a `CustomPath`.
-///
-/// Called by the PostgreSQL planner on the main backend thread.
-/// Build a `CustomScan` plan node for GPU aggregate.
-///
-/// The original `tlist` from the planner contains `Aggref` expressions
-/// which PG's executor can only evaluate inside an `AggState`.  Since our
-/// Custom Scan replaces the Agg node, we must build:
-///
-/// 1. **`custom_scan_tlist`** — one `TargetEntry(Var)` per aggregate
-///    result column, defining the scan tuple descriptor.
-/// 2. **`plan.targetlist`** — `TargetEntry(Var(INDEX_VAR))` entries that
-///    project from the scan tuple, avoiding Aggref evaluation entirely.
+/// The AQS2/AOP2 contract is copied into framed plan-private data. No child
+/// plan or retired aggregate metadata is accepted.
 ///
 /// # Safety
 ///
 /// Called by the PostgreSQL planner on the main backend thread.
 #[pgrx::pg_guard]
-#[allow(clippy::too_many_lines, clippy::cast_ptr_alignment)]
 unsafe extern "C-unwind" fn plan_custom_path_agg(
     _root: *mut pg_sys::PlannerInfo,
     _rel: *mut pg_sys::RelOptInfo,
@@ -544,117 +508,18 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
     unsafe {
         (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
 
-        // Read aggregate descriptors + partial flag from the path's custom_private.
-        // Path layout:
-        //   [num_aggs, (op, attno, rtype)*N,
-        //    has_gk,
-        //    (gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos)?,
-        //    self_scan_relid,
-        //    is_partial,
-        //    (PARTIAL_SENTINEL, n_cols, (op, attno, transtype, ser)*n_cols)?]
-        //
-        // The trailing PAAG sentinel block is optional — only present when
-        // `partial_agg::try_inject` injected this path. Structural walk (vs
-        // "last-1 / last-2") is required so the optional block doesn't shift
-        // the positions of self_scan_relid / is_partial.
         let path_priv = (*best_path).custom_private;
-        let num_aggs = list_int_at(path_priv, 0);
-        let path_len = pg_sys::list_length(path_priv) as usize;
-        let gk_base = 1 + (num_aggs as usize) * 3;
-        let has_gk = if gk_base < path_len {
-            list_int_at(path_priv, gk_base as c_int)
-        } else {
-            0
-        };
-        let group_key_payload = if has_gk != 0 {
-            if gk_base + 7 >= path_len {
-                pgrx::error!("pg_accel: malformed aggregate private group-key layout");
-            }
-            let gk_attno = list_int_at(path_priv, (gk_base + 1) as c_int);
-            let gk_type_oid = list_int_at(path_priv, (gk_base + 2) as c_int);
-            let gk_key_type = list_int_at(path_priv, (gk_base + 3) as c_int);
-            let gk2_attno = list_int_at(path_priv, (gk_base + 4) as c_int);
-            let gk_tlist_pos = list_int_at(path_priv, (gk_base + 5) as c_int);
-            if gk_attno <= 0
-                || !(matches!(gk_key_type, 0 | 1 | 2 | 4 | 5)
-                    || is_h3_synthetic_group_key(gk_key_type))
-            {
-                pgrx::error!("pg_accel: invalid aggregate private group-key layout");
-            }
-            Some((gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos))
-        } else {
-            None
-        };
-        let self_scan_idx = if group_key_payload.is_some() {
-            gk_base + 6
-        } else {
-            gk_base + 1
-        };
-        let is_partial_idx = self_scan_idx + 1;
-        let self_scan_relid = if self_scan_idx < path_len {
-            list_int_at(path_priv, self_scan_idx as c_int)
-        } else {
-            0
-        };
-        let self_scan_relid = if self_scan_relid > 0 {
-            planned_child_seqscan_relid(custom_plans).unwrap_or(self_scan_relid)
-        } else {
-            0
-        };
-        let is_partial = if is_partial_idx < path_len {
-            list_int_at(path_priv, is_partial_idx as c_int)
-        } else {
-            0
-        };
-        let mut trailer_idx = is_partial_idx + 1;
-        let has_agg_scan_expr = trailer_idx < path_len
-            && list_int_at(path_priv, trailer_idx as c_int) == AGG_SCAN_EXPR_SENTINEL;
-        if has_agg_scan_expr {
-            let template_type = list_int_at(path_priv, (trailer_idx + 1) as c_int);
-            let trailer_len = match template_type {
-                1 => 6,  // sentinel, type, col, op, const bits x2
-                2 => 7,  // sentinel, type, col, lo bits x2, hi bits x2
-                3 => 10, // sentinel, type, col/op/const x2
-                _ => pgrx::error!("pg_accel: malformed aggregate scan-expression trailer"),
-            };
-            if trailer_idx + trailer_len > path_len {
-                pgrx::error!("pg_accel: truncated aggregate scan-expression trailer");
-            }
-            trailer_idx += trailer_len;
-        }
-        let agg_query_contract = deserialize_agg_query_path_contract(path_priv, trailer_idx)
-            .unwrap_or_else(|error| {
+        let (spec, projection) =
+            deserialize_agg_query_path_contract(path_priv).unwrap_or_else(|error| {
                 pgrx::error!("pg_accel: malformed aggregate AQS2/AOP2 path contract: {error}")
             });
-        let sentinel_idx = agg_query_contract
-            .as_ref()
-            .map_or(trailer_idx, |(_, _, end)| *end);
-        let has_sentinel_block = sentinel_idx < path_len
-            && list_int_at(path_priv, sentinel_idx as c_int) == PARTIAL_SENTINEL;
+        if !custom_plans.is_null() && pg_sys::list_length(custom_plans) != 0 {
+            pgrx::error!("pg_accel: descriptor aggregate path unexpectedly has child plans");
+        }
 
-        // custom_scan_tlist: original expressions define the scan tuple layout
-        //   (ExecTypeFromTL extracts types from Aggref.aggtype / Var.vartype).
-        //
-        // plan.targetlist shape depends on whether this is a partial-agg path:
-        //   - non-partial: keep the original Aggref-bearing expressions so
-        //     prepare_sort_from_pathkeys can still find group-key Vars for
-        //     upper-level ORDER BY; fix_upper_expr rewrites callers to
-        //     Var(INDEX_VAR, resno) referencing custom_scan_tlist.
-        //   - partial: build an INDEX_VAR-only targetlist NOW so that
-        //     set_plan_references never walks into raw Aggref sub-nodes (which
-        //     would trigger `unrecognized node type: 9 (T_Aggref)` — or,
-        //     after the planner zeroes out Aggref sub-fields in a partial
-        //     context, `unrecognized node type: 0`).
-        //
-        // For partial paths, the Aggrefs in `tlist` are AGGSPLIT_INITIAL_SERIAL
-        // (produced by make_partial_grouping_target on partially_grouped_rel's
-        // reltarget). The Finalize Agg node above our Gather runs
-        // `convert_combining_aggrefs` on its own tlist to build a matching
-        // INITIAL_SERIAL Aggref; fix_upper_expr then looks up that Aggref in
-        // our plan.targetlist via `equal()`. So partial mode needs the Aggref
-        // itself in plan.targetlist — not an INDEX_VAR wrapper — otherwise
-        // set_upper_references errors with "variable not found in subplan
-        // target list".
+        // The descriptor executor materializes the complete output itself.
+        // Preserve the planner's ordered expressions on both target lists so
+        // the wire projection binds to the concrete tuple descriptor.
         // SAFETY: copyObjectImpl deep-copies the list in CurrentMemoryContext.
         (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
         (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
@@ -663,23 +528,12 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
         (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
         (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
-        (*cscan).custom_plans = custom_plans;
-        (*cscan).flags = (*best_path).flags
-            | if is_partial != 0 {
-                pg_sys::CUSTOMPATH_SUPPORT_PROJECTION
-            } else {
-                0
-            };
-        (*cscan).scan.scanrelid = if has_agg_scan_expr && self_scan_relid > 0 {
-            self_scan_relid as pg_sys::Index
-        } else {
-            0
-        };
+        (*cscan).custom_plans = std::ptr::null_mut();
+        (*cscan).flags = (*best_path).flags;
+        (*cscan).scan.scanrelid = 0;
         (*cscan).methods = &raw const AGG_SCAN_METHODS.0;
 
-        // Serialize: [strategy=Agg, batch_size, threads, fn_oid=0,
-        //             target_attno=0, accel_strategy=GpuReduce,
-        //             num_aggs, op0, attno0, op1, attno1, ...]
+        // Serialize the common header followed immediately by AQS2/AOP2.
         let batch_size = gucs::min_batch_size();
         let expected_threads = resolve_thread_count();
 
@@ -693,118 +547,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
             list,
             pg_sys::makeInteger(AccelStrategy::GpuReduce as c_int).cast(),
         );
-        // Build attno remap: original table attno → child slot position.
-        // The child Seq Scan may project only referenced columns, so
-        // the slot position differs from the original table attno when
-        // unreferenced columns (e.g. a serial PK) are omitted.
-        let mut attno_map: Vec<(c_int, c_int)> = Vec::new();
-        if !custom_plans.is_null() && pg_sys::list_length(custom_plans) > 0 {
-            let child_plan = pg_sys::list_nth(custom_plans, 0).cast::<pg_sys::Plan>();
-            if !child_plan.is_null() {
-                let child_tlist = (*child_plan).targetlist;
-                if !child_tlist.is_null() {
-                    let tlen = pg_sys::list_length(child_tlist);
-                    for j in 0..tlen {
-                        let tle = pg_sys::list_nth(child_tlist, j).cast::<pg_sys::TargetEntry>();
-                        if tle.is_null() {
-                            continue;
-                        }
-                        let expr = (*tle).expr;
-                        if !expr.is_null()
-                            && (*expr.cast::<pg_sys::Node>()).type_ == pg_sys::NodeTag::T_Var
-                        {
-                            let var = expr.cast::<pg_sys::Var>();
-                            attno_map.push((i32::from((*var).varattno), i32::from((*tle).resno)));
-                        }
-                    }
-                }
-            }
-        }
-        // When self-scanning, attnos reference the base table directly —
-        // no remapping needed.
-        let remap_attno = |orig: c_int| -> c_int {
-            if self_scan_relid > 0 {
-                return orig;
-            }
-            for &(from, to) in &attno_map {
-                if from == orig {
-                    return to;
-                }
-            }
-            orig
-        };
-
-        // Append aggregate descriptors (triples: op, attno, result_type_oid).
-        // Attno is remapped from original table position to child slot position.
-        list = pg_sys::lappend(list, pg_sys::makeInteger(num_aggs).cast());
-        for k in 0..num_aggs {
-            let op = list_int_at(path_priv, 1 + k * 3);
-            let attno = list_int_at(path_priv, 2 + k * 3);
-            let rtype = list_int_at(path_priv, 3 + k * 3);
-            list = pg_sys::lappend(list, pg_sys::makeInteger(op).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(if attno > 0 { remap_attno(attno) } else { attno }).cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(rtype).cast());
-        }
-
-        // Forward group key info from path's custom_private. Plan layout:
-        //   [..., has_group_key,
-        //    (gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos)?,
-        //    self_scan_relid, (PARTIAL_SENTINEL block)?]
-        if let Some((gk_attno, gk_type_oid, gk_key_type, gk2_attno, gk_tlist_pos)) =
-            group_key_payload
-        {
-            list = pg_sys::lappend(list, pg_sys::makeInteger(1).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(remap_attno(gk_attno)).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(gk_type_oid).cast());
-            list = pg_sys::lappend(list, pg_sys::makeInteger(gk_key_type).cast());
-            list = pg_sys::lappend(
-                list,
-                pg_sys::makeInteger(if gk2_attno > 0 {
-                    remap_attno(gk2_attno)
-                } else {
-                    gk2_attno
-                })
-                .cast(),
-            );
-            list = pg_sys::lappend(list, pg_sys::makeInteger(gk_tlist_pos).cast());
-        } else {
-            list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
-        }
-
-        // Append self-scan relid so begin_custom_scan can open the heap.
-        list = pg_sys::lappend(list, pg_sys::makeInteger(self_scan_relid).cast());
-
-        if trailer_idx > is_partial_idx + 1 {
-            for idx in is_partial_idx + 1..trailer_idx {
-                list = pg_sys::lappend(
-                    list,
-                    pg_sys::makeInteger(list_int_at(path_priv, idx as c_int)).cast(),
-                );
-            }
-        }
-
-        if let Some((spec, projection, _)) = &agg_query_contract {
-            list = append_agg_query_plan(list, spec, projection, cscan);
-        }
-
-        // When this path was injected on a partial (worker-side) Gather branch,
-        // propagate the PartialAggSpec into the plan's custom_private using
-        // the sentinel-prefixed layout. The deserializer treats absence of the
-        // sentinel as `partial = None`.
-        //
-        if is_partial != 0 {
-            // sentinel @ sentinel_idx, n_cols @ sentinel_idx + 1
-            if !has_sentinel_block {
-                pgrx::error!("pg_accel: partial aggregate path missing sentinel spec block");
-            }
-            let spec = deserialize_partial_spec(path_priv, sentinel_idx + 1).unwrap_or_else(|| {
-                pgrx::error!("pg_accel: malformed partial aggregate sentinel spec block")
-            });
-            list = append_partial_spec(list, &spec);
-        }
+        list = append_agg_query_plan(list, &spec, &projection, cscan);
 
         seal_custom_scan_private(cscan, list, path_priv, GpuStrategy::Agg);
     }

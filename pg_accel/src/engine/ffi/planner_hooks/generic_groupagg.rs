@@ -26,7 +26,6 @@ use crate::engine::spec::{AggOutputProjection, FilterSpec, MeasureExpr};
 use crate::engine::stats;
 
 const GENERIC_SHAPE_PATH_CONTEXT: &str = "upper_paths_generic_groupagg";
-const SHAPE_PATH_LEGACY_PREFIX: [c_int; 4] = [0, 0, 0, 0];
 const AGG_QUERY_SPEC_SENTINEL: c_int = i32::from_be_bytes(*b"AQS2");
 const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = i32::from_be_bytes(*b"AOP2");
 
@@ -361,10 +360,7 @@ fn encode_shape_path_private(
     let projection_words = projection
         .encode_i32(spec)
         .map_err(|error| ShapeDecline::Codec(error.to_string()))?;
-    let mut words = Vec::with_capacity(
-        SHAPE_PATH_LEGACY_PREFIX.len() + spec_words.len() + projection_words.len() + 2,
-    );
-    words.extend(SHAPE_PATH_LEGACY_PREFIX);
+    let mut words = Vec::with_capacity(spec_words.len() + projection_words.len() + 2);
     words.push(AGG_QUERY_SPEC_SENTINEL);
     words.extend(spec_words);
     words.push(AGG_OUTPUT_PROJECTION_SENTINEL);
@@ -1107,13 +1103,12 @@ mod tests {
     }
 
     #[test]
-    fn shape_path_uses_empty_legacy_prefix_then_strict_contracts() {
+    fn shape_path_contains_only_strict_contracts() {
         let (spec, projection) = count_contract();
         let words = encode_shape_path_private(&spec, &projection).expect("contract encodes");
 
-        assert_eq!(&words[..4], &SHAPE_PATH_LEGACY_PREFIX);
-        assert_eq!(words[4], AGG_QUERY_SPEC_SENTINEL);
-        let spec_start = 5;
+        assert_eq!(words[0], AGG_QUERY_SPEC_SENTINEL);
+        let spec_start = 1;
         let spec_len =
             crate::engine::spec::AggQuerySpec::encoded_i32_prefix_len(&words[spec_start..])
                 .expect("AQS2 body has a strict length");

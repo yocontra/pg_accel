@@ -5,7 +5,6 @@
 use super::*;
 
 use crate::engine::cost;
-use crate::engine::executor::agg::H3_LATLNG_GROUP_KEY_TYPE;
 use crate::engine::executor::sort::{SORT_KEY_INTS, SortKeyDesc};
 use crate::engine::registry::AccelStrategy;
 use crate::engine::residency::ResidentProofSnapshot;
@@ -1410,30 +1409,6 @@ fn window_func_from_i32_invalid_returns_none() {
 }
 
 // -----------------------------------------------------------------------
-// AggOp — from_i32 / to_i32 used in serialization
-// -----------------------------------------------------------------------
-
-#[test]
-fn agg_op_roundtrip_all_variants() {
-    let variants = [AggOp::Sum, AggOp::Avg, AggOp::Min, AggOp::Max, AggOp::Count];
-    for op in variants {
-        let raw = op.to_i32();
-        let recovered = AggOp::from_i32(raw);
-        assert_eq!(
-            Some(op),
-            recovered,
-            "roundtrip failed for {op:?} (raw={raw})"
-        );
-    }
-}
-
-#[test]
-fn agg_op_unknown_is_invalid() {
-    assert_eq!(AggOp::from_i32(-1), None);
-    assert_eq!(AggOp::from_i32(99), None);
-}
-
-// -----------------------------------------------------------------------
 // WindowFuncSpec — default_val bit encoding
 // -----------------------------------------------------------------------
 
@@ -1494,23 +1469,6 @@ fn sort_key_desc_nulls_first_false() {
 }
 
 // -----------------------------------------------------------------------
-// GroupKeyInfo — key_type values
-// -----------------------------------------------------------------------
-
-#[test]
-fn group_key_info_key_types() {
-    // The key_type field maps: 0=i32, 1=i64, 2=f64.
-    for (kt, label) in [(0, "i32"), (1, "i64"), (2, "f64")] {
-        let gk = GroupKeyInfo {
-            attno: 1,
-            type_oid: pg_sys::Oid::from(23u32),
-            key_type: kt,
-        };
-        assert_eq!(gk.key_type, kt, "key_type for {label} should be {kt}");
-    }
-}
-
-// -----------------------------------------------------------------------
 // PgaccelKeyType used in hash join context
 // -----------------------------------------------------------------------
 
@@ -1529,11 +1487,4 @@ fn hash_key_type_mapping_matches_begin_custom_scan() {
     assert!(matches!(map(2), PgaccelKeyType::Float64));
     assert!(matches!(map(-1), PgaccelKeyType::Int32));
     assert!(matches!(map(99), PgaccelKeyType::Int32));
-}
-
-#[test]
-fn partial_sentinel_is_ascii_paag() {
-    // PARTIAL_SENTINEL is `b"PAAG"` packed as a big-endian i32.
-    let bytes = 0x5041_4147u32.to_be_bytes();
-    assert_eq!(&bytes, b"PAAG");
 }

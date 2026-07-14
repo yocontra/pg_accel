@@ -8,10 +8,6 @@ use std::ffi::c_int;
 use pgrx::pg_sys;
 
 use super::{GpuStrategy, OutputShapeDisc};
-use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
-use crate::engine::executor::agg::{
-    AggOp, GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE, is_h3_synthetic_group_key,
-};
 use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSpec};
 use crate::engine::gucs;
 use crate::engine::registry::AccelStrategy;
@@ -36,7 +32,6 @@ pub(super) const PLAN_WIRE_VERSION: c_int = 2;
 pub(super) const PLAN_WIRE_FOOTER_INTS: usize = 4;
 pub(in crate::engine::ffi) const AGG_QUERY_SPEC_SENTINEL: c_int = 0x4151_5332; // b"AQS2"
 pub(in crate::engine::ffi) const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = 0x414F_5032; // b"AOP2"
-const MAX_LEGACY_AGGREGATES: usize = 64;
 const MAX_WINDOW_SPECS: usize = 64;
 const MAX_FUNCTION_ARGS: usize = 100;
 const MAX_TUPLE_COLUMNS: usize = 1_664;
@@ -462,7 +457,7 @@ mod typed_private_tests {
             }],
         };
         let mut words = header(GpuStrategy::Agg, AccelStrategy::GpuReduce);
-        words.extend([0, 0, 0, AGG_QUERY_SPEC_SENTINEL]);
+        words.push(AGG_QUERY_SPEC_SENTINEL);
         words.extend(spec.encode_i32().expect("query spec encodes"));
         words.push(AGG_OUTPUT_PROJECTION_SENTINEL);
         words.extend(projection.encode_i32(&spec).expect("projection encodes"));
@@ -568,7 +563,7 @@ mod typed_private_tests {
     #[test]
     fn retired_olap_aggregate_contract_is_rejected() {
         let mut words = generic_agg_frame();
-        words[PLAN_PAYLOAD_START + 3] = i32::from_be_bytes(*b"OLAP");
+        words[PLAN_PAYLOAD_START] = i32::from_be_bytes(*b"OLAP");
         assert!(validate_plan_wire_slice(&words, PlanExecMethod::Agg).is_err());
     }
 
@@ -657,58 +652,40 @@ mod typed_private_tests {
     }
 
     #[test]
-    fn neutral_aggregate_rejects_all_legacy_execution_fields() {
-        let mut self_scan = generic_agg_frame();
-        self_scan[PLAN_PAYLOAD_START + 2] = 42;
-        assert!(validate_plan_wire_slice(&self_scan, PlanExecMethod::Agg).is_err());
+    fn neutral_aggregate_rejects_prefixes_suffixes_and_retired_tags() {
+        for retired_tag in [
+            0,
+            i32::from_be_bytes(*b"AGXP"),
+            i32::from_be_bytes(*b"PAAG"),
+        ] {
+            let mut prefixed = generic_agg_frame();
+            prefixed.insert(PLAN_PAYLOAD_START, retired_tag);
+            let footer = prefixed.len() - PLAN_WIRE_FOOTER_INTS;
+            prefixed[footer + 2] = prefixed.len() as i32;
+            assert!(validate_plan_wire_slice(&prefixed, PlanExecMethod::Agg).is_err());
+        }
 
-        let mut scan_expr = generic_agg_frame();
-        scan_expr.splice(
-            PLAN_PAYLOAD_START + 3..PLAN_PAYLOAD_START + 3,
-            [
-                AGG_SCAN_EXPR_SENTINEL,
-                1,
-                0,
-                i32::from(crate::engine::expr_compiler::opcode::EQ),
-                0,
-                0,
-            ],
-        );
-        let footer = scan_expr.len() - PLAN_WIRE_FOOTER_INTS;
-        scan_expr[footer + 2] = scan_expr.len() as i32;
-        assert!(validate_plan_wire_slice(&scan_expr, PlanExecMethod::Agg).is_err());
-
-        let mut partial = generic_agg_frame();
-        let proof = partial.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
-        partial.splice(
-            proof..proof,
-            [
-                PARTIAL_SENTINEL,
-                1,
-                AggOp::Count.to_i32(),
-                1,
-                pg_sys::INT8OID.to_u32() as i32,
-                0,
-            ],
-        );
-        let footer = partial.len() - PLAN_WIRE_FOOTER_INTS;
-        partial[footer + 2] = partial.len() as i32;
-        assert!(validate_plan_wire_slice(&partial, PlanExecMethod::Agg).is_err());
+        let mut trailing = generic_agg_frame();
+        let proof = trailing.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
+        trailing.insert(proof, 0);
+        let footer = trailing.len() - PLAN_WIRE_FOOTER_INTS;
+        trailing[footer + 2] = trailing.len() as i32;
+        assert!(validate_plan_wire_slice(&trailing, PlanExecMethod::Agg).is_err());
     }
 
     #[test]
-    fn selected_path_contract_decoder_stops_before_resident_proof() {
+    fn neutral_aggregate_contract_roundtrips_to_proof_boundary() {
         let frame = generic_agg_frame();
         let reader = IntListReader::from_slice(&frame);
-        let contract = decode_agg_query_contract_at(&reader, PLAN_PAYLOAD_START + 3)
-            .expect("strict path contract decodes")
-            .expect("generic aggregate carries a path contract");
         let proof_start = frame.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
-        assert_eq!(contract.2, proof_start);
-        contract
-            .1
-            .validate(&contract.0)
-            .expect("projection matches spec");
+        assert_eq!(frame[PLAN_PAYLOAD_START], AGG_QUERY_SPEC_SENTINEL);
+        let (spec, projection) =
+            decode_agg_query_contract_at(&reader, PLAN_PAYLOAD_START, proof_start)
+                .expect("strict path contract decodes");
+        assert_eq!(spec.fact_rel, 42);
+        assert_eq!(spec.measures.len(), 1);
+        assert_eq!(projection.slots.len(), 1);
+        projection.validate(&spec).expect("projection matches spec");
     }
 
     #[test]
@@ -1367,24 +1344,55 @@ fn copy_wire_words(
 fn decode_agg_query_contract_at(
     fields: &IntListReader<'_>,
     mut index: usize,
-) -> Result<Option<(AggQuerySpec, AggOutputProjection, usize)>, DecodeError> {
-    if fields.get(index) != Some(AGG_QUERY_SPEC_SENTINEL) {
-        return Ok(None);
+    contract_end: usize,
+) -> Result<(AggQuerySpec, AggOutputProjection), DecodeError> {
+    if index >= contract_end {
+        return Err(DecodeError::Truncated {
+            index,
+            field: "aggregate query spec sentinel",
+        });
+    }
+    let sentinel = strict_word(fields, index, "aggregate query spec sentinel")?;
+    if sentinel != AGG_QUERY_SPEC_SENTINEL {
+        return Err(DecodeError::InvalidValue {
+            index,
+            field: "aggregate query spec sentinel",
+            raw: sentinel,
+        });
     }
     let spec_start = index + 1;
-    let remaining = fields.len().saturating_sub(spec_start);
+    let remaining = contract_end
+        .checked_sub(spec_start)
+        .ok_or(DecodeError::Truncated {
+            index: contract_end,
+            field: "aggregate query spec",
+        })?;
     let prefix_words = copy_wire_words(fields, spec_start, remaining, "aggregate query spec")?;
     let spec_len = AggQuerySpec::encoded_i32_prefix_len(&prefix_words)?;
     let spec = AggQuerySpec::decode_i32(&prefix_words[..spec_len])?;
     index = spec_start + spec_len;
-    if fields.get(index) != Some(AGG_OUTPUT_PROJECTION_SENTINEL) {
+    if index >= contract_end {
         return Err(DecodeError::Truncated {
             index,
-            field: "aggregate output projection",
+            field: "aggregate output projection sentinel",
+        });
+    }
+    let sentinel = strict_word(fields, index, "aggregate output projection sentinel")?;
+    if sentinel != AGG_OUTPUT_PROJECTION_SENTINEL {
+        return Err(DecodeError::InvalidValue {
+            index,
+            field: "aggregate output projection sentinel",
+            raw: sentinel,
         });
     }
     let projection_start = index + 1;
     let length_index = projection_start + 2;
+    if length_index >= contract_end {
+        return Err(DecodeError::Truncated {
+            index: contract_end,
+            field: "aggregate output projection length",
+        });
+    }
     let projection_len_raw =
         strict_word(fields, length_index, "aggregate output projection length")?;
     let projection_len =
@@ -1401,6 +1409,21 @@ fn decode_agg_query_contract_at(
             maximum: AGG_OUTPUT_PROJECTION_MAX_WORDS,
         });
     }
+    let projection_end =
+        projection_start
+            .checked_add(projection_len)
+            .ok_or(DecodeError::LimitExceeded {
+                index: length_index,
+                field: "aggregate output projection length",
+                declared: projection_len,
+                maximum: AGG_OUTPUT_PROJECTION_MAX_WORDS,
+            })?;
+    if projection_end > contract_end {
+        return Err(DecodeError::Truncated {
+            index: contract_end,
+            field: "aggregate output projection",
+        });
+    }
     let projection_words = copy_wire_words(
         fields,
         projection_start,
@@ -1408,7 +1431,8 @@ fn decode_agg_query_contract_at(
         "aggregate output projection",
     )?;
     let projection = AggOutputProjection::decode_i32(&projection_words, &spec)?;
-    Ok(Some((spec, projection, projection_start + projection_len)))
+    require_payload_end(projection_end, contract_end)?;
+    Ok((spec, projection))
 }
 
 /// Decode the strict AQS2/AOP2 trailer carried by a selected aggregate path.
@@ -1418,30 +1442,12 @@ fn decode_agg_query_contract_at(
 /// extension in the current planner context.
 pub(super) unsafe fn deserialize_agg_query_path_contract(
     path_private: *mut pg_sys::List,
-    index: usize,
-) -> Result<Option<(AggQuerySpec, AggOutputProjection, usize)>, DecodeError> {
+) -> Result<(AggQuerySpec, AggOutputProjection), DecodeError> {
     // SAFETY: caller supplies a planner-owned list; the reader validates every
     // node before any integer is interpreted.
     let fields = unsafe { IntListReader::from_pg_list(path_private) };
-    decode_agg_query_contract_at(&fields, index)
-}
-
-fn strict_f64_at(
-    fields: &IntListReader<'_>,
-    index: usize,
-    field: &'static str,
-) -> Result<f64, DecodeError> {
-    let high = strict_word(fields, index, field)? as u32 as u64;
-    let low = strict_word(fields, index + 1, field)? as u32 as u64;
-    let value = f64::from_bits((high << 32) | low);
-    if value == 0.0 && value.is_sign_negative() {
-        return Err(DecodeError::InvalidValue {
-            index,
-            field,
-            raw: i32::MIN,
-        });
-    }
-    Ok(value)
+    let contract_end = payload_end_before_proof(&fields);
+    decode_agg_query_contract_at(&fields, 0, contract_end)
 }
 
 fn validate_function_payload(
@@ -1734,252 +1740,13 @@ fn validate_join_payload(
     }
 }
 
-fn validate_partial_payload(
-    fields: &IntListReader<'_>,
-    start: usize,
-    payload_end: usize,
-) -> Result<usize, DecodeError> {
-    let count = strict_count(
-        fields,
-        start,
-        "partial aggregate column count",
-        MAX_LEGACY_AGGREGATES,
-        4,
-        payload_end,
-    )?;
-    if count == 0 {
-        return Err(DecodeError::InvalidValue {
-            index: start,
-            field: "partial aggregate column count",
-            raw: 0,
-        });
-    }
-    let mut index = start + 1;
-    for _ in 0..count {
-        let op = strict_word(fields, index, "partial aggregate operation")?;
-        if AggOp::from_i32(op).is_none() {
-            return Err(DecodeError::InvalidValue {
-                index,
-                field: "partial aggregate operation",
-                raw: op,
-            });
-        }
-        if strict_word(fields, index + 1, "partial aggregate attno")? <= 0
-            || strict_word(fields, index + 2, "partial aggregate transition type")? == 0
-        {
-            return Err(DecodeError::InvalidValue {
-                index: index + 1,
-                field: "partial aggregate column",
-                raw: strict_word(fields, index + 1, "partial aggregate attno")?,
-            });
-        }
-        index += 4;
-    }
-    Ok(index)
-}
-
-#[allow(clippy::too_many_lines)] // validates the complete ordered aggregate extension grammar
 fn validate_agg_payload(
     fields: &IntListReader<'_>,
     start: usize,
     payload_end: usize,
 ) -> Result<(Option<AggQuerySpec>, Option<AggOutputProjection>), DecodeError> {
-    let count = strict_count(
-        fields,
-        start,
-        "legacy aggregate count",
-        MAX_LEGACY_AGGREGATES,
-        3,
-        payload_end,
-    )?;
-    let mut index = start + 1;
-    for _ in 0..count {
-        let op = strict_word(fields, index, "aggregate operation")?;
-        if AggOp::from_i32(op).is_none() {
-            return Err(DecodeError::InvalidValue {
-                index,
-                field: "aggregate operation",
-                raw: op,
-            });
-        }
-        let attno = strict_word(fields, index + 1, "aggregate attno")?;
-        if attno < 0 || strict_word(fields, index + 2, "aggregate result type OID")? == 0 {
-            return Err(DecodeError::InvalidValue {
-                index: index + 1,
-                field: "aggregate descriptor",
-                raw: attno,
-            });
-        }
-        index += 3;
-    }
-    let has_group = strict_bool(fields, index, "aggregate group-key presence")?;
-    index += 1;
-    if has_group {
-        let attno = strict_word(fields, index, "aggregate group-key attno")?;
-        let type_oid = strict_word(fields, index + 1, "aggregate group-key type OID")?;
-        let key_type = strict_word(fields, index + 2, "aggregate group-key type")?;
-        let attno2 = strict_word(fields, index + 3, "aggregate second group-key attno")?;
-        let tlist_pos = strict_word(fields, index + 4, "aggregate group-key target position")?;
-        if attno <= 0
-            || type_oid == 0
-            || !(matches!(key_type, 0 | 1 | 2 | 4 | 5) || is_h3_synthetic_group_key(key_type))
-            || attno2 < 0
-            || tlist_pos < 0
-        {
-            return Err(DecodeError::InvalidValue {
-                index,
-                field: "aggregate group-key descriptor",
-                raw: attno,
-            });
-        }
-        index += 5;
-    }
-    let self_scan_relid = strict_word(fields, index, "aggregate self-scan relid")?;
-    if self_scan_relid < 0 {
-        return Err(DecodeError::InvalidValue {
-            index,
-            field: "aggregate self-scan relid",
-            raw: self_scan_relid,
-        });
-    }
-    index += 1;
-
-    let mut legacy_scan_expr = false;
-    if fields.get(index) == Some(AGG_SCAN_EXPR_SENTINEL) {
-        legacy_scan_expr = true;
-        let template = strict_word(fields, index + 1, "aggregate scan-expression template")?;
-        let width = match template {
-            1 => 6,
-            2 => 7,
-            3 => 10,
-            raw => {
-                return Err(DecodeError::InvalidValue {
-                    index: index + 1,
-                    field: "aggregate scan-expression template",
-                    raw,
-                });
-            }
-        };
-        if index + width > payload_end {
-            return Err(DecodeError::Truncated {
-                index: payload_end,
-                field: "aggregate scan expression",
-            });
-        }
-        let validate_column = |offset: usize| -> Result<(), DecodeError> {
-            let raw = strict_word(fields, index + offset, "aggregate scan-expression column")?;
-            if raw < 0 || raw as usize >= MAX_TUPLE_COLUMNS {
-                return Err(DecodeError::InvalidValue {
-                    index: index + offset,
-                    field: "aggregate scan-expression column",
-                    raw,
-                });
-            }
-            Ok(())
-        };
-        let validate_opcode = |offset: usize| -> Result<(), DecodeError> {
-            let raw = strict_word(fields, index + offset, "aggregate scan-expression opcode")?;
-            if !(i32::from(crate::engine::expr_compiler::opcode::EQ)
-                ..=i32::from(crate::engine::expr_compiler::opcode::ALWAYS_TRUE))
-                .contains(&raw)
-            {
-                return Err(DecodeError::InvalidValue {
-                    index: index + offset,
-                    field: "aggregate scan-expression opcode",
-                    raw,
-                });
-            }
-            Ok(())
-        };
-        match template {
-            1 => {
-                validate_column(2)?;
-                validate_opcode(3)?;
-                let value = strict_f64_at(fields, index + 4, "aggregate scan constant")?;
-                if value.is_nan() {
-                    return Err(DecodeError::InvalidValue {
-                        index: index + 4,
-                        field: "aggregate scan constant",
-                        raw: 0,
-                    });
-                }
-            }
-            2 => {
-                validate_column(2)?;
-                let lo = strict_f64_at(fields, index + 3, "aggregate scan lower bound")?;
-                let hi = strict_f64_at(fields, index + 5, "aggregate scan upper bound")?;
-                if lo.is_nan() || hi.is_nan() || lo > hi {
-                    return Err(DecodeError::InvalidValue {
-                        index: index + 3,
-                        field: "aggregate scan range",
-                        raw: 0,
-                    });
-                }
-            }
-            3 => {
-                validate_column(2)?;
-                validate_opcode(3)?;
-                validate_column(6)?;
-                validate_opcode(7)?;
-                for constant_index in [index + 4, index + 8] {
-                    let value = strict_f64_at(fields, constant_index, "aggregate scan constant")?;
-                    if value.is_nan() {
-                        return Err(DecodeError::InvalidValue {
-                            index: constant_index,
-                            field: "aggregate scan constant",
-                            raw: 0,
-                        });
-                    }
-                }
-            }
-            _ => unreachable!(),
-        }
-        index += width;
-    }
-
-    let mut agg_query_spec = None;
-    let mut agg_output_projection = None;
-    if let Some((spec, projection, end)) = decode_agg_query_contract_at(fields, index)? {
-        if end > payload_end {
-            return Err(DecodeError::Truncated {
-                index: payload_end,
-                field: "aggregate query/projection contract",
-            });
-        }
-        agg_query_spec = Some(spec);
-        agg_output_projection = Some(projection);
-        index = end;
-    }
-    let mut legacy_partial = false;
-    if fields.get(index) == Some(PARTIAL_SENTINEL) {
-        legacy_partial = true;
-        index = validate_partial_payload(fields, index + 1, payload_end)?;
-    }
-    require_payload_end(index, payload_end)?;
-    if agg_query_spec.is_none() {
-        return Err(DecodeError::InvalidValue {
-            index,
-            field: "aggregate execution contract",
-            raw: 0,
-        });
-    }
-    if agg_query_spec.is_some() != agg_output_projection.is_some() {
-        return Err(DecodeError::InvalidValue {
-            index,
-            field: "generic aggregate projection contract",
-            raw: 0,
-        });
-    }
-    if agg_query_spec.is_some()
-        && (count != 0 || has_group || self_scan_relid != 0 || legacy_scan_expr || legacy_partial)
-    {
-        return Err(DecodeError::InvalidValue {
-            index: start,
-            field: "noncanonical generic aggregate legacy fields",
-            raw: count as i32,
-        });
-    }
-    Ok((agg_query_spec, agg_output_projection))
+    let (spec, projection) = decode_agg_query_contract_at(fields, start, payload_end)?;
+    Ok((Some(spec), Some(projection)))
 }
 
 fn validate_plan_wire_from_reader(
@@ -2378,19 +2145,6 @@ pub(super) unsafe fn deserialize_custom_private(
     }
 }
 
-// ---------------------------------------------------------------------------
-// PartialAggSpec serialization / deserialization
-// ---------------------------------------------------------------------------
-
-/// Magic marker preceding a serialized [`PartialAggSpec`] in `custom_private`.
-/// Chosen to be distinct from any plausible scalar field so mistaken layouts
-/// don't silently deserialize as partial-agg metadata.
-pub(in crate::engine::ffi) const PARTIAL_SENTINEL: c_int = 0x5041_4147; // b"PAAG"
-
-/// Magic marker preceding an aggregate self-scan template expression in
-/// `custom_private`.
-pub(in crate::engine::ffi) const AGG_SCAN_EXPR_SENTINEL: c_int = 0x4147_5850; // b"AGXP"
-
 /// Append the neutral aggregate query and ordered output contracts consumed by
 /// the Phase 5 descriptor executor. Both blocks own independent v2 framing.
 ///
@@ -2398,7 +2152,6 @@ pub(in crate::engine::ffi) const AGG_SCAN_EXPR_SENTINEL: c_int = 0x4147_5850; //
 /// Must be called in a valid PostgreSQL planner memory context. `cscan` must
 /// own one-to-one `custom_scan_tlist` and `plan.targetlist` lists matching the
 /// ordered projection.
-#[allow(dead_code)] // Cross-branch API consumed by the Phase 5C shape planner after integration.
 pub(in crate::engine::ffi) unsafe fn append_agg_query_plan(
     list: *mut pg_sys::List,
     spec: &AggQuerySpec,
@@ -2460,10 +2213,8 @@ pub(super) unsafe fn append_plan_wire_footer(
 
 /// Magic marker preceding a serialized [`ResidentProofSnapshot`] trailer.
 ///
-/// This block is always appended after each strategy-specific payload so legacy
-/// offsets stay stable: generic scan/sort/agg/window payloads still start at
-/// index 6, FunctionScan/SRF sentinels still live at index 6, and PreAgg still
-/// starts at index 3.
+/// This block is always appended after each strategy-specific payload and before
+/// the plan-wire footer.
 pub(in crate::engine::ffi) const RESIDENT_PROOF_SENTINEL: c_int = 0x5250_5246; // b"RPRF"
 pub(in crate::engine::ffi) const RESIDENT_PROOF_VERSION: c_int = 2;
 pub(super) const RESIDENT_PROOF_TRAILER_INTS: usize = 9;
@@ -2560,112 +2311,14 @@ fn deserialize_resident_proof_snapshot_from_reader(
     )
 }
 
-/// Append a [`PartialAggSpec`] onto `list` using the sentinel-prefixed
-/// layout consumed by `deserialize_partial_spec`.
-///
-/// Layout: `[PARTIAL_SENTINEL, n_cols, (op, attno, transtype_oid, serialize_fn_oid)*n_cols]`
-/// where `serialize_fn_oid == 0` encodes `None`.
-///
-/// # Safety
-/// Must be called in a valid PG memory context on the main backend thread.
-#[allow(clippy::cast_possible_wrap)]
-pub(in crate::engine::ffi) unsafe fn append_partial_spec(
-    list: *mut pg_sys::List,
-    spec: &PartialAggSpec,
-) -> *mut pg_sys::List {
-    if spec.per_column.is_empty() || spec.per_column.len() > MAX_LEGACY_AGGREGATES {
-        pgrx::error!("pg_accel: invalid partial aggregate column count");
-    }
-    for column in &spec.per_column {
-        if column.attno <= 0 || column.transtype_oid == pg_sys::InvalidOid {
-            pgrx::error!("pg_accel: invalid partial aggregate column metadata");
-        }
-    }
-    let mut writer = PgListWriter::from_existing(list);
-    writer.push_int(PARTIAL_SENTINEL);
-    writer.push_len(spec.per_column.len());
-    for col in &spec.per_column {
-        writer.push_int(col.op.to_i32());
-        writer.push_int(col.attno);
-        writer.push_oid(col.transtype_oid);
-        writer.push_u32(col.serialize_fn_oid.map_or(0, u32::from));
-    }
-    writer.into_list()
-}
-
-/// Deserialize a [`PartialAggSpec`] from `list` starting at `start_idx`
-/// (the position of `n_cols`). Returns `None` when the list is too short
-/// or `n_cols` is zero.
-///
-/// # Safety
-/// `list` must be a valid PG `List` of `Integer` nodes.
-#[allow(clippy::cast_sign_loss)]
-pub(in crate::engine::ffi) unsafe fn deserialize_partial_spec(
-    list: *mut pg_sys::List,
-    start_idx: usize,
-) -> Option<PartialAggSpec> {
-    // SAFETY: caller guarantees a valid PG List.
-    let fields = unsafe { IntListReader::from_pg_list(list) };
-    deserialize_partial_spec_from_reader(&fields, start_idx)
-}
-
-fn deserialize_partial_spec_from_reader(
-    fields: &IntListReader<'_>,
-    start_idx: usize,
-) -> Option<PartialAggSpec> {
-    let payload_end = payload_end_before_proof(fields);
-    let n_cols = strict_count(
-        fields,
-        start_idx,
-        "partial aggregate column count",
-        MAX_LEGACY_AGGREGATES,
-        4,
-        payload_end,
-    )
-    .ok()?;
-    if n_cols == 0 {
-        return None;
-    }
-    let base = start_idx + 1;
-    let end = base.checked_add(n_cols.checked_mul(4)?)?;
-    if end > payload_end {
-        return None;
-    }
-    let mut per_column = Vec::new();
-    per_column.try_reserve_exact(n_cols).ok()?;
-    for k in 0..n_cols {
-        let mut column = fields.cursor_at(base + k * 4);
-        let op_raw = column.read_int();
-        let op = AggOp::from_i32(op_raw)?;
-        let attno = column.read_int();
-        let transtype_oid = column.read_oid();
-        if attno <= 0 || transtype_oid == pg_sys::InvalidOid {
-            return None;
-        }
-        let ser_raw = column.read_u32();
-        let serialize_fn_oid = if ser_raw == 0 {
-            None
-        } else {
-            Some(pg_sys::Oid::from(ser_raw))
-        };
-        per_column.push(PartialColumn {
-            op,
-            attno,
-            transtype_oid,
-            serialize_fn_oid,
-        });
-    }
-    Some(PartialAggSpec { per_column })
-}
-
 // ---------------------------------------------------------------------------
 // FunctionScan serialization / deserialization (Phase 2 F3)
 // ---------------------------------------------------------------------------
 
 /// Magic marker preceding a serialized [`FunctionScanPrivData`].
 ///
-/// Distinct from `PARTIAL_SENTINEL` so the two block formats cannot be
-/// silently confused if a layout regression mis-positions the cursor.
+/// Distinct from the other strategy-local sentinels so a layout regression
+/// cannot silently decode one payload as another.
 pub const FUNCTIONSCAN_SENTINEL: c_int = 0x4653_4341; // b"FSCA"
 
 /// Plan metadata for a `FunctionScan` Custom-Scan injection (Phase 2 F3).
@@ -2805,12 +2458,12 @@ pub unsafe fn deserialize_functionscan_priv(
 mod functionscan_tests {
     use super::*;
 
-    /// Sentinel must be distinct from `PARTIAL_SENTINEL` so the two
-    /// optional-trailer blocks cannot be silently confused if a layout
-    /// regression mis-positions the cursor.
+    /// Strategy-local sentinels must remain unambiguous.
     #[test]
-    fn functionscan_sentinel_distinct_from_partial() {
-        assert_ne!(FUNCTIONSCAN_SENTINEL, PARTIAL_SENTINEL);
+    fn functionscan_sentinel_is_distinct() {
+        assert_ne!(FUNCTIONSCAN_SENTINEL, AGG_QUERY_SPEC_SENTINEL);
+        assert_ne!(FUNCTIONSCAN_SENTINEL, AGG_OUTPUT_PROJECTION_SENTINEL);
+        assert_ne!(FUNCTIONSCAN_SENTINEL, SRF_TARGET_LIST_SENTINEL);
     }
 
     #[pgrx::pg_schema]
@@ -2854,9 +2507,8 @@ mod functionscan_tests {
 
 /// Magic marker preceding a serialized [`SrfTargetListPrivData`] block.
 ///
-/// Distinct from `FUNCTIONSCAN_SENTINEL` and `PARTIAL_SENTINEL` so the three
-/// block formats cannot be silently confused if a layout regression
-/// mis-positions the cursor.
+/// Distinct from the other strategy-local sentinels so a layout regression
+/// cannot silently decode one payload as another.
 pub const SRF_TARGET_LIST_SENTINEL: c_int = 0x5354_4C53; // b"STLS"
 
 /// Plan metadata for an SRF-in-target-list Custom-Scan injection.
@@ -3046,12 +2698,12 @@ pub unsafe fn deserialize_srf_target_list_priv(
 mod srf_target_list_tests {
     use super::*;
 
-    /// Sentinel must be distinct from `FUNCTIONSCAN_SENTINEL` and
-    /// `PARTIAL_SENTINEL` so the three block formats are unambiguous.
+    /// Strategy-local sentinels must remain unambiguous.
     #[test]
     fn srf_target_list_sentinel_distinct() {
         assert_ne!(SRF_TARGET_LIST_SENTINEL, FUNCTIONSCAN_SENTINEL);
-        assert_ne!(SRF_TARGET_LIST_SENTINEL, PARTIAL_SENTINEL);
+        assert_ne!(SRF_TARGET_LIST_SENTINEL, AGG_QUERY_SPEC_SENTINEL);
+        assert_ne!(SRF_TARGET_LIST_SENTINEL, AGG_OUTPUT_PROJECTION_SENTINEL);
     }
 
     #[pgrx::pg_schema]

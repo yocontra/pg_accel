@@ -3,7 +3,6 @@
 #![allow(clippy::unwrap_used, dead_code)]
 
 use super::*;
-use crate::engine::executor::agg::{AggOp, GroupKeyInfo};
 
 // =====================================================================
 // Existing tests (preserved)
@@ -198,31 +197,6 @@ fn accel_strategy_repr_i32_roundtrip() {
 }
 
 // =====================================================================
-// AggOp round-trip
-// =====================================================================
-
-#[test]
-fn agg_op_to_i32_roundtrip() {
-    let ops = [
-        AggOp::Sum,
-        AggOp::Avg,
-        AggOp::Min,
-        AggOp::Max,
-        AggOp::Count,
-        AggOp::Passthrough,
-    ];
-    for op in ops {
-        assert_eq!(AggOp::from_i32(op.to_i32()), Some(op));
-    }
-}
-
-#[test]
-fn agg_op_from_i32_unknown_is_invalid() {
-    assert_eq!(AggOp::from_i32(100), None);
-    assert_eq!(AggOp::from_i32(-1), None);
-}
-
-// =====================================================================
 // WindowFunc round-trip
 // =====================================================================
 
@@ -351,40 +325,6 @@ fn setop_decline_reason_codes_are_stable() {
         setop_reason_for_recursive_union(true),
         "recursiveunion_no_gpu_kernel"
     );
-}
-
-// =====================================================================
-// GroupKeyInfo::key_type_from_oid classification
-// =====================================================================
-
-#[test]
-fn group_key_type_int2_maps_to_int32() {
-    assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::INT2OID), Some(0));
-}
-
-#[test]
-fn group_key_type_int4_maps_to_int32() {
-    assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::INT4OID), Some(0));
-}
-
-#[test]
-fn group_key_type_int8_maps_to_int64() {
-    assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::INT8OID), Some(1));
-}
-
-#[test]
-fn group_key_type_float4_maps_to_float64() {
-    assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::FLOAT4OID), Some(2));
-}
-
-#[test]
-fn group_key_type_float8_maps_to_float64() {
-    assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::FLOAT8OID), Some(2));
-}
-
-#[test]
-fn group_key_type_text_returns_none() {
-    assert_eq!(GroupKeyInfo::key_type_from_oid(pg_sys::TEXTOID), None);
 }
 
 // =====================================================================
@@ -1042,256 +982,6 @@ fn window_cost_helper_applies_multiplier_on_soft_fp64_device() {
         (unpenalised - native).abs() < 1e-9,
         "penalty leaked onto non-fp64 path: unpenalised={unpenalised} native={native}"
     );
-}
-
-// =====================================================================
-// Phase 3 — AVG / STDDEV / VAR parallel path
-//
-// `partial_agg::try_inject` builds a `PartialAggSpec` carrying per-column
-// `serialize_fn_oid` and appends it via the PAAG sentinel block so the
-// plan-side (`plan_custom_path_agg`) can hand the correct emitter to the
-// executor. The tests below lock down:
-//
-//   1. The transtype gate that replaces the old INTERNAL bail — only
-//      FLOAT8ARRAYOID (`_float8`) is accepted for Float8Stats aggregates.
-//   2. The `PartialColumn` shape round-trips through `Clone` without losing
-//      `serialize_fn_oid` (the field exists and carries an `Option<Oid>`).
-//   3. The `build_partial_emitters` branch selection matches op + transtype:
-//      float8[] stats → Float8StatsEmitter with no serialize fn; bytea stats
-//      → Float8StatsEmitter with the serialize fn OID.
-//
-// A `#[pg_test]` covering the full PG-allocated list round-trip
-// (`append_partial_spec` → `deserialize_partial_spec`) lives in
-// `custom_scan/tests.rs` alongside the other sentinel fixtures.
-// =====================================================================
-
-#[test]
-fn partial_agg_gate_accepts_float8_array_avg_transtype() {
-    // Mirror the gate predicate in `partial_agg::try_inject` post-fix:
-    //   bail only when a Float8Stats op sees transtype != FLOAT8ARRAYOID.
-    use crate::engine::executor::agg::AggOp;
-    let float_stats_op = |op: AggOp| -> bool {
-        matches!(
-            op,
-            AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop
-        )
-    };
-    let allow = |op: AggOp, transtype: pg_sys::Oid| -> bool {
-        !(float_stats_op(op) && transtype != pg_sys::FLOAT8ARRAYOID)
-    };
-
-    // float4/float8 AVG-family → transtype `_float8` → allowed.
-    assert!(allow(AggOp::Avg, pg_sys::FLOAT8ARRAYOID));
-    assert!(allow(AggOp::StddevSamp, pg_sys::FLOAT8ARRAYOID));
-    assert!(allow(AggOp::StddevPop, pg_sys::FLOAT8ARRAYOID));
-    assert!(allow(AggOp::VarSamp, pg_sys::FLOAT8ARRAYOID));
-    assert!(allow(AggOp::VarPop, pg_sys::FLOAT8ARRAYOID));
-}
-
-#[test]
-fn partial_agg_gate_rejects_internal_transtype_for_float_stats_ops() {
-    use crate::engine::executor::agg::AggOp;
-    let float_stats_op = |op: AggOp| -> bool {
-        matches!(
-            op,
-            AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop
-        )
-    };
-    let allow = |op: AggOp, transtype: pg_sys::Oid| -> bool {
-        !(float_stats_op(op) && transtype != pg_sys::FLOAT8ARRAYOID)
-    };
-
-    // int8/numeric/interval AVG → INTERNAL transtype → bailed.
-    assert!(!allow(AggOp::Avg, pg_sys::INTERNALOID));
-    assert!(!allow(AggOp::StddevSamp, pg_sys::INTERNALOID));
-    assert!(!allow(AggOp::VarPop, pg_sys::INTERNALOID));
-}
-
-#[test]
-fn partial_agg_gate_rejects_int8_array_transtype_for_int_avg() {
-    // AVG(int2)/AVG(int4) resolve to transtype `_int8` (INT8ARRAYOID = 1016).
-    // Float8StatsEmitter would ship a float8[] with the wrong element type;
-    // the gate must bail.
-    use crate::engine::executor::agg::AggOp;
-    let float_stats_op = |op: AggOp| -> bool {
-        matches!(
-            op,
-            AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop
-        )
-    };
-    let allow = |op: AggOp, transtype: pg_sys::Oid| -> bool {
-        !(float_stats_op(op) && transtype != pg_sys::FLOAT8ARRAYOID)
-    };
-    // INT8ARRAYOID is 1016 per pg_type.dat.
-    let int8_array_oid = pg_sys::Oid::from(1016u32);
-    assert!(!allow(AggOp::Avg, int8_array_oid));
-}
-
-#[test]
-fn partial_agg_gate_allows_non_float_stats_ops_regardless_of_transtype() {
-    // SUM / COUNT / MIN / MAX / BIT / BOOL families don't go through
-    // Float8StatsEmitter, so the transtype gate must NOT fire for them.
-    use crate::engine::executor::agg::AggOp;
-    let float_stats_op = |op: AggOp| -> bool {
-        matches!(
-            op,
-            AggOp::Avg | AggOp::StddevSamp | AggOp::StddevPop | AggOp::VarSamp | AggOp::VarPop
-        )
-    };
-    let allow = |op: AggOp, transtype: pg_sys::Oid| -> bool {
-        !(float_stats_op(op) && transtype != pg_sys::FLOAT8ARRAYOID)
-    };
-
-    // SUM(int8) / SUM(numeric) / SUM(float8): transtype varies but no gate.
-    assert!(allow(AggOp::Sum, pg_sys::INT8OID));
-    assert!(allow(AggOp::Sum, pg_sys::NUMERICOID));
-    assert!(allow(AggOp::Sum, pg_sys::FLOAT8OID));
-    // COUNT(*): transtype INT8OID.
-    assert!(allow(AggOp::Count, pg_sys::INT8OID));
-}
-
-#[test]
-#[allow(clippy::redundant_clone)]
-fn partial_column_preserves_serialize_fn_oid_through_clone() {
-    // `partial_agg::try_inject` clones the `Vec<PartialColumn>` into the
-    // spec that `append_partial_spec` consumes. Regression guard: the
-    // `serialize_fn_oid: Option<Oid>` field must survive a Clone round-trip.
-    // (The explicit `.clone()` here is the test subject — the clippy
-    // redundant-clone lint is suppressed deliberately.)
-    use crate::engine::executor::agg::AggOp;
-    use crate::engine::executor::agg::partial::PartialColumn;
-
-    let nonzero_ser_oid = pg_sys::Oid::from(4321u32);
-    let col = PartialColumn {
-        op: AggOp::Avg,
-        attno: 3,
-        transtype_oid: pg_sys::FLOAT8ARRAYOID,
-        serialize_fn_oid: Some(nonzero_ser_oid),
-    };
-    let cloned = col.clone();
-    // Keep both bindings live so clippy can't fold the clone away:
-    // assertions below compare fields from both `col` and `cloned`.
-    assert_eq!(col.attno, cloned.attno);
-    assert_eq!(col.transtype_oid, cloned.transtype_oid);
-    assert_eq!(col.serialize_fn_oid, cloned.serialize_fn_oid);
-    assert!(matches!(cloned.op, AggOp::Avg));
-    assert_eq!(cloned.attno, 3);
-    assert_eq!(cloned.transtype_oid, pg_sys::FLOAT8ARRAYOID);
-    assert_eq!(cloned.serialize_fn_oid, Some(nonzero_ser_oid));
-}
-
-#[test]
-fn partial_column_none_serialize_fn_oid_is_canonical_invalid() {
-    // For float4/float8 AVG the classifier resolves aggserialfn via syscache;
-    // when the aggregate has no serialize fn, the resolved Oid is `InvalidOid`
-    // which the injector normalises to `None`.
-    use crate::engine::executor::agg::AggOp;
-    use crate::engine::executor::agg::partial::PartialColumn;
-
-    let col = PartialColumn {
-        op: AggOp::Avg,
-        attno: 1,
-        transtype_oid: pg_sys::FLOAT8ARRAYOID,
-        serialize_fn_oid: None,
-    };
-    // `Option::None` is the emitter's signal to ship float8[] directly
-    // (bypassing OidFunctionCall1Coll). Any non-None must be a real fn OID.
-    assert!(col.serialize_fn_oid.is_none());
-}
-
-// ---------------------------------------------------------------------
-// PG-live round-trip of the PAAG sentinel block.
-//
-// Covers `append_partial_spec` → `deserialize_partial_spec` on a real
-// `*mut pg_sys::List` so we can exercise `makeInteger` / `lappend` /
-// `list_nth`. A pure-Rust clone of this logic would only test our own
-// struct conversion — this test catches bugs where the list layout and
-// the reader walk disagree on offsets.
-// ---------------------------------------------------------------------
-
-mod partial_agg_spec_roundtrip {
-    #[pgrx::pg_schema]
-    mod tests {
-        use pgrx::pg_sys;
-        use pgrx::prelude::pg_test;
-
-        use crate::engine::executor::agg::AggOp;
-        use crate::engine::executor::agg::partial::{PartialAggSpec, PartialColumn};
-        use crate::engine::ffi::custom_scan::{
-            PARTIAL_SENTINEL, append_partial_spec, deserialize_partial_spec,
-        };
-
-        #[pg_test]
-        fn paag_roundtrip_preserves_serialize_fn_oid_for_avg() {
-            // Mirror a spec produced by `partial_agg::try_inject` for a mixed
-            // aggregate list: AVG(float8), STDDEV_SAMP(float4), SUM(float8).
-            // Only the Float8Stats ops would ever carry a non-None
-            // `serialize_fn_oid` today (float4/float8 accum have no serialize fn,
-            // so the emitter ships float8[] directly) — but the sentinel format
-            // must still faithfully round-trip any caller-supplied OID.
-            let ser_avg_oid = pg_sys::Oid::from(12345u32);
-            let spec = PartialAggSpec {
-                per_column: vec![
-                    PartialColumn {
-                        op: AggOp::Avg,
-                        attno: 2,
-                        transtype_oid: pg_sys::FLOAT8ARRAYOID,
-                        serialize_fn_oid: Some(ser_avg_oid),
-                    },
-                    PartialColumn {
-                        op: AggOp::StddevSamp,
-                        attno: 3,
-                        transtype_oid: pg_sys::FLOAT8ARRAYOID,
-                        serialize_fn_oid: None,
-                    },
-                    PartialColumn {
-                        op: AggOp::Sum,
-                        attno: 4,
-                        transtype_oid: pg_sys::FLOAT8OID,
-                        serialize_fn_oid: None,
-                    },
-                ],
-            };
-
-            // SAFETY: test runs on the main backend thread with a live
-            // `CurrentMemoryContext`. `append_partial_spec` / `deserialize_partial_spec`
-            // are both main-thread helpers.
-            let (got_len, got_first_op, got_first_ser, got_second_ser, got_third_transtype) = unsafe {
-                let list: *mut pg_sys::List = std::ptr::null_mut();
-                // Sentinel @ idx 0, n_cols @ idx 1, columns from idx 2.
-                let list = append_partial_spec(list, &spec);
-                let Some(back) = deserialize_partial_spec(list, 1) else {
-                    panic!("deserialize_partial_spec returned None on a 3-column spec");
-                };
-                (
-                    back.per_column.len(),
-                    back.per_column[0].op,
-                    back.per_column[0].serialize_fn_oid,
-                    back.per_column[1].serialize_fn_oid,
-                    back.per_column[2].transtype_oid,
-                )
-            };
-
-            assert_eq!(got_len, 3);
-            assert!(matches!(got_first_op, AggOp::Avg));
-            assert_eq!(got_first_ser, Some(ser_avg_oid));
-            assert!(got_second_ser.is_none());
-            assert_eq!(got_third_transtype, pg_sys::FLOAT8OID);
-        }
-
-        #[pg_test]
-        fn paag_zero_column_wire_is_rejected() {
-            // SAFETY: Main backend thread, live memory context. Both list
-            // elements are valid PostgreSQL Integer nodes.
-            let decoded = unsafe {
-                let mut list: *mut pg_sys::List = std::ptr::null_mut();
-                list = pg_sys::lappend(list, pg_sys::makeInteger(PARTIAL_SENTINEL).cast());
-                list = pg_sys::lappend(list, pg_sys::makeInteger(0).cast());
-                deserialize_partial_spec(list, 1)
-            };
-            assert!(decoded.is_none(), "zero-column PAAG wire was accepted");
-        }
-    }
 }
 
 // =====================================================================
@@ -2258,11 +1948,7 @@ mod phase0_overhead_audit {
     }
 }
 
-// Unit tests for the upper_paths fast-decline classifier helpers can't
+// Unit tests for the upper_paths fast-decline classifier helpers cannot
 // directly exercise `grouped_query_has_unsupported_group_key` because it
-// takes a `*mut PlannerInfo` populated by the planner. The behaviour is
-// covered by the pg_test integration above (text group key → fast-decline,
-// numeric group key → no fast-decline). The lower-level
-// `GroupKeyInfo::key_type_from_oid` is exhaustively tested at
-// `engine/executor/agg/keys.rs:210-275` and pinned at
-// `planner_hooks/tests.rs:653-688`.
+// takes a planner-populated `*mut PlannerInfo`. The pg_test integration above
+// covers the behavior for supported and unsupported group-key types.

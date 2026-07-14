@@ -14,18 +14,10 @@
 mod artifact;
 mod descriptor;
 mod execute;
-mod keys;
-mod ops;
 mod output;
-pub mod partial;
 
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
 pub use execute::AggExecState;
-pub use keys::{
-    GroupKeyInfo, H3_LATLNG_GROUP_KEY_TYPE, H3_PARENT_GROUP_KEY_TYPE, is_h3_synthetic_group_key,
-};
-pub use ops::AggOp;
-pub use partial::{PartialAggSpec, PartialColumn};
 
 pub(crate) fn validate_descriptor_capability(
     spec: &crate::engine::spec::AggQuerySpec,
