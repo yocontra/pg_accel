@@ -751,6 +751,18 @@ mod tests {
     }
 
     #[test]
+    fn h3_compact_boundary_rejects_repeated_null_prefix() {
+        let values = h3_key_bytes(&[0, 0]);
+        assert!(validate_h3_compact_key_buffers(&values, Some(&[1, 1]), 2, 2).is_err());
+    }
+
+    #[test]
+    fn h3_compact_boundary_rejects_emitted_count_above_capacity() {
+        let values = h3_key_bytes(&[7]);
+        assert!(validate_h3_compact_key_buffers(&values, None, 1, 2).is_err());
+    }
+
+    #[test]
     fn h3_compact_boundary_rejects_duplicate_nonnull_key() {
         let values = h3_key_bytes(&[7, 7]);
         assert!(validate_h3_compact_key_buffers(&values, None, 2, 2).is_err());
