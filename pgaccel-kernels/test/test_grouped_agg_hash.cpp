@@ -400,6 +400,28 @@ void test_fixed_seed_differential() {
   check_success(output, oracle(host_keys, &host_nulls), rows);
 }
 
+void test_million_row_hot_groups() {
+  std::printf("--- hash million-row hot groups ---\n");
+  constexpr size_t rows = 1'000'000;
+  constexpr size_t h3_resolution_zero_capacity = 123;
+  std::vector<uint64_t> host_keys(rows, UINT64_C(0x08001fffffffffff));
+  std::vector<uint8_t> host_nulls(rows);
+  for (size_t row = 0; row < rows; ++row)
+    host_nulls[row] = row % 97 == 0 ? 1 : 0;
+
+  SharedArray<uint64_t> keys(host_keys);
+  SharedArray<uint8_t> nulls(host_nulls);
+  pgaccel_grouped_agg_desc desc =
+      hash_desc(keys.data(), nulls.data(), rows, h3_resolution_zero_capacity);
+  const pgaccel_grouped_agg_workspace_req req = query_workspace(desc);
+  SharedWorkspace workspace(req.bytes, req.alignment);
+  HashOutput output(desc.group_capacity, true);
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_with_workspace(desc, req, workspace, &output.out, &detail), PGACCEL_OK);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+  check_success(output, oracle(host_keys, &host_nulls), rows);
+}
+
 void test_hard_failure_and_unsupported_shapes() {
   std::printf("--- hash hard failure and unsupported shapes ---\n");
   std::vector<uint64_t> host_keys = {1, 2, 1, 3};
@@ -451,6 +473,7 @@ int main() {
     test_duplicates_nulls_high_bits_collisions_and_warm_workspace();
     test_empty_all_null_and_capacity_boundaries();
     test_fixed_seed_differential();
+    test_million_row_hot_groups();
     test_hard_failure_and_unsupported_shapes();
     CHECK_STATUS(pgaccel_shutdown(), PGACCEL_OK);
   } catch (const std::exception& error) {

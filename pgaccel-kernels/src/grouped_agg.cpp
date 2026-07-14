@@ -1174,12 +1174,11 @@ inline void record_failure(DeviceMeta& meta, uint32_t failure) {
 
 inline bool atomic_increment_u32(uint32_t* value) {
   DeviceAtomic<uint32_t> count(*value);
-  uint32_t current = count.load();
-  while (current != UINT32_MAX) {
-    if (count.compare_exchange_weak(current, current + 1))
-      return true;
-  }
-  return false;
+  // Hash validation caps row_count at UINT32_MAX, and each row increments
+  // exactly one slot once, so a slot can reach UINT32_MAX but cannot wrap.
+  // A CAS retry loop turns hot groups into severe device-wide contention and
+  // can trip Metal's command-buffer watchdog at the one-million-row H3 scale.
+  return count.fetch_add(1) != UINT32_MAX;
 }
 
 inline uint64_t hash_u64_key(uint64_t value, bool is_null) {
