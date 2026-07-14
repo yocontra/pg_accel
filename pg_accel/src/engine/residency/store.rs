@@ -545,6 +545,19 @@ fn first_use_scope_for_load(
         .then(current_command_scope)
 }
 
+/// Drain relcache callbacks from new-trigger DDL before an explicit load
+/// captures or publishes its post-DDL relation snapshot.
+fn continue_explicit_load_after_trigger_install<T>(
+    trigger: loader::TriggerInstall,
+    drain_invalidations: impl FnOnce(),
+    continue_load: impl FnOnce() -> T,
+) -> T {
+    if matches!(trigger, loader::TriggerInstall::New) {
+        drain_invalidations();
+    }
+    continue_load()
+}
+
 impl ResidentRelation {
     fn evidence(&self) -> ResidentRelationEvidence {
         ResidentRelationEvidence {
@@ -612,6 +625,15 @@ impl RelationStore {
             entry.last_used_tick = self.tick;
             entry.last_used_us = now;
         }
+    }
+
+    fn make_pin_durable(&mut self, relid: pg_sys::Oid) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.relid == relid) else {
+            return false;
+        };
+        entry.pinned = true;
+        entry.first_use_scope = None;
+        true
     }
 
     fn remove_relation(&mut self, relid: pg_sys::Oid) -> bool {
@@ -1977,32 +1999,44 @@ fn pin_relation(
 ) -> Result<u64, ResidentLoadError> {
     let columns = loader::resolve_column_names(relid, columns.as_deref())
         .map_err(ResidentLoadError::Loader)?;
-    let previous = STORE.with(|store| {
-        store.borrow_mut().pins.insert(
-            u32::from(relid),
-            PinSpec {
-                columns: columns.clone(),
-            },
-        )
-    });
-    let request = SelectedRelation {
-        relid,
-        columns: columns.iter().map(|column| column.attno).collect(),
-    };
-    match ensure_one(&request, true) {
-        Ok(evidence) => Ok(evidence.row_count),
-        Err(error) => {
-            STORE.with(|store| {
-                let mut store = store.borrow_mut();
-                if let Some(previous) = previous {
-                    store.pins.insert(u32::from(relid), previous);
-                } else {
-                    store.pins.remove(&u32::from(relid));
-                }
-            });
-            Err(error)
+    process_invalidations();
+    let trigger = loader::ensure_invalidation_trigger(relid).map_err(ResidentLoadError::Loader)?;
+    continue_explicit_load_after_trigger_install(trigger, process_invalidations, || {
+        let previous = STORE.with(|store| {
+            store.borrow_mut().pins.insert(
+                u32::from(relid),
+                PinSpec {
+                    columns: columns.clone(),
+                },
+            )
+        });
+        let request = SelectedRelation {
+            relid,
+            columns: columns.iter().map(|column| column.attno).collect(),
+        };
+        match ensure_one(&request, true) {
+            Ok(evidence) => {
+                let promoted =
+                    STORE.with(|store| store.borrow_mut().make_pin_durable(request.relid));
+                debug_assert!(
+                    promoted,
+                    "successful pin ensure must leave a resident entry"
+                );
+                Ok(evidence.row_count)
+            }
+            Err(error) => {
+                STORE.with(|store| {
+                    let mut store = store.borrow_mut();
+                    if let Some(previous) = previous {
+                        store.pins.insert(u32::from(relid), previous);
+                    } else {
+                        store.pins.remove(&u32::from(relid));
+                    }
+                });
+                Err(error)
+            }
         }
-    }
+    })
 }
 
 fn unpin_relation(relid: pg_sys::Oid) -> bool {
@@ -2055,7 +2089,10 @@ fn refresh_relation(relid: pg_sys::Oid) -> Result<u64, ResidentLoadError> {
         (columns, false)
     };
     let trigger = loader::ensure_invalidation_trigger(relid).map_err(ResidentLoadError::Loader)?;
-    let staged = loader::stage_relation(relid, &columns).map_err(ResidentLoadError::Loader)?;
+    let staged =
+        continue_explicit_load_after_trigger_install(trigger, process_invalidations, || {
+            loader::stage_relation(relid, &columns).map_err(ResidentLoadError::Loader)
+        })?;
     let rows = staged.row_count();
     let pinned = STORE.with(|store| store.borrow().pins.contains_key(&u32::from(relid)));
     let first_use_scope = first_use_scope_for_load(trigger, pinned, false);
@@ -2311,6 +2348,44 @@ mod tests {
             first_use_scope_for_load(loader::TriggerInstall::New, true, false),
             None,
         );
+    }
+
+    #[test]
+    fn explicit_load_drains_new_trigger_invalidations_before_continuing() {
+        let events = RefCell::new(Vec::new());
+        let staged = continue_explicit_load_after_trigger_install(
+            loader::TriggerInstall::New,
+            || events.borrow_mut().push("drain"),
+            || {
+                events.borrow_mut().push("stage");
+                42
+            },
+        );
+        assert_eq!(staged, 42);
+        assert_eq!(*events.borrow(), ["drain", "stage"]);
+
+        events.borrow_mut().clear();
+        continue_explicit_load_after_trigger_install(
+            loader::TriggerInstall::Existing,
+            || events.borrow_mut().push("drain"),
+            || events.borrow_mut().push("stage"),
+        );
+        assert_eq!(*events.borrow(), ["stage"]);
+    }
+
+    #[test]
+    fn explicit_pin_promotes_existing_scoped_auto_load() {
+        let mut store = RelationStore::default();
+        let mut auto_loaded = empty_relation(75, false, 1);
+        auto_loaded.first_use_scope = Some(CommandScope {
+            xid: 4,
+            command_id: 9,
+        });
+        store.entries.push(auto_loaded);
+
+        assert!(store.make_pin_durable(pg_sys::Oid::from(75_u32)));
+        assert!(store.entries[0].pinned);
+        assert_eq!(store.entries[0].first_use_scope, None);
     }
 
     #[test]
