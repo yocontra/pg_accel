@@ -754,6 +754,10 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.gpu_op_cost_filter.to_string(),
         ),
         (
+            "gpu_op_cost_h3_parent_resident".into(),
+            limits.gpu_op_cost_h3_parent_resident.to_string(),
+        ),
+        (
             "gpu_hashjoin_build_per_row".into(),
             limits.gpu_hashjoin_build_per_row.to_string(),
         ),
@@ -1185,11 +1189,12 @@ mod tests {
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM pg_accel_device_limits()")
             .expect("pg_accel_device_limits() should succeed")
             .expect("pg_accel_device_limits() should return a row count");
-        assert_eq!(count, 74, "expected one SRF row per DeviceLimits field");
+        assert_eq!(count, 75, "expected one SRF row per DeviceLimits field");
 
         let phase6_count = Spi::get_one::<i64>(
             "SELECT COUNT(*) FROM pg_accel_device_limits() WHERE name IN (\
              'gpu_h3_group_min_rows', 'gpu_h3_max_chunk_rows', \
+             'gpu_op_cost_h3_parent_resident', \
              'gpu_spatial_max_vertices_per_row', \
              'gpu_spatial_max_recheck_fraction', 'gpu_raster_min_pixels', \
              'gpu_raster_max_chunk_pixels', \
@@ -1201,7 +1206,7 @@ mod tests {
         .expect("Phase 6 device-limit lookup should succeed")
         .expect("Phase 6 device-limit lookup should return a count");
         assert_eq!(
-            phase6_count, 10,
+            phase6_count, 11,
             "Phase 6 domain and legacy unsafe-band limits must be exposed"
         );
 

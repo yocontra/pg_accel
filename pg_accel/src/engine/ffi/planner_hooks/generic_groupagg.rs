@@ -106,6 +106,9 @@ impl AdmissionDecline {
             Self::DeviceCostGate(ShapeCostGate::FactRowsBelowDeviceMinimum { .. }) => {
                 "generic_fact_rows_below_device_minimum"
             }
+            Self::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum { .. }) => {
+                "h3_rows_below_grouped_agg_min"
+            }
             Self::DeviceCostGate(ShapeCostGate::DimensionRowsExceedDeviceMaximum { .. }) => {
                 "generic_dimension_rows_exceed_device_maximum"
             }
@@ -393,6 +396,15 @@ fn shape_stages(shape: &ShapePlan) -> (Vec<ResidentOperatorStage>, bool) {
     }
     if has_expression {
         stages.push(ResidentOperatorStage::Expression);
+    }
+    if shape.spec.group_keys.iter().any(|key| {
+        matches!(
+            key.source,
+            crate::engine::spec::GroupKeySource::H3CellToParent { .. }
+                | crate::engine::spec::GroupKeySource::H3LatLngToCell { .. }
+        )
+    }) {
+        stages.push(ResidentOperatorStage::H3);
     }
     stages.push(ResidentOperatorStage::GroupedAggregate);
     stages.push(ResidentOperatorStage::FinalMaterialization);
@@ -713,6 +725,25 @@ mod tests {
         shape
     }
 
+    fn h3_parent_shape() -> ShapePlan {
+        const H3INDEXOID: u32 = 90_001;
+        let mut shape = grouped_count_shape();
+        shape.spec.group_keys[0] = GroupKeyRef {
+            source: GroupKeySource::H3CellToParent {
+                cell: ColumnRef {
+                    relation_oid: 42,
+                    attno: 1,
+                    type_oid: H3INDEXOID,
+                },
+                resolution: 4,
+            },
+            type_oid: H3INDEXOID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        };
+        shape
+    }
+
     fn integer_measure_shape(kind: AggregateKind) -> ShapePlan {
         let mut shape = count_shape();
         shape.spec.measures[0] = MeasureSpec {
@@ -1030,6 +1061,30 @@ mod tests {
     }
 
     #[test]
+    fn h3_device_floor_has_a_stable_admission_decline_code() {
+        let mut shape = h3_parent_shape();
+        shape.cost_gate = ShapeCostGate::H3RowsBelowDeviceMinimum {
+            estimated: Rows::new(99),
+            required: Rows::new(100),
+        };
+        let decline = gate_cost(
+            &shape,
+            Some(1_000.0),
+            model().planner.gpu_agg_cost_ratio,
+            effective_path_cost(&shape, 1.0),
+        )
+        .expect_err("H3 input below the device floor must decline");
+        assert_eq!(decline.code(), "h3_rows_below_grouped_agg_min");
+        assert!(matches!(
+            decline,
+            AdmissionDecline::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum {
+                estimated,
+                required,
+            }) if estimated == Rows::new(99) && required == Rows::new(100)
+        ));
+    }
+
+    #[test]
     fn global_cost_multiplier_controls_gate_and_scales_auto_load() {
         let mut shape = count_shape();
         shape.cost.amortized_auto_load = PgCost::new(100.0);
@@ -1149,5 +1204,11 @@ mod tests {
         );
         assert!(!proof.has_device_selection);
         assert!(proof.has_device_projection);
+    }
+
+    #[test]
+    fn h3_parent_shape_proof_includes_the_h3_resident_stage() {
+        let proof = shape_resident_proof(&h3_parent_shape());
+        assert_ne!(proof.stage_mask & ResidentOperatorStage::H3.bit(), 0);
     }
 }

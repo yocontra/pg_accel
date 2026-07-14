@@ -1,7 +1,7 @@
 //! DeviceLimits-derived costing for neutral aggregate shapes.
 
-use crate::engine::cost::{PgCost, Rows, TypedCostModel};
-use crate::engine::spec::{AggQuerySpec, ColumnRef, MeasureExpr};
+use crate::engine::cost::{GPU_LAUNCH_OVERHEAD, PgCost, Rows, TypedCostModel};
+use crate::engine::spec::{AggQuerySpec, ColumnRef, GroupKeySource, MeasureExpr};
 
 use super::{ResidencyEstimate, ShapeInput};
 
@@ -23,6 +23,7 @@ pub struct ShapeCost {
 pub enum ShapeCostGate {
     Eligible,
     FactRowsBelowDeviceMinimum { estimated: Rows, required: Rows },
+    H3RowsBelowDeviceMinimum { estimated: Rows, required: Rows },
     DimensionRowsExceedDeviceMaximum { estimated: Rows, maximum: Rows },
     GroupsExceedDeviceMaximum { estimated: Rows, maximum: Rows },
 }
@@ -50,6 +51,40 @@ fn expression_uses_fp64(expression: &MeasureExpr) -> bool {
             ..
         } => *result_type_oid == FLOAT8OID || inputs.iter().any(is_fp64),
     }
+}
+
+fn h3_parent_resolution(spec: &AggQuerySpec) -> Option<i32> {
+    spec.group_keys.iter().find_map(|key| match key.source {
+        GroupKeySource::H3CellToParent { resolution, .. } => Some(resolution),
+        _ => None,
+    })
+}
+
+fn h3_group_bound(fact_rows: u64, resolution: i32) -> Option<u64> {
+    let resolution = u32::try_from(resolution)
+        .ok()
+        .filter(|value| *value <= 15)?;
+    // H3 has `2 + 120 * 7^r` cells; reserve one additional group for NULL.
+    let possible = 7_u64
+        .checked_pow(resolution)?
+        .checked_mul(120)?
+        .checked_add(3)?;
+    Some(fact_rows.min(possible))
+}
+
+fn h3_transform_chunks(fact_rows: u64, max_chunk_rows: Rows) -> u64 {
+    if fact_rows == 0 {
+        return 0;
+    }
+    let chunk_rows = u64::try_from(max_chunk_rows.get())
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(1);
+    fact_rows
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_div(chunk_rows))
+        .and_then(|chunks| chunks.checked_add(1))
+        .unwrap_or(u64::MAX)
 }
 
 /// Cost one normalized shape exclusively from typed device coefficients.
@@ -100,8 +135,17 @@ pub fn estimate_shape_cost(
     } else {
         model.coefficients.gpu_op_cost_hash_agg
     };
+    let h3_resolution = h3_parent_resolution(spec);
     let aggregate =
         mul_cost(fact_rows, aggregate_coefficient) * spec.measures.len() as f64 * fp64_multiplier;
+    let aggregate = aggregate
+        + h3_resolution.map_or(0.0, |_| {
+            let transform = mul_cost(fact_rows, model.coefficients.gpu_op_cost_h3_parent_resident);
+            let launches = h3_transform_chunks(fact_rows, model.executor.gpu_h3_max_chunk_rows)
+                as f64
+                * GPU_LAUNCH_OVERHEAD;
+            transform + launches
+        });
     let output_materialization = mul_cost(
         input.estimated_output_rows,
         model.coefficients.preagg_yield_cost,
@@ -124,7 +168,9 @@ pub fn estimate_shape_cost(
         total: PgCost::new(total),
     };
 
-    let required_fact_rows = if !spec.star_dims.is_empty() {
+    let required_fact_rows = if h3_resolution.is_some() {
+        model.planner.gpu_h3_group_min_rows
+    } else if !spec.star_dims.is_empty() {
         model.planner.gpu_preagg_min_fact_rows
     } else if spec.group_keys.is_empty() {
         model.planner.gpu_reduce_min_rows
@@ -133,9 +179,16 @@ pub fn estimate_shape_cost(
     };
     let estimated_fact_rows = Rows::new(rows(fact_rows));
     let gate = if estimated_fact_rows < required_fact_rows {
-        ShapeCostGate::FactRowsBelowDeviceMinimum {
-            estimated: estimated_fact_rows,
-            required: required_fact_rows,
+        if h3_resolution.is_some() {
+            ShapeCostGate::H3RowsBelowDeviceMinimum {
+                estimated: estimated_fact_rows,
+                required: required_fact_rows,
+            }
+        } else {
+            ShapeCostGate::FactRowsBelowDeviceMinimum {
+                estimated: estimated_fact_rows,
+                required: required_fact_rows,
+            }
         }
     } else if let Some(too_large) = spec.star_dims.iter().find_map(|dimension| {
         let relation = input
@@ -150,7 +203,10 @@ pub fn estimate_shape_cost(
             maximum: model.memory.gpu_preagg_max_dim_rows,
         }
     } else {
-        let estimated_groups = Rows::new(rows(input.estimated_output_rows));
+        let gate_group_rows = h3_resolution
+            .and_then(|resolution| h3_group_bound(fact_rows, resolution))
+            .unwrap_or(input.estimated_output_rows);
+        let estimated_groups = Rows::new(rows(gate_group_rows));
         if !spec.group_keys.is_empty() && estimated_groups > model.memory.gpu_hash_agg_max_groups {
             ShapeCostGate::GroupsExceedDeviceMaximum {
                 estimated: estimated_groups,

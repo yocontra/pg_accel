@@ -161,6 +161,15 @@ pub struct DeviceLimits {
     /// GPU filter (spatial/expr) per-row op cost.
     /// Includes predicate evaluation on GPU.
     pub gpu_op_cost_filter: f64,
+    /// Resident H3 cell-to-parent per-row transform cost.
+    ///
+    /// This charges only the device-to-device integer transform after the
+    /// source H3 lane is resident. Datum extraction and host staging are
+    /// charged elsewhere, so they must not be folded into this coefficient.
+    /// The conservative default is no cheaper than reduce and matches the
+    /// filter/window coefficients; hash aggregation and each transform launch
+    /// remain separate costs.
+    pub gpu_op_cost_h3_parent_resident: f64,
 
     // -- Hash-join + partial-agg per-row planner costs (Phase 6 amortisation)
     //
@@ -577,12 +586,15 @@ impl DeviceLimits {
             // (~1ms at heap scan speed) vs CHECK_FOR_INTERRUPTS overhead.
             fused_interrupt_interval: 65_536,
 
-            // Per-strategy GPU op costs include explicit staging overhead.
+            // Per-strategy GPU op costs include explicit staging overhead,
+            // except the resident H3 parent transform. That integer-only D2D
+            // kernel is conservatively priced like a resident GPU filter.
             gpu_op_cost_reduce: 0.000_5,
             gpu_op_cost_hash_agg: 0.002,
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
             gpu_op_cost_filter: 0.001,
+            gpu_op_cost_h3_parent_resident: 0.001,
 
             // Phase 6 dispatch-perf calibration: per-row hash-join +
             // partial-agg + CustomScan-yield costs derived from kernel
@@ -749,6 +761,9 @@ impl DeviceLimits {
             gpu_op_cost_sort: 0.003,
             gpu_op_cost_window: 0.001,
             gpu_op_cost_filter: 0.001,
+            // Match the conservative resident-filter estimate; extraction
+            // and host staging are intentionally excluded.
+            gpu_op_cost_h3_parent_resident: 0.001,
             // Phase 6 dispatch-perf calibration. CPU-only fallback keeps the
             // same conservative values as detected GPU profiles.
             gpu_hashjoin_build_per_row: 0.001,
@@ -930,6 +945,10 @@ impl DeviceLimits {
             ("gpu_op_cost_window", self.gpu_op_cost_window),
             ("gpu_op_cost_filter", self.gpu_op_cost_filter),
             (
+                "gpu_op_cost_h3_parent_resident",
+                self.gpu_op_cost_h3_parent_resident,
+            ),
+            (
                 "gpu_hashjoin_build_per_row",
                 self.gpu_hashjoin_build_per_row,
             ),
@@ -1000,6 +1019,16 @@ mod tests {
         let limits = DeviceLimits::cpu_only();
         assert_eq!(limits.gpu_h3_group_min_rows, 100_000);
         assert_eq!(limits.gpu_h3_max_chunk_rows, 1_000_000);
+        assert_eq!(limits.gpu_op_cost_h3_parent_resident, 0.001);
+        assert!(limits.gpu_op_cost_h3_parent_resident >= limits.gpu_op_cost_reduce);
+        assert_eq!(
+            limits.gpu_op_cost_h3_parent_resident,
+            limits.gpu_op_cost_filter,
+        );
+        assert_eq!(
+            limits.gpu_op_cost_h3_parent_resident,
+            limits.gpu_op_cost_window,
+        );
         assert_eq!(limits.gpu_spatial_max_vertices_per_row, 1_000_000);
         assert_eq!(limits.gpu_spatial_max_recheck_fraction, 0.10);
         assert_eq!(limits.gpu_raster_min_pixels, 65_536);
@@ -1173,6 +1202,16 @@ mod tests {
             Err(DeviceLimitsValidationError::InvalidPositiveFloat {
                 field: "gpu_nlj_per_pair_cost",
                 value: f64::INFINITY,
+            })
+        );
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_op_cost_h3_parent_resident = 0.0;
+        assert_eq!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvalidPositiveFloat {
+                field: "gpu_op_cost_h3_parent_resident",
+                value: 0.0,
             })
         );
     }

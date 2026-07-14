@@ -635,6 +635,7 @@ fn gpu_op_costs_positive() {
     assert!(l.gpu_op_cost_sort > 0.0);
     assert!(l.gpu_op_cost_window > 0.0);
     assert!(l.gpu_op_cost_filter > 0.0);
+    assert!(l.gpu_op_cost_h3_parent_resident > 0.0);
 }
 
 #[test]
@@ -643,6 +644,15 @@ fn gpu_op_cost_ordering() {
     let l = DeviceLimits::cpu_only();
     assert!(l.gpu_op_cost_sort >= l.gpu_op_cost_hash_agg);
     assert!(l.gpu_op_cost_hash_agg >= l.gpu_op_cost_reduce);
+    assert!(l.gpu_op_cost_h3_parent_resident >= l.gpu_op_cost_reduce);
+    assert_eq!(
+        l.gpu_op_cost_h3_parent_resident, l.gpu_op_cost_filter,
+        "resident H3 parent transform uses the conservative filter estimate",
+    );
+    assert_eq!(
+        l.gpu_op_cost_h3_parent_resident, l.gpu_op_cost_window,
+        "resident H3 parent transform matches the conservative window estimate",
+    );
 }
 
 // -- self_scan_cost -----------------------------------------------------------

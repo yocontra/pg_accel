@@ -109,6 +109,8 @@ pub struct CostCoefficients {
     pub gpu_op_cost_window: PgCost,
     /// GPU filter per-row operation cost.
     pub gpu_op_cost_filter: PgCost,
+    /// Resident H3 cell-to-parent device transform per-row cost.
+    pub gpu_op_cost_h3_parent_resident: PgCost,
     /// GPU hash-join build-side per-row cost.
     pub gpu_hashjoin_build_per_row: PgCost,
     /// GPU hash-join probe-side per-row cost.
@@ -134,6 +136,7 @@ impl From<&DeviceLimits> for CostCoefficients {
             gpu_op_cost_sort: PgCost::new(limits.gpu_op_cost_sort),
             gpu_op_cost_window: PgCost::new(limits.gpu_op_cost_window),
             gpu_op_cost_filter: PgCost::new(limits.gpu_op_cost_filter),
+            gpu_op_cost_h3_parent_resident: PgCost::new(limits.gpu_op_cost_h3_parent_resident),
             gpu_hashjoin_build_per_row: PgCost::new(limits.gpu_hashjoin_build_per_row),
             gpu_hashjoin_probe_per_row: PgCost::new(limits.gpu_hashjoin_probe_per_row),
             custom_scan_yield_per_row: PgCost::new(limits.custom_scan_yield_per_row),
@@ -162,6 +165,8 @@ pub struct PlannerPolicy {
     pub gpu_reduce_min_rows: Rows,
     /// Minimum rows for grouped GPU hash aggregation.
     pub gpu_hash_agg_min_rows: Rows,
+    /// Minimum rows for resident H3 parent grouped aggregation.
+    pub gpu_h3_group_min_rows: Rows,
     /// Minimum constant polygon vertex count for GPU spatial dispatch.
     pub gpu_spatial_min_vertices: usize,
     /// Maximum estimated output fraction for heap-backed GPU spatial scans.
@@ -211,6 +216,7 @@ impl From<&DeviceLimits> for PlannerPolicy {
             gpu_window_min_rows: Rows::new(limits.gpu_window_min_rows),
             gpu_reduce_min_rows: Rows::new(limits.gpu_reduce_min_rows),
             gpu_hash_agg_min_rows: Rows::new(limits.gpu_hash_agg_min_rows),
+            gpu_h3_group_min_rows: Rows::new(limits.gpu_h3_group_min_rows),
             gpu_spatial_min_vertices: limits.gpu_spatial_min_vertices,
             gpu_spatial_max_output_fraction: limits.gpu_spatial_max_output_fraction,
             gpu_expr_min_rows: Rows::new(limits.gpu_expr_min_rows),
@@ -244,6 +250,8 @@ pub struct ExecutorLimits {
     pub gpu_reduce_max_chunk: Rows,
     /// Maximum elements for GPU sort dispatch.
     pub gpu_sort_max_elements: Rows,
+    /// Maximum resident H3 rows per device-to-device transform launch.
+    pub gpu_h3_max_chunk_rows: Rows,
     /// Lower bound for `optimal_batch_size`.
     pub optimal_batch_min: Rows,
     /// Upper bound for `optimal_batch_size`.
@@ -257,6 +265,7 @@ impl From<&DeviceLimits> for ExecutorLimits {
         Self {
             gpu_reduce_max_chunk: Rows::new(limits.gpu_reduce_max_chunk),
             gpu_sort_max_elements: Rows::new(limits.gpu_sort_max_elements),
+            gpu_h3_max_chunk_rows: Rows::new(limits.gpu_h3_max_chunk_rows),
             optimal_batch_min: Rows::new(limits.optimal_batch_min),
             optimal_batch_max: Rows::new(limits.optimal_batch_max),
             fused_interrupt_interval: Rows::new(limits.fused_interrupt_interval),
@@ -364,6 +373,10 @@ mod tests {
             limits.gpu_op_cost_filter,
         );
         assert_eq!(
+            model.coefficients.gpu_op_cost_h3_parent_resident.get(),
+            limits.gpu_op_cost_h3_parent_resident,
+        );
+        assert_eq!(
             model.coefficients.gpu_hashjoin_build_per_row.get(),
             limits.gpu_hashjoin_build_per_row,
         );
@@ -408,6 +421,10 @@ mod tests {
         assert_eq!(
             model.planner.gpu_hash_agg_min_rows.get(),
             limits.gpu_hash_agg_min_rows,
+        );
+        assert_eq!(
+            model.planner.gpu_h3_group_min_rows.get(),
+            limits.gpu_h3_group_min_rows,
         );
         assert_eq!(
             model.planner.gpu_spatial_min_vertices,
@@ -489,6 +506,10 @@ mod tests {
         assert_eq!(
             model.executor.gpu_sort_max_elements.get(),
             limits.gpu_sort_max_elements,
+        );
+        assert_eq!(
+            model.executor.gpu_h3_max_chunk_rows.get(),
+            limits.gpu_h3_max_chunk_rows,
         );
         assert_eq!(
             model.executor.optimal_batch_min.get(),

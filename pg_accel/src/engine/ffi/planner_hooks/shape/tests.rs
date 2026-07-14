@@ -1032,6 +1032,144 @@ fn cost_gate_reads_device_limits_without_magic_undercut() {
     );
 }
 
+fn h3_parent_input(estimated_rows: u64, resolution: i32) -> ShapeInput {
+    const H3INDEXOID: u32 = 90_001;
+    let mut input = single_table_input();
+    input.relations[0].estimated_rows = estimated_rows;
+    input.relations[0].column_widths.insert(1, 8);
+    let source = GroupKeySource::H3CellToParent {
+        cell: ColumnRef {
+            relation_oid: 100,
+            attno: 1,
+            type_oid: H3INDEXOID,
+        },
+        resolution,
+    };
+    let key = PlannerGroupKey::Expression {
+        source,
+        type_oid: H3INDEXOID,
+        collation_oid: 0,
+        collation_is_deterministic: true,
+    };
+    let (count, count_output) = aggregate(
+        MeasureExpr::CountStar,
+        AggregateKind::Count,
+        u32::from(pg_sys::INT8OID),
+    );
+    input.group_keys = vec![key.clone()];
+    input.aggregates = vec![count];
+    input.projections = vec![
+        InputProjection::Group {
+            key,
+            output: output(H3INDEXOID, true),
+        },
+        InputProjection::Aggregate {
+            aggregate_index: 0,
+            output: count_output,
+        },
+    ];
+    input
+}
+
+#[test]
+fn h3_grouping_uses_its_device_floor_and_resident_transform_cost() {
+    let mut limits = DeviceLimits::cpu_only();
+    limits.gpu_h3_group_min_rows = 100;
+    limits.gpu_hash_agg_min_rows = 1;
+    limits.gpu_op_cost_h3_parent_resident = 0.000_37;
+    let plan = build_shape(
+        h3_parent_input(99, 4),
+        &TypedCostModel::from_limits(&limits),
+    )
+    .expect("H3 shape remains available for an honest device-floor decline");
+    assert_eq!(
+        plan.cost_gate,
+        ShapeCostGate::H3RowsBelowDeviceMinimum {
+            estimated: crate::engine::cost::Rows::new(99),
+            required: crate::engine::cost::Rows::new(100),
+        }
+    );
+    let expected_aggregate = 99.0 * limits.gpu_op_cost_hash_agg
+        + 99.0 * limits.gpu_op_cost_h3_parent_resident
+        + crate::engine::cost::GPU_LAUNCH_OVERHEAD;
+    assert!((plan.cost.aggregate.get() - expected_aggregate).abs() < 1.0e-12);
+    let observed_per_row =
+        (plan.cost.aggregate.get() - crate::engine::cost::GPU_LAUNCH_OVERHEAD) / 99.0;
+    assert!(
+        (observed_per_row - (limits.gpu_op_cost_hash_agg + limits.gpu_op_cost_h3_parent_resident))
+            .abs()
+            < 1.0e-12
+    );
+    assert!(
+        observed_per_row >= limits.gpu_op_cost_hash_agg,
+        "resident H3 parent cost cannot undercut the generic hash baseline",
+    );
+}
+
+#[test]
+fn h3_parent_cost_charges_each_transform_chunk_launch() {
+    let mut limits = DeviceLimits::cpu_only();
+    limits.gpu_h3_group_min_rows = 1;
+    limits.gpu_hash_agg_min_rows = 1;
+    limits.gpu_h3_max_chunk_rows = 100;
+    let per_row_cost = |rows: f64| {
+        rows * limits.gpu_op_cost_hash_agg + rows * limits.gpu_op_cost_h3_parent_resident
+    };
+
+    let at_boundary = build_shape(
+        h3_parent_input(100, 4),
+        &TypedCostModel::from_limits(&limits),
+    )
+    .expect("one full H3 transform chunk should build");
+    let expected = per_row_cost(100.0) + crate::engine::cost::GPU_LAUNCH_OVERHEAD;
+    assert!((at_boundary.cost.aggregate.get() - expected).abs() < 1.0e-12);
+
+    let over_boundary = build_shape(
+        h3_parent_input(101, 4),
+        &TypedCostModel::from_limits(&limits),
+    )
+    .expect("a partial second H3 transform chunk should build");
+    let expected = per_row_cost(101.0) + 2.0 * crate::engine::cost::GPU_LAUNCH_OVERHEAD;
+    assert!((over_boundary.cost.aggregate.get() - expected).abs() < 1.0e-12);
+}
+
+#[test]
+fn h3_parent_group_capacity_uses_exact_resolution_universe_bound() {
+    let mut limits = DeviceLimits::cpu_only();
+    limits.gpu_h3_group_min_rows = 1;
+    limits.gpu_hash_agg_min_rows = 1;
+    limits.gpu_hash_agg_max_groups = 122;
+
+    let plan = build_shape(
+        h3_parent_input(1_000, 0),
+        &TypedCostModel::from_limits(&limits),
+    )
+    .expect("H3 shape should retain its device capacity decline");
+    assert_eq!(
+        plan.cost_gate,
+        ShapeCostGate::GroupsExceedDeviceMaximum {
+            estimated: crate::engine::cost::Rows::new(123),
+            maximum: crate::engine::cost::Rows::new(122),
+        },
+        "resolution zero has 122 H3 cells plus one NULL group",
+    );
+
+    limits.gpu_hash_agg_max_groups = 99;
+    let plan = build_shape(
+        h3_parent_input(100, 15),
+        &TypedCostModel::from_limits(&limits),
+    )
+    .expect("H3 shape should cap its group universe by fact rows");
+    assert_eq!(
+        plan.cost_gate,
+        ShapeCostGate::GroupsExceedDeviceMaximum {
+            estimated: crate::engine::cost::Rows::new(100),
+            maximum: crate::engine::cost::Rows::new(99),
+        },
+        "the exact bound is min(N, 120 * 7^r + 3)",
+    );
+}
+
 #[test]
 fn fp64_cost_uses_typed_device_multiplier() {
     let input = single_table_input();
