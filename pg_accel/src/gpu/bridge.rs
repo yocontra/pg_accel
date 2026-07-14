@@ -4,6 +4,7 @@
 //! exactly. The kernel library is linked unconditionally; there is no
 //! no-GPU build and no CPU fallback.
 
+pub use super::spatial::PgaccelSpatialResidentRequest;
 pub use super::types::{
     PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExpr, PgaccelExprInst,
     PgaccelExprInstruction, PgaccelExprProgram, PgaccelExprUsmCol, PgaccelGeomType,
@@ -243,6 +244,15 @@ bridge_status_fns! {
         geoms_b: *const PgaccelGeometry,
         count: usize,
         results: *mut i8,
+    ) -> PgaccelStatus;
+
+    /// Evaluate one resident fp64 spatial predicate or distance operation.
+    ///
+    /// The request owns no memory. Every lane and output pointer in the
+    /// descriptor must reference device or shared USM in the active context.
+    pub fn pgaccel_spatial_eval_resident_ex(
+        request: *const PgaccelSpatialResidentRequest,
+        detail: *mut i32,
     ) -> PgaccelStatus;
 
     /// Deprecated cross-product ABI. Non-empty inputs are unsupported.
