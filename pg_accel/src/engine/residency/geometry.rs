@@ -31,6 +31,7 @@ pub struct ResidentGeometryValueMetadata {
     pub geom_type: u32,
     pub srid: i32,
     pub coordinate_pairs: usize,
+    pub ring_count: usize,
 }
 
 impl ParsedGeometry {
@@ -287,6 +288,7 @@ pub fn validate_resident_geometry_value(
         geom_type: parsed.geom_type,
         srid: parsed.srid,
         coordinate_pairs: parsed.coordinate_pairs(),
+        ring_count: parsed.ring_offsets.len(),
     })
 }
 
@@ -608,8 +610,8 @@ impl ResidentGeometryColumnView<'_> {
 
 /// Materialize one already-validated exact geometry constant into the same
 /// frozen resident lane layout used by relation columns.
-#[cfg(test)]
-pub(super) fn materialize_resident_geometry_constant(
+#[allow(dead_code)] // reason: consumed by the spatial workspace checkpoint landing next
+pub fn materialize_resident_geometry_constant(
     exact: &[u8],
     max_exact_value_bytes: usize,
     max_vertices_per_row: usize,

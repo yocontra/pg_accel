@@ -697,6 +697,7 @@ fn prepare_dimension(
     dimension: &crate::engine::spec::DimSpec,
     columns: &HostColumns,
     fact_rows: usize,
+    pad_device_lanes: bool,
 ) -> Result<PreparedDimension, String> {
     let fact = columns.get(dimension.fact_key)?;
     let dim = columns.get(dimension.dim_key)?;
@@ -730,9 +731,14 @@ fn prepare_dimension(
         row_matches[row] = filter_accepts(&dimension.filter, columns, row)?;
     }
 
-    let mut match_by_key = vec![0_u8; by_key.len()];
-    let mut multiplicity =
-        (dimension.multiplicity == JoinMultiplicity::Counted).then(|| vec![0_u64; by_key.len()]);
+    let device_key_count = if pad_device_lanes {
+        dim_rows
+    } else {
+        by_key.len()
+    };
+    let mut match_by_key = vec![0_u8; device_key_count];
+    let mut multiplicity = (dimension.multiplicity == JoinMultiplicity::Counted)
+        .then(|| vec![0_u64; device_key_count]);
     for row in 0..dim_rows {
         let (Some(code), true) = (row_codes[row], row_matches[row]) else {
             continue;
@@ -868,17 +874,23 @@ fn checked_device_bytes(prepared: &PreparedAggArtifact) -> Result<u64, String> {
     u64::try_from(bytes).map_err(|_| "derived artifact bytes exceed u64".to_owned())
 }
 
-pub(super) fn prepare_agg_artifact(
+fn prepare_agg_artifact_impl(
     spec: &AggQuerySpec,
     requests: &[ResidentColumnRef],
     bundle: ResidentInputBundle<'_>,
     max_groups: usize,
+    pad_device_lanes: bool,
 ) -> Result<PreparedDerived<PreparedAggArtifact>, String> {
     let columns = HostColumns::copy(requests, bundle)?;
     let fact_rows = columns.row_count(spec.fact_rel)?;
     let mut dimensions = Vec::with_capacity(spec.star_dims.len());
     for dimension in &spec.star_dims {
-        dimensions.push(prepare_dimension(dimension, &columns, fact_rows)?);
+        dimensions.push(prepare_dimension(
+            dimension,
+            &columns,
+            fact_rows,
+            pad_device_lanes,
+        )?);
     }
 
     let mut resolved_spec = spec.clone();
@@ -909,7 +921,12 @@ pub(super) fn prepare_agg_artifact(
                     return Err("cannot group by a counted dimension".to_owned());
                 }
                 let group_column = columns.get(*group_column)?;
-                let mut lookup = vec![0_i32; dimension.match_by_key.len()];
+                let lookup_len = if pad_device_lanes {
+                    group_column.len()
+                } else {
+                    dimension.match_by_key.len()
+                };
+                let mut lookup = vec![0_i32; lookup_len];
                 for row in 0..group_column.len() {
                     let (Some(join_code), true) =
                         (dimension.row_codes[row], dimension.row_matches[row])
@@ -980,6 +997,25 @@ pub(super) fn prepare_agg_artifact(
         prepared,
         device_bytes,
     })
+}
+
+pub(super) fn prepare_agg_artifact(
+    spec: &AggQuerySpec,
+    requests: &[ResidentColumnRef],
+    bundle: ResidentInputBundle<'_>,
+    max_groups: usize,
+) -> Result<PreparedDerived<PreparedAggArtifact>, String> {
+    prepare_agg_artifact_impl(spec, requests, bundle, max_groups, false)
+}
+
+#[allow(dead_code)] // reason: consumed by the spatial workspace checkpoint landing next
+pub(super) fn prepare_spatial_base_artifact(
+    spec: &AggQuerySpec,
+    requests: &[ResidentColumnRef],
+    bundle: ResidentInputBundle<'_>,
+    max_groups: usize,
+) -> Result<PreparedDerived<PreparedAggArtifact>, String> {
+    prepare_agg_artifact_impl(spec, requests, bundle, max_groups, true)
 }
 
 fn upload<T: Copy>(
@@ -1378,9 +1414,13 @@ mod tests {
                 nulls: Some(vec![0, 0, 1]),
             },
         );
-        let prepared =
-            prepare_dimension(&dimension(INT4OID, JoinMultiplicity::Unique), &columns, 4)
-                .expect("unique INT4 dimension prepares");
+        let prepared = prepare_dimension(
+            &dimension(INT4OID, JoinMultiplicity::Unique),
+            &columns,
+            4,
+            false,
+        )
+        .expect("unique INT4 dimension prepares");
         assert_eq!(prepared.fact_codes, vec![1, -1, 0, -1]);
         assert_eq!(prepared.row_codes, vec![Some(0), Some(1), None]);
         assert_eq!(prepared.match_by_key, vec![1, 1]);
@@ -1403,9 +1443,13 @@ mod tests {
                 labels: vec!["EU".into(), "NA".into(), "APAC".into()],
             },
         );
-        let prepared =
-            prepare_dimension(&dimension(BPCHAROID, JoinMultiplicity::Unique), &columns, 3)
-                .expect("independent BPCHAR dictionaries correlate");
+        let prepared = prepare_dimension(
+            &dimension(BPCHAROID, JoinMultiplicity::Unique),
+            &columns,
+            3,
+            false,
+        )
+        .expect("independent BPCHAR dictionaries correlate");
         assert_eq!(prepared.fact_codes, vec![1, 0, 2]);
         assert_eq!(prepared.match_by_key, vec![1, 1, 1]);
     }
@@ -1424,9 +1468,13 @@ mod tests {
                 nulls: Some(vec![0, 0, 0, 1]),
             },
         );
-        let prepared =
-            prepare_dimension(&dimension(INT4OID, JoinMultiplicity::Counted), &columns, 4)
-                .expect("counted dimension prepares");
+        let prepared = prepare_dimension(
+            &dimension(INT4OID, JoinMultiplicity::Counted),
+            &columns,
+            4,
+            false,
+        )
+        .expect("counted dimension prepares");
         assert_eq!(prepared.fact_codes, vec![0, 1, -1, -1]);
         assert_eq!(prepared.multiplicity_by_key, Some(vec![2, 1]));
     }
@@ -1446,7 +1494,13 @@ mod tests {
             },
         );
         assert!(
-            prepare_dimension(&dimension(INT4OID, JoinMultiplicity::Unique), &columns, 1).is_err()
+            prepare_dimension(
+                &dimension(INT4OID, JoinMultiplicity::Unique),
+                &columns,
+                1,
+                false,
+            )
+            .is_err()
         );
     }
 

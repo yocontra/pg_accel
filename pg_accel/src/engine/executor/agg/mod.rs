@@ -15,6 +15,7 @@ mod artifact;
 mod descriptor;
 mod execute;
 mod output;
+mod spatial;
 
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
 pub use execute::AggExecState;

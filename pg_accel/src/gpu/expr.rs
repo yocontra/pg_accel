@@ -156,6 +156,43 @@ impl<T> ExprDeviceBuffer<T> {
         )
     }
 
+    /// Copy a complete caller-owned host slice into this device allocation.
+    pub fn write_from_slice(&self, input: &[T]) -> GpuResult<()>
+    where
+        T: Copy,
+    {
+        if input.len() != self.len {
+            return Err(GpuError::with_detail(
+                GpuErrorDomain::Memory,
+                GpuOperation::ValidateDeviceInput,
+                GpuStatusDetail::ShapeMismatch,
+                "host-to-device input length does not match device buffer",
+            ));
+        }
+        let bytes = checked_allocation_bytes::<T>(self.len).ok_or_else(|| {
+            GpuError::with_detail(
+                GpuErrorDomain::Memory,
+                GpuOperation::ValidateDeviceInput,
+                GpuStatusDetail::CapacityOverflow,
+                "host-to-device copy size overflow",
+            )
+        })?;
+        // SAFETY: the equal-length check makes input valid for `bytes`, and
+        // self owns a live device allocation of the same byte length.
+        let status = unsafe {
+            bridge::pgaccel_expr_device_copy_from_host(
+                self.ptr.as_ptr().cast::<c_void>(),
+                input.as_ptr().cast::<c_void>(),
+                bytes,
+            )
+        };
+        status_to_result(
+            status,
+            GpuErrorDomain::Memory,
+            GpuOperation::Kernel("pgaccel_expr_device_copy_from_host"),
+        )
+    }
+
     /// Copy the complete device buffer into owned host memory.
     pub fn copy_to_vec(&self) -> GpuResult<Vec<T>>
     where
@@ -340,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_to_slice_rejects_mismatched_preallocation_before_ffi() {
+    fn preallocated_copies_reject_mismatched_lengths_before_ffi() {
         let buffer = std::mem::ManuallyDrop::new(ExprDeviceBuffer::<u8> {
             ptr: NonNull::dangling(),
             len: 2,
@@ -348,7 +385,12 @@ mod tests {
         });
         let error = buffer
             .copy_to_slice(&mut [0_u8; 1])
-            .expect_err("mismatched host storage must be rejected");
+            .expect_err("short D2H destination must fail");
+        assert_eq!(error.domain, GpuErrorDomain::Memory);
+        assert_eq!(error.status, GpuStatusDetail::ShapeMismatch);
+        let error = buffer
+            .write_from_slice(&[0_u8; 1])
+            .expect_err("short H2D source must fail");
         assert_eq!(error.domain, GpuErrorDomain::Memory);
         assert_eq!(error.status, GpuStatusDetail::ShapeMismatch);
     }
