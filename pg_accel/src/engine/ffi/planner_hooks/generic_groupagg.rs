@@ -26,7 +26,7 @@ use crate::engine::spec::{AggOutputProjection, FilterSpec, MeasureExpr};
 use crate::engine::stats;
 
 const GENERIC_SHAPE_PATH_CONTEXT: &str = "upper_paths_generic_groupagg";
-const AGG_QUERY_SPEC_SENTINEL: c_int = i32::from_be_bytes(*b"AQS2");
+const AGG_QUERY_SPEC_SENTINEL: c_int = i32::from_be_bytes(*b"AQS3");
 const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = i32::from_be_bytes(*b"AOP2");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,7 +444,7 @@ unsafe fn inject_childless_shape_path(
     })?);
     if digest_words != shape.digest_words {
         return Err(ShapeDecline::Codec(
-            "shape digest words do not match the serialized AQS2/AOP2 contract".to_owned(),
+            "shape digest words do not match the serialized AQS3/AOP2 contract".to_owned(),
         ));
     }
 
@@ -1111,11 +1111,11 @@ mod tests {
         let spec_start = 1;
         let spec_len =
             crate::engine::spec::AggQuerySpec::encoded_i32_prefix_len(&words[spec_start..])
-                .expect("AQS2 body has a strict length");
+                .expect("AQS3 body has a strict length");
         let decoded_spec = crate::engine::spec::AggQuerySpec::decode_i32(
             &words[spec_start..spec_start + spec_len],
         )
-        .expect("AQS2 body decodes");
+        .expect("AQS3 body decodes");
         assert_eq!(decoded_spec, spec);
 
         let projection_sentinel = spec_start + spec_len;

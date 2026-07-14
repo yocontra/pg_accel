@@ -14,10 +14,11 @@ use crate::engine::spec::{
 
 use super::cost::estimate_shape_cost;
 use super::{
-    DescriptorFilterBinding, DescriptorMeasurePlan, DescriptorResolution,
-    DictionaryJoinRequirement, DictionaryKeyRequirement, InputProjection, PlannerColumn,
-    ProjectionSlot, ProjectionSource, RelationResidency, RelationResidencyRequirement,
-    RequiredRelation, ResidencyEstimate, ShapeDecline, ShapeInput, ShapeModifiers, ShapePlan,
+    DerivedGroupKeyRequirement, DescriptorFilterBinding, DescriptorGroupingMode,
+    DescriptorMeasurePlan, DescriptorResolution, DictionaryJoinRequirement,
+    DictionaryKeyRequirement, InputProjection, PlannerColumn, PlannerGroupKey, ProjectionSlot,
+    ProjectionSource, RelationResidency, RelationResidencyRequirement, RequiredRelation,
+    ResidencyEstimate, ShapeDecline, ShapeInput, ShapeModifiers, ShapePlan,
 };
 
 const MAX_RELATIONS: usize = PGACCEL_GROUPED_AGG_MAX_DIMS + 1;
@@ -66,26 +67,34 @@ fn validate_planner_column(input: &ShapeInput, column: PlannerColumn) -> Result<
     Ok(())
 }
 
-fn validate_key_collation(column: PlannerColumn) -> Result<(), ShapeDecline> {
+fn validate_key_metadata(
+    type_oid: u32,
+    collation_oid: u32,
+    collation_is_deterministic: bool,
+) -> Result<(), ShapeDecline> {
     const TEXTOID: u32 = 25;
     const BPCHAROID: u32 = 1042;
     const VARCHAROID: u32 = 1043;
-    if matches!(column.column.type_oid, TEXTOID | BPCHAROID | VARCHAROID)
-        && (column.collation_oid == 0 || !column.collation_is_deterministic)
+    if matches!(type_oid, TEXTOID | BPCHAROID | VARCHAROID)
+        && (collation_oid == 0 || !collation_is_deterministic)
     {
-        return Err(ShapeDecline::NondeterministicKeyCollation {
-            collation_oid: column.collation_oid,
-        });
+        return Err(ShapeDecline::NondeterministicKeyCollation { collation_oid });
     }
-    if !matches!(column.column.type_oid, TEXTOID | BPCHAROID | VARCHAROID)
-        && column.collation_oid != 0
-    {
+    if !matches!(type_oid, TEXTOID | BPCHAROID | VARCHAROID) && collation_oid != 0 {
         return Err(ShapeDecline::InvalidKeyCollation {
-            type_oid: column.column.type_oid,
-            collation_oid: column.collation_oid,
+            type_oid,
+            collation_oid,
         });
     }
     Ok(())
+}
+
+fn validate_key_collation(column: PlannerColumn) -> Result<(), ShapeDecline> {
+    validate_key_metadata(
+        column.column.type_oid,
+        column.collation_oid,
+        column.collation_is_deterministic,
+    )
 }
 
 fn validate_group_key_type(type_oid: u32) -> Result<(), ShapeDecline> {
@@ -251,7 +260,19 @@ fn validate_relations(input: &ShapeInput) -> Result<(), ShapeDecline> {
                 Some(input.relation_oid)
             }
             FilterSpec::Bytecode { inputs, .. } => inputs.first().map(|input| input.relation_oid),
-            FilterSpec::Spatial { left, .. } => Some(left.relation_oid),
+            FilterSpec::Spatial { left, right, .. } => {
+                let mut columns = [left, right]
+                    .into_iter()
+                    .filter_map(|operand| operand.column());
+                let first = columns.next().map(|column| column.relation_oid);
+                if first == Some(*relation_oid)
+                    && columns.all(|column| column.relation_oid == *relation_oid)
+                {
+                    first
+                } else {
+                    Some(0)
+                }
+            }
         };
         if referenced_relation != Some(*relation_oid) {
             return Err(ShapeDecline::UnsupportedColumn {
@@ -486,8 +507,37 @@ fn collect_filter_columns(required: &mut BTreeMap<u32, BTreeSet<i32>>, filter: &
             }
         }
         FilterSpec::Spatial { left, right, .. } => {
-            collect_required_column(required, *left);
-            collect_required_column(required, *right);
+            for column in [left, right]
+                .into_iter()
+                .filter_map(|operand| operand.column())
+            {
+                collect_required_column(required, column);
+            }
+        }
+    }
+}
+
+fn collect_group_key_columns(required: &mut BTreeMap<u32, BTreeSet<i32>>, source: &GroupKeySource) {
+    match source {
+        GroupKeySource::FactColumn(column) => collect_required_column(required, *column),
+        GroupKeySource::StarDimension { group_column, .. } => {
+            collect_required_column(required, *group_column);
+        }
+        GroupKeySource::Expression { inputs, .. } => {
+            for input in inputs {
+                collect_required_column(required, *input);
+            }
+        }
+        GroupKeySource::H3CellToParent { cell, .. } => {
+            collect_required_column(required, *cell);
+        }
+        GroupKeySource::H3LatLngToCell {
+            latitude,
+            longitude,
+            ..
+        } => {
+            collect_required_column(required, *latitude);
+            collect_required_column(required, *longitude);
         }
     }
 }
@@ -673,23 +723,48 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
     if input.projections.is_empty() {
         return Err(ShapeDecline::UnsupportedProjection);
     }
-    if input.group_columns.len() > PGACCEL_GROUPED_AGG_MAX_KEYS {
+    if input.group_keys.len() > PGACCEL_GROUPED_AGG_MAX_KEYS {
         return Err(ShapeDecline::TooManyGroupKeys {
-            actual: input.group_columns.len(),
+            actual: input.group_keys.len(),
             maximum: PGACCEL_GROUPED_AGG_MAX_KEYS,
         });
     }
-    for group in &input.group_columns {
-        validate_planner_column(&input, *group)?;
-        validate_group_key_type(group.column.type_oid)?;
-        validate_key_collation(*group)?;
+    for group in &input.group_keys {
+        match group {
+            PlannerGroupKey::Column(column) => {
+                validate_planner_column(&input, *column)?;
+                validate_group_key_type(column.column.type_oid)?;
+                validate_key_collation(*column)?;
+            }
+            PlannerGroupKey::Expression {
+                source,
+                type_oid,
+                collation_oid,
+                collation_is_deterministic,
+            } => {
+                if *type_oid == 0
+                    || !matches!(
+                        source,
+                        GroupKeySource::Expression { .. }
+                            | GroupKeySource::H3CellToParent { .. }
+                            | GroupKeySource::H3LatLngToCell { .. }
+                    )
+                {
+                    return Err(ShapeDecline::UnsupportedGroupExpression);
+                }
+                validate_key_metadata(*type_oid, *collation_oid, *collation_is_deterministic)?;
+            }
+        }
         if !input.projections.iter().any(
-            |projection| matches!(projection, InputProjection::Group { column, .. } if column == group),
+            |projection| matches!(projection, InputProjection::Group { key, .. } if key == group),
         ) {
-            return Err(ShapeDecline::UnprojectedGroupKey {
-                relation_oid: group.column.relation_oid,
-                attno: group.column.attno,
-            });
+            return match group {
+                PlannerGroupKey::Column(column) => Err(ShapeDecline::UnprojectedGroupKey {
+                    relation_oid: column.column.relation_oid,
+                    attno: column.column.attno,
+                }),
+                PlannerGroupKey::Expression { .. } => Err(ShapeDecline::UnsupportedProjection),
+            };
         }
     }
 
@@ -719,36 +794,47 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
         });
     }
 
-    let mut group_keys = Vec::with_capacity(input.group_columns.len());
-    for group in &input.group_columns {
-        let source = if group.varno == fact_varno {
-            GroupKeySource::FactColumn(group.column)
-        } else {
-            let dimension_index = dim_index_by_oid
-                .get(&group.column.relation_oid)
-                .copied()
-                .ok_or(ShapeDecline::UnsupportedGroupExpression)?;
-            let dimension = &dimensions[dimension_index];
-            if dimension.multiplicity != JoinMultiplicity::Unique {
-                return Err(ShapeDecline::GroupedByNonUniqueDimension {
-                    relation_oid: group.column.relation_oid,
-                    attno: group.column.attno,
-                });
-            }
-            GroupKeySource::StarDimension {
-                dim_index: u32::try_from(dimension_index).map_err(|_| {
-                    ShapeDecline::TooManyDimensions {
-                        actual: dimensions.len(),
-                        maximum: PGACCEL_GROUPED_AGG_MAX_DIMS,
+    let mut group_keys = Vec::with_capacity(input.group_keys.len());
+    for group in &input.group_keys {
+        let (source, type_oid, collation_oid) = match group {
+            PlannerGroupKey::Column(group) => {
+                let source = if group.varno == fact_varno {
+                    GroupKeySource::FactColumn(group.column)
+                } else {
+                    let dimension_index = dim_index_by_oid
+                        .get(&group.column.relation_oid)
+                        .copied()
+                        .ok_or(ShapeDecline::UnsupportedGroupExpression)?;
+                    let dimension = &dimensions[dimension_index];
+                    if dimension.multiplicity != JoinMultiplicity::Unique {
+                        return Err(ShapeDecline::GroupedByNonUniqueDimension {
+                            relation_oid: group.column.relation_oid,
+                            attno: group.column.attno,
+                        });
                     }
-                })?,
-                group_column: group.column,
+                    GroupKeySource::StarDimension {
+                        dim_index: u32::try_from(dimension_index).map_err(|_| {
+                            ShapeDecline::TooManyDimensions {
+                                actual: dimensions.len(),
+                                maximum: PGACCEL_GROUPED_AGG_MAX_DIMS,
+                            }
+                        })?,
+                        group_column: group.column,
+                    }
+                };
+                (source, group.column.type_oid, group.collation_oid)
             }
+            PlannerGroupKey::Expression {
+                source,
+                type_oid,
+                collation_oid,
+                ..
+            } => (source.clone(), *type_oid, *collation_oid),
         };
         group_keys.push(GroupKeyRef {
             source,
-            type_oid: group.column.type_oid,
-            collation_oid: group.collation_oid,
+            type_oid,
+            collation_oid,
             encoding: GroupKeyEncoding::Hash,
         });
     }
@@ -783,28 +869,38 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
 
     let mut projections = Vec::with_capacity(input.projections.len());
     for projection in &input.projections {
-        let (output, source) = match *projection {
-            InputProjection::Group { column, output } => {
-                if output.source_type_oid != column.column.type_oid {
+        let (output, source) = match projection {
+            InputProjection::Group { key, output } => {
+                let (type_oid, collation_oid) = match key {
+                    PlannerGroupKey::Column(column) => {
+                        (column.column.type_oid, column.collation_oid)
+                    }
+                    PlannerGroupKey::Expression {
+                        type_oid,
+                        collation_oid,
+                        ..
+                    } => (*type_oid, *collation_oid),
+                };
+                if output.source_type_oid != type_oid {
                     return Err(ShapeDecline::ProjectionSourceTypeMismatch {
-                        expected_type_oid: column.column.type_oid,
+                        expected_type_oid: type_oid,
                         actual_type_oid: output.source_type_oid,
                     });
                 }
-                if output.result_type_oid != column.column.type_oid
+                if output.result_type_oid != type_oid
                     || output.result_type_oid == 0
                     || output.result_typmod < -1
-                    || output.result_collation_oid != column.collation_oid
+                    || output.result_collation_oid != collation_oid
                 {
                     return Err(ShapeDecline::UnsupportedProjection);
                 }
                 let key_index = input
-                    .group_columns
+                    .group_keys
                     .iter()
-                    .position(|group| *group == column)
+                    .position(|group| group == key)
                     .ok_or(ShapeDecline::UnsupportedProjection)?;
                 (
-                    output,
+                    *output,
                     ProjectionSource::GroupKey {
                         key_index: u32::try_from(key_index)
                             .map_err(|_| ShapeDecline::UnsupportedProjection)?,
@@ -815,12 +911,16 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
                 aggregate_index,
                 output,
             } => {
-                let aggregate_index_usize = usize::try_from(aggregate_index)
-                    .map_err(|_| ShapeDecline::InvalidProjectionReference { aggregate_index })?;
-                let aggregate = input
-                    .aggregates
-                    .get(aggregate_index_usize)
-                    .ok_or(ShapeDecline::InvalidProjectionReference { aggregate_index })?;
+                let aggregate_index_usize = usize::try_from(*aggregate_index).map_err(|_| {
+                    ShapeDecline::InvalidProjectionReference {
+                        aggregate_index: *aggregate_index,
+                    }
+                })?;
+                let aggregate = input.aggregates.get(aggregate_index_usize).ok_or(
+                    ShapeDecline::InvalidProjectionReference {
+                        aggregate_index: *aggregate_index,
+                    },
+                )?;
                 let source_type_oid = aggregate_source_type(aggregate)?;
                 if output.source_type_oid != source_type_oid {
                     return Err(ShapeDecline::ProjectionSourceTypeMismatch {
@@ -851,7 +951,7 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
                 }
                 let measure_index = aggregate_locations[aggregate_index_usize];
                 (
-                    output,
+                    *output,
                     ProjectionSource::Aggregate {
                         measure_index: u32::try_from(measure_index)
                             .map_err(|_| ShapeDecline::UnsupportedProjection)?,
@@ -889,8 +989,8 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
     for dimension in &spec.star_dims {
         required.entry(dimension.relation_oid).or_default();
     }
-    for key in &input.group_columns {
-        collect_required_column(&mut required, key.column);
+    for key in &spec.group_keys {
+        collect_group_key_columns(&mut required, &key.source);
     }
     for measure in &spec.measures {
         collect_measure_columns(&mut required, &measure.expression);
@@ -937,12 +1037,37 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
             })
         })
         .collect::<Result<Vec<_>, ShapeDecline>>()?;
+    let derived_keys = spec
+        .group_keys
+        .iter()
+        .enumerate()
+        .filter(|(_, key)| {
+            matches!(
+                &key.source,
+                GroupKeySource::Expression { .. }
+                    | GroupKeySource::H3CellToParent { .. }
+                    | GroupKeySource::H3LatLngToCell { .. }
+            )
+        })
+        .map(|(index, key)| {
+            Ok(DerivedGroupKeyRequirement {
+                key_index: u32::try_from(index)
+                    .map_err(|_| ShapeDecline::InvalidGroupKeyResolution)?,
+                source: key.source.clone(),
+                result_type_oid: key.type_oid,
+            })
+        })
+        .collect::<Result<Vec<_>, ShapeDecline>>()?;
     let descriptor_resolution = if spec.group_keys.is_empty() && dictionary_joins.is_empty() {
         DescriptorResolution::Ready
     } else {
-        DescriptorResolution::BeginTimeDictionary {
-            keys: spec
-                .group_keys
+        let grouping_mode = if derived_keys.is_empty() {
+            DescriptorGroupingMode::DenseDictionary
+        } else {
+            DescriptorGroupingMode::Hash
+        };
+        let dictionary_keys = if grouping_mode == DescriptorGroupingMode::DenseDictionary {
+            spec.group_keys
                 .iter()
                 .enumerate()
                 .map(|(index, key)| {
@@ -953,8 +1078,15 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
                         collation_oid: key.collation_oid,
                     })
                 })
-                .collect::<Result<Vec<_>, ShapeDecline>>()?,
+                .collect::<Result<Vec<_>, ShapeDecline>>()?
+        } else {
+            Vec::new()
+        };
+        DescriptorResolution::BeginTimeArtifacts {
+            dictionary_keys,
+            derived_keys,
             joins: dictionary_joins,
+            grouping_mode,
             max_group_count: model.memory.gpu_hash_agg_max_groups.get(),
         }
     };

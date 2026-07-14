@@ -822,11 +822,11 @@ mod tests {
         let h3_spec = AggQuerySpec {
             fact_rel: 10,
             group_keys: vec![GroupKeyRef {
-                source: GroupKeySource::H3Cell {
-                    input: ColumnRef {
+                source: GroupKeySource::H3CellToParent {
+                    cell: ColumnRef {
                         relation_oid: 10,
                         attno: 1,
-                        type_oid: FLOAT8_OID,
+                        type_oid: 9_999,
                     },
                     resolution: 9,
                 },

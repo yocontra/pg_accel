@@ -322,7 +322,9 @@ fn validate_catalog_contract(
                 group_column: column,
                 ..
             } => validate_column(column, key.collation_oid)?,
-            GroupKeySource::Expression { .. } | GroupKeySource::H3Cell { .. } => -1,
+            GroupKeySource::Expression { .. }
+            | GroupKeySource::H3CellToParent { .. }
+            | GroupKeySource::H3LatLngToCell { .. } => -1,
         };
         key_typmods.push(typmod);
     }
@@ -378,8 +380,13 @@ fn insert_filter_columns(
             Ok(())
         }
         FilterSpec::Spatial { left, right, .. } => {
-            insert_column(relations, *left)?;
-            insert_column(relations, *right)
+            if let Some(column) = left.column() {
+                insert_column(relations, column)?;
+            }
+            if let Some(column) = right.column() {
+                insert_column(relations, column)?;
+            }
+            Ok(())
         }
     }
 }
@@ -398,7 +405,17 @@ fn selected_relations(spec: &AggQuerySpec) -> Result<Vec<SelectedRelation>, Stri
                     insert_column(&mut relations, *input)?;
                 }
             }
-            GroupKeySource::H3Cell { input, .. } => insert_column(&mut relations, *input)?,
+            GroupKeySource::H3CellToParent { cell, .. } => {
+                insert_column(&mut relations, *cell)?;
+            }
+            GroupKeySource::H3LatLngToCell {
+                latitude,
+                longitude,
+                ..
+            } => {
+                insert_column(&mut relations, *latitude)?;
+                insert_column(&mut relations, *longitude)?;
+            }
         }
     }
     for measure in &spec.measures {

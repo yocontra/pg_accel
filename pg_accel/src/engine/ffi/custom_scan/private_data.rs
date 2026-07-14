@@ -30,7 +30,7 @@ const PLAN_PAYLOAD_START: usize = PLAN_PRIVATE_HEADER_INTS;
 pub(super) const PLAN_WIRE_MAGIC: c_int = 0x5043_5732; // b"PCW2"
 pub(super) const PLAN_WIRE_VERSION: c_int = 2;
 pub(super) const PLAN_WIRE_FOOTER_INTS: usize = 4;
-pub(in crate::engine::ffi) const AGG_QUERY_SPEC_SENTINEL: c_int = 0x4151_5332; // b"AQS2"
+pub(in crate::engine::ffi) const AGG_QUERY_SPEC_SENTINEL: c_int = 0x4151_5333; // b"AQS3"
 pub(in crate::engine::ffi) const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = 0x414F_5032; // b"AOP2"
 const MAX_WINDOW_SPECS: usize = 64;
 const MAX_FUNCTION_ARGS: usize = 100;
@@ -657,6 +657,7 @@ mod typed_private_tests {
             0,
             i32::from_be_bytes(*b"AGXP"),
             i32::from_be_bytes(*b"PAAG"),
+            i32::from_be_bytes(*b"AQS2"),
         ] {
             let mut prefixed = generic_agg_frame();
             prefixed.insert(PLAN_PAYLOAD_START, retired_tag);
@@ -1435,7 +1436,7 @@ fn decode_agg_query_contract_at(
     Ok((spec, projection))
 }
 
-/// Decode the strict AQS2/AOP2 trailer carried by a selected aggregate path.
+/// Decode the strict AQS3/AOP2 trailer carried by a selected aggregate path.
 ///
 /// # Safety
 /// `path_private` must be a valid PostgreSQL `List<Integer>` emitted by this

@@ -20,7 +20,10 @@ pub use constants::{
     GPU_SPATIAL_PER_ROW_COST, PER_DATUM_EXTRACT_COST, PREAGG_FIXED_OVERHEAD,
     SPATIAL_INDEX_COST_RATIO_THRESHOLD, SPATIAL_INDEX_SELECTIVITY_THRESHOLD,
 };
-pub use device_limits::{DeviceLimits, DeviceLimitsSource, device_limits, device_limits_source};
+pub use device_limits::{
+    DeviceLimits, DeviceLimitsSource, DeviceLimitsValidationError, device_limits,
+    device_limits_source,
+};
 pub use formulas::{
     SELF_SCAN_EXTRACT_COST_PER_COLUMN, SELF_SCAN_HEAP_COST_PER_ROW, SelfScanCostBreakdown,
     SelfScanCostInput, apply_fp64_penalty, conservative_input_rows, estimate_self_scan_cost,

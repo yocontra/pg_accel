@@ -20,10 +20,11 @@ pub use projection::{
     MAX_AGG_OUTPUT_PROJECTION_SLOTS, ProjectionCodecError,
 };
 
-pub const AGG_QUERY_SPEC_VERSION: u32 = 2;
+pub const AGG_QUERY_SPEC_VERSION: u32 = 3;
 
 const MAX_BYTECODE_WORDS: usize = 65_536;
 const MAX_PROGRAM_INPUTS: usize = 64;
+pub const MAX_SPATIAL_CONSTANT_BYTES: usize = 1024 * 1024;
 const MAX_VALUE_AGGREGATE_OUTPUTS: usize = 6;
 const MAX_STATS_PAIR_RHS_AGGREGATE_OUTPUTS: usize = 3;
 const MAX_AGGREGATE_OUTPUTS: usize =
@@ -69,6 +70,57 @@ pub enum MaskKind {
     Recheck,
 }
 
+/// Stable spatial operation carried by AQS3.
+///
+/// PostgreSQL function OIDs are catalog-local identifiers and are therefore
+/// deliberately excluded from the serialized contract. Planner extraction
+/// resolves a catalog function to one of these semantic operations first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialPredicateKind {
+    Intersects,
+    Contains,
+    Within,
+    DWithin,
+    Disjoint,
+    Equals,
+    Touches,
+    Crosses,
+    Overlaps,
+}
+
+/// Catalog-resolved PostGIS value family. This is stable across installations,
+/// unlike the extension-defined `geometry` and `geography` type OIDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialValueKind {
+    Geometry,
+    Geography,
+}
+
+/// Stable metadata required to interpret a spatial operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpatialValueMetadata {
+    pub kind: SpatialValueKind,
+    /// PostgreSQL typmod, or `-1` when the expression is not typmod-constrained.
+    pub typmod: i32,
+    /// Catalog/extractor-proved SRID. `None` means the SRID is row-dependent.
+    pub srid: Option<i32>,
+}
+
+/// A typed spatial input. Constants own their exact detoasted payload so no
+/// backend `Datum`, varlena pointer, or memory-context address crosses the plan
+/// wire boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpatialOperand {
+    Column {
+        column: ColumnRef,
+        metadata: SpatialValueMetadata,
+    },
+    Constant {
+        metadata: SpatialValueMetadata,
+        bytes: Box<[u8]>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilterSpec {
     None,
@@ -85,9 +137,9 @@ pub enum FilterSpec {
         program: Vec<i32>,
     },
     Spatial {
-        function_oid: u32,
-        left: ColumnRef,
-        right: ColumnRef,
+        predicate: SpatialPredicateKind,
+        left: SpatialOperand,
+        right: SpatialOperand,
         distance: Option<ScalarValue>,
     },
 }
@@ -103,8 +155,18 @@ pub enum GroupKeySource {
         inputs: Vec<ColumnRef>,
         program: Vec<i32>,
     },
-    H3Cell {
-        input: ColumnRef,
+    /// `h3_cell_to_parent(cell, resolution)` with a catalog-proved h3index
+    /// input. The function/type OIDs remain planner facts, not wire tags.
+    H3CellToParent {
+        cell: ColumnRef,
+        resolution: i32,
+    },
+    /// `h3_latlng_to_cell(latitude, longitude, resolution)` over two resident
+    /// numeric lanes. Point extraction is intentionally not represented until
+    /// the geometry resident contract is wired into planner extraction.
+    H3LatLngToCell {
+        latitude: ColumnRef,
+        longitude: ColumnRef,
         resolution: i32,
     },
 }
@@ -320,6 +382,58 @@ impl ScalarRange {
     }
 }
 
+impl SpatialValueMetadata {
+    fn validate(self) -> Result<(), SpecValidationError> {
+        if self.typmod < -1 {
+            return Err(SpecValidationError::new("invalid spatial typmod"));
+        }
+        if self.srid.is_some_and(|srid| !(0..=999_999).contains(&srid)) {
+            return Err(SpecValidationError::new("invalid spatial SRID"));
+        }
+        Ok(())
+    }
+}
+
+impl SpatialOperand {
+    fn validate(&self) -> Result<(), SpecValidationError> {
+        match self {
+            Self::Column { column, metadata } => {
+                column.validate()?;
+                metadata.validate()
+            }
+            Self::Constant { metadata, bytes } => {
+                metadata.validate()?;
+                if bytes.is_empty() || bytes.len() > MAX_SPATIAL_CONSTANT_BYTES {
+                    return Err(SpecValidationError::new(
+                        "invalid spatial constant payload length",
+                    ));
+                }
+                if metadata.srid.is_none() {
+                    return Err(SpecValidationError::new(
+                        "spatial constant is missing a stable SRID",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[must_use]
+    pub const fn column(&self) -> Option<ColumnRef> {
+        match self {
+            Self::Column { column, .. } => Some(*column),
+            Self::Constant { .. } => None,
+        }
+    }
+
+    #[must_use]
+    const fn metadata(&self) -> SpatialValueMetadata {
+        match self {
+            Self::Column { metadata, .. } | Self::Constant { metadata, .. } => *metadata,
+        }
+    }
+}
+
 fn validate_program(inputs: &[ColumnRef], program: &[i32]) -> Result<(), SpecValidationError> {
     if inputs.len() > MAX_PROGRAM_INPUTS || program.is_empty() || program.len() > MAX_BYTECODE_WORDS
     {
@@ -348,17 +462,36 @@ impl FilterSpec {
             Self::Mask { input, .. } => input.validate(),
             Self::Bytecode { inputs, program } => validate_program(inputs, program),
             Self::Spatial {
-                function_oid,
+                predicate,
                 left,
                 right,
                 distance,
             } => {
-                if *function_oid == 0 {
-                    return Err(SpecValidationError::new("invalid spatial function OID"));
-                }
                 left.validate()?;
                 right.validate()?;
-                if distance.is_some_and(|value| !value.is_nonnegative_finite()) {
+                if left.column().is_none() && right.column().is_none() {
+                    return Err(SpecValidationError::new(
+                        "spatial filter has no relation operand",
+                    ));
+                }
+                let left_metadata = left.metadata();
+                let right_metadata = right.metadata();
+                if left_metadata.kind != right_metadata.kind {
+                    return Err(SpecValidationError::new(
+                        "spatial operand families do not match",
+                    ));
+                }
+                if let (Some(left_srid), Some(right_srid)) =
+                    (left_metadata.srid, right_metadata.srid)
+                    && left_srid != right_srid
+                {
+                    return Err(SpecValidationError::new(
+                        "spatial operand SRIDs do not match",
+                    ));
+                }
+                if (*predicate == SpatialPredicateKind::DWithin) != distance.is_some()
+                    || distance.is_some_and(|value| !value.is_nonnegative_finite())
+                {
                     return Err(SpecValidationError::new("invalid spatial distance"));
                 }
                 Ok(())
@@ -379,9 +512,10 @@ impl FilterSpec {
             Self::Bytecode { inputs, .. } => inputs
                 .iter()
                 .all(|input| relation_allowed(input.relation_oid)),
-            Self::Spatial { left, right, .. } => {
-                relation_allowed(left.relation_oid) && relation_allowed(right.relation_oid)
-            }
+            Self::Spatial { left, right, .. } => [left, right]
+                .into_iter()
+                .filter_map(|operand| operand.column())
+                .all(|column| relation_allowed(column.relation_oid)),
         };
         if !valid {
             return Err(SpecValidationError::new(
@@ -400,9 +534,10 @@ impl FilterSpec {
             Self::Bytecode { inputs, .. } => inputs
                 .iter()
                 .any(|input| input.relation_oid == relation_oid),
-            Self::Spatial { left, right, .. } => {
-                left.relation_oid == relation_oid || right.relation_oid == relation_oid
-            }
+            Self::Spatial { left, right, .. } => [left, right]
+                .into_iter()
+                .filter_map(|operand| operand.column())
+                .any(|column| column.relation_oid == relation_oid),
         }
     }
 }
@@ -506,13 +641,32 @@ impl GroupKeyRef {
                 }
                 Ok(())
             }
-            GroupKeySource::H3Cell { input, resolution } => {
-                input.validate()?;
-                if input.relation_oid != fact_rel
+            GroupKeySource::H3CellToParent { cell, resolution } => {
+                cell.validate()?;
+                if cell.relation_oid != fact_rel
+                    || cell.type_oid != self.type_oid
                     || !(0..=15).contains(resolution)
                     || self.encoding != GroupKeyEncoding::Hash
                 {
-                    return Err(SpecValidationError::new("invalid H3 group key"));
+                    return Err(SpecValidationError::new("invalid H3 parent group key"));
+                }
+                Ok(())
+            }
+            GroupKeySource::H3LatLngToCell {
+                latitude,
+                longitude,
+                resolution,
+            } => {
+                latitude.validate()?;
+                longitude.validate()?;
+                if latitude.relation_oid != fact_rel
+                    || longitude.relation_oid != fact_rel
+                    || latitude.type_oid != longitude.type_oid
+                    || !matches!(latitude.type_oid, FLOAT4OID | FLOAT8OID)
+                    || !(0..=15).contains(resolution)
+                    || self.encoding != GroupKeyEncoding::Hash
+                {
+                    return Err(SpecValidationError::new("invalid H3 lat/lng group key"));
                 }
                 Ok(())
             }

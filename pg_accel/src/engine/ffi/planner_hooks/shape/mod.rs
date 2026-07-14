@@ -89,6 +89,23 @@ pub struct AggregateExpr {
     pub filter: FilterSpec,
 }
 
+/// One analyzed GROUP BY key before relation orientation.
+///
+/// Direct columns retain planner `varno` identity so star dimensions can be
+/// oriented safely. Expression keys carry only a catalog-resolved neutral
+/// source; PostgreSQL extraction must prove the function/operator semantics
+/// before constructing one of these variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlannerGroupKey {
+    Column(PlannerColumn),
+    Expression {
+        source: GroupKeySource,
+        type_oid: u32,
+        collation_oid: u32,
+        collation_is_deterministic: bool,
+    },
+}
+
 /// PostgreSQL output typing carried verbatim into the strict plan wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputMetadata {
@@ -102,10 +119,10 @@ pub struct OutputMetadata {
 }
 
 /// A non-junk output in PostgreSQL target-list order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputProjection {
     Group {
-        column: PlannerColumn,
+        key: PlannerGroupKey,
         output: OutputMetadata,
     },
     Aggregate {
@@ -137,7 +154,7 @@ pub struct ShapeModifiers {
 pub struct ShapeInput {
     pub relations: Vec<RelationShape>,
     pub joins: Vec<EquiJoin>,
-    pub group_columns: Vec<PlannerColumn>,
+    pub group_keys: Vec<PlannerGroupKey>,
     pub aggregates: Vec<AggregateExpr>,
     pub projections: Vec<InputProjection>,
     /// At most one descriptor-compatible filter per relation.
@@ -195,14 +212,32 @@ pub struct DictionaryJoinRequirement {
     pub collation_oid: u32,
 }
 
-/// Whether the logical spec can be converted to the currently implemented
-/// dense-radix descriptor ABI.
+/// One expression-backed group key that must be materialized from current
+/// resident data before the generic HASH descriptor can be bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedGroupKeyRequirement {
+    pub key_index: u32,
+    pub source: GroupKeySource,
+    pub result_type_oid: u32,
+}
+
+/// Begin-time grouping implementation selected for the logical AQS3 spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DescriptorGroupingMode {
+    DenseDictionary,
+    Hash,
+}
+
+/// Whether the logical spec requires resident artifacts before a descriptor
+/// can be built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DescriptorResolution {
     Ready,
-    BeginTimeDictionary {
-        keys: Vec<DictionaryKeyRequirement>,
+    BeginTimeArtifacts {
+        dictionary_keys: Vec<DictionaryKeyRequirement>,
+        derived_keys: Vec<DerivedGroupKeyRequirement>,
         joins: Vec<DictionaryJoinRequirement>,
+        grouping_mode: DescriptorGroupingMode,
         max_group_count: usize,
     },
 }
@@ -214,6 +249,15 @@ pub struct ResolvedDictionaryKey {
     /// Includes the NULL code when `null_code` is present.
     pub cardinality: u32,
     pub null_code: Option<i32>,
+}
+
+/// Proof that one expression-backed HASH lane was built for the exact source
+/// and logical type carried by the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDerivedGroupKey {
+    pub key_index: u32,
+    pub source: GroupKeySource,
+    pub result_type_oid: u32,
 }
 
 /// Descriptor slot used to evaluate a scalar fact filter.
@@ -469,9 +513,7 @@ impl std::fmt::Display for ShapeDecline {
 impl std::error::Error for ShapeDecline {}
 
 impl ShapePlan {
-    /// Borrow a spec only when no Begin-time dictionary artifact is needed.
-    /// HASH group keys and collatable joins are logical planner IR today; the
-    /// Phase 4 descriptor accepts only resolved dense INT32 domains.
+    /// Borrow a spec only when no Begin-time artifact is needed.
     pub fn descriptor_spec(&self) -> Result<&AggQuerySpec, ShapeDecline> {
         if self.descriptor_resolution != DescriptorResolution::Ready
             || self
@@ -485,8 +527,7 @@ impl ShapePlan {
         Ok(&self.spec)
     }
 
-    /// Rewrite every unresolved logical HASH key to an exact dictionary
-    /// domain derived from current resident data at Begin time.
+    /// Resolve a dense-dictionary plan using current resident domains.
     ///
     /// The returned spec has descriptor-legal key encodings; Phase 5D must
     /// still bind the resident dictionary codes/decoders and device pointers.
@@ -496,24 +537,40 @@ impl ShapePlan {
         &self,
         resolutions: &[ResolvedDictionaryKey],
     ) -> Result<AggQuerySpec, ShapeDecline> {
-        let DescriptorResolution::BeginTimeDictionary {
-            keys,
+        self.resolve_group_key_artifacts(resolutions, &[])
+    }
+
+    /// Validate every Begin-time group-key artifact and return the descriptor
+    /// spec. Dense mode rewrites HASH keys to exact INT32 dictionary domains;
+    /// generic HASH mode preserves expression/H3 encodings after proving that
+    /// their resident derived lanes match the canonical source and type.
+    pub fn resolve_group_key_artifacts(
+        &self,
+        dictionary_resolutions: &[ResolvedDictionaryKey],
+        derived_resolutions: &[ResolvedDerivedGroupKey],
+    ) -> Result<AggQuerySpec, ShapeDecline> {
+        let DescriptorResolution::BeginTimeArtifacts {
+            dictionary_keys,
+            derived_keys,
             joins: _,
+            grouping_mode,
             max_group_count,
         } = &self.descriptor_resolution
         else {
-            if resolutions.is_empty() {
+            if dictionary_resolutions.is_empty() && derived_resolutions.is_empty() {
                 return Ok(self.spec.clone());
             }
             return Err(ShapeDecline::InvalidGroupKeyResolution);
         };
-        if resolutions.len() != keys.len() {
+        if dictionary_resolutions.len() != dictionary_keys.len()
+            || derived_resolutions.len() != derived_keys.len()
+        {
             return Err(ShapeDecline::InvalidGroupKeyResolution);
         }
         let mut resolved = self.spec.clone();
         let mut group_count = 1_usize;
-        for requirement in keys {
-            let domain = resolutions
+        for requirement in dictionary_keys {
+            let domain = dictionary_resolutions
                 .iter()
                 .find(|domain| domain.key_index == requirement.key_index)
                 .ok_or(ShapeDecline::InvalidGroupKeyResolution)?;
@@ -540,12 +597,50 @@ impl ShapePlan {
                 null_code: domain.null_code,
             };
         }
-        if resolved
-            .group_keys
-            .iter()
-            .any(|key| key.encoding == GroupKeyEncoding::Hash)
-        {
-            return Err(ShapeDecline::InvalidGroupKeyResolution);
+        for requirement in derived_keys {
+            let artifact = derived_resolutions
+                .iter()
+                .find(|artifact| artifact.key_index == requirement.key_index)
+                .ok_or(ShapeDecline::InvalidGroupKeyResolution)?;
+            let index = usize::try_from(requirement.key_index)
+                .map_err(|_| ShapeDecline::InvalidGroupKeyResolution)?;
+            let key = resolved
+                .group_keys
+                .get(index)
+                .ok_or(ShapeDecline::InvalidGroupKeyResolution)?;
+            let artifact_source_matches = artifact.source == requirement.source;
+            let key_source_matches = key.source == requirement.source;
+            let artifact_type_matches = artifact.result_type_oid == requirement.result_type_oid;
+            let key_type_matches = key.type_oid == requirement.result_type_oid;
+            if !artifact_source_matches
+                || !key_source_matches
+                || !artifact_type_matches
+                || !key_type_matches
+                || key.encoding != GroupKeyEncoding::Hash
+            {
+                return Err(ShapeDecline::InvalidGroupKeyResolution);
+            }
+        }
+        match grouping_mode {
+            DescriptorGroupingMode::DenseDictionary
+                if !derived_keys.is_empty()
+                    || resolved
+                        .group_keys
+                        .iter()
+                        .any(|key| key.encoding == GroupKeyEncoding::Hash) =>
+            {
+                return Err(ShapeDecline::InvalidGroupKeyResolution);
+            }
+            DescriptorGroupingMode::Hash
+                if derived_keys.is_empty()
+                    || !resolved
+                        .group_keys
+                        .iter()
+                        .any(|key| key.encoding == GroupKeyEncoding::Hash) =>
+            {
+                return Err(ShapeDecline::InvalidGroupKeyResolution);
+            }
+            DescriptorGroupingMode::DenseDictionary | DescriptorGroupingMode::Hash => {}
         }
         resolved
             .validate()

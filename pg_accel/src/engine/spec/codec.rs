@@ -4,15 +4,27 @@ use super::{
     AGG_QUERY_SPEC_VERSION, AggQuerySpec, AggregateKind, AggregateOutput, AggregateRef,
     AggregateSource, BinaryMeasureOp, ColumnRef, DimSpec, FilterSpec, GroupKeyEncoding,
     GroupKeyRef, GroupKeySource, HavingSpec, JoinMultiplicity, MAX_AGGREGATE_OUTPUTS,
-    MAX_BYTECODE_WORDS, MAX_PROGRAM_INPUTS, MAX_VALUE_AGGREGATE_OUTPUTS, MaskKind, MeasureExpr,
-    MeasureSpec, ScalarRange, ScalarValue, SpecValidationError, abi,
+    MAX_BYTECODE_WORDS, MAX_PROGRAM_INPUTS, MAX_SPATIAL_CONSTANT_BYTES,
+    MAX_VALUE_AGGREGATE_OUTPUTS, MaskKind, MeasureExpr, MeasureSpec, ScalarRange, ScalarValue,
+    SpatialOperand, SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
+    SpecValidationError, abi,
 };
 
-pub const AGG_QUERY_SPEC_WIRE_MAGIC: i32 = 0x5047_4132; // "PGA2"
+pub const AGG_QUERY_SPEC_WIRE_MAGIC: i32 = 0x5047_4133; // "PGA3"
 pub const AGG_QUERY_SPEC_HEADER_WORDS: usize = 3;
 const MAX_COLUMN_LIST_WORDS: usize = 1 + MAX_PROGRAM_INPUTS * 3;
 const MAX_BYTECODE_BLOCK_WORDS: usize = 1 + MAX_BYTECODE_WORDS;
-const MAX_FILTER_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS;
+const MAX_PACKED_SPATIAL_WORDS: usize = MAX_SPATIAL_CONSTANT_BYTES.div_ceil(4);
+const MAX_SPATIAL_COLUMN_OPERAND_WORDS: usize = 1 + 4 + 3;
+const MAX_SPATIAL_CONSTANT_OPERAND_WORDS: usize = 1 + 4 + 1 + MAX_PACKED_SPATIAL_WORDS;
+const MAX_SPATIAL_FILTER_WORDS: usize =
+    1 + 1 + MAX_SPATIAL_COLUMN_OPERAND_WORDS + MAX_SPATIAL_CONSTANT_OPERAND_WORDS + 1 + 3;
+const MAX_BYTECODE_FILTER_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS;
+const MAX_FILTER_WORDS: usize = if MAX_SPATIAL_FILTER_WORDS > MAX_BYTECODE_FILTER_WORDS {
+    MAX_SPATIAL_FILTER_WORDS
+} else {
+    MAX_BYTECODE_FILTER_WORDS
+};
 const MAX_GROUP_KEY_WORDS: usize = 1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 7;
 const MAX_BYTECODE_MEASURE_EXPR_WORDS: usize =
     1 + MAX_COLUMN_LIST_WORDS + MAX_BYTECODE_BLOCK_WORDS + 1;
@@ -31,7 +43,7 @@ const MAX_MEASURE_WORDS: usize = if MAX_BYTECODE_MEASURE_WORDS > MAX_STATS_PAIR_
 const MAX_DIM_WORDS: usize = 1 + 3 + 3 + 1 + 1 + MAX_FILTER_WORDS;
 const MAX_HAVING_WORDS: usize = 1 + 1 + MAX_PROGRAM_INPUTS * 3 + MAX_BYTECODE_BLOCK_WORDS;
 
-/// Exact maximum word length of any semantically valid v2 spec.
+/// Exact maximum word length of any semantically valid v3 spec.
 pub const AGG_QUERY_SPEC_MAX_WORDS: usize = AGG_QUERY_SPEC_HEADER_WORDS
     + 1
     + 1
@@ -246,6 +258,44 @@ impl Encoder {
         Ok(())
     }
 
+    fn push_bytes(&mut self, bytes: &[u8]) -> Result<(), SpecCodecError> {
+        self.push_len(bytes.len())?;
+        for chunk in bytes.chunks(4) {
+            let mut packed = [0_u8; 4];
+            packed[..chunk.len()].copy_from_slice(chunk);
+            self.push(u32::from_le_bytes(packed) as i32);
+        }
+        Ok(())
+    }
+
+    fn push_spatial_metadata(&mut self, metadata: SpatialValueMetadata) {
+        self.push(match metadata.kind {
+            SpatialValueKind::Geometry => 0,
+            SpatialValueKind::Geography => 1,
+        });
+        self.push(metadata.typmod);
+        self.push_bool(metadata.srid.is_some());
+        if let Some(srid) = metadata.srid {
+            self.push(srid);
+        }
+    }
+
+    fn push_spatial_operand(&mut self, operand: &SpatialOperand) -> Result<(), SpecCodecError> {
+        match operand {
+            SpatialOperand::Column { column, metadata } => {
+                self.push(0);
+                self.push_spatial_metadata(*metadata);
+                self.push_column(*column);
+            }
+            SpatialOperand::Constant { metadata, bytes } => {
+                self.push(1);
+                self.push_spatial_metadata(*metadata);
+                self.push_bytes(bytes)?;
+            }
+        }
+        Ok(())
+    }
+
     fn push_scalar(&mut self, value: ScalarValue) {
         match value {
             ScalarValue::Bool(value) => {
@@ -309,15 +359,25 @@ impl Encoder {
                 self.push_words(program)?;
             }
             FilterSpec::Spatial {
-                function_oid,
+                predicate,
                 left,
                 right,
                 distance,
             } => {
                 self.push(4);
-                self.push_u32(*function_oid);
-                self.push_column(*left);
-                self.push_column(*right);
+                self.push(match predicate {
+                    SpatialPredicateKind::Intersects => 0,
+                    SpatialPredicateKind::Contains => 1,
+                    SpatialPredicateKind::Within => 2,
+                    SpatialPredicateKind::DWithin => 3,
+                    SpatialPredicateKind::Disjoint => 4,
+                    SpatialPredicateKind::Equals => 5,
+                    SpatialPredicateKind::Touches => 6,
+                    SpatialPredicateKind::Crosses => 7,
+                    SpatialPredicateKind::Overlaps => 8,
+                });
+                self.push_spatial_operand(left)?;
+                self.push_spatial_operand(right)?;
                 self.push_bool(distance.is_some());
                 if let Some(distance) = distance {
                     self.push_scalar(*distance);
@@ -346,9 +406,19 @@ impl Encoder {
                 self.push_columns(inputs)?;
                 self.push_words(program)?;
             }
-            GroupKeySource::H3Cell { input, resolution } => {
+            GroupKeySource::H3CellToParent { cell, resolution } => {
                 self.push(3);
-                self.push_column(*input);
+                self.push_column(*cell);
+                self.push(*resolution);
+            }
+            GroupKeySource::H3LatLngToCell {
+                latitude,
+                longitude,
+                resolution,
+            } => {
+                self.push(4);
+                self.push_column(*latitude);
+                self.push_column(*longitude);
                 self.push(*resolution);
             }
         }
@@ -593,6 +663,75 @@ impl<'a> Decoder<'a> {
         Ok(values)
     }
 
+    fn read_bytes(&mut self) -> Result<Vec<u8>, SpecCodecError> {
+        let length_index = self.index;
+        let raw = self.read("spatial constant byte length")?;
+        let len = usize::try_from(raw).map_err(|_| SpecCodecError::InvalidValue {
+            index: length_index,
+            context: "spatial constant byte length",
+        })?;
+        if len > MAX_SPATIAL_CONSTANT_BYTES {
+            return Err(SpecCodecError::LimitExceeded {
+                index: length_index,
+                context: "spatial constant byte length",
+                declared: len,
+                maximum: MAX_SPATIAL_CONSTANT_BYTES,
+            });
+        }
+        let packed_words = len.div_ceil(4);
+        if packed_words > self.words.len().saturating_sub(self.index) {
+            return Err(SpecCodecError::Truncated {
+                index: self.index,
+                context: "spatial constant payload",
+            });
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| SpecCodecError::AllocationFailed {
+                context: "spatial constant payload",
+            })?;
+        for packed_index in 0..packed_words {
+            let word_index = self.index;
+            let packed = self.read("spatial constant payload")?.to_le_bytes();
+            let remaining = len.saturating_sub(packed_index * 4);
+            let used = remaining.min(4);
+            bytes.extend_from_slice(&packed[..used]);
+            if used < 4 && packed[used..].iter().any(|byte| *byte != 0) {
+                return Err(SpecCodecError::NonCanonical { index: word_index });
+            }
+        }
+        Ok(bytes)
+    }
+
+    fn read_spatial_metadata(&mut self) -> Result<SpatialValueMetadata, SpecCodecError> {
+        let kind = match self.read_tag("spatial value kind", 1)? {
+            0 => SpatialValueKind::Geometry,
+            1 => SpatialValueKind::Geography,
+            _ => unreachable!(),
+        };
+        let typmod = self.read("spatial typmod")?;
+        let srid = self
+            .read_bool("spatial SRID presence")?
+            .then(|| self.read("spatial SRID"))
+            .transpose()?;
+        Ok(SpatialValueMetadata { kind, typmod, srid })
+    }
+
+    fn read_spatial_operand(&mut self) -> Result<SpatialOperand, SpecCodecError> {
+        match self.read_tag("spatial operand", 1)? {
+            0 => Ok(SpatialOperand::Column {
+                metadata: self.read_spatial_metadata()?,
+                column: self.read_column()?,
+            }),
+            1 => Ok(SpatialOperand::Constant {
+                metadata: self.read_spatial_metadata()?,
+                bytes: self.read_bytes()?.into_boxed_slice(),
+            }),
+            _ => unreachable!(),
+        }
+    }
+
     fn read_scalar(&mut self) -> Result<ScalarValue, SpecCodecError> {
         match self.read_tag("scalar", 8)? {
             1 => Ok(ScalarValue::Bool(self.read_bool("boolean scalar")?)),
@@ -643,15 +782,26 @@ impl<'a> Decoder<'a> {
                 program: self.read_words("bytecode word count")?,
             }),
             4 => {
-                let function_oid = self.read_u32("spatial function OID")?;
-                let left = self.read_column()?;
-                let right = self.read_column()?;
+                let predicate = match self.read_tag("spatial predicate", 8)? {
+                    0 => SpatialPredicateKind::Intersects,
+                    1 => SpatialPredicateKind::Contains,
+                    2 => SpatialPredicateKind::Within,
+                    3 => SpatialPredicateKind::DWithin,
+                    4 => SpatialPredicateKind::Disjoint,
+                    5 => SpatialPredicateKind::Equals,
+                    6 => SpatialPredicateKind::Touches,
+                    7 => SpatialPredicateKind::Crosses,
+                    8 => SpatialPredicateKind::Overlaps,
+                    _ => unreachable!(),
+                };
+                let left = self.read_spatial_operand()?;
+                let right = self.read_spatial_operand()?;
                 let distance = self
                     .read_bool("spatial distance presence")?
                     .then(|| self.read_scalar())
                     .transpose()?;
                 Ok(FilterSpec::Spatial {
-                    function_oid,
+                    predicate,
                     left,
                     right,
                     distance,
@@ -662,7 +812,7 @@ impl<'a> Decoder<'a> {
     }
 
     fn read_group_key(&mut self) -> Result<GroupKeyRef, SpecCodecError> {
-        let source = match self.read_tag("group-key source", 3)? {
+        let source = match self.read_tag("group-key source", 4)? {
             0 => GroupKeySource::FactColumn(self.read_column()?),
             1 => GroupKeySource::StarDimension {
                 dim_index: self.read_u32("group-key dimension index")?,
@@ -672,8 +822,13 @@ impl<'a> Decoder<'a> {
                 inputs: self.read_columns()?,
                 program: self.read_words("group-key bytecode word count")?,
             },
-            3 => GroupKeySource::H3Cell {
-                input: self.read_column()?,
+            3 => GroupKeySource::H3CellToParent {
+                cell: self.read_column()?,
+                resolution: self.read("H3 resolution")?,
+            },
+            4 => GroupKeySource::H3LatLngToCell {
+                latitude: self.read_column()?,
+                longitude: self.read_column()?,
                 resolution: self.read("H3 resolution")?,
             },
             _ => unreachable!(),
@@ -1050,9 +1205,23 @@ mod tests {
                         output(AggregateSource::Rhs, AggregateKind::Avg),
                     ],
                     filter: FilterSpec::Spatial {
-                        function_oid: 42,
-                        left: column(10, 10, 1_000),
-                        right: column(20, 4, 1_000),
+                        predicate: SpatialPredicateKind::DWithin,
+                        left: SpatialOperand::Column {
+                            column: column(10, 10, 1_000),
+                            metadata: SpatialValueMetadata {
+                                kind: SpatialValueKind::Geometry,
+                                typmod: -1,
+                                srid: Some(4_326),
+                            },
+                        },
+                        right: SpatialOperand::Column {
+                            column: column(20, 4, 1_000),
+                            metadata: SpatialValueMetadata {
+                                kind: SpatialValueKind::Geometry,
+                                typmod: -1,
+                                srid: Some(4_326),
+                            },
+                        },
                         distance: Some(ScalarValue::F64(10.5)),
                     },
                 },
@@ -1103,8 +1272,8 @@ mod tests {
         AggQuerySpec {
             fact_rel: 30,
             group_keys: vec![GroupKeyRef {
-                source: GroupKeySource::H3Cell {
-                    input: column(30, 1, INT8_OID),
+                source: GroupKeySource::H3CellToParent {
+                    cell: column(30, 1, INT8_OID),
                     resolution: 9,
                 },
                 type_oid: INT8_OID,
@@ -1125,6 +1294,30 @@ mod tests {
         }
     }
 
+    fn h3_latlng_spec() -> AggQuerySpec {
+        AggQuerySpec {
+            fact_rel: 30,
+            group_keys: vec![GroupKeyRef {
+                source: GroupKeySource::H3LatLngToCell {
+                    latitude: column(30, 1, FLOAT8_OID),
+                    longitude: column(30, 2, FLOAT8_OID),
+                    resolution: 7,
+                },
+                type_oid: 9_999,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            }],
+            measures: vec![MeasureSpec {
+                expression: MeasureExpr::CountStar,
+                outputs: vec![output(AggregateSource::Value, AggregateKind::Count)],
+                filter: FilterSpec::None,
+            }],
+            fact_filter: FilterSpec::None,
+            star_dims: Vec::new(),
+            having: None,
+        }
+    }
+
     fn maximal_program() -> Vec<i32> {
         vec![0; MAX_BYTECODE_WORDS]
     }
@@ -1134,9 +1327,22 @@ mod tests {
     }
 
     fn maximal_filter(relation_oid: u32) -> FilterSpec {
-        FilterSpec::Bytecode {
-            inputs: maximal_inputs(relation_oid),
-            program: maximal_program(),
+        let metadata = SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: -1,
+            srid: Some(4_326),
+        };
+        FilterSpec::Spatial {
+            predicate: SpatialPredicateKind::DWithin,
+            left: SpatialOperand::Column {
+                column: column(relation_oid, 1, 9_999),
+                metadata,
+            },
+            right: SpatialOperand::Constant {
+                metadata,
+                bytes: vec![0xA5; MAX_SPATIAL_CONSTANT_BYTES].into_boxed_slice(),
+            },
+            distance: Some(ScalarValue::F64(f64::MAX)),
         }
     }
 
@@ -1206,7 +1412,7 @@ mod tests {
 
     #[test]
     fn round_trips_minimal_dense_and_hash_specs() {
-        for spec in [minimal_spec(), dense_spec(), h3_spec()] {
+        for spec in [minimal_spec(), dense_spec(), h3_spec(), h3_latlng_spec()] {
             let encoded = spec.encode_i32().expect("valid spec encodes");
             let decoded = AggQuerySpec::decode_i32(&encoded).expect("encoded spec decodes");
             assert_eq!(decoded, spec);
@@ -1248,20 +1454,19 @@ mod tests {
         );
 
         let mut explicit_h3 = h3_spec();
-        explicit_h3.group_keys[0].type_oid = 9_999;
         explicit_h3
             .validate()
-            .expect("H3 group key accepts an explicit analyzed result type");
-        explicit_h3.group_keys[0].type_oid = 0;
+            .expect("H3 group key accepts a matching source and result type");
+        explicit_h3.group_keys[0].type_oid = 9_999;
         assert!(
             explicit_h3.validate().is_err(),
-            "H3 group key accepted an omitted logical type"
+            "H3 group key accepted a logical type different from its source cell"
         );
     }
 
     #[test]
     fn exported_max_words_is_reached_by_a_valid_maximal_spec() {
-        assert_eq!(AGG_QUERY_SPEC_MAX_WORDS, 1_117_547);
+        assert_eq!(AGG_QUERY_SPEC_MAX_WORDS, 2_885_444);
         let spec = maximal_spec();
         let encoded = spec.encode_i32().expect("maximal valid spec encodes");
         assert_eq!(encoded.len(), AGG_QUERY_SPEC_MAX_WORDS);
@@ -1273,7 +1478,7 @@ mod tests {
 
     #[test]
     fn every_truncated_prefix_is_rejected() {
-        for spec in [minimal_spec(), dense_spec(), h3_spec()] {
+        for spec in [minimal_spec(), dense_spec(), h3_spec(), h3_latlng_spec()] {
             let encoded = spec.encode_i32().expect("valid spec encodes");
             for end in 0..encoded.len() {
                 assert!(
@@ -1301,7 +1506,7 @@ mod tests {
             AggQuerySpec::decode_i32(&words)
         }
 
-        for spec in [minimal_spec(), dense_spec(), h3_spec()] {
+        for spec in [minimal_spec(), dense_spec(), h3_spec(), h3_latlng_spec()] {
             let words = spec.encode_i32().expect("valid spec encodes");
             let bytes = words
                 .iter()
@@ -1316,6 +1521,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn aqs2_and_unknown_wire_headers_fail_closed() {
+        let encoded = minimal_spec()
+            .encode_i32()
+            .expect("valid AQS3 spec encodes");
+
+        let mut old_magic = encoded.clone();
+        old_magic[0] = 0x5047_4132; // "PGA2"
+        assert_eq!(
+            AggQuerySpec::decode_i32(&old_magic),
+            Err(SpecCodecError::InvalidMagic(0x5047_4132))
+        );
+
+        let mut old_version = encoded.clone();
+        old_version[1] = 2;
+        assert_eq!(
+            AggQuerySpec::decode_i32(&old_version),
+            Err(SpecCodecError::UnsupportedVersion(2))
+        );
+
+        let mut unknown_version = encoded;
+        unknown_version[1] = i32::MAX;
+        assert_eq!(
+            AggQuerySpec::decode_i32(&unknown_version),
+            Err(SpecCodecError::UnsupportedVersion(i32::MAX as u32))
+        );
+    }
+
+    #[test]
+    fn spatial_constant_length_and_padding_are_canonical_and_bounded() {
+        let metadata = SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: -1,
+            srid: Some(4_326),
+        };
+        let mut spec = minimal_spec();
+        spec.fact_filter = FilterSpec::Spatial {
+            predicate: SpatialPredicateKind::Intersects,
+            left: SpatialOperand::Column {
+                column: column(10, 2, 9_999),
+                metadata,
+            },
+            right: SpatialOperand::Constant {
+                metadata,
+                bytes: vec![0x11, 0x22, 0x33].into_boxed_slice(),
+            },
+            distance: None,
+        };
+        let encoded = spec.encode_i32().expect("spatial constant encodes");
+        let payload_index = encoded
+            .iter()
+            .position(|word| *word as u32 == 0x0033_2211)
+            .expect("packed constant payload is present");
+
+        let mut noncanonical_padding = encoded.clone();
+        noncanonical_padding[payload_index] = 0x7F33_2211;
+        assert_eq!(
+            AggQuerySpec::decode_i32(&noncanonical_padding),
+            Err(SpecCodecError::NonCanonical {
+                index: payload_index
+            })
+        );
+
+        let mut oversized = encoded;
+        oversized[payload_index - 1] =
+            i32::try_from(MAX_SPATIAL_CONSTANT_BYTES + 1).expect("limit fits i32");
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&oversized),
+            Err(SpecCodecError::LimitExceeded {
+                context: "spatial constant byte length",
+                declared,
+                maximum: MAX_SPATIAL_CONSTANT_BYTES,
+                ..
+            }) if declared == MAX_SPATIAL_CONSTANT_BYTES + 1
+        ));
     }
 
     #[test]
@@ -1438,6 +1720,14 @@ mod tests {
         let mut encoded = h3_spec().encode_i32().expect("valid spec encodes");
         // H3 resolution follows source tag + three-word column at word 9.
         encoded[9] = 16;
+        assert!(matches!(
+            AggQuerySpec::decode_i32(&encoded),
+            Err(SpecCodecError::InvalidSpec(_))
+        ));
+
+        let mut encoded = h3_spec().encode_i32().expect("valid spec encodes");
+        // The H3 result type follows the encoding tag at word 11.
+        encoded[11] = INT4_OID as i32;
         assert!(matches!(
             AggQuerySpec::decode_i32(&encoded),
             Err(SpecCodecError::InvalidSpec(_))

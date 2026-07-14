@@ -12,8 +12,8 @@ use crate::engine::spec::{
 };
 
 use super::{
-    AggregateExpr, EquiJoin, InputProjection, OutputMetadata, PlannerColumn, RelationResidency,
-    RelationShape, ShapeDecline, ShapeInput, ShapeModifiers,
+    AggregateExpr, EquiJoin, InputProjection, OutputMetadata, PlannerColumn, PlannerGroupKey,
+    RelationResidency, RelationShape, ShapeDecline, ShapeInput, ShapeModifiers,
 };
 
 #[derive(Default)]
@@ -215,7 +215,7 @@ unsafe fn target_entry_expr(
     (!expr.is_null()).then_some((target, expr))
 }
 
-unsafe fn group_columns(query: &pg_sys::Query) -> Result<Vec<PlannerColumn>, ShapeDecline> {
+unsafe fn group_keys(query: &pg_sys::Query) -> Result<Vec<PlannerGroupKey>, ShapeDecline> {
     let mut groups = Vec::with_capacity(list_len(query.groupClause));
     for index in 0..list_len(query.groupClause) {
         // SAFETY: index is bounded by list_len(groupClause).
@@ -260,6 +260,7 @@ unsafe fn group_columns(query: &pg_sys::Query) -> Result<Vec<PlannerColumn>, Sha
             }
         }
         let group = found.ok_or(ShapeDecline::UnsupportedGroupExpression)?;
+        let group = PlannerGroupKey::Column(group);
         if groups.contains(&group) {
             return Err(ShapeDecline::UnsupportedGroupExpression);
         }
@@ -496,7 +497,7 @@ unsafe fn projections_and_aggregates(
         // SAFETY: expression belongs to this Query target list.
         if let Some(group) = unsafe { direct_var(expression, query) } {
             projections.push(InputProjection::Group {
-                column: group,
+                key: PlannerGroupKey::Column(group),
                 // SAFETY: expression/group came from the active target list;
                 // the catalog lookup runs synchronously on the backend.
                 output: unsafe {
@@ -1319,7 +1320,7 @@ pub(super) unsafe fn extract_input(
     super::builder::reject_modifiers(modifiers)?;
 
     // SAFETY: all adapters inspect the same still-live planner Query.
-    let groups = unsafe { group_columns(query) }?;
+    let groups = unsafe { group_keys(query) }?;
     // SAFETY: inventory pointers were collected synchronously from query.
     let (projections, aggregates) = unsafe { projections_and_aggregates(query, &inventory) }?;
     // SAFETY: inventory pointers were collected synchronously from query.
@@ -1335,7 +1336,7 @@ pub(super) unsafe fn extract_input(
     Ok(ShapeInput {
         relations,
         joins,
-        group_columns: groups,
+        group_keys: groups,
         aggregates,
         projections,
         relation_filters,

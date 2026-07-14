@@ -1,6 +1,6 @@
 //! Resident descriptor aggregate executor for pg_accel Custom Scan nodes.
 //!
-//! [`AggExecState`] adapts the strict neutral AQS2/AOP2 contract to the Custom
+//! [`AggExecState`] adapts the strict neutral AQS3/AOP2 contract to the Custom
 //! Scan FFI layer.
 //!
 //! # Lifecycle

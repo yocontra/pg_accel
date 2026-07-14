@@ -505,7 +505,9 @@ pub(super) fn artifact_column_refs(spec: &AggQuerySpec) -> Result<Vec<ResidentCo
             GroupKeySource::StarDimension { group_column, .. } => {
                 insert_column_ref(&mut columns, *group_column)?;
             }
-            GroupKeySource::Expression { .. } | GroupKeySource::H3Cell { .. } => {
+            GroupKeySource::Expression { .. }
+            | GroupKeySource::H3CellToParent { .. }
+            | GroupKeySource::H3LatLngToCell { .. } => {
                 return Err("Phase 5D supports only column group keys".to_owned());
             }
         }
@@ -786,7 +788,8 @@ pub(crate) fn estimate_descriptor_artifact_bytes_upper_bound(
             }
             GroupKeySource::FactColumn(_)
             | GroupKeySource::Expression { .. }
-            | GroupKeySource::H3Cell { .. } => return None,
+            | GroupKeySource::H3CellToParent { .. }
+            | GroupKeySource::H3LatLngToCell { .. } => return None,
         }
     }
 
@@ -895,7 +898,9 @@ pub(super) fn prepare_agg_artifact(
                 }
                 PreparedKeyInput::Dimension { dim_index, lookup }
             }
-            GroupKeySource::Expression { .. } | GroupKeySource::H3Cell { .. } => {
+            GroupKeySource::Expression { .. }
+            | GroupKeySource::H3CellToParent { .. }
+            | GroupKeySource::H3LatLngToCell { .. } => {
                 return Err("Phase 5D cannot resolve expression/H3 group keys".to_owned());
             }
         };
@@ -1044,6 +1049,10 @@ impl DescriptorAggArtifact {
 impl DerivedArtifact for DescriptorAggArtifact {
     fn device_bytes(&self) -> u64 {
         self.device_bytes
+    }
+
+    fn retained_host_exact_bytes(&self) -> u64 {
+        0
     }
 
     fn as_any(&self) -> &dyn Any {

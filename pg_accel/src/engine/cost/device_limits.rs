@@ -1,5 +1,7 @@
 //! Hardware-derived dispatch thresholds.
 
+use std::fmt;
+
 use super::platform::PlatformProfile;
 
 // ---------------------------------------------------------------------------
@@ -16,6 +18,12 @@ pub struct DeviceLimits {
     /// Default cluster-wide cap for backend-local resident GPU allocations.
     /// The `pg_accel.resident_memory_budget_mb` GUC overrides this value.
     pub resident_memory_budget_bytes: usize,
+    /// Maximum retained exact varlena bytes for one resident domain value.
+    ///
+    /// Spatial and raster lanes retain original values for exact recheck or
+    /// reconstruction. This per-value cap prevents one pathological value
+    /// from consuming an unbounded share of the resident ledger.
+    pub resident_domain_max_exact_value_bytes: usize,
     /// Number of expected reuses over which planner costing amortizes a
     /// synchronous first-use resident load.
     pub auto_load_amortization_queries: u32,
@@ -66,6 +74,10 @@ pub struct DeviceLimits {
     /// Custom Scan yield overhead (~3μs/row) makes large-output joins
     /// strictly slower than PG's native HashJoin.
     pub gpu_join_max_output_rows: usize,
+    /// Minimum input rows for a GPU-resident H3 grouped aggregate.
+    pub gpu_h3_group_min_rows: usize,
+    /// Maximum rows in one H3 key-generation/grouping dispatch.
+    pub gpu_h3_max_chunk_rows: usize,
     /// Lower bound of the 100K-row spatial polygon crash band.
     pub gpu_spatial_unsafe_band_min_rows: usize,
     /// Upper bound of the 100K-row spatial polygon crash band.
@@ -77,6 +89,10 @@ pub struct DeviceLimits {
     /// Below this threshold, the GPU kernel overhead exceeds PG parallel's
     /// per-row cost, so we defer to standard PostGIS evaluation.
     pub gpu_spatial_min_vertices: usize,
+    /// Maximum vertices accepted from one resident spatial value.
+    /// Larger values stay native rather than creating an unbounded flattened
+    /// coordinate lane or exact-recheck workload.
+    pub gpu_spatial_max_vertices_per_row: usize,
     /// Maximum estimated output fraction for heap-backed GPU spatial scans.
     ///
     /// Until spatial predicates can feed a GPU-resident aggregate/filter
@@ -84,12 +100,19 @@ pub struct DeviceLimits {
     /// back through PostgreSQL. Those rows are left native even when the
     /// point-in-ring kernel itself is compute-heavy.
     pub gpu_spatial_max_output_fraction: f64,
+    /// Maximum fraction of spatial rows that may require exact recheck.
+    /// Above this threshold the exact path is expected to dominate execution.
+    pub gpu_spatial_max_recheck_fraction: f64,
     /// Maximum rows per linear pairwise spatial dispatch.
     ///
     /// The C bridge packs descriptors, unique coordinate/ring payloads, and
     /// one tri-state result byte into a single device allocation. Chunking
     /// bounds that allocation while preserving a linear row-wise contract.
     pub gpu_spatial_pairwise_chunk_rows: usize,
+    /// Minimum flattened pixel count before raster GPU dispatch is considered.
+    pub gpu_raster_min_pixels: usize,
+    /// Maximum flattened pixels in one raster GPU dispatch.
+    pub gpu_raster_max_chunk_pixels: usize,
     /// Minimum rows for GPU expression scan dispatch.
     /// Below this, PG's native executor with JIT is faster.
     pub gpu_expr_min_rows: usize,
@@ -299,6 +322,57 @@ pub struct DeviceLimits {
     pub soft_fp64_cost_multiplier: f64,
 }
 
+/// A violated invariant in a [`DeviceLimits`] contract.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeviceLimitsValidationError {
+    /// A row, element, byte, vertex, pixel, or reuse count is zero.
+    ZeroCount { field: &'static str },
+    /// A lower bound exceeds its corresponding upper bound.
+    InvertedRange {
+        lower_field: &'static str,
+        lower: u128,
+        upper_field: &'static str,
+        upper: u128,
+    },
+    /// A fraction is non-finite or outside the inclusive range `[0, 1]`.
+    InvalidFraction { field: &'static str, value: f64 },
+    /// A cost coefficient or ratio is non-finite or not strictly positive.
+    InvalidPositiveFloat { field: &'static str, value: f64 },
+    /// The software fp64 multiplier is non-finite or outside `[1, 64]`.
+    InvalidSoftFp64Multiplier { value: f64 },
+}
+
+impl fmt::Display for DeviceLimitsValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroCount { field } => write!(f, "device limit {field} must be nonzero"),
+            Self::InvertedRange {
+                lower_field,
+                lower,
+                upper_field,
+                upper,
+            } => write!(
+                f,
+                "device limit range is inverted: {lower_field}={lower} exceeds {upper_field}={upper}"
+            ),
+            Self::InvalidFraction { field, value } => write!(
+                f,
+                "device limit {field} must be finite and within [0, 1], got {value}"
+            ),
+            Self::InvalidPositiveFloat { field, value } => write!(
+                f,
+                "device limit {field} must be finite and positive, got {value}"
+            ),
+            Self::InvalidSoftFp64Multiplier { value } => write!(
+                f,
+                "device limit soft_fp64_cost_multiplier must be finite and within [1, 64], got {value}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DeviceLimitsValidationError {}
+
 impl DeviceLimits {
     /// Reference baseline: 32 compute units (Apple M2 Max GPU).
     /// Thresholds scale inversely with CU count relative to this baseline.
@@ -337,6 +411,29 @@ impl DeviceLimits {
         let gpu_hash_agg_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000);
         let gpu_hash_agg_unsafe_input_rows = 100_000;
 
+        // H3 grouping stages exact/f32 coordinates, generated keys, validity,
+        // and face/IJK state in one slab. Reserve at most 1/16th of a device
+        // allocation and budget 64 bytes per row, then retain a useful floor.
+        let gpu_h3_max_chunk_rows = if mem > 0 {
+            (mem / 16 / 64).clamp(100_000, 4_000_000)
+        } else {
+            1_000_000
+        };
+        let gpu_h3_group_min_rows = cu_scale(100_000)
+            .clamp(10_000, 1_000_000)
+            .min(gpu_h3_max_chunk_rows);
+
+        // Raster kernels retain native typed pixel bytes. Budgeting the widest
+        // eight-byte pixel keeps metadata, output, and multi-input headroom.
+        let gpu_raster_max_chunk_pixels = if mem > 0 {
+            (mem / 8 / 8).clamp(65_536, 4_000_000)
+        } else {
+            1_000_000
+        };
+        let gpu_raster_min_pixels = cu_scale(65_536)
+            .clamp(16_384, 1_048_576)
+            .min(gpu_raster_max_chunk_pixels);
+
         // ~64 bytes per hash entry; use 1/256th of GPU memory as budget.
         // GPU hash agg kernel uses open-addressing with atomic accumulators;
         // tested up to 100K groups on Metal.
@@ -364,7 +461,6 @@ impl DeviceLimits {
         } else {
             2_000_000
         };
-
         // Max output rows for GPU hash join. Custom Scan yield overhead
         // (~3μs/row) dominates for large outputs. Scale with CUs: more
         // CUs means GPU probe is faster, tolerating more output rows.
@@ -374,6 +470,15 @@ impl DeviceLimits {
             let base = 100_000_usize;
             let scaled = (base as u64 * cus as u64 / Self::BASELINE_CUS as u64) as usize;
             scaled.clamp(50_000, 500_000)
+        };
+
+        // Hash join build: reject the sort-merge kernel branch that starts at
+        // 100K rows. Memory may lower the cap on tiny devices but never raises
+        // it into the unsafe branch.
+        let gpu_hash_join_build_max_rows = if mem > 0 {
+            (mem / 64 / 64).clamp(10_000, 99_999)
+        } else {
+            99_999
         };
 
         // Batch size bounds scale with available GPU memory.
@@ -387,6 +492,7 @@ impl DeviceLimits {
 
         Self {
             resident_memory_budget_bytes,
+            resident_domain_max_exact_value_bytes: 1024 * 1024,
             auto_load_amortization_queries: 8,
             gpu_min_rows,
             gpu_sort_min_rows,
@@ -402,6 +508,8 @@ impl DeviceLimits {
             gpu_sort_heap_topk_max_fraction: 0.25,
             gpu_sort_heap_topk_max_width_bytes: 16,
             gpu_join_max_output_rows,
+            gpu_h3_group_min_rows,
+            gpu_h3_max_chunk_rows,
             // 2026-05-13 safety band: many polygon/selectivity fixtures crash
             // at the 100K scale, while adjacent 10K/1M cells do not show the
             // same monotonic memory profile. Keep this row-band gate narrow.
@@ -422,7 +530,9 @@ impl DeviceLimits {
             // break-even. The work-product gate is the correct discriminator;
             // keep this only as a hard floor for truly degenerate polygons.
             gpu_spatial_min_vertices: cu_scale(100).clamp(32, 1_000),
+            gpu_spatial_max_vertices_per_row: 1_000_000,
             gpu_spatial_max_output_fraction: 0.80,
+            gpu_spatial_max_recheck_fraction: 0.10,
             // Pairwise spatial uses one packed device slab. Reserve 1/32 of
             // max-allocation capacity and budget 16 KiB per pair (enough for
             // two 1K-vertex payloads before pointer-based payload dedup).
@@ -433,21 +543,13 @@ impl DeviceLimits {
             } else {
                 2_048
             },
+            gpu_raster_min_pixels,
+            gpu_raster_max_chunk_pixels,
             // GpuExpr scan: inline template filter avoids ExecQual overhead
             // but Custom Scan framing still adds per-row cost. Needs enough
             // rows to amortize compilation + scan overhead.
             gpu_expr_min_rows: cu_scale(250_000).clamp(50_000, 2_000_000),
-            // Hash join build: reject the sort-merge kernel branch that
-            // starts at count >= 100000. That path currently probes SYCL
-            // kernels with raw host pointers on Metal, so the planner cap is
-            // pinned just below the threshold until the kernel contract is
-            // fixed. Memory can lower the cap on tiny devices but never
-            // raises it into the unsafe branch.
-            gpu_hash_join_build_max_rows: if mem > 0 {
-                (mem / 64 / 64).clamp(10_000, 99_999)
-            } else {
-                99_999
-            },
+            gpu_hash_join_build_max_rows,
             // Pipeline fusion: setup has overhead (scan_desc open, template
             // compile). Needs enough rows to amortize.
             gpu_pipeline_fusion_min_rows: cu_scale(10_000).clamp(5_000, 100_000),
@@ -597,6 +699,7 @@ impl DeviceLimits {
     pub const fn cpu_only() -> Self {
         Self {
             resident_memory_budget_bytes: 256 * 1024 * 1024,
+            resident_domain_max_exact_value_bytes: 1024 * 1024,
             auto_load_amortization_queries: 8,
             gpu_min_rows: 10_000,
             gpu_sort_min_rows: 100_000,
@@ -614,14 +717,20 @@ impl DeviceLimits {
             gpu_sort_heap_topk_max_fraction: 0.25,
             gpu_sort_heap_topk_max_width_bytes: 16,
             gpu_join_max_output_rows: 100_000,
+            gpu_h3_group_min_rows: 100_000,
+            gpu_h3_max_chunk_rows: 1_000_000,
             gpu_spatial_unsafe_band_min_rows: 80_000,
             gpu_spatial_unsafe_band_max_rows: 150_000,
             gpu_spatial_unsafe_band_min_vertices: 100,
             gpu_spatial_min_vertices: 50_000,
+            gpu_spatial_max_vertices_per_row: 1_000_000,
             gpu_spatial_max_output_fraction: 0.80,
+            gpu_spatial_max_recheck_fraction: 0.10,
             // Conservative fallback for callers that inspect limits before
             // device discovery. No GPU dispatch occurs under cpu_only().
             gpu_spatial_pairwise_chunk_rows: 2_048,
+            gpu_raster_min_pixels: 65_536,
+            gpu_raster_max_chunk_pixels: 1_000_000,
             gpu_expr_min_rows: 250_000,
             gpu_hash_join_build_max_rows: 99_999,
             gpu_pipeline_fusion_min_rows: 10_000,
@@ -681,6 +790,415 @@ impl DeviceLimits {
             soft_fp64_cost_multiplier: 32.0,
         }
     }
+
+    /// Validate the complete limits contract before it is consumed by a
+    /// planner or executor.
+    ///
+    /// This method deliberately validates both hardware-derived and CPU-only
+    /// values. The fallback does not dispatch work, but diagnostics and typed
+    /// cost-model views still consume it and must never observe impossible
+    /// ranges or non-finite coefficients.
+    pub fn validate(&self) -> Result<(), DeviceLimitsValidationError> {
+        macro_rules! require_nonzero {
+            ($($field:ident),+ $(,)?) => {
+                $(
+                    if self.$field == 0 {
+                        return Err(DeviceLimitsValidationError::ZeroCount {
+                            field: stringify!($field),
+                        });
+                    }
+                )+
+            };
+        }
+
+        macro_rules! require_ordered {
+            ($lower:ident, $upper:ident) => {
+                if self.$lower > self.$upper {
+                    return Err(DeviceLimitsValidationError::InvertedRange {
+                        lower_field: stringify!($lower),
+                        lower: self.$lower as u128,
+                        upper_field: stringify!($upper),
+                        upper: self.$upper as u128,
+                    });
+                }
+            };
+        }
+
+        require_nonzero!(
+            resident_memory_budget_bytes,
+            resident_domain_max_exact_value_bytes,
+            auto_load_amortization_queries,
+            gpu_min_rows,
+            gpu_sort_min_rows,
+            gpu_sort_planner_min_rows,
+            gpu_window_min_rows,
+            gpu_reduce_min_rows,
+            gpu_hash_agg_min_rows,
+            gpu_hash_agg_unsafe_input_rows,
+            gpu_hash_agg_max_groups,
+            gpu_reduce_max_chunk,
+            gpu_sort_max_elements,
+            gpu_sort_topk_max_limit,
+            gpu_sort_heap_topk_max_width_bytes,
+            gpu_join_max_output_rows,
+            gpu_h3_group_min_rows,
+            gpu_h3_max_chunk_rows,
+            gpu_spatial_unsafe_band_min_rows,
+            gpu_spatial_unsafe_band_max_rows,
+            gpu_spatial_unsafe_band_min_vertices,
+            gpu_spatial_min_vertices,
+            gpu_spatial_max_vertices_per_row,
+            gpu_spatial_pairwise_chunk_rows,
+            gpu_raster_min_pixels,
+            gpu_raster_max_chunk_pixels,
+            gpu_expr_min_rows,
+            gpu_hash_join_build_max_rows,
+            gpu_pipeline_fusion_min_rows,
+            gpu_preagg_min_fact_rows,
+            gpu_preagg_max_dim_rows,
+            optimal_batch_min,
+            optimal_batch_max,
+            fused_interrupt_interval,
+            reduce_f32_break_even_rows,
+            reduce_f64_break_even_rows,
+            reduce_i64_break_even_rows,
+            reduce_bit_break_even_rows,
+            reduce_bool_break_even_rows,
+            hashagg_min_rows_per_group,
+            hashagg_max_state_bytes_per_group,
+            sort_break_even_rows_int,
+            sort_break_even_rows_float,
+            spatial_point_in_ring_break_even_verts_x_rows,
+            spatial_point_in_ring_max_verts_x_rows,
+            window_min_partition_rows,
+            expr_min_predicate_complexity_x_rows,
+            hashjoin_min_build_rows,
+            gpu_nlj_min_outer_rows,
+            gpu_nlj_min_inner_rows,
+            gpu_nlj_max_output_rows,
+        );
+
+        require_ordered!(gpu_sort_min_rows, gpu_sort_planner_min_rows);
+        require_ordered!(
+            resident_domain_max_exact_value_bytes,
+            resident_memory_budget_bytes
+        );
+        require_ordered!(gpu_h3_group_min_rows, gpu_h3_max_chunk_rows);
+        require_ordered!(
+            gpu_spatial_unsafe_band_min_rows,
+            gpu_spatial_unsafe_band_max_rows
+        );
+        require_ordered!(gpu_spatial_min_vertices, gpu_spatial_max_vertices_per_row);
+        require_ordered!(gpu_raster_min_pixels, gpu_raster_max_chunk_pixels);
+        require_ordered!(optimal_batch_min, optimal_batch_max);
+        require_ordered!(
+            spatial_point_in_ring_break_even_verts_x_rows,
+            spatial_point_in_ring_max_verts_x_rows
+        );
+
+        for (field, value) in [
+            (
+                "gpu_sort_heap_topk_max_fraction",
+                self.gpu_sort_heap_topk_max_fraction,
+            ),
+            (
+                "gpu_spatial_max_output_fraction",
+                self.gpu_spatial_max_output_fraction,
+            ),
+            (
+                "gpu_spatial_max_recheck_fraction",
+                self.gpu_spatial_max_recheck_fraction,
+            ),
+        ] {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(DeviceLimitsValidationError::InvalidFraction { field, value });
+            }
+        }
+
+        for (field, value) in [
+            (
+                "preagg_dim_materialize_cost",
+                self.preagg_dim_materialize_cost,
+            ),
+            ("preagg_fact_scan_cost", self.preagg_fact_scan_cost),
+            ("preagg_probe_cost", self.preagg_probe_cost),
+            ("preagg_agg_cost", self.preagg_agg_cost),
+            ("preagg_yield_cost", self.preagg_yield_cost),
+            ("gpu_op_cost_reduce", self.gpu_op_cost_reduce),
+            ("gpu_op_cost_hash_agg", self.gpu_op_cost_hash_agg),
+            ("gpu_op_cost_sort", self.gpu_op_cost_sort),
+            ("gpu_op_cost_window", self.gpu_op_cost_window),
+            ("gpu_op_cost_filter", self.gpu_op_cost_filter),
+            (
+                "gpu_hashjoin_build_per_row",
+                self.gpu_hashjoin_build_per_row,
+            ),
+            (
+                "gpu_hashjoin_probe_per_row",
+                self.gpu_hashjoin_probe_per_row,
+            ),
+            ("custom_scan_yield_per_row", self.custom_scan_yield_per_row),
+            ("gpu_partial_agg_per_row", self.gpu_partial_agg_per_row),
+            ("gpu_agg_cost_ratio", self.gpu_agg_cost_ratio),
+            ("gpu_window_cost_ratio", self.gpu_window_cost_ratio),
+            ("gpu_preagg_cost_ratio", self.gpu_preagg_cost_ratio),
+            ("gpu_nlj_per_pair_cost", self.gpu_nlj_per_pair_cost),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(DeviceLimitsValidationError::InvalidPositiveFloat { field, value });
+            }
+        }
+
+        if !self.soft_fp64_cost_multiplier.is_finite()
+            || !(1.0..=64.0).contains(&self.soft_fp64_cost_multiplier)
+        {
+            return Err(DeviceLimitsValidationError::InvalidSoftFp64Multiplier {
+                value: self.soft_fp64_cost_multiplier,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(compute_units: u32, gpu_max_alloc_bytes: usize) -> PlatformProfile {
+        PlatformProfile {
+            cpu_cores: 8,
+            has_gpu: true,
+            estimated_gpu_gflops: 2_000.0,
+            compute_units,
+            gpu_max_alloc_bytes,
+            has_native_fp64: false,
+        }
+    }
+
+    #[test]
+    fn constructors_produce_valid_limits() {
+        DeviceLimits::cpu_only()
+            .validate()
+            .expect("cpu-only device limits must satisfy the contract");
+
+        for candidate in [
+            profile(0, 0),
+            profile(1, 1),
+            profile(8, 64 * 1024 * 1024),
+            profile(32, 256 * 1024 * 1024),
+            profile(128, 8 * 1024 * 1024 * 1024),
+        ] {
+            DeviceLimits::from_profile(&candidate)
+                .validate()
+                .expect("hardware-derived device limits must satisfy the contract");
+        }
+    }
+
+    #[test]
+    fn phase6_cpu_only_domain_limits_are_pinned() {
+        let limits = DeviceLimits::cpu_only();
+        assert_eq!(limits.gpu_h3_group_min_rows, 100_000);
+        assert_eq!(limits.gpu_h3_max_chunk_rows, 1_000_000);
+        assert_eq!(limits.gpu_spatial_max_vertices_per_row, 1_000_000);
+        assert_eq!(limits.gpu_spatial_max_recheck_fraction, 0.10);
+        assert_eq!(limits.gpu_raster_min_pixels, 65_536);
+        assert_eq!(limits.gpu_raster_max_chunk_pixels, 1_000_000);
+        assert_eq!(limits.resident_domain_max_exact_value_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn domain_chunks_scale_with_device_allocation() {
+        let low = DeviceLimits::from_profile(&profile(32, 64 * 1024 * 1024));
+        let high = DeviceLimits::from_profile(&profile(32, 8 * 1024 * 1024 * 1024));
+
+        assert!(high.gpu_h3_max_chunk_rows > low.gpu_h3_max_chunk_rows);
+        assert!(high.gpu_raster_max_chunk_pixels > low.gpu_raster_max_chunk_pixels);
+        assert_eq!(high.gpu_spatial_max_vertices_per_row, 1_000_000);
+        assert_eq!(high.resident_domain_max_exact_value_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn validation_rejects_zero_counts_with_the_field_name() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_h3_max_chunk_rows = 0;
+
+        assert_eq!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::ZeroCount {
+                field: "gpu_h3_max_chunk_rows",
+            })
+        );
+    }
+
+    #[test]
+    fn validation_rejects_inverted_ranges() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_h3_group_min_rows = limits.gpu_h3_max_chunk_rows + 1;
+        assert!(matches!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvertedRange {
+                lower_field: "gpu_h3_group_min_rows",
+                upper_field: "gpu_h3_max_chunk_rows",
+                ..
+            })
+        ));
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_spatial_unsafe_band_min_rows = limits.gpu_spatial_unsafe_band_max_rows + 1;
+        assert!(matches!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvertedRange {
+                lower_field: "gpu_spatial_unsafe_band_min_rows",
+                upper_field: "gpu_spatial_unsafe_band_max_rows",
+                ..
+            })
+        ));
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_spatial_min_vertices = limits.gpu_spatial_max_vertices_per_row + 1;
+        assert!(matches!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvertedRange {
+                lower_field: "gpu_spatial_min_vertices",
+                upper_field: "gpu_spatial_max_vertices_per_row",
+                ..
+            })
+        ));
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_raster_min_pixels = limits.gpu_raster_max_chunk_pixels + 1;
+        assert!(matches!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvertedRange {
+                lower_field: "gpu_raster_min_pixels",
+                upper_field: "gpu_raster_max_chunk_pixels",
+                ..
+            })
+        ));
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.resident_domain_max_exact_value_bytes = limits.resident_memory_budget_bytes + 1;
+        assert!(matches!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvertedRange {
+                lower_field: "resident_domain_max_exact_value_bytes",
+                upper_field: "resident_memory_budget_bytes",
+                ..
+            })
+        ));
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.optimal_batch_min = limits.optimal_batch_max + 1;
+        assert!(matches!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvertedRange {
+                lower_field: "optimal_batch_min",
+                upper_field: "optimal_batch_max",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_nonfinite_or_out_of_band_fractions() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_spatial_max_recheck_fraction = f64::NAN;
+        assert!(matches!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvalidFraction {
+                field: "gpu_spatial_max_recheck_fraction",
+                value,
+            }) if value.is_nan()
+        ));
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_spatial_max_output_fraction = 1.01;
+        assert_eq!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvalidFraction {
+                field: "gpu_spatial_max_output_fraction",
+                value: 1.01,
+            })
+        );
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_sort_heap_topk_max_fraction = -0.01;
+        assert_eq!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvalidFraction {
+                field: "gpu_sort_heap_topk_max_fraction",
+                value: -0.01,
+            })
+        );
+    }
+
+    #[test]
+    fn validation_accepts_inclusive_fraction_and_fp64_boundaries() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_sort_heap_topk_max_fraction = 0.0;
+        limits.gpu_spatial_max_output_fraction = 1.0;
+        limits.gpu_spatial_max_recheck_fraction = 0.0;
+        limits.soft_fp64_cost_multiplier = 1.0;
+        limits
+            .validate()
+            .expect("inclusive lower fraction/fp64 bounds must be valid");
+
+        limits.soft_fp64_cost_multiplier = 64.0;
+        limits
+            .validate()
+            .expect("inclusive upper fp64 bound must be valid");
+    }
+
+    #[test]
+    fn validation_rejects_invalid_fp64_multiplier() {
+        for value in [f64::NEG_INFINITY, 0.99, 64.01, f64::NAN] {
+            let mut limits = DeviceLimits::cpu_only();
+            limits.soft_fp64_cost_multiplier = value;
+            assert!(matches!(
+                limits.validate(),
+                Err(DeviceLimitsValidationError::InvalidSoftFp64Multiplier {
+                    value: rejected,
+                }) if rejected.is_nan() == value.is_nan() && (rejected == value || value.is_nan())
+            ));
+        }
+    }
+
+    #[test]
+    fn validation_rejects_nonpositive_or_nonfinite_costs() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_nlj_per_pair_cost = f64::INFINITY;
+        assert_eq!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvalidPositiveFloat {
+                field: "gpu_nlj_per_pair_cost",
+                value: f64::INFINITY,
+            })
+        );
+    }
+
+    #[test]
+    fn publication_validation_accepts_valid_limits_and_rejects_invalid_limits() {
+        let valid = validate_device_limits_for_publication(DeviceLimits::cpu_only())
+            .expect("valid CPU-only limits may be published");
+        assert_eq!(valid.gpu_h3_max_chunk_rows, 1_000_000);
+
+        let mut invalid = DeviceLimits::cpu_only();
+        invalid.gpu_h3_max_chunk_rows = 0;
+        assert!(matches!(
+            validate_device_limits_for_publication(invalid),
+            Err(DeviceLimitsValidationError::ZeroCount {
+                field: "gpu_h3_max_chunk_rows",
+            })
+        ));
+    }
+}
+
+fn validate_device_limits_for_publication(
+    limits: DeviceLimits,
+) -> Result<DeviceLimits, DeviceLimitsValidationError> {
+    limits.validate()?;
+    Ok(limits)
 }
 
 /// Cached device limits, initialised on first access after GPU init.
@@ -728,21 +1246,29 @@ static DEVICE_LIMITS_SOURCE: std::sync::OnceLock<DeviceLimitsSource> = std::sync
 pub fn device_limits() -> &'static DeviceLimits {
     DEVICE_LIMITS.get_or_init(|| {
         #[cfg(test)]
-        {
-            let _ = DEVICE_LIMITS_SOURCE.set(DeviceLimitsSource::FallbackCpuOnly);
-            DeviceLimits::cpu_only()
-        }
+        let (candidate, source) = (
+            DeviceLimits::cpu_only(),
+            DeviceLimitsSource::FallbackCpuOnly,
+        );
         #[cfg(not(test))]
-        {
+        let (candidate, source) = {
             let profile = PlatformProfile::detect();
             if profile.has_gpu {
-                let _ = DEVICE_LIMITS_SOURCE.set(DeviceLimitsSource::HardwareDerived);
-                DeviceLimits::from_profile(&profile)
+                (
+                    DeviceLimits::from_profile(&profile),
+                    DeviceLimitsSource::HardwareDerived,
+                )
             } else {
-                let _ = DEVICE_LIMITS_SOURCE.set(DeviceLimitsSource::FallbackCpuOnly);
-                DeviceLimits::cpu_only()
+                (
+                    DeviceLimits::cpu_only(),
+                    DeviceLimitsSource::FallbackCpuOnly,
+                )
             }
-        }
+        };
+        let limits = validate_device_limits_for_publication(candidate)
+            .unwrap_or_else(|error| panic!("refusing to publish invalid device limits: {error}"));
+        let _ = DEVICE_LIMITS_SOURCE.set(source);
+        limits
     })
 }
 

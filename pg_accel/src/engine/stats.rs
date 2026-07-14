@@ -571,6 +571,18 @@ fn pg_accel_device_limits() -> TableIterator<
     // Keep ordering aligned with the struct declaration in
     // `engine/cost/device_limits.rs` so readers can cross-reference.
     let rows: Vec<(String, String)> = vec![
+        (
+            "resident_memory_budget_bytes".into(),
+            limits.resident_memory_budget_bytes.to_string(),
+        ),
+        (
+            "resident_domain_max_exact_value_bytes".into(),
+            limits.resident_domain_max_exact_value_bytes.to_string(),
+        ),
+        (
+            "auto_load_amortization_queries".into(),
+            limits.auto_load_amortization_queries.to_string(),
+        ),
         ("gpu_min_rows".into(), limits.gpu_min_rows.to_string()),
         (
             "gpu_sort_min_rows".into(),
@@ -593,6 +605,10 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.gpu_hash_agg_min_rows.to_string(),
         ),
         (
+            "gpu_hash_agg_unsafe_input_rows".into(),
+            limits.gpu_hash_agg_unsafe_input_rows.to_string(),
+        ),
+        (
             "gpu_hash_agg_max_groups".into(),
             limits.gpu_hash_agg_max_groups.to_string(),
         ),
@@ -605,16 +621,68 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.gpu_sort_max_elements.to_string(),
         ),
         (
+            "gpu_sort_topk_max_limit".into(),
+            limits.gpu_sort_topk_max_limit.to_string(),
+        ),
+        (
+            "gpu_sort_heap_topk_max_fraction".into(),
+            limits.gpu_sort_heap_topk_max_fraction.to_string(),
+        ),
+        (
+            "gpu_sort_heap_topk_max_width_bytes".into(),
+            limits.gpu_sort_heap_topk_max_width_bytes.to_string(),
+        ),
+        (
             "gpu_join_max_output_rows".into(),
             limits.gpu_join_max_output_rows.to_string(),
+        ),
+        (
+            "gpu_h3_group_min_rows".into(),
+            limits.gpu_h3_group_min_rows.to_string(),
+        ),
+        (
+            "gpu_h3_max_chunk_rows".into(),
+            limits.gpu_h3_max_chunk_rows.to_string(),
+        ),
+        (
+            "gpu_spatial_unsafe_band_min_rows".into(),
+            limits.gpu_spatial_unsafe_band_min_rows.to_string(),
+        ),
+        (
+            "gpu_spatial_unsafe_band_max_rows".into(),
+            limits.gpu_spatial_unsafe_band_max_rows.to_string(),
+        ),
+        (
+            "gpu_spatial_unsafe_band_min_vertices".into(),
+            limits.gpu_spatial_unsafe_band_min_vertices.to_string(),
         ),
         (
             "gpu_spatial_min_vertices".into(),
             limits.gpu_spatial_min_vertices.to_string(),
         ),
         (
+            "gpu_spatial_max_vertices_per_row".into(),
+            limits.gpu_spatial_max_vertices_per_row.to_string(),
+        ),
+        (
             "gpu_spatial_max_output_fraction".into(),
             limits.gpu_spatial_max_output_fraction.to_string(),
+        ),
+        (
+            "gpu_spatial_max_recheck_fraction".into(),
+            limits.gpu_spatial_max_recheck_fraction.to_string(),
+        ),
+        (
+            "gpu_spatial_pairwise_chunk_rows".into(),
+            limits.gpu_spatial_pairwise_chunk_rows.to_string(),
+        ),
+        (
+            "gpu_raster_min_pixels".into(),
+            limits.gpu_raster_min_pixels.to_string(),
+        ),
+        (
+            "gpu_raster_max_chunk_pixels".into(),
+            limits.gpu_raster_max_chunk_pixels.to_string(),
         ),
         (
             "gpu_expr_min_rows".into(),
@@ -786,10 +854,6 @@ fn pg_accel_device_limits() -> TableIterator<
         (
             "gpu_nlj_per_pair_cost".into(),
             limits.gpu_nlj_per_pair_cost.to_string(),
-        ),
-        (
-            "gpu_spatial_pairwise_chunk_rows".into(),
-            limits.gpu_spatial_pairwise_chunk_rows.to_string(),
         ),
         ("has_native_fp64".into(), limits.has_native_fp64.to_string()),
         (
@@ -1114,15 +1178,32 @@ mod tests {
         );
     }
 
-    /// End-to-end `#[pg_test]`: run the SQL SRF and verify it returns at
-    /// least one row with a non-empty `source` column and the
-    /// `gpu_reduce_min_rows` row falls inside the clamp bounds.
+    /// End-to-end `#[pg_test]`: run the SQL SRF and verify the complete frozen
+    /// contract, source tag, and a representative hardware-derived threshold.
     #[pg_test]
     fn pg_accel_device_limits_returns_rows() {
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM pg_accel_device_limits()")
             .expect("pg_accel_device_limits() should succeed")
             .expect("pg_accel_device_limits() should return a row count");
-        assert!(count > 40, "expected >40 limit rows, got {count}");
+        assert_eq!(count, 74, "expected one SRF row per DeviceLimits field");
+
+        let phase6_count = Spi::get_one::<i64>(
+            "SELECT COUNT(*) FROM pg_accel_device_limits() WHERE name IN (\
+             'gpu_h3_group_min_rows', 'gpu_h3_max_chunk_rows', \
+             'gpu_spatial_max_vertices_per_row', \
+             'gpu_spatial_max_recheck_fraction', 'gpu_raster_min_pixels', \
+             'gpu_raster_max_chunk_pixels', \
+             'resident_domain_max_exact_value_bytes', \
+             'gpu_spatial_unsafe_band_min_rows', \
+             'gpu_spatial_unsafe_band_max_rows', \
+             'gpu_spatial_unsafe_band_min_vertices')",
+        )
+        .expect("Phase 6 device-limit lookup should succeed")
+        .expect("Phase 6 device-limit lookup should return a count");
+        assert_eq!(
+            phase6_count, 10,
+            "Phase 6 domain and legacy unsafe-band limits must be exposed"
+        );
 
         let source = Spi::get_one::<String>("SELECT source FROM pg_accel_device_limits() LIMIT 1")
             .expect("source column query should succeed")

@@ -5,11 +5,13 @@
 //! snapshot loads, and [`store`] owns the backend-local two-tier LRU. The
 //! proof types used by planner/executor boundaries remain in [`proof`].
 
+mod domain;
 mod ledger;
 mod loader;
 mod proof;
 mod store;
 
+pub use domain::*;
 pub use proof::*;
 pub use store::{
     ArtifactEnsureOutcome, DerivedArtifact, DerivedArtifactIdentity, PreparedDerived,
@@ -17,10 +19,10 @@ pub use store::{
     ResidentDependencyStamp, ResidentInputBundle, ResidentKeyDecoder, ResidentLoadError,
     ResidentLoadEstimate, ResidentRelationEvidence, ResidentRelationStatus, ResolvedArtifactBundle,
     ResolvedDerivedInputs, SelectedRelation, SelectedRelationsEnsureOutcome,
-    ensure_derived_artifact, ensure_selected_relations, estimate_selected_relation,
-    register_derived_artifact, resident_budget_snapshot, resident_live_bytes, shape_digest,
-    with_derived_artifact, with_derived_artifact_inputs, with_resident_column,
-    with_resolved_artifact,
+    ensure_derived_artifact, ensure_device_derived_artifact, ensure_selected_relations,
+    estimate_selected_relation, register_derived_artifact, resident_budget_snapshot,
+    resident_live_bytes, shape_digest, with_derived_artifact, with_derived_artifact_inputs,
+    with_resident_column, with_resolved_artifact,
 };
 
 /// Register residency shared memory. Must be called from `_PG_init`.

@@ -18,7 +18,7 @@ use crate::engine::residency::{
 use crate::engine::spec::{
     AggOutputProjection, AggOutputSource, AggQuerySpec, AggregateKind, AggregateSource,
     BinaryMeasureOp, FilterSpec, GroupKeyEncoding, GroupKeySource, JoinMultiplicity, MaskKind,
-    MeasureExpr,
+    MeasureExpr, SpatialOperand, SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
 };
 
 use super::private_data::{RESIDENT_PROOF_VERSION, resident_proof_default_for_strategy};
@@ -634,9 +634,19 @@ fn group_key_source_summary(source: &GroupKeySource) -> String {
             inputs.len(),
             program.len()
         ),
-        GroupKeySource::H3Cell { input, resolution } => {
-            format!("h3({}, resolution={resolution})", column_summary(*input))
-        }
+        GroupKeySource::H3CellToParent { cell, resolution } => format!(
+            "h3_cell_to_parent({}, resolution={resolution})",
+            column_summary(*cell)
+        ),
+        GroupKeySource::H3LatLngToCell {
+            latitude,
+            longitude,
+            resolution,
+        } => format!(
+            "h3_latlng_to_cell(latitude={}, longitude={}, resolution={resolution})",
+            column_summary(*latitude),
+            column_summary(*longitude)
+        ),
     }
 }
 
@@ -734,13 +744,60 @@ fn filter_summary(filter: &FilterSpec) -> String {
             format!("bytecode(inputs={}, words={})", inputs.len(), program.len())
         }
         FilterSpec::Spatial {
-            function_oid,
+            predicate,
+            left,
+            right,
             distance,
-            ..
         } => format!(
-            "spatial(function={function_oid}, distance={})",
-            distance.is_some()
+            "spatial(predicate={}, left={}, right={}, distance={})",
+            spatial_predicate_label(*predicate),
+            spatial_operand_summary(left),
+            spatial_operand_summary(right),
+            distance.is_some(),
         ),
+    }
+}
+
+fn spatial_operand_summary(operand: &SpatialOperand) -> String {
+    match operand {
+        SpatialOperand::Column { column, metadata } => format!(
+            "column({}, {})",
+            column_summary(*column),
+            spatial_metadata_summary(*metadata)
+        ),
+        SpatialOperand::Constant { metadata, bytes } => format!(
+            "constant({}, bytes={})",
+            spatial_metadata_summary(*metadata),
+            bytes.len()
+        ),
+    }
+}
+
+fn spatial_metadata_summary(metadata: SpatialValueMetadata) -> String {
+    format!(
+        "kind={}, typmod={}, srid={}",
+        match metadata.kind {
+            SpatialValueKind::Geometry => "geometry",
+            SpatialValueKind::Geography => "geography",
+        },
+        metadata.typmod,
+        metadata
+            .srid
+            .map_or_else(|| "dynamic".to_owned(), |srid| srid.to_string())
+    )
+}
+
+const fn spatial_predicate_label(predicate: SpatialPredicateKind) -> &'static str {
+    match predicate {
+        SpatialPredicateKind::Intersects => "intersects",
+        SpatialPredicateKind::Contains => "contains",
+        SpatialPredicateKind::Within => "within",
+        SpatialPredicateKind::DWithin => "dwithin",
+        SpatialPredicateKind::Disjoint => "disjoint",
+        SpatialPredicateKind::Equals => "equals",
+        SpatialPredicateKind::Touches => "touches",
+        SpatialPredicateKind::Crosses => "crosses",
+        SpatialPredicateKind::Overlaps => "overlaps",
     }
 }
 

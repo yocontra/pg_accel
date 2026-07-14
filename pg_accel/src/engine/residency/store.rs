@@ -10,6 +10,7 @@ use pgrx::{default, name, pg_sys, prelude::*};
 use crate::engine::gucs;
 use crate::gpu::ExprDeviceBuffer;
 
+use super::domain::ResidentByteAccounting;
 use super::ledger::{self, GenerationStamp, LedgerCharge};
 use super::loader::{self, ColumnRequest, StagedRelation};
 
@@ -311,11 +312,21 @@ impl ResidentKeyDecoder<'_> {
     }
 }
 
-/// A derived artifact owns any device buffers produced from raw columns.
-/// `device_bytes` must be exact; the value is charged before publication.
+/// A derived artifact owns any device buffers produced from raw columns and
+/// any original host values retained for exact recheck or reconstruction.
 pub trait DerivedArtifact: Any {
     fn device_bytes(&self) -> u64;
+
+    fn retained_host_exact_bytes(&self) -> u64;
+
     fn as_any(&self) -> &dyn Any;
+}
+
+fn artifact_accounting<T: DerivedArtifact + ?Sized>(artifact: &T) -> ResidentByteAccounting {
+    ResidentByteAccounting {
+        device_bytes: artifact.device_bytes(),
+        retained_host_exact_bytes: artifact.retained_host_exact_bytes(),
+    }
 }
 
 /// Exact identity for one derived shape. The digest is an index accelerator;
@@ -400,7 +411,9 @@ pub struct ResolvedDerivedInputs<'a, T> {
     pub artifact: &'a T,
     pub columns: Vec<ResidentColumnView<'a>>,
     pub evidence: Vec<ResidentRelationEvidence>,
+    /// Device-only portion of `accounting`, retained for existing consumers.
     pub device_bytes: u64,
+    pub accounting: ResidentByteAccounting,
 }
 
 pub(super) struct DerivedEntry {
@@ -723,9 +736,10 @@ pub enum ResidentLoadError {
     ArtifactDependencyChanged {
         relid: pg_sys::Oid,
     },
-    ArtifactByteMismatch {
-        declared: u64,
-        actual: u64,
+    ArtifactAccountingOverflow,
+    ArtifactAccountingMismatch {
+        declared: ResidentByteAccounting,
+        actual: ResidentByteAccounting,
     },
 }
 
@@ -763,9 +777,16 @@ impl fmt::Display for ResidentLoadError {
                 f,
                 "resident derived artifact dependency relation OID {relid} changed during resolution"
             ),
-            Self::ArtifactByteMismatch { declared, actual } => write!(
+            Self::ArtifactAccountingOverflow => {
+                f.write_str("resident derived artifact byte accounting overflows u64")
+            }
+            Self::ArtifactAccountingMismatch { declared, actual } => write!(
                 f,
-                "resident derived artifact declared {declared} device bytes but owns {actual}"
+                "resident derived artifact accounting mismatch: declared {} device + {} retained host bytes, actual {} device + {} retained host bytes",
+                declared.device_bytes,
+                declared.retained_host_exact_bytes,
+                actual.device_bytes,
+                actual.retained_host_exact_bytes
             ),
         }
     }
@@ -1479,13 +1500,140 @@ pub fn ensure_derived_artifact<T: DerivedArtifact, P>(
 
     let charge = reserve_with_local_eviction_excluding(&protected, prepared.device_bytes)?;
     let artifact = build(prepared.prepared).map_err(ResidentLoadError::Loader)?;
-    let actual = artifact.device_bytes();
-    if actual != prepared.device_bytes {
+    let declared = ResidentByteAccounting {
+        device_bytes: prepared.device_bytes,
+        retained_host_exact_bytes: 0,
+    };
+    let actual = artifact_accounting(&artifact);
+    if actual != declared {
         drop(artifact);
-        return Err(ResidentLoadError::ArtifactByteMismatch {
-            declared: prepared.device_bytes,
-            actual,
+        return Err(ResidentLoadError::ArtifactAccountingMismatch { declared, actual });
+    }
+
+    process_invalidations();
+    STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        if let Some(relid) = first_dependency_mismatch(&store, &captured_dependencies) {
+            return Err(ResidentLoadError::ArtifactDependencyChanged { relid });
+        }
+        let owner = store
+            .entries
+            .iter_mut()
+            .find(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        if let Some(index) = owner
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity))
+        {
+            owner.remove_derived(index);
+            replacing_stale = true;
+        }
+        owner.derived.push(DerivedEntry {
+            digest: identity.digest(),
+            canonical_words: identity.canonical_words().to_vec().into_boxed_slice(),
+            dependencies: captured_dependencies,
+            artifact: Box::new(artifact),
+            charge,
         });
+        Ok(())
+    })?;
+    Ok(if replacing_stale {
+        ArtifactEnsureOutcome::Rebuilt
+    } else {
+        ArtifactEnsureOutcome::Built
+    })
+}
+
+/// Find or build a dependency-stamped artifact directly from resident device
+/// inputs after reserving its complete ledger charge.
+///
+/// Unlike [`ensure_derived_artifact`], `build` runs while all requested raw
+/// columns remain pinned under one immutable store borrow. This permits a
+/// synchronous device-to-device transform without copying the source lanes to
+/// host memory. `declared` must include both device allocations and retained
+/// exact host values; the store charges their checked total before invoking
+/// `build` and verifies both categories before publication.
+///
+/// The callback must not re-enter residency APIs or execute SPI/catalog work.
+pub fn ensure_device_derived_artifact<T: DerivedArtifact>(
+    owner_relid: pg_sys::Oid,
+    identity: &DerivedArtifactIdentity,
+    dependency_relids: &[pg_sys::Oid],
+    columns: &[ResidentColumnRef],
+    declared: ResidentByteAccounting,
+    build: impl FnOnce(ResidentInputBundle<'_>) -> Result<T, String>,
+) -> Result<ArtifactEnsureOutcome, ResidentLoadError> {
+    if identity.canonical_words().is_empty() {
+        return Err(ResidentLoadError::InvalidArtifactDependencies(
+            "canonical artifact identity is empty".to_owned(),
+        ));
+    }
+    let declared_total = declared
+        .checked_total()
+        .map_err(|_| ResidentLoadError::ArtifactAccountingOverflow)?;
+    process_invalidations();
+    let protected = canonical_dependency_relids(owner_relid, dependency_relids, columns)?;
+
+    let mut replacing_stale = false;
+    let hit = STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        let owner_index = store
+            .entries
+            .iter()
+            .position(|entry| entry.relid == owner_relid)
+            .ok_or(ResidentLoadError::MissingRelation(owner_relid))?;
+        let exact_index = store.entries[owner_index]
+            .derived
+            .iter()
+            .position(|entry| entry.has_identity(identity));
+        let Some(exact_index) = exact_index else {
+            return Ok(false);
+        };
+        let stored_dependencies = &store.entries[owner_index].derived[exact_index].dependencies;
+        let stale = !dependency_relids_match(stored_dependencies, &protected)
+            || first_dependency_mismatch(&store, stored_dependencies).is_some();
+        if stale {
+            store.entries[owner_index].remove_derived(exact_index);
+            replacing_stale = true;
+            return Ok(false);
+        }
+        let artifact = &store.entries[owner_index].derived[exact_index].artifact;
+        if !artifact.as_any().is::<T>() {
+            return Err(ResidentLoadError::ArtifactTypeMismatch {
+                digest: identity.digest(),
+            });
+        }
+        let actual = artifact_accounting(artifact.as_ref());
+        if actual != declared {
+            return Err(ResidentLoadError::ArtifactAccountingMismatch { declared, actual });
+        }
+        Ok(true)
+    })?;
+    if hit {
+        for raw_relid in &protected {
+            STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+        }
+        return Ok(ArtifactEnsureOutcome::Hit);
+    }
+
+    let charge = reserve_with_local_eviction_excluding(&protected, declared_total)?;
+    for raw_relid in &protected {
+        STORE.with(|store| store.borrow_mut().touch(pg_sys::Oid::from(*raw_relid)));
+    }
+    let (artifact, captured_dependencies) = STORE.with(|store| {
+        let store = store.borrow();
+        let captured_dependencies = dependency_stamps(&store, &protected)?;
+        let columns = resolve_column_views(&store, columns)?;
+        let evidence = dependency_evidence(&store, &captured_dependencies)?;
+        let artifact =
+            build(ResidentInputBundle { columns, evidence }).map_err(ResidentLoadError::Loader)?;
+        Ok::<_, ResidentLoadError>((artifact, captured_dependencies))
+    })?;
+    let actual = artifact_accounting(&artifact);
+    if actual != declared {
+        drop(artifact);
+        return Err(ResidentLoadError::ArtifactAccountingMismatch { declared, actual });
     }
 
     process_invalidations();
@@ -1610,11 +1758,13 @@ pub fn with_derived_artifact_inputs<T: Any, R>(
         )?;
         let columns = resolve_column_views(&store, columns)?;
         let evidence = dependency_evidence(&store, &entry.dependencies)?;
+        let accounting = artifact_accounting(entry.artifact.as_ref());
         Ok(callback(ResolvedDerivedInputs {
             artifact,
             columns,
             evidence,
-            device_bytes: entry.bytes(),
+            device_bytes: accounting.device_bytes,
+            accounting,
         }))
     })
 }
@@ -1649,13 +1799,14 @@ pub fn register_derived_artifact<T: DerivedArtifact>(
     // cache miss, never an unaccounted allocation or stale artifact.
     let charge = reserve_with_local_eviction(owner_relid, declared_bytes)?;
     let artifact = build().map_err(ResidentLoadError::Loader)?;
-    let actual = artifact.device_bytes();
-    if actual != declared_bytes {
+    let declared = ResidentByteAccounting {
+        device_bytes: declared_bytes,
+        retained_host_exact_bytes: 0,
+    };
+    let actual = artifact_accounting(&artifact);
+    if actual != declared {
         drop(artifact);
-        return Err(ResidentLoadError::ArtifactByteMismatch {
-            declared: declared_bytes,
-            actual,
-        });
+        return Err(ResidentLoadError::ArtifactAccountingMismatch { declared, actual });
     }
     STORE.with(|store| {
         let mut store = store.borrow_mut();
@@ -2196,6 +2347,10 @@ mod tests {
             0
         }
 
+        fn retained_host_exact_bytes(&self) -> u64 {
+            0
+        }
+
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -2208,6 +2363,29 @@ mod tests {
             self.0
         }
 
+        fn retained_host_exact_bytes(&self) -> u64 {
+            0
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    struct AccountedArtifact {
+        device_bytes: u64,
+        retained_host_exact_bytes: u64,
+    }
+
+    impl DerivedArtifact for AccountedArtifact {
+        fn device_bytes(&self) -> u64 {
+            self.device_bytes
+        }
+
+        fn retained_host_exact_bytes(&self) -> u64 {
+            self.retained_host_exact_bytes
+        }
+
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -2217,6 +2395,10 @@ mod tests {
 
     impl DerivedArtifact for MarkerArtifact {
         fn device_bytes(&self) -> u64 {
+            0
+        }
+
+        fn retained_host_exact_bytes(&self) -> u64 {
             0
         }
 
@@ -2233,6 +2415,10 @@ mod tests {
     impl DerivedArtifact for DropTrackedArtifact {
         fn device_bytes(&self) -> u64 {
             self.bytes
+        }
+
+        fn retained_host_exact_bytes(&self) -> u64 {
+            0
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -2772,12 +2958,125 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(ResidentLoadError::ArtifactByteMismatch {
-                declared: 16,
-                actual: 8
+            Err(ResidentLoadError::ArtifactAccountingMismatch {
+                declared: ResidentByteAccounting {
+                    device_bytes: 16,
+                    retained_host_exact_bytes: 0,
+                },
+                actual: ResidentByteAccounting {
+                    device_bytes: 8,
+                    retained_host_exact_bytes: 0,
+                },
             })
         ));
         assert_eq!(ledger::total_bytes(), before);
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn host_retaining_artifacts_require_the_reserve_first_builder() {
+        install_test_relations(&[1_125]);
+        let owner = pg_sys::Oid::from(1_125_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 12]);
+        let result = ensure_derived_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            |_| {
+                Ok(PreparedDerived {
+                    prepared: (),
+                    device_bytes: 8,
+                })
+            },
+            |()| {
+                Ok(AccountedArtifact {
+                    device_bytes: 8,
+                    retained_host_exact_bytes: 5,
+                })
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactAccountingMismatch {
+                declared: ResidentByteAccounting {
+                    device_bytes: 8,
+                    retained_host_exact_bytes: 0
+                },
+                actual: ResidentByteAccounting {
+                    device_bytes: 8,
+                    retained_host_exact_bytes: 5
+                }
+            })
+        ));
+        STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn reserve_first_device_build_charges_device_and_retained_host_bytes() {
+        install_test_relations(&[1_150]);
+        let owner = pg_sys::Oid::from(1_150_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 15]);
+        let accounting = ResidentByteAccounting {
+            device_bytes: 16,
+            retained_host_exact_bytes: 7,
+        };
+        let outcome =
+            ensure_device_derived_artifact(owner, &identity, &[owner], &[], accounting, |inputs| {
+                assert!(inputs.columns.is_empty());
+                assert_eq!(inputs.evidence.len(), 1);
+                Ok(AccountedArtifact {
+                    device_bytes: 16,
+                    retained_host_exact_bytes: 7,
+                })
+            })
+            .expect("reserve-first build succeeds");
+        assert_eq!(outcome, ArtifactEnsureOutcome::Built);
+        STORE.with(|store| assert_eq!(store.borrow().entries[0].derived[0].bytes(), 23));
+        with_derived_artifact_inputs::<AccountedArtifact, _>(owner, &identity, &[], |resolved| {
+            assert_eq!(resolved.device_bytes, 16);
+            assert_eq!(resolved.accounting, accounting);
+        })
+        .expect("accounted artifact resolves");
+        STORE.with(|store| store.borrow_mut().entries.clear());
+    }
+
+    #[test]
+    fn reserve_first_device_build_rejects_category_mismatch_and_releases_charge() {
+        install_test_relations(&[1_160]);
+        let owner = pg_sys::Oid::from(1_160_u32);
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 16]);
+        let result = ensure_device_derived_artifact(
+            owner,
+            &identity,
+            &[owner],
+            &[],
+            ResidentByteAccounting {
+                device_bytes: 8,
+                retained_host_exact_bytes: 5,
+            },
+            |_| {
+                Ok(AccountedArtifact {
+                    device_bytes: 9,
+                    retained_host_exact_bytes: 4,
+                })
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(ResidentLoadError::ArtifactAccountingMismatch {
+                declared: ResidentByteAccounting {
+                    device_bytes: 8,
+                    retained_host_exact_bytes: 5
+                },
+                actual: ResidentByteAccounting {
+                    device_bytes: 9,
+                    retained_host_exact_bytes: 4
+                }
+            })
+        ));
         STORE.with(|store| assert!(store.borrow().entries[0].derived.is_empty()));
         STORE.with(|store| store.borrow_mut().entries.clear());
     }

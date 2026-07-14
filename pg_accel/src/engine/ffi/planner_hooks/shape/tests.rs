@@ -87,7 +87,7 @@ fn single_table_input() -> ShapeInput {
     ShapeInput {
         relations: vec![relation(1, 100, 1_000_000)],
         joins: Vec::new(),
-        group_columns: Vec::new(),
+        group_keys: Vec::new(),
         aggregates: vec![minimum],
         projections: vec![InputProjection::Aggregate {
             aggregate_index: 0,
@@ -113,11 +113,11 @@ fn add_dimension(input: &mut ShapeInput, varno: pg_sys::Index, relation_oid: u32
     });
     if group {
         let group_column = column(varno, relation_oid, 2, u32::from(pg_sys::FLOAT8OID));
-        input.group_columns.push(group_column);
+        input.group_keys.push(PlannerGroupKey::Column(group_column));
         input.projections.insert(
-            input.group_columns.len() - 1,
+            input.group_keys.len() - 1,
             InputProjection::Group {
-                column: group_column,
+                key: PlannerGroupKey::Column(group_column),
                 output: output(u32::from(pg_sys::FLOAT8OID), true),
             },
         );
@@ -250,11 +250,11 @@ fn groupagg_coalesces_measure_outputs_but_preserves_projection_order() {
         AggregateKind::Count,
         u32::from(pg_sys::INT8OID),
     );
-    input.group_columns = vec![group];
+    input.group_keys = vec![PlannerGroupKey::Column(group)];
     input.aggregates.push(count);
     input.projections = vec![
         InputProjection::Group {
-            column: group,
+            key: PlannerGroupKey::Column(group),
             output: output(u32::from(pg_sys::INT4OID), false),
         },
         InputProjection::Aggregate {
@@ -303,11 +303,11 @@ fn groupagg_coalesces_measure_outputs_but_preserves_projection_order() {
 fn grouped_plan_requires_exact_dictionary_resolution_before_descriptor_use() {
     let mut input = single_table_input();
     let group = column(1, 100, 1, u32::from(pg_sys::INT4OID));
-    input.group_columns = vec![group];
+    input.group_keys = vec![PlannerGroupKey::Column(group)];
     input.projections.insert(
         0,
         InputProjection::Group {
-            column: group,
+            key: PlannerGroupKey::Column(group),
             output: output(u32::from(pg_sys::INT4OID), false),
         },
     );
@@ -315,7 +315,10 @@ fn grouped_plan_requires_exact_dictionary_resolution_before_descriptor_use() {
     let plan = build_shape(input, &model()).expect("group shape should build as logical IR");
     assert!(matches!(
         &plan.descriptor_resolution,
-        DescriptorResolution::BeginTimeDictionary { .. }
+        DescriptorResolution::BeginTimeArtifacts {
+            grouping_mode: DescriptorGroupingMode::DenseDictionary,
+            ..
+        }
     ));
     assert_eq!(
         plan.descriptor_spec(),
@@ -352,10 +355,85 @@ fn grouped_plan_requires_exact_dictionary_resolution_before_descriptor_use() {
 }
 
 #[test]
+fn h3_group_key_requires_a_derived_hash_lane_without_dictionary_rewrite() {
+    const H3INDEXOID: u32 = 90_001;
+    let mut input = single_table_input();
+    let source = GroupKeySource::H3CellToParent {
+        cell: ColumnRef {
+            relation_oid: 100,
+            attno: 1,
+            type_oid: H3INDEXOID,
+        },
+        resolution: 7,
+    };
+    let key = PlannerGroupKey::Expression {
+        source: source.clone(),
+        type_oid: H3INDEXOID,
+        collation_oid: 0,
+        collation_is_deterministic: true,
+    };
+    input.group_keys.push(key.clone());
+    input.projections.insert(
+        0,
+        InputProjection::Group {
+            key,
+            output: output(H3INDEXOID, true),
+        },
+    );
+
+    let plan = build_shape(input, &model()).expect("H3 logical shape should build");
+    let DescriptorResolution::BeginTimeArtifacts {
+        dictionary_keys,
+        derived_keys,
+        grouping_mode,
+        ..
+    } = &plan.descriptor_resolution
+    else {
+        panic!("H3 grouping must require a derived artifact");
+    };
+    assert!(dictionary_keys.is_empty());
+    assert_eq!(*grouping_mode, DescriptorGroupingMode::Hash);
+    assert_eq!(derived_keys.len(), 1);
+    assert_eq!(derived_keys[0].source, source);
+
+    let resolved = plan
+        .resolve_group_key_artifacts(
+            &[],
+            &[ResolvedDerivedGroupKey {
+                key_index: 0,
+                source: source.clone(),
+                result_type_oid: H3INDEXOID,
+            }],
+        )
+        .expect("matching H3 artifact should resolve");
+    assert_eq!(resolved.group_keys[0].encoding, GroupKeyEncoding::Hash);
+    assert_eq!(resolved.group_keys[0].source, source);
+
+    assert_eq!(
+        plan.resolve_group_key_artifacts(
+            &[],
+            &[ResolvedDerivedGroupKey {
+                key_index: 0,
+                source: GroupKeySource::H3CellToParent {
+                    cell: ColumnRef {
+                        relation_oid: 100,
+                        attno: 1,
+                        type_oid: H3INDEXOID,
+                    },
+                    resolution: 8,
+                },
+                result_type_oid: H3INDEXOID,
+            }],
+        ),
+        Err(ShapeDecline::InvalidGroupKeyResolution)
+    );
+}
+
+#[test]
 fn omitted_group_key_declines_before_path_construction() {
     let mut input = single_table_input();
     let group = column(1, 100, 1, u32::from(pg_sys::INT4OID));
-    input.group_columns = vec![group];
+    input.group_keys = vec![PlannerGroupKey::Column(group)];
 
     let decline = build_shape(input, &model()).expect_err("hidden group output must decline");
     assert_eq!(
@@ -1376,11 +1454,11 @@ fn nondeterministic_text_group_key_declines_before_dictionary_coding() {
     let mut group = column(1, 100, 1, u32::from(pg_sys::TEXTOID));
     group.collation_oid = 9_999;
     group.collation_is_deterministic = false;
-    input.group_columns.push(group);
+    input.group_keys.push(PlannerGroupKey::Column(group));
     input.projections.insert(
         0,
         InputProjection::Group {
-            column: group,
+            key: PlannerGroupKey::Column(group),
             output: OutputMetadata {
                 source_type_oid: u32::from(pg_sys::TEXTOID),
                 result_type_oid: u32::from(pg_sys::TEXTOID),
@@ -1403,11 +1481,11 @@ fn deterministic_text_group_key_remains_dictionary_resolvable() {
     let mut input = single_table_input();
     let mut group = column(1, 100, 1, u32::from(pg_sys::TEXTOID));
     group.collation_oid = u32::from(pg_sys::C_COLLATION_OID);
-    input.group_columns.push(group);
+    input.group_keys.push(PlannerGroupKey::Column(group));
     input.projections.insert(
         0,
         InputProjection::Group {
-            column: group,
+            key: PlannerGroupKey::Column(group),
             output: OutputMetadata {
                 source_type_oid: u32::from(pg_sys::TEXTOID),
                 result_type_oid: u32::from(pg_sys::TEXTOID),
@@ -1418,10 +1496,16 @@ fn deterministic_text_group_key_remains_dictionary_resolvable() {
         },
     );
     let plan = build_shape(input, &model()).expect("deterministic text can be dictionary-coded");
-    let DescriptorResolution::BeginTimeDictionary { keys, .. } = &plan.descriptor_resolution else {
+    let DescriptorResolution::BeginTimeArtifacts {
+        dictionary_keys, ..
+    } = &plan.descriptor_resolution
+    else {
         panic!("grouped text shape must require a dictionary");
     };
-    assert_eq!(keys[0].collation_oid, u32::from(pg_sys::C_COLLATION_OID));
+    assert_eq!(
+        dictionary_keys[0].collation_oid,
+        u32::from(pg_sys::C_COLLATION_OID)
+    );
     assert_eq!(plan.spec.group_keys[0].type_oid, u32::from(pg_sys::TEXTOID));
     assert_eq!(
         plan.spec.group_keys[0].collation_oid,
@@ -1433,11 +1517,11 @@ fn deterministic_text_group_key_remains_dictionary_resolvable() {
 fn group_keys_require_a_resident_supported_logical_type() {
     let mut input = single_table_input();
     let group = column(1, 100, 1, u32::from(pg_sys::NUMERICOID));
-    input.group_columns.push(group);
+    input.group_keys.push(PlannerGroupKey::Column(group));
     input.projections.insert(
         0,
         InputProjection::Group {
-            column: group,
+            key: PlannerGroupKey::Column(group),
             output: output(u32::from(pg_sys::NUMERICOID), true),
         },
     );
@@ -1465,11 +1549,15 @@ fn deterministic_text_join_requires_begin_time_shared_dictionary() {
         plan.spec.star_dims[0].collation_oid,
         u32::from(pg_sys::C_COLLATION_OID)
     );
-    let DescriptorResolution::BeginTimeDictionary { keys, joins, .. } = &plan.descriptor_resolution
+    let DescriptorResolution::BeginTimeArtifacts {
+        dictionary_keys,
+        joins,
+        ..
+    } = &plan.descriptor_resolution
     else {
         panic!("text join must require a shared dictionary artifact");
     };
-    assert!(keys.is_empty());
+    assert!(dictionary_keys.is_empty());
     assert_eq!(joins.len(), 1);
     assert_eq!(joins[0].fact_key, left.column);
     assert_eq!(joins[0].dim_key, right.column);
@@ -1493,7 +1581,7 @@ fn varchar_and_bpchar_joins_use_the_same_dictionary_correlation_contract() {
         let plan = build_shape(input, &model()).expect("collatable join should normalize");
         assert!(matches!(
             &plan.descriptor_resolution,
-            DescriptorResolution::BeginTimeDictionary { joins, .. } if joins.len() == 1
+            DescriptorResolution::BeginTimeArtifacts { joins, .. } if joins.len() == 1
         ));
     }
 }

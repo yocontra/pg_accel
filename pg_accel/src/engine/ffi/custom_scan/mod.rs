@@ -482,7 +482,7 @@ unsafe fn seal_custom_scan_private(
 
 /// Convert a strict childless descriptor aggregate path into a `CustomScan`.
 ///
-/// The AQS2/AOP2 contract is copied into framed plan-private data. No child
+/// The AQS3/AOP2 contract is copied into framed plan-private data. No child
 /// plan or retired aggregate metadata is accepted.
 ///
 /// # Safety
@@ -511,7 +511,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         let path_priv = (*best_path).custom_private;
         let (spec, projection) =
             deserialize_agg_query_path_contract(path_priv).unwrap_or_else(|error| {
-                pgrx::error!("pg_accel: malformed aggregate AQS2/AOP2 path contract: {error}")
+                pgrx::error!("pg_accel: malformed aggregate AQS3/AOP2 path contract: {error}")
             });
         if !custom_plans.is_null() && pg_sys::list_length(custom_plans) != 0 {
             pgrx::error!("pg_accel: descriptor aggregate path unexpectedly has child plans");
@@ -533,7 +533,7 @@ unsafe extern "C-unwind" fn plan_custom_path_agg(
         (*cscan).scan.scanrelid = 0;
         (*cscan).methods = &raw const AGG_SCAN_METHODS.0;
 
-        // Serialize the common header followed immediately by AQS2/AOP2.
+        // Serialize the common header followed immediately by AQS3/AOP2.
         let batch_size = gucs::min_batch_size();
         let expected_threads = resolve_thread_count();
 
@@ -2367,7 +2367,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     });
                 Box::into_raw(Box::new(executor)).cast()
             } else {
-                pgrx::error!("pg_accel: aggregate plan is missing its AQS2/AOP2 contract");
+                pgrx::error!("pg_accel: aggregate plan is missing its AQS3/AOP2 contract");
             }
         } else if privdata.accel_strategy == AccelStrategy::GpuHashJoin {
             // Hash join: create a JoinExecState with hash join context.
