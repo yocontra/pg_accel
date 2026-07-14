@@ -507,11 +507,13 @@ pgaccel_status pgaccel_spatial_intersects_pairwise(const pgaccel_geometry* geoms
                                                    int8_t* results);
 
 /* Resident fp64 spatial ABI. All lane and output pointers are current-context
- * DEVICE or SHARED_USM allocations. The descriptor itself remains host-owned
- * for the duration of the synchronous call. Geometry/ring offsets count
- * coordinate pairs (not scalar doubles or bytes), matching ResidentGeometryData.
+ * DEVICE or SHARED_USM allocations. Each byte field is the actual readable or
+ * writable allocation span from its paired pointer, not a size inferred from
+ * logical counts. The descriptor itself remains host-owned for the duration of
+ * the synchronous call. Geometry/ring offsets count coordinate pairs (not
+ * scalar doubles or bytes), matching ResidentGeometryData.
  */
-#define PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION 1u
+#define PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION 2u
 
 typedef enum {
   PGACCEL_RESIDENT_GEOMETRY_POINT = 1,
@@ -540,6 +542,12 @@ typedef struct {
   const uint64_t* ring_offsets;              /* [ring_count], coordinate-pair offsets */
   const pgaccel_resident_geometry_row* rows; /* [row_count] */
   const uint8_t* nulls;                      /* optional [row_count], canonical 0/1 */
+  size_t coordinates_bytes;                  /* readable bytes from coordinates */
+  size_t bboxes_bytes;                       /* readable bytes from bboxes */
+  size_t geometry_offsets_bytes;             /* readable bytes from geometry_offsets */
+  size_t ring_offsets_bytes;                 /* readable bytes from ring_offsets */
+  size_t rows_bytes;                         /* readable bytes from rows */
+  size_t nulls_bytes;                        /* readable bytes from nulls, zero when NULL */
   size_t row_count;
   size_t coordinate_pair_count;
   size_t ring_count;
@@ -577,9 +585,12 @@ typedef struct {
   size_t max_referenced_bytes; /* defensive per-call geometry work cap */
   pgaccel_resident_geometry_operand left;
   pgaccel_resident_geometry_operand right;
-  int8_t* predicate_results;   /* device [output_capacity], boolean predicates */
-  double* distances;           /* device [output_capacity], Distance only */
-  uint8_t* distance_uncertain; /* device [output_capacity], Distance only */
+  int8_t* predicate_results;        /* device [output_capacity], boolean predicates */
+  size_t predicate_results_bytes;   /* writable bytes from predicate_results */
+  double* distances;                /* device [output_capacity], Distance only */
+  size_t distances_bytes;           /* writable bytes from distances */
+  uint8_t* distance_uncertain;      /* device [output_capacity], Distance only */
+  size_t distance_uncertain_bytes;  /* writable bytes from distance_uncertain */
   size_t output_capacity;
 } pgaccel_spatial_resident_request;
 
@@ -971,6 +982,63 @@ _Static_assert(offsetof(pgaccel_geometry, ring_offsets) == 32,
 _Static_assert(offsetof(pgaccel_geometry, ring_count) == 40,
                "pgaccel_geometry.ring_count at offset 40");
 #endif
+
+#ifdef __cplusplus
+#define PGACCEL_RESIDENT_ABI_PIN(condition) static_assert(condition, #condition)
+#else
+#define PGACCEL_RESIDENT_ABI_PIN(condition) _Static_assert(condition, #condition)
+#endif
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_resident_geometry_row) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, geom_type) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, srid) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, first_ring) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, ring_count) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_row, flags) == 20);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_resident_geometry_view) == 128);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, coordinates) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, bboxes) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, geometry_offsets) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, ring_offsets) == 32);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, rows) == 40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, nulls) == 48);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, coordinates_bytes) == 56);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, bboxes_bytes) == 64);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, geometry_offsets_bytes) == 72);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, ring_offsets_bytes) == 80);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, rows_bytes) == 88);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, nulls_bytes) == 96);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, row_count) == 104);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, coordinate_pair_count) == 112);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_view, ring_count) == 120);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_resident_geometry_operand) == 144);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_operand, view) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_operand, first_row) == 128);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_resident_geometry_operand, row_stride) == 136);
+
+PGACCEL_RESIDENT_ABI_PIN(sizeof(pgaccel_spatial_resident_request) == 384);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, abi_version) == 0);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, flags) == 4);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, predicate) == 8);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, pad) == 12);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distance_threshold) == 16);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, count) == 24);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, max_referenced_bytes) == 32);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, left) == 40);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, right) == 184);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, predicate_results) == 328);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, predicate_results_bytes) == 336);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distances) == 344);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distances_bytes) == 352);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distance_uncertain) == 360);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, distance_uncertain_bytes) == 368);
+PGACCEL_RESIDENT_ABI_PIN(offsetof(pgaccel_spatial_resident_request, output_capacity) == 376);
+
+#undef PGACCEL_RESIDENT_ABI_PIN
 
 #ifdef __cplusplus
 }

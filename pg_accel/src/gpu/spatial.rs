@@ -1,11 +1,37 @@
+use super::expr::ExprDeviceBuffer;
 use super::{
     GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail, PgaccelGeometry,
     PgaccelStatus, bridge, status_to_result,
 };
 
+const RESIDENT_SPATIAL_OPERATION: GpuOperation = GpuOperation::Kernel("spatial_eval_resident");
+
+#[allow(dead_code)] // reason: checked resident executor caller lands in the parallel integration slice
+fn resident_builder_error(status: GpuStatusDetail, detail: &'static str) -> GpuError {
+    GpuError::with_detail(
+        GpuErrorDomain::Spatial,
+        RESIDENT_SPATIAL_OPERATION,
+        status,
+        detail,
+    )
+}
+
+#[allow(dead_code)] // reason: checked resident executor caller lands in the parallel integration slice
+fn resident_buffer_bytes<T>(buffer: &ExprDeviceBuffer<T>) -> GpuResult<usize> {
+    buffer
+        .len()
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or_else(|| {
+            resident_builder_error(
+                GpuStatusDetail::CapacityOverflow,
+                "resident spatial device-buffer byte length overflow",
+            )
+        })
+}
+
 /// Frozen ABI version for resident fp64 geometry descriptors.
 #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
-pub const PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION: u32 = 1;
+pub const PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION: u32 = 2;
 
 /// Resident geometry row flag indicating a populated `[xmin, ymin, xmax, ymax]` bbox.
 #[allow(dead_code)] // reason: row construction remains owned by the residency integration slice
@@ -34,13 +60,19 @@ pub struct PgaccelResidentGeometryView {
     pub ring_offsets: *const u64,
     pub rows: *const PgaccelResidentGeometryRow,
     pub nulls: *const u8,
+    pub coordinates_bytes: usize,
+    pub bboxes_bytes: usize,
+    pub geometry_offsets_bytes: usize,
+    pub ring_offsets_bytes: usize,
+    pub rows_bytes: usize,
+    pub nulls_bytes: usize,
     pub row_count: usize,
     pub coordinate_pair_count: usize,
     pub ring_count: usize,
 }
 
 impl PgaccelResidentGeometryView {
-    /// Build a frozen-v1 view over already-resident geometry lanes.
+    /// Build a frozen-v2 view over already-resident geometry lanes.
     #[allow(clippy::too_many_arguments)] // reason: fields mirror the frozen C descriptor
     #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
     #[must_use]
@@ -51,6 +83,12 @@ impl PgaccelResidentGeometryView {
         ring_offsets: *const u64,
         rows: *const PgaccelResidentGeometryRow,
         nulls: *const u8,
+        coordinates_bytes: usize,
+        bboxes_bytes: usize,
+        geometry_offsets_bytes: usize,
+        ring_offsets_bytes: usize,
+        rows_bytes: usize,
+        nulls_bytes: usize,
         row_count: usize,
         coordinate_pair_count: usize,
         ring_count: usize,
@@ -64,10 +102,90 @@ impl PgaccelResidentGeometryView {
             ring_offsets,
             rows,
             nulls,
+            coordinates_bytes,
+            bboxes_bytes,
+            geometry_offsets_bytes,
+            ring_offsets_bytes,
+            rows_bytes,
+            nulls_bytes,
             row_count,
             coordinate_pair_count,
             ring_count,
         }
+    }
+
+    /// Build a view from the allocations that own every lane.
+    ///
+    /// Logical counts must exactly match the allocation element counts. Byte
+    /// spans are derived from those allocations and cannot be supplied by the
+    /// caller. `R` must be the engine row mirror with compile-time field-layout
+    /// pins matching [`PgaccelResidentGeometryRow`].
+    #[allow(clippy::too_many_arguments)] // reason: arguments are the six frozen ABI lanes
+    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
+    pub fn from_device_buffers<R>(
+        coordinates: Option<&ExprDeviceBuffer<f64>>,
+        bboxes: Option<&ExprDeviceBuffer<[f64; 4]>>,
+        geometry_offsets: &ExprDeviceBuffer<u64>,
+        ring_offsets: Option<&ExprDeviceBuffer<u64>>,
+        rows: Option<&ExprDeviceBuffer<R>>,
+        nulls: Option<&ExprDeviceBuffer<u8>>,
+        row_count: usize,
+        coordinate_pair_count: usize,
+        ring_count: usize,
+    ) -> GpuResult<Self> {
+        let coordinate_scalar_count = coordinate_pair_count.checked_mul(2).ok_or_else(|| {
+            resident_builder_error(
+                GpuStatusDetail::CapacityOverflow,
+                "resident geometry coordinate scalar count overflow",
+            )
+        })?;
+        let geometry_offset_count = row_count.checked_add(1).ok_or_else(|| {
+            resident_builder_error(
+                GpuStatusDetail::CapacityOverflow,
+                "resident geometry offset count overflow",
+            )
+        })?;
+        if row_count == 0
+            || coordinates.map_or(0, ExprDeviceBuffer::len) != coordinate_scalar_count
+            || bboxes.map_or(0, ExprDeviceBuffer::len) != row_count
+            || geometry_offsets.len() != geometry_offset_count
+            || ring_offsets.map_or(0, ExprDeviceBuffer::len) != ring_count
+            || rows.map_or(0, ExprDeviceBuffer::len) != row_count
+            || nulls.is_some_and(|buffer| buffer.len() != row_count)
+        {
+            return Err(resident_builder_error(
+                GpuStatusDetail::ShapeMismatch,
+                "resident geometry logical counts do not match device-buffer lengths",
+            ));
+        }
+        if std::mem::size_of::<R>() != std::mem::size_of::<PgaccelResidentGeometryRow>()
+            || std::mem::align_of::<R>() != std::mem::align_of::<PgaccelResidentGeometryRow>()
+        {
+            return Err(resident_builder_error(
+                GpuStatusDetail::InvalidDescriptor,
+                "resident geometry row buffer does not match the native row ABI",
+            ));
+        }
+
+        let bboxes = bboxes.expect("row_count > 0 requires a bbox buffer");
+        let rows = rows.expect("row_count > 0 requires a row buffer");
+        Ok(Self::new(
+            coordinates.map_or(std::ptr::null(), ExprDeviceBuffer::as_ptr),
+            bboxes.as_ptr().cast::<f64>(),
+            geometry_offsets.as_ptr(),
+            ring_offsets.map_or(std::ptr::null(), ExprDeviceBuffer::as_ptr),
+            rows.as_ptr().cast::<PgaccelResidentGeometryRow>(),
+            nulls.map_or(std::ptr::null(), ExprDeviceBuffer::as_ptr),
+            coordinates.map_or(Ok(0), resident_buffer_bytes)?,
+            resident_buffer_bytes(bboxes)?,
+            resident_buffer_bytes(geometry_offsets)?,
+            ring_offsets.map_or(Ok(0), resident_buffer_bytes)?,
+            resident_buffer_bytes(rows)?,
+            nulls.map_or(Ok(0), resident_buffer_bytes)?,
+            row_count,
+            coordinate_pair_count,
+            ring_count,
+        ))
     }
 }
 
@@ -156,8 +274,11 @@ pub struct PgaccelSpatialResidentRequest {
     pub left: PgaccelResidentGeometryOperand,
     pub right: PgaccelResidentGeometryOperand,
     pub predicate_results: *mut i8,
+    pub predicate_results_bytes: usize,
     pub distances: *mut f64,
+    pub distances_bytes: usize,
     pub distance_uncertain: *mut u8,
+    pub distance_uncertain_bytes: usize,
     pub output_capacity: usize,
 }
 
@@ -178,6 +299,7 @@ impl PgaccelSpatialResidentRequest {
         left: PgaccelResidentGeometryOperand,
         right: PgaccelResidentGeometryOperand,
         predicate_results: *mut i8,
+        predicate_results_bytes: usize,
         output_capacity: usize,
     ) -> Self {
         Self {
@@ -191,10 +313,43 @@ impl PgaccelSpatialResidentRequest {
             left,
             right,
             predicate_results,
+            predicate_results_bytes,
             distances: std::ptr::null_mut(),
+            distances_bytes: 0,
             distance_uncertain: std::ptr::null_mut(),
+            distance_uncertain_bytes: 0,
             output_capacity,
         }
+    }
+
+    /// Build a boolean request whose capacity and byte span come from `results`.
+    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
+    pub fn boolean_device(
+        predicate: ResidentSpatialPredicate,
+        distance_threshold: f64,
+        count: usize,
+        max_referenced_bytes: usize,
+        left: PgaccelResidentGeometryOperand,
+        right: PgaccelResidentGeometryOperand,
+        results: &ExprDeviceBuffer<i8>,
+    ) -> GpuResult<Self> {
+        if results.len() < count {
+            return Err(resident_builder_error(
+                GpuStatusDetail::ShapeMismatch,
+                "resident spatial predicate output is shorter than the request count",
+            ));
+        }
+        Ok(Self::boolean(
+            predicate,
+            distance_threshold,
+            count,
+            max_referenced_bytes,
+            left,
+            right,
+            results.as_mut_ptr(),
+            resident_buffer_bytes(results)?,
+            results.len(),
+        ))
     }
 
     /// Build a distance request with separate `f64` values and `u8` uncertainty outputs.
@@ -207,7 +362,9 @@ impl PgaccelSpatialResidentRequest {
         left: PgaccelResidentGeometryOperand,
         right: PgaccelResidentGeometryOperand,
         distances: *mut f64,
+        distances_bytes: usize,
         distance_uncertain: *mut u8,
+        distance_uncertain_bytes: usize,
         output_capacity: usize,
     ) -> Self {
         Self {
@@ -221,14 +378,44 @@ impl PgaccelSpatialResidentRequest {
             left,
             right,
             predicate_results: std::ptr::null_mut(),
+            predicate_results_bytes: 0,
             distances,
+            distances_bytes,
             distance_uncertain,
+            distance_uncertain_bytes,
             output_capacity,
         }
     }
-}
 
-const RESIDENT_SPATIAL_OPERATION: GpuOperation = GpuOperation::Kernel("spatial_eval_resident");
+    /// Build a distance request from equally sized value and uncertainty buffers.
+    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
+    pub fn distance_device(
+        count: usize,
+        max_referenced_bytes: usize,
+        left: PgaccelResidentGeometryOperand,
+        right: PgaccelResidentGeometryOperand,
+        distances: &ExprDeviceBuffer<f64>,
+        distance_uncertain: &ExprDeviceBuffer<u8>,
+    ) -> GpuResult<Self> {
+        if distances.len() < count || distance_uncertain.len() != distances.len() {
+            return Err(resident_builder_error(
+                GpuStatusDetail::ShapeMismatch,
+                "resident spatial distance outputs have inconsistent capacities",
+            ));
+        }
+        Ok(Self::distance(
+            count,
+            max_referenced_bytes,
+            left,
+            right,
+            distances.as_mut_ptr(),
+            resident_buffer_bytes(distances)?,
+            distance_uncertain.as_mut_ptr(),
+            resident_buffer_bytes(distance_uncertain)?,
+            distances.len(),
+        ))
+    }
+}
 
 fn resident_spatial_result(status: PgaccelStatus, detail: i32) -> GpuResult<()> {
     if status.is_ok() {
@@ -289,10 +476,10 @@ fn resident_spatial_result(status: PgaccelStatus, detail: i32) -> GpuResult<()> 
 /// [`GpuError`] values and never synthesize output classifications.
 ///
 /// # Safety
-/// Every non-null lane and output pointer in `request` must reference the
-/// stated number of elements in device or shared USM belonging to the active
-/// pg_accel context. Input and output spans must obey the native non-overlap
-/// contract and remain alive until this synchronous call returns.
+/// Every non-null lane and output pointer in `request` must reference its
+/// explicitly declared byte span in device or shared USM belonging to the
+/// active pg_accel context. Input and output spans must obey the native
+/// non-overlap contract and remain alive until this synchronous call returns.
 #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
 pub unsafe fn spatial_eval_resident(request: &PgaccelSpatialResidentRequest) -> GpuResult<()> {
     let mut detail = ResidentSpatialDetail::None as i32;
@@ -310,9 +497,9 @@ pub unsafe fn spatial_eval_resident(request: &PgaccelSpatialResidentRequest) -> 
 const _: () = {
     assert!(std::mem::size_of::<PgaccelResidentGeometryRow>() == 24);
     assert!(std::mem::align_of::<PgaccelResidentGeometryRow>() == 8);
-    assert!(std::mem::size_of::<PgaccelResidentGeometryView>() == 80);
-    assert!(std::mem::size_of::<PgaccelResidentGeometryOperand>() == 96);
-    assert!(std::mem::size_of::<PgaccelSpatialResidentRequest>() == 264);
+    assert!(std::mem::size_of::<PgaccelResidentGeometryView>() == 128);
+    assert!(std::mem::size_of::<PgaccelResidentGeometryOperand>() == 144);
+    assert!(std::mem::size_of::<PgaccelSpatialResidentRequest>() == 384);
 };
 
 #[cfg(test)]
@@ -328,6 +515,12 @@ mod resident_spatial_tests {
             std::ptr::null(),
             std::ptr::null(),
             std::ptr::null(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
             1,
             0,
             0,
@@ -347,7 +540,7 @@ mod resident_spatial_tests {
         assert_eq!(offset_of!(PgaccelResidentGeometryRow, ring_count), 16);
         assert_eq!(offset_of!(PgaccelResidentGeometryRow, flags), 20);
 
-        assert_eq!(size_of::<PgaccelResidentGeometryView>(), 80);
+        assert_eq!(size_of::<PgaccelResidentGeometryView>(), 128);
         assert_eq!(align_of::<PgaccelResidentGeometryView>(), 8);
         assert_eq!(offset_of!(PgaccelResidentGeometryView, abi_version), 0);
         assert_eq!(offset_of!(PgaccelResidentGeometryView, flags), 4);
@@ -360,20 +553,35 @@ mod resident_spatial_tests {
         assert_eq!(offset_of!(PgaccelResidentGeometryView, ring_offsets), 32);
         assert_eq!(offset_of!(PgaccelResidentGeometryView, rows), 40);
         assert_eq!(offset_of!(PgaccelResidentGeometryView, nulls), 48);
-        assert_eq!(offset_of!(PgaccelResidentGeometryView, row_count), 56);
+        assert_eq!(
+            offset_of!(PgaccelResidentGeometryView, coordinates_bytes),
+            56
+        );
+        assert_eq!(offset_of!(PgaccelResidentGeometryView, bboxes_bytes), 64);
+        assert_eq!(
+            offset_of!(PgaccelResidentGeometryView, geometry_offsets_bytes),
+            72
+        );
+        assert_eq!(
+            offset_of!(PgaccelResidentGeometryView, ring_offsets_bytes),
+            80
+        );
+        assert_eq!(offset_of!(PgaccelResidentGeometryView, rows_bytes), 88);
+        assert_eq!(offset_of!(PgaccelResidentGeometryView, nulls_bytes), 96);
+        assert_eq!(offset_of!(PgaccelResidentGeometryView, row_count), 104);
         assert_eq!(
             offset_of!(PgaccelResidentGeometryView, coordinate_pair_count),
-            64
+            112
         );
-        assert_eq!(offset_of!(PgaccelResidentGeometryView, ring_count), 72);
+        assert_eq!(offset_of!(PgaccelResidentGeometryView, ring_count), 120);
 
-        assert_eq!(size_of::<PgaccelResidentGeometryOperand>(), 96);
+        assert_eq!(size_of::<PgaccelResidentGeometryOperand>(), 144);
         assert_eq!(align_of::<PgaccelResidentGeometryOperand>(), 8);
         assert_eq!(offset_of!(PgaccelResidentGeometryOperand, view), 0);
-        assert_eq!(offset_of!(PgaccelResidentGeometryOperand, first_row), 80);
-        assert_eq!(offset_of!(PgaccelResidentGeometryOperand, row_stride), 88);
+        assert_eq!(offset_of!(PgaccelResidentGeometryOperand, first_row), 128);
+        assert_eq!(offset_of!(PgaccelResidentGeometryOperand, row_stride), 136);
 
-        assert_eq!(size_of::<PgaccelSpatialResidentRequest>(), 264);
+        assert_eq!(size_of::<PgaccelSpatialResidentRequest>(), 384);
         assert_eq!(align_of::<PgaccelSpatialResidentRequest>(), 8);
         assert_eq!(offset_of!(PgaccelSpatialResidentRequest, abi_version), 0);
         assert_eq!(offset_of!(PgaccelSpatialResidentRequest, flags), 4);
@@ -389,25 +597,37 @@ mod resident_spatial_tests {
             32
         );
         assert_eq!(offset_of!(PgaccelSpatialResidentRequest, left), 40);
-        assert_eq!(offset_of!(PgaccelSpatialResidentRequest, right), 136);
+        assert_eq!(offset_of!(PgaccelSpatialResidentRequest, right), 184);
         assert_eq!(
             offset_of!(PgaccelSpatialResidentRequest, predicate_results),
-            232
+            328
         );
-        assert_eq!(offset_of!(PgaccelSpatialResidentRequest, distances), 240);
+        assert_eq!(
+            offset_of!(PgaccelSpatialResidentRequest, predicate_results_bytes),
+            336
+        );
+        assert_eq!(offset_of!(PgaccelSpatialResidentRequest, distances), 344);
+        assert_eq!(
+            offset_of!(PgaccelSpatialResidentRequest, distances_bytes),
+            352
+        );
         assert_eq!(
             offset_of!(PgaccelSpatialResidentRequest, distance_uncertain),
-            248
+            360
+        );
+        assert_eq!(
+            offset_of!(PgaccelSpatialResidentRequest, distance_uncertain_bytes),
+            368
         );
         assert_eq!(
             offset_of!(PgaccelSpatialResidentRequest, output_capacity),
-            256
+            376
         );
     }
 
     #[test]
     fn resident_spatial_discriminants_match_c_header() {
-        assert_eq!(PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION, 1);
+        assert_eq!(PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION, 2);
         assert_eq!(PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID, 1);
         assert_eq!(ResidentSpatialPredicate::Intersects as i32, 0);
         assert_eq!(ResidentSpatialPredicate::Contains as i32, 1);
@@ -445,6 +665,7 @@ mod resident_spatial_tests {
             constant,
             predicate_output,
             3,
+            3,
         );
         assert_eq!(boolean.abi_version, PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION);
         assert_eq!(boolean.flags, 0);
@@ -452,8 +673,11 @@ mod resident_spatial_tests {
         assert_eq!(boolean.predicate, ResidentSpatialPredicate::DWithin);
         assert_eq!(boolean.distance_threshold, 2.5);
         assert_eq!(boolean.predicate_results, predicate_output);
+        assert_eq!(boolean.predicate_results_bytes, 3);
         assert!(boolean.distances.is_null());
+        assert_eq!(boolean.distances_bytes, 0);
         assert!(boolean.distance_uncertain.is_null());
+        assert_eq!(boolean.distance_uncertain_bytes, 0);
 
         let distances = std::ptr::NonNull::<f64>::dangling().as_ptr();
         let uncertainty = std::ptr::NonNull::<u8>::dangling().as_ptr();
@@ -463,14 +687,19 @@ mod resident_spatial_tests {
             column,
             constant,
             distances,
+            3 * size_of::<f64>(),
             uncertainty,
+            3,
             3,
         );
         assert_eq!(distance.predicate, ResidentSpatialPredicate::Distance);
         assert_eq!(distance.distance_threshold, 0.0);
         assert!(distance.predicate_results.is_null());
+        assert_eq!(distance.predicate_results_bytes, 0);
         assert_eq!(distance.distances, distances);
+        assert_eq!(distance.distances_bytes, 3 * size_of::<f64>());
         assert_eq!(distance.distance_uncertain, uncertainty);
+        assert_eq!(distance.distance_uncertain_bytes, 3);
     }
 
     #[test]

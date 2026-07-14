@@ -804,11 +804,23 @@ static bool resident_same_point(const double* left, const double* right) {
  * bound to certify a sign. It is intentionally not treated as collinear: the
  * exact PostGIS recheck owns that case. */
 static int resident_orientation(double ax, double ay, double bx, double by, double cx, double cy) {
-  const double left = (bx - ax) * (cy - ay);
-  const double right = (by - ay) * (cx - ax);
+  const double abx = bx - ax;
+  const double aby = by - ay;
+  const double acx = cx - ax;
+  const double acy = cy - ay;
+  if (!sycl::isfinite(abx) || !sycl::isfinite(aby) || !sycl::isfinite(acx) ||
+      !sycl::isfinite(acy)) {
+    return 0;
+  }
+  const double left = abx * acy;
+  const double right = aby * acx;
   const double determinant = left - right;
-  const double error =
-      (resident_abs(left) + resident_abs(right)) * (32.0 * DBL_EPSILON) + 4.0 * DBL_MIN;
+  const double magnitude = resident_abs(left) + resident_abs(right);
+  const double error = magnitude * (32.0 * DBL_EPSILON) + 4.0 * DBL_MIN;
+  if (!sycl::isfinite(left) || !sycl::isfinite(right) || !sycl::isfinite(determinant) ||
+      !sycl::isfinite(magnitude) || !sycl::isfinite(error)) {
+    return 0;
+  }
   if (resident_abs(determinant) <= error)
     return 0;
   return determinant > 0.0 ? 1 : -1;
@@ -933,12 +945,6 @@ static bool resident_bbox_disjoint(const SpatialResidentGeometry& left,
                                    const SpatialResidentGeometry& right) {
   return left.bbox[2] < right.bbox[0] || right.bbox[2] < left.bbox[0] ||
          left.bbox[3] < right.bbox[1] || right.bbox[3] < left.bbox[1];
-}
-
-static bool resident_bbox_contains(const SpatialResidentGeometry& outer,
-                                   const SpatialResidentGeometry& inner) {
-  return outer.bbox[0] <= inner.bbox[0] && outer.bbox[1] <= inner.bbox[1] &&
-         outer.bbox[2] >= inner.bbox[2] && outer.bbox[3] >= inner.bbox[3];
 }
 
 static int8_t resident_point_linestring(const double* point, const SpatialResidentGeometry& line) {
@@ -1122,8 +1128,6 @@ static int8_t resident_polygon_contains(const SpatialResidentGeometry& polygon,
                                         const SpatialResidentGeometry& inner) {
   if (!resident_polygon_algorithm_supported(polygon))
     return 0;
-  if (!resident_bbox_contains(polygon, inner))
-    return -1;
   if (inner.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
     const double* point = inner.view->coordinates + inner.coordinate_begin * 2;
     return resident_point_polygon(point[0], point[1], polygon);
@@ -1171,8 +1175,6 @@ static int8_t resident_contains(const SpatialResidentGeometry& outer,
                                 const SpatialResidentGeometry& inner) {
   if (outer.is_null || inner.is_null || outer.is_empty || inner.is_empty)
     return -1;
-  if (!resident_bbox_contains(outer, inner))
-    return -1;
   if (outer.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
     if (inner.row.geom_type != PGACCEL_RESIDENT_GEOMETRY_POINT)
       return -1;
@@ -1193,46 +1195,98 @@ static int8_t resident_contains(const SpatialResidentGeometry& outer,
   return resident_polygon_contains(outer, inner);
 }
 
-static double resident_point_distance(double ax, double ay, double bx, double by) {
+static SpatialResidentDistance resident_hypot(double dx, double dy) {
+  if (!sycl::isfinite(dx) || !sycl::isfinite(dy))
+    return {0.0, 1};
+  const double abs_x = resident_abs(dx);
+  const double abs_y = resident_abs(dy);
+  const double maximum = resident_max(abs_x, abs_y);
+  const double minimum = resident_min(abs_x, abs_y);
+  if (maximum == 0.0)
+    return {0.0, 0};
+  const double ratio = minimum / maximum;
+  const double value = maximum * sycl::sqrt(1.0 + ratio * ratio);
+  return sycl::isfinite(value) ? SpatialResidentDistance{value, 0}
+                               : SpatialResidentDistance{0.0, 1};
+}
+
+static SpatialResidentDistance resident_point_distance(double ax, double ay, double bx, double by) {
   const double dx = ax - bx;
   const double dy = ay - by;
-  return sycl::sqrt(dx * dx + dy * dy);
+  return resident_hypot(dx, dy);
 }
 
-static double resident_point_segment_distance(double px, double py, double ax, double ay, double bx,
-                                              double by) {
+static SpatialResidentDistance resident_point_segment_distance(double px, double py, double ax,
+                                                               double ay, double bx, double by) {
   const double dx = bx - ax;
   const double dy = by - ay;
-  const double length_squared = dx * dx + dy * dy;
-  if (length_squared == 0.0)
+  if (!sycl::isfinite(dx) || !sycl::isfinite(dy))
+    return {0.0, 1};
+  const double scale = resident_max(resident_abs(dx), resident_abs(dy));
+  if (scale == 0.0)
     return resident_point_distance(px, py, ax, ay);
-  double projection = ((px - ax) * dx + (py - ay) * dy) / length_squared;
+  const double px_offset = px - ax;
+  const double py_offset = py - ay;
+  if (!sycl::isfinite(px_offset) || !sycl::isfinite(py_offset))
+    return {0.0, 1};
+  const double unit_x = dx / scale;
+  const double unit_y = dy / scale;
+  const double offset_x = px_offset / scale;
+  const double offset_y = py_offset / scale;
+  const double denominator = unit_x * unit_x + unit_y * unit_y;
+  const double numerator = offset_x * unit_x + offset_y * unit_y;
+  double projection = numerator / denominator;
+  if (!sycl::isfinite(offset_x) || !sycl::isfinite(offset_y) ||
+      !sycl::isfinite(denominator) || !sycl::isfinite(numerator) ||
+      !sycl::isfinite(projection)) {
+    return {0.0, 1};
+  }
   projection = resident_max(0.0, resident_min(1.0, projection));
-  return resident_point_distance(px, py, ax + projection * dx, ay + projection * dy);
+  if (projection == 0.0)
+    return resident_point_distance(px, py, ax, ay);
+  if (projection == 1.0)
+    return resident_point_distance(px, py, bx, by);
+  const double projected_x = ax + projection * dx;
+  const double projected_y = ay + projection * dy;
+  if (!sycl::isfinite(projected_x) || !sycl::isfinite(projected_y))
+    return {0.0, 1};
+  return resident_point_distance(px, py, projected_x, projected_y);
 }
 
-static double resident_segment_distance(double a0x, double a0y, double a1x, double a1y, double b0x,
-                                        double b0y, double b1x, double b1y) {
-  double minimum = resident_point_segment_distance(a0x, a0y, b0x, b0y, b1x, b1y);
-  minimum = resident_min(minimum, resident_point_segment_distance(a1x, a1y, b0x, b0y, b1x, b1y));
-  minimum = resident_min(minimum, resident_point_segment_distance(b0x, b0y, a0x, a0y, a1x, a1y));
-  return resident_min(minimum, resident_point_segment_distance(b1x, b1y, a0x, a0y, a1x, a1y));
+static SpatialResidentDistance resident_distance_min(SpatialResidentDistance left,
+                                                     SpatialResidentDistance right) {
+  if (left.uncertain != 0 || right.uncertain != 0)
+    return {0.0, 1};
+  return {resident_min(left.value, right.value), 0};
 }
 
-static double resident_point_geometry_distance(const double* point,
-                                               const SpatialResidentGeometry& geometry) {
+static SpatialResidentDistance resident_segment_distance(double a0x, double a0y, double a1x,
+                                                         double a1y, double b0x, double b0y,
+                                                         double b1x, double b1y) {
+  SpatialResidentDistance minimum =
+      resident_point_segment_distance(a0x, a0y, b0x, b0y, b1x, b1y);
+  minimum = resident_distance_min(
+      minimum, resident_point_segment_distance(a1x, a1y, b0x, b0y, b1x, b1y));
+  minimum = resident_distance_min(
+      minimum, resident_point_segment_distance(b0x, b0y, a0x, a0y, a1x, a1y));
+  return resident_distance_min(
+      minimum, resident_point_segment_distance(b1x, b1y, a0x, a0y, a1x, a1y));
+}
+
+static SpatialResidentDistance resident_point_geometry_distance(
+    const double* point, const SpatialResidentGeometry& geometry) {
   if (geometry.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
     const double* other = geometry.view->coordinates + geometry.coordinate_begin * 2;
     return resident_point_distance(point[0], point[1], other[0], other[1]);
   }
-  double minimum = DBL_MAX;
+  SpatialResidentDistance minimum{DBL_MAX, 0};
   if (geometry.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING) {
     for (size_t index = geometry.coordinate_begin; index + 1 < geometry.coordinate_end; ++index) {
       const double* first = geometry.view->coordinates + index * 2;
       const double* second = geometry.view->coordinates + (index + 1) * 2;
-      minimum =
-          resident_min(minimum, resident_point_segment_distance(point[0], point[1], first[0],
-                                                                first[1], second[0], second[1]));
+      minimum = resident_distance_min(
+          minimum, resident_point_segment_distance(point[0], point[1], first[0], first[1],
+                                                    second[0], second[1]));
     }
     return minimum;
   }
@@ -1242,17 +1296,17 @@ static double resident_point_geometry_distance(const double* point,
     for (size_t edge = begin; edge + 1 < end; ++edge) {
       const double* first = geometry.view->coordinates + edge * 2;
       const double* second = geometry.view->coordinates + (edge + 1) * 2;
-      minimum =
-          resident_min(minimum, resident_point_segment_distance(point[0], point[1], first[0],
-                                                                first[1], second[0], second[1]));
+      minimum = resident_distance_min(
+          minimum, resident_point_segment_distance(point[0], point[1], first[0], first[1],
+                                                    second[0], second[1]));
     }
   }
   return minimum;
 }
 
-static double resident_linear_distance(const SpatialResidentGeometry& left,
-                                       const SpatialResidentGeometry& right) {
-  double minimum = DBL_MAX;
+static SpatialResidentDistance resident_linear_distance(const SpatialResidentGeometry& left,
+                                                        const SpatialResidentGeometry& right) {
+  SpatialResidentDistance minimum{DBL_MAX, 0};
   if (left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
       right.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING) {
     for (size_t a = left.coordinate_begin; a + 1 < left.coordinate_end; ++a) {
@@ -1261,8 +1315,9 @@ static double resident_linear_distance(const SpatialResidentGeometry& left,
       for (size_t b = right.coordinate_begin; b + 1 < right.coordinate_end; ++b) {
         const double* b0 = right.view->coordinates + b * 2;
         const double* b1 = right.view->coordinates + (b + 1) * 2;
-        minimum = resident_min(minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1], b0[0],
-                                                                  b0[1], b1[0], b1[1]));
+        minimum = resident_distance_min(
+            minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1], b0[0], b0[1], b1[0],
+                                                b1[1]));
       }
     }
     return minimum;
@@ -1282,18 +1337,18 @@ static double resident_linear_distance(const SpatialResidentGeometry& left,
       for (size_t edge = begin; edge + 1 < end; ++edge) {
         const double* poly_a = polygon.view->coordinates + edge * 2;
         const double* poly_b = polygon.view->coordinates + (edge + 1) * 2;
-        minimum = resident_min(minimum, resident_segment_distance(line_a[0], line_a[1], line_b[0],
-                                                                  line_b[1], poly_a[0], poly_a[1],
-                                                                  poly_b[0], poly_b[1]));
+        minimum = resident_distance_min(
+            minimum, resident_segment_distance(line_a[0], line_a[1], line_b[0], line_b[1],
+                                                poly_a[0], poly_a[1], poly_b[0], poly_b[1]));
       }
     }
   }
   return minimum;
 }
 
-static double resident_polygon_distance(const SpatialResidentGeometry& left,
-                                        const SpatialResidentGeometry& right) {
-  double minimum = DBL_MAX;
+static SpatialResidentDistance resident_polygon_distance(const SpatialResidentGeometry& left,
+                                                         const SpatialResidentGeometry& right) {
+  SpatialResidentDistance minimum{DBL_MAX, 0};
   for (size_t left_ring = 0; left_ring < left.ring_end - left.ring_begin; ++left_ring) {
     const size_t left_begin = resident_ring_start(left, left_ring);
     const size_t left_end = resident_ring_end(left, left_ring);
@@ -1306,8 +1361,9 @@ static double resident_polygon_distance(const SpatialResidentGeometry& left,
         for (size_t b = right_begin; b + 1 < right_end; ++b) {
           const double* b0 = right.view->coordinates + b * 2;
           const double* b1 = right.view->coordinates + (b + 1) * 2;
-          minimum = resident_min(minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1],
-                                                                    b0[0], b0[1], b1[0], b1[1]));
+          minimum = resident_distance_min(
+              minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1], b0[0], b0[1], b1[0],
+                                                  b1[1]));
         }
       }
     }
@@ -1326,19 +1382,17 @@ static SpatialResidentDistance resident_distance(const SpatialResidentGeometry& 
     return {0.0, 1};
 
   if (left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
-    return {
-        resident_point_geometry_distance(left.view->coordinates + left.coordinate_begin * 2, right),
-        0};
+    return resident_point_geometry_distance(left.view->coordinates + left.coordinate_begin * 2,
+                                            right);
   }
   if (right.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
-    return {resident_point_geometry_distance(right.view->coordinates + right.coordinate_begin * 2,
-                                             left),
-            0};
+    return resident_point_geometry_distance(right.view->coordinates + right.coordinate_begin * 2,
+                                            left);
   }
   if (left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
       right.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON)
-    return {resident_polygon_distance(left, right), 0};
-  return {resident_linear_distance(left, right), 0};
+    return resident_polygon_distance(left, right);
+  return resident_linear_distance(left, right);
 }
 
 static int8_t resident_dwithin(const SpatialResidentGeometry& left,
@@ -1347,14 +1401,23 @@ static int8_t resident_dwithin(const SpatialResidentGeometry& left,
     return -1;
   const SpatialResidentDistance distance = resident_distance(left, right);
   if (distance.uncertain != 0) {
-    const double dx =
-        resident_max(0.0, resident_max(left.bbox[0] - right.bbox[2], right.bbox[0] - left.bbox[2]));
-    const double dy =
-        resident_max(0.0, resident_max(left.bbox[1] - right.bbox[3], right.bbox[1] - left.bbox[3]));
-    const double bbox_lower_bound = sycl::sqrt(dx * dx + dy * dy);
+    double dx = 0.0;
+    double dy = 0.0;
+    if (left.bbox[2] < right.bbox[0])
+      dx = right.bbox[0] - left.bbox[2];
+    else if (right.bbox[2] < left.bbox[0])
+      dx = left.bbox[0] - right.bbox[2];
+    if (left.bbox[3] < right.bbox[1])
+      dy = right.bbox[1] - left.bbox[3];
+    else if (right.bbox[3] < left.bbox[1])
+      dy = left.bbox[1] - right.bbox[3];
+    const SpatialResidentDistance lower_bound = resident_hypot(dx, dy);
+    if (lower_bound.uncertain != 0)
+      return -1;
+    const double bbox_lower_bound = lower_bound.value;
     const double tolerance =
         resident_max(1.0, resident_max(bbox_lower_bound, threshold)) * (64.0 * DBL_EPSILON);
-    return bbox_lower_bound > threshold + tolerance ? -1 : 0;
+    return bbox_lower_bound > threshold && bbox_lower_bound - threshold > tolerance ? -1 : 0;
   }
   const double tolerance =
       resident_max(1.0, resident_max(distance.value, threshold)) * (64.0 * DBL_EPSILON);
@@ -1368,14 +1431,12 @@ struct SpatialResidentSpan {
   uintptr_t end;
 };
 
-static bool resident_span(const void* pointer, size_t count, size_t width, size_t alignment,
+static bool resident_span(const void* pointer, size_t bytes, size_t alignment,
                           SpatialResidentSpan* span) {
-  if (pointer == nullptr || span == nullptr || count == 0 || width == 0 || alignment == 0 ||
-      reinterpret_cast<uintptr_t>(pointer) % alignment != 0 ||
-      count > std::numeric_limits<size_t>::max() / width) {
+  if (pointer == nullptr || span == nullptr || bytes == 0 || alignment == 0 ||
+      reinterpret_cast<uintptr_t>(pointer) % alignment != 0) {
     return false;
   }
-  const size_t bytes = count * width;
   const uintptr_t begin = reinterpret_cast<uintptr_t>(pointer);
   if (begin > std::numeric_limits<uintptr_t>::max() - bytes)
     return false;
@@ -1400,14 +1461,41 @@ static bool resident_current_device_pointer(sycl::queue& queue, const void* poin
   }
 }
 
-static bool resident_add_span(sycl::queue& queue, const void* pointer, size_t count, size_t width,
-                              size_t alignment, std::vector<SpatialResidentSpan>* spans) {
-  SpatialResidentSpan span{};
-  if (!resident_span(pointer, count, width, alignment, &span) ||
-      !resident_current_device_pointer(queue, pointer)) {
+static bool resident_declared_span_shape(const void* pointer, size_t declared_bytes,
+                                         size_t required_count, size_t width) {
+  size_t required_bytes = 0;
+  if (width == 0 || declared_bytes % width != 0 ||
+      !spatial_checked_mul(required_count, width, &required_bytes) ||
+      required_bytes > declared_bytes ||
+      (pointer == nullptr) != (declared_bytes == 0)) {
     return false;
   }
-  spans->push_back(span);
+  return declared_bytes != 0 || required_bytes == 0;
+}
+
+static bool resident_validate_declared_span(sycl::queue& queue, const void* pointer,
+                                            size_t declared_bytes, size_t required_count,
+                                            size_t width, size_t alignment,
+                                            SpatialResidentSpan* span) {
+  if (!resident_declared_span_shape(pointer, declared_bytes, required_count, width))
+    return false;
+  if (declared_bytes == 0)
+    return true;
+  return resident_span(pointer, declared_bytes, alignment, span) &&
+         resident_current_device_pointer(queue, pointer);
+}
+
+static bool resident_add_span(sycl::queue& queue, const void* pointer, size_t declared_bytes,
+                              size_t required_count, size_t width, size_t alignment,
+                              std::vector<SpatialResidentSpan>* spans) {
+  SpatialResidentSpan span{};
+  if (spans == nullptr ||
+      !resident_validate_declared_span(queue, pointer, declared_bytes, required_count, width,
+                                       alignment, &span)) {
+    return false;
+  }
+  if (declared_bytes != 0)
+    spans->push_back(span);
   return true;
 }
 
@@ -1429,24 +1517,23 @@ static bool resident_validate_view_pointers(const pgaccel_resident_geometry_view
       (view.ring_count == 0) != (view.ring_offsets == nullptr)) {
     return false;
   }
-  if (coordinate_scalars != 0 && !resident_add_span(queue, view.coordinates, coordinate_scalars,
-                                                    sizeof(double), alignof(double), spans)) {
+  if (!resident_add_span(queue, view.coordinates, view.coordinates_bytes, coordinate_scalars,
+                         sizeof(double), alignof(double), spans) ||
+      !resident_add_span(queue, view.bboxes, view.bboxes_bytes, bbox_scalars, sizeof(double),
+                         alignof(double), spans) ||
+      !resident_add_span(queue, view.geometry_offsets, view.geometry_offsets_bytes,
+                         view.row_count + 1, sizeof(uint64_t), alignof(uint64_t), spans) ||
+      !resident_add_span(queue, view.rows, view.rows_bytes, view.row_count,
+                         sizeof(pgaccel_resident_geometry_row),
+                         alignof(pgaccel_resident_geometry_row), spans) ||
+      !resident_add_span(queue, view.ring_offsets, view.ring_offsets_bytes, view.ring_count,
+                         sizeof(uint64_t), alignof(uint64_t), spans)) {
     return false;
   }
-  if (!resident_add_span(queue, view.bboxes, bbox_scalars, sizeof(double), alignof(double),
-                         spans) ||
-      !resident_add_span(queue, view.geometry_offsets, view.row_count + 1, sizeof(uint64_t),
-                         alignof(uint64_t), spans) ||
-      !resident_add_span(queue, view.rows, view.row_count, sizeof(pgaccel_resident_geometry_row),
-                         alignof(pgaccel_resident_geometry_row), spans)) {
-    return false;
-  }
-  if (view.ring_count != 0 && !resident_add_span(queue, view.ring_offsets, view.ring_count,
-                                                 sizeof(uint64_t), alignof(uint64_t), spans)) {
-    return false;
-  }
-  return view.nulls == nullptr || resident_add_span(queue, view.nulls, view.row_count,
-                                                    sizeof(uint8_t), alignof(uint8_t), spans);
+  if (view.nulls == nullptr)
+    return view.nulls_bytes == 0;
+  return resident_add_span(queue, view.nulls, view.nulls_bytes, view.row_count, sizeof(uint8_t),
+                           alignof(uint8_t), spans);
 }
 
 static bool resident_validate_operand_range(const pgaccel_resident_geometry_operand& operand,
@@ -1646,11 +1733,18 @@ pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request
       (request->predicate != PGACCEL_SPATIAL_PREDICATE_DWITHIN &&
        request->distance_threshold != 0.0) ||
       (!distance_operation &&
-       (request->predicate_results == nullptr || request->distances != nullptr ||
-        request->distance_uncertain != nullptr)) ||
+       (!resident_declared_span_shape(request->predicate_results,
+                                      request->predicate_results_bytes,
+                                      request->output_capacity, sizeof(int8_t)) ||
+        request->distances != nullptr || request->distances_bytes != 0 ||
+        request->distance_uncertain != nullptr || request->distance_uncertain_bytes != 0)) ||
       (distance_operation &&
-       (request->predicate_results != nullptr || request->distances == nullptr ||
-        request->distance_uncertain == nullptr))) {
+       (request->predicate_results != nullptr || request->predicate_results_bytes != 0 ||
+        !resident_declared_span_shape(request->distances, request->distances_bytes,
+                                      request->output_capacity, sizeof(double)) ||
+        !resident_declared_span_shape(request->distance_uncertain,
+                                      request->distance_uncertain_bytes,
+                                      request->output_capacity, sizeof(uint8_t))))) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
   }
@@ -1678,19 +1772,22 @@ pgaccel_spatial_eval_resident_ex(const pgaccel_spatial_resident_request* request
   SpatialResidentSpan distance_span{};
   SpatialResidentSpan uncertain_span{};
   if (!distance_operation) {
-    if (!resident_span(request->predicate_results, request->output_capacity, sizeof(int8_t),
-                       alignof(int8_t), &predicate_span) ||
-        !resident_current_device_pointer(queue, request->predicate_results) ||
+    if (!resident_validate_declared_span(queue, request->predicate_results,
+                                         request->predicate_results_bytes,
+                                         request->output_capacity, sizeof(int8_t), alignof(int8_t),
+                                         &predicate_span) ||
         !resident_output_does_not_overlap(predicate_span, input_spans)) {
       *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
       return PGACCEL_INVALID_ARGUMENT;
     }
-  } else if (!resident_span(request->distances, request->output_capacity, sizeof(double),
-                            alignof(double), &distance_span) ||
-             !resident_span(request->distance_uncertain, request->output_capacity, sizeof(uint8_t),
-                            alignof(uint8_t), &uncertain_span) ||
-             !resident_current_device_pointer(queue, request->distances) ||
-             !resident_current_device_pointer(queue, request->distance_uncertain) ||
+  } else if (!resident_validate_declared_span(queue, request->distances,
+                                               request->distances_bytes,
+                                               request->output_capacity, sizeof(double),
+                                               alignof(double), &distance_span) ||
+             !resident_validate_declared_span(queue, request->distance_uncertain,
+                                               request->distance_uncertain_bytes,
+                                               request->output_capacity, sizeof(uint8_t),
+                                               alignof(uint8_t), &uncertain_span) ||
              resident_spans_overlap(distance_span, uncertain_span) ||
              !resident_output_does_not_overlap(distance_span, input_spans) ||
              !resident_output_does_not_overlap(uncertain_span, input_spans)) {

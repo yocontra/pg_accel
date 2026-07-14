@@ -150,6 +150,12 @@ struct DeviceLane {
             ring_offsets.get(),
             rows.get(),
             nulls.get(),
+            coordinates.size() * sizeof(double),
+            bboxes.size() * sizeof(double),
+            geometry_offsets.size() * sizeof(uint64_t),
+            ring_offsets.size() * sizeof(uint64_t),
+            rows.size() * sizeof(pgaccel_resident_geometry_row),
+            nulls.size() * sizeof(uint8_t),
             row_count,
             coordinate_pair_count,
             ring_count};
@@ -230,6 +236,7 @@ PredicateRun run_predicate(const DeviceLane& left, bool left_constant, const Dev
   request.left = {left.view(), 0, left_constant ? 0u : 1u};
   request.right = {right.view(), 0, right_constant ? 0u : 1u};
   request.predicate_results = output.get();
+  request.predicate_results_bytes = output.size() * sizeof(int8_t);
   request.output_capacity = count;
   int32_t detail = -1;
   const pgaccel_status status = pgaccel_spatial_eval_resident_ex(&request, &detail);
@@ -240,6 +247,36 @@ void check_results(const char* label, const PredicateRun& run,
                    std::initializer_list<int8_t> expected) {
   CHECK(label, run.status == PGACCEL_OK && run.detail == PGACCEL_SPATIAL_DETAIL_NONE &&
                    run.results == std::vector<int8_t>(expected));
+}
+
+struct DistanceRun {
+  pgaccel_status status;
+  int32_t detail;
+  std::vector<double> distances;
+  std::vector<uint8_t> uncertain;
+};
+
+DistanceRun run_distance(const DeviceLane& left, bool left_constant, const DeviceLane& right,
+                         bool right_constant, size_t count) {
+  DeviceBuffer<double> distances(count);
+  DeviceBuffer<uint8_t> uncertain(count);
+  pgaccel_spatial_resident_request request{};
+  request.abi_version = PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION;
+  request.predicate = PGACCEL_SPATIAL_PREDICATE_DISTANCE;
+  request.count = count;
+  request.max_referenced_bytes = 256 * 1024 * 1024;
+  request.left = {left.view(), 0, left_constant ? 0u : 1u};
+  request.right = {right.view(), 0, right_constant ? 0u : 1u};
+  request.distances = distances.get();
+  request.distances_bytes = distances.size() * sizeof(double);
+  request.distance_uncertain = uncertain.get();
+  request.distance_uncertain_bytes = uncertain.size() * sizeof(uint8_t);
+  request.output_capacity = count;
+  int32_t detail = -1;
+  const pgaccel_status status = pgaccel_spatial_eval_resident_ex(&request, &detail);
+  if (status != PGACCEL_OK)
+    return {status, detail, {}, {}};
+  return {status, detail, distances.to_host(), uncertain.to_host()};
 }
 
 void test_intersects_pair_matrix() {
@@ -333,6 +370,28 @@ void test_holes_boundaries_and_predicates() {
       run_predicate(concave, true, exits_concavity, true, 1, PGACCEL_SPATIAL_PREDICATE_CONTAINS),
       {-1});
 
+  const DeviceLane extreme_line_a = make_lane({line({-1e200, -1e200, 1e200, 1e200})});
+  const DeviceLane extreme_line_b =
+      make_lane({line({-1e200, -1e200 + 1e185, 1e200, 1e200 - 1e185})});
+  check_results(
+      "overflowing orientation is uncertain",
+      run_predicate(extreme_line_a, true, extreme_line_b, true, 1,
+                    PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {0});
+
+  const DeviceLane large_square =
+      make_lane({polygon({0, 0, 10, 0, 10, 10, 0, 10, 0, 0})});
+  DeviceLane non_tight_point = make_lane({point(5, 5)});
+  const double covering_bbox[4] = {-1, -1, 11, 11};
+  CHECK("non-tight bbox setup",
+        pgaccel_expr_device_copy_from_host(non_tight_point.bboxes.get(), covering_bbox,
+                                           sizeof(covering_bbox)) == PGACCEL_OK);
+  check_results(
+      "Contains does not trust non-tight inner bbox",
+      run_predicate(large_square, true, non_tight_point, true, 1,
+                    PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+      {1});
+
   const DeviceLane origins = make_lane({point(0, 0), point(0, 0), point(0, 0)});
   const DeviceLane targets = make_lane({point(1, 0), point(3, 0), point(2, 0)});
   check_results(
@@ -350,25 +409,35 @@ void test_holes_boundaries_and_predicates() {
 void test_distance() {
   const DeviceLane origins = make_lane({point(0, 0), point(0, 0)});
   const DeviceLane targets = make_lane({point(3, 4), point(0, 0)});
-  DeviceBuffer<double> distances(2);
-  DeviceBuffer<uint8_t> uncertain(2);
-  pgaccel_spatial_resident_request request{};
-  request.abi_version = PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION;
-  request.predicate = PGACCEL_SPATIAL_PREDICATE_DISTANCE;
-  request.count = 2;
-  request.max_referenced_bytes = 1 << 20;
-  request.left = {origins.view(), 0, 1};
-  request.right = {targets.view(), 0, 1};
-  request.distances = distances.get();
-  request.distance_uncertain = uncertain.get();
-  request.output_capacity = 2;
-  int32_t detail = -1;
-  const pgaccel_status status = pgaccel_spatial_eval_resident_ex(&request, &detail);
-  const std::vector<double> values = distances.to_host();
-  const std::vector<uint8_t> flags = uncertain.to_host();
-  CHECK("Distance status", status == PGACCEL_OK && detail == PGACCEL_SPATIAL_DETAIL_NONE);
-  CHECK("Distance values", std::fabs(values[0] - 5.0) < 1e-12 && values[1] == 0.0);
-  CHECK("Distance uncertainty sidecar", flags == std::vector<uint8_t>({0, 0}));
+  const DistanceRun run = run_distance(origins, false, targets, false, 2);
+  CHECK("Distance status",
+        run.status == PGACCEL_OK && run.detail == PGACCEL_SPATIAL_DETAIL_NONE);
+  CHECK("Distance values",
+        run.distances.size() == 2 && std::fabs(run.distances[0] - 5.0) < 1e-12 &&
+            run.distances[1] == 0.0);
+  CHECK("Distance uncertainty sidecar", run.uncertain == std::vector<uint8_t>({0, 0}));
+
+  const DeviceLane extreme_origin = make_lane({point(0, 0)});
+  const DeviceLane extreme_target = make_lane({point(1e200, 0)});
+  const DistanceRun extreme = run_distance(extreme_origin, true, extreme_target, true, 1);
+  CHECK("finite 1e200 point distance remains finite",
+        extreme.status == PGACCEL_OK && extreme.distances.size() == 1 &&
+            std::isfinite(extreme.distances[0]) &&
+            std::fabs(extreme.distances[0] / 1e200 - 1.0) < 1e-12 &&
+            extreme.uncertain == std::vector<uint8_t>({0}));
+
+  const DeviceLane projection_point = make_lane({point(0, 2)});
+  const DeviceLane overflowing_segment = make_lane({line({-1e308, 0, 1e308, 0})});
+  const DistanceRun projection =
+      run_distance(projection_point, true, overflowing_segment, true, 1);
+  CHECK("overflowing projection is uncertain",
+        projection.status == PGACCEL_OK && projection.distances == std::vector<double>({0.0}) &&
+            projection.uncertain == std::vector<uint8_t>({1}));
+  check_results(
+      "DWithin uses bbox lower bound after projection uncertainty",
+      run_predicate(projection_point, true, overflowing_segment, true, 1,
+                    PGACCEL_SPATIAL_PREDICATE_DWITHIN, 1.0),
+      {-1});
 }
 
 void test_hard_failures() {
@@ -407,6 +476,7 @@ void test_hard_failures() {
   request.left = {left.view(), 0, 0};
   request.right = {right.view(), 0, 0};
   request.predicate_results = output.get();
+  request.predicate_results_bytes = output.size() * sizeof(int8_t);
   request.output_capacity = 0;
   int32_t detail = -1;
   CHECK("output capacity is hard",
@@ -438,6 +508,35 @@ void test_hard_failures() {
         pgaccel_spatial_eval_resident_ex(&request, &detail) == PGACCEL_INVALID_ARGUMENT &&
             detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
 
+  DeviceBuffer<int8_t> short_output(2);
+  pgaccel_spatial_resident_request short_output_request{};
+  short_output_request.abi_version = PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION;
+  short_output_request.predicate = PGACCEL_SPATIAL_PREDICATE_INTERSECTS;
+  short_output_request.count = 2;
+  short_output_request.max_referenced_bytes = 1 << 20;
+  short_output_request.left = {left.view(), 0, 0};
+  short_output_request.right = {right.view(), 0, 0};
+  short_output_request.predicate_results = short_output.get();
+  short_output_request.predicate_results_bytes = 1;
+  short_output_request.output_capacity = 2;
+  detail = -1;
+  CHECK("short output allocation is hard",
+        pgaccel_spatial_eval_resident_ex(&short_output_request, &detail) ==
+                PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  pgaccel_resident_geometry_view oversized_view = left.view();
+  oversized_view.row_count = 2;
+  pgaccel_spatial_resident_request oversized_request = short_output_request;
+  oversized_request.left = {oversized_view, 0, 1};
+  oversized_request.predicate_results_bytes = short_output.size() * sizeof(int8_t);
+  pgaccel_reset_gpu_exec_count();
+  detail = -1;
+  CHECK("oversized logical lane count is hard before dispatch",
+        pgaccel_spatial_eval_resident_ex(&oversized_request, &detail) ==
+                PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT && pgaccel_gpu_exec_count() == 0);
+
   DeviceLane invalid_null = make_lane({point(0, 0)});
   const uint8_t invalid_null_byte = 2;
   CHECK("invalid NULL sidecar setup",
@@ -448,6 +547,29 @@ void test_hard_failures() {
   CHECK("invalid NULL sidecar is hard",
         invalid_null_run.status == PGACCEL_INVALID_ARGUMENT &&
             invalid_null_run.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY);
+
+  DeviceLane invalid_coordinate = make_lane({point(0, 0)});
+  const double nan_coordinate = std::numeric_limits<double>::quiet_NaN();
+  CHECK("NaN coordinate setup",
+        pgaccel_expr_device_copy_from_host(invalid_coordinate.coordinates.get(), &nan_coordinate,
+                                           sizeof(nan_coordinate)) == PGACCEL_OK);
+  const PredicateRun invalid_coordinate_run = run_predicate(
+      invalid_coordinate, true, right, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS);
+  CHECK("NaN coordinate is hard",
+        invalid_coordinate_run.status == PGACCEL_INVALID_ARGUMENT &&
+            invalid_coordinate_run.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY);
+
+  DeviceLane invalid_empty = make_lane({empty_point()});
+  const double negative_zero = -0.0;
+  CHECK("negative-zero empty bbox setup",
+        pgaccel_expr_device_copy_from_host(invalid_empty.bboxes.get(), &negative_zero,
+                                           sizeof(negative_zero)) == PGACCEL_OK);
+  const PredicateRun invalid_empty_run =
+      run_predicate(invalid_empty, true, right, true, 1,
+                    PGACCEL_SPATIAL_PREDICATE_INTERSECTS);
+  CHECK("negative-zero empty bbox is hard",
+        invalid_empty_run.status == PGACCEL_INVALID_ARGUMENT &&
+            invalid_empty_run.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY);
 }
 
 void test_large_rows_and_vertices() {

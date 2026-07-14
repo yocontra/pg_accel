@@ -72,6 +72,8 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 # Files that rely on IEEE NaN/Inf semantics opt out of -ffast-math:
 #   raster_ops         — isnan/isinf drive NODATA propagation
 #   spatial_predicates — isfinite gates NaN/Inf → UNCERTAIN
+#   spatial_dispatch   — resident fp64 validation and uncertainty gates depend
+#                         on finite intermediates and signed-zero semantics.
 #   sort               — pad_value<float>() uses +infinity as the bitonic
 #                         sentinel; -ffast-math's no-infinities assumption
 #                         makes pad elements leak into the output with
@@ -95,6 +97,7 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 set_source_files_properties(
     src/raster_ops.cpp
     src/spatial_predicates.cpp
+    src/spatial_dispatch.cpp
     src/sort.cpp
     src/hash_agg.cpp
     src/fused_ops.cpp
