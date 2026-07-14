@@ -1089,6 +1089,10 @@ fn has_requested_columns(entry: &ResidentRelation, attnos: &[i16]) -> bool {
     attnos.iter().all(|attno| entry.columns.contains_key(attno))
 }
 
+fn missing_load_is_authorized(force: bool, pinned: bool, auto_load: bool) -> bool {
+    force || pinned || auto_load
+}
+
 fn ensure_one(
     request: &SelectedRelation,
     force: bool,
@@ -1134,7 +1138,8 @@ fn ensure_one_after_invalidations(
             loaded: false,
         });
     }
-    if !force && !gucs::auto_load() {
+    let pinned = STORE.with(|store| store.borrow().pins.contains_key(&u32::from(request.relid)));
+    if !missing_load_is_authorized(force, pinned, gucs::auto_load()) {
         return Err(ResidentLoadError::AutoLoadDisabled {
             relid: request.relid,
         });
@@ -1145,7 +1150,6 @@ fn ensure_one_after_invalidations(
         loader::ensure_invalidation_trigger(request.relid).map_err(ResidentLoadError::Loader)?;
     let staged =
         loader::stage_relation(request.relid, &columns).map_err(ResidentLoadError::Loader)?;
-    let pinned = STORE.with(|store| store.borrow().pins.contains_key(&u32::from(request.relid)));
     let first_use_scope = first_use_scope_for_load(trigger, pinned, !force);
     install_staged(staged, pinned, first_use_scope, protected)?;
     let evidence = STORE.with(|store| {
@@ -2351,6 +2355,14 @@ mod tests {
     }
 
     #[test]
+    fn pin_intent_authorizes_missing_reload_when_auto_load_is_disabled() {
+        assert!(missing_load_is_authorized(false, true, false));
+        assert!(missing_load_is_authorized(true, false, false));
+        assert!(missing_load_is_authorized(false, false, true));
+        assert!(!missing_load_is_authorized(false, false, false));
+    }
+
+    #[test]
     fn explicit_load_drains_new_trigger_invalidations_before_continuing() {
         let events = RefCell::new(Vec::new());
         let staged = continue_explicit_load_after_trigger_install(
@@ -2419,6 +2431,37 @@ mod tests {
         assert_eq!(store.entries[0].relid, pg_sys::Oid::from(90_u32));
         assert!(store.entries[0].pinned);
         assert_eq!(store.entries[0].first_use_scope, None);
+    }
+
+    #[test]
+    fn commit_generation_bump_evicts_snapshot_but_preserves_pin_intent() {
+        let relid = pg_sys::Oid::from(95_u32);
+        let mut store = RelationStore::default();
+        store.pins.insert(
+            95,
+            PinSpec {
+                columns: Vec::new(),
+            },
+        );
+        store.entries.push(empty_relation(95, true, 1));
+
+        prune_invalid_relations(
+            &mut store,
+            false,
+            &PendingRelcacheInvalidations::empty(),
+            CommandScope {
+                xid: 2,
+                command_id: 1,
+            },
+            |_| GenerationStamp {
+                global: 1,
+                relation: 2,
+            },
+            |_| Some(pg_sys::Oid::from(195_u32)),
+        );
+
+        assert!(store.entries.is_empty());
+        assert!(store.pins.contains_key(&u32::from(relid)));
     }
 
     #[test]

@@ -221,7 +221,7 @@ fn apply_exact_residency(
         let state = if estimate.loaded {
             RelationResidency::Resident
         } else {
-            if !policy.auto_load {
+            if !policy.auto_load && !estimate.pinned {
                 return Err(AdmissionDecline::AutoLoadDisabled {
                     relation_oid: required.relation_oid,
                     estimated_bytes: estimate.estimated_bytes,
@@ -886,6 +886,32 @@ mod tests {
                 estimated_bytes: 4096
             }
         ));
+    }
+
+    #[test]
+    fn missing_pinned_residency_reloads_with_auto_load_disabled() {
+        let mut shape = count_shape();
+        let mut pinned = estimate(false, 4096);
+        pinned.pinned = true;
+        apply_exact_residency(
+            &mut shape,
+            &[pinned],
+            AdmissionPolicy {
+                auto_load: false,
+                budget_bytes: 8192,
+                budget_snapshot: budget_snapshot(0, 0, 0),
+            },
+            &model(),
+        )
+        .expect("durable pin intent authorizes a budgeted reload");
+        assert_eq!(
+            shape.residency.relations[0].state,
+            RelationResidency::AutoLoad
+        );
+        assert_eq!(shape.residency.missing_bytes, Some(4096));
+        assert_eq!(shape.residency.missing_rows, 100_000);
+        assert_eq!(shape.cost.amortized_auto_load, PgCost::new(100.0));
+        assert_eq!(shape.cost.total, PgCost::new(116.0));
     }
 
     #[test]
