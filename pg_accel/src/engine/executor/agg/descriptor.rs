@@ -701,12 +701,12 @@ fn spatial_artifact_kind(
     )?))
 }
 
-fn verify_catalog_before_artifact_ensure<T>(
+fn verify_catalog_before<T>(
     verify_catalog: impl FnOnce() -> Result<(), ResidentLoadError>,
-    ensure_artifact: impl FnOnce() -> Result<T, ResidentLoadError>,
+    operation: impl FnOnce() -> Result<T, ResidentLoadError>,
 ) -> Result<T, ResidentLoadError> {
     verify_catalog()?;
-    ensure_artifact()
+    operation()
 }
 
 pub(super) struct DescriptorAggPlan {
@@ -901,7 +901,15 @@ impl DescriptorAggPlan {
         &self,
     ) -> Result<DescriptorResidencyReport, DescriptorAggExecutionError> {
         let preparation_started = Instant::now();
-        let selected = ensure_selected_relations(&self.selected)?;
+        let selected = match &self.artifact_kind {
+            DescriptorArtifactKind::Spatial(plan) => verify_catalog_before(
+                || plan.verify_catalog(),
+                || ensure_selected_relations(&self.selected),
+            )?,
+            DescriptorArtifactKind::Dense | DescriptorArtifactKind::H3Parent { .. } => {
+                ensure_selected_relations(&self.selected)?
+            }
+        };
         let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
         let (artifact_outcome, relations, artifact_bytes) = match &self.artifact_kind {
             DescriptorArtifactKind::Dense => {
@@ -1044,7 +1052,7 @@ impl DescriptorAggPlan {
                 (outcome, relations, bytes)
             }
             DescriptorArtifactKind::Spatial(plan) => {
-                let outcome = verify_catalog_before_artifact_ensure(
+                let outcome = verify_catalog_before(
                     || plan.verify_catalog(),
                     || {
                         ensure_staged_device_transform_artifact(
@@ -2120,9 +2128,9 @@ mod tests {
     }
 
     #[test]
-    fn catalog_verification_precedes_cached_artifact_ensure() {
+    fn catalog_verification_precedes_guarded_operation() {
         let calls = std::cell::RefCell::new(Vec::new());
-        let outcome = verify_catalog_before_artifact_ensure(
+        let outcome = verify_catalog_before(
             || {
                 calls.borrow_mut().push("verify");
                 Ok(())
@@ -2137,7 +2145,7 @@ mod tests {
         assert_eq!(*calls.borrow(), ["verify", "ensure"]);
 
         let ensure_called = std::cell::Cell::new(false);
-        let error = verify_catalog_before_artifact_ensure(
+        let error = verify_catalog_before(
             || Err(ResidentLoadError::Loader("catalog changed".to_owned())),
             || {
                 ensure_called.set(true);
