@@ -273,8 +273,9 @@ pgaccel_status point_in_ring_bulk_sycl(const T* points_xy, size_t point_count, c
     // why constexpr-double captures may collide with Metal arg-buffer
     // limits. T = float / double both work here because eps participates
     // in plain compare/multiply, not soft-fp64 trig.
-    const T eps =
-        std::is_same<T, double>::value ? static_cast<T>(EPS_FP64) : static_cast<T>(EPS_FP32);
+    T eps = static_cast<T>(EPS_FP32);
+    if (std::is_same<T, double>::value)
+      eps = static_cast<T>(EPS_FP64);
 
     q->parallel_for(sycl::range<1>(point_count), [=](sycl::id<1> id) {
        const size_t i = id[0];
@@ -356,7 +357,7 @@ pgaccel_status point_in_ring_bulk_sycl(const T* points_xy, size_t point_count, c
        }
      }).wait_and_throw();
 
-    std::memcpy(results, d_res, point_count * sizeof(int8_t));
+    q->memcpy(results, d_res, point_count * sizeof(int8_t)).wait_and_throw();
 
     sycl::free(d_pts, *q);
     sycl::free(d_ring, *q);
@@ -476,8 +477,8 @@ static pgaccel_status sphere_distance_bulk_sycl_f32(const float* points_a, const
        d_unc[i] = 0;
      }).wait_and_throw();
 
-    std::memcpy(distances, d_dist, count * sizeof(float));
-    std::memcpy(uncertain, d_unc, count * sizeof(uint8_t));
+    q->memcpy(distances, d_dist, count * sizeof(float)).wait_and_throw();
+    q->memcpy(uncertain, d_unc, count * sizeof(uint8_t)).wait_and_throw();
 
     sycl::free(d_a, *q);
     sycl::free(d_b, *q);
@@ -585,8 +586,8 @@ static pgaccel_status sphere_distance_bulk_sycl_f64(const double* points_a, cons
        });
      }).wait_and_throw();
 
-    std::memcpy(distances, d_dist, count * sizeof(double));
-    std::memcpy(uncertain, d_unc, count * sizeof(uint8_t));
+    q->memcpy(distances, d_dist, count * sizeof(double)).wait_and_throw();
+    q->memcpy(uncertain, d_unc, count * sizeof(uint8_t)).wait_and_throw();
 
     sycl::free(d_a, *q);
     sycl::free(d_b, *q);
@@ -647,8 +648,9 @@ pgaccel_status segment_intersects_bulk_sycl(const T* segs_a, const T* segs_b, si
     // eps as `const T` capture — see point_in_ring_bulk_sycl notes for
     // why this works under Metal arg-buffer limits while constexpr-T
     // captures of trig-pulling math constants do not.
-    const T eps =
-        std::is_same<T, double>::value ? static_cast<T>(EPS_FP64) : static_cast<T>(EPS_FP32);
+    T eps = static_cast<T>(EPS_FP32);
+    if (std::is_same<T, double>::value)
+      eps = static_cast<T>(EPS_FP64);
 
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        const size_t i = id[0];
@@ -704,7 +706,7 @@ pgaccel_status segment_intersects_bulk_sycl(const T* segs_a, const T* segs_b, si
        }
      }).wait_and_throw();
 
-    std::memcpy(results, d_res, count * sizeof(int8_t));
+    q->memcpy(results, d_res, count * sizeof(int8_t)).wait_and_throw();
 
     sycl::free(d_a, *q);
     sycl::free(d_b, *q);
@@ -760,7 +762,10 @@ pgaccel_status st_area_bulk_sycl(const T* coords, const uint32_t* row_offsets, s
   const uint32_t total_coord_count = row_offsets[row_count];
 
   try {
-    T* d_coords = sycl::malloc_shared<T>(total_coord_count > 0 ? total_coord_count : 1, *q);
+    size_t coord_capacity = total_coord_count;
+    if (coord_capacity == 0)
+      coord_capacity = 1;
+    T* d_coords = sycl::malloc_shared<T>(coord_capacity, *q);
     uint32_t* d_offsets = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
     T* d_areas = sycl::malloc_shared<T>(row_count, *q);
 
@@ -804,7 +809,7 @@ pgaccel_status st_area_bulk_sycl(const T* coords, const uint32_t* row_offsets, s
        d_areas[i] = sycl::fabs(signed_area) * T(0.5);
      }).wait_and_throw();
 
-    std::memcpy(areas, d_areas, row_count * sizeof(T));
+    q->memcpy(areas, d_areas, row_count * sizeof(T)).wait_and_throw();
 
     sycl::free(d_coords, *q);
     sycl::free(d_offsets, *q);
@@ -870,7 +875,10 @@ pgaccel_status st_length_bulk_sycl_f32(const float* coords, const uint32_t* row_
   const uint32_t total_coord_count = row_offsets[row_count];
 
   try {
-    float* d_coords = sycl::malloc_shared<float>(total_coord_count > 0 ? total_coord_count : 1, *q);
+    size_t coord_capacity = total_coord_count;
+    if (coord_capacity == 0)
+      coord_capacity = 1;
+    float* d_coords = sycl::malloc_shared<float>(coord_capacity, *q);
     uint32_t* d_offsets = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
     float* d_lengths = sycl::malloc_shared<float>(row_count, *q);
 
@@ -915,7 +923,7 @@ pgaccel_status st_length_bulk_sycl_f32(const float* coords, const uint32_t* row_
        d_lengths[i] = total;
      }).wait_and_throw();
 
-    std::memcpy(lengths, d_lengths, row_count * sizeof(float));
+    q->memcpy(lengths, d_lengths, row_count * sizeof(float)).wait_and_throw();
 
     sycl::free(d_coords, *q);
     sycl::free(d_offsets, *q);
@@ -949,8 +957,10 @@ pgaccel_status st_length_bulk_sycl_f64(const double* coords, const uint32_t* row
   const uint32_t total_coord_count = row_offsets[row_count];
 
   try {
-    double* d_coords =
-        sycl::malloc_shared<double>(total_coord_count > 0 ? total_coord_count : 1, *q);
+    size_t coord_capacity = total_coord_count;
+    if (coord_capacity == 0)
+      coord_capacity = 1;
+    double* d_coords = sycl::malloc_shared<double>(coord_capacity, *q);
     uint32_t* d_offsets = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
     double* d_lengths = sycl::malloc_shared<double>(row_count, *q);
 
@@ -997,7 +1007,7 @@ pgaccel_status st_length_bulk_sycl_f64(const double* coords, const uint32_t* row
        });
      }).wait_and_throw();
 
-    std::memcpy(lengths, d_lengths, row_count * sizeof(double));
+    q->memcpy(lengths, d_lengths, row_count * sizeof(double)).wait_and_throw();
 
     sycl::free(d_coords, *q);
     sycl::free(d_offsets, *q);
@@ -1189,8 +1199,14 @@ st_distance_polygon_polygon_bulk_sycl_f32(const float* coords_a, const uint32_t*
   const uint32_t total_b = row_offsets_b[row_count];
 
   try {
-    float* d_a = sycl::malloc_shared<float>(total_a > 0 ? total_a : 1, *q);
-    float* d_b = sycl::malloc_shared<float>(total_b > 0 ? total_b : 1, *q);
+    size_t capacity_a = total_a;
+    size_t capacity_b = total_b;
+    if (capacity_a == 0)
+      capacity_a = 1;
+    if (capacity_b == 0)
+      capacity_b = 1;
+    float* d_a = sycl::malloc_shared<float>(capacity_a, *q);
+    float* d_b = sycl::malloc_shared<float>(capacity_b, *q);
     uint32_t* d_off_a = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
     uint32_t* d_off_b = sycl::malloc_shared<uint32_t>(row_count + 1, *q);
     float* d_dist = sycl::malloc_shared<float>(row_count, *q);
@@ -1313,8 +1329,8 @@ st_distance_polygon_polygon_bulk_sycl_f32(const float* coords_a, const uint32_t*
        d_unc[i] = overlap ? 1 : 0;
      }).wait_and_throw();
 
-    std::memcpy(distances, d_dist, row_count * sizeof(float));
-    std::memcpy(uncertain, d_unc, row_count * sizeof(uint8_t));
+    q->memcpy(distances, d_dist, row_count * sizeof(float)).wait_and_throw();
+    q->memcpy(uncertain, d_unc, row_count * sizeof(uint8_t)).wait_and_throw();
 
     sycl::free(d_a, *q);
     sycl::free(d_b, *q);
@@ -1388,6 +1404,7 @@ namespace {
 // Maximum ring vertex count for which the device attempts the O(N^2)
 // rotation/reversal equality fast path. Larger rings remain UNCERTAIN.
 constexpr size_t RING_EQUAL_FAST_PATH_LIMIT = 32;
+constexpr size_t ALGORITHMIC_STAGED_COORD_LIMIT = RING_EQUAL_FAST_PATH_LIMIT + 1;
 constexpr size_t ALGORITHMIC_NO_COORDS = std::numeric_limits<size_t>::max();
 
 enum class AlgorithmicPredicate {
@@ -1401,22 +1418,31 @@ struct AlgorithmicPredicateKernelSlabHeader {
   size_t count;
   size_t geoms_a_off;
   size_t geoms_b_off;
-  size_t results_off;
   int pred_id;
 };
 
 struct AlgorithmicPredicateGeometryMeta {
   int type;
   uint32_t has_bbox;
+  uint32_t has_ring_offsets;
+  uint32_t reserved;
   float bbox[4];
   size_t coords_off;
   size_t coord_count;
+  size_t copied_coord_count;
+  size_t ring_count;
+  uint32_t first_ring_offset;
 };
 
 struct AlgorithmicPredicatePayloadCopy {
   size_t off;
   const void* src;
   size_t bytes;
+};
+
+struct AlgorithmicPredicateStaging {
+  std::vector<uint8_t> bytes;
+  size_t result_bytes;
 };
 
 static bool algorithmic_checked_add(size_t a, size_t b, size_t* out) {
@@ -1450,6 +1476,102 @@ static bool algorithmic_add_region(size_t* cursor, size_t bytes, size_t alignmen
   return true;
 }
 
+static bool algorithmic_stage_predicate_inputs(const pgaccel_geometry* geoms_a,
+                                               const pgaccel_geometry* geoms_b, size_t count,
+                                               AlgorithmicPredicate pred,
+                                               AlgorithmicPredicateStaging* out) {
+  if (geoms_a == nullptr || geoms_b == nullptr || out == nullptr)
+    return false;
+
+  AlgorithmicPredicateKernelSlabHeader header{};
+  header.count = count;
+  header.pred_id = static_cast<int>(pred);
+
+  size_t meta_bytes = 0;
+  size_t result_bytes = 0;
+  if (!algorithmic_checked_mul(count, sizeof(AlgorithmicPredicateGeometryMeta), &meta_bytes) ||
+      !algorithmic_checked_mul(count, sizeof(int8_t), &result_bytes)) {
+    return false;
+  }
+
+  size_t cursor = sizeof(header);
+  if (!algorithmic_add_region(&cursor, meta_bytes, alignof(AlgorithmicPredicateGeometryMeta),
+                              &header.geoms_a_off) ||
+      !algorithmic_add_region(&cursor, meta_bytes, alignof(AlgorithmicPredicateGeometryMeta),
+                              &header.geoms_b_off)) {
+    return false;
+  }
+
+  std::vector<AlgorithmicPredicateGeometryMeta> meta_a(count);
+  std::vector<AlgorithmicPredicateGeometryMeta> meta_b(count);
+  std::vector<AlgorithmicPredicatePayloadCopy> payloads;
+
+  // This helper only serializes descriptor fields and a bounded coordinate
+  // prefix. Geometry support and every predicate decision are device work.
+  auto stage_geometry = [&](const pgaccel_geometry& geom,
+                            AlgorithmicPredicateGeometryMeta* meta) -> bool {
+    *meta = AlgorithmicPredicateGeometryMeta{};
+    meta->type = static_cast<int>(geom.type);
+    meta->coords_off = ALGORITHMIC_NO_COORDS;
+    meta->coord_count = geom.coord_count;
+    meta->ring_count = geom.ring_count;
+
+    if (geom.bbox != nullptr) {
+      meta->has_bbox = 1;
+      std::memcpy(meta->bbox, geom.bbox, sizeof(meta->bbox));
+    }
+    if (geom.ring_offsets != nullptr) {
+      meta->has_ring_offsets = 1;
+      if (geom.ring_count != 0)
+        meta->first_ring_offset = geom.ring_offsets[0];
+    }
+    if (geom.coords == nullptr || geom.coord_count == 0)
+      return true;
+
+    size_t copied_coord_count = geom.coord_count;
+    if (copied_coord_count > ALGORITHMIC_STAGED_COORD_LIMIT)
+      copied_coord_count = ALGORITHMIC_STAGED_COORD_LIMIT;
+
+    size_t value_count = 0;
+    size_t coord_bytes = 0;
+    if (!algorithmic_checked_mul(copied_coord_count, size_t{2}, &value_count) ||
+        !algorithmic_checked_mul(value_count, sizeof(float), &coord_bytes) ||
+        !algorithmic_add_region(&cursor, coord_bytes, alignof(float), &meta->coords_off)) {
+      return false;
+    }
+    meta->copied_coord_count = copied_coord_count;
+    payloads.push_back({meta->coords_off, geom.coords, coord_bytes});
+    return true;
+  };
+
+  for (size_t i = 0; i < count; ++i) {
+    if (!stage_geometry(geoms_a[i], &meta_a[i]) ||
+        !stage_geometry(geoms_b[i], &meta_b[i])) {
+      return false;
+    }
+  }
+
+  out->bytes.assign(cursor, uint8_t{0});
+  std::memcpy(out->bytes.data(), &header, sizeof(header));
+  std::memcpy(out->bytes.data() + header.geoms_a_off, meta_a.data(), meta_bytes);
+  std::memcpy(out->bytes.data() + header.geoms_b_off, meta_b.data(), meta_bytes);
+  for (const auto& payload : payloads)
+    std::memcpy(out->bytes.data() + payload.off, payload.src, payload.bytes);
+  out->result_bytes = result_bytes;
+  return true;
+}
+
+static bool algorithmic_device_ring_comparable(const AlgorithmicPredicateGeometryMeta& geom) {
+  if (geom.coords_off == ALGORITHMIC_NO_COORDS || geom.coord_count < 3 ||
+      geom.coord_count > RING_EQUAL_FAST_PATH_LIMIT ||
+      geom.copied_coord_count < geom.coord_count) {
+    return false;
+  }
+  if (geom.ring_count == 0)
+    return true;
+  return geom.ring_count == 1 && geom.has_ring_offsets != 0 && geom.first_ring_offset == 0;
+}
+
 static bool algorithmic_device_coord_equal(float ax, float ay, float bx, float by) {
   const float dx = ax - bx;
   const float dy = ay - by;
@@ -1467,7 +1589,7 @@ static size_t algorithmic_device_open_ring_count(const float* coords, size_t cou
 static bool algorithmic_device_ring_equal(const uint8_t* slab,
                                           const AlgorithmicPredicateGeometryMeta& a,
                                           const AlgorithmicPredicateGeometryMeta& b) {
-  if (a.coords_off == ALGORITHMIC_NO_COORDS || b.coords_off == ALGORITHMIC_NO_COORDS)
+  if (!algorithmic_device_ring_comparable(a) || !algorithmic_device_ring_comparable(b))
     return false;
 
   const auto* coords_a = reinterpret_cast<const float*>(slab + a.coords_off);
@@ -1513,91 +1635,24 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
     return PGACCEL_ERROR_NO_DEVICE;
 
   uint8_t* d_slab = nullptr;
+  int8_t* d_results = nullptr;
   try {
-    AlgorithmicPredicateKernelSlabHeader header{};
-    header.count = count;
-    header.pred_id = static_cast<int>(pred);
+    AlgorithmicPredicateStaging staged{};
+    if (!algorithmic_stage_predicate_inputs(geoms_a, geoms_b, count, pred, &staged))
+      return PGACCEL_OOM;
 
-    size_t meta_bytes = 0;
-    size_t result_bytes = 0;
-    if (!algorithmic_checked_mul(count, sizeof(AlgorithmicPredicateGeometryMeta), &meta_bytes) ||
-        !algorithmic_checked_mul(count, sizeof(int8_t), &result_bytes)) {
+    // Keep the Metal kernel ABI low-capture: one input slab and one result
+    // allocation are captured, with typed views rebuilt inside the kernel.
+    d_slab = sycl::malloc_shared<uint8_t>(staged.bytes.size(), *q);
+    d_results = sycl::malloc_shared<int8_t>(count, *q);
+    if (!d_slab || !d_results) {
+      if (d_slab)
+        sycl::free(d_slab, *q);
+      if (d_results)
+        sycl::free(d_results, *q);
       return PGACCEL_OOM;
     }
-
-    size_t cursor = sizeof(header);
-    if (!algorithmic_add_region(&cursor, meta_bytes, alignof(AlgorithmicPredicateGeometryMeta),
-                                &header.geoms_a_off) ||
-        !algorithmic_add_region(&cursor, meta_bytes, alignof(AlgorithmicPredicateGeometryMeta),
-                                &header.geoms_b_off) ||
-        !algorithmic_add_region(&cursor, result_bytes, alignof(int8_t), &header.results_off)) {
-      return PGACCEL_OOM;
-    }
-
-    std::vector<AlgorithmicPredicateGeometryMeta> meta_a(count);
-    std::vector<AlgorithmicPredicateGeometryMeta> meta_b(count);
-    std::vector<AlgorithmicPredicatePayloadCopy> payloads;
-
-    // This pass only validates descriptors and serializes their byte payloads.
-    // Spatial comparisons and result classification are exclusively device work.
-    auto stage_geometry = [&](const pgaccel_geometry& geom,
-                              AlgorithmicPredicateGeometryMeta* meta) -> bool {
-      *meta = AlgorithmicPredicateGeometryMeta{};
-      meta->type = static_cast<int>(geom.type);
-      meta->coords_off = ALGORITHMIC_NO_COORDS;
-      if (geom.bbox != nullptr) {
-        meta->has_bbox = 1;
-        std::memcpy(meta->bbox, geom.bbox, sizeof(meta->bbox));
-      }
-
-      size_t copied_coord_count = 0;
-      if (geom.type == PGACCEL_GEOM_POINT && geom.coords != nullptr && geom.coord_count >= 1) {
-        copied_coord_count = 1;
-      } else if (geom.type == PGACCEL_GEOM_POLYGON && geom.coords != nullptr &&
-                 geom.coord_count >= 3 && geom.coord_count <= RING_EQUAL_FAST_PATH_LIMIT) {
-        const bool single_ring =
-            geom.ring_count == 0 ||
-            (geom.ring_count == 1 && geom.ring_offsets != nullptr && geom.ring_offsets[0] == 0);
-        if (single_ring) {
-          copied_coord_count = geom.coord_count;
-        }
-      }
-
-      if (copied_coord_count == 0)
-        return true;
-
-      size_t value_count = 0;
-      size_t coord_bytes = 0;
-      if (!algorithmic_checked_mul(copied_coord_count, size_t{2}, &value_count) ||
-          !algorithmic_checked_mul(value_count, sizeof(float), &coord_bytes) ||
-          !algorithmic_add_region(&cursor, coord_bytes, alignof(float), &meta->coords_off)) {
-        return false;
-      }
-      meta->coord_count = copied_coord_count;
-      payloads.push_back({meta->coords_off, geom.coords, coord_bytes});
-      return true;
-    };
-
-    for (size_t i = 0; i < count; ++i) {
-      if (!stage_geometry(geoms_a[i], &meta_a[i]) || !stage_geometry(geoms_b[i], &meta_b[i])) {
-        return PGACCEL_OOM;
-      }
-    }
-
-    std::vector<uint8_t> staged(cursor, 0);
-    std::memcpy(staged.data(), &header, sizeof(header));
-    std::memcpy(staged.data() + header.geoms_a_off, meta_a.data(), meta_bytes);
-    std::memcpy(staged.data() + header.geoms_b_off, meta_b.data(), meta_bytes);
-    for (const auto& payload : payloads) {
-      std::memcpy(staged.data() + payload.off, payload.src, payload.bytes);
-    }
-
-    // Keep the Metal kernel ABI low-capture: one shared USM slab is captured,
-    // and typed views are reconstructed from offsets inside the kernel.
-    d_slab = sycl::malloc_shared<uint8_t>(cursor, *q);
-    if (!d_slab)
-      return PGACCEL_OOM;
-    q->memcpy(d_slab, staged.data(), cursor).wait_and_throw();
+    q->memcpy(d_slab, staged.bytes.data(), staged.bytes.size()).wait_and_throw();
 
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        const auto* h = reinterpret_cast<const AlgorithmicPredicateKernelSlabHeader*>(d_slab);
@@ -1605,7 +1660,6 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
            reinterpret_cast<const AlgorithmicPredicateGeometryMeta*>(d_slab + h->geoms_a_off);
        const auto* device_meta_b =
            reinterpret_cast<const AlgorithmicPredicateGeometryMeta*>(d_slab + h->geoms_b_off);
-       auto* slab_results = reinterpret_cast<int8_t*>(d_slab + h->results_off);
        const size_t i = id[0];
        const AlgorithmicPredicateGeometryMeta a = device_meta_a[i];
        const AlgorithmicPredicateGeometryMeta b = device_meta_b[i];
@@ -1614,15 +1668,16 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
 
        if (ta == static_cast<int>(PGACCEL_GEOM_UNKNOWN) ||
            tb == static_cast<int>(PGACCEL_GEOM_UNKNOWN)) {
-         slab_results[i] = 0;
+         d_results[i] = 0;
          return;
        }
 
        const bool disjoint = a.has_bbox != 0 && b.has_bbox != 0 &&
                              ((a.bbox[2] < b.bbox[0]) || (b.bbox[2] < a.bbox[0]) ||
                               (a.bbox[3] < b.bbox[1]) || (b.bbox[3] < a.bbox[1]));
-       const bool point_comparable =
-           a.coords_off != ALGORITHMIC_NO_COORDS && b.coords_off != ALGORITHMIC_NO_COORDS;
+       const bool point_comparable = a.coords_off != ALGORITHMIC_NO_COORDS &&
+                                     b.coords_off != ALGORITHMIC_NO_COORDS &&
+                                     a.copied_coord_count >= 1 && b.copied_coord_count >= 1;
        bool point_equal = false;
        if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
            tb == static_cast<int>(PGACCEL_GEOM_POINT) && point_comparable) {
@@ -1637,91 +1692,97 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
 
        if (h->pred_id == static_cast<int>(AlgorithmicPredicate::Equals)) {
          if (disjoint) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
              tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
-           slab_results[i] = point_comparable ? (point_equal ? int8_t(1) : int8_t(-1)) : int8_t(0);
+           d_results[i] = point_comparable ? (point_equal ? int8_t(1) : int8_t(-1)) : int8_t(0);
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
              tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_equal) {
-           slab_results[i] = 1;
+           d_results[i] = 1;
            return;
          }
          if (ta != tb) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
-         slab_results[i] = 0;
+         d_results[i] = 0;
        } else if (h->pred_id == static_cast<int>(AlgorithmicPredicate::Touches)) {
          if (disjoint) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
              tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
              tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_equal) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
-         slab_results[i] = 0;
+         d_results[i] = 0;
        } else if (h->pred_id == static_cast<int>(AlgorithmicPredicate::Crosses)) {
          if (disjoint) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
              tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
              tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_equal) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
-         slab_results[i] = 0;
+         d_results[i] = 0;
        } else /* Overlaps */ {
          if (disjoint) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
          if (ta != tb) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POINT) && point_equal) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_equal) {
-           slab_results[i] = -1;
+           d_results[i] = -1;
            return;
          }
-         slab_results[i] = 0;
+         d_results[i] = 0;
        }
      }).wait_and_throw();
 
-    q->memcpy(results, d_slab + header.results_off, result_bytes).wait_and_throw();
+    q->memcpy(results, d_results, staged.result_bytes).wait_and_throw();
     sycl::free(d_slab, *q);
+    sycl::free(d_results, *q);
     d_slab = nullptr;
+    d_results = nullptr;
 
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
     if (d_slab)
       sycl::free(d_slab, *q);
+    if (d_results)
+      sycl::free(d_results, *q);
     fprintf(stderr, "pgaccel: SYCL sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
     if (d_slab)
       sycl::free(d_slab, *q);
+    if (d_results)
+      sycl::free(d_results, *q);
     fprintf(stderr, "pgaccel: sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
