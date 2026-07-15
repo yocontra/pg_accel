@@ -18,8 +18,11 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import os
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
@@ -80,6 +83,24 @@ FAILURE_STATUSES = frozenset(
         "PGACCEL_ERROR_UNSUPPORTED",
     }
 )
+
+KNOWN_PREPROCESSOR_FEATURES = frozenset(
+    {
+        "__APPLE__",
+        "__clang__",
+        "__cplusplus",
+    }
+)
+OUTPUT_ASSIGNMENTS = frozenset(
+    {"=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "++", "--"}
+)
+
+DEFAULT_ABI_MANIFEST = pathlib.Path(__file__).with_name("cpu_cheat_abi_manifest.txt")
+EXPECTED_ABI_MANIFEST_COUNT = 167
+EXPECTED_ABI_MANIFEST_SHA256 = (
+    "3c8a3db2cd7a070af3ebf796cb7d3189add46959c4cc2eb481554478da4ab2c6"
+)
+INTERNAL_NON_ABI_HEADERS = frozenset({"alloc_helper.h", "pgaccel_queue.h"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -194,6 +215,115 @@ class ParseError(ValueError):
 class PreprocessorDirective:
     line: int
     text: str
+
+
+def _directive_parts(directive: PreprocessorDirective) -> tuple[str, str]:
+    match = re.match(r"\s*#\s*([A-Za-z_][A-Za-z0-9_]*)\b(.*)", directive.text, re.S)
+    if match is None:
+        return "", ""
+    return match.group(1), match.group(2).strip()
+
+
+def _header_guard_names(directives: Sequence[PreprocessorDirective]) -> set[str]:
+    guards: set[str] = set()
+    for index, directive in enumerate(directives[:-1]):
+        command, argument = _directive_parts(directive)
+        next_command, next_argument = _directive_parts(directives[index + 1])
+        if (
+            command == "ifndef"
+            and argument.isidentifier()
+            and next_command == "define"
+            and next_argument.split(maxsplit=1)[0] == argument
+            and directives[index + 1].line == directive.line + 1
+        ):
+            guards.add(argument)
+    return guards
+
+
+def _known_preprocessor_condition(command: str, argument: str) -> bool:
+    if command in {"if", "elif"} and re.fullmatch(
+        r"\(?\s*(?:0+|1+)[uUlL]*\s*\)?", argument
+    ):
+        return True
+    if command in {"ifdef", "ifndef"}:
+        return argument in KNOWN_PREPROCESSOR_FEATURES
+    features = re.findall(r"defined\s*(?:\(\s*)?([A-Za-z_][A-Za-z0-9_]*)", argument)
+    if features and all(feature in KNOWN_PREPROCESSOR_FEATURES for feature in features):
+        remainder = re.sub(
+            r"defined\s*(?:\(\s*)?[A-Za-z_][A-Za-z0-9_]*\s*\)?", "", argument
+        )
+        return not re.search(r"[A-Za-z_]", remainder)
+    return False
+
+
+def _ambiguous_preprocessor_directives(
+    directives: Sequence[PreprocessorDirective],
+) -> tuple[PreprocessorDirective, ...]:
+    guards = _header_guard_names(directives)
+    ambiguous: list[PreprocessorDirective] = []
+    for directive in directives:
+        command, argument = _directive_parts(directive)
+        if command not in {"if", "ifdef", "ifndef", "elif"}:
+            continue
+        if command == "ifndef" and argument in guards:
+            continue
+        if not _known_preprocessor_condition(command, argument):
+            ambiguous.append(directive)
+    return tuple(ambiguous)
+
+
+def _macro_inventory_findings(
+    path: pathlib.Path,
+    directives: Sequence[PreprocessorDirective],
+    *,
+    header: bool = False,
+    abi_inventory: bool = False,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    for directive in directives:
+        command, _ = _directive_parts(directive)
+        if command != "define":
+            continue
+        token_paste = "##" in directive.text
+        export_bearing = "pgaccel_" in directive.text or bool(
+            re.search(r"extern\s*(?:\\\"C\\\"|\"C\")", directive.text)
+        )
+        if not token_paste and not export_bearing:
+            continue
+        if token_paste:
+            message = (
+                "token-pasting macro can synthesize an export outside the parsed ABI "
+                "inventory"
+            )
+            classifications = (
+                "token_paste_export_risk",
+                "macro_hidden_export",
+                "abi_inventory_mismatch"
+                if header or abi_inventory
+                else "review_required",
+            )
+        else:
+            message = (
+                "export-bearing header macro is absent from the parsed ABI declaration inventory"
+                if header
+                else "export-bearing macro cannot be proven against the source ABI inventory"
+            )
+            classifications = (
+                "macro_hidden_export",
+                "abi_inventory_mismatch"
+                if header or abi_inventory
+                else "review_required",
+            )
+        findings.append(
+            Finding(
+                path,
+                directive.line,
+                "<preprocessor>",
+                message,
+                classifications,
+            )
+        )
+    return findings
 
 
 def normalize_preprocessor(
@@ -341,6 +471,8 @@ class AbiSymbol:
     name: str
     return_spelling: str
     parameter_count: int | None
+    parameter_types: tuple[str, ...]
+    full_signature: str
     origin: str
 
 
@@ -353,6 +485,27 @@ class AbiInventory:
     definition_hash: str
     source_definition_hash: str
     declaration_hash: str
+    manifest: dict[str, object] | None = None
+    compiler: dict[str, object] | None = None
+    objects: tuple[dict[str, object], ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class AbiManifest:
+    path: pathlib.Path
+    count: int
+    sha256: str
+    signatures: dict[str, str]
+
+
+@dataclasses.dataclass(frozen=True)
+class CompilerAbiInventory:
+    symbols: tuple[AbiSymbol, ...]
+    compiler_path: str
+    compiler_version: str
+    command: tuple[str, ...]
+    umbrella_sha256: str
+    stderr: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -867,7 +1020,48 @@ def _contract_contains_dispatch(
     return None
 
 
-def _lifecycle_proof(tokens: Sequence[Token], function: Function) -> _Proof | None:
+def _active_contract_sequence(
+    tokens: Sequence[Token],
+    function: Function,
+    sequence: Sequence[str],
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> bool:
+    size = len(sequence)
+    for index in range(function.body_open + 1, function.body_close - size + 1):
+        if tuple(token.value for token in tokens[index : index + size]) != tuple(
+            sequence
+        ):
+            continue
+        if _is_inside(index, lambda_ranges):
+            continue
+        if any(
+            region.definitely_inactive and region.start <= index <= region.end
+            for region in regions
+        ):
+            continue
+        if any(
+            return_index < index
+            and not _is_inside(return_index, lambda_ranges)
+            and _context_dominates(
+                _context(return_index, regions), _context(index, regions)
+            )
+            for return_index in range(function.body_open + 1, index)
+            if tokens[return_index].value == "return"
+        ):
+            continue
+        return True
+    return False
+
+
+def _lifecycle_proof(
+    tokens: Sequence[Token],
+    function: Function,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+    host_writes: Sequence[tuple[int, int, bool]],
+    control_lines: Sequence[tuple[str, int]],
+) -> _Proof | None:
     contract = LIFECYCLE_CONTRACTS.get(function.name)
     if contract is None:
         return None
@@ -877,7 +1071,9 @@ def _lifecycle_proof(tokens: Sequence[Token], function: Function) -> _Proof | No
     missing = [
         sequence
         for sequence in contract.required_sequences
-        if not _contains_sequence(values, sequence)
+        if not _active_contract_sequence(
+            tokens, function, sequence, regions, lambda_ranges
+        )
     ]
     forbidden: list[str] = []
     if not contract.allow_host_loops and set(values) & {"for", "while", "do"}:
@@ -886,6 +1082,16 @@ def _lifecycle_proof(tokens: Sequence[Token], function: Function) -> _Proof | No
         forbidden.append("GPU execution counter")
     if _contract_contains_dispatch(tokens, function) is not None:
         forbidden.append("device dispatch")
+    if host_writes:
+        forbidden.append(
+            "host ABI-output write at line(s) "
+            + ", ".join(str(record[1]) for record in host_writes)
+        )
+    if control_lines:
+        forbidden.append(
+            "ambiguous control flow "
+            + ", ".join(f"{kind} at line {line}" for kind, line in control_lines)
+        )
     if missing or forbidden:
         expected = " and ".join(" ".join(sequence) for sequence in missing)
         details: list[str] = []
@@ -906,7 +1112,12 @@ def _lifecycle_proof(tokens: Sequence[Token], function: Function) -> _Proof | No
 
 
 def _fail_only_contract_proof(
-    tokens: Sequence[Token], function: Function
+    tokens: Sequence[Token],
+    function: Function,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+    host_writes: Sequence[tuple[int, int, bool]],
+    control_lines: Sequence[tuple[str, int]],
 ) -> _Proof | None:
     contract = FAIL_ONLY_CONTRACTS.get(function.name)
     if contract is None:
@@ -917,7 +1128,9 @@ def _fail_only_contract_proof(
     missing = [
         sequence
         for sequence in contract.required_sequences
-        if not _contains_sequence(values, sequence)
+        if not _active_contract_sequence(
+            tokens, function, sequence, regions, lambda_ranges
+        )
     ]
     forbidden: list[str] = []
     if set(values) & {"for", "while", "do"}:
@@ -926,6 +1139,17 @@ def _fail_only_contract_proof(
         forbidden.append("GPU execution counter")
     if _contract_contains_dispatch(tokens, function) is not None:
         forbidden.append("device dispatch")
+    unsafe_writes = [record for record in host_writes if not record[2]]
+    if unsafe_writes:
+        forbidden.append(
+            "non-neutral host ABI-output write at line(s) "
+            + ", ".join(str(record[1]) for record in unsafe_writes)
+        )
+    if control_lines:
+        forbidden.append(
+            "ambiguous control flow "
+            + ", ".join(f"{kind} at line {line}" for kind, line in control_lines)
+        )
     if missing or forbidden:
         details: list[str] = []
         if missing:
@@ -1017,26 +1241,27 @@ def _statement_range(
         }:
             depth = max(0, depth - 1)
         elif value == ";" and depth == 0:
-            return start - 1, cursor + 1, cursor + 1
+            return start - 1, cursor, cursor + 1
         cursor += 1
     return start - 1, limit, limit
 
 
-def _condition_is_zero(values: Sequence[str]) -> bool:
+def _condition_is_zero(values: Sequence[str], parameters: set[str]) -> bool:
     compact = tuple(value for value in values if value not in {"(", ")"})
-    if len(compact) == 2 and compact[0] == "!" and compact[1].isidentifier():
-        return True
     if len(compact) != 3:
         return False
     left, operator, right = compact
     return operator == "==" and (
-        (left.isidentifier() and right in {"0", "0u", "0U"})
-        or (right.isidentifier() and left in {"0", "0u", "0U"})
+        (left in parameters and right in {"0", "0u", "0U"})
+        or (right in parameters and left in {"0", "0u", "0U"})
     )
 
 
 def _regions(
-    tokens: Sequence[Token], function: Function, forward: dict[int, int]
+    tokens: Sequence[Token],
+    function: Function,
+    forward: dict[int, int],
+    parameters: set[str],
 ) -> list[_Region]:
     regions: list[_Region] = []
     serial = 0
@@ -1066,7 +1291,7 @@ def _regions(
                     "true",
                     start,
                     end,
-                    _condition_is_zero(condition),
+                    _condition_is_zero(condition, parameters),
                     false_condition,
                 )
             )
@@ -1323,11 +1548,12 @@ def _lambda_contributes(
     tokens: Sequence[Token], bounds: tuple[int, int], mutable: set[str]
 ) -> bool:
     left, right = bounds
-    values = [token.value for token in tokens[left + 1 : right]]
-    if not values or not mutable.intersection(values):
-        return False
-    assignment = {"=", "+=", "-=", "*=", "/=", "++", "--"}
-    return bool(assignment.intersection(values))
+    forward, _ = _delimiter_pairs(tokens)
+    return any(
+        tokens[index].value in mutable
+        and _output_write_operator(tokens, index, right, forward) is not None
+        for index in range(left + 1, right)
+    )
 
 
 def _lambda_nonempty(tokens: Sequence[Token], bounds: tuple[int, int]) -> bool:
@@ -1340,12 +1566,18 @@ def _direct_dispatches(
     function: Function,
     mutable: set[str],
     regions: Sequence[_Region],
-) -> tuple[list[_DispatchEvidence], list[_DispatchEvidence], list[str]]:
+) -> tuple[
+    list[_DispatchEvidence],
+    list[_DispatchEvidence],
+    list[str],
+    set[tuple[int, int]],
+]:
     forward, reverse = _delimiter_pairs(tokens)
     lambdas = _lambda_ranges(tokens, function, forward, reverse)
     evidence: list[_DispatchEvidence] = []
     raw_launches: list[_DispatchEvidence] = []
     rejected: list[str] = []
+    device_lambdas: set[tuple[int, int]] = set()
     index = function.body_open + 1
     while index + 2 < function.body_close:
         if (
@@ -1407,6 +1639,7 @@ def _direct_dispatches(
                         tokens, inner_call[0], inner_call[1], forward, reverse
                     )
                     if kernel is not None and _lambda_nonempty(tokens, kernel):
+                        device_lambdas.add(kernel)
                         raw_inner_found = True
                         if _lambda_contributes(tokens, kernel, mutable):
                             inner_found = True
@@ -1436,6 +1669,7 @@ def _direct_dispatches(
                 continue
             kernel = _kernel_lambda(tokens, lparen, rparen, forward, reverse)
             if kernel is not None and _lambda_nonempty(tokens, kernel):
+                device_lambdas.add(kernel)
                 raw_launches.append(
                     _DispatchEvidence(
                         index,
@@ -1461,7 +1695,7 @@ def _direct_dispatches(
             )
         )
         index = rparen + 1
-    return evidence, raw_launches, rejected
+    return evidence, raw_launches, rejected, device_lambdas
 
 
 def _indexed_calls(
@@ -1476,6 +1710,12 @@ def _indexed_calls(
             continue
         token = tokens[index]
         if token.kind != "identifier" or token.value in CALL_KEYWORDS | NON_GRAPH_CALLS:
+            continue
+        if (
+            index > 1
+            and tokens[index - 1].value == "<"
+            and tokens[index - 2].value in DISPATCH_METHODS
+        ):
             continue
         if index > 0 and tokens[index - 1].value in {".", "->", "::"}:
             continue
@@ -1550,37 +1790,146 @@ def _returns(
     return result
 
 
+def _output_write_operator(
+    tokens: Sequence[Token],
+    index: int,
+    limit: int,
+    forward: dict[int, int],
+) -> int | None:
+    """Return the assignment operator for a write rooted at an output value."""
+
+    if index > 0 and tokens[index - 1].value in {"++", "--"}:
+        return index - 1
+    cursor = index + 1
+    projected = index > 0 and tokens[index - 1].value == "*"
+    while cursor < limit:
+        value = tokens[cursor].value
+        if value == "[" and cursor in forward:
+            projected = True
+            cursor = forward[cursor] + 1
+            continue
+        if value in {"->", "."} and cursor + 1 < limit:
+            projected = True
+            cursor += 2
+            continue
+        if value == ")" and projected:
+            cursor += 1
+            continue
+        break
+    if cursor < limit and tokens[cursor].value in {"++", "--"} and projected:
+        return cursor
+    if cursor < limit and tokens[cursor].value in OUTPUT_ASSIGNMENTS and projected:
+        return cursor
+    return None
+
+
+def _neutral_output_write(tokens: Sequence[Token], operator: int, limit: int) -> bool:
+    if tokens[operator].value != "=":
+        return False
+    values: list[str] = []
+    cursor = operator + 1
+    depth = 0
+    while cursor < limit:
+        value = tokens[cursor].value
+        if value in {"(", "[", "{"}:
+            depth += 1
+        elif value in {")", "]", "}"}:
+            if depth == 0:
+                break
+            depth -= 1
+        if value in {";", ","} and depth == 0:
+            break
+        values.append(value)
+        cursor += 1
+    compact = tuple(value for value in values if value not in {"(", ")"})
+    return compact in {
+        ("0",),
+        ("0u",),
+        ("0U",),
+        ("0L",),
+        ("0UL",),
+        ("false",),
+        ("nullptr",),
+        ("NULL",),
+    }
+
+
+def _output_aliases(
+    tokens: Sequence[Token],
+    function: Function,
+    mutable: set[str],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> tuple[set[str], set[int]]:
+    roots = set(mutable)
+    declarations: set[int] = set()
+    changed = True
+    while changed:
+        changed = False
+        for occurrence in range(function.body_open + 1, function.body_close):
+            if tokens[occurrence].value not in roots or _is_inside(
+                occurrence, lambda_ranges
+            ):
+                continue
+            statement_start = occurrence - 1
+            while statement_start > function.body_open and tokens[
+                statement_start
+            ].value not in {";", "{", "}"}:
+                statement_start -= 1
+            equals = next(
+                (
+                    index
+                    for index in range(statement_start + 1, occurrence)
+                    if tokens[index].value == "="
+                ),
+                None,
+            )
+            if equals is None:
+                continue
+            candidates = [
+                index
+                for index in range(statement_start + 1, equals)
+                if tokens[index].kind == "identifier"
+                and tokens[index].value not in CALL_KEYWORDS
+            ]
+            if not candidates:
+                continue
+            candidate = candidates[-1]
+            alias = tokens[candidate].value
+            if alias in roots:
+                continue
+            roots.add(alias)
+            declarations.add(candidate)
+            changed = True
+    return roots - mutable, declarations
+
+
 def _host_output_accesses(
     tokens: Sequence[Token],
     function: Function,
     mutable: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
-) -> tuple[list[int], list[int]]:
+) -> tuple[list[tuple[int, int, bool]], list[int], set[str]]:
     forward, _ = _delimiter_pairs(tokens)
-    lines: set[int] = set()
+    aliases, alias_declarations = _output_aliases(
+        tokens, function, mutable, lambda_ranges
+    )
+    roots = mutable | aliases
+    writes: dict[int, tuple[int, int, bool]] = {}
     transfers: set[int] = set()
-    assignments = {"=", "+=", "-=", "*=", "/=", "++", "--"}
     for index in range(function.body_open + 1, function.body_close):
-        if tokens[index].value not in mutable or _is_inside(index, lambda_ranges):
+        if (
+            tokens[index].value not in roots
+            or index in alias_declarations
+            or _is_inside(index, lambda_ranges)
+        ):
             continue
-        cursor = index + 1
-        if (
-            cursor < function.body_close
-            and tokens[cursor].value == "["
-            and cursor in forward
-        ):
-            cursor = forward[cursor] + 1
-        elif cursor + 1 < function.body_close and tokens[cursor].value == "->":
-            cursor += 2
-        if cursor < function.body_close and tokens[cursor].value in assignments:
-            lines.add(tokens[index].line)
-        if (
-            index > 0
-            and tokens[index - 1].value == "*"
-            and cursor < function.body_close
-            and tokens[cursor].value in assignments
-        ):
-            lines.add(tokens[index].line)
+        operator = _output_write_operator(tokens, index, function.body_close, forward)
+        if operator is not None:
+            writes[index] = (
+                index,
+                tokens[index].line,
+                _neutral_output_write(tokens, operator, function.body_close),
+            )
         if (
             index > 1
             and tokens[index - 1].value == "("
@@ -1589,8 +1938,62 @@ def _host_output_accesses(
             if index > 2 and tokens[index - 3].value in {".", "->"}:
                 transfers.add(tokens[index].line)
             else:
-                lines.add(tokens[index].line)
-    return sorted(lines), sorted(transfers)
+                writes[index] = (index, tokens[index].line, False)
+    return sorted(writes.values()), sorted(transfers), aliases
+
+
+def _deferred_output_writes(
+    tokens: Sequence[Token],
+    function: Function,
+    roots: set[str],
+    lambda_ranges: Sequence[tuple[int, int]],
+    device_lambdas: set[tuple[int, int]],
+) -> list[int]:
+    forward, _ = _delimiter_pairs(tokens)
+    lines: set[int] = set()
+    for index in range(function.body_open + 1, function.body_close):
+        if tokens[index].value not in roots:
+            continue
+        containing = [
+            bounds for bounds in lambda_ranges if bounds[0] < index < bounds[1]
+        ]
+        if not containing:
+            continue
+        innermost = max(containing, key=lambda bounds: bounds[0])
+        if innermost in device_lambdas:
+            continue
+        if (
+            _output_write_operator(tokens, index, function.body_close, forward)
+            is not None
+        ):
+            lines.add(tokens[index].line)
+    return sorted(lines)
+
+
+def _unresolved_member_output_calls(
+    tokens: Sequence[Token],
+    function: Function,
+    roots: set[str],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> list[tuple[str, int]]:
+    forward, _ = _delimiter_pairs(tokens)
+    calls: set[tuple[str, int]] = set()
+    for method_index in range(function.body_open + 2, function.body_close):
+        if (
+            tokens[method_index].kind != "identifier"
+            or tokens[method_index - 1].value not in {".", "->"}
+            or tokens[method_index].value in DISPATCH_METHODS | {"memcpy", "copy"}
+            or _is_inside(method_index, lambda_ranges)
+        ):
+            continue
+        call = _method_lparen(tokens, method_index, function.body_close, forward)
+        if call is None:
+            continue
+        receiver = tokens[method_index - 2].value
+        arguments = {token.value for token in tokens[call[0] + 1 : call[1]]}
+        if receiver in roots or roots.intersection(arguments):
+            calls.add((tokens[method_index].value, tokens[method_index].line))
+    return sorted(calls, key=lambda item: (item[1], item[0]))
 
 
 def _bounded_detail(parts: Iterable[str], limit: int = 6000) -> str:
@@ -1646,22 +2049,61 @@ class _PathAuditor:
                 ("recursive_helper", "review_required"),
             )
 
-        lifecycle = _lifecycle_proof(self.tokens, function)
+        lambda_ranges = _lambda_ranges(
+            self.tokens, function, self.forward, self.reverse
+        )
+        parameters, mutable = _parameter_names(self.tokens, function)
+        regions = _regions(self.tokens, function, self.forward, parameters)
+        host_writes, transfer_lines, aliases = _host_output_accesses(
+            self.tokens, function, mutable, lambda_ranges
+        )
+        output_roots = mutable | aliases
+        control_lines = sorted(
+            (
+                (token.value, token.line)
+                for index, token in enumerate(self.tokens)
+                if function.body_open < index < function.body_close
+                and token.value in {"switch", "goto", "?"}
+                and not _is_inside(index, lambda_ranges)
+            ),
+            key=lambda item: (item[1], item[0]),
+        )
+
+        lifecycle = _lifecycle_proof(
+            self.tokens,
+            function,
+            regions,
+            lambda_ranges,
+            host_writes,
+            control_lines,
+        )
         if lifecycle is not None:
             self.cache[function] = lifecycle
             return lifecycle
-        fail_contract = _fail_only_contract_proof(self.tokens, function)
+        fail_contract = _fail_only_contract_proof(
+            self.tokens,
+            function,
+            regions,
+            lambda_ranges,
+            host_writes,
+            control_lines,
+        )
         if fail_contract is not None:
             self.cache[function] = fail_contract
             return fail_contract
 
-        lambda_ranges = _lambda_ranges(
-            self.tokens, function, self.forward, self.reverse
+        direct, raw_launches, rejected, device_lambdas = _direct_dispatches(
+            self.tokens, function, output_roots, regions
         )
-        regions = _regions(self.tokens, function, self.forward)
-        _, mutable = _parameter_names(self.tokens, function)
-        direct, raw_launches, rejected = _direct_dispatches(
-            self.tokens, function, mutable, regions
+        deferred_write_lines = _deferred_output_writes(
+            self.tokens,
+            function,
+            output_roots,
+            lambda_ranges,
+            device_lambdas,
+        )
+        member_output_calls = _unresolved_member_output_calls(
+            self.tokens, function, output_roots, lambda_ranges
         )
         calls = _indexed_calls(self.tokens, function, lambda_ranges)
         classifications: set[str] = set()
@@ -1705,27 +2147,18 @@ class _PathAuditor:
                 "host loop(s) at line(s) " + ", ".join(map(str, host_loop_lines))
             )
 
-        output_write_lines, transfer_lines = _host_output_accesses(
-            self.tokens, function, mutable, lambda_ranges
-        )
         zero_ranges = [region for region in regions if region.zero_work]
-        unsafe_write_lines = [
-            line
-            for line in output_write_lines
-            if not any(
-                region.start
-                <= next(
-                    (
-                        index
-                        for index in range(region.start, region.end + 1)
-                        if self.tokens[index].line == line
-                    ),
-                    region.end + 1,
+        unsafe_write_records = [
+            record
+            for record in host_writes
+            if not (
+                record[2]
+                and any(
+                    region.start <= record[0] <= region.end for region in zero_ranges
                 )
-                <= region.end
-                for region in zero_ranges
             )
         ]
+        unsafe_write_lines = sorted({record[1] for record in unsafe_write_records})
         if unsafe_write_lines:
             classifications.update({"host_output_write", "host_computation"})
             details.append(
@@ -1738,6 +2171,25 @@ class _PathAuditor:
                 "output transfer provenance requires review at line(s) "
                 + ", ".join(map(str, transfer_lines))
             )
+        if deferred_write_lines:
+            classifications.update(
+                {"deferred_host_output_write", "host_computation", "review_required"}
+            )
+            details.append(
+                "non-device lambda writes ABI output at line(s) "
+                + ", ".join(map(str, deferred_write_lines))
+            )
+
+        if aliases:
+            classifications.add("output_alias_tracking")
+            details.append("ABI output alias(es): " + ", ".join(sorted(aliases)))
+
+        if control_lines:
+            classifications.update({"ambiguous_control_flow", "review_required"})
+            details.append(
+                "unmodeled control flow: "
+                + ", ".join(f"{kind} at line {line}" for kind, line in control_lines)
+            )
 
         if "if" in body_values and "constexpr" in body_values:
             classifications.update(
@@ -1748,7 +2200,12 @@ class _PathAuditor:
         # A successful helper call used as a statement can establish evidence
         # only when it receives one of this function's mutable ABI outputs.
         call_evidence: list[_DispatchEvidence] = []
-        unsafe_contributing_helpers: list[str] = []
+        unsafe_contributing_helpers = [
+            f"unresolved output method {name} at line {line} may finalize or overwrite the ABI result"
+            for name, line in member_output_calls
+        ]
+        if member_output_calls:
+            classifications.update({"unresolved_output_helper", "review_required"})
         call_proofs: dict[int, tuple[_IndexedCall, _Proof | None, str | None]] = {}
         for indexed in calls:
             candidate, error = self.resolve(indexed.call)
@@ -1761,7 +2218,7 @@ class _PathAuditor:
             if (
                 proof is not None
                 and "large_input_gpu_chain" in proof.classifications
-                and mutable.intersection(indexed.argument_values)
+                and output_roots.intersection(indexed.argument_values)
             ):
                 classifications.add("large_input_gpu_chain")
                 details.append(
@@ -1772,7 +2229,7 @@ class _PathAuditor:
             if (
                 proof is not None
                 and not proof.ok
-                and mutable.intersection(indexed.argument_values)
+                and output_roots.intersection(indexed.argument_values)
             ):
                 classifications.update(proof.classifications)
                 unsafe_contributing_helpers.append(
@@ -1782,7 +2239,7 @@ class _PathAuditor:
             if (
                 proof is not None
                 and proof.ok
-                and mutable.intersection(indexed.argument_values)
+                and output_roots.intersection(indexed.argument_values)
             ):
                 call_evidence.append(
                     _DispatchEvidence(
@@ -1792,6 +2249,18 @@ class _PathAuditor:
                         f"{function.name} -> {candidate.name} at line {indexed.call.line}: {proof.detail}",
                         _context(indexed.index, regions),
                     )
+                )
+            if proof is None and output_roots.intersection(indexed.argument_values):
+                classifications.update(
+                    {
+                        error or "unresolved_helper",
+                        "unresolved_output_helper",
+                        "review_required",
+                    }
+                )
+                unsafe_contributing_helpers.append(
+                    f"unresolved output helper {indexed.call.name} at line "
+                    f"{indexed.call.line} may finalize or overwrite the ABI result"
                 )
 
         all_evidence = sorted(direct + call_evidence, key=lambda item: item.index)
@@ -1817,7 +2286,17 @@ class _PathAuditor:
                 region.zero_work and region.start <= return_index <= region.end
                 for region in zero_ranges
             )
-            if zero and not host_loop_lines and not counter_lines:
+            if (
+                zero
+                and not host_loop_lines
+                and not counter_lines
+                and not control_lines
+                and not any(
+                    region.start <= record[0] <= region.end and not record[2]
+                    for region in zero_ranges
+                    for record in host_writes
+                )
+            ):
                 classifications.add("zero_work")
                 continue
 
@@ -1861,7 +2340,23 @@ class _PathAuditor:
                     f"success at line {self.tokens[return_index].line} is not dominated by output-producing SYCL work"
                 )
 
-        if function.is_status and returns and success_paths == 0:
+        failure_only_hazards = bool(
+            host_loop_lines
+            or host_writes
+            or transfer_lines
+            or counter_lines
+            or control_lines
+            or rejected
+            or deferred_write_lines
+            or member_output_calls
+            or unsafe_contributing_helpers
+        )
+        if (
+            function.is_status
+            and returns
+            and success_paths == 0
+            and not failure_only_hazards
+        ):
             proof = _Proof(
                 True,
                 "all reachable returns are explicit failure statuses",
@@ -1887,6 +2382,8 @@ class _PathAuditor:
             or unsafe_write_lines
             or transfer_lines
             or unsafe_contributing_helpers
+            or control_lines
+            or deferred_write_lines
             or "template_specialization_review" in classifications
         )
         if hard_failure:
@@ -1932,21 +2429,18 @@ def audit_source(
         return FileAudit(path, 0, 0, 0, (), (finding,))
 
     entrypoints = [function for function in functions if function.is_export]
-    findings: list[Finding] = []
-    for directive in directives:
-        if re.match(r"\s*#\s*define\b", directive.text) and (
-            "pgaccel_" in directive.text
-            or re.search(r"extern\s*(?:\\\"C\\\"|\"C\")", directive.text)
-        ):
-            findings.append(
-                Finding(
-                    path,
-                    directive.line,
-                    "<preprocessor>",
-                    "export-bearing macro cannot be proven against the source ABI inventory",
-                    ("macro_hidden_export", "review_required"),
-                )
+    findings = _macro_inventory_findings(path, directives)
+    ambiguous_directives = _ambiguous_preprocessor_directives(directives)
+    for directive in ambiguous_directives:
+        findings.append(
+            Finding(
+                path,
+                directive.line,
+                "<preprocessor>",
+                f"preprocessor condition is not compiler-proven: {directive.text.splitlines()[0]}",
+                ("ambiguous_preprocessor_condition", "review_required"),
             )
+        )
     if require_entrypoint and not entrypoints:
         findings.append(
             Finding(
@@ -1993,6 +2487,26 @@ def audit_source(
             )
             continue
         proof = auditor.prove(entrypoint)
+        if ambiguous_directives:
+            condition_lines = ", ".join(
+                str(directive.line) for directive in ambiguous_directives
+            )
+            proof = _Proof(
+                False,
+                _bounded_detail(
+                    (
+                        proof.detail,
+                        "ambiguous preprocessor condition(s) at line(s) "
+                        + condition_lines,
+                    )
+                ),
+                tuple(
+                    sorted(
+                        set(proof.classifications)
+                        | {"ambiguous_preprocessor_condition", "review_required"}
+                    )
+                ),
+            )
         entrypoint_audits.append(
             EntrypointAudit(
                 path,
@@ -2097,6 +2611,89 @@ def _declaration_return_spelling(
     return " ".join(token.value for token in result).strip() or "<unknown>"
 
 
+def _parameter_segments(
+    tokens: Sequence[Token], lparen: int, rparen: int
+) -> list[tuple[int, int]]:
+    forward, _ = _delimiter_pairs(tokens)
+    segments: list[tuple[int, int]] = []
+    start = lparen + 1
+    cursor = start
+    while cursor < rparen:
+        if tokens[cursor].value in {"(", "[", "{"} and cursor in forward:
+            cursor = forward[cursor] + 1
+            continue
+        if tokens[cursor].value == ",":
+            segments.append((start, cursor))
+            start = cursor + 1
+        cursor += 1
+    segments.append((start, rparen))
+    return segments
+
+
+def _parameter_type_spellings(
+    tokens: Sequence[Token], lparen: int, rparen: int
+) -> tuple[str, ...]:
+    result: list[str] = []
+    for left, right in _parameter_segments(tokens, lparen, rparen):
+        segment = list(tokens[left:right])
+        if not segment or [token.value for token in segment] == ["void"]:
+            continue
+        depth = 0
+        for index, token in enumerate(segment):
+            if token.value in {"(", "[", "{"}:
+                depth += 1
+            elif token.value in {")", "]", "}"}:
+                depth = max(0, depth - 1)
+            elif token.value == "=" and depth == 0:
+                segment = segment[:index]
+                break
+        identifiers = [
+            index for index, token in enumerate(segment) if token.kind == "identifier"
+        ]
+        if len(identifiers) >= 2:
+            del segment[identifiers[-1]]
+        result.append(" ".join(token.value for token in segment).strip())
+    return tuple(result)
+
+
+def _full_signature(return_spelling: str, parameter_types: Sequence[str]) -> str:
+    return (
+        " ".join(return_spelling.split())
+        + " ("
+        + ", ".join(" ".join(parameter.split()) for parameter in parameter_types)
+        + ")"
+    )
+
+
+def _canonical_signature_tokens(signature: str) -> tuple[str, ...]:
+    return tuple(
+        token.value for token in lex_cpp(signature) if token.value not in {"struct"}
+    )
+
+
+def _symbol_from_tokens(
+    path: pathlib.Path,
+    line: int,
+    name: str,
+    return_spelling: str,
+    tokens: Sequence[Token],
+    lparen: int,
+    rparen: int,
+    origin: str,
+) -> AbiSymbol:
+    parameter_types = _parameter_type_spellings(tokens, lparen, rparen)
+    return AbiSymbol(
+        path,
+        line,
+        name,
+        return_spelling,
+        _parameter_count(tokens, lparen, rparen),
+        parameter_types,
+        _full_signature(return_spelling, parameter_types),
+        origin,
+    )
+
+
 def parse_declarations(
     path: pathlib.Path, source: str
 ) -> tuple[list[AbiSymbol], list[Finding]]:
@@ -2106,21 +2703,17 @@ def parse_declarations(
     extern_braces = _extern_c_braces(tokens)
     parents = _brace_parents(tokens)
     symbols: list[AbiSymbol] = []
-    findings: list[Finding] = []
-    for directive in directives:
-        if re.match(r"\s*#\s*define\b", directive.text) and (
-            "pgaccel_" in directive.text
-            or re.search(r"extern\s*(?:\\\"C\\\"|\"C\")", directive.text)
-        ):
-            findings.append(
-                Finding(
-                    path,
-                    directive.line,
-                    "<preprocessor>",
-                    "export-bearing header macro is absent from the parsed ABI declaration inventory",
-                    ("macro_hidden_export", "abi_inventory_mismatch"),
-                )
-            )
+    findings = _macro_inventory_findings(path, directives, header=True)
+    findings.extend(
+        Finding(
+            path,
+            directive.line,
+            "<preprocessor>",
+            f"header ABI depends on an unproven condition: {directive.text.splitlines()[0]}",
+            ("ambiguous_preprocessor_condition", "abi_inventory_mismatch"),
+        )
+        for directive in _ambiguous_preprocessor_directives(directives)
+    )
     for name_index, token in enumerate(tokens):
         if token.kind != "identifier" or not token.value.startswith("pgaccel_"):
             continue
@@ -2151,14 +2744,16 @@ def parse_declarations(
         if not linked:
             continue
         symbols.append(
-            AbiSymbol(
+            _symbol_from_tokens(
                 path,
                 token.line,
                 token.value,
                 _declaration_return_spelling(
                     tokens, signature_start, name_index, rparen, cursor
                 ),
-                _parameter_count(tokens, lparen, rparen),
+                tokens,
+                lparen,
+                rparen,
                 "header_declaration",
             )
         )
@@ -2171,12 +2766,14 @@ def _definition_symbols(
     parsed_source = normalize_preprocessor(source)[0] if normalized else source
     tokens = lex_cpp(parsed_source)
     return [
-        AbiSymbol(
+        _symbol_from_tokens(
             path,
             function.line,
             function.name,
             function.return_spelling,
-            function.parameter_count,
+            tokens,
+            function.lparen,
+            function.rparen,
             "source_definition",
         )
         for function in parse_functions(tokens)
@@ -2184,8 +2781,8 @@ def _definition_symbols(
     ]
 
 
-def _canonical_symbol(symbol: AbiSymbol) -> tuple[str, str, int | None]:
-    return symbol.name, " ".join(symbol.return_spelling.split()), symbol.parameter_count
+def _canonical_symbol(symbol: AbiSymbol) -> tuple[str, tuple[str, ...]]:
+    return symbol.name, _canonical_signature_tokens(symbol.full_signature)
 
 
 def _inventory_hash(symbols: Iterable[AbiSymbol]) -> str:
@@ -2194,14 +2791,409 @@ def _inventory_hash(symbols: Iterable[AbiSymbol]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def load_abi_manifest(path: pathlib.Path) -> AbiManifest:
+    try:
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ParseError(f"cannot read ABI signature manifest: {error}") from error
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != EXPECTED_ABI_MANIFEST_SHA256:
+        raise ParseError(
+            "ABI signature manifest SHA-256 mismatch: "
+            f"expected {EXPECTED_ABI_MANIFEST_SHA256}, got {digest}"
+        )
+    if not text.endswith("\n"):
+        raise ParseError("ABI signature manifest must end with a newline")
+    signatures: dict[str, str] = {}
+    rows = text.splitlines()
+    for line_number, row in enumerate(rows, 1):
+        name, separator, signature = row.partition("|")
+        if (
+            not separator
+            or not name.startswith("pgaccel_")
+            or not name.isidentifier()
+            or not signature
+        ):
+            raise ParseError(f"invalid ABI signature manifest row {line_number}")
+        if name in signatures:
+            raise ParseError(f"duplicate ABI signature manifest symbol {name}")
+        signatures[name] = signature
+    if len(signatures) != EXPECTED_ABI_MANIFEST_COUNT:
+        raise ParseError(
+            "ABI signature manifest count mismatch: "
+            f"expected {EXPECTED_ABI_MANIFEST_COUNT}, got {len(signatures)}"
+        )
+    if list(signatures) != sorted(signatures):
+        raise ParseError("ABI signature manifest rows must be sorted by symbol")
+    return AbiManifest(path, len(signatures), digest, signatures)
+
+
+def _symbol_from_full_signature(
+    path: pathlib.Path,
+    line: int,
+    name: str,
+    signature: str,
+    origin: str,
+) -> AbiSymbol:
+    tokens = lex_cpp(signature)
+    forward, _ = _delimiter_pairs(tokens)
+    lparen = next(
+        (index for index, token in enumerate(tokens) if token.value == "("), None
+    )
+    if lparen is None or lparen not in forward or forward[lparen] != len(tokens) - 1:
+        raise ParseError(f"invalid full ABI signature for {name}: {signature}")
+    rparen = forward[lparen]
+    return_spelling = " ".join(token.value for token in tokens[:lparen])
+    parameter_types = tuple(
+        " ".join(token.value for token in tokens[left:right])
+        for left, right in _parameter_segments(tokens, lparen, rparen)
+        if left != right
+    )
+    return AbiSymbol(
+        path,
+        line,
+        name,
+        return_spelling,
+        len(parameter_types),
+        parameter_types,
+        signature,
+        origin,
+    )
+
+
+def compiler_header_inventory(
+    header_paths: Sequence[pathlib.Path], compiler: str | None = None
+) -> CompilerAbiInventory:
+    public_headers = [
+        path.resolve()
+        for path in sorted(
+            dict.fromkeys(header_paths), key=lambda item: item.as_posix()
+        )
+        if path.name not in INTERNAL_NON_ABI_HEADERS
+    ]
+    if not public_headers:
+        raise ParseError("no public ABI headers supplied for compiler inventory")
+    selected = (
+        compiler or os.environ.get("PGACCEL_ABI_CLANG") or shutil.which("clang++")
+    )
+    if selected is None:
+        raise ParseError("clang++ is required for compiler-backed ABI inventory")
+    compiler_path = str(pathlib.Path(selected).resolve())
+    umbrella = "".join(
+        '#include "' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"\n'
+        for path in public_headers
+    )
+    include_dirs = sorted({str(path.parent) for path in public_headers})
+    command = [
+        compiler_path,
+        "-std=c++17",
+        "-x",
+        "c++",
+        *(argument for directory in include_dirs for argument in ("-I", directory)),
+        "-Xclang",
+        "-ast-dump=json",
+        "-fsyntax-only",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            input=umbrella,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=120,
+        )
+        version = subprocess.run(
+            [compiler_path, "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ParseError(f"compiler-backed ABI inventory failed: {error}") from error
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.strip()[-4000:]
+        raise ParseError(
+            f"compiler-backed ABI inventory exited {completed.returncode}: {diagnostic}"
+        )
+    try:
+        root = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise ParseError(f"compiler ABI AST was not valid JSON: {error}") from error
+
+    discovered: dict[tuple[str, tuple[str, ...]], AbiSymbol] = {}
+
+    def visit(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("kind") == "FunctionDecl":
+                name = str(node.get("name", ""))
+                mangled = str(node.get("mangledName", ""))
+                signature = str(
+                    node.get("type", {}).get("qualType", "")
+                    if isinstance(node.get("type"), dict)
+                    else ""
+                )
+                if (
+                    name.startswith("pgaccel_")
+                    and mangled.lstrip("_") == name
+                    and signature
+                ):
+                    location = node.get("loc", {})
+                    line = (
+                        int(location.get("line", 1))
+                        if isinstance(location, dict)
+                        else 1
+                    )
+                    symbol = _symbol_from_full_signature(
+                        public_headers[0],
+                        line,
+                        name,
+                        signature,
+                        "clang_ast_declaration",
+                    )
+                    discovered[_canonical_symbol(symbol)] = symbol
+            for value in node.values():
+                visit(value)
+        elif isinstance(node, list):
+            for value in node:
+                visit(value)
+
+    visit(root)
+    symbols = tuple(
+        sorted(
+            discovered.values(), key=lambda symbol: (symbol.name, symbol.full_signature)
+        )
+    )
+    if not symbols:
+        raise ParseError(
+            "compiler ABI AST contained no extern-C pgaccel_* declarations"
+        )
+    version_line = (version.stdout or version.stderr).splitlines()
+    return CompilerAbiInventory(
+        symbols,
+        compiler_path,
+        version_line[0] if version_line else "<unknown>",
+        tuple(command),
+        hashlib.sha256(umbrella.encode("utf-8")).hexdigest(),
+        completed.stderr.strip(),
+    )
+
+
+def _compare_symbols_to_manifest(
+    symbols: Sequence[AbiSymbol],
+    manifest: AbiManifest,
+    *,
+    origin: str,
+    fallback_path: pathlib.Path,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    actual: dict[str, set[tuple[str, ...]]] = defaultdict(set)
+    locations: dict[str, AbiSymbol] = {}
+    for symbol in symbols:
+        actual[symbol.name].add(_canonical_signature_tokens(symbol.full_signature))
+        locations.setdefault(symbol.name, symbol)
+    expected = {
+        name: _canonical_signature_tokens(signature)
+        for name, signature in manifest.signatures.items()
+    }
+    for name in sorted(set(expected) - set(actual)):
+        findings.append(
+            Finding(
+                fallback_path,
+                1,
+                name,
+                f"{origin} is missing immutable-manifest symbol {name}",
+                ("missing_manifest_symbol", "abi_inventory_mismatch"),
+            )
+        )
+    for name in sorted(set(actual) - set(expected)):
+        symbol = locations[name]
+        findings.append(
+            Finding(
+                symbol.path,
+                symbol.line,
+                name,
+                f"{origin} contains symbol absent from immutable manifest",
+                ("extra_manifest_symbol", "abi_inventory_mismatch"),
+            )
+        )
+    for name in sorted(set(actual) & set(expected)):
+        if expected[name] not in actual[name] or len(actual[name]) != 1:
+            symbol = locations[name]
+            actual_signatures = sorted(
+                item.full_signature for item in symbols if item.name == name
+            )
+            findings.append(
+                Finding(
+                    symbol.path,
+                    symbol.line,
+                    name,
+                    f"{origin} signature {actual_signatures!r} does not match immutable manifest {manifest.signatures[name]!r}",
+                    ("abi_signature_mismatch", "abi_inventory_mismatch"),
+                )
+            )
+    return findings
+
+
+def _object_abi_evidence(
+    object_paths: Sequence[pathlib.Path], manifest: AbiManifest
+) -> tuple[tuple[dict[str, object], ...], list[Finding]]:
+    nm = shutil.which("nm")
+    if nm is None:
+        return (
+            ({"status": "unavailable", "error": "nm was not found"},),
+            [
+                Finding(
+                    object_paths[0] if object_paths else manifest.path,
+                    1,
+                    "<object-inventory>",
+                    "nm is required for requested object ABI evidence",
+                    ("object_inventory_error", "abi_inventory_mismatch"),
+                )
+            ],
+        )
+    try:
+        version = subprocess.run(
+            [nm, "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        version_line = "<unknown>"
+    else:
+        lines = (version.stdout or version.stderr).splitlines()
+        version_line = lines[0] if lines else "<unknown>"
+
+    evidence: list[dict[str, object]] = []
+    findings: list[Finding] = []
+    expected = set(manifest.signatures)
+    combined_names: set[str] = set()
+    collected_paths: list[str] = []
+    for path in sorted(dict.fromkeys(object_paths), key=lambda item: item.as_posix()):
+        command = [nm, "-g", str(path)]
+        try:
+            completed = subprocess.run(
+                command,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=60,
+            )
+            binary_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, subprocess.TimeoutExpired) as error:
+            findings.append(
+                Finding(
+                    path,
+                    1,
+                    "<object-inventory>",
+                    f"object ABI inventory failed: {error}",
+                    ("object_inventory_error", "abi_inventory_mismatch"),
+                )
+            )
+            evidence.append(
+                {"path": path.as_posix(), "status": "error", "error": str(error)}
+            )
+            continue
+        if completed.returncode != 0:
+            diagnostic = completed.stderr.strip()[-2000:]
+            findings.append(
+                Finding(
+                    path,
+                    1,
+                    "<object-inventory>",
+                    f"nm exited {completed.returncode}: {diagnostic}",
+                    ("object_inventory_error", "abi_inventory_mismatch"),
+                )
+            )
+            evidence.append(
+                {
+                    "path": path.as_posix(),
+                    "status": "error",
+                    "command": command,
+                    "stderr": diagnostic,
+                }
+            )
+            continue
+        names: set[str] = set()
+        for line in completed.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            symbol = parts[-1].lstrip("_")
+            symbol_type = parts[-2]
+            if (
+                symbol.startswith("pgaccel_")
+                and len(symbol_type) == 1
+                and symbol_type.upper() in {"B", "D", "R", "S", "T", "V", "W"}
+                and symbol_type != "U"
+            ):
+                names.add(symbol)
+        combined_names.update(names)
+        collected_paths.append(path.as_posix())
+        evidence.append(
+            {
+                "kind": "object",
+                "path": path.as_posix(),
+                "status": "collected",
+                "command": command,
+                "nm_version": version_line,
+                "binary_sha256": binary_sha256,
+                "count": len(names),
+                "names_sha256": hashlib.sha256(
+                    ("\n".join(sorted(names)) + "\n").encode("ascii")
+                ).hexdigest(),
+            }
+        )
+    if collected_paths:
+        missing = sorted(expected - combined_names)
+        extra = sorted(combined_names - expected)
+        evidence.append(
+            {
+                "kind": "combined_object_inventory",
+                "status": "verified" if not (missing or extra) else "mismatch",
+                "paths": collected_paths,
+                "count": len(combined_names),
+                "names_sha256": hashlib.sha256(
+                    ("\n".join(sorted(combined_names)) + "\n").encode("ascii")
+                ).hexdigest(),
+                "missing": missing,
+                "extra": extra,
+            }
+        )
+        if missing or extra:
+            findings.append(
+                Finding(
+                    pathlib.Path(collected_paths[0]),
+                    1,
+                    "<object-inventory>",
+                    f"combined object exports disagree with immutable manifest: {len(missing)} missing, {len(extra)} extra",
+                    ("object_inventory_mismatch", "abi_inventory_mismatch"),
+                )
+            )
+    return tuple(evidence), findings
+
+
 def audit_abi(
-    source_paths: Sequence[pathlib.Path], header_paths: Sequence[pathlib.Path]
+    source_paths: Sequence[pathlib.Path],
+    header_paths: Sequence[pathlib.Path],
+    *,
+    manifest_path: pathlib.Path | None = None,
+    compiler: str | None = None,
+    object_paths: Sequence[pathlib.Path] = (),
 ) -> AbiInventory:
     definitions: list[AbiSymbol] = []
     source_definitions: list[AbiSymbol] = []
     declarations: list[AbiSymbol] = []
     findings: list[Finding] = []
     per_file: list[dict[str, object]] = []
+    manifest_evidence: dict[str, object] | None = None
+    compiler_evidence: dict[str, object] | None = None
+    object_evidence: tuple[dict[str, object], ...] = ()
     for path in sorted(dict.fromkeys(source_paths), key=lambda item: item.as_posix()):
         try:
             source = path.read_text(encoding="utf-8")
@@ -2232,20 +3224,17 @@ def audit_abi(
                         ("preprocessor_inventory_mismatch", "abi_inventory_mismatch"),
                     )
                 )
-        for directive in directives:
-            if re.match(r"\s*#\s*define\b", directive.text) and (
-                "pgaccel_" in directive.text
-                or re.search(r"extern\s*(?:\\\"C\\\"|\"C\")", directive.text)
-            ):
-                findings.append(
-                    Finding(
-                        path,
-                        directive.line,
-                        "<preprocessor>",
-                        "macro-hidden source export cannot be reconciled with definitions",
-                        ("macro_hidden_export", "abi_inventory_mismatch"),
-                    )
-                )
+        findings.extend(_macro_inventory_findings(path, directives, abi_inventory=True))
+        findings.extend(
+            Finding(
+                path,
+                directive.line,
+                "<preprocessor>",
+                f"source ABI depends on an unproven condition: {directive.text.splitlines()[0]}",
+                ("ambiguous_preprocessor_condition", "abi_inventory_mismatch"),
+            )
+            for directive in _ambiguous_preprocessor_directives(directives)
+        )
         per_file.append(
             {
                 "path": path.as_posix(),
@@ -2320,11 +3309,11 @@ def audit_abi(
         )
     for name in sorted(definition_names & declaration_names):
         definition_signatures = {
-            (" ".join(symbol.return_spelling.split()), symbol.parameter_count)
+            _canonical_signature_tokens(symbol.full_signature)
             for symbol in definitions_by_name[name]
         }
         declaration_signatures = {
-            (" ".join(symbol.return_spelling.split()), symbol.parameter_count)
+            _canonical_signature_tokens(symbol.full_signature)
             for symbol in declarations_by_name[name]
         }
         if definition_signatures.isdisjoint(declaration_signatures):
@@ -2338,6 +3327,80 @@ def audit_abi(
                     ("abi_signature_mismatch", "abi_inventory_mismatch"),
                 )
             )
+
+    if manifest_path is not None:
+        try:
+            manifest = load_abi_manifest(manifest_path)
+        except ParseError as error:
+            findings.append(
+                Finding(
+                    manifest_path,
+                    1,
+                    "<abi-manifest>",
+                    str(error),
+                    ("abi_manifest_integrity_error", "abi_inventory_mismatch"),
+                )
+            )
+            manifest_evidence = {
+                "path": manifest_path.as_posix(),
+                "expected_count": EXPECTED_ABI_MANIFEST_COUNT,
+                "expected_sha256": EXPECTED_ABI_MANIFEST_SHA256,
+                "status": "invalid",
+            }
+        else:
+            manifest_evidence = {
+                "path": manifest.path.as_posix(),
+                "count": manifest.count,
+                "sha256": manifest.sha256,
+                "expected_count": EXPECTED_ABI_MANIFEST_COUNT,
+                "expected_sha256": EXPECTED_ABI_MANIFEST_SHA256,
+                "status": "verified",
+            }
+            findings.extend(
+                _compare_symbols_to_manifest(
+                    definitions,
+                    manifest,
+                    origin="source definition inventory",
+                    fallback_path=manifest_path,
+                )
+            )
+            try:
+                compiler_inventory = compiler_header_inventory(header_paths, compiler)
+            except ParseError as error:
+                findings.append(
+                    Finding(
+                        header_paths[0] if header_paths else manifest_path,
+                        1,
+                        "<compiler-inventory>",
+                        str(error),
+                        ("compiler_inventory_error", "abi_inventory_mismatch"),
+                    )
+                )
+                compiler_evidence = {"status": "error", "error": str(error)}
+            else:
+                findings.extend(
+                    _compare_symbols_to_manifest(
+                        compiler_inventory.symbols,
+                        manifest,
+                        origin="compiler header inventory",
+                        fallback_path=manifest_path,
+                    )
+                )
+                compiler_evidence = {
+                    "status": "verified",
+                    "compiler_path": compiler_inventory.compiler_path,
+                    "compiler_version": compiler_inventory.compiler_version,
+                    "command": list(compiler_inventory.command),
+                    "umbrella_sha256": compiler_inventory.umbrella_sha256,
+                    "inventory_count": len(compiler_inventory.symbols),
+                    "inventory_hash": _inventory_hash(compiler_inventory.symbols),
+                    "stderr": compiler_inventory.stderr,
+                }
+            if object_paths:
+                object_evidence, object_findings = _object_abi_evidence(
+                    object_paths, manifest
+                )
+                findings.extend(object_findings)
     return AbiInventory(
         tuple(
             sorted(
@@ -2368,6 +3431,9 @@ def audit_abi(
         _inventory_hash(definitions),
         _inventory_hash(source_definitions),
         _inventory_hash(declarations),
+        manifest_evidence,
+        compiler_evidence,
+        object_evidence,
     )
 
 
@@ -2386,7 +3452,29 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="public C/C++ headers whose extern-C declarations form the ABI baseline",
     )
     parser.add_argument(
-        "sources", nargs="+", type=pathlib.Path, help="C++ source files to audit"
+        "--abi-manifest",
+        type=pathlib.Path,
+        default=DEFAULT_ABI_MANIFEST,
+        help="immutable full-signature ABI manifest (verified, never rewritten)",
+    )
+    parser.add_argument(
+        "--abi-compiler",
+        help="clang++ executable used for the compiler-backed header inventory",
+    )
+    parser.add_argument(
+        "--objects",
+        nargs="*",
+        default=(),
+        type=pathlib.Path,
+        help="built library/object files whose exported symbols are checked with nm",
+    )
+    parser.add_argument(
+        "--regenerate-abi-manifest",
+        type=pathlib.Path,
+        help="explicit maintainer operation that writes a compiler-derived manifest",
+    )
+    parser.add_argument(
+        "sources", nargs="*", type=pathlib.Path, help="C++ source files to audit"
     )
     return parser.parse_args(argv)
 
@@ -2404,7 +3492,7 @@ def _write_json_report(
         for classification in finding.classifications
     )
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "fail" if findings else "pass",
         "summary": {
             "files": len(audits),
@@ -2451,6 +3539,9 @@ def _write_json_report(
                 "definition_hash": abi.definition_hash,
                 "source_definition_hash": abi.source_definition_hash,
                 "declaration_hash": abi.declaration_hash,
+                "manifest": abi.manifest,
+                "compiler": abi.compiler,
+                "objects": list(abi.objects),
                 "per_file": list(abi.per_file),
                 "definitions": [
                     {
@@ -2459,6 +3550,8 @@ def _write_json_report(
                         "name": symbol.name,
                         "return_type": symbol.return_spelling,
                         "parameter_count": symbol.parameter_count,
+                        "parameter_types": list(symbol.parameter_types),
+                        "full_signature": symbol.full_signature,
                     }
                     for symbol in abi.definitions
                 ],
@@ -2469,6 +3562,8 @@ def _write_json_report(
                         "name": symbol.name,
                         "return_type": symbol.return_spelling,
                         "parameter_count": symbol.parameter_count,
+                        "parameter_types": list(symbol.parameter_types),
+                        "full_signature": symbol.full_signature,
                     }
                     for symbol in abi.declarations
                 ],
@@ -2495,10 +3590,71 @@ def _write_json_report(
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    if args.regenerate_abi_manifest is not None:
+        if not args.headers:
+            print(
+                "--regenerate-abi-manifest requires --headers",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            compiler_inventory = compiler_header_inventory(
+                args.headers, args.abi_compiler
+            )
+        except ParseError as error:
+            print(str(error), file=sys.stderr)
+            return 1
+        by_name: dict[str, str] = {}
+        for symbol in compiler_inventory.symbols:
+            previous = by_name.setdefault(symbol.name, symbol.full_signature)
+            if _canonical_signature_tokens(previous) != _canonical_signature_tokens(
+                symbol.full_signature
+            ):
+                print(
+                    f"ambiguous compiler signatures for {symbol.name}", file=sys.stderr
+                )
+                return 1
+        rendered = "".join(
+            f"{name}|{signature}\n" for name, signature in sorted(by_name.items())
+        )
+        args.regenerate_abi_manifest.parent.mkdir(parents=True, exist_ok=True)
+        args.regenerate_abi_manifest.write_text(rendered, encoding="utf-8")
+        digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+        print(
+            f"wrote {len(by_name)} signatures to {args.regenerate_abi_manifest}; "
+            f"SHA-256 {digest}. Review the diff and update literal integrity constants explicitly."
+        )
+        return 0
+    if not args.sources:
+        print("at least one C++ source file is required", file=sys.stderr)
+        return 2
     unique_paths = list(dict.fromkeys(args.sources))
     audits = audit_paths(unique_paths)
     findings = [finding for audit in audits for finding in audit.findings]
-    abi = audit_abi(unique_paths, args.headers) if args.headers else None
+    object_paths = list(args.objects)
+    if not object_paths:
+        shared = sorted(
+            path
+            for path in pathlib.Path("pgaccel-kernels/build").glob(
+                "**/libpgaccel_kernels_shared.*"
+            )
+            if path.suffix in {".dylib", ".so"}
+        )
+        static = sorted(
+            pathlib.Path("pgaccel-kernels/build").glob("**/libpgaccel_kernels.a")
+        )
+        object_paths = shared[:1] or static[:1]
+    abi = (
+        audit_abi(
+            unique_paths,
+            args.headers,
+            manifest_path=args.abi_manifest,
+            compiler=args.abi_compiler,
+            object_paths=object_paths,
+        )
+        if args.headers
+        else None
+    )
     if abi is not None:
         findings.extend(abi.findings)
     if args.json_report is not None:

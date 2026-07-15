@@ -690,8 +690,24 @@ audit-cpu-cheats: audit-cpu-cheats-test
     report="${CPU_CHEAT_AUDIT_REPORT:-target/cpu-cheat-audit.json}"
     python3 scripts/cpu_cheat_audit.py \
         --json-report "$report" \
+        --abi-manifest scripts/cpu_cheat_abi_manifest.txt \
         --headers pgaccel-kernels/include/*.h -- \
         pgaccel-kernels/src/*.cpp
+
+# Explicit maintainer-only rebaseline. This does not update the literal integrity
+# constants; review the manifest diff and hash before changing those constants.
+update-cpu-cheat-abi-manifest:
+    python3 scripts/cpu_cheat_audit.py \
+        --regenerate-abi-manifest scripts/cpu_cheat_abi_manifest.txt \
+        --headers \
+        pgaccel-kernels/include/pgaccel_ffi.h \
+        pgaccel-kernels/include/pgaccel_expr.h \
+        pgaccel-kernels/include/pgaccel_fused.h \
+        pgaccel-kernels/include/pgaccel_hash_agg.h \
+        pgaccel-kernels/include/pgaccel_hash_join.h \
+        pgaccel-kernels/include/pgaccel_nested_loop_ineq.h \
+        pgaccel-kernels/include/pgaccel_olap.h \
+        pgaccel-kernels/include/pgaccel_window.h
 
 # === CI ===
 

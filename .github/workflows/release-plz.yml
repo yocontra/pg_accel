@@ -25,6 +25,7 @@ jobs:
         run: |
           python3 scripts/cpu_cheat_audit.py \
             --json-report target/cpu-cheat-audit.json \
+            --abi-manifest scripts/cpu_cheat_abi_manifest.txt \
             --headers pgaccel-kernels/include/*.h -- \
             pgaccel-kernels/src/*.cpp
       - uses: MarcoIeni/release-plz-action@v0.5

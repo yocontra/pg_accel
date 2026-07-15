@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shutil
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -337,6 +339,226 @@ class ControlFlowEvasionTests(unittest.TestCase):
             "pgaccel_success_catch",
         )
         self.assertIn("CPU-success catch", finding.message)
+
+    def test_unknown_preprocessor_condition_fails_closed(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_pp(int* out) {
+              sycl::queue& q = get_queue();
+            #if GPU_FEATURE_AVAILABLE
+              q.single_task<Kernel>([=]() { *out = 1; });
+            #else
+              q.single_task<Kernel>([=]() { *out = 2; });
+            #endif
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_pp",
+        )
+        self.assertIn("ambiguous_preprocessor_condition", finding.classifications)
+
+    def test_false_identifier_preprocessor_condition_is_not_literal_false(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            #define GPU_FEATURE_AVAILABLE 0
+            extern "C" pgaccel_status pgaccel_pp_false(int* out) {
+              sycl::queue& q = get_queue();
+            #if GPU_FEATURE_AVAILABLE
+              q.single_task<Kernel>([=]() { *out = 1; });
+            #else
+              q.single_task<Kernel>([=]() { *out = 2; });
+            #endif
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_pp_false",
+        )
+        self.assertIn("ambiguous_preprocessor_condition", finding.classifications)
+
+    def test_switch_bypass_fails_closed(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_switch(int mode, int* out) {
+              sycl::queue& q = get_queue();
+              switch (mode) {
+                case 0: return PGACCEL_OK;
+                default: break;
+              }
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_switch",
+        )
+        self.assertIn("ambiguous_control_flow", finding.classifications)
+
+    def test_goto_bypass_remains_rejected(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_goto(bool bypass, int* out) {
+              sycl::queue& q = get_queue();
+              if (bypass) goto cpu_success;
+              q.single_task<Kernel>([=]() { *out = 1; });
+            cpu_success:
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_goto",
+        )
+        self.assertIn("ambiguous_control_flow", finding.classifications)
+
+    def test_read_only_kernel_does_not_prove_output_contribution(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_read_only(int* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() {
+                int observed = *out;
+                observed = 7;
+              });
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_read_only",
+        )
+        self.assertIn("rejected_terminal", finding.classifications)
+
+    def test_alias_host_overwrite_is_tracked(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_alias_write(int* out) {
+              int* alias = out;
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              *alias = 2;
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_alias_write",
+        )
+        self.assertIn("host_output_write", finding.classifications)
+        self.assertIn("output_alias_tracking", finding.classifications)
+
+    def test_unresolved_host_finalizer_on_output_fails_closed(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_host_finalize(int* out, size_t count) {
+              sycl::queue& q = get_queue();
+              q.parallel_for<Kernel>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                out[id[0]] = 1;
+              });
+              host_finalize(out);
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_host_finalize",
+        )
+        self.assertIn("unresolved_output_helper", finding.classifications)
+
+    def test_unresolved_member_finalizer_on_output_fails_closed(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_member_finalize(
+                Output* out, size_t count) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { out->value = count; });
+              out->finalize();
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_member_finalize",
+        )
+        self.assertIn("unresolved_output_helper", finding.classifications)
+
+    def test_invoked_host_lambda_output_write_is_not_hidden(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_host_lambda(int* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              auto finalize = [&]() { *out = 2; };
+              finalize();
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_host_lambda",
+        )
+        self.assertIn("deferred_host_output_write", finding.classifications)
+
+    def test_ternary_success_path_requires_review(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            pgaccel_status launch(int* out) {
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_ternary(bool gpu, int* out) {
+              return gpu ? launch(out) : PGACCEL_OK;
+            }
+            """,
+            "pgaccel_ternary",
+        )
+        self.assertIn("ambiguous_control_flow", finding.classifications)
+
+    def test_failure_only_path_with_host_compute_is_not_exempt(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_fail_compute(
+                const int* input, size_t count, int* out) {
+              for (size_t index = 0; index < count; ++index) out[index] = input[index];
+              return PGACCEL_ERROR_NO_DEVICE;
+            }
+            """,
+            "pgaccel_fail_compute",
+        )
+        self.assertIn("host_computation", finding.classifications)
+
+    def test_lifecycle_evidence_in_dead_decoy_is_rejected(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              if (false) {
+                g_queue->wait_and_throw();
+                delete g_queue;
+              }
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_shutdown",
+        )
+        self.assertIn("invalid_lifecycle_contract", finding.classifications)
+
+    def test_lifecycle_evidence_after_return_is_rejected(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              return PGACCEL_OK;
+              g_queue->wait_and_throw();
+              delete g_queue;
+            }
+            """,
+            "pgaccel_shutdown",
+        )
+        self.assertIn("invalid_lifecycle_contract", finding.classifications)
+
+    def test_not_identifier_is_not_a_zero_work_contract(self) -> None:
+        finding = self.assert_rejected(
+            r"""
+            extern "C" pgaccel_status pgaccel_not_gpu(bool gpu, int* out) {
+              if (!gpu) {
+                *out = 42;
+                return PGACCEL_OK;
+              }
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            """,
+            "pgaccel_not_gpu",
+        )
+        self.assertIn("host_output_write", finding.classifications)
+        self.assertNotIn("zero_work", finding.classifications)
 
     def test_macro_hidden_export_fails_inventory(self) -> None:
         result = audit_fixture(
@@ -806,6 +1028,117 @@ class AbiInventoryTests(unittest.TestCase):
         self.assertIn("preprocessor_inventory_mismatch", classifications)
         self.assertNotEqual(inventory.source_definition_hash, inventory.definition_hash)
 
+    def test_parameter_type_mismatch_changes_full_signature_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            header = root / "fixture.h"
+            source = root / "fixture.cpp"
+            header.write_text(
+                'extern "C" pgaccel_status pgaccel_typed(float* out);\n',
+                encoding="utf-8",
+            )
+            source.write_text(
+                textwrap.dedent(
+                    r"""
+                    extern "C" pgaccel_status pgaccel_typed(int* out) {
+                      return PGACCEL_ERROR_NO_DEVICE;
+                    }
+                    """
+                ),
+                encoding="utf-8",
+            )
+            inventory = audit.audit_abi([source], [header])
+        classifications = {
+            item for finding in inventory.findings for item in finding.classifications
+        }
+        self.assertIn("abi_signature_mismatch", classifications)
+        self.assertNotEqual(inventory.definition_hash, inventory.declaration_hash)
+        self.assertEqual(inventory.definitions[0].parameter_types, ("int *",))
+        self.assertEqual(inventory.declarations[0].parameter_types, ("float *",))
+
+    def test_compiler_inventory_expands_token_pasted_c_export(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            header = pathlib.Path(directory) / "token_paste.h"
+            header.write_text(
+                textwrap.dedent(
+                    r"""
+                    #define ABI_JOIN_INNER(left, right) left##right
+                    #define ABI_JOIN(left, right) ABI_JOIN_INNER(left, right)
+                    extern "C" int ABI_JOIN(pgaccel_, hidden)(float* out);
+                    """
+                ),
+                encoding="utf-8",
+            )
+            compiler_inventory = audit.compiler_header_inventory([header])
+            _, findings = audit.parse_declarations(
+                header, header.read_text(encoding="utf-8")
+            )
+        self.assertEqual(
+            [symbol.name for symbol in compiler_inventory.symbols],
+            ["pgaccel_hidden"],
+        )
+        classifications = {
+            item for finding in findings for item in finding.classifications
+        }
+        self.assertIn("token_paste_export_risk", classifications)
+
+    def test_mutated_immutable_manifest_is_rejected(self) -> None:
+        original = audit.DEFAULT_ABI_MANIFEST.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            mutated = pathlib.Path(directory) / "manifest.txt"
+            mutated.write_text(original.replace("void", "int", 1), encoding="utf-8")
+            with self.assertRaisesRegex(audit.ParseError, "SHA-256 mismatch"):
+                audit.load_abi_manifest(mutated)
+
+    def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
+        manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
+        self.assertEqual(manifest.count, 167)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 167)
+        self.assertEqual(
+            manifest.sha256,
+            "3c8a3db2cd7a070af3ebf796cb7d3189add46959c4cc2eb481554478da4ab2c6",
+        )
+        self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
+
+    def test_nm_object_union_is_bound_to_manifest_names(self) -> None:
+        compiler = shutil.which("clang++")
+        self.assertIsNotNone(compiler)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            object_paths: list[pathlib.Path] = []
+            for suffix in ("first", "second"):
+                source = root / f"{suffix}.cpp"
+                object_path = root / f"{suffix}.o"
+                source.write_text(
+                    f'extern "C" int pgaccel_object_{suffix}() {{ return 1; }}\n',
+                    encoding="utf-8",
+                )
+                subprocess.run(
+                    [compiler, "-c", str(source), "-o", str(object_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                object_paths.append(object_path)
+            manifest = audit.AbiManifest(
+                root / "manifest.txt",
+                2,
+                "fixture",
+                {
+                    "pgaccel_object_first": "int ()",
+                    "pgaccel_object_second": "int ()",
+                },
+            )
+            evidence, findings = audit._object_abi_evidence(object_paths, manifest)
+        self.assertFalse(findings)
+        self.assertEqual(evidence[0]["status"], "collected")
+        self.assertEqual(evidence[0]["count"], 1)
+        self.assertIn("binary_sha256", evidence[0])
+        self.assertEqual(evidence[1]["status"], "collected")
+        self.assertEqual(evidence[2]["kind"], "combined_object_inventory")
+        self.assertEqual(evidence[2]["status"], "verified")
+        self.assertEqual(evidence[2]["count"], 2)
+
 
 class ReleaseWiringTests(unittest.TestCase):
     def test_precommit_keeps_fixture_gate_and_real_recipe_has_headers(self) -> None:
@@ -816,6 +1149,8 @@ class ReleaseWiringTests(unittest.TestCase):
         self.assertIn("audit-cpu-cheats-test", precommit)
         recipe = justfile[justfile.index("audit-cpu-cheats: audit-cpu-cheats-test") :]
         self.assertIn("--headers pgaccel-kernels/include/*.h --", recipe)
+        self.assertIn("--abi-manifest scripts/cpu_cheat_abi_manifest.txt", recipe)
+        self.assertIn("update-cpu-cheat-abi-manifest:", justfile)
 
     def test_release_matrix_builds_before_real_audit(self) -> None:
         matrix = (REPO_ROOT / "scripts/release_verification_matrix.sh").read_text(
@@ -830,7 +1165,7 @@ class ReleaseWiringTests(unittest.TestCase):
             matrix.index('run_logged "install-pg-accel"'),
         )
 
-    def test_ci_and_tag_release_cannot_omit_real_gate(self) -> None:
+    def test_green_ci_uses_integrity_suite_and_release_keeps_real_gate(self) -> None:
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         release = (REPO_ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
@@ -838,10 +1173,8 @@ class ReleaseWiringTests(unittest.TestCase):
         release_plz = (REPO_ROOT / ".github/workflows/release-plz.yml").read_text(
             encoding="utf-8"
         )
-        self.assertLess(
-            ci.index("Run standalone GPU kernel gate"),
-            ci.index("Run real CPU-cheat audit after GPU build"),
-        )
+        self.assertIn("Run CPU-cheat analyzer and ABI integrity gate", ci)
+        self.assertNotIn("Run real CPU-cheat audit", ci)
         self.assertLess(
             release.index("Build kernels before CPU-cheat release gate"),
             release.index("Run CPU-cheat release gate"),
@@ -868,7 +1201,11 @@ class ProductionWitnessTests(unittest.TestCase):
             for file_audit in cls.audits
             for finding in file_audit.findings
         }
-        cls.abi = audit.audit_abi(cls.source_paths, cls.header_paths)
+        cls.abi = audit.audit_abi(
+            cls.source_paths,
+            cls.header_paths,
+            manifest_path=audit.DEFAULT_ABI_MANIFEST,
+        )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
         self.assertEqual(len(self.abi.definitions), 167)
@@ -877,6 +1214,9 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
+        self.assertEqual(self.abi.manifest["status"], "verified")
+        self.assertEqual(self.abi.compiler["status"], "verified")
+        self.assertEqual(self.abi.compiler["inventory_count"], 167)
         status_failed = sum(
             entry.is_status and not entry.ok
             for file_audit in self.audits
@@ -891,7 +1231,11 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertGreater(non_status_failed, 0)
 
     def test_inventory_hashes_are_deterministic(self) -> None:
-        second = audit.audit_abi(self.source_paths, self.header_paths)
+        second = audit.audit_abi(
+            self.source_paths,
+            self.header_paths,
+            manifest_path=audit.DEFAULT_ABI_MANIFEST,
+        )
         self.assertEqual(second.definition_hash, self.abi.definition_hash)
         self.assertEqual(second.declaration_hash, self.abi.declaration_hash)
         self.assertEqual(second.per_file, self.abi.per_file)
@@ -951,7 +1295,7 @@ class ReportTests(unittest.TestCase):
             report_path = pathlib.Path(directory) / "report.json"
             audit._write_json_report(report_path, [result])
             report = json.loads(report_path.read_text(encoding="utf-8"))
-        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["schema_version"], 3)
         self.assertEqual(report["status"], "fail")
         self.assertEqual(report["summary"]["entrypoints"], 1)
         self.assertEqual(report["summary"]["entrypoints_failed"], 1)

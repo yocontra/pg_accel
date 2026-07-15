@@ -164,13 +164,6 @@ jobs:
           set -euo pipefail
           just gpu-test
 
-      - name: Run real CPU-cheat audit after GPU build
-        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
-        shell: bash
-        run: |
-          set -euo pipefail
-          CPU_CHEAT_AUDIT_REPORT=target/cpu-cheat-audit.json just audit-cpu-cheats
-
       - name: Run live extension smoke
         if: steps.pg-support.outputs.skip != 'true'
         shell: bash
@@ -231,7 +224,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Run CPU-cheat analyzer fixture gate
+      - name: Run CPU-cheat analyzer and ABI integrity gate
         if: matrix.pg == 18
         shell: bash
         run: |
