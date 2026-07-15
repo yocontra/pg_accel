@@ -27,6 +27,14 @@ pub(crate) fn validate_descriptor_capability(
     descriptor::validate_runtime_capability(spec, projection)
 }
 
+#[cfg(any(test, feature = "pg_test"))]
+pub(crate) fn validate_test_forced_spatial_capability(
+    spec: &crate::engine::spec::AggQuerySpec,
+    projection: &crate::engine::spec::AggOutputProjection,
+) -> Result<(), String> {
+    descriptor::validate_test_forced_spatial_capability(spec, projection)
+}
+
 use pgrx::pg_sys;
 
 impl crate::engine::executor::state::ExecutorState for AggExecState {

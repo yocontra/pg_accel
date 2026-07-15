@@ -923,8 +923,15 @@ impl SpatialWorkspace {
             };
             // SAFETY: every pointer is owned by this workspace or the active
             // resident input borrow; the queue was prepared by `build`.
-            chunk.eval_outcome =
-                Some(unsafe { spatial_eval_resident_launch(&request, &chunk.native_workspace) });
+            let eval_outcome =
+                unsafe { spatial_eval_resident_launch(&request, &chunk.native_workspace) };
+            #[cfg(any(test, feature = "pg_test"))]
+            let eval_outcome = if crate::engine::gucs::test_inject_spatial_kernel_failure() {
+                crate::gpu::test_injected_spatial_kernel_failure_outcome()
+            } else {
+                eval_outcome
+            };
+            chunk.eval_outcome = Some(eval_outcome);
             // SAFETY: compaction is the ordered second half of the same chain.
             chunk.compact_outcome = Some(unsafe {
                 spatial_recheck_compact_launch(&chunk.compact_request, &chunk.native_workspace)

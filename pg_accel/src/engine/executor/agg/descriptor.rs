@@ -375,6 +375,17 @@ fn validate_internal_runtime_capability(
     validate_runtime_capability_with_spatial(spec, projection, true)
 }
 
+#[cfg(any(test, feature = "pg_test"))]
+pub(super) fn validate_test_forced_spatial_capability(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+) -> Result<(), String> {
+    if !matches!(spec.fact_filter, FilterSpec::Spatial { .. }) {
+        return Err("test-forced spatial capability requires a spatial fact filter".to_owned());
+    }
+    validate_internal_runtime_capability(spec, projection)
+}
+
 fn validate_catalog_contract(
     spec: &AggQuerySpec,
     projection: &AggOutputProjection,

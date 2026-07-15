@@ -323,6 +323,24 @@ fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> 
     .map_err(|detail| AdmissionDecline::DescriptorCapability { detail })
 }
 
+#[cfg(any(test, feature = "pg_test"))]
+fn test_force_spatial_groupagg(shape: &ShapePlan) -> bool {
+    gucs::test_force_spatial_groupagg()
+        && matches!(&shape.spec.fact_filter, FilterSpec::Spatial { .. })
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+fn test_forceable_spatial_cost_gate(gate: ShapeCostGate) -> bool {
+    matches!(
+        gate,
+        ShapeCostGate::Eligible
+            | ShapeCostGate::FactRowsBelowDeviceMinimum { .. }
+            | ShapeCostGate::SpatialRowsBelowDeviceMinimum { .. }
+            | ShapeCostGate::SpatialVerticesBelowDeviceMinimum { .. }
+            | ShapeCostGate::SpatialWorkBelowDeviceMinimum { .. }
+    )
+}
+
 fn gate_cost(
     shape: &ShapePlan,
     native_cost: Option<f64>,
@@ -570,6 +588,51 @@ pub(super) unsafe fn try_inject(
     let result = (|| {
         let mut shape = unsafe { super::shape::extract_shape(root, output_rel, &model) }
             .map_err(AdmissionDecline::Shape)?;
+
+        #[cfg(any(test, feature = "pg_test"))]
+        if test_force_spatial_groupagg(&shape) {
+            crate::engine::executor::agg::validate_test_forced_spatial_capability(
+                &shape.spec,
+                &AggOutputProjection {
+                    slots: shape.projections.clone(),
+                },
+            )
+            .map_err(|detail| AdmissionDecline::DescriptorCapability { detail })?;
+            if !test_forceable_spatial_cost_gate(shape.cost_gate) {
+                return Err(AdmissionDecline::DeviceCostGate(shape.cost_gate));
+            }
+            let estimates = exact_residency_estimates(&shape)?;
+            let selected_relids = estimates
+                .iter()
+                .map(|estimate| estimate.relid)
+                .collect::<Vec<_>>();
+            let budget_snapshot = resident_budget_snapshot(&selected_relids)
+                .ok_or(AdmissionDecline::ResidencyBudgetSnapshotUnavailable)?;
+            apply_exact_residency(
+                &mut shape,
+                &estimates,
+                AdmissionPolicy {
+                    auto_load: gucs::auto_load(),
+                    budget_bytes: gucs::resident_memory_budget_bytes(),
+                    budget_snapshot,
+                },
+                &model,
+            )?;
+            shape.cost_gate = ShapeCostGate::Eligible;
+            let added = unsafe {
+                inject_childless_shape_path(
+                    output_rel,
+                    &shape,
+                    EffectivePathCost {
+                        startup: 0.0,
+                        total: 0.0,
+                    },
+                )
+            }
+            .map_err(AdmissionDecline::Shape)?;
+            return added.then_some(()).ok_or(AdmissionDecline::PathNotAdded);
+        }
+
         validate_shape_capability(&shape)?;
         let estimates = exact_residency_estimates(&shape)?;
         let selected_relids = estimates
@@ -615,7 +678,7 @@ pub(super) unsafe fn try_inject(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::cost::{DeviceLimits, Rows};
+    use crate::engine::cost::{DeviceLimits, Rows, WorkProduct};
     use crate::engine::ffi::planner_hooks::shape::{
         DescriptorMeasurePlan, DescriptorResolution, RequiredRelation, ShapeCost,
     };
@@ -1120,6 +1183,54 @@ mod tests {
                 .code(),
             "generic_fact_rows_below_device_minimum"
         );
+    }
+
+    #[test]
+    fn test_force_only_bypasses_spatial_minimum_work_gates() {
+        assert!(test_forceable_spatial_cost_gate(ShapeCostGate::Eligible));
+        assert!(test_forceable_spatial_cost_gate(
+            ShapeCostGate::FactRowsBelowDeviceMinimum {
+                estimated: Rows::new(1),
+                required: Rows::new(2),
+            }
+        ));
+        assert!(test_forceable_spatial_cost_gate(
+            ShapeCostGate::SpatialRowsBelowDeviceMinimum {
+                estimated: Rows::new(1),
+                required: Rows::new(2),
+            }
+        ));
+        assert!(test_forceable_spatial_cost_gate(
+            ShapeCostGate::SpatialVerticesBelowDeviceMinimum {
+                estimated: Rows::new(4),
+                required: Rows::new(8),
+            }
+        ));
+        assert!(test_forceable_spatial_cost_gate(
+            ShapeCostGate::SpatialWorkBelowDeviceMinimum {
+                estimated: WorkProduct::new(4),
+                required: WorkProduct::new(8),
+            }
+        ));
+
+        assert!(!test_forceable_spatial_cost_gate(
+            ShapeCostGate::SpatialVerticesExceedDeviceMaximum {
+                estimated: Rows::new(9),
+                maximum: Rows::new(8),
+            }
+        ));
+        assert!(!test_forceable_spatial_cost_gate(
+            ShapeCostGate::SpatialWorkExceedsDeviceMaximum {
+                estimated: WorkProduct::new(9),
+                maximum: WorkProduct::new(8),
+            }
+        ));
+        assert!(!test_forceable_spatial_cost_gate(
+            ShapeCostGate::GroupsExceedDeviceMaximum {
+                estimated: Rows::new(9),
+                maximum: Rows::new(8),
+            }
+        ));
     }
 
     #[test]

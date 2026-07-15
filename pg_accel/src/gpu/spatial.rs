@@ -616,6 +616,15 @@ pub struct SpatialResidentLaunchOutcome {
     detail: i32,
 }
 
+#[cfg(any(test, feature = "pg_test"))]
+#[must_use]
+pub const fn test_injected_spatial_kernel_failure_outcome() -> SpatialResidentLaunchOutcome {
+    SpatialResidentLaunchOutcome {
+        status: PgaccelStatus::Error as i32,
+        detail: ResidentSpatialDetail::None as i32,
+    }
+}
+
 #[inline(always)]
 fn capture_spatial_raw_outcome(
     launch: impl FnOnce(*mut i32) -> i32,
@@ -1327,6 +1336,13 @@ mod resident_spatial_tests {
         };
         let error = spatial_eval_resident_launch_result(unknown)
             .expect_err("unknown raw status must fail closed");
+        assert_eq!(error.status, GpuStatusDetail::ExecutionFailed);
+
+        let error =
+            spatial_eval_resident_launch_result(test_injected_spatial_kernel_failure_outcome())
+                .expect_err("test-injected kernel status must use the hard failure mapper");
+        assert_eq!(error.domain, GpuErrorDomain::Spatial);
+        assert_eq!(error.operation, RESIDENT_SPATIAL_OPERATION);
         assert_eq!(error.status, GpuStatusDetail::ExecutionFailed);
     }
 

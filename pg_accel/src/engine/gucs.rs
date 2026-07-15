@@ -80,6 +80,14 @@ static OTEL_LOG_MAX_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
 /// allowing unbounded disk usage.
 static OTEL_LOG_MAX_ROTATIONS: GucSetting<i32> = GucSetting::<i32>::new(4);
 
+/// Test-only planner seam for exercising the dark spatial descriptor executor.
+#[cfg(any(test, feature = "pg_test"))]
+static TEST_FORCE_SPATIAL_GROUPAGG: GucSetting<bool> = GucSetting::<bool>::new(false);
+
+/// Test-only typed failure injection at the resident spatial kernel boundary.
+#[cfg(any(test, feature = "pg_test"))]
+static TEST_INJECT_SPATIAL_KERNEL_FAILURE: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 // ---------------------------------------------------------------------------
 // Log-level enum
 // ---------------------------------------------------------------------------
@@ -259,6 +267,26 @@ pub fn init_gucs() {
         GucContext::Userset,
         GucFlags::default(),
     );
+
+    #[cfg(any(test, feature = "pg_test"))]
+    GucRegistry::define_bool_guc(
+        c"pg_accel.test_force_spatial_groupagg",
+        c"Force covered spatial aggregates through the generic descriptor CustomScan.",
+        c"Test-only admission seam; exact residency, budget, and maximum capability gates remain enforced.",
+        &TEST_FORCE_SPATIAL_GROUPAGG,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
+    #[cfg(any(test, feature = "pg_test"))]
+    GucRegistry::define_bool_guc(
+        c"pg_accel.test_inject_spatial_kernel_failure",
+        c"Inject a resident spatial kernel failure.",
+        c"Test-only failure seam for proving selected CustomScans fail hard without CPU fallback.",
+        &TEST_INJECT_SPATIAL_KERNEL_FAILURE,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +419,20 @@ pub fn otel_log_max_mb() -> i32 {
 #[must_use]
 pub fn otel_log_max_rotations() -> i32 {
     OTEL_LOG_MAX_ROTATIONS.get()
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[inline]
+#[must_use]
+pub fn test_force_spatial_groupagg() -> bool {
+    TEST_FORCE_SPATIAL_GROUPAGG.get()
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+#[inline]
+#[must_use]
+pub fn test_inject_spatial_kernel_failure() -> bool {
+    TEST_INJECT_SPATIAL_KERNEL_FAILURE.get()
 }
 
 #[cfg(feature = "pg_test")]
