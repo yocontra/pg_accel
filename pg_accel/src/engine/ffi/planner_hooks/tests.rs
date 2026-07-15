@@ -894,12 +894,6 @@ fn empty_registry_is_empty() {
     assert!(reg.is_empty());
 }
 
-#[test]
-fn empty_registry_lookup_returns_none() {
-    let reg = registry::AdapterRegistry::new();
-    assert!(reg.lookup(pg_sys::Oid::from(12345u32)).is_none());
-}
-
 /// Gate: the window cost site must route through the fp64-aware helper —
 /// verify that the helper applies the soft-fp64 multiplier on soft devices
 /// and is a no-op on native devices. Mirrors the

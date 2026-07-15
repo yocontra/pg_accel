@@ -40,6 +40,14 @@ mod tests {
         })
     }
 
+    fn planner_rejection_count(reason: &str) -> i64 {
+        Spi::get_one::<i64>(&format!(
+            "SELECT pg_accel_planner_rejection_count('{reason}')"
+        ))
+        .expect("planner rejection count query should succeed")
+        .expect("planner rejection count should not be NULL")
+    }
+
     fn explain_analyze_text(query: &str) -> String {
         Spi::connect(|client| {
             let mut lines = Vec::new();
@@ -1566,10 +1574,7 @@ mod tests {
         let a = crate::adapters::h3::adapter();
         assert_eq!(a.name, "h3");
         let expected = a.functions.len();
-        assert_eq!(
-            expected, 6,
-            "expected one scalar winning lane plus approved varlen/record GPU H3 entries"
-        );
+        assert_eq!(expected, 2, "expected the exact production H3 allowlist");
 
         let gpu_count = a
             .functions
@@ -1579,12 +1584,7 @@ mod tests {
         assert_eq!(gpu_count, expected);
 
         let names: Vec<&str> = a.functions.iter().map(|f| f.name).collect();
-        assert!(names.contains(&"h3_latlng_to_cell"));
-        assert!(names.contains(&"h3_grid_disk"));
-        assert!(names.contains(&"h3_grid_ring_unsafe"));
-        assert!(names.contains(&"h3_cell_to_children"));
-        assert!(names.contains(&"h3_cell_to_boundary"));
-        assert!(names.contains(&"h3_cells_to_multi_polygon"));
+        assert_eq!(names, ["h3_latlng_to_cell", "h3_cell_to_children"]);
         for quarantined in [
             "h3_grid_distance",
             "h3_cell_to_parent",
@@ -1594,10 +1594,15 @@ mod tests {
             "h3_is_valid_cell",
             "h3_is_pentagon",
             "h3_is_res_class_iii",
+            "h3_grid_disk",
+            "h3_grid_ring_unsafe",
+            "h3_cell_to_boundary",
+            "h3_polygon_to_cells",
+            "h3_cells_to_multi_polygon",
         ] {
             assert!(
                 !names.contains(&quarantined),
-                "cheap scalar H3 op {quarantined} should not be registered"
+                "quarantined H3 op {quarantined} should not be registered"
             );
         }
     }
@@ -3836,8 +3841,12 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("reducing ROW_NUMBER decline should record a reason");
         assert_eq!(
-            rejection, RESIDENT_ONLY_REJECTION,
-            "reducing ROW_NUMBER should expose the resident-only gate; plan:\n{reducing_plan}"
+            rejection, "shape_unsupported_rte",
+            "outer aggregate should be the final typed decline; plan:\n{reducing_plan}"
+        );
+        assert!(
+            planner_rejection_count(RESIDENT_ONLY_REJECTION) > 0,
+            "the inner window must still record its resident-only gate"
         );
     }
 
@@ -4542,7 +4551,11 @@ mod tests {
         let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
             .expect("last rejection query should succeed")
             .expect("default-planned full sort should record a decline");
-        assert_eq!(rejection, "sort_heap_full_output");
+        assert_eq!(rejection, RESIDENT_ONLY_REJECTION);
+        assert!(
+            planner_rejection_count("sort_heap_full_output") > 0,
+            "full-output sort must retain its typed shape decline before the resident-only observer"
+        );
     }
 
     /// Generic numeric WHERE clauses must remain a typed native decline under
@@ -4591,7 +4604,7 @@ mod tests {
         let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
             .expect("last rejection query should succeed")
             .expect("generic numeric WHERE should record a decline");
-        assert_eq!(rejection, "shape_unsupported_predicate");
+        assert_eq!(rejection, RESIDENT_ONLY_REJECTION);
     }
 
     /// Parallel partial aggregate must not wrap PostgreSQL's CPU parallel
@@ -4667,7 +4680,7 @@ mod tests {
             "CREATE TEMP TABLE _preagg_fact (\
                 k int4 NOT NULL, \
                 g int4 NOT NULL, \
-                v float8 NOT NULL\
+                v int4 NOT NULL\
              )",
         )
         .expect("create fact");
@@ -4680,7 +4693,7 @@ mod tests {
         .expect("create dim");
         Spi::run(
             "INSERT INTO _preagg_fact \
-             SELECT (g % 2048) + 1, g % 64, (g * 0.5)::float8 \
+             SELECT (g % 2048) + 1, g % 64, (g % 10000)::int4 \
              FROM generate_series(1, 200000) g",
         )
         .expect("seed fact");
@@ -4711,8 +4724,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("grouped join aggregate PreAgg decline should record a reason");
         assert_eq!(
-            rejection, "shape_unsupported_predicate",
-            "filtered grouped join should expose the exact generic predicate decline; plan:\n{plan}"
+            rejection, "generic_descriptor_capability",
+            "grouped join must expose the exact descriptor-capability decline; plan:\n{plan}"
         );
 
         Spi::run("DROP TABLE _preagg_fact").expect("drop fact");

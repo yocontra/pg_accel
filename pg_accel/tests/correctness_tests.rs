@@ -696,14 +696,9 @@ fn adapter_no_duplicate_names_within_each() {
 #[test]
 fn adapter_h3_gpu_strategy_for_gpu_functions() {
     let a = h3::adapter();
-    let gpu_names = [
-        "h3_latlng_to_cell",
-        "h3_grid_disk",
-        "h3_grid_ring_unsafe",
-        "h3_cell_to_children",
-        "h3_cell_to_boundary",
-        "h3_cells_to_multi_polygon",
-    ];
+    let gpu_names = ["h3_latlng_to_cell", "h3_cell_to_children"];
+    let names: Vec<&str> = a.functions.iter().map(|entry| entry.name).collect();
+    assert_eq!(names, gpu_names, "H3 adapter allowlist drifted");
     for name in &gpu_names {
         let entry = a.functions.iter().find(|f| f.name == *name);
         assert!(
@@ -769,15 +764,14 @@ fn adapter_combined_function_count() {
     let total: usize = all_adapters().iter().map(|a| a.functions.len()).sum();
     let expected = h3::adapter().functions.len() + postgis::adapter().functions.len();
     assert_eq!(total, expected);
-    // Exact pin of the intentional GPU-only adapter surface: h3 registers one
-    // scalar winner (h3_latlng_to_cell) plus five var-len SRF lanes; postgis
-    // registers st_intersects behind the planner point/polygon shape gate.
+    // Exact pin of the intentional GPU-only adapter surface: H3 registers one
+    // scalar winner and one exact var-len lane; PostGIS registers st_intersects.
     // Raster deliberately registers no scalar adapter functions — it routes
     // through the planner-observed resident lane instead (see
     // engine/ffi/planner_hooks/raster.rs). Any change to this number must be
     // an audited adapter-surface decision, not drift.
     assert_eq!(
-        total, 7,
+        total, 3,
         "GPU-only adapter surface changed; audit the h3/postgis allowlists"
     );
 }
