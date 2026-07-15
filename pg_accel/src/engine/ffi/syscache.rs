@@ -82,23 +82,33 @@ pub unsafe fn function_schema_and_name(fn_oid: pg_sys::Oid) -> Option<(String, S
         return None;
     }
 
+    // SAFETY: the caller guarantees backend-thread catalog access and fn_oid is
+    // non-invalid; PostgreSQL returns null or a context-owned C string.
     let name_ptr = unsafe { pg_sys::get_func_name(fn_oid) };
     if name_ptr.is_null() {
         return None;
     }
+    // SAFETY: a non-null get_func_name result is NUL-terminated and remains live
+    // in the current PostgreSQL memory context while it is copied here.
     let name = unsafe { std::ffi::CStr::from_ptr(name_ptr) }
         .to_str()
         .ok()?
         .to_ascii_lowercase();
 
+    // SAFETY: fn_oid is the same live function catalog OID and the caller holds
+    // the backend-thread catalog invariant.
     let namespace_oid = unsafe { pg_sys::get_func_namespace(fn_oid) };
     if namespace_oid == pg_sys::InvalidOid {
         return None;
     }
+    // SAFETY: namespace_oid is non-invalid and catalog access remains on the
+    // backend thread; PostgreSQL returns null or a context-owned C string.
     let namespace_ptr = unsafe { pg_sys::get_namespace_name(namespace_oid) };
     if namespace_ptr.is_null() {
         return None;
     }
+    // SAFETY: a non-null namespace name is NUL-terminated and remains live in
+    // the current PostgreSQL memory context while it is copied here.
     let schema = unsafe { std::ffi::CStr::from_ptr(namespace_ptr) }
         .to_str()
         .ok()?
@@ -120,11 +130,15 @@ unsafe fn object_is_extension_member(
         Ok(extname) => extname,
         Err(_) => return false,
     };
+    // SAFETY: extname_cstr is NUL-terminated for the duration of this backend
+    // catalog lookup; missing_ok=true permits an absent extension.
     let extension_oid = unsafe { pg_sys::get_extension_oid(extname_cstr.as_ptr(), true) };
     if extension_oid == pg_sys::InvalidOid {
         return false;
     }
 
+    // SAFETY: class_oid selects a PostgreSQL catalog and object_oid is non-invalid;
+    // dependency catalog access occurs on the caller-guaranteed backend thread.
     (unsafe { pg_sys::getExtensionOfObject(class_oid, object_oid) }) == extension_oid
 }
 
@@ -134,6 +148,8 @@ unsafe fn object_is_extension_member(
 /// Must be called on the main backend thread. Performs backend catalog
 /// lookups via PostgreSQL extension/dependency helpers.
 pub unsafe fn function_is_extension_member(fn_oid: pg_sys::Oid, extname: &str) -> bool {
+    // SAFETY: this function forwards its backend-thread catalog requirement and
+    // the ProcedureRelationId class for fn_oid.
     unsafe { object_is_extension_member(pg_sys::ProcedureRelationId, fn_oid, extname) }
 }
 
@@ -143,6 +159,8 @@ pub unsafe fn function_is_extension_member(fn_oid: pg_sys::Oid, extname: &str) -
 /// Must be called on the main backend thread. Performs backend catalog
 /// lookups via PostgreSQL extension/dependency helpers.
 pub unsafe fn type_is_extension_member(type_oid: pg_sys::Oid, extname: &str) -> bool {
+    // SAFETY: this function forwards its backend-thread catalog requirement and
+    // the TypeRelationId class for type_oid.
     unsafe { object_is_extension_member(pg_sys::TypeRelationId, type_oid, extname) }
 }
 
@@ -156,6 +174,8 @@ pub unsafe fn type_name(type_oid: pg_sys::Oid) -> Option<String> {
         return None;
     }
 
+    // SAFETY: TYPEOID expects one OID Datum and the caller guarantees backend
+    // syscache access; a non-null result remains pinned until ReleaseSysCache.
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::TYPEOID as ::core::ffi::c_int,
@@ -167,6 +187,8 @@ pub unsafe fn type_name(type_oid: pg_sys::Oid) -> Option<String> {
     }
 
     let mut isnull: bool = false;
+    // SAFETY: tuple remains pinned and typname is an attribute of its TYPEOID
+    // row; isnull points to writable stack storage for the call.
     let datum = unsafe {
         pg_sys::SysCacheGetAttr(
             pg_sys::SysCacheIdentifier::TYPEOID as ::core::ffi::c_int,
@@ -176,19 +198,24 @@ pub unsafe fn type_name(type_oid: pg_sys::Oid) -> Option<String> {
         )
     };
     if isnull {
+        // SAFETY: releases exactly the non-null TYPEOID pin acquired above.
         unsafe { pg_sys::ReleaseSysCache(tuple) };
         return None;
     }
 
     let name_ptr = datum.cast_mut_ptr::<pg_sys::NameData>();
     if name_ptr.is_null() {
+        // SAFETY: releases exactly the non-null TYPEOID pin acquired above.
         unsafe { pg_sys::ReleaseSysCache(tuple) };
         return None;
     }
+    // SAFETY: while tuple is pinned, its non-null typname Datum points to a
+    // fixed-size, NUL-terminated NameData; the result is copied before release.
     let name = unsafe { std::ffi::CStr::from_ptr((*name_ptr).data.as_ptr()) }
         .to_str()
         .ok()
         .map(str::to_ascii_lowercase);
+    // SAFETY: name no longer borrows the row, so the matching TYPEOID pin can be released.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     name
 }
@@ -203,11 +230,15 @@ pub unsafe fn type_oid_in_schema(schema: &str, type_name: &str) -> Option<pg_sys
     let schema_cstr = std::ffi::CString::new(schema).ok()?;
     let type_name_cstr = std::ffi::CString::new(type_name).ok()?;
 
+    // SAFETY: schema_cstr is NUL-terminated for this backend catalog lookup;
+    // missing_ok=true permits an absent namespace.
     let namespace_oid = unsafe { pg_sys::get_namespace_oid(schema_cstr.as_ptr(), true) };
     if namespace_oid == pg_sys::InvalidOid {
         return None;
     }
 
+    // SAFETY: TYPENAMENSP expects the NUL-terminated type name and resolved
+    // namespace OID; a non-null row remains pinned until release below.
     let tuple = unsafe {
         pg_sys::SearchSysCache2(
             pg_sys::SysCacheIdentifier::TYPENAMENSP as ::core::ffi::c_int,
@@ -220,6 +251,8 @@ pub unsafe fn type_oid_in_schema(schema: &str, type_name: &str) -> Option<pg_sys
     }
 
     let mut isnull: bool = false;
+    // SAFETY: tuple remains pinned and oid is an attribute of its TYPENAMENSP
+    // row; isnull points to writable stack storage for the call.
     let datum = unsafe {
         pg_sys::SysCacheGetAttr(
             pg_sys::SysCacheIdentifier::TYPENAMENSP as ::core::ffi::c_int,
@@ -228,6 +261,8 @@ pub unsafe fn type_oid_in_schema(schema: &str, type_name: &str) -> Option<pg_sys
             &raw mut isnull,
         )
     };
+    // SAFETY: datum is by-value Oid data, so the matching syscache pin can be
+    // released before decoding it.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
 
     if isnull {
@@ -589,11 +624,15 @@ unsafe fn named_extension_identity(
 ) -> Result<(pg_sys::Oid, pg_sys::Oid), String> {
     let extension_name = std::ffi::CString::new(expected_name)
         .map_err(|_| format!("invalid extension name {expected_name:?}"))?;
+    // SAFETY: extension_name is NUL-terminated for this backend catalog lookup;
+    // missing_ok=true permits the not-installed error path below.
     let extension_oid = unsafe { pg_sys::get_extension_oid(extension_name.as_ptr(), true) };
     if extension_oid == pg_sys::InvalidOid {
         return Err(format!("extension {expected_name} is not installed"));
     }
 
+    // SAFETY: EXTENSIONOID expects the resolved OID Datum; a non-null result is
+    // pinned until the matching ReleaseSysCache below.
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::EXTENSIONOID as ::core::ffi::c_int,
@@ -605,6 +644,8 @@ unsafe fn named_extension_identity(
             "extension {expected_name} disappeared during catalog validation"
         ));
     }
+    // SAFETY: tuple is a live pinned pg_extension row for extension_oid; all
+    // FormData fields and NameData bytes are read before the pin is released.
     let result = (|| unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_extension>();
         let name = std::ffi::CStr::from_ptr((*form).extname.data.as_ptr())
@@ -624,11 +665,15 @@ unsafe fn named_extension_identity(
             Ok((extension_oid, (*form).extnamespace))
         }
     })();
+    // SAFETY: result owns every value copied from the row, so the matching
+    // EXTENSIONOID pin can now be released exactly once.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     result
 }
 
 unsafe fn extension_identity() -> Result<(pg_sys::Oid, pg_sys::Oid), String> {
+    // SAFETY: forwards this helper's backend-thread catalog invariant and fixes
+    // the expected H3 extension identity and relocatability.
     unsafe { named_extension_identity(H3_EXTENSION_NAME, Some(true)) }
 }
 
@@ -641,6 +686,8 @@ unsafe fn find_exact_function(
         .map_err(|_| format!("invalid function name {function_name:?}"))?;
     let argument_count = i32::try_from(argument_types.len())
         .map_err(|_| format!("function {function_name} has too many argument types"))?;
+    // SAFETY: argument_types.as_ptr() is valid for argument_count initialized
+    // OIDs during the call; buildoidvector copies them into palloc storage.
     let argument_vector =
         unsafe { pg_sys::buildoidvector(argument_types.as_ptr(), argument_count) };
     if argument_vector.is_null() {
@@ -648,6 +695,8 @@ unsafe fn find_exact_function(
             "could not build function signature for {function_name}"
         ));
     }
+    // SAFETY: PROCNAMEARGSNSP expects a NUL-terminated name, the live oidvector,
+    // and schema OID; a non-null result remains pinned until release below.
     let tuple = unsafe {
         pg_sys::SearchSysCache3(
             pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as ::core::ffi::c_int,
@@ -656,6 +705,8 @@ unsafe fn find_exact_function(
             pg_sys::ObjectIdGetDatum(schema_oid),
         )
     };
+    // SAFETY: buildoidvector returned this palloc-owned allocation and the
+    // syscache lookup no longer borrows it after returning.
     unsafe { pg_sys::pfree(argument_vector.cast()) };
     if tuple.is_null() {
         return Err(format!(
@@ -663,10 +714,13 @@ unsafe fn find_exact_function(
             u32::from(schema_oid)
         ));
     }
+    // SAFETY: tuple is a live pinned pg_proc row; GETSTRUCT has pg_proc layout
+    // and oid is copied before releasing the pin.
     let fn_oid = unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_proc>();
         (*form).oid
     };
+    // SAFETY: releases exactly the non-null PROCNAMEARGSNSP pin acquired above.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     Ok(fn_oid)
 }
@@ -674,6 +728,8 @@ unsafe fn find_exact_function(
 unsafe fn find_h3_type_oid(schema_oid: pg_sys::Oid) -> Result<pg_sys::Oid, String> {
     let type_name =
         std::ffi::CString::new(H3_TYPE_NAME).map_err(|_| "invalid H3 type name".to_owned())?;
+    // SAFETY: TYPENAMENSP expects the NUL-terminated H3 type name and schema OID;
+    // a non-null result remains pinned until release below.
     let tuple = unsafe {
         pg_sys::SearchSysCache2(
             pg_sys::SysCacheIdentifier::TYPENAMENSP as ::core::ffi::c_int,
@@ -687,15 +743,20 @@ unsafe fn find_h3_type_oid(schema_oid: pg_sys::Oid) -> Result<pg_sys::Oid, Strin
             u32::from(schema_oid)
         ));
     }
+    // SAFETY: tuple is a live pinned pg_type row; GETSTRUCT has pg_type layout
+    // and oid is copied before releasing the pin.
     let type_oid = unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_type>();
         (*form).oid
     };
+    // SAFETY: releases exactly the non-null TYPENAMENSP pin acquired above.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     Ok(type_oid)
 }
 
 unsafe fn read_h3_type_shape(type_oid: pg_sys::Oid) -> Result<H3TypeShape, String> {
+    // SAFETY: TYPEOID expects one OID Datum and the caller guarantees backend
+    // syscache access; a non-null row remains pinned until release below.
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::TYPEOID as ::core::ffi::c_int,
@@ -705,6 +766,8 @@ unsafe fn read_h3_type_shape(type_oid: pg_sys::Oid) -> Result<H3TypeShape, Strin
     if tuple.is_null() {
         return Err(format!("type OID {} does not exist", u32::from(type_oid)));
     }
+    // SAFETY: tuple is a live pinned pg_type row for type_oid; GETSTRUCT,
+    // NameData, tuple header, and item-pointer fields are copied before release.
     let result = (|| unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_type>();
         let name = std::ffi::CStr::from_ptr((*form).typname.data.as_ptr())
@@ -732,14 +795,20 @@ unsafe fn read_h3_type_shape(type_oid: pg_sys::Oid) -> Result<H3TypeShape, Strin
             tuple_offset: pg_sys::ItemPointerGetOffsetNumber(&raw const (*tuple).t_self),
         })
     })();
+    // SAFETY: result owns all copied row data, so the matching TYPEOID pin can
+    // now be released exactly once.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     result
 }
 
 unsafe fn validate_h3_type(type_oid: pg_sys::Oid) -> Result<H3TypeProof, String> {
+    // SAFETY: validation runs on the backend thread and retains only copied OIDs.
     let (extension_oid, schema_oid) = unsafe { extension_identity()? };
+    // SAFETY: type_oid is inspected under a syscache pin held wholly inside the helper.
     let shape = unsafe { read_h3_type_shape(type_oid)? };
     validate_h3_type_shape(&shape, schema_oid)?;
+    // SAFETY: type_oid is a catalog OID and dependency lookup occurs on the
+    // caller-guaranteed backend thread.
     if unsafe { pg_sys::getExtensionOfObject(pg_sys::TypeRelationId, type_oid) } != extension_oid {
         return Err(format!(
             "type OID {} is not owned by extension h3",
@@ -759,11 +828,15 @@ unsafe fn find_h3_parent_function(
     let function_name = std::ffi::CString::new(H3_PARENT_FUNCTION_NAME)
         .map_err(|_| "invalid H3 parent function name".to_owned())?;
     let argument_types = [type_oid, pg_sys::INT4OID];
+    // SAFETY: the fixed array contains exactly the initialized OIDs described by
+    // its length; buildoidvector copies them into palloc-owned storage.
     let argument_vector =
         unsafe { pg_sys::buildoidvector(argument_types.as_ptr(), argument_types.len() as i32) };
     if argument_vector.is_null() {
         return Err("could not build H3 parent function signature".to_owned());
     }
+    // SAFETY: PROCNAMEARGSNSP expects the NUL-terminated name, live oidvector,
+    // and schema OID; a non-null row remains pinned until release below.
     let tuple = unsafe {
         pg_sys::SearchSysCache3(
             pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as ::core::ffi::c_int,
@@ -772,30 +845,40 @@ unsafe fn find_h3_parent_function(
             pg_sys::ObjectIdGetDatum(schema_oid),
         )
     };
+    // SAFETY: buildoidvector returned this palloc-owned allocation and the
+    // completed syscache lookup no longer borrows it.
     unsafe { pg_sys::pfree(argument_vector.cast()) };
     if tuple.is_null() {
         return Err(
             "extension h3 has no exact h3_cell_to_parent(h3index, int4) function".to_owned(),
         );
     }
+    // SAFETY: tuple is a live pinned pg_proc row; its OID is copied before the
+    // matching pin is released.
     let fn_oid = unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_proc>();
         (*form).oid
     };
+    // SAFETY: releases exactly the non-null PROCNAMEARGSNSP pin acquired above.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     Ok(fn_oid)
 }
 
 unsafe fn default_h3_equality_operator(type_oid: pg_sys::Oid) -> Result<pg_sys::Oid, String> {
+    // SAFETY: lookup_type_cache runs on the backend thread and returns a cache
+    // entry whose lifetime is managed by PostgreSQL's current type cache.
     let entry = unsafe {
         pg_sys::lookup_type_cache(type_oid, pg_sys::TYPECACHE_EQ_OPR as ::core::ffi::c_int)
     };
+    // SAFETY: short-circuiting proves entry is non-null before reading type_id.
     if entry.is_null() || unsafe { (*entry).type_id } != type_oid {
         return Err(format!(
             "type cache has no entry for H3 type OID {}",
             u32::from(type_oid)
         ));
     }
+    // SAFETY: entry is non-null, belongs to type_oid, and remains live in the
+    // backend type cache for this lookup.
     let equality_op_oid = unsafe { (*entry).eq_opr };
     if equality_op_oid == pg_sys::InvalidOid {
         return Err(format!(
@@ -807,6 +890,8 @@ unsafe fn default_h3_equality_operator(type_oid: pg_sys::Oid) -> Result<pg_sys::
 }
 
 unsafe fn read_h3_operator_shape(operator_oid: pg_sys::Oid) -> Result<H3OperatorShape, String> {
+    // SAFETY: OPEROID expects one OID Datum and the caller guarantees backend
+    // syscache access; a non-null row remains pinned until release below.
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::OPEROID as ::core::ffi::c_int,
@@ -819,6 +904,8 @@ unsafe fn read_h3_operator_shape(operator_oid: pg_sys::Oid) -> Result<H3Operator
             u32::from(operator_oid)
         ));
     }
+    // SAFETY: tuple is a live pinned pg_operator row; GETSTRUCT, NameData,
+    // tuple-header, and item-pointer fields are copied before release.
     let result = (|| unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_operator>();
         let name = std::ffi::CStr::from_ptr((*form).oprname.data.as_ptr())
@@ -847,12 +934,15 @@ unsafe fn read_h3_operator_shape(operator_oid: pg_sys::Oid) -> Result<H3Operator
             tuple_offset: pg_sys::ItemPointerGetOffsetNumber(&raw const (*tuple).t_self),
         })
     })();
+    // SAFETY: result owns all copied row data, so the matching OPEROID pin can be released.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     result
 }
 
 unsafe fn proc_text_attr(tuple: pg_sys::HeapTuple, attnum: i16) -> Result<Option<String>, String> {
     let mut isnull = false;
+    // SAFETY: callers supply a live pinned PROCOID tuple; attnum selects a
+    // pg_proc text attribute and isnull is writable stack storage.
     let datum = unsafe {
         pg_sys::SysCacheGetAttr(
             pg_sys::SysCacheIdentifier::PROCOID as ::core::ffi::c_int,
@@ -864,12 +954,16 @@ unsafe fn proc_text_attr(tuple: pg_sys::HeapTuple, attnum: i16) -> Result<Option
     if isnull {
         return Ok(None);
     }
+    // SAFETY: SysCacheGetAttr reported a non-null text Datum still protected by
+    // the caller's tuple pin; FromDatum copies it into an owned String.
     unsafe { String::from_datum(datum, false) }
         .map(Some)
         .ok_or_else(|| "could not decode pg_proc implementation text".to_owned())
 }
 
 unsafe fn language_name(language_oid: pg_sys::Oid) -> Result<String, String> {
+    // SAFETY: catalog lookup runs on the backend thread; missing_ok=true returns
+    // null rather than raising for an absent language.
     let name_ptr = unsafe { pg_sys::get_language_name(language_oid, true) };
     if name_ptr.is_null() {
         return Err(format!(
@@ -877,6 +971,8 @@ unsafe fn language_name(language_oid: pg_sys::Oid) -> Result<String, String> {
             u32::from(language_oid)
         ));
     }
+    // SAFETY: a non-null get_language_name result is a NUL-terminated,
+    // palloc-owned string; the result is copied before pfree.
     let result = unsafe {
         std::ffi::CStr::from_ptr(name_ptr)
             .to_str()
@@ -888,11 +984,15 @@ unsafe fn language_name(language_oid: pg_sys::Oid) -> Result<String, String> {
                 )
             })
     };
+    // SAFETY: get_language_name returned this palloc-owned pointer and result no
+    // longer borrows it after the copy above.
     unsafe { pg_sys::pfree(name_ptr.cast()) };
     result
 }
 
 unsafe fn read_h3_function_shape(fn_oid: pg_sys::Oid) -> Result<H3FunctionShape, String> {
+    // SAFETY: PROCOID expects one OID Datum and the caller guarantees backend
+    // syscache access; a non-null row remains pinned until release below.
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::PROCOID as ::core::ffi::c_int,
@@ -902,6 +1002,8 @@ unsafe fn read_h3_function_shape(fn_oid: pg_sys::Oid) -> Result<H3FunctionShape,
     if tuple.is_null() {
         return Err(format!("function OID {} does not exist", u32::from(fn_oid)));
     }
+    // SAFETY: tuple is a live pinned pg_proc row; GETSTRUCT, variable OID fields,
+    // text attributes, tuple header, and item pointer are copied before release.
     let result = (|| unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_proc>();
         let name = std::ffi::CStr::from_ptr((*form).proname.data.as_ptr())
@@ -939,6 +1041,7 @@ unsafe fn read_h3_function_shape(fn_oid: pg_sys::Oid) -> Result<H3FunctionShape,
             tuple_offset: pg_sys::ItemPointerGetOffsetNumber(&raw const (*tuple).t_self),
         })
     })();
+    // SAFETY: result owns every copied field, so the matching PROCOID pin can be released.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     result
 }
@@ -952,9 +1055,14 @@ pub unsafe fn validate_h3_parent_function(
     fn_oid: pg_sys::Oid,
     type_oid: pg_sys::Oid,
 ) -> Result<Vec<i32>, String> {
+    // SAFETY: catalog validation runs on the backend thread and each helper owns
+    // the complete lifetime of its syscache pins.
     let type_proof = unsafe { validate_h3_type(type_oid)? };
+    // SAFETY: fn_oid is inspected under a PROCOID pin held wholly by the helper.
     let shape = unsafe { read_h3_function_shape(fn_oid)? };
     validate_h3_function_shape(&shape, type_proof.shape.schema_oid, type_oid)?;
+    // SAFETY: fn_oid is a catalog OID and dependency lookup occurs on the
+    // caller-guaranteed backend thread.
     if unsafe { pg_sys::getExtensionOfObject(pg_sys::ProcedureRelationId, fn_oid) }
         != type_proof.extension_oid
     {
@@ -970,9 +1078,14 @@ unsafe fn resolve_h3_equality_catalog(
     type_proof: &H3TypeProof,
 ) -> Result<(H3OperatorShape, H3FunctionShape), String> {
     let type_oid = type_proof.shape.type_oid;
+    // SAFETY: type_oid was obtained from the already validated H3 type proof and
+    // type-cache access occurs on the backend thread.
     let equality_op_oid = unsafe { default_h3_equality_operator(type_oid)? };
+    // SAFETY: equality_op_oid is inspected under an OPEROID pin held wholly by the helper.
     let operator = unsafe { read_h3_operator_shape(equality_op_oid)? };
     validate_h3_equality_operator_shape(&operator, type_proof.shape.schema_oid, type_oid)?;
+    // SAFETY: equality_op_oid is a catalog OID and dependency lookup occurs on
+    // the backend thread.
     if unsafe { pg_sys::getExtensionOfObject(pg_sys::OperatorRelationId, equality_op_oid) }
         != type_proof.extension_oid
     {
@@ -982,12 +1095,17 @@ unsafe fn resolve_h3_equality_catalog(
         ));
     }
 
+    // SAFETY: equality_op_oid was resolved from the type cache and validated as
+    // a live operator catalog row before this backend lookup.
     let equality_fn_oid = unsafe { pg_sys::get_opcode(equality_op_oid) };
     if equality_fn_oid == pg_sys::InvalidOid || equality_fn_oid != operator.function_oid {
         return Err("H3 equality operator implementation changed during validation".to_owned());
     }
+    // SAFETY: equality_fn_oid is inspected under a PROCOID pin held wholly by the helper.
     let function = unsafe { read_h3_function_shape(equality_fn_oid)? };
     validate_h3_equality_function_shape(&function, type_proof.shape.schema_oid, type_oid)?;
+    // SAFETY: equality_fn_oid is a catalog OID and dependency lookup occurs on
+    // the backend thread.
     if unsafe { pg_sys::getExtensionOfObject(pg_sys::ProcedureRelationId, equality_fn_oid) }
         != type_proof.extension_oid
     {
@@ -1004,17 +1122,24 @@ unsafe fn resolve_h3_equality_catalog(
 /// # Safety
 /// Must be called on the PostgreSQL backend main thread.
 pub unsafe fn resolve_h3_catalog() -> Result<H3CatalogIdentity, String> {
+    // SAFETY: resolution runs on the backend thread and each helper owns its
+    // complete syscache-pin lifetime.
     let (extension_oid, schema_oid) = unsafe { extension_identity()? };
+    // SAFETY: schema_oid came from the live extension row and lookup is backend-local.
     let type_oid = unsafe { find_h3_type_oid(schema_oid)? };
+    // SAFETY: type_oid is inspected and dependency-checked on the same backend thread.
     let type_proof = unsafe { validate_h3_type(type_oid)? };
     if type_proof.extension_oid != extension_oid || type_proof.shape.schema_oid != schema_oid {
         return Err("extension h3 catalog identity changed during validation".to_owned());
     }
+    // SAFETY: schema_oid and type_oid are the mutually validated H3 catalog identity.
     let parent_fn_oid = unsafe { find_h3_parent_function(schema_oid, type_oid)? };
     let (equality_operator, equality_function) =
+        // SAFETY: type_proof owns copied values from a validated H3 type row.
         unsafe { resolve_h3_equality_catalog(&type_proof)? };
     let mut fingerprint_words = vec![u32_word(H3_FINGERPRINT_VERSION), oid_word(extension_oid)];
     fingerprint_words.extend(type_fingerprint(&type_proof.shape));
+    // SAFETY: both OIDs were resolved from the same validated H3 extension schema.
     fingerprint_words.extend(unsafe { validate_h3_parent_function(parent_fn_oid, type_oid)? });
     fingerprint_words.extend(operator_fingerprint(&equality_operator));
     fingerprint_words.extend(function_fingerprint(&equality_function));

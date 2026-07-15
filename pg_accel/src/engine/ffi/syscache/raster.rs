@@ -986,6 +986,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
     if summary_impl.variadic_type != pg_sys::InvalidOid {
         return Err("PostGIS Raster _st_summarystats became variadic".to_owned());
     }
+    // SAFETY: main-thread syscache read of the exact st_aswkb OID resolved and
+    // extension-checked above; the helper owns its tuple pin.
     let as_wkb = unsafe { read_h3_function_shape(as_wkb_fn_oid)? };
     validate_raster_c_function(
         &as_wkb,
@@ -1000,6 +1002,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
     if as_wkb.variadic_type != pg_sys::InvalidOid {
         return Err("PostGIS Raster st_aswkb became variadic".to_owned());
     }
+    // SAFETY: main-thread syscache read of the exact st_rastfromwkb OID resolved
+    // and extension-checked above; the helper owns its tuple pin.
     let rast_from_wkb = unsafe { read_h3_function_shape(rast_from_wkb_fn_oid)? };
     validate_raster_c_function(
         &rast_from_wkb,
@@ -1133,7 +1137,11 @@ pub unsafe fn postgis_raster_datum_to_wkb(
         }
         // SAFETY: detoasted is a flat bytea valid for its reported payload.
         let len = unsafe { pgrx::varsize_any_exhdr(detoasted) };
+        // SAFETY: detoasted is non-null and flat; vardata_any points to its
+        // payload for the len bytes reported immediately above.
         let data = unsafe { pgrx::vardata_any(detoasted).cast::<u8>() };
+        // SAFETY: data addresses the complete readable payload of length len;
+        // to_vec copies it before either palloc allocation is freed.
         let wkb = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
         if detoasted != original {
             // SAFETY: a distinct detoast result is palloc-owned by this call.

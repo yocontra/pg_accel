@@ -220,6 +220,8 @@ fn postgis_type_fingerprint(shape: &PostgisTypeShape) -> Vec<i32> {
 unsafe fn find_postgis_geometry_type(schema_oid: pg_sys::Oid) -> Result<pg_sys::Oid, String> {
     let type_name = std::ffi::CString::new(POSTGIS_GEOMETRY_TYPE_NAME)
         .map_err(|_| "invalid PostGIS geometry type name".to_owned())?;
+    // SAFETY: TYPENAMENSP expects the NUL-terminated geometry name and validated
+    // extension schema OID; a non-null row remains pinned until release below.
     let tuple = unsafe {
         pg_sys::SearchSysCache2(
             pg_sys::SysCacheIdentifier::TYPENAMENSP as ::core::ffi::c_int,
@@ -233,15 +235,20 @@ unsafe fn find_postgis_geometry_type(schema_oid: pg_sys::Oid) -> Result<pg_sys::
             u32::from(schema_oid)
         ));
     }
+    // SAFETY: tuple is a live pinned pg_type row; its OID is copied before the
+    // matching syscache pin is released.
     let type_oid = unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_type>();
         (*form).oid
     };
+    // SAFETY: releases exactly the non-null TYPENAMENSP pin acquired above.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     Ok(type_oid)
 }
 
 unsafe fn read_postgis_type_shape(type_oid: pg_sys::Oid) -> Result<PostgisTypeShape, String> {
+    // SAFETY: TYPEOID expects one OID Datum and the caller guarantees backend
+    // syscache access; a non-null row remains pinned until release below.
     let tuple = unsafe {
         pg_sys::SearchSysCache1(
             pg_sys::SysCacheIdentifier::TYPEOID as ::core::ffi::c_int,
@@ -251,6 +258,8 @@ unsafe fn read_postgis_type_shape(type_oid: pg_sys::Oid) -> Result<PostgisTypeSh
     if tuple.is_null() {
         return Err(format!("type OID {} does not exist", u32::from(type_oid)));
     }
+    // SAFETY: tuple is a live pinned pg_type row; GETSTRUCT, NameData, tuple
+    // header, and item-pointer fields are copied before release.
     let result = (|| unsafe {
         let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_type>();
         let name = std::ffi::CStr::from_ptr((*form).typname.data.as_ptr())
@@ -285,6 +294,7 @@ unsafe fn read_postgis_type_shape(type_oid: pg_sys::Oid) -> Result<PostgisTypeSh
             tuple_offset: pg_sys::ItemPointerGetOffsetNumber(&raw const (*tuple).t_self),
         })
     })();
+    // SAFETY: result owns all copied row data, so the matching TYPEOID pin can be released.
     unsafe { pg_sys::ReleaseSysCache(tuple) };
     result
 }
@@ -314,8 +324,11 @@ unsafe fn validate_postgis_function(
     fn_oid: pg_sys::Oid,
     contract: PostgisFunctionContract<'_>,
 ) -> Result<H3FunctionShape, String> {
+    // SAFETY: fn_oid is inspected under a PROCOID pin held wholly by the helper.
     let shape = unsafe { read_h3_function_shape(fn_oid)? };
     validate_postgis_function_shape(&shape, schema_oid, contract)?;
+    // SAFETY: fn_oid is a catalog OID and dependency lookup occurs on the
+    // caller-guaranteed backend thread.
     if unsafe { pg_sys::getExtensionOfObject(pg_sys::ProcedureRelationId, fn_oid) } != extension_oid
     {
         return Err(format!(
@@ -331,11 +344,17 @@ unsafe fn validate_postgis_function(
 /// # Safety
 /// Must be called on the PostgreSQL backend main thread.
 pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String> {
+    // SAFETY: resolution runs on the backend thread and the helper owns the
+    // complete lifetime of its extension syscache pin.
     let (extension_oid, schema_oid) =
         unsafe { named_extension_identity(POSTGIS_EXTENSION_NAME, Some(false))? };
+    // SAFETY: schema_oid came from the validated PostGIS extension row.
     let geometry_type_oid = unsafe { find_postgis_geometry_type(schema_oid)? };
+    // SAFETY: geometry_type_oid is inspected under a TYPEOID pin owned by the helper.
     let type_shape = unsafe { read_postgis_type_shape(geometry_type_oid)? };
     validate_postgis_type_shape(&type_shape, schema_oid)?;
+    // SAFETY: geometry_type_oid is a catalog OID and dependency lookup occurs
+    // on the backend thread.
     if unsafe { pg_sys::getExtensionOfObject(pg_sys::TypeRelationId, geometry_type_oid) }
         != extension_oid
     {
@@ -345,6 +364,8 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
         ));
     }
 
+    // SAFETY: schema_oid is the validated PostGIS schema and the helper owns its
+    // signature oidvector and syscache pin lifetimes.
     let support_fn_oid = unsafe {
         find_exact_function(
             schema_oid,
@@ -362,6 +383,8 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
         volatility: pg_sys::PROVOLATILE_VOLATILE,
         parallel: pg_sys::PROPARALLEL_UNSAFE,
     };
+    // SAFETY: all OIDs belong to the same validated PostGIS extension identity;
+    // validation owns each temporary syscache pin.
     let support_shape = unsafe {
         validate_postgis_function(extension_oid, schema_oid, support_fn_oid, support_contract)?
     };
@@ -435,6 +458,8 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
     ];
     let mut function_shapes = Vec::new();
     for (fn_oid, contract) in io_contracts {
+        // SAFETY: every fn_oid is copied from the validated geometry pg_type row
+        // and each contract pins its exact expected signature.
         function_shapes.push(unsafe {
             validate_postgis_function(extension_oid, schema_oid, fn_oid, contract)?
         });
@@ -449,6 +474,8 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
         volatility: pg_sys::PROVOLATILE_VOLATILE,
         parallel: pg_sys::PROPARALLEL_UNSAFE,
     };
+    // SAFETY: typanalyze was copied from the validated geometry pg_type row and
+    // the exact analysis contract is checked under a helper-owned pin.
     function_shapes.push(unsafe {
         validate_postgis_function(
             extension_oid,
@@ -459,13 +486,20 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
     });
 
     let binary_args = [geometry_type_oid, geometry_type_oid];
+    // SAFETY: schema_oid and both argument OIDs belong to the validated PostGIS
+    // identity; the helper bounds and owns its temporary oidvector.
     let intersects_fn_oid =
         unsafe { find_exact_function(schema_oid, "st_intersects", &binary_args)? };
+    // SAFETY: the exact binary geometry signature is backed by validated catalog OIDs.
     let contains_fn_oid = unsafe { find_exact_function(schema_oid, "st_contains", &binary_args)? };
+    // SAFETY: the exact binary geometry signature is backed by validated catalog OIDs.
     let within_fn_oid = unsafe { find_exact_function(schema_oid, "st_within", &binary_args)? };
     let dwithin_args = [geometry_type_oid, geometry_type_oid, pg_sys::FLOAT8OID];
+    // SAFETY: the exact geometry, geometry, float8 signature uses validated OIDs.
     let dwithin_fn_oid = unsafe { find_exact_function(schema_oid, "st_dwithin", &dwithin_args)? };
+    // SAFETY: the exact binary geometry signature is backed by validated catalog OIDs.
     let distance_fn_oid = unsafe { find_exact_function(schema_oid, "st_distance", &binary_args)? };
+    // SAFETY: the exact unary geometry signature is backed by the validated type OID.
     let is_valid_fn_oid = unsafe { find_exact_function(schema_oid, "st_isvalid", &geometry_args)? };
     for (fn_oid, contract) in [
         (
@@ -529,6 +563,8 @@ pub unsafe fn resolve_postgis_catalog() -> Result<PostgisCatalogIdentity, String
             ),
         ),
     ] {
+        // SAFETY: each fn_oid was resolved by exact signature in the validated
+        // PostGIS schema and contract validation owns its syscache-pin lifetime.
         function_shapes.push(unsafe {
             validate_postgis_function(extension_oid, schema_oid, fn_oid, contract)?
         });
