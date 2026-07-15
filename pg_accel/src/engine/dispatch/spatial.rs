@@ -253,8 +253,16 @@ pub unsafe fn dispatch_gpu_spatial(
     // second argument. Branch off before the two-arg gate.
     if qual_datums.is_empty() {
         match op {
-            SpatialDispatchOp::Area => return unsafe { dispatch_gpu_st_area(batch) },
-            SpatialDispatchOp::Length => return unsafe { dispatch_gpu_st_length(batch) },
+            SpatialDispatchOp::Area => {
+                // SAFETY: this dispatcher inherits the backend-thread contract;
+                // every non-null batch Datum is a planned PostGIS geometry.
+                return unsafe { dispatch_gpu_st_area(batch) };
+            }
+            SpatialDispatchOp::Length => {
+                // SAFETY: this dispatcher inherits the backend-thread contract;
+                // every non-null batch Datum is a planned PostGIS geometry.
+                return unsafe { dispatch_gpu_st_length(batch) };
+            }
             _ => {
                 // Other single-arg names not yet wired — defer.
                 pgrx::debug1!("pg_accel: dispatch_gpu_spatial: no qual_datums, deferring");
@@ -290,6 +298,8 @@ pub unsafe fn dispatch_gpu_spatial(
     // min_vertices gate (Point has coord_count = 1, which is below
     // the predicate vertex-count threshold).
     if op == SpatialDispatchOp::Distance {
+        // SAFETY: `geom_b` was successfully extracted from the planned constant
+        // geometry and the outer dispatcher runs on the backend thread.
         return unsafe { dispatch_gpu_st_distance(batch, &geom_b, qual_d) };
     }
 
@@ -902,6 +912,8 @@ unsafe fn dispatch_gpu_st_distance(
         && geom_b.coords.len() >= 6
         && geom_b.ring_offsets.len() <= 1
     {
+        // SAFETY: the predicates prove `geom_b` is a valid single-ring polygon
+        // with at least three coordinate pairs; batch Datums are planned geometries.
         return unsafe { dispatch_gpu_st_distance_polygon_polygon(batch, geom_b) };
     }
 

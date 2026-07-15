@@ -61,12 +61,18 @@ pub unsafe fn dispatch_gpu_h3(
     // expose today (see adapters/h3.rs module doc + Phase B follow-up).
     match op {
         H3DispatchOp::GridDisk => {
+            // SAFETY: this dispatcher inherits the backend-thread contract;
+            // `qual_datum` is the typed constant k for the grid-disk operation.
             return unsafe { dispatch_gpu_h3_var_grid_disk(batch, qual_datum) };
         }
         H3DispatchOp::GridRingUnsafe => {
+            // SAFETY: this dispatcher inherits the backend-thread contract;
+            // `qual_datum` is the typed constant k for the grid-ring operation.
             return unsafe { dispatch_gpu_h3_var_grid_ring_unsafe(batch, qual_datum) };
         }
         H3DispatchOp::CellToChildren => {
+            // SAFETY: this dispatcher inherits the backend-thread contract;
+            // `qual_datum` is the typed child-resolution constant.
             return unsafe { dispatch_gpu_h3_var_cell_to_children(batch, qual_datum) };
         }
         H3DispatchOp::CellToBoundary => {
@@ -75,6 +81,8 @@ pub unsafe fn dispatch_gpu_h3(
             // kernel emits raw lat/lng coord pairs in DOUBLE units; we
             // encode each cell's vertex run via the F2 GSERIALIZED encoder
             // and wrap the resulting bytes in a PG varlena.
+            // SAFETY: this dispatcher runs on the backend thread and each
+            // non-null batch Datum is the planned 64-bit H3 cell value.
             return unsafe { dispatch_gpu_h3_cell_to_boundary(batch) };
         }
         H3DispatchOp::CellsToMultiPolygon => {
@@ -83,6 +91,8 @@ pub unsafe fn dispatch_gpu_h3(
             // collects cells into a u64 buffer, runs the two-pass kernel
             // (`output_size` -> `emit`), and encodes the resulting ring
             // CSR as a GSERIALIZED MULTIPOLYGON via the F2 encoder.
+            // SAFETY: this dispatcher runs on the backend thread and the plan
+            // supplies each non-null batch Datum as a valid bigint[] varlena.
             return unsafe { dispatch_gpu_h3_cells_to_multi_polygon(batch) };
         }
         H3DispatchOp::Polyfill => {
@@ -91,6 +101,8 @@ pub unsafe fn dispatch_gpu_h3(
             // each row's polygon via `extract_geometry` and call the
             // two-pass kernel to get cells. Resolution is the constant
             // `qual_datum`.
+            // SAFETY: this dispatcher runs on the backend thread; batch Datums
+            // are planned geometries and `qual_datum` is the typed resolution.
             return unsafe { dispatch_gpu_h3_polyfill(batch, qual_datum) };
         }
         _ => {}
@@ -953,6 +965,8 @@ unsafe fn dispatch_gpu_h3_cells_to_multi_polygon(
         // bookkeeping (ndim, dataoffset, elemtype, dim/lbound) and inter-
         // element MAXALIGN padding; hand-rolling that layout was historically
         // a source of layout drift across PG versions.
+        // SAFETY: every hole body is a successfully encoded polygon payload;
+        // the backend-thread call may allocate the polygon[] in CurrentMemoryContext.
         let holes_datum = unsafe { build_polygon_array_datum(&hole_bodies) };
         datums.push((exterior_datum, false));
         datums.push((holes_datum, false));
