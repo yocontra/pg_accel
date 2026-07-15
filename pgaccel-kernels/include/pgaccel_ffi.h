@@ -165,7 +165,7 @@ pgaccel_status pgaccel_bbox_intersects_bulk_f32(const float* boxes_a, size_t cou
                                                 const float* boxes_b, size_t count_b,
                                                 uint8_t* result, size_t* hit_count);
 
-/* fp64 path — PG native box type; correctness fallback on Metal */
+/* fp64 path — PG native box type; raw IEEE-754 ordering on Metal */
 pgaccel_status pgaccel_bbox_intersects_bulk_f64(const double* boxes_a, size_t count_a,
                                                 const double* boxes_b, size_t count_b,
                                                 uint8_t* result, size_t* hit_count);

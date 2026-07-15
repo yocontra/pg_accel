@@ -100,8 +100,8 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 #                         accumulators initialise to ±infinity so the
 #                         first real value supersedes the sentinel.
 #   fused_ops          — MIN/MAX fused reductions initialise to ±infinity.
-#   bbox_ops_f64       — host fallback preserves conservative NaN/Inf
-#                         behavior for PG native double boxes.
+#   bbox_ops_f64       — raw IEEE-754 ordering preserves conservative NaN/Inf
+#                         behavior without invoking Metal fp64 lowering.
 #   window             — sycl_window_sum uses Kahan compensated summation
 #                         (window.cpp `comp` term); -ffast-math licenses
 #                         reassociation that algebraically deletes the
