@@ -2139,10 +2139,6 @@ static pgaccel_agg_state* agg_hash_row_parallel(const void* group_keys,
   }
 }
 
-static pgaccel_agg_state* build_count_i64_state(sycl::queue& q, const int64_t* out_keys,
-                                                const int64_t* out_counts,
-                                                const double* out_results, uint32_t n_groups);
-
 static pgaccel_agg_state* agg_count_i64_hash_device(int64_t* group_keys, size_t row_count,
                                                     size_t max_distinct_hint) {
   sycl::queue* q = pgaccel_get_queue();
@@ -2372,27 +2368,11 @@ static pgaccel_agg_state* agg_count_i64_hash_device(int64_t* group_keys, size_t 
     return nullptr;
   }
 
-  pgaccel_agg_state* state = nullptr;
-  try {
-    state = build_count_i64_state(*q, d_out_keys, d_out_counts, d_out_results, n_groups);
-  } catch (...) {
-    cleanup();
-    throw;
-  }
-  cleanup();
-  return state;
-}
-
-static pgaccel_agg_state* build_count_i64_state(sycl::queue& q, const int64_t* out_keys,
-                                                const int64_t* out_counts,
-                                                const double* out_results, uint32_t n_groups) {
-  if (out_keys == nullptr || out_counts == nullptr || out_results == nullptr || n_groups == 0)
-    return nullptr;
-
   auto* state = new (std::nothrow) pgaccel_agg_state();
-  if (state == nullptr)
+  if (state == nullptr) {
+    cleanup();
     return nullptr;
-
+  }
   try {
     const size_t key_bytes = static_cast<size_t>(n_groups) * sizeof(int64_t);
     const size_t result_bytes = static_cast<size_t>(n_groups) * sizeof(double);
@@ -2404,14 +2384,15 @@ static pgaccel_agg_state* build_count_i64_state(sycl::queue& q, const int64_t* o
     state->counts.resize(n_groups);
     state->results.resize(1);
     state->results[0].resize(n_groups);
-    q.memcpy(state->group_key_buf.data(), out_keys, key_bytes).wait_and_throw();
-    q.memcpy(state->counts.data(), out_counts, key_bytes).wait_and_throw();
-    q.memcpy(state->results[0].data(), out_results, result_bytes).wait_and_throw();
+    q->memcpy(state->group_key_buf.data(), d_out_keys, key_bytes).wait_and_throw();
+    q->memcpy(state->counts.data(), d_out_counts, key_bytes).wait_and_throw();
+    q->memcpy(state->results[0].data(), d_out_results, result_bytes).wait_and_throw();
   } catch (...) {
     delete state;
+    cleanup();
     throw;
   }
-
+  cleanup();
   return state;
 }
 
@@ -2567,13 +2548,27 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
     return nullptr;
   }
 
-  const auto* out_keys = reinterpret_cast<const int64_t*>(d_slab);
-  const auto* out_counts = reinterpret_cast<const int64_t*>(d_slab + counts_off);
-  const auto* out_results = reinterpret_cast<const double*>(d_slab + results_off);
-  pgaccel_agg_state* state = nullptr;
+  auto* state = new (std::nothrow) pgaccel_agg_state();
+  if (state == nullptr) {
+    cleanup();
+    return nullptr;
+  }
   try {
-    state = build_count_i64_state(*q, out_keys, out_counts, out_results, n_groups);
+    const size_t key_bytes = static_cast<size_t>(n_groups) * sizeof(int64_t);
+    const size_t result_bytes = static_cast<size_t>(n_groups) * sizeof(double);
+    state->key_size = sizeof(int64_t);
+    state->key_type = 1;
+    state->group_count = n_groups;
+    state->num_aggs = 1;
+    state->group_key_buf.resize(key_bytes);
+    state->counts.resize(n_groups);
+    state->results.resize(1);
+    state->results[0].resize(n_groups);
+    q->memcpy(state->group_key_buf.data(), d_slab, key_bytes).wait_and_throw();
+    q->memcpy(state->counts.data(), d_slab + counts_off, key_bytes).wait_and_throw();
+    q->memcpy(state->results[0].data(), d_slab + results_off, result_bytes).wait_and_throw();
   } catch (...) {
+    delete state;
     cleanup();
     throw;
   }
