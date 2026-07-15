@@ -2066,15 +2066,15 @@ fn nlj_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresh
         ),
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
-        batch_count: "generic BETWEEN predicate descriptor is not admitted".to_owned(),
+        batch_count: "non-equality BETWEEN join descriptor is not admitted".to_owned(),
         row_width: "nullable 12-byte event row + nullable 20-byte window row",
         output_size: "one count row after join output",
         dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
         cache_gate: GENERIC_CACHE_GATE,
-        threshold_basis: "generic predicate descriptor preflight; selected unsafe host boundary remains unavailable",
+        threshold_basis: "non-equality join descriptor preflight; selected unsafe host boundary remains unavailable",
         expectation: BenchmarkLaneExpectation::NativeDecline {
-            reason: "shape_unsupported_predicate",
+            reason: "shape_non_equality_join",
         },
     })
 }
@@ -3279,7 +3279,7 @@ mod tests {
                 100_000,
                 "shape_floating_accumulator_semantics",
             ),
-            ("gpu_nlj_between", 50_000, "shape_unsupported_predicate"),
+            ("gpu_nlj_between", 50_000, "shape_non_equality_join"),
             ("gpu_sort_topk_wide", 100_000, "no_gpu_resident_pipeline"),
             ("h3_bulk", 100_000, "shape_unsupported_rte"),
             ("spatial_filter", 100_000, "shape_unsupported_predicate"),
@@ -3606,9 +3606,9 @@ mod tests {
         assert_eq!(entry.lane, "nested_loop_between");
         assert_eq!(
             entry.expectation.decline_reason(),
-            Some("shape_unsupported_predicate")
+            Some("shape_non_equality_join")
         );
-        assert!(entry.threshold_basis.contains("generic predicate"));
+        assert!(entry.threshold_basis.contains("non-equality join"));
     }
 
     #[test]

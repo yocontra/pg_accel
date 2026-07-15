@@ -1520,7 +1520,7 @@ fn plan_shape_grouped_hashagg_100k_declines_gpu() {
 
 #[cfg(feature = "integration_tests")]
 #[test]
-fn plan_shape_nlj_between_unsupported_predicate_stays_native() {
+fn plan_shape_nlj_between_non_equality_join_stays_native() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     ensure_nlj_between_fixture(&mut c);
@@ -1556,8 +1556,8 @@ fn plan_shape_nlj_between_unsupported_predicate_stays_native() {
     }
     assert_rejection_reason_observed(
         &mut c,
-        &["shape_unsupported_predicate"],
-        &format!("NLJ BETWEEN should expose its generic predicate decline; plan:\n{plan}"),
+        &["shape_non_equality_join"],
+        &format!("NLJ BETWEEN should expose its non-equality join decline; plan:\n{plan}"),
     );
 
     let before = kernel_executions(&mut c);

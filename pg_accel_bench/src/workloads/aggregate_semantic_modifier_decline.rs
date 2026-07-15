@@ -5,15 +5,6 @@ use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i32, 
 const AGGREGATE_SEMANTIC_MODIFIER_ROW_SCALES: &[usize] = &[10_000, 100_000];
 const AGGREGATE_ORDERED_SET_ROW_SCALES: &[usize] = &[10_000, 100_000];
 
-fn format_pg_int_array(values: &[Option<i32>]) -> String {
-    let body = values
-        .iter()
-        .map(|value| value.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{{{body}}}")
-}
-
 fn aggregate_modifier_expected(rows: usize) -> (i64, i64, Vec<Option<i32>>) {
     let mut filtered_sum = 0_i64;
     let mut distinct_keys = BTreeSet::new();
@@ -43,7 +34,7 @@ fn aggregate_modifier_expected(rows: usize) -> (i64, i64, Vec<Option<i32>>) {
     )
 }
 
-fn ordered_set_expected(rows: usize) -> (String, i64) {
+fn ordered_set_expected(rows: usize) -> (Vec<i32>, i64) {
     let mut values = (1..=rows)
         .filter(|g| g % 4 != 0)
         .map(|g| usize_to_i32(g % 10))
@@ -53,12 +44,8 @@ fn ordered_set_expected(rows: usize) -> (String, i64) {
         let rank = (values.len() * numerator).div_ceil(denominator);
         values[rank - 1]
     };
-    let quartiles = [
-        Some(percentile(1, 4)),
-        Some(percentile(1, 2)),
-        Some(percentile(3, 4)),
-    ];
-    (format_pg_int_array(&quartiles), usize_to_i64(values.len()))
+    let quartiles = vec![percentile(1, 4), percentile(1, 2), percentile(3, 4)];
+    (quartiles, usize_to_i64(values.len()))
 }
 
 /// FILTER, DISTINCT, and aggregate-local ORDER BY semantics that must stay native.
@@ -155,8 +142,8 @@ impl Workload for AggregateOrderedSetDecline {
     }
 
     fn query_sql(&self) -> String {
-        "SELECT (percentile_disc(ARRAY[0.25, 0.5, 0.75]) \
-                   WITHIN GROUP (ORDER BY v))::text AS quartiles, \
+        "SELECT percentile_disc(ARRAY[0.25, 0.5, 0.75]) \
+                   WITHIN GROUP (ORDER BY v) AS quartiles, \
                 count(v) AS nonnull_rows \
          FROM bench_aggregate_ordered_set"
             .to_owned()
@@ -170,11 +157,30 @@ impl Workload for AggregateOrderedSetDecline {
         let (quartiles, nonnull_rows) = ordered_set_expected(rows);
         Some(ResultOracle::one_row(
             self.query_sql(),
-            vec![Value::Text(quartiles), Value::I64(nonnull_rows)],
+            vec![Value::I32Array(quartiles), Value::I64(nonnull_rows)],
         ))
     }
 
     fn cleanup_sql(&self) -> Vec<String> {
         vec!["DROP TABLE IF EXISTS bench_aggregate_ordered_set".to_owned()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordered_set_lane_keeps_the_aggregate_direct_and_the_oracle_typed() {
+        let workload = AggregateOrderedSetDecline;
+        let query = workload.query_sql();
+        assert!(query.contains("percentile_disc"));
+        assert!(query.contains("WITHIN GROUP"));
+        assert!(!query.contains("::text"));
+
+        let oracle = workload
+            .result_oracle(10_000)
+            .expect("ordered-set lane has an exact oracle");
+        assert!(matches!(oracle.expected_row[0], Value::I32Array(_)));
     }
 }

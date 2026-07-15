@@ -11,7 +11,7 @@ impl Workload for GpuNljBetween {
     }
 
     fn description(&self) -> &'static str {
-        "nullable events x duplicated non-overlapping windows with outer.ts BETWEEN inner.lo AND inner.hi - native decline (`shape_unsupported_predicate`)"
+        "nullable events x duplicated non-overlapping windows with outer.ts BETWEEN inner.lo AND inner.hi - native decline (`shape_non_equality_join`)"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

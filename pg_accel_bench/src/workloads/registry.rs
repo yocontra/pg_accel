@@ -349,7 +349,7 @@ pub const PHASE9_OPERATOR_DECLINES: &[Phase9DeclineContract] = &[
     Phase9DeclineContract {
         lane: Phase9OperatorLane::NestedLoopInequality,
         workload: "gpu_nlj_between",
-        reason: "shape_unsupported_predicate",
+        reason: "shape_non_equality_join",
     },
 ];
 
