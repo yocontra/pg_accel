@@ -1,11 +1,11 @@
 /*
  * Generic dense grouped aggregation for the frozen OLAP descriptor ABI.
  *
- * Phase 4B intentionally uses one GPU work-item.  This preserves descriptor
- * row order (and therefore deterministic floating-point results) while the
- * generic surface is brought up.  No row is interpreted or aggregated on the
- * host; the device publishes a completion record and the host only performs
- * the record's awaited device-to-host transfers.
+ * Order-sensitive general aggregates retain the deterministic serial device
+ * path.  The ordinary dense COUNT(*) shape uses parallel row classification
+ * and per-group chunk counters, followed by a checked 64-bit state commit.
+ * No row is interpreted or aggregated on the host; the device publishes a
+ * completion record and the host only performs its awaited copybacks.
  */
 
 #include <sycl/sycl.hpp>
@@ -242,6 +242,7 @@ struct KernelParams {
   uint32_t* hash_owners;
   uint32_t* hash_counts;
   uint32_t* hash_group_count;
+  uint32_t* dense_chunk_counts;
   DeviceMeta* meta;
 };
 
@@ -269,6 +270,7 @@ struct WorkspaceLayout {
   size_t hash_owners = kNoOffset;
   size_t hash_counts = kNoOffset;
   size_t hash_group_count = kNoOffset;
+  size_t dense_chunk_counts = kNoOffset;
   size_t meta = kNoOffset;
   size_t publish_params = kNoOffset;
   size_t completion = kNoOffset;
@@ -302,6 +304,22 @@ bool key_nullable(const pgaccel_grouped_agg_desc& desc, const pgaccel_grouped_ag
       key.source != PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT)
     return key.null_code != PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE;
   return key.values.nulls != nullptr;
+}
+
+bool parallel_dense_count_star_shape(const pgaccel_grouped_agg_desc& desc) {
+  if (desc.grouping_mode != PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX ||
+      desc.output_mode != PGACCEL_GROUPED_AGG_OUTPUT_DENSE || desc.measure_count != 1 ||
+      desc.dim_count != 0 ||
+      desc.measures[0].op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR ||
+      desc.measures[0].agg_mask != PGACCEL_GROUPED_AGG_LANE_COUNT ||
+      !canonical_disabled_filter(desc.where_filter) ||
+      !canonical_disabled_filter(desc.measure_filters[0]))
+    return false;
+  for (size_t key = 0; key < desc.key_count; ++key) {
+    if (desc.keys[key].source != PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT)
+      return false;
+  }
+  return true;
 }
 
 bool known_val_tag(int32_t tag) {
@@ -394,6 +412,9 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
   }
 
   if (!arena.add<size_t>(desc.group_capacity, &layout->staged_group_codes))
+    return false;
+  if (parallel_dense_count_star_shape(desc) &&
+      !arena.add<uint32_t>(desc.group_capacity, &layout->dense_chunk_counts))
     return false;
   for (size_t i = 0; i < desc.key_count; ++i) {
     const size_t key_width = val_tag_width(materialized_key_type(desc, desc.keys[i]));
@@ -1527,6 +1548,100 @@ inline void run_hash_init_kernel(KernelParams* params_ptr) {
   *params_ptr->meta = {};
 }
 
+inline void run_dense_count_prepare_kernel(KernelParams* params_ptr) {
+  KernelParams& params = *params_ptr;
+  DeviceMeta& meta = *params.meta;
+  const bool reset = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_RESET) != 0;
+
+  if (reset) {
+    meta = {};
+    meta.lifecycle_cookie = kLifecycleCookie;
+    meta.shape_fingerprint = params.shape_fingerprint;
+    meta.lifecycle_state = kLifecycleActive;
+    for (size_t group = 0; group < params.group_capacity; ++group) {
+      params.active[group] = 0;
+      params.buffers[0].count[group] = 0;
+    }
+    if (params.key_count == 0)
+      params.active[0] = 1;
+    return;
+  }
+
+  if (meta.lifecycle_cookie != kLifecycleCookie ||
+      meta.shape_fingerprint != params.shape_fingerprint ||
+      meta.lifecycle_state != kLifecycleActive || meta.failure_flags != 0) {
+    meta.failure_flags |= kFailureInvalid;
+    meta.lifecycle_state = kLifecycleFailed;
+  }
+}
+
+inline void run_dense_count_row(KernelParams* params_ptr, size_t row) {
+  KernelParams& params = *params_ptr;
+  size_t group = 0;
+  for (size_t key_index = 0; key_index < params.key_count; ++key_index) {
+    const pgaccel_grouped_agg_key& key = params.keys[key_index];
+    bool is_null = false;
+    if (!null_at(key.values.nulls, row, &is_null)) {
+      record_failure(*params.meta, kFailureInvalid);
+      return;
+    }
+    const int32_t raw =
+        is_null ? key.null_code : static_cast<const int32_t*>(key.values.values)[row];
+    const int64_t digit = static_cast<int64_t>(raw) - key.code_min;
+    if (digit < 0 || static_cast<uint64_t>(digit) >= key.cardinality) {
+      record_failure(*params.meta, kFailureInvalid);
+      return;
+    }
+    group = group * key.cardinality + static_cast<size_t>(digit);
+  }
+
+  DeviceAtomic<uint32_t> count(params.dense_chunk_counts[group]);
+  if (count.fetch_add(1) == UINT32_MAX)
+    record_failure(*params.meta, kFailureNumericOverflow);
+}
+
+inline void run_dense_count_commit_kernel(KernelParams* params_ptr) {
+  KernelParams& params = *params_ptr;
+  DeviceMeta& meta = *params.meta;
+  const bool accumulate = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0;
+  const bool finalize = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
+
+  if (meta.failure_flags != 0) {
+    meta.lifecycle_state = kLifecycleFailed;
+    return;
+  }
+  if (accumulate) {
+    if (!add_u64(meta.selected, static_cast<uint64_t>(params.row_count), &meta.selected)) {
+      meta.failure_flags = kFailureNumericOverflow;
+      meta.lifecycle_state = kLifecycleFailed;
+      return;
+    }
+    for (size_t group = 0; group < params.group_capacity; ++group) {
+      const uint64_t chunk_count = params.dense_chunk_counts[group];
+      if (chunk_count == 0)
+        continue;
+      uint64_t next = 0;
+      if (!add_u64(params.buffers[0].count[group], chunk_count, &next)) {
+        meta.failure_flags = kFailureNumericOverflow;
+        meta.lifecycle_state = kLifecycleFailed;
+        return;
+      }
+      params.buffers[0].count[group] = next;
+      params.active[group] = 1;
+    }
+  }
+  if (!finalize)
+    return;
+
+  meta.emitted = 0;
+  for (size_t group = 0; group < params.group_capacity; ++group) {
+    stage_keys(params, group, group);
+    if (params.active[group] != 0)
+      ++meta.emitted;
+  }
+  meta.lifecycle_state = kLifecycleFinalized;
+}
+
 inline void run_dense_kernel(KernelParams* params_ptr) {
   KernelParams& params = *params_ptr;
   DeviceMeta& meta = *params.meta;
@@ -1856,6 +1971,7 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   params->hash_owners = arena_ptr<uint32_t>(scratch, layout.hash_owners);
   params->hash_counts = arena_ptr<uint32_t>(scratch, layout.hash_counts);
   params->hash_group_count = arena_ptr<uint32_t>(scratch, layout.hash_group_count);
+  params->dense_chunk_counts = arena_ptr<uint32_t>(scratch, layout.dense_chunk_counts);
   params->meta = arena_ptr<DeviceMeta>(scratch, layout.meta);
   for (size_t k = 0; k < desc.key_count; ++k) {
     params->staged_key_values[k] = arena_ptr<uint8_t>(scratch, layout.staged_key_values[k]);
@@ -2275,6 +2391,9 @@ void publish_completion(sycl::queue& queue, const void* scratch,
 }
 
 class GroupedAggDenseKernel;
+class GroupedAggDenseCountPrepareKernel;
+class GroupedAggDenseCountRowsKernel;
+class GroupedAggDenseCountCommitKernel;
 class GroupedAggHashKernel;
 class GroupedAggHashInitKernel;
 class GroupedAggHashCompactKernel;
@@ -2375,6 +2494,8 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
     queue.memcpy(device_publish_params, &host_publish_params, sizeof(host_publish_params))
         .wait_and_throw();
 
+    const bool parallel_dense_count =
+        parallel_dense_count_star_shape(*desc) && desc->row_count <= UINT32_MAX;
     if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
       queue.single_task<GroupedAggHashInitKernel>([=]() { run_hash_init_kernel(device_params); });
       queue.fill(host_params.hash_owners, kHashEmptyOwner, layout.hash_slot_count);
@@ -2387,6 +2508,19 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
       }
       queue.single_task<GroupedAggHashCompactKernel>(
           [=]() { run_hash_compact_kernel(device_params); });
+    } else if (parallel_dense_count) {
+      queue.single_task<GroupedAggDenseCountPrepareKernel>(
+          [=]() { run_dense_count_prepare_kernel(device_params); });
+      if ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0) {
+        queue.fill(host_params.dense_chunk_counts, uint32_t{0}, desc->group_capacity);
+        if (desc->row_count != 0) {
+          queue.parallel_for<GroupedAggDenseCountRowsKernel>(
+              sycl::range<1>(desc->row_count),
+              [=](sycl::id<1> id) { run_dense_count_row(device_params, id[0]); });
+        }
+      }
+      queue.single_task<GroupedAggDenseCountCommitKernel>(
+          [=]() { run_dense_count_commit_kernel(device_params); });
     } else {
       queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
     }

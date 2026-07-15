@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -904,6 +905,99 @@ void test_empty_ungrouped_active() {
   CHECK(output.active[0] == 1);
   CHECK(output.group_codes[0] == 0);
   CHECK(output.measures[0].count[0] == 0);
+}
+
+void test_parallel_dense_count_star_lifecycle() {
+  std::printf("--- parallel dense COUNT(*) lifecycle ---\n");
+  constexpr size_t rows = 262144;
+  constexpr size_t groups = 17;
+  constexpr int32_t code_min = -8;
+  constexpr int32_t null_code = 8;
+  std::vector<int32_t> host_keys(rows);
+  std::vector<uint8_t> host_nulls(rows);
+  std::array<uint64_t, groups> expected{};
+  for (size_t row = 0; row < rows; ++row) {
+    const bool is_null = row % 113 == 0;
+    host_nulls[row] = is_null ? 1 : 0;
+    host_keys[row] = is_null ? INT32_MAX : code_min + static_cast<int32_t>(row % 16);
+    const size_t group = is_null ? groups - 1 : row % 16;
+    ++expected[group];
+  }
+
+  SharedArray<int32_t> keys(host_keys);
+  SharedArray<uint8_t> nulls(host_nulls);
+  pgaccel_grouped_agg_desc desc = base_desc(rows);
+  set_fact_key(desc, 0, keys.data(), nulls.data(), code_min, groups, null_code);
+  set_count_star(desc, 0);
+
+  OutputStorage one_shot(desc, true, true);
+  CHECK_STATUS(execute_external(desc, &one_shot.out), PGACCEL_OK);
+  CHECK(one_shot.out.selected_count == rows);
+  CHECK(one_shot.out.uncertain_count == 0);
+  CHECK(one_shot.out.emitted_group_count == groups);
+  CHECK(one_shot.active == std::vector<uint8_t>(groups, 1));
+  for (size_t group = 0; group < groups; ++group) {
+    CHECK(one_shot.group_codes[group] == group);
+    CHECK(one_shot.key_values[0][group] == code_min + static_cast<int32_t>(group));
+    CHECK(one_shot.key_nulls[0][group] == (group + 1 == groups ? 1 : 0));
+    CHECK(one_shot.measures[0].count[group] == expected[group]);
+  }
+
+  OutputStorage timed(desc, true, true);
+  const auto timed_start = std::chrono::steady_clock::now();
+  CHECK_STATUS(execute_external(desc, &timed.out), PGACCEL_OK);
+  const auto timed_end = std::chrono::steady_clock::now();
+  const double timed_ms =
+      std::chrono::duration<double, std::milli>(timed_end - timed_start).count();
+  std::printf("parallel dense COUNT(*) %zu rows/%zu groups: %.3f ms\n", rows, groups,
+              timed_ms);
+  check_outputs_equal(timed, one_shot, desc.measure_count);
+
+  const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+  SharedWorkspace workspace(req.bytes, req.alignment);
+  constexpr size_t first_rows = 100003;
+  pgaccel_grouped_agg_desc first = row_slice(desc, 0, first_rows);
+  first.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  CHECK_STATUS(execute_in_workspace(first, req, workspace, nullptr, &detail), PGACCEL_OK);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+  pgaccel_grouped_agg_desc second = row_slice(desc, first_rows, rows - first_rows);
+  second.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  CHECK_STATUS(execute_in_workspace(second, req, workspace, nullptr, &detail), PGACCEL_OK);
+  pgaccel_grouped_agg_desc finalize = row_slice(desc, 0, 0);
+  finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+  OutputStorage chunked(desc, true, true);
+  CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &chunked.out, &detail),
+               PGACCEL_OK);
+  check_outputs_equal(chunked, one_shot, desc.measure_count);
+
+  nulls[7] = 2;
+  pgaccel_grouped_agg_desc invalid = row_slice(desc, 7, 1);
+  invalid.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_in_workspace(invalid, req, workspace, nullptr, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  pgaccel_grouped_agg_desc poisoned = row_slice(desc, 8, 1);
+  poisoned.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_in_workspace(poisoned, req, workspace, nullptr, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+
+  nulls[7] = 0;
+  OutputStorage recovered(desc, true, true);
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  CHECK_STATUS(execute_in_workspace(desc, req, workspace, &recovered.out, &detail), PGACCEL_OK);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+  check_outputs_equal(recovered, one_shot, desc.measure_count);
+
+  keys[19] = 99;
+  OutputStorage invalid_code(desc);
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_external_ex(desc, &invalid_code.out, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  CHECK(invalid_code.measures[0].count[0] == OutputStorage::kSentinel);
 }
 
 void test_i64_four_measure_lanes() {
@@ -1832,6 +1926,7 @@ int main() {
     test_dense_chunk_lifecycle_equivalence();
     test_dense_chunk_lifecycle_fail_closed();
     test_empty_ungrouped_active();
+    test_parallel_dense_count_star_lifecycle();
     test_i64_four_measure_lanes();
     test_f64_stats_pair_and_nan_ordering();
     test_global_and_measure_filters();
