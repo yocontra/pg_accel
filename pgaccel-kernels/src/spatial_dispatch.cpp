@@ -2074,7 +2074,6 @@ static void resident_stage_control(sycl::queue& queue, const pgaccel_spatial_wor
 }
 
 class SpatialResidentValidateKernel;
-class SpatialResidentFinalizeKernel;
 class SpatialResidentContainsKernel;
 template <SpatialResidentGeometryPairFamily Family>
 class SpatialResidentIntersectsKernel;
@@ -2395,28 +2394,6 @@ pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* req
     resident_launch_intersects(queue, args, failure_flags, request->count);
     resident_launch_metric(queue, args, failure_flags, request->count);
   }
-  queue.single_task<SpatialResidentFinalizeKernel>([=]() {
-    uint32_t failure = failure_flags[0];
-    if (failure == 0) {
-      if (predicate == PGACCEL_SPATIAL_PREDICATE_DISTANCE) {
-        for (size_t row = 0; row < args->request.count; ++row) {
-          if (args->request.distance_uncertain[row] > 1) {
-            failure |= SPATIAL_RESIDENT_FAILURE_TRISTATE;
-            break;
-          }
-        }
-      } else {
-        for (size_t row = 0; row < args->request.count; ++row) {
-          const int8_t value = args->request.predicate_results[row];
-          if (value < -1 || value > 1) {
-            failure |= SPATIAL_RESIDENT_FAILURE_TRISTATE;
-            break;
-          }
-        }
-      }
-    }
-    failure_flags[0] = failure;
-  });
   queue.wait_and_throw();
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
