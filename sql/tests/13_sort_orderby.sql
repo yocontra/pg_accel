@@ -141,8 +141,9 @@ DO $$ BEGIN
         RAISE EXCEPTION '13_sort FAILED: test 5 (ORDER BY + WHERE) differs';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:13_sort_orderby.assert_001'
 
-\echo 'PASS: 13_sort_orderby (5 tests)'
+
 
 DROP TABLE IF EXISTS _sort_data,
     _st1_off, _st1_on, _st2_off, _st2_on,
@@ -150,3 +151,5 @@ DROP TABLE IF EXISTS _sort_data,
     _st5_off, _st5_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:13_sort_orderby'

@@ -29,7 +29,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '56_hash_join_edge test 1 FAILED: empty inner should yield 0 rows';
     END IF;
 END $$;
-\echo 'PASS: 56_hash_join_edge_t1_empty_inner'
+\echo 'PGACCEL_ASSERT_OK:56_hash_join_edge_cases.assert_002'
 DROP TABLE _hje1_on, _hje1_off, _hje_inner_empty;
 
 -- =========================================================================
@@ -56,7 +56,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '56_hash_join_edge test 2 FAILED: empty outer should yield 0 rows';
     END IF;
 END $$;
-\echo 'PASS: 56_hash_join_edge_t2_empty_outer'
+\echo 'PGACCEL_ASSERT_OK:56_hash_join_edge_cases.assert_003'
 DROP TABLE _hje2_on, _hje2_off, _hje_outer_empty, _hje_inner;
 
 -- =========================================================================
@@ -80,12 +80,13 @@ DO $$ BEGIN
     IF (SELECT count(*) FROM _hje3_on) <> (SELECT count(*) FROM _hje3_off) THEN
         RAISE EXCEPTION '56_hash_join_edge test 3 FAILED: single-row inner count mismatch';
     END IF;
+    RAISE NOTICE 'PGACCEL_ASSERT_OK:56_hash_join_edge_cases.assert_001';
     IF (SELECT count(*) FROM _hje3_off) <> 1 THEN
         RAISE EXCEPTION '56_hash_join_edge test 3 FAILED: expected 1 match, got %',
             (SELECT count(*) FROM _hje3_off);
     END IF;
 END $$;
-\echo 'PASS: 56_hash_join_edge_t3_single_row_inner'
+\echo 'PGACCEL_ASSERT_OK:56_hash_join_edge_cases.assert_004'
 DROP TABLE _hje3_on, _hje3_off, _hje_single_inner;
 
 -- =========================================================================
@@ -120,7 +121,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '56_hash_join_edge test 4 FAILED: all-match count mismatch';
     END IF;
 END $$;
-\echo 'PASS: 56_hash_join_edge_t4_all_match'
+\echo 'PGACCEL_ASSERT_OK:56_hash_join_edge_cases.assert_005'
 DROP TABLE _hje4_on, _hje4_off, _hje_all_a, _hje_all_b;
 
 -- =========================================================================
@@ -147,7 +148,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '56_hash_join_edge test 5 FAILED: no-match join should be empty';
     END IF;
 END $$;
-\echo 'PASS: 56_hash_join_edge_t5_no_match'
+\echo 'PGACCEL_ASSERT_OK:56_hash_join_edge_cases.assert_006'
 DROP TABLE _hje5_on, _hje5_off, _hje_no_a, _hje_no_b;
 
 -- =========================================================================
@@ -184,7 +185,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '56_hash_join_edge test 6 FAILED: join+GROUP BY results differ';
     END IF;
 END $$;
-\echo 'PASS: 56_hash_join_edge_t6_join_group_by'
+\echo 'PGACCEL_ASSERT_OK:56_hash_join_edge_cases.assert_007'
 DROP TABLE _hje6_on, _hje6_off, _hje_orders, _hje_depts;
 
 -- =========================================================================
@@ -225,9 +226,9 @@ DO $$ BEGIN
         RAISE EXCEPTION '56_hash_join_edge test 7 FAILED: self-join values differ';
     END IF;
 END $$;
-\echo 'PASS: 56_hash_join_edge_t7_self_join'
+\echo 'PGACCEL_ASSERT_OK:56_hash_join_edge_cases.assert_008'
 DROP TABLE _hje7_on, _hje7_off, _hje_self;
 
 DROP TABLE _hje_outer;
 
-\echo 'PASS: 56_hash_join_edge_cases (all tests)'
+\echo 'PGACCEL_FILE_OK:56_hash_join_edge_cases'

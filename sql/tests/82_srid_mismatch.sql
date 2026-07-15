@@ -150,13 +150,13 @@ BEGIN
         RAISE EXCEPTION '82_srid FAILED: T1 st_intersects SRID mismatch SQLSTATE differs: OFF=%, ON=%',
             off_state, on_state;
     END IF;
+    RAISE NOTICE 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_001';
     -- Both should have errored (not 'OK')
     IF off_state = 'OK' THEN
         RAISE EXCEPTION '82_srid FAILED: T1 st_intersects did not error on SRID mismatch';
     END IF;
 END $$;
-
-\echo 'PASS: 82_srid T1 st_intersects SRID mismatch error match'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_002'
 
 -- =========================================================================
 -- Test 2: ST_Contains with SRID 4326 vs 3857 — error match
@@ -194,7 +194,7 @@ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T2 st_contains SRID mismatch error match'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_003'
 
 -- =========================================================================
 -- Test 3: ST_Within with SRID 4326 vs 3857 — error match
@@ -232,7 +232,7 @@ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T3 st_within SRID mismatch error match'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_004'
 
 -- =========================================================================
 -- Test 4: ST_DWithin with SRID 4326 vs 3857 — error match
@@ -270,7 +270,7 @@ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T4 st_dwithin SRID mismatch error match'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_005'
 
 -- =========================================================================
 -- Test 5: SRID=0 behavior — should work (no SRID enforcement)
@@ -321,7 +321,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T5 SRID=0 st_contains works correctly'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_006'
 
 -- =========================================================================
 -- Test 6: SRID=0 with ST_Intersects
@@ -351,7 +351,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T6 SRID=0 st_intersects works correctly'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_007'
 
 -- =========================================================================
 -- Test 7: SRID=0 with ST_DWithin
@@ -383,7 +383,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T7 SRID=0 st_dwithin works correctly'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_008'
 
 -- =========================================================================
 -- Test 8: Geography — ST_DWithin (geography version, meters)
@@ -436,7 +436,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T8 geography st_dwithin works correctly'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_009'
 
 -- =========================================================================
 -- Test 9: Geography — ST_Intersects
@@ -482,7 +482,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T9 geography st_intersects works correctly'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_010'
 
 -- =========================================================================
 -- Test 10: Mixed SRID in JOIN conditions (3857 points x 4326 polys) — error
@@ -526,7 +526,7 @@ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T10 mixed SRID JOIN error match'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_011'
 
 -- =========================================================================
 -- Test 11: Mixed SRID JOIN with ST_Intersects — error
@@ -566,7 +566,7 @@ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T11 mixed SRID st_intersects JOIN error match'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_012'
 
 -- =========================================================================
 -- Test 12: Mixed SRID JOIN with ST_DWithin — error
@@ -606,7 +606,7 @@ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T12 mixed SRID st_dwithin JOIN error match'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_013'
 
 -- =========================================================================
 -- Test 13: Same-SRID queries stay native until geometry subtype gates exist
@@ -656,7 +656,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T13 same-SRID st_contains (sanity baseline)'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_014'
 
 -- =========================================================================
 -- Test 14: Same SRID 3857 queries work correctly
@@ -706,7 +706,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T14 same-SRID-3857 st_intersects works correctly'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_015'
 
 -- =========================================================================
 -- Test 15: SRID=0 mixed with SRID=4326 — error
@@ -743,7 +743,7 @@ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T15 SRID=0 vs SRID=4326 behavior match'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_016'
 
 -- =========================================================================
 -- Test 16: ST_Within with reversed SRID mismatch (3857 in 4326 poly) — error
@@ -783,13 +783,12 @@ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 82_srid T16 st_within reversed SRID mismatch error match'
+\echo 'PGACCEL_ASSERT_OK:82_srid_mismatch.assert_017'
 
 -- =========================================================================
 -- Final summary
 -- =========================================================================
 
-\echo 'PASS: 82_srid_mismatch (16 tests)'
 
 DROP TABLE IF EXISTS
     _sr_4326, _sr_3857, _sr_poly_4326, _sr_poly_3857,
@@ -801,3 +800,5 @@ DROP TABLE IF EXISTS
     _sr_t13_off, _sr_t13_on, _sr_t14_off, _sr_t14_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:82_srid_mismatch'

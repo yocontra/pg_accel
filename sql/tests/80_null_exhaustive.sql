@@ -119,6 +119,8 @@ DO $$ BEGIN
         RAISE EXCEPTION '80_null: st_intersects selected a pg_accel spatial plan';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_001'
+
 
 -- A1: NULL in arg1 only (polygon NULL)
 SET pg_accel.enabled = off;
@@ -145,7 +147,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null A1 st_intersects NULL-in-arg1'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_002'
 
 -- A2: NULL in arg2 only (point NULL)
 SET pg_accel.enabled = off;
@@ -172,7 +174,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null A2 st_intersects NULL-in-arg2'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_003'
 
 -- A3: NULL in both args
 SET pg_accel.enabled = off;
@@ -194,7 +196,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null A3 st_intersects both-NULL'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_004'
 
 -- =========================================================================
 -- GROUP B: PostGIS — ST_Contains (3 NULL variants)
@@ -243,7 +245,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null B1 st_contains with NULLs'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_005'
 
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _ne_b2_off AS
@@ -264,7 +266,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null B2 st_contains both-NULL'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_006'
 
 -- =========================================================================
 -- GROUP C: PostGIS — ST_Within (3 NULL variants)
@@ -313,7 +315,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null C1 st_within with NULLs'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_007'
 
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _ne_c2_off AS
@@ -334,7 +336,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null C2 st_within both-NULL'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_008'
 
 -- =========================================================================
 -- GROUP D: PostGIS — ST_DWithin (3 NULL variants)
@@ -387,7 +389,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null D1 st_dwithin with NULLs'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_009'
 
 -- =========================================================================
 -- GROUP E: GpuH3 — h3_latlng_to_cell with NULL lat/lng
@@ -431,7 +433,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null E1 h3_latlng_to_cell NULL lat/lng'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_010'
 
 -- E2: NULL in lat only
 SET pg_accel.enabled = off;
@@ -453,7 +455,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null E2 h3_latlng_to_cell NULL lat'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_011'
 
 -- =========================================================================
 -- GROUP F: native H3 — h3_grid_distance with NULL cells
@@ -507,7 +509,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null F1 h3_grid_distance NULL cells'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_012'
 
 -- =========================================================================
 -- GROUP G: native H3 — h3_cell_to_parent with NULL cell
@@ -551,7 +553,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null G1 h3_cell_to_parent NULL cell'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_013'
 
 -- =========================================================================
 -- GROUP H: native H3 — h3_get_resolution with NULL cell
@@ -595,7 +597,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null H1 h3_get_resolution NULL cell'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_014'
 
 -- =========================================================================
 -- GROUP I: GpuRaster — st_clip with NULL raster
@@ -639,7 +641,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null I1 st_clip NULL raster'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_015'
 
 -- =========================================================================
 -- GROUP J: GpuRaster — st_reclass with NULL raster
@@ -683,7 +685,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null J1 st_reclass NULL raster'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_016'
 
 -- =========================================================================
 -- GROUP K: GpuRaster — st_mapalgebra with NULL rasters
@@ -728,7 +730,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null K1 st_mapalgebra NULL rasters'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_017'
 
 -- =========================================================================
 -- GROUP L: NULL in spatial JOIN keys
@@ -779,7 +781,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null L1 spatial JOIN NULL keys'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_018'
 
 -- L2: LEFT JOIN preserving NULL geom rows
 SET pg_accel.enabled = off;
@@ -808,7 +810,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null L2 LEFT JOIN NULL geoms'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_019'
 
 -- L3: CROSS JOIN / self-join with NULLs
 SET pg_accel.enabled = off;
@@ -837,7 +839,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null L3 self-join NULL geoms'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_020'
 
 -- L4: Anti-join pattern (NOT EXISTS with spatial predicate + NULLs)
 SET pg_accel.enabled = off;
@@ -870,7 +872,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null L4 anti-join NULLs'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_021'
 
 -- =========================================================================
 -- GROUP M: NULL in GROUP BY with spatial functions
@@ -908,7 +910,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null M1 GROUP BY spatial NULLs'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_022'
 
 -- M2: GROUP BY h3 function with NULLs
 SET pg_accel.enabled = off;
@@ -937,7 +939,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null M2 GROUP BY h3 NULLs'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_023'
 
 -- =========================================================================
 -- GROUP N: NULL in ORDER BY with spatial/h3 functions
@@ -970,7 +972,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null N1 ORDER BY h3 NULLs'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_024'
 
 -- N2: ORDER BY spatial expression with NULLs
 SET pg_accel.enabled = off;
@@ -1000,7 +1002,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null N2 ORDER BY spatial NULLs'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_025'
 
 -- =========================================================================
 -- GROUP O: All-NULL columns
@@ -1035,7 +1037,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null O1 all-NULL geom column'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_026'
 
 -- O2: All-NULL h3 column
 CREATE TEMP TABLE _ne_allnull_h3 (
@@ -1067,13 +1069,12 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 80_null O2 all-NULL h3 column'
+\echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_027'
 
 -- =========================================================================
 -- Final summary
 -- =========================================================================
 
-\echo 'PASS: 80_null_exhaustive (50 test cases across 15 groups)'
 
 DROP TABLE IF EXISTS
     _ne_points, _ne_polys, _ne_h3, _ne_rast,
@@ -1100,3 +1101,5 @@ DROP TABLE IF EXISTS
     _ne_o1_off, _ne_o1_on, _ne_o2_off, _ne_o2_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:80_null_exhaustive'

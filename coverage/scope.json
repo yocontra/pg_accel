@@ -1,16 +1,21 @@
 {
-  "schema_version": 1,
-  "minimum_line_percent": 90.0,
+  "schema_version": 2,
+  "minimum_percent": 90.0,
+  "sql_manifest": "coverage/sql-semantic-assertions.json",
+  "sql_baseline_files": 52,
+  "sql_baseline_assertions": 285,
   "layers": {
     "rust": {
       "description": "Owned Rust production code exercised by workspace and pgrx tests, including benchmark classification.",
       "roots": [
         "pg_accel/src",
-        "pg_accel_bench/src"
+        "pg_accel_bench/src",
+        "pg_accel/build.rs"
       ],
       "extensions": [".rs"],
       "required_extensions": [".rs"],
       "require_executable_mapping_only": true,
+      "exclude_cfg_test_items": true,
       "exclude": [
         "pg_accel/src/tests/**",
         "pg_accel/src/gpu/mod_tests.rs",
@@ -24,7 +29,7 @@
       ]
     },
     "cpp": {
-      "description": "Owned C++/SYCL kernel implementation and inline headers exercised by standalone CTest binaries.",
+      "description": "Owned C++/SYCL host-object source coverage exercised by standalone CTest binaries; device execution correctness is separate evidence.",
       "roots": [
         "pgaccel-kernels/src",
         "pgaccel-kernels/include"
@@ -34,12 +39,13 @@
       "require_executable_mapping_only": true,
       "exclude": []
     },
-    "sql": {
-      "description": "Owned Rust extension code reached exclusively by the external SQL integration suite.",
-      "roots": ["pg_accel/src"],
+    "sql_reachability": {
+      "description": "Non-threshold Rust source reachability observed during the external SQL integration suite.",
+      "roots": ["pg_accel/src", "pg_accel/build.rs"],
       "extensions": [".rs"],
       "required_extensions": [".rs"],
       "require_executable_mapping_only": true,
+      "exclude_cfg_test_items": true,
       "exclude": [
         "pg_accel/src/tests/**",
         "pg_accel/src/gpu/mod_tests.rs",

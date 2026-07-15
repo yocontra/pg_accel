@@ -41,7 +41,10 @@ BEGIN
         RAISE EXCEPTION '32_expr_boolean FAILED: baseline=% gpu=%', bl, gp;
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:32_expr_boolean.assert_001'
 
-\echo '32_expr_boolean PASSED'
+
 
 DROP TABLE IF EXISTS expr_bool_test, bool_baseline, bool_gpu;
+
+\echo 'PGACCEL_FILE_OK:32_expr_boolean'

@@ -62,6 +62,8 @@ BEGIN
     END IF;
     RAISE NOTICE 'spatial+sort row count OK: %', off_cnt;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:25_spatial_sort.assert_001'
+
 
 -- Sort order must match (compare first 100 ids in order)
 DO $$
@@ -183,4 +185,4 @@ END $$;
 
 ROLLBACK;
 
-\echo '=== 25_spatial_sort PASSED ==='
+\echo 'PGACCEL_FILE_OK:25_spatial_sort'

@@ -10,9 +10,11 @@ BEGIN;
 -- Ensure PostGIS is available
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis') THEN
-        RAISE EXCEPTION '11_geometry_extractor SKIPPED: postgis not installed';
+        RAISE EXCEPTION '11_geometry_extractor FAILED: postgis not installed';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:11_geometry_extractor.assert_001'
+
 
 -- =========================================================================
 -- 1. Basic geometry types — create and validate shapes
@@ -395,7 +397,6 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 11_geometry_extractor'
 
 DROP TABLE IF EXISTS _ge_shapes, _ge_nulls, _ge_large,
     _ge_spatial_baseline, _ge_predicate_data,
@@ -404,3 +405,5 @@ DROP TABLE IF EXISTS _ge_shapes, _ge_nulls, _ge_large,
     _ge_pred_cmp_off, _ge_pred_cmp_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:11_geometry_extractor'

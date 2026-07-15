@@ -43,7 +43,10 @@ BEGIN
         RAISE EXCEPTION '33_expr_null FAILED: % rows differ', diff_count;
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:33_expr_null.assert_001'
 
-\echo '33_expr_null PASSED'
+
 
 DROP TABLE IF EXISTS expr_null_test, null_baseline, null_gpu;
+
+\echo 'PGACCEL_FILE_OK:33_expr_null'

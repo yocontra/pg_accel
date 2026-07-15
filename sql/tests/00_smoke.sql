@@ -9,6 +9,8 @@ DO $$ BEGIN
         RAISE EXCEPTION '00_smoke FAILED: pg_accel extension not installed';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:00_smoke.assert_001'
+
 
 -- Verify PostGIS extension is loaded
 DO $$ BEGIN
@@ -65,4 +67,4 @@ END $$;
 DROP TABLE IF EXISTS _smoke_data, _smoke_off, _smoke_on;
 COMMIT;
 
-\echo 'PASS: 00_smoke'
+\echo 'PGACCEL_FILE_OK:00_smoke'

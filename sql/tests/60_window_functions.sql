@@ -38,7 +38,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 1 FAILED: ROW_NUMBER results differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t1_row_number'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_002'
 DROP TABLE _w1_on, _w1_off;
 
 -- =========================================================================
@@ -71,7 +71,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 2 FAILED: RANK results differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t2_rank_ties'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_003'
 DROP TABLE _w2_on, _w2_off, _win_ties;
 
 -- =========================================================================
@@ -104,7 +104,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 3 FAILED: DENSE_RANK results differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t3_dense_rank'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_004'
 DROP TABLE _w3_on, _w3_off, _win_dense;
 
 -- =========================================================================
@@ -130,7 +130,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 4 FAILED: running SUM results differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t4_running_sum'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_005'
 DROP TABLE _w4_on, _w4_off;
 
 -- =========================================================================
@@ -156,7 +156,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 5 FAILED: running COUNT results differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t5_running_count'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_006'
 DROP TABLE _w5_on, _w5_off;
 
 -- =========================================================================
@@ -182,7 +182,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 6 FAILED: LAG results differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t6_lag'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_007'
 DROP TABLE _w6_on, _w6_off;
 
 -- =========================================================================
@@ -208,7 +208,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 7 FAILED: LEAD results differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t7_lead'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_008'
 DROP TABLE _w7_on, _w7_off;
 
 -- =========================================================================
@@ -244,7 +244,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 8 FAILED: multiple window functions differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t8_multiple_functions'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_009'
 DROP TABLE _w8_on, _w8_off;
 
 -- =========================================================================
@@ -270,7 +270,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 9 FAILED: no-PARTITION results differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t9_no_partition'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_010'
 DROP TABLE _w9_on, _w9_off;
 
 -- =========================================================================
@@ -308,7 +308,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '60_window_functions test 10 FAILED: NULL handling results differ';
     END IF;
 END $$;
-\echo 'PASS: 60_window_functions_t10_nulls'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_011'
 DROP TABLE _w10_on, _w10_off, _win_nulls;
 
 -- =========================================================================
@@ -340,16 +340,17 @@ DO $$ BEGIN
             RAISE EXCEPTION '60_window_functions test 11 FAILED: OFF row count % != expected %',
                 cnt_off, expected;
         END IF;
+        RAISE NOTICE 'PGACCEL_ASSERT_OK:60_window_functions.assert_001';
         IF cnt_on <> expected THEN
             RAISE EXCEPTION '60_window_functions test 11 FAILED: ON row count % != expected %',
                 cnt_on, expected;
         END IF;
     END;
 END $$;
-\echo 'PASS: 60_window_functions_t11_row_count'
+\echo 'PGACCEL_ASSERT_OK:60_window_functions.assert_012'
 DROP TABLE _w11_on, _w11_off;
 
 -- Cleanup shared data
 DROP TABLE _win_data;
 
-\echo 'PASS: 60_window_functions (all tests)'
+\echo 'PGACCEL_FILE_OK:60_window_functions'

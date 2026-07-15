@@ -101,9 +101,12 @@ DO $$ BEGIN
         RAISE EXCEPTION '02_aggregates FAILED: grouped aggregate results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:02_aggregates.assert_001'
 
-\echo 'PASS: 02_aggregates'
+
 
 DROP TABLE IF EXISTS _agg_data, _agg_off, _agg_on, _agg_grp_off, _agg_grp_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:02_aggregates'

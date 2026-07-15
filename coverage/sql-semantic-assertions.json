@@ -1,0 +1,1800 @@
+{
+  "baseline_assertions": 285,
+  "baseline_files": 52,
+  "declared_assertions": 285,
+  "declared_files": 52,
+  "files": [
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "00_smoke.assert_001",
+          "source_line": 12
+        }
+      ],
+      "completion_id": "00_smoke",
+      "file": "00_smoke.sql",
+      "sha256": "18edb71d2b94f08d27d27077cb22423728e38aff7c2cc9c358a10e4e95455d50"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "01_core_engine.assert_001",
+          "source_line": 17
+        }
+      ],
+      "completion_id": "01_core_engine",
+      "file": "01_core_engine.sql",
+      "sha256": "3821a15a390c2afb1a800ccdf2d36545ca7d3b8bf76c27069431360aa27da235"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "02_aggregates.assert_001",
+          "source_line": 104
+        }
+      ],
+      "completion_id": "02_aggregates",
+      "file": "02_aggregates.sql",
+      "sha256": "2310ad1855eb1b01247a4cead00e19a764355e75e6f636ccd034bc4c449e8896"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "03_large_table.assert_001",
+          "source_line": 110
+        }
+      ],
+      "completion_id": "03_large_table",
+      "file": "03_large_table.sql",
+      "sha256": "f99b31e2bcae7fda19cbd842001494a2125765ca14238197cdbaaeee162ed852"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "04_null_handling.assert_001",
+          "source_line": 131
+        }
+      ],
+      "completion_id": "04_null_handling",
+      "file": "04_null_handling.sql",
+      "sha256": "b12a3e5f9df86ea2675dd22aee83b29efb5104963ed64edbaf4f4eddd63b759d"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "05_quals_correctness.assert_001",
+          "source_line": 139
+        }
+      ],
+      "completion_id": "05_quals_correctness",
+      "file": "05_quals_correctness.sql",
+      "sha256": "c171f73e8407c315e32d1c7030cdd6f54071dd626f8830c6ac8152d47c27c7fd"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "06_mixed_queries.assert_001",
+          "source_line": 227
+        }
+      ],
+      "completion_id": "06_mixed_queries",
+      "file": "06_mixed_queries.sql",
+      "sha256": "0511201762458096d79a60d103870e0df7895222acf5deebb1a8940b1b15397c"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "07_regression_small.assert_001",
+          "source_line": 130
+        }
+      ],
+      "completion_id": "07_regression_small",
+      "file": "07_regression_small.sql",
+      "sha256": "8a388a954e9accc1b50e054d7f17bb650893720d6f7a3018a7ff3764cc66d16a"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "08_extension_toggle.assert_001",
+          "source_line": 110
+        }
+      ],
+      "completion_id": "08_extension_toggle",
+      "file": "08_extension_toggle.sql",
+      "sha256": "27306789099e994af2c7fc3e190c9cf595eb6fca23adb35922f08956506b9d6b"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "09_explain_plans.assert_001",
+          "source_line": 70
+        }
+      ],
+      "completion_id": "09_explain_plans",
+      "file": "09_explain_plans.sql",
+      "sha256": "09025f0310de14d7835c7cf67eb6a4f68098e590d59e8bad179731a165b28c02"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "10_result_correctness.assert_001",
+          "source_line": 130
+        }
+      ],
+      "completion_id": "10_result_correctness",
+      "file": "10_result_correctness.sql",
+      "sha256": "a65bb0873795c76d4681ef14d48bf3b33c8b8d6681043651166a227e8e2530cb"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "11_geometry_extractor.assert_001",
+          "source_line": 16
+        }
+      ],
+      "completion_id": "11_geometry_extractor",
+      "file": "11_geometry_extractor.sql",
+      "sha256": "fe382f8c91921bc99a78903fd113329c072552bc1a1a7c5f355c8baee6a8fdec"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "12_h3_operations.assert_001",
+          "source_line": 176
+        }
+      ],
+      "completion_id": "12_h3_operations",
+      "file": "12_h3_operations.sql",
+      "sha256": "24655c119870621d64482eebb580f0c951a98bec15329faf27d217197675a19d"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "13_sort_orderby.assert_001",
+          "source_line": 144
+        }
+      ],
+      "completion_id": "13_sort_orderby",
+      "file": "13_sort_orderby.sql",
+      "sha256": "72537a46a213c2e9bb5b4d96d12f90c3fb6b8fe72769b86a13eb142826465285"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "14_complex_predicates.assert_001",
+          "source_line": 163
+        }
+      ],
+      "completion_id": "14_complex_predicates",
+      "file": "14_complex_predicates.sql",
+      "sha256": "c0e64565f73894bcaa72d69c6f0b51b5de3cd1261e4b7f7cf2f1bba25c614f37"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "15_distinct_having.assert_001",
+          "source_line": 174
+        }
+      ],
+      "completion_id": "15_distinct_having",
+      "file": "15_distinct_having.sql",
+      "sha256": "c524dd0025874cb381e275ff617ee6c28e7735c1d6ab34701c4797f7b87d1f1f"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "16_limit_offset.assert_001",
+          "source_line": 141
+        }
+      ],
+      "completion_id": "16_limit_offset",
+      "file": "16_limit_offset.sql",
+      "sha256": "380f2b41851086b4ba8474d8a756340052d029b9dee303a7c09695cf5d8336b3"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "17_multitable_agg.assert_001",
+          "source_line": 174
+        }
+      ],
+      "completion_id": "17_multitable_agg",
+      "file": "17_multitable_agg.sql",
+      "sha256": "5f54dc2d2fa74ebb36c960127fb21b3b448c0caacaaa72cb08ee4c28dcb4f899"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "18_window_functions.assert_001",
+          "source_line": 125
+        }
+      ],
+      "completion_id": "18_window_functions",
+      "file": "18_window_functions.sql",
+      "sha256": "a84efff1fb86a36f223e58f7368330f60525898d03a5482217fb42c8576ca6de"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "19_spatial_predicates.assert_001",
+          "source_line": 153
+        }
+      ],
+      "completion_id": "19_spatial_predicates",
+      "file": "19_spatial_predicates.sql",
+      "sha256": "c1df72798db7135cd8a19a5cc968b746aa3654533f9b5d2f5da6f713a16a4fe6"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "20_spatial_advanced.assert_001",
+          "source_line": 245
+        }
+      ],
+      "completion_id": "20_spatial_advanced",
+      "file": "20_spatial_advanced.sql",
+      "sha256": "040eb18cdd48d2eed091507f499a5584c791495aedec270aa639adadeefcf044"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "21_join_types.assert_001",
+          "source_line": 215
+        }
+      ],
+      "completion_id": "21_join_types",
+      "file": "21_join_types.sql",
+      "sha256": "f57db89935bc9d23b1dbd162ff43346caf76771efc49da930e6dda7d55ce86fd"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "22_regression_oltp.assert_001",
+          "source_line": 169
+        }
+      ],
+      "completion_id": "22_regression_oltp",
+      "file": "22_regression_oltp.sql",
+      "sha256": "a940825e723e765c1a39aedf0e13eaf543b73533882ddc519d1d94cbe83571dc"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "23_null_edge_cases.assert_001",
+          "source_line": 46
+        }
+      ],
+      "completion_id": "23_null_edge_cases",
+      "file": "23_null_edge_cases.sql",
+      "sha256": "752baab46c904761debf8bd8cb574d0b6177aee884095f87391e1b6408016f6b"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "24_basic_scan.assert_001",
+          "source_line": 76
+        }
+      ],
+      "completion_id": "24_basic_scan",
+      "file": "24_basic_scan.sql",
+      "sha256": "e723656858789f3799fb4fcd07b198b9fe976904451131fa15d4c82081cda2dc"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "25_spatial_sort.assert_001",
+          "source_line": 65
+        }
+      ],
+      "completion_id": "25_spatial_sort",
+      "file": "25_spatial_sort.sql",
+      "sha256": "49db2b5feb4b497f25b45a80c3072199d6846355389ead018d3ed95711173e65"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "30_expr_arithmetic.assert_001",
+          "source_line": 61
+        }
+      ],
+      "completion_id": "30_expr_arithmetic",
+      "file": "30_expr_arithmetic.sql",
+      "sha256": "8f3b21e65cf9fcf186101304b8d00c6c965e9de12f6cb3f3b651dde4d47ddecb"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "31_expr_comparison.assert_001",
+          "source_line": 42
+        }
+      ],
+      "completion_id": "31_expr_comparison",
+      "file": "31_expr_comparison.sql",
+      "sha256": "3cb52de237867ee246c5b87cfcf594b409b136878137744f4d940aed4551c87a"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "32_expr_boolean.assert_001",
+          "source_line": 44
+        }
+      ],
+      "completion_id": "32_expr_boolean",
+      "file": "32_expr_boolean.sql",
+      "sha256": "337b435dd207e743daa2e7bd8fe6d375ca2f6d8d661b9f16d984108f30633a78"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "33_expr_null.assert_001",
+          "source_line": 46
+        }
+      ],
+      "completion_id": "33_expr_null",
+      "file": "33_expr_null.sql",
+      "sha256": "e18ce30812abaa4ad7a9ea019e0712a28e7a2ce2b4b1f5945d5eb67f239640eb"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "34_expr_case.assert_001",
+          "source_line": 52
+        }
+      ],
+      "completion_id": "34_expr_case",
+      "file": "34_expr_case.sql",
+      "sha256": "cb2095e0f7380ada259f1d8ae7f2428b85f166b2f818cced37422ccf1b690157"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "40_gpu_expr_where.assert_001",
+          "source_line": 44
+        },
+        {
+          "emission": "echo",
+          "id": "40_gpu_expr_where.assert_002",
+          "source_line": 62
+        },
+        {
+          "emission": "echo",
+          "id": "40_gpu_expr_where.assert_003",
+          "source_line": 95
+        },
+        {
+          "emission": "echo",
+          "id": "40_gpu_expr_where.assert_004",
+          "source_line": 128
+        },
+        {
+          "emission": "echo",
+          "id": "40_gpu_expr_where.assert_005",
+          "source_line": 161
+        },
+        {
+          "emission": "echo",
+          "id": "40_gpu_expr_where.assert_006",
+          "source_line": 195
+        },
+        {
+          "emission": "echo",
+          "id": "40_gpu_expr_where.assert_007",
+          "source_line": 234
+        },
+        {
+          "emission": "echo",
+          "id": "40_gpu_expr_where.assert_008",
+          "source_line": 269
+        },
+        {
+          "emission": "echo",
+          "id": "40_gpu_expr_where.assert_009",
+          "source_line": 302
+        }
+      ],
+      "completion_id": "40_gpu_expr_where",
+      "file": "40_gpu_expr_where.sql",
+      "sha256": "06df601e5b783534a64b72067ab2f2f5b7d8cce8d7403755b5f8b9f98117626b"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "41_gpu_expr_projection.assert_002",
+          "source_line": 36
+        },
+        {
+          "emission": "echo",
+          "id": "41_gpu_expr_projection.assert_003",
+          "source_line": 82
+        },
+        {
+          "emission": "echo",
+          "id": "41_gpu_expr_projection.assert_004",
+          "source_line": 119
+        },
+        {
+          "emission": "echo",
+          "id": "41_gpu_expr_projection.assert_001",
+          "source_line": 149
+        }
+      ],
+      "completion_id": "41_gpu_expr_projection",
+      "file": "41_gpu_expr_projection.sql",
+      "sha256": "07b71c2300b8b101bc0a2ad4cc92c1f14fee7016a0025c2c37beabfaaea3839c"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "42_gpu_expr_edge_cases.assert_002",
+          "source_line": 36
+        },
+        {
+          "emission": "echo",
+          "id": "42_gpu_expr_edge_cases.assert_003",
+          "source_line": 73
+        },
+        {
+          "emission": "echo",
+          "id": "42_gpu_expr_edge_cases.assert_004",
+          "source_line": 119
+        },
+        {
+          "emission": "echo",
+          "id": "42_gpu_expr_edge_cases.assert_005",
+          "source_line": 154
+        },
+        {
+          "emission": "echo",
+          "id": "42_gpu_expr_edge_cases.assert_006",
+          "source_line": 190
+        },
+        {
+          "emission": "echo",
+          "id": "42_gpu_expr_edge_cases.assert_001",
+          "source_line": 224
+        }
+      ],
+      "completion_id": "42_gpu_expr_edge_cases",
+      "file": "42_gpu_expr_edge_cases.sql",
+      "sha256": "ed98c0ca9c96cacb4ced02c7b6e4adb0c1b687d1ee98ab9b62b6a102000137eb"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "43_sort_topk.assert_002",
+          "source_line": 45
+        },
+        {
+          "emission": "echo",
+          "id": "43_sort_topk.assert_003",
+          "source_line": 84
+        },
+        {
+          "emission": "echo",
+          "id": "43_sort_topk.assert_004",
+          "source_line": 120
+        },
+        {
+          "emission": "echo",
+          "id": "43_sort_topk.assert_005",
+          "source_line": 156
+        },
+        {
+          "emission": "echo",
+          "id": "43_sort_topk.assert_001",
+          "source_line": 192
+        }
+      ],
+      "completion_id": "43_sort_topk",
+      "file": "43_sort_topk.sql",
+      "sha256": "006afa869affbbdbcff3903392762a48320290805aef3dcea317b8a37180577e"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_002",
+          "source_line": 39
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_003",
+          "source_line": 73
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_004",
+          "source_line": 106
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_005",
+          "source_line": 137
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_006",
+          "source_line": 170
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_007",
+          "source_line": 196
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_001",
+          "source_line": 221
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_008",
+          "source_line": 242
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_009",
+          "source_line": 280
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_010",
+          "source_line": 320
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_011",
+          "source_line": 355
+        },
+        {
+          "emission": "echo",
+          "id": "50_hash_agg_groupby.assert_012",
+          "source_line": 438
+        }
+      ],
+      "completion_id": "50_hash_agg_groupby",
+      "file": "50_hash_agg_groupby.sql",
+      "sha256": "01748f907274d1ffca89b3cb6664e0569ae92ed2ac4dddbcab2e45b1ba022f1f"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "51_hash_agg_edge_cases.assert_002",
+          "source_line": 38
+        },
+        {
+          "emission": "notice",
+          "id": "51_hash_agg_edge_cases.assert_001",
+          "source_line": 70
+        },
+        {
+          "emission": "echo",
+          "id": "51_hash_agg_edge_cases.assert_003",
+          "source_line": 80
+        },
+        {
+          "emission": "echo",
+          "id": "51_hash_agg_edge_cases.assert_004",
+          "source_line": 112
+        },
+        {
+          "emission": "echo",
+          "id": "51_hash_agg_edge_cases.assert_005",
+          "source_line": 143
+        },
+        {
+          "emission": "echo",
+          "id": "51_hash_agg_edge_cases.assert_006",
+          "source_line": 174
+        }
+      ],
+      "completion_id": "51_hash_agg_edge_cases",
+      "file": "51_hash_agg_edge_cases.sql",
+      "sha256": "426719aec5e3f5896df5756adb32cae9035e44a4d086c9d7e107db8a8fe04556"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "notice",
+          "id": "55_hash_join.assert_001",
+          "source_line": 44
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_002",
+          "source_line": 54
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_003",
+          "source_line": 90
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_004",
+          "source_line": 126
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_005",
+          "source_line": 165
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_006",
+          "source_line": 201
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_007",
+          "source_line": 234
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_008",
+          "source_line": 275
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_009",
+          "source_line": 312
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_010",
+          "source_line": 347
+        },
+        {
+          "emission": "echo",
+          "id": "55_hash_join.assert_011",
+          "source_line": 390
+        }
+      ],
+      "completion_id": "55_hash_join",
+      "file": "55_hash_join.sql",
+      "sha256": "df6fb461f22507c4c60a81da01db97b7bb2cc5f89b8864dfa782d9bf22bf6e10"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "56_hash_join_edge_cases.assert_002",
+          "source_line": 32
+        },
+        {
+          "emission": "echo",
+          "id": "56_hash_join_edge_cases.assert_003",
+          "source_line": 59
+        },
+        {
+          "emission": "notice",
+          "id": "56_hash_join_edge_cases.assert_001",
+          "source_line": 83
+        },
+        {
+          "emission": "echo",
+          "id": "56_hash_join_edge_cases.assert_004",
+          "source_line": 89
+        },
+        {
+          "emission": "echo",
+          "id": "56_hash_join_edge_cases.assert_005",
+          "source_line": 124
+        },
+        {
+          "emission": "echo",
+          "id": "56_hash_join_edge_cases.assert_006",
+          "source_line": 151
+        },
+        {
+          "emission": "echo",
+          "id": "56_hash_join_edge_cases.assert_007",
+          "source_line": 188
+        },
+        {
+          "emission": "echo",
+          "id": "56_hash_join_edge_cases.assert_008",
+          "source_line": 229
+        }
+      ],
+      "completion_id": "56_hash_join_edge_cases",
+      "file": "56_hash_join_edge_cases.sql",
+      "sha256": "7400dcd491d36f1757b42a61c1a3107d116d5311bdd7d3733a656c6d6b872264"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_002",
+          "source_line": 41
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_003",
+          "source_line": 74
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_004",
+          "source_line": 107
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_005",
+          "source_line": 133
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_006",
+          "source_line": 159
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_007",
+          "source_line": 185
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_008",
+          "source_line": 211
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_009",
+          "source_line": 247
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_010",
+          "source_line": 273
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_011",
+          "source_line": 311
+        },
+        {
+          "emission": "notice",
+          "id": "60_window_functions.assert_001",
+          "source_line": 343
+        },
+        {
+          "emission": "echo",
+          "id": "60_window_functions.assert_012",
+          "source_line": 350
+        }
+      ],
+      "completion_id": "60_window_functions",
+      "file": "60_window_functions.sql",
+      "sha256": "1e444e348457276263e0f2c6bdb7d41b536e53d49a1d5a76b5f22f43d9f394c6"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "61_window_edge_cases.assert_002",
+          "source_line": 35
+        },
+        {
+          "emission": "echo",
+          "id": "61_window_edge_cases.assert_003",
+          "source_line": 76
+        },
+        {
+          "emission": "echo",
+          "id": "61_window_edge_cases.assert_004",
+          "source_line": 110
+        },
+        {
+          "emission": "notice",
+          "id": "61_window_edge_cases.assert_001",
+          "source_line": 145
+        },
+        {
+          "emission": "echo",
+          "id": "61_window_edge_cases.assert_005",
+          "source_line": 151
+        },
+        {
+          "emission": "echo",
+          "id": "61_window_edge_cases.assert_006",
+          "source_line": 187
+        },
+        {
+          "emission": "echo",
+          "id": "61_window_edge_cases.assert_007",
+          "source_line": 224
+        },
+        {
+          "emission": "echo",
+          "id": "61_window_edge_cases.assert_008",
+          "source_line": 259
+        },
+        {
+          "emission": "echo",
+          "id": "61_window_edge_cases.assert_009",
+          "source_line": 294
+        },
+        {
+          "emission": "echo",
+          "id": "61_window_edge_cases.assert_010",
+          "source_line": 329
+        }
+      ],
+      "completion_id": "61_window_edge_cases",
+      "file": "61_window_edge_cases.sql",
+      "sha256": "acd5d65d8c1fca3b6fb6c08091b70a8f7f157adce5277fbeca7db1f158328abf"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "70_zero_overhead_oltp.assert_001",
+          "source_line": 60
+        }
+      ],
+      "completion_id": "70_zero_overhead_oltp",
+      "file": "70_zero_overhead_oltp.sql",
+      "sha256": "962175bb52bce09a23269d681259bf0904ecff311fc0c9eed5872756923e8ac1"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_001",
+          "source_line": 122
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_002",
+          "source_line": 150
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_003",
+          "source_line": 177
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_004",
+          "source_line": 199
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_005",
+          "source_line": 248
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_006",
+          "source_line": 269
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_007",
+          "source_line": 318
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_008",
+          "source_line": 339
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_009",
+          "source_line": 392
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_010",
+          "source_line": 436
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_011",
+          "source_line": 458
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_012",
+          "source_line": 512
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_013",
+          "source_line": 556
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_014",
+          "source_line": 600
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_015",
+          "source_line": 644
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_016",
+          "source_line": 688
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_017",
+          "source_line": 733
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_018",
+          "source_line": 784
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_019",
+          "source_line": 813
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_020",
+          "source_line": 842
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_021",
+          "source_line": 875
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_022",
+          "source_line": 913
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_023",
+          "source_line": 942
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_024",
+          "source_line": 975
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_025",
+          "source_line": 1005
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_026",
+          "source_line": 1040
+        },
+        {
+          "emission": "echo",
+          "id": "80_null_exhaustive.assert_027",
+          "source_line": 1072
+        }
+      ],
+      "completion_id": "80_null_exhaustive",
+      "file": "80_null_exhaustive.sql",
+      "sha256": "e5ebd9ae78ec47e76ee5aa5a08050f3071f797dc9914a40222869696a124d746"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_001",
+          "source_line": 118
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_002",
+          "source_line": 145
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_003",
+          "source_line": 195
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_004",
+          "source_line": 245
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_005",
+          "source_line": 298
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_006",
+          "source_line": 329
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_007",
+          "source_line": 359
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_008",
+          "source_line": 389
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_009",
+          "source_line": 421
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_010",
+          "source_line": 457
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_011",
+          "source_line": 545
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_012",
+          "source_line": 575
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_013",
+          "source_line": 628
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_014",
+          "source_line": 681
+        },
+        {
+          "emission": "echo",
+          "id": "81_degenerate_geometry.assert_015",
+          "source_line": 721
+        }
+      ],
+      "completion_id": "81_degenerate_geometry",
+      "file": "81_degenerate_geometry.sql",
+      "sha256": "c5f7d52aa168ac2cce874de3d4f98032c8f91ab58571f6850613cb1f4e39fc00"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "notice",
+          "id": "82_srid_mismatch.assert_001",
+          "source_line": 153
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_002",
+          "source_line": 159
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_003",
+          "source_line": 197
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_004",
+          "source_line": 235
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_005",
+          "source_line": 273
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_006",
+          "source_line": 324
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_007",
+          "source_line": 354
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_008",
+          "source_line": 386
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_009",
+          "source_line": 439
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_010",
+          "source_line": 485
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_011",
+          "source_line": 529
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_012",
+          "source_line": 569
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_013",
+          "source_line": 609
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_014",
+          "source_line": 659
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_015",
+          "source_line": 709
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_016",
+          "source_line": 746
+        },
+        {
+          "emission": "echo",
+          "id": "82_srid_mismatch.assert_017",
+          "source_line": 786
+        }
+      ],
+      "completion_id": "82_srid_mismatch",
+      "file": "82_srid_mismatch.sql",
+      "sha256": "3bd71ad90ca5131ebe3c1b9339ce1095cc03d8caaf234273a0af050f593666b8"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_001",
+          "source_line": 81
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_002",
+          "source_line": 110
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_003",
+          "source_line": 160
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_004",
+          "source_line": 204
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_005",
+          "source_line": 251
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_006",
+          "source_line": 307
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_007",
+          "source_line": 363
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_008",
+          "source_line": 419
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_009",
+          "source_line": 470
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_010",
+          "source_line": 516
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_011",
+          "source_line": 563
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_012",
+          "source_line": 617
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_013",
+          "source_line": 681
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_014",
+          "source_line": 734
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_015",
+          "source_line": 790
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_016",
+          "source_line": 858
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_017",
+          "source_line": 909
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_018",
+          "source_line": 940
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_019",
+          "source_line": 967
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_020",
+          "source_line": 992
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_021",
+          "source_line": 1019
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_022",
+          "source_line": 1068
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_023",
+          "source_line": 1093
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_024",
+          "source_line": 1128
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_025",
+          "source_line": 1165
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_026",
+          "source_line": 1192
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_027",
+          "source_line": 1233
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_028",
+          "source_line": 1264
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_029",
+          "source_line": 1289
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_030",
+          "source_line": 1320
+        },
+        {
+          "emission": "echo",
+          "id": "83_plan_patterns.assert_031",
+          "source_line": 1348
+        }
+      ],
+      "completion_id": "83_plan_patterns",
+      "file": "83_plan_patterns.sql",
+      "sha256": "8acf1150991a87ded0e6340090ba25b0a12384dfb7311afde41864d4fddc6bda"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_002",
+          "source_line": 61
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_001",
+          "source_line": 92
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_003",
+          "source_line": 111
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_004",
+          "source_line": 186
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_005",
+          "source_line": 220
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_006",
+          "source_line": 296
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_007",
+          "source_line": 334
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_008",
+          "source_line": 396
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_009",
+          "source_line": 451
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_010",
+          "source_line": 479
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_011",
+          "source_line": 531
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_012",
+          "source_line": 573
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_013",
+          "source_line": 610
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_014",
+          "source_line": 651
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_015",
+          "source_line": 676
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_016",
+          "source_line": 739
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_017",
+          "source_line": 771
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_018",
+          "source_line": 796
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_019",
+          "source_line": 825
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_020",
+          "source_line": 852
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_021",
+          "source_line": 877
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_022",
+          "source_line": 909
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_023",
+          "source_line": 941
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_024",
+          "source_line": 972
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_025",
+          "source_line": 996
+        },
+        {
+          "emission": "echo",
+          "id": "84_transaction_semantics.assert_026",
+          "source_line": 1028
+        }
+      ],
+      "completion_id": "84_transaction_semantics",
+      "file": "84_transaction_semantics.sql",
+      "sha256": "d3542d0a06f3ba748139c082fba210d38d76d52e0e205d5d333ecbe568db1826"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_002",
+          "source_line": 99
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_003",
+          "source_line": 122
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_004",
+          "source_line": 145
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_005",
+          "source_line": 168
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_006",
+          "source_line": 191
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_007",
+          "source_line": 216
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_008",
+          "source_line": 239
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_009",
+          "source_line": 262
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_010",
+          "source_line": 291
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_011",
+          "source_line": 316
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_020",
+          "source_line": 339
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_012",
+          "source_line": 348
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_013",
+          "source_line": 375
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_014",
+          "source_line": 401
+        },
+        {
+          "emission": "notice",
+          "id": "85_function_matrix.assert_001",
+          "source_line": 421
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_015",
+          "source_line": 427
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_016",
+          "source_line": 452
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_017",
+          "source_line": 477
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_018",
+          "source_line": 498
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_019",
+          "source_line": 519
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_021",
+          "source_line": 593
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_022",
+          "source_line": 613
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_023",
+          "source_line": 633
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_024",
+          "source_line": 653
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_025",
+          "source_line": 692
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_026",
+          "source_line": 718
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_027",
+          "source_line": 743
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_028",
+          "source_line": 767
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_029",
+          "source_line": 791
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_030",
+          "source_line": 818
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_031",
+          "source_line": 856
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_032",
+          "source_line": 878
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_033",
+          "source_line": 903
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_034",
+          "source_line": 935
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_035",
+          "source_line": 973
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_036",
+          "source_line": 1001
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_037",
+          "source_line": 1170
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_038",
+          "source_line": 1204
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_039",
+          "source_line": 1237
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_040",
+          "source_line": 1266
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_041",
+          "source_line": 1290
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_042",
+          "source_line": 1315
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_043",
+          "source_line": 1341
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_044",
+          "source_line": 1368
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_045",
+          "source_line": 1399
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_046",
+          "source_line": 1426
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_047",
+          "source_line": 1462
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_048",
+          "source_line": 1491
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_049",
+          "source_line": 1516
+        },
+        {
+          "emission": "echo",
+          "id": "85_function_matrix.assert_050",
+          "source_line": 1551
+        }
+      ],
+      "completion_id": "85_function_matrix",
+      "file": "85_function_matrix.sql",
+      "sha256": "8417190c740763bc31f1953fef189e516e7d236bdfe5edb7e09944151c094f76"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "86_batch_boundary.assert_001",
+          "source_line": 36
+        }
+      ],
+      "completion_id": "86_batch_boundary",
+      "file": "86_batch_boundary.sql",
+      "sha256": "b32ead2c59bbb28112b9b43020b900898c30f9bc51d1c1e5f07825aae679bef9"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "87_type_coercion.assert_001",
+          "source_line": 64
+        }
+      ],
+      "completion_id": "87_type_coercion",
+      "file": "87_type_coercion.sql",
+      "sha256": "830ac228d2cf8b6cf089871d6cee41062677fd206ed8e99004ec5c761dcc93c4"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "88_concurrent_features.assert_001",
+          "source_line": 70
+        }
+      ],
+      "completion_id": "88_concurrent_features",
+      "file": "88_concurrent_features.sql",
+      "sha256": "51d4e965a6909ee7e572b3701c1e271c49fe211345ba1509977919347b9f5d39"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "id": "89_regression_guards.assert_001",
+          "source_line": 19
+        }
+      ],
+      "completion_id": "89_regression_guards",
+      "file": "89_regression_guards.sql",
+      "sha256": "7ea5c523a198233b782c7dddef3160949ae18b511b5b4f45012bcba7f3c13344"
+    }
+  ],
+  "kind": "sql-semantic-assertion-manifest",
+  "schema_version": 2,
+  "test_root": "sql/tests"
+}

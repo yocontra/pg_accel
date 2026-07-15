@@ -212,8 +212,9 @@ DO $$ BEGIN
         RAISE EXCEPTION '21_joins FAILED: test 5 (LEFT JOIN spatial) differs';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:21_join_types.assert_001'
 
-\echo 'PASS: 21_join_types (5 tests)'
+
 
 DROP TABLE IF EXISTS _jt_customers, _jt_orders, _jt_zones,
     _jt1_off, _jt1_on, _jt2_off, _jt2_on,
@@ -221,3 +222,5 @@ DROP TABLE IF EXISTS _jt_customers, _jt_orders, _jt_zones,
     _jt5_off, _jt5_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:21_join_types'

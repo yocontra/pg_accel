@@ -107,11 +107,14 @@ BEGIN
         RAISE EXCEPTION '08_extension_toggle FAILED: aggregate OFF differs from baseline';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:08_extension_toggle.assert_001'
 
-\echo 'PASS: 08_extension_toggle'
+
 
 DROP TABLE IF EXISTS _et_data, _et_baseline, _et_agg_baseline,
     _et_r1, _et_r2, _et_r3, _et_r4, _et_r5,
     _et_agg_on, _et_agg_off;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:08_extension_toggle'

@@ -127,11 +127,14 @@ DO $$ BEGIN
         RAISE EXCEPTION '07_regression_small FAILED: empty table results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:07_regression_small.assert_001'
 
-\echo 'PASS: 07_regression_small'
+
 
 DROP TABLE IF EXISTS _rs_tiny, _rs_off, _rs_on, _rs_agg_off, _rs_agg_on,
     _rs_single, _rs_single_off, _rs_single_on,
     _rs_empty, _rs_empty_off, _rs_empty_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:07_regression_small'

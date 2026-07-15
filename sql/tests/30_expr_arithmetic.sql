@@ -58,7 +58,10 @@ BEGIN
         RAISE EXCEPTION '30_expr_arithmetic FAILED: % rows differ', diff_count;
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:30_expr_arithmetic.assert_001'
 
-\echo '30_expr_arithmetic PASSED'
+
 
 DROP TABLE IF EXISTS expr_arith_test, arith_baseline, arith_gpu;
+
+\echo 'PGACCEL_FILE_OK:30_expr_arithmetic'

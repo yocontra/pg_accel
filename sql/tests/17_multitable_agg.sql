@@ -171,10 +171,13 @@ DO $$ BEGIN
         RAISE EXCEPTION '17_multitable FAILED: test 3 (3-way JOIN) results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:17_multitable_agg.assert_001'
 
-\echo 'PASS: 17_multitable_agg (3 tests)'
+
 
 DROP TABLE IF EXISTS _mt_products, _mt_orders, _mt_categories, _mt_prod_cat,
     _mt1_off, _mt1_on, _mt2_off, _mt2_on, _mt3_off, _mt3_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:17_multitable_agg'

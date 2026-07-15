@@ -173,6 +173,8 @@ BEGIN
             offending;
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:12_h3_operations.assert_001'
+
 
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _h3t4_off AS
@@ -345,7 +347,6 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 12_h3_operations (9 result tests + H3 plan guards)'
 
 DROP TABLE IF EXISTS _h3_points, _h3_cells, _h3_pairs, _h3_sample,
     _h3_plan_guard,
@@ -356,3 +357,5 @@ DROP TABLE IF EXISTS _h3_points, _h3_cells, _h3_pairs, _h3_sample,
     _h3t9_off, _h3t9_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:12_h3_operations'

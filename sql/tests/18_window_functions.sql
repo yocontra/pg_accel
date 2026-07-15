@@ -122,11 +122,14 @@ DO $$ BEGIN
         RAISE EXCEPTION '18_window FAILED: test 4 (LAG/LEAD) results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:18_window_functions.assert_001'
 
-\echo 'PASS: 18_window_functions (4 tests)'
+
 
 DROP TABLE IF EXISTS _wf_data,
     _wf1_off, _wf1_on, _wf2_off, _wf2_on,
     _wf3_off, _wf3_on, _wf4_off, _wf4_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:18_window_functions'

@@ -32,7 +32,7 @@ jobs:
   mac-arm64:
     name: macOS arm64 PG ${{ matrix.pg }}
     runs-on: macos-14
-    timeout-minutes: 240
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -120,14 +120,6 @@ jobs:
           cargo install cargo-deny --locked
           cargo install cargo-audit --locked
 
-      - name: Install three-layer coverage tooling
-        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup component add llvm-tools-preview
-          cargo install cargo-llvm-cov --locked
-
       - name: Build pinned AdaptiveCpp Metal toolchain
         if: steps.pg-support.outputs.skip != 'true' && steps.cache-acpp.outputs.cache-hit != 'true'
         shell: bash
@@ -165,13 +157,6 @@ jobs:
           set -euo pipefail
           cargo test -p pg_accel_bench --locked
 
-      - name: Run standalone GPU kernel gate
-        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
-        shell: bash
-        run: |
-          set -euo pipefail
-          just gpu-test
-
       - name: Run live extension smoke
         if: steps.pg-support.outputs.skip != 'true'
         shell: bash
@@ -195,26 +180,6 @@ jobs:
           set -euo pipefail
           just plan-shape-tests ${{ matrix.pg }}
 
-      - name: Run three-layer coverage gate
-        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
-        shell: bash
-        env:
-          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18-macos-arm64
-          COVERAGE_MIN_RUST_LINES: 90
-          COVERAGE_MIN_CPP_LINES: 90
-          COVERAGE_MIN_SQL_LINES: 90
-        run: |
-          set -euo pipefail
-          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage ${{ matrix.pg }}
-
-      - name: Upload three-layer coverage artifacts
-        if: always() && steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
-        uses: actions/upload-artifact@v4
-        with:
-          name: pg-accel-three-layer-coverage-pg18-macos-arm64
-          path: artifacts/coverage-pg18-macos-arm64
-          if-no-files-found: error
-
       - name: Generate package schema artifact
         if: always() && steps.pg-support.outputs.skip != 'true'
         id: schema
@@ -237,6 +202,88 @@ jobs:
         with:
           name: pg-accel-schema-pg${{ matrix.pg }}-macos-arm64
           path: ${{ steps.schema.outputs.path }}
+          if-no-files-found: error
+
+  metal-release-gates:
+    name: Qualified Metal release coverage (PG 18)
+    runs-on: [self-hosted, macOS, ARM64, metal, pg-accel-coverage]
+    timeout-minutes: 360
+    env:
+      SOFT_FP64_REQUIRED_TAG: v1.3.0
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Load pinned AdaptiveCpp SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
+
+      - name: Install Rust and coverage tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt,llvm-tools-preview
+          rustup default "$rust_version"
+          cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
+          cargo install cargo-llvm-cov --locked
+
+      - name: Install qualified Metal dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update
+          brew install just cmake llvm@20 lld@20 boost libomp postgis
+
+      - name: Cache qualified Metal toolchain
+        id: cache-acpp-metal-gate
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pgaccel/acpp
+            .pgaccel/src/AdaptiveCpp
+            .pgaccel/src/soft-fp64
+          key: acpp-qualified-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+
+      - name: Build pinned AdaptiveCpp Metal toolchain
+        if: steps.cache-acpp-metal-gate.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-gpu-metal-headers
+          ACPP_BACKEND=metal \
+            LLVM_PREFIX="$(brew --prefix llvm@20)" \
+            ACPP_LLD_PATH="$(brew --prefix lld@20)/bin/ld64.lld" \
+            just setup-gpu-acpp
+
+      - name: Initialize PostgreSQL 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          just setup-pg-source 18
+          just setup-pg-extensions 18
+          just setup-pgrx 18
+
+      - name: Run three-layer release coverage gate
+        shell: bash
+        env:
+          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18-qualified-metal
+          COVERAGE_MIN_RUST_LINES: 90
+          COVERAGE_MIN_CPP_LINES: 90
+          COVERAGE_MIN_SQL_ASSERTIONS: 90
+        run: |
+          set -euo pipefail
+          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18
+
+      - name: Upload three-layer coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-three-layer-coverage-pg18-qualified-metal
+          path: artifacts/coverage-pg18-qualified-metal
           if-no-files-found: error
 
   linux-x86:

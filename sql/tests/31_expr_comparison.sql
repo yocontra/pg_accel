@@ -39,7 +39,10 @@ BEGIN
         RAISE EXCEPTION '31_expr_comparison FAILED: baseline=% gpu=%', bl, gp;
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:31_expr_comparison.assert_001'
 
-\echo '31_expr_comparison PASSED'
+
 
 DROP TABLE IF EXISTS expr_cmp_test, cmp_baseline, cmp_gpu;
+
+\echo 'PGACCEL_FILE_OK:31_expr_comparison'

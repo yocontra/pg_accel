@@ -61,6 +61,8 @@ DO $$ BEGIN
         RAISE EXCEPTION '87_type: float4 distance selected a pg_accel spatial plan';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:87_type_coercion.assert_001'
+
 
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _tc_f4_off AS
@@ -388,7 +390,6 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 87_type_coercion (15 tests)'
 
 DROP TABLE IF EXISTS _tc_points, _tc_ref, _tc_h3, _tc_h3_cells, _tc_polys,
     _tc_plan_f4, _tc_plan_f8, _tc_plan_h3, _tc_plan_case,
@@ -401,3 +402,5 @@ DROP TABLE IF EXISTS _tc_points, _tc_ref, _tc_h3, _tc_h3_cells, _tc_polys,
     _tc_isect_off, _tc_isect_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:87_type_coercion'

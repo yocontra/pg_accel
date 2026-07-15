@@ -73,9 +73,12 @@ DO $$ BEGIN
         RAISE EXCEPTION '01_basic_scan FAILED: expected 500 rows, got %', (SELECT count(*) FROM _bs_on);
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:24_basic_scan.assert_001'
 
-\echo 'PASS: 01_basic_scan'
+
 
 DROP TABLE IF EXISTS _bs_data, _bs_off, _bs_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:24_basic_scan'

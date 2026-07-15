@@ -128,9 +128,12 @@ DO $$ BEGIN
         RAISE EXCEPTION '04_null_handling FAILED: aggregate results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:04_null_handling.assert_001'
 
-\echo 'PASS: 04_null_handling'
+
 
 DROP TABLE IF EXISTS _null_data, _null_off, _null_on, _null_agg_off, _null_agg_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:04_null_handling'

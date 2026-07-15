@@ -67,6 +67,8 @@ DO $$ BEGIN
         RAISE EXCEPTION '09_explain FAILED: CustomScan found in plan with accel OFF';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:09_explain_plans.assert_001'
+
 
 -- =========================================================================
 -- Test 3: Results must still match between ON and OFF
@@ -134,10 +136,11 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 09_explain_plans'
 
 DROP TABLE IF EXISTS _ep_data, _ep_plan_on, _ep_plan_off,
     _ep_result_off, _ep_result_on, _ep_plan_agg,
     _ep_tiny, _ep_plan_tiny;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:09_explain_plans'

@@ -160,8 +160,9 @@ DO $$ BEGIN
         RAISE EXCEPTION '14_complex FAILED: test 6 (COALESCE) results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:14_complex_predicates.assert_001'
 
-\echo 'PASS: 14_complex_predicates (6 tests)'
+
 
 DROP TABLE IF EXISTS _cp_data,
     _cp1_off, _cp1_on, _cp2_off, _cp2_on,
@@ -169,3 +170,5 @@ DROP TABLE IF EXISTS _cp_data,
     _cp5_off, _cp5_on, _cp6_off, _cp6_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:14_complex_predicates'

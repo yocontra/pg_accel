@@ -57,6 +57,8 @@ BEGIN
         RAISE EXCEPTION '70_zero_overhead FAILED: point lookup used Custom Scan';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:70_zero_overhead_oltp.assert_001'
+
 
 -- =========================================================================
 -- Test 2: Small table scan — must NOT use Custom Scan (below min_batch_size)
@@ -214,8 +216,9 @@ END $$;
 DROP TABLE IF EXISTS _narrow_on;
 DROP TABLE IF EXISTS _narrow_off;
 
-\echo 'PASS: 70_zero_overhead_oltp (9 tests)'
 
 DROP TABLE IF EXISTS oltp_test;
 DROP TABLE IF EXISTS sort_regress;
 DROP TABLE IF EXISTS narrow_sort;
+
+\echo 'PGACCEL_FILE_OK:70_zero_overhead_oltp'

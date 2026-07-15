@@ -82,8 +82,14 @@ redacted_connstr() {
     printf '%s\n' "$CONNSTR" | sed -E 's/(password=)[^ ]+/\1<redacted>/g'
 }
 
-has_pass_marker() {
-    grep -Eq '(^PASS:|^[[:alnum:]_]+ PASSED$|^=== .* PASSED ===$)'
+completion_marker_count() {
+    local test_name="$1"
+    local stem="${test_name%.sql}"
+    grep -Fxc "PGACCEL_FILE_OK:${stem}" || true
+}
+
+has_forbidden_release_evidence() {
+    grep -Eiq '(^|[[:space:]])WARNING:|(^|[^[:alnum:]_])SKIP(PED)?([^[:alnum:]_]|$)|caught.*exception'
 }
 
 echo "========================================"
@@ -136,22 +142,31 @@ for test_file in "$TESTS_DIR"/[0-9]*.sql; do
     set -e
     result_status="fail"
     if [ "$psql_status" -eq 0 ]; then
-        # Check for an explicit PASS/PASSED echo in output.
-        if has_pass_marker <<<"$output"; then
+        # A file completion marker proves only that psql reached the end of the
+        # file. Semantic assertion IDs are validated separately against the
+        # fixed manifest and never inferred from this marker.
+        marker_count="$(completion_marker_count "$test_name" <<<"$output")"
+        if sql_test_strict && has_forbidden_release_evidence <<<"$output"; then
+            FAILURES=$((FAILURES + 1))
+            FAILED_TESTS+=("$test_name (warning/skip/caught exception evidence)")
+            echo "FAIL: $test_name (warning/skip/caught exception evidence)"
+            echo "$output" | tail -10 | sed 's/^/  | /'
+            echo ""
+        elif [ "$marker_count" -eq 1 ]; then
             PASSES=$((PASSES + 1))
             result_status="pass"
             echo "PASS: $test_name"
         elif sql_test_strict; then
             FAILURES=$((FAILURES + 1))
-            FAILED_TESTS+=("$test_name (no PASS marker)")
-            echo "FAIL: $test_name (no PASS marker)"
+            FAILED_TESTS+=("$test_name (file completion markers=$marker_count)")
+            echo "FAIL: $test_name (file completion markers=$marker_count)"
             echo "$output" | tail -5 | sed 's/^/  | /'
             echo ""
         else
-            # No PASS marker but no error either — treat as pass with warning
+            # Local non-strict runs keep the historical permissive behavior.
             PASSES=$((PASSES + 1))
             result_status="pass"
-            echo "PASS: $test_name (no explicit PASS marker)"
+            echo "PASS: $test_name (completion markers=$marker_count)"
         fi
     else
         FAILURES=$((FAILURES + 1))

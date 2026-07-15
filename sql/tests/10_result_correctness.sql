@@ -127,6 +127,8 @@ DO $$ BEGIN
         WHERE a.log_y IS DISTINCT FROM b.log_y
     ) THEN RAISE EXCEPTION '10_correctness FAILED: log() results differ'; END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:10_result_correctness.assert_001'
+
 
 -- =========================================================================
 -- Text functions: length, lower, upper, btrim
@@ -290,7 +292,6 @@ DO $$ BEGIN
     ) THEN RAISE EXCEPTION '10_correctness FAILED: combined query results differ'; END IF;
 END $$;
 
-\echo 'PASS: 10_result_correctness'
 
 DROP TABLE IF EXISTS _rc_ints, _rc_floats, _rc_texts, _rc_timestamps, _rc_jsonb_data,
     _rc_math_off, _rc_math_on, _rc_sqrt_off, _rc_sqrt_on, _rc_log_off, _rc_log_on,
@@ -298,3 +299,5 @@ DROP TABLE IF EXISTS _rc_ints, _rc_floats, _rc_texts, _rc_timestamps, _rc_jsonb_
     _rc_combo, _rc_combo_off, _rc_combo_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:10_result_correctness'

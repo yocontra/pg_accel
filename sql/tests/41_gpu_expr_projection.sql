@@ -30,11 +30,10 @@ DO $$ BEGIN
         RAISE EXCEPTION '41_gpu_expr_projection FAILED: test 1 arithmetic projection differs';
     END IF;
 END $$;
-
 DROP TABLE IF EXISTS _proj1, _proj1_off, _proj1_on;
 COMMIT;
 
-\echo 'PASS: 41_gpu_expr_projection_arithmetic'
+\echo 'PGACCEL_ASSERT_OK:41_gpu_expr_projection.assert_002'
 
 -- =========================================================================
 -- Test 2: CASE in projection
@@ -80,7 +79,7 @@ END $$;
 DROP TABLE IF EXISTS _proj2, _proj2_off, _proj2_on;
 COMMIT;
 
-\echo 'PASS: 41_gpu_expr_projection_case'
+\echo 'PGACCEL_ASSERT_OK:41_gpu_expr_projection.assert_003'
 
 -- =========================================================================
 -- Test 3: COALESCE — SELECT COALESCE(nullable_val, 0.0)
@@ -117,7 +116,7 @@ END $$;
 DROP TABLE IF EXISTS _proj3, _proj3_off, _proj3_on;
 COMMIT;
 
-\echo 'PASS: 41_gpu_expr_projection_coalesce'
+\echo 'PGACCEL_ASSERT_OK:41_gpu_expr_projection.assert_004'
 
 -- =========================================================================
 -- Test 4: Nested arithmetic — SELECT sqrt(val * val + 1.0)
@@ -147,7 +146,9 @@ DO $$ BEGIN
     END IF;
 END $$;
 
+\echo 'PGACCEL_ASSERT_OK:41_gpu_expr_projection.assert_001'
+
 DROP TABLE IF EXISTS _proj4, _proj4_off, _proj4_on;
 COMMIT;
 
-\echo 'PASS: 41_gpu_expr_projection_nested_arithmetic'
+\echo 'PGACCEL_FILE_OK:41_gpu_expr_projection'

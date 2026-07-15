@@ -49,7 +49,10 @@ BEGIN
         RAISE EXCEPTION '34_expr_case FAILED: % rows differ', diff_count;
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:34_expr_case.assert_001'
 
-\echo '34_expr_case PASSED'
+
 
 DROP TABLE IF EXISTS expr_case_test, case_baseline, case_gpu;
+
+\echo 'PGACCEL_FILE_OK:34_expr_case'

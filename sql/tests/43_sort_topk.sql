@@ -39,11 +39,10 @@ DO $$ BEGIN
         RAISE EXCEPTION '43_sort_topk FAILED: test 1 ORDER BY val LIMIT 100 differs';
     END IF;
 END $$;
-
 DROP TABLE IF EXISTS _topk1, _topk1_off, _topk1_on;
 COMMIT;
 
-\echo 'PASS: 43_sort_topk_basic'
+\echo 'PGACCEL_ASSERT_OK:43_sort_topk.assert_002'
 
 -- =========================================================================
 -- Test 2: LIMIT with OFFSET — ORDER BY val LIMIT 50 OFFSET 25
@@ -82,7 +81,7 @@ END $$;
 DROP TABLE IF EXISTS _topk2, _topk2_off, _topk2_on;
 COMMIT;
 
-\echo 'PASS: 43_sort_topk_offset'
+\echo 'PGACCEL_ASSERT_OK:43_sort_topk.assert_003'
 
 -- =========================================================================
 -- Test 3: LIMIT 0 (edge case — should return 0 rows)
@@ -118,7 +117,7 @@ END $$;
 DROP TABLE IF EXISTS _topk3, _topk3_off, _topk3_on;
 COMMIT;
 
-\echo 'PASS: 43_sort_topk_limit_zero'
+\echo 'PGACCEL_ASSERT_OK:43_sort_topk.assert_004'
 
 -- =========================================================================
 -- Test 4: LIMIT > row count (should return all rows)
@@ -154,7 +153,7 @@ END $$;
 DROP TABLE IF EXISTS _topk4, _topk4_off, _topk4_on;
 COMMIT;
 
-\echo 'PASS: 43_sort_topk_limit_exceeds'
+\echo 'PGACCEL_ASSERT_OK:43_sort_topk.assert_005'
 
 -- =========================================================================
 -- Test 5: DESC + LIMIT — ORDER BY val DESC LIMIT 100
@@ -190,7 +189,9 @@ DO $$ BEGIN
     END IF;
 END $$;
 
+\echo 'PGACCEL_ASSERT_OK:43_sort_topk.assert_001'
+
 DROP TABLE IF EXISTS _topk5, _topk5_off, _topk5_on;
 COMMIT;
 
-\echo 'PASS: 43_sort_topk_desc'
+\echo 'PGACCEL_FILE_OK:43_sort_topk'

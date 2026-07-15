@@ -242,8 +242,9 @@ DO $$ BEGIN
         RAISE EXCEPTION '20_spatial_adv FAILED: test 6 (multi-geom types) differs';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:20_spatial_advanced.assert_001'
 
-\echo 'PASS: 20_spatial_advanced (6 tests)'
+
 
 DROP TABLE IF EXISTS _sa_points, _sa_polys, _sa_large,
     _sa1_off, _sa1_on, _sa2_off, _sa2_on,
@@ -251,3 +252,5 @@ DROP TABLE IF EXISTS _sa_points, _sa_polys, _sa_large,
     _sa5_off, _sa5_on, _sa6_off, _sa6_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:20_spatial_advanced'

@@ -107,9 +107,12 @@ DO $$ BEGIN
         RAISE EXCEPTION '03_large_table FAILED: aggregate results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:03_large_table.assert_001'
 
-\echo 'PASS: 03_large_table'
+
 
 DROP TABLE IF EXISTS _lt_data, _lt_off, _lt_on, _lt_agg_off, _lt_agg_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:03_large_table'

@@ -58,8 +58,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '84_01_plan FAILED: spatial predicate selected a pg_accel scan/join plan';
     END IF;
 END $$;
-
-\echo 'PASS: 84_01_plan_verify'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_002'
 
 -- =========================================================================
 -- 2. SAVEPOINT + ROLLBACK TO with ST_DWithin
@@ -90,6 +89,8 @@ DO $$ BEGIN
     END;
 END $$;
 
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_001'
+
 -- Re-run the query after rollback - should still work
 CREATE TEMP TABLE _tx02_after (id int);
 INSERT INTO _tx02_after
@@ -107,7 +108,7 @@ DROP TABLE IF EXISTS _tx02_after, _tx02_count;
 
 COMMIT;
 
-\echo 'PASS: 84_02_savepoint'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_003'
 
 -- =========================================================================
 -- 3. Cursor DECLARE/FETCH/CLOSE with spatial source
@@ -182,7 +183,7 @@ DROP TABLE _tx03_plan, _tx03_fetched, _tx03_direct;
 
 COMMIT;
 
-\echo 'PASS: 84_03_cursor'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_004'
 
 -- =========================================================================
 -- 4. WITH HOLD cursor across COMMIT
@@ -216,7 +217,7 @@ END $$;
 CLOSE hold_cur;
 DROP TABLE _tx04_hold;
 
-\echo 'PASS: 84_04_hold_cursor'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_005'
 
 -- =========================================================================
 -- 5. PREPARE/EXECUTE with spatial predicate, multiple param sets
@@ -292,7 +293,7 @@ END $$;
 DEALLOCATE spatial_prep;
 DROP TABLE _tx05_plan, _tx05_params, _tx05_on, _tx05_off;
 
-\echo 'PASS: 84_05_prepare'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_006'
 
 -- =========================================================================
 -- 6. ON CONFLICT DO UPDATE with spatial WHERE
@@ -330,7 +331,7 @@ DROP TABLE _tx06_target, _tx06_spatial_ids;
 
 COMMIT;
 
-\echo 'PASS: 84_06_on_conflict'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_007'
 
 -- =========================================================================
 -- 7. Nested savepoints 3 levels deep
@@ -392,7 +393,7 @@ DROP TABLE _tx07_l1, _tx07_after;
 
 COMMIT;
 
-\echo 'PASS: 84_07_nested_savepoints'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_008'
 
 -- =========================================================================
 -- 8. SERIALIZABLE isolation with spatial predicate
@@ -447,7 +448,7 @@ END $$;
 
 DROP TABLE _tx08_ser, _tx08_default;
 
-\echo 'PASS: 84_08_serializable'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_009'
 
 -- =========================================================================
 -- 9. REPEATABLE READ isolation with spatial predicate
@@ -475,7 +476,7 @@ END $$;
 
 DROP TABLE _tx09_rr, _tx09_default;
 
-\echo 'PASS: 84_09_repeatable_read'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_010'
 
 -- =========================================================================
 -- 10. Cursor SCROLL + FETCH BACKWARD
@@ -527,7 +528,7 @@ DROP TABLE _tx10_fwd, _tx10_bwd;
 
 COMMIT;
 
-\echo 'PASS: 84_10_scroll_cursor'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_011'
 
 -- =========================================================================
 -- 11. Rapid ON/OFF toggle - verify no state leaks
@@ -569,7 +570,7 @@ DROP TABLE _tx11_results;
 
 COMMIT;
 
-\echo 'PASS: 84_11_toggle'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_012'
 
 -- =========================================================================
 -- 12. Transaction-local temp table with spatial insert + rollback
@@ -606,7 +607,7 @@ DO $$ BEGIN
     END;
 END $$;
 
-\echo 'PASS: 84_12_on_commit_drop'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_013'
 
 -- =========================================================================
 -- 13. SAVEPOINT with spatial insert, partial rollback, then commit
@@ -647,7 +648,7 @@ DROP TABLE _tx13_committed, _tx13_rolled_back;
 
 COMMIT;
 
-\echo 'PASS: 84_13_partial_rollback'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_014'
 
 -- =========================================================================
 -- 14. Prepared statement with plan invalidation after toggle
@@ -672,7 +673,7 @@ END $$;
 DEALLOCATE tx14_prep;
 DROP TABLE _tx14_on, _tx14_off;
 
-\echo 'PASS: 84_14_prepare_toggle'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_015'
 
 -- =========================================================================
 -- 15. Multiple cursors simultaneously
@@ -735,7 +736,7 @@ DROP TABLE _tx15_a, _tx15_b;
 
 COMMIT;
 
-\echo 'PASS: 84_15_multi_cursor'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_016'
 
 -- =========================================================================
 -- 16. Spatial query inside DO block exception handler
@@ -767,7 +768,7 @@ END $$;
 
 COMMIT;
 
-\echo 'PASS: 84_16_exception_handler'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_017'
 
 -- =========================================================================
 -- 17. Spatial query with SET LOCAL (transaction-scoped GUC)
@@ -792,7 +793,7 @@ END $$;
 
 DROP TABLE _tx17_local;
 
-\echo 'PASS: 84_17_set_local'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_018'
 
 -- =========================================================================
 -- 18. SAVEPOINT + spatial query + RELEASE SAVEPOINT
@@ -821,7 +822,7 @@ DROP TABLE _tx18_data;
 
 COMMIT;
 
-\echo 'PASS: 84_18_release_savepoint'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_019'
 
 -- =========================================================================
 -- 19. Verify spatial results stable across repeated reads in RR
@@ -848,7 +849,7 @@ DROP TABLE _tx19_read1, _tx19_read2;
 
 COMMIT;
 
-\echo 'PASS: 84_19_rr_stable'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_020'
 
 -- =========================================================================
 -- 20. Spatial query in implicit transaction (autocommit)
@@ -873,7 +874,7 @@ END $$;
 
 DROP TABLE _tx20_auto, _tx20_auto_off;
 
-\echo 'PASS: 84_20_autocommit'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_021'
 
 -- =========================================================================
 -- 21. Large batch spatial query inside transaction
@@ -905,7 +906,7 @@ DROP TABLE _tx21_large, _tx21_large_off;
 
 COMMIT;
 
-\echo 'PASS: 84_21_large_batch_txn'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_022'
 
 -- =========================================================================
 -- 22. Abort and retry transaction with spatial query
@@ -937,7 +938,7 @@ DROP TABLE _tx22_after_error;
 
 COMMIT;
 
-\echo 'PASS: 84_22_abort_retry'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_023'
 
 -- =========================================================================
 -- 23. EXPLAIN ANALYZE in transaction
@@ -968,7 +969,7 @@ DROP TABLE _tx23_plan;
 
 COMMIT;
 
-\echo 'PASS: 84_23_explain_analyze'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_024'
 
 -- =========================================================================
 -- 24. Spatial query with SET constraints
@@ -992,7 +993,7 @@ DROP TABLE _tx24_deferred;
 
 COMMIT;
 
-\echo 'PASS: 84_24_deferred_constraints'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_025'
 
 -- =========================================================================
 -- 25. Final toggle stress: 20 rapid switches
@@ -1024,7 +1025,7 @@ BEGIN
     END LOOP;
 END $$;
 
-\echo 'PASS: 84_25_toggle_stress'
+\echo 'PGACCEL_ASSERT_OK:84_transaction_semantics.assert_026'
 
 -- =========================================================================
 -- Cleanup
@@ -1032,4 +1033,4 @@ END $$;
 
 DROP TABLE IF EXISTS _tx_points, _tx_polys, _tx01_plan;
 
-\echo 'PASS: 84_transaction_semantics'
+\echo 'PGACCEL_FILE_OK:84_transaction_semantics'

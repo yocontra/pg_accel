@@ -35,7 +35,7 @@ DO $$ BEGIN
         END IF;
     END;
 END $$;
-\echo 'PASS: 51_hash_agg_edge_t1_empty_table'
+\echo 'PGACCEL_ASSERT_OK:51_hash_agg_edge_cases.assert_002'
 DROP TABLE _e1_on, _e1_off, _edge_empty;
 
 -- =========================================================================
@@ -67,6 +67,7 @@ DO $$ BEGIN
             RAISE EXCEPTION '51_hash_agg_edge test 2 FAILED: single row should yield 1 group (off=%, on=%)',
                 cnt_off, cnt_on;
         END IF;
+        RAISE NOTICE 'PGACCEL_ASSERT_OK:51_hash_agg_edge_cases.assert_001';
     END;
     IF EXISTS (
         SELECT 1 FROM _e2_on a FULL OUTER JOIN _e2_off b ON a.category = b.category
@@ -76,7 +77,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '51_hash_agg_edge test 2 FAILED: single row results differ';
     END IF;
 END $$;
-\echo 'PASS: 51_hash_agg_edge_t2_single_row'
+\echo 'PGACCEL_ASSERT_OK:51_hash_agg_edge_cases.assert_003'
 DROP TABLE _e2_on, _e2_off, _edge_single;
 
 -- =========================================================================
@@ -108,7 +109,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '51_hash_agg_edge test 3 FAILED: boolean GROUP BY results differ';
     END IF;
 END $$;
-\echo 'PASS: 51_hash_agg_edge_t3_boolean_key'
+\echo 'PGACCEL_ASSERT_OK:51_hash_agg_edge_cases.assert_004'
 DROP TABLE _e3_on, _e3_off, _edge_bool;
 
 -- =========================================================================
@@ -139,7 +140,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '51_hash_agg_edge test 4 FAILED: ORDER BY aggregate results differ';
     END IF;
 END $$;
-\echo 'PASS: 51_hash_agg_edge_t4_order_by_agg'
+\echo 'PGACCEL_ASSERT_OK:51_hash_agg_edge_cases.assert_005'
 DROP TABLE _e4_on, _e4_off, _edge_order;
 
 -- =========================================================================
@@ -170,7 +171,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '51_hash_agg_edge test 5 FAILED: expression key results differ';
     END IF;
 END $$;
-\echo 'PASS: 51_hash_agg_edge_t5_expression_key'
+\echo 'PGACCEL_ASSERT_OK:51_hash_agg_edge_cases.assert_006'
 DROP TABLE _e5_on, _e5_off, _edge_expr;
 
-\echo 'PASS: 51_hash_agg_edge_cases (all tests)'
+\echo 'PGACCEL_FILE_OK:51_hash_agg_edge_cases'

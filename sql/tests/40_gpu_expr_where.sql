@@ -41,6 +41,8 @@ BEGIN
             rejection_reason;
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_001'
+
 
 CREATE TEMP TABLE _expr_w1_on AS
 SELECT count(*) AS cnt FROM _expr_w1 WHERE val > 500.0;
@@ -57,7 +59,7 @@ END $$;
 DROP TABLE IF EXISTS _expr_w1, _expr_w1_off, _expr_w1_on;
 COMMIT;
 
-\echo 'PASS: 40_gpu_expr_where_simple_comparison'
+\echo 'PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_002'
 
 -- =========================================================================
 -- Test 2: BETWEEN — WHERE val BETWEEN 200.0 AND 800.0
@@ -90,7 +92,7 @@ END $$;
 DROP TABLE IF EXISTS _expr_w2, _expr_w2_off, _expr_w2_on;
 COMMIT;
 
-\echo 'PASS: 40_gpu_expr_where_between'
+\echo 'PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_003'
 
 -- =========================================================================
 -- Test 3: Arithmetic — WHERE val * 2.0 + 10.0 > 1000.0
@@ -123,7 +125,7 @@ END $$;
 DROP TABLE IF EXISTS _expr_w3, _expr_w3_off, _expr_w3_on;
 COMMIT;
 
-\echo 'PASS: 40_gpu_expr_where_arithmetic'
+\echo 'PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_004'
 
 -- =========================================================================
 -- Test 4: Boolean logic — WHERE val > 300.0 AND val < 700.0
@@ -156,7 +158,7 @@ END $$;
 DROP TABLE IF EXISTS _expr_w4, _expr_w4_off, _expr_w4_on;
 COMMIT;
 
-\echo 'PASS: 40_gpu_expr_where_boolean_logic'
+\echo 'PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_005'
 
 -- =========================================================================
 -- Test 5: NULL handling — NULLs excluded by WHERE val > 500.0
@@ -190,7 +192,7 @@ END $$;
 DROP TABLE IF EXISTS _expr_w5, _expr_w5_off, _expr_w5_on;
 COMMIT;
 
-\echo 'PASS: 40_gpu_expr_where_null_handling'
+\echo 'PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_006'
 
 -- =========================================================================
 -- Test 6: IS NULL / IS NOT NULL
@@ -229,7 +231,7 @@ END $$;
 DROP TABLE IF EXISTS _expr_w6, _expr_w6_off, _expr_w6_on;
 COMMIT;
 
-\echo 'PASS: 40_gpu_expr_where_is_null'
+\echo 'PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_007'
 
 -- =========================================================================
 -- Test 7: CASE expression in WHERE
@@ -264,7 +266,7 @@ END $$;
 DROP TABLE IF EXISTS _expr_w7, _expr_w7_off, _expr_w7_on;
 COMMIT;
 
-\echo 'PASS: 40_gpu_expr_where_case'
+\echo 'PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_008'
 
 -- =========================================================================
 -- Test 8: Mixed types — WHERE id > 50000 AND val < 500.0
@@ -297,7 +299,7 @@ END $$;
 DROP TABLE IF EXISTS _expr_w8, _expr_w8_off, _expr_w8_on;
 COMMIT;
 
-\echo 'PASS: 40_gpu_expr_where_mixed_types'
+\echo 'PGACCEL_ASSERT_OK:40_gpu_expr_where.assert_009'
 
 -- =========================================================================
 -- Test 9: Verify correct count (actual math check)
@@ -324,4 +326,4 @@ END $$;
 DROP TABLE IF EXISTS _expr_w9, _expr_w9_on;
 COMMIT;
 
-\echo 'PASS: 40_gpu_expr_where_correct_count'
+\echo 'PGACCEL_FILE_OK:40_gpu_expr_where'

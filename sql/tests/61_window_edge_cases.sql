@@ -32,7 +32,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '61_window_edge_cases test 1 FAILED: empty table should return 0 rows';
     END IF;
 END $$;
-\echo 'PASS: 61_window_edge_cases_t1_empty'
+\echo 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_002'
 DROP TABLE _we1_on, _we1_off, _we_empty;
 
 -- =========================================================================
@@ -73,7 +73,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '61_window_edge_cases test 2 FAILED: single row results differ';
     END IF;
 END $$;
-\echo 'PASS: 61_window_edge_cases_t2_single_row'
+\echo 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_003'
 DROP TABLE _we2_on, _we2_off, _we_single;
 
 -- =========================================================================
@@ -107,7 +107,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '61_window_edge_cases test 3 FAILED: single partition results differ';
     END IF;
 END $$;
-\echo 'PASS: 61_window_edge_cases_t3_single_partition'
+\echo 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_004'
 DROP TABLE _we3_on, _we3_off, _we_one_part;
 
 -- =========================================================================
@@ -142,12 +142,13 @@ DO $$ BEGIN
     ) THEN
         RAISE EXCEPTION '61_window_edge_cases test 4 FAILED: unique partition results differ';
     END IF;
+    RAISE NOTICE 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_001';
     -- Every row should have rn=1
     IF EXISTS (SELECT 1 FROM _we4_on WHERE rn <> 1) THEN
         RAISE EXCEPTION '61_window_edge_cases test 4 FAILED: expected rn=1 for unique partitions';
     END IF;
 END $$;
-\echo 'PASS: 61_window_edge_cases_t4_unique_partitions'
+\echo 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_005'
 DROP TABLE _we4_on, _we4_off, _we_unique_part;
 
 -- =========================================================================
@@ -183,7 +184,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '61_window_edge_cases test 5 FAILED: LAG/LEAD boundary results differ';
     END IF;
 END $$;
-\echo 'PASS: 61_window_edge_cases_t5_lag_lead_boundaries'
+\echo 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_006'
 DROP TABLE _we5_on, _we5_off, _we_boundary;
 
 -- =========================================================================
@@ -220,7 +221,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '61_window_edge_cases test 6 FAILED: expected default for large offset';
     END IF;
 END $$;
-\echo 'PASS: 61_window_edge_cases_t6_lag_big_offset'
+\echo 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_007'
 DROP TABLE _we6_on, _we6_off, _we_biglag;
 
 -- =========================================================================
@@ -255,7 +256,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '61_window_edge_cases test 7 FAILED: NULL running SUM results differ';
     END IF;
 END $$;
-\echo 'PASS: 61_window_edge_cases_t7_null_running_sum'
+\echo 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_008'
 DROP TABLE _we7_on, _we7_off, _we_nullsum;
 
 -- =========================================================================
@@ -290,7 +291,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '61_window_edge_cases test 8 FAILED: WHERE + window results differ';
     END IF;
 END $$;
-\echo 'PASS: 61_window_edge_cases_t8_where_filter'
+\echo 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_009'
 DROP TABLE _we8_on, _we8_off, _we_filter;
 
 -- =========================================================================
@@ -325,7 +326,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '61_window_edge_cases test 9 FAILED: outer ORDER BY results differ';
     END IF;
 END $$;
-\echo 'PASS: 61_window_edge_cases_t9_outer_order_by'
+\echo 'PGACCEL_ASSERT_OK:61_window_edge_cases.assert_010'
 DROP TABLE _we9_on, _we9_off, _we_outer_order;
 
-\echo 'PASS: 61_window_edge_cases (all tests)'
+\echo 'PGACCEL_FILE_OK:61_window_edge_cases'

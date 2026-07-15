@@ -150,11 +150,14 @@ DO $$ BEGIN
         RAISE EXCEPTION '19_spatial FAILED: test 4 (ST_Intersects + agg) results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:19_spatial_predicates.assert_001'
 
-\echo 'PASS: 19_spatial_predicates (4 tests)'
+
 
 DROP TABLE IF EXISTS _sp_points, _sp_polys,
     _sp1_off, _sp1_on, _sp2_off, _sp2_on,
     _sp3_off, _sp3_on, _sp4_off, _sp4_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:19_spatial_predicates'

@@ -224,11 +224,14 @@ DO $$ BEGIN
         RAISE EXCEPTION '06_mixed FAILED: test 5 (correlated subquery) results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:06_mixed_queries.assert_001'
 
-\echo 'PASS: 06_mixed_queries'
+
 
 DROP TABLE IF EXISTS _mq_orders, _mq_customers,
     _mq1_off, _mq1_on, _mq2_off, _mq2_on, _mq3_off, _mq3_on,
     _mq4_off, _mq4_on, _mq5_off, _mq5_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:06_mixed_queries'

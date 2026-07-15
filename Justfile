@@ -351,9 +351,9 @@ test-matrix:
 test: test-matrix
     @echo "All tests passed."
 
-# Run the fail-closed Rust, C++/SYCL, and SQL-extension coverage gate for one
-# PG major. This starts the pgrx PostgreSQL cluster and runs the registered GPU
-# CTest suite, so it requires the same exclusive runtime lane as gpu-test.
+# Run the fail-closed Rust production-line, C++/SYCL host-object-line, and SQL
+# semantic-assertion gate for one PG major. This starts PostgreSQL and runs the
+# complete registered GPU CTest suite, so it requires a qualified Metal runner.
 coverage pg="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -366,8 +366,8 @@ coverage pg="":
     fi
     bash scripts/coverage_gate.sh "$pg"
 
-# Validate coverage scope, source inventories, parsers, and shell syntax
-# without starting PostgreSQL or touching a GPU device.
+# Validate fixed coverage scopes, the SQL assertion manifest, parsers, aggregate
+# negative cases, and shell syntax without starting PostgreSQL or a GPU device.
 coverage-audit:
     bash -n scripts/coverage_gate.sh sql/tests/run_all.sh
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_coverage_tools.py'

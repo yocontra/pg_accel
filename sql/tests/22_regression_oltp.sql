@@ -166,8 +166,9 @@ DO $$ BEGIN
         RAISE EXCEPTION '22_regression FAILED: test 7 (DELETE) differs';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:22_regression_oltp.assert_001'
 
-\echo 'PASS: 22_regression_oltp (7 tests)'
+
 
 DROP TABLE IF EXISTS _ro_users, _ro_tiny, _ro_insert_test,
     _ro1_off, _ro1_on, _ro2_off, _ro2_on,
@@ -176,3 +177,5 @@ DROP TABLE IF EXISTS _ro_users, _ro_tiny, _ro_insert_test,
     _ro7_off, _ro7_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:22_regression_oltp'

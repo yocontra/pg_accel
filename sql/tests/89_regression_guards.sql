@@ -16,6 +16,8 @@ DO $$ DECLARE v int; BEGIN
         RAISE EXCEPTION '89_regression: SELECT 1 failed';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:89_regression_guards.assert_001'
+
 
 -- =========================================================================
 -- 2. PK lookup on small table -- NOT intercepted (no Custom Scan)
@@ -366,7 +368,6 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 89_regression_guards (20 tests)'
 
 DROP TABLE IF EXISTS _rg_small, _rg_tiny_geo, _rg_dml, _rg_json_pts, _rg_large, _rg_empty,
     _rg_plan_pk, _rg_plan_tiny_geo, _rg_json_plan, _rg_toggle_plan,
@@ -374,3 +375,5 @@ DROP TABLE IF EXISTS _rg_small, _rg_tiny_geo, _rg_dml, _rg_json_pts, _rg_large, 
     _rg_large_off, _rg_large_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:89_regression_guards'

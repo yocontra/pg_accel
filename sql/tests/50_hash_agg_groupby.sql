@@ -36,7 +36,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 1 FAILED: GROUP BY results differ';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t1_simple'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_002'
 DROP TABLE _g1_on, _g1_off;
 
 -- =========================================================================
@@ -70,7 +70,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 2 FAILED: NULL group key results differ';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t2_null_key'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_003'
 DROP TABLE _g2_on, _g2_off, _agg_nullkey;
 
 -- =========================================================================
@@ -103,7 +103,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 3 FAILED: NULL val aggregate results differ';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t3_null_values'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_004'
 DROP TABLE _g3_on, _g3_off, _agg_nullval;
 
 -- =========================================================================
@@ -134,7 +134,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 4 FAILED: high cardinality results differ';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t4_high_cardinality'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_005'
 DROP TABLE _g4_on, _g4_off, _agg_highcard;
 
 -- =========================================================================
@@ -167,7 +167,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 5 FAILED: single group results differ';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t5_single_group'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_006'
 DROP TABLE _g5_on, _g5_off, _agg_single;
 
 -- =========================================================================
@@ -193,7 +193,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 6 FAILED: HAVING clause results differ';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t6_having'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_007'
 DROP TABLE _g6_on, _g6_off;
 
 -- =========================================================================
@@ -218,6 +218,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 7 FAILED: grouped AVG selected a GpuAccelAgg plan';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_001'
 DROP TABLE _g7_plan;
 
 SET pg_accel.enabled = off;
@@ -238,7 +239,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 7 FAILED: AVG results differ';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t7_avg'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_008'
 DROP TABLE _g7_on, _g7_off;
 
 -- =========================================================================
@@ -276,7 +277,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 8 FAILED: expected COUNT(*) > COUNT(val) with NULLs';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t8_count_star_vs_col'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_009'
 DROP TABLE _g8_on, _g8_off, _agg_cnt;
 
 -- =========================================================================
@@ -316,7 +317,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 9 FAILED: int8 key results differ';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t9_multiple_types'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_010'
 DROP TABLE _g9a_on, _g9a_off, _g9b_on, _g9b_off, _agg_types;
 
 -- =========================================================================
@@ -351,7 +352,7 @@ DO $$ BEGIN
         END IF;
     END;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t10_row_count'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_011'
 DROP TABLE _g10_on, _g10_off;
 
 -- =========================================================================
@@ -434,10 +435,10 @@ DO $$ BEGIN
         RAISE EXCEPTION '50_hash_agg_groupby test 11 FAILED: SUM(bigint) results differ';
     END IF;
 END $$;
-\echo 'PASS: 50_hash_agg_groupby_t11_sum_bigint_parallel_gate'
+\echo 'PGACCEL_ASSERT_OK:50_hash_agg_groupby.assert_012'
 DROP TABLE _g11_on, _g11_off, _g11_plan, _agg_bigint_parallel;
 
 -- Cleanup shared data
 DROP TABLE _agg_data;
 
-\echo 'PASS: 50_hash_agg_groupby (all tests)'
+\echo 'PGACCEL_FILE_OK:50_hash_agg_groupby'

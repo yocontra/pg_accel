@@ -67,6 +67,8 @@ DO $$ BEGIN
         RAISE EXCEPTION '88_concurrent: parallel + spatial selected a pg_accel scan/join plan';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:88_concurrent_features.assert_001'
+
 
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _cf_par_off AS
@@ -485,7 +487,6 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 88_concurrent_features (15 tests)'
 
 DROP VIEW IF EXISTS _cf_view;
 DROP TABLE IF EXISTS _cf_matview;
@@ -503,3 +504,5 @@ DROP TABLE IF EXISTS _cf_points, _cf_polys, _cf_ref, _cf_h3pts,
     _cf_combo_off, _cf_combo_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:88_concurrent_features'

@@ -30,11 +30,10 @@ DO $$ BEGIN
         RAISE EXCEPTION '42_gpu_expr_edge_cases FAILED: test 1 large int arithmetic differs';
     END IF;
 END $$;
-
 DROP TABLE IF EXISTS _edge1, _edge1_off, _edge1_on;
 COMMIT;
 
-\echo 'PASS: 42_gpu_expr_edge_cases_large_int'
+\echo 'PGACCEL_ASSERT_OK:42_gpu_expr_edge_cases.assert_002'
 
 -- =========================================================================
 -- Test 2: Division by zero — WHERE x / NULLIF(x - x, 0) > 0
@@ -71,7 +70,7 @@ END $$;
 DROP TABLE IF EXISTS _edge2, _edge2_off, _edge2_on;
 COMMIT;
 
-\echo 'PASS: 42_gpu_expr_edge_cases_div_by_zero'
+\echo 'PGACCEL_ASSERT_OK:42_gpu_expr_edge_cases.assert_003'
 
 -- =========================================================================
 -- Test 3: NaN comparisons — PG says NaN = NaN is TRUE
@@ -117,7 +116,7 @@ END $$;
 DROP TABLE IF EXISTS _edge3, _edge3_off, _edge3_on;
 COMMIT;
 
-\echo 'PASS: 42_gpu_expr_edge_cases_nan'
+\echo 'PGACCEL_ASSERT_OK:42_gpu_expr_edge_cases.assert_004'
 
 -- =========================================================================
 -- Test 4: Empty table — WHERE val > 0 on 0 rows
@@ -152,7 +151,7 @@ END $$;
 DROP TABLE IF EXISTS _edge4, _edge4_off, _edge4_on;
 COMMIT;
 
-\echo 'PASS: 42_gpu_expr_edge_cases_empty_table'
+\echo 'PGACCEL_ASSERT_OK:42_gpu_expr_edge_cases.assert_005'
 
 -- =========================================================================
 -- Test 5: All rows pass — WHERE val >= 0.0 (selectivity = 1.0)
@@ -188,7 +187,7 @@ END $$;
 DROP TABLE IF EXISTS _edge5, _edge5_off, _edge5_on;
 COMMIT;
 
-\echo 'PASS: 42_gpu_expr_edge_cases_all_pass'
+\echo 'PGACCEL_ASSERT_OK:42_gpu_expr_edge_cases.assert_006'
 
 -- =========================================================================
 -- Test 6: No rows pass — WHERE val < -999999.0 (selectivity = 0.0)
@@ -222,7 +221,9 @@ DO $$ BEGIN
     END IF;
 END $$;
 
+\echo 'PGACCEL_ASSERT_OK:42_gpu_expr_edge_cases.assert_001'
+
 DROP TABLE IF EXISTS _edge6, _edge6_off, _edge6_on;
 COMMIT;
 
-\echo 'PASS: 42_gpu_expr_edge_cases_no_pass'
+\echo 'PGACCEL_FILE_OK:42_gpu_expr_edge_cases'

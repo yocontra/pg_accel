@@ -136,11 +136,14 @@ DO $$ BEGIN
         RAISE EXCEPTION '05_quals FAILED: test 5 (NOT conditions) results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:05_quals_correctness.assert_001'
 
-\echo 'PASS: 05_quals_correctness'
+
 
 DROP TABLE IF EXISTS _qc_data,
     _qc1_off, _qc1_on, _qc2_off, _qc2_on, _qc3_off, _qc3_on,
     _qc4_off, _qc4_on, _qc5_off, _qc5_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:05_quals_correctness'

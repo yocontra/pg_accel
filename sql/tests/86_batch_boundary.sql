@@ -33,6 +33,8 @@ DO $$ DECLARE v_cnt bigint; BEGIN
         RAISE EXCEPTION '86_batch: empty table should return 0 rows';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:86_batch_boundary.assert_001'
+
 
 -- =========================================================================
 -- 2. Single row table (1 row)
@@ -535,7 +537,6 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 86_batch_boundary (20 tests)'
 
 DROP TABLE IF EXISTS _bb_ref, _bb_0, _bb_4095, _bb_4096, _bb_4097,
     _bb_8192, _bb_8193, _bb_nulls, _bb_grp, _bb_tiny,
@@ -547,3 +548,5 @@ DROP TABLE IF EXISTS _bb_ref, _bb_0, _bb_4095, _bb_4096, _bb_4097,
     _bb_tiny_off, _bb_tiny_on, _bb_agg_off, _bb_agg_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:86_batch_boundary'

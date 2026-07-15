@@ -96,8 +96,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '85_si_plan: ST_Intersects selected a pg_accel spatial plan';
     END IF;
 END $$;
-
-\echo 'PASS: 85_si_plan_optional'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_002'
 
 -- 1. Point x Polygon intersection
 SET pg_accel.enabled = off;
@@ -120,7 +119,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_si01_point_polygon'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_003'
 
 -- 2. Line x Polygon intersection
 SET pg_accel.enabled = off;
@@ -143,7 +142,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_si02_line_polygon'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_004'
 
 -- 3. Polygon x Polygon intersection
 SET pg_accel.enabled = off;
@@ -166,7 +165,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_si03_polygon_polygon'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_005'
 
 -- 4. Self-intersects (point with zero-area polygon)
 SET pg_accel.enabled = off;
@@ -189,7 +188,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_si04_zero_area'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_006'
 
 -- =========================================================================
 -- PostGIS: ST_CONTAINS stays native until a covered GPU path exists
@@ -214,7 +213,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_sc_plan_optional'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_007'
 
 -- 5. Point in polygon (global grid)
 SET pg_accel.enabled = off;
@@ -237,7 +236,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_sc05_point_in_poly'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_008'
 
 -- 6. Polygon contains polygon
 SET pg_accel.enabled = off;
@@ -260,7 +259,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_sc06_poly_contains_poly'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_009'
 
 -- 7. Contains with near-pole points
 SET pg_accel.enabled = off;
@@ -289,7 +288,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_sc07_pole_region'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_010'
 
 -- =========================================================================
 -- PostGIS: ST_WITHIN stays native until a covered GPU path exists
@@ -314,7 +313,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_sw_plan_optional'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_011'
 
 -- 8. ST_Within should match ST_Contains (inverse)
 SET pg_accel.enabled = off;
@@ -337,6 +336,8 @@ DO $$ BEGIN
     END IF;
 END $$;
 
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_020'
+
 -- Cross-check: ST_Within(p,poly) should equal ST_Contains(poly,p)
 DO $$ BEGIN
     IF (SELECT count(*) FROM _fm_sw08_off) IS DISTINCT FROM (SELECT count(*) FROM _fm_sc05_off) THEN
@@ -344,7 +345,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_sw08_within_vs_contains'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_012'
 
 -- 9. Point within antimeridian-spanning polygon
 SET pg_accel.enabled = off;
@@ -371,7 +372,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_sw09_antimeridian'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_013'
 
 -- =========================================================================
 -- PostGIS: ST_DWITHIN stays native until a covered GPU path exists
@@ -397,7 +398,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_dw_plan_optional'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_014'
 
 -- 10. Distance = 0 (same point)
 SET pg_accel.enabled = off;
@@ -417,12 +418,13 @@ DO $$ BEGIN
     IF (SELECT count(*) FROM _fm_dw10_on) IS DISTINCT FROM (SELECT count(*) FROM _fm_points) THEN
         RAISE EXCEPTION '85_dw10 FAILED: not all points within 0m of themselves';
     END IF;
+    RAISE NOTICE 'PGACCEL_ASSERT_OK:85_function_matrix.assert_001';
     IF (SELECT count(*) FROM _fm_dw10_on) IS DISTINCT FROM (SELECT count(*) FROM _fm_dw10_off) THEN
         RAISE EXCEPTION '85_dw10 FAILED: distance=0 counts differ ON vs OFF';
     END IF;
 END $$;
 
-\echo 'PASS: 85_dw10_zero_distance'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_015'
 
 -- 11. Very close (1m)
 SET pg_accel.enabled = off;
@@ -447,7 +449,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_dw11_very_close'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_016'
 
 -- 12. Very far (20000km - nearly global)
 SET pg_accel.enabled = off;
@@ -472,7 +474,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_dw12_very_far'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_017'
 
 -- 13. Across antimeridian
 SET pg_accel.enabled = off;
@@ -493,7 +495,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_dw13_antimeridian'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_018'
 
 -- 14. Near poles
 SET pg_accel.enabled = off;
@@ -514,7 +516,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_dw14_poles'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_019'
 
 -- =========================================================================
 -- GpuH3: Setup
@@ -570,8 +572,6 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h3c_plan_optional'
-
 -- 15. Resolution 0 (coarsest)
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _fm_h315_off AS
@@ -590,7 +590,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h315_res0'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_021'
 
 -- 16. Resolution 5 (medium)
 SET pg_accel.enabled = off;
@@ -610,7 +610,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h316_res5'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_022'
 
 -- 17. Resolution 10 (fine)
 SET pg_accel.enabled = off;
@@ -630,7 +630,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h317_res10'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_023'
 
 -- 18. Resolution 15 (finest)
 SET pg_accel.enabled = off;
@@ -650,7 +650,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h318_res15'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_024'
 
 -- =========================================================================
 -- Native H3: h3_get_resolution
@@ -689,7 +689,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_gr_plan_native'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_025'
 
 -- 19. Resolution round-trip: all resolutions 0-15
 SET pg_accel.enabled = off;
@@ -715,7 +715,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h319_resolution_roundtrip'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_026'
 
 -- =========================================================================
 -- Native H3: h3_cell_to_parent
@@ -740,7 +740,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_cp_plan_native'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_027'
 
 -- 20. Parent at resolution 0
 SET pg_accel.enabled = off;
@@ -764,7 +764,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h320_parent_res0'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_028'
 
 -- 21. Parent one level up
 SET pg_accel.enabled = off;
@@ -788,7 +788,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h321_parent_one_up'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_029'
 
 -- 22. Parent at same resolution (should return same cell)
 SET pg_accel.enabled = off;
@@ -815,7 +815,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h322_parent_same_res'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_030'
 
 -- =========================================================================
 -- Native H3: h3_grid_distance
@@ -853,7 +853,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_gd_plan_native'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_031'
 
 -- 23. Grid distance between pairs
 SET pg_accel.enabled = off;
@@ -875,7 +875,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h323_grid_distance'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_032'
 
 -- 24. Distance to self (should be 0)
 SET pg_accel.enabled = off;
@@ -900,7 +900,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h324_self_distance'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_033'
 
 -- 25. Adjacent cells (distance should be 1)
 CREATE TEMP TABLE _fm_h3adj AS
@@ -932,7 +932,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h325_adjacent'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_034'
 
 -- =========================================================================
 -- GpuH3: Combined H3 pipeline
@@ -970,7 +970,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h326_pipeline'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_035'
 
 -- =========================================================================
 -- GpuH3: Equator and prime meridian
@@ -998,27 +998,18 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h327_equator'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_036'
 
 -- =========================================================================
--- GpuRaster: conditional tests (skip if PostGIS raster not available)
+-- GpuRaster: required release tests (PostGIS raster must be available)
 -- =========================================================================
 
 -- 28-30. Raster operations (ST_MapAlgebra, ST_Clip, ST_Reclass)
 DO $$
-DECLARE
-    has_raster boolean;
 BEGIN
-    -- Check if raster functions are available
-    BEGIN
-        PERFORM ST_MakeEmptyRaster(10, 10, 0, 0, 1);
-        has_raster := true;
-    EXCEPTION WHEN undefined_function THEN
-        has_raster := false;
-        RAISE WARNING '85_raster: PostGIS raster not available, skipping raster tests';
-    END;
-
-    IF has_raster THEN
+    -- Release coverage requires PostGIS raster. An unavailable function or any
+    -- raster operation error propagates through ON_ERROR_STOP and fails the file.
+    PERFORM ST_MakeEmptyRaster(10, 10, 0, 0, 1);
         -- Create raster test table
         EXECUTE '
             CREATE TEMP TABLE _fm_rasters (
@@ -1078,9 +1069,6 @@ BEGIN
                     END IF;
                 END $inner$';
 
-            RAISE NOTICE 'PASS: 85_r28_reclass';
-        EXCEPTION WHEN OTHERS THEN
-            RAISE WARNING '85_r28: ST_Reclass test skipped: %', SQLERRM;
         END;
 
         -- Test 29: ST_Clip (clip raster by polygon)
@@ -1126,9 +1114,6 @@ BEGIN
                     END IF;
                 END $inner$';
 
-            RAISE NOTICE 'PASS: 85_r29_clip';
-        EXCEPTION WHEN OTHERS THEN
-            RAISE WARNING '85_r29: ST_Clip test skipped: %', SQLERRM;
         END;
 
         -- Test 30: ST_MapAlgebra (unary)
@@ -1174,19 +1159,15 @@ BEGIN
                     END IF;
                 END $inner$';
 
-            RAISE NOTICE 'PASS: 85_r30_mapalgebra';
-        EXCEPTION WHEN OTHERS THEN
-            RAISE WARNING '85_r30: ST_MapAlgebra test skipped: %', SQLERRM;
         END;
 
         -- Cleanup raster tables
         EXECUTE 'DROP TABLE IF EXISTS _fm_rasters,
             _fm_r28_off, _fm_r28_on, _fm_r29_off, _fm_r29_on,
             _fm_r30_off, _fm_r30_on';
-    END IF;
 END $$;
 
-\echo 'PASS: 85_raster_group (or skipped with warning)'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_037'
 
 -- =========================================================================
 -- Combined spatial + H3 queries
@@ -1220,7 +1201,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_c31_spatial_then_h3'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_038'
 
 -- 32. H3 GROUP BY after spatial filter
 SET pg_accel.enabled = off;
@@ -1253,7 +1234,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_c32_h3_groupby_spatial'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_039'
 
 -- =========================================================================
 -- Empty geometry edge cases
@@ -1282,7 +1263,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_e33_empty_geom'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_040'
 
 -- 34. Point ST_Contains with empty polygon
 SET pg_accel.enabled = off;
@@ -1306,7 +1287,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_e34_empty_polygon'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_041'
 
 -- 35. ST_DWithin with very large distance (circumference)
 SET pg_accel.enabled = off;
@@ -1331,7 +1312,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_e35_earth_circumference'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_042'
 
 -- =========================================================================
 -- H3 with polar/edge inputs
@@ -1357,7 +1338,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h336_polar_h3'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_043'
 
 -- 37. H3 at antimeridian
 SET pg_accel.enabled = off;
@@ -1384,7 +1365,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_h337_antimeridian_h3'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_044'
 
 -- =========================================================================
 -- Multiple spatial functions in single query
@@ -1415,7 +1396,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_m38_intersects_dwithin'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_045'
 
 -- 39. ST_Contains + ST_Within + ST_Intersects (all three)
 SET pg_accel.enabled = off;
@@ -1442,7 +1423,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_m39_triple_spatial'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_046'
 
 -- 40. All four spatial functions in one query
 SET pg_accel.enabled = off;
@@ -1478,7 +1459,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_m40_four_spatial'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_047'
 
 -- =========================================================================
 -- Type combination matrix
@@ -1507,7 +1488,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_t41_point_point'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_048'
 
 -- 42. Line x Line (ST_Intersects)
 SET pg_accel.enabled = off;
@@ -1532,7 +1513,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_t42_line_line'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_049'
 
 -- =========================================================================
 -- Large result set correctness
@@ -1567,7 +1548,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 85_l43_large_result'
+\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_050'
 
 -- =========================================================================
 -- Cleanup
@@ -1619,6 +1600,7 @@ DROP TABLE IF EXISTS
     _fm_t42_off, _fm_t42_on,
     _fm_l43_off, _fm_l43_on;
 
-\echo 'PASS: 85_function_matrix'
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:85_function_matrix'

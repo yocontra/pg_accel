@@ -115,6 +115,8 @@ DO $$ BEGIN
         RAISE EXCEPTION '81_degen FAILED: st_intersects selected a pg_accel spatial plan';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_001'
+
 
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _dg_t1_off AS
@@ -140,7 +142,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T1 st_intersects with degenerate geoms'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_002'
 
 -- =========================================================================
 -- Test 2: ST_Contains with degenerate geoms (arg1 = normal, arg2 = degen)
@@ -190,7 +192,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T2 st_contains with degenerate geoms'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_003'
 
 -- =========================================================================
 -- Test 3: ST_Within with degenerate geoms (arg1 = degen, arg2 = normal)
@@ -240,7 +242,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T3 st_within with degenerate geoms'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_004'
 
 -- =========================================================================
 -- Test 4: ST_DWithin with degenerate geoms
@@ -293,7 +295,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T4 st_dwithin with degenerate geoms'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_005'
 
 -- =========================================================================
 -- Test 5: Per-degenerate-type explicit cross-product with ST_Intersects
@@ -324,7 +326,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T5 per-type st_intersects cross-product (500 combos)'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_006'
 
 -- =========================================================================
 -- Test 6: Per-degenerate-type cross-product with ST_Contains
@@ -354,7 +356,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T6 per-type st_contains cross-product (500 combos)'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_007'
 
 -- =========================================================================
 -- Test 7: Per-degenerate-type cross-product with ST_Within
@@ -384,7 +386,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T7 per-type st_within cross-product (500 combos)'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_008'
 
 -- =========================================================================
 -- Test 8: Per-degenerate-type cross-product with ST_DWithin
@@ -416,7 +418,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T8 per-type st_dwithin cross-product'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_009'
 
 -- =========================================================================
 -- Test 9: Degenerate-vs-degenerate cross-product (20x20 = 400 combos)
@@ -452,7 +454,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T9 degen-vs-degen cross-product (1200 predicate evals)'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_010'
 
 -- =========================================================================
 -- Test 10: High-vertex polygons (1K, 10K, 50K vertices)
@@ -540,7 +542,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T10 high-vertex polygon containment (1K, 10K, 50K)'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_011'
 
 -- =========================================================================
 -- Test 11: High-vertex polygon with ST_Intersects
@@ -570,7 +572,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T11 high-vertex polygon st_intersects'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_012'
 
 -- =========================================================================
 -- Test 12: Coordinate extremes
@@ -623,7 +625,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T12 coordinate extremes (600 predicate evals)'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_013'
 
 -- =========================================================================
 -- Test 13: Reversed arg positions (predicate symmetry/asymmetry checks)
@@ -676,7 +678,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T13 reversed arg positions + symmetry (3000 predicate evals)'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_014'
 
 -- =========================================================================
 -- Test 14: Spatial aggregate on degenerate geoms
@@ -716,13 +718,12 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 81_degen T14 spatial aggregate on degenerate geoms'
+\echo 'PGACCEL_ASSERT_OK:81_degenerate_geometry.assert_015'
 
 -- =========================================================================
 -- Final summary
 -- =========================================================================
 
-\echo 'PASS: 81_degenerate_geometry (100+ test cases across 14 groups)'
 
 DROP TABLE IF EXISTS
     _dg_geoms, _dg_ref, _dg_bulk, _dg_highvert, _dg_extremes,
@@ -737,3 +738,5 @@ DROP TABLE IF EXISTS
     _dg_t14_off, _dg_t14_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:81_degenerate_geometry'

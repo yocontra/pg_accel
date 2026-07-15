@@ -22,7 +22,7 @@ just deny                # license/advisory policy
 just audit               # cargo-audit using deny.toml's ignored set
 just doc-parity          # documentation citation/GUC/capability parity
 just pg-version-audit    # PostgreSQL-version plumbing audit
-just coverage            # Rust, C++/SYCL, and SQL coverage; each layer gates at 90%
+just coverage            # Rust/C++ lines plus fixed-manifest SQL assertions; each layer gates at 90%
 just test                # pgrx test matrix
 just gpu-build           # build the AdaptiveCpp/SYCL kernel library
 just gpu-test            # run the standalone GPU kernel suite

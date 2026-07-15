@@ -41,6 +41,7 @@ DO $$ BEGIN
     IF (SELECT count(*) FROM _hj1_on) <> (SELECT count(*) FROM _hj1_off) THEN
         RAISE EXCEPTION '55_hash_join test 1 FAILED: row count mismatch';
     END IF;
+    RAISE NOTICE 'PGACCEL_ASSERT_OK:55_hash_join.assert_001';
     IF EXISTS (
         SELECT 1 FROM _hj1_on a FULL OUTER JOIN _hj1_off b ON a.order_id = b.order_id
         WHERE a.customer_id IS DISTINCT FROM b.customer_id
@@ -50,7 +51,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '55_hash_join test 1 FAILED: join values differ';
     END IF;
 END $$;
-\echo 'PASS: 55_hash_join_t1_simple_equi'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_002'
 DROP TABLE _hj1_on, _hj1_off;
 
 -- =========================================================================
@@ -86,7 +87,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '55_hash_join test 2 FAILED: NULL count mismatch in LEFT JOIN';
     END IF;
 END $$;
-\echo 'PASS: 55_hash_join_t2_left_join'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_003'
 DROP TABLE _hj2_on, _hj2_off, _hj_orders_extra;
 
 -- =========================================================================
@@ -122,7 +123,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '55_hash_join test 3 FAILED: NULL key rows matched';
     END IF;
 END $$;
-\echo 'PASS: 55_hash_join_t3_null_keys'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_004'
 DROP TABLE _hj3_on, _hj3_off, _hj_orders_null;
 
 -- =========================================================================
@@ -161,7 +162,7 @@ DO $$ BEGIN
             (SELECT count(*) FROM _hj4_on), (SELECT count(*) FROM _hj4_off);
     END IF;
 END $$;
-\echo 'PASS: 55_hash_join_t4_many_to_many'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_005'
 DROP TABLE _hj4_on, _hj4_off, _hj_m2m_a, _hj_m2m_b;
 
 -- =========================================================================
@@ -197,7 +198,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '55_hash_join test 5 FAILED: large join results differ';
     END IF;
 END $$;
-\echo 'PASS: 55_hash_join_t5_large_inner'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_006'
 DROP TABLE _hj5_on, _hj5_off, _hj_large_a, _hj_large_b;
 
 -- =========================================================================
@@ -230,7 +231,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '55_hash_join test 6 FAILED: join+WHERE values differ';
     END IF;
 END $$;
-\echo 'PASS: 55_hash_join_t6_join_where'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_007'
 DROP TABLE _hj6_on, _hj6_off;
 
 -- =========================================================================
@@ -271,7 +272,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '55_hash_join test 7 FAILED: int8 join values differ';
     END IF;
 END $$;
-\echo 'PASS: 55_hash_join_t7_int8_key'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_008'
 DROP TABLE _hj7_on, _hj7_off, _hj_i8_a, _hj_i8_b;
 
 -- =========================================================================
@@ -308,7 +309,7 @@ DO $$ BEGIN
         RAISE EXCEPTION '55_hash_join test 8 FAILED: float8 join row count mismatch';
     END IF;
 END $$;
-\echo 'PASS: 55_hash_join_t8_float8_key'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_009'
 DROP TABLE _hj8_on, _hj8_off, _hj_f8_a, _hj_f8_b;
 
 -- =========================================================================
@@ -343,7 +344,7 @@ DO $$ BEGIN
         END IF;
     END;
 END $$;
-\echo 'PASS: 55_hash_join_t9_row_count'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_010'
 DROP TABLE _hj9_on, _hj9_off;
 
 -- =========================================================================
@@ -386,9 +387,9 @@ BEGIN
     END IF;
 END $$;
 COMMIT;
-\echo 'PASS: 55_hash_join_t10_declines_cpu_fallback'
+\echo 'PGACCEL_ASSERT_OK:55_hash_join.assert_011'
 
 -- Cleanup shared data
 DROP TABLE _hj_orders, _hj_customers;
 
-\echo 'PASS: 55_hash_join (all tests)'
+\echo 'PGACCEL_FILE_OK:55_hash_join'

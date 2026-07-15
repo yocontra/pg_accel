@@ -138,8 +138,9 @@ DO $$ BEGIN
         RAISE EXCEPTION '16_limit FAILED: test 5 row count differs';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:16_limit_offset.assert_001'
 
-\echo 'PASS: 16_limit_offset (5 tests)'
+
 
 DROP TABLE IF EXISTS _lo_data,
     _lo1_off, _lo1_on, _lo2_off, _lo2_on,
@@ -147,3 +148,5 @@ DROP TABLE IF EXISTS _lo_data,
     _lo5_off, _lo5_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:16_limit_offset'

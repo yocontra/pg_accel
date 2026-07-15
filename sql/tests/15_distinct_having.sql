@@ -171,8 +171,9 @@ DO $$ BEGIN
         RAISE EXCEPTION '15_dh FAILED: test 6 (DISTINCT + WHERE) results differ';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:15_distinct_having.assert_001'
 
-\echo 'PASS: 15_distinct_having (6 tests)'
+
 
 DROP TABLE IF EXISTS _dh_data,
     _dh1_off, _dh1_on, _dh2_off, _dh2_on,
@@ -180,3 +181,5 @@ DROP TABLE IF EXISTS _dh_data,
     _dh5_off, _dh5_on, _dh6_off, _dh6_on;
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:15_distinct_having'

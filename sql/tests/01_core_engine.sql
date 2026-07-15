@@ -14,6 +14,8 @@ DO $$ DECLARE v text; BEGIN
         RAISE EXCEPTION '01_core_engine FAILED: pg_accel_version() returned NULL or empty';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:01_core_engine.assert_001'
+
 
 -- =========================================================================
 -- Test 2: pg_accel_stats() returns a row
@@ -85,4 +87,4 @@ DROP TABLE IF EXISTS _ce_data, _ce_off, _ce_on;
 
 COMMIT;
 
-\echo 'PASS: 01_core_engine'
+\echo 'PGACCEL_FILE_OK:01_core_engine'

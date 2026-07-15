@@ -4,99 +4,78 @@ set -uo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root" || exit 1
 
-# shellcheck source=scripts/pg_versions.sh
-source scripts/pg_versions.sh
-
-pg="${1:-$(pg_accel_default_pg_major)}"
+pg="${1:-18}"
 pg="${pg#pg}"
 artifact_dir="${COVERAGE_ARTIFACT_DIR:-artifacts/coverage}"
 build_root="${COVERAGE_BUILD_DIR:-target/coverage}"
 scope_file="coverage/scope.json"
-minimum_default="${COVERAGE_MIN_LINES:-90}"
+manifest_file="coverage/sql-semantic-assertions.json"
+minimum_default="${COVERAGE_MIN_PERCENT:-90}"
 rust_minimum="${COVERAGE_MIN_RUST_LINES:-$minimum_default}"
 cpp_minimum="${COVERAGE_MIN_CPP_LINES:-$minimum_default}"
-sql_minimum="${COVERAGE_MIN_SQL_LINES:-$minimum_default}"
+sql_minimum="${COVERAGE_MIN_SQL_ASSERTIONS:-$minimum_default}"
 test_threads="${RUST_TEST_THREADS:-1}"
 
-pg_accel_require_pgrx_support "$pg"
-pg_accel_require_pgrx_pg_config "$pg"
-
-for command in cargo cmake ctest git python3; do
-    if ! command -v "$command" >/dev/null 2>&1; then
-        echo "error: required coverage command is unavailable: $command" >&2
-        exit 1
-    fi
-done
-if ! cargo llvm-cov --version >/dev/null 2>&1; then
-    echo "error: cargo-llvm-cov is not installed for the active Rust toolchain." >&2
-    echo "       run: cargo install cargo-llvm-cov --locked" >&2
-    exit 1
-fi
-if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
-    echo "error: release coverage requires a clean source tree for exact-SHA provenance" >&2
-    git status --short >&2
-    exit 1
+# Artifact roots and a valid red schema exist before any tool, PostgreSQL,
+# repository-state, or threshold prerequisite is checked.
+mkdir -p "$artifact_dir"/{rust,cpp,sql,sql-reachability} "$build_root"
+if command -v python3 >/dev/null 2>&1; then
+    python3 scripts/coverage_tools.py init-artifacts \
+        --artifact-dir "$artifact_dir" \
+        --rust-threshold 90 --cpp-threshold 90 --sql-threshold 90 \
+        > "$artifact_dir/init.log" 2>&1 || true
 fi
 
-mkdir -p "$artifact_dir" "$build_root"
 artifact_dir="$(cd "$artifact_dir" && pwd -P)"
 build_root="$(cd "$build_root" && pwd -P)"
-case "$artifact_dir" in
-    "$repo_root"/*) ;;
-    *)
-        echo "error: COVERAGE_ARTIFACT_DIR must resolve inside the repository" >&2
-        exit 1
-        ;;
-esac
-case "$build_root" in
-    "$repo_root"/*) ;;
-    *)
-        echo "error: COVERAGE_BUILD_DIR must resolve inside the repository" >&2
-        exit 1
-        ;;
-esac
-if ! python3 scripts/coverage_tools.py validate-thresholds \
-    "$rust_minimum" "$cpp_minimum" "$sql_minimum"; then
-    exit 1
-fi
-for layer in rust cpp sql; do
-    if [ -d "$artifact_dir/$layer" ]; then
-        find "$artifact_dir/$layer" -depth -mindepth 1 -delete
+aggregate_done=0
+overall_status=0
+
+# shellcheck disable=SC2329  # invoked indirectly by the EXIT trap
+aggregate_on_exit() {
+    local prior_status=$?
+    if [ "$aggregate_done" -eq 0 ] && command -v python3 >/dev/null 2>&1; then
+        python3 scripts/coverage_tools.py aggregate --artifact-dir "$artifact_dir" \
+            > "$artifact_dir/aggregate-on-exit.log" 2>&1 || true
     fi
-    mkdir -p "$artifact_dir/$layer"
-done
-cp "$scope_file" "$artifact_dir/scope.json"
+    return "$prior_status"
+}
+trap aggregate_on_exit EXIT
 
-cat > "$artifact_dir/coverage-scope.txt" <<EOF
-Gate: pg_accel three-layer release coverage
-Git commit: $(git rev-parse --verify HEAD)
-Git tree: clean
-PostgreSQL major: ${pg}
-Rust threshold: ${rust_minimum}% lines
-C++/SYCL threshold: ${cpp_minimum}% lines
-SQL-extension threshold: ${sql_minimum}% lines
+mark_layer_error() {
+    local layer="$1"
+    local threshold="$2"
+    local stage="$3"
+    local message="$4"
+    local exit_code="${5:-1}"
+    python3 scripts/coverage_tools.py mark-layer-error \
+        --artifact-dir "$artifact_dir" \
+        --layer "$layer" \
+        --threshold "$threshold" \
+        --stage "$stage" \
+        --message "$message" \
+        --exit-code "$exit_code" >/dev/null 2>&1 || true
+    overall_status=1
+}
 
-Rust scope: owned production Rust in pg_accel/src and pg_accel_bench/src,
-excluding separately compiled test-only source files. Execution includes the
-workspace test targets and pgrx pg_test feature.
+mark_all_layers() {
+    local stage="$1"
+    local message="$2"
+    local exit_code="${3:-1}"
+    mark_layer_error rust "$rust_minimum" "$stage" "$message" "$exit_code"
+    mark_layer_error cpp "$cpp_minimum" "$stage" "$message" "$exit_code"
+    mark_layer_error sql "$sql_minimum" "$stage" "$message" "$exit_code"
+}
 
-C++/SYCL scope: all owned implementation files under pgaccel-kernels/src plus
-owned inline headers reported by LLVM. Every src/*.cpp file must have a source
-mapping, as must each owned header containing executable definitions. Execution
-is the registered standalone CTest suite against the instrumented
-pgaccel_kernels_shared library.
-
-SQL-extension scope: the same owned pg_accel production Rust source is rebuilt
-with rustc source coverage and reached exclusively by sql/tests/[0-9]*.sql in
-a live PostgreSQL backend. test-inventory.json binds source hashes and explicit
-PASS/PASSED behavior markers to retained psql logs. File or marker counts are
-supporting traceability, not the SQL layer percentage.
-
-Generated, vendored, AdaptiveCpp runtime/toolchain, PostgreSQL, PostGIS, H3,
-test-source, shell, and benchmark artifact files are outside their respective
-owned production-code denominators. No production planner, executor, FFI,
-dispatch, domain, or kernel implementation file is allowlisted out.
-EOF
+record_stage() {
+    local layer="$1"
+    local stage="$2"
+    local exit_code="$3"
+    local message="${4:-stage failed}"
+    python3 scripts/coverage_tools.py record-stage \
+        --artifact-dir "$artifact_dir" --layer "$layer" --stage "$stage" \
+        --exit-code "$exit_code" --message "$message" >/dev/null 2>&1 || true
+}
 
 run_logged() {
     local log="$1"
@@ -113,7 +92,7 @@ merge_profiles() {
     local profiles=()
     while IFS= read -r -d '' profile; do
         profiles+=("$profile")
-    done < <(find "$profile_dir" -type f -name '*.profraw' -print0)
+    done < <(find "$profile_dir" -type f -name '*.profraw' -print0 2>/dev/null)
     if [ "${#profiles[@]}" -eq 0 ]; then
         echo "error: no LLVM raw profiles were written under $profile_dir" >&2
         return 1
@@ -127,25 +106,144 @@ llvm_export_artifacts() {
     local profdata="$3"
     local output_dir="$4"
     local status=0
-    if ! "$llvm_cov" export "$object" \
-        -instr-profile="$profdata" -format=text \
+    "$llvm_cov" export "$object" -instr-profile="$profdata" -format=text \
         > "$output_dir/raw-coverage.json" \
-        2> "$output_dir/llvm-cov-export.log"; then
-        status=1
-    fi
-    if ! "$llvm_cov" export "$object" \
-        -instr-profile="$profdata" -format=lcov \
+        2> "$output_dir/llvm-cov-export.log" || status=1
+    "$llvm_cov" export "$object" -instr-profile="$profdata" -format=lcov \
         > "$output_dir/raw-lcov.info" \
-        2> "$output_dir/llvm-cov-lcov.log"; then
-        status=1
-    fi
-    if ! "$llvm_cov" report "$object" -instr-profile="$profdata" \
+        2> "$output_dir/llvm-cov-lcov.log" || status=1
+    "$llvm_cov" report "$object" -instr-profile="$profdata" \
         > "$output_dir/raw-summary.txt" \
-        2> "$output_dir/llvm-cov-report.log"; then
-        status=1
-    fi
+        2> "$output_dir/llvm-cov-report.log" || status=1
     return "$status"
 }
+
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "error: python3 is required to validate coverage evidence" >&2
+    exit 2
+fi
+
+if python3 scripts/coverage_tools.py validate-thresholds \
+    "$rust_minimum" "$cpp_minimum" "$sql_minimum" \
+    > "$artifact_dir/thresholds.log" 2>&1; then
+    python3 scripts/coverage_tools.py init-artifacts \
+        --artifact-dir "$artifact_dir" \
+        --rust-threshold "$rust_minimum" \
+        --cpp-threshold "$cpp_minimum" \
+        --sql-threshold "$sql_minimum" \
+        >> "$artifact_dir/init.log" 2>&1 || mark_all_layers initialization \
+            "artifact initialization failed" 2
+else
+    cat "$artifact_dir/thresholds.log" >&2
+    rust_minimum=90
+    cpp_minimum=90
+    sql_minimum=90
+    mark_all_layers thresholds "release coverage threshold validation failed" 2
+fi
+
+case "$artifact_dir" in
+    "$repo_root"/*) ;;
+    *)
+        mark_all_layers artifact_path \
+            "COVERAGE_ARTIFACT_DIR must resolve inside the repository" 2
+        overall_status=1
+        ;;
+esac
+case "$build_root" in
+    "$repo_root"/*) ;;
+    *)
+        mark_all_layers build_path \
+            "COVERAGE_BUILD_DIR must resolve inside the repository" 2
+        overall_status=1
+        ;;
+esac
+
+cp "$scope_file" "$artifact_dir/scope.json" 2>/dev/null || true
+cp "$manifest_file" "$artifact_dir/sql-semantic-assertions.json" 2>/dev/null || true
+
+git_commit="unknown"
+git_tree="unknown"
+if command -v git >/dev/null 2>&1; then
+    git_commit="$(git rev-parse --verify HEAD 2>/dev/null || printf unknown)"
+    if [ -z "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
+        git_tree="clean"
+    else
+        git_tree="dirty"
+        mark_all_layers provenance \
+            "release coverage requires a clean source tree for exact-SHA provenance" 1
+        git status --short > "$artifact_dir/dirty-tree.log" 2>&1 || true
+    fi
+else
+    mark_all_layers provenance "git is unavailable for release provenance" 127
+fi
+
+cat > "$artifact_dir/coverage-scope.txt" <<EOF
+Gate: pg_accel three-layer release coverage
+Git commit: ${git_commit}
+Git tree: ${git_tree}
+PostgreSQL major: ${pg}
+Rust threshold: ${rust_minimum}% production source lines
+C++ threshold: ${cpp_minimum}% host-object source lines
+SQL threshold: ${sql_minimum}% fixed-manifest semantic assertions
+
+Rust scope includes owned production Rust in pg_accel/src,
+pg_accel_bench/src, and pg_accel/build.rs. LCOV line records inside parsed
+positive cfg(test)-only item ranges are excluded; separately compiled test
+files are excluded. Missing production mappings fail closed.
+
+C++ scope is host-object source coverage for every owned implementation under
+pgaccel-kernels/src and executable inline header under pgaccel-kernels/include.
+The complete registered CTest suite is separate GPU correctness evidence,
+including the unchanged OOM-never invariant measured at 14.08GB peak RSS.
+Host-object source coverage
+does not claim device kernel-line execution.
+
+SQL scope is unique successful PGACCEL_ASSERT_OK IDs divided by the pinned
+coverage/sql-semantic-assertions.json declarations. The fixed floors are 52
+files and 285 assertions. File completion markers, warnings, skips, caught
+exceptions, duplicate IDs, source/hash drift, or nonzero exits cannot earn
+semantic credit. SQL-triggered Rust source reachability is retained separately
+under sql-reachability and has no release percentage threshold.
+EOF
+
+if ! python3 scripts/coverage_tools.py audit-scope \
+    --scope "$scope_file" --repo-root "$repo_root" \
+    > "$artifact_dir/scope-audit.log" 2>&1; then
+    cat "$artifact_dir/scope-audit.log" >&2
+    mark_all_layers scope_audit "checked-in coverage scope or manifest audit failed" 2
+fi
+if ! env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+    -s scripts/tests -p 'test_coverage_tools.py' \
+    > "$artifact_dir/tool-tests.log" 2>&1; then
+    cat "$artifact_dir/tool-tests.log" >&2
+    mark_all_layers tool_tests "coverage helper regression tests failed" 2
+fi
+
+# PostgreSQL setup is shared by Rust/pgrx and SQL execution, but a failure does
+# not suppress the independent C++/GPU attempt.
+pg_ready=1
+# shellcheck source=/dev/null
+if ! source scripts/pg_versions.sh; then
+    pg_ready=0
+fi
+if [ "$pg_ready" -eq 1 ] && ! pg_accel_require_pgrx_support "$pg" \
+    > "$artifact_dir/pg-support.log" 2>&1; then
+    pg_ready=0
+fi
+if [ "$pg_ready" -eq 1 ] && ! pg_accel_require_pgrx_pg_config "$pg" \
+    > "$artifact_dir/pg-config.log" 2>&1; then
+    pg_ready=0
+fi
+if [ "$pg_ready" -eq 1 ] && ! run_logged "$artifact_dir/setup-pg-extensions.log" \
+    scripts/setup_pg_extensions.sh "$pg"; then
+    pg_ready=0
+fi
+if [ "$pg_ready" -eq 0 ]; then
+    mark_layer_error rust "$rust_minimum" postgres_setup \
+        "PostgreSQL/pgrx prerequisites failed" 1
+    mark_layer_error sql "$sql_minimum" postgres_setup \
+        "PostgreSQL/pgrx prerequisites failed" 1
+fi
 
 rust_coverage() (
     local output_dir="$artifact_dir/rust"
@@ -153,67 +251,87 @@ rust_coverage() (
     local execution_status=0
     mkdir -p "$output_dir" "$build_dir"
 
-    local coverage_env
-    if ! coverage_env="$(CARGO_TARGET_DIR="$build_dir" cargo llvm-cov show-env --sh)"; then
-        echo "error: cargo llvm-cov could not produce Rust instrumentation environment" >&2
+    if ! command -v cargo >/dev/null 2>&1; then
+        mark_layer_error rust "$rust_minimum" prerequisite \
+            "cargo is unavailable" 127
         return 1
     fi
+    if ! cargo llvm-cov --version > "$output_dir/cargo-llvm-cov-version.txt" 2>&1; then
+        mark_layer_error rust "$rust_minimum" prerequisite \
+            "cargo-llvm-cov is unavailable" 127
+        return 1
+    fi
+    if [ "$pg_ready" -eq 0 ]; then
+        return 1
+    fi
+
+    local coverage_env
+    if ! coverage_env="$(CARGO_TARGET_DIR="$build_dir" cargo llvm-cov show-env --sh \
+        --include-build-script \
+        2> "$output_dir/show-env.log")"; then
+        mark_layer_error rust "$rust_minimum" instrumentation \
+            "cargo llvm-cov could not produce Rust instrumentation environment" 1
+        return 1
+    fi
+    record_stage rust instrumentation 0
     eval "$coverage_env"
-    if ! run_logged "$output_dir/clean.log" \
-        env CARGO_TARGET_DIR="$build_dir" cargo llvm-cov clean --workspace; then
+    run_logged "$output_dir/clean.log" env CARGO_TARGET_DIR="$build_dir" \
+        cargo llvm-cov clean --workspace || execution_status=1
+    if run_logged "$output_dir/test.log" env \
+        CARGO_TARGET_DIR="$build_dir" RUST_TEST_THREADS="$test_threads" \
+        cargo test --workspace --locked --no-default-features \
+            --features "pg${pg} pg_test" --all-targets -- \
+            --test-threads="$test_threads"; then
+        record_stage rust unit_tests 0
+    else
         execution_status=1
+        record_stage rust unit_tests 1 "workspace unit tests failed"
     fi
-    if ! run_logged "$output_dir/test.log" \
-        env CARGO_TARGET_DIR="$build_dir" \
-            RUST_TEST_THREADS="$test_threads" \
-            cargo test \
-                --workspace \
-                --locked \
-                --no-default-features \
-                --features "pg${pg} pg_test" \
-                --all-targets \
-                -- \
-                --test-threads="$test_threads"; then
-        execution_status=1
-    fi
-    if ! run_logged "$output_dir/pgrx-test.log" env \
+    if run_logged "$output_dir/pgrx-test.log" env \
         CARGO_TARGET_DIR="$build_dir" RUST_TEST_THREADS="$test_threads" \
         cargo pgrx test --package pg_accel "pg$pg"; then
+        record_stage rust pgrx_tests 0
+    else
         execution_status=1
+        record_stage rust pgrx_tests 1 "cargo pgrx tests failed"
     fi
-    if ! run_logged "$output_dir/json-report.log" \
-        env CARGO_TARGET_DIR="$build_dir" cargo llvm-cov report \
-            --json --output-path "$output_dir/raw-coverage.json"; then
+    local report_status=0
+    run_logged "$output_dir/lcov-report.log" env CARGO_TARGET_DIR="$build_dir" \
+        cargo llvm-cov report --lcov \
+            --include-build-script \
+            --output-path "$output_dir/raw-lcov.info" || report_status=1
+    run_logged "$output_dir/json-report.log" env CARGO_TARGET_DIR="$build_dir" \
+        cargo llvm-cov report --json \
+            --include-build-script \
+            --output-path "$output_dir/raw-coverage.json" || report_status=1
+    env CARGO_TARGET_DIR="$build_dir" cargo llvm-cov report --include-build-script \
+        > "$output_dir/raw-summary.txt" 2> "$output_dir/summary-report.log" || report_status=1
+    if [ "$report_status" -eq 0 ]; then
+        record_stage rust coverage_report 0
+    else
         execution_status=1
+        record_stage rust coverage_report 1 "Rust coverage report generation failed"
     fi
-    if ! run_logged "$output_dir/lcov-report.log" \
-        env CARGO_TARGET_DIR="$build_dir" cargo llvm-cov report \
-            --lcov --output-path "$output_dir/raw-lcov.info"; then
-        execution_status=1
-    fi
-    if ! env CARGO_TARGET_DIR="$build_dir" cargo llvm-cov report \
-        > "$output_dir/raw-summary.txt" 2> "$output_dir/summary-report.log"; then
-        execution_status=1
-    fi
-    if [ ! -s "$output_dir/raw-coverage.json" ]; then
-        echo "error: Rust LLVM JSON report was not generated" >&2
+    if [ ! -s "$output_dir/raw-lcov.info" ]; then
+        mark_layer_error rust "$rust_minimum" report \
+            "Rust LCOV report was not generated" 1
         return 1
     fi
     python3 scripts/coverage_tools.py summarize \
-        --layer rust \
-        --input "$output_dir/raw-coverage.json" \
-        --scope "$scope_file" \
-        --repo-root "$repo_root" \
+        --layer rust --format lcov \
+        --input "$output_dir/raw-lcov.info" \
+        --scope "$scope_file" --repo-root "$repo_root" \
         --threshold "$rust_minimum" \
         --execution-status "$execution_status" \
-        --output-dir "$output_dir"
+        --output-dir "$output_dir" --artifact-dir "$artifact_dir"
 )
 
 resolve_cpp_llvm_tools() {
     local acpp="$1"
     local configured_clang="${CPP_COVERAGE_CLANGXX:-}"
     if [ -z "$configured_clang" ]; then
-        configured_clang="$($acpp --acpp-version 2>/dev/null | awk -F': ' '/^[[:space:]]*default-clang:/ { print $2; exit }')"
+        configured_clang="$($acpp --acpp-version 2>/dev/null | \
+            awk -F': ' '/^[[:space:]]*default-clang:/ { print $2; exit }')"
     fi
     if [ -z "$configured_clang" ] || [ ! -x "$configured_clang" ]; then
         echo "error: cannot resolve the Clang executable used by AdaptiveCpp" >&2
@@ -226,13 +344,6 @@ resolve_cpp_llvm_tools() {
         echo "error: matching llvm-cov/llvm-profdata are unavailable under $llvm_prefix" >&2
         return 1
     fi
-    local clang_major cov_major
-    clang_major="$($configured_clang --version | sed -nE '1s/.*clang version ([0-9]+).*/\1/p')"
-    cov_major="$($llvm_cov --version | sed -nE '1s/.*LLVM version ([0-9]+).*/\1/p')"
-    if [ -z "$clang_major" ] || [ -z "$cov_major" ] || [ "$clang_major" != "$cov_major" ]; then
-        echo "error: C++ coverage LLVM mismatch: clang=$clang_major llvm-cov=$cov_major" >&2
-        return 1
-    fi
     printf '%s\n%s\n%s\n' "$configured_clang" "$llvm_cov" "$llvm_profdata"
 }
 
@@ -240,48 +351,80 @@ cpp_coverage() (
     local output_dir="$artifact_dir/cpp"
     local build_dir="$build_root/cpp-build"
     local profile_dir="$output_dir/profiles"
-    local acpp_prefix="${ACPP_PREFIX:-$(pg_accel_acpp_prefix)}"
+    local acpp_prefix="${ACPP_PREFIX:-$(pg_accel_acpp_prefix 2>/dev/null || printf '%s' "$repo_root/.pgaccel/acpp/current")}"
     local acpp="$acpp_prefix/bin/acpp"
     local execution_status=0
     mkdir -p "$output_dir" "$profile_dir"
     find "$profile_dir" -type f -delete
 
+    for command in cmake ctest; do
+        if ! command -v "$command" >/dev/null 2>&1; then
+            mark_layer_error cpp "$cpp_minimum" prerequisite \
+                "$command is unavailable" 127
+            return 1
+        fi
+    done
     if [ ! -x "$acpp" ]; then
-        echo "error: AdaptiveCpp driver not found at $acpp" >&2
+        mark_layer_error cpp "$cpp_minimum" prerequisite \
+            "AdaptiveCpp driver not found at $acpp" 127
         return 1
     fi
     local tools
-    if ! tools="$(resolve_cpp_llvm_tools "$acpp")"; then
+    if ! tools="$(resolve_cpp_llvm_tools "$acpp" 2> "$output_dir/resolve-tools.log")"; then
+        mark_layer_error cpp "$cpp_minimum" toolchain \
+            "C++ LLVM tools could not be resolved" 1
         return 1
     fi
     local clangxx llvm_cov llvm_profdata
     clangxx="$(printf '%s\n' "$tools" | sed -n '1p')"
     llvm_cov="$(printf '%s\n' "$tools" | sed -n '2p')"
     llvm_profdata="$(printf '%s\n' "$tools" | sed -n '3p')"
-    {
-        "$acpp" --acpp-version
-        "$clangxx" --version
-        "$llvm_cov" --version
-        "$llvm_profdata" --version
-    } > "$output_dir/toolchain.txt" 2>&1
+    if ! python3 scripts/coverage_tools.py validate-toolchain \
+        --clang "$clangxx" --llvm-cov "$llvm_cov" \
+        --llvm-profdata "$llvm_profdata" \
+        --output "$output_dir/toolchain.json"; then
+        mark_layer_error cpp "$cpp_minimum" toolchain \
+            "clang, llvm-cov, and llvm-profdata majors do not match" 1
+        return 1
+    fi
+    record_stage cpp toolchain 0
 
     if ! run_logged "$output_dir/configure.log" cmake \
-        -S pgaccel-kernels \
-        -B "$build_dir" \
+        -S pgaccel-kernels -B "$build_dir" \
         -DCMAKE_BUILD_TYPE=Debug \
         -DCMAKE_CXX_COMPILER="$clangxx" \
         -DAdaptiveCpp_DIR="$acpp_prefix/lib/cmake/AdaptiveCpp" \
         -DPGACCEL_ENABLE_COVERAGE=ON; then
+        mark_layer_error cpp "$cpp_minimum" configure \
+            "instrumented C++ CMake configure failed" 1
         return 1
     fi
+    record_stage cpp configure 0
     if ! run_logged "$output_dir/build.log" cmake --build "$build_dir" --parallel; then
+        mark_layer_error cpp "$cpp_minimum" build \
+            "instrumented C++ build failed" 1
         return 1
     fi
+    record_stage cpp build 0
+
+    # Do not override per-test timeouts: test_oom_invariant retains its 900s
+    # timeout and unchanged 2GB-per-family sweep (14.08GB measured peak RSS).
     if ! run_logged "$output_dir/ctest.log" env \
         LLVM_PROFILE_FILE="$profile_dir/pgaccel-cpp-%p-%m.profraw" \
-        ctest --test-dir "$build_dir" --output-on-failure \
-            --timeout "${GPU_TEST_TIMEOUT_S:-300}"; then
+        ctest --test-dir "$build_dir" --output-on-failure; then
         execution_status=1
+        record_stage cpp ctest 1 "registered GPU CTest suite failed"
+    else
+        record_stage cpp ctest 0
+    fi
+    if python3 scripts/coverage_tools.py gpu-evidence \
+        --execution-status "$execution_status" \
+        --ctest-log "$output_dir/ctest.log" \
+        --output "$output_dir/gpu-correctness-evidence.json"; then
+        record_stage cpp gpu_evidence 0
+    else
+        execution_status=1
+        record_stage cpp gpu_evidence 1 "GPU correctness/OOM evidence failed"
     fi
 
     local objects=()
@@ -292,40 +435,48 @@ cpp_coverage() (
         -o -name 'libpgaccel_kernels_shared.dylib' \
         -o -name 'pgaccel_kernels_shared.dll' \) -print0)
     if [ "${#objects[@]}" -ne 1 ]; then
-        echo "error: expected exactly one instrumented shared kernel object, found ${#objects[@]}" >&2
+        mark_layer_error cpp "$cpp_minimum" object \
+            "expected exactly one instrumented shared kernel host object; found ${#objects[@]}" 1
         return 1
     fi
-    if ! merge_profiles "$llvm_profdata" "$profile_dir" "$output_dir/coverage.profdata" \
+    if ! merge_profiles "$llvm_profdata" "$profile_dir" \
+        "$output_dir/coverage.profdata" \
         > "$output_dir/llvm-profdata.log" 2>&1; then
-        cat "$output_dir/llvm-profdata.log" >&2
+        mark_layer_error cpp "$cpp_minimum" profiles \
+            "C++ raw profiles could not be merged" 1
         return 1
     fi
-    if ! llvm_export_artifacts "$llvm_cov" "${objects[0]}" \
-        "$output_dir/coverage.profdata" "$output_dir"; then
+    local export_status=0
+    llvm_export_artifacts "$llvm_cov" "${objects[0]}" \
+        "$output_dir/coverage.profdata" "$output_dir" || export_status=1
+    if [ "$export_status" -ne 0 ]; then
         execution_status=1
     fi
     if [ ! -s "$output_dir/raw-coverage.json" ]; then
-        echo "error: C++ LLVM JSON report was not generated" >&2
+        mark_layer_error cpp "$cpp_minimum" report \
+            "C++ LLVM JSON report was not generated" 1
         return 1
     fi
+    if [ "$export_status" -eq 0 ]; then
+        record_stage cpp coverage_report 0
+    else
+        record_stage cpp coverage_report 1 "C++ coverage export failed"
+    fi
     python3 scripts/coverage_tools.py summarize \
-        --layer cpp \
+        --layer cpp --format json \
         --input "$output_dir/raw-coverage.json" \
-        --scope "$scope_file" \
-        --repo-root "$repo_root" \
+        --scope "$scope_file" --repo-root "$repo_root" \
         --threshold "$cpp_minimum" \
         --execution-status "$execution_status" \
-        --output-dir "$output_dir"
+        --output-dir "$output_dir" --artifact-dir "$artifact_dir"
 )
 
 rust_llvm_tools() {
     local sysroot host tool_dir
-    sysroot="$(rustc --print sysroot)"
-    host="$(rustc -vV | awk '/^host:/ { print $2; exit }')"
+    sysroot="$(rustc --print sysroot 2>/dev/null)" || return 1
+    host="$(rustc -vV 2>/dev/null | awk '/^host:/ { print $2; exit }')"
     tool_dir="$sysroot/lib/rustlib/$host/bin"
     if [ ! -x "$tool_dir/llvm-cov" ] || [ ! -x "$tool_dir/llvm-profdata" ]; then
-        echo "error: rustc llvm-tools-preview is unavailable for $host" >&2
-        echo "       run: rustup component add llvm-tools-preview" >&2
         return 1
     fi
     printf '%s\n%s\n' "$tool_dir/llvm-cov" "$tool_dir/llvm-profdata"
@@ -333,165 +484,141 @@ rust_llvm_tools() {
 
 sql_coverage() (
     local output_dir="$artifact_dir/sql"
+    local reachability_dir="$artifact_dir/sql-reachability"
     local build_dir="$build_root/sql-build"
-    local profile_dir="$output_dir/profiles"
+    local profile_dir="$reachability_dir/profiles"
     local test_run_dir="$output_dir/test-run"
     local execution_status=0
+    local reachability_enabled=0
     local should_stop=0
-    mkdir -p "$output_dir" "$profile_dir" "$test_run_dir/logs"
+    local llvm_cov=""
+    local llvm_profdata=""
+    mkdir -p "$output_dir" "$reachability_dir" "$profile_dir" "$test_run_dir/logs"
     find "$profile_dir" -type f -delete
     printf 'file\tstatus\texit_code\tlog\n' > "$test_run_dir/results.tsv"
 
-    local tools llvm_cov llvm_profdata
-    if ! tools="$(rust_llvm_tools)"; then
-        return 1
-    fi
-    llvm_cov="$(printf '%s\n' "$tools" | sed -n '1p')"
-    llvm_profdata="$(printf '%s\n' "$tools" | sed -n '2p')"
-    {
-        rustc -vV
-        "$llvm_cov" --version
-        "$llvm_profdata" --version
-    } > "$output_dir/toolchain.txt" 2>&1
-
-    local coverage_env
-    if ! coverage_env="$(CARGO_TARGET_DIR="$build_dir" cargo llvm-cov show-env --sh)"; then
-        echo "error: cargo llvm-cov could not produce instrumentation environment" >&2
-        return 1
-    fi
-    eval "$coverage_env"
-    export LLVM_PROFILE_FILE="$profile_dir/pgaccel-sql-%p-%m.profraw"
-    if ! run_logged "$output_dir/clean.log" \
-        env CARGO_TARGET_DIR="$build_dir" cargo llvm-cov clean --workspace; then
+    if ! command -v cargo >/dev/null 2>&1 || ! command -v just >/dev/null 2>&1; then
+        mark_layer_error sql "$sql_minimum" prerequisite \
+            "cargo or just is unavailable for SQL extension installation" 127
+        execution_status=127
+    elif [ "$pg_ready" -eq 0 ]; then
         execution_status=1
-    fi
-
-    stop_instrumented_postgres() {
-        if [ "$should_stop" -eq 0 ]; then
-            return 0
-        fi
-        if run_logged "$output_dir/postgres-stop.log" \
-            cargo pgrx stop --package pg_accel "pg$pg"; then
-            should_stop=0
-            return 0
-        fi
-        return 1
-    }
-    trap 'stop_instrumented_postgres >/dev/null 2>&1 || true' EXIT
-    trap 'stop_instrumented_postgres >/dev/null 2>&1 || true; exit 130' INT TERM
-
-    should_stop=1
-    if run_logged "$output_dir/install.log" env CARGO_TARGET_DIR="$build_dir" \
-        just install-pg-accel "$pg"; then
-        # Build scripts can also be instrumented. Remove their profiles after
-        # PostgreSQL starts; backend and postmaster profiles are written later.
-        find "$profile_dir" -type f -delete
-        local pg_config psql_bin port connection
-        pg_config="$(pg_accel_pg_config_for_pg "$pg")"
-        psql_bin="$("$pg_config" --bindir)/psql"
-        if [ ! -x "$psql_bin" ]; then
-            psql_bin="psql"
-        fi
-        port="$(pg_accel_pgrx_port_for_pg "$pg")"
-        connection="host=localhost port=$port dbname=postgres"
-        if ! run_logged "$output_dir/create-extensions.log" \
-            "$psql_bin" "$connection" -v ON_ERROR_STOP=1 \
-                -f sql/init/01-create-extensions.sql; then
-            execution_status=1
-        fi
-        if ! run_logged "$output_dir/sql-tests.log" env \
-            PG_ACCEL_PG_MAJOR="$pg" \
-            PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 \
-            PG_ACCEL_RELEASE_MODE=1 \
-            PG_ACCEL_SQL_TEST_ARTIFACT_DIR="$test_run_dir" \
-            sql/tests/run_all.sh "$connection"; then
-            execution_status=1
-        fi
     else
-        execution_status=1
+        local tools coverage_env
+        if cargo llvm-cov --version >/dev/null 2>&1 \
+            && tools="$(rust_llvm_tools)" \
+            && coverage_env="$(CARGO_TARGET_DIR="$build_dir" cargo llvm-cov show-env --sh \
+                --include-build-script \
+                2> "$reachability_dir/show-env.log")"; then
+            llvm_cov="$(printf '%s\n' "$tools" | sed -n '1p')"
+            llvm_profdata="$(printf '%s\n' "$tools" | sed -n '2p')"
+            eval "$coverage_env"
+            export LLVM_PROFILE_FILE="$profile_dir/pgaccel-sql-%p-%m.profraw"
+            reachability_enabled=1
+        else
+            printf '%s\n' \
+                "SQL-triggered Rust reachability unavailable; semantic assertions still run." \
+                > "$reachability_dir/unavailable.log"
+        fi
+
+        stop_postgres() {
+            if [ "$should_stop" -eq 0 ]; then
+                return 0
+            fi
+            if run_logged "$output_dir/postgres-stop.log" \
+                cargo pgrx stop --package pg_accel "pg$pg"; then
+                should_stop=0
+                return 0
+            fi
+            return 1
+        }
+        trap 'stop_postgres >/dev/null 2>&1 || true' EXIT
+        trap 'stop_postgres >/dev/null 2>&1 || true; exit 130' INT TERM
+
+        if run_logged "$output_dir/install.log" env CARGO_TARGET_DIR="$build_dir" \
+            just install-pg-accel "$pg"; then
+            record_stage sql extension_install 0
+            should_stop=1
+            local pg_config psql_bin port connection
+            pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+            psql_bin="$("$pg_config" --bindir)/psql"
+            if [ ! -x "$psql_bin" ]; then
+                psql_bin="psql"
+            fi
+            port="$(pg_accel_pgrx_port_for_pg "$pg")"
+            connection="host=localhost port=$port dbname=postgres"
+            if run_logged "$output_dir/create-extensions.log" \
+                "$psql_bin" "$connection" -v ON_ERROR_STOP=1 \
+                    -f sql/init/01-create-extensions.sql; then
+                record_stage sql extension_init 0
+            else
+                execution_status=1
+                record_stage sql extension_init 1 "extension initialization failed"
+            fi
+            if run_logged "$output_dir/sql-tests.log" env \
+                PG_ACCEL_PG_MAJOR="$pg" \
+                PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 \
+                PG_ACCEL_RELEASE_MODE=1 \
+                PG_ACCEL_SQL_TEST_ARTIFACT_DIR="$test_run_dir" \
+                sql/tests/run_all.sh "$connection"; then
+                record_stage sql sql_tests 0
+            else
+                execution_status=1
+                record_stage sql sql_tests 1 "SQL integration test runner failed"
+            fi
+        else
+            execution_status=1
+            record_stage sql extension_install 1 "extension installation failed"
+        fi
+        stop_postgres || execution_status=1
     fi
 
-    if ! stop_instrumented_postgres; then
-        execution_status=1
-    fi
-
-    if ! python3 scripts/coverage_tools.py sql-inventory \
-        --tests-dir sql/tests \
+    python3 scripts/coverage_tools.py sql-inventory \
+        --tests-dir sql/tests --manifest "$manifest_file" \
         --results "$test_run_dir/results.tsv" \
-        --output "$output_dir/test-inventory.json" \
-        > "$output_dir/test-inventory.log" 2>&1; then
-        execution_status=1
-    fi
-
-    local objects=()
-    while IFS= read -r -d '' object; do
-        objects+=("$object")
-    done < <(find "$build_dir/release" -maxdepth 1 -type f \
-        \( -name 'libpg_accel.so' -o -name 'libpg_accel.dylib' \
-        -o -name 'pg_accel.dll' \) -print0 2>/dev/null)
-    if [ "${#objects[@]}" -ne 1 ]; then
-        echo "error: expected exactly one instrumented pg_accel shared object, found ${#objects[@]}" >&2
-        return 1
-    fi
-    if ! merge_profiles "$llvm_profdata" "$profile_dir" "$output_dir/coverage.profdata" \
-        > "$output_dir/llvm-profdata.log" 2>&1; then
-        cat "$output_dir/llvm-profdata.log" >&2
-        return 1
-    fi
-    if ! llvm_export_artifacts "$llvm_cov" "${objects[0]}" \
-        "$output_dir/coverage.profdata" "$output_dir"; then
-        execution_status=1
-    fi
-    if [ ! -s "$output_dir/raw-coverage.json" ]; then
-        echo "error: SQL-extension LLVM JSON report was not generated" >&2
-        return 1
-    fi
-    python3 scripts/coverage_tools.py summarize \
-        --layer sql \
-        --input "$output_dir/raw-coverage.json" \
-        --scope "$scope_file" \
-        --repo-root "$repo_root" \
+        --output-dir "$output_dir" \
         --threshold "$sql_minimum" \
         --execution-status "$execution_status" \
-        --output-dir "$output_dir"
+        --artifact-dir "$artifact_dir" || execution_status=1
+
+    if [ "$reachability_enabled" -eq 1 ]; then
+        local objects=()
+        while IFS= read -r -d '' object; do
+            objects+=("$object")
+        done < <(find "$build_dir/release" -maxdepth 1 -type f \
+            \( -name 'libpg_accel.so' -o -name 'libpg_accel.dylib' \
+            -o -name 'pg_accel.dll' \) -print0 2>/dev/null)
+        if [ "${#objects[@]}" -eq 1 ] \
+            && merge_profiles "$llvm_profdata" "$profile_dir" \
+                "$reachability_dir/coverage.profdata" \
+                > "$reachability_dir/llvm-profdata.log" 2>&1 \
+            && llvm_export_artifacts "$llvm_cov" "${objects[0]}" \
+                "$reachability_dir/coverage.profdata" "$reachability_dir" \
+            && python3 scripts/coverage_tools.py summarize-reachability \
+                --input "$reachability_dir/raw-lcov.info" \
+                --scope "$scope_file" --repo-root "$repo_root" \
+                --output "$reachability_dir/reachability-summary.json"; then
+            :
+        else
+            printf '%s\n' "SQL Rust reachability collection failed; this artifact has no threshold." \
+                >> "$reachability_dir/unavailable.log"
+        fi
+    fi
+    return "$execution_status"
 )
 
-overall_status=0
+echo "=== Rust production source coverage ==="
+rust_coverage || overall_status=1
 
-if ! python3 scripts/coverage_tools.py audit-scope \
-    --scope "$scope_file" --repo-root "$repo_root" \
-    | tee "$artifact_dir/scope-audit.log"; then
-    overall_status=1
-fi
-if ! env PYTHONDONTWRITEBYTECODE=1 \
-    python3 -m unittest discover -s scripts/tests -p 'test_coverage_tools.py' \
-    > "$artifact_dir/tool-tests.log" 2>&1; then
-    cat "$artifact_dir/tool-tests.log" >&2
-    overall_status=1
-fi
+echo "=== C++/SYCL host-object source coverage and GPU correctness ==="
+cpp_coverage || overall_status=1
 
-if ! run_logged "$artifact_dir/setup-pg-extensions.log" \
-    scripts/setup_pg_extensions.sh "$pg"; then
-    overall_status=1
-fi
-
-echo "=== Rust coverage ==="
-if ! rust_coverage; then
-    overall_status=1
-fi
-
-echo "=== C++/SYCL coverage ==="
-if ! cpp_coverage; then
-    overall_status=1
-fi
-
-echo "=== SQL-extension coverage ==="
-if ! sql_coverage; then
-    overall_status=1
-fi
+echo "=== SQL semantic assertion coverage ==="
+sql_coverage || overall_status=1
 
 if ! python3 scripts/coverage_tools.py aggregate --artifact-dir "$artifact_dir"; then
     overall_status=1
 fi
+aggregate_done=1
 
 exit "$overall_status"

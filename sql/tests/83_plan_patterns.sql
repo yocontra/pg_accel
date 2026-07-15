@@ -78,6 +78,8 @@ DO $$ BEGIN
         RAISE EXCEPTION '83_01_cte_dwithin FAILED: spatial predicate selected a pg_accel scan/join plan';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_001'
+
 
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _pp01_off AS
@@ -105,7 +107,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_01_cte_dwithin'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_002'
 
 -- =========================================================================
 -- 2. Subquery in WHERE with ST_Contains
@@ -155,7 +157,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_02_subquery_where'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_003'
 
 -- =========================================================================
 -- 3. Subquery in FROM with ST_Intersects
@@ -199,7 +201,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_03_subquery_from'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_004'
 
 -- =========================================================================
 -- 4. Subquery in SELECT list with ST_Within
@@ -246,7 +248,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_04_subquery_select'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_005'
 
 -- =========================================================================
 -- 5. UNION ALL with spatial queries on both sides
@@ -302,7 +304,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_05_union_all'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_006'
 
 -- =========================================================================
 -- 6. EXCEPT with spatial queries
@@ -358,7 +360,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_06_except'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_007'
 
 -- =========================================================================
 -- 7. INTERSECT with spatial queries
@@ -414,7 +416,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_07_intersect'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_008'
 
 -- =========================================================================
 -- 8. Correlated subquery with ST_Intersects
@@ -465,7 +467,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_08_correlated'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_009'
 
 -- =========================================================================
 -- 9. INSERT INTO ... SELECT with spatial WHERE
@@ -511,7 +513,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_09_insert_select'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_010'
 
 -- =========================================================================
 -- 10. CREATE TEMP TABLE AS with spatial query
@@ -558,7 +560,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_10_ctas'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_011'
 
 -- =========================================================================
 -- 11. Nested 3-deep subqueries with ST_Contains
@@ -612,7 +614,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_11_nested_3deep'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_012'
 
 -- =========================================================================
 -- 12. LATERAL JOIN with spatial function
@@ -676,7 +678,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_12_lateral'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_013'
 
 -- =========================================================================
 -- 13. Window function over spatial results
@@ -729,7 +731,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_13_window'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_014'
 
 -- =========================================================================
 -- 14. CASE WHEN with spatial predicate
@@ -785,7 +787,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_14_case_when'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_015'
 
 -- =========================================================================
 -- 15. Multiple CTEs chained with spatial predicates
@@ -853,7 +855,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_15_multi_cte'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_016'
 
 -- =========================================================================
 -- 16. GROUP BY with ST_Contains aggregate
@@ -904,7 +906,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_16_group_by'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_017'
 
 -- =========================================================================
 -- 17. HAVING with spatial aggregate
@@ -935,7 +937,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_17_having'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_018'
 
 -- =========================================================================
 -- 18. ORDER BY with spatial predicate filter
@@ -962,7 +964,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_18_order_by'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_019'
 
 -- =========================================================================
 -- 19. DISTINCT with spatial join
@@ -987,7 +989,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_19_distinct'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_020'
 
 -- =========================================================================
 -- 20. LIMIT/OFFSET with spatial predicate
@@ -1014,7 +1016,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_20_limit_offset'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_021'
 
 -- =========================================================================
 -- 21. Self-join with ST_DWithin
@@ -1063,7 +1065,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_21_self_join'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_022'
 
 -- =========================================================================
 -- 22. Line x Polygon intersection
@@ -1088,7 +1090,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_22_line_poly'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_023'
 
 -- =========================================================================
 -- 23. Multiple spatial predicates in AND
@@ -1123,7 +1125,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_23_multi_pred_and'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_024'
 
 -- =========================================================================
 -- 24. Multiple spatial predicates in OR
@@ -1160,7 +1162,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_24_multi_pred_or'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_025'
 
 -- =========================================================================
 -- 25. NOT with spatial predicate
@@ -1187,7 +1189,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_25_not'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_026'
 
 -- =========================================================================
 -- 26. Recursive CTE with spatial filter
@@ -1228,7 +1230,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_26_recursive_cte'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_027'
 
 -- =========================================================================
 -- 27. EXISTS / NOT EXISTS with spatial predicate
@@ -1259,7 +1261,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_27_not_exists'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_028'
 
 -- =========================================================================
 -- 28. Spatial join with additional non-spatial filter
@@ -1284,7 +1286,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_28_mixed_filter'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_029'
 
 -- =========================================================================
 -- 29. Window function rank() over spatial join
@@ -1315,7 +1317,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_29_window_rank'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_030'
 
 -- =========================================================================
 -- 30. Aggregate count + sum over spatial join
@@ -1343,7 +1345,7 @@ DO $$ BEGIN
     END IF;
 END $$;
 
-\echo 'PASS: 83_30_agg'
+\echo 'PGACCEL_ASSERT_OK:83_plan_patterns.assert_031'
 
 -- =========================================================================
 -- Cleanup
@@ -1382,6 +1384,7 @@ DROP TABLE IF EXISTS
     _pp29_off, _pp29_on,
     _pp30_off, _pp30_on;
 
-\echo 'PASS: 83_plan_patterns'
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:83_plan_patterns'

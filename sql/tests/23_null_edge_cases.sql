@@ -43,6 +43,8 @@ DO $$ BEGIN
         RAISE EXCEPTION '23_null_edge: NULL WHERE length(t) IS NULL count mismatch';
     END IF;
 END $$;
+\echo 'PGACCEL_ASSERT_OK:23_null_edge_cases.assert_001'
+
 
 DROP TABLE _nw, _nw_off, _nw_on, _nw_null_off, _nw_null_on;
 
@@ -327,6 +329,7 @@ END $$;
 
 DROP TABLE _allnull, _allnull_off, _allnull_on;
 
-\echo 'PASS: 23_null_edge_cases'
 
 COMMIT;
+
+\echo 'PGACCEL_FILE_OK:23_null_edge_cases'
