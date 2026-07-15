@@ -4,7 +4,8 @@
  * Phase 4B intentionally uses one GPU work-item.  This preserves descriptor
  * row order (and therefore deterministic floating-point results) while the
  * generic surface is brought up.  No row is interpreted or aggregated on the
- * host; the host validates the ABI and publishes completed scratch state.
+ * host; the device publishes a completion record and the host only performs
+ * the record's awaited device-to-host transfers.
  */
 
 #include <sycl/sycl.hpp>
@@ -34,6 +35,19 @@ constexpr uint64_t kLifecycleCookie = UINT64_C(0x7067616363656c32);
 constexpr uint32_t kLifecycleActive = 1;
 constexpr uint32_t kLifecycleFinalized = 2;
 constexpr uint32_t kLifecycleFailed = 3;
+constexpr size_t kPublishKeyLaneCount = 2;
+constexpr size_t kPublishMeasureLaneCount = 9;
+constexpr size_t kPublishDetail = 0;
+constexpr size_t kPublishActive = 1;
+constexpr size_t kPublishGroupCodes = 2;
+constexpr size_t kPublishKeys = 3;
+constexpr size_t kPublishMeasures =
+    kPublishKeys + PGACCEL_GROUPED_AGG_MAX_KEYS * kPublishKeyLaneCount;
+constexpr size_t kPublishEmitted =
+    kPublishMeasures + PGACCEL_GROUPED_AGG_MAX_MEASURES * kPublishMeasureLaneCount;
+constexpr size_t kPublishSelected = kPublishEmitted + 1;
+constexpr size_t kPublishUncertain = kPublishSelected + 1;
+constexpr size_t kPublishCommandCount = kPublishUncertain + 1;
 constexpr uint16_t kOpEq = PGACCEL_EXPR_OP_EQ;
 constexpr uint16_t kOpNe = PGACCEL_EXPR_OP_NE;
 constexpr uint16_t kOpLt = PGACCEL_EXPR_OP_LT;
@@ -151,6 +165,56 @@ struct DeviceMeta {
   uint32_t lifecycle_state;
 };
 
+struct DeviceCopyCommand {
+  size_t source_offset;
+  uint64_t destination;
+  size_t bytes;
+};
+
+struct DeviceCompletion {
+  int32_t status;
+  int32_t detail;
+  size_t emitted;
+  uint64_t selected;
+  uint64_t uncertain;
+  DeviceCopyCommand commands[kPublishCommandCount];
+};
+
+struct DeviceOutputBindings {
+  uint64_t detail;
+  uint64_t group_codes;
+  uint64_t active_groups;
+  uint64_t key_values[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  uint64_t key_nulls[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  uint64_t measure_lanes[PGACCEL_GROUPED_AGG_MAX_MEASURES][kPublishMeasureLaneCount];
+  uint64_t emitted;
+  uint64_t selected;
+  uint64_t uncertain;
+};
+
+struct DeviceSourceOffsets {
+  size_t completion;
+  size_t active;
+  size_t group_codes;
+  size_t key_values[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  size_t key_nulls[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  size_t measure_lanes[PGACCEL_GROUPED_AGG_MAX_MEASURES][kPublishMeasureLaneCount];
+};
+
+struct DevicePublishParams {
+  size_t group_capacity;
+  uint32_t execution_flags;
+  uint32_t key_count;
+  uint32_t measure_count;
+  int32_t output_mode;
+  int32_t key_types[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  size_t measure_state_bytes[PGACCEL_GROUPED_AGG_MAX_MEASURES];
+  DeviceMeta* meta;
+  DeviceCompletion* completion;
+  DeviceOutputBindings output;
+  DeviceSourceOffsets source_offsets;
+};
+
 static_assert(kFailureInvalid == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
 static_assert(kFailureNumericOverflow == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
 
@@ -206,6 +270,8 @@ struct WorkspaceLayout {
   size_t hash_counts = kNoOffset;
   size_t hash_group_count = kNoOffset;
   size_t meta = kNoOffset;
+  size_t publish_params = kNoOffset;
+  size_t completion = kNoOffset;
 };
 
 class ArenaSizer {
@@ -286,6 +352,8 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
   // Lifecycle metadata stays at a shape-independent offset so a changed
   // descriptor cannot reinterpret some other workspace lane as session state.
   if (!arena.add<KernelParams>(1, &layout->params) || !arena.add<DeviceMeta>(1, &layout->meta) ||
+      !arena.add<DevicePublishParams>(1, &layout->publish_params) ||
+      !arena.add<DeviceCompletion>(1, &layout->completion) ||
       !arena.add<uint8_t>(desc.group_capacity, &layout->active))
     return false;
 
@@ -1413,6 +1481,9 @@ inline void sort_hash_output(uint64_t* keys, uint8_t* nulls, uint64_t* counts, s
 inline void run_hash_compact_kernel(KernelParams* params_ptr) {
   KernelParams& params = *params_ptr;
   DeviceMeta& meta = *params.meta;
+  meta.selected = params.row_count;
+  if (meta.failure_flags != 0)
+    return;
   uint64_t* staged_keys = reinterpret_cast<uint64_t*>(params.staged_key_values[0]);
   uint8_t* staged_nulls = params.staged_key_nulls[0];
   uint64_t* staged_counts = params.buffers[0].count;
@@ -1450,6 +1521,10 @@ inline void run_hash_compact_kernel(KernelParams* params_ptr) {
     return;
   }
   sort_hash_output(staged_keys, staged_nulls, staged_counts, output);
+}
+
+inline void run_hash_init_kernel(KernelParams* params_ptr) {
+  *params_ptr->meta = {};
 }
 
 inline void run_dense_kernel(KernelParams* params_ptr) {
@@ -1661,6 +1736,98 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
   meta.lifecycle_state = kLifecycleFinalized;
 }
 
+inline void set_completion_copy(DevicePublishParams& params, size_t slot, size_t source_offset,
+                                uint64_t destination, size_t count, size_t width) {
+  if (source_offset == kNoOffset || destination == 0 || count == 0)
+    return;
+  DeviceCopyCommand& command = params.completion->commands[slot];
+  command.source_offset = source_offset;
+  command.destination = destination;
+  command.bytes = count * width;
+}
+
+inline void run_completion_kernel(DevicePublishParams* params_ptr) {
+  DevicePublishParams& params = *params_ptr;
+  DeviceMeta& meta = *params.meta;
+  DeviceCompletion& completion = *params.completion;
+  completion = {};
+
+  const uint32_t known_failures = kFailureInvalid | kFailureNumericOverflow | kFailureCapacity;
+  if ((meta.failure_flags & ~known_failures) != 0 ||
+      (meta.failure_flags & kFailureInvalid) != 0) {
+    completion.status = PGACCEL_ERROR;
+    completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  } else if ((meta.failure_flags & kFailureNumericOverflow) != 0) {
+    completion.status = PGACCEL_ERROR;
+    completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
+  } else if ((meta.failure_flags & kFailureCapacity) != 0) {
+    completion.status = PGACCEL_UNSUPPORTED;
+    completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  } else {
+    completion.status = PGACCEL_OK;
+    completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  }
+
+  set_completion_copy(params, kPublishDetail,
+                      params.source_offsets.completion + offsetof(DeviceCompletion, detail),
+                      params.output.detail, 1, sizeof(completion.detail));
+  if (completion.status != PGACCEL_OK ||
+      (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) == 0)
+    return;
+
+  completion.emitted = meta.emitted;
+  completion.selected = meta.selected;
+  completion.uncertain = meta.uncertain;
+  const size_t count = params.output_mode == PGACCEL_GROUPED_AGG_OUTPUT_COMPACT
+                           ? completion.emitted
+                           : params.group_capacity;
+  if (params.output_mode == PGACCEL_GROUPED_AGG_OUTPUT_DENSE) {
+    set_completion_copy(params, kPublishActive, params.source_offsets.active,
+                        params.output.active_groups, params.group_capacity, sizeof(uint8_t));
+  }
+  set_completion_copy(params, kPublishGroupCodes, params.source_offsets.group_codes,
+                      params.output.group_codes, count, sizeof(size_t));
+
+  for (size_t key = 0; key < params.key_count; ++key) {
+    const size_t slot = kPublishKeys + key * kPublishKeyLaneCount;
+    const size_t width = val_tag_width(params.key_types[key]);
+    set_completion_copy(params, slot, params.source_offsets.key_values[key],
+                        params.output.key_values[key], count, width);
+    set_completion_copy(params, slot + 1, params.source_offsets.key_nulls[key],
+                        params.output.key_nulls[key], count, sizeof(uint8_t));
+  }
+
+  for (size_t measure = 0; measure < params.measure_count; ++measure) {
+    const size_t slot = kPublishMeasures + measure * kPublishMeasureLaneCount;
+    const uint64_t* destinations = params.output.measure_lanes[measure];
+    const size_t state_bytes = params.measure_state_bytes[measure];
+    const size_t* offsets = params.source_offsets.measure_lanes[measure];
+    set_completion_copy(params, slot, offsets[0], destinations[0], count, state_bytes);
+    set_completion_copy(params, slot + 1, offsets[1], destinations[1], count, state_bytes);
+    set_completion_copy(params, slot + 2, offsets[2], destinations[2], count, state_bytes);
+    set_completion_copy(params, slot + 3, offsets[3], destinations[3], count, state_bytes);
+    set_completion_copy(params, slot + 4, offsets[4], destinations[4], count,
+                        sizeof(uint64_t));
+    set_completion_copy(params, slot + 5, offsets[5], destinations[5], count,
+                        sizeof(uint64_t));
+    set_completion_copy(params, slot + 6, offsets[6], destinations[6], count, state_bytes);
+    set_completion_copy(params, slot + 7, offsets[7], destinations[7], count,
+                        sizeof(uint64_t));
+    set_completion_copy(params, slot + 8, offsets[8], destinations[8], count,
+                        sizeof(uint64_t));
+  }
+
+  set_completion_copy(params, kPublishEmitted,
+                      params.source_offsets.completion + offsetof(DeviceCompletion, emitted),
+                      params.output.emitted, 1, sizeof(completion.emitted));
+  set_completion_copy(params, kPublishSelected,
+                      params.source_offsets.completion + offsetof(DeviceCompletion, selected),
+                      params.output.selected, 1, sizeof(completion.selected));
+  set_completion_copy(params, kPublishUncertain,
+                      params.source_offsets.completion + offsetof(DeviceCompletion, uncertain),
+                      params.output.uncertain, 1, sizeof(completion.uncertain));
+}
+
 template <typename T>
 T* arena_ptr(void* base, size_t offset) {
   return offset == kNoOffset ? nullptr : reinterpret_cast<T*>(static_cast<uint8_t*>(base) + offset);
@@ -1706,6 +1873,70 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
     buffers.rhs_sum = arena_ptr<uint64_t>(scratch, ml.rhs_sum);
     buffers.rhs_count = arena_ptr<uint64_t>(scratch, ml.rhs_count);
     buffers.rhs_nonnull = arena_ptr<uint64_t>(scratch, ml.rhs_nonnull);
+  }
+}
+
+uint64_t pointer_bits(const void* pointer) {
+  return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pointer));
+}
+
+void bind_publish_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& layout,
+                         void* scratch, pgaccel_grouped_agg_out* out, int32_t* detail,
+                         DevicePublishParams* params) {
+  *params = {};
+  params->group_capacity = desc.group_capacity;
+  params->execution_flags = desc.execution_flags;
+  params->key_count = desc.key_count;
+  params->measure_count = desc.measure_count;
+  params->output_mode = desc.output_mode;
+  params->meta = arena_ptr<DeviceMeta>(scratch, layout.meta);
+  params->completion = arena_ptr<DeviceCompletion>(scratch, layout.completion);
+  params->source_offsets.completion = layout.completion;
+  params->source_offsets.active = layout.active;
+  params->source_offsets.group_codes = layout.staged_group_codes;
+  for (size_t key = 0; key < desc.key_count; ++key) {
+    params->key_types[key] = materialized_key_type(desc, desc.keys[key]);
+    params->source_offsets.key_values[key] = layout.staged_key_values[key];
+    params->source_offsets.key_nulls[key] = layout.staged_key_nulls[key];
+  }
+  for (size_t measure = 0; measure < desc.measure_count; ++measure) {
+    params->measure_state_bytes[measure] = desc.measures[measure].state_bytes;
+    const MeasureLayout& ml = layout.measures[measure];
+    size_t* offsets = params->source_offsets.measure_lanes[measure];
+    offsets[0] = ml.sum;
+    offsets[1] = ml.min;
+    offsets[2] = ml.max;
+    offsets[3] = ml.sumsq;
+    offsets[4] = ml.count;
+    offsets[5] = ml.nonnull;
+    offsets[6] = ml.rhs_sum;
+    offsets[7] = ml.rhs_count;
+    offsets[8] = ml.rhs_nonnull;
+  }
+  params->output.detail = pointer_bits(detail);
+  if (out == nullptr)
+    return;
+  params->output.group_codes = pointer_bits(out->group_codes);
+  params->output.active_groups = pointer_bits(out->active_groups);
+  params->output.emitted = pointer_bits(&out->emitted_group_count);
+  params->output.selected = pointer_bits(&out->selected_count);
+  params->output.uncertain = pointer_bits(&out->uncertain_count);
+  for (size_t key = 0; key < PGACCEL_GROUPED_AGG_MAX_KEYS; ++key) {
+    params->output.key_values[key] = pointer_bits(out->keys[key].values);
+    params->output.key_nulls[key] = pointer_bits(out->keys[key].nulls);
+  }
+  for (size_t measure = 0; measure < PGACCEL_GROUPED_AGG_MAX_MEASURES; ++measure) {
+    const pgaccel_grouped_agg_measure_out& output = out->measures[measure];
+    uint64_t* lanes = params->output.measure_lanes[measure];
+    lanes[0] = pointer_bits(output.sum);
+    lanes[1] = pointer_bits(output.min);
+    lanes[2] = pointer_bits(output.max);
+    lanes[3] = pointer_bits(output.sumsq);
+    lanes[4] = pointer_bits(output.count);
+    lanes[5] = pointer_bits(output.nonnull_count);
+    lanes[6] = pointer_bits(output.rhs_sum);
+    lanes[7] = pointer_bits(output.rhs_count);
+    lanes[8] = pointer_bits(output.rhs_nonnull_count);
   }
 }
 
@@ -1995,56 +2226,59 @@ bool validate_scratch_usm(sycl::queue& queue, const pgaccel_grouped_agg_desc& de
   return expected_space && same_queue_device(queue, desc.scratch);
 }
 
-void enqueue_copy(sycl::queue& queue, void* dst, const void* src, size_t count, size_t width) {
-  if (dst != nullptr && count != 0)
-    queue.memcpy(dst, src, count * width);
+void enqueue_copyback(sycl::queue& queue, const void* scratch,
+                      const DeviceCopyCommand& command) {
+  if (command.bytes == 0)
+    return;
+  const void* source = static_cast<const uint8_t*>(scratch) + command.source_offset;
+  queue.memcpy(reinterpret_cast<void*>(command.destination), source, command.bytes);
 }
 
-void publish_output(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
-                    const WorkspaceLayout& layout, void* scratch, const DeviceMeta& meta,
-                    pgaccel_grouped_agg_out* out) {
-  const size_t count =
-      desc.output_mode == PGACCEL_GROUPED_AGG_OUTPUT_COMPACT ? meta.emitted : desc.group_capacity;
-  if (desc.output_mode == PGACCEL_GROUPED_AGG_OUTPUT_DENSE)
-    enqueue_copy(queue, out->active_groups, arena_ptr<uint8_t>(scratch, layout.active),
-                 desc.group_capacity, sizeof(uint8_t));
-  enqueue_copy(queue, out->group_codes, arena_ptr<size_t>(scratch, layout.staged_group_codes),
-               count, sizeof(size_t));
-  for (size_t k = 0; k < desc.key_count; ++k) {
-    const size_t width = val_tag_width(materialized_key_type(desc, desc.keys[k]));
-    enqueue_copy(queue, out->keys[k].values,
-                 arena_ptr<uint8_t>(scratch, layout.staged_key_values[k]), count, width);
-    enqueue_copy(queue, out->keys[k].nulls, arena_ptr<uint8_t>(scratch, layout.staged_key_nulls[k]),
-                 count, sizeof(uint8_t));
-  }
-  for (size_t m = 0; m < desc.measure_count; ++m) {
-    const MeasureLayout& ml = layout.measures[m];
-    pgaccel_grouped_agg_measure_out& output = out->measures[m];
-    enqueue_copy(queue, output.sum, arena_ptr<uint64_t>(scratch, ml.sum), count, sizeof(uint64_t));
-    enqueue_copy(queue, output.min, arena_ptr<uint64_t>(scratch, ml.min), count, sizeof(uint64_t));
-    enqueue_copy(queue, output.max, arena_ptr<uint64_t>(scratch, ml.max), count, sizeof(uint64_t));
-    enqueue_copy(queue, output.sumsq, arena_ptr<uint64_t>(scratch, ml.sumsq), count,
-                 sizeof(uint64_t));
-    enqueue_copy(queue, output.count, arena_ptr<uint64_t>(scratch, ml.count), count,
-                 sizeof(uint64_t));
-    enqueue_copy(queue, output.nonnull_count, arena_ptr<uint64_t>(scratch, ml.nonnull), count,
-                 sizeof(uint64_t));
-    enqueue_copy(queue, output.rhs_sum, arena_ptr<uint64_t>(scratch, ml.rhs_sum), count,
-                 sizeof(uint64_t));
-    enqueue_copy(queue, output.rhs_count, arena_ptr<uint64_t>(scratch, ml.rhs_count), count,
-                 sizeof(uint64_t));
-    enqueue_copy(queue, output.rhs_nonnull_count, arena_ptr<uint64_t>(scratch, ml.rhs_nonnull),
-                 count, sizeof(uint64_t));
-  }
+void enqueue_key_copybacks(sycl::queue& queue, const void* scratch,
+                           const DeviceCompletion& completion, size_t slot) {
+  enqueue_copyback(queue, scratch, completion.commands[slot]);
+  enqueue_copyback(queue, scratch, completion.commands[slot + 1]);
+}
+
+void enqueue_measure_copybacks(sycl::queue& queue, const void* scratch,
+                               const DeviceCompletion& completion, size_t slot) {
+  enqueue_copyback(queue, scratch, completion.commands[slot]);
+  enqueue_copyback(queue, scratch, completion.commands[slot + 1]);
+  enqueue_copyback(queue, scratch, completion.commands[slot + 2]);
+  enqueue_copyback(queue, scratch, completion.commands[slot + 3]);
+  enqueue_copyback(queue, scratch, completion.commands[slot + 4]);
+  enqueue_copyback(queue, scratch, completion.commands[slot + 5]);
+  enqueue_copyback(queue, scratch, completion.commands[slot + 6]);
+  enqueue_copyback(queue, scratch, completion.commands[slot + 7]);
+  enqueue_copyback(queue, scratch, completion.commands[slot + 8]);
+}
+
+void publish_completion(sycl::queue& queue, const void* scratch,
+                        const DeviceCompletion& completion) {
+  enqueue_copyback(queue, scratch, completion.commands[kPublishDetail]);
+  enqueue_copyback(queue, scratch, completion.commands[kPublishActive]);
+  enqueue_copyback(queue, scratch, completion.commands[kPublishGroupCodes]);
+  enqueue_key_copybacks(queue, scratch, completion, kPublishKeys);
+  enqueue_key_copybacks(queue, scratch, completion, kPublishKeys + kPublishKeyLaneCount);
+  enqueue_key_copybacks(queue, scratch, completion, kPublishKeys + 2 * kPublishKeyLaneCount);
+  enqueue_measure_copybacks(queue, scratch, completion, kPublishMeasures);
+  enqueue_measure_copybacks(queue, scratch, completion,
+                            kPublishMeasures + kPublishMeasureLaneCount);
+  enqueue_measure_copybacks(queue, scratch, completion,
+                            kPublishMeasures + 2 * kPublishMeasureLaneCount);
+  enqueue_measure_copybacks(queue, scratch, completion,
+                            kPublishMeasures + 3 * kPublishMeasureLaneCount);
+  enqueue_copyback(queue, scratch, completion.commands[kPublishEmitted]);
+  enqueue_copyback(queue, scratch, completion.commands[kPublishSelected]);
+  enqueue_copyback(queue, scratch, completion.commands[kPublishUncertain]);
   queue.wait_and_throw();
-  out->emitted_group_count = meta.emitted;
-  out->selected_count = meta.selected;
-  out->uncertain_count = meta.uncertain;
 }
 
 class GroupedAggDenseKernel;
 class GroupedAggHashKernel;
+class GroupedAggHashInitKernel;
 class GroupedAggHashCompactKernel;
+class GroupedAggCompletionKernel;
 
 class ScratchOwner {
  public:
@@ -2131,13 +2365,18 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
 
     KernelParams host_params;
     bind_params(*desc, layout, scratch, &host_params);
+    DevicePublishParams host_publish_params;
+    bind_publish_params(*desc, layout, scratch, finalize ? out : nullptr, detail,
+                        &host_publish_params);
     KernelParams* device_params = arena_ptr<KernelParams>(scratch, layout.params);
-    queue.memcpy(device_params, &host_params, sizeof(host_params));
-    DeviceMeta meta{};
+    DevicePublishParams* device_publish_params =
+        arena_ptr<DevicePublishParams>(scratch, layout.publish_params);
+    queue.memcpy(device_params, &host_params, sizeof(host_params)).wait_and_throw();
+    queue.memcpy(device_publish_params, &host_publish_params, sizeof(host_publish_params))
+        .wait_and_throw();
 
     if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
-      meta.selected = desc->row_count;
-      queue.memcpy(host_params.meta, &meta, sizeof(meta));
+      queue.single_task<GroupedAggHashInitKernel>([=]() { run_hash_init_kernel(device_params); });
       queue.fill(host_params.hash_owners, kHashEmptyOwner, layout.hash_slot_count);
       queue.fill(host_params.hash_counts, uint32_t{0}, layout.hash_slot_count);
       queue.fill(host_params.hash_group_count, uint32_t{0}, size_t{1});
@@ -2146,42 +2385,21 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
             sycl::range<1>(desc->row_count),
             [=](sycl::id<1> id) { run_hash_row(device_params, id[0]); });
       }
-      queue.wait_and_throw();
-      pgaccel_record_gpu_exec();
-      queue.memcpy(&meta, host_params.meta, sizeof(meta)).wait_and_throw();
-    } else {
-      queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
-      queue.wait_and_throw();
-      pgaccel_record_gpu_exec();
-      queue.memcpy(&meta, host_params.meta, sizeof(meta)).wait_and_throw();
-    }
-
-    const uint32_t known_failures = kFailureInvalid | kFailureNumericOverflow | kFailureCapacity;
-    if ((meta.failure_flags & ~known_failures) != 0 ||
-        (meta.failure_flags & kFailureInvalid) != 0) {
-      *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
-      return PGACCEL_ERROR;
-    }
-    if ((meta.failure_flags & kFailureNumericOverflow) != 0) {
-      *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW;
-      return PGACCEL_ERROR;
-    }
-    if ((meta.failure_flags & kFailureCapacity) != 0)
-      return PGACCEL_UNSUPPORTED;
-
-    if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
       queue.single_task<GroupedAggHashCompactKernel>(
           [=]() { run_hash_compact_kernel(device_params); });
-      queue.wait_and_throw();
-      queue.memcpy(&meta, host_params.meta, sizeof(meta)).wait_and_throw();
-      if (meta.failure_flags != 0) {
-        *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
-        return PGACCEL_ERROR;
-      }
+    } else {
+      queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
     }
-    if (finalize)
-      publish_output(queue, *desc, layout, scratch, meta, out);
-    return PGACCEL_OK;
+    queue.wait_and_throw();
+    queue.single_task<GroupedAggCompletionKernel>(
+        [=]() { run_completion_kernel(device_publish_params); });
+    queue.wait_and_throw();
+
+    DeviceCompletion completion{};
+    queue.memcpy(&completion, host_publish_params.completion, sizeof(completion)).wait_and_throw();
+    pgaccel_record_gpu_exec();
+    publish_completion(queue, scratch, completion);
+    return static_cast<pgaccel_status>(completion.status);
   } catch (const pgaccel_no_device_error&) {
     return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::bad_alloc&) {

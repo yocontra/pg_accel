@@ -1245,6 +1245,53 @@ void test_mixed_radix_compact_and_keyed_empty() {
   CHECK(nullable_output.measures[0].count == std::vector<uint64_t>({1, 1, 1}));
 }
 
+void test_device_publication_contract() {
+  std::printf("--- device publication variable-width/no-write contract ---\n");
+  SharedArray<int32_t> keys({3, 1, 6, 3});
+  SharedArray<uint8_t> nulls({0, 0, 1, 0});
+  pgaccel_grouped_agg_desc desc = base_desc(keys.size());
+  desc.output_mode = PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+  set_fact_key(desc, 0, keys.data(), nulls.data(), 0, 8, 7);
+  set_count_star(desc, 0);
+
+  OutputStorage output(desc, true);
+  pgaccel_reset_gpu_exec_count();
+  CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+  CHECK(pgaccel_gpu_exec_count() > 0);
+  CHECK(output.out.emitted_group_count == 3);
+  CHECK(output.out.selected_count == keys.size());
+  CHECK(std::vector<int32_t>(output.key_values[0].begin(), output.key_values[0].begin() + 3) ==
+        std::vector<int32_t>({1, 3, 7}));
+  CHECK(std::vector<uint8_t>(output.key_nulls[0].begin(), output.key_nulls[0].begin() + 3) ==
+        std::vector<uint8_t>({0, 0, 1}));
+  CHECK(std::vector<uint64_t>(output.measures[0].count.begin(),
+                              output.measures[0].count.begin() + 3) ==
+        std::vector<uint64_t>({1, 2, 1}));
+  for (size_t group = 3; group < desc.group_capacity; ++group) {
+    CHECK(output.key_values[0][group] == std::numeric_limits<int32_t>::min());
+    CHECK(output.key_nulls[0][group] == 0xa5);
+    CHECK(output.measures[0].count[group] == OutputStorage::kSentinel);
+  }
+
+  pgaccel_grouped_agg_desc invalid = desc;
+  ++invalid.abi_version;
+  OutputStorage invalid_output(desc, true);
+  pgaccel_reset_gpu_exec_count();
+  CHECK_STATUS(execute_external(invalid, &invalid_output.out), PGACCEL_ERROR);
+  CHECK(pgaccel_gpu_exec_count() == 0);
+  CHECK(invalid_output.measures[0].count[0] == OutputStorage::kSentinel);
+
+  nulls[1] = 2;
+  OutputStorage device_failure(desc, true);
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  pgaccel_reset_gpu_exec_count();
+  CHECK_STATUS(execute_external_ex(desc, &device_failure.out, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  CHECK(pgaccel_gpu_exec_count() > 0);
+  CHECK(device_failure.out.emitted_group_count == 0);
+  CHECK(device_failure.measures[0].count[0] == OutputStorage::kSentinel);
+}
+
 void test_group_activity_ignores_measure_validity() {
   std::printf("--- group activity ignores measure validity ---\n");
   SharedArray<int32_t> keys({0, 1});
@@ -1791,6 +1838,7 @@ int main() {
     test_predicate_only_physical_count();
     test_four_dimensions_and_multiplicity();
     test_mixed_radix_compact_and_keyed_empty();
+    test_device_publication_contract();
     test_group_activity_ignores_measure_validity();
     test_integer_expression_overflow_semantics();
     test_error_and_unsupported_statuses();
