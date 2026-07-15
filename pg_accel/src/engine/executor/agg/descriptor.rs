@@ -1128,51 +1128,48 @@ impl DescriptorAggPlan {
         &self,
     ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
         let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
-        let result: Result<DescriptorAggDispatch, DescriptorDispatchFailure> =
-            match &self.artifact_kind {
-                DescriptorArtifactKind::Dense => execute_bounded_dense_artifact(
+        let result: Result<DescriptorAggDispatch, DescriptorDispatchFailure> = match &self
+            .artifact_kind
+        {
+            DescriptorArtifactKind::Dense => execute_bounded_dense_artifact(
+                owner_relid,
+                &self.identity,
+                &self.dispatch_columns,
+                &self.projection,
+                self.dispatch_chunk_rows,
+            ),
+            DescriptorArtifactKind::H3Parent { cell, .. } => {
+                match with_derived_artifact_inputs::<H3ParentArtifact, _>(
                     owner_relid,
                     &self.identity,
                     &self.dispatch_columns,
-                    &self.projection,
-                    self.dispatch_chunk_rows,
-                ),
-                DescriptorArtifactKind::H3Parent { cell, .. } => {
-                    match with_derived_artifact_inputs::<H3ParentArtifact, _>(
-                        owner_relid,
-                        &self.identity,
-                        &self.dispatch_columns,
-                        |inputs| {
-                            build_and_execute_h3_one_shot(
-                                inputs,
-                                &self.dispatch_columns,
-                                *cell,
-                                &self.projection,
-                            )
-                        },
-                    ) {
-                        Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
-                        Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
-                    }
+                    |inputs| {
+                        build_and_execute_h3_one_shot(
+                            inputs,
+                            &self.dispatch_columns,
+                            *cell,
+                            &self.projection,
+                        )
+                    },
+                ) {
+                    Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
+                    Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
                 }
-                DescriptorArtifactKind::Spatial(_) => {
-                    match with_derived_artifact_inputs::<SpatialAggArtifact, _>(
-                        owner_relid,
-                        &self.identity,
-                        &self.dispatch_columns,
-                        |inputs| {
-                            build_and_execute_spatial(
-                                inputs,
-                                &self.dispatch_columns,
-                                &self.projection,
-                            )
-                        },
-                    ) {
-                        Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
-                        Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
-                    }
+            }
+            DescriptorArtifactKind::Spatial(_) => {
+                match with_derived_artifact_inputs::<SpatialAggArtifact, _>(
+                    owner_relid,
+                    &self.identity,
+                    &self.dispatch_columns,
+                    |inputs| {
+                        build_and_execute_spatial(inputs, &self.dispatch_columns, &self.projection)
+                    },
+                ) {
+                    Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
+                    Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
                 }
-            };
+            }
+        };
         match result {
             Ok(dispatch) => Ok(Ok(dispatch)),
             Err(DescriptorDispatchFailure::Residency(error)) => Err(error),
