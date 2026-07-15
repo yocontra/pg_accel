@@ -12,8 +12,14 @@ unchecked.
 - CI evidence: link to the GitHub Actions run for the release candidate commit.
 - Bench evidence: link to the committed or uploaded benchmark report artifact.
 - Correctness evidence: link to the diff report, SQL output, kernel test log, or CI artifact.
-- Hardware evidence: name the runner or host class used for Metal/CUDA/ROCm/L0.
+- Hardware evidence: name the Apple Silicon runner or host class used for Metal.
 - Deferrals: link to the release-note section and issue that explicitly scopes the item out of 1.0.
+
+CUDA, NVIDIA, and PG-Strom are owner-deferred until a CUDA device is available.
+They remain tracked in [TODO.md](../TODO.md), are excluded from this Metal
+release gate, and must not be presented as validated or supported by this
+release. Adding any CUDA/NVIDIA support claim requires completing that deferred
+gate with real hardware evidence first.
 
 ### Local Evidence Ledger (Not Gate Completion)
 
@@ -55,12 +61,12 @@ justify checking any release item.
 - [ ] No selected GPU benchmark cell disconnects PostgreSQL or records backend crashes; known no-crash repro rows remain covered (`1779092044`, `1779092148`, `1779093355`, `1779093366`, `1779093376`, `1779093387`) and stale `gpu_nlj_between @ 50K` selected evidence is replaced by crash-gated native-decline artifact `benchmarks/artifacts/gpu-nlj-between-native-decline-50k-cacheboth-pass-20260609`. Release evidence artifact: `<sha-or-url>`.
 - [ ] Any new backend-crashing shape discovered before the tag is recorded in the remaining-work register and either gated before re-entry or blocks the release. Evidence SHA/artifact: `<sha-or-url>`.
 
-## Phase 2 - AdaptiveCpp Runtime, Metal, CUDA, And Fork Stability
+## Phase 2 - AdaptiveCpp Runtime, Metal, And Fork Stability
 
 - [ ] fp64 soft path uses the pinned AdaptiveCpp fork or newer accepted upstream commits, with fork-local commits listed in release notes. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] fp64 ULP budget, special-value behavior, documented no-fenv-read-back release semantics, ABI value-buffer contract, and `pg_accel.soft_fp64_cost_multiplier` calibration are verified for every shipped fp64 kernel family. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] Cold-start, fork, archive-size, SSCP debug, and warning-noise behavior are captured as pass/fail artifacts, including first-dispatch latency per kernel. Interim evidence: quiet CTest H3 log `.pgaccel/logs/test_h3-20260609-003356-84515.log`, focused f32/all-res log `.pgaccel/logs/test_h3-f32-allres-refactor-20260609-003343-84484.log`, and warmup/JIT report fields required by the benchmark evidence contract. Final evidence SHA/artifact: `<sha-or-url>`.
-- [ ] Metal and CUDA runtime setup paths are documented with backend metadata and any ROCm/L0 deferrals. Evidence SHA/artifact: `<sha-or-url>`.
+- [ ] The Metal runtime setup path is documented with backend metadata, and unvalidated backends are explicitly identified as unsupported. Evidence SHA/artifact: `<sha-or-url>`.
 
 ## Phase 3 - GPU-Resident Execution Substrate
 
@@ -68,7 +74,7 @@ justify checking any release item.
 - [ ] Expression/filter/projection wrappers over PostgreSQL-native child plans are declined unless GPU dispatch is real, output semantics match PostgreSQL, and selected cells meet benchmark parity. Current direct generic `GpuExpr` template scans decline with `standalone_gpuexpr_no_gpu_pipeline`; live plan-shape evidence keeps the GPU counter flat and matches native `count(*)`. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] Aggregate wrappers require attached fact child plans, visible GPU dispatch, correct PostgreSQL semantics, and benchmark parity for selected grouped aggregate cells. Evidence SHA/artifact: `<sha-or-url>`.
 
-## Phase 4 - Core OLAP Coverage And PG-Strom Parity
+## Phase 4 - Core OLAP Coverage
 
 - [ ] HashAgg, grouped aggregate, COUNT/DISTINCT, reduce, hash join, nested-loop join, sort/top-k/rank, window, SSBM, and expression lanes either dispatch real GPU work with correctness proof or visibly decline. Current local Metal evidence: standalone GPU tests pass in `benchmarks/artifacts/metal-stress-20260704-161735/standalone-gpu-tests.log`; segmented Metal window aggregate/rank kernels dispatch in device coverage, while planner-visible full/reducing window SQL stays PostgreSQL-native and records `no_gpu_resident_pipeline` because no resident consumer exists. Release evidence SHA/artifact: `<sha-or-url>`.
 - [ ] Sort/top-k/rank/window selected shapes match PostgreSQL semantics for NULLs, duplicates, collation/order-sensitive cases, peer groups, and frames. Current local evidence: `test_window` passes with segmented count/sum/rank/dense-rank device dispatch coverage; SQL window files `18_window_functions.sql`, `60_window_functions.sql`, and `61_window_edge_cases.sql` pass under `just sql-test 18` while production planning retains the resident-consumer boundary above. Release evidence SHA/artifact: `<sha-or-url>`.
@@ -84,34 +90,32 @@ justify checking any release item.
 ## Phase 6 - Feature Completion And Deferrals
 
 - [ ] SQL operator/function support matrix, unsupported JSON/JSONB or deferred type coverage, type coercion, NULL edge cases, and released GUC docs match the implementation. Evidence SHA/artifact: `<sha-or-url>`.
-- [ ] SetOp, RecursiveUnion, merge join, NUMERIC behavior, generated columns, partition/pruning behavior, and any remaining PG-Strom-surface gaps either have GPU/correctness/performance proof or documented planner-decline deferrals. Evidence SHA/artifact: `<sha-or-url>`.
+- [ ] SetOp, RecursiveUnion, merge join, NUMERIC behavior, generated columns, partition/pruning behavior, and any remaining accelerator-surface gaps either have GPU/correctness/performance proof or documented planner-decline deferrals. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] AdaptiveCpp rebase/upstream status and any fork-pinned installation burden are explicitly documented for public release. Evidence SHA/artifact: `<sha-or-url>`.
 
 ## Phase 7 - Cost Models, Performance Ratchets, And Comparative Benchmarks
 
 - [ ] Benchmark ratchets fail CI when a selected GPU cell regresses below PostgreSQL parallel parity, crashes, silently misses GPU dispatch, or loses expected GPU plan selection. Evidence SHA/CI: `<sha-or-url>`.
 - [ ] Per-lane threshold matrices exist for row count, type, cardinality, selectivity, row width, output size, geometry complexity, batch count, H3 operation, and raster operation. H3 lat/lng grouped-count winners retain the 1.50x floor; fused parent grouped count has its own 1.10x floor backed by the 2026-06-10 cache-mode-both artifacts above, while standalone scalar H3 parent/distance lanes remain native-decline parity guards. Evidence SHA/artifact: `<sha-or-url>`.
-- [ ] PostgreSQL native comparison passes: every selected GPU cell in the release matrix is `speedup_x >= 1.0` on M-series and NVIDIA hardware, and every non-selected cell has a visible planner-decline reason. Evidence artifact: `<sha-or-url>`.
-- [ ] PG-Strom comparison passes: pg_accel matches or beats PG-Strom for benchmarked PG-Strom-supported OLAP/Geo use cases, or the release is blocked. Evidence artifact: `<sha-or-url>`.
+- [ ] PostgreSQL native comparison passes: every selected GPU cell in the release matrix is `speedup_x >= 1.0` on the validated M-series hardware, and every non-selected cell has a visible planner-decline reason. Evidence artifact: `<sha-or-url>`.
 
 ## Phase 8 - Test Coverage, CI, And Stress Gates
 
 - [ ] Coverage reaches at least 90% for pg_accel-owned Rust, C++/SYCL, and SQL-extension behavior; CI publishes coverage artifacts and fails below the required thresholds. Current local evidence: the automated coverage artifact is Rust-only `cargo llvm-cov` with `pg_test` enabled and the Rust test harness pinned to one thread. It covers Rust reached by pgrx tests, writes `coverage-scope.txt`, and explicitly does not instrument `pgaccel-kernels` C++/SYCL sources, standalone SQL harness files, benchmark artifacts, shell scripts, or GPU runtime/toolchain code. The Rust gate completes after the direct-USM fused-filter null-mask fix but fails with 40.23% Rust line coverage and 38.36% Rust region coverage in `artifacts/coverage/coverage-summary.txt`. C++/SYCL and SQL coverage remain unevidenced for the 90% release claim. Evidence CI/artifact: `<sha-or-url>`.
 - [ ] Coverage includes planner hooks, executor state, private-data encoding/decoding, GPU dispatch adapters, SQL extension surfaces, C++ kernels, H3/PostGIS/raster semantics, and benchmark classification. Current gap evidence: the 2026-07-04 Rust coverage report still shows major uncovered planner/executor/runtime surfaces, including custom scan execution, resident/group aggregate planners, OLAP cache, GPU dispatch adapters, H3/PostGIS/raster dispatch, and benchmark CLI/integration paths; separate C++/SYCL and SQL-extension coverage artifacts are not yet produced. Evidence CI/artifact: `<sha-or-url>`.
 - [ ] Metal stress gate passes on M-series hardware with mixed scan, aggregate, join, sort, H3, PostGIS, raster, fork, and cancellation workloads: zero backend crashes, kernel failures, panic-log entries, and resource-leak messages. Current local evidence: `just metal-stress 18` passed on 2026-07-04 with artifact directory `benchmarks/artifacts/metal-stress-20260704-161735`, including install, extension smoke, 52/52 SQL files, clean logs, standalone GPU tests, `gpu-stress-archive` 8x20 with zero XPC/pipeline/archive failures, benchmark crash-artifact checks, cancellation probe, and final clean-log assertion. Release evidence artifact: `<sha-or-url>`.
-- [ ] CUDA stress gate passes on NVIDIA hardware using the same matrix adjusted only for backend metadata: zero backend crashes, kernel failures, and panic-log entries, with benchmark results satisfying PostgreSQL/PG-Strom gates. Evidence artifact: `<sha-or-url>`.
-- [ ] Required CI ship-bar jobs pass on the release candidate commit: macOS arm64 GPU, Linux x86_64 no-GPU, and optional self-hosted CUDA smoke or documented hardware skip. Branch protection is recommended repository policy but is not a tag blocker. Evidence CI/settings: `<sha-or-url>`.
+- [ ] Required CI ship-bar jobs pass on the release candidate commit: macOS arm64 Metal GPU and Linux x86_64 no-GPU. Branch protection is recommended repository policy but is not a tag blocker. Evidence CI/settings: `<sha-or-url>`.
 - [ ] Release verification matrix passes with artifacts for EXPLAIN audit, correctness diff, benchmark sweep, fork stress, deferred-site audit, and `pg_accel_stats()` sanity. Interim live-PG evidence: H3 protection passes under the default Rust test scheduler without `--test-threads=1`, the plan-shape filter passes 8/8 after the direct-GpuExpr and NLJ crash gates, and `parallel_stress_test` passes 4/4 with no backend disconnects. Current local PG18 evidence on 2026-07-04: `just sql-test 18` passes 52/52 SQL files; `just metal-stress 18` passes with artifacts at `benchmarks/artifacts/metal-stress-20260704-161735`; native Metal tests pass (`test_bbox` 27/27, `test_spatial` 162/162, `test_reduce_stats` PASS, `test_correctness` 340/340, `test_hash_join` 23/23); Rust format, diff whitespace, shell syntax, lint, unit tests, audit, package, and doc parity complete. Rust coverage execution also completes, writes scope metadata, and still fails the 90% threshold; C++/SYCL and SQL coverage artifacts are still missing. Release evidence artifact: `<sha-or-url>`.
 - [ ] Release checklist synchronization is complete: this checklist matches the remaining release gates, every item has evidence, and the tag PR includes the checked checklist. Evidence PR: `<url>`.
 
 ## Phase 9 - Public Release And Installability
 
 - [ ] Fresh-machine smoke passes from a clean clone using public README instructions: install prerequisites, `just setup-gpu-acpp`, package, install, `CREATE EXTENSION`, and run a representative benchmark without manual fixes. Evidence artifact: `<sha-or-url>`.
-- [ ] Installable-by-anyone gate passes: PostgreSQL extension package, AdaptiveCpp fork setup, kernel build, SQL/control files, source PostgreSQL/pgrx path, native macOS notes, Linux CUDA notes, and verification command all work from clean machines. Evidence artifact: `<sha-or-url>`.
+- [ ] Installable-by-anyone gate passes: PostgreSQL extension package, AdaptiveCpp fork setup, kernel build, SQL/control files, source PostgreSQL/pgrx path, native macOS notes, Linux no-GPU behavior, and verification command all work from clean machines. Evidence artifact: `<sha-or-url>`.
 - [ ] Install provenance confirms the live PostgreSQL backend loads the just-built extension binary and failures produce actionable diagnostics. Evidence artifact: `<sha-or-url>`.
 - [ ] Public repository readiness is complete: README, architecture docs, benchmark docs, release notes, license files, contribution guide, security policy, issue templates, reproducible benchmark artifacts, supported hardware, limitations, and failure-reporting docs are published. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] Release candidate and final tag artifacts are published: `v1.0.0-rc1`, one-week monitoring notes, `v1.0.0`, release notes, source archive, SQL artifacts, checksums, benchmark artifacts, and install docs. Evidence release: `<release-url>`.
-- [ ] Hacker News launch is blocked until the repo is public, installable, benchmark-backed, crash-free on the release matrix, and the post links to install docs, benchmark evidence, PG-Strom comparison, supported hardware, limitations, and issue tracker. Evidence URL: `<url>`.
+- [ ] Hacker News launch is blocked until the repo is public, installable, benchmark-backed, crash-free on the release matrix, and the post links to install docs, benchmark evidence, supported hardware, limitations, and issue tracker. Evidence URL: `<url>`.
 
 ## Maintainer Sign-Off
 

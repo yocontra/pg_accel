@@ -4,11 +4,10 @@ set -euo pipefail
 checklist="docs/release-checklist-1.0.md"
 
 required_patterns=(
+    "CUDA, NVIDIA, and PG-Strom are owner-deferred"
     "PostgreSQL native comparison passes"
-    "PG-Strom comparison passes"
     "Coverage reaches at least 90%"
     "Metal stress gate passes"
-    "CUDA stress gate passes"
     "Required CI ship-bar jobs pass"
     "Release verification matrix passes"
     "Release checklist synchronization is complete"
