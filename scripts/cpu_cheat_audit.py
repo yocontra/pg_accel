@@ -2609,10 +2609,20 @@ def _parameter_names(
         "int64_t",
     }
     for left, right in segments:
-        values = [token.value for token in tokens[left:right]]
+        segment = list(tokens[left:right])
+        depth = 0
+        for index, token in enumerate(segment):
+            if token.value in {"(", "[", "{"}:
+                depth += 1
+            elif token.value in {")", "]", "}"}:
+                depth = max(0, depth - 1)
+            elif token.value == "=" and depth == 0:
+                segment = segment[:index]
+                break
+        values = [token.value for token in segment]
         identifiers = [
             token.value
-            for token in tokens[left:right]
+            for token in segment
             if token.kind == "identifier" and token.value not in ignored
         ]
         if not identifiers:
@@ -2620,12 +2630,19 @@ def _parameter_names(
         name = identifiers[-1]
         parameters.add(name)
         name_offset = max(
-            index
-            for index, token in enumerate(tokens[left:right])
-            if token.value == name
+            index for index, token in enumerate(segment) if token.value == name
         )
         before_name = values[:name_offset]
-        if ("*" in before_name or "&" in before_name) and "const" not in before_name:
+        sycl_service_reference = "&" in before_name and any(
+            before_name[index : index + 3] == ["sycl", "::", service]
+            for service in ("queue", "handler")
+            for index in range(max(0, len(before_name) - 2))
+        )
+        if (
+            ("*" in before_name or "&" in before_name)
+            and "const" not in before_name
+            and not sycl_service_reference
+        ):
             mutable.add(name)
     return parameters, mutable
 
@@ -3276,7 +3293,12 @@ def _range_references_output(
     )
 
 
-def _neutral_output_write(tokens: Sequence[Token], operator: int, limit: int) -> bool:
+def _neutral_output_write(
+    tokens: Sequence[Token],
+    operator: int,
+    limit: int,
+    allowed_identity_identifiers: set[str],
+) -> bool:
     if tokens[operator].value != "=":
         return False
     values: list[str] = []
@@ -3295,16 +3317,103 @@ def _neutral_output_write(tokens: Sequence[Token], operator: int, limit: int) ->
         values.append(value)
         cursor += 1
     compact = tuple(value for value in values if value not in {"(", ")"})
-    return compact in {
-        ("0",),
-        ("0u",),
-        ("0U",),
-        ("0L",),
-        ("0UL",),
+
+    def zero_literal(value: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"(?:0+[uUlL]*|0[xX]0+[uUlL]*|"
+                r"(?:0+\.0*|0*\.0+)(?:[eE][+-]?0+)?[fFlL]?|"
+                r"0+[eE][+-]?0+[fFlL]?)",
+                value,
+            )
+        )
+
+    if compact in {
         ("false",),
         ("nullptr",),
         ("NULL",),
+    } or (len(compact) == 1 and zero_literal(compact[0])):
+        return True
+
+    # A typed aggregate identity may be written on the host only for an exact
+    # zero-work branch. It must be independent of every runtime parameter and
+    # match a closed constant grammar. This admits integral forms such as
+    # ``T{0}`` and ``static_cast<T>(~T{0})`` without treating ``42``,
+    # ``data[0]``, or a disguised host finalizer as an identity.
+    if any(
+        token.kind == "identifier" and token.value not in allowed_identity_identifiers
+        for token in tokens[operator + 1 : cursor]
+    ):
+        return False
+    if any(value in {"[", "]", ".", "->", "++", "--", ","} for value in values):
+        return False
+
+    cast_keywords = {
+        "static_cast",
+        "const_cast",
+        "reinterpret_cast",
+        "dynamic_cast",
     }
+
+    def strip_parentheses(expression: tuple[str, ...]) -> tuple[str, ...]:
+        while len(expression) >= 2 and expression[0] == "(" and expression[-1] == ")":
+            depth = 0
+            closes_at_end = True
+            for index, value in enumerate(expression):
+                if value == "(":
+                    depth += 1
+                elif value == ")":
+                    depth -= 1
+                    if depth == 0 and index != len(expression) - 1:
+                        closes_at_end = False
+                        break
+            if not closes_at_end or depth != 0:
+                break
+            expression = expression[1:-1]
+        return expression
+
+    def typed_zero(expression: tuple[str, ...]) -> bool:
+        return (
+            len(expression) == 4
+            and expression[0] in allowed_identity_identifiers
+            and expression[1] == "{"
+            and zero_literal(expression[2])
+            and expression[3] == "}"
+        )
+
+    def constant_identity(expression: tuple[str, ...]) -> bool:
+        expression = strip_parentheses(expression)
+        if typed_zero(expression):
+            return True
+        if expression[:1] == ("~",) and typed_zero(expression[1:]):
+            return True
+        if len(expression) < 7 or expression[0] not in cast_keywords:
+            return False
+        if expression[1] != "<":
+            return False
+        angle_depth = 1
+        close = 2
+        while close < len(expression) and angle_depth:
+            if expression[close] == "<":
+                angle_depth += 1
+            elif expression[close] == ">":
+                angle_depth -= 1
+            elif expression[close] == ">>":
+                angle_depth -= 2
+            close += 1
+        if angle_depth != 0 or close >= len(expression):
+            return False
+        cast_type = expression[2 : close - 1]
+        if not cast_type or any(
+            value not in allowed_identity_identifiers | {"::", "*", "&", "const"}
+            for value in cast_type
+        ):
+            return False
+        if expression[close] != "(" or expression[-1] != ")":
+            return False
+        return constant_identity(expression[close + 1 : -1])
+
+    return constant_identity(tuple(values))
 
 
 def _output_aliases(
@@ -3459,6 +3568,39 @@ def _host_output_accesses(
     lambda_ranges: Sequence[tuple[int, int]],
 ) -> tuple[list[tuple[int, int, bool]], list[tuple[int, int]], set[str]]:
     forward, _ = _delimiter_pairs(tokens)
+    identity_identifiers = {
+        "bool",
+        "char",
+        "short",
+        "int",
+        "long",
+        "float",
+        "double",
+        "size_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "true",
+        "false",
+        "nullptr",
+        "NULL",
+        "static_cast",
+        "const_cast",
+        "reinterpret_cast",
+        "dynamic_cast",
+    }
+    if function.is_template:
+        for index in range(function.signature_start, function.name_index - 1):
+            if (
+                tokens[index].value in {"typename", "class"}
+                and tokens[index + 1].kind == "identifier"
+            ):
+                identity_identifiers.add(tokens[index + 1].value)
     aliases, alias_declarations = _output_aliases(
         tokens, function, mutable, lambda_ranges
     )
@@ -3478,7 +3620,9 @@ def _host_output_accesses(
             writes[index] = (
                 index,
                 tokens[index].line,
-                _neutral_output_write(tokens, operator, function.body_close),
+                _neutral_output_write(
+                    tokens, operator, function.body_close, identity_identifiers
+                ),
             )
         if (
             index > 1

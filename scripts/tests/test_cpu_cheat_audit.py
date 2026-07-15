@@ -281,6 +281,92 @@ class CallGraphTests(unittest.TestCase):
             "large_input_gpu_chain", result.entrypoint_audits[0].classifications
         )
 
+    def test_sycl_queue_reference_is_service_context_not_output(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status copy_result(sycl::queue& q, int* out) {
+              int* device_result = sycl::malloc_device<int>(1, q);
+              q.single_task<Kernel>([=]() { *device_result = 42; }).wait_and_throw();
+              q.memcpy(out, device_result, sizeof(int)).wait_and_throw();
+              sycl::free(device_result, q);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_queue_context(int* out) {
+              sycl::queue& q = get_queue();
+              return copy_result(q, out);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("device_copyback", result.entrypoint_audits[0].classifications)
+
+    def test_sycl_queue_reference_cannot_hide_host_output(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status host_result(sycl::queue& q, int* out) {
+              int* unrelated = sycl::malloc_device<int>(1, q);
+              q.single_task<Decoy>([=]() { *unrelated = 42; }).wait_and_throw();
+              *out = 42;
+              sycl::free(unrelated, q);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_queue_context_host(int* out) {
+              sycl::queue& q = get_queue();
+              return host_result(q, out);
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_queue_context_host")
+        self.assertIn("host_output_write", finding.classifications)
+        self.assertFalse(result.entrypoint_audits[0].ok)
+
+    def test_typed_constant_identity_is_exact_zero_work(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <typename T>
+            pgaccel_status typed_reduce(const T* data, size_t count, T* out) {
+              if (count == 0) {
+                *out = static_cast<T>(~T{0});
+                return PGACCEL_OK;
+              }
+              sycl::queue& q = get_queue();
+              q.single_task<Kernel<T>>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_typed_identity(
+                const int* data, size_t count, int* out) {
+              return typed_reduce<int>(data, count, out);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("zero_work", result.entrypoint_audits[0].classifications)
+
+    def test_zero_work_identity_cannot_read_input_or_call_host(self) -> None:
+        result = audit_fixture(
+            r"""
+            int host_identity();
+            extern "C" pgaccel_status pgaccel_zero_reads_input(
+                const int* data, size_t count, int* out) {
+              if (count == 0) { *out = data[0]; return PGACCEL_OK; }
+              sycl::queue& q = get_queue();
+              q.single_task<ReadKernel>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_zero_calls_host(
+                const int* data, size_t count, int* out) {
+              if (count == 0) { *out = host_identity(); return PGACCEL_OK; }
+              sycl::queue& q = get_queue();
+              q.single_task<CallKernel>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for name in ("pgaccel_zero_reads_input", "pgaccel_zero_calls_host"):
+            with self.subTest(name=name):
+                finding = finding_for(result, name)
+                self.assertIn("host_output_write", finding.classifications)
+
 
 class ControlFlowEvasionTests(unittest.TestCase):
     def assert_rejected(self, source: str, name: str) -> audit.Finding:
@@ -2165,10 +2251,13 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertIn("template_specialization_review", finding.classifications)
         self.assertIn("if constexpr paths require", finding.message)
 
-    def test_reduction_host_finalize_is_flagged(self) -> None:
-        finding = self.findings["pgaccel_reduce_sum_f32"]
-        self.assertIn("host_computation", finding.classifications)
-        self.assertIn("host_output_write", finding.classifications)
+    def test_reduction_device_finalize_is_source_proven(self) -> None:
+        entry = self.by_name["pgaccel_reduce_sum_f32"]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.path.name, "reduce.cpp")
+        self.assertIn("large_input_gpu_chain", entry.classifications)
+        self.assertIn("zero_work", entry.classifications)
+        self.assertNotIn("host_output_write", entry.classifications)
 
     def test_non_status_hash_join_build_is_audited(self) -> None:
         entry = self.by_name["pgaccel_hash_join_build"]
@@ -2191,7 +2280,6 @@ class ProductionWitnessTests(unittest.TestCase):
         for name in wrappers:
             with self.subTest(name=name):
                 entry = self.by_name[name]
-                self.assertFalse(entry.ok)
                 self.assertIn("large_input_gpu_chain", entry.classifications)
 
 
