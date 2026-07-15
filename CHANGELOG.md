@@ -17,10 +17,11 @@
 - Setup now applies a local AdaptiveCpp patch that preserves semicolon
   separated `DEFAULT_TARGETS` values in generated JSON config, preventing
   multi-target defaults such as `omp;metal` from collapsing to `ompmetal`.
-- NUMERIC aggregate families now report the stable planner decline reason
-  `numeric_agg_no_gpu_kernel`, and the benchmark suite includes a bounded
-  `numeric_agg_decline` workload for release evidence until a multi-limb GPU
-  accumulator/comparator lane exists.
+- NUMERIC `SUM`/`AVG` now report the generic shape decline
+  `shape_numeric_accumulator_unavailable` (other unsupported NUMERIC aggregate
+  families report `shape_unsupported_aggregate`), and the benchmark suite
+  includes bounded NUMERIC and non-floating AVG decline workloads until
+  PostgreSQL-compatible GPU accumulators exist.
 - MergeJoin-shaped ordered equi-join opportunities remain PostgreSQL-native
   with planner reason `mergejoin_no_gpu_kernel`, backed by a bounded
   `mergejoin_decline` benchmark workload.

@@ -3229,7 +3229,9 @@ only when benchmarks prove no release-relevant GPU opportunity.
   measured evidence that release workloads should decline them.
 - Progress (2026-06-05): built-in NUMERIC `SUM`, `AVG`, `MIN`, `MAX`,
   `STDDEV`, and `VAR_SAMP` aggregate shapes now remain PostgreSQL-native with
-  exact `numeric_agg_no_gpu_kernel` planner-decline evidence. This item
+  generic shape evidence: `SUM`/`AVG` report
+  `shape_numeric_accumulator_unavailable`, while the unsupported comparator
+  and statistics families report `shape_unsupported_aggregate`. This item
   remains open until the release matrix has either measured native-decline
   artifacts or a correct multi-limb GPU accumulator/comparator implementation.
 
@@ -3240,12 +3242,11 @@ only when benchmarks prove no release-relevant GPU opportunity.
 - Acceptance: supported AVG variants dispatch GPU kernels and match
   PostgreSQL, or planner decline reasons explain why the variant is outside
   the release matrix.
-- Progress (2026-06-05): unsupported AVG variants now expose precise native
-  decline reasons: integer AVG uses `avg_unsupported_input_type`, NUMERIC AVG
-  uses `numeric_agg_no_gpu_kernel`, and interval AVG uses
-  `unsupported_interval_type`. This item remains open until AVG variants
-  either gain PostgreSQL-compatible GPU accumulator/finalization support or
-  have release benchmark artifacts documenting native decline.
+- Progress (2026-06-05): unsupported integer, NUMERIC, and interval AVG
+  variants now stay native with the generic shape decline
+  `shape_numeric_accumulator_unavailable`. This item remains open until AVG
+  variants either gain PostgreSQL-compatible GPU accumulator/finalization
+  support or have release benchmark artifacts documenting native decline.
 
 ### Cascaded multi-key GPU sort
 

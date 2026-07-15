@@ -4334,7 +4334,14 @@ impl BenchReport {
         }
 
         for w in &report.workloads {
-            if w.custom_scan_selected_not_dispatched {
+            let threshold_entry =
+                crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows);
+            let is_native_decline =
+                crate::workloads::workload_metadata(&w.name).is_some_and(|metadata| {
+                    metadata.evidence.threshold
+                        == crate::workloads::ThresholdEvidenceEligibility::NativeDeclineOnly
+                });
+            if w.custom_scan_selected_not_dispatched && !is_native_decline {
                 failures.push(BenchmarkShipGateFailure {
                     workload: w.name.clone(),
                     rows: w.rows,
@@ -4347,8 +4354,7 @@ impl BenchReport {
                 continue;
             }
 
-            if let Some(entry) = crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows)
-            {
+            if let Some(entry) = threshold_entry {
                 match entry.expectation {
                     crate::workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
                         let classification = w.dispatch_classification();
@@ -4441,7 +4447,10 @@ impl BenchReport {
                         }
                     }
                     crate::workloads::BenchmarkLaneExpectation::NativeDecline { reason } => {
-                        if w.gpu_kernel_dispatched {
+                        if w.plan_selected
+                            || w.gpu_kernel_dispatched
+                            || w.gpu_kernel_execution_delta > 0
+                        {
                             failures.push(BenchmarkShipGateFailure {
                                 workload: w.name.clone(),
                                 rows: w.rows,
@@ -4449,9 +4458,14 @@ impl BenchReport {
                                 speedup_median: w.speedup_median_vs_parallel,
                                 gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
                                 detail: format!(
-                                    "native-decline lane `{}` unexpectedly dispatched GPU work; \
-                                     expected decline reason `{reason}`",
-                                    entry.lane
+                                    "native-decline lane `{}` unexpectedly selected a pg_accel \
+                                     Custom Scan or dispatched GPU work (plan_selected={}, \
+                                     gpu_kernel_dispatched={}, kernel_delta={}); expected decline \
+                                     reason `{reason}`",
+                                    entry.lane,
+                                    w.plan_selected,
+                                    w.gpu_kernel_dispatched,
+                                    w.gpu_kernel_execution_delta
                                 ),
                             });
                             continue;
@@ -6518,6 +6532,36 @@ mod tests {
     }
 
     #[test]
+    fn test_phase9_native_declines_reject_custom_scan_or_kernel_dispatch() {
+        for (name, rows) in [
+            ("aggregate_semantic_modifier_decline", 10_000),
+            ("anti_join_null_decline", 10_000),
+            ("avg_nonfloat_decline", 10_000),
+            ("semi_join_null_decline", 10_000),
+            ("window_reducing_decline", 10_000),
+        ] {
+            for (plan_selected, kernel_delta) in [(true, 0), (false, 1)] {
+                let mut workload = mock_workload_result(name, rows, 10.0, 10.0);
+                workload.plan_selected = plan_selected;
+                workload.dispatch_counter_captured = true;
+                workload.gpu_kernel_execution_delta = kernel_delta;
+                workload.accel_output_rows_consumed = kernel_delta;
+                workload.plan_snippet = plan_selected.then(|| {
+                    "Custom Scan (GpuAccelUnexpected)\n  GPU Dispatched: false".to_owned()
+                });
+
+                let failures = mock_report(vec![workload]).evaluate_benchmark_ship_gate();
+                assert_eq!(failures.len(), 1, "{name}");
+                assert_eq!(
+                    failures[0].kind,
+                    BenchmarkShipGateFailureKind::NativeDeclineUnexpectedDispatch,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_benchmark_ship_gate_allows_planner_declined_native_rows() {
         // Honest evidence: the planner itself reported this decline reason
         // (`DeclineReasonSource::PlannerReported`), so the ship gate passes.
@@ -6543,6 +6587,17 @@ mod tests {
     #[test]
     fn test_phase9_structural_decline_cells_require_planner_confirmation() {
         for (name, rows, reason) in [
+            (
+                "aggregate_semantic_modifier_decline",
+                10_000,
+                "shape_aggregate_modifier",
+            ),
+            ("anti_join_null_decline", 10_000, "no_gpu_resident_pipeline"),
+            (
+                "avg_nonfloat_decline",
+                10_000,
+                "shape_numeric_accumulator_unavailable",
+            ),
             ("setop_intersect_decline", 10_000, "setop_no_gpu_kernel"),
             (
                 "recursive_union_decline",
@@ -6556,6 +6611,17 @@ mod tests {
                 10_000,
                 "no_gpu_resident_pipeline",
             ),
+            (
+                "window_reducing_decline",
+                10_000,
+                "no_gpu_resident_pipeline",
+            ),
+            (
+                "numeric_agg_decline",
+                10_000,
+                "shape_numeric_accumulator_unavailable",
+            ),
+            ("semi_join_null_decline", 10_000, "no_gpu_resident_pipeline"),
         ] {
             let mut workload = mark_no_dispatch(
                 mock_workload_result(name, rows, 10.0, 10.0),

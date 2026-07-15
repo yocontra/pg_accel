@@ -4481,6 +4481,17 @@ mod tests {
     #[test]
     fn test_phase9_structural_declines_are_unconfirmed_without_planner_evidence() {
         for (name, rows, reason) in [
+            (
+                "aggregate_semantic_modifier_decline",
+                10_000,
+                "shape_aggregate_modifier",
+            ),
+            ("anti_join_null_decline", 10_000, "no_gpu_resident_pipeline"),
+            (
+                "avg_nonfloat_decline",
+                10_000,
+                "shape_numeric_accumulator_unavailable",
+            ),
             ("setop_intersect_decline", 10_000, "setop_no_gpu_kernel"),
             (
                 "recursive_union_decline",
@@ -4494,6 +4505,17 @@ mod tests {
                 10_000,
                 "no_gpu_resident_pipeline",
             ),
+            (
+                "window_reducing_decline",
+                10_000,
+                "no_gpu_resident_pipeline",
+            ),
+            (
+                "numeric_agg_decline",
+                10_000,
+                "shape_numeric_accumulator_unavailable",
+            ),
+            ("semi_join_null_decline", 10_000, "no_gpu_resident_pipeline"),
         ] {
             let expected_only = native_decline_evidence(name, rows, false, None)
                 .unwrap_or_else(|| panic!("threshold expectation for {name}"));
@@ -4511,6 +4533,11 @@ mod tests {
                 planner_reported.source,
                 report::DeclineReasonSource::PlannerReported,
                 "{name}"
+            );
+
+            assert!(
+                native_decline_evidence(name, rows, true, Some(reason)).is_none(),
+                "{name}: selecting a pg_accel Custom Scan must invalidate native-decline evidence"
             );
         }
     }

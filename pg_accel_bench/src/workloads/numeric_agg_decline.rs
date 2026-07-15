@@ -12,7 +12,7 @@ impl Workload for NumericAggDecline {
 
     fn description(&self) -> &'static str {
         "NUMERIC sum/avg/min/max/stddev/variance — native planner decline \
-         (`numeric_agg_no_gpu_kernel`) until a multi-limb GPU accumulator lands"
+         (`shape_numeric_accumulator_unavailable`) until a multi-limb GPU accumulator lands"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

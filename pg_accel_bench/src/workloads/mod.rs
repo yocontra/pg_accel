@@ -78,17 +78,23 @@ pub mod parallel_stress;
 mod spatial_agg;
 mod spatial_sort;
 // --- Regression ---
+mod aggregate_semantic_modifier_decline;
+mod avg_nonfloat_decline;
 mod bitmap_heap_gpuexpr_decline;
 mod mergejoin_decline;
 mod numeric_agg_decline;
 mod oltp_point;
 mod parallel_hashjoin_rebuild_decline;
 mod recursive_union_decline;
+mod semi_anti_null_decline;
 mod setop_decline;
 mod small_table;
 mod topk_wide;
 mod window_full_output_decline;
+mod window_reducing_decline;
 
+pub use aggregate_semantic_modifier_decline::AggregateSemanticModifierDecline;
+pub use avg_nonfloat_decline::AvgNonfloatDecline;
 pub use bitmap_heap_gpuexpr_decline::BitmapHeapGpuExprDecline;
 pub use case_when_expression_grouped_agg::CaseWhenExpressionGroupedAgg;
 pub use case_when_in_expression_grouped_agg::CaseWhenInExpressionGroupedAgg;
@@ -131,7 +137,10 @@ pub use parallel_stress::{
 pub use predicate_filter_expression_grouped_agg::PredicateFilterExpressionGroupedAgg;
 pub use proximity::Proximity;
 pub use recursive_union_decline::RecursiveUnionDecline;
-pub use registry::{H3LaneClass, ResidentPinSpec, WorkloadCategory, workload_metadata};
+pub use registry::{
+    H3LaneClass, ResidentPinSpec, ThresholdEvidenceEligibility, WorkloadCategory, workload_metadata,
+};
+pub use semi_anti_null_decline::{AntiJoinNullDecline, SemiJoinNullDecline};
 pub use setop_decline::SetOpDecline;
 pub use small_table::SmallTable;
 pub use spatial_agg::SpatialAgg;
@@ -150,6 +159,7 @@ pub use timeseries_sensor_rollup::TimeseriesSensorRollup;
 pub use topk_wide::TopkWide;
 pub use window_analytics::WindowAnalytics;
 pub use window_full_output_decline::WindowFullOutputDecline;
+pub use window_reducing_decline::WindowReducingDecline;
 
 /// A benchmark workload that can set up tables, run a query, and clean up.
 pub trait Workload: Send + Sync {
@@ -435,6 +445,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(window_variants::WINDOW_LAG),
         Box::new(window_variants::WINDOW_LEAD),
         Box::new(WindowFullOutputDecline),
+        Box::new(WindowReducingDecline),
         // --- SSBM (Star Schema Benchmark — PG-Strom comparison) ---
         Box::new(SsbmQ1_1),
         Box::new(SsbmQ1_2),
@@ -479,11 +490,15 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SpatialContains),
         Box::new(SpatialMultiPred),
         Box::new(OltpPoint),
+        Box::new(AggregateSemanticModifierDecline),
+        Box::new(AntiJoinNullDecline),
+        Box::new(AvgNonfloatDecline),
         Box::new(BitmapHeapGpuExprDecline),
         Box::new(MergeJoinDecline),
         Box::new(NumericAggDecline),
         Box::new(ParallelHashJoinRebuildDecline),
         Box::new(RecursiveUnionDecline),
+        Box::new(SemiJoinNullDecline),
         Box::new(SetOpDecline),
         Box::new(SmallTable),
         Box::new(TopkWide),
@@ -2090,26 +2105,55 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
 }
 
 fn window_decline_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
-    if name != "window_full_output_decline" {
-        return None;
-    }
+    let (
+        lane,
+        data_type,
+        cardinality,
+        selectivity,
+        result_count,
+        row_width,
+        output_size,
+        threshold_basis,
+    ) = match name {
+        "window_full_output_decline" => (
+            "window_partitioned_full_output",
+            "int4 partition/order keys + int8 measure",
+            "256 partitions with multi-key peer ordering",
+            "100% input rows enter and leave WindowAgg",
+            format_matrix_rows(rows),
+            "20-byte input plus row_number/running-sum outputs",
+            "full row-proportional window relation",
+            "full-output WindowAgg is outside the GPU-resident reducing-shape contract",
+        ),
+        "window_reducing_decline" => (
+            "window_partitioned_reducing",
+            "int4 partition/order keys + nullable int4 measure",
+            "4 partitions with two-row peer groups",
+            "100% input rows enter WindowAgg; outer aggregate emits one row",
+            "1".to_owned(),
+            "16-byte nullable window input",
+            "one aggregate row consuming running-sum and peer-rank outputs",
+            "reducing output has no segmented window kernel or resident consumer pipeline",
+        ),
+        _ => return None,
+    };
     Some(BenchmarkThresholdMatrixEntry {
-        lane: "window_partitioned_full_output",
+        lane,
         workload: static_workload_name(name),
         rows,
-        data_type: "int4 partition/order keys + int8 measure",
-        cardinality: "256 partitions with multi-key peer ordering",
-        selectivity: "100% input rows enter and leave WindowAgg",
-        result_count: format_matrix_rows(rows),
+        data_type,
+        cardinality,
+        selectivity,
+        result_count,
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
         batch_count: "n/a".to_owned(),
-        row_width: "20-byte input plus row_number/running-sum outputs",
-        output_size: "full row-proportional window relation",
+        row_width,
+        output_size,
         dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
         cache_gate: GENERIC_CACHE_GATE,
-        threshold_basis: "full-output WindowAgg is outside the GPU-resident reducing-shape contract",
+        threshold_basis,
         expectation: BenchmarkLaneExpectation::NativeDecline {
             reason: "no_gpu_resident_pipeline",
         },
@@ -2394,6 +2438,33 @@ fn regression_decline_matrix_entry(
     rows: usize,
 ) -> Option<BenchmarkThresholdMatrixEntry> {
     let (lane, data_type, cardinality, selectivity, row_width, output_size, reason) = match name {
+        "aggregate_semantic_modifier_decline" => (
+            "aggregate_semantic_modifiers",
+            "nullable int4 measures and duplicate keys",
+            "global aggregate",
+            "FILTER plus DISTINCT and ordered bounded sample",
+            "21-byte nullable aggregate input",
+            "one aggregate row",
+            "shape_aggregate_modifier",
+        ),
+        "anti_join_null_decline" => (
+            "anti_join_null_semantics",
+            "nullable duplicate int4 equality keys",
+            "8 outer keys, 4 inner membership keys, plus NULLs",
+            "NOT EXISTS preserves unmatched and NULL outer rows",
+            "8-byte outer row plus nullable key",
+            "one aggregate row",
+            "no_gpu_resident_pipeline",
+        ),
+        "avg_nonfloat_decline" => (
+            "avg_nonfloat_accumulators",
+            "nullable int2/int4/int8/NUMERIC/interval",
+            "global aggregate",
+            "100% input rows enter five native AVG accumulators",
+            "variable-width nullable aggregate input",
+            "one aggregate row",
+            "shape_numeric_accumulator_unavailable",
+        ),
         "mergejoin_decline" => (
             "mergejoin_ordered_equi",
             "int4 ordered equality key",
@@ -2410,7 +2481,7 @@ fn regression_decline_matrix_entry(
             "100% input rows accumulated",
             "variable-width numeric datum",
             "one aggregate row",
-            "numeric_agg_no_gpu_kernel",
+            "shape_numeric_accumulator_unavailable",
         ),
         "bitmap_heap_gpuexpr_decline" => (
             "bitmap_heap_gpuexpr",
@@ -2438,6 +2509,15 @@ fn regression_decline_matrix_entry(
             "4-byte emitted state row",
             "full row-proportional recursive relation",
             "recursiveunion_no_gpu_kernel",
+        ),
+        "semi_join_null_decline" => (
+            "semi_join_null_semantics",
+            "nullable duplicate int4 equality keys",
+            "8 outer keys, 4 inner membership keys, plus NULLs",
+            "EXISTS returns only non-NULL outer membership matches",
+            "8-byte outer row plus nullable key",
+            "one aggregate row",
+            "no_gpu_resident_pipeline",
         ),
         _ => return None,
     };
@@ -2597,12 +2677,17 @@ fn static_workload_name(name: &str) -> &'static str {
         "raster_slope" => "raster_slope",
         "raster_reclass" => "raster_reclass",
         "raster_algebra_deep" => "raster_algebra_deep",
+        "aggregate_semantic_modifier_decline" => "aggregate_semantic_modifier_decline",
+        "anti_join_null_decline" => "anti_join_null_decline",
+        "avg_nonfloat_decline" => "avg_nonfloat_decline",
         "mergejoin_decline" => "mergejoin_decline",
         "numeric_agg_decline" => "numeric_agg_decline",
         "bitmap_heap_gpuexpr_decline" => "bitmap_heap_gpuexpr_decline",
         "setop_intersect_decline" => "setop_intersect_decline",
         "recursive_union_decline" => "recursive_union_decline",
+        "semi_join_null_decline" => "semi_join_null_decline",
         "window_full_output_decline" => "window_full_output_decline",
+        "window_reducing_decline" => "window_reducing_decline",
         _ => "unknown",
     }
 }
@@ -2705,7 +2790,28 @@ mod tests {
 
     #[test]
     fn test_phase9_documented_decline_workload_contracts() {
-        let cases: [(&str, &[usize], &str, &str, &str); 5] = [
+        let cases: [(&str, &[usize], &str, &str, &str); 11] = [
+            (
+                "aggregate_semantic_modifier_decline",
+                &[10_000, 100_000],
+                "FILTER (WHERE keep)",
+                "shape_aggregate_modifier",
+                "hash_agg",
+            ),
+            (
+                "anti_join_null_decline",
+                &[10_000, 100_000],
+                "WHERE NOT EXISTS",
+                "no_gpu_resident_pipeline",
+                "hash_join",
+            ),
+            (
+                "avg_nonfloat_decline",
+                &[10_000, 100_000],
+                "avg(d) AS avg_interval",
+                "shape_numeric_accumulator_unavailable",
+                "reduce",
+            ),
             (
                 "setop_intersect_decline",
                 &[10_000, 100_000],
@@ -2741,6 +2847,27 @@ mod tests {
                 "no_gpu_resident_pipeline",
                 "window",
             ),
+            (
+                "window_reducing_decline",
+                &[10_000, 100_000],
+                "max(peer_rank)",
+                "no_gpu_resident_pipeline",
+                "window",
+            ),
+            (
+                "numeric_agg_decline",
+                &[10_000, 100_000],
+                "sum(n)",
+                "shape_numeric_accumulator_unavailable",
+                "unclassified",
+            ),
+            (
+                "semi_join_null_decline",
+                &[10_000, 100_000],
+                "WHERE EXISTS",
+                "no_gpu_resident_pipeline",
+                "hash_join",
+            ),
         ];
 
         for (name, scales, query_fragment, reason, kernel) in cases {
@@ -2771,6 +2898,79 @@ mod tests {
         assert_eq!(window.row_scales(), &[10_000, 100_000]);
         assert!(window.query_sql().trim_start().starts_with("SELECT"));
         assert!(!window.query_sql().contains("SELECT count("));
+    }
+
+    #[test]
+    fn test_phase9_structural_decline_sql_and_native_reference_results() {
+        let semi = find_workload("semi_join_null_decline").expect("semi workload");
+        let anti = find_workload("anti_join_null_decline").expect("anti workload");
+        let semi_setup = semi.setup_sql(10_000).join("\n");
+        assert!(semi_setup.contains("g % 10 = 0 THEN NULL"));
+        assert!(semi_setup.contains("g % 5 = 0 THEN NULL"));
+        assert!(semi_setup.contains("g % 8"));
+        assert!(semi_setup.contains("g % 4"));
+        assert!(semi.query_sql().contains("i.k = o.k"));
+        assert!(anti.query_sql().contains("i.k = o.k"));
+        assert_eq!(
+            semi.pre_query_sql(),
+            [
+                "SET enable_hashjoin = on",
+                "SET enable_mergejoin = off",
+                "SET enable_nestloop = off"
+            ]
+        );
+        assert_eq!(
+            semi_anti_null_decline::SEMI_EXPECTED_NATIVE_RESULTS,
+            &[(10_000, 4_500, 4_500), (100_000, 45_000, 45_000)]
+        );
+        assert_eq!(
+            semi_anti_null_decline::ANTI_EXPECTED_NATIVE_RESULTS,
+            &[(10_000, 5_500, 4_500), (100_000, 55_000, 45_000)]
+        );
+
+        let aggregate = find_workload("aggregate_semantic_modifier_decline")
+            .expect("aggregate modifier workload");
+        let aggregate_query = aggregate.query_sql();
+        assert!(aggregate_query.contains("sum(v) FILTER (WHERE keep)"));
+        assert!(aggregate_query.contains("count(DISTINCT distinct_key)"));
+        assert!(aggregate_query.contains("array_agg(distinct_key ORDER BY order_key, id)"));
+        assert!(aggregate_query.contains("FILTER (WHERE id <= 8)"));
+        assert_eq!(
+            aggregate_semantic_modifier_decline::EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 10_000, 5, "{3,1,1,NULL,2,2,0,NULL}"),
+                (100_000, 100_000, 5, "{3,1,1,NULL,2,2,0,NULL}")
+            ]
+        );
+
+        let window = find_workload("window_reducing_decline").expect("reducing window workload");
+        let window_query = window.query_sql();
+        assert!(window_query.trim_start().starts_with("SELECT count("));
+        assert!(window_query.contains("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"));
+        assert!(window_query.contains("rank() OVER"));
+        assert!(window_query.contains("max(running_sum)"));
+        assert!(window_query.contains("max(peer_rank)"));
+        assert_eq!(
+            window_reducing_decline::EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 10_000, 2_500, 2_499),
+                (100_000, 100_000, 25_000, 24_999)
+            ]
+        );
+
+        let avg = find_workload("avg_nonfloat_decline").expect("non-float AVG workload");
+        let avg_setup = avg.setup_sql(10_000).join("\n");
+        let avg_query = avg.query_sql();
+        for nullable_modulus in ["g % 11", "g % 10", "g % 8", "g % 6", "g % 5"] {
+            assert!(avg_setup.contains(nullable_modulus));
+        }
+        for column in ["i2", "i4", "i8", "n", "d"] {
+            assert!(avg_query.contains(&format!("avg({column})")));
+        }
+        assert_eq!(
+            avg_nonfloat_decline::EXPECTED_NATIVE_RESULT,
+            ("2", "4", "8", "1.25", "00:00:03")
+        );
     }
 
     #[test]

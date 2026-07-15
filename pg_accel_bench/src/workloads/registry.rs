@@ -696,6 +696,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("window_lag", C::GpuWindow, K::Window),
     workload("window_lead", C::GpuWindow, K::Window),
     workload("window_full_output_decline", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
+    workload("window_reducing_decline", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
     workload("ssbm_q1_1", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q1_1)
         .evidence(WINNER),
@@ -767,6 +768,14 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("spatial_multi_pred", C::Regression, K::PointInRing).extensions(POSTGIS),
     workload("oltp_point_lookup", C::Regression, K::PointInRing),
     workload(
+        "aggregate_semantic_modifier_decline",
+        C::Regression,
+        K::HashAgg,
+    )
+    .evidence(NATIVE_DECLINE),
+    workload("anti_join_null_decline", C::Regression, K::HashJoin).evidence(NATIVE_DECLINE),
+    workload("avg_nonfloat_decline", C::Regression, K::Reduce).evidence(NATIVE_DECLINE),
+    workload(
         "bitmap_heap_gpuexpr_decline",
         C::Regression,
         K::Unclassified,
@@ -781,6 +790,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     )
     .evidence(NATIVE_DECLINE),
     workload("recursive_union_decline", C::Regression, K::RecursiveUnion).evidence(NATIVE_DECLINE),
+    workload("semi_join_null_decline", C::Regression, K::HashJoin).evidence(NATIVE_DECLINE),
     workload("setop_intersect_decline", C::Regression, K::SetOp).evidence(NATIVE_DECLINE),
     workload("small_table_scan", C::Regression, K::Unclassified),
     workload("topk_wide", C::Regression, K::Sort).evidence(NATIVE_DECLINE),
