@@ -160,6 +160,9 @@ pub(super) unsafe extern "C-unwind" fn initialize_dsm_custom_scan(
     }
     if !css.is_null() {
         let scan_state = css.cast::<GpuAccelScanState>();
+        // SAFETY: `css` is the live CustomScanState allocated as the leading
+        // field of GpuAccelScanState; the leader owns it while initializing
+        // this node's DSM coordinate.
         unsafe {
             (*scan_state).accel.dsm_state = state;
             (*scan_state).accel.dsm_counters_recorded = false;
@@ -188,6 +191,8 @@ pub(super) unsafe extern "C-unwind" fn reinitialize_dsm_custom_scan(
         pgrx::warning!("pg_accel: custom scan DSM coordinate is null during reinitialize");
         return;
     }
+    // SAFETY: PostgreSQL passes the same DSM coordinate allocated using this
+    // node's estimate and initialized as GpuAccelDsmState by the leader.
     let dsm = unsafe { &*coordinate.cast::<GpuAccelDsmState>() };
     dsm.reset_agg_counters();
     // SAFETY: same inputs and invariants as InitializeDSMCustomScan.
@@ -275,6 +280,8 @@ pub(super) unsafe extern "C-unwind" fn initialize_worker_custom_scan(
 /// Called in the leader when shutting down parallel execution.
 #[pgrx::pg_guard]
 pub(super) unsafe extern "C-unwind" fn shutdown_custom_scan(css: *mut pg_sys::CustomScanState) {
+    // SAFETY: PostgreSQL invokes ShutdownCustomScan with this node's live
+    // CustomScanState before releasing its DSM coordinate.
     unsafe { snapshot_parallel_agg_counters_to_state(css.cast::<GpuAccelScanState>()) };
     tracing::debug!(node = "pg_accel_custom_scan", "dsm.shutdown");
 }
@@ -289,6 +296,8 @@ unsafe fn snapshot_parallel_agg_counters_to_state(state: *mut GpuAccelScanState)
     if accel.dsm_state.is_null() {
         return;
     }
+    // SAFETY: `dsm_state` was installed from this node's validated DSM
+    // coordinate and remains mapped until ShutdownCustomScan returns.
     let dsm = unsafe { &*accel.dsm_state };
     if dsm.is_valid() {
         let counters = dsm.snapshot_agg_counters();

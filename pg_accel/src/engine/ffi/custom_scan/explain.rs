@@ -328,6 +328,8 @@ unsafe fn gpu_kernel_dispatched_for_explain(
     strategy: GpuStrategy,
     state: *const GpuAccelScanState,
 ) -> bool {
+    // SAFETY: the EXPLAIN callback passes this node's live extended
+    // CustomScanState, which remains allocated for the callback duration.
     let executor = unsafe { (*state).accel.executor };
     if executor.is_null() {
         return false;
@@ -337,8 +339,16 @@ unsafe fn gpu_kernel_dispatched_for_explain(
         // GpuSort retired: begin_custom_scan rejects the strategy before an
         // executor exists, so EXPLAIN can never reach this arm.
         GpuStrategy::Sort => false,
-        GpuStrategy::FunctionScan => unsafe { function_scan::dispatched_ok(executor) },
-        GpuStrategy::SrfTargetList => unsafe { srf_target_list::batches_executed(executor) > 0 },
+        GpuStrategy::FunctionScan => {
+            // SAFETY: for FunctionScan, `executor` is the still-live state
+            // pointer produced by function_scan::init_state.
+            unsafe { function_scan::dispatched_ok(executor) }
+        }
+        GpuStrategy::SrfTargetList => {
+            // SAFETY: for SrfTargetList, `executor` is the still-live state
+            // pointer produced by srf_target_list::init_state.
+            unsafe { srf_target_list::batches_executed(executor) > 0 }
+        }
         // GpuPreAgg retired: begin_custom_scan rejects the strategy before an
         // executor exists, so EXPLAIN can never reach this arm.
         GpuStrategy::PreAgg => false,
@@ -346,15 +356,23 @@ unsafe fn gpu_kernel_dispatched_for_explain(
         | GpuStrategy::Join
         | GpuStrategy::Agg
         | GpuStrategy::Window
-        | GpuStrategy::Raster => unsafe { (*state).accel.batches_executed > 0 },
+        | GpuStrategy::Raster => {
+            // SAFETY: these strategies store counters directly in the same
+            // live GpuAccelScanState supplied to the EXPLAIN callback.
+            unsafe { (*state).accel.batches_executed > 0 }
+        }
     }
 }
 
 unsafe fn rows_returned_to_cpu(node: *mut pg_sys::CustomScanState) -> i64 {
+    // SAFETY: `node` is the live CustomScanState passed to EXPLAIN; PostgreSQL
+    // owns its PlanState instrumentation pointer for the query lifetime.
     let instrument = unsafe { (*node).ss.ps.instrument };
     if instrument.is_null() {
         return 0;
     }
+    // SAFETY: the null check proves PostgreSQL supplied an Instrumentation
+    // object that remains live while EXPLAIN reads its tuple counter.
     let tuple_count = unsafe { (*instrument).tuplecount };
     if tuple_count.is_finite() && tuple_count > 0.0 {
         tuple_count.round() as i64
@@ -399,6 +417,8 @@ unsafe fn explain_resident_boundary(
     es: *mut pg_sys::ExplainState,
 ) {
     if !proof.gpu_resident_pipeline() && proof == resident_proof_default_for_strategy(strategy) {
+        // SAFETY: PostgreSQL supplied a live ExplainState; both property name
+        // and strategy boundary label are static NUL-terminated strings.
         unsafe {
             pg_sys::ExplainPropertyText(
                 c"GPU Resident Boundary".as_ptr(),
@@ -412,6 +432,8 @@ unsafe fn explain_resident_boundary(
     let boundary = if let Ok(boundary) = CString::new(proof.boundary_label()) {
         boundary
     } else {
+        // SAFETY: PostgreSQL supplied a live ExplainState and both fallback
+        // strings have static storage for the synchronous property call.
         unsafe {
             pg_sys::ExplainPropertyText(
                 c"GPU Resident Boundary".as_ptr(),
@@ -421,6 +443,8 @@ unsafe fn explain_resident_boundary(
         }
         return;
     };
+    // SAFETY: `es` is live for this callback and `boundary` remains allocated
+    // until ExplainPropertyText has copied/consumed the C string.
     unsafe {
         pg_sys::ExplainPropertyText(c"GPU Resident Boundary".as_ptr(), boundary.as_ptr(), es);
     }
@@ -433,6 +457,8 @@ unsafe fn explain_resident_operator_class(
     let label = if let Ok(label) = CString::new(proof.operator_class_label()) {
         label
     } else {
+        // SAFETY: PostgreSQL supplied a live ExplainState and both fallback
+        // strings have static storage for the synchronous property call.
         unsafe {
             pg_sys::ExplainPropertyText(
                 c"GPU Resident Operator Class".as_ptr(),
@@ -442,6 +468,8 @@ unsafe fn explain_resident_operator_class(
         }
         return;
     };
+    // SAFETY: `es` is live for this callback and `label` remains allocated
+    // through the synchronous ExplainPropertyText call.
     unsafe {
         pg_sys::ExplainPropertyText(c"GPU Resident Operator Class".as_ptr(), label.as_ptr(), es);
     }
@@ -1174,6 +1202,8 @@ mod tests {
     #[test]
     fn explain_dispatch_flag_uses_strategy_specific_state() {
         let mut state = GpuAccelScanState {
+            // SAFETY: CustomScanState is a PostgreSQL C aggregate containing
+            // pointer/scalar fields; zero is a valid inert test fixture state.
             css: unsafe { std::mem::zeroed() },
             accel: super::super::GpuAccelState {
                 strategy: GpuStrategy::Agg as i32,
@@ -1197,14 +1227,20 @@ mod tests {
             },
         };
 
+        // SAFETY: `state` is a live local GpuAccelScanState for the duration
+        // of the helper call; its dangling executor is never dereferenced here.
         assert!(!unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Agg, &raw const state) });
         state.accel.batches_executed = 1;
+        // SAFETY: the same live local state remains valid and the Agg branch
+        // reads only its inline batch counter.
         assert!(unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Agg, &raw const state) });
     }
 
     #[test]
     fn explain_dispatch_flag_uses_batch_counters_for_scan_like_strategies() {
         let mut state = GpuAccelScanState {
+            // SAFETY: CustomScanState is a PostgreSQL C aggregate containing
+            // pointer/scalar fields; zero is a valid inert test fixture state.
             css: unsafe { std::mem::zeroed() },
             accel: super::super::GpuAccelState {
                 strategy: GpuStrategy::Scan as i32,
@@ -1228,8 +1264,11 @@ mod tests {
             },
         };
 
+        // SAFETY: `state` is a live local GpuAccelScanState and the Scan branch
+        // reads only its inline batch counter, not the dangling executor.
         assert!(!unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Scan, &raw const state) });
         state.accel.batches_executed = 1;
+        // SAFETY: the same live local state remains valid for the counter read.
         assert!(unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Scan, &raw const state) });
     }
 

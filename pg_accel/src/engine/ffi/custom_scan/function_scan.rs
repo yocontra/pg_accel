@@ -131,6 +131,8 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
     // ExecInitCustomScan; custom_private layout was produced by
     // plan_custom_path_function.
     let cscan = unsafe { (*node).ss.ps.plan.cast::<pg_sys::CustomScan>() };
+    // SAFETY: `cscan` is the CustomScan plan owned by this initialized state;
+    // its custom_private list remains in the plan memory context for execution.
     let priv_list = unsafe { (*cscan).custom_private };
     if priv_list.is_null() {
         pgrx::error!("pg_accel: function_scan init: missing validated custom_private");
@@ -210,6 +212,8 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
     // Dispatch the call once. The "batch" is exactly one input row
     // (representing the single funcexpr invocation); args[0] is the per-row
     // column the dispatcher reads, args[1..] are the qual_datums constants.
+    // SAFETY: PostgreSQL's FmgrInfo is a plain C descriptor that may be
+    // zero-initialized before `fmgr_info` fills every field used below.
     let mut fmgr_buf: pg_sys::FmgrInfo = unsafe { std::mem::zeroed() };
     // SAFETY: fmgr_info populates the FmgrInfo from pg_proc on the main
     // backend thread. Required by dispatch_gpu_h3 / raster which inspect
@@ -220,6 +224,9 @@ pub(super) unsafe fn init_state(node: *mut pg_sys::CustomScanState) -> *mut std:
 
     let (batch, qual_datums) = build_dispatch_inputs(&priv_data);
 
+    // SAFETY: `fmgr_buf` was initialized by `fmgr_info` for `fn_oid`, and the
+    // batch/constant Datums retain their PostgreSQL representations for the
+    // synchronous dispatcher call.
     let dispatch_result = unsafe {
         dispatch::dispatch(
             entry.strategy,

@@ -152,6 +152,8 @@ pub(super) unsafe fn init_state(
     // ExecInitCustomScan; custom_private layout was produced by
     // plan_custom_path_srf_target_list.
     let cscan = unsafe { (*node).ss.ps.plan.cast::<pg_sys::CustomScan>() };
+    // SAFETY: `cscan` is this initialized node's CustomScan plan and its
+    // custom_private list is retained by the plan memory context.
     let priv_list = unsafe { (*cscan).custom_private };
     if priv_list.is_null() {
         pgrx::error!("pg_accel: srf_target_list init: missing validated custom_private");
@@ -179,6 +181,8 @@ pub(super) unsafe fn init_state(
         });
 
     // Build the FmgrInfo for dispatch.
+    // SAFETY: FmgrInfo is a PostgreSQL C descriptor that is initialized by
+    // `fmgr_info` before any field is read or passed to the dispatcher.
     let mut fmgr_buf: pg_sys::FmgrInfo = unsafe { std::mem::zeroed() };
     // SAFETY: fmgr_info populates the FmgrInfo from pg_proc on the main
     // backend thread.
@@ -334,19 +338,28 @@ unsafe fn dispatch_and_buffer_batch(
     let mut has_dispatchable_arg = false;
 
     while batch.len() < state.batch_size {
+        // SAFETY: `child_state` is this Custom Scan's live child PlanState and
+        // executor callbacks are invoked on the owning backend thread.
         let input_slot = unsafe { pg_sys::ExecProcNode(child_state) };
+        // SAFETY: a non-null slot returned by ExecProcNode is a valid executor
+        // slot for `TupIsNull`/tuple_is_null inspection until the next pull.
         if input_slot.is_null() || unsafe { tuple_is_null(input_slot) } {
             state.child_exhausted = true;
             break;
         }
 
+        // SAFETY: `input_slot` is live and belongs to the child executor;
+        // materializing all attributes sizes and populates its value arrays.
         unsafe {
             pg_sys::slot_getallattrs(input_slot);
         }
+        // SAFETY: slot_getallattrs operated on this live slot, whose tuple
+        // descriptor is owned by the child's executor state.
         let input_desc = unsafe { (*input_slot).tts_tupleDescriptor };
         let input_natts = if input_desc.is_null() {
             0
         } else {
+            // SAFETY: the null check above proves the child TupleDesc is live.
             unsafe { (*input_desc).natts }
         };
 
@@ -357,7 +370,11 @@ unsafe fn dispatch_and_buffer_batch(
                 continue;
             }
             let idx = (attno - 1) as usize;
+            // SAFETY: `attno` was checked against `input_natts`, and
+            // slot_getallattrs populated the slot's natts-sized value array.
             let datum = unsafe { *(*input_slot).tts_values.add(idx) };
+            // SAFETY: the same validated attribute index addresses the
+            // parallel natts-sized null bitmap in the live input slot.
             let is_null = unsafe { *(*input_slot).tts_isnull.add(idx) };
             passthrough.push((datum, is_null));
         }
@@ -372,7 +389,11 @@ unsafe fn dispatch_and_buffer_batch(
             );
         }
         let srf_arg_idx = (srf_attno - 1) as usize;
+        // SAFETY: `srf_attno` was checked against `input_natts`, and the value
+        // array was materialized for all attributes above.
         let srf_arg_datum = unsafe { *(*input_slot).tts_values.add(srf_arg_idx) };
+        // SAFETY: `srf_arg_idx` is in bounds for the slot's matching null
+        // bitmap, which remains live for this child row.
         let mut srf_arg_isnull = unsafe { *(*input_slot).tts_isnull.add(srf_arg_idx) };
 
         // STRICT semantics: NULL argument produces an empty SRF range for the
@@ -409,6 +430,8 @@ unsafe fn dispatch_and_buffer_batch(
         .collect();
 
     let started = std::time::Instant::now();
+    // SAFETY: the FmgrInfo was initialized for the registered SRF, while the
+    // batch and constant Datum buffers remain alive for synchronous dispatch.
     let result = unsafe {
         dispatch::dispatch(
             state.strategy,
@@ -485,6 +508,8 @@ unsafe fn emit_one_row(
 
     let srf_pos = state.priv_data.srf_tlist_pos as usize;
     let Some(passthrough_row) = state.expansion.passthrough_rows.get(source_idx) else {
+        // SAFETY: `slot` is the live result slot supplied by PostgreSQL to
+        // this Custom Scan callback and may be cleared before returning EOF.
         unsafe { pg_sys::ExecClearTuple(slot) };
         return slot;
     };
@@ -567,6 +592,8 @@ pub(super) unsafe fn batches_executed(executor: *mut c_void) -> u64 {
     if executor.is_null() {
         return 0;
     }
+    // SAFETY: the caller guarantees `executor` is the still-live pointer
+    // produced by init_state for this SRF target-list node.
     let state = unsafe { &*executor.cast::<SrfTargetListExecState>() };
     state.batches_executed
 }
@@ -579,6 +606,8 @@ pub(super) unsafe fn dispatch_time_us(executor: *mut c_void) -> u64 {
     if executor.is_null() {
         return 0;
     }
+    // SAFETY: the caller guarantees `executor` is the still-live pointer
+    // produced by init_state for this SRF target-list node.
     let state = unsafe { &*executor.cast::<SrfTargetListExecState>() };
     state.dispatch_time_us
 }
