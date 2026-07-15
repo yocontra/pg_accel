@@ -226,13 +226,22 @@ unsafe fn try_fast_read<T: Copy>(
     has_null_flag: bool,
 ) -> Option<T> {
     if info.can_fast_extract
-        && (!has_null_flag || !unsafe { has_preceding_null((*mt).t_bits.as_ptr(), info.att_index) })
+        && (!has_null_flag
+            || !unsafe {
+                // SAFETY: `mt` points to a MinimalTuple matching `info`; when
+                // HEAP_HASNULL is set its bitmap covers every schema attribute.
+                has_preceding_null((*mt).t_bits.as_ptr(), info.att_index)
+            })
     {
         // SAFETY: mt is valid. In a MinimalTuple, t_hoff includes
         // MINIMAL_TUPLE_OFFSET so data starts at t_hoff - offset.
         let data_start =
             unsafe { (mt as *const u8).add((*mt).t_hoff as usize - minimal_tuple_offset()) };
-        Some(unsafe { *(data_start.add(info.data_offset).cast::<T>()) })
+        Some(unsafe {
+            // SAFETY: `info` was derived from this tuple's descriptor, and the
+            // fast-path predicate proves the fixed-width offset is valid.
+            *(data_start.add(info.data_offset).cast::<T>())
+        })
     } else {
         None
     }
@@ -252,8 +261,11 @@ unsafe fn slow_getattr(
     // SAFETY: mt is valid, fallback_slot is valid, on main thread.
     unsafe { pg_sys::ExecForceStoreMinimalTuple(mt, fallback_slot, false) };
     let mut is_null = false;
-    let datum =
-        unsafe { pg_sys::slot_getattr(fallback_slot, attno, std::ptr::addr_of_mut!(is_null)) };
+    let datum = unsafe {
+        // SAFETY: ExecForceStoreMinimalTuple initialized `fallback_slot` from
+        // `mt`, and `attno` names an attribute in that slot's descriptor.
+        pg_sys::slot_getattr(fallback_slot, attno, std::ptr::addr_of_mut!(is_null))
+    };
     (datum, is_null)
 }
 
@@ -478,6 +490,8 @@ pub unsafe fn extract_uuid(
                 let p = datum.value() as *const u8;
                 let mut bytes = [0u8; 16];
                 unsafe {
+                    // SAFETY: a non-null UUID Datum points to exactly 16
+                    // readable bytes; `bytes` provides 16 writable bytes.
                     std::ptr::copy_nonoverlapping(p, bytes.as_mut_ptr(), 16);
                 }
                 values.push(bytes);
@@ -517,13 +531,15 @@ unsafe fn canonicalize_inet_payload(vardata: *const u8, payload_len: usize) -> O
     }
     // SAFETY: caller guarantees ≥ payload_len readable bytes.
     let family = unsafe { *vardata };
+    // SAFETY: the payload-length check above proves byte 1 is readable.
     let bits = unsafe { *vardata.add(1) };
     let mut out = [0u8; 24];
     out[0] = family;
     out[1] = bits;
     match family {
         PGSQL_AF_INET => {
-            // Copy 4 IPv4 bytes; bytes 6-17 stay zero from initialiser.
+            // SAFETY: payload_len >= 6 proves bytes 2..6 are readable, and
+            // the canonical output has room for all four IPv4 bytes.
             unsafe {
                 std::ptr::copy_nonoverlapping(vardata.add(2), out.as_mut_ptr().add(2), 4);
             }
@@ -532,7 +548,8 @@ unsafe fn canonicalize_inet_payload(vardata: *const u8, payload_len: usize) -> O
             if payload_len < 18 {
                 return None;
             }
-            // Copy 16 IPv6 bytes verbatim.
+            // SAFETY: payload_len >= 18 proves bytes 2..18 are readable, and
+            // the canonical output has room for all 16 IPv6 bytes.
             unsafe {
                 std::ptr::copy_nonoverlapping(vardata.add(2), out.as_mut_ptr().add(2), 16);
             }
@@ -613,7 +630,11 @@ pub unsafe fn extract_inet(
                     datum: *mut pgrx::pg_sys::varlena,
                 ) -> *mut pgrx::pg_sys::varlena;
             }
-            unsafe { pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>()) }
+            unsafe {
+                // SAFETY: the non-null INET/CIDR Datum is a valid varlena;
+                // the test symbol is the identity detoast stub described above.
+                pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>())
+            }
         };
         if detoasted.is_null() {
             values.push([0u8; 24]);
@@ -626,6 +647,8 @@ pub unsafe fn extract_inet(
         // up to 16 ipaddr bytes); varsize_any_exhdr is the payload
         // length excluding the varlena header.
         let payload_len = unsafe { pgrx::varsize_any_exhdr(detoasted) };
+        // SAFETY: `detoasted` is the same valid flat varlena used to obtain
+        // `payload_len`; `vardata_any` returns its payload start.
         let vardata = unsafe { pgrx::vardata_any(detoasted).cast::<u8>() };
 
         // SAFETY: vardata is non-null when detoasted is non-null;
@@ -661,34 +684,47 @@ pub unsafe fn diagnose_extraction(
         if mt.is_null() {
             continue;
         }
+        // SAFETY: every non-null entry is a valid MinimalTuple by contract.
         let mt_ref = unsafe { &*mt };
         let t_hoff = mt_ref.t_hoff;
         let _has_null = (mt_ref.t_infomask & pg_sys::HEAP_HASNULL as u16) != 0;
 
-        // Fast-path raw bytes
+        // SAFETY: MinimalTuple `t_hoff` includes MINIMAL_TUPLE_OFFSET, so this
+        // subtraction reaches the beginning of the tuple's data area.
         let data_start = unsafe { (mt as *const u8).add(t_hoff as usize - minimal_tuple_offset()) };
+        // SAFETY: diagnostics are called with a tuple whose first fixed-width
+        // field provides at least four readable data bytes.
         let raw_at_0 = unsafe { *(data_start.cast::<u32>()) };
         let _raw_at_off = if info.data_offset > 0 {
+            // SAFETY: `info.data_offset` was computed from this tuple's schema
+            // and the diagnostic target is a four-byte fixed-width attribute.
             unsafe { *(data_start.add(info.data_offset).cast::<u32>()) }
         } else {
             raw_at_0
         };
 
-        // Slow-path
+        // SAFETY: `mt`, `fallback_slot`, and `attno` satisfy `slow_getattr`'s
+        // contract inherited from this function's caller.
         let (datum, _is_null) = unsafe { slow_getattr(mt, fallback_slot, attno) };
 
-        // Check Rust struct field offsets
+        // SAFETY: `mt` points to a live MinimalTuple, both pointers refer into
+        // that same allocation, and `addr_of!` does not read the field.
         let rust_t_hoff_offset = unsafe {
             let base = mt as *const u8;
             let field = std::ptr::addr_of!((*mt).t_hoff).cast::<u8>();
             field.offset_from(base) as usize
         };
+        // SAFETY: a valid MinimalTuple header contains byte offset 14.
         let raw_byte_14 = unsafe { *((mt as *const u8).add(14)) };
         let rust_t_hoff_val = mt_ref.t_hoff;
 
         // Dump first 32 bytes of the MinimalTuple
         let mt_bytes: Vec<u8> = (0..32usize)
-            .map(|j| unsafe { *((mt as *const u8).add(j)) })
+            .map(|j| unsafe {
+                // SAFETY: a valid MinimalTuple includes the fixed 32-byte
+                // diagnostic prefix read here, and `j` is restricted to it.
+                *((mt as *const u8).add(j))
+            })
             .collect();
         let hex: Vec<String> = mt_bytes.iter().map(|b| format!("{b:02x}")).collect();
         pgrx::debug1!(
@@ -800,18 +836,36 @@ pub unsafe fn extract_datum(
         if info.can_fast_extract
             && info.typlen > 0
             && (!has_null_flag
-                || !unsafe { has_preceding_null(mt_ref.t_bits.as_ptr(), info.att_index) })
+                || !unsafe {
+                    // SAFETY: HEAP_HASNULL proves the tuple owns a bitmap, and
+                    // `info.att_index` is within its matching descriptor.
+                    has_preceding_null(mt_ref.t_bits.as_ptr(), info.att_index)
+                })
         {
             // SAFETY: t_hoff - MINIMAL_TUPLE_OFFSET + data_offset is
             // within the tuple data area.
             let data_start =
                 unsafe { (mt as *const u8).add(mt_ref.t_hoff as usize - minimal_tuple_offset()) };
+            // SAFETY: the fast-path predicates and descriptor-derived offset
+            // place this pointer within the fixed-width tuple data area.
             let val_ptr = unsafe { data_start.add(info.data_offset) };
             let datum_val: usize = match info.typlen {
-                1 => unsafe { *val_ptr as usize },
-                2 => unsafe { *(val_ptr.cast::<u16>()) as usize },
-                4 => unsafe { *(val_ptr.cast::<u32>()) as usize },
-                8 => unsafe { *(val_ptr.cast::<u64>()) as usize },
+                1 => unsafe {
+                    // SAFETY: `typlen == 1` proves one readable byte at val_ptr.
+                    *val_ptr as usize
+                },
+                2 => unsafe {
+                    // SAFETY: `typlen == 2` proves a descriptor-aligned u16.
+                    *(val_ptr.cast::<u16>()) as usize
+                },
+                4 => unsafe {
+                    // SAFETY: `typlen == 4` proves a descriptor-aligned u32.
+                    *(val_ptr.cast::<u32>()) as usize
+                },
+                8 => unsafe {
+                    // SAFETY: `typlen == 8` proves a descriptor-aligned u64.
+                    *(val_ptr.cast::<u64>()) as usize
+                },
                 _ => {
                     // SAFETY: Unusual fixed-width type; fall back to slot.
                     let (d, is_null) = unsafe { slow_getattr(mt, fallback_slot, attno) };
@@ -873,7 +927,12 @@ pub unsafe fn heap_attr_is_null_pub(
     // SAFETY: ht_data is valid per caller.
     let hdr = unsafe { &*ht_data };
     let has_null_flag = (hdr.t_infomask & pg_sys::HEAP_HASNULL as u16) != 0;
-    has_null_flag && unsafe { att_is_null(hdr.t_bits.as_ptr(), info.att_index) }
+    has_null_flag
+        && unsafe {
+            // SAFETY: HEAP_HASNULL proves `hdr.t_bits` is present, and `info`
+            // matches the tuple descriptor so its attribute index is in range.
+            att_is_null(hdr.t_bits.as_ptr(), info.att_index)
+        }
 }
 
 /// Read a fixed-width value directly from a HeapTuple's data area.
@@ -897,19 +956,35 @@ unsafe fn try_fast_read_heap<T: Copy>(
     let hdr = unsafe { &*ht_data };
     let has_null_flag = (hdr.t_infomask & pg_sys::HEAP_HASNULL as u16) != 0;
 
-    if has_null_flag && unsafe { has_preceding_null(hdr.t_bits.as_ptr(), info.att_index) } {
+    if has_null_flag
+        && unsafe {
+            // SAFETY: HEAP_HASNULL proves a bitmap is present and the matching
+            // descriptor bounds `info.att_index`.
+            has_preceding_null(hdr.t_bits.as_ptr(), info.att_index)
+        }
+    {
         return None;
     }
 
     // Check target attribute is not null.
-    if has_null_flag && unsafe { att_is_null(hdr.t_bits.as_ptr(), info.att_index) } {
+    if has_null_flag
+        && unsafe {
+            // SAFETY: HEAP_HASNULL proves a bitmap is present and the matching
+            // descriptor bounds `info.att_index`.
+            att_is_null(hdr.t_bits.as_ptr(), info.att_index)
+        }
+    {
         return None;
     }
 
     // HeapTuple data starts at t_data + t_hoff (no MINIMAL_TUPLE_OFFSET).
     // SAFETY: ht_data is valid, t_hoff is within bounds, data_offset is precomputed.
     let data_start = unsafe { (ht_data as *const u8).add(hdr.t_hoff as usize) };
-    Some(unsafe { *(data_start.add(info.data_offset).cast::<T>()) })
+    Some(unsafe {
+        // SAFETY: the descriptor-derived fixed-width offset is valid after the
+        // preceding null/layout checks, and `T` is the matching column type.
+        *(data_start.add(info.data_offset).cast::<T>())
+    })
 }
 
 /// Extract f64 values from a batch of HeapTuple headers (for deferred materialization).
@@ -972,12 +1047,24 @@ pub unsafe fn extract_inet_from_heap_headers(
             nulls.push(1);
             continue;
         }
-        if has_null_flag && unsafe { has_preceding_null(h.t_bits.as_ptr(), info.att_index) } {
+        if has_null_flag
+            && unsafe {
+                // SAFETY: HEAP_HASNULL proves a bitmap is present and `info`
+                // comes from this tuple's descriptor.
+                has_preceding_null(h.t_bits.as_ptr(), info.att_index)
+            }
+        {
             values.push([0u8; 24]);
             nulls.push(1);
             continue;
         }
-        if has_null_flag && unsafe { att_is_null(h.t_bits.as_ptr(), info.att_index) } {
+        if has_null_flag
+            && unsafe {
+                // SAFETY: HEAP_HASNULL proves a bitmap is present and `info`
+                // comes from this tuple's descriptor.
+                att_is_null(h.t_bits.as_ptr(), info.att_index)
+            }
+        {
             values.push([0u8; 24]);
             nulls.push(1);
             continue;
@@ -1001,8 +1088,11 @@ pub unsafe fn extract_inet_from_heap_headers(
             // Long header: 4-byte little-endian, length in bits 2..31.
             // SAFETY: attr_ptr + 0..3 is in-bounds (we already read +0).
             let h0 = header_byte as u32;
+            // SAFETY: the long-header tag proves bytes 0..4 are readable.
             let h1 = unsafe { *attr_ptr.add(1) } as u32;
+            // SAFETY: the long-header tag proves bytes 0..4 are readable.
             let h2 = unsafe { *attr_ptr.add(2) } as u32;
+            // SAFETY: the long-header tag proves bytes 0..4 are readable.
             let h3 = unsafe { *attr_ptr.add(3) } as u32;
             let raw = h0 | (h1 << 8) | (h2 << 16) | (h3 << 24);
             let total = (raw >> 2) as usize;
@@ -1025,20 +1115,24 @@ pub unsafe fn extract_inet_from_heap_headers(
 
         // SAFETY: payload bytes are in-bounds.
         let payload = unsafe { attr_ptr.add(payload_offset) };
+        // SAFETY: payload_len >= 6 proves the family byte is readable.
         let family = unsafe { *payload };
+        // SAFETY: payload_len >= 6 proves the prefix byte is readable.
         let bits = unsafe { *payload.add(1) };
         let mut canon = [0u8; 24];
         canon[0] = family;
         canon[1] = bits;
         match family {
             2 => {
-                // IPv4: copy 4 ipaddr bytes; remaining stays zero.
+                // SAFETY: payload_len >= 6 provides four address bytes after
+                // family/bits, and `canon` has a 16-byte address field.
                 unsafe {
                     std::ptr::copy_nonoverlapping(payload.add(2), canon.as_mut_ptr().add(2), 4);
                 }
             }
             3 if payload_len >= 18 => {
-                // IPv6: copy all 16 ipaddr bytes.
+                // SAFETY: payload_len >= 18 provides all 16 address bytes and
+                // `canon` has a 16-byte address field.
                 unsafe {
                     std::ptr::copy_nonoverlapping(payload.add(2), canon.as_mut_ptr().add(2), 16);
                 }
@@ -1074,6 +1168,8 @@ pub unsafe fn extract_f64_from_heap_headers(
             continue;
         }
 
+        // SAFETY: each non-null header is valid by contract and `info` was
+        // derived from the headers' common tuple descriptor.
         let val: Option<f64> = unsafe {
             match info.typid {
                 t if t == pg_sys::FLOAT4OID => try_fast_read_heap::<f32>(hdr, info).map(f64::from),
