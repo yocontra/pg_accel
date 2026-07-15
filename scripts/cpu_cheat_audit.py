@@ -2978,10 +2978,112 @@ def _device_orchestration_do_loops(
     output_roots: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
     device_lambdas: set[tuple[int, int]],
+    proven_helper_calls: set[int],
     forward: dict[int, int],
     reverse: dict[int, int],
 ) -> set[int]:
     """Prove guaranteed-once host loops only orchestrate awaited device launches."""
+
+    def command_group_lambda_safe(
+        bounds: tuple[int, int],
+        nested_device_lambdas: set[tuple[int, int]],
+        roots: set[str],
+        owner: Function,
+    ) -> bool:
+        left, right = bounds
+        nested = {
+            device_bounds
+            for device_bounds in nested_device_lambdas
+            if left < device_bounds[0] < device_bounds[1] < right
+        }
+        if not nested:
+            return False
+        capture_ranges: list[tuple[int, int]] = []
+        for device_left, _ in nested:
+            capture_close = _lambda_capture_before_body(
+                tokens, device_left, left, reverse
+            )
+            if capture_close is not None and capture_close in reverse:
+                capture_ranges.append((reverse[capture_close], capture_close))
+        for index in range(left + 1, right):
+            if _is_inside(index, nested) or any(
+                capture_left <= index <= capture_right
+                for capture_left, capture_right in capture_ranges
+            ):
+                continue
+            value = tokens[index].value
+            if value in roots and _unqualified_output_identifier(tokens, index):
+                return False
+            if value in {
+                "for",
+                "while",
+                "do",
+                "return",
+                "break",
+                "continue",
+                "goto",
+                "throw",
+                "switch",
+                "[",
+                "]",
+            }:
+                return False
+            if value == "*":
+                previous = tokens[index - 1].value if index > left else ""
+                if previous in {"", "=", "(", "{", ";", ",", ":", "?"}:
+                    return False
+            if (
+                tokens[index].kind != "identifier"
+                or _method_lparen(tokens, index, right, forward) is None
+            ):
+                continue
+            if index > 0 and tokens[index - 1].value in {".", "->"}:
+                if (
+                    value not in {"parallel_for", "single_task"}
+                    or index < 2
+                    or _receiver_kind(
+                        tokens, owner, tokens[index - 2].value, index, forward
+                    )
+                    != "handler"
+                ):
+                    return False
+                continue
+            statement_left = index - 1
+            while statement_left > left and tokens[statement_left].value not in {
+                ";",
+                "{",
+                "}",
+            }:
+                statement_left -= 1
+            if "local_accessor" in {
+                token.value for token in tokens[statement_left + 1 : index]
+            }:
+                continue
+            if value.rsplit("::", 1)[-1] not in {
+                "local_accessor",
+                "range",
+                "nd_range",
+            }:
+                return False
+        return True
+
+    def local_pointer(name: str, before: int) -> bool:
+        for index in range(function.body_open + 1, before):
+            if (
+                tokens[index].value != name
+                or _declaration_kind(tokens, index, function) is None
+            ):
+                continue
+            left = index - 1
+            while left > function.body_open and tokens[left].value not in {
+                ";",
+                "{",
+                "}",
+            }:
+                left -= 1
+            if "*" in {token.value for token in tokens[left + 1 : index]}:
+                return True
+        return False
 
     indexed_calls = _indexed_calls(tokens, function, lambda_ranges)
     proven: set[int] = set()
@@ -3006,9 +3108,19 @@ def _device_orchestration_do_loops(
         ):
             continue
 
+        command_group_lambdas = {
+            (left, right)
+            for left, right in lambda_ranges
+            if body_start < left < right < body_end
+            and (left, right) not in device_lambdas
+            and command_group_lambda_safe(
+                (left, right), device_lambdas, output_roots, function
+            )
+        }
         # A host lambda could hide semantic publication from the body scan.
         if any(
-            body_start < left < right < body_end and (left, right) not in device_lambdas
+            body_start < left < right < body_end
+            and (left, right) not in device_lambdas | command_group_lambdas
             for left, right in lambda_ranges
         ):
             continue
@@ -3016,7 +3128,7 @@ def _device_orchestration_do_loops(
         launch_calls: dict[int, tuple[int, int]] = {}
         allowed_call_indices: set[int] = set()
         capture_ranges: list[tuple[int, int]] = []
-        for left, right in device_lambdas:
+        for left, right in device_lambdas | command_group_lambdas:
             if not (body_start < left < right < body_end):
                 continue
             capture_close = _lambda_capture_before_body(
@@ -3046,12 +3158,33 @@ def _device_orchestration_do_loops(
             allowed_call_indices.add(method_index)
             allowed_call_indices.add(call[1] + 2)
 
+        for method_index in range(body_start + 1, body_end):
+            if (
+                tokens[method_index].value != "memset"
+                or _is_inside(method_index, lambda_ranges)
+                or method_index < 2
+                or tokens[method_index - 1].value not in {".", "->"}
+            ):
+                continue
+            receiver = tokens[method_index - 2].value
+            call = _method_lparen(tokens, method_index, body_end, forward)
+            if (
+                _receiver_kind(tokens, function, receiver, method_index, forward)
+                != "queue"
+                or call is None
+                or not _call_is_awaited(tokens, call[1], body_end, forward)
+                or _range_references_output(tokens, call[0] + 1, call[1], output_roots)
+            ):
+                continue
+            allowed_call_indices.add(method_index)
+            allowed_call_indices.add(call[1] + 2)
+
         if not launch_calls:
             continue
 
         unsafe = False
         for index in range(body_start + 1, condition_end):
-            if _is_inside(index, device_lambdas) or any(
+            if _is_inside(index, device_lambdas | command_group_lambdas) or any(
                 left <= index <= right for left, right in capture_ranges
             ):
                 continue
@@ -3068,8 +3201,36 @@ def _device_orchestration_do_loops(
             if value == "*":
                 previous = tokens[index - 1].value if index > body_start else ""
                 if previous in {"", "=", "(", "{", ";", ",", ":", "?"}:
-                    unsafe = True
-                    break
+                    queue_reference = (
+                        index + 1 < condition_end
+                        and tokens[index + 1].kind == "identifier"
+                        and _receiver_kind(
+                            tokens,
+                            function,
+                            tokens[index + 1].value,
+                            index + 1,
+                            forward,
+                        )
+                        == "queue"
+                    )
+                    if not queue_reference:
+                        unsafe = True
+                        break
+        if unsafe:
+            continue
+
+        for method_index in range(body_start + 1, body_end):
+            if (
+                _is_inside(method_index, lambda_ranges)
+                or tokens[method_index].kind != "identifier"
+                or method_index < 1
+                or tokens[method_index - 1].value not in {".", "->"}
+                or _method_lparen(tokens, method_index, body_end, forward) is None
+            ):
+                continue
+            if method_index not in allowed_call_indices:
+                unsafe = True
+                break
         if unsafe:
             continue
 
@@ -3078,12 +3239,31 @@ def _device_orchestration_do_loops(
                 continue
             if indexed.index in allowed_call_indices:
                 continue
+            if indexed.index in proven_helper_calls:
+                continue
             if any(
                 left < indexed.index < right
                 and indexed.call.name.rsplit("::", 1)[-1] in {"range", "nd_range"}
                 for left, right in launch_calls.values()
             ):
                 continue
+            if indexed.call.name.rsplit("::", 1)[-1] in {"range", "nd_range"}:
+                continue
+            if indexed.call.name == "std::swap":
+                arguments = _call_argument_ranges(
+                    tokens, indexed.lparen, indexed.rparen, forward
+                )
+                names = [
+                    tokens[left].value
+                    for left, right in arguments
+                    if right - left == 1 and tokens[left].kind == "identifier"
+                ]
+                if (
+                    len(names) == 2
+                    and not output_roots.intersection(names)
+                    and all(local_pointer(name, indexed.index) for name in names)
+                ):
+                    continue
             unsafe = True
             break
         if not unsafe:
@@ -5035,6 +5215,11 @@ class _PathAuditor:
             output_roots,
             lambda_ranges,
             device_lambdas,
+            {
+                index
+                for index, (_, proof, _) in call_proofs.items()
+                if proof is not None and proof.ok
+            },
             self.forward,
             self.reverse,
         )

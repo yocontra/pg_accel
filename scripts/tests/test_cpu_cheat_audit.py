@@ -1617,9 +1617,23 @@ class ResidentV5RegressionTests(unittest.TestCase):
         template <int> struct range { explicit range(size_t) {} };
         template <int> struct id { operator size_t() const { return 0; } };
         struct event { void wait_and_throw() {} };
+        struct handler {
+          template <class Function> void parallel_for(range<1>, Function) {}
+          template <class Function> void single_task(Function) {}
+        };
+        template <class T, int Dimensions> struct local_accessor {
+          local_accessor(range<Dimensions>, handler&) {}
+          T& operator[](size_t) const { static T value{}; return value; }
+        };
         struct queue {
           template <class Function> event parallel_for(range<1>, Function) { return {}; }
+          template <class Function> event submit(Function fn) {
+            handler h;
+            fn(h);
+            return {};
+          }
           event memcpy(void*, const void*, size_t) { return {}; }
+          event memset(void*, int, size_t) { return {}; }
           void wait_and_throw() {}
         };
         struct device { static void get_devices() {} };
@@ -1627,7 +1641,14 @@ class ResidentV5RegressionTests(unittest.TestCase):
         inline void* malloc_device(size_t, queue&) { static int value; return &value; }
         inline void free(void*, queue&) {}
         }
-        namespace std { inline void* memcpy(void* dst, const void*, size_t) { return dst; } }
+        namespace std {
+        inline void* memcpy(void* dst, const void*, size_t) { return dst; }
+        template <class T> void swap(T& left, T& right) {
+          T value = left;
+          left = right;
+          right = value;
+        }
+        }
         static bool initialized = false;
         static uint64_t counter = 0;
         static sycl::queue queue_value;
@@ -1778,6 +1799,138 @@ class ResidentV5RegressionTests(unittest.TestCase):
             """
         )
         self.assertEqual(result.entrypoints, 5)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.entrypoint)
+            self.assertIn("host_computation", entry.classifications)
+
+    def test_radix_style_device_orchestration_is_proven(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status prepare_device(
+                sycl::queue& q, int* device, size_t count) {
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_radix_orchestration(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue* q = &queue_value;
+              int* first = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), *q));
+              int* second = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), *q));
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), *q));
+              size_t stage = 0;
+              do {
+                q->memset(second, 0, count * sizeof(int)).wait_and_throw();
+                prepare_device(*q, second, count);
+                q->submit([&](sycl::handler& h) {
+                  sycl::local_accessor<int, 1> scratch(sycl::range<1>(1), h);
+                  h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                    scratch[0] = second[i];
+                    second[i] = scratch[0] + 1;
+                  });
+                }).wait_and_throw();
+                std::swap(first, second);
+                ++stage;
+              } while (stage < 1);
+              q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                result[i] = first[i];
+              }).wait_and_throw();
+              q->memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "device_launch_orchestration",
+            result.entrypoint_audits[0].classifications,
+        )
+
+    def test_radix_style_orchestration_mutants_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static void host_prepare(int* device) { device[0] = 9; }
+
+            extern "C" pgaccel_status pgaccel_command_group_host_staging(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* shared = static_cast<int*>(
+                  sycl::malloc_shared(count * sizeof(int), q));
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                q.submit([&](sycl::handler& h) {
+                  shared[0] = 7;
+                  h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                    result[i] = shared[i];
+                  });
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_memset_output(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                q.memset(out, 0, count * sizeof(int)).wait_and_throw();
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_scalar_swap(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t first = 0;
+              size_t second = 1;
+              do {
+                std::swap(first, second);
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  result[i] = static_cast<int>(first);
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_unproven_helper(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                host_prepare(result);
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 4)
         for entry in result.entrypoint_audits:
             self.assertFalse(entry.ok, entry.entrypoint)
             self.assertIn("host_computation", entry.classifications)
