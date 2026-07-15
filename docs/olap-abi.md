@@ -734,7 +734,8 @@ executor can read a lane.
 
 ## Chunk state machine
 
-Chunking is reserved now for Phase 10 cancellation and bounded dispatch:
+Chunking implements bounded dispatch and cancellation between completed GPU
+calls:
 
 - RESET clears prior state and poison. It may appear alone or with ACCUMULATE
   and/or FINALIZE.
@@ -755,8 +756,11 @@ Chunking is reserved now for Phase 10 cancellation and bounded dispatch:
   further ACCUMULATE/FINALIZE is legal until RESET. UNSUPPORTED is detected
   before mutation and does not poison state.
 
-Phase 4B may return UNSUPPORTED for valid multi-call flag combinations until
-Phase 10 implements chunking. The ABI and bridge marshaling do not change.
+The executor uses the multi-call form for bounded resident aggregation and
+checks PostgreSQL interrupts between completed ACCUMULATE calls and before
+FINALIZE. An individual in-flight GPU call is not asynchronously cancellable.
+Valid multi-call flag combinations are part of the released ABI and use the
+same bridge marshaling as the one-shot form.
 
 ## Legacy mapping
 
