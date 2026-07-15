@@ -30,6 +30,8 @@ use crate::gpu::{
     raster_reclass_resident_launch_result, raster_reclass_resident_validation,
 };
 
+pub(crate) const RASTER_OUTPUT_MEMORY_CONTEXT_NAME: &str = "pg_accel_raster_output";
+
 const _: () = assert!(
     std::mem::size_of::<RasterReclassRule>()
         == std::mem::size_of::<PgaccelResidentRasterReclassRule>()
@@ -248,11 +250,141 @@ pub struct RasterExecReady {
     pub accounting: ResidentByteAccounting,
 }
 
+#[derive(Debug)]
+struct RasterOutputMemoryContext {
+    parent: pg_sys::MemoryContext,
+    context: pg_sys::MemoryContext,
+    output_slot: *mut pg_sys::TupleTableSlot,
+}
+
+impl RasterOutputMemoryContext {
+    fn new(
+        parent: pg_sys::MemoryContext,
+        output_slot: *mut pg_sys::TupleTableSlot,
+    ) -> Result<Self, ResidentLoadError> {
+        if parent.is_null() {
+            return Err(ResidentLoadError::Loader(
+                "raster CustomScan has no executor query memory context".to_owned(),
+            ));
+        }
+        Ok(Self {
+            parent,
+            context: std::ptr::null_mut(),
+            output_slot,
+        })
+    }
+
+    /// Clear the slot while its Datum is still live, then release all prior
+    /// output allocations in one reset.
+    ///
+    /// # Safety
+    /// Must run on the backend main thread while `output_slot` and any owned
+    /// context remain live under the executor query context.
+    unsafe fn clear_and_reset(&mut self) {
+        if !self.output_slot.is_null() {
+            // Clear even when no context exists: a prior NULL virtual tuple
+            // still leaves the slot nonempty and must not be stored over.
+            // SAFETY: the scan slot remains executor-owned until EndCustomScan.
+            unsafe { pg_sys::ExecClearTuple(self.output_slot) };
+        }
+        if self.context.is_null() {
+            return;
+        }
+        // SAFETY: clearing the slot removed its last reference to allocations
+        // owned by this dedicated child context.
+        unsafe { pg_sys::MemoryContextReset(self.context) };
+    }
+
+    /// Import one exact raster Datum inside the bounded output context.
+    ///
+    /// # Safety
+    /// Must run on the PostgreSQL backend main thread with a freshly proved
+    /// catalog identity and external WKB bytes live for this call.
+    unsafe fn import(
+        &mut self,
+        catalog: &PostgisRasterCatalogIdentity,
+        wkb: &[u8],
+    ) -> Result<pg_sys::Datum, String> {
+        let context = unsafe { self.ensure_context()? };
+        // SAFETY: context is our live child of the executor query context.
+        let previous = unsafe { pg_sys::MemoryContextSwitchTo(context) };
+        let guard = MemoryContextSwitchGuard { previous };
+        // SAFETY: the catalog and WKB contracts are upheld by the caller; the
+        // importer catches PostgreSQL ERRORs and returns them as Rust errors.
+        let result = unsafe { postgis_raster_datum_from_wkb(catalog, wkb) };
+        drop(guard);
+        if result.is_err() {
+            // No slot references a value from the failed import. Free any
+            // temporary bytea/importer allocations before escalating.
+            unsafe { pg_sys::MemoryContextReset(context) };
+        }
+        result
+    }
+
+    /// # Safety
+    /// Must run on the PostgreSQL backend main thread while `parent` is live.
+    unsafe fn ensure_context(&mut self) -> Result<pg_sys::MemoryContext, String> {
+        if self.context.is_null() {
+            // SAFETY: parent is the live EState query context captured at
+            // BeginCustomScan. PostgreSQL owns the child on ERROR unwind.
+            self.context = unsafe {
+                pg_sys::AllocSetContextCreateInternal(
+                    self.parent,
+                    c"pg_accel_raster_output".as_ptr(),
+                    pg_sys::ALLOCSET_DEFAULT_MINSIZE as pg_sys::Size,
+                    pg_sys::ALLOCSET_DEFAULT_INITSIZE as pg_sys::Size,
+                    pg_sys::ALLOCSET_DEFAULT_MAXSIZE as pg_sys::Size,
+                )
+            };
+            if self.context.is_null() {
+                return Err(format!(
+                    "could not create {RASTER_OUTPUT_MEMORY_CONTEXT_NAME} memory context"
+                ));
+            }
+        }
+        Ok(self.context)
+    }
+
+    /// Clear any live output Datum before deleting its owning context.
+    ///
+    /// # Safety
+    /// Must run on the backend main thread before the executor scan slot or
+    /// query memory context is destroyed.
+    unsafe fn release(&mut self) {
+        if !self.output_slot.is_null() {
+            // Clear NULL and non-NULL virtual tuples alike before End returns.
+            // SAFETY: the slot is still owned by this CustomScanState.
+            unsafe { pg_sys::ExecClearTuple(self.output_slot) };
+        }
+        if self.context.is_null() {
+            return;
+        }
+        // SAFETY: this is the dedicated child context owned by this state.
+        unsafe { pg_sys::MemoryContextDelete(self.context) };
+        self.context = std::ptr::null_mut();
+    }
+}
+
+struct MemoryContextSwitchGuard {
+    previous: pg_sys::MemoryContext,
+}
+
+impl Drop for MemoryContextSwitchGuard {
+    fn drop(&mut self) {
+        if !self.previous.is_null() {
+            // SAFETY: the previous CurrentMemoryContext remains live for the
+            // synchronous backend callback that created this guard.
+            unsafe { pg_sys::MemoryContextSwitchTo(self.previous) };
+        }
+    }
+}
+
 /// Childless CustomScan state for one exact RQS2 transform.
 pub struct RasterExecState {
     plan: RasterExecPlan,
     cursor: RasterOutputCursor,
     ready: Option<RasterExecReady>,
+    output_memory: RasterOutputMemoryContext,
     rows_dispatched: u64,
     batches_executed: u64,
     dispatch_time_us: u64,
@@ -269,12 +401,14 @@ impl RasterExecState {
     pub unsafe fn begin(
         plan: RasterExecPlan,
         output_slot: *mut pg_sys::TupleTableSlot,
+        query_context: pg_sys::MemoryContext,
     ) -> Result<Self, ResidentLoadError> {
         unsafe { validate_output_slot(&plan, output_slot) }?;
         Ok(Self {
             plan,
             cursor: RasterOutputCursor::new(),
             ready: None,
+            output_memory: RasterOutputMemoryContext::new(query_context, output_slot)?,
             rows_dispatched: 0,
             batches_executed: 0,
             dispatch_time_us: 0,
@@ -283,7 +417,12 @@ impl RasterExecState {
 
     /// Invalidate readiness and rewind output. The first subsequent tuple
     /// request must reprove catalog and resident generations before use.
-    pub fn reset_for_rescan(&mut self) {
+    /// # Safety
+    /// Must run on the PostgreSQL backend main thread while the scan slot and
+    /// executor query context captured at BeginCustomScan remain live.
+    pub unsafe fn reset_for_rescan(&mut self) {
+        // SAFETY: ReScanCustomScan runs before the executor reuses this slot.
+        unsafe { self.output_memory.clear_and_reset() };
         self.ready = None;
         self.cursor.reset();
         self.rows_dispatched = 0;
@@ -321,6 +460,14 @@ impl RasterExecState {
         &mut self,
         output_slot: *mut pg_sys::TupleTableSlot,
     ) -> Result<*mut pg_sys::TupleTableSlot, ResidentLoadError> {
+        if output_slot != self.output_memory.output_slot {
+            return Err(ResidentLoadError::Loader(
+                "raster CustomScan output slot changed after BeginCustomScan".to_owned(),
+            ));
+        }
+        // PostgreSQL has finished consuming the prior virtual tuple. Clear its
+        // slot reference before resetting the context that owns its Datum.
+        unsafe { self.output_memory.clear_and_reset() };
         unsafe { self.ensure_ready_for_execution() }?;
         let owner = self.plan.selected_relation.relid;
         let catalog = &self
@@ -339,16 +486,13 @@ impl RasterExecState {
                     // the WKB slice remains valid for this complete store borrow
                     // and first execution after Begin/ReScan proved this exact
                     // PostGIS importer.
-                    unsafe { postgis_raster_datum_from_wkb(catalog, wkb) }
+                    unsafe { self.output_memory.import(catalog, wkb) }
                         .map_err(ResidentLoadError::Loader)
                         .map(|datum| Some((datum, false)))
                 }
                 None => Ok(None),
             },
         )??;
-        // SAFETY: output_slot was validated at BeginCustomScan and remains
-        // owned by this plan state until EndCustomScan.
-        unsafe { pg_sys::ExecClearTuple(output_slot) };
         let Some((datum, is_null)) = value else {
             return Ok(output_slot);
         };
@@ -370,6 +514,15 @@ impl RasterExecState {
     #[must_use]
     pub const fn ready(&self) -> Option<&RasterExecReady> {
         self.ready.as_ref()
+    }
+}
+
+impl Drop for RasterExecState {
+    fn drop(&mut self) {
+        // SAFETY: RasterExecState is dropped synchronously by EndCustomScan on
+        // the backend main thread. On ERROR unwind, the parent es_query_cxt
+        // owns and releases this child even when EndCustomScan is bypassed.
+        unsafe { self.output_memory.release() };
     }
 }
 
@@ -1647,6 +1800,25 @@ mod tests {
     }
 
     #[test]
+    fn raster_output_context_is_query_bound_and_lazy() {
+        let slot = dangling::<pg_sys::TupleTableSlot>();
+        let error = RasterOutputMemoryContext::new(std::ptr::null_mut(), slot)
+            .expect_err("a raster output context requires es_query_cxt");
+        assert!(error.to_string().contains("query memory context"));
+
+        let parent = dangling::<pg_sys::MemoryContextData>();
+        let lifetime = std::mem::ManuallyDrop::new(
+            RasterOutputMemoryContext::new(parent, slot).expect("lazy output lifetime"),
+        );
+        assert_eq!(lifetime.parent, parent);
+        assert_eq!(lifetime.output_slot, slot);
+        assert!(
+            lifetime.context.is_null(),
+            "BeginCustomScan must not allocate output memory for plain EXPLAIN"
+        );
+    }
+
+    #[test]
     fn rescan_reuses_the_canonical_plan_identity_and_invalidates_readiness() {
         let plan = RasterExecPlan::from_spec(spec(7)).expect("executor plan");
         let identity = plan.identity().clone();
@@ -1665,13 +1837,21 @@ mod tests {
                 row_count: 9,
                 accounting: ResidentByteAccounting::default(),
             }),
+            output_memory: RasterOutputMemoryContext {
+                parent: dangling::<pg_sys::MemoryContextData>(),
+                context: std::ptr::null_mut(),
+                output_slot: std::ptr::null_mut(),
+            },
             rows_dispatched: 9,
             batches_executed: 1,
             dispatch_time_us: 17,
         };
-        state.reset_for_rescan();
+        // SAFETY: the output context remains lazy/null, so this pure unit test
+        // does not call PostgreSQL memory or slot APIs.
+        unsafe { state.reset_for_rescan() };
         assert_eq!(state.cursor.position(), 0);
         assert!(state.ready().is_none());
+        assert!(state.output_memory.context.is_null());
         assert_eq!(state.rows_dispatched, 0);
         assert_eq!(state.batches_executed, 0);
         assert_eq!(state.dispatch_time_us, 0);

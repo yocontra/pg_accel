@@ -1166,15 +1166,21 @@ pub unsafe fn postgis_raster_datum_from_wkb(
     if identity.rast_from_wkb_fn_oid == pg_sys::InvalidOid {
         return Err("PostGIS Raster WKB import has no catalog-proved function".to_owned());
     }
-    let bytea = wkb
-        .into_datum()
-        .ok_or_else(|| "could not allocate reconstructed raster WKB bytea".to_owned())?;
-    let result = pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+    pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        // Keep the temporary bytea allocation inside the PostgreSQL ERROR
+        // boundary. The caller's output context is reset when this returns an
+        // error, covering allocation or importer failures alike.
+        let bytea = wkb
+            .into_datum()
+            .ok_or_else(|| "could not allocate reconstructed raster WKB bytea".to_owned())?;
         // SAFETY: the identity proves strict st_rastfromwkb(bytea) with the
         // exact PostGIS raster result type.
         let raster = unsafe {
             pg_sys::OidFunctionCall1Coll(identity.rast_from_wkb_fn_oid, pg_sys::InvalidOid, bytea)
         };
+        // SAFETY: IntoDatum allocated this temporary bytea in the current
+        // memory context and the strict importer returned normally.
+        unsafe { pg_sys::pfree(bytea.cast_mut_ptr::<std::ffi::c_void>()) };
         if raster.value() == 0 {
             Err("catalog-proved PostGIS st_rastfromwkb returned NULL".to_owned())
         } else {
@@ -1187,11 +1193,7 @@ pub unsafe fn postgis_raster_datum_from_wkb(
             caught_error_message(&caught)
         ))
     })
-    .execute();
-    // SAFETY: IntoDatum allocated this temporary bytea in the current memory
-    // context and the strict importer has returned or its ERROR was caught.
-    unsafe { pg_sys::pfree(bytea.cast_mut_ptr::<std::ffi::c_void>()) };
-    result
+    .execute()
 }
 
 /// Resolve one function OID to the exact public PostGIS Raster overload.

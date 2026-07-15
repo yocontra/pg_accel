@@ -2433,14 +2433,22 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         let plan = privdata.raster_exec_plan.unwrap_or_else(|| {
             pgrx::error!("pg_accel: raster CustomScan is missing its exact RQS2 contract")
         });
+        // Bind output allocations to this executor's query lifetime rather
+        // than whichever context happens to be current during tuple emission.
+        // SAFETY: node is an initialized CustomScanState.
+        let estate = unsafe { (*node).ss.ps.state };
+        if estate.is_null() || unsafe { (*estate).es_query_cxt.is_null() } {
+            pgrx::error!("pg_accel: raster CustomScan has no executor query memory context");
+        }
         // SAFETY: ExecInitCustomScan initialized the scan slot and this callback
-        // runs on the PostgreSQL backend main thread.
-        let exec = unsafe { RasterExecState::begin(plan, (*node).ss.ss_ScanTupleSlot) }
-            .unwrap_or_else(|error| {
-                pgrx::error!(
-                    "pg_accel: raster BeginCustomScan failed ({error}); refusing CPU fallback"
-                )
-            });
+        // runs on the PostgreSQL backend main thread. es_query_cxt owns the
+        // dedicated raster output child on ERROR paths that bypass EndCustomScan.
+        let exec = unsafe {
+            RasterExecState::begin(plan, (*node).ss.ss_ScanTupleSlot, (*estate).es_query_cxt)
+        }
+        .unwrap_or_else(|error| {
+            pgrx::error!("pg_accel: raster BeginCustomScan failed ({error}); refusing CPU fallback")
+        });
         let rows = crate::engine::executor::ExecutorState::rows_dispatched(&exec);
         let batches = crate::engine::executor::ExecutorState::batches_executed(&exec);
         let dispatch_time = crate::engine::executor::ExecutorState::dispatch_time_us(&exec);

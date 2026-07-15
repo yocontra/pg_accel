@@ -886,6 +886,29 @@ mod tests {
         .expect("create and pin raster executor matrix");
     }
 
+    fn setup_raster_memory_fixture() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS postgis")
+            .expect("PostGIS must be available for raster memory tests");
+        Spi::run("CREATE EXTENSION IF NOT EXISTS postgis_raster")
+            .expect("PostGIS Raster must be available for raster memory tests");
+        Spi::run(
+            "SET pg_accel.enabled = on; \
+             SET pg_accel.gpu_enabled = on; \
+             SET pg_accel.auto_load = off; \
+             DROP TABLE IF EXISTS pgaccel_raster_memory; \
+             CREATE TEMP TABLE pgaccel_raster_memory(id int4, rast raster); \
+             INSERT INTO pgaccel_raster_memory \
+             SELECT g, ST_AddBand( \
+               ST_MakeEmptyRaster(128, 128, 0, 0, 1, -1, 0, 0, 4326), \
+               '8BUI'::text, (g % 8)::double precision, 255) \
+             FROM generate_series(1, 1024) AS g; \
+             ANALYZE pgaccel_raster_memory; \
+             SELECT pg_accel_pin( \
+               'pgaccel_raster_memory'::regclass, ARRAY['rast'])",
+        )
+        .expect("create and pin bounded raster output fixture");
+    }
+
     fn setup_zero_grid_band_fixture() {
         Spi::run("CREATE EXTENSION IF NOT EXISTS postgis")
             .expect("PostGIS must be available for zero-grid raster tests");
@@ -1075,7 +1098,47 @@ mod tests {
         })
     }
 
-    unsafe fn rewind_named_raster_cursor() {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct RasterOutputMemoryStats {
+        contexts: i64,
+        total_bytes: i64,
+        used_bytes: i64,
+    }
+
+    fn raster_output_memory_stats() -> RasterOutputMemoryStats {
+        let name = crate::engine::executor::raster::RASTER_OUTPUT_MEMORY_CONTEXT_NAME;
+        Spi::connect(|client| {
+            let mut rows = client
+                .select(
+                    &format!(
+                        "SELECT count(*)::bigint, \
+                                COALESCE(sum(total_bytes), 0)::bigint, \
+                                COALESCE(sum(used_bytes), 0)::bigint \
+                         FROM pg_backend_memory_contexts WHERE name = '{name}'"
+                    ),
+                    None,
+                    &[],
+                )
+                .expect("read raster output memory context");
+            let row = rows.next().expect("memory aggregate returns one row");
+            RasterOutputMemoryStats {
+                contexts: row
+                    .get::<i64>(1)
+                    .expect("read raster context count")
+                    .expect("raster context count is non-NULL"),
+                total_bytes: row
+                    .get::<i64>(2)
+                    .expect("read raster context total bytes")
+                    .expect("raster context total bytes are non-NULL"),
+                used_bytes: row
+                    .get::<i64>(3)
+                    .expect("read raster context used bytes")
+                    .expect("raster context used bytes are non-NULL"),
+            }
+        })
+    }
+
+    unsafe fn rewind_named_raster_cursor(name: &std::ffi::CStr) {
         struct ActiveSnapshotGuard;
 
         impl Drop for ActiveSnapshotGuard {
@@ -1086,7 +1149,7 @@ mod tests {
             }
         }
 
-        let portal = unsafe { pg_sys::GetPortalByName(c"pgaccel_raster_rescan".as_ptr()) };
+        let portal = unsafe { pg_sys::GetPortalByName(name.as_ptr()) };
         assert!(!portal.is_null(), "named raster cursor portal must exist");
         // SAFETY: GetPortalByName returned the live named portal.
         let query_desc = unsafe { (*portal).queryDesc };
@@ -1286,7 +1349,7 @@ mod tests {
 
         // SAFETY: the named cursor is live in this pg_test transaction and the
         // helper validates its QueryDesc and top CustomScanState before rewind.
-        unsafe { rewind_named_raster_cursor() };
+        unsafe { rewind_named_raster_cursor(c"pgaccel_raster_rescan") };
         let second = raster_wkb_rows("FETCH FORWARD ALL FROM pgaccel_raster_rescan");
         assert_eq!(second, first, "ExecReScan must rewind every raster row");
         assert!(
@@ -1295,6 +1358,161 @@ mod tests {
         );
         crate::gpu::assert_gpu_executed(1);
         Spi::run("CLOSE pgaccel_raster_rescan").expect("close forced raster rescan cursor");
+    }
+
+    #[pg_test]
+    fn forced_null_only_reclass_clears_the_virtual_slot_without_an_output_context() {
+        setup_extension_and_fixture();
+        Spi::run(
+            "CREATE TEMP TABLE pgaccel_raster_null_only(id int4, rast raster); \
+             INSERT INTO pgaccel_raster_null_only \
+             SELECT g, NULL::raster FROM generate_series(1, 256) AS g; \
+             ANALYZE pgaccel_raster_null_only; \
+             SELECT pg_accel_pin( \
+               'pgaccel_raster_null_only'::regclass, ARRAY['rast'])",
+        )
+        .expect("create and pin NULL-only raster fixture");
+        let sql = "SELECT ST_Reclass(rast, '0:1', '8BUI') \
+                   FROM pgaccel_raster_null_only";
+        super::with_forced_raster_path(|| {
+            Spi::run(&format!(
+                "DECLARE pgaccel_raster_null_cursor NO SCROLL CURSOR FOR {sql}"
+            ))
+            .expect("declare forced NULL-only raster cursor");
+        });
+        for batch in 0..8 {
+            let rows = raster_wkb_rows("FETCH FORWARD 32 FROM pgaccel_raster_null_cursor");
+            assert_eq!(rows.len(), 32, "NULL-only cursor batch {batch}");
+            assert!(rows.iter().all(Option::is_none));
+            assert_eq!(
+                raster_output_memory_stats(),
+                RasterOutputMemoryStats {
+                    contexts: 0,
+                    total_bytes: 0,
+                    used_bytes: 0,
+                },
+                "NULL rows must clear and reuse the slot without allocating an importer context"
+            );
+        }
+        assert!(raster_wkb_rows("FETCH FORWARD 1 FROM pgaccel_raster_null_cursor").is_empty());
+        assert!(
+            raster_wkb_rows("FETCH FORWARD 1 FROM pgaccel_raster_null_cursor").is_empty(),
+            "NULL-only cursor EOF must remain stable"
+        );
+        Spi::run("CLOSE pgaccel_raster_null_cursor").expect("close NULL-only raster cursor");
+        assert_eq!(
+            raster_output_memory_stats(),
+            RasterOutputMemoryStats {
+                contexts: 0,
+                total_bytes: 0,
+                used_bytes: 0,
+            }
+        );
+    }
+
+    #[pg_test]
+    fn forced_reclass_output_memory_is_bounded_across_cursor_rescan_and_end() {
+        setup_raster_memory_fixture();
+        let sql = "SELECT ST_Reclass( \
+                     rast, '0:8,1:9,2:10,3:11,4:12,5:13,6:14,7:15', '8BUI') \
+                   FROM pgaccel_raster_memory";
+        assert_eq!(
+            raster_output_memory_stats(),
+            RasterOutputMemoryStats {
+                contexts: 0,
+                total_bytes: 0,
+                used_bytes: 0,
+            },
+            "no raster output context may predate executor tuple emission"
+        );
+        super::with_forced_raster_path(|| {
+            Spi::run(&format!(
+                "DECLARE pgaccel_raster_memory_cursor NO SCROLL CURSOR FOR {sql}"
+            ))
+            .expect("declare forced raster memory cursor");
+        });
+
+        let first = raster_wkb_rows("FETCH FORWARD 64 FROM pgaccel_raster_memory_cursor");
+        assert_eq!(first.len(), 64);
+        let row_bytes = i64::try_from(
+            first
+                .iter()
+                .filter_map(Option::as_ref)
+                .map(Vec::len)
+                .max()
+                .expect("memory fixture rows are non-NULL"),
+        )
+        .expect("one raster WKB length fits i64");
+        let first_stats = raster_output_memory_stats();
+        assert_eq!(first_stats.contexts, 1);
+        assert!(first_stats.total_bytes > 0 && first_stats.used_bytes > 0);
+
+        // AllocSet may retain one block sized for the largest single output,
+        // but resetting before each row must prevent batch-count growth.
+        let total_limit = first_stats
+            .total_bytes
+            .saturating_add(row_bytes.saturating_mul(4))
+            .saturating_add(128 * 1024);
+        let used_limit = first_stats
+            .used_bytes
+            .saturating_add(row_bytes.saturating_mul(2))
+            .saturating_add(64 * 1024);
+        let mut max_stats = first_stats;
+        for batch in 1..12 {
+            let rows = raster_wkb_rows("FETCH FORWARD 64 FROM pgaccel_raster_memory_cursor");
+            assert_eq!(rows.len(), 64, "cursor batch {batch} must be complete");
+            let stats = raster_output_memory_stats();
+            assert_eq!(stats.contexts, 1);
+            assert!(
+                stats.total_bytes <= total_limit,
+                "raster output total bytes grew with cursor batches: \
+                 first={first_stats:?} current={stats:?} limit={total_limit}"
+            );
+            assert!(
+                stats.used_bytes <= used_limit,
+                "raster output used bytes grew with cursor batches: \
+                 first={first_stats:?} current={stats:?} limit={used_limit}"
+            );
+            max_stats.total_bytes = max_stats.total_bytes.max(stats.total_bytes);
+            max_stats.used_bytes = max_stats.used_bytes.max(stats.used_bytes);
+        }
+        assert!(
+            max_stats.total_bytes <= total_limit && max_stats.used_bytes <= used_limit,
+            "many emitted rows must retain only one-row-scale output memory"
+        );
+
+        let before_rewind = raster_output_memory_stats();
+        // SAFETY: the named portal is live and the helper validates its
+        // QueryDesc and top-level CustomScanState before ExecutorRewind.
+        unsafe { rewind_named_raster_cursor(c"pgaccel_raster_memory_cursor") };
+        let after_rewind = raster_output_memory_stats();
+        assert_eq!(after_rewind.contexts, 1);
+        assert!(
+            after_rewind.used_bytes < before_rewind.used_bytes,
+            "ReScan must clear the slot before resetting its output context: \
+             before={before_rewind:?} after={after_rewind:?}"
+        );
+        assert!(
+            after_rewind.used_bytes <= 8 * 1024,
+            "rewound output context must be empty apart from allocator bookkeeping: \
+             {after_rewind:?}"
+        );
+        let replay = raster_wkb_rows("FETCH FORWARD 64 FROM pgaccel_raster_memory_cursor");
+        assert_eq!(replay, first, "rewound raster batch must remain bit-exact");
+        let replay_stats = raster_output_memory_stats();
+        assert!(replay_stats.total_bytes <= total_limit);
+        assert!(replay_stats.used_bytes <= used_limit);
+
+        Spi::run("CLOSE pgaccel_raster_memory_cursor").expect("close forced raster memory cursor");
+        assert_eq!(
+            raster_output_memory_stats(),
+            RasterOutputMemoryStats {
+                contexts: 0,
+                total_bytes: 0,
+                used_bytes: 0,
+            },
+            "EndCustomScan must delete the dedicated raster output context"
+        );
     }
 
     #[pg_test]
