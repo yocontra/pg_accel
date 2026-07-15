@@ -2805,11 +2805,12 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertIn("missing_device_terminal", finding.classifications)
         self.assertIn("undominated_success", finding.classifications)
 
-    def test_sort_i64_does_not_borrow_f32_constexpr_branch(self) -> None:
-        finding = self.findings["pgaccel_sort_i64"]
-        self.assertEqual(finding.path.name, "sort.cpp")
-        self.assertIn("template_specialization_review", finding.classifications)
-        self.assertIn("if constexpr paths require", finding.message)
+    def test_sort_i64_uses_independently_proven_concrete_dispatch(self) -> None:
+        entry = self.by_name["pgaccel_sort_i64"]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.path.name, "sort.cpp")
+        self.assertIn("large_input_gpu_chain", entry.classifications)
+        self.assertNotIn("template_specialization_review", entry.classifications)
 
     def test_reduction_device_finalize_is_source_proven(self) -> None:
         entry = self.by_name["pgaccel_reduce_sum_f32"]

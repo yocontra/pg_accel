@@ -1361,126 +1361,194 @@ static pgaccel_status sycl_radix_sort_u32(uint32_t* data, size_t count) {
 // Dispatch: choose GPU radix / GPU bitonic
 // ===========================================================================
 
-/// Trait: which types can use radix sort.
-template <typename T>
-struct is_radix_sortable : std::false_type {};
-template <>
-struct is_radix_sortable<float> : std::true_type {};
-template <>
-struct is_radix_sortable<double> : std::true_type {};
-template <>
-struct is_radix_sortable<int32_t> : std::true_type {};
-template <>
-struct is_radix_sortable<uint32_t> : std::true_type {};
-template <>
-struct is_radix_sortable<int64_t> : std::true_type {};
-template <>
-struct is_radix_sortable<uint64_t> : std::true_type {};
-
-template <typename T>
-static pgaccel_status dispatch_sort(T* data, size_t count) {
+static pgaccel_status dispatch_sort_f32(float* data, size_t count) {
   if (data == nullptr && count > 0)
     return PGACCEL_ERROR;
-  if (count <= 1)
+  if (count == 0)
     return PGACCEL_OK;
 
-  // Radix-sortable keys above RADIX_SORT_THRESHOLD: use radix sort.
-  // The radix kernel uses local-memory atomics only (reliable on Metal)
-  // and a work-group-per-tile scatter with device-computed per-group
-  // offsets — no global atomics.
-  if constexpr (is_radix_sortable<T>::value) {
-    if (count >= RADIX_SORT_THRESHOLD) {
-      pgaccel_status st = PGACCEL_UNSUPPORTED;
-      if constexpr (std::is_same_v<T, float>) {
-        st = sycl_radix_sort_f32(data, count);
-      } else if constexpr (std::is_same_v<T, double>) {
-        st = sycl_radix_sort_f64(data, count);
-      } else if constexpr (std::is_same_v<T, int32_t>) {
-        st = sycl_radix_sort_i32(data, count);
-      } else if constexpr (std::is_same_v<T, uint32_t>) {
-        st = sycl_radix_sort_u32(reinterpret_cast<uint32_t*>(data), count);
-      } else if constexpr (std::is_same_v<T, int64_t>) {
-        st = sycl_radix_sort_i64(data, count);
-      } else if constexpr (std::is_same_v<T, uint64_t>) {
-        st = sycl_radix_sort_u64(reinterpret_cast<uint64_t*>(data), count);
-      }
-      if (st == PGACCEL_OK) {
-        pgaccel_record_gpu_exec();
-        return st;
-      }
-      // Fall through to bitonic on radix failure (intra-GPU retry).
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_f32(data, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
     }
   }
 
-  // Bitonic sort uses compare-and-swap only — reliable on Metal. As the
-  // last kernel in the chain its status is returned as-is (honest error,
-  // not collapsed to NO_DEVICE).
-  {
-    pgaccel_status st = sycl_bitonic_sort(data, count);
-    if (st == PGACCEL_OK)
-      pgaccel_record_gpu_exec();
-    return st;
-  }
+  const pgaccel_status st = sycl_bitonic_sort(data, count);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
-template <typename T>
-static pgaccel_status dispatch_sort_fp_checked(T* data, size_t count) {
+static pgaccel_status dispatch_sort_f64(double* data, size_t count) {
   if (data == nullptr && count > 0)
     return PGACCEL_ERROR;
-  if (count <= 1)
+  if (count == 0)
     return PGACCEL_OK;
 
-  // fp64 always available: native on CUDA/ROCm/Level Zero, soft-fp64 on Metal.
-  return dispatch_sort(data, count);
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_f64(data, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
+    }
+  }
+
+  const pgaccel_status st = sycl_bitonic_sort(data, count);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
-template <typename K>
-static pgaccel_status dispatch_sort_kv(K* keys, uint32_t* indices, size_t count) {
+static pgaccel_status dispatch_sort_i32(int32_t* data, size_t count) {
+  if (data == nullptr && count > 0)
+    return PGACCEL_ERROR;
+  if (count == 0)
+    return PGACCEL_OK;
+
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_i32(data, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
+    }
+  }
+
+  const pgaccel_status st = sycl_bitonic_sort(data, count);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
+}
+
+static pgaccel_status dispatch_sort_i64(int64_t* data, size_t count) {
+  if (data == nullptr && count > 0)
+    return PGACCEL_ERROR;
+  if (count == 0)
+    return PGACCEL_OK;
+
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_i64(data, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
+    }
+  }
+
+  const pgaccel_status st = sycl_bitonic_sort(data, count);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
+}
+
+static pgaccel_status dispatch_sort_u64(uint64_t* data, size_t count) {
+  if (data == nullptr && count > 0)
+    return PGACCEL_ERROR;
+  if (count == 0)
+    return PGACCEL_OK;
+
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_u64(data, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
+    }
+  }
+
+  const pgaccel_status st = sycl_bitonic_sort(data, count);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
+}
+
+static pgaccel_status dispatch_sort_kv_f32(float* keys, uint32_t* indices, size_t count) {
   if ((keys == nullptr || indices == nullptr) && count > 0) {
     return PGACCEL_ERROR;
   }
-  if (count <= 1)
+  if (count == 0)
     return PGACCEL_OK;
 
-  // Radix-sortable keys above RADIX_SORT_THRESHOLD: use radix sort.
-  if constexpr (is_radix_sortable<K>::value) {
-    if (count >= RADIX_SORT_THRESHOLD) {
-      pgaccel_status st = PGACCEL_UNSUPPORTED;
-      if constexpr (std::is_same_v<K, float>) {
-        st = sycl_radix_sort_kv_f32(keys, indices, count);
-      } else if constexpr (std::is_same_v<K, double>) {
-        st = sycl_radix_sort_kv_f64(keys, indices, count);
-      } else if constexpr (std::is_same_v<K, int32_t>) {
-        st = sycl_radix_sort_kv_i32(keys, indices, count);
-      } else if constexpr (std::is_same_v<K, uint32_t>) {
-        st = sycl_radix_sort_kv_u32(reinterpret_cast<uint32_t*>(keys), indices, count);
-      } else if constexpr (std::is_same_v<K, int64_t>) {
-        st = sycl_radix_sort_kv_i64(keys, indices, count);
-      } else if constexpr (std::is_same_v<K, uint64_t>) {
-        st = sycl_radix_sort_kv_u64(reinterpret_cast<uint64_t*>(keys), indices, count);
-      }
-      if (st == PGACCEL_OK) {
-        pgaccel_record_gpu_exec();
-        return st;
-      }
-      // Fall through to bitonic on radix failure (intra-GPU retry).
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_kv_f32(keys, indices, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
     }
   }
 
-  // Bitonic sort uses compare-and-swap only — reliable on Metal. Last
-  // kernel in the chain: status returned as-is.
-  {
-    pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
-    if (st == PGACCEL_OK)
-      pgaccel_record_gpu_exec();
-    return st;
+  const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
+}
+
+static pgaccel_status dispatch_sort_kv_f64(double* keys, uint32_t* indices, size_t count) {
+  if ((keys == nullptr || indices == nullptr) && count > 0) {
+    return PGACCEL_ERROR;
   }
+  if (count == 0)
+    return PGACCEL_OK;
+
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_kv_f64(keys, indices, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
+    }
+  }
+
+  const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
+}
+
+static pgaccel_status dispatch_sort_kv_i32(int32_t* keys, uint32_t* indices, size_t count) {
+  if ((keys == nullptr || indices == nullptr) && count > 0) {
+    return PGACCEL_ERROR;
+  }
+  if (count == 0)
+    return PGACCEL_OK;
+
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_kv_i32(keys, indices, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
+    }
+  }
+
+  const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
+}
+
+static pgaccel_status dispatch_sort_kv_i64(int64_t* keys, uint32_t* indices, size_t count) {
+  if ((keys == nullptr || indices == nullptr) && count > 0) {
+    return PGACCEL_ERROR;
+  }
+  if (count == 0)
+    return PGACCEL_OK;
+
+  if (count >= RADIX_SORT_THRESHOLD) {
+    const pgaccel_status st = sycl_radix_sort_kv_i64(keys, indices, count);
+    if (st == PGACCEL_OK) {
+      pgaccel_record_gpu_exec();
+      return st;
+    }
+  }
+
+  const pgaccel_status st = sycl_bitonic_sort_kv(keys, indices, count);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 }
 
 static pgaccel_status dispatch_sort_kv_i32_device(int32_t* keys, uint32_t* indices, size_t count) {
   if ((keys == nullptr || indices == nullptr) && count > 0)
     return PGACCEL_ERROR;
-  if (count <= 1)
+  if (count == 0)
     return PGACCEL_OK;
 
   if (count >= RADIX_SORT_THRESHOLD) {
@@ -1502,7 +1570,7 @@ static pgaccel_status dispatch_sort_kv_i32_nonnegative_device(int32_t* keys, uin
                                                               size_t count, uint32_t radix_bits) {
   if ((keys == nullptr || indices == nullptr) && count > 0)
     return PGACCEL_ERROR;
-  if (count <= 1)
+  if (count == 0)
     return PGACCEL_OK;
 
   if (count >= RADIX_SORT_THRESHOLD) {
@@ -1519,18 +1587,6 @@ static pgaccel_status dispatch_sort_kv_i32_nonnegative_device(int32_t* keys, uin
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
-}
-
-template <typename K>
-static pgaccel_status dispatch_sort_kv_fp_checked(K* keys, uint32_t* indices, size_t count) {
-  if ((keys == nullptr || indices == nullptr) && count > 0) {
-    return PGACCEL_ERROR;
-  }
-  if (count <= 1)
-    return PGACCEL_OK;
-
-  // fp64 always available: native on CUDA/ROCm/Level Zero, soft-fp64 on Metal.
-  return dispatch_sort_kv(keys, indices, count);
 }
 
 // ---------------------------------------------------------------------------
@@ -1826,7 +1882,7 @@ static pgaccel_status dispatch_topk_kv(const K* keys, size_t count, size_t reque
 extern "C" {
 
 pgaccel_status pgaccel_sort_f32(float* data, size_t count) try {
-  return dispatch_sort(data, count);
+  return dispatch_sort_f32(data, count);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1836,7 +1892,7 @@ pgaccel_status pgaccel_sort_f32(float* data, size_t count) try {
 }
 
 pgaccel_status pgaccel_sort_f64(double* data, size_t count) try {
-  return dispatch_sort_fp_checked(data, count);
+  return dispatch_sort_f64(data, count);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1846,7 +1902,7 @@ pgaccel_status pgaccel_sort_f64(double* data, size_t count) try {
 }
 
 pgaccel_status pgaccel_sort_i32(int32_t* data, size_t count) try {
-  return dispatch_sort(data, count);
+  return dispatch_sort_i32(data, count);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1856,7 +1912,7 @@ pgaccel_status pgaccel_sort_i32(int32_t* data, size_t count) try {
 }
 
 pgaccel_status pgaccel_sort_i64(int64_t* data, size_t count) try {
-  return dispatch_sort(data, count);
+  return dispatch_sort_i64(data, count);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1866,7 +1922,7 @@ pgaccel_status pgaccel_sort_i64(int64_t* data, size_t count) try {
 }
 
 pgaccel_status pgaccel_sort_u64(uint64_t* data, size_t count) try {
-  return dispatch_sort(data, count);
+  return dispatch_sort_u64(data, count);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1876,7 +1932,7 @@ pgaccel_status pgaccel_sort_u64(uint64_t* data, size_t count) try {
 }
 
 pgaccel_status pgaccel_sort_kv_f32(float* keys, uint32_t* indices, size_t count) try {
-  return dispatch_sort_kv(keys, indices, count);
+  return dispatch_sort_kv_f32(keys, indices, count);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1886,7 +1942,7 @@ pgaccel_status pgaccel_sort_kv_f32(float* keys, uint32_t* indices, size_t count)
 }
 
 pgaccel_status pgaccel_sort_kv_f64(double* keys, uint32_t* indices, size_t count) try {
-  return dispatch_sort_kv_fp_checked(keys, indices, count);
+  return dispatch_sort_kv_f64(keys, indices, count);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1896,7 +1952,7 @@ pgaccel_status pgaccel_sort_kv_f64(double* keys, uint32_t* indices, size_t count
 }
 
 pgaccel_status pgaccel_sort_kv_i32(int32_t* keys, uint32_t* indices, size_t count) try {
-  return dispatch_sort_kv(keys, indices, count);
+  return dispatch_sort_kv_i32(keys, indices, count);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1927,7 +1983,7 @@ pgaccel_status pgaccel_sort_kv_i32_nonnegative_device(int32_t* keys, uint32_t* i
 }
 
 pgaccel_status pgaccel_sort_kv_i64(int64_t* keys, uint32_t* indices, size_t count) try {
-  return dispatch_sort_kv(keys, indices, count);
+  return dispatch_sort_kv_i64(keys, indices, count);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
