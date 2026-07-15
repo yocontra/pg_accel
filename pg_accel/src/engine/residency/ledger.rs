@@ -1,7 +1,7 @@
 //! Cluster-wide resident-byte accounting and relation generations.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pgrx::pg_sys;
 
@@ -108,8 +108,44 @@ mod shared {
     }
 }
 
+#[derive(Debug, Default)]
+struct PendingGenerationBumps {
+    final_relids: BTreeSet<u32>,
+    subxact_relids: BTreeMap<pg_sys::SubTransactionId, BTreeSet<u32>>,
+}
+
+impl PendingGenerationBumps {
+    fn record(&mut self, relid: u32, subxid: pg_sys::SubTransactionId) {
+        self.final_relids.insert(relid);
+        self.subxact_relids.entry(subxid).or_default().insert(relid);
+    }
+
+    fn abort_subtransaction(&mut self, subxid: pg_sys::SubTransactionId) -> BTreeSet<u32> {
+        self.subxact_relids.remove(&subxid).unwrap_or_default()
+    }
+
+    fn commit_subtransaction(
+        &mut self,
+        subxid: pg_sys::SubTransactionId,
+        parent_subxid: pg_sys::SubTransactionId,
+    ) {
+        let Some(relids) = self.subxact_relids.remove(&subxid) else {
+            return;
+        };
+        self.subxact_relids
+            .entry(parent_subxid)
+            .or_default()
+            .extend(relids);
+    }
+
+    fn close(&mut self) -> BTreeSet<u32> {
+        self.subxact_relids.clear();
+        std::mem::take(&mut self.final_relids)
+    }
+}
+
 thread_local! {
-    static PENDING_COMMIT_BUMPS: RefCell<BTreeSet<u32>> = const { RefCell::new(BTreeSet::new()) };
+    static PENDING_GENERATION_BUMPS: RefCell<PendingGenerationBumps> = RefCell::default();
     static XACT_CALLBACKS_ARMED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -405,10 +441,24 @@ fn bump_generation(relid: pg_sys::Oid) {
 /// the first bump. Extra bumps are harmless fail-closed invalidations.
 pub(super) fn note_relation_change(relid: pg_sys::Oid) {
     bump_generation(relid);
-    PENDING_COMMIT_BUMPS.with(|pending| {
-        pending.borrow_mut().insert(u32::from(relid));
+    let subxid = current_subtransaction_id();
+    PENDING_GENERATION_BUMPS.with(|pending| {
+        pending.borrow_mut().record(u32::from(relid), subxid);
     });
     arm_xact_callbacks();
+}
+
+fn current_subtransaction_id() -> pg_sys::SubTransactionId {
+    #[cfg(test)]
+    {
+        1
+    }
+    #[cfg(not(test))]
+    {
+        // SAFETY: relation-change notifications run synchronously on the
+        // backend main thread inside an active transaction.
+        unsafe { pg_sys::GetCurrentSubTransactionId() }
+    }
 }
 
 fn arm_xact_callbacks() {
@@ -434,26 +484,35 @@ fn arm_xact_callbacks() {
     });
     pgrx::register_subxact_callback(
         pgrx::PgSubXactCallbackEvent::AbortSub,
-        |_my_subid, _parent_subid| {
-            // A refresh inside the aborted subtransaction can contain rows
-            // that disappear at ROLLBACK TO SAVEPOINT. Bump every relation
-            // already pending in the outer transaction. Keeping the set
-            // intact preserves the final commit/abort visibility bump.
-            bump_pending_relations();
+        |my_subid, _parent_subid| {
+            // Only relations changed in this aborted scope can contain rows
+            // that disappear at ROLLBACK TO SAVEPOINT. Outer-scope artifacts
+            // remain valid across an unrelated caught ERROR.
+            bump_aborted_subtransaction(my_subid);
+        },
+    );
+    pgrx::register_subxact_callback(
+        pgrx::PgSubXactCallbackEvent::CommitSub,
+        |my_subid, parent_subid| {
+            PENDING_GENERATION_BUMPS.with(|pending| {
+                pending
+                    .borrow_mut()
+                    .commit_subtransaction(my_subid, parent_subid);
+            });
         },
     );
 }
 
-fn bump_pending_relations() {
-    PENDING_COMMIT_BUMPS.with(|pending| {
-        for raw in pending.borrow().iter().copied() {
-            bump_generation(pg_sys::Oid::from(raw));
-        }
-    });
+fn bump_aborted_subtransaction(subxid: pg_sys::SubTransactionId) {
+    let relids =
+        PENDING_GENERATION_BUMPS.with(|pending| pending.borrow_mut().abort_subtransaction(subxid));
+    for raw in relids {
+        bump_generation(pg_sys::Oid::from(raw));
+    }
 }
 
 fn close_generation_window() {
-    let relids = PENDING_COMMIT_BUMPS.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
+    let relids = PENDING_GENERATION_BUMPS.with(|pending| pending.borrow_mut().close());
     XACT_CALLBACKS_ARMED.with(|armed| armed.set(false));
     for raw in relids {
         bump_generation(pg_sys::Oid::from(raw));
@@ -628,8 +687,8 @@ mod tests {
         let oid = pg_sys::Oid::from(5252_u32);
         bump_generation(oid);
         let after_statement = generation_stamp(oid);
-        PENDING_COMMIT_BUMPS.with(|pending| {
-            pending.borrow_mut().insert(u32::from(oid));
+        PENDING_GENERATION_BUMPS.with(|pending| {
+            pending.borrow_mut().record(u32::from(oid), 1);
         });
         XACT_CALLBACKS_ARMED.with(|armed| armed.set(true));
         close_generation_window();
@@ -639,18 +698,55 @@ mod tests {
     }
 
     #[test]
-    fn subtransaction_abort_bumps_without_closing_generation_window() {
+    fn unrelated_subtransaction_abort_preserves_outer_change_generation() {
         let _guard = test_guard();
-        let oid = pg_sys::Oid::from(6262_u32);
-        PENDING_COMMIT_BUMPS.with(|pending| {
-            pending.borrow_mut().insert(u32::from(oid));
+        let outer_oid = pg_sys::Oid::from(6262_u32);
+        PENDING_GENERATION_BUMPS.with(|pending| {
+            pending.borrow_mut().record(u32::from(outer_oid), 1);
         });
-        let before_abort = generation_stamp(oid);
-        bump_pending_relations();
-        let after_abort = generation_stamp(oid);
-        assert!(after_abort.relation > before_abort.relation);
-        assert!(PENDING_COMMIT_BUMPS.with(|pending| pending.borrow().contains(&u32::from(oid))));
+        let outer_before = generation_stamp(outer_oid);
+        bump_aborted_subtransaction(2);
+        assert_eq!(generation_stamp(outer_oid), outer_before);
+        PENDING_GENERATION_BUMPS.with(|pending| {
+            let pending = pending.borrow();
+            assert!(pending.final_relids.contains(&u32::from(outer_oid)));
+            assert!(pending.subxact_relids.contains_key(&1));
+            assert!(!pending.subxact_relids.contains_key(&2));
+        });
 
         close_generation_window();
+    }
+
+    #[test]
+    fn subtransaction_abort_bumps_its_inner_change_and_keeps_final_bump() {
+        let _guard = test_guard();
+        let inner_oid = pg_sys::Oid::from(6263_u32);
+        PENDING_GENERATION_BUMPS.with(|pending| {
+            pending.borrow_mut().record(u32::from(inner_oid), 2);
+        });
+        let inner_before = generation_stamp(inner_oid);
+
+        bump_aborted_subtransaction(2);
+
+        assert!(generation_stamp(inner_oid).relation > inner_before.relation);
+        PENDING_GENERATION_BUMPS.with(|pending| {
+            let pending = pending.borrow();
+            assert!(pending.final_relids.contains(&u32::from(inner_oid)));
+            assert!(!pending.subxact_relids.contains_key(&2));
+        });
+        close_generation_window();
+    }
+
+    #[test]
+    fn committed_nested_subtransaction_changes_follow_parent_before_abort() {
+        let mut pending = PendingGenerationBumps::default();
+        pending.record(7373, 4);
+        pending.commit_subtransaction(4, 3);
+        pending.commit_subtransaction(3, 2);
+
+        assert!(!pending.subxact_relids.contains_key(&4));
+        assert!(!pending.subxact_relids.contains_key(&3));
+        assert_eq!(pending.abort_subtransaction(2), BTreeSet::from([7373]));
+        assert!(pending.final_relids.contains(&7373));
     }
 }
