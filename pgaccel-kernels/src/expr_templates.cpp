@@ -495,11 +495,50 @@ struct CountPartialsScratch {
   }
 };
 
-size_t sum_count_partials(const uint32_t* partials, size_t num_groups) {
-  size_t total = 0;
-  for (size_t i = 0; i < num_groups; ++i)
-    total += partials[i];
-  return total;
+pgaccel_status finalize_count_partials_on_device(sycl::queue& q, const uint32_t* partials,
+                                                 size_t num_groups, size_t* true_count,
+                                                 const char* kernel_name) {
+  if (partials == nullptr || num_groups == 0 || true_count == nullptr)
+    return PGACCEL_ERROR;
+
+  size_t* final_count = sycl::malloc_shared<size_t>(1, q);
+  if (final_count == nullptr)
+    return PGACCEL_OOM;
+
+  try {
+    q.submit([&](sycl::handler& h) {
+       sycl::local_accessor<size_t, 1> local_mem(COUNT_WG_SIZE, h);
+       h.parallel_for(sycl::nd_range<1>(COUNT_WG_SIZE, COUNT_WG_SIZE),
+                      [=](sycl::nd_item<1> item) {
+                        const size_t lid = item.get_local_id(0);
+                        size_t local_count = 0;
+                        for (size_t group = lid; group < num_groups; group += COUNT_WG_SIZE) {
+                          local_count += static_cast<size_t>(partials[group]);
+                        }
+                        local_mem[lid] = local_count;
+                        item.barrier(sycl::access::fence_space::local_space);
+
+                        for (size_t stride = COUNT_WG_SIZE / 2; stride > 0; stride >>= 1) {
+                          if (lid < stride) {
+                            local_mem[lid] += local_mem[lid + stride];
+                          }
+                          item.barrier(sycl::access::fence_space::local_space);
+                        }
+
+                        if (lid == 0) {
+                          final_count[0] = local_mem[0];
+                        }
+                      });
+     }).wait_and_throw();
+    q.memcpy(true_count, final_count, sizeof(*true_count)).wait_and_throw();
+  } catch (const std::exception& e) {
+    sycl::free(final_count, q);
+    std::fprintf(stderr, "pgaccel: %s final count reduction failed: %s\n", kernel_name, e.what());
+    return PGACCEL_ERROR;
+  }
+
+  sycl::free(final_count, q);
+  return PGACCEL_OK;
 }
 
 template <typename T>
@@ -634,7 +673,10 @@ pgaccel_status launch_cmp_const_count_f32_nan_const(const float* d_col, const ui
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
@@ -711,7 +753,10 @@ pgaccel_status launch_cmp_const_count_usm_typed(const T* d_col, const uint8_t* d
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
@@ -787,7 +832,10 @@ pgaccel_status launch_two_pred_and_count_usm_typed(const T1* d_col1, const uint8
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
@@ -856,7 +904,10 @@ pgaccel_status launch_cmp_const_count_usm_as_double(const T* d_col, const uint8_
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
@@ -932,7 +983,10 @@ launch_two_pred_and_count_usm_as_double(const T1* d_col1, const uint8_t* d_null1
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
@@ -1002,7 +1056,10 @@ pgaccel_status launch_cmp_const_mask_f32_nan_const(const float* d_col, const uin
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
@@ -1081,7 +1138,10 @@ pgaccel_status launch_cmp_const_mask_usm_typed(const T* d_col, const uint8_t* d_
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
@@ -1160,7 +1220,10 @@ pgaccel_status launch_two_pred_and_mask_usm_typed(const T1* d_col1, const uint8_
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
@@ -1233,7 +1296,10 @@ pgaccel_status launch_cmp_const_mask_usm_as_double(const T* d_col, const uint8_t
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
@@ -1313,7 +1379,10 @@ pgaccel_status launch_two_pred_and_mask_usm_as_double(const T1* d_col1, const ui
     return PGACCEL_ERROR;
   }
 
-  *true_count = sum_count_partials(s.partials, num_groups);
+  const pgaccel_status finalize_status =
+      finalize_count_partials_on_device(*q, s.partials, num_groups, true_count, kernel_name);
+  if (finalize_status != PGACCEL_OK)
+    return finalize_status;
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }

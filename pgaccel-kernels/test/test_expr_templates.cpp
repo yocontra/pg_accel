@@ -470,6 +470,41 @@ static void test_cmp_const_count_usm_multigroup_all_valid() {
   pgaccel_expr_shared_free(vals);
 }
 
+static void test_cmp_const_count_usm_device_finalizer_many_groups() {
+  printf("--- test_cmp_const_count_usm_device_finalizer_many_groups ---\n");
+
+  // More than 256 first-stage groups forces every finalizer lane to consume
+  // multiple partials, exercising the device reduction rather than a one-pass
+  // copy of a small partial array.
+  constexpr size_t n = 300123;
+  constexpr size_t miss_stride = 997;
+  int32_t* vals =
+      alloc_shared_array<int32_t>("cmp_const_count_usm device finalizer values alloc", n);
+  if (vals == nullptr)
+    return;
+
+  for (size_t i = 0; i < n; ++i) {
+    vals[i] = (i % miss_stride == 0) ? 0 : 1;
+  }
+  const size_t expected = n - ((n - 1) / miss_stride + 1);
+
+  pgaccel_expr_usm_col col{vals, nullptr, PGACCEL_VAL_INT32};
+  size_t true_count = 0;
+  size_t uncertain_count = 99;
+  pgaccel_reset_gpu_exec_count();
+  const uint64_t before = pgaccel_gpu_exec_count();
+  const pgaccel_status status = pgaccel_expr_template_cmp_const_count_usm(
+      col, n, PGACCEL_EXPR_OP_EQ, 1.0, &true_count, &uncertain_count);
+
+  ASSERT_STATUS_OK("cmp_const_count_usm device finalizer status", status);
+  ASSERT_TRUE("cmp_const_count_usm device finalizer exact count", true_count == expected);
+  ASSERT_TRUE("cmp_const_count_usm device finalizer uncertain rows", uncertain_count == 0);
+  ASSERT_TRUE("cmp_const_count_usm device finalizer records GPU operation",
+              pgaccel_gpu_exec_count() == before + 1);
+
+  pgaccel_expr_shared_free(vals);
+}
+
 static void test_cmp_const_count_usm_strided_rows_and_nulls() {
   printf("--- test_cmp_const_count_usm_strided_rows_and_nulls ---\n");
 
@@ -1645,6 +1680,7 @@ int main() {
   test_cmp_const_count_i32_non_integral_const_fallback();
   test_cmp_const_count_usm();
   test_cmp_const_count_usm_multigroup_all_valid();
+  test_cmp_const_count_usm_device_finalizer_many_groups();
   test_cmp_const_count_usm_strided_rows_and_nulls();
   test_cmp_const_count_usm_f32_nan_const();
   test_cmp_const_count_usm_int64();
