@@ -194,18 +194,127 @@ PY
         require_shell_value PG_ACCEL_PREVIEW_PG_MAJORS "19"
         require_shell_value PG_ACCEL_PGRX_VERSION "0.19.1"
 
-        if ! pg_accel_require_pgrx_support 18; then
-            echo "error: $view does not satisfy the PostgreSQL 18 pgrx contract" >&2
-            exit 1
-        fi
-        if ! pg_accel_require_pgrx_support 19; then
-            echo "error: $view does not satisfy the PostgreSQL 19 pgrx contract" >&2
-            exit 1
-        fi
-        if pg_accel_skip_if_preview_without_pgrx 19; then
-            echo "error: $view resolves PostgreSQL 19 through a successful preview skip" >&2
-            exit 1
-        fi
+        require_helper_output() {
+            local label="$1"
+            local expected="$2"
+            shift 2
+            local actual
+            if ! actual="$("$@")"; then
+                echo "error: $view $label returned a failure status" >&2
+                exit 1
+            fi
+            if [ "$actual" != "$expected" ]; then
+                echo "error: $view $label must output [$expected], found [$actual]" >&2
+                exit 1
+            fi
+        }
+
+        require_helper_status() {
+            local label="$1"
+            local expected="$2"
+            shift 2
+            local actual
+            if "$@" >/dev/null 2>&1; then
+                actual=0
+            else
+                actual=$?
+            fi
+            if [ "$actual" -ne "$expected" ]; then
+                echo "error: $view $label must return $expected, found $actual" >&2
+                exit 1
+            fi
+        }
+
+        require_skip_return() {
+            local pg="$1"
+            local probe
+            local status
+            if probe="$(
+                set +e
+                pg_accel_skip_if_preview_without_pgrx "$pg" >/dev/null 2>&1
+                printf 'returned:%s' "$?"
+            )"; then
+                status=0
+            else
+                status=$?
+            fi
+            if [ "$status" -ne 0 ] || [ "$probe" != "returned:1" ]; then
+                echo "error: $view preview helper must normally return 1 for PostgreSQL $pg" >&2
+                exit 1
+            fi
+        }
+
+        require_skip_hard_exit() {
+            local pg="$1"
+            local probe
+            local status
+            if probe="$(
+                set +e
+                pg_accel_skip_if_preview_without_pgrx "$pg" >/dev/null 2>&1
+                printf 'returned:%s' "$?"
+            )"; then
+                status=0
+            else
+                status=$?
+            fi
+            if [ "$status" -ne 1 ] || [ -n "$probe" ]; then
+                echo "error: $view preview helper must hard-exit 1 for unsupported PostgreSQL $pg" >&2
+                exit 1
+            fi
+        }
+
+        require_helper_output \
+            "pg_accel_supported_pg_majors" $'18\n19' \
+            pg_accel_supported_pg_majors
+        require_helper_output \
+            "pg_accel_source_pg_majors" $'18\n19' \
+            pg_accel_source_pg_majors
+        require_helper_output "pg_accel_default_pg_major" "18" pg_accel_default_pg_major
+        require_helper_output \
+            "pg_accel_highest_buildable_pg_major" "19" \
+            pg_accel_highest_buildable_pg_major
+        require_helper_output \
+            "pg_accel_buildable_default_pg_major" "18" \
+            pg_accel_buildable_default_pg_major
+
+        require_helper_output "pg_accel_pgrx_feature_for_pg 18" "pg18" pg_accel_pgrx_feature_for_pg 18
+        require_helper_output "pg_accel_pgrx_feature_for_pg pg18" "pg18" pg_accel_pgrx_feature_for_pg pg18
+        require_helper_output "pg_accel_pgrx_feature_for_pg 19" "pg19" pg_accel_pgrx_feature_for_pg 19
+        require_helper_output "pg_accel_pgrx_feature_for_pg pg19" "pg19" pg_accel_pgrx_feature_for_pg pg19
+        require_helper_output "pg_accel_pgrx_feature_for_pg 17" "pg17" pg_accel_pgrx_feature_for_pg 17
+        require_helper_output "pg_accel_pgrx_feature_for_pg 20" "pg20" pg_accel_pgrx_feature_for_pg 20
+
+        require_helper_status "pg_accel_is_supported_pg 18" 0 pg_accel_is_supported_pg 18
+        require_helper_status "pg_accel_is_supported_pg pg18" 0 pg_accel_is_supported_pg pg18
+        require_helper_status "pg_accel_is_supported_pg 19" 0 pg_accel_is_supported_pg 19
+        require_helper_status "pg_accel_is_supported_pg pg19" 0 pg_accel_is_supported_pg pg19
+        require_helper_status "pg_accel_is_supported_pg 17" 1 pg_accel_is_supported_pg 17
+        require_helper_status "pg_accel_is_supported_pg 20" 1 pg_accel_is_supported_pg 20
+        require_helper_status "pg_accel_require_supported_pg 18" 0 pg_accel_require_supported_pg 18
+        require_helper_status "pg_accel_require_supported_pg 19" 0 pg_accel_require_supported_pg 19
+        require_helper_status "pg_accel_require_supported_pg 17" 1 pg_accel_require_supported_pg 17
+        require_helper_status "pg_accel_require_supported_pg 20" 1 pg_accel_require_supported_pg 20
+
+        require_helper_status "pg_accel_is_preview_pg 18" 1 pg_accel_is_preview_pg 18
+        require_helper_status "pg_accel_is_preview_pg pg18" 1 pg_accel_is_preview_pg pg18
+        require_helper_status "pg_accel_is_preview_pg 19" 0 pg_accel_is_preview_pg 19
+        require_helper_status "pg_accel_is_preview_pg pg19" 0 pg_accel_is_preview_pg pg19
+        require_helper_status "pg_accel_is_preview_pg 17" 1 pg_accel_is_preview_pg 17
+        require_helper_status "pg_accel_is_preview_pg 20" 1 pg_accel_is_preview_pg 20
+
+        require_helper_status "pg_accel_pgrx_supports_pg 18" 0 pg_accel_pgrx_supports_pg 18
+        require_helper_status "pg_accel_pgrx_supports_pg 19" 0 pg_accel_pgrx_supports_pg 19
+        require_helper_status "pg_accel_pgrx_supports_pg 17" 1 pg_accel_pgrx_supports_pg 17
+        require_helper_status "pg_accel_pgrx_supports_pg 20" 1 pg_accel_pgrx_supports_pg 20
+        require_helper_status "pg_accel_require_pgrx_support 18" 0 pg_accel_require_pgrx_support 18
+        require_helper_status "pg_accel_require_pgrx_support 19" 0 pg_accel_require_pgrx_support 19
+        require_helper_status "pg_accel_require_pgrx_support 17" 1 pg_accel_require_pgrx_support 17
+        require_helper_status "pg_accel_require_pgrx_support 20" 1 pg_accel_require_pgrx_support 20
+
+        require_skip_return 18
+        require_skip_return 19
+        require_skip_hard_exit 17
+        require_skip_hard_exit 20
     )
 }
 
