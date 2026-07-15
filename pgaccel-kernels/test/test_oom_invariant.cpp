@@ -89,6 +89,7 @@ struct FamilyResult {
   size_t rss_ceiling_bytes;
   bool under_ceiling;
   std::string note;
+  size_t rss_baseline_bytes = 0;
   size_t rss_delta_bytes = 0;
   uint64_t gpu_dispatches = 0;
 };
@@ -117,6 +118,7 @@ static FamilyResult run_reduce_family(size_t N, size_t rss_ceiling) {
   const size_t rss_after = peak_rss_bytes();
   r.status_ok = (st == PGACCEL_OK && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
+  r.rss_baseline_bytes = rss_before;
   // Correctness: sum of N 1.0s is N exactly in fp64.
   r.correct = r.status_ok && got == static_cast<double>(N);
   // RSS ceiling — delta from before-call vs peak.
@@ -158,6 +160,7 @@ static FamilyResult run_sort_family(size_t N, size_t rss_ceiling) {
   const size_t rss_after = peak_rss_bytes();
   r.status_ok = (st == PGACCEL_OK && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
+  r.rss_baseline_bytes = rss_before;
   // Correctness: ascending monotone.
   bool monotone = true;
   if (r.status_ok) {
@@ -218,6 +221,7 @@ static FamilyResult run_hashagg_family(size_t N, size_t rss_ceiling) {
   const size_t rss_after = peak_rss_bytes();
   r.status_ok = (status == PGACCEL_OK && state != nullptr && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
+  r.rss_baseline_bytes = rss_before;
   if (state) {
     // Each of the 4 groups should have exactly N/4 rows, sum = N/4.
     size_t ngroups = pgaccel_agg_group_count(state);
@@ -276,6 +280,7 @@ static FamilyResult run_spatial_family(size_t N, size_t rss_ceiling) {
   const size_t rss_after = peak_rss_bytes();
   r.status_ok = (st == PGACCEL_OK && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
+  r.rss_baseline_bytes = rss_before;
   // Correctness: every result should be 1 (inside).
   bool all_inside = r.status_ok;
   if (r.status_ok) {
@@ -325,6 +330,7 @@ static FamilyResult run_h3_family(size_t N, size_t rss_ceiling) {
   const size_t rss_after = peak_rss_bytes();
   r.status_ok = (st == PGACCEL_OK && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
+  r.rss_baseline_bytes = rss_before;
   bool all_valid = r.status_ok;
   uint64_t first = 0;
   if (r.status_ok) {
@@ -365,8 +371,7 @@ int main() {
   std::transform(backend.begin(), backend.end(), backend.begin(),
                  [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
   const bool accelerator_backend =
-      backend.find("metal") != std::string::npos || backend.find("cuda") != std::string::npos ||
-      backend.find("hip") != std::string::npos || backend.find("level_zero") != std::string::npos;
+      backend == "metal" || backend == "cuda" || backend == "hip" || backend == "level_zero";
   if (info.device_name[0] == '\0' || info.backend_name[0] == '\0' || info.compute_units == 0 ||
       caps.max_alloc_bytes == 0 || !accelerator_backend) {
     fprintf(stderr,
@@ -415,9 +420,10 @@ int main() {
            r.name, pass ? "PASS" : "FAIL", r.peak_rss_bytes / 1e9, r.rss_ceiling_bytes / 1e9,
            r.status_ok, r.correct, r.under_ceiling, r.note.c_str());
     printf("PGACCEL_OOM_FAMILY family=%s result=%s dispatches=%llu "
-           "peak_rss_bytes=%zu rss_delta_bytes=%zu rss_limit_bytes=%zu\n",
+           "peak_rss_bytes=%zu rss_baseline_bytes=%zu rss_delta_bytes=%zu "
+           "rss_limit_bytes=%zu\n",
            r.name, pass ? "PASS" : "FAIL", static_cast<unsigned long long>(r.gpu_dispatches),
-           r.peak_rss_bytes, r.rss_delta_bytes, r.rss_ceiling_bytes);
+           r.peak_rss_bytes, r.rss_baseline_bytes, r.rss_delta_bytes, r.rss_ceiling_bytes);
     if (!pass)
       fails++;
   }

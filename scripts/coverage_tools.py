@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import decimal
 import fnmatch
 import hashlib
 import json
@@ -25,6 +26,9 @@ BASELINE_SQL_FILES = 52
 BASELINE_SQL_ASSERTIONS = 287
 BASELINE_CPP_SOURCES = 21
 BASELINE_CPP_TESTS = 29
+UINT32_MAX = (1 << 32) - 1
+UINT64_MAX = (1 << 64) - 1
+ACCELERATOR_BACKENDS = {"metal", "cuda", "hip", "level_zero"}
 PINNED_CPP_EXECUTABLE_HEADERS = {
     "pgaccel-kernels/include/alloc_helper.h",
     "pgaccel-kernels/include/pgaccel_hash_agg.h",
@@ -93,8 +97,16 @@ RUST_FUNCTION = re.compile(
     r"(?:unsafe\s+)?(?:extern\s+(?:\"[^\"]+\"\s+)?)?)fn\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:<[^;{]*>)?\s*\(",
     flags=re.MULTILINE,
 )
-CPP_FUNCTION_BODY = re.compile(
-    r"\)\s*(?:const\s*)?(?:noexcept\s*)?(?:->[^\{]+)?\{", flags=re.DOTALL
+CPP_LAMBDA_BODY = re.compile(
+    r"(?:^|[=(:,;{}]|\breturn\s+)\s*\[[^\]\n]*\]\s*"
+    r"(?:\([^;{}]*\)\s*)?(?:mutable\s*)?(?:noexcept(?:\([^)]*\))?\s*)?"
+    r"(?:->[^;{}]+)?\{",
+    flags=re.DOTALL | re.MULTILINE,
+)
+CPP_EXECUTABLE_MACRO = re.compile(
+    r"^\s*#\s*define\s+[A-Za-z_][A-Za-z0-9_]*(?:\([^\n]*\))?"
+    r"(?:[^\n\\]|\\\n)*\{",
+    flags=re.MULTILINE,
 )
 
 
@@ -166,12 +178,89 @@ def excluded(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
 
 
+def cpp_executable_code(text: str) -> str:
+    output: list[str] = []
+    index = 0
+    block_comment = False
+    quote: str | None = None
+    while index < len(text):
+        if block_comment:
+            if text.startswith("*/", index):
+                output.extend("  ")
+                index += 2
+                block_comment = False
+            else:
+                output.append("\n" if text[index] == "\n" else " ")
+                index += 1
+            continue
+        if quote is not None:
+            char = text[index]
+            output.append("\n" if char == "\n" else " ")
+            if char == "\\" and index + 1 < len(text):
+                index += 1
+                output.append("\n" if text[index] == "\n" else " ")
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if text.startswith("//", index):
+            newline = text.find("\n", index + 2)
+            if newline < 0:
+                output.extend(" " * (len(text) - index))
+                break
+            output.extend(" " * (newline - index))
+            output.append("\n")
+            index = newline + 1
+            continue
+        if text.startswith("/*", index):
+            output.extend("  ")
+            index += 2
+            block_comment = True
+            continue
+        if text[index] in {'"', "'"}:
+            quote = text[index]
+            output.append(" ")
+            index += 1
+            continue
+        output.append(text[index])
+        index += 1
+    return "".join(output)
+
+
+def cpp_has_callable_body(code: str) -> bool:
+    for close_index, char in enumerate(code):
+        if char != ")":
+            continue
+        line_start = code.rfind("\n", 0, close_index) + 1
+        if code[line_start:close_index].lstrip().startswith("#"):
+            continue
+        cursor = close_index + 1
+        while cursor < len(code) and cursor - close_index <= 4096:
+            current = code[cursor]
+            if current == ";":
+                break
+            if (
+                current == "#"
+                and not code[code.rfind("\n", 0, cursor) + 1 : cursor].strip()
+            ):
+                break
+            if current == "{":
+                return True
+            cursor += 1
+    return False
+
+
 def has_executable_mapping_candidate(path: pathlib.Path) -> bool:
     text = path.read_text(encoding="utf-8", errors="replace")
     if path.suffix == ".rs":
         return RUST_FUNCTION.search(text) is not None or "extension_sql!(" in text
     if path.suffix in {".cpp", ".hpp", ".h"}:
-        return CPP_FUNCTION_BODY.search(text) is not None
+        code = cpp_executable_code(text)
+        return (
+            cpp_has_callable_body(code)
+            or CPP_LAMBDA_BODY.search(code) is not None
+            or CPP_EXECUTABLE_MACRO.search(code) is not None
+        )
     return True
 
 
@@ -1087,10 +1176,390 @@ SQL_GUARD_KEYWORDS = {
     "THEN",
     "TRUE",
     "UNION",
+    "UNKNOWN",
     "USING",
     "WHEN",
     "WHERE",
 }
+
+
+SQLTruth = str
+SQLGuardNode = tuple[Any, ...]
+SQL_TRUE: SQLTruth = "true"
+SQL_FALSE: SQLTruth = "false"
+SQL_UNKNOWN: SQLTruth = "unknown"
+SQL_ALWAYS_NULL = "always-null"
+
+
+def strip_balanced_parentheses(tokens: list[str]) -> list[str]:
+    result = tokens
+    while len(result) >= 2 and result[0] == "(" and result[-1] == ")":
+        depth = 0
+        encloses_all = True
+        for index, token in enumerate(result):
+            if token == "(":
+                depth += 1
+            elif token == ")":
+                depth -= 1
+                if depth == 0 and index != len(result) - 1:
+                    encloses_all = False
+                    break
+            if depth < 0:
+                encloses_all = False
+                break
+        if not encloses_all or depth != 0:
+            break
+        result = result[1:-1]
+    return result
+
+
+def split_sql_boolean(tokens: list[str], operator: str) -> list[list[str]]:
+    parts: list[list[str]] = []
+    start = 0
+    paren_depth = 0
+    case_depth = 0
+    between_pending = False
+    for index, token in enumerate(tokens):
+        upper = token.upper()
+        if token == "(":
+            paren_depth += 1
+        elif token == ")" and paren_depth:
+            paren_depth -= 1
+        elif paren_depth == 0:
+            if upper == "CASE":
+                case_depth += 1
+            elif upper == "END" and case_depth:
+                case_depth -= 1
+            elif case_depth == 0:
+                if upper == "BETWEEN":
+                    between_pending = True
+                elif upper == "AND" and between_pending:
+                    between_pending = False
+                elif upper == operator:
+                    parts.append(tokens[start:index])
+                    start = index + 1
+    if not parts:
+        return [tokens]
+    parts.append(tokens[start:])
+    return parts
+
+
+def sql_guard_not(node: SQLGuardNode) -> SQLGuardNode:
+    if node[0] == "constant":
+        return (
+            "constant",
+            {
+                SQL_TRUE: SQL_FALSE,
+                SQL_FALSE: SQL_TRUE,
+                SQL_UNKNOWN: SQL_UNKNOWN,
+            }[node[1]],
+        )
+    if node[0] == "not":
+        return node[1]
+    return ("not", node)
+
+
+def normalized_sql_term(tokens: list[str]) -> str:
+    return " ".join(value.lower() for value in strip_balanced_parentheses(tokens))
+
+
+def sql_term_value_source(term: str) -> str | None:
+    if term == "null":
+        return SQL_ALWAYS_NULL
+    if re.fullmatch(r"(?:[0-9]+(?:\.[0-9]+)?|true|false)", term):
+        return None
+    return f"truth-value:{term}"
+
+
+def sql_constant_term(term: str) -> tuple[str, Any] | None:
+    if term in {"null", "unknown"}:
+        return ("null", None)
+    if term in {"true", "false"}:
+        return ("boolean", term == "true")
+    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", term):
+        return ("number", decimal.Decimal(term))
+    return None
+
+
+def top_level_sql_comparison(
+    tokens: list[str],
+) -> tuple[list[str], str, list[str]] | None:
+    depth = 0
+    case_depth = 0
+    upper = [token.upper() for token in tokens]
+    for index, token in enumerate(tokens):
+        current = upper[index]
+        if token == "(":
+            depth += 1
+            continue
+        if token == ")" and depth:
+            depth -= 1
+            continue
+        if depth or case_depth:
+            if current == "CASE":
+                case_depth += 1
+            elif current == "END" and case_depth:
+                case_depth -= 1
+            continue
+        if current == "CASE":
+            case_depth += 1
+            continue
+        if upper[index : index + 4] == ["IS", "NOT", "DISTINCT", "FROM"]:
+            return tokens[:index], "IS NOT DISTINCT FROM", tokens[index + 4 :]
+        if upper[index : index + 3] == ["IS", "DISTINCT", "FROM"]:
+            return tokens[:index], "IS DISTINCT FROM", tokens[index + 3 :]
+        if current in {"=", "<>", "!=", "<", ">", "<=", ">="}:
+            return tokens[:index], current, tokens[index + 1 :]
+    return None
+
+
+def sql_guard_atom(tokens: list[str]) -> SQLGuardNode:
+    tokens = strip_balanced_parentheses(tokens)
+    upper = [token.upper() for token in tokens]
+    if upper == ["TRUE"]:
+        return ("constant", SQL_TRUE)
+    if upper == ["FALSE"]:
+        return ("constant", SQL_FALSE)
+    if upper in (["NULL"], ["UNKNOWN"]):
+        return ("constant", SQL_UNKNOWN)
+
+    for suffix, target in (
+        (["IS", "NULL"], SQL_UNKNOWN),
+        (["IS", "TRUE"], SQL_TRUE),
+        (["IS", "FALSE"], SQL_FALSE),
+        (["IS", "UNKNOWN"], SQL_UNKNOWN),
+    ):
+        if len(tokens) > len(suffix) and upper[-len(suffix) :] == suffix:
+            term = normalized_sql_term(tokens[: -len(suffix)])
+            constant = sql_constant_term(term)
+            if constant is not None:
+                truth = (
+                    SQL_UNKNOWN
+                    if constant[0] == "null"
+                    else SQL_TRUE
+                    if constant == ("boolean", True)
+                    else SQL_FALSE
+                )
+                return ("constant", SQL_TRUE if truth == target else SQL_FALSE)
+            return ("is-test", f"truth-value:{term}", target)
+        negated = ["IS", "NOT", suffix[-1]]
+        if len(tokens) > len(negated) and upper[-len(negated) :] == negated:
+            term = normalized_sql_term(tokens[: -len(negated)])
+            constant = sql_constant_term(term)
+            if constant is not None:
+                truth = (
+                    SQL_UNKNOWN
+                    if constant[0] == "null"
+                    else SQL_TRUE
+                    if constant == ("boolean", True)
+                    else SQL_FALSE
+                )
+                return (
+                    "constant",
+                    SQL_FALSE if truth == target else SQL_TRUE,
+                )
+            return sql_guard_not(("is-test", f"truth-value:{term}", target))
+
+    comparison = top_level_sql_comparison(tokens)
+    if comparison is not None:
+        left_tokens, operator, right_tokens = comparison
+        left = normalized_sql_term(left_tokens)
+        right = normalized_sql_term(right_tokens)
+        if left and left == right:
+            raise CoverageError(
+                "semantic assertion guard compares evidence with itself: "
+                + " ".join(tokens)
+            )
+        if left and right:
+            left_constant = sql_constant_term(left)
+            right_constant = sql_constant_term(right)
+            if left_constant is not None and right_constant is not None:
+                if operator in {"IS DISTINCT FROM", "IS NOT DISTINCT FROM"}:
+                    if left_constant[0] == "null" and right_constant[0] == "null":
+                        value = SQL_FALSE
+                    elif (left_constant[0] == "null") != (right_constant[0] == "null"):
+                        value = SQL_TRUE
+                    else:
+                        value = (
+                            SQL_FALSE if left_constant == right_constant else SQL_TRUE
+                        )
+                    if operator == "IS NOT DISTINCT FROM":
+                        value = SQL_FALSE if value == SQL_TRUE else SQL_TRUE
+                    return ("constant", value)
+                if left_constant[0] == "null" or right_constant[0] == "null":
+                    return ("constant", SQL_UNKNOWN)
+                if left_constant[0] == right_constant[0]:
+                    left_value = left_constant[1]
+                    right_value = right_constant[1]
+                    comparisons = {
+                        "=": left_value == right_value,
+                        "<>": left_value != right_value,
+                        "!=": left_value != right_value,
+                        "<": left_value < right_value,
+                        ">": left_value > right_value,
+                        "<=": left_value <= right_value,
+                        ">=": left_value >= right_value,
+                    }
+                    return (
+                        "constant",
+                        SQL_TRUE if comparisons[operator] else SQL_FALSE,
+                    )
+            if operator in {"=", "<>", "!="}:
+                operands = sorted((left, right))
+                node: SQLGuardNode = (
+                    "comparison",
+                    f"equal:{operands[0]}:{operands[1]}",
+                    sql_term_value_source(left),
+                    sql_term_value_source(right),
+                )
+                return sql_guard_not(node) if operator in {"<>", "!="} else node
+            if operator in {"IS DISTINCT FROM", "IS NOT DISTINCT FROM"}:
+                operands = sorted((left, right))
+                node = (
+                    "distinct-comparison",
+                    f"distinct:{operands[0]}:{operands[1]}",
+                    sql_term_value_source(left),
+                    sql_term_value_source(right),
+                )
+                return (
+                    sql_guard_not(node) if operator == "IS NOT DISTINCT FROM" else node
+                )
+            if operator == ">":
+                left, right = right, left
+                operator = "<"
+            elif operator == "<=":
+                left, right = right, left
+                operator = ">="
+            node = (
+                "comparison",
+                f"less-than:{left}:{right}",
+                sql_term_value_source(left),
+                sql_term_value_source(right),
+            )
+            return sql_guard_not(node) if operator == ">=" else node
+
+    normalized = " ".join(value.lower() for value in tokens)
+    return (
+        "atom",
+        f"predicate:{normalized}",
+        (SQL_TRUE, SQL_FALSE, SQL_UNKNOWN),
+    )
+
+
+def parse_sql_guard_boolean(tokens: list[str]) -> SQLGuardNode:
+    tokens = strip_balanced_parentheses(tokens)
+    if not tokens:
+        return ("constant", SQL_UNKNOWN)
+    parts = split_sql_boolean(tokens, "OR")
+    if len(parts) > 1:
+        return ("or", tuple(parse_sql_guard_boolean(part) for part in parts))
+    parts = split_sql_boolean(tokens, "AND")
+    if len(parts) > 1:
+        return ("and", tuple(parse_sql_guard_boolean(part) for part in parts))
+    if tokens[0].upper() == "NOT":
+        return sql_guard_not(parse_sql_guard_boolean(tokens[1:]))
+    return sql_guard_atom(tokens)
+
+
+def evaluate_sql_guard(node: SQLGuardNode, values: dict[str, SQLTruth]) -> SQLTruth:
+    kind = node[0]
+    if kind == "constant":
+        return node[1]
+    if kind == "atom":
+        return values[node[1]]
+    if kind == "is-test":
+        return SQL_TRUE if values[node[1]] == node[2] else SQL_FALSE
+    if kind in {"comparison", "distinct-comparison"}:
+        left = node[2]
+        right = node[3]
+        left_null = left == SQL_ALWAYS_NULL or (
+            left is not None and values[left] == SQL_UNKNOWN
+        )
+        right_null = right == SQL_ALWAYS_NULL or (
+            right is not None and values[right] == SQL_UNKNOWN
+        )
+        if kind == "comparison" and (left_null or right_null):
+            return SQL_UNKNOWN
+        if kind == "distinct-comparison":
+            if left_null and right_null:
+                return SQL_FALSE
+            if left_null != right_null:
+                return SQL_TRUE
+        return values[node[1]]
+    if kind == "not":
+        value = evaluate_sql_guard(node[1], values)
+        return {
+            SQL_TRUE: SQL_FALSE,
+            SQL_FALSE: SQL_TRUE,
+            SQL_UNKNOWN: SQL_UNKNOWN,
+        }[value]
+    children = [evaluate_sql_guard(child, values) for child in node[1]]
+    if kind == "and":
+        if SQL_FALSE in children:
+            return SQL_FALSE
+        return SQL_TRUE if all(value == SQL_TRUE for value in children) else SQL_UNKNOWN
+    if SQL_TRUE in children:
+        return SQL_TRUE
+    return SQL_FALSE if all(value == SQL_FALSE for value in children) else SQL_UNKNOWN
+
+
+def sql_guard_outcomes(node: SQLGuardNode) -> set[SQLTruth]:
+    atoms: dict[str, tuple[SQLTruth, ...]] = {}
+
+    def collect(value: SQLGuardNode) -> None:
+        if value[0] == "atom":
+            atoms[value[1]] = value[2]
+        elif value[0] == "is-test":
+            atoms[value[1]] = (SQL_TRUE, SQL_FALSE, SQL_UNKNOWN)
+        elif value[0] in {"comparison", "distinct-comparison"}:
+            atoms[value[1]] = (SQL_TRUE, SQL_FALSE)
+            for source in value[2:4]:
+                if source not in {None, SQL_ALWAYS_NULL}:
+                    atoms[source] = (SQL_TRUE, SQL_FALSE, SQL_UNKNOWN)
+        elif value[0] == "not":
+            collect(value[1])
+        elif value[0] in {"and", "or"}:
+            for child in value[1]:
+                collect(child)
+
+    collect(node)
+    if len(atoms) > 12:
+        raise CoverageError("semantic assertion guard has too many boolean predicates")
+    items = sorted(atoms.items())
+    outcomes: set[SQLTruth] = set()
+
+    def enumerate_values(index: int, values: dict[str, SQLTruth]) -> None:
+        if index == len(items):
+            outcomes.add(evaluate_sql_guard(node, values))
+            return
+        name, allowed = items[index]
+        for value in allowed:
+            values[name] = value
+            enumerate_values(index + 1, values)
+        values.pop(name, None)
+
+    enumerate_values(0, {})
+    return outcomes
+
+
+def validate_sql_guard_semantics(condition: list[str]) -> None:
+    normalized = " ".join(value.lower() for value in condition)
+    simple_self_comparison = re.search(
+        r"\b([a-z_][a-z0-9_$]*(?:\s*\.\s*[a-z_][a-z0-9_$]*)*)\s*"
+        r"(?:=|<>|!=|<=|>=|<|>|is\s+(?:not\s+)?distinct\s+from)\s*\1\b",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if simple_self_comparison is not None:
+        raise CoverageError(
+            "semantic assertion guard compares evidence with itself: " + normalized
+        )
+    outcomes = sql_guard_outcomes(parse_sql_guard_boolean(condition))
+    if SQL_TRUE not in outcomes or outcomes.issubset({SQL_TRUE}):
+        raise CoverageError(
+            "semantic assertion guard cannot both trigger and not trigger under SQL IF semantics: "
+            + normalized
+        )
 
 
 def sql_guard_expressions(source: str) -> list[dict[str, Any]]:
@@ -1169,6 +1638,7 @@ def sql_guard_expressions(source: str) -> list[dict[str, Any]]:
                 "semantic assertion guard is constant or has no relevant identifier: "
                 + " ".join(condition)
             )
+        validate_sql_guard_semantics(condition)
         normalized = " ".join(value.lower() for value in condition)
         guards.append(
             {
@@ -3593,6 +4063,28 @@ def validate_rust_toolchain(args: argparse.Namespace) -> int:
     return 0 if not errors else 1
 
 
+def gpu_test_body_hashes(
+    test_name: str,
+    exit_code: int,
+    result: str,
+    raw_lines: int,
+    body: str,
+) -> tuple[str, str]:
+    body_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    binding = hashlib.sha256()
+    binding.update(b"pgaccel-ctest-body-v1\0")
+    binding.update(test_name.encode("utf-8"))
+    binding.update(b"\0")
+    binding.update(str(exit_code).encode("ascii"))
+    binding.update(b"\0")
+    binding.update(result.encode("ascii"))
+    binding.update(b"\0")
+    binding.update(str(raw_lines).encode("ascii"))
+    binding.update(b"\0")
+    binding.update(bytes.fromhex(body_sha256))
+    return body_sha256, binding.hexdigest()
+
+
 def inspect_gpu_evidence(
     *, status: int, log: pathlib.Path, per_test_dir: pathlib.Path, baseline: Any
 ) -> dict[str, Any]:
@@ -3627,22 +4119,60 @@ def inspect_gpu_evidence(
     ):
         evidence_policy = {}
         errors.append("pinned per-test evidence policy is invalid")
-    passed_tests = re.findall(
-        r"Test\s+#\d+:\s+([A-Za-z0-9_.-]+)\s+\.+\s+Passed\b", log_text
+    ctest_pattern = re.compile(
+        r"^\s*([0-9]+)/([0-9]+)\s+Test\s+#([0-9]+):\s+"
+        r"([A-Za-z0-9_.-]+)\s+\.+\s+Passed\s+"
+        r"[0-9]+(?:\.[0-9]+)?\s+sec\s*$",
+        flags=re.MULTILINE,
     )
-    if sorted(passed_tests) != sorted(pinned_tests) or len(passed_tests) != len(
-        set(passed_tests)
+    ctest_matches = ctest_pattern.findall(log_text)
+    passed_tests = [match[3] for match in ctest_matches]
+    ctest_result_lines = [
+        line for line in log_text.splitlines() if re.search(r"\bTest\s+#\d+:", line)
+    ]
+    expected_ctest_matches = [
+        (str(index), str(len(pinned_tests)), str(index), test_name)
+        for index, test_name in enumerate(pinned_tests, start=1)
+    ]
+    if ctest_matches != expected_ctest_matches or len(ctest_result_lines) != len(
+        ctest_matches
     ):
         errors.append("full pinned CTest inventory did not pass exactly once")
+    expected_summary = f"100% tests passed, 0 tests failed out of {len(pinned_tests)}"
+    ctest_summaries = [
+        line for line in log_text.splitlines() if "tests passed," in line
+    ]
+    total_time_lines = [
+        line for line in log_text.splitlines() if "Total Test time (real)" in line
+    ]
+    if (
+        ctest_summaries != [expected_summary]
+        or len(total_time_lines) != 1
+        or re.fullmatch(
+            r"Total Test time \(real\) =\s+[0-9]+(?:\.[0-9]+)? sec",
+            total_time_lines[0] if total_time_lines else "",
+        )
+        is None
+    ):
+        errors.append("CTest completion summary is absent or inconsistent")
 
     raw_logs: dict[str, dict[str, Any]] = {}
+    retained_log_paths = {
+        path.absolute() for path in per_test_dir.rglob("*.log") if path.is_file()
+    }
+    matched_log_paths: set[pathlib.Path] = set()
+    body_owners: dict[str, str] = {}
     for test_name in pinned_tests:
-        matches = sorted(per_test_dir.glob(f"{test_name}-*.log"))
+        matches = sorted(
+            path for path in per_test_dir.glob(f"{test_name}-*.log") if path.is_file()
+        )
         if len(matches) != 1:
             errors.append(f"expected one retained raw log for {test_name}")
             continue
+        matched_log_paths.add(matches[0].absolute())
         raw_text = matches[0].read_text(encoding="utf-8", errors="replace")
         raw_lines = raw_text.splitlines()
+        physical_lines = raw_text.splitlines(keepends=True)
         starts = re.findall(
             r"^PGACCEL_TEST_START name=([A-Za-z0-9_.-]+)$",
             raw_text,
@@ -3650,32 +4180,59 @@ def inspect_gpu_evidence(
         )
         results = re.findall(
             r"^PGACCEL_TEST_RESULT name=([A-Za-z0-9_.-]+) "
-            r"exit_code=(-?[0-9]+) result=(PASS|FAIL) raw_lines=([0-9]+)$",
+            r"exit_code=(-?[0-9]+) result=(PASS|FAIL) raw_lines=([0-9]+) "
+            r"body_sha256=([0-9a-f]{64}) binding_sha256=([0-9a-f]{64})$",
             raw_text,
             flags=re.MULTILINE,
         )
         expected_raw_lines = max(0, len(raw_lines) - 2)
+        body = "".join(physical_lines[1:-1]) if len(physical_lines) >= 2 else ""
+        body_sha256, binding_sha256 = gpu_test_body_hashes(
+            test_name, 0, "PASS", expected_raw_lines, body
+        )
         if (
             matches[0].stat().st_size <= 0
             or starts != [test_name]
             or raw_text.count("PGACCEL_TEST_START") != 1
             or len(results) != 1
             or raw_text.count("PGACCEL_TEST_RESULT") != 1
-            or results[0] != (test_name, "0", "PASS", str(expected_raw_lines))
+            or results[0]
+            != (
+                test_name,
+                "0",
+                "PASS",
+                str(expected_raw_lines),
+                body_sha256,
+                binding_sha256,
+            )
             or not raw_lines
+            or expected_raw_lines <= 0
+            or not body.strip()
+            or not raw_text.endswith("\n")
             or raw_lines[0] != f"PGACCEL_TEST_START name={test_name}"
             or not raw_lines[-1].startswith(f"PGACCEL_TEST_RESULT name={test_name} ")
         ):
             errors.append(f"retained raw log envelope is invalid for {test_name}")
+        previous_owner = body_owners.setdefault(body_sha256, test_name)
+        if previous_owner != test_name:
+            errors.append(
+                f"retained raw log body is replayed by {previous_owner} and {test_name}"
+            )
         raw_logs[test_name] = {
             "path": matches[0].name,
             "sha256": sha256(matches[0]),
             "size": matches[0].stat().st_size,
             "evidence_kind": evidence_policy.get(test_name),
             "raw_output_lines": expected_raw_lines,
+            "body_sha256": body_sha256,
+            "binding_sha256": binding_sha256,
             "result": "PASS" if len(results) == 1 and results[0][2] == "PASS" else None,
         }
-    oom_matches = sorted(per_test_dir.glob("test_oom_invariant-*.log"))
+    if matched_log_paths != retained_log_paths:
+        errors.append("retained per-test log inventory has missing or extra files")
+    oom_matches = sorted(
+        path for path in per_test_dir.glob("test_oom_invariant-*.log") if path.is_file()
+    )
     oom_text = (
         oom_matches[0].read_text(encoding="utf-8", errors="replace")
         if len(oom_matches) == 1
@@ -3687,9 +4244,11 @@ def inspect_gpu_evidence(
     ):
         errors.append("OOM invariant accepted an unsupported path")
     device_matches = re.findall(
-        r'PGACCEL_DEVICE_PROOF device="([^"]+)" backend="([^"]+)" '
-        r"compute_units=([0-9]+) max_alloc_bytes=([0-9]+) real_device=1",
+        r'^PGACCEL_DEVICE_PROOF device="([^"\r\n]{1,127})" '
+        r'backend="([a-z_]{1,63})" compute_units=([0-9]+) '
+        r"max_alloc_bytes=([0-9]+) real_device=1$",
         oom_text,
+        flags=re.MULTILINE,
     )
     device: dict[str, Any] | None = None
     if len(device_matches) == 1 and oom_text.count("PGACCEL_DEVICE_PROOF") == 1:
@@ -3700,13 +4259,13 @@ def inspect_gpu_evidence(
             "compute_units": int(device_match[2]),
             "max_alloc_bytes": int(device_match[3]),
         }
-        backend = device["backend"].lower()
         if (
-            device["compute_units"] <= 0
-            or device["max_alloc_bytes"] <= 0
-            or not any(
-                name in backend for name in ("metal", "cuda", "hip", "level_zero")
-            )
+            device["name"] != device["name"].strip()
+            or re.search(r"[A-Za-z0-9]", device["name"]) is None
+            or len(device["name"].encode("utf-8")) > 127
+            or device["backend"] not in ACCELERATOR_BACKENDS
+            or not 0 < device["compute_units"] <= UINT32_MAX
+            or not 0 < device["max_alloc_bytes"] <= UINT64_MAX // 3
         ):
             errors.append("OOM proof did not identify a real accelerator")
     else:
@@ -3714,9 +4273,11 @@ def inspect_gpu_evidence(
 
     families: dict[str, dict[str, Any]] = {}
     family_pattern = re.compile(
-        r"PGACCEL_OOM_FAMILY family=([A-Za-z0-9_]+) result=(PASS|FAIL) "
+        r"^PGACCEL_OOM_FAMILY family=([A-Za-z0-9_]+) result=(PASS|FAIL) "
         r"dispatches=([0-9]+) peak_rss_bytes=([0-9]+) "
-        r"rss_delta_bytes=([0-9]+) rss_limit_bytes=([0-9]+)"
+        r"rss_baseline_bytes=([0-9]+) rss_delta_bytes=([0-9]+) "
+        r"rss_limit_bytes=([0-9]+)$",
+        flags=re.MULTILINE,
     )
     for match in family_pattern.finditer(oom_text):
         name = match.group(1)
@@ -3727,8 +4288,9 @@ def inspect_gpu_evidence(
             "result": match.group(2),
             "dispatches": int(match.group(3)),
             "peak_rss_bytes": int(match.group(4)),
-            "rss_delta_bytes": int(match.group(5)),
-            "rss_limit_bytes": int(match.group(6)),
+            "rss_baseline_bytes": int(match.group(5)),
+            "rss_delta_bytes": int(match.group(6)),
+            "rss_limit_bytes": int(match.group(7)),
         }
     if oom_text.count("PGACCEL_OOM_FAMILY") != len(families):
         errors.append("OOM proof contains malformed family evidence")
@@ -3737,18 +4299,24 @@ def inspect_gpu_evidence(
     for name, family in families.items():
         if (
             family["result"] != "PASS"
-            or family["dispatches"] <= 0
-            or family["peak_rss_bytes"] <= 0
-            or family["rss_limit_bytes"] <= 0
-            or family["rss_delta_bytes"] > family["peak_rss_bytes"]
+            or not 0 < family["dispatches"] <= UINT64_MAX
+            or not 0 < family["peak_rss_bytes"] <= UINT64_MAX
+            or not 0 < family["rss_baseline_bytes"] <= UINT64_MAX
+            or not 0 < family["rss_limit_bytes"] <= UINT64_MAX
+            or not 0 <= family["rss_delta_bytes"] <= UINT64_MAX
+            or family["peak_rss_bytes"] < family["rss_baseline_bytes"]
+            or family["rss_delta_bytes"]
+            != family["peak_rss_bytes"] - family["rss_baseline_bytes"]
+            or family["peak_rss_bytes"] > family["rss_limit_bytes"]
             or family["rss_delta_bytes"] > family["rss_limit_bytes"]
         ):
             errors.append(f"OOM proof is invalid for family {name}")
     invariant_matches = re.findall(
-        r"PGACCEL_OOM_INVARIANT result=(PASS|FAIL) families=([0-9]+) "
+        r"^PGACCEL_OOM_INVARIANT result=(PASS|FAIL) families=([0-9]+) "
         r"max_alloc_bytes=([0-9]+) input_doubles=([0-9]+) "
-        r"rss_limit_bytes=([0-9]+)",
+        r"rss_limit_bytes=([0-9]+)$",
         oom_text,
+        flags=re.MULTILINE,
     )
     invariant: dict[str, Any] | None = None
     invariant_passed = False
@@ -3768,7 +4336,10 @@ def inspect_gpu_evidence(
         invariant_passed = (
             invariant["result"] == "PASS"
             and invariant["families"] == len(pinned_families)
-            and invariant["max_alloc_bytes"] > 0
+            and 0 < invariant["families"] <= UINT64_MAX
+            and 0 < invariant["max_alloc_bytes"] <= UINT64_MAX // 3
+            and 0 < invariant["input_doubles"] <= UINT64_MAX
+            and 0 < invariant["rss_limit_bytes"] <= UINT64_MAX
             and invariant["input_doubles"] == expected_input
             and invariant["rss_limit_bytes"] == 3 * invariant["max_alloc_bytes"]
             and device is not None
@@ -3777,6 +4348,7 @@ def inspect_gpu_evidence(
                 family["rss_limit_bytes"] == invariant["rss_limit_bytes"]
                 for family in families.values()
             )
+            and sum(family["dispatches"] for family in families.values()) <= UINT64_MAX
         )
     if not invariant_passed:
         errors.append("exact OOM invariant completion proof is absent")
@@ -3889,6 +4461,20 @@ def audit_scope(args: argparse.Namespace) -> int:
             raise CoverageError(
                 f"Rust compiler-derived production coverage invariant is absent: {required_text}"
             )
+    gpu_filter = (repo_root / "scripts/filter_gpu_output.py").read_text(
+        encoding="utf-8"
+    )
+    for required_text in (
+        "PGACCEL_TEST_START",
+        "PGACCEL_TEST_RESULT",
+        "pgaccel-ctest-body-v1",
+        "body_sha256",
+        "binding_sha256",
+    ):
+        if required_text not in gpu_filter:
+            raise CoverageError(
+                f"per-test CTest body-binding protocol is absent: {required_text}"
+            )
     if coverage_gate.count("seal-layer-evidence") != len(EXPECTED_LAYERS):
         raise CoverageError("every coverage layer must seal retained raw evidence")
 
@@ -3948,6 +4534,11 @@ def audit_scope(args: argparse.Namespace) -> int:
         "run_h3_family(N_capped / 2, rss_ceiling)",
         "PGACCEL_DEVICE_PROOF",
         "PGACCEL_OOM_FAMILY",
+        "rss_baseline_bytes",
+        'backend == "metal"',
+        'backend == "cuda"',
+        'backend == "hip"',
+        'backend == "level_zero"',
         "r.gpu_dispatches > 0",
     ):
         if required_text not in oom_source:

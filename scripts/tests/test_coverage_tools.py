@@ -29,6 +29,44 @@ def quiet_call(function, *args):
         return function(*args)
 
 
+def gpu_test_log_text(
+    test_name: str,
+    body: str,
+    *,
+    exit_code: int = 0,
+    result: str = "PASS",
+) -> str:
+    if body and not body.endswith("\n"):
+        body += "\n"
+    raw_lines = len(body.splitlines())
+    body_sha256, binding_sha256 = coverage_tools.gpu_test_body_hashes(
+        test_name, exit_code, result, raw_lines, body
+    )
+    return (
+        f"PGACCEL_TEST_START name={test_name}\n"
+        + body
+        + f"PGACCEL_TEST_RESULT name={test_name} exit_code={exit_code} "
+        f"result={result} raw_lines={raw_lines} body_sha256={body_sha256} "
+        f"binding_sha256={binding_sha256}\n"
+    )
+
+
+def ctest_pass_log(names: list[str]) -> str:
+    total = len(names)
+    lines = [
+        f"{index}/{total} Test #{index}: {name} .... Passed 0.01 sec"
+        for index, name in enumerate(names, start=1)
+    ]
+    lines.extend(
+        (
+            f"100% tests passed, 0 tests failed out of {total}",
+            "",
+            "Total Test time (real) = 1.00 sec",
+        )
+    )
+    return "\n".join(lines) + "\n"
+
+
 class LineCoverageTests(unittest.TestCase):
     def write_scope(
         self, root: pathlib.Path, *, include_build_script: bool = False
@@ -298,6 +336,14 @@ class LineCoverageTests(unittest.TestCase):
 
 
 class SqlSemanticCoverageTests(unittest.TestCase):
+    @staticmethod
+    def guard_source(condition: str) -> str:
+        return (
+            "DO $$ BEGIN\n"
+            f"  IF {condition} THEN RAISE EXCEPTION 'bad'; END IF;\n"
+            "END $$;\n"
+        )
+
     def create_fixture(
         self,
         root: pathlib.Path,
@@ -581,6 +627,69 @@ class SqlSemanticCoverageTests(unittest.TestCase):
                         tests_dir=str(tests), output=str(root / "manifest.json")
                     )
                 )
+
+    def test_self_comparisons_and_constant_boolean_guards_are_rejected(self) -> None:
+        invalid = (
+            "observed = observed",
+            "observed <> observed",
+            "TRUE OR observed = 1",
+            "FALSE AND observed = 1",
+            "NOT (TRUE OR observed = 1)",
+            "(observed = 1) AND NOT (observed = 1)",
+            "(observed IS NULL) AND (observed IS NOT NULL)",
+            "(observed IS NULL) OR (observed IS NOT NULL)",
+            "(observed IS UNKNOWN) OR (observed IS NOT NULL)",
+            "observed IS TRUE OR observed IS FALSE OR observed IS UNKNOWN",
+            "observed IS TRUE AND observed IS FALSE",
+            "observed = 1 OR observed <> 1 OR observed IS NULL",
+            "observed IS NULL OR observed IS DISTINCT FROM NULL",
+            "observed IS DISTINCT FROM observed",
+            "observed OR NULL IS NULL",
+            "observed AND NULL IS NOT NULL",
+            "observed AND 1 = 2",
+            "observed OR 1 < 2",
+        )
+        for condition in invalid:
+            with (
+                self.subTest(condition=condition),
+                self.assertRaises(coverage_tools.CoverageError),
+            ):
+                coverage_tools.sql_guard_expressions(self.guard_source(condition))
+
+    def test_nested_three_valued_guards_retain_distinct_evidence(self) -> None:
+        valid = (
+            "observed = expected",
+            "observed <> 1",
+            "NOT (observed IS NULL)",
+            "observed IS UNKNOWN",
+            "observed IS NULL AND expected IS NOT NULL",
+            "(observed = 1 AND expected IS NOT NULL) OR retry_count > 2",
+            "NOT ((observed = expected) OR retry_count < 0)",
+            "observed = expected OR observed <> expected",
+        )
+        for condition in valid:
+            with self.subTest(condition=condition):
+                guards = coverage_tools.sql_guard_expressions(
+                    self.guard_source(condition)
+                )
+                self.assertEqual(len(guards), 1)
+                self.assertEqual(guards[0]["kind"], "if")
+
+    def test_guard_normalization_ignores_comment_and_string_boolean_words(
+        self,
+    ) -> None:
+        plain = coverage_tools.sql_guard_expressions(
+            self.guard_source("observed = expected")
+        )
+        commented = coverage_tools.sql_guard_expressions(
+            self.guard_source("observed /* TRUE OR observed = observed */ = expected")
+        )
+        self.assertEqual(plain, commented)
+        string_guard = coverage_tools.sql_guard_expressions(
+            self.guard_source("message = 'TRUE OR message = message'")
+        )
+        self.assertEqual(len(string_guard), 1)
+        self.assertEqual(string_guard[0]["tokens"], ["message"])
 
     def test_guard_words_in_a_comment_do_not_create_an_assertion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1237,38 +1346,36 @@ raise SystemExit(2)
         families = baseline["cpp"]["oom_families"]
         per_test_logs = root / "cpp/per-test-logs"
         per_test_logs.mkdir()
-        ctest_lines = []
-        for index, test_name in enumerate(ctest_names, start=1):
-            ctest_lines.append(f"Test #{index}: {test_name} .... Passed 0.01 sec")
+        for test_name in ctest_names:
             raw_log = per_test_logs / f"{test_name}-fixture.log"
             if test_name == "test_oom_invariant":
                 family_lines = [
                     "PGACCEL_OOM_FAMILY "
                     f"family={family} result=PASS dispatches=1 "
-                    "peak_rss_bytes=100 rss_delta_bytes=10 rss_limit_bytes=300"
+                    "peak_rss_bytes=100 rss_baseline_bytes=90 "
+                    "rss_delta_bytes=10 rss_limit_bytes=300"
                     for family in families
                 ]
-                raw_log.write_text(
-                    f"PGACCEL_TEST_START name={test_name}\n"
-                    + 'PGACCEL_DEVICE_PROOF device="fixture" backend="cuda" '
+                body = (
+                    'PGACCEL_DEVICE_PROOF device="fixture" backend="cuda" '
                     "compute_units=1 max_alloc_bytes=100 real_device=1\n"
                     + "\n".join(family_lines)
                     + "\nPGACCEL_OOM_INVARIANT result=PASS families=5 "
                     "max_alloc_bytes=100 input_doubles=25 rss_limit_bytes=300\n"
-                    f"PGACCEL_TEST_RESULT name={test_name} exit_code=0 "
-                    "result=PASS raw_lines=7\n",
+                )
+                raw_log.write_text(
+                    gpu_test_log_text(test_name, body),
                     encoding="utf-8",
                 )
             else:
                 raw_log.write_text(
-                    f"PGACCEL_TEST_START name={test_name}\n"
-                    f"PGACCEL_TEST_PASS name={test_name}\n"
-                    f"PGACCEL_TEST_RESULT name={test_name} exit_code=0 "
-                    "result=PASS raw_lines=1\n",
+                    gpu_test_log_text(
+                        test_name, f"PGACCEL_TEST_PASS name={test_name}\n"
+                    ),
                     encoding="utf-8",
                 )
         ctest_log = root / "cpp/ctest.log"
-        ctest_log.write_text("\n".join(ctest_lines) + "\n", encoding="utf-8")
+        ctest_log.write_text(ctest_pass_log(ctest_names), encoding="utf-8")
         self.assertEqual(
             quiet_call(
                 coverage_tools.gpu_evidence,
@@ -1994,6 +2101,66 @@ class ImmutableBaselineTests(unittest.TestCase):
                 with self.assertRaises(coverage_tools.CoverageError):
                     self.audit(REPO_ROOT / "coverage/scope.json", baseline)
 
+    def test_cpp_executable_header_forms_are_detected(self) -> None:
+        executable = (
+            "struct Probe { Probe() : value{} { value = 42; } int value; };\n",
+            "struct Probe { ~Probe() { cleanup(); } };\n",
+            "struct Probe { int operator()(int x) const { return x; } };\n",
+            "template <typename T> T convert(T value) { return value; }\n",
+            "inline auto callback = [] { return 42; };\n",
+            "#define PGACCEL_PROBE(value) do { consume(value); } while (0)\n",
+        )
+        declarations_only = (
+            "struct Probe { Probe(); ~Probe(); int value; };\n",
+            "int declared_only(int value);\n",
+            "inline constexpr int values[] {1, 2, 3};\n",
+            '// fake() { return 1; }\nconst char* text = "fake() {";\n',
+            "#define PGACCEL_SIZE(value) sizeof(value)\nstruct Plain { int value; };\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for index, source in enumerate(executable):
+                path = root / f"executable_{index}.hpp"
+                path.write_text(source, encoding="utf-8")
+                self.assertTrue(
+                    coverage_tools.has_executable_mapping_candidate(path), source
+                )
+            for index, source in enumerate(declarations_only):
+                path = root / f"declaration_{index}.hpp"
+                path.write_text(source, encoding="utf-8")
+                self.assertFalse(
+                    coverage_tools.has_executable_mapping_candidate(path), source
+                )
+
+    def test_new_constructor_header_fails_after_matching_baseline_refresh(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            original_inventory = coverage_tools.source_inventory
+            added = "pgaccel-kernels/include/new_constructor.hpp"
+
+            def inventory_with_constructor(repo_root, scope):
+                included, required = original_inventory(repo_root, scope)
+                if "pgaccel-kernels/include" in scope.get("roots", []):
+                    included.add(added)
+                    required.add(added)
+                return included, required
+
+            with mock.patch.object(
+                coverage_tools,
+                "source_inventory",
+                side_effect=inventory_with_constructor,
+            ):
+                baseline = self.write_matching_baseline(
+                    root, REPO_ROOT / "coverage/scope.json"
+                )
+                document = coverage_tools.read_json(baseline)
+                self.assertIn(added, document["cpp"]["executable_headers"])
+                self.assertIn(added, document["cpp"]["required_mapping_files"])
+                with self.assertRaises(coverage_tools.CoverageError):
+                    self.audit(REPO_ROOT / "coverage/scope.json", baseline)
+
     def test_ctest_sql_filename_and_sql_id_baseline_mutations_are_rejected(
         self,
     ) -> None:
@@ -2062,9 +2229,7 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0)
             self.assertEqual(
                 log.read_text(encoding="utf-8"),
-                "PGACCEL_TEST_START name=test_empty\n"
-                "PGACCEL_TEST_RESULT name=test_empty exit_code=0 "
-                "result=PASS raw_lines=0\n",
+                gpu_test_log_text("test_empty", ""),
             )
 
     def test_llvm_major_parser_accepts_clang_and_llvm(self) -> None:
@@ -2134,29 +2299,25 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                     }
                 },
             )
+            valid_oom_body = ""
             for name in names:
-                text = (
-                    f"PGACCEL_TEST_START name={name}\n"
-                    "pass\n"
-                    f"PGACCEL_TEST_RESULT name={name} exit_code=0 "
-                    "result=PASS raw_lines=1\n"
-                )
+                text = gpu_test_log_text(name, f"pass {name}\n")
                 if name == "test_oom_invariant":
-                    text = (
-                        f"PGACCEL_TEST_START name={name}\n"
-                        + 'PGACCEL_DEVICE_PROOF device="fixture" backend="cuda" '
+                    body = (
+                        'PGACCEL_DEVICE_PROOF device="fixture" backend="cuda" '
                         "compute_units=1 max_alloc_bytes=100 real_device=1\n"
                         + "\n".join(
                             "PGACCEL_OOM_FAMILY "
                             f"family={family} result=PASS dispatches=1 "
-                            "peak_rss_bytes=100 rss_delta_bytes=10 rss_limit_bytes=300"
+                            "peak_rss_bytes=100 rss_baseline_bytes=90 "
+                            "rss_delta_bytes=10 rss_limit_bytes=300"
                             for family in families
                         )
                         + "\nPGACCEL_OOM_INVARIANT result=PASS families=5 "
                         "max_alloc_bytes=100 input_doubles=25 rss_limit_bytes=300\n"
-                        f"PGACCEL_TEST_RESULT name={name} exit_code=0 "
-                        "result=PASS raw_lines=7\n"
                     )
+                    valid_oom_body = body
+                    text = gpu_test_log_text(name, body)
                 (per_test / f"{name}-fixture.log").write_text(text, encoding="utf-8")
             args = argparse.Namespace(
                 execution_status=0,
@@ -2179,17 +2340,87 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
-            log.write_text(
-                "\n".join(
-                    f"Test #{index}: {name} .... Passed 0.01 sec"
-                    for index, name in enumerate(names, start=1)
-                )
-                + "\n",
+            valid_ctest = ctest_pass_log(names)
+            log.write_text(valid_ctest, encoding="utf-8")
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
+
+            first_name, second_name = names[:2]
+            first_log = per_test / f"{first_name}-fixture.log"
+            second_log = per_test / f"{second_name}-fixture.log"
+            valid_first = first_log.read_text(encoding="utf-8")
+            valid_second = second_log.read_text(encoding="utf-8")
+            first_log.write_text(gpu_test_log_text(first_name, ""), encoding="utf-8")
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            replayed_body = "replayed body\n"
+            first_log.write_text(
+                gpu_test_log_text(first_name, replayed_body), encoding="utf-8"
+            )
+            second_log.write_text(
+                gpu_test_log_text(second_name, replayed_body), encoding="utf-8"
+            )
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            first_log.write_text(valid_first, encoding="utf-8")
+            second_log.write_text(valid_second, encoding="utf-8")
+
+            extra_log = per_test / "unexpected-fixture.log"
+            extra_log.write_text(
+                gpu_test_log_text("unexpected", "unexpected body\n"),
                 encoding="utf-8",
             )
-            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            extra_log.unlink()
+            nested = per_test / "nested"
+            nested.mkdir()
+            nested_extra = nested / "test_00-replayed.log"
+            nested_extra.write_text(
+                gpu_test_log_text("test_00", "nested replay\n"), encoding="utf-8"
+            )
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            nested_extra.unlink()
+            nested.rmdir()
+            log.write_text(
+                valid_ctest.replace(
+                    "100% tests passed, 0 tests failed out of 29",
+                    "100% tests passed, 0 tests failed out of 28",
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            log.write_text(
+                valid_ctest + "50% tests passed, 1 tests failed out of 29\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            log.write_text(
+                valid_ctest.replace("1/29 Test #1", "2/29 Test #1", 1),
+                encoding="utf-8",
+            )
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            log.write_text(
+                valid_ctest + " 50% tests passed, 1 tests failed out of 29\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            log.write_text(valid_ctest, encoding="utf-8")
+
+            first_log.write_text(
+                gpu_test_log_text(
+                    first_name, f"pass {first_name}\n", exit_code=1, result="FAIL"
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            first_log.write_text(valid_first, encoding="utf-8")
+
             oom_log = per_test / "test_oom_invariant-fixture.log"
-            valid_oom = oom_log.read_text(encoding="utf-8")
+            self.assertTrue(valid_oom_body)
+
+            def write_oom_body(value: str) -> None:
+                oom_log.write_text(
+                    gpu_test_log_text("test_oom_invariant", value),
+                    encoding="utf-8",
+                )
+
             for old, new in (
                 ("input_doubles=25", "input_doubles=24"),
                 ("rss_limit_bytes=300", "rss_limit_bytes=299"),
@@ -2197,20 +2428,40 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                     "max_alloc_bytes=100 real_device=1",
                     "max_alloc_bytes=99 real_device=1",
                 ),
+                ("compute_units=1", "compute_units=4294967296"),
+                (
+                    "max_alloc_bytes=100 real_device=1",
+                    "max_alloc_bytes=18446744073709551616 real_device=1",
+                ),
+                (
+                    "dispatches=1",
+                    "dispatches=18446744073709551616",
+                ),
+                ("families=5", "families=18446744073709551616"),
+                ("input_doubles=25", "input_doubles=18446744073709551616"),
+                (
+                    "peak_rss_bytes=100 rss_baseline_bytes=90 "
+                    "rss_delta_bytes=10 rss_limit_bytes=300",
+                    "peak_rss_bytes=301 rss_baseline_bytes=291 "
+                    "rss_delta_bytes=10 rss_limit_bytes=300",
+                ),
+                (
+                    "peak_rss_bytes=100 rss_baseline_bytes=90 rss_delta_bytes=10",
+                    "peak_rss_bytes=100 rss_baseline_bytes=101 rss_delta_bytes=0",
+                ),
+                ("rss_baseline_bytes=90", "rss_baseline_bytes=0"),
+                ("rss_delta_bytes=10", "rss_delta_bytes=9"),
+                ('backend="cuda"', 'backend="definitely-not-cuda-host"'),
             ):
                 with self.subTest(arithmetic=f"{old}->{new}"):
-                    oom_log.write_text(valid_oom.replace(old, new, 1), encoding="utf-8")
+                    write_oom_body(valid_oom_body.replace(old, new, 1))
                     self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
-            oom_log.write_text(
-                valid_oom.replace("dispatches=1", "dispatches=0", 1),
-                encoding="utf-8",
-            )
+            write_oom_body(valid_oom_body.replace("dispatches=1", "dispatches=0", 1))
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
-            oom_log.write_text(
-                "PGACCEL_UNSUPPORTED\n" + valid_oom,
-                encoding="utf-8",
-            )
+            write_oom_body("PGACCEL_UNSUPPORTED\n" + valid_oom_body)
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            write_oom_body(valid_oom_body)
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
 
 
 if __name__ == "__main__":

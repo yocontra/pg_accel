@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import collections
 import datetime
+import hashlib
 import os
 import re
 import subprocess
@@ -111,6 +112,7 @@ def run(args: argparse.Namespace) -> int:
     counts: Counter[str] = collections.Counter()
     raw_lines = 0
     last_line_terminated = True
+    body_hash = hashlib.sha256()
 
     with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
         log_file.write(f"PGACCEL_TEST_START name={args.label}\n")
@@ -129,6 +131,7 @@ def run(args: argparse.Namespace) -> int:
             raw_lines += 1
             last_line_terminated = line.endswith("\n")
             log_file.write(line)
+            body_hash.update(line.encode("utf-8"))
             category = classify_noise(line, state)
             if category:
                 counts[category] += 1
@@ -138,10 +141,24 @@ def run(args: argparse.Namespace) -> int:
         returncode = process.wait()
         if raw_lines and not last_line_terminated:
             log_file.write("\n")
+            body_hash.update(b"\n")
         result = "PASS" if returncode == 0 else "FAIL"
+        body_sha256 = body_hash.hexdigest()
+        binding = hashlib.sha256()
+        binding.update(b"pgaccel-ctest-body-v1\0")
+        binding.update(args.label.encode("utf-8"))
+        binding.update(b"\0")
+        binding.update(str(returncode).encode("ascii"))
+        binding.update(b"\0")
+        binding.update(result.encode("ascii"))
+        binding.update(b"\0")
+        binding.update(str(raw_lines).encode("ascii"))
+        binding.update(b"\0")
+        binding.update(bytes.fromhex(body_sha256))
         log_file.write(
             f"PGACCEL_TEST_RESULT name={args.label} exit_code={returncode} "
-            f"result={result} raw_lines={raw_lines}\n"
+            f"result={result} raw_lines={raw_lines} body_sha256={body_sha256} "
+            f"binding_sha256={binding.hexdigest()}\n"
         )
 
     emit_suppression_summary(args.label, log_path, counts)
