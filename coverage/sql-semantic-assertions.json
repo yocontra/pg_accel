@@ -1,7 +1,7 @@
 {
-  "baseline_assertions": 285,
+  "baseline_assertions": 287,
   "baseline_files": 52,
-  "declared_assertions": 285,
+  "declared_assertions": 287,
   "declared_files": 52,
   "files": [
     {
@@ -1671,79 +1671,89 @@
           "source_line": 1001
         },
         {
-          "emission": "echo",
+          "emission": "notice",
           "id": "85_function_matrix.assert_037",
-          "source_line": 1170
+          "source_line": 1064
+        },
+        {
+          "emission": "notice",
+          "id": "85_function_matrix.assert_051",
+          "source_line": 1104
+        },
+        {
+          "emission": "notice",
+          "id": "85_function_matrix.assert_052",
+          "source_line": 1144
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_038",
-          "source_line": 1204
+          "source_line": 1184
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_039",
-          "source_line": 1237
+          "source_line": 1217
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_040",
-          "source_line": 1266
+          "source_line": 1246
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_041",
-          "source_line": 1290
+          "source_line": 1270
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_042",
-          "source_line": 1315
+          "source_line": 1295
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_043",
-          "source_line": 1341
+          "source_line": 1321
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_044",
-          "source_line": 1368
+          "source_line": 1348
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_045",
-          "source_line": 1399
+          "source_line": 1379
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_046",
-          "source_line": 1426
+          "source_line": 1406
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_047",
-          "source_line": 1462
+          "source_line": 1442
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_048",
-          "source_line": 1491
+          "source_line": 1471
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_049",
-          "source_line": 1516
+          "source_line": 1496
         },
         {
           "emission": "echo",
           "id": "85_function_matrix.assert_050",
-          "source_line": 1551
+          "source_line": 1531
         }
       ],
       "completion_id": "85_function_matrix",
       "file": "85_function_matrix.sql",
-      "sha256": "8417190c740763bc31f1953fef189e516e7d236bdfe5edb7e09944151c094f76"
+      "sha256": "a68d41242fa88691c4118d06040d8490bed3a466d7495236d6c0e5437228c1a4"
     },
     {
       "assertions": [

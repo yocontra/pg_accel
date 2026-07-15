@@ -9,6 +9,7 @@ pg="${pg#pg}"
 artifact_dir="${COVERAGE_ARTIFACT_DIR:-artifacts/coverage}"
 build_root="${COVERAGE_BUILD_DIR:-target/coverage}"
 scope_file="coverage/scope.json"
+baseline_file="coverage/release-baseline.json"
 manifest_file="coverage/sql-semantic-assertions.json"
 minimum_default="${COVERAGE_MIN_PERCENT:-90}"
 rust_minimum="${COVERAGE_MIN_RUST_LINES:-$minimum_default}"
@@ -36,6 +37,7 @@ aggregate_on_exit() {
     local prior_status=$?
     if [ "$aggregate_done" -eq 0 ] && command -v python3 >/dev/null 2>&1; then
         python3 scripts/coverage_tools.py aggregate --artifact-dir "$artifact_dir" \
+            --repo-root "$repo_root" \
             > "$artifact_dir/aggregate-on-exit.log" 2>&1 || true
     fi
     return "$prior_status"
@@ -100,6 +102,24 @@ merge_profiles() {
     "$llvm_profdata" merge -sparse "${profiles[@]}" -o "$output"
 }
 
+copy_profiles() {
+    local source_dir="$1"
+    local output_dir="$2"
+    local index=0
+    mkdir -p "$output_dir"
+    find "$output_dir" -type f -name '*.profraw' -delete
+    while IFS= read -r -d '' profile; do
+        if [ -s "$profile" ]; then
+            cp "$profile" "$output_dir/profile-${index}.profraw" || return 1
+            index=$((index + 1))
+        fi
+    done < <(find "$source_dir" -type f -name '*.profraw' -print0 2>/dev/null)
+    if [ "$index" -eq 0 ]; then
+        echo "error: no nonempty LLVM raw profiles were retained from $source_dir" >&2
+        return 1
+    fi
+}
+
 llvm_export_artifacts() {
     local llvm_cov="$1"
     local object="$2"
@@ -159,6 +179,7 @@ case "$build_root" in
 esac
 
 cp "$scope_file" "$artifact_dir/scope.json" 2>/dev/null || true
+cp "$baseline_file" "$artifact_dir/release-baseline.json" 2>/dev/null || true
 cp "$manifest_file" "$artifact_dir/sql-semantic-assertions.json" 2>/dev/null || true
 
 git_commit="unknown"
@@ -176,6 +197,12 @@ if command -v git >/dev/null 2>&1; then
 else
     mark_all_layers provenance "git is unavailable for release provenance" 127
 fi
+if ! python3 scripts/coverage_tools.py capture-provenance \
+    --repo-root "$repo_root" --scope "$scope_file" --baseline "$baseline_file" \
+    --output "$artifact_dir/provenance.json" \
+    > "$artifact_dir/provenance.log" 2>&1; then
+    mark_all_layers provenance "exact clean-tree provenance capture failed" 1
+fi
 
 cat > "$artifact_dir/coverage-scope.txt" <<EOF
 Gate: pg_accel three-layer release coverage
@@ -187,9 +214,11 @@ C++ threshold: ${cpp_minimum}% host-object source lines
 SQL threshold: ${sql_minimum}% fixed-manifest semantic assertions
 
 Rust scope includes owned production Rust in pg_accel/src,
-pg_accel_bench/src, and pg_accel/build.rs. LCOV line records inside parsed
-positive cfg(test)-only item ranges are excluded; separately compiled test
-files are excluded. Missing production mappings fail closed.
+pg_accel_bench/src, and pg_accel/build.rs. Its denominator is the compiler-
+derived pg${pg} build map produced without the pg_test feature. The same
+configuration is tested before pg_test tests may supplement hits. Separately
+compiled test files are pinned exclusions. Missing production mappings fail
+closed.
 
 C++ scope is host-object source coverage for every owned implementation under
 pgaccel-kernels/src and executable inline header under pgaccel-kernels/include.
@@ -200,7 +229,7 @@ does not claim device kernel-line execution.
 
 SQL scope is unique successful PGACCEL_ASSERT_OK IDs divided by the pinned
 coverage/sql-semantic-assertions.json declarations. The fixed floors are 52
-files and 285 assertions. File completion markers, warnings, skips, caught
+files and 287 assertions. File completion markers, warnings, skips, caught
 exceptions, duplicate IDs, source/hash drift, or nonzero exits cannot earn
 semantic credit. SQL-triggered Rust source reachability is retained separately
 under sql-reachability and has no release percentage threshold.
@@ -249,7 +278,9 @@ rust_coverage() (
     local output_dir="$artifact_dir/rust"
     local build_dir="$build_root/rust"
     local execution_status=0
-    mkdir -p "$output_dir" "$build_dir"
+    local profile_dir="$output_dir/profiles"
+    mkdir -p "$output_dir" "$build_dir" "$profile_dir"
+    find "$profile_dir" -type f -delete
 
     if ! command -v cargo >/dev/null 2>&1; then
         mark_layer_error rust "$rust_minimum" prerequisite \
@@ -275,17 +306,57 @@ rust_coverage() (
     fi
     record_stage rust instrumentation 0
     eval "$coverage_env"
-    run_logged "$output_dir/clean.log" env CARGO_TARGET_DIR="$build_dir" \
-        cargo llvm-cov clean --workspace || execution_status=1
-    if run_logged "$output_dir/test.log" env \
+    if ! run_logged "$output_dir/clean.log" env CARGO_TARGET_DIR="$build_dir" \
+        cargo llvm-cov clean --workspace; then
+        mark_layer_error rust "$rust_minimum" clean \
+            "stale Rust coverage artifacts could not be removed" 1
+        return 1
+    fi
+    record_stage rust clean 0
+    printf '{"postgres_major":%s,"default_features":false,"features":["pg%s"],"pg_test":false}\n' \
+        "$pg" "$pg" > "$output_dir/production-config.json"
+    if run_logged "$output_dir/production-build.log" env \
+        CARGO_TARGET_DIR="$build_dir" \
+        cargo build --workspace --locked --no-default-features \
+            --features "pg${pg}"; then
+        record_stage rust production_build 0
+    else
+        execution_status=1
+        record_stage rust production_build 1 \
+            "production pg${pg} build without pg_test failed"
+    fi
+    if run_logged "$output_dir/production-map.log" env \
+        CARGO_TARGET_DIR="$build_dir" \
+        cargo llvm-cov report --lcov --include-build-script \
+            --output-path "$output_dir/production-map.info" \
+        && [ -s "$output_dir/production-map.info" ]; then
+        record_stage rust production_mapping 0
+    else
+        execution_status=1
+        record_stage rust production_mapping 1 \
+            "compiler-derived production LCOV map was not generated"
+    fi
+    if run_logged "$output_dir/production-test.log" env \
+        CARGO_TARGET_DIR="$build_dir" RUST_TEST_THREADS="$test_threads" \
+        cargo test --workspace --locked --no-default-features \
+            --features "pg${pg}" --all-targets -- \
+            --test-threads="$test_threads"; then
+        record_stage rust production_tests 0
+    else
+        execution_status=1
+        record_stage rust production_tests 1 \
+            "workspace tests without pg_test failed"
+    fi
+    if run_logged "$output_dir/supplemental-test.log" env \
         CARGO_TARGET_DIR="$build_dir" RUST_TEST_THREADS="$test_threads" \
         cargo test --workspace --locked --no-default-features \
             --features "pg${pg} pg_test" --all-targets -- \
             --test-threads="$test_threads"; then
-        record_stage rust unit_tests 0
+        record_stage rust supplemental_tests 0
     else
         execution_status=1
-        record_stage rust unit_tests 1 "workspace unit tests failed"
+        record_stage rust supplemental_tests 1 \
+            "supplemental pg_test workspace tests failed"
     fi
     if run_logged "$output_dir/pgrx-test.log" env \
         CARGO_TARGET_DIR="$build_dir" RUST_TEST_THREADS="$test_threads" \
@@ -294,6 +365,32 @@ rust_coverage() (
     else
         execution_status=1
         record_stage rust pgrx_tests 1 "cargo pgrx tests failed"
+    fi
+    local tools llvm_cov llvm_profdata
+    if ! tools="$(rust_llvm_tools)"; then
+        mark_layer_error rust "$rust_minimum" toolchain \
+            "matching Rust llvm-cov/llvm-profdata tools are unavailable" 1
+        return 1
+    fi
+    llvm_cov="$(printf '%s\n' "$tools" | sed -n '1p')"
+    llvm_profdata="$(printf '%s\n' "$tools" | sed -n '2p')"
+    if ! python3 scripts/coverage_tools.py validate-rust-toolchain \
+        --rustc "$(command -v rustc)" --llvm-cov "$llvm_cov" \
+        --llvm-profdata "$llvm_profdata" \
+        --output "$output_dir/toolchain.json"; then
+        mark_layer_error rust "$rust_minimum" toolchain \
+            "rustc, llvm-cov, and llvm-profdata majors do not match" 1
+        return 1
+    fi
+    record_stage rust toolchain 0
+    if ! copy_profiles "$build_dir" "$profile_dir" \
+        > "$output_dir/copy-profiles.log" 2>&1 \
+        || ! merge_profiles "$llvm_profdata" "$profile_dir" \
+            "$output_dir/coverage.profdata" \
+            > "$output_dir/llvm-profdata.log" 2>&1; then
+        mark_layer_error rust "$rust_minimum" profiles \
+            "Rust raw profiles could not be retained and merged" 1
+        return 1
     fi
     local report_status=0
     run_logged "$output_dir/lcov-report.log" env CARGO_TARGET_DIR="$build_dir" \
@@ -317,13 +414,24 @@ rust_coverage() (
             "Rust LCOV report was not generated" 1
         return 1
     fi
+    local summary_status=0
     python3 scripts/coverage_tools.py summarize \
         --layer rust --format lcov \
         --input "$output_dir/raw-lcov.info" \
+        --production-map "$output_dir/production-map.info" \
         --scope "$scope_file" --repo-root "$repo_root" \
         --threshold "$rust_minimum" \
         --execution-status "$execution_status" \
-        --output-dir "$output_dir" --artifact-dir "$artifact_dir"
+        --output-dir "$output_dir" --artifact-dir "$artifact_dir" \
+        || summary_status=$?
+    if python3 scripts/coverage_tools.py seal-layer-evidence \
+        --artifact-dir "$artifact_dir" --layer rust; then
+        record_stage rust raw_evidence 0
+    else
+        record_stage rust raw_evidence 1 "Rust raw evidence sealing failed"
+        summary_status=1
+    fi
+    return "$summary_status"
 )
 
 resolve_cpp_llvm_tools() {
@@ -353,9 +461,11 @@ cpp_coverage() (
     local profile_dir="$output_dir/profiles"
     local acpp_prefix="${ACPP_PREFIX:-$(pg_accel_acpp_prefix 2>/dev/null || printf '%s' "$repo_root/.pgaccel/acpp/current")}"
     local acpp="$acpp_prefix/bin/acpp"
+    local per_test_log_dir="$output_dir/per-test-logs"
     local execution_status=0
-    mkdir -p "$output_dir" "$profile_dir"
+    mkdir -p "$output_dir" "$profile_dir" "$per_test_log_dir"
     find "$profile_dir" -type f -delete
+    find "$per_test_log_dir" -type f -delete
 
     for command in cmake ctest; do
         if ! command -v "$command" >/dev/null 2>&1; then
@@ -389,12 +499,21 @@ cpp_coverage() (
     fi
     record_stage cpp toolchain 0
 
+    if ! cmake -E remove_directory "$build_dir" \
+        > "$output_dir/clean.log" 2>&1; then
+        mark_layer_error cpp "$cpp_minimum" clean \
+            "stale C++ coverage build artifacts could not be removed" 1
+        return 1
+    fi
+    record_stage cpp clean 0
+
     if ! run_logged "$output_dir/configure.log" cmake \
         -S pgaccel-kernels -B "$build_dir" \
         -DCMAKE_BUILD_TYPE=Debug \
         -DCMAKE_CXX_COMPILER="$clangxx" \
         -DAdaptiveCpp_DIR="$acpp_prefix/lib/cmake/AdaptiveCpp" \
-        -DPGACCEL_ENABLE_COVERAGE=ON; then
+        -DPGACCEL_ENABLE_COVERAGE=ON \
+        -DPGACCEL_GPU_TEST_LOG_DIR="$per_test_log_dir"; then
         mark_layer_error cpp "$cpp_minimum" configure \
             "instrumented C++ CMake configure failed" 1
         return 1
@@ -420,6 +539,8 @@ cpp_coverage() (
     if python3 scripts/coverage_tools.py gpu-evidence \
         --execution-status "$execution_status" \
         --ctest-log "$output_dir/ctest.log" \
+        --per-test-log-dir "$per_test_log_dir" \
+        --baseline "$baseline_file" \
         --output "$output_dir/gpu-correctness-evidence.json"; then
         record_stage cpp gpu_evidence 0
     else
@@ -462,13 +583,23 @@ cpp_coverage() (
     else
         record_stage cpp coverage_report 1 "C++ coverage export failed"
     fi
+    local summary_status=0
     python3 scripts/coverage_tools.py summarize \
         --layer cpp --format json \
         --input "$output_dir/raw-coverage.json" \
         --scope "$scope_file" --repo-root "$repo_root" \
         --threshold "$cpp_minimum" \
         --execution-status "$execution_status" \
-        --output-dir "$output_dir" --artifact-dir "$artifact_dir"
+        --output-dir "$output_dir" --artifact-dir "$artifact_dir" \
+        || summary_status=$?
+    if python3 scripts/coverage_tools.py seal-layer-evidence \
+        --artifact-dir "$artifact_dir" --layer cpp; then
+        record_stage cpp raw_evidence 0
+    else
+        record_stage cpp raw_evidence 1 "C++ raw evidence sealing failed"
+        summary_status=1
+    fi
+    return "$summary_status"
 )
 
 rust_llvm_tools() {
@@ -581,6 +712,14 @@ sql_coverage() (
         --execution-status "$execution_status" \
         --artifact-dir "$artifact_dir" || execution_status=1
 
+    if python3 scripts/coverage_tools.py seal-layer-evidence \
+        --artifact-dir "$artifact_dir" --layer sql; then
+        record_stage sql raw_evidence 0
+    else
+        record_stage sql raw_evidence 1 "SQL raw evidence sealing failed"
+        execution_status=1
+    fi
+
     if [ "$reachability_enabled" -eq 1 ]; then
         local objects=()
         while IFS= read -r -d '' object; do
@@ -616,7 +755,8 @@ cpp_coverage || overall_status=1
 echo "=== SQL semantic assertion coverage ==="
 sql_coverage || overall_status=1
 
-if ! python3 scripts/coverage_tools.py aggregate --artifact-dir "$artifact_dir"; then
+if ! python3 scripts/coverage_tools.py aggregate --artifact-dir "$artifact_dir" \
+    --repo-root "$repo_root"; then
     overall_status=1
 fi
 aggregate_done=1

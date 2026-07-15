@@ -3,7 +3,7 @@
   "minimum_percent": 90.0,
   "sql_manifest": "coverage/sql-semantic-assertions.json",
   "sql_baseline_files": 52,
-  "sql_baseline_assertions": 285,
+  "sql_baseline_assertions": 287,
   "layers": {
     "rust": {
       "description": "Owned Rust production code exercised by workspace and pgrx tests, including benchmark classification.",
@@ -14,8 +14,8 @@
       ],
       "extensions": [".rs"],
       "required_extensions": [".rs"],
-      "require_executable_mapping_only": true,
-      "exclude_cfg_test_items": true,
+      "require_executable_mapping_only": false,
+      "production_mapping": "compiler-derived-pg18-without-pg_test",
       "exclude": [
         "pg_accel/src/tests/**",
         "pg_accel/src/gpu/mod_tests.rs",
@@ -44,8 +44,8 @@
       "roots": ["pg_accel/src", "pg_accel/build.rs"],
       "extensions": [".rs"],
       "required_extensions": [".rs"],
-      "require_executable_mapping_only": true,
-      "exclude_cfg_test_items": true,
+      "require_executable_mapping_only": false,
+      "production_mapping": "compiler-derived-pg18-without-pg_test",
       "exclude": [
         "pg_accel/src/tests/**",
         "pg_accel/src/gpu/mod_tests.rs",

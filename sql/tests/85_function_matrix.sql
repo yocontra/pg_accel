@@ -1005,169 +1005,149 @@ END $$;
 -- =========================================================================
 
 -- 28-30. Raster operations (ST_MapAlgebra, ST_Clip, ST_Reclass)
-DO $$
-BEGIN
-    -- Release coverage requires PostGIS raster. An unavailable function or any
-    -- raster operation error propagates through ON_ERROR_STOP and fails the file.
+-- PostGIS raster is a required release dependency. Missing functions and every
+-- operation error propagate through ON_ERROR_STOP.
+DO $$ BEGIN
     PERFORM ST_MakeEmptyRaster(10, 10, 0, 0, 1);
-        -- Create raster test table
-        EXECUTE '
-            CREATE TEMP TABLE _fm_rasters (
-                id serial PRIMARY KEY,
-                rast raster NOT NULL
-            )';
-
-        EXECUTE '
-            INSERT INTO _fm_rasters (rast)
-            SELECT ST_AddBand(
-                ST_MakeEmptyRaster(10, 10,
-                    -180 + (g % 36) * 10,
-                    -90 + (g / 36) * 10,
-                    1),
-                ''8BUI''::text,
-                (g % 255)::double precision,
-                0::double precision
-            )
-            FROM generate_series(0, 5039) AS s(g)';
-
-        EXECUTE 'ANALYZE _fm_rasters';
-
-        -- Test 28: ST_Reclass
-        BEGIN
-            EXECUTE 'SET pg_accel.enabled = off';
-            EXECUTE '
-                CREATE TEMP TABLE _fm_r28_off AS
-                SELECT id, ST_BandPixelType(
-                    ST_Reclass(rast, 1, ''0-128]:1, (128-255]:2'', ''8BUI'', 0)
-                ) AS ptype,
-                (ST_SummaryStats(
-                    ST_Reclass(rast, 1, ''0-128]:1, (128-255]:2'', ''8BUI'', 0),
-                    1, true
-                )).sum AS pixel_sum
-                FROM _fm_rasters WHERE id <= 2000 ORDER BY id';
-
-            EXECUTE 'SET pg_accel.enabled = on';
-            EXECUTE '
-                CREATE TEMP TABLE _fm_r28_on AS
-                SELECT id, ST_BandPixelType(
-                    ST_Reclass(rast, 1, ''0-128]:1, (128-255]:2'', ''8BUI'', 0)
-                ) AS ptype,
-                (ST_SummaryStats(
-                    ST_Reclass(rast, 1, ''0-128]:1, (128-255]:2'', ''8BUI'', 0),
-                    1, true
-                )).sum AS pixel_sum
-                FROM _fm_rasters WHERE id <= 2000 ORDER BY id';
-
-            EXECUTE '
-                DO $inner$ BEGIN
-                    IF EXISTS (
-                        SELECT 1 FROM _fm_r28_on a FULL OUTER JOIN _fm_r28_off b USING (id)
-                        WHERE a.ptype IS DISTINCT FROM b.ptype
-                           OR a.pixel_sum IS DISTINCT FROM b.pixel_sum
-                    ) THEN
-                        RAISE EXCEPTION ''85_r28 FAILED: ST_Reclass results differ ON vs OFF'';
-                    END IF;
-                END $inner$';
-
-        END;
-
-        -- Test 29: ST_Clip (clip raster by polygon)
-        BEGIN
-            EXECUTE 'SET pg_accel.enabled = off';
-            EXECUTE '
-                CREATE TEMP TABLE _fm_r29_off AS
-                SELECT r.id,
-                    ST_Width(ST_Clip(r.rast,
-                        ST_SetSRID(ST_MakeEnvelope(0, 0, 5, 5), 0))) AS w,
-                    (ST_SummaryStats(
-                        ST_Clip(r.rast,
-                            ST_SetSRID(ST_MakeEnvelope(0, 0, 5, 5), 0)),
-                        1, true
-                    )).sum AS pixel_sum
-                FROM _fm_rasters r
-                WHERE r.id <= 1000
-                ORDER BY r.id';
-
-            EXECUTE 'SET pg_accel.enabled = on';
-            EXECUTE '
-                CREATE TEMP TABLE _fm_r29_on AS
-                SELECT r.id,
-                    ST_Width(ST_Clip(r.rast,
-                        ST_SetSRID(ST_MakeEnvelope(0, 0, 5, 5), 0))) AS w,
-                    (ST_SummaryStats(
-                        ST_Clip(r.rast,
-                            ST_SetSRID(ST_MakeEnvelope(0, 0, 5, 5), 0)),
-                        1, true
-                    )).sum AS pixel_sum
-                FROM _fm_rasters r
-                WHERE r.id <= 1000
-                ORDER BY r.id';
-
-            EXECUTE '
-                DO $inner$ BEGIN
-                    IF EXISTS (
-                        SELECT 1 FROM _fm_r29_on a FULL OUTER JOIN _fm_r29_off b USING (id)
-                        WHERE a.w IS DISTINCT FROM b.w
-                           OR a.pixel_sum IS DISTINCT FROM b.pixel_sum
-                    ) THEN
-                        RAISE EXCEPTION ''85_r29 FAILED: ST_Clip results differ ON vs OFF'';
-                    END IF;
-                END $inner$';
-
-        END;
-
-        -- Test 30: ST_MapAlgebra (unary)
-        BEGIN
-            EXECUTE 'SET pg_accel.enabled = off';
-            EXECUTE '
-                CREATE TEMP TABLE _fm_r30_off AS
-                SELECT r.id,
-                    ST_BandPixelType(
-                        ST_MapAlgebra(r.rast, 1, NULL, ''[rast] * 2'')
-                    ) AS ptype,
-                    (ST_SummaryStats(
-                        ST_MapAlgebra(r.rast, 1, NULL, ''[rast] * 2''),
-                        1, true
-                    )).sum AS pixel_sum
-                FROM _fm_rasters r
-                WHERE r.id <= 1000
-                ORDER BY r.id';
-
-            EXECUTE 'SET pg_accel.enabled = on';
-            EXECUTE '
-                CREATE TEMP TABLE _fm_r30_on AS
-                SELECT r.id,
-                    ST_BandPixelType(
-                        ST_MapAlgebra(r.rast, 1, NULL, ''[rast] * 2'')
-                    ) AS ptype,
-                    (ST_SummaryStats(
-                        ST_MapAlgebra(r.rast, 1, NULL, ''[rast] * 2''),
-                        1, true
-                    )).sum AS pixel_sum
-                FROM _fm_rasters r
-                WHERE r.id <= 1000
-                ORDER BY r.id';
-
-            EXECUTE '
-                DO $inner$ BEGIN
-                    IF EXISTS (
-                        SELECT 1 FROM _fm_r30_on a FULL OUTER JOIN _fm_r30_off b USING (id)
-                        WHERE a.ptype IS DISTINCT FROM b.ptype
-                           OR a.pixel_sum IS DISTINCT FROM b.pixel_sum
-                    ) THEN
-                        RAISE EXCEPTION ''85_r30 FAILED: ST_MapAlgebra results differ ON vs OFF'';
-                    END IF;
-                END $inner$';
-
-        END;
-
-        -- Cleanup raster tables
-        EXECUTE 'DROP TABLE IF EXISTS _fm_rasters,
-            _fm_r28_off, _fm_r28_on, _fm_r29_off, _fm_r29_on,
-            _fm_r30_off, _fm_r30_on';
 END $$;
 
-\echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_037'
+CREATE TEMP TABLE _fm_rasters (
+    id serial PRIMARY KEY,
+    rast raster NOT NULL
+);
+
+INSERT INTO _fm_rasters (rast)
+SELECT ST_AddBand(
+    ST_MakeEmptyRaster(10, 10,
+        -180 + (g % 36) * 10,
+        -90 + (g / 36) * 10,
+        1),
+    '8BUI'::text,
+    (g % 255)::double precision,
+    0::double precision
+)
+FROM generate_series(0, 5039) AS s(g);
+
+ANALYZE _fm_rasters;
+
+-- Test 28: ST_Reclass
+SET pg_accel.enabled = off;
+CREATE TEMP TABLE _fm_r28_off AS
+SELECT id, ST_BandPixelType(
+    ST_Reclass(rast, 1, '0-128]:1, (128-255]:2', '8BUI', 0)
+) AS ptype,
+(ST_SummaryStats(
+    ST_Reclass(rast, 1, '0-128]:1, (128-255]:2', '8BUI', 0),
+    1, true
+)).sum AS pixel_sum
+FROM _fm_rasters WHERE id <= 2000 ORDER BY id;
+
+SET pg_accel.enabled = on;
+CREATE TEMP TABLE _fm_r28_on AS
+SELECT id, ST_BandPixelType(
+    ST_Reclass(rast, 1, '0-128]:1, (128-255]:2', '8BUI', 0)
+) AS ptype,
+(ST_SummaryStats(
+    ST_Reclass(rast, 1, '0-128]:1, (128-255]:2', '8BUI', 0),
+    1, true
+)).sum AS pixel_sum
+FROM _fm_rasters WHERE id <= 2000 ORDER BY id;
+
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM _fm_r28_on a FULL OUTER JOIN _fm_r28_off b USING (id)
+        WHERE a.ptype IS DISTINCT FROM b.ptype
+           OR a.pixel_sum IS DISTINCT FROM b.pixel_sum
+    ) THEN
+        RAISE EXCEPTION '85_r28 FAILED: ST_Reclass results differ ON vs OFF';
+    END IF;
+    RAISE NOTICE 'PGACCEL_ASSERT_OK:85_function_matrix.assert_037';
+END $$;
+
+-- Test 29: ST_Clip (clip raster by polygon)
+SET pg_accel.enabled = off;
+CREATE TEMP TABLE _fm_r29_off AS
+SELECT r.id,
+    ST_Width(ST_Clip(r.rast,
+        ST_SetSRID(ST_MakeEnvelope(0, 0, 5, 5), 0))) AS w,
+    (ST_SummaryStats(
+        ST_Clip(r.rast,
+            ST_SetSRID(ST_MakeEnvelope(0, 0, 5, 5), 0)),
+        1, true
+    )).sum AS pixel_sum
+FROM _fm_rasters r
+WHERE r.id <= 1000
+ORDER BY r.id;
+
+SET pg_accel.enabled = on;
+CREATE TEMP TABLE _fm_r29_on AS
+SELECT r.id,
+    ST_Width(ST_Clip(r.rast,
+        ST_SetSRID(ST_MakeEnvelope(0, 0, 5, 5), 0))) AS w,
+    (ST_SummaryStats(
+        ST_Clip(r.rast,
+            ST_SetSRID(ST_MakeEnvelope(0, 0, 5, 5), 0)),
+        1, true
+    )).sum AS pixel_sum
+FROM _fm_rasters r
+WHERE r.id <= 1000
+ORDER BY r.id;
+
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM _fm_r29_on a FULL OUTER JOIN _fm_r29_off b USING (id)
+        WHERE a.w IS DISTINCT FROM b.w
+           OR a.pixel_sum IS DISTINCT FROM b.pixel_sum
+    ) THEN
+        RAISE EXCEPTION '85_r29 FAILED: ST_Clip results differ ON vs OFF';
+    END IF;
+    RAISE NOTICE 'PGACCEL_ASSERT_OK:85_function_matrix.assert_051';
+END $$;
+
+-- Test 30: ST_MapAlgebra (unary)
+SET pg_accel.enabled = off;
+CREATE TEMP TABLE _fm_r30_off AS
+SELECT r.id,
+    ST_BandPixelType(
+        ST_MapAlgebra(r.rast, 1, NULL, '[rast] * 2')
+    ) AS ptype,
+    (ST_SummaryStats(
+        ST_MapAlgebra(r.rast, 1, NULL, '[rast] * 2'),
+        1, true
+    )).sum AS pixel_sum
+FROM _fm_rasters r
+WHERE r.id <= 1000
+ORDER BY r.id;
+
+SET pg_accel.enabled = on;
+CREATE TEMP TABLE _fm_r30_on AS
+SELECT r.id,
+    ST_BandPixelType(
+        ST_MapAlgebra(r.rast, 1, NULL, '[rast] * 2')
+    ) AS ptype,
+    (ST_SummaryStats(
+        ST_MapAlgebra(r.rast, 1, NULL, '[rast] * 2'),
+        1, true
+    )).sum AS pixel_sum
+FROM _fm_rasters r
+WHERE r.id <= 1000
+ORDER BY r.id;
+
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM _fm_r30_on a FULL OUTER JOIN _fm_r30_off b USING (id)
+        WHERE a.ptype IS DISTINCT FROM b.ptype
+           OR a.pixel_sum IS DISTINCT FROM b.pixel_sum
+    ) THEN
+        RAISE EXCEPTION '85_r30 FAILED: ST_MapAlgebra results differ ON vs OFF';
+    END IF;
+    RAISE NOTICE 'PGACCEL_ASSERT_OK:85_function_matrix.assert_052';
+END $$;
+
+DROP TABLE IF EXISTS _fm_rasters,
+    _fm_r28_off, _fm_r28_on, _fm_r29_off, _fm_r29_on,
+    _fm_r30_off, _fm_r30_on;
+
 
 -- =========================================================================
 -- Combined spatial + H3 queries

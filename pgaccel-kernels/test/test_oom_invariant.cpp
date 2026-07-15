@@ -27,6 +27,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -88,6 +89,8 @@ struct FamilyResult {
   size_t rss_ceiling_bytes;
   bool under_ceiling;
   std::string note;
+  size_t rss_delta_bytes = 0;
+  uint64_t gpu_dispatches = 0;
 };
 
 static FamilyResult run_reduce_family(size_t N, size_t rss_ceiling) {
@@ -108,18 +111,22 @@ static FamilyResult run_reduce_family(size_t N, size_t rss_ceiling) {
   }
   const size_t rss_before = current_rss_bytes();
   double got = 0.0;
+  pgaccel_reset_gpu_exec_count();
   pgaccel_status st = pgaccel_reduce_sum_f64(v.data(), N, &got);
+  r.gpu_dispatches = pgaccel_gpu_exec_count();
   const size_t rss_after = peak_rss_bytes();
-  r.status_ok = (st == PGACCEL_OK);
+  r.status_ok = (st == PGACCEL_OK && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
   // Correctness: sum of N 1.0s is N exactly in fp64.
   r.correct = r.status_ok && got == static_cast<double>(N);
   // RSS ceiling — delta from before-call vs peak.
   const size_t rss_delta = rss_after > rss_before ? rss_after - rss_before : 0;
+  r.rss_delta_bytes = rss_delta;
   r.under_ceiling = rss_delta <= rss_ceiling;
   printf("   status=%d (OK=%d) got=%.0f expected=%.0f correct=%d  "
-         "rss_before=%.2fGB peak=%.2fGB delta=%.2fGB ceiling=%.2fGB under=%d\n",
-         (int)st, r.status_ok, got, (double)N, r.correct, rss_before / 1e9, rss_after / 1e9,
+         "dispatches=%llu rss_before=%.2fGB peak=%.2fGB delta=%.2fGB ceiling=%.2fGB under=%d\n",
+         (int)st, r.status_ok, got, (double)N, r.correct,
+         static_cast<unsigned long long>(r.gpu_dispatches), rss_before / 1e9, rss_after / 1e9,
          rss_delta / 1e9, rss_ceiling / 1e9, r.under_ceiling);
   if (!r.status_ok)
     r.note = "kernel returned non-OK status on device-exceeding input";
@@ -145,9 +152,11 @@ static FamilyResult run_sort_family(size_t N, size_t rss_ceiling) {
     v[i] = static_cast<double>(N - i);
   }
   const size_t rss_before = current_rss_bytes();
+  pgaccel_reset_gpu_exec_count();
   pgaccel_status st = pgaccel_sort_f64(v.data(), N);
+  r.gpu_dispatches = pgaccel_gpu_exec_count();
   const size_t rss_after = peak_rss_bytes();
-  r.status_ok = (st == PGACCEL_OK);
+  r.status_ok = (st == PGACCEL_OK && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
   // Correctness: ascending monotone.
   bool monotone = true;
@@ -161,11 +170,12 @@ static FamilyResult run_sort_family(size_t N, size_t rss_ceiling) {
   }
   r.correct = r.status_ok && monotone;
   const size_t rss_delta = rss_after > rss_before ? rss_after - rss_before : 0;
+  r.rss_delta_bytes = rss_delta;
   r.under_ceiling = rss_delta <= rss_ceiling;
   printf("   status=%d (OK=%d) monotone=%d  rss_before=%.2fGB peak=%.2fGB delta=%.2fGB "
-         "ceiling=%.2fGB under=%d\n",
+         "ceiling=%.2fGB dispatches=%llu under=%d\n",
          (int)st, r.status_ok, monotone, rss_before / 1e9, rss_after / 1e9, rss_delta / 1e9,
-         rss_ceiling / 1e9, r.under_ceiling);
+         rss_ceiling / 1e9, static_cast<unsigned long long>(r.gpu_dispatches), r.under_ceiling);
   if (!r.status_ok)
     r.note = "sort_f64 returned non-OK on device-exceeding input";
   else if (!r.correct)
@@ -204,18 +214,9 @@ static FamilyResult run_hashagg_family(size_t N, size_t rss_ceiling) {
   pgaccel_reset_gpu_exec_count();
   const pgaccel_status status = pgaccel_hash_agg_execute_checked(
       keys.data(), knulls.data(), N, PGACCEL_KEY_INT64, varr, vnull_arr, vtypes, ac, 1, &state);
+  r.gpu_dispatches = pgaccel_gpu_exec_count();
   const size_t rss_after = peak_rss_bytes();
-  if (status == PGACCEL_UNSUPPORTED) {
-    r.status_ok = state == nullptr && pgaccel_gpu_exec_count() == 0;
-    r.correct = r.status_ok;
-    r.peak_rss_bytes = rss_after;
-    const size_t rss_delta = rss_after > rss_before ? rss_after - rss_before : 0;
-    r.under_ceiling = rss_delta <= rss_ceiling;
-    r.note = "generic hashagg unsupported before GPU dispatch on this backend";
-    return r;
-  }
-
-  r.status_ok = (status == PGACCEL_OK && state != nullptr);
+  r.status_ok = (status == PGACCEL_OK && state != nullptr && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
   if (state) {
     // Each of the 4 groups should have exactly N/4 rows, sum = N/4.
@@ -233,11 +234,12 @@ static FamilyResult run_hashagg_family(size_t N, size_t rss_ceiling) {
     pgaccel_agg_free(state);
   }
   const size_t rss_delta = rss_after > rss_before ? rss_after - rss_before : 0;
+  r.rss_delta_bytes = rss_delta;
   r.under_ceiling = rss_delta <= rss_ceiling;
   printf("   status_ok=%d correct=%d  rss_before=%.2fGB peak=%.2fGB delta=%.2fGB "
-         "ceiling=%.2fGB under=%d\n",
+         "ceiling=%.2fGB dispatches=%llu under=%d\n",
          r.status_ok, r.correct, rss_before / 1e9, rss_after / 1e9, rss_delta / 1e9,
-         rss_ceiling / 1e9, r.under_ceiling);
+         rss_ceiling / 1e9, static_cast<unsigned long long>(r.gpu_dispatches), r.under_ceiling);
   if (!r.status_ok)
     r.note = "hashagg_f64 returned NULL on device-exceeding input";
   else if (!r.correct)
@@ -267,10 +269,12 @@ static FamilyResult run_spatial_family(size_t N, size_t rss_ceiling) {
     pts[2 * i + 1] = 0.5;
   }
   const size_t rss_before = current_rss_bytes();
+  pgaccel_reset_gpu_exec_count();
   pgaccel_status st =
       pgaccel_point_in_ring_bulk(pts.data(), N, ring, 5, /*use_fp64=*/true, results.data());
+  r.gpu_dispatches = pgaccel_gpu_exec_count();
   const size_t rss_after = peak_rss_bytes();
-  r.status_ok = (st == PGACCEL_OK);
+  r.status_ok = (st == PGACCEL_OK && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
   // Correctness: every result should be 1 (inside).
   bool all_inside = r.status_ok;
@@ -284,11 +288,12 @@ static FamilyResult run_spatial_family(size_t N, size_t rss_ceiling) {
   }
   r.correct = all_inside;
   const size_t rss_delta = rss_after > rss_before ? rss_after - rss_before : 0;
+  r.rss_delta_bytes = rss_delta;
   r.under_ceiling = rss_delta <= rss_ceiling;
   printf("   status=%d (OK=%d) all_inside=%d  rss_before=%.2fGB peak=%.2fGB delta=%.2fGB "
-         "ceiling=%.2fGB under=%d\n",
+         "ceiling=%.2fGB dispatches=%llu under=%d\n",
          (int)st, r.status_ok, all_inside, rss_before / 1e9, rss_after / 1e9, rss_delta / 1e9,
-         rss_ceiling / 1e9, r.under_ceiling);
+         rss_ceiling / 1e9, static_cast<unsigned long long>(r.gpu_dispatches), r.under_ceiling);
   if (!r.status_ok)
     r.note = "spatial_f64 PIP returned non-OK on device-exceeding input";
   else if (!r.correct)
@@ -313,10 +318,12 @@ static FamilyResult run_h3_family(size_t N, size_t rss_ceiling) {
     return r;
   }
   const size_t rss_before = current_rss_bytes();
+  pgaccel_reset_gpu_exec_count();
   pgaccel_status st = pgaccel_h3_lat_lng_to_cell_bulk(lats.data(), lngs.data(), N, 7,
                                                       /*use_fp64=*/1, cells.data(), valids.data());
+  r.gpu_dispatches = pgaccel_gpu_exec_count();
   const size_t rss_after = peak_rss_bytes();
-  r.status_ok = (st == PGACCEL_OK);
+  r.status_ok = (st == PGACCEL_OK && r.gpu_dispatches > 0);
   r.peak_rss_bytes = rss_after;
   bool all_valid = r.status_ok;
   uint64_t first = 0;
@@ -331,11 +338,12 @@ static FamilyResult run_h3_family(size_t N, size_t rss_ceiling) {
   }
   r.correct = all_valid;
   const size_t rss_delta = rss_after > rss_before ? rss_after - rss_before : 0;
+  r.rss_delta_bytes = rss_delta;
   r.under_ceiling = rss_delta <= rss_ceiling;
   printf("   status=%d (OK=%d) all_same_valid=%d  rss_before=%.2fGB peak=%.2fGB delta=%.2fGB "
-         "ceiling=%.2fGB under=%d\n",
+         "ceiling=%.2fGB dispatches=%llu under=%d\n",
          (int)st, r.status_ok, all_valid, rss_before / 1e9, rss_after / 1e9, rss_delta / 1e9,
-         rss_ceiling / 1e9, r.under_ceiling);
+         rss_ceiling / 1e9, static_cast<unsigned long long>(r.gpu_dispatches), r.under_ceiling);
   if (!r.status_ok)
     r.note = "h3_f64 returned non-OK on device-exceeding input";
   else if (!r.correct)
@@ -353,11 +361,25 @@ int main() {
   pgaccel_device_info info = pgaccel_get_device_info();
   printf("Device: %s backend=%s has_native_fp64=%d max_alloc_bytes=%zu\n", info.device_name,
          info.backend_name, info.has_native_fp64, caps.max_alloc_bytes);
+  std::string backend = info.backend_name;
+  std::transform(backend.begin(), backend.end(), backend.begin(),
+                 [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+  const bool accelerator_backend =
+      backend.find("metal") != std::string::npos || backend.find("cuda") != std::string::npos ||
+      backend.find("hip") != std::string::npos || backend.find("level_zero") != std::string::npos;
+  if (info.device_name[0] == '\0' || info.backend_name[0] == '\0' || info.compute_units == 0 ||
+      caps.max_alloc_bytes == 0 || !accelerator_backend) {
+    fprintf(stderr,
+            "FAIL: OOM invariant requires a real accelerator device with nonzero capacity\n");
+    pgaccel_shutdown();
+    return 2;
+  }
+  printf("PGACCEL_DEVICE_PROOF device=\"%s\" backend=\"%s\" compute_units=%u "
+         "max_alloc_bytes=%zu real_device=1\n",
+         info.device_name, info.backend_name, info.compute_units, caps.max_alloc_bytes);
 
-  // Input size: 2 × max_alloc_bytes / sizeof(double). If caps reports 0
-  // (unknown), fall back to 2 GiB / 8 = 256 Mi doubles.
-  const size_t max_alloc =
-      caps.max_alloc_bytes > 0 ? caps.max_alloc_bytes : (size_t)2ULL * 1024 * 1024 * 1024;
+  // Input size: 2 × max_alloc_bytes / sizeof(double).
+  const size_t max_alloc = caps.max_alloc_bytes;
   const size_t N = (2 * max_alloc) / sizeof(double);
   // Cap N at 256 Mi (2 GiB of doubles) to keep the test feasible on
   // constrained hosts — still exceeds any typical max_alloc on M-series.
@@ -387,11 +409,15 @@ int main() {
   printf("\n=== OOM-never invariant summary ===\n");
   int fails = 0;
   for (const auto& r : results) {
-    const bool pass = r.status_ok && r.correct && r.under_ceiling;
+    const bool pass = r.status_ok && r.correct && r.under_ceiling && r.gpu_dispatches > 0;
     printf("  %-14s %s  peak_rss=%.2fGB ceiling=%.2fGB status_ok=%d correct=%d under_ceiling=%d "
            "note=\"%s\"\n",
            r.name, pass ? "PASS" : "FAIL", r.peak_rss_bytes / 1e9, r.rss_ceiling_bytes / 1e9,
            r.status_ok, r.correct, r.under_ceiling, r.note.c_str());
+    printf("PGACCEL_OOM_FAMILY family=%s result=%s dispatches=%llu "
+           "peak_rss_bytes=%zu rss_delta_bytes=%zu rss_limit_bytes=%zu\n",
+           r.name, pass ? "PASS" : "FAIL", static_cast<unsigned long long>(r.gpu_dispatches),
+           r.peak_rss_bytes, r.rss_delta_bytes, r.rss_ceiling_bytes);
     if (!pass)
       fails++;
   }
@@ -403,6 +429,9 @@ int main() {
             fails);
     return 1;
   }
+  printf("PGACCEL_OOM_INVARIANT result=PASS families=%zu max_alloc_bytes=%zu "
+         "input_doubles=%zu rss_limit_bytes=%zu\n",
+         results.size(), max_alloc, N_capped, rss_ceiling);
   printf("\nPASS — all fp64 kernel families honor OOM-never invariant.\n");
   return 0;
 }

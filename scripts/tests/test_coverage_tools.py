@@ -6,12 +6,14 @@ import importlib.util
 import io
 import json
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "coverage_tools.py"
+REPO_ROOT = SCRIPT.parent.parent
 SPEC = importlib.util.spec_from_file_location("coverage_tools", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 coverage_tools = importlib.util.module_from_spec(SPEC)
@@ -43,7 +45,8 @@ class LineCoverageTests(unittest.TestCase):
                     "extensions": [".rs"],
                     "required_extensions": [".rs"],
                     "exclude": ["**/tests.rs"],
-                    "exclude_cfg_test_items": True,
+                    "require_executable_mapping_only": False,
+                    "production_mapping": "compiler-derived-pg18-without-pg_test",
                 },
                 "cpp": {
                     "description": "test C++ scope",
@@ -59,14 +62,18 @@ class LineCoverageTests(unittest.TestCase):
         return path
 
     def write_lcov(
-        self, root: pathlib.Path, records: dict[pathlib.Path, dict[int, int]]
+        self,
+        root: pathlib.Path,
+        records: dict[pathlib.Path, dict[int, int]],
+        *,
+        name: str = "raw.info",
     ) -> pathlib.Path:
         lines = ["TN:"]
         for source, hits in records.items():
             lines.append(f"SF:{source}")
             lines.extend(f"DA:{line},{count}" for line, count in sorted(hits.items()))
             lines.append("end_of_record")
-        path = root / "raw.info"
+        path = root / name
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
 
@@ -85,6 +92,7 @@ class LineCoverageTests(unittest.TestCase):
             threshold=90.0,
             execution_status=execution_status,
             input=str(report),
+            production_map=str(report),
             format="lcov",
             output_dir=str(root / "output"),
             artifact_dir=None,
@@ -193,55 +201,71 @@ class LineCoverageTests(unittest.TestCase):
             self.assertIn("dirty tree", summary["errors"])
             self.assertEqual(summary["execution"]["exit_code"], 1)
 
-    def test_huge_inline_cfg_test_module_is_excluded_structurally(self) -> None:
+    def test_compiler_map_ignores_6000_line_pg_test_supplement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             source = root / "crate/src/lib.rs"
             source.parent.mkdir(parents=True)
-            huge = "\n".join(
-                f"fn generated_{i}() {{ assert_eq!({i}, {i}); }}" for i in range(6000)
+            production = "\n".join(
+                f"fn production_{i}() -> usize {{ {i} }}" for i in range(6000)
+            )
+            supplement = "\n".join(
+                f"fn pg_test_{i}() {{ assert_eq!({i}, {i}); }}" for i in range(6000)
             )
             text = (
-                "fn production() -> usize { 1 }\n"
-                "#[cfg(test)]\n"
-                "mod tests {\n"
+                '#[cfg(not(feature = "pg_test"))]\n'
+                "mod production {\n"
+                f"{production}\n"
+                "}\n"
+                '#[cfg(feature = "pg_test")]\n'
+                "mod pg_test_only {\n"
                 '  const BRACES: &str = r###" }}} /* not syntax */ "###;\n'
                 "  /* nested comment { /* } */ } */\n"
-                f"{huge}\n"
+                f"{supplement}\n"
                 "}\n"
                 "fn after() -> usize { 2 }\n"
             )
             source.write_text(text, encoding="utf-8")
-            ranges = coverage_tools.rust_cfg_test_ranges(text)
-            self.assertEqual(len(ranges), 1)
-            self.assertEqual(ranges[0][0], 2)
-            self.assertGreater(ranges[0][1], 6000)
-            final_line = text.count("\n")
+            production_lines = {line: 1 for line in range(3, 6003)}
+            production_lines[text.count("\n")] = 1
+            supplemental_lines = dict(production_lines)
+            supplemental_lines.update({line: 1 for line in range(6009, 12009)})
             scope = self.write_scope(root)
             report = self.write_lcov(
                 root,
-                {source: {1: 1, 2: 0, 3: 0, 1000: 0, final_line: 1}},
+                {source: supplemental_lines},
             )
+            production_map = self.write_lcov(
+                root,
+                {source: production_lines},
+                name="production-map.info",
+            )
+            args = self.rust_args(root, scope, report)
+            args.production_map = str(production_map)
 
             status = quiet_call(
                 coverage_tools.summarize_layer,
-                self.rust_args(root, scope, report),
+                args,
             )
 
             self.assertEqual(status, 0)
             summary = json.loads((root / "output/layer-summary.json").read_text())
-            self.assertEqual(summary["line_count"], 2)
-            self.assertEqual(summary["covered_lines"], 2)
-            self.assertEqual(summary["excluded_cfg_test_lines"], 3)
+            self.assertEqual(summary["line_count"], 6001)
+            self.assertEqual(summary["covered_lines"], 6001)
+            self.assertGreaterEqual(summary["supplemental_nonproduction_lines"], 6000)
+            self.assertEqual(
+                summary["production_mapping"]["policy"],
+                "compiler-derived-pg18-without-pg_test",
+            )
 
-    def test_cfg_parser_does_not_hide_not_or_optional_test_code(self) -> None:
-        text = (
-            "#[cfg(not(test))]\nfn production() {}\n"
-            '#[cfg(any(test, feature = "fixture"))]\nfn maybe_production() {}\n'
-            '#[cfg(all(test, feature = "fixture"))]\nmod only_test { fn helper() {} }\n'
-        )
-        ranges = coverage_tools.rust_cfg_test_ranges(text)
-        self.assertEqual(ranges, [(5, 6)])
+    def test_rust_scope_requires_compiler_mapping_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            scope = coverage_tools.read_json(self.write_scope(root))
+            self.assertEqual(
+                scope["layers"]["rust"]["production_mapping"],
+                "compiler-derived-pg18-without-pg_test",
+            )
 
     def test_build_script_is_a_required_owned_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -556,6 +580,101 @@ class SqlSemanticCoverageTests(unittest.TestCase):
                     )
                 )
 
+    def test_guard_words_in_literals_and_noncode_dollars_are_rejected(self) -> None:
+        fake_guards = (
+            "SELECT 'RAISE EXCEPTION';",
+            'SELECT "RAISE EXCEPTION";',
+            "SELECT $$ RAISE EXCEPTION $$;",
+            "/* outer /* RAISE EXCEPTION */ still comment */ SELECT 1;",
+        )
+        for fake_guard in fake_guards:
+            with (
+                self.subTest(fake_guard=fake_guard),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = pathlib.Path(directory)
+                tests = root / "tests"
+                tests.mkdir()
+                (tests / "00_probe.sql").write_text(
+                    fake_guard
+                    + "\n\\echo 'PGACCEL_ASSERT_OK:00_probe.assert_001'\n"
+                    + "\\echo 'PGACCEL_FILE_OK:00_probe'\n",
+                    encoding="utf-8",
+                )
+                with (
+                    mock.patch.object(coverage_tools, "BASELINE_SQL_FILES", 1),
+                    mock.patch.object(coverage_tools, "BASELINE_SQL_ASSERTIONS", 1),
+                    self.assertRaises(coverage_tools.CoverageError),
+                ):
+                    coverage_tools.build_sql_manifest(
+                        argparse.Namespace(
+                            tests_dir=str(tests),
+                            output=str(root / "manifest.json"),
+                        )
+                    )
+
+    def test_checked_in_manifest_matches_baseline_and_raster_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "manifest.json"
+            status = quiet_call(
+                coverage_tools.build_sql_manifest,
+                argparse.Namespace(
+                    tests_dir=str(REPO_ROOT / "sql/tests"),
+                    output=str(output),
+                    baseline=str(REPO_ROOT / "coverage/release-baseline.json"),
+                ),
+            )
+            self.assertEqual(status, 0)
+            generated = coverage_tools.read_json(output)
+            checked_in = coverage_tools.read_json(
+                REPO_ROOT / "coverage/sql-semantic-assertions.json"
+            )
+            self.assertEqual(generated, checked_in)
+            self.assertEqual(generated["declared_assertions"], 287)
+            matrix = next(
+                entry
+                for entry in generated["files"]
+                if entry["file"] == "85_function_matrix.sql"
+            )
+            raster_ids = {
+                "85_function_matrix.assert_037",
+                "85_function_matrix.assert_051",
+                "85_function_matrix.assert_052",
+            }
+            declarations = {
+                assertion["id"]: assertion for assertion in matrix["assertions"]
+            }
+            self.assertTrue(raster_ids.issubset(declarations))
+            self.assertTrue(
+                all(declarations[value]["emission"] == "notice" for value in raster_ids)
+            )
+
+    def test_normal_manifest_generation_rejects_baseline_id_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with self.assertRaises(coverage_tools.CoverageError):
+                coverage_tools.build_sql_manifest(
+                    argparse.Namespace(
+                        tests_dir=str(REPO_ROOT / "sql/tests"),
+                        output=str(root / "no-baseline.json"),
+                        baseline="",
+                    )
+                )
+            baseline = coverage_tools.read_json(
+                REPO_ROOT / "coverage/release-baseline.json"
+            )
+            baseline["sql"]["assertion_ids"].pop()
+            baseline_path = root / "baseline.json"
+            coverage_tools.write_json(baseline_path, baseline)
+            with self.assertRaises(coverage_tools.CoverageError):
+                coverage_tools.build_sql_manifest(
+                    argparse.Namespace(
+                        tests_dir=str(REPO_ROOT / "sql/tests"),
+                        output=str(root / "manifest.json"),
+                        baseline=str(baseline_path),
+                    )
+                )
+
 
 class AggregateNegativeMatrixTests(unittest.TestCase):
     def initialize_valid_gate(self, root: pathlib.Path) -> None:
@@ -568,61 +687,440 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
                 sql_threshold=90.0,
             ),
         )
-        for layer in ("rust", "cpp"):
-            summary = coverage_tools.initial_layer_summary(layer, 90.0)
-            summary.update(
+        repo_root = root / "checkout"
+        rust_sources = ["crate/src/lib.rs", "crate/build.rs"]
+        cpp_sources = [f"kernels/src/source_{index:02d}.cpp" for index in range(21)]
+        ctest_names = [
+            "test_device",
+            *(f"test_{index:02d}" for index in range(1, 28)),
+            "test_oom_invariant",
+        ]
+        families = [
+            "reduce_f64",
+            "sort_f64",
+            "hashagg_f64",
+            "spatial_f64",
+            "h3_f64",
+        ]
+        for relative in rust_sources:
+            path = repo_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fn fixture() {}\n", encoding="utf-8")
+        for relative in cpp_sources:
+            path = repo_root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("int fixture() { return 1; }\n", encoding="utf-8")
+
+        manifest_entries: list[dict[str, object]] = []
+        assertion_ids: list[str] = []
+        sql_dir = repo_root / "sql/tests"
+        sql_dir.mkdir(parents=True)
+        for file_index in range(52):
+            stem = f"{file_index:02d}_fixture"
+            name = f"{stem}.sql"
+            assertion_count = 6 if file_index < 27 else 5
+            source_lines: list[str] = []
+            assertions: list[dict[str, object]] = []
+            for assertion_index in range(1, assertion_count + 1):
+                identifier = f"{stem}.assert_{assertion_index:03d}"
+                source_lines.extend(
+                    (
+                        "DO $ BEGIN",
+                        "  IF 1 <> 1 THEN RAISE EXCEPTION 'bad'; END IF;",
+                        "END $;",
+                        f"\\echo 'PGACCEL_ASSERT_OK:{identifier}'",
+                    )
+                )
+                assertion_ids.append(identifier)
+                assertions.append(
+                    {
+                        "id": identifier,
+                        "source_line": len(source_lines),
+                        "emission": "echo",
+                    }
+                )
+            source_lines.append(f"\\echo 'PGACCEL_FILE_OK:{stem}'")
+            source_path = sql_dir / name
+            source_path.write_text("\n".join(source_lines) + "\n", encoding="utf-8")
+            manifest_entries.append(
                 {
-                    "covered_units": 90,
-                    "total_units": 100,
-                    "uncovered_units": 10,
-                    "percent": 90.0,
-                    "covered_lines": 90,
-                    "line_count": 100,
-                    "uncovered_lines": 10,
-                    "line_percent": 90.0,
-                    "excluded_cfg_test_lines": 0,
-                    "mapping": {
-                        "owned_files": 1,
-                        "required_files": 1,
-                        "mapped_files": 1,
-                        "missing_required_files": [],
-                        "unexpected_owned_report_files": [],
-                    },
-                    "execution": {
-                        "status": "complete",
-                        "exit_code": 0,
-                        "stages_complete": True,
-                    },
-                    "errors": [],
-                    "passed": True,
+                    "file": name,
+                    "sha256": coverage_tools.sha256(source_path),
+                    "completion_id": stem,
+                    "assertions": assertions,
                 }
             )
-            coverage_tools.write_json(root / layer / "layer-summary.json", summary)
-            self.write_complete_stage(root, layer)
-        sql = coverage_tools.initial_layer_summary("sql", 90.0)
-        manifest = coverage_tools.initial_manifest_state()
-        manifest.update(
+        self.assertEqual(len(assertion_ids), 287)
+
+        scope = {
+            "schema_version": 2,
+            "minimum_percent": 90.0,
+            "sql_manifest": "coverage/sql-semantic-assertions.json",
+            "layers": {
+                "rust": {
+                    "description": "fixture Rust scope",
+                    "roots": ["crate/src", "crate/build.rs"],
+                    "extensions": [".rs"],
+                    "required_extensions": [".rs"],
+                    "require_executable_mapping_only": False,
+                    "production_mapping": "compiler-derived-pg18-without-pg_test",
+                    "exclude": [],
+                },
+                "cpp": {
+                    "description": "fixture C++ scope",
+                    "roots": ["kernels/src"],
+                    "extensions": [".cpp"],
+                    "required_extensions": [".cpp"],
+                    "require_executable_mapping_only": False,
+                    "exclude": [],
+                },
+            },
+        }
+        manifest = {
+            "schema_version": 2,
+            "kind": "sql-semantic-assertion-manifest",
+            "test_root": "sql/tests",
+            "baseline_files": 52,
+            "baseline_assertions": 287,
+            "declared_files": 52,
+            "declared_assertions": 287,
+            "files": manifest_entries,
+        }
+        baseline = {
+            "schema_version": 2,
+            "kind": "coverage-release-baseline",
+            "minimum_percent": 90.0,
+            "rust": {
+                "roots": scope["layers"]["rust"]["roots"],
+                "exclude": [],
+                "production_feature": "pg18",
+                "forbidden_production_feature": "pg_test",
+                "mapping_policy": "compiler-derived-pg18-without-pg_test",
+                "owned_files": rust_sources,
+                "required_mapping_files": rust_sources,
+            },
+            "cpp": {
+                "sources": cpp_sources,
+                "ctest_names": sorted(ctest_names),
+                "oom_families": families,
+            },
+            "sql": {
+                "files": [entry["file"] for entry in manifest_entries],
+                "assertion_ids": sorted(assertion_ids),
+            },
+        }
+        coverage_dir = repo_root / "coverage"
+        coverage_dir.mkdir()
+        coverage_tools.write_json(coverage_dir / "scope.json", scope)
+        coverage_tools.write_json(coverage_dir / "release-baseline.json", baseline)
+        coverage_tools.write_json(
+            coverage_dir / "sql-semantic-assertions.json", manifest
+        )
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "config", "user.email", "coverage@example.invalid"],
+            ["git", "config", "user.name", "Coverage Fixture"],
+            ["git", "add", "."],
+            ["git", "commit", "-q", "-m", "fixture"],
+        ):
+            subprocess.run(command, cwd=repo_root, check=True)
+
+        for name in (
+            "scope.json",
+            "release-baseline.json",
+            "sql-semantic-assertions.json",
+        ):
+            source_path = coverage_dir / name
+            (root / name).write_bytes(source_path.read_bytes())
+
+        scope = coverage_tools.read_json(root / "scope.json")
+        baseline = coverage_tools.read_json(root / "release-baseline.json")
+
+        def write_lcov(
+            path: pathlib.Path, relative_files: list[str], hits: int = 1
+        ) -> None:
+            lines = ["TN:"]
+            for relative in relative_files:
+                lines.extend(
+                    (
+                        f"SF:{repo_root / relative}",
+                        f"DA:1,{hits}",
+                        "end_of_record",
+                    )
+                )
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        def write_export(path: pathlib.Path, relative_files: list[str]) -> None:
+            coverage_tools.write_json(
+                path,
+                {
+                    "type": "llvm.coverage.json.export",
+                    "version": "2.0.1",
+                    "data": [
+                        {
+                            "files": [
+                                {
+                                    "filename": str(repo_root / relative),
+                                    "summary": {
+                                        "lines": {
+                                            "count": 1,
+                                            "covered": 1,
+                                            "percent": 100.0,
+                                        }
+                                    },
+                                }
+                                for relative in relative_files
+                            ]
+                        }
+                    ],
+                },
+            )
+
+        rust_files = baseline["rust"]["owned_files"]
+        write_lcov(root / "rust/production-map.info", rust_files, hits=0)
+        write_lcov(root / "rust/raw-lcov.info", rust_files)
+        write_export(root / "rust/raw-coverage.json", rust_files)
+        (root / "rust/raw-summary.txt").write_text("TOTAL 100.00%\n", encoding="utf-8")
+        coverage_tools.write_json(
+            root / "rust/production-config.json",
+            {
+                "postgres_major": 18,
+                "default_features": False,
+                "features": ["pg18"],
+                "pg_test": False,
+            },
+        )
+        rust_status = quiet_call(
+            coverage_tools.summarize_layer,
+            argparse.Namespace(
+                repo_root=str(repo_root),
+                scope=str(root / "scope.json"),
+                layer="rust",
+                threshold=90.0,
+                execution_status=0,
+                input=str(root / "rust/raw-lcov.info"),
+                production_map=str(root / "rust/production-map.info"),
+                format="lcov",
+                output_dir=str(root / "rust"),
+                artifact_dir=None,
+            ),
+        )
+        self.assertEqual(rust_status, 0)
+
+        _, cpp_required = coverage_tools.source_inventory(
+            repo_root, scope["layers"]["cpp"]
+        )
+        cpp_files = sorted(cpp_required)
+        write_export(root / "cpp/raw-coverage.json", cpp_files)
+        write_lcov(root / "cpp/raw-lcov.info", cpp_files)
+        (root / "cpp/raw-summary.txt").write_text("TOTAL 100.00%\n", encoding="utf-8")
+        cpp_status = quiet_call(
+            coverage_tools.summarize_layer,
+            argparse.Namespace(
+                repo_root=str(repo_root),
+                scope=str(root / "scope.json"),
+                layer="cpp",
+                threshold=90.0,
+                execution_status=0,
+                input=str(root / "cpp/raw-coverage.json"),
+                production_map=None,
+                format="json",
+                output_dir=str(root / "cpp"),
+                artifact_dir=None,
+            ),
+        )
+        self.assertEqual(cpp_status, 0)
+
+        tools_dir = root / "tools"
+        tools_dir.mkdir()
+        tool_outputs = {
+            "rustc": "rustc 1.99.0\nLLVM version: 20.1.0",
+            "clang": "clang version 20.1.0",
+            "llvm-cov": "LLVM version 20.1.0",
+        }
+        tool_paths: dict[str, pathlib.Path] = {}
+        for name, output in tool_outputs.items():
+            path = tools_dir / name
+            path.write_text(
+                f"#!/bin/sh\nprintf '%s\\n' '{output}'\n",
+                encoding="utf-8",
+            )
+            path.chmod(0o755)
+            tool_paths[name] = path
+        profdata = tools_dir / "llvm-profdata"
+        profdata.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = show ]; then\n'
+            "  grep -q '^VALID' \"$2\"\n"
+            "  exit $?\n"
+            "fi\n"
+            "printf '%s\\n' 'LLVM version 20.1.0'\n",
+            encoding="utf-8",
+        )
+        profdata.chmod(0o755)
+        tool_paths["llvm-profdata"] = profdata
+        for layer in ("rust", "cpp"):
+            profiles = root / layer / "profiles"
+            profiles.mkdir(exist_ok=True)
+            (profiles / "fixture.profraw").write_text(
+                "VALID raw profile\n", encoding="utf-8"
+            )
+            (root / layer / "coverage.profdata").write_text(
+                "VALID indexed profile\n", encoding="utf-8"
+            )
+        self.assertEqual(
+            quiet_call(
+                coverage_tools.validate_rust_toolchain,
+                argparse.Namespace(
+                    rustc=str(tool_paths["rustc"]),
+                    llvm_cov=str(tool_paths["llvm-cov"]),
+                    llvm_profdata=str(tool_paths["llvm-profdata"]),
+                    output=str(root / "rust/toolchain.json"),
+                ),
+            ),
+            0,
+        )
+        self.assertEqual(
+            quiet_call(
+                coverage_tools.validate_toolchain,
+                argparse.Namespace(
+                    clang=str(tool_paths["clang"]),
+                    llvm_cov=str(tool_paths["llvm-cov"]),
+                    llvm_profdata=str(tool_paths["llvm-profdata"]),
+                    output=str(root / "cpp/toolchain.json"),
+                ),
+            ),
+            0,
+        )
+
+        ctest_names = baseline["cpp"]["ctest_names"]
+        families = baseline["cpp"]["oom_families"]
+        per_test_logs = root / "cpp/per-test-logs"
+        per_test_logs.mkdir()
+        ctest_lines = []
+        for index, test_name in enumerate(ctest_names, start=1):
+            ctest_lines.append(f"Test #{index}: {test_name} .... Passed 0.01 sec")
+            raw_log = per_test_logs / f"{test_name}-fixture.log"
+            if test_name == "test_oom_invariant":
+                family_lines = [
+                    "PGACCEL_OOM_FAMILY "
+                    f"family={family} result=PASS dispatches=1 "
+                    "peak_rss_bytes=100 rss_delta_bytes=10 rss_limit_bytes=100"
+                    for family in families
+                ]
+                raw_log.write_text(
+                    'PGACCEL_DEVICE_PROOF device="fixture" backend="cuda" '
+                    "compute_units=1 max_alloc_bytes=100 real_device=1\n"
+                    + "\n".join(family_lines)
+                    + "\nPGACCEL_OOM_INVARIANT result=PASS families=5 "
+                    "max_alloc_bytes=100 input_doubles=200 rss_limit_bytes=300\n",
+                    encoding="utf-8",
+                )
+            else:
+                raw_log.write_text(
+                    f"PGACCEL_TEST_PASS name={test_name}\n", encoding="utf-8"
+                )
+        ctest_log = root / "cpp/ctest.log"
+        ctest_log.write_text("\n".join(ctest_lines) + "\n", encoding="utf-8")
+        self.assertEqual(
+            quiet_call(
+                coverage_tools.gpu_evidence,
+                argparse.Namespace(
+                    execution_status=0,
+                    ctest_log=str(ctest_log),
+                    per_test_log_dir=str(per_test_logs),
+                    baseline=str(root / "release-baseline.json"),
+                    output=str(root / "cpp/gpu-correctness-evidence.json"),
+                ),
+            ),
+            0,
+        )
+
+        manifest_path = root / "sql-semantic-assertions.json"
+        manifest_document = coverage_tools.read_json(manifest_path)
+        manifest_hash = coverage_tools.sha256(manifest_path)
+        successful_ids: list[str] = []
+        file_rows: list[dict[str, object]] = []
+        result_lines = ["file\tstatus\texit_code\tlog"]
+        logs_dir = root / "sql/test-run/logs"
+        logs_dir.mkdir(parents=True)
+        for entry in manifest_document["files"]:
+            name = entry["file"]
+            identifiers = [assertion["id"] for assertion in entry["assertions"]]
+            successful_ids.extend(identifiers)
+            log_path = logs_dir / f"{name}.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        *(
+                            f"PGACCEL_ASSERT_OK:{identifier}"
+                            for identifier in identifiers
+                        ),
+                        f"PGACCEL_FILE_OK:{entry['completion_id']}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            relative_log = f"logs/{name}.log"
+            result_lines.append(f"{name}\tpass\t0\t{relative_log}")
+            file_rows.append(
+                {
+                    "file": name,
+                    "status": "pass",
+                    "exit_code": 0,
+                    "observed_assertions": len(identifiers),
+                    "completion_markers": 1,
+                    "log": relative_log,
+                    "log_sha256": coverage_tools.sha256(log_path),
+                }
+            )
+        self.assertEqual(len(successful_ids), 287)
+        (root / "sql/test-run/results.tsv").write_text(
+            "\n".join(result_lines) + "\n", encoding="utf-8"
+        )
+        coverage_tools.write_json(
+            root / "sql/assertion-inventory.json",
+            {
+                "schema_version": 2,
+                "kind": "sql-semantic-assertion-inventory",
+                "manifest_sha256": manifest_hash,
+                "declared_assertions": len(successful_ids),
+                "successful_assertions": len(successful_ids),
+                "assertion_percent": 100.0,
+                "declared_files": len(file_rows),
+                "passed_files": len(file_rows),
+                "completed_files": len(file_rows),
+                "successful_assertion_ids": sorted(successful_ids),
+                "errors": [],
+                "complete": True,
+                "files": file_rows,
+            },
+        )
+        sql_summary = coverage_tools.initial_layer_summary("sql", 90.0)
+        sql_manifest = coverage_tools.initial_manifest_state()
+        sql_manifest.update(
             {
                 "valid": True,
-                "sha256": "a" * 64,
-                "declared_files": 52,
-                "declared_assertions": 285,
-                "completed_files": 52,
-                "passed_test_files": 52,
-                "test_files": 52,
+                "sha256": manifest_hash,
+                "declared_files": len(file_rows),
+                "declared_assertions": len(successful_ids),
+                "completed_files": len(file_rows),
+                "passed_test_files": len(file_rows),
+                "test_files": len(file_rows),
             }
         )
-        sql.update(
+        sql_summary.update(
             {
-                "covered_units": 285,
-                "total_units": 285,
+                "covered_units": len(successful_ids),
+                "total_units": len(successful_ids),
                 "uncovered_units": 0,
                 "percent": 100.0,
-                "covered_assertions": 285,
-                "assertion_count": 285,
+                "covered_assertions": len(successful_ids),
+                "assertion_count": len(successful_ids),
                 "uncovered_assertions": 0,
                 "assertion_percent": 100.0,
-                "manifest": manifest,
+                "manifest": sql_manifest,
                 "execution": {
                     "status": "complete",
                     "exit_code": 0,
@@ -632,116 +1130,39 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
                 "passed": True,
             }
         )
-        coverage_tools.write_json(root / "sql/layer-summary.json", sql)
-        self.write_complete_stage(root, "sql")
-        manifest_entries = []
-        successful_ids = []
-        file_rows = []
-        logs_dir = root / "sql/test-run/logs"
-        logs_dir.mkdir(parents=True)
-        for file_index in range(52):
-            stem = f"{file_index:02d}_fixture"
-            name = f"{stem}.sql"
-            assertion_count = 6 if file_index < 25 else 5
-            identifiers = [
-                f"{stem}.assert_{assertion_index:03d}"
-                for assertion_index in range(1, assertion_count + 1)
-            ]
-            successful_ids.extend(identifiers)
-            manifest_entries.append(
-                {
-                    "file": name,
-                    "sha256": "b" * 64,
-                    "completion_id": stem,
-                    "assertions": [
-                        {
-                            "id": identifier,
-                            "source_line": line_number,
-                            "emission": "echo",
-                        }
-                        for line_number, identifier in enumerate(identifiers, start=1)
-                    ],
-                }
-            )
-            log_path = logs_dir / f"{name}.log"
-            log_path.write_text(
-                "\n".join(
-                    [
-                        *(f"PGACCEL_ASSERT_OK:{value}" for value in identifiers),
-                        f"PGACCEL_FILE_OK:{stem}",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            file_rows.append(
-                {
-                    "file": name,
-                    "status": "pass",
-                    "exit_code": 0,
-                    "observed_assertions": assertion_count,
-                    "completion_markers": 1,
-                    "log": f"logs/{name}.log",
-                    "log_sha256": coverage_tools.sha256(log_path),
-                }
-            )
-        self.assertEqual(len(successful_ids), 285)
+        coverage_tools.write_json(root / "sql/layer-summary.json", sql_summary)
+
+        commit = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         coverage_tools.write_json(
-            root / "sql-semantic-assertions.json",
+            root / "provenance.json",
             {
                 "schema_version": 2,
-                "kind": "sql-semantic-assertion-manifest",
-                "test_root": "sql/tests",
-                "baseline_files": 52,
-                "baseline_assertions": 285,
-                "declared_files": 52,
-                "declared_assertions": 285,
-                "files": manifest_entries,
-            },
-        )
-        copied_hash = coverage_tools.sha256(root / "sql-semantic-assertions.json")
-        sql_path = root / "sql/layer-summary.json"
-        sql_document = json.loads(sql_path.read_text())
-        sql_document["manifest"]["sha256"] = copied_hash
-        sql_path.write_text(json.dumps(sql_document), encoding="utf-8")
-        coverage_tools.write_json(
-            root / "sql/assertion-inventory.json",
-            {
-                "schema_version": 2,
-                "kind": "sql-semantic-assertion-inventory",
-                "manifest_sha256": copied_hash,
-                "declared_assertions": 285,
-                "successful_assertions": 285,
-                "assertion_percent": 100.0,
-                "declared_files": 52,
-                "passed_files": 52,
-                "completed_files": 52,
-                "successful_assertion_ids": sorted(successful_ids),
+                "kind": "coverage-provenance",
+                "commit": commit,
+                "tree": "clean",
+                "scope_sha256": coverage_tools.sha256(root / "scope.json"),
+                "baseline_sha256": coverage_tools.sha256(
+                    root / "release-baseline.json"
+                ),
                 "errors": [],
-                "complete": True,
-                "files": file_rows,
-            },
-        )
-        ctest_log = root / "cpp/ctest.log"
-        ctest_log.write_text(
-            "Test #42: test_oom_invariant .... Passed 441.50 sec\n",
-            encoding="utf-8",
-        )
-        coverage_tools.write_json(
-            root / "cpp/gpu-correctness-evidence.json",
-            {
-                "schema_version": 2,
-                "kind": "gpu-correctness-evidence",
-                "status": "complete",
-                "execution_status": 0,
-                "ctest_log": "ctest.log",
-                "ctest_log_sha256": coverage_tools.sha256(ctest_log),
-                "oom_invariant_required": True,
-                "oom_invariant_observed": True,
-                "oom_invariant_passed": True,
                 "passed": True,
             },
         )
+        for layer in ("rust", "cpp", "sql"):
+            self.write_complete_stage(root, layer)
+            self.assertEqual(
+                quiet_call(
+                    coverage_tools.seal_layer_evidence,
+                    argparse.Namespace(artifact_dir=str(root), layer=layer),
+                ),
+                0,
+            )
 
     def write_complete_stage(self, root: pathlib.Path, layer: str) -> None:
         coverage_tools.write_json(
@@ -762,7 +1183,18 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
     def aggregate(self, root: pathlib.Path) -> int:
         return quiet_call(
             coverage_tools.aggregate,
-            argparse.Namespace(artifact_dir=str(root)),
+            argparse.Namespace(
+                artifact_dir=str(root), repo_root=str(root / "checkout")
+            ),
+        )
+
+    def reseal(self, root: pathlib.Path, layer: str) -> None:
+        self.assertEqual(
+            quiet_call(
+                coverage_tools.seal_layer_evidence,
+                argparse.Namespace(artifact_dir=str(root), layer=layer),
+            ),
+            0,
         )
 
     def mutate_summary(self, root: pathlib.Path, layer: str, mutation) -> None:
@@ -942,6 +1374,117 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
                 "Test #42: test_oom_invariant .... Not Run (Disabled)\n",
                 encoding="utf-8",
             )
+            self.reseal(root, "cpp")
+            self.assertEqual(self.aggregate(root), 1)
+
+    def test_missing_per_test_gpu_log_is_rejected_after_reseal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            victim = next((root / "cpp/per-test-logs").glob("test_device-*.log"))
+            victim.unlink()
+            self.reseal(root, "cpp")
+            self.assertEqual(self.aggregate(root), 1)
+
+    def test_raw_evidence_absence_and_hash_mismatch_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            (root / "rust/profiles/fixture.profraw").unlink()
+            self.assertEqual(self.aggregate(root), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            with (root / "cpp/raw-lcov.info").open("a", encoding="utf-8") as handle:
+                handle.write("TN:tampered\n")
+            self.assertEqual(self.aggregate(root), 1)
+
+    def test_malformed_lcov_json_and_profdata_fail_after_reseal(self) -> None:
+        mutations = (
+            ("rust", "raw-lcov.info", "not lcov\n"),
+            ("cpp", "raw-coverage.json", "{}\n"),
+            ("rust", "coverage.profdata", "MALFORMED\n"),
+        )
+        for layer, relative, contents in mutations:
+            with (
+                self.subTest(layer=layer, relative=relative),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = pathlib.Path(directory)
+                self.initialize_valid_gate(root)
+                (root / layer / relative).write_text(contents, encoding="utf-8")
+                self.reseal(root, layer)
+                self.assertEqual(self.aggregate(root), 1)
+
+    def test_toolchain_major_mismatch_is_rejected_after_reseal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            path = root / "cpp/toolchain.json"
+            toolchain = coverage_tools.read_json(path)
+            toolchain["tools"]["llvm_cov"]["major"] = 19
+            coverage_tools.write_json(path, toolchain)
+            self.reseal(root, "cpp")
+            self.assertEqual(self.aggregate(root), 1)
+
+    def test_dirty_deadbeef_and_scope_drift_provenance_are_rejected(self) -> None:
+        for mutation in ("dirty", "deadbeef", "scope", "checkout_dirty"):
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = pathlib.Path(directory)
+                self.initialize_valid_gate(root)
+                path = root / "provenance.json"
+                provenance = coverage_tools.read_json(path)
+                if mutation == "dirty":
+                    provenance.update(tree="dirty", passed=False, errors=["dirty"])
+                elif mutation == "deadbeef":
+                    provenance["commit"] = "deadbeef" + "0" * 32
+                elif mutation == "scope":
+                    scope_path = root / "scope.json"
+                    scope = coverage_tools.read_json(scope_path)
+                    scope["minimum_percent"] = 91.0
+                    coverage_tools.write_json(scope_path, scope)
+                    provenance["scope_sha256"] = coverage_tools.sha256(scope_path)
+                    for layer in ("rust", "cpp", "sql"):
+                        evidence_path = root / layer / "raw-evidence.json"
+                        evidence = coverage_tools.read_json(evidence_path)
+                        evidence["scope_sha256"] = provenance["scope_sha256"]
+                        coverage_tools.write_json(evidence_path, evidence)
+                else:
+                    (root / "checkout/untracked.txt").write_text(
+                        "dirty\n", encoding="utf-8"
+                    )
+                coverage_tools.write_json(path, provenance)
+                self.assertEqual(self.aggregate(root), 1)
+
+    def test_self_consistent_green_summary_cannot_override_raw_totals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            path = root / "rust/layer-summary.json"
+            summary = coverage_tools.read_json(path)
+            summary.update(
+                covered_units=1,
+                total_units=1,
+                uncovered_units=0,
+                percent=100.0,
+                covered_lines=1,
+                line_count=1,
+                uncovered_lines=0,
+                line_percent=100.0,
+                passed=True,
+                errors=[],
+            )
+            summary["mapping"] = {
+                "owned_files": 1,
+                "required_files": 1,
+                "mapped_files": 1,
+                "missing_required_files": [],
+                "unexpected_owned_report_files": [],
+            }
+            coverage_tools.write_json(path, summary)
             self.assertEqual(self.aggregate(root), 1)
 
     def test_nonfinite_summary_json_still_produces_gate_summary(self) -> None:
@@ -950,11 +1493,116 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
             self.initialize_valid_gate(root)
             path = root / "rust/layer-summary.json"
             path.write_text(
-                path.read_text().replace('"percent": 90.0', '"percent": NaN'),
+                path.read_text().replace('"percent": 100.0', '"percent": NaN', 1),
                 encoding="utf-8",
             )
             self.assertEqual(self.aggregate(root), 1)
             self.assertTrue((root / "gate-summary.json").is_file())
+
+
+class ImmutableBaselineTests(unittest.TestCase):
+    def audit(self, scope: pathlib.Path, baseline: pathlib.Path) -> int:
+        return quiet_call(
+            coverage_tools.audit_scope,
+            argparse.Namespace(
+                scope=str(scope),
+                baseline=str(baseline),
+                repo_root=str(REPO_ROOT),
+            ),
+        )
+
+    def write_matching_baseline(
+        self, root: pathlib.Path, scope: pathlib.Path
+    ) -> pathlib.Path:
+        path = root / "baseline.json"
+        coverage_tools.write_json(
+            path,
+            coverage_tools.release_baseline_document(
+                REPO_ROOT,
+                scope,
+                REPO_ROOT / "coverage/sql-semantic-assertions.json",
+            ),
+        )
+        return path
+
+    def test_release_baseline_update_requires_explicit_acknowledgement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            args = argparse.Namespace(
+                repo_root=str(REPO_ROOT),
+                scope=str(REPO_ROOT / "coverage/scope.json"),
+                manifest=str(REPO_ROOT / "coverage/sql-semantic-assertions.json"),
+                output=str(root / "baseline.json"),
+                acknowledge_review_visible_update="no",
+            )
+            with self.assertRaises(coverage_tools.CoverageError):
+                coverage_tools.update_release_baseline(args)
+            args.acknowledge_review_visible_update = "UPDATE-RELEASE-BASELINE"
+            self.assertEqual(
+                quiet_call(coverage_tools.update_release_baseline, args), 0
+            )
+            self.assertEqual(
+                coverage_tools.read_json(pathlib.Path(args.output)),
+                coverage_tools.read_json(REPO_ROOT / "coverage/release-baseline.json"),
+            )
+
+    def test_rust_build_script_and_nonempty_owned_scope_are_pinned(self) -> None:
+        mutations = ("remove_build", "exclude_all")
+        for mutation in mutations:
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = pathlib.Path(directory)
+                scope = coverage_tools.read_json(REPO_ROOT / "coverage/scope.json")
+                if mutation == "remove_build":
+                    scope["layers"]["rust"]["roots"].remove("pg_accel/build.rs")
+                else:
+                    scope["layers"]["rust"]["exclude"] = ["**/*.rs"]
+                scope_path = root / "scope.json"
+                coverage_tools.write_json(scope_path, scope)
+                if mutation == "remove_build":
+                    baseline = self.write_matching_baseline(root, scope_path)
+                else:
+                    baseline = REPO_ROOT / "coverage/release-baseline.json"
+                with self.assertRaises(coverage_tools.CoverageError):
+                    self.audit(scope_path, pathlib.Path(baseline))
+
+    def test_cpp_headers_only_scope_is_rejected_even_with_matching_baseline(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            scope = coverage_tools.read_json(REPO_ROOT / "coverage/scope.json")
+            scope["layers"]["cpp"]["exclude"] = ["pgaccel-kernels/src/**"]
+            scope_path = root / "scope.json"
+            coverage_tools.write_json(scope_path, scope)
+            baseline = self.write_matching_baseline(root, scope_path)
+            with self.assertRaises(coverage_tools.CoverageError):
+                self.audit(scope_path, baseline)
+
+    def test_ctest_sql_filename_and_sql_id_baseline_mutations_are_rejected(
+        self,
+    ) -> None:
+        mutations = (
+            ("cpp", "ctest_names"),
+            ("sql", "files"),
+            ("sql", "assertion_ids"),
+        )
+        for section, field in mutations:
+            with (
+                self.subTest(section=section, field=field),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = pathlib.Path(directory)
+                baseline = coverage_tools.read_json(
+                    REPO_ROOT / "coverage/release-baseline.json"
+                )
+                baseline[section][field].pop()
+                baseline_path = root / "baseline.json"
+                coverage_tools.write_json(baseline_path, baseline)
+                with self.assertRaises(coverage_tools.CoverageError):
+                    self.audit(REPO_ROOT / "coverage/scope.json", baseline_path)
 
 
 class ArtifactAndToolchainTests(unittest.TestCase):
@@ -1017,19 +1665,86 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             root = pathlib.Path(directory)
             log = root / "ctest.log"
             output = root / "evidence.json"
+            per_test = root / "per-test"
+            per_test.mkdir()
+            names = [f"test_{index:02d}" for index in range(28)] + [
+                "test_oom_invariant"
+            ]
+            families = [
+                "reduce_f64",
+                "sort_f64",
+                "hashagg_f64",
+                "spatial_f64",
+                "h3_f64",
+            ]
+            baseline = root / "baseline.json"
+            coverage_tools.write_json(
+                baseline,
+                {
+                    "cpp": {
+                        "ctest_names": names,
+                        "oom_families": families,
+                    }
+                },
+            )
+            for name in names:
+                text = "pass\n"
+                if name == "test_oom_invariant":
+                    text = (
+                        'PGACCEL_DEVICE_PROOF device="fixture" backend="cuda" '
+                        "compute_units=1 max_alloc_bytes=100 real_device=1\n"
+                        + "\n".join(
+                            "PGACCEL_OOM_FAMILY "
+                            f"family={family} result=PASS dispatches=1 "
+                            "peak_rss_bytes=100 rss_delta_bytes=10 rss_limit_bytes=100"
+                            for family in families
+                        )
+                        + "\nPGACCEL_OOM_INVARIANT result=PASS families=5 "
+                        "max_alloc_bytes=100 input_doubles=200 rss_limit_bytes=300\n"
+                    )
+                (per_test / f"{name}-fixture.log").write_text(text, encoding="utf-8")
             args = argparse.Namespace(
-                execution_status=0, ctest_log=str(log), output=str(output)
+                execution_status=0,
+                ctest_log=str(log),
+                per_test_log_dir=str(per_test),
+                baseline=str(baseline),
+                output=str(output),
             )
             log.write_text(
-                "Test #42: test_oom_invariant .... Not Run (Disabled)\n",
+                "\n".join(
+                    f"Test #{index}: {name} .... "
+                    + (
+                        "Not Run (Disabled)"
+                        if name == "test_oom_invariant"
+                        else "Passed 0.01 sec"
+                    )
+                    for index, name in enumerate(names, start=1)
+                )
+                + "\n",
                 encoding="utf-8",
             )
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
             log.write_text(
-                "Test #42: test_oom_invariant .... Passed 441.50 sec\n",
+                "\n".join(
+                    f"Test #{index}: {name} .... Passed 0.01 sec"
+                    for index, name in enumerate(names, start=1)
+                )
+                + "\n",
                 encoding="utf-8",
             )
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
+            oom_log = per_test / "test_oom_invariant-fixture.log"
+            valid_oom = oom_log.read_text(encoding="utf-8")
+            oom_log.write_text(
+                valid_oom.replace("dispatches=1", "dispatches=0", 1),
+                encoding="utf-8",
+            )
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            oom_log.write_text(
+                "PGACCEL_UNSUPPORTED\n" + valid_oom,
+                encoding="utf-8",
+            )
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
 
 
 if __name__ == "__main__":
