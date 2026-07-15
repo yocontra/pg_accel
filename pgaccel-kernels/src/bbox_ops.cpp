@@ -6,7 +6,6 @@
 #include <sycl/sycl.hpp>
 
 #include <cstddef>
-#include <cstring>
 #include <limits>
 #include <stdexcept>
 
@@ -44,20 +43,24 @@ pgaccel_status bbox_intersects_bulk_sycl_f32(sycl::queue& q, const float* boxes_
 
   const size_t total_pairs = count_a * count_b;
 
-  float* d_a = sycl::malloc_shared<float>(count_a * 4, q);
-  float* d_b = sycl::malloc_shared<float>(count_b * 4, q);
-  uint8_t* d_result = sycl::malloc_shared<uint8_t>(total_pairs, q);
+  float* d_a = sycl::malloc_device<float>(count_a * 4, q);
+  float* d_b = sycl::malloc_device<float>(count_b * 4, q);
+  uint8_t* d_result = sycl::malloc_device<uint8_t>(total_pairs, q);
+  size_t* d_hits = nullptr;
+  if (hit_count != nullptr)
+    d_hits = sycl::malloc_device<size_t>(1, q);
 
-  if (!d_a || !d_b || !d_result) {
+  if (!d_a || !d_b || !d_result || (hit_count != nullptr && !d_hits)) {
     sycl::free(d_a, q);
     sycl::free(d_b, q);
     sycl::free(d_result, q);
+    sycl::free(d_hits, q);
     return PGACCEL_OOM;
   }
 
   try {
-    std::memcpy(d_a, boxes_a, count_a * 4 * sizeof(float));
-    std::memcpy(d_b, boxes_b, count_b * 4 * sizeof(float));
+    q.memcpy(d_a, boxes_a, count_a * 4 * sizeof(float)).wait_and_throw();
+    q.memcpy(d_b, boxes_b, count_b * 4 * sizeof(float)).wait_and_throw();
 
     const size_t cb = count_b;  // capture for kernel lambda
 
@@ -84,25 +87,29 @@ pgaccel_status bbox_intersects_bulk_sycl_f32(sycl::queue& q, const float* boxes_
        });
      }).wait_and_throw();
 
-    std::memcpy(result, d_result, total_pairs * sizeof(uint8_t));
-
-    if (hit_count) {
-      size_t hits = 0;
-      for (size_t idx = 0; idx < total_pairs; ++idx) {
-        hits += d_result[idx] != 0 ? 1 : 0;
-      }
-      *hit_count = hits;
+    if (d_hits != nullptr) {
+      q.single_task([=]() {
+         size_t hits = 0;
+         for (size_t idx = 0; idx < total_pairs; ++idx)
+           hits += d_result[idx] != 0 ? 1 : 0;
+         *d_hits = hits;
+       }).wait_and_throw();
+      q.memcpy(hit_count, d_hits, sizeof(size_t)).wait_and_throw();
     }
+
+    q.memcpy(result, d_result, total_pairs * sizeof(uint8_t)).wait_and_throw();
   } catch (...) {
     sycl::free(d_a, q);
     sycl::free(d_b, q);
     sycl::free(d_result, q);
+    sycl::free(d_hits, q);
     throw;
   }
 
   sycl::free(d_a, q);
   sycl::free(d_b, q);
   sycl::free(d_result, q);
+  sycl::free(d_hits, q);
 
   return PGACCEL_OK;
 }

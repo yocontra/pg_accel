@@ -79,7 +79,9 @@ static pgaccel_status bbox_intersects_bulk_sycl_f64(sycl::queue& queue, const do
   uint64_t* device_a = sycl::malloc_device<uint64_t>(words_a, queue);
   uint64_t* device_b = sycl::malloc_device<uint64_t>(words_b, queue);
   uint8_t* device_result = sycl::malloc_device<uint8_t>(total_pairs, queue);
-  size_t* device_hits = hit_count == nullptr ? nullptr : sycl::malloc_device<size_t>(1, queue);
+  size_t* device_hits = nullptr;
+  if (hit_count != nullptr)
+    device_hits = sycl::malloc_device<size_t>(1, queue);
 
   if (device_a == nullptr || device_b == nullptr || device_result == nullptr ||
       (hit_count != nullptr && device_hits == nullptr)) {
@@ -98,42 +100,37 @@ static pgaccel_status bbox_intersects_bulk_sycl_f64(sycl::queue& queue, const do
     queue.wait_and_throw();
 
     const size_t inner_count = count_b;
-    const sycl::event pair_event = queue.submit([&](sycl::handler& handler) {
-      handler.parallel_for(sycl::range<1>(total_pairs), [=](sycl::id<1> id) {
-        const size_t pair_index = id[0];
-        const size_t outer_index = pair_index / inner_count;
-        const size_t inner_index = pair_index % inner_count;
-        const uint64_t* outer = device_a + outer_index * kBoxWords;
-        const uint64_t* inner = device_b + inner_index * kBoxWords;
+    queue
+        .submit([&](sycl::handler& handler) {
+          handler.parallel_for(sycl::range<1>(total_pairs), [=](sycl::id<1> id) {
+            const size_t pair_index = id[0];
+            const size_t outer_index = pair_index / inner_count;
+            const size_t inner_index = pair_index % inner_count;
+            const uint64_t* outer = device_a + outer_index * kBoxWords;
+            const uint64_t* inner = device_b + inner_index * kBoxWords;
 
-        const bool separated = f64_bits_ordered_less(outer[2], inner[0]) ||
-                               f64_bits_ordered_less(inner[2], outer[0]) ||
-                               f64_bits_ordered_less(outer[3], inner[1]) ||
-                               f64_bits_ordered_less(inner[3], outer[1]);
-        device_result[pair_index] = separated ? 0 : 1;
-      });
-    });
+            const bool separated = f64_bits_ordered_less(outer[2], inner[0]) ||
+                                   f64_bits_ordered_less(inner[2], outer[0]) ||
+                                   f64_bits_ordered_less(outer[3], inner[1]) ||
+                                   f64_bits_ordered_less(inner[3], outer[1]);
+            device_result[pair_index] = separated ? 0 : 1;
+          });
+        })
+        .wait_and_throw();
 
-    sycl::event terminal_event = pair_event;
     if (device_hits != nullptr) {
-      terminal_event = queue.submit([&](sycl::handler& handler) {
-        handler.depends_on(pair_event);
-        handler.single_task([=]() {
-          size_t hits = 0;
-          for (size_t pair_index = 0; pair_index < total_pairs; ++pair_index) {
-            hits += device_result[pair_index] != 0 ? 1 : 0;
-          }
-          *device_hits = hits;
-        });
-      });
+      queue
+          .single_task([=]() {
+            size_t hits = 0;
+            for (size_t pair_index = 0; pair_index < total_pairs; ++pair_index)
+              hits += device_result[pair_index] != 0 ? 1 : 0;
+            *device_hits = hits;
+          })
+          .wait_and_throw();
+      queue.memcpy(hit_count, device_hits, sizeof(size_t)).wait_and_throw();
     }
-    terminal_event.wait_and_throw();
 
-    queue.memcpy(result, device_result, total_pairs * sizeof(uint8_t));
-    if (device_hits != nullptr) {
-      queue.memcpy(hit_count, device_hits, sizeof(size_t));
-    }
-    queue.wait_and_throw();
+    queue.memcpy(result, device_result, total_pairs * sizeof(uint8_t)).wait_and_throw();
   } catch (...) {
     sycl::free(device_a, queue);
     sycl::free(device_b, queue);
