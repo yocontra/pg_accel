@@ -139,9 +139,11 @@ pub use parallel_stress::{
 pub use predicate_filter_expression_grouped_agg::PredicateFilterExpressionGroupedAgg;
 pub use proximity::Proximity;
 pub use recursive_union_decline::RecursiveUnionDecline;
+#[cfg(test)]
+pub use registry::Phase9OperatorLane;
 pub use registry::{
-    H3LaneClass, PHASE9_OPERATOR_DECLINES, Phase9OperatorLane, ResidentPinSpec,
-    ThresholdEvidenceEligibility, WorkloadCategory, workload_metadata,
+    H3LaneClass, PHASE9_OPERATOR_DECLINES, ResidentPinSpec, ThresholdEvidenceEligibility,
+    WorkloadCategory, workload_metadata,
 };
 pub use semi_anti_null_decline::{
     AntiJoinNullDecline, InJoinNullDecline, NotInJoinNullDecline, SemiJoinNullDecline,
