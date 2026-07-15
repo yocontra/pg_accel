@@ -2401,6 +2401,29 @@ def _is_inside(index: int, ranges: Sequence[tuple[int, int]]) -> bool:
     return any(start < index < end for start, end in ranges)
 
 
+def _lambda_capture_before_body(
+    tokens: Sequence[Token], brace: int, lower: int, reverse: dict[int, int]
+) -> int | None:
+    cursor = brace - 1
+    if cursor >= lower and tokens[cursor].value not in {")", "]"}:
+        # A lambda may declare an explicit trailing return type. Walk back to
+        # its arrow; an ordinary trailing-return function still fails the
+        # capture-list check below.
+        candidate = cursor
+        while candidate > lower and tokens[candidate].value not in {
+            ";",
+            "{",
+            "}",
+            "->",
+        }:
+            candidate -= 1
+        if tokens[candidate].value == "->":
+            cursor = candidate - 1
+    if cursor >= lower and tokens[cursor].value == ")" and cursor in reverse:
+        cursor = reverse[cursor] - 1
+    return cursor if cursor >= lower and tokens[cursor].value == "]" else None
+
+
 def _lambda_ranges(
     tokens: Sequence[Token],
     function: Function,
@@ -2411,10 +2434,10 @@ def _lambda_ranges(
     for brace in range(function.body_open + 1, function.body_close):
         if tokens[brace].value != "{" or brace not in forward:
             continue
-        cursor = brace - 1
-        if cursor >= 0 and tokens[cursor].value == ")" and cursor in reverse:
-            cursor = reverse[cursor] - 1
-        if cursor >= 0 and tokens[cursor].value == "]":
+        if (
+            _lambda_capture_before_body(tokens, brace, function.body_open + 1, reverse)
+            is not None
+        ):
             ranges.append((brace, forward[brace]))
     return ranges
 
@@ -2833,10 +2856,7 @@ def _kernel_lambda(
     for index in range(left + 1, right):
         if tokens[index].value != "{" or index not in forward:
             continue
-        cursor = index - 1
-        if tokens[cursor].value == ")" and cursor in reverse:
-            cursor = reverse[cursor] - 1
-        if cursor >= left and tokens[cursor].value == "]":
+        if _lambda_capture_before_body(tokens, index, left, reverse) is not None:
             candidates.append((index, forward[index]))
     outermost = [
         candidate
@@ -2861,10 +2881,7 @@ def _handler_lambda(
     for index in range(left + 1, right):
         if tokens[index].value != "{" or index not in forward:
             continue
-        cursor = index - 1
-        if tokens[cursor].value == ")" and cursor in reverse:
-            cursor = reverse[cursor] - 1
-        if cursor >= left and tokens[cursor].value == "]":
+        if _lambda_capture_before_body(tokens, index, left, reverse) is not None:
             candidates.append((index, forward[index]))
     return candidates[0] if candidates else None
 
@@ -2923,10 +2940,7 @@ def _lambda_written_roots(tokens: Sequence[Token], bounds: tuple[int, int]) -> s
     for brace in range(left + 1, right):
         if tokens[brace].value != "{" or brace not in forward:
             continue
-        cursor = brace - 1
-        if cursor >= 0 and tokens[cursor].value == ")" and cursor in reverse:
-            cursor = reverse[cursor] - 1
-        if cursor > left and tokens[cursor].value == "]":
+        if _lambda_capture_before_body(tokens, brace, left + 1, reverse) is not None:
             nested.append((brace, forward[brace]))
     return {
         tokens[index].value
@@ -3328,11 +3342,20 @@ def _neutral_output_write(
             )
         )
 
+    def one_literal(value: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"(?:1[uUlL]*|0[xX]0*1[uUlL]*|"
+                r"1(?:\.0*)?(?:[eE][+-]?0+)?[fFlL]?)",
+                value,
+            )
+        )
+
     if compact in {
         ("false",),
         ("nullptr",),
         ("NULL",),
-    } or (len(compact) == 1 and zero_literal(compact[0])):
+    } or (len(compact) == 1 and (zero_literal(compact[0]) or one_literal(compact[0]))):
         return True
 
     # A typed aggregate identity may be written on the host only for an exact
@@ -3372,18 +3395,21 @@ def _neutral_output_write(
             expression = expression[1:-1]
         return expression
 
-    def typed_zero(expression: tuple[str, ...]) -> bool:
+    def typed_scalar_identity(expression: tuple[str, ...]) -> bool:
         return (
             len(expression) == 4
             and expression[0] in allowed_identity_identifiers
             and expression[1] == "{"
-            and zero_literal(expression[2])
+            and (zero_literal(expression[2]) or one_literal(expression[2]))
             and expression[3] == "}"
         )
 
+    def typed_zero(expression: tuple[str, ...]) -> bool:
+        return typed_scalar_identity(expression) and zero_literal(expression[2])
+
     def constant_identity(expression: tuple[str, ...]) -> bool:
         expression = strip_parentheses(expression)
-        if typed_zero(expression):
+        if typed_scalar_identity(expression):
             return True
         if expression[:1] == ("~",) and typed_zero(expression[1:]):
             return True
@@ -3865,7 +3891,27 @@ def _exact_pointer_root(
         if tokens[index].value in allowed_roots
         and _unqualified_output_identifier(tokens, index)
     ]
-    return roots[0] if len(roots) == 1 else None
+    if len(roots) != 1:
+        return None
+    root = roots[0]
+    if right - left == 1:
+        return root
+
+    def nonnegative_integer_literal(value: str) -> bool:
+        rendered = re.sub(r"[uUlL]+$", "", value)
+        try:
+            return int(rendered, 0) >= 0
+        except ValueError:
+            return False
+
+    values = tuple(token.value for token in tokens[left:right])
+    root_offset = root[1] - left
+    if len(values) == 3 and values[1] == "+":
+        if root_offset == 0 and nonnegative_integer_literal(values[2]):
+            return root
+        if root_offset == 2 and nonnegative_integer_literal(values[0]):
+            return root
+    return None
 
 
 def _transfer_size_is_positive(
@@ -4001,6 +4047,10 @@ def _proven_output_transfers(
                 return True
             for index in range(launch.index + 1, method_index):
                 if _is_inside(index, lambda_ranges):
+                    continue
+                # An earlier proven copyback reads its staging source and is
+                # awaited; it cannot invalidate later reads from that source.
+                if index in proven_call_indices:
                     continue
                 if (
                     tokens[index].value in source_roots
@@ -4196,6 +4246,188 @@ def _bounded_detail(parts: Iterable[str], limit: int = 6000) -> str:
     )
 
 
+def _proven_device_selection_ternaries(
+    tokens: Sequence[Token],
+    function: Function,
+    output_roots: set[str],
+    lambda_ranges: Sequence[tuple[int, int]],
+    call_proofs: Mapping[int, tuple[_IndexedCall, _Proof | None, str | None]],
+    forward: dict[int, int],
+) -> set[int]:
+    """Recognize exact ternaries whose every successful arm is device-proven."""
+
+    template_boolean_parameters = {
+        tokens[index + 1].value
+        for index in range(function.signature_start, function.name_index - 1)
+        if tokens[index].value == "bool" and tokens[index + 1].kind == "identifier"
+    }
+    constant_type_names = {
+        "bool",
+        "char",
+        "short",
+        "int",
+        "long",
+        "size_t",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "true",
+        "false",
+    }
+
+    def strip_parentheses(left: int, right: int) -> tuple[int, int]:
+        while (
+            left < right
+            and tokens[left].value == "("
+            and forward.get(left) == right - 1
+        ):
+            left += 1
+            right -= 1
+        return left, right
+
+    def exact_device_call(
+        left: int, right: int
+    ) -> tuple[_IndexedCall, frozenset[str]] | None:
+        left, right = strip_parentheses(left, right)
+        for indexed, proof, _ in call_proofs.values():
+            if (
+                proof is None
+                or not proof.ok
+                or indexed.index != left
+                or indexed.rparen + 1 != right
+            ):
+                continue
+            roots = frozenset(
+                root
+                for root in output_roots
+                if _range_references_output(
+                    tokens, indexed.lparen + 1, indexed.rparen, {root}
+                )
+            )
+            if roots:
+                return indexed, roots
+        return None
+
+    def exact_failure(left: int, right: int) -> bool:
+        left, right = strip_parentheses(left, right)
+        return right == left + 1 and tokens[left].value in FAILURE_STATUSES
+
+    def exact_template_constant(left: int, right: int) -> bool:
+        left, right = strip_parentheses(left, right)
+        if left >= right:
+            return False
+        values = {token.value for token in tokens[left:right]}
+        if values & {
+            "(",
+            ")",
+            "[",
+            "]",
+            ".",
+            "->",
+            ",",
+            "?",
+            ":",
+            "=",
+            "++",
+            "--",
+        }:
+            return False
+        return all(
+            token.kind != "identifier" or token.value in constant_type_names
+            for token in tokens[left:right]
+        ) and any(
+            token.kind == "number" or token.value in {"true", "false"}
+            for token in tokens[left:right]
+        )
+
+    safe: set[int] = set()
+    for question in range(function.body_open + 1, function.body_close):
+        if tokens[question].value != "?" or _is_inside(question, lambda_ranges):
+            continue
+
+        cursor = question + 1
+        nested = 0
+        colon: int | None = None
+        while cursor < function.body_close:
+            if tokens[cursor].value in {"(", "[", "{"} and cursor in forward:
+                cursor = forward[cursor] + 1
+                continue
+            if tokens[cursor].value == "?":
+                nested += 1
+            elif tokens[cursor].value == ":":
+                if nested == 0:
+                    colon = cursor
+                    break
+                nested -= 1
+            elif tokens[cursor].value == ";":
+                break
+            cursor += 1
+        if colon is None:
+            continue
+
+        end = colon + 1
+        while end < function.body_close:
+            if tokens[end].value in {"(", "[", "{"} and end in forward:
+                end = forward[end] + 1
+                continue
+            if tokens[end].value == ";":
+                break
+            end += 1
+        if end >= function.body_close:
+            continue
+
+        statement_start = question - 1
+        while statement_start > function.body_open and tokens[
+            statement_start
+        ].value not in {";", "{", "}"}:
+            statement_start -= 1
+        if _range_references_output(
+            tokens, statement_start + 1, question, output_roots
+        ):
+            continue
+
+        condition_left = statement_start + 1
+        for index in range(condition_left, question):
+            if tokens[index].value in {"=", "return"}:
+                condition_left = index + 1
+        condition_left, condition_right = strip_parentheses(condition_left, question)
+        condition = tuple(
+            token.value for token in tokens[condition_left:condition_right]
+        )
+        template_condition = (
+            len(condition) == 1 and condition[0] in template_boolean_parameters
+        ) or (
+            len(condition) == 2
+            and condition[0] == "!"
+            and condition[1] in template_boolean_parameters
+        )
+        if (
+            template_condition
+            and exact_template_constant(question + 1, colon)
+            and exact_template_constant(colon + 1, end)
+        ):
+            safe.add(question)
+            continue
+
+        true_call = exact_device_call(question + 1, colon)
+        false_call = exact_device_call(colon + 1, end)
+        if true_call is not None and false_call is not None:
+            if true_call[1] == false_call[1]:
+                safe.add(question)
+            continue
+        if true_call is not None and exact_failure(colon + 1, end):
+            safe.add(question)
+            continue
+        if false_call is not None and exact_failure(question + 1, colon):
+            safe.add(question)
+    return safe
+
+
 class _PathAuditor:
     """Conservative all-success-path verifier for ABI exports and helpers."""
 
@@ -4359,14 +4591,15 @@ class _PathAuditor:
                 self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
             )
         )
+        control_records = [
+            (index, token.value, token.line)
+            for index, token in enumerate(self.tokens)
+            if function.body_open < index < function.body_close
+            and token.value in {"switch", "goto", "?"}
+            and not _is_inside(index, lambda_ranges)
+        ]
         control_lines = sorted(
-            (
-                (token.value, token.line)
-                for index, token in enumerate(self.tokens)
-                if function.body_open < index < function.body_close
-                and token.value in {"switch", "goto", "?"}
-                and not _is_inside(index, lambda_ranges)
-            ),
+            ((kind, line) for _, kind, line in control_records),
             key=lambda item: (item[1], item[0]),
         )
 
@@ -4397,6 +4630,34 @@ class _PathAuditor:
             self.cache[function] = fail_contract
             return fail_contract
 
+        call_proofs: dict[int, tuple[_IndexedCall, _Proof | None, str | None]] = {}
+        for indexed in calls:
+            if indexed.index in proven_transfer_calls | safe_initializer_calls:
+                continue
+            candidate, error = self.resolve(indexed.call)
+            proof = (
+                self.prove(candidate, stack + (function,))
+                if candidate is not None
+                else None
+            )
+            call_proofs[indexed.index] = (indexed, proof, error)
+        safe_ternaries = _proven_device_selection_ternaries(
+            self.tokens,
+            function,
+            output_roots,
+            lambda_ranges,
+            call_proofs,
+            self.forward,
+        )
+        control_lines = sorted(
+            (
+                (kind, line)
+                for index, kind, line in control_records
+                if index not in safe_ternaries
+            ),
+            key=lambda item: (item[1], item[0]),
+        )
+
         deferred_write_lines = _deferred_output_writes(
             self.tokens,
             function,
@@ -4425,8 +4686,6 @@ class _PathAuditor:
             classifications.add("rejected_terminal")
             details.extend(rejected[:4])
 
-        body = self.tokens[function.body_open + 1 : function.body_close]
-        body_values = [token.value for token in body]
         counter_indices = [
             index
             for index in range(function.body_open + 1, function.body_close - 1)
@@ -4511,11 +4770,32 @@ class _PathAuditor:
                 + ", ".join(f"{kind} at line {line}" for kind, line in control_lines)
             )
 
-        if "if" in body_values and "constexpr" in body_values:
+        if safe_ternaries:
+            classifications.add("validated_device_selection")
+            details.append(
+                "all successful ternary arms are independently device-proven at line(s) "
+                + ", ".join(
+                    str(self.tokens[index].line) for index in sorted(safe_ternaries)
+                )
+            )
+
+        host_constexpr_lines = sorted(
+            {
+                self.tokens[index].line
+                for index in range(function.body_open + 1, function.body_close - 1)
+                if self.tokens[index].value == "if"
+                and self.tokens[index + 1].value == "constexpr"
+                and not _is_inside(index, device_lambdas)
+            }
+        )
+        if host_constexpr_lines:
             classifications.update(
                 {"template_specialization_review", "review_required"}
             )
-            details.append("if constexpr paths require a concrete specialization proof")
+            details.append(
+                "host if constexpr paths require a concrete specialization proof at line(s) "
+                + ", ".join(map(str, host_constexpr_lines))
+            )
 
         # A successful helper call used as a statement can establish evidence
         # only when it receives one of this function's mutable ABI outputs.
@@ -4532,17 +4812,7 @@ class _PathAuditor:
             classifications.update({"unresolved_output_helper", "review_required"})
         if indirect_output_calls:
             classifications.add("unresolved_indirect_output_call")
-        call_proofs: dict[int, tuple[_IndexedCall, _Proof | None, str | None]] = {}
-        for indexed in calls:
-            if indexed.index in proven_transfer_calls | safe_initializer_calls:
-                continue
-            candidate, error = self.resolve(indexed.call)
-            proof = (
-                self.prove(candidate, stack + (function,))
-                if candidate is not None
-                else None
-            )
-            call_proofs[indexed.index] = (indexed, proof, error)
+        for indexed, proof, error in call_proofs.values():
             if (
                 proof is not None
                 and "large_input_gpu_chain" in proof.classifications
@@ -4552,7 +4822,7 @@ class _PathAuditor:
             ):
                 classifications.add("large_input_gpu_chain")
                 details.append(
-                    f"large-input chain {function.name} -> {candidate.name} at line "
+                    f"large-input chain {function.name} -> {indexed.call.name} at line "
                     f"{indexed.call.line}: typed SYCL launch observed; result proof remains "
                     "independently fail-closed"
                 )
@@ -4565,7 +4835,7 @@ class _PathAuditor:
             ):
                 classifications.update(proof.classifications)
                 unsafe_contributing_helpers.append(
-                    f"output helper {candidate.name} at line {indexed.call.line} is not "
+                    f"output helper {indexed.call.name} at line {indexed.call.line} is not "
                     "independently device-proven"
                 )
             if (
@@ -4580,7 +4850,7 @@ class _PathAuditor:
                         indexed.index,
                         indexed.call.line,
                         "helper",
-                        f"{function.name} -> {candidate.name} at line {indexed.call.line}: {proof.detail}",
+                        f"{function.name} -> {indexed.call.name} at line {indexed.call.line}: {proof.detail}",
                         _context(indexed.index, regions),
                     )
                 )

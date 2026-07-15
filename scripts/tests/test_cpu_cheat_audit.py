@@ -320,6 +320,102 @@ class CallGraphTests(unittest.TestCase):
         self.assertIn("host_output_write", finding.classifications)
         self.assertFalse(result.entrypoint_audits[0].ok)
 
+    def test_explicit_trailing_return_device_lambda_is_structural(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_trailing_lambda(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for<Kernel>(sycl::range<1>(count),
+                  [=](sycl::id<1> i) -> void { out[i] = i[0] ? 1 : 0; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("device_dispatch", result.entrypoint_audits[0].classifications)
+
+    def test_explicit_trailing_return_host_lambda_remains_deferred(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_trailing_host_lambda(
+                int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for<Kernel>(sycl::range<1>(count),
+                  [=](sycl::id<1> i) { out[i] = 1; });
+              auto finish = [&]() -> int { *out = 42; return 0; };
+              finish();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_trailing_host_lambda")
+        self.assertIn("deferred_host_output_write", finding.classifications)
+
+    def test_device_if_constexpr_does_not_require_host_specialization(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <bool First>
+            pgaccel_status constexpr_device(sycl::queue& q, int* out) {
+              q.single_task<Kernel<First>>([=]() {
+                if constexpr (First) { *out = 1; } else { *out = 2; }
+              });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_constexpr_device(int* out) {
+              sycl::queue q;
+              return constexpr_device<true>(q, out);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertNotIn(
+            "template_specialization_review",
+            result.entrypoint_audits[0].classifications,
+        )
+
+    def test_exact_ternary_device_selection_proves_every_success_arm(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status launch_a(sycl::queue& q, int* out) {
+              q.single_task<KernelA>([=]() { *out = 1; });
+              return PGACCEL_OK;
+            }
+            pgaccel_status launch_b(sycl::queue& q, int* out) {
+              q.single_task<KernelB>([=]() { *out = 2; });
+              return PGACCEL_OK;
+            }
+            pgaccel_status host_branch(int* out) {
+              *out = 42;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_device_selection(
+                bool first, int* out) {
+              sycl::queue q;
+              return first ? launch_a(q, out) : launch_b(q, out);
+            }
+            extern "C" pgaccel_status pgaccel_host_selection(
+                bool first, int* out) {
+              sycl::queue q;
+              return first ? launch_a(q, out) : host_branch(out);
+            }
+            extern "C" pgaccel_status pgaccel_success_selection(
+                bool first, int* out) {
+              sycl::queue q;
+              return first ? launch_a(q, out) : PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        valid = entries["pgaccel_device_selection"]
+        self.assertTrue(valid.ok, valid.detail)
+        self.assertIn("validated_device_selection", valid.classifications)
+        for name in ("pgaccel_host_selection", "pgaccel_success_selection"):
+            with self.subTest(name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertIn("ambiguous_control_flow", entries[name].classifications)
+
     def test_typed_constant_identity_is_exact_zero_work(self) -> None:
         result = audit_fixture(
             r"""
@@ -337,10 +433,18 @@ class CallGraphTests(unittest.TestCase):
                 const int* data, size_t count, int* out) {
               return typed_reduce<int>(data, count, out);
             }
+            extern "C" pgaccel_status pgaccel_unit_identity(
+                const uint8_t* data, size_t count, uint8_t* out) {
+              if (count == 0) { *out = 1; return PGACCEL_OK; }
+              sycl::queue& q = get_queue();
+              q.single_task<UnitKernel>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
             """
         )
         self.assertFalse(result.findings)
-        self.assertIn("zero_work", result.entrypoint_audits[0].classifications)
+        for entry in result.entrypoint_audits:
+            self.assertIn("zero_work", entry.classifications)
 
     def test_zero_work_identity_cannot_read_input_or_call_host(self) -> None:
         result = audit_fixture(
@@ -1526,6 +1630,46 @@ class ResidentV5RegressionTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertFalse(entries[name].ok, entries[name].detail)
                 self.assertNotIn("device_copyback", entries[name].classifications)
+
+    def test_sequential_constant_offset_copybacks_share_device_producer(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_offset_copybacks(
+                int* out_first, int* out_second) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_device(2 * sizeof(int), q));
+              q.parallel_for(sycl::range<1>(2), [=](sycl::id<1> i) {
+                buffer[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out_first, buffer, sizeof(int)).wait_and_throw();
+              q.memcpy(out_second, buffer + 1, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("device_copyback", result.entrypoint_audits[0].classifications)
+
+    def test_runtime_pointer_offset_does_not_prove_copyback(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_runtime_offset(
+                int* out, size_t offset) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_device(2 * sizeof(int), q));
+              q.parallel_for(sycl::range<1>(2), [=](sycl::id<1> i) {
+                buffer[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, buffer + offset, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertNotIn("device_copyback", entry.classifications)
 
     def test_same_line_copyback_does_not_mask_later_host_overwrite(self) -> None:
         result = audit_compiling_fixture(
