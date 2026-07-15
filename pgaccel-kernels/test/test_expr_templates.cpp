@@ -25,6 +25,7 @@
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
+#include "pgaccel_fused.h"
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -649,8 +650,8 @@ static void test_cmp_const_mask_usm_selection_and_count() {
   pgaccel_expr_shared_free(vals);
 }
 
-static void test_cmp_const_reduce_f32_usm_selection_and_value_nulls() {
-  printf("--- test_cmp_const_reduce_f32_usm_selection_and_value_nulls ---\n");
+static void test_cmp_const_reduce_f32_usm_quarantine() {
+  printf("--- test_cmp_const_reduce_f32_usm_quarantine ---\n");
 
   constexpr size_t n = 6;
   float* pred_vals = alloc_shared_array<float>("cmp_const_reduce_f32_usm pred values alloc", n);
@@ -686,16 +687,24 @@ static void test_cmp_const_reduce_f32_usm_selection_and_value_nulls() {
   int64_t out_value_count = -1;
   size_t true_count = 99;
   size_t uncertain_count = 99;
+  pgaccel_reset_gpu_exec_count();
   pgaccel_status s = pgaccel_expr_template_cmp_const_reduce_f32_usm(
       pred_col, PGACCEL_EXPR_OP_GT, 6.0, value_col, n, &out_sum, &out_min, &out_max,
       &out_value_count, &true_count, &uncertain_count);
-  ASSERT_STATUS_OK("cmp_const_reduce_f32_usm status", s);
-  ASSERT_TRUE("cmp_const_reduce_f32_usm selected rows", true_count == 3);
-  ASSERT_TRUE("cmp_const_reduce_f32_usm value count", out_value_count == 2);
-  ASSERT_TRUE("cmp_const_reduce_f32_usm uncertain rows", uncertain_count == 0);
-  ASSERT_TRUE("cmp_const_reduce_f32_usm sum", out_sum == 70.0f);
-  ASSERT_TRUE("cmp_const_reduce_f32_usm min", out_min == 20.0f);
-  ASSERT_TRUE("cmp_const_reduce_f32_usm max", out_max == 50.0f);
+  ASSERT_TRUE("cmp_const_reduce_f32_usm valid nonempty is unsupported", s == PGACCEL_UNSUPPORTED);
+  ASSERT_TRUE("cmp_const_reduce_f32_usm preserves outputs",
+              out_sum == -1.0f && out_min == -1.0f && out_max == -1.0f && out_value_count == -1 &&
+                  true_count == 99 && uncertain_count == 99);
+  ASSERT_TRUE("cmp_const_reduce_f32_usm launches no GPU work", pgaccel_gpu_exec_count() == 0);
+
+  s = pgaccel_expr_template_cmp_const_reduce_f32_usm(
+      pred_col, PGACCEL_EXPR_OP_GT, 6.0, value_col, 0, &out_sum, &out_min, &out_max,
+      &out_value_count, &true_count, &uncertain_count);
+  ASSERT_STATUS_OK("cmp_const_reduce_f32_usm empty status", s);
+  ASSERT_TRUE("cmp_const_reduce_f32_usm empty identity",
+              out_sum == 0.0f && out_min == 0.0f && out_max == 0.0f && out_value_count == 0 &&
+                  true_count == 0 && uncertain_count == 0);
+  ASSERT_TRUE("cmp_const_reduce_f32_usm empty launches no GPU work", pgaccel_gpu_exec_count() == 0);
 
   pgaccel_expr_shared_free(value_nulls);
   pgaccel_expr_shared_free(value_vals);
@@ -1435,8 +1444,8 @@ static void test_two_pred_and_mask_usm_selection_and_count() {
   pgaccel_expr_shared_free(col1_vals);
 }
 
-static void test_two_pred_and_reduce_f32_usm_selection_and_value_nulls() {
-  printf("--- test_two_pred_and_reduce_f32_usm_selection_and_value_nulls ---\n");
+static void test_two_pred_and_reduce_f32_usm_quarantine() {
+  printf("--- test_two_pred_and_reduce_f32_usm_quarantine ---\n");
 
   constexpr size_t n = 7;
   int32_t* col1_vals =
@@ -1477,16 +1486,26 @@ static void test_two_pred_and_reduce_f32_usm_selection_and_value_nulls() {
   int64_t out_value_count = -1;
   size_t true_count = 99;
   size_t uncertain_count = 99;
+  pgaccel_reset_gpu_exec_count();
   pgaccel_status s = pgaccel_expr_template_two_pred_and_reduce_f32_usm(
       col1, PGACCEL_EXPR_OP_GE, 2.0, col2, PGACCEL_EXPR_OP_LT, 8.0, value_col, n, &out_sum,
       &out_min, &out_max, &out_value_count, &true_count, &uncertain_count);
-  ASSERT_STATUS_OK("two_pred_and_reduce_f32_usm status", s);
-  ASSERT_TRUE("two_pred_and_reduce_f32_usm selected rows", true_count == 3);
-  ASSERT_TRUE("two_pred_and_reduce_f32_usm value count", out_value_count == 2);
-  ASSERT_TRUE("two_pred_and_reduce_f32_usm uncertain rows", uncertain_count == 0);
-  ASSERT_TRUE("two_pred_and_reduce_f32_usm sum", out_sum == 11.0f);
-  ASSERT_TRUE("two_pred_and_reduce_f32_usm min", out_min == 4.0f);
-  ASSERT_TRUE("two_pred_and_reduce_f32_usm max", out_max == 7.0f);
+  ASSERT_TRUE("two_pred_and_reduce_f32_usm valid nonempty is unsupported",
+              s == PGACCEL_UNSUPPORTED);
+  ASSERT_TRUE("two_pred_and_reduce_f32_usm preserves outputs",
+              out_sum == -1.0f && out_min == -1.0f && out_max == -1.0f && out_value_count == -1 &&
+                  true_count == 99 && uncertain_count == 99);
+  ASSERT_TRUE("two_pred_and_reduce_f32_usm launches no GPU work", pgaccel_gpu_exec_count() == 0);
+
+  s = pgaccel_expr_template_two_pred_and_reduce_f32_usm(
+      col1, PGACCEL_EXPR_OP_GE, 2.0, col2, PGACCEL_EXPR_OP_LT, 8.0, value_col, 0, &out_sum,
+      &out_min, &out_max, &out_value_count, &true_count, &uncertain_count);
+  ASSERT_STATUS_OK("two_pred_and_reduce_f32_usm empty status", s);
+  ASSERT_TRUE("two_pred_and_reduce_f32_usm empty identity",
+              out_sum == 0.0f && out_min == 0.0f && out_max == 0.0f && out_value_count == 0 &&
+                  true_count == 0 && uncertain_count == 0);
+  ASSERT_TRUE("two_pred_and_reduce_f32_usm empty launches no GPU work",
+              pgaccel_gpu_exec_count() == 0);
 
   pgaccel_expr_shared_free(value_nulls);
   pgaccel_expr_shared_free(value_vals);
@@ -1574,6 +1593,34 @@ static void test_empty_batch() {
   ASSERT_TRUE("empty batch → OK", s == PGACCEL_OK);
 }
 
+static void test_fused_multi_reduce_quarantine() {
+  printf("--- test_fused_multi_reduce_quarantine ---\n");
+
+  constexpr size_t n = 8192;
+  std::vector<float> values(n, 1.0f);
+  pgaccel_reduce_col cols[2] = {
+      {PGACCEL_FUSED_SUM, values.data()},
+      {PGACCEL_FUSED_COUNT, nullptr},
+  };
+  float results[2] = {-11.0f, -22.0f};
+  size_t pass_count = 99;
+
+  pgaccel_reset_gpu_exec_count();
+  pgaccel_status s = pgaccel_fused_filter_multi_reduce_f32(nullptr, n, PGACCEL_CMP_ALWAYS_TRUE,
+                                                           0.0f, cols, 2, results, &pass_count);
+  ASSERT_TRUE("fused multi-reduce valid nonempty is unsupported", s == PGACCEL_UNSUPPORTED);
+  ASSERT_TRUE("fused multi-reduce preserves outputs",
+              results[0] == -11.0f && results[1] == -22.0f && pass_count == 99);
+  ASSERT_TRUE("fused multi-reduce launches no GPU work", pgaccel_gpu_exec_count() == 0);
+
+  s = pgaccel_fused_filter_multi_reduce_f32(nullptr, 0, PGACCEL_CMP_ALWAYS_TRUE, 0.0f, cols, 2,
+                                            results, &pass_count);
+  ASSERT_STATUS_OK("fused multi-reduce empty status", s);
+  ASSERT_TRUE("fused multi-reduce empty identity",
+              results[0] == 0.0f && results[1] == 0.0f && pass_count == 0);
+  ASSERT_TRUE("fused multi-reduce empty launches no GPU work", pgaccel_gpu_exec_count() == 0);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1603,7 +1650,7 @@ int main() {
   test_cmp_const_count_usm_int64();
   test_cmp_const_count_usm_rejects_bad_inputs();
   test_cmp_const_mask_usm_selection_and_count();
-  test_cmp_const_reduce_f32_usm_selection_and_value_nulls();
+  test_cmp_const_reduce_f32_usm_quarantine();
   test_cmp_const_without_col_nulls_array();
   test_cmp_const_with_null_col_entry();
   test_between();
@@ -1625,9 +1672,10 @@ int main() {
   test_two_pred_and_count_usm_int64();
   test_two_pred_and_count_usm_rejects_bad_inputs();
   test_two_pred_and_mask_usm_selection_and_count();
-  test_two_pred_and_reduce_f32_usm_selection_and_value_nulls();
+  test_two_pred_and_reduce_f32_usm_quarantine();
   test_two_pred_and_mixed_null_pointer_entries();
   test_two_pred_and_rejects_unsupported_opcode();
+  test_fused_multi_reduce_quarantine();
 
   printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

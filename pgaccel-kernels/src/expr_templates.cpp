@@ -34,7 +34,6 @@
 #include "pgaccel_ffi.h"
 #include "pgaccel_queue.h"
 
-
 namespace {
 
 // PG-compatible NaN-aware comparison opcodes encoded as small integers
@@ -1398,354 +1397,45 @@ bool const_to_typed(double value, T* out) {
   }
 }
 
-struct F32ReducePartial {
-  float sum;
-  float min;
-  float max;
-  int64_t count;
-  uint64_t selected;
-};
-
-struct F32ReducePartialsScratch {
-  F32ReducePartial* partials;
-  sycl::queue* q;
-  ~F32ReducePartialsScratch() {
-    if (partials)
-      sycl::free(partials, *q);
-  }
-};
-
-inline F32ReducePartial f32_reduce_identity() {
-  return F32ReducePartial{0.0f, 0.0f, 0.0f, 0, 0};
-}
-
-inline F32ReducePartial f32_reduce_one(float value, uint64_t selected) {
-  return F32ReducePartial{value, value, value, 1, selected};
-}
-
-inline bool f32_reduce_pg_less(float a, float b) {
-  const bool a_nan = pg_is_nan_f32(a);
-  const bool b_nan = pg_is_nan_f32(b);
-  if (a_nan)
-    return false;
-  if (b_nan)
-    return true;
-  return a < b;
-}
-
-inline bool f32_reduce_pg_greater(float a, float b) {
-  const bool a_nan = pg_is_nan_f32(a);
-  const bool b_nan = pg_is_nan_f32(b);
-  if (b_nan)
-    return false;
-  if (a_nan)
-    return true;
-  return a > b;
-}
-
-inline F32ReducePartial f32_reduce_combine(F32ReducePartial a, F32ReducePartial b) {
-  F32ReducePartial r;
-  r.selected = a.selected + b.selected;
-  if (a.count == 0) {
-    r.sum = b.sum;
-    r.min = b.min;
-    r.max = b.max;
-    r.count = b.count;
-    return r;
-  }
-  if (b.count == 0) {
-    r.sum = a.sum;
-    r.min = a.min;
-    r.max = a.max;
-    r.count = a.count;
-    return r;
-  }
-  r.sum = a.sum + b.sum;
-  r.min = f32_reduce_pg_less(b.min, a.min) ? b.min : a.min;
-  r.max = f32_reduce_pg_greater(b.max, a.max) ? b.max : a.max;
-  r.count = a.count + b.count;
-  return r;
-}
-
-inline void finish_f32_reduce(F32ReducePartial final, float* out_sum, float* out_min,
-                              float* out_max, int64_t* out_count, size_t* true_count) {
-  if (final.count == 0) {
+void reset_f32_reduce_outputs(float* out_sum, float* out_min, float* out_max,
+                              int64_t* out_value_count, size_t* true_count,
+                              size_t* uncertain_count) {
+  if (out_sum != nullptr)
     *out_sum = 0.0f;
+  if (out_min != nullptr)
     *out_min = 0.0f;
+  if (out_max != nullptr)
     *out_max = 0.0f;
-  } else {
-    *out_sum = final.sum;
-    *out_min = final.min;
-    *out_max = final.max;
-  }
-  *out_count = final.count;
-  *true_count = static_cast<size_t>(final.selected);
+  if (out_value_count != nullptr)
+    *out_value_count = 0;
+  if (true_count != nullptr)
+    *true_count = 0;
+  if (uncertain_count != nullptr)
+    *uncertain_count = 0;
 }
 
-template <typename T>
-pgaccel_status launch_cmp_const_reduce_f32_usm_typed(
-    const T* d_pred, const uint8_t* d_pred_null, const float* d_value, const uint8_t* d_value_null,
-    size_t n, uint16_t cmp_opcode, T const_val, float* out_sum, float* out_min, float* out_max,
-    int64_t* out_count, size_t* true_count, const char* kernel_name) {
-  if (n == 0)
-    return PGACCEL_OK;
-  if (d_pred == nullptr || d_value == nullptr)
-    return PGACCEL_ERROR;
-
-  sycl::queue* q = pgaccel_get_queue();
-  if (q == nullptr)
-    return PGACCEL_ERROR_NO_DEVICE;
-
-  const size_t num_groups = count_num_groups(n);
-  F32ReducePartialsScratch s{
-      sycl::malloc_shared<F32ReducePartial>(num_groups, *q),
-      q,
-  };
-  if (s.partials == nullptr)
-    return PGACCEL_OOM;
-
-  F32ReducePartial* partials = s.partials;
-  const uint16_t op = cmp_opcode;
-  const KernelConst<T> cv = make_kernel_const<T>(const_val);
-  const size_t count = n;
-  const bool pred_nulls_present = d_pred_null != nullptr;
-  const bool value_nulls_present = d_value_null != nullptr;
-  const F32ReducePartial identity = f32_reduce_identity();
-
-  try {
-    q->submit([&](sycl::handler& h) {
-       sycl::local_accessor<F32ReducePartial, 1> local_mem(COUNT_WG_SIZE, h);
-       h.parallel_for(
-           sycl::nd_range<1>(num_groups * COUNT_WG_SIZE, COUNT_WG_SIZE),
-           [=](sycl::nd_item<1> item) {
-             const size_t lid = item.get_local_id(0);
-             const size_t group_id = item.get_group(0);
-             const size_t group_start = group_id * COUNT_GROUP_ROWS;
-             F32ReducePartial local = identity;
-             for (size_t offset = 0; offset < COUNT_GROUP_ROWS; offset += COUNT_WG_SIZE) {
-               const size_t row = group_start + offset + lid;
-               if (row < count) {
-                 const bool pass = (!pred_nulls_present || !d_pred_null[row]) &&
-                                   pg_cmp_typed(op, d_pred[row], load_kernel_const<T>(cv));
-                 if (pass) {
-                   const bool consume = !value_nulls_present || d_value_null[row] == 0;
-                   F32ReducePartial row_partial{0.0f, 0.0f, 0.0f, 0, 1};
-                   if (consume) {
-                     row_partial = f32_reduce_one(d_value[row], 1);
-                   }
-                   local = f32_reduce_combine(local, row_partial);
-                 }
-               }
-             }
-             local_mem[lid] = local;
-             item.barrier(sycl::access::fence_space::local_space);
-
-             for (size_t stride = COUNT_WG_SIZE / 2; stride > 0; stride >>= 1) {
-               if (lid < stride) {
-                 local_mem[lid] = f32_reduce_combine(local_mem[lid], local_mem[lid + stride]);
-               }
-               item.barrier(sycl::access::fence_space::local_space);
-             }
-
-             if (lid == 0) {
-               partials[group_id] = local_mem[0];
-             }
-           });
-     }).wait_and_throw();
-  } catch (const std::exception& e) {
-    std::fprintf(stderr, "pgaccel: %s failed: %s\n", kernel_name, e.what());
-    return PGACCEL_ERROR;
-  }
-
-  F32ReducePartial final = identity;
-  for (size_t i = 0; i < num_groups; ++i) {
-    final = f32_reduce_combine(final, s.partials[i]);
-  }
-  finish_f32_reduce(final, out_sum, out_min, out_max, out_count, true_count);
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
-}
-
-template <typename T1, typename T2>
-pgaccel_status launch_two_pred_and_reduce_f32_usm_typed(
-    const T1* d_col1, const uint8_t* d_null1, const T2* d_col2, const uint8_t* d_null2,
-    const float* d_value, const uint8_t* d_value_null, size_t n, uint16_t cmp1_opcode,
-    T1 const1_val, uint16_t cmp2_opcode, T2 const2_val, float* out_sum, float* out_min,
-    float* out_max, int64_t* out_count, size_t* true_count, const char* kernel_name) {
-  if (n == 0)
-    return PGACCEL_OK;
-  if (d_col1 == nullptr || d_col2 == nullptr || d_value == nullptr)
-    return PGACCEL_ERROR;
-
-  sycl::queue* q = pgaccel_get_queue();
-  if (q == nullptr)
-    return PGACCEL_ERROR_NO_DEVICE;
-
-  const size_t num_groups = count_num_groups(n);
-  F32ReducePartialsScratch s{
-      sycl::malloc_shared<F32ReducePartial>(num_groups, *q),
-      q,
-  };
-  if (s.partials == nullptr)
-    return PGACCEL_OOM;
-
-  F32ReducePartial* partials = s.partials;
-  const uint16_t op1 = cmp1_opcode;
-  const uint16_t op2 = cmp2_opcode;
-  const KernelConst<T1> cv1 = make_kernel_const<T1>(const1_val);
-  const KernelConst<T2> cv2 = make_kernel_const<T2>(const2_val);
-  const size_t count = n;
-  const bool nulls1_present = d_null1 != nullptr;
-  const bool nulls2_present = d_null2 != nullptr;
-  const bool value_nulls_present = d_value_null != nullptr;
-  const F32ReducePartial identity = f32_reduce_identity();
-
-  try {
-    q->submit([&](sycl::handler& h) {
-       sycl::local_accessor<F32ReducePartial, 1> local_mem(COUNT_WG_SIZE, h);
-       h.parallel_for(
-           sycl::nd_range<1>(num_groups * COUNT_WG_SIZE, COUNT_WG_SIZE),
-           [=](sycl::nd_item<1> item) {
-             const size_t lid = item.get_local_id(0);
-             const size_t group_id = item.get_group(0);
-             const size_t group_start = group_id * COUNT_GROUP_ROWS;
-             F32ReducePartial local = identity;
-             for (size_t offset = 0; offset < COUNT_GROUP_ROWS; offset += COUNT_WG_SIZE) {
-               const size_t row = group_start + offset + lid;
-               if (row < count) {
-                 const bool pass = (!nulls1_present || !d_null1[row]) &&
-                                   pg_cmp_typed(op1, d_col1[row], load_kernel_const<T1>(cv1)) &&
-                                   (!nulls2_present || !d_null2[row]) &&
-                                   pg_cmp_typed(op2, d_col2[row], load_kernel_const<T2>(cv2));
-                 if (pass) {
-                   const bool consume = !value_nulls_present || d_value_null[row] == 0;
-                   F32ReducePartial row_partial{0.0f, 0.0f, 0.0f, 0, 1};
-                   if (consume) {
-                     row_partial = f32_reduce_one(d_value[row], 1);
-                   }
-                   local = f32_reduce_combine(local, row_partial);
-                 }
-               }
-             }
-             local_mem[lid] = local;
-             item.barrier(sycl::access::fence_space::local_space);
-
-             for (size_t stride = COUNT_WG_SIZE / 2; stride > 0; stride >>= 1) {
-               if (lid < stride) {
-                 local_mem[lid] = f32_reduce_combine(local_mem[lid], local_mem[lid + stride]);
-               }
-               item.barrier(sycl::access::fence_space::local_space);
-             }
-
-             if (lid == 0) {
-               partials[group_id] = local_mem[0];
-             }
-           });
-     }).wait_and_throw();
-  } catch (const std::exception& e) {
-    std::fprintf(stderr, "pgaccel: %s failed: %s\n", kernel_name, e.what());
-    return PGACCEL_ERROR;
-  }
-
-  F32ReducePartial final = identity;
-  for (size_t i = 0; i < num_groups; ++i) {
-    final = f32_reduce_combine(final, s.partials[i]);
-  }
-  finish_f32_reduce(final, out_sum, out_min, out_max, out_count, true_count);
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
-}
-
-template <typename T>
-pgaccel_status dispatch_cmp_const_reduce_f32_usm(pgaccel_expr_usm_col pred_col, uint16_t cmp_opcode,
-                                                 double const_val, pgaccel_expr_usm_col value_col,
-                                                 size_t row_count, float* out_sum, float* out_min,
-                                                 float* out_max, int64_t* out_count,
-                                                 size_t* true_count) {
-  const T* pred_values = static_cast<const T*>(pred_col.values);
-  const float* value_values = static_cast<const float*>(value_col.values);
-  T typed_const{};
-  if (!const_to_typed<T>(const_val, &typed_const))
-    return PGACCEL_UNSUPPORTED;
-  return launch_cmp_const_reduce_f32_usm_typed<T>(
-      pred_values, pred_col.nulls, value_values, value_col.nulls, row_count, cmp_opcode,
-      typed_const, out_sum, out_min, out_max, out_count, true_count,
-      "expr_template_cmp_const_reduce_f32_usm");
-}
-
-template <typename T1, typename T2>
-pgaccel_status dispatch_two_pred_and_reduce_f32_usm_pair(
-    pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
-    uint16_t cmp2_opcode, double const2_val, pgaccel_expr_usm_col value_col, size_t row_count,
-    float* out_sum, float* out_min, float* out_max, int64_t* out_count, size_t* true_count) {
-  const T1* values1 = static_cast<const T1*>(col1.values);
-  const T2* values2 = static_cast<const T2*>(col2.values);
-  const float* value_values = static_cast<const float*>(value_col.values);
-  T1 typed_const1{};
-  T2 typed_const2{};
-  if (!const_to_typed<T1>(const1_val, &typed_const1) ||
-      !const_to_typed<T2>(const2_val, &typed_const2))
-    return PGACCEL_UNSUPPORTED;
-  return launch_two_pred_and_reduce_f32_usm_typed<T1, T2>(
-      values1, col1.nulls, values2, col2.nulls, value_values, value_col.nulls, row_count,
-      cmp1_opcode, typed_const1, cmp2_opcode, typed_const2, out_sum, out_min, out_max, out_count,
-      true_count, "expr_template_two_pred_and_reduce_f32_usm");
-}
-
-template <typename T1>
-pgaccel_status dispatch_two_pred_and_reduce_f32_usm_col2(
-    pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
-    uint16_t cmp2_opcode, double const2_val, pgaccel_expr_usm_col value_col, size_t row_count,
-    float* out_sum, float* out_min, float* out_max, int64_t* out_count, size_t* true_count) {
-  switch (col2.type) {
+bool reduce_predicate_shape_supported(pgaccel_expr_usm_col col, double const_val) {
+  switch (col.type) {
     case PGACCEL_VAL_INT32:
-    case PGACCEL_VAL_DATE:
-      return dispatch_two_pred_and_reduce_f32_usm_pair<T1, int32_t>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, value_col, row_count,
-          out_sum, out_min, out_max, out_count, true_count);
+    case PGACCEL_VAL_DATE: {
+      int32_t converted{};
+      return const_to_typed<int32_t>(const_val, &converted);
+    }
     case PGACCEL_VAL_INT64:
-    case PGACCEL_VAL_TIMESTAMP:
-      return dispatch_two_pred_and_reduce_f32_usm_pair<T1, int64_t>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, value_col, row_count,
-          out_sum, out_min, out_max, out_count, true_count);
-    case PGACCEL_VAL_FLOAT32:
-      return dispatch_two_pred_and_reduce_f32_usm_pair<T1, float>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, value_col, row_count,
-          out_sum, out_min, out_max, out_count, true_count);
-    case PGACCEL_VAL_FLOAT64:
-      return dispatch_two_pred_and_reduce_f32_usm_pair<T1, double>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, value_col, row_count,
-          out_sum, out_min, out_max, out_count, true_count);
+    case PGACCEL_VAL_TIMESTAMP: {
+      int64_t converted{};
+      return const_to_typed<int64_t>(const_val, &converted);
+    }
+    case PGACCEL_VAL_FLOAT32: {
+      float converted{};
+      return const_to_typed<float>(const_val, &converted);
+    }
+    case PGACCEL_VAL_FLOAT64: {
+      double converted{};
+      return const_to_typed<double>(const_val, &converted);
+    }
     default:
-      return PGACCEL_UNSUPPORTED;
-  }
-}
-
-pgaccel_status dispatch_two_pred_and_reduce_f32_usm(
-    pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
-    uint16_t cmp2_opcode, double const2_val, pgaccel_expr_usm_col value_col, size_t row_count,
-    float* out_sum, float* out_min, float* out_max, int64_t* out_count, size_t* true_count) {
-  switch (col1.type) {
-    case PGACCEL_VAL_INT32:
-    case PGACCEL_VAL_DATE:
-      return dispatch_two_pred_and_reduce_f32_usm_col2<int32_t>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, value_col, row_count,
-          out_sum, out_min, out_max, out_count, true_count);
-    case PGACCEL_VAL_INT64:
-    case PGACCEL_VAL_TIMESTAMP:
-      return dispatch_two_pred_and_reduce_f32_usm_col2<int64_t>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, value_col, row_count,
-          out_sum, out_min, out_max, out_count, true_count);
-    case PGACCEL_VAL_FLOAT32:
-      return dispatch_two_pred_and_reduce_f32_usm_col2<float>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, value_col, row_count,
-          out_sum, out_min, out_max, out_count, true_count);
-    case PGACCEL_VAL_FLOAT64:
-      return dispatch_two_pred_and_reduce_f32_usm_col2<double>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, value_col, row_count,
-          out_sum, out_min, out_max, out_count, true_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
+      return false;
   }
 }
 
@@ -2276,52 +1966,38 @@ extern "C" pgaccel_status pgaccel_expr_template_cmp_const_reduce_f32_usm(
     pgaccel_expr_usm_col pred_col, uint16_t cmp_opcode, double const_val,
     pgaccel_expr_usm_col value_col, size_t row_count, float* out_sum, float* out_min,
     float* out_max, int64_t* out_value_count, size_t* true_count, size_t* uncertain_count) try {
-  if (out_sum != nullptr)
-    *out_sum = 0.0f;
-  if (out_min != nullptr)
-    *out_min = 0.0f;
-  if (out_max != nullptr)
-    *out_max = 0.0f;
-  if (out_value_count != nullptr)
-    *out_value_count = 0;
-  if (true_count != nullptr)
-    *true_count = 0;
-  if (uncertain_count != nullptr)
-    *uncertain_count = 0;
   if (out_sum == nullptr || out_min == nullptr || out_max == nullptr ||
-      out_value_count == nullptr || true_count == nullptr)
+      out_value_count == nullptr || true_count == nullptr) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
     return PGACCEL_ERROR;
-  if (!is_supported_cmp(cmp_opcode))
-    return PGACCEL_UNSUPPORTED;
-  if (row_count == 0 || pred_col.type == PGACCEL_VAL_NULL)
-    return PGACCEL_OK;
-  if (value_col.type != PGACCEL_VAL_FLOAT32)
-    return PGACCEL_UNSUPPORTED;
-  if (pred_col.values == nullptr || value_col.values == nullptr)
-    return PGACCEL_ERROR;
-
-  switch (pred_col.type) {
-    case PGACCEL_VAL_INT32:
-    case PGACCEL_VAL_DATE:
-      return dispatch_cmp_const_reduce_f32_usm<int32_t>(pred_col, cmp_opcode, const_val, value_col,
-                                                        row_count, out_sum, out_min, out_max,
-                                                        out_value_count, true_count);
-    case PGACCEL_VAL_INT64:
-    case PGACCEL_VAL_TIMESTAMP:
-      return dispatch_cmp_const_reduce_f32_usm<int64_t>(pred_col, cmp_opcode, const_val, value_col,
-                                                        row_count, out_sum, out_min, out_max,
-                                                        out_value_count, true_count);
-    case PGACCEL_VAL_FLOAT32:
-      return dispatch_cmp_const_reduce_f32_usm<float>(pred_col, cmp_opcode, const_val, value_col,
-                                                      row_count, out_sum, out_min, out_max,
-                                                      out_value_count, true_count);
-    case PGACCEL_VAL_FLOAT64:
-      return dispatch_cmp_const_reduce_f32_usm<double>(pred_col, cmp_opcode, const_val, value_col,
-                                                       row_count, out_sum, out_min, out_max,
-                                                       out_value_count, true_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
   }
+  if (!is_supported_cmp(cmp_opcode)) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
+    return PGACCEL_UNSUPPORTED;
+  }
+  if (row_count == 0 || pred_col.type == PGACCEL_VAL_NULL) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
+    return PGACCEL_OK;
+  }
+  if (value_col.type != PGACCEL_VAL_FLOAT32) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
+    return PGACCEL_UNSUPPORTED;
+  }
+  if (pred_col.values == nullptr || value_col.values == nullptr) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
+    return PGACCEL_ERROR;
+  }
+  if (!reduce_predicate_shape_supported(pred_col, const_val)) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
+    return PGACCEL_UNSUPPORTED;
+  }
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -2389,33 +2065,39 @@ extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_reduce_f32_usm(
     uint16_t cmp2_opcode, double const2_val, pgaccel_expr_usm_col value_col, size_t row_count,
     float* out_sum, float* out_min, float* out_max, int64_t* out_value_count, size_t* true_count,
     size_t* uncertain_count) try {
-  if (out_sum != nullptr)
-    *out_sum = 0.0f;
-  if (out_min != nullptr)
-    *out_min = 0.0f;
-  if (out_max != nullptr)
-    *out_max = 0.0f;
-  if (out_value_count != nullptr)
-    *out_value_count = 0;
-  if (true_count != nullptr)
-    *true_count = 0;
-  if (uncertain_count != nullptr)
-    *uncertain_count = 0;
   if (out_sum == nullptr || out_min == nullptr || out_max == nullptr ||
-      out_value_count == nullptr || true_count == nullptr)
+      out_value_count == nullptr || true_count == nullptr) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
     return PGACCEL_ERROR;
-  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode))
+  }
+  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode)) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
     return PGACCEL_UNSUPPORTED;
-  if (row_count == 0 || col1.type == PGACCEL_VAL_NULL || col2.type == PGACCEL_VAL_NULL)
+  }
+  if (row_count == 0 || col1.type == PGACCEL_VAL_NULL || col2.type == PGACCEL_VAL_NULL) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
     return PGACCEL_OK;
-  if (value_col.type != PGACCEL_VAL_FLOAT32)
+  }
+  if (value_col.type != PGACCEL_VAL_FLOAT32) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
     return PGACCEL_UNSUPPORTED;
-  if (col1.values == nullptr || col2.values == nullptr || value_col.values == nullptr)
+  }
+  if (col1.values == nullptr || col2.values == nullptr || value_col.values == nullptr) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
     return PGACCEL_ERROR;
-
-  return dispatch_two_pred_and_reduce_f32_usm(col1, cmp1_opcode, const1_val, col2, cmp2_opcode,
-                                              const2_val, value_col, row_count, out_sum, out_min,
-                                              out_max, out_value_count, true_count);
+  }
+  if (!reduce_predicate_shape_supported(col1, const1_val) ||
+      !reduce_predicate_shape_supported(col2, const2_val)) {
+    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
+                             uncertain_count);
+    return PGACCEL_UNSUPPORTED;
+  }
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
