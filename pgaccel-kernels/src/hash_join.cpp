@@ -21,17 +21,14 @@
 #include <exception>
 #include <limits>
 #include <new>
-#include <vector>
 
 #include "pgaccel_hash_join.h"
 #include "pgaccel_queue.h"
-
 
 struct pgaccel_hash_table {
   pgaccel_key_type key_type;
   size_t count;
   size_t capacity;
-  size_t non_null_rows;
   sycl::queue* queue;
   void* d_keys;
   uint8_t* d_null_mask;
@@ -210,88 +207,74 @@ static bool allocate_external_count_build_inputs(pgaccel_hash_table* ht, const K
   return true;
 }
 
-template <typename K>
-static bool build_hash_table_on_host(const K* keys, const uint8_t* null_mask, size_t count,
-                                     size_t table_capacity, std::vector<int32_t>& heads,
-                                     std::vector<int32_t>& next) {
-  heads.assign(table_capacity, EMPTY_HEAD);
-  next.assign(count > 0 ? count : 1, EMPTY_HEAD);
-  const size_t mask = table_capacity - 1;
-
-  for (size_t row = 0; row < count; ++row) {
-    if (null_mask != nullptr && null_mask[row] != 0) {
-      continue;
-    }
-
-    const K key = keys[row];
-    const uint64_t h = hash_key<K>(key);
-    const int32_t row_i = static_cast<int32_t>(row);
-    bool inserted = false;
-
-    for (size_t attempt = 0; attempt < table_capacity; ++attempt) {
-      const size_t slot = (h + attempt) & mask;
-      const int32_t head = heads[slot];
-      if (head == EMPTY_HEAD) {
-        heads[slot] = row_i;
-        next[row] = EMPTY_HEAD;
-        inserted = true;
-        break;
-      }
-      if (keys[static_cast<size_t>(head)] != key) {
-        continue;
-      }
-      next[row] = head;
-      heads[slot] = row_i;
-      inserted = true;
-      break;
-    }
-
-    if (!inserted) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-static void copy_host_hash_table_to_device(sycl::queue& q, const std::vector<int32_t>& heads,
-                                           const std::vector<int32_t>& next, int32_t* d_heads,
-                                           int32_t* d_next) {
-  q.memcpy(d_heads, heads.data(), heads.size() * sizeof(int32_t));
-  q.memcpy(d_next, next.data(), next.size() * sizeof(int32_t));
-  q.wait_and_throw();
-}
-
-template <typename K>
-static bool build_hash_table_host_inputs_to_device(sycl::queue& q, const K* keys,
-                                                   const uint8_t* null_mask, size_t count,
-                                                   int32_t* d_heads, int32_t* d_next,
-                                                   size_t table_capacity) {
-  std::vector<int32_t> heads;
-  std::vector<int32_t> next;
-  if (!build_hash_table_on_host(keys, null_mask, count, table_capacity, heads, next)) {
+template <typename K, bool HasNullMask>
+static bool build_hash_table_serial_kernel(sycl::queue& q, const K* d_keys, const uint8_t* d_nulls,
+                                           int32_t* d_heads, int32_t* d_next, size_t count,
+                                           size_t table_capacity) {
+  uint32_t* d_build_failed = sycl::malloc_shared<uint32_t>(1, q);
+  if (d_build_failed == nullptr) {
     return false;
   }
-  copy_host_hash_table_to_device(q, heads, next, d_heads, d_next);
-  return true;
+  *d_build_failed = 0;
+  const size_t mask = table_capacity - 1;
+
+  try {
+    q.single_task([=]() {
+       for (size_t row = 0; row < count; ++row) {
+         if constexpr (HasNullMask) {
+           if (d_nulls[row] != 0) {
+             continue;
+           }
+         }
+
+         const K key = d_keys[row];
+         const uint64_t h = hash_key<K>(key);
+         const int32_t row_i = static_cast<int32_t>(row);
+         bool inserted = false;
+
+         for (size_t attempt = 0; attempt < table_capacity; ++attempt) {
+           const size_t slot = (h + attempt) & mask;
+           const int32_t head = d_heads[slot];
+           if (head == EMPTY_HEAD) {
+             d_heads[slot] = row_i;
+             d_next[row] = EMPTY_HEAD;
+             inserted = true;
+             break;
+           }
+           if (d_keys[static_cast<size_t>(head)] != key) {
+             continue;
+           }
+           d_next[row] = head;
+           d_heads[slot] = row_i;
+           inserted = true;
+           break;
+         }
+
+         if (!inserted) {
+           *d_build_failed = 1;
+           return;
+         }
+       }
+     }).wait_and_throw();
+    const bool built = *d_build_failed == 0;
+    sycl::free(d_build_failed, q);
+    return built;
+  } catch (...) {
+    sycl::free(d_build_failed, q);
+    throw;
+  }
 }
 
 template <typename K>
-static bool build_hash_table_device_inputs_to_device(sycl::queue& q, const K* d_keys,
-                                                     const uint8_t* d_nulls, size_t count,
-                                                     int32_t* d_heads, int32_t* d_next,
-                                                     size_t table_capacity) {
-  std::vector<K> keys(count);
-  std::vector<uint8_t> nulls;
-  q.memcpy(keys.data(), d_keys, count * sizeof(K));
-  if (d_nulls != nullptr) {
-    nulls.resize(count);
-    q.memcpy(nulls.data(), d_nulls, count * sizeof(uint8_t));
+static bool build_hash_table_serial_kernel(sycl::queue& q, const K* d_keys, const uint8_t* d_nulls,
+                                           int32_t* d_heads, int32_t* d_next, size_t count,
+                                           size_t table_capacity) {
+  if (d_nulls == nullptr) {
+    return build_hash_table_serial_kernel<K, false>(q, d_keys, d_nulls, d_heads, d_next, count,
+                                                    table_capacity);
   }
-  q.wait_and_throw();
-
-  return build_hash_table_host_inputs_to_device(q, keys.data(), nulls.empty() ? nullptr : nulls.data(),
-                                                count, d_heads, d_next, table_capacity);
+  return build_hash_table_serial_kernel<K, true>(q, d_keys, d_nulls, d_heads, d_next, count,
+                                                 table_capacity);
 }
 
 template <typename K, bool HasNullMask>
@@ -366,18 +349,8 @@ static pgaccel_hash_table* build_typed(const K* keys, const uint8_t* null_mask,
     return nullptr;
   }
 
-  size_t non_null_rows = 0;
-  if (null_mask == nullptr) {
-    non_null_rows = count;
-  } else {
-    for (size_t i = 0; i < count; ++i) {
-      if (null_mask[i] == 0)
-        non_null_rows++;
-    }
-  }
-
   size_t capacity = 0;
-  if (!hash_join_capacity(non_null_rows, &capacity)) {
+  if (!hash_join_capacity(count, &capacity)) {
     return nullptr;
   }
 
@@ -388,7 +361,6 @@ static pgaccel_hash_table* build_typed(const K* keys, const uint8_t* null_mask,
   ht->key_type = key_type;
   ht->count = count;
   ht->capacity = capacity;
-  ht->non_null_rows = non_null_rows;
   ht->queue = q;
 
   try {
@@ -398,23 +370,24 @@ static pgaccel_hash_table* build_typed(const K* keys, const uint8_t* null_mask,
       return nullptr;
     }
 
-    if (non_null_rows > 0) {
-      const K* d_keys = static_cast<const K*>(ht->d_keys);
-      const uint8_t* d_nulls = ht->d_null_mask;
-      int32_t* d_heads = ht->d_heads;
-      int32_t* d_next = ht->d_next;
-      if (is_metal_backend()) {
-        if (!build_hash_table_host_inputs_to_device(*q, keys, null_mask, count, d_heads, d_next,
-                                                    ht->capacity)) {
-          free_table_storage(ht);
-          delete ht;
-          return nullptr;
-        }
-      } else {
-        build_hash_table_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count, ht->capacity);
-        pgaccel_record_gpu_exec();
-      }
+    const K* d_keys = static_cast<const K*>(ht->d_keys);
+    const uint8_t* d_nulls = ht->d_null_mask;
+    int32_t* d_heads = ht->d_heads;
+    int32_t* d_next = ht->d_next;
+    bool built = false;
+    if (is_metal_backend()) {
+      built = build_hash_table_serial_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count,
+                                                ht->capacity);
+    } else {
+      build_hash_table_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count, ht->capacity);
+      built = true;
     }
+    if (!built) {
+      free_table_storage(ht);
+      delete ht;
+      return nullptr;
+    }
+    pgaccel_record_gpu_exec();
 
     return ht;
   } catch (const sycl::exception& e) {
@@ -432,8 +405,8 @@ static pgaccel_hash_table* build_typed(const K* keys, const uint8_t* null_mask,
 
 template <typename K>
 static pgaccel_hash_table* build_device_count_typed(const K* device_keys,
-                                                    const uint8_t* device_null_mask,
-                                                    size_t count, pgaccel_key_type key_type) {
+                                                    const uint8_t* device_null_mask, size_t count,
+                                                    pgaccel_key_type key_type) {
   if (device_keys == nullptr || count == 0 ||
       count > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
     return nullptr;
@@ -456,10 +429,6 @@ static pgaccel_hash_table* build_device_count_typed(const K* device_keys,
   ht->key_type = key_type;
   ht->count = count;
   ht->capacity = capacity;
-  // The null mask is device-resident here, so avoid a host read in the timed
-  // path. Capacity based on all rows is safe and keeps this count-only ABI
-  // resident even when nullable keys are present.
-  ht->non_null_rows = count;
   ht->queue = q;
 
   try {
@@ -473,17 +442,20 @@ static pgaccel_hash_table* build_device_count_typed(const K* device_keys,
     const uint8_t* d_nulls = ht->d_null_mask;
     int32_t* d_heads = ht->d_heads;
     int32_t* d_next = ht->d_next;
+    bool built = false;
     if (is_metal_backend()) {
-      if (!build_hash_table_device_inputs_to_device(*q, d_keys, d_nulls, count, d_heads, d_next,
-                                                    ht->capacity)) {
-        free_table_storage(ht);
-        delete ht;
-        return nullptr;
-      }
+      built = build_hash_table_serial_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count,
+                                                ht->capacity);
     } else {
       build_hash_table_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count, ht->capacity);
-      pgaccel_record_gpu_exec();
+      built = true;
     }
+    if (!built) {
+      free_table_storage(ht);
+      delete ht;
+      return nullptr;
+    }
+    pgaccel_record_gpu_exec();
     return ht;
   } catch (const sycl::exception& e) {
     std::fprintf(stderr, "pgaccel: resident hash_join build kernel failed: %s\n", e.what());
@@ -900,8 +872,7 @@ pgaccel_hash_table* pgaccel_hash_join_build(const void* keys, const uint8_t* nul
 
 pgaccel_hash_table* pgaccel_hash_join_build_device_count(const void* device_keys,
                                                          const uint8_t* device_null_mask,
-                                                         size_t count,
-                                                         pgaccel_key_type key_type) {
+                                                         size_t count, pgaccel_key_type key_type) {
   if (device_keys == nullptr || count == 0 || key_size(key_type) == 0) {
     return nullptr;
   }
@@ -990,8 +961,7 @@ pgaccel_status pgaccel_hash_join_count(const pgaccel_hash_table* ht, const void*
 pgaccel_status pgaccel_hash_join_count_device(const pgaccel_hash_table* ht,
                                               const void* device_outer_keys,
                                               const uint8_t* device_outer_null_mask,
-                                              size_t outer_count,
-                                              size_t* match_count) try {
+                                              size_t outer_count, size_t* match_count) try {
   if (match_count != nullptr) {
     *match_count = 0;
   }

@@ -56,6 +56,28 @@ static std::vector<std::pair<uint32_t, uint32_t>> collect_pairs(const uint32_t* 
   return out;
 }
 
+static uint64_t test_hash64(uint64_t k) {
+  k ^= k >> 33;
+  k *= 0xff51afd7ed558ccdULL;
+  k ^= k >> 33;
+  k *= 0xc4ceb9fe1a85ec53ULL;
+  k ^= k >> 33;
+  return k;
+}
+
+static std::vector<int32_t> colliding_int32_keys(size_t count, size_t table_capacity) {
+  std::vector<int32_t> keys;
+  keys.reserve(count);
+  const uint64_t mask = table_capacity - 1;
+  const uint64_t target_bucket = test_hash64(0) & mask;
+  for (uint32_t candidate = 0; keys.size() < count; ++candidate) {
+    if ((test_hash64(static_cast<uint64_t>(candidate)) & mask) == target_bucket) {
+      keys.push_back(static_cast<int32_t>(candidate));
+    }
+  }
+  return keys;
+}
+
 static void test_int32_duplicates_nulls_and_dispatch_counter() {
   printf("--- test_int32_duplicates_nulls_and_dispatch_counter ---\n");
 
@@ -83,10 +105,7 @@ static void test_int32_duplicates_nulls_and_dispatch_counter() {
   auto got = collect_pairs(pairs.data(), match_count);
   std::vector<std::pair<uint32_t, uint32_t>> expected = {{0, 1}, {0, 3}, {1, 5}};
   ASSERT_TRUE("INT32 probe pairs match expected duplicate/null semantics", got == expected);
-  const pgaccel_platform_caps caps = pgaccel_get_caps();
-  const uint64_t min_gpu_dispatches = std::strcmp(caps.backend_name, "metal") == 0 ? 1 : 2;
-  ASSERT_TRUE("INT32 build+probe launched expected GPU kernels",
-              pgaccel_gpu_exec_count() >= min_gpu_dispatches);
+  ASSERT_TRUE("INT32 build+probe launched expected GPU kernels", pgaccel_gpu_exec_count() >= 2);
 
   pgaccel_hash_join_free(ht);
 }
@@ -151,9 +170,8 @@ static void test_device_count_table_rejects_pair_probe() {
   std::vector<uint8_t> build_nulls = {0, 0, 0};
   void* device_keys = nullptr;
   void* device_nulls = nullptr;
-  pgaccel_status st =
-      pgaccel_expr_device_alloc_copy(build_keys.data(), build_keys.size() * sizeof(int32_t),
-                                     &device_keys);
+  pgaccel_status st = pgaccel_expr_device_alloc_copy(
+      build_keys.data(), build_keys.size() * sizeof(int32_t), &device_keys);
   ASSERT_EQ_STATUS("device-count keys allocation", st, PGACCEL_OK);
   st = pgaccel_expr_device_alloc_copy(build_nulls.data(), build_nulls.size() * sizeof(uint8_t),
                                       &device_nulls);
@@ -229,6 +247,99 @@ static void test_duplicate_overflow_is_guarded() {
   pgaccel_hash_join_free(ht);
 }
 
+static void test_adversarial_collisions_duplicates_nulls_and_device_build() {
+  printf("--- test_adversarial_collisions_duplicates_nulls_and_device_build ---\n");
+
+  constexpr size_t distinct_keys = 16;
+  constexpr size_t repetitions = 64;
+  constexpr size_t row_count = distinct_keys * repetitions;
+  constexpr size_t table_capacity = row_count * 2;
+  const std::vector<int32_t> collision_keys = colliding_int32_keys(distinct_keys, table_capacity);
+
+  std::vector<int32_t> build_keys;
+  std::vector<uint8_t> build_nulls;
+  std::vector<uint32_t> indices;
+  std::vector<std::vector<uint32_t>> expected_indices(distinct_keys);
+  build_keys.reserve(row_count);
+  build_nulls.reserve(row_count);
+  indices.reserve(row_count);
+
+  for (size_t repetition = 0; repetition < repetitions; ++repetition) {
+    for (size_t key_index = 0; key_index < distinct_keys; ++key_index) {
+      const size_t row = build_keys.size();
+      const uint8_t is_null = (row % 17 == 0 || (repetition == 31 && key_index == 7)) ? 1 : 0;
+      const uint32_t index = static_cast<uint32_t>(100000 + row * 7);
+      build_keys.push_back(collision_keys[key_index]);
+      build_nulls.push_back(is_null);
+      indices.push_back(index);
+      if (is_null == 0) {
+        expected_indices[key_index].push_back(index);
+      }
+    }
+  }
+
+  pgaccel_hash_table* ht = pgaccel_hash_join_build(build_keys.data(), build_nulls.data(),
+                                                   indices.data(), row_count, PGACCEL_KEY_INT32);
+  ASSERT_TRUE("collision-heavy host-input build returns a table", ht != nullptr);
+  if (ht == nullptr) {
+    return;
+  }
+
+  size_t expected_matches = 0;
+  std::vector<std::pair<uint32_t, uint32_t>> expected_pairs;
+  for (size_t key_index = 0; key_index < distinct_keys; ++key_index) {
+    expected_matches += expected_indices[key_index].size();
+    for (uint32_t index : expected_indices[key_index]) {
+      expected_pairs.emplace_back(static_cast<uint32_t>(key_index), index);
+    }
+  }
+  std::sort(expected_pairs.begin(), expected_pairs.end());
+
+  std::vector<uint32_t> pairs(expected_matches * 2, 0);
+  size_t match_count = 0;
+  pgaccel_status st =
+      pgaccel_hash_join_probe(ht, collision_keys.data(), nullptr, collision_keys.size(),
+                              pairs.data(), expected_matches, &match_count);
+  ASSERT_EQ_STATUS("collision-heavy pair probe status", st, PGACCEL_OK);
+  ASSERT_EQ_SZ("collision-heavy pair probe match count", match_count, expected_matches);
+  ASSERT_TRUE("collision-heavy pair probe preserves caller indices",
+              collect_pairs(pairs.data(), match_count) == expected_pairs);
+  pgaccel_hash_join_free(ht);
+
+  void* device_keys = nullptr;
+  void* device_nulls = nullptr;
+  st = pgaccel_expr_device_alloc_copy(build_keys.data(), build_keys.size() * sizeof(int32_t),
+                                      &device_keys);
+  ASSERT_EQ_STATUS("collision-heavy device keys allocation", st, PGACCEL_OK);
+  st = pgaccel_expr_device_alloc_copy(build_nulls.data(), build_nulls.size() * sizeof(uint8_t),
+                                      &device_nulls);
+  ASSERT_EQ_STATUS("collision-heavy device null allocation", st, PGACCEL_OK);
+  if (device_keys == nullptr || device_nulls == nullptr) {
+    pgaccel_expr_device_free(device_keys);
+    pgaccel_expr_device_free(device_nulls);
+    return;
+  }
+
+  ht = pgaccel_hash_join_build_device_count(device_keys, static_cast<const uint8_t*>(device_nulls),
+                                            row_count, PGACCEL_KEY_INT32);
+  ASSERT_TRUE("collision-heavy device-input build returns a table", ht != nullptr);
+  if (ht != nullptr) {
+    size_t expected_count = 0;
+    for (const auto& key_indices : expected_indices) {
+      expected_count += key_indices.size() * key_indices.size();
+    }
+    match_count = 0;
+    st = pgaccel_hash_join_count_device(ht, device_keys, static_cast<const uint8_t*>(device_nulls),
+                                        row_count, &match_count);
+    ASSERT_EQ_STATUS("collision-heavy device count status", st, PGACCEL_OK);
+    ASSERT_EQ_SZ("collision-heavy device count result", match_count, expected_count);
+    pgaccel_hash_join_free(ht);
+  }
+
+  pgaccel_expr_device_free(device_keys);
+  pgaccel_expr_device_free(device_nulls);
+}
+
 int main() {
   printf("=== pgaccel hash_join selected-kernel tests ===\n\n");
 
@@ -244,6 +355,7 @@ int main() {
   test_device_count_table_rejects_pair_probe();
   test_unsupported_float64_build_fails_closed();
   test_duplicate_overflow_is_guarded();
+  test_adversarial_collisions_duplicates_nulls_and_device_build();
 
   printf("\nPASS=%d FAIL=%d\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
