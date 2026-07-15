@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <vector>
 
@@ -246,6 +247,49 @@ static void test_size(size_t N) {
   }
 }
 
+static void test_fp64_singleton() {
+  std::printf("\n=== fp64 singleton device reductions ===\n");
+  const double value = -4.25;
+  double sum = 0.0;
+  double min = 0.0;
+  double max = 0.0;
+  double multi_sum = 0.0;
+  double multi_min = 0.0;
+  double multi_max = 0.0;
+  int64_t multi_count = 0;
+  double sum_sq = 0.0;
+  uint64_t stats_count = 0;
+  double stats_sum = 0.0;
+  double stats_sum_sq = 0.0;
+
+  const pgaccel_status sum_st = pgaccel_reduce_sum_f64(&value, 1, &sum);
+  const pgaccel_status min_st = pgaccel_reduce_min_f64(&value, 1, &min);
+  const pgaccel_status max_st = pgaccel_reduce_max_f64(&value, 1, &max);
+  const pgaccel_status multi_st =
+      pgaccel_reduce_multi_f64(&value, 1, &multi_sum, &multi_min, &multi_max, &multi_count);
+  const pgaccel_status sum_sq_st = pgaccel_reduce_sum_sq_f64(&value, 1, &sum_sq);
+  const pgaccel_status stats_st =
+      pgaccel_reduce_stats_f64(&value, 1, &stats_count, &stats_sum, &stats_sum_sq);
+
+  if (sum_st != PGACCEL_OK || min_st != PGACCEL_OK || max_st != PGACCEL_OK ||
+      multi_st != PGACCEL_OK || sum_sq_st != PGACCEL_OK || stats_st != PGACCEL_OK || sum != value ||
+      min != value || max != value || multi_sum != value || multi_min != value ||
+      multi_max != value || multi_count != 1 || sum_sq != 18.0625 || stats_count != 1 ||
+      stats_sum != value || stats_sum_sq != 18.0625) {
+    std::fprintf(stderr,
+                 "FAIL fp64 singleton: status=%d/%d/%d/%d/%d/%d scalar=%.17g/%.17g/%.17g "
+                 "multi=%.17g/%.17g/%.17g/%lld sum_sq=%.17g stats=%llu/%.17g/%.17g\n",
+                 static_cast<int>(sum_st), static_cast<int>(min_st), static_cast<int>(max_st),
+                 static_cast<int>(multi_st), static_cast<int>(sum_sq_st),
+                 static_cast<int>(stats_st), sum, min, max, multi_sum, multi_min, multi_max,
+                 static_cast<long long>(multi_count), sum_sq,
+                 static_cast<unsigned long long>(stats_count), stats_sum, stats_sum_sq);
+    g_failures++;
+  } else {
+    std::printf("  OK  fp64 singleton device reductions\n");
+  }
+}
+
 static void test_fp32_regression() {
   // Preserve the prior [1..100] fp32 coverage — never shorten, never loosen.
   std::printf("\n=== fp32 regression ([1..100] coverage) ===\n");
@@ -291,6 +335,81 @@ static void test_fp32_regression() {
       }
     }
   }
+  // Singleton inputs must still dispatch through the device reduction path.
+  {
+    const float value = -3.5f;
+    double sum_sq = -1.0;
+    uint64_t count = 0;
+    double sum = 0.0;
+    double stats_sum_sq = 0.0;
+    pgaccel_status sum_sq_st = pgaccel_reduce_sum_sq_f32(&value, 1, &sum_sq);
+    pgaccel_status stats_st = pgaccel_reduce_stats_f32(&value, 1, &count, &sum, &stats_sum_sq);
+    if (sum_sq_st != PGACCEL_OK || stats_st != PGACCEL_OK || count != 1 || sum != -3.5 ||
+        sum_sq != 12.25 || stats_sum_sq != 12.25) {
+      std::fprintf(stderr,
+                   "FAIL fp32 singleton: sum_sq_status=%d stats_status=%d count=%llu "
+                   "sum=%.17g sum_sq=%.17g stats_sum_sq=%.17g\n",
+                   static_cast<int>(sum_sq_st), static_cast<int>(stats_st),
+                   static_cast<unsigned long long>(count), sum, sum_sq, stats_sum_sq);
+      g_failures++;
+    } else {
+      std::printf("  OK  fp32 singleton device reductions\n");
+    }
+  }
+  // Cross-group finalization must preserve the prior double promotion.
+  {
+    constexpr size_t LARGE_N = 1025;
+    std::vector<float> values(LARGE_N);
+    double expected_sum = 0.0;
+    double expected_sum_sq = 0.0;
+    for (size_t i = 0; i < LARGE_N; ++i) {
+      values[i] = static_cast<float>(static_cast<int>(i % 11) - 5);
+      expected_sum += static_cast<double>(values[i]);
+      expected_sum_sq += static_cast<double>(values[i]) * static_cast<double>(values[i]);
+    }
+
+    double sum_sq = -1.0;
+    uint64_t count = 0;
+    double sum = 0.0;
+    double stats_sum_sq = 0.0;
+    pgaccel_status sum_sq_st = pgaccel_reduce_sum_sq_f32(values.data(), values.size(), &sum_sq);
+    pgaccel_status stats_st =
+        pgaccel_reduce_stats_f32(values.data(), values.size(), &count, &sum, &stats_sum_sq);
+    if (sum_sq_st != PGACCEL_OK || stats_st != PGACCEL_OK || count != LARGE_N ||
+        sum != expected_sum || sum_sq != expected_sum_sq || stats_sum_sq != expected_sum_sq) {
+      std::fprintf(stderr,
+                   "FAIL fp32 cross-group finalize: sum_sq_status=%d stats_status=%d count=%llu "
+                   "sum=%.17g/%.17g sum_sq=%.17g/%.17g stats_sum_sq=%.17g\n",
+                   static_cast<int>(sum_sq_st), static_cast<int>(stats_st),
+                   static_cast<unsigned long long>(count), sum, expected_sum, sum_sq,
+                   expected_sum_sq, stats_sum_sq);
+      g_failures++;
+    } else {
+      std::printf("  OK  fp32 cross-group device finalization\n");
+    }
+  }
+  // The final device merge must retain IEEE infinity/NaN propagation.
+  {
+    std::vector<float> values(513, 0.0f);
+    values[256] = std::numeric_limits<float>::infinity();
+    values[512] = -std::numeric_limits<float>::infinity();
+
+    uint64_t count = 0;
+    double sum = 0.0;
+    double sum_sq = 0.0;
+    pgaccel_status st =
+        pgaccel_reduce_stats_f32(values.data(), values.size(), &count, &sum, &sum_sq);
+    if (st != PGACCEL_OK || count != values.size() || !std::isnan(sum) || !std::isinf(sum_sq) ||
+        std::signbit(sum_sq)) {
+      std::fprintf(stderr,
+                   "FAIL fp32 special finalization: status=%d count=%llu sum=%.17g "
+                   "sum_sq=%.17g\n",
+                   static_cast<int>(st), static_cast<unsigned long long>(count), sum, sum_sq);
+      g_failures++;
+    } else {
+      std::printf("  OK  fp32 cross-group IEEE propagation\n");
+    }
+  }
   // Empty-input zero-init contract.
   {
     uint64_t count = 99;
@@ -316,8 +435,10 @@ int main() {
   std::printf("Device: %s backend=%s has_native_fp64=%d\n", info.device_name, info.backend_name,
               info.has_native_fp64);
 
+  test_fp64_singleton();
+
   // Sizes per W5 fp64-unlock plan. The 1k size catches scalar-path bugs,
-  // 1M catches tree-reduce accumulation drift.
+  // and 1M catches accumulation drift.
   for (size_t N : {size_t(1024), size_t(65536), size_t(262144), size_t(1048576)}) {
     test_size(N);
   }

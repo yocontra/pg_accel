@@ -51,12 +51,18 @@ static bool is_metal_backend() {
 
 static constexpr size_t WG_SIZE = 256;
 
-/// Generic two-pass tree reduction.  Pass 1 reduces within work-groups using
-/// shared local memory.  Partial results are reduced on the host (typically
-/// only a few hundred values).
+static void wait_for_submitted_work(sycl::queue& q) noexcept {
+  try {
+    q.wait();
+  } catch (...) {}
+}
+
+/// Generic two-pass tree reduction. Pass 1 reduces within work-groups using
+/// local memory. Pass 2 reduces the work-group partials and writes the final
+/// value on the device; the host only transfers that completed value.
 template <typename T, typename BinOp>
 pgaccel_status tree_reduce_sycl(sycl::queue& q, const T* data, size_t count, T* result, T identity,
-                                BinOp op) {
+                                BinOp op, bool identity_from_first = false) {
   // NOTE: Raw host pointers are not accessible from Metal GPU kernels. Always
   // copy through malloc_device.
   T* d_data = sycl::malloc_device<T>(count, q);
@@ -65,62 +71,73 @@ pgaccel_status tree_reduce_sycl(sycl::queue& q, const T* data, size_t count, T* 
 
   size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
 
-  // SAFETY: partials is shared memory — accessible from both host and device.
-  T* partials = sycl::malloc_shared<T>(num_groups, q);
-  if (!partials) {
+  T* partials = sycl::malloc_device<T>(num_groups, q);
+  T* d_result = sycl::malloc_device<T>(1, q);
+  if (!partials || !d_result) {
     sycl::free(d_data, q);
+    sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_OOM;
   }
 
   try {
     q.memcpy(d_data, data, count * sizeof(T)).wait_and_throw();
+    const sycl::event group_event = q.submit([&](sycl::handler& h) {
+      sycl::local_accessor<T, 1> local_mem(WG_SIZE, h);
+
+      h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
+        const size_t gid = item.get_global_id(0);
+        const size_t lid = item.get_local_id(0);
+        const size_t group_id = item.get_group(0);
+        const T lane_identity = identity_from_first ? d_data[0] : identity;
+
+        local_mem[lid] = (gid < count) ? d_data[gid] : lane_identity;
+        item.barrier(sycl::access::fence_space::local_space);
+
+        for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
+          if (lid < stride) {
+            local_mem[lid] = op(local_mem[lid], local_mem[lid + stride]);
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+        }
+
+        if (lid == 0) {
+          partials[group_id] = local_mem[0];
+        }
+      });
+    });
+
     q.submit([&](sycl::handler& h) {
-       sycl::local_accessor<T, 1> local_mem(WG_SIZE, h);
-
-       h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
-         size_t gid = item.get_global_id(0);
-         size_t lid = item.get_local_id(0);
-         size_t group_id = item.get_group(0);
-
-         // Load — out-of-range lanes get the identity element.
-         local_mem[lid] = (gid < count) ? d_data[gid] : identity;
-         item.barrier(sycl::access::fence_space::local_space);
-
-         // Tree reduction in local memory.
-         for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
-           if (lid < stride) {
-             local_mem[lid] = op(local_mem[lid], local_mem[lid + stride]);
-           }
-           item.barrier(sycl::access::fence_space::local_space);
+       h.depends_on(group_event);
+       h.single_task([=]() {
+         T final_value = identity_from_first ? d_data[0] : identity;
+         for (size_t i = 0; i < num_groups; ++i) {
+           final_value = op(final_value, partials[i]);
          }
-
-         if (lid == 0) {
-           partials[group_id] = local_mem[0];
-         }
+         d_result[0] = final_value;
        });
      }).wait_and_throw();
 
-    // Final reduction of partial results on host — only after
-    // wait_and_throw() confirms the kernel completed successfully.
-    T final_val = identity;
-    for (size_t i = 0; i < num_groups; ++i) {
-      final_val = op(final_val, partials[i]);
-    }
-    *result = final_val;
+    q.memcpy(result, d_result, sizeof(T)).wait_and_throw();
   } catch (const std::exception& e) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce failed: %s\n", e.what());
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_ERROR;
   } catch (...) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce failed (unknown)\n");
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_ERROR;
   }
 
   sycl::free(d_data, q);
   sycl::free(partials, q);
+  sycl::free(d_result, q);
   return PGACCEL_OK;
 }
 
@@ -135,12 +152,14 @@ pgaccel_status reduce_sum_sycl(sycl::queue& q, const T* data, size_t count, T* r
 
 template <typename T>
 pgaccel_status reduce_min_sycl(sycl::queue& q, const T* data, size_t count, T* result) {
-  return tree_reduce_sycl(q, data, count, result, data[0], [](T a, T b) { return a < b ? a : b; });
+  return tree_reduce_sycl(
+      q, data, count, result, T{0}, [](T a, T b) { return a < b ? a : b; }, true);
 }
 
 template <typename T>
 pgaccel_status reduce_max_sycl(sycl::queue& q, const T* data, size_t count, T* result) {
-  return tree_reduce_sycl(q, data, count, result, data[0], [](T a, T b) { return a > b ? a : b; });
+  return tree_reduce_sycl(
+      q, data, count, result, T{0}, [](T a, T b) { return a > b ? a : b; }, true);
 }
 
 static constexpr uint64_t F64_SIGN_BIT = 0x8000000000000000ULL;
@@ -167,9 +186,7 @@ static inline uint64_t f64_to_pg_sortable(double value) {
 static inline double pg_sortable_to_f64(uint64_t key) {
   const uint64_t mask = (key & F64_SIGN_BIT) ? F64_SIGN_BIT : 0xffffffffffffffffULL;
   const uint64_t bits = key ^ mask;
-  double value;
-  std::memcpy(&value, &bits, sizeof(value));
-  return value;
+  return sycl::bit_cast<double>(bits);
 }
 
 template <bool FindMax>
@@ -180,9 +197,12 @@ pgaccel_status reduce_minmax_f64_sortable_sycl(sycl::queue& q, const double* dat
     return PGACCEL_OOM;
 
   const size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
-  uint64_t* partials = sycl::malloc_shared<uint64_t>(num_groups, q);
-  if (!partials) {
+  uint64_t* partials = sycl::malloc_device<uint64_t>(num_groups, q);
+  double* d_result = sycl::malloc_device<double>(1, q);
+  if (!partials || !d_result) {
     sycl::free(d_data, q);
+    sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_OOM;
   }
 
@@ -190,59 +210,70 @@ pgaccel_status reduce_minmax_f64_sortable_sycl(sycl::queue& q, const double* dat
 
   try {
     q.memcpy(d_data, data, count * sizeof(double)).wait_and_throw();
+    const sycl::event group_event = q.submit([&](sycl::handler& h) {
+      sycl::local_accessor<uint64_t, 1> local_mem(WG_SIZE, h);
+
+      h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
+        const size_t gid = item.get_global_id(0);
+        const size_t lid = item.get_local_id(0);
+        const size_t group_id = item.get_group(0);
+
+        local_mem[lid] = (gid < count) ? f64_to_pg_sortable(d_data[gid]) : identity;
+        item.barrier(sycl::access::fence_space::local_space);
+
+        for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
+          if (lid < stride) {
+            const uint64_t a = local_mem[lid];
+            const uint64_t b = local_mem[lid + stride];
+            if constexpr (FindMax) {
+              local_mem[lid] = (a > b) ? a : b;
+            } else {
+              local_mem[lid] = (a < b) ? a : b;
+            }
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+        }
+
+        if (lid == 0) {
+          partials[group_id] = local_mem[0];
+        }
+      });
+    });
+
     q.submit([&](sycl::handler& h) {
-       sycl::local_accessor<uint64_t, 1> local_mem(WG_SIZE, h);
-
-       h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
-         const size_t gid = item.get_global_id(0);
-         const size_t lid = item.get_local_id(0);
-         const size_t group_id = item.get_group(0);
-
-         local_mem[lid] = (gid < count) ? f64_to_pg_sortable(d_data[gid]) : identity;
-         item.barrier(sycl::access::fence_space::local_space);
-
-         for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
-           if (lid < stride) {
-             const uint64_t a = local_mem[lid];
-             const uint64_t b = local_mem[lid + stride];
-             if constexpr (FindMax) {
-               local_mem[lid] = (a > b) ? a : b;
-             } else {
-               local_mem[lid] = (a < b) ? a : b;
-             }
+       h.depends_on(group_event);
+       h.single_task([=]() {
+         uint64_t final_key = identity;
+         for (size_t i = 0; i < num_groups; ++i) {
+           if constexpr (FindMax) {
+             final_key = (final_key > partials[i]) ? final_key : partials[i];
+           } else {
+             final_key = (final_key < partials[i]) ? final_key : partials[i];
            }
-           item.barrier(sycl::access::fence_space::local_space);
          }
-
-         if (lid == 0) {
-           partials[group_id] = local_mem[0];
-         }
+         d_result[0] = pg_sortable_to_f64(final_key);
        });
      }).wait_and_throw();
-
-    uint64_t final_key = identity;
-    for (size_t i = 0; i < num_groups; ++i) {
-      if constexpr (FindMax) {
-        final_key = (final_key > partials[i]) ? final_key : partials[i];
-      } else {
-        final_key = (final_key < partials[i]) ? final_key : partials[i];
-      }
-    }
-    *result = pg_sortable_to_f64(final_key);
+    q.memcpy(result, d_result, sizeof(double)).wait_and_throw();
   } catch (const std::exception& e) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL reduce_minmax_f64_sortable failed: %s\n", e.what());
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_ERROR;
   } catch (...) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL reduce_minmax_f64_sortable failed (unknown)\n");
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_ERROR;
   }
 
   sycl::free(d_data, q);
   sycl::free(partials, q);
+  sycl::free(d_result, q);
   return PGACCEL_OK;
 }
 
@@ -256,56 +287,96 @@ pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask, size_t cou
 
   size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
 
-  size_t* partials = sycl::malloc_shared<size_t>(num_groups, q);
-  if (!partials) {
+  size_t* partials = sycl::malloc_device<size_t>(num_groups, q);
+  size_t* d_result = sycl::malloc_device<size_t>(1, q);
+  if (!partials || !d_result) {
     sycl::free(d_mask, q);
+    sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_OOM;
   }
 
   try {
     q.memcpy(d_mask, mask, count * sizeof(uint8_t)).wait_and_throw();
+    const sycl::event group_event = q.submit([&](sycl::handler& h) {
+      sycl::local_accessor<size_t, 1> local_mem(WG_SIZE, h);
+
+      h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
+        const size_t gid = item.get_global_id(0);
+        const size_t lid = item.get_local_id(0);
+        const size_t group_id = item.get_group(0);
+
+        local_mem[lid] = (gid < count && d_mask[gid] != 0) ? size_t{1} : size_t{0};
+        item.barrier(sycl::access::fence_space::local_space);
+
+        for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
+          if (lid < stride) {
+            local_mem[lid] += local_mem[lid + stride];
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+        }
+
+        if (lid == 0) {
+          partials[group_id] = local_mem[0];
+        }
+      });
+    });
+
     q.submit([&](sycl::handler& h) {
-       sycl::local_accessor<size_t, 1> local_mem(WG_SIZE, h);
-
-       h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
-         size_t gid = item.get_global_id(0);
-         size_t lid = item.get_local_id(0);
-         size_t group_id = item.get_group(0);
-
-         local_mem[lid] = (gid < count && d_mask[gid] != 0) ? size_t{1} : size_t{0};
-         item.barrier(sycl::access::fence_space::local_space);
-
-         for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
-           if (lid < stride) {
-             local_mem[lid] += local_mem[lid + stride];
-           }
-           item.barrier(sycl::access::fence_space::local_space);
+       h.depends_on(group_event);
+       h.single_task([=]() {
+         size_t total = 0;
+         for (size_t i = 0; i < num_groups; ++i) {
+           total += partials[i];
          }
-
-         if (lid == 0) {
-           partials[group_id] = local_mem[0];
-         }
+         d_result[0] = total;
        });
      }).wait_and_throw();
-
-    size_t total = 0;
-    for (size_t i = 0; i < num_groups; ++i)
-      total += partials[i];
-    *result = total;
+    q.memcpy(result, d_result, sizeof(size_t)).wait_and_throw();
   } catch (const std::exception& e) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL reduce_count failed: %s\n", e.what());
     sycl::free(d_mask, q);
     sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_ERROR;
   } catch (...) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL reduce_count failed (unknown)\n");
     sycl::free(d_mask, q);
     sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_ERROR;
   }
 
   sycl::free(d_mask, q);
   sycl::free(partials, q);
+  sycl::free(d_result, q);
+  return PGACCEL_OK;
+}
+
+template <typename CountT>
+pgaccel_status write_count_sycl(sycl::queue& q, size_t count, CountT* result) {
+  CountT* d_result = sycl::malloc_device<CountT>(1, q);
+  if (!d_result)
+    return PGACCEL_OOM;
+
+  try {
+    q.single_task([=]() { d_result[0] = static_cast<CountT>(count); }).wait_and_throw();
+    q.memcpy(result, d_result, sizeof(CountT)).wait_and_throw();
+  } catch (const std::exception& e) {
+    wait_for_submitted_work(q);
+    fprintf(stderr, "pgaccel: SYCL count finalization failed: %s\n", e.what());
+    sycl::free(d_result, q);
+    return PGACCEL_ERROR;
+  } catch (...) {
+    wait_for_submitted_work(q);
+    fprintf(stderr, "pgaccel: SYCL count finalization failed (unknown)\n");
+    sycl::free(d_result, q);
+    return PGACCEL_ERROR;
+  }
+
+  sycl::free(d_result, q);
   return PGACCEL_OK;
 }
 
@@ -315,7 +386,8 @@ pgaccel_status reduce_count_sycl(sycl::queue& q, const uint8_t* mask, size_t cou
 // Public API — fp32 (all platforms)
 // ---------------------------------------------------------------------------
 
-extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data, size_t count, float* result) try {
+extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data, size_t count,
+                                                 float* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -324,10 +396,6 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data, size_t count
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -354,7 +422,8 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f32(const float* data, size_t count
   return pgaccel_kernel_failure("pgaccel_reduce_sum_f32", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data, size_t count, float* result) try {
+extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data, size_t count,
+                                                 float* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -363,10 +432,6 @@ extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data, size_t count
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -393,7 +458,8 @@ extern "C" pgaccel_status pgaccel_reduce_min_f32(const float* data, size_t count
   return pgaccel_kernel_failure("pgaccel_reduce_min_f32", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data, size_t count, float* result) try {
+extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data, size_t count,
+                                                 float* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -402,10 +468,6 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data, size_t count
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -437,7 +499,8 @@ extern "C" pgaccel_status pgaccel_reduce_max_f32(const float* data, size_t count
 // via AdaptiveCpp SSCP). fp64 is always available.
 // ---------------------------------------------------------------------------
 
-extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data, size_t count, double* result) try {
+extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data, size_t count,
+                                                 double* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -446,10 +509,6 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data, size_t coun
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -476,7 +535,8 @@ extern "C" pgaccel_status pgaccel_reduce_sum_f64(const double* data, size_t coun
   return pgaccel_kernel_failure("pgaccel_reduce_sum_f64", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data, size_t count, double* result) try {
+extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data, size_t count,
+                                                 double* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -485,17 +545,13 @@ extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data, size_t coun
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = is_metal_backend()
-                               ? reduce_minmax_f64_sortable_sycl<false>(*q, data, count, result)
-                               : reduce_min_sycl<double>(*q, data, count, result);
+                              ? reduce_minmax_f64_sortable_sycl<false>(*q, data, count, result)
+                              : reduce_min_sycl<double>(*q, data, count, result);
       if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
       return st;
@@ -517,7 +573,8 @@ extern "C" pgaccel_status pgaccel_reduce_min_f64(const double* data, size_t coun
   return pgaccel_kernel_failure("pgaccel_reduce_min_f64", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data, size_t count, double* result) try {
+extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data, size_t count,
+                                                 double* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -526,17 +583,13 @@ extern "C" pgaccel_status pgaccel_reduce_max_f64(const double* data, size_t coun
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
     if (q) {
       pgaccel_status st = is_metal_backend()
-                               ? reduce_minmax_f64_sortable_sycl<true>(*q, data, count, result)
-                               : reduce_max_sycl<double>(*q, data, count, result);
+                              ? reduce_minmax_f64_sortable_sycl<true>(*q, data, count, result)
+                              : reduce_max_sycl<double>(*q, data, count, result);
       if (st == PGACCEL_OK)
         pgaccel_record_gpu_exec();
       return st;
@@ -572,10 +625,6 @@ extern "C" pgaccel_status pgaccel_reduce_sum_i64(const int64_t* data, size_t cou
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -612,10 +661,6 @@ extern "C" pgaccel_status pgaccel_reduce_min_i64(const int64_t* data, size_t cou
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -652,10 +697,6 @@ extern "C" pgaccel_status pgaccel_reduce_max_i64(const int64_t* data, size_t cou
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -686,7 +727,8 @@ extern "C" pgaccel_status pgaccel_reduce_max_i64(const int64_t* data, size_t cou
 // Public API — mask popcount (all platforms)
 // ---------------------------------------------------------------------------
 
-extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count, size_t* result) try {
+extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count,
+                                               size_t* result) try {
   if (!result)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -732,8 +774,8 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count
 // Implementation strategy: a tree-reduce per work group over a struct of
 // (sum, min, max, count). Every lane loads one element, initializes its
 // local struct (or identity for out-of-range lanes), then pairwise combines
-// using work-group local memory. Partial results from all work groups are
-// combined on the host (O(num_groups) final merge).
+// using work-group local memory. A dependent device kernel combines all
+// work-group partials and writes the ABI results.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -831,9 +873,14 @@ pgaccel_status tree_reduce_multi_sycl(sycl::queue& q, const T* data, size_t coun
   size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
 
   using Partial = MultiAggPartial<T>;
-  Partial* partials = sycl::malloc_shared<Partial>(num_groups, q);
-  if (!partials) {
+  Partial* partials = sycl::malloc_device<Partial>(num_groups, q);
+  T* d_aggregates = sycl::malloc_device<T>(3, q);
+  int64_t* d_count = sycl::malloc_device<int64_t>(1, q);
+  if (!partials || !d_aggregates || !d_count) {
     sycl::free(d_data, q);
+    sycl::free(partials, q);
+    sycl::free(d_aggregates, q);
+    sycl::free(d_count, q);
     return PGACCEL_OOM;
   }
 
@@ -841,62 +888,79 @@ pgaccel_status tree_reduce_multi_sycl(sycl::queue& q, const T* data, size_t coun
 
   try {
     q.memcpy(d_data, data, count * sizeof(T)).wait_and_throw();
+    const sycl::event group_event = q.submit([&](sycl::handler& h) {
+      sycl::local_accessor<Partial, 1> local_mem(WG_SIZE, h);
+
+      h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
+        const size_t gid = item.get_global_id(0);
+        const size_t lid = item.get_local_id(0);
+        const size_t group_id = item.get_group(0);
+
+        Partial p;
+        if (gid < count) {
+          const T v = d_data[gid];
+          p.sum = v;
+          p.min = v;
+          p.max = v;
+          p.count = 1;
+        } else {
+          p = identity;
+        }
+        local_mem[lid] = p;
+        item.barrier(sycl::access::fence_space::local_space);
+
+        for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
+          if (lid < stride) {
+            local_mem[lid] = multi_combine(local_mem[lid], local_mem[lid + stride]);
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+        }
+
+        if (lid == 0) {
+          partials[group_id] = local_mem[0];
+        }
+      });
+    });
+
     q.submit([&](sycl::handler& h) {
-       sycl::local_accessor<Partial, 1> local_mem(WG_SIZE, h);
-
-       h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
-         size_t gid = item.get_global_id(0);
-         size_t lid = item.get_local_id(0);
-         size_t group_id = item.get_group(0);
-
-         Partial p;
-         if (gid < count) {
-           T v = d_data[gid];
-           p.sum = v;
-           p.min = v;
-           p.max = v;
-           p.count = 1;
-         } else {
-           p = identity;
+       h.depends_on(group_event);
+       h.single_task([=]() {
+         Partial final = identity;
+         for (size_t i = 0; i < num_groups; ++i) {
+           final = multi_combine(final, partials[i]);
          }
-         local_mem[lid] = p;
-         item.barrier(sycl::access::fence_space::local_space);
-
-         for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
-           if (lid < stride) {
-             local_mem[lid] = multi_combine(local_mem[lid], local_mem[lid + stride]);
-           }
-           item.barrier(sycl::access::fence_space::local_space);
-         }
-
-         if (lid == 0) {
-           partials[group_id] = local_mem[0];
-         }
+         d_aggregates[0] = final.sum;
+         d_aggregates[1] = final.min;
+         d_aggregates[2] = final.max;
+         d_count[0] = final.count;
        });
      }).wait_and_throw();
-
-    Partial final = identity;
-    for (size_t i = 0; i < num_groups; ++i) {
-      final = multi_combine(final, partials[i]);
-    }
-    *out_sum = final.sum;
-    *out_min = final.min;
-    *out_max = final.max;
-    *out_count = final.count;
+    q.memcpy(out_sum, d_aggregates, sizeof(T)).wait_and_throw();
+    q.memcpy(out_min, d_aggregates + 1, sizeof(T)).wait_and_throw();
+    q.memcpy(out_max, d_aggregates + 2, sizeof(T)).wait_and_throw();
+    q.memcpy(out_count, d_count, sizeof(int64_t)).wait_and_throw();
   } catch (const std::exception& e) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce_multi failed: %s\n", e.what());
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_aggregates, q);
+    sycl::free(d_count, q);
     return PGACCEL_ERROR;
   } catch (...) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce_multi failed (unknown)\n");
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_aggregates, q);
+    sycl::free(d_count, q);
     return PGACCEL_ERROR;
   }
 
   sycl::free(d_data, q);
   sycl::free(partials, q);
+  sycl::free(d_aggregates, q);
+  sycl::free(d_count, q);
   return PGACCEL_OK;
 }
 
@@ -943,13 +1007,18 @@ pgaccel_status tree_reduce_multi_masked_sycl(sycl::queue& q, const T* values,
   size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
 
   using Partial = MultiAggPartial<T>;
-  Partial* partials = sycl::malloc_shared<Partial>(num_groups, q);
-  if (!partials) {
+  Partial* partials = sycl::malloc_device<Partial>(num_groups, q);
+  T* d_aggregates = sycl::malloc_device<T>(3, q);
+  int64_t* d_count = sycl::malloc_device<int64_t>(1, q);
+  if (!partials || !d_aggregates || !d_count) {
     sycl::free(d_values, q);
     if (d_value_nulls)
       sycl::free(d_value_nulls, q);
     if (d_selection)
       sycl::free(d_selection, q);
+    sycl::free(partials, q);
+    sycl::free(d_aggregates, q);
+    sycl::free(d_count, q);
     return PGACCEL_OOM;
   }
 
@@ -962,62 +1031,71 @@ pgaccel_status tree_reduce_multi_masked_sycl(sycl::queue& q, const T* values,
     if (has_selection)
       q.memcpy(d_selection, selection, count * sizeof(uint8_t)).wait_and_throw();
 
+    const sycl::event group_event = q.submit([&](sycl::handler& h) {
+      sycl::local_accessor<Partial, 1> local_mem(WG_SIZE, h);
+
+      h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
+        const size_t gid = item.get_global_id(0);
+        const size_t lid = item.get_local_id(0);
+        const size_t group_id = item.get_group(0);
+
+        bool consume = gid < count;
+        if (consume && has_selection)
+          consume = d_selection[gid] != 0;
+        if (consume && has_value_nulls)
+          consume = d_value_nulls[gid] == 0;
+
+        Partial p;
+        if (consume) {
+          const T v = d_values[gid];
+          p.sum = v;
+          p.min = v;
+          p.max = v;
+          p.count = 1;
+        } else {
+          p = identity;
+        }
+        local_mem[lid] = p;
+        item.barrier(sycl::access::fence_space::local_space);
+
+        for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
+          if (lid < stride) {
+            local_mem[lid] = multi_combine(local_mem[lid], local_mem[lid + stride]);
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+        }
+
+        if (lid == 0) {
+          partials[group_id] = local_mem[0];
+        }
+      });
+    });
+
     q.submit([&](sycl::handler& h) {
-       sycl::local_accessor<Partial, 1> local_mem(WG_SIZE, h);
-
-       h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
-         size_t gid = item.get_global_id(0);
-         size_t lid = item.get_local_id(0);
-         size_t group_id = item.get_group(0);
-
-         bool consume = gid < count;
-         if (consume && has_selection)
-           consume = d_selection[gid] != 0;
-         if (consume && has_value_nulls)
-           consume = d_value_nulls[gid] == 0;
-
-         Partial p;
-         if (consume) {
-           T v = d_values[gid];
-           p.sum = v;
-           p.min = v;
-           p.max = v;
-           p.count = 1;
+       h.depends_on(group_event);
+       h.single_task([=]() {
+         Partial final = identity;
+         for (size_t i = 0; i < num_groups; ++i) {
+           final = multi_combine(final, partials[i]);
+         }
+         if (final.count == 0) {
+           d_aggregates[0] = T{0};
+           d_aggregates[1] = T{0};
+           d_aggregates[2] = T{0};
          } else {
-           p = identity;
+           d_aggregates[0] = final.sum;
+           d_aggregates[1] = final.min;
+           d_aggregates[2] = final.max;
          }
-         local_mem[lid] = p;
-         item.barrier(sycl::access::fence_space::local_space);
-
-         for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
-           if (lid < stride) {
-             local_mem[lid] = multi_combine(local_mem[lid], local_mem[lid + stride]);
-           }
-           item.barrier(sycl::access::fence_space::local_space);
-         }
-
-         if (lid == 0) {
-           partials[group_id] = local_mem[0];
-         }
+         d_count[0] = final.count;
        });
      }).wait_and_throw();
-
-    Partial final = identity;
-    for (size_t i = 0; i < num_groups; ++i) {
-      final = multi_combine(final, partials[i]);
-    }
-
-    if (final.count == 0) {
-      *out_sum = T{0};
-      *out_min = T{0};
-      *out_max = T{0};
-    } else {
-      *out_sum = final.sum;
-      *out_min = final.min;
-      *out_max = final.max;
-    }
-    *out_count = final.count;
+    q.memcpy(out_sum, d_aggregates, sizeof(T)).wait_and_throw();
+    q.memcpy(out_min, d_aggregates + 1, sizeof(T)).wait_and_throw();
+    q.memcpy(out_max, d_aggregates + 2, sizeof(T)).wait_and_throw();
+    q.memcpy(out_count, d_count, sizeof(int64_t)).wait_and_throw();
   } catch (const std::exception& e) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce_multi_masked failed: %s\n", e.what());
     sycl::free(d_values, q);
     if (d_value_nulls)
@@ -1025,8 +1103,11 @@ pgaccel_status tree_reduce_multi_masked_sycl(sycl::queue& q, const T* values,
     if (d_selection)
       sycl::free(d_selection, q);
     sycl::free(partials, q);
+    sycl::free(d_aggregates, q);
+    sycl::free(d_count, q);
     return PGACCEL_ERROR;
   } catch (...) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce_multi_masked failed (unknown)\n");
     sycl::free(d_values, q);
     if (d_value_nulls)
@@ -1034,6 +1115,8 @@ pgaccel_status tree_reduce_multi_masked_sycl(sycl::queue& q, const T* values,
     if (d_selection)
       sycl::free(d_selection, q);
     sycl::free(partials, q);
+    sycl::free(d_aggregates, q);
+    sycl::free(d_count, q);
     return PGACCEL_ERROR;
   }
 
@@ -1043,6 +1126,8 @@ pgaccel_status tree_reduce_multi_masked_sycl(sycl::queue& q, const T* values,
   if (d_selection)
     sycl::free(d_selection, q);
   sycl::free(partials, q);
+  sycl::free(d_aggregates, q);
+  sycl::free(d_count, q);
   return PGACCEL_OK;
 }
 
@@ -1117,8 +1202,8 @@ extern "C" pgaccel_status pgaccel_reduce_multi_f64(const double* data, size_t co
     st = pgaccel_reduce_max_f64(data, count, out_max);
     if (st != PGACCEL_OK)
       return st;
-    *out_count = static_cast<int64_t>(count);
-    return PGACCEL_OK;
+    sycl::queue* q = get_queue();
+    return q ? write_count_sycl(*q, count, out_count) : PGACCEL_ERROR_NO_DEVICE;
   }
 
   try {
@@ -1281,11 +1366,10 @@ extern "C" pgaccel_status pgaccel_reduce_multi_masked_f64(const double* data,
   return pgaccel_kernel_failure("pgaccel_reduce_multi_masked_f64", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_reduce_multi_masked_i64(const int64_t* data,
-                                                          const uint8_t* value_nulls,
-                                                          const uint8_t* selection, size_t count,
-                                                          int64_t* out_sum, int64_t* out_min,
-                                                          int64_t* out_max, int64_t* out_count) try {
+extern "C" pgaccel_status
+pgaccel_reduce_multi_masked_i64(const int64_t* data, const uint8_t* value_nulls,
+                                const uint8_t* selection, size_t count, int64_t* out_sum,
+                                int64_t* out_min, int64_t* out_max, int64_t* out_count) try {
   if (!out_sum || !out_min || !out_max || !out_count)
     return PGACCEL_ERROR;
   if (count == 0) {
@@ -1339,8 +1423,8 @@ namespace {
 // Template parameters:
 //   T — element type of input buffer (float or double).
 //   Acc — on-device accumulator scalar (float for Metal, double elsewhere).
-// Partials are stored in an Acc array, then host sums them into a double
-// result for better-than-kernel-precision final output.
+// Work-group partials are promoted to double by a dependent device finalizer
+// so fp32 callers retain the existing cross-group precision.
 template <typename T, typename Acc>
 pgaccel_status tree_reduce_sumsq_sycl(sycl::queue& q, const T* data, size_t count, double* result) {
   T* d_data = sycl::malloc_device<T>(count, q);
@@ -1349,60 +1433,72 @@ pgaccel_status tree_reduce_sumsq_sycl(sycl::queue& q, const T* data, size_t coun
 
   size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
 
-  Acc* partials = sycl::malloc_shared<Acc>(num_groups, q);
-  if (!partials) {
+  Acc* partials = sycl::malloc_device<Acc>(num_groups, q);
+  double* d_result = sycl::malloc_device<double>(1, q);
+  if (!partials || !d_result) {
     sycl::free(d_data, q);
+    sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_OOM;
   }
 
   try {
     q.memcpy(d_data, data, count * sizeof(T)).wait_and_throw();
+    const sycl::event group_event = q.submit([&](sycl::handler& h) {
+      sycl::local_accessor<Acc, 1> local_mem(WG_SIZE, h);
+
+      h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
+        const size_t gid = item.get_global_id(0);
+        const size_t lid = item.get_local_id(0);
+        const size_t group_id = item.get_group(0);
+
+        const Acc v = (gid < count) ? static_cast<Acc>(d_data[gid]) : Acc{0};
+        local_mem[lid] = v * v;
+        item.barrier(sycl::access::fence_space::local_space);
+
+        for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
+          if (lid < stride) {
+            local_mem[lid] += local_mem[lid + stride];
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+        }
+
+        if (lid == 0) {
+          partials[group_id] = local_mem[0];
+        }
+      });
+    });
+
     q.submit([&](sycl::handler& h) {
-       sycl::local_accessor<Acc, 1> local_mem(WG_SIZE, h);
-
-       h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
-         size_t gid = item.get_global_id(0);
-         size_t lid = item.get_local_id(0);
-         size_t group_id = item.get_group(0);
-
-         Acc v = (gid < count) ? static_cast<Acc>(d_data[gid]) : Acc{0};
-         local_mem[lid] = v * v;
-         item.barrier(sycl::access::fence_space::local_space);
-
-         for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
-           if (lid < stride) {
-             local_mem[lid] += local_mem[lid + stride];
-           }
-           item.barrier(sycl::access::fence_space::local_space);
+       h.depends_on(group_event);
+       h.single_task([=]() {
+         double final_value = 0.0;
+         for (size_t i = 0; i < num_groups; ++i) {
+           final_value += static_cast<double>(partials[i]);
          }
-
-         if (lid == 0) {
-           partials[group_id] = local_mem[0];
-         }
+         d_result[0] = final_value;
        });
      }).wait_and_throw();
-
-    // Final sum in double regardless of Acc — Metal still returns floats
-    // but the host side promotes to double for the final accumulation.
-    double final_val = 0.0;
-    for (size_t i = 0; i < num_groups; ++i) {
-      final_val += static_cast<double>(partials[i]);
-    }
-    *result = final_val;
+    q.memcpy(result, d_result, sizeof(double)).wait_and_throw();
   } catch (const std::exception& e) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce_sumsq failed: %s\n", e.what());
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_ERROR;
   } catch (...) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce_sumsq failed (unknown)\n");
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_result, q);
     return PGACCEL_ERROR;
   }
 
   sycl::free(d_data, q);
   sycl::free(partials, q);
+  sycl::free(d_result, q);
   return PGACCEL_OK;
 }
 
@@ -1410,9 +1506,8 @@ pgaccel_status tree_reduce_sumsq_sycl(sycl::queue& q, const T* data, size_t coun
 // available: native on CUDA/ROCm/L0, soft-fp64 on Metal via AdaptiveCpp SSCP.
 // The fp32 variant is kept for callers that explicitly prefer single
 // precision (faster on Metal given soft-fp64 overhead).
-// Count stored as uint32_t in the on-device struct (work-group has at most
-// WG_SIZE elements so 32-bit count is ample even after log2(n) merges
-// within a group); host promotes to u64.
+// Count stored as uint32_t in the work-group partial (at most WG_SIZE rows),
+// then promoted to u64 by the device finalizer.
 template <typename Acc, typename CountT>
 struct StatsPartialT {
   Acc sum;
@@ -1446,84 +1541,100 @@ pgaccel_status tree_reduce_stats_sycl(sycl::queue& q, const T* data, size_t coun
 
   size_t num_groups = (count + WG_SIZE - 1) / WG_SIZE;
 
-  Partial* partials = sycl::malloc_shared<Partial>(num_groups, q);
-  if (!partials) {
+  Partial* partials = sycl::malloc_device<Partial>(num_groups, q);
+  double* d_sums = sycl::malloc_device<double>(2, q);
+  uint64_t* d_count = sycl::malloc_device<uint64_t>(1, q);
+  if (!partials || !d_sums || !d_count) {
     sycl::free(d_data, q);
+    sycl::free(partials, q);
+    sycl::free(d_sums, q);
+    sycl::free(d_count, q);
     return PGACCEL_OOM;
   }
 
   try {
     q.memcpy(d_data, data, count * sizeof(T)).wait_and_throw();
+    const sycl::event group_event = q.submit([&](sycl::handler& h) {
+      sycl::local_accessor<Partial, 1> local_mem(WG_SIZE, h);
+
+      h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
+        const size_t gid = item.get_global_id(0);
+        const size_t lid = item.get_local_id(0);
+        const size_t group_id = item.get_group(0);
+
+        Partial p;
+        if (gid < count) {
+          const Acc v = static_cast<Acc>(d_data[gid]);
+          p.sum = v;
+          p.sum_sq = v * v;
+          p.count = CountT{1};
+        } else {
+          p = stats_identity_t<Acc, CountT>();
+        }
+        local_mem[lid] = p;
+        item.barrier(sycl::access::fence_space::local_space);
+
+        for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
+          if (lid < stride) {
+            local_mem[lid] = stats_combine_t<Acc, CountT>(local_mem[lid], local_mem[lid + stride]);
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+        }
+
+        if (lid == 0) {
+          partials[group_id] = local_mem[0];
+        }
+      });
+    });
+
     q.submit([&](sycl::handler& h) {
-       sycl::local_accessor<Partial, 1> local_mem(WG_SIZE, h);
-
-       h.parallel_for(sycl::nd_range<1>(num_groups * WG_SIZE, WG_SIZE), [=](sycl::nd_item<1> item) {
-         size_t gid = item.get_global_id(0);
-         size_t lid = item.get_local_id(0);
-         size_t group_id = item.get_group(0);
-
-         Partial p;
-         if (gid < count) {
-           Acc v = static_cast<Acc>(d_data[gid]);
-           p.sum = v;
-           p.sum_sq = v * v;
-           p.count = CountT{1};
-         } else {
-           p.sum = Acc{0};
-           p.sum_sq = Acc{0};
-           p.count = CountT{0};
+       h.depends_on(group_event);
+       h.single_task([=]() {
+         double final_sum = 0.0;
+         double final_sum_sq = 0.0;
+         uint64_t final_count = 0;
+         for (size_t i = 0; i < num_groups; ++i) {
+           final_sum += static_cast<double>(partials[i].sum);
+           final_sum_sq += static_cast<double>(partials[i].sum_sq);
+           final_count += static_cast<uint64_t>(partials[i].count);
          }
-         local_mem[lid] = p;
-         item.barrier(sycl::access::fence_space::local_space);
-
-         for (size_t stride = WG_SIZE / 2; stride > 0; stride >>= 1) {
-           if (lid < stride) {
-             local_mem[lid] = stats_combine_t<Acc, CountT>(local_mem[lid], local_mem[lid + stride]);
-           }
-           item.barrier(sycl::access::fence_space::local_space);
-         }
-
-         if (lid == 0) {
-           partials[group_id] = local_mem[0];
-         }
+         d_sums[0] = final_sum;
+         d_sums[1] = final_sum_sq;
+         d_count[0] = final_count;
        });
      }).wait_and_throw();
-
-    // Host-side final merge promotes to double + u64 for output.
-    double final_sum = 0.0;
-    double final_sum_sq = 0.0;
-    uint64_t final_count = 0;
-    for (size_t i = 0; i < num_groups; ++i) {
-      final_sum += static_cast<double>(partials[i].sum);
-      final_sum_sq += static_cast<double>(partials[i].sum_sq);
-      final_count += static_cast<uint64_t>(partials[i].count);
-    }
-    *out_count = final_count;
-    *out_sum = final_sum;
-    *out_sum_sq = final_sum_sq;
+    q.memcpy(out_sum, d_sums, sizeof(double)).wait_and_throw();
+    q.memcpy(out_sum_sq, d_sums + 1, sizeof(double)).wait_and_throw();
+    q.memcpy(out_count, d_count, sizeof(uint64_t)).wait_and_throw();
   } catch (const std::exception& e) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce_stats failed: %s\n", e.what());
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_sums, q);
+    sycl::free(d_count, q);
     return PGACCEL_ERROR;
   } catch (...) {
+    wait_for_submitted_work(q);
     fprintf(stderr, "pgaccel: SYCL tree_reduce_stats failed (unknown)\n");
     sycl::free(d_data, q);
     sycl::free(partials, q);
+    sycl::free(d_sums, q);
+    sycl::free(d_count, q);
     return PGACCEL_ERROR;
   }
 
   sycl::free(d_data, q);
   sycl::free(partials, q);
+  sycl::free(d_sums, q);
+  sycl::free(d_count, q);
   return PGACCEL_OK;
 }
 
 }  // anonymous namespace
 
-// fp32 input: kernel accumulates in float (Metal-safe); host promotes to
-// double for the final merge. This preserves better-than-single-float
-// precision on the final sum of a few thousand partials without requiring
-// fp64 inside kernel code.
+// fp32 input: work groups accumulate in float (Metal-safe); the device
+// finalizer promotes partials to double for cross-group accumulation.
 extern "C" pgaccel_status pgaccel_reduce_sum_sq_f32(const float* data, size_t count,
                                                     double* result) try {
   if (!result)
@@ -1534,11 +1645,6 @@ extern "C" pgaccel_status pgaccel_reduce_sum_sq_f32(const float* data, size_t co
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    double v = static_cast<double>(data[0]);
-    *result = v * v;
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -1577,11 +1683,6 @@ extern "C" pgaccel_status pgaccel_reduce_sum_sq_f64(const double* data, size_t c
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    double v = data[0];
-    *result = v * v;
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -1670,8 +1771,8 @@ extern "C" pgaccel_status pgaccel_reduce_stats_f64(const double* data, size_t co
   st = pgaccel_reduce_sum_sq_f64(data, count, out_sum_sq);
   if (st != PGACCEL_OK)
     return st;
-  *out_count = static_cast<uint64_t>(count);
-  return PGACCEL_OK;
+  sycl::queue* q = get_queue();
+  return q ? write_count_sycl(*q, count, out_count) : PGACCEL_ERROR_NO_DEVICE;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1712,10 +1813,6 @@ extern "C" pgaccel_status pgaccel_reduce_bool_and(const uint8_t* data, size_t co
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0] ? 1 : 0;
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -1754,10 +1851,6 @@ extern "C" pgaccel_status pgaccel_reduce_bool_or(const uint8_t* data, size_t cou
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0] ? 1 : 0;
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -1803,10 +1896,6 @@ pgaccel_status reduce_bit_and_kernel(const T* data, size_t count, T* result) {
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -1838,10 +1927,6 @@ pgaccel_status reduce_bit_or_kernel(const T* data, size_t count, T* result) {
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();
@@ -1873,10 +1958,6 @@ pgaccel_status reduce_bit_xor_kernel(const T* data, size_t count, T* result) {
   }
   if (!data)
     return PGACCEL_ERROR;
-  if (count == 1) {
-    *result = data[0];
-    return PGACCEL_OK;
-  }
 
   try {
     sycl::queue* q = get_queue();

@@ -187,7 +187,7 @@ int main() {
   st = pgaccel_reduce_sum_f32(small_data, 4, &small_sum);
   printf("small N=4: status=%d sum=%f (expected 10.0)\n", st, small_sum);
 
-  // Test 3: count=1 (should skip GPU)
+  // Test 3: count=1 (must still use the GPU reduction path)
   float one = 42.0f;
   float one_sum = -1.0f;
   st = pgaccel_reduce_sum_f32(&one, 1, &one_sum);
