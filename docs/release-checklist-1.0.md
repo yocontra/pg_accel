@@ -15,6 +15,33 @@ unchecked.
 - Hardware evidence: name the runner or host class used for Metal/CUDA/ROCm/L0.
 - Deferrals: link to the release-note section and issue that explicitly scopes the item out of 1.0.
 
+### Local Evidence Ledger (Not Gate Completion)
+
+The entries below preserve completed local checks without satisfying the
+exact-candidate, CI, publication, or external-hardware rules above. They do not
+justify checking any release item.
+
+- Phase 6 domain-gate implementation commits: `37a9571d`, `868e0e89`, and
+  `2f85c059`. Passing pre-integration PG18/Metal artifact:
+  `.codex/worktrees/phase6-domain-gate/benchmarks/artifacts/phase6-gate-d94b583-pg18-metal/`
+  (`provenance.json` status `pass`, no errors or warnings). The exact-candidate
+  rerun remains open.
+- Phase 9 operator-gate implementation commits: `b3261c86`, `64948b96`, and
+  `d58db14f`. Passing pre-integration PG18/Metal artifact:
+  `.codex/worktrees/phase9-operator-gate/benchmarks/artifacts/phase9-gate-db2c6d2-pg18-metal/`
+  (`provenance.json` status `pass`, no errors or warnings). The exact-candidate
+  rerun remains open.
+- PostgreSQL 19 source/build commits: `3fd3d743` and `4ae5e337`. Local build:
+  `.codex/worktrees/phase12-pg19/target/phase12-pg19/release/libpg_accel.dylib`
+  (`sha256:685cc1cf01c82b659965a1a3078a9ca993c47a5ee5ddb23e0f411da5deb78f5f`),
+  with `pg19` recorded in
+  `.codex/worktrees/phase12-pg19/target/phase12-pg19/release/.fingerprint/pg_accel-ebeb4c9184e13ef2/lib-pg_accel.json`.
+  This is build-only evidence; package, install, and test gates remain open.
+- Safety-documentation and strict-Clippy closure: `a0b98dd`. The local
+  strict-Clippy command passed:
+  `cargo clippy -p pg_accel --features pg18 --all-targets -- -D clippy::undocumented_unsafe_blocks`.
+  No durable CI artifact was produced, so exact-candidate CI remains open.
+
 ## Phase 0 - Evidence, Provenance, And GPU-Only Guardrails
 
 - [ ] Benchmark artifacts prove the exact binary, extension version, GUC snapshot, device metadata, selected plan, dispatched GPU kernels, returned row counts, correctness diffs, no-dispatch timing/plan audits, telemetry limits, warmup/JIT timings, and crash logs for every release benchmark run. Interim evidence: resume/audit manifests and fail-closed loader tests exercise this contract. Final evidence artifact: `<sha-or-url>`.
