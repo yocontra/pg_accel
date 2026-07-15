@@ -458,7 +458,7 @@ impl ColumnarBatchOwner {
     }
 
     /// Add an all-valid column of `i32` values.
-    #[allow(dead_code)] // reason: all-valid batch handoff is being rolled into scan/H3 callers incrementally
+    #[allow(dead_code)] // reason: all-valid i32 constructor is pinned by batch-contract tests
     pub fn add_col_i32_all_valid(&mut self, values: Vec<i32>) {
         self.push_column(ColumnarColumnData::Int32(values), ColumnarNulls::AllValid);
     }
@@ -512,7 +512,7 @@ impl ColumnarBatchOwner {
     }
 
     /// Add an all-valid column of `bool` values.
-    #[allow(dead_code)] // reason: bool all-valid callers land with generic expression scan re-entry
+    #[allow(dead_code)] // reason: bool all-valid constructor is pinned by batch-contract tests
     pub fn add_col_bool_all_valid(&mut self, values: Vec<bool>) {
         let normalized = values.into_iter().map(u8::from).collect();
         self.push_column(
@@ -522,7 +522,7 @@ impl ColumnarBatchOwner {
     }
 
     /// Add a PostgreSQL `date` column (`DateADT`, days since PG epoch).
-    #[allow(dead_code)] // reason: date expression kernels are admitted after the scan batch contract lands
+    #[allow(dead_code)] // reason: date column ABI is retained while planner exposure stays disabled
     pub fn add_col_date(&mut self, values: Vec<i32>, nulls: Vec<u8>) {
         self.push_column(
             ColumnarColumnData::Date(values),
@@ -531,7 +531,7 @@ impl ColumnarBatchOwner {
     }
 
     /// Add a PostgreSQL timestamp/timestamptz column (`Timestamp`, microseconds).
-    #[allow(dead_code)] // reason: timestamp expression kernels are admitted after the scan batch contract lands
+    #[allow(dead_code)] // reason: timestamp column ABI is retained while planner exposure stays disabled
     pub fn add_col_timestamp(&mut self, values: Vec<i64>, nulls: Vec<u8>) {
         self.push_column(
             ColumnarColumnData::Timestamp(values),

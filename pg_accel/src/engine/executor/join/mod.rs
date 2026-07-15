@@ -30,7 +30,7 @@ pub(crate) const NLJ_SHAPE_BETWEEN: i32 = 2;
 /// the caller errors because pg_accel must not run a scalar PostGIS fallback
 /// inside an accelerator plan.
 #[must_use]
-#[allow(dead_code)] // reason: last runtime caller (next_gpu_spatial) retired with the spatial join executor; resolver retained for the Phase 6 spatial pipeline re-wiring and pinned by join/tests.rs
+#[allow(dead_code)] // reason: spatial joins are planner-gated; pure allowlist remains a regression oracle
 pub(super) fn resolve_spatial_predicate(
     fn_name: Option<&str>,
 ) -> Option<three_layer::SpatialPredicate> {

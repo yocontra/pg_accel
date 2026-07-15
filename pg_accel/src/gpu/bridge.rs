@@ -1003,31 +1003,24 @@ mod resident_spatial_raw {
     };
 
     unsafe extern "C" {
-        #[allow(dead_code)]
-        // reason: raw borrow-safe caller lands in the spatial executor checkpoint
         pub fn pgaccel_spatial_eval_resident_launch(
             request: *const PgaccelSpatialResidentRequest,
             workspace: *const PgaccelSpatialWorkspace,
             detail: *mut i32,
         ) -> i32;
 
-        #[allow(dead_code)]
-        // reason: raw borrow-safe caller lands in the spatial executor checkpoint
         pub fn pgaccel_spatial_recheck_compact_launch(
             request: *const PgaccelSpatialRecheckCompactRequest,
             workspace: *const PgaccelSpatialWorkspace,
             detail: *mut i32,
         ) -> i32;
 
-        #[allow(dead_code)]
-        // reason: raw borrow-safe caller lands in the spatial executor checkpoint
         pub fn pgaccel_spatial_recheck_patch_launch(
             request: *const PgaccelSpatialRecheckPatchRequest,
             workspace: *const PgaccelSpatialWorkspace,
             detail: *mut i32,
         ) -> i32;
 
-        #[allow(dead_code)] // reason: post-borrow caller lands in the spatial executor checkpoint
         pub fn pgaccel_spatial_workspace_finish(
             workspace: *const PgaccelSpatialWorkspace,
             detail: *mut i32,
@@ -1063,7 +1056,6 @@ pub(super) unsafe fn pgaccel_raster_reclass_resident_ex_raw(
 /// prepare the process queue before entering the resident-store borrow.
 #[must_use]
 #[inline]
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub(super) unsafe fn pgaccel_spatial_eval_resident_launch_raw(
     request: *const PgaccelSpatialResidentRequest,
     workspace: *const PgaccelSpatialWorkspace,
@@ -1083,7 +1075,6 @@ pub(super) unsafe fn pgaccel_spatial_eval_resident_launch_raw(
 /// contract.
 #[must_use]
 #[inline]
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub(super) unsafe fn pgaccel_spatial_recheck_compact_launch_raw(
     request: *const PgaccelSpatialRecheckCompactRequest,
     workspace: *const PgaccelSpatialWorkspace,
@@ -1102,7 +1093,6 @@ pub(super) unsafe fn pgaccel_spatial_recheck_compact_launch_raw(
 /// The caller must uphold the native request/workspace span contract.
 #[must_use]
 #[inline]
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub(super) unsafe fn pgaccel_spatial_recheck_patch_launch_raw(
     request: *const PgaccelSpatialRecheckPatchRequest,
     workspace: *const PgaccelSpatialWorkspace,
@@ -1122,7 +1112,6 @@ pub(super) unsafe fn pgaccel_spatial_recheck_patch_launch_raw(
 /// contract. Call this only after releasing resident input borrows.
 #[must_use]
 #[inline]
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub(super) unsafe fn pgaccel_spatial_workspace_finish_raw(
     workspace: *const PgaccelSpatialWorkspace,
     detail: *mut i32,

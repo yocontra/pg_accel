@@ -305,10 +305,8 @@ mod tests {
 
     // -- Kernel-less operators MUST NOT be registered -------------------------
     //
-    // TODO.md Phase 4 lists these operators as candidates for registration,
-    // but no GPU kernel exists in `pgaccel-kernels/src/h3_ops.cpp` for any of
-    // them (verified at the commit that introduced this test). Registering
-    // any of them without a kernel would make the planner classify a call as
+    // These operators have no GPU kernel in `pgaccel-kernels/src/h3_ops.cpp`.
+    // Registering any of them without a kernel would make the planner classify a call as
     // `GpuH3` and then either crash or silently drop rows at execute time
     // (see `CLAUDE.md` rules 11 and 12, no-CPU-fallback enforcement).
     //

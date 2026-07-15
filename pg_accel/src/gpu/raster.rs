@@ -17,7 +17,6 @@ const RASTER_DETAIL_OFFSETS: i32 = 4;
 const RASTER_DETAIL_CAPACITY: i32 = 5;
 const RASTER_DETAIL_BYTE_BUDGET: i32 = 6;
 const RASTER_DETAIL_NUMERIC_OVERFLOW: i32 = 7;
-#[allow(dead_code)] // reason: post-borrow validation mapper is consumed by executor wiring landing separately
 const RASTER_VALIDATION_KNOWN_FAILURES: u32 = PGACCEL_RASTER_VALIDATION_VIEW
     | PGACCEL_RASTER_VALIDATION_RULES
     | PGACCEL_RASTER_VALIDATION_OFFSETS
@@ -29,7 +28,6 @@ const RASTER_VALIDATION_KNOWN_FAILURES: u32 = PGACCEL_RASTER_VALIDATION_VIEW
 /// scratch. This remains separate from [`GpuStatusDetail`] so callers can
 /// retain the C ABI's domain-specific reason while still using `GpuResult`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reason: typed resident detail surface consumed by executor wiring landing separately
 pub enum RasterResidentDetail {
     Contract,
     View,
@@ -133,7 +131,6 @@ fn raster_detail_error(detail: RasterResidentDetail) -> GpuError {
 /// Construct the process-local device queue before acquiring a resident-store
 /// dispatch borrow. The raw launch deliberately does not call this helper: its
 /// store-borrow phase must contain no lazy queue initialization.
-#[allow(dead_code)] // reason: consumed by the resident raster executor checkpoint landing separately
 pub fn prepare_raster_reclass_resident() -> GpuResult<()> {
     crate::ensure_backend_exit_callback();
     // SAFETY: pgaccel_init is process-idempotent and owns queue construction.
@@ -152,7 +149,6 @@ pub fn prepare_raster_reclass_resident() -> GpuResult<()> {
 /// Every request pointer/span must satisfy `pgaccel_ffi.h`, all allocations
 /// must remain alive through the synchronous call, and the process queue must
 /// already have been prepared outside the resident-store borrow.
-#[allow(dead_code)] // reason: consumed by the resident raster executor checkpoint landing separately
 pub unsafe fn raster_reclass_resident_launch(
     request: &PgaccelRasterReclassResidentRequest,
 ) -> RasterResidentLaunchOutcome {
@@ -173,7 +169,6 @@ pub unsafe fn raster_reclass_resident_launch(
 /// Convert a retained raw launch outcome after releasing the resident-store
 /// dispatch borrow. This is the first point allowed to trace, update counters,
 /// or construct a typed error.
-#[allow(dead_code)] // reason: consumed after the resident borrow by executor wiring landing separately
 pub fn raster_reclass_resident_launch_result(
     outcome: RasterResidentLaunchOutcome,
 ) -> GpuResult<()> {
@@ -192,7 +187,6 @@ pub fn raster_reclass_resident_launch_result(
 /// This function is pure and must only receive scratch copied after the
 /// resident-store dispatch borrow has been released.
 #[must_use]
-#[allow(dead_code)] // reason: consumed after the resident borrow by executor wiring landing separately
 pub fn raster_reclass_resident_validation_detail(
     scratch: &PgaccelResidentRasterValidationScratch,
 ) -> Option<RasterResidentDetail> {
@@ -221,7 +215,6 @@ pub fn raster_reclass_resident_validation_detail(
 }
 
 /// Map host-copied device validation into the typed GPU error surface.
-#[allow(dead_code)] // reason: consumed after the resident borrow by executor wiring landing separately
 pub fn raster_reclass_resident_validation(
     scratch: &PgaccelResidentRasterValidationScratch,
 ) -> GpuResult<()> {

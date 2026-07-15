@@ -610,7 +610,6 @@ impl ResidentGeometryColumnView<'_> {
 
 /// Materialize one already-validated exact geometry constant into the same
 /// frozen resident lane layout used by relation columns.
-#[allow(dead_code)] // reason: consumed by the spatial workspace checkpoint landing next
 pub fn materialize_resident_geometry_constant(
     exact: &[u8],
     max_exact_value_bytes: usize,

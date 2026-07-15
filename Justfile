@@ -621,8 +621,8 @@ gpu-test-cold-all:
     just gpu-test
 
 # 8-worker x 20-iteration fork stress test for the Metal MTLBinaryArchive
-# fork-safety path. Acceptance gate for TODO.md Phase 2 "Metal pipeline-state
-# XPC edge case": zero MTLCompilerService errors over the 8x20 matrix.
+# fork-safety path. The acceptance condition is zero MTLCompilerService errors
+# over the 8x20 matrix.
 #
 # Override sizing with environment:
 #   PGACCEL_FORK_STRESS_WORKERS=16 PGACCEL_FORK_STRESS_ITERS=40 just gpu-stress-archive

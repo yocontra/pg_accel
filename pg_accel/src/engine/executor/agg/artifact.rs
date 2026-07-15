@@ -798,7 +798,7 @@ pub(super) struct PreparedAggArtifact {
 /// `None` means a required relation estimate is absent, the key/filter shape
 /// is outside the Phase 5D artifact subset, or checked byte arithmetic
 /// overflowed. Callers must decline rather than treating `None` as zero.
-#[allow(dead_code, clippy::redundant_pub_crate)] // reason: Phase 5E consumes this crate re-export after rebasing this prerequisite
+#[allow(clippy::redundant_pub_crate)] // reason: re-exported crate-wide from this private module
 pub(crate) fn estimate_descriptor_artifact_bytes_upper_bound(
     spec: &AggQuerySpec,
     relation_rows: &BTreeMap<u32, u64>,
@@ -1017,7 +1017,6 @@ pub(super) fn prepare_agg_artifact(
     prepare_agg_artifact_impl(spec, requests, bundle, max_groups, false)
 }
 
-#[allow(dead_code)] // reason: consumed by the spatial workspace checkpoint landing next
 pub(super) fn prepare_spatial_base_artifact(
     spec: &AggQuerySpec,
     requests: &[ResidentColumnRef],

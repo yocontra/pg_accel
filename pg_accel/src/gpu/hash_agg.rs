@@ -94,7 +94,7 @@ impl HashAggResult {
 /// The input buffer must be device-accessible and remains owned by the caller.
 /// The C++ side copies compacted group keys/counts into the returned aggregate
 /// state, so the result is independent of the input buffer lifetime.
-#[allow(dead_code)] // Phase 6 spatial grouping will consume this device-buffer path.
+#[allow(dead_code)] // reason: native device-buffer ABI wrapper is not planner-exposed
 pub fn hash_count_i64_device_bounded(
     keys: &ExprDeviceBuffer<i64>,
     max_distinct_hint: usize,

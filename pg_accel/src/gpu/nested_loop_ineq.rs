@@ -27,8 +27,7 @@ use super::{GpuErrorDomain, GpuOperation, GpuResult, bridge, status_to_result};
 
 /// Inequality opcode mirroring `pgaccel_nlj_ineq_op` in the C header.
 #[allow(dead_code)]
-// reason: kernel + bridge landed ahead of the executor node that consumes them;
-// see join_pathlist.rs::selected_gpu_nlj_kernel_available for the gate.
+// reason: selected executor supports BETWEEN only; single-predicate opcodes remain gated.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NljIneqOp {
@@ -42,7 +41,7 @@ pub enum NljIneqOp {
     Gt = 3,
 }
 
-#[allow(dead_code)] // reason: see NljIneqOp.
+#[allow(dead_code)] // reason: pure oracle for the gated single-predicate ABI.
 impl NljIneqOp {
     /// Pure Rust oracle for testing — evaluate the predicate on host values.
     #[must_use]
@@ -68,7 +67,6 @@ impl NljIneqOp {
 }
 
 /// A matched index pair produced by the NLJ kernel.
-#[allow(dead_code)] // reason: kernel + bridge landed ahead of the executor; see NljIneqOp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NljPair {
     /// Index into the outer key array.
@@ -79,7 +77,6 @@ pub struct NljPair {
 
 /// Result of an NLJ dispatch — either the emitted pair list, or an explicit
 /// `Overflow` signal so the planner / executor can decline to PG native.
-#[allow(dead_code)] // reason: kernel + bridge landed ahead of the executor; see NljIneqOp.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NljDispatchResult {
     /// All matches fit inside the caller-provided `max_pairs` cap.
@@ -95,8 +92,6 @@ pub enum NljDispatchResult {
     },
 }
 
-#[allow(dead_code)] // reason: helper for the four dispatch_* functions below;
-// gated alongside them.
 fn build_pairs(buf: &[u32], pair_count: usize) -> Vec<NljPair> {
     let mut out = Vec::with_capacity(pair_count);
     for chunk in buf[..pair_count * 2].chunks_exact(2) {
@@ -108,13 +103,11 @@ fn build_pairs(buf: &[u32], pair_count: usize) -> Vec<NljPair> {
     out
 }
 
-#[allow(dead_code)] // reason: kernel name tags used by the four dispatch_* fns.
+#[allow(dead_code)] // reason: single-predicate i64 dispatch is not planner-exposed.
 const NLJ_KERNEL_INEQ_I64: &str = "nlj_ineq_i64";
-#[allow(dead_code)] // reason: kernel name tag.
+#[allow(dead_code)] // reason: single-predicate f64 dispatch is not planner-exposed.
 const NLJ_KERNEL_INEQ_F64: &str = "nlj_ineq_f64";
-#[allow(dead_code)] // reason: kernel name tag.
 const NLJ_KERNEL_BETWEEN_I64: &str = "nlj_between_i64";
-#[allow(dead_code)] // reason: kernel name tag.
 const NLJ_KERNEL_BETWEEN_F64: &str = "nlj_between_f64";
 
 /// Drive the GPU NLJ inequality kernel for `i64` keys.
@@ -123,7 +116,7 @@ const NLJ_KERNEL_BETWEEN_F64: &str = "nlj_between_f64";
 ///
 /// Returns `GpuError` on FFI failure. Returns `NljDispatchResult::Overflow`
 /// (success) when the kernel observed more matches than `max_pairs`.
-#[allow(dead_code)] // reason: see NljIneqOp; executor wiring pending.
+#[allow(dead_code)] // reason: single-predicate i64 path remains planner-gated.
 pub fn dispatch_ineq_i64(
     outer_keys: &[i64],
     inner_keys: &[i64],
@@ -171,7 +164,7 @@ pub fn dispatch_ineq_i64(
 ///
 /// Returns `GpuError` on FFI failure. Returns `NljDispatchResult::Overflow`
 /// (success) when the kernel observed more matches than `max_pairs`.
-#[allow(dead_code)] // reason: see NljIneqOp; executor wiring pending.
+#[allow(dead_code)] // reason: single-predicate f64 path remains planner-gated.
 pub fn dispatch_ineq_f64(
     outer_keys: &[f64],
     inner_keys: &[f64],
@@ -222,7 +215,6 @@ pub fn dispatch_ineq_f64(
 /// Returns `GpuError` on FFI failure or on mismatched lo/hi lengths.
 /// Returns `NljDispatchResult::Overflow` (success) when the kernel
 /// observed more matches than `max_pairs`.
-#[allow(dead_code)] // reason: see NljIneqOp; executor wiring pending.
 pub fn dispatch_between_i64(
     outer_keys: &[i64],
     inner_lo: &[i64],
@@ -278,7 +270,6 @@ pub fn dispatch_between_i64(
 /// Returns `GpuError` on FFI failure or on mismatched lo/hi lengths.
 /// Returns `NljDispatchResult::Overflow` (success) when the kernel
 /// observed more matches than `max_pairs`.
-#[allow(dead_code)] // reason: see NljIneqOp; executor wiring pending.
 pub fn dispatch_between_f64(
     outer_keys: &[f64],
     inner_lo: &[f64],

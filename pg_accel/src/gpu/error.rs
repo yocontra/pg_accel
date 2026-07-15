@@ -11,7 +11,6 @@ use super::types::PgaccelStatus;
 pub type GpuResult<T> = Result<T, GpuError>;
 
 /// High-level GPU subsystem associated with an error.
-#[allow(dead_code)] // reason: additive facade detail type for future typed GPU callers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuErrorDomain {
     Runtime,
@@ -51,7 +50,6 @@ impl fmt::Display for GpuErrorDomain {
 }
 
 /// Specific GPU operation being attempted.
-#[allow(dead_code)] // reason: additive facade detail type for future typed GPU callers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuOperation {
     Init,
@@ -80,7 +78,6 @@ impl fmt::Display for GpuOperation {
 }
 
 /// Normalised status detail for FFI statuses and facade validation failures.
-#[allow(dead_code)] // reason: additive facade detail type for future typed GPU callers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuStatusDetail {
     Ok,
@@ -96,7 +93,6 @@ pub enum GpuStatusDetail {
     NumericOverflow,
 }
 
-#[allow(dead_code)] // reason: additive facade helper; future typed callers use this instead of raw status checks
 impl GpuStatusDetail {
     /// Returns `true` when the status indicates success.
     #[must_use]

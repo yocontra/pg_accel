@@ -1167,7 +1167,6 @@ pub(super) struct CustomPrivateData {
     pub(super) window_scan_relid: pg_sys::Index,
     /// Neutral grouped-aggregate query contract carried by the v2 wire.
     /// Residency resolves its relation/column references after decode.
-    #[allow(dead_code)] // consumed by the descriptor executor landing in Phase 5D
     pub(super) agg_query_spec: Option<AggQuerySpec>,
     /// Ordered PostgreSQL result slots for the neutral aggregate contract.
     pub(super) agg_output_projection: Option<AggOutputProjection>,

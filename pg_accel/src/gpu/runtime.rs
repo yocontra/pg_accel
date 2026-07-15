@@ -59,7 +59,7 @@ pub fn get_device_info() -> PgaccelDeviceInfo {
 }
 
 /// Human-readable device name for log messages.
-#[allow(dead_code)] // reason: diagnostic API; used by future log/EXPLAIN VERBOSE callers
+#[allow(dead_code)] // reason: explicit diagnostic API kept separate from planner and executor paths
 pub fn device_name() -> String {
     let info = get_device_info();
     let name = info

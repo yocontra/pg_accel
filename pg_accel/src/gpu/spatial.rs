@@ -5,17 +5,13 @@ use super::{
 };
 
 const RESIDENT_SPATIAL_OPERATION: GpuOperation = GpuOperation::Kernel("spatial_eval_resident");
-#[allow(dead_code)] // reason: post-borrow result mapping lands in the spatial executor checkpoint
 const RESIDENT_SPATIAL_COMPACT_OPERATION: GpuOperation =
     GpuOperation::Kernel("spatial_recheck_compact");
-#[allow(dead_code)] // reason: post-borrow result mapping lands in the spatial executor checkpoint
 const RESIDENT_SPATIAL_PATCH_OPERATION: GpuOperation =
     GpuOperation::Kernel("spatial_recheck_patch");
-#[allow(dead_code)] // reason: post-borrow finish caller lands in the spatial executor checkpoint
 const RESIDENT_SPATIAL_FINISH_OPERATION: GpuOperation =
     GpuOperation::Kernel("spatial_workspace_finish");
 
-#[allow(dead_code)] // reason: checked resident executor caller lands in the parallel integration slice
 fn resident_builder_error(status: GpuStatusDetail, detail: &'static str) -> GpuError {
     GpuError::with_detail(
         GpuErrorDomain::Spatial,
@@ -25,7 +21,6 @@ fn resident_builder_error(status: GpuStatusDetail, detail: &'static str) -> GpuE
     )
 }
 
-#[allow(dead_code)] // reason: checked resident executor caller lands in the parallel integration slice
 fn resident_buffer_bytes<T>(buffer: &ExprDeviceBuffer<T>) -> GpuResult<usize> {
     buffer
         .len()
@@ -39,7 +34,6 @@ fn resident_buffer_bytes<T>(buffer: &ExprDeviceBuffer<T>) -> GpuResult<usize> {
 }
 
 /// Frozen ABI version for resident fp64 geometry descriptors.
-#[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
 pub const PGACCEL_RESIDENT_GEOMETRY_ABI_VERSION: u32 = 2;
 
 /// Frozen ABI version for caller-owned resident spatial control scratch.
@@ -55,7 +49,7 @@ pub const PGACCEL_SPATIAL_CONTROL_BYTES: usize = 384;
 pub const PGACCEL_SPATIAL_MAX_CHUNK_ROWS: usize = 65_536;
 
 /// Resident geometry row flag indicating a populated `[xmin, ymin, xmax, ymax]` bbox.
-#[allow(dead_code)] // reason: row construction remains owned by the residency integration slice
+#[allow(dead_code)] // reason: frozen native row flag pinned by ABI tests; Rust builds rows in residency
 pub const PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID: u32 = 1 << 0;
 
 /// One resident geometry row. Geometry and ring offsets count coordinate pairs.
@@ -95,7 +89,6 @@ pub struct PgaccelResidentGeometryView {
 impl PgaccelResidentGeometryView {
     /// Build a frozen-v2 view over already-resident geometry lanes.
     #[allow(clippy::too_many_arguments)] // reason: fields mirror the frozen C descriptor
-    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
     #[must_use]
     pub const fn new(
         coordinates: *const f64,
@@ -142,7 +135,6 @@ impl PgaccelResidentGeometryView {
     /// caller. `R` must be the engine row mirror with compile-time field-layout
     /// pins matching [`PgaccelResidentGeometryRow`].
     #[allow(clippy::too_many_arguments)] // reason: arguments are the six frozen ABI lanes
-    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
     pub fn from_device_buffers<R>(
         coordinates: Option<&ExprDeviceBuffer<f64>>,
         bboxes: Option<&ExprDeviceBuffer<[f64; 4]>>,
@@ -221,7 +213,6 @@ pub struct PgaccelResidentGeometryOperand {
 
 impl PgaccelResidentGeometryOperand {
     /// Build a row-aligned column operand (`row_stride = 1`).
-    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
     #[must_use]
     pub const fn column(view: PgaccelResidentGeometryView, first_row: usize) -> Self {
         Self {
@@ -232,7 +223,6 @@ impl PgaccelResidentGeometryOperand {
     }
 
     /// Build a one-row constant operand (`first_row = row_stride = 0`).
-    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
     #[must_use]
     pub const fn constant(view: PgaccelResidentGeometryView) -> Self {
         Self {
@@ -246,7 +236,6 @@ impl PgaccelResidentGeometryOperand {
 /// Resident spatial operation tag. Discriminants mirror `pgaccel_spatial_predicate`.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
 pub enum ResidentSpatialPredicate {
     Intersects = 0,
     Contains = 1,
@@ -316,7 +305,6 @@ impl PgaccelSpatialResidentRequest {
     /// zero for every other boolean predicate. Passing `Distance` here is a
     /// native contract error; use [`Self::distance`] for that operation.
     #[allow(clippy::too_many_arguments)] // reason: fields mirror the frozen C request
-    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
     #[must_use]
     pub const fn boolean(
         predicate: ResidentSpatialPredicate,
@@ -350,7 +338,6 @@ impl PgaccelSpatialResidentRequest {
     }
 
     /// Build a boolean request whose capacity and byte span come from `results`.
-    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
     pub fn boolean_device(
         predicate: ResidentSpatialPredicate,
         distance_threshold: f64,
@@ -381,7 +368,7 @@ impl PgaccelSpatialResidentRequest {
 
     /// Build a distance request with separate `f64` values and `u8` uncertainty outputs.
     #[allow(clippy::too_many_arguments)] // reason: fields mirror the frozen C request
-    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
+    #[allow(dead_code)] // reason: frozen distance-request constructor pinned by ABI tests
     #[must_use]
     pub const fn distance(
         count: usize,
@@ -415,7 +402,7 @@ impl PgaccelSpatialResidentRequest {
     }
 
     /// Build a distance request from equally sized value and uncertainty buffers.
-    #[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
+    #[allow(dead_code)] // reason: distance output is not planner-exposed; retained as a typed ABI builder
     pub fn distance_device(
         count: usize,
         max_referenced_bytes: usize,
@@ -475,7 +462,6 @@ impl PgaccelSpatialWorkspace {
     }
 
     /// Bind the exact native workspace spans to preallocated device buffers.
-    #[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
     pub fn from_device_buffers(
         control: &ExprDeviceBuffer<u8>,
         failure_flags: &ExprDeviceBuffer<u32>,
@@ -516,7 +502,6 @@ pub struct PgaccelSpatialRecheckCompactRequest {
 impl PgaccelSpatialRecheckCompactRequest {
     /// Bind exact full-capacity compaction buffers. Zero-row chunks are skipped
     /// by the executor and are intentionally rejected here.
-    #[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
     pub fn from_device_buffers(
         tri_state: &ExprDeviceBuffer<i8>,
         final_mask: &ExprDeviceBuffer<i8>,
@@ -572,7 +557,7 @@ pub struct PgaccelSpatialRecheckPatchRequest {
 impl PgaccelSpatialRecheckPatchRequest {
     /// Bind exact patch inputs and the full chunk mask. Empty patches are
     /// skipped by the executor and are intentionally rejected here.
-    #[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
+    #[allow(dead_code)] // reason: runtime patch counts vary, so executor builds this frozen descriptor directly
     pub fn from_device_buffers(
         indices: &ExprDeviceBuffer<u64>,
         results: &ExprDeviceBuffer<i8>,
@@ -717,7 +702,6 @@ fn resident_spatial_outcome_result(
 
 /// Construct the process-local device queue before acquiring a resident-store
 /// dispatch borrow. Raw spatial launches never initialize the queue lazily.
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub fn prepare_spatial_resident() -> GpuResult<()> {
     crate::ensure_backend_exit_callback();
     // SAFETY: pgaccel_init is process-idempotent and owns queue construction.
@@ -735,7 +719,6 @@ pub fn prepare_spatial_resident() -> GpuResult<()> {
 /// through the synchronous launch, and belong to the already-prepared queue.
 #[must_use]
 #[inline]
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub unsafe fn spatial_eval_resident_launch(
     request: &PgaccelSpatialResidentRequest,
     workspace: &PgaccelSpatialWorkspace,
@@ -753,7 +736,6 @@ pub unsafe fn spatial_eval_resident_launch(
 }
 
 /// Map an evaluation launch outcome after releasing the resident-store borrow.
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub fn spatial_eval_resident_launch_result(outcome: SpatialResidentLaunchOutcome) -> GpuResult<()> {
     resident_spatial_outcome_result(
         outcome,
@@ -771,7 +753,6 @@ pub fn spatial_eval_resident_launch_result(outcome: SpatialResidentLaunchOutcome
 /// the same workspace as the immediately preceding evaluation launch.
 #[must_use]
 #[inline]
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub unsafe fn spatial_recheck_compact_launch(
     request: &PgaccelSpatialRecheckCompactRequest,
     workspace: &PgaccelSpatialWorkspace,
@@ -789,7 +770,6 @@ pub unsafe fn spatial_recheck_compact_launch(
 }
 
 /// Map a compaction launch outcome after releasing the resident-store borrow.
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub fn spatial_recheck_compact_launch_result(
     outcome: SpatialResidentLaunchOutcome,
 ) -> GpuResult<()> {
@@ -809,7 +789,6 @@ pub fn spatial_recheck_compact_launch_result(
 /// allocation must remain live through the synchronous launch.
 #[must_use]
 #[inline]
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub unsafe fn spatial_recheck_patch_launch(
     request: &PgaccelSpatialRecheckPatchRequest,
     workspace: &PgaccelSpatialWorkspace,
@@ -827,7 +806,6 @@ pub unsafe fn spatial_recheck_patch_launch(
 }
 
 /// Map a patch launch outcome after the native call returns.
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub fn spatial_recheck_patch_launch_result(outcome: SpatialResidentLaunchOutcome) -> GpuResult<()> {
     resident_spatial_outcome_result(
         outcome,
@@ -843,7 +821,6 @@ pub fn spatial_recheck_patch_launch_result(outcome: SpatialResidentLaunchOutcome
 ///
 /// `workspace` must satisfy the native exact-span contract and remain live
 /// through the synchronous finish call.
-#[allow(dead_code)] // reason: consumed by the spatial executor checkpoint landing separately
 pub unsafe fn spatial_workspace_finish(workspace: &PgaccelSpatialWorkspace) -> GpuResult<()> {
     let outcome = capture_spatial_raw_outcome(|detail| {
         // SAFETY: the caller upholds the native workspace pointer/span contract.
@@ -869,7 +846,7 @@ pub unsafe fn spatial_workspace_finish(workspace: &PgaccelSpatialWorkspace) -> G
 /// explicitly declared byte span in device or shared USM belonging to the
 /// active pg_accel context. Input and output spans must obey the native
 /// non-overlap contract and remain alive until this synchronous call returns.
-#[allow(dead_code)] // reason: resident executor caller lands in the parallel integration slice
+#[allow(dead_code)] // reason: legacy one-shot ABI wrapper retained for direct native conformance
 pub unsafe fn spatial_eval_resident(request: &PgaccelSpatialResidentRequest) -> GpuResult<()> {
     let mut detail = ResidentSpatialDetail::None as i32;
     // SAFETY: the caller upholds the complete resident pointer/count contract.

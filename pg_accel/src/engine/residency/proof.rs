@@ -338,7 +338,6 @@ impl ResidentMaterializationKind {
 
 /// Device-side buffer descriptor used by the resident batch fabric.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reason: additive contract for scan/expression/geo workers before direct consumers land
 pub struct DeviceBufferRef {
     pub ptr: *const c_void,
     pub bytes: usize,

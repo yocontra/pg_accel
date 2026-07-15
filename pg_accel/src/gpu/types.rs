@@ -385,7 +385,6 @@ pub const PGACCEL_RESIDENT_BATCH_ABI_VERSION: u32 = 1;
 /// Memory space for a resident batch pointer.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reason: additive resident ABI mirror; consumers land incrementally
 pub enum PgaccelMemSpace {
     Host = 0,
     SharedUsm = 1,
@@ -395,7 +394,7 @@ pub enum PgaccelMemSpace {
 /// One typed input/output column view in the resident batch fabric.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // reason: additive resident ABI mirror; no selected SQL callers until proof wiring lands
+#[allow(dead_code)] // reason: frozen resident-batch ABI member; selected executors use domain-specific views
 pub struct PgaccelResidentColumnView {
     pub values: *const c_void,
     pub nulls: *const u8,
@@ -521,11 +520,11 @@ pub struct PgaccelGeometry {
 
 /// ABI version for the exact resident PostGIS Reclass descriptor.
 pub const PGACCEL_RESIDENT_RASTER_ABI_VERSION: u32 = 1;
-#[allow(dead_code)] // reason: exact resident ABI cap consumed by executor wiring landing separately
+#[allow(dead_code)] // reason: frozen native ABI cap pinned by discriminant tests
 pub const PGACCEL_RESIDENT_RASTER_MAX_RECLASS_RULES: u32 = 64;
-#[allow(dead_code)] // reason: exact resident ABI cap consumed by executor wiring landing separately
+#[allow(dead_code)] // reason: frozen native ABI cap pinned by discriminant tests
 pub const PGACCEL_RESIDENT_RASTER_ROWS_PER_VALIDATION_LAUNCH: u32 = 65_536;
-#[allow(dead_code)] // reason: exact resident ABI cap consumed by executor wiring landing separately
+#[allow(dead_code)] // reason: frozen native ABI cap pinned by discriminant tests
 pub const PGACCEL_RESIDENT_RASTER_MAX_LAUNCH_CHUNKS: u32 = 4_096;
 
 // Literal PostGIS 3.6.4 rt_pixtype tags. These stay raw u32 values instead of
@@ -552,29 +551,23 @@ pub const PGACCEL_RESIDENT_RASTER_FLOAT32: u32 = 10;
 #[allow(dead_code)] // reason: literal PostGIS resident ABI tag retained for input views
 pub const PGACCEL_RESIDENT_RASTER_FLOAT64: u32 = 11;
 
-#[allow(dead_code)] // reason: raw resident ABI flag consumed by executor wiring landing separately
+#[allow(dead_code)] // reason: frozen native band flag; residency owns the Rust-domain mirror
 pub const PGACCEL_RESIDENT_RASTER_BAND_HAS_NODATA: u32 = 1 << 0;
-#[allow(dead_code)] // reason: raw resident ABI flag consumed by executor wiring landing separately
+#[allow(dead_code)] // reason: frozen native band flag; residency owns the Rust-domain mirror
 pub const PGACCEL_RESIDENT_RASTER_BAND_IS_NODATA: u32 = 1 << 1;
 
-#[allow(dead_code)] // reason: native row action consumed by executor wiring landing separately
+#[allow(dead_code)] // reason: frozen native output tag pinned by discriminant tests
 pub const PGACCEL_RASTER_ROW_NULL: u8 = 0;
-#[allow(dead_code)] // reason: native row action consumed by executor wiring landing separately
+#[allow(dead_code)] // reason: frozen native output tag pinned by discriminant tests
 pub const PGACCEL_RASTER_ROW_PASSTHROUGH: u8 = 1;
-#[allow(dead_code)] // reason: native row action consumed by executor wiring landing separately
+#[allow(dead_code)] // reason: frozen native output tag pinned by discriminant tests
 pub const PGACCEL_RASTER_ROW_RECLASSIFIED: u8 = 2;
 
-#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
 pub const PGACCEL_RASTER_VALIDATION_VIEW: u32 = 1 << 0;
-#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
 pub const PGACCEL_RASTER_VALIDATION_RULES: u32 = 1 << 1;
-#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
 pub const PGACCEL_RASTER_VALIDATION_OFFSETS: u32 = 1 << 2;
-#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
 pub const PGACCEL_RASTER_VALIDATION_CAPACITY: u32 = 1 << 3;
-#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
 pub const PGACCEL_RASTER_VALIDATION_BYTE_BUDGET: u32 = 1 << 4;
-#[allow(dead_code)] // reason: device validation bit consumed by post-borrow mapper
 pub const PGACCEL_RASTER_VALIDATION_NUMERIC_OVERFLOW: u32 = 1 << 5;
 
 /// Per-row raster metadata consumed directly from resident device storage.
