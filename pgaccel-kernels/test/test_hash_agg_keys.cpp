@@ -702,6 +702,81 @@ static void test_hash_agg_invalid_inputs_return_null() {
   ASSERT_EQ_SZ("finalize-mode AVG launches no GPU kernels", pgaccel_gpu_exec_count(), (uint64_t)0);
 }
 
+static void test_host_staged_compatibility_exports_decline_without_dispatch() {
+  printf("--- test_host_staged_compatibility_exports_decline_without_dispatch ---\n");
+
+  std::vector<int64_t> keys = {2, 1, 2, 1};
+  std::vector<double> values = {1.0, 2.0, 3.0, 4.0};
+  const void* value_cols[1] = {values.data()};
+  const uint8_t* value_nulls[1] = {nullptr};
+  int value_types[1] = {PGACCEL_VAL_FLOAT64};
+  pgaccel_agg_col sum_cols[1] = {{PGACCEL_AGG_SUM, 0}};
+  pgaccel_agg_col avg_cols[1] = {{PGACCEL_AGG_AVG, 0}};
+
+  pgaccel_agg_state* state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  pgaccel_reset_gpu_exec_count();
+  pgaccel_status status = pgaccel_hash_agg_execute_checked(
+      keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64, value_cols, value_nulls, value_types,
+      sum_cols, 1, &state);
+  ASSERT_EQ_INT("host-staged checked finalize returns UNSUPPORTED", status, PGACCEL_UNSUPPORTED);
+  ASSERT_TRUE("host-staged checked finalize clears state", state == nullptr);
+  ASSERT_EQ_SZ("host-staged checked finalize launches no GPU kernels", pgaccel_gpu_exec_count(),
+               (uint64_t)0);
+
+  pgaccel_reset_gpu_exec_count();
+  state = pgaccel_hash_agg_execute(keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64, value_cols,
+                                   value_nulls, value_types, sum_cols, 1);
+  ASSERT_TRUE("host-staged finalize wrapper returns NULL", state == nullptr);
+  ASSERT_EQ_SZ("host-staged finalize wrapper launches no GPU kernels", pgaccel_gpu_exec_count(),
+               (uint64_t)0);
+
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  pgaccel_reset_gpu_exec_count();
+  status = pgaccel_hash_agg_execute_sort_based(
+      keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64, value_cols, value_nulls, value_types,
+      sum_cols, 1, &state);
+  ASSERT_EQ_INT("forced host-staged sort returns UNSUPPORTED", status, PGACCEL_UNSUPPORTED);
+  ASSERT_TRUE("forced host-staged sort clears state", state == nullptr);
+  ASSERT_EQ_SZ("forced host-staged sort launches no GPU kernels", pgaccel_gpu_exec_count(),
+               (uint64_t)0);
+
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  pgaccel_reset_gpu_exec_count();
+  status = pgaccel_hash_agg_execute_partial_checked(
+      keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64, value_cols, value_nulls, value_types,
+      avg_cols, 1, &state);
+  ASSERT_EQ_INT("host-staged checked partial returns UNSUPPORTED", status, PGACCEL_UNSUPPORTED);
+  ASSERT_TRUE("host-staged checked partial clears state", state == nullptr);
+  ASSERT_EQ_SZ("host-staged checked partial launches no GPU kernels", pgaccel_gpu_exec_count(),
+               (uint64_t)0);
+
+  pgaccel_reset_gpu_exec_count();
+  state = pgaccel_hash_agg_execute_partial(keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64,
+                                           value_cols, value_nulls, value_types, avg_cols, 1);
+  ASSERT_TRUE("host-staged partial wrapper returns NULL", state == nullptr);
+  ASSERT_EQ_SZ("host-staged partial wrapper launches no GPU kernels", pgaccel_gpu_exec_count(),
+               (uint64_t)0);
+
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  pgaccel_reset_gpu_exec_count();
+  status = pgaccel_hash_agg_execute_checked(keys.data(), nullptr, 0, PGACCEL_KEY_INT64, value_cols,
+                                            value_nulls, value_types, sum_cols, 1, &state);
+  ASSERT_EQ_INT("zero-row checked finalize preserves ERROR", status, PGACCEL_ERROR);
+  ASSERT_TRUE("zero-row checked finalize clears state", state == nullptr);
+  ASSERT_EQ_SZ("zero-row checked finalize launches no GPU kernels", pgaccel_gpu_exec_count(),
+               (uint64_t)0);
+
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  pgaccel_reset_gpu_exec_count();
+  status = pgaccel_hash_agg_execute_partial_checked(
+      keys.data(), nullptr, 0, PGACCEL_KEY_INT64, value_cols, value_nulls, value_types, avg_cols, 1,
+      &state);
+  ASSERT_EQ_INT("zero-row checked partial preserves ERROR", status, PGACCEL_ERROR);
+  ASSERT_TRUE("zero-row checked partial clears state", state == nullptr);
+  ASSERT_EQ_SZ("zero-row checked partial launches no GPU kernels", pgaccel_gpu_exec_count(),
+               (uint64_t)0);
+}
+
 static void test_hash_agg_count_star_without_value_cols() {
   printf("--- test_hash_agg_count_star_without_value_cols ---\n");
 
@@ -940,6 +1015,7 @@ int main() {
   }
 
   test_hash_agg_invalid_inputs_return_null();
+  test_host_staged_compatibility_exports_decline_without_dispatch();
   test_hash_agg_count_star_without_value_cols();
   test_hash_count_i64_host_keys_decline_without_dispatch();
   test_hash_count_i64_high_cardinality_resident_gpu_path();

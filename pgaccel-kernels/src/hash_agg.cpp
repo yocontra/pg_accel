@@ -3128,26 +3128,12 @@ pgaccel_status pgaccel_hash_agg_execute_checked(
   if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
                                num_aggs, false))
     return PGACCEL_ERROR;
-
-  pgaccel_agg_state* state = nullptr;
-  switch (select_hashagg_finalize_path(group_keys, group_null_mask, row_count, key_type,
-                                       value_types, agg_cols, num_aggs)) {
-    case HashAggGpuPath::row_parallel:
-      state = agg_hash_row_parallel(group_keys, group_null_mask, row_count, key_type, value_cols,
-                                    value_nulls, value_types, agg_cols, num_aggs);
-      break;
-    case HashAggGpuPath::sort:
-      state = agg_sort_based(group_keys, group_null_mask, row_count, key_type, value_cols,
-                             value_nulls, value_types, agg_cols, num_aggs);
-      break;
-    case HashAggGpuPath::unsupported:
-      return PGACCEL_UNSUPPORTED;
-  }
-
-  if (state == nullptr)
-    return PGACCEL_ERROR_NO_DEVICE;
-  *out_state = state;
-  return PGACCEL_OK;
+  (void)group_null_mask;
+  (void)value_nulls;
+  // Compatibility-only host-staged ABI. Resident callers use the device-key
+  // count entry points below; a valid nonempty host batch must decline before
+  // queue creation or output allocation.
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -3162,11 +3148,16 @@ pgaccel_agg_state* pgaccel_hash_agg_execute(const void* group_keys, const uint8_
                                             const uint8_t* const* value_nulls,
                                             const int* value_types, const pgaccel_agg_col* agg_cols,
                                             size_t num_aggs) {
-  pgaccel_agg_state* state = nullptr;
-  (void)pgaccel_hash_agg_execute_checked(group_keys, group_null_mask, row_count, key_type,
-                                         value_cols, value_nulls, value_types, agg_cols, num_aggs,
-                                         &state);
-  return state;
+  (void)group_keys;
+  (void)group_null_mask;
+  (void)row_count;
+  (void)key_type;
+  (void)value_cols;
+  (void)value_nulls;
+  (void)value_types;
+  (void)agg_cols;
+  (void)num_aggs;
+  return nullptr;
 }
 
 pgaccel_agg_state* pgaccel_hash_count_i64_execute(const int64_t* group_keys,
@@ -3240,25 +3231,9 @@ pgaccel_status pgaccel_hash_agg_execute_sort_based(
   if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
                                num_aggs, false))
     return PGACCEL_ERROR;
-
-  if (!hashagg_sort_based_available() ||
-      !hashagg_sort_shape_supported(group_keys, group_null_mask, row_count, key_type))
-    return PGACCEL_UNSUPPORTED;
-
-  try {
-    pgaccel_agg_state* state =
-        agg_sort_based(group_keys, group_null_mask, row_count, key_type, value_cols, value_nulls,
-                       value_types, agg_cols, num_aggs);
-    if (state == nullptr)
-      return PGACCEL_ERROR_NO_DEVICE;
-    *out_state = state;
-    return PGACCEL_OK;
-  } catch (const std::exception& e) {
-    std::fprintf(stderr, "pgaccel: hash_agg_execute_sort_based failed: %s\n", e.what());
-  } catch (...) {
-    std::fprintf(stderr, "pgaccel: hash_agg_execute_sort_based failed (unknown)\n");
-  }
-  return PGACCEL_ERROR_NO_DEVICE;
+  (void)group_null_mask;
+  (void)value_nulls;
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -3298,18 +3273,9 @@ pgaccel_status pgaccel_hash_agg_execute_partial_checked(
   if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
                                num_aggs, true))
     return PGACCEL_ERROR;
-
-  if (!hashagg_sort_based_available() ||
-      !hashagg_sort_shape_supported(group_keys, group_null_mask, row_count, key_type))
-    return PGACCEL_UNSUPPORTED;
-
-  pgaccel_agg_state* state =
-      agg_sort_based_partial(group_keys, group_null_mask, row_count, key_type, value_cols,
-                             value_nulls, value_types, agg_cols, num_aggs);
-  if (state == nullptr)
-    return PGACCEL_ERROR_NO_DEVICE;
-  *out_state = state;
-  return PGACCEL_OK;
+  (void)group_null_mask;
+  (void)value_nulls;
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -3323,11 +3289,16 @@ pgaccel_hash_agg_execute_partial(const void* group_keys, const uint8_t* group_nu
                                  size_t row_count, int key_type, const void* const* value_cols,
                                  const uint8_t* const* value_nulls, const int* value_types,
                                  const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  pgaccel_agg_state* state = nullptr;
-  (void)pgaccel_hash_agg_execute_partial_checked(group_keys, group_null_mask, row_count, key_type,
-                                                 value_cols, value_nulls, value_types, agg_cols,
-                                                 num_aggs, &state);
-  return state;
+  (void)group_keys;
+  (void)group_null_mask;
+  (void)row_count;
+  (void)key_type;
+  (void)value_cols;
+  (void)value_nulls;
+  (void)value_types;
+  (void)agg_cols;
+  (void)num_aggs;
+  return nullptr;
 }
 
 const double* pgaccel_agg_get_partial_results(const pgaccel_agg_state* state, size_t agg_idx) {
