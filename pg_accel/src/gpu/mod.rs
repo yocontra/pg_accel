@@ -81,3 +81,22 @@ pub use raster::*;
 pub use runtime::*;
 pub use spatial::*;
 pub use window::*;
+
+#[cfg(test)]
+mod backend_local_owner_tests {
+    use static_assertions::assert_not_impl_any;
+
+    use super::{
+        ExprDeviceBuffer, GpuHashTable, GroupedAggChunk, GroupedAggOutputStorage,
+        GroupedAggSession, GroupedAggWorkspace, HashAggResult, ResolvedGroupedAggPlan,
+    };
+
+    assert_not_impl_any!(ExprDeviceBuffer<u8>: Send, Sync);
+    assert_not_impl_any!(HashAggResult: Send, Sync);
+    assert_not_impl_any!(GpuHashTable: Send, Sync);
+    assert_not_impl_any!(ResolvedGroupedAggPlan<'static>: Send, Sync);
+    assert_not_impl_any!(GroupedAggChunk<'static, 'static>: Send, Sync);
+    assert_not_impl_any!(GroupedAggWorkspace: Send, Sync);
+    assert_not_impl_any!(GroupedAggSession: Send, Sync);
+    assert_not_impl_any!(GroupedAggOutputStorage: Send, Sync);
+}

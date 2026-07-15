@@ -1,6 +1,7 @@
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 use super::{
     GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail, PgaccelBatch,
@@ -43,7 +44,7 @@ fn batch_rows_checked(func: &'static str, batch: &PgaccelBatch, num_rows: usize)
 pub struct ExprDeviceBuffer<T> {
     ptr: NonNull<T>,
     len: usize,
-    _not_send_sync: PhantomData<*mut T>,
+    _not_send_sync: PhantomData<Rc<()>>,
 }
 
 impl<T> ExprDeviceBuffer<T> {

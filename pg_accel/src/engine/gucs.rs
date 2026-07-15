@@ -12,21 +12,20 @@ use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting, PostgresGucEnum};
 /// Master switch for the extension.
 static ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
-/// Batch size for GPU dispatch. Larger batches amortize dispatch overhead
-/// but use more memory. Default 65536 balances throughput and memory.
+/// Minimum executor fill target for legacy row-fed Custom Scans.
 static MIN_BATCH_SIZE: GucSetting<i32> = GucSetting::<i32>::new(65536);
 
 /// Whether GPU acceleration is enabled.
 static GPU_ENABLED: GucSetting<bool> = GucSetting::<bool>::new(true);
 
-/// Warning threshold in milliseconds for a single GPU kernel invocation.
+/// Post-call warning threshold for an instrumented synchronous GPU dispatch.
 static KERNEL_TIMEOUT_MS: GucSetting<i32> = GucSetting::<i32>::new(5000);
 
 /// Cluster-wide cap for pg_accel-owned host worker threads. 0 means unlimited.
 static MAX_WORKERS_TOTAL: GucSetting<i32> = GucSetting::<i32>::new(0);
 
-/// Cluster-wide resident GPU-memory cap in MiB. -1 derives the cap from the
-/// active device profile through `DeviceLimits`.
+/// Cluster-wide cap in MiB for every byte charged to residency. -1 derives the
+/// cap from the active device profile through `DeviceLimits`.
 static RESIDENT_MEMORY_BUDGET_MB: GucSetting<i32> = GucSetting::<i32>::new(-1);
 
 /// Whether a selected resident plan may synchronously load missing columns.
@@ -48,19 +47,11 @@ const COST_MULTIPLIER_MAX: f64 = 10.0;
 static LOG_LEVEL: GucSetting<PgAccelLogLevel> =
     GucSetting::<PgAccelLogLevel>::new(PgAccelLogLevel::Notice);
 
-/// Bench-mode dispatch coverage assertion. When `true`, the planner hook
-/// emits a loud `WARNING` (and increments `planner_rejected_count`) for
-/// every query above the row-count threshold that would otherwise have
-/// been silently declined. Exists so that benchmark runs can catch the
-/// "Bucket B" class of regressions where a workload appears to run on GPU
-/// because `pg_accel_stats()` looks non-zero, but the planner actually
-/// declined to inject for this particular query.
+/// Reserved compatibility setting. Dispatch proof belongs in the benchmark
+/// harness, which checks plan shape and per-backend kernel deltas directly.
 static ASSERT_DISPATCH: GucSetting<bool> = GucSetting::<bool>::new(false);
 
-/// Admit the PG18 parallel fused `COUNT(*) WHERE template_predicate` path.
-/// This is a visible roadmap knob only while the Metal worker path is
-/// crash-gated; planner admission remains disabled until no-crash evidence
-/// exists and performance beats PostgreSQL native parallel aggregation.
+/// Reserved roadmap setting for the crash-gated parallel fused count path.
 static PARALLEL_FUSED_COUNT: GucSetting<bool> = GucSetting::<bool>::new(false);
 
 /// Per-file size cap (in MiB) for the JSONL trace artifacts that pg_accel
@@ -117,8 +108,8 @@ pub enum PgAccelLogLevel {
 pub fn init_gucs() {
     GucRegistry::define_bool_guc(
         c"pg_accel.enabled",
-        c"Enable or disable pg_accel query acceleration.",
-        c"When false, all custom scan paths are disabled and queries use the stock executor.",
+        c"Planning-time master switch for pg_accel paths.",
+        c"When false, planner hooks add no new pg_accel paths. A Custom Scan planned while enabled fails closed if this setting is off when it executes.",
         &ENABLED,
         GucContext::Userset,
         GucFlags::default(),
@@ -126,8 +117,8 @@ pub fn init_gucs() {
 
     GucRegistry::define_int_guc(
         c"pg_accel.min_batch_size",
-        c"Minimum row estimate before GPU batched execution is considered.",
-        c"Below this threshold, the standard row-at-a-time executor is used.",
+        c"Minimum executor fill target for row-fed Custom Scans.",
+        c"The row-fed scan arena fills at least this many rows per batch. Operator-specific device limits and costs independently decide planner admission; resident descriptor calls use their device-limit chunk caps.",
         &MIN_BATCH_SIZE,
         1,
         // Upper bound must sit well above the 65536 default so operators can
@@ -144,8 +135,8 @@ pub fn init_gucs() {
 
     GucRegistry::define_bool_guc(
         c"pg_accel.gpu_enabled",
-        c"Enable or disable GPU kernel dispatch.",
-        c"When false, pg_accel will not inject any custom scan paths.",
+        c"Planning-time admission switch for GPU paths.",
+        c"When false, planner hooks add no new GPU Custom Scan paths. It does not rewrite or disable a path that was already planned.",
         &GPU_ENABLED,
         GucContext::Userset,
         GucFlags::default(),
@@ -153,10 +144,8 @@ pub fn init_gucs() {
 
     GucRegistry::define_int_guc(
         c"pg_accel.kernel_timeout_ms",
-        c"Warning threshold in milliseconds for a single GPU kernel invocation.",
-        c"pg_accel records elapsed synchronous kernel time and warns when this \
-          threshold is exceeded. It does not asynchronously cancel an in-flight \
-          GPU call; use PostgreSQL statement_timeout for a hard query timeout.",
+        c"Warning threshold for one synchronous GPU dispatch call, in milliseconds.",
+        c"Instrumented calls are timed after they return. Dense resident aggregation uses bounded input chunks and checks cancellation or statement_timeout between calls; one-shot calls remain uninterruptible until they return. This setting does not asynchronously cancel an in-flight call.",
         &KERNEL_TIMEOUT_MS,
         100,
         60_000,
@@ -167,9 +156,7 @@ pub fn init_gucs() {
     GucRegistry::define_int_guc(
         c"pg_accel.max_workers_total",
         c"Cluster-wide cap for pg_accel-owned host worker threads.",
-        c"Limits host-side worker threads used inside pg_accel backends. \
-          0 means unlimited. PostgreSQL parallel query workers are separate \
-          processes and are not counted by this budget.",
+        c"Caps grants made through pg_accel's shared host-thread ledger. 0 means unlimited. PostgreSQL parallel query workers are separate processes and are not counted; current executors request no host worker threads.",
         &MAX_WORKERS_TOTAL,
         0,
         4096,
@@ -179,9 +166,8 @@ pub fn init_gucs() {
 
     GucRegistry::define_int_guc(
         c"pg_accel.resident_memory_budget_mb",
-        c"Cluster-wide GPU-memory budget for resident relation data, in MiB.",
-        c"-1 derives a conservative cap from the active DeviceLimits profile. \
-          Pinned entries are protected from LRU eviction but cannot exceed the cap.",
+        c"Cluster-wide budget for all residency-owned bytes, in MiB.",
+        c"Charges device buffers, retained exact host values, derived artifacts, and transient transform storage across all backends. -1 derives the cap from DeviceLimits. Pinned entries resist local LRU eviction but never bypass the cap.",
         &RESIDENT_MEMORY_BUDGET_MB,
         -1,
         1_048_576,
@@ -191,8 +177,8 @@ pub fn init_gucs() {
 
     GucRegistry::define_bool_guc(
         c"pg_accel.auto_load",
-        c"Load missing resident columns when a resident GPU plan is selected.",
-        c"When false, selected plans must find an already loaded or pinned relation entry.",
+        c"Allow selected resident plans to load missing columns synchronously.",
+        c"When false, ordinary selected plans require resident data already loaded in this backend. Explicit pg_accel_pin and reload of an existing pin remain authorized.",
         &AUTO_LOAD,
         GucContext::Userset,
         GucFlags::default(),
@@ -200,8 +186,8 @@ pub fn init_gucs() {
 
     GucRegistry::define_float_guc(
         c"pg_accel.cost_multiplier",
-        c"Global multiplier for pg_accel cost estimates.",
-        c"Values >1.0 make pg_accel more conservative, <1.0 more aggressive. Default 1.0.",
+        c"Cost multiplier for resident generic grouped-aggregate candidates.",
+        c"Applied after the resident generic grouped-aggregate cost is built. Values above 1.0 are more conservative and values below 1.0 more aggressive; other path families use their own calibrated costs.",
         &COST_MULTIPLIER,
         COST_MULTIPLIER_MIN,
         COST_MULTIPLIER_MAX,
@@ -211,8 +197,8 @@ pub fn init_gucs() {
 
     GucRegistry::define_enum_guc(
         c"pg_accel.log_level",
-        c"Verbosity of pg_accel log messages.",
-        c"One of: debug, info, notice, warning, error.",
+        c"Initial tracing verbosity for each PostgreSQL backend.",
+        c"Read once when the backend's first executing Custom Scan initializes tracing. Later SET commands do not rebuild that subscriber. notice and warning both select tracing WARN; debug, info, and error map directly.",
         &LOG_LEVEL,
         GucContext::Userset,
         GucFlags::default(),
@@ -220,10 +206,8 @@ pub fn init_gucs() {
 
     GucRegistry::define_bool_guc(
         c"pg_accel.assert_dispatch",
-        c"Assert that every large-enough query actually ran on the GPU.",
-        c"When true, the planner hook raises a WARNING for any query above \
-          the dispatch threshold that it declined to inject. Use during \
-          benchmark runs to catch silent-decline regressions.",
+        c"Reserved no-op compatibility setting for old benchmark profiles.",
+        c"This setting does not alter planning or execution. Current benchmark gates prove dispatch by checking exact plan shape and a kernel-counter delta in each backend.",
         &ASSERT_DISPATCH,
         GucContext::Userset,
         GucFlags::default(),
@@ -231,10 +215,8 @@ pub fn init_gucs() {
 
     GucRegistry::define_bool_guc(
         c"pg_accel.parallel_fused_count",
-        c"Enable parallel fused COUNT(*) over template-safe WHERE predicates.",
-        c"Roadmap knob only while the PG18 Metal worker path is crash-gated. \
-          The planner currently records parallel_fused_count_unstable and \
-          keeps this shape native even when the GUC is true.",
+        c"Reserved no-op roadmap setting for parallel fused COUNT(*).",
+        c"The crash-gated PG18 parallel fused-count path is not admitted. Changing this setting has no planner or executor effect; PostgreSQL keeps the shape native.",
         &PARALLEL_FUSED_COUNT,
         GucContext::Suset,
         GucFlags::default(),
@@ -243,10 +225,7 @@ pub fn init_gucs() {
     GucRegistry::define_int_guc(
         c"pg_accel.otel_log_max_mb",
         c"Per-file size cap for pg_accel_otel.jsonl and pg_accel_traces.jsonl, in MiB.",
-        c"When an active trace file would exceed this cap, the writer \
-          renames it to <file>.1 (ageing prior rotations) and reopens a \
-          fresh file. Prevents long-running benchmark sessions from \
-          producing multi-GiB JSONL artifacts. Default 256 MiB.",
+        c"Sampled when backend tracing initializes. The legacy PG_ACCEL_TRACE_FILE_MAX_BYTES environment variable takes precedence when valid. On overflow the writer rotates to <file>.1 and opens a fresh active file.",
         &OTEL_LOG_MAX_MB,
         1,
         65_536,
@@ -257,10 +236,7 @@ pub fn init_gucs() {
     GucRegistry::define_int_guc(
         c"pg_accel.otel_log_max_rotations",
         c"Number of rotated copies of each trace artifact to retain.",
-        c"When the active trace file rotates, the writer ages \
-          <file>.N-1 → <file>.N and drops anything older. Set to 0 to \
-          disable retention (still bounds the active file but discards \
-          rotations immediately). Default 4.",
+        c"Sampled when backend tracing initializes. Rotation ages <file>.N-1 to <file>.N and drops older files. 0 still bounds the active file but discards every rotated copy.",
         &OTEL_LOG_MAX_ROTATIONS,
         0,
         32,
@@ -334,7 +310,7 @@ pub fn resident_memory_budget_bytes() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// GPU kernel warning threshold in milliseconds.
+/// Synchronous GPU-dispatch warning threshold in milliseconds.
 #[inline]
 #[must_use]
 pub fn kernel_timeout_ms() -> i32 {
@@ -388,14 +364,14 @@ pub fn log_level() -> PgAccelLogLevel {
     LOG_LEVEL.get()
 }
 
-/// Whether bench-mode dispatch-coverage assertion is enabled.
+/// Raw value of the reserved `assert_dispatch` compatibility setting.
 #[inline]
 #[must_use]
 pub fn assert_dispatch() -> bool {
     ASSERT_DISPATCH.get()
 }
 
-/// Whether the PG18 parallel fused-count planner path is enabled.
+/// Raw value of the reserved `parallel_fused_count` roadmap setting.
 #[inline]
 #[must_use]
 pub fn parallel_fused_count_enabled() -> bool {

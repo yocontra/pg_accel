@@ -1,4 +1,6 @@
 use super::{ExprDeviceBuffer, PgaccelAggState, bridge};
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
 // Hash aggregation wrappers
@@ -16,6 +18,7 @@ use super::{ExprDeviceBuffer, PgaccelAggState, bridge};
 /// Owns the underlying C++ allocation and frees it on drop.
 pub struct HashAggResult {
     state: *mut PgaccelAggState,
+    _not_send_sync: PhantomData<Rc<()>>,
 }
 
 impl Drop for HashAggResult {
@@ -39,7 +42,10 @@ impl HashAggResult {
             return None;
         }
         crate::note_backend_gpu_owner_acquired();
-        Some(Self { state })
+        Some(Self {
+            state,
+            _not_send_sync: PhantomData,
+        })
     }
 
     /// Number of distinct groups. Retained for the Phase 6 spatial cutover.

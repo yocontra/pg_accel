@@ -1,5 +1,7 @@
 //! Portable bounded-dispatch orchestration for synchronous device calls.
 
+use std::time::Duration;
+
 /// One exact, nonempty input range presented to a device launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct DispatchChunk {
@@ -59,6 +61,16 @@ pub(super) fn cleanup_before_rethrow<C, E, R>(
 ) -> R {
     drop(cleanup);
     rethrow(error)
+}
+
+/// Whether a completed synchronous dispatch call crossed its warning
+/// threshold. This never claims to cancel an in-flight call.
+#[must_use]
+pub(super) fn dispatch_warning_threshold_exceeded(elapsed: Duration, threshold_ms: i32) -> bool {
+    let Ok(threshold_ms) = u64::try_from(threshold_ms) else {
+        return false;
+    };
+    threshold_ms != 0 && elapsed > Duration::from_millis(threshold_ms)
 }
 
 #[cfg(test)]
@@ -227,5 +239,25 @@ mod tests {
 
         assert_eq!(result, "cancelled");
         assert_eq!(dropped.get(), 2);
+    }
+
+    #[test]
+    fn dispatch_warning_threshold_is_post_call_and_strictly_exceeded() {
+        assert!(!dispatch_warning_threshold_exceeded(
+            Duration::from_millis(101),
+            0
+        ));
+        assert!(!dispatch_warning_threshold_exceeded(
+            Duration::from_millis(101),
+            -1
+        ));
+        assert!(!dispatch_warning_threshold_exceeded(
+            Duration::from_millis(100),
+            100
+        ));
+        assert!(dispatch_warning_threshold_exceeded(
+            Duration::from_micros(100_001),
+            100
+        ));
     }
 }

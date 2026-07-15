@@ -6,6 +6,8 @@
 //! selectable again.
 
 use std::ffi::{c_int, c_void};
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 use crate::gpu::{PgaccelMemSpace, PgaccelValTag};
 
@@ -343,6 +345,7 @@ pub struct DeviceBufferRef {
     pub value_tag: Option<PgaccelValTag>,
     pub residency: BatchResidency,
     pub producer: ResidentOperatorStage,
+    _not_send_sync: PhantomData<Rc<()>>,
 }
 
 impl DeviceBufferRef {
@@ -360,6 +363,7 @@ impl DeviceBufferRef {
             value_tag,
             residency,
             producer,
+            _not_send_sync: PhantomData,
         }
     }
 
@@ -641,6 +645,9 @@ pub enum ResidentProofDecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use static_assertions::assert_not_impl_any;
+
+    assert_not_impl_any!(DeviceBufferRef: Send, Sync);
 
     #[test]
     fn batch_residency_maps_to_ffi_memory_space() {

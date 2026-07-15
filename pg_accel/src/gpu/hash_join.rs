@@ -1,4 +1,6 @@
 use super::{PgaccelHashTable, PgaccelKeyType, bridge};
+use std::marker::PhantomData;
+use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
 // Hash join wrappers
@@ -7,6 +9,7 @@ use super::{PgaccelHashTable, PgaccelKeyType, bridge};
 /// RAII wrapper around a GPU-side hash table.
 pub struct GpuHashTable {
     ht: *mut PgaccelHashTable,
+    _not_send_sync: PhantomData<Rc<()>>,
 }
 
 impl Drop for GpuHashTable {
@@ -55,7 +58,10 @@ impl GpuHashTable {
             None
         } else {
             crate::note_backend_gpu_owner_acquired();
-            Some(Self { ht })
+            Some(Self {
+                ht,
+                _not_send_sync: PhantomData,
+            })
         }
     }
 

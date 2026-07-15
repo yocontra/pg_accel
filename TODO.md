@@ -73,10 +73,13 @@ measured specializations of those classes. A benchmark win is not release-ready
 if it creates another isolated table/query path that cannot be reused by nearby
 SQL shapes.
 
-GPU timeout and cancellation semantics (2026-07-04): `pg_accel.kernel_timeout_ms`
-is currently a warning threshold measured after synchronous GPU dispatch
-returns. It does not cancel an in-flight kernel. Before claiming hard
-query-timeout semantics, investigate a portable cancellation model across
+GPU timeout and cancellation semantics (updated 2026-07-14):
+`pg_accel.kernel_timeout_ms` remains a warning threshold measured after a
+synchronous GPU dispatch returns. Dense resident grouped aggregation now uses
+bounded calls with PostgreSQL interrupt checks before the first call and after
+each call, so cancel and `statement_timeout` are observed at those boundaries.
+One-shot dispatch paths still cannot cancel an in-flight call. Before claiming
+hard query-timeout semantics for every path, investigate a portable model across
 AdaptiveCpp backends. This is a blocker for hard GPU-kernel cancellation claims,
 not for a release that documents the GUC as a post-dispatch warning threshold
 and proves bounded-batch interrupt behavior with stress artifacts.

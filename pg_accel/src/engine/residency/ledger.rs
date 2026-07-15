@@ -149,6 +149,70 @@ fn backend_slot(ledger: &ResidencyLedger, pid: i32) -> Option<usize> {
         .or_else(|| ledger.backends.iter().position(|slot| slot.pid == 0))
 }
 
+/// Reserve bytes for one PostgreSQL backend while the caller holds the ledger
+/// lock. The shared ledger intentionally stores only process identifiers and
+/// byte counts; device addresses remain in the backend-local residency store.
+fn reserve_backend_bytes(
+    ledger: &mut ResidencyLedger,
+    pid: i32,
+    bytes: u64,
+    budget: u64,
+) -> Result<(), u64> {
+    if bytes == 0 {
+        return Ok(());
+    }
+    if pid <= 0 {
+        return Err(ledger.total_bytes);
+    }
+    let Some(next_total) = ledger.total_bytes.checked_add(bytes) else {
+        return Err(ledger.total_bytes);
+    };
+    if next_total > budget {
+        return Err(ledger.total_bytes);
+    }
+    let Some(index) = backend_slot(ledger, pid) else {
+        return Err(ledger.total_bytes);
+    };
+    let Some(next_backend) = ledger.backends[index].bytes.checked_add(bytes) else {
+        return Err(ledger.total_bytes);
+    };
+
+    ledger.backends[index] = BackendBytes {
+        pid,
+        bytes: next_backend,
+    };
+    ledger.total_bytes = next_total;
+    Ok(())
+}
+
+/// Release at most `bytes` from one backend slot while the caller holds the
+/// ledger lock. A backend can never release another backend's reservation.
+fn release_backend_bytes(ledger: &mut ResidencyLedger, pid: i32, bytes: u64) -> u64 {
+    let Some(index) = ledger.backends.iter().position(|slot| slot.pid == pid) else {
+        return 0;
+    };
+    let released = bytes.min(ledger.backends[index].bytes);
+    ledger.backends[index].bytes -= released;
+    ledger.total_bytes = ledger
+        .total_bytes
+        .checked_sub(released)
+        .expect("resident backend charge exceeds cluster ledger during release");
+    if ledger.backends[index].bytes == 0 {
+        ledger.backends[index] = BackendBytes::default();
+    }
+    released
+}
+
+#[must_use]
+fn backend_byte_snapshot(ledger: &ResidencyLedger, pid: i32) -> (u64, u64) {
+    let current_backend = ledger
+        .backends
+        .iter()
+        .find(|slot| slot.pid == pid)
+        .map_or(0, |slot| slot.bytes);
+    (ledger.total_bytes, current_backend)
+}
+
 #[cfg(any(test, not(feature = "pg_test")))]
 fn reclaim_dead_backends_with(
     ledger: &mut ResidencyLedger,
@@ -207,22 +271,7 @@ impl LedgerCharge {
         let pid = current_pid();
         shared::with_mut(|ledger| {
             reclaim_dead_backends(ledger);
-            let Some(next_total) = ledger.total_bytes.checked_add(bytes) else {
-                return Err(ledger.total_bytes);
-            };
-            if next_total > budget {
-                return Err(ledger.total_bytes);
-            }
-            let Some(index) = backend_slot(ledger, pid) else {
-                return Err(ledger.total_bytes);
-            };
-            ledger.backends[index].pid = pid;
-            ledger.backends[index].bytes = ledger.backends[index]
-                .bytes
-                .checked_add(bytes)
-                .expect("resident backend byte total overflow after cluster-total check");
-            ledger.total_bytes = next_total;
-            Ok(Self { bytes })
+            reserve_backend_bytes(ledger, pid, bytes, budget).map(|()| Self { bytes })
         })
     }
 
@@ -244,17 +293,7 @@ impl LedgerCharge {
         let pid = current_pid();
         self.release_with(true, |bytes| {
             shared::with_mut(|ledger| {
-                if let Some(index) = ledger.backends.iter().position(|slot| slot.pid == pid) {
-                    let released = bytes.min(ledger.backends[index].bytes);
-                    ledger.backends[index].bytes -= released;
-                    ledger.total_bytes = ledger
-                        .total_bytes
-                        .checked_sub(released)
-                        .expect("resident backend charge exceeds cluster ledger during release");
-                    if ledger.backends[index].bytes == 0 {
-                        ledger.backends[index].pid = 0;
-                    }
-                }
+                release_backend_bytes(ledger, pid, bytes);
             });
         });
     }
@@ -299,14 +338,7 @@ pub(super) fn total_bytes() -> u64 {
 #[must_use]
 pub(super) fn byte_snapshot() -> (u64, u64) {
     let pid = current_pid();
-    shared::with_ref(|ledger| {
-        let current_backend = ledger
-            .backends
-            .iter()
-            .find(|slot| slot.pid == pid)
-            .map_or(0, |slot| slot.bytes);
-        (ledger.total_bytes, current_backend)
-    })
+    shared::with_ref(|ledger| backend_byte_snapshot(ledger, pid))
 }
 
 #[must_use]
@@ -444,6 +476,9 @@ pub(super) fn cleanup_backend() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use static_assertions::assert_impl_all;
+
+    assert_impl_all!(ResidencyLedger: Send, Sync);
 
     static TEST_LEDGER_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
@@ -508,6 +543,53 @@ mod tests {
             LedgerCharge::reserve(225, 1024).expect_err("reservation must exceed budget"),
             800
         );
+    }
+
+    #[test]
+    fn eight_backends_share_one_exact_budget_without_cross_charging() {
+        let mut ledger = ResidencyLedger::default();
+        let budget = 8 * 128;
+
+        for pid in 10_001..=10_008 {
+            reserve_backend_bytes(&mut ledger, pid, 128, budget).expect("backend fits budget");
+        }
+        assert_eq!(ledger.total_bytes, budget);
+        for pid in 10_001..=10_008 {
+            assert_eq!(backend_byte_snapshot(&ledger, pid), (budget, 128));
+        }
+
+        assert_eq!(
+            reserve_backend_bytes(&mut ledger, 10_009, 1, budget),
+            Err(budget)
+        );
+        assert_eq!(backend_byte_snapshot(&ledger, 10_009), (budget, 0));
+
+        assert_eq!(release_backend_bytes(&mut ledger, 10_004, 128), 128);
+        assert_eq!(backend_byte_snapshot(&ledger, 10_004), (budget - 128, 0));
+        assert_eq!(backend_byte_snapshot(&ledger, 10_005), (budget - 128, 128));
+
+        reserve_backend_bytes(&mut ledger, 10_009, 64, budget).expect("released capacity reused");
+        assert_eq!(backend_byte_snapshot(&ledger, 10_009), (budget - 64, 64));
+        assert_eq!(release_backend_bytes(&mut ledger, 99_999, u64::MAX), 0);
+        assert_eq!(backend_byte_snapshot(&ledger, 10_005), (budget - 64, 128));
+    }
+
+    #[test]
+    fn failed_reservations_leave_backend_slots_and_total_unchanged() {
+        let mut ledger = ResidencyLedger::default();
+        reserve_backend_bytes(&mut ledger, 21, 400, 1_000).expect("initial reserve");
+
+        assert_eq!(reserve_backend_bytes(&mut ledger, 22, 601, 1_000), Err(400));
+        assert_eq!(reserve_backend_bytes(&mut ledger, 0, 1, 1_000), Err(400));
+        assert_eq!(backend_byte_snapshot(&ledger, 21), (400, 400));
+        assert_eq!(backend_byte_snapshot(&ledger, 22), (400, 0));
+
+        ledger.total_bytes = u64::MAX;
+        assert_eq!(
+            reserve_backend_bytes(&mut ledger, 21, 1, u64::MAX),
+            Err(u64::MAX)
+        );
+        assert_eq!(ledger.backends[0].bytes, 400);
     }
 
     #[test]

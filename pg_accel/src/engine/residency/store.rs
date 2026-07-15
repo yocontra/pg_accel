@@ -3283,7 +3283,12 @@ fn pg_accel_residency_invalidate<'a>(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use static_assertions::assert_not_impl_any;
     use std::rc::Rc;
+
+    assert_not_impl_any!(ResidentColumn: Send, Sync);
+    assert_not_impl_any!(ResidentRelation: Send, Sync);
+    assert_not_impl_any!(RelationStore: Send, Sync);
 
     struct TestCountingAllocator;
 

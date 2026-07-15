@@ -43,6 +43,7 @@ tracing-subscriber = { version = "0.3", features = [
 
 [dev-dependencies]
 pgrx-tests = "0.18.1"
+static_assertions = "1"
 
 [build-dependencies]
 

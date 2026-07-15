@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::fmt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pgrx::pg_sys;
 
@@ -14,9 +14,11 @@ use super::artifact::{
 use super::output::{DescriptorAggOutput, validate_h3_compact_key_buffers};
 use super::spatial::{SpatialAggArtifact, SpatialTransformPlan, SpatialWorkspace};
 use crate::engine::executor::bounded::{
-    BoundedDispatchError, cleanup_before_rethrow, run_bounded_dispatch,
+    BoundedDispatchError, cleanup_before_rethrow, dispatch_warning_threshold_exceeded,
+    run_bounded_dispatch,
 };
 use crate::engine::ffi::syscache::{PostgisCatalogIdentity, resolve_postgis_catalog};
+use crate::engine::gucs;
 use crate::engine::residency::{
     ArtifactEnsureOutcome, DerivedArtifactIdentity, ResidentByteAccounting, ResidentColumnRef,
     ResidentColumnView, ResidentLoadError, ResidentRelationEvidence, ResolvedDerivedInputs,
@@ -1866,6 +1868,17 @@ fn capture_postgres_interrupt() -> Option<pg_sys::panic::CaughtError> {
     .execute()
 }
 
+fn warn_if_grouped_dispatch_slow(phase: &str, elapsed: Duration) {
+    let threshold_ms = gucs::kernel_timeout_ms();
+    if !dispatch_warning_threshold_exceeded(elapsed, threshold_ms) {
+        return;
+    }
+    pgrx::warning!(
+        "pg_accel: grouped aggregate {phase} dispatch returned after {}us (warning threshold {threshold_ms}ms); cancellation and statement_timeout are observed only between synchronous calls",
+        elapsed.as_micros()
+    );
+}
+
 fn execute_bounded_dense_artifact(
     owner_relid: pg_sys::Oid,
     identity: &DerivedArtifactIdentity,
@@ -1912,7 +1925,7 @@ fn execute_bounded_dense_artifact(
         metadata.fact_rows,
         max_chunk_rows,
         |range| {
-            with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
+            let elapsed = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
                 owner_relid,
                 identity,
                 requests,
@@ -1930,14 +1943,18 @@ fn execute_bounded_dense_artifact(
                             .map_err(|error| {
                                 gpu_execution_error("grouped chunk descriptor rejected", error)
                             })?;
-                    session
-                        .accumulate(&chunk)
-                        .map_err(|error| gpu_execution_error("grouped chunk kernel failed", error))
+                    let chunk_started = Instant::now();
+                    session.accumulate(&chunk).map_err(|error| {
+                        gpu_execution_error("grouped chunk kernel failed", error)
+                    })?;
+                    Ok::<_, DescriptorAggExecutionError>(chunk_started.elapsed())
                 },
             )
             .map_err(DescriptorDispatchFailure::Residency)
             .and_then(|result| result.map_err(DescriptorDispatchFailure::Execution))
-            .map_err(DenseBoundedFailure::Dispatch)
+            .map_err(DenseBoundedFailure::Dispatch)?;
+            warn_if_grouped_dispatch_slow("accumulate chunk", elapsed);
+            Ok(())
         },
         || {
             // This closure runs only after the preceding residency callback
@@ -1960,32 +1977,32 @@ fn execute_bounded_dense_artifact(
         },
     };
 
-    let (outcome, storage) = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
-        owner_relid,
-        identity,
-        requests,
-        |inputs| {
-            let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
-                .map_err(DescriptorAggExecutionError::Failure)?;
-            // SAFETY: finalization is synchronous and this fresh plan remains
-            // pinned until the callback returns.
-            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.map_err(|error| {
-                gpu_execution_error("grouped descriptor changed before finalize", error)
-            })?;
-            // Output buffers carry an exact resolved-plan identity. Allocate
-            // them from this final pinned plan, not the temporary setup plan
-            // that was dropped before the bounded residency borrows began.
-            let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
-                gpu_execution_error("grouped final output allocation failed", error)
-            })?;
-            let outcome = session
-                .finalize(&plan, &mut storage)
-                .map_err(|error| gpu_execution_error("grouped finalization failed", error))?;
-            Ok::<_, DescriptorAggExecutionError>((outcome, storage))
-        },
-    )
+    let (outcome, storage, finalize_elapsed) = with_derived_artifact_inputs::<
+        DescriptorAggArtifact,
+        _,
+    >(owner_relid, identity, requests, |inputs| {
+        let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
+            .map_err(DescriptorAggExecutionError::Failure)?;
+        // SAFETY: finalization is synchronous and this fresh plan remains
+        // pinned until the callback returns.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.map_err(|error| {
+            gpu_execution_error("grouped descriptor changed before finalize", error)
+        })?;
+        // Output buffers carry an exact resolved-plan identity. Allocate
+        // them from this final pinned plan, not the temporary setup plan
+        // that was dropped before the bounded residency borrows began.
+        let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
+            gpu_execution_error("grouped final output allocation failed", error)
+        })?;
+        let finalize_started = Instant::now();
+        let outcome = session
+            .finalize(&plan, &mut storage)
+            .map_err(|error| gpu_execution_error("grouped finalization failed", error))?;
+        Ok::<_, DescriptorAggExecutionError>((outcome, storage, finalize_started.elapsed()))
+    })
     .map_err(DescriptorDispatchFailure::Residency)?
     .map_err(DescriptorDispatchFailure::Execution)?;
+    warn_if_grouped_dispatch_slow("finalize", finalize_elapsed);
     // Finalize is another synchronous native call. Capture only after its
     // store guard has been released, then release detached resources before
     // preserving the original PostgreSQL error and SQLSTATE.

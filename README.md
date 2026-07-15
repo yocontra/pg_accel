@@ -304,17 +304,19 @@ All parameters live under the `pg_accel.*` namespace.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `pg_accel.enabled` | bool | `on` | Master switch. Set to `off` to disable all acceleration. |
-| `pg_accel.min_batch_size` | int | `65536` | Minimum estimated rows before batched GPU execution is considered. |
-| `pg_accel.gpu_enabled` | bool | `on` | Enable GPU kernel dispatch. Set to `off` to disable all acceleration. |
-| `pg_accel.cost_multiplier` | float | `1.0` | Global multiplier for pg_accel cost estimates. >1.0 = more conservative, <1.0 = more aggressive. Range 0.1-10.0. |
-| `pg_accel.kernel_timeout_ms` | int | `5000` | Warning threshold (ms) for a single synchronous GPU kernel call. Exceeded kernels emit a warning; use PostgreSQL `statement_timeout` for a hard query timeout. |
-| `pg_accel.max_workers_total` | int | `0` | Superuser-settable cluster-wide cap for pg_accel-owned host worker thread requests. `0` means unlimited; current executors do not spawn CPU worker threads. |
-| `pg_accel.log_level` | enum | `notice` | Verbosity: `debug`, `info`, `notice`, `warning`, `error`. |
-| `pg_accel.assert_dispatch` | bool | `off` | Benchmark guard that warns when a large-enough query was not routed to a GPU path. |
-| `pg_accel.parallel_fused_count` | bool | `off` | Superuser-settable roadmap knob. The PG18 parallel fused-count shape remains native with `parallel_fused_count_unstable` even when enabled. |
-| `pg_accel.otel_log_max_mb` | int | `256` | Per-file cap for `$PGDATA/pg_accel_otel.jsonl` and `$PGDATA/pg_accel_traces.jsonl`, in MiB. |
-| `pg_accel.otel_log_max_rotations` | int | `4` | Number of rotated trace files to retain; `0` discards rotations immediately. |
+| `pg_accel.enabled` | bool | `on` | Planning-time master switch. New pg_accel paths are not added while off; an already-planned Custom Scan fails closed if executed while off. |
+| `pg_accel.min_batch_size` | int | `65536` | Minimum fill target for legacy row-fed Custom Scan batches. Operator-specific device limits and costs decide admission independently. |
+| `pg_accel.gpu_enabled` | bool | `on` | Planning-time GPU-path switch. It does not rewrite an already-planned Custom Scan. |
+| `pg_accel.cost_multiplier` | float | `1.0` | Multiplier for resident generic grouped-aggregate candidate costs. Range 0.1-10.0; other path families use their calibrated costs. |
+| `pg_accel.kernel_timeout_ms` | int | `5000` | Post-call warning threshold for an instrumented synchronous GPU dispatch. Dense resident aggregation checks cancellation and `statement_timeout` between bounded calls; no in-flight call is asynchronously cancelled. |
+| `pg_accel.max_workers_total` | int | `0` | Superuser-settable cluster-wide cap for pg_accel host-thread ledger grants. `0` means unlimited; current executors request no host threads, and PostgreSQL parallel workers are not counted. |
+| `pg_accel.resident_memory_budget_mb` | int | `-1` | Superuser-settable cluster-wide cap for charged residency device bytes, retained exact host values, derived artifacts, and transient storage. `-1` derives the cap from `DeviceLimits`. |
+| `pg_accel.auto_load` | bool | `on` | Allow selected resident plans to load missing columns synchronously. Explicit pins remain authorized while off. |
+| `pg_accel.log_level` | enum | `notice` | Initial per-backend tracing filter, sampled at first Custom Scan execution. Later changes do not rebuild the subscriber; `notice` and `warning` both map to WARN. |
+| `pg_accel.assert_dispatch` | bool | `off` | Reserved no-op compatibility setting. Current benchmark gates verify plan shape and per-backend kernel deltas directly. |
+| `pg_accel.parallel_fused_count` | bool | `off` | Reserved no-op roadmap setting. The crash-gated PG18 parallel fused-count shape remains native. |
+| `pg_accel.otel_log_max_mb` | int | `256` | Per-file trace cap sampled when backend tracing starts; valid `PG_ACCEL_TRACE_FILE_MAX_BYTES` takes precedence. |
+| `pg_accel.otel_log_max_rotations` | int | `4` | Rotated trace files retained, sampled when backend tracing starts; `0` discards rotations. |
 | `pg_accel.fp64_enabled` | bool | `on` | Deprecated no-op compatibility flag. fp64 GPU dispatch is selected by operator support and cost via native fp64 or Metal soft-fp64, not by a user disable switch. |
 | `pg_accel.soft_fp64_cost_multiplier` | float | `32.0` | Extra planner cost multiplier for fp64 work on devices without native fp64. Range 1.0-64.0. |
 
