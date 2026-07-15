@@ -187,6 +187,176 @@ pub struct WorkloadMetadata {
     pub evidence: EvidenceEligibility,
 }
 
+/// Phase 9 operator lanes that intentionally remain PostgreSQL-native.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Phase9OperatorLane {
+    WindowFullOutput,
+    WindowRowNumberTopN,
+    WindowRankFilter,
+    WindowDenseRankFilter,
+    WindowRunningAggregate,
+    WindowAnalytics,
+    WindowCountSumAvgRank,
+    ExistsMembership,
+    InMembership,
+    NotExistsMembership,
+    NotInMembership,
+    AggregateModifiers,
+    AggregateOrderedSet,
+    NumericAccumulator,
+    NonFloatAvg,
+    SetOp,
+    RecursiveUnion,
+    MergeJoin,
+    MultiKeySort,
+    NestedLoopInequality,
+}
+
+#[cfg(test)]
+impl Phase9OperatorLane {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WindowFullOutput => "window_full_output",
+            Self::WindowRowNumberTopN => "window_row_number_topn",
+            Self::WindowRankFilter => "window_rank_filter",
+            Self::WindowDenseRankFilter => "window_dense_rank_filter",
+            Self::WindowRunningAggregate => "window_running_aggregate",
+            Self::WindowAnalytics => "window_analytics",
+            Self::WindowCountSumAvgRank => "window_count_sum_avg_rank",
+            Self::ExistsMembership => "exists_membership",
+            Self::InMembership => "in_membership",
+            Self::NotExistsMembership => "not_exists_membership",
+            Self::NotInMembership => "not_in_membership",
+            Self::AggregateModifiers => "aggregate_modifiers",
+            Self::AggregateOrderedSet => "aggregate_ordered_set",
+            Self::NumericAccumulator => "numeric_accumulator",
+            Self::NonFloatAvg => "nonfloat_avg",
+            Self::SetOp => "setop",
+            Self::RecursiveUnion => "recursive_union",
+            Self::MergeJoin => "merge_join",
+            Self::MultiKeySort => "multi_key_sort",
+            Self::NestedLoopInequality => "nested_loop_inequality",
+        }
+    }
+}
+
+/// Exact benchmark and planner-reason contract for one Phase 9 lane.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Phase9DeclineContract {
+    pub lane: Phase9OperatorLane,
+    pub workload: &'static str,
+    pub reason: &'static str,
+}
+
+/// Exhaustive Phase 9 native-decline disposition. A lane may leave this table
+/// only when it gains a differential-correct selected GPU workload.
+#[cfg(test)]
+pub const PHASE9_OPERATOR_DECLINES: &[Phase9DeclineContract] = &[
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::WindowFullOutput,
+        workload: "window_full_output_decline",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::WindowRowNumberTopN,
+        workload: "window_row_number",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::WindowRankFilter,
+        workload: "window_rank",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::WindowDenseRankFilter,
+        workload: "window_dense_rank",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::WindowRunningAggregate,
+        workload: "window_running_sum",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::WindowAnalytics,
+        workload: "window_analytics",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::WindowCountSumAvgRank,
+        workload: "window_reducing_decline",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::ExistsMembership,
+        workload: "semi_join_null_decline",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::InMembership,
+        workload: "in_join_null_decline",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::NotExistsMembership,
+        workload: "anti_join_null_decline",
+        reason: "no_gpu_resident_pipeline",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::NotInMembership,
+        workload: "not_in_join_null_decline",
+        reason: "shape_unsupported_predicate",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::AggregateModifiers,
+        workload: "aggregate_semantic_modifier_decline",
+        reason: "shape_aggregate_modifier",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::AggregateOrderedSet,
+        workload: "aggregate_ordered_set_decline",
+        reason: "shape_aggregate_modifier",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::NumericAccumulator,
+        workload: "numeric_agg_decline",
+        reason: "shape_numeric_accumulator_unavailable",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::NonFloatAvg,
+        workload: "avg_nonfloat_decline",
+        reason: "shape_numeric_accumulator_unavailable",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::SetOp,
+        workload: "setop_intersect_decline",
+        reason: "setop_no_gpu_kernel",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::RecursiveUnion,
+        workload: "recursive_union_decline",
+        reason: "recursiveunion_no_gpu_kernel",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::MergeJoin,
+        workload: "mergejoin_decline",
+        reason: "mergejoin_no_gpu_kernel",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::MultiKeySort,
+        workload: "gpu_sort_multikey",
+        reason: "sort_multikey_no_gpu_kernel",
+    },
+    Phase9DeclineContract {
+        lane: Phase9OperatorLane::NestedLoopInequality,
+        workload: "gpu_nlj_between",
+        reason: "shape_unsupported_predicate",
+    },
+];
+
 const fn workload(
     name: &'static str,
     category: WorkloadCategory,
@@ -688,11 +858,11 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("expr_sqrt_heavy", C::GpuExpr, K::Expr),
     workload("expr_pow_chain", C::GpuExpr, K::Expr),
     workload("expr_math_mixed", C::GpuExpr, K::Expr),
-    workload("window_analytics", C::GpuWindow, K::Window),
-    workload("window_row_number", C::GpuWindow, K::Window),
-    workload("window_rank", C::GpuWindow, K::Window),
-    workload("window_dense_rank", C::GpuWindow, K::Window),
-    workload("window_running_sum", C::GpuWindow, K::Window),
+    workload("window_analytics", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
+    workload("window_row_number", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
+    workload("window_rank", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
+    workload("window_dense_rank", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
+    workload("window_running_sum", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
     workload("window_lag", C::GpuWindow, K::Window),
     workload("window_lead", C::GpuWindow, K::Window),
     workload("window_full_output_decline", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
@@ -767,6 +937,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("spatial_contains", C::Regression, K::PointInRing).extensions(POSTGIS),
     workload("spatial_multi_pred", C::Regression, K::PointInRing).extensions(POSTGIS),
     workload("oltp_point_lookup", C::Regression, K::PointInRing),
+    workload("aggregate_ordered_set_decline", C::Regression, K::HashAgg).evidence(NATIVE_DECLINE),
     workload(
         "aggregate_semantic_modifier_decline",
         C::Regression,
@@ -782,7 +953,9 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     )
     .evidence(NATIVE_DECLINE),
     workload("mergejoin_decline", C::Regression, K::MergeJoin).evidence(NATIVE_DECLINE),
-    workload("numeric_agg_decline", C::Regression, K::Unclassified).evidence(NATIVE_DECLINE),
+    workload("numeric_agg_decline", C::Regression, K::Reduce).evidence(NATIVE_DECLINE),
+    workload("in_join_null_decline", C::Regression, K::HashJoin).evidence(NATIVE_DECLINE),
+    workload("not_in_join_null_decline", C::Regression, K::HashJoin).evidence(NATIVE_DECLINE),
     workload(
         "parallel_hashjoin_rebuild_decline",
         C::Regression,
@@ -959,5 +1132,102 @@ mod tests {
     fn lookup_is_exact() {
         assert!(workload_metadata("h3_bulk").is_some());
         assert!(workload_metadata("H3_BULK").is_none());
+    }
+
+    #[test]
+    fn phase9_operator_decline_registry_is_exhaustive_and_typed() {
+        let mut lanes = BTreeSet::new();
+        let mut workloads = BTreeSet::new();
+        let runtime = super::super::all_workloads();
+
+        for contract in PHASE9_OPERATOR_DECLINES {
+            assert!(lanes.insert(contract.lane), "duplicate Phase 9 lane");
+            assert!(
+                workloads.insert(contract.workload),
+                "duplicate Phase 9 workload `{}`",
+                contract.workload
+            );
+            assert!(!contract.lane.as_str().is_empty());
+            assert!(!contract.reason.is_empty());
+
+            let metadata = workload_metadata(contract.workload)
+                .unwrap_or_else(|| panic!("missing metadata for `{}`", contract.workload));
+            assert_ne!(
+                metadata.kernel_class,
+                KernelClass::Unclassified,
+                "{} must have a typed kernel class",
+                contract.workload
+            );
+            assert_eq!(
+                metadata.evidence.threshold,
+                ThresholdEvidenceEligibility::NativeDeclineOnly,
+                "{} must reject CustomScan/kernel dispatch",
+                contract.workload
+            );
+
+            let workload = runtime
+                .iter()
+                .find(|workload| workload.name() == contract.workload)
+                .unwrap_or_else(|| panic!("missing runtime workload `{}`", contract.workload));
+            for &rows in workload.row_scales() {
+                let threshold =
+                    super::super::benchmark_threshold_matrix_entry(contract.workload, rows)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "missing threshold entry for `{}` at {rows}",
+                                contract.workload
+                            )
+                        });
+                assert_eq!(
+                    threshold.expectation.decline_reason(),
+                    Some(contract.reason),
+                    "{} at {rows}",
+                    contract.workload
+                );
+                assert_eq!(
+                    threshold.dispatch_evidence,
+                    super::super::GENERIC_NATIVE_DISPATCH_EVIDENCE,
+                    "{} at {rows}",
+                    contract.workload
+                );
+            }
+        }
+
+        assert_eq!(
+            lanes.len(),
+            Phase9OperatorLane::NestedLoopInequality as usize + 1
+        );
+    }
+
+    #[test]
+    fn phase9_decline_workloads_are_deterministic_and_do_not_force_admission() {
+        let runtime = super::super::all_workloads();
+        let banned_settings = [
+            "pg_accel.cost_multiplier",
+            "pg_accel.min_batch_size",
+            "max_parallel_workers_per_gather",
+        ];
+
+        for contract in PHASE9_OPERATOR_DECLINES {
+            let workload = runtime
+                .iter()
+                .find(|workload| workload.name() == contract.workload)
+                .unwrap_or_else(|| panic!("missing runtime workload `{}`", contract.workload));
+            let rows = workload.row_scales()[0];
+            let setup = workload.setup_sql(rows).join("\n").to_ascii_lowercase();
+            assert!(
+                !setup.contains("random()"),
+                "{} fixture must be deterministic",
+                contract.workload
+            );
+            let session_sql = workload.pre_query_sql().join("\n").to_ascii_lowercase();
+            for setting in banned_settings {
+                assert!(
+                    !setup.contains(setting) && !session_sql.contains(setting),
+                    "{} must not force `{setting}`",
+                    contract.workload
+                );
+            }
+        }
     }
 }

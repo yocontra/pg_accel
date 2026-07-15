@@ -3,9 +3,9 @@ use super::Workload;
 const WINDOW_REDUCING_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
 
 #[cfg(test)]
-pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i64)] = &[
-    (10_000, 10_000, 2_500, 2_499),
-    (100_000, 100_000, 25_000, 24_999),
+pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i64, bool, i64)] = &[
+    (10_000, 10_000, 2_500, 2_500, true, 2_499),
+    (100_000, 100_000, 25_000, 25_000, true, 24_999),
 ];
 
 /// Reducing-output window lane without a segmented GPU implementation.
@@ -17,7 +17,7 @@ impl Workload for WindowReducingDecline {
     }
 
     fn description(&self) -> &'static str {
-        "NULL-sensitive running SUM and peer RANK reduced to one row - native planner decline \
+        "NULL-sensitive running COUNT/SUM/AVG and peer RANK reduced to one row - native planner decline \
          (`no_gpu_resident_pipeline`) until segmented window kernels feed a resident consumer"
     }
 
@@ -45,14 +45,26 @@ impl Workload for WindowReducingDecline {
 
     fn query_sql(&self) -> String {
         "SELECT count(running_sum) AS nonnull_frames, \
+                max(running_count) AS max_running_count, \
                 max(running_sum) AS max_running_sum, \
+                bool_and(running_avg = 1::numeric) AS running_avg_is_one, \
                 max(peer_rank) AS max_peer_rank \
          FROM ( \
-           SELECT sum(value) OVER ( \
+           SELECT count(value) OVER ( \
+                    PARTITION BY partition_key \
+                    ORDER BY order_key, id \
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW \
+                  ) AS running_count, \
+                  sum(value) OVER ( \
                     PARTITION BY partition_key \
                     ORDER BY order_key, id \
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW \
                   ) AS running_sum, \
+                  avg(value) OVER ( \
+                    PARTITION BY partition_key \
+                    ORDER BY order_key, id \
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW \
+                  ) AS running_avg, \
                   rank() OVER ( \
                     PARTITION BY partition_key ORDER BY order_key \
                   ) AS peer_rank \

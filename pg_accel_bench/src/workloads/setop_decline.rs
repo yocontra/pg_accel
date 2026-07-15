@@ -2,7 +2,13 @@ use super::Workload;
 
 const SETOP_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
 
-/// Full-output INTERSECT lane that remains native until a GPU SetOp exists.
+#[cfg(test)]
+pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i64, i32, i32)] = &[
+    (10_000, 5_002, 5_000, 2, 2_500, 4_999),
+    (100_000, 50_002, 50_000, 2, 25_000, 49_999),
+];
+
+/// Duplicate- and NULL-sensitive INTERSECT ALL lane without a GPU SetOp.
 pub struct SetOpDecline;
 
 impl Workload for SetOpDecline {
@@ -11,38 +17,46 @@ impl Workload for SetOpDecline {
     }
 
     fn description(&self) -> &'static str {
-        "row-producing INTERSECT over overlapping int4 relations - native planner decline \
+        "ordered INTERSECT ALL preserving duplicate and NULL multiplicities - native planner decline \
          (`setop_no_gpu_kernel`) until a GPU SetOp kernel lands"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
-        let rows = rows.max(1);
-        let overlap_start = (rows / 2).max(1);
-        let right_end = overlap_start.saturating_add(rows).saturating_sub(1);
+        let groups = (rows / 2).max(2);
+        let overlap_start = groups / 2;
+        let right_end = overlap_start.saturating_add(groups).saturating_sub(1);
         vec![
             "DROP TABLE IF EXISTS bench_setop_l".to_owned(),
             "DROP TABLE IF EXISTS bench_setop_r".to_owned(),
-            "CREATE TABLE bench_setop_l (k int4 NOT NULL, payload int4 NOT NULL)".to_owned(),
-            "CREATE TABLE bench_setop_r (k int4 NOT NULL, payload int4 NOT NULL)".to_owned(),
+            "CREATE TABLE bench_setop_l (k int4)".to_owned(),
+            "CREATE TABLE bench_setop_r (k int4)".to_owned(),
             format!(
-                "INSERT INTO bench_setop_l (k, payload) \
-                 SELECT g, (g::bigint * 17 % 1009)::int4 \
-                 FROM generate_series(1, {rows}) g"
+                "INSERT INTO bench_setop_l (k) \
+                 SELECT key::int4 \
+                 FROM generate_series(0, {}) AS keys(key) \
+                 CROSS JOIN generate_series(1, 2) AS copies(copy)",
+                groups - 1
             ),
+            "INSERT INTO bench_setop_l (k) VALUES (NULL), (NULL), (NULL)".to_owned(),
             format!(
-                "INSERT INTO bench_setop_r (k, payload) \
-                 SELECT g, (g::bigint * 17 % 1009)::int4 \
-                 FROM generate_series({overlap_start}, {right_end}) g"
+                "INSERT INTO bench_setop_r (k) \
+                 SELECT key::int4 \
+                 FROM generate_series({overlap_start}, {right_end}) AS keys(key) \
+                 CROSS JOIN generate_series(1, 3) AS copies(copy)"
             ),
+            "INSERT INTO bench_setop_r (k) VALUES (NULL), (NULL)".to_owned(),
             "ANALYZE bench_setop_l".to_owned(),
             "ANALYZE bench_setop_r".to_owned(),
         ]
     }
 
     fn query_sql(&self) -> String {
-        "SELECT k, payload FROM bench_setop_l \
-         INTERSECT \
-         SELECT k, payload FROM bench_setop_r"
+        "SELECT k FROM ( \
+           SELECT k FROM bench_setop_l \
+           INTERSECT ALL \
+           SELECT k FROM bench_setop_r \
+         ) intersected \
+         ORDER BY k NULLS FIRST"
             .to_owned()
     }
 

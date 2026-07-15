@@ -2,7 +2,13 @@ use super::Workload;
 
 const MERGEJOIN_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
 
-/// Ordered equi-join workload that must stay native until a GPU merge join lands.
+#[cfg(test)]
+pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i32, i32)] = &[
+    (10_000, 17_000, 17_000, 0, 4_999),
+    (100_000, 170_000, 170_000, 0, 49_999),
+];
+
+/// Ordered duplicate- and NULL-sensitive equi-join without a GPU merge join.
 pub struct MergeJoinDecline;
 
 impl Workload for MergeJoinDecline {
@@ -11,7 +17,7 @@ impl Workload for MergeJoinDecline {
     }
 
     fn description(&self) -> &'static str {
-        "ordered int4 equi-join — native planner decline (`mergejoin_no_gpu_kernel`) \
+        "ordered int4 equi-join preserving duplicate multiplicity and NULL non-matches - native planner decline (`mergejoin_no_gpu_kernel`) \
          until a GPU merge-join kernel lands"
     }
 
@@ -20,15 +26,19 @@ impl Workload for MergeJoinDecline {
         vec![
             "DROP TABLE IF EXISTS bench_mergejoin_l".to_owned(),
             "DROP TABLE IF EXISTS bench_mergejoin_r".to_owned(),
-            "CREATE TABLE bench_mergejoin_l (k int4 NOT NULL, v int4 NOT NULL)".to_owned(),
-            "CREATE TABLE bench_mergejoin_r (k int4 NOT NULL, w int4 NOT NULL)".to_owned(),
+            "CREATE TABLE bench_mergejoin_l (k int4, v int4 NOT NULL)".to_owned(),
+            "CREATE TABLE bench_mergejoin_r (k int4, w int4 NOT NULL)".to_owned(),
             format!(
                 "INSERT INTO bench_mergejoin_l (k, v) \
-                 SELECT g, g * 2 FROM generate_series(1, {rows}) g"
+                 SELECT CASE WHEN g % 10 = 0 THEN NULL ELSE ((g - 1) / 2)::int4 END, \
+                        (g::bigint * 17 % 1009)::int4 \
+                 FROM generate_series(1, {rows}) g"
             ),
             format!(
                 "INSERT INTO bench_mergejoin_r (k, w) \
-                 SELECT g, g * 3 FROM generate_series(1, {right_rows}) g"
+                 SELECT CASE WHEN g % 10 = 0 THEN NULL ELSE ((g - 1) / 2)::int4 END, \
+                        (g::bigint * 31 % 1013)::int4 \
+                 FROM generate_series(1, {right_rows}) g"
             ),
             "CREATE INDEX bench_mergejoin_l_k_idx ON bench_mergejoin_l (k)".to_owned(),
             "CREATE INDEX bench_mergejoin_r_k_idx ON bench_mergejoin_r (k)".to_owned(),
@@ -38,7 +48,10 @@ impl Workload for MergeJoinDecline {
     }
 
     fn query_sql(&self) -> String {
-        "SELECT count(*) \
+        "SELECT count(*) AS joined_rows, \
+                count(l.k) AS joined_nonnull_keys, \
+                min(l.k) AS min_join_key, \
+                max(l.k) AS max_join_key \
          FROM bench_mergejoin_l l \
          JOIN bench_mergejoin_r r ON l.k = r.k"
             .to_owned()

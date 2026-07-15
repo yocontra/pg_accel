@@ -2821,6 +2821,13 @@ window work.
   planner-decline evidence instead of routing through row-returning
   `GpuHashJoin` heap reconstruction. This item remains open until GPU
   membership/Bloom-filter semantics are implemented and benchmark-proven.
+- Progress (2026-07-15): the resident-v2 release matrix now covers `EXISTS`,
+  `IN`, `NOT EXISTS`, and NULL-poisoned `NOT IN` with deterministic duplicate
+  and NULL fixtures. The first three lanes decline with
+  `no_gpu_resident_pipeline`; `NOT IN` declines at the unsupported predicate
+  gate with `shape_unsupported_predicate`. Every cell is native-decline-only
+  and requires the exact result digest, no CustomScan, and a zero GPU-kernel
+  counter delta.
 
 ### NestedLoop inequality pure-GPU follow-up
 
@@ -2831,9 +2838,8 @@ window work.
   (`benchmarks/artifacts/gpu-nlj-between-release-50k-cacheboth-20260609`).
   The planner gate now returns `false`
   (`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:497-507`), and the
-  benchmark threshold matrix pins `gpu_nlj_between @ 50K` as native-decline
-  with `nlj_between_host_boundary_unsafe`
-  (`pg_accel_bench/src/workloads/mod.rs:1535-1559`). Current passing proof:
+  historical benchmark threshold matrix pinned `gpu_nlj_between @ 50K` as
+  native-decline with `nlj_between_host_boundary_unsafe`. Current passing proof:
   `benchmarks/artifacts/gpu-nlj-between-native-decline-50k-cacheboth-pass-20260609`
   records no crash, zero GPU dispatch, `planner_declined`, and a passing
   threshold-matrix row.
@@ -2863,6 +2869,13 @@ window work.
   fixture, verifies the native count matches with pg_accel enabled, rejects
   `Custom Scan`/`GpuAccelJoin` plan text, accepts the native-decline reason,
   and asserts the GPU kernel counter remains flat.
+- Progress (2026-07-15): the current resident-v2 contract supersedes the
+  historical host-boundary reason with `shape_unsupported_predicate` at every
+  preserved `gpu_nlj_between` scale. Its deterministic nullable, duplicated
+  BETWEEN fixture has an exact match-count digest, and both report and runner
+  ship gates reject CustomScan selection or any GPU-kernel counter delta.
+  Live coverage is named
+  `plan_shape_nlj_between_unsupported_predicate_stays_native`.
 
 ### Aggregate FILTER / DISTINCT / ordered semantics
 
@@ -2886,6 +2899,12 @@ window work.
   `GpuAgg` path that would ignore the modifier semantics. This item remains
   open until those modifiers have implemented GPU semantic paths and
   correctness/performance evidence.
+- Progress (2026-07-15): the resident-v2 disposition is
+  `shape_aggregate_modifier`. Deterministic workloads cover combined
+  `FILTER`/`DISTINCT`/aggregate-local `ORDER BY` and actual
+  `percentile_disc(...) WITHIN GROUP`, including NULLs and duplicates. Both
+  are native-decline-only and require exact result digests, no CustomScan,
+  and zero GPU-kernel counter delta.
 
 ### Full sort algorithm and cost gating
 
@@ -2951,6 +2970,13 @@ window work.
   legacy prefix scans. Focused evidence: `test_window` passes with row_number
   still dispatching and the non-segmented Metal paths returning
   `PGACCEL_ERROR_NO_DEVICE`.
+- Progress (2026-07-15): the release breadth matrix now captures deterministic
+  `ROW_NUMBER`, peer-sensitive `RANK`/`DENSE_RANK`, running `COUNT`/`SUM`/`AVG`,
+  and combined reducing-window fixtures at every preserved workload scale.
+  The current resident-v2 planner disposition is
+  `no_gpu_resident_pipeline`; exact peer/NULL/order digests, no CustomScan,
+  and zero GPU-kernel counter delta are mandatory before these cells count as
+  captured declines.
 
 ## Phase 5 - Geo, H3, Raster, And PostGIS Coverage
 
@@ -3234,6 +3260,10 @@ only when benchmarks prove no release-relevant GPU opportunity.
   and statistics families report `shape_unsupported_aggregate`. This item
   remains open until the release matrix has either measured native-decline
   artifacts or a correct multi-limb GPU accumulator/comparator implementation.
+- Progress (2026-07-15): the bounded `numeric_agg_decline` workload is now a typed
+  reduce-lane native-decline contract at every preserved scale. Its exact
+  nullable-input digest and `shape_numeric_accumulator_unavailable` reason are
+  enforced together with no CustomScan and zero GPU-kernel counter delta.
 
 ### Integer / NUMERIC AVG variants
 
@@ -3247,6 +3277,10 @@ only when benchmarks prove no release-relevant GPU opportunity.
   `shape_numeric_accumulator_unavailable`. This item remains open until AVG
   variants either gain PostgreSQL-compatible GPU accumulator/finalization
   support or have release benchmark artifacts documenting native decline.
+- Progress (2026-07-15): focused regression coverage now exercises `AVG` over
+  `int2`, `int4`, `int8`, `numeric`, and `interval`. The bounded
+  `avg_nonfloat_decline` workload remains native-decline-only with exact nullable
+  output and `shape_numeric_accumulator_unavailable` at each preserved scale.
 
 ### Cascaded multi-key GPU sort
 
@@ -3261,6 +3295,11 @@ only when benchmarks prove no release-relevant GPU opportunity.
   cascaded multi-key support. This item remains open until production-style
   multi-key and IncrementalSort traces are backed by benchmark artifacts or a
   correct cascaded GPU sort implementation.
+- Progress (2026-07-15): `gpu_sort_multikey` now uses deterministic nullable
+  keys, duplicate peer groups, and an explicit final tie-breaker. Every
+  preserved threshold remains a native decline with
+  `sort_multikey_no_gpu_kernel`, exact row/order semantics, no CustomScan, and
+  zero GPU-kernel counter delta.
 
 ### GPU merge-join kernel
 
@@ -3275,6 +3314,10 @@ only when benchmarks prove no release-relevant GPU opportunity.
   item remains open until representative merge-join workloads have benchmark
   artifacts documenting native decline or a correct GPU merge-join kernel is
   implemented and proven.
+- Progress (2026-07-15): `mergejoin_decline` now exercises nullable duplicate
+  pair keys and asserts an exact join-count digest at every preserved scale.
+  It remains native-decline-only with `mergejoin_no_gpu_kernel`, no
+  CustomScan, and zero GPU-kernel counter delta.
 
 ### GpuExpr+Scan for BitmapHeapScan
 
@@ -3321,6 +3364,11 @@ only when benchmarks prove no release-relevant GPU opportunity.
   item remains open until benchmarked SetOp/RecursiveUnion shapes are either
   release-documented as native declines with artifacts or implemented with
   correctness-proof GPU kernels.
+- Progress (2026-07-15): deterministic bounded workloads now preserve
+  duplicate/NULL semantics for `INTERSECT ALL` and duplicate elimination for
+  recursive `UNION`. Their exact ordered digests are tied to
+  `setop_no_gpu_kernel` and `recursiveunion_no_gpu_kernel`, with no CustomScan
+  and zero GPU-kernel counter delta required for every preserved cell.
 
 ### AdaptiveCpp rebase and upstream PRs
 

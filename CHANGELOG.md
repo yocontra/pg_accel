@@ -9,6 +9,16 @@
 > this repo and is independently checkable there.
 
 ### Changed
+- Phase 9 benchmark coverage now uses an exhaustive typed operator-lane
+  registry: every reducing-window, NULL-sensitive semi/anti, aggregate
+  modifier, non-floating accumulator, SetOp, RecursiveUnion, merge-join,
+  multi-key sort, and nested-loop inequality cell is either implemented or an
+  exact native-decline contract. Decline gates require the expected planner
+  reason, no CustomScan selection, and zero GPU-kernel counter delta.
+- Deterministic Phase 9 fixtures now preserve and verify NULL, duplicate, peer,
+  and ordering semantics, including `IN`/NULL-poisoned `NOT IN`, actual
+  ordered-set `WITHIN GROUP`, `INTERSECT ALL`, recursive `UNION`, nullable
+  duplicate merge keys, and total-order multi-key sorting.
 - Public setup, release packaging, and attribution docs now pin AdaptiveCpp to
   `yocontra/AdaptiveCpp` `fork-safe-metal`
   `7e79a6ca45f5a067f02a30207cb8da1b81eb5f29`, with the fork-pinned install

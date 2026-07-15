@@ -2,7 +2,11 @@ use super::Workload;
 
 const RECURSIVE_UNION_DECLINE_ROW_SCALES: &[usize] = &[10_000];
 
-/// Row-producing recursive CTE that remains native until RecursiveUnion support exists.
+#[cfg(test)]
+pub(super) const EXPECTED_NATIVE_RESULT: (usize, i64, i64, i64, i32, i32) =
+    (10_000, 10_001, 10_000, 1, 1, 10_000);
+
+/// Recursive CTE with duplicate seeds and a NULL state.
 pub struct RecursiveUnionDecline;
 
 impl Workload for RecursiveUnionDecline {
@@ -11,7 +15,7 @@ impl Workload for RecursiveUnionDecline {
     }
 
     fn description(&self) -> &'static str {
-        "linear recursive CTE with row-proportional output - native planner decline \
+        "ordered recursive UNION with duplicate elimination and one NULL state - native planner decline \
          (`recursiveunion_no_gpu_kernel`) until a GPU RecursiveUnion lane lands"
     }
 
@@ -19,9 +23,12 @@ impl Workload for RecursiveUnionDecline {
         let max_n = rows.max(1);
         vec![
             "DROP TABLE IF EXISTS bench_recursive_union_seed".to_owned(),
-            "CREATE TABLE bench_recursive_union_seed (start_n int4 NOT NULL, max_n int4 NOT NULL)"
+            "CREATE TABLE bench_recursive_union_seed (start_n int4, max_n int4 NOT NULL)"
                 .to_owned(),
-            format!("INSERT INTO bench_recursive_union_seed (start_n, max_n) VALUES (1, {max_n})"),
+            format!(
+                "INSERT INTO bench_recursive_union_seed (start_n, max_n) VALUES \
+                 (1, {max_n}), (1, {max_n}), (NULL, {max_n}), (NULL, {max_n})"
+            ),
             "ANALYZE bench_recursive_union_seed".to_owned(),
         ]
     }
@@ -30,11 +37,12 @@ impl Workload for RecursiveUnionDecline {
         "SELECT n FROM ( \
            WITH RECURSIVE r(n, max_n) AS ( \
              SELECT start_n, max_n FROM bench_recursive_union_seed \
-             UNION ALL \
+             UNION \
              SELECT n + 1, max_n FROM r WHERE n < max_n \
            ) \
            SELECT n FROM r \
-         ) recursive_rows"
+         ) recursive_rows \
+         ORDER BY n NULLS FIRST"
             .to_owned()
     }
 

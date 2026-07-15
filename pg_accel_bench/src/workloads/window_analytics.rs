@@ -1,5 +1,13 @@
 use super::Workload;
 
+#[cfg(test)]
+pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i64)] = &[
+    (10_000, 10_000, 55_000, 27_472_500),
+    (100_000, 100_000, 5_050_000, 2_522_475_000),
+    (1_000_000, 1_000_000, 500_500_000, 249_999_750_000),
+    (10_000_000, 10_000_000, 50_005_000_000, 24_977_497_500_000),
+];
+
 /// Tests GPU window function acceleration with ROW_NUMBER and running SUM.
 pub struct WindowAnalytics;
 
@@ -9,7 +17,7 @@ impl Workload for WindowAnalytics {
     }
 
     fn description(&self) -> &'static str {
-        "ROW_NUMBER + deterministic running SUM digest over 1000 user partitions — tests GPU window functions"
+        "ROW_NUMBER plus running SUM consumed by one deterministic aggregate digest - native decline (`no_gpu_resident_pipeline`)"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -25,10 +33,10 @@ impl Workload for WindowAnalytics {
             format!(
                 "INSERT INTO bench_win_events (user_id, ts, val) \
                  SELECT \
-                   (random() * 999)::int, \
-                   '2024-01-01'::timestamp + (random() * 365)::int * interval '1 day', \
-                   random() * 10000 \
-                 FROM generate_series(1, {rows})"
+                   ((g - 1) % 1000)::int, \
+                   '2024-01-01'::timestamp + ((g - 1) / 1000) * interval '1 second', \
+                   ((g - 1) % 1000)::double precision \
+                 FROM generate_series(1, {rows}) AS series(g)"
             ),
             "ANALYZE bench_win_events".to_owned(),
         ]
@@ -65,5 +73,12 @@ mod tests {
         assert!(sql.contains("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"));
         assert!(sql.contains("sum(rn)"));
         assert!(sql.contains("sum(running_sum)"));
+        assert!(
+            !WindowAnalytics
+                .setup_sql(10_000)
+                .join("\n")
+                .to_ascii_lowercase()
+                .contains("random()")
+        );
     }
 }

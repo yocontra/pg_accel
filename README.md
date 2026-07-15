@@ -261,11 +261,15 @@ pg_accel does not run PostGIS predicate evaluation under an accelerator plan.
 - **BitmapHeapScan + GpuExpr**: Bitmap-prefiltered scalar expression opportunities stay PostgreSQL-native with planner reason `bitmap_heap_gpuexpr_no_gpu_pipeline` until GpuExpr can fuse with GPU-resident scan batches.
 - **Unsupported expression types**: Generic GpuExpr, PreAgg filters/inputs, aggregate grouping, windows, and joins only accept their wired scalar/key types. JSON/JSONB, ARRAY, INTERVAL, DOMAIN, COMPOSITE, and user-defined custom types are planner-policy rejects, not partial GPU support.
 - **NUMERIC aggregates**: Arbitrary-precision `numeric` aggregate families stay on PostgreSQL until pg_accel has PostgreSQL-compatible multi-limb accumulator/comparator lanes. `sum`/`avg` report `shape_numeric_accumulator_unavailable`; unsupported comparator and statistics aggregates report `shape_unsupported_aggregate`.
+- **Aggregate modifiers**: `FILTER`, `DISTINCT`, aggregate-local ordering, and ordered-set aggregates stay PostgreSQL-native with `shape_aggregate_modifier` until a GPU path owns their complete NULL, duplicate, and order semantics.
 - **Hash join**: Equi-join only (single key: int4, int8, float8). Multi-key and non-equi joins use PostgreSQL.
+- **Membership joins**: `EXISTS`, `IN`, and `NOT EXISTS` currently report `no_gpu_resident_pipeline`; NULL-sensitive `NOT IN` reports `shape_unsupported_predicate`. These lanes do not fall back to row-returning GPU joins.
 - **Parallel hash join**: Partial `GpuHashJoin` can use private per-worker inner builds only for small inner sides. Large-inner partial candidates decline with `hashjoin_parallel_inner_rebuild_too_large` until pg_accel can share or reuse GPU-resident inner hash tables across workers.
 - **Merge join**: Ordered equi-join opportunities are observed but stay PostgreSQL-native with planner reason `mergejoin_no_gpu_kernel` until a GPU merge-join kernel and downstream GPU-resident consumers exist.
+- **Set operations and recursion**: `SetOp` and `RecursiveUnion` stages remain PostgreSQL-native with `setop_no_gpu_kernel` and `recursiveunion_no_gpu_kernel`.
+- **Nested-loop inequalities**: BETWEEN-shaped nested-loop joins remain PostgreSQL-native with `shape_unsupported_predicate` until the executor has GPU-resident inputs, pair output, and downstream consumers.
 - **Grouped aggregation**: Single numeric group key. Multi-key GROUP BY deferred to PostgreSQL.
-- **Window functions**: Running `SUM`/`COUNT` only. Ranking and offset functions (`ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`) are intentionally left to PostgreSQL after benchmark gating showed GPU loses on Apple Silicon.
+- **Window functions**: Reducing/ranking shapes including `ROW_NUMBER`, peer-sensitive `RANK`/`DENSE_RANK`, and running `COUNT`/`SUM`/`AVG` currently remain PostgreSQL-native with `no_gpu_resident_pipeline`. Offset functions (`LAG`, `LEAD`) are also left to PostgreSQL after benchmark gating showed GPU loses on Apple Silicon.
 
 ## GPU acceleration
 

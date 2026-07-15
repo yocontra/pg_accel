@@ -4480,65 +4480,35 @@ mod tests {
 
     #[test]
     fn test_phase9_structural_declines_are_unconfirmed_without_planner_evidence() {
-        for (name, rows, reason) in [
-            (
-                "aggregate_semantic_modifier_decline",
-                10_000,
-                "shape_aggregate_modifier",
-            ),
-            ("anti_join_null_decline", 10_000, "no_gpu_resident_pipeline"),
-            (
-                "avg_nonfloat_decline",
-                10_000,
-                "shape_numeric_accumulator_unavailable",
-            ),
-            ("setop_intersect_decline", 10_000, "setop_no_gpu_kernel"),
-            (
-                "recursive_union_decline",
-                10_000,
-                "recursiveunion_no_gpu_kernel",
-            ),
-            ("mergejoin_decline", 10_000, "mergejoin_no_gpu_kernel"),
-            ("gpu_sort_multikey", 10_000, "sort_multikey_no_gpu_kernel"),
-            (
-                "window_full_output_decline",
-                10_000,
-                "no_gpu_resident_pipeline",
-            ),
-            (
-                "window_reducing_decline",
-                10_000,
-                "no_gpu_resident_pipeline",
-            ),
-            (
-                "numeric_agg_decline",
-                10_000,
-                "shape_numeric_accumulator_unavailable",
-            ),
-            ("semi_join_null_decline", 10_000, "no_gpu_resident_pipeline"),
-        ] {
-            let expected_only = native_decline_evidence(name, rows, false, None)
-                .unwrap_or_else(|| panic!("threshold expectation for {name}"));
-            assert_eq!(expected_only.reason, reason, "{name}");
-            assert_eq!(
-                expected_only.source,
-                report::DeclineReasonSource::ExpectedUnconfirmed,
-                "{name}"
-            );
+        for contract in crate::workloads::PHASE9_OPERATOR_DECLINES {
+            let name = contract.workload;
+            let reason = contract.reason;
+            let workload = crate::workloads::find_workload(name)
+                .unwrap_or_else(|| panic!("workload for {name}"));
+            for &rows in workload.row_scales() {
+                let expected_only = native_decline_evidence(name, rows, false, None)
+                    .unwrap_or_else(|| panic!("threshold expectation for {name} at {rows}"));
+                assert_eq!(expected_only.reason, reason, "{name} at {rows}");
+                assert_eq!(
+                    expected_only.source,
+                    report::DeclineReasonSource::ExpectedUnconfirmed,
+                    "{name} at {rows}"
+                );
 
-            let planner_reported = native_decline_evidence(name, rows, false, Some(reason))
-                .unwrap_or_else(|| panic!("planner evidence for {name}"));
-            assert_eq!(planner_reported.reason, reason, "{name}");
-            assert_eq!(
-                planner_reported.source,
-                report::DeclineReasonSource::PlannerReported,
-                "{name}"
-            );
+                let planner_reported = native_decline_evidence(name, rows, false, Some(reason))
+                    .unwrap_or_else(|| panic!("planner evidence for {name} at {rows}"));
+                assert_eq!(planner_reported.reason, reason, "{name} at {rows}");
+                assert_eq!(
+                    planner_reported.source,
+                    report::DeclineReasonSource::PlannerReported,
+                    "{name} at {rows}"
+                );
 
-            assert!(
-                native_decline_evidence(name, rows, true, Some(reason)).is_none(),
-                "{name}: selecting a pg_accel Custom Scan must invalidate native-decline evidence"
-            );
+                assert!(
+                    native_decline_evidence(name, rows, true, Some(reason)).is_none(),
+                    "{name} at {rows}: selecting a pg_accel Custom Scan must invalidate native-decline evidence"
+                );
+            }
         }
     }
 

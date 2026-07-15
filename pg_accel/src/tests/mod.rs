@@ -759,7 +759,9 @@ mod tests {
     fn test_non_float_avg_variants_decline_gpu_agg_plan() {
         Spi::run(
             "CREATE TEMP TABLE t_avg_variants (\
+                i2 int2 NOT NULL, \
                 i4 int4 NOT NULL, \
+                i8 int8 NOT NULL, \
                 n numeric NOT NULL, \
                 d interval NOT NULL\
              )",
@@ -767,7 +769,8 @@ mod tests {
         .expect("CREATE TABLE");
         Spi::run(
             "INSERT INTO t_avg_variants \
-             SELECT g::int4, g::numeric, make_interval(secs => g::double precision) \
+             SELECT (g % 30000)::int2, g::int4, g::int8, g::numeric, \
+                    make_interval(secs => g::double precision) \
              FROM generate_series(1, 200000) g",
         )
         .expect("INSERT");
@@ -776,7 +779,9 @@ mod tests {
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
 
         for query in [
+            "SELECT avg(i2) FROM t_avg_variants",
             "SELECT avg(i4) FROM t_avg_variants",
+            "SELECT avg(i8) FROM t_avg_variants",
             "SELECT avg(n) FROM t_avg_variants",
             "SELECT avg(d) FROM t_avg_variants",
         ] {
@@ -882,6 +887,8 @@ mod tests {
             "SELECT sum(v) FILTER (WHERE id > 0) FROM t_agg_semantic_decline",
             "SELECT count(DISTINCT id) FROM t_agg_semantic_decline",
             "SELECT sum(v ORDER BY id) FROM t_agg_semantic_decline",
+            "SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY v) \
+             FROM t_agg_semantic_decline",
         ] {
             Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
             let plan_text = explain_text(query);

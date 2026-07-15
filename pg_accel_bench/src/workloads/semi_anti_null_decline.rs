@@ -10,6 +10,14 @@ pub(super) const SEMI_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] =
 pub(super) const ANTI_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] =
     &[(10_000, 5_500, 4_500), (100_000, 55_000, 45_000)];
 
+#[cfg(test)]
+pub(super) const IN_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] =
+    &[(10_000, 4_500, 4_500), (100_000, 45_000, 45_000)];
+
+#[cfg(test)]
+pub(super) const NOT_IN_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] =
+    &[(10_000, 0, 0), (100_000, 0, 0)];
+
 fn setup_semi_anti_tables(rows: usize) -> Vec<String> {
     let inner_rows = (rows / 4).max(32);
     vec![
@@ -121,6 +129,80 @@ impl Workload for AntiJoinNullDecline {
            SELECT 1 FROM bench_semi_anti_inner i WHERE i.k = o.k \
          )"
         .to_owned()
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        SEMI_ANTI_NULL_DECLINE_ROW_SCALES
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        cleanup_semi_anti_tables()
+    }
+}
+
+/// NULL-sensitive `IN` membership lane that PostgreSQL may lower to a semi join.
+pub struct InJoinNullDecline;
+
+impl Workload for InJoinNullDecline {
+    fn name(&self) -> &'static str {
+        "in_join_null_decline"
+    }
+
+    fn description(&self) -> &'static str {
+        "IN over duplicate nullable int4 keys - native planner decline (`no_gpu_resident_pipeline`) until GPU membership filters preserve SQL NULL semantics"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        setup_semi_anti_tables(rows)
+    }
+
+    fn pre_query_sql(&self) -> Vec<String> {
+        semi_anti_pre_query_sql()
+    }
+
+    fn query_sql(&self) -> String {
+        "SELECT count(*) AS matching_rows, \
+                count(o.k) AS matching_nonnull_keys \
+         FROM bench_semi_anti_outer o \
+         WHERE o.k IN (SELECT i.k FROM bench_semi_anti_inner i)"
+            .to_owned()
+    }
+
+    fn row_scales(&self) -> &'static [usize] {
+        SEMI_ANTI_NULL_DECLINE_ROW_SCALES
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        cleanup_semi_anti_tables()
+    }
+}
+
+/// `NOT IN` must return no TRUE row when the inner membership set contains NULL.
+pub struct NotInJoinNullDecline;
+
+impl Workload for NotInJoinNullDecline {
+    fn name(&self) -> &'static str {
+        "not_in_join_null_decline"
+    }
+
+    fn description(&self) -> &'static str {
+        "NULL-poisoned NOT IN over duplicate int4 keys - native planner decline (`shape_unsupported_predicate`) until GPU membership implements SQL three-valued logic"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        setup_semi_anti_tables(rows)
+    }
+
+    fn pre_query_sql(&self) -> Vec<String> {
+        semi_anti_pre_query_sql()
+    }
+
+    fn query_sql(&self) -> String {
+        "SELECT count(*) AS nonmatching_rows, \
+                count(o.k) AS nonmatching_nonnull_keys \
+         FROM bench_semi_anti_outer o \
+         WHERE o.k NOT IN (SELECT i.k FROM bench_semi_anti_inner i)"
+            .to_owned()
     }
 
     fn row_scales(&self) -> &'static [usize] {

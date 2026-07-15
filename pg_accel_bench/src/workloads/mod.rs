@@ -93,7 +93,9 @@ mod topk_wide;
 mod window_full_output_decline;
 mod window_reducing_decline;
 
-pub use aggregate_semantic_modifier_decline::AggregateSemanticModifierDecline;
+pub use aggregate_semantic_modifier_decline::{
+    AggregateOrderedSetDecline, AggregateSemanticModifierDecline,
+};
 pub use avg_nonfloat_decline::AvgNonfloatDecline;
 pub use bitmap_heap_gpuexpr_decline::BitmapHeapGpuExprDecline;
 pub use case_when_expression_grouped_agg::CaseWhenExpressionGroupedAgg;
@@ -140,7 +142,11 @@ pub use recursive_union_decline::RecursiveUnionDecline;
 pub use registry::{
     H3LaneClass, ResidentPinSpec, ThresholdEvidenceEligibility, WorkloadCategory, workload_metadata,
 };
-pub use semi_anti_null_decline::{AntiJoinNullDecline, SemiJoinNullDecline};
+#[cfg(test)]
+pub use registry::{PHASE9_OPERATOR_DECLINES, Phase9OperatorLane};
+pub use semi_anti_null_decline::{
+    AntiJoinNullDecline, InJoinNullDecline, NotInJoinNullDecline, SemiJoinNullDecline,
+};
 pub use setop_decline::SetOpDecline;
 pub use small_table::SmallTable;
 pub use spatial_agg::SpatialAgg;
@@ -490,12 +496,15 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SpatialContains),
         Box::new(SpatialMultiPred),
         Box::new(OltpPoint),
+        Box::new(AggregateOrderedSetDecline),
         Box::new(AggregateSemanticModifierDecline),
         Box::new(AntiJoinNullDecline),
         Box::new(AvgNonfloatDecline),
         Box::new(BitmapHeapGpuExprDecline),
         Box::new(MergeJoinDecline),
         Box::new(NumericAggDecline),
+        Box::new(InJoinNullDecline),
+        Box::new(NotInJoinNullDecline),
         Box::new(ParallelHashJoinRebuildDecline),
         Box::new(RecursiveUnionDecline),
         Box::new(SemiJoinNullDecline),
@@ -1998,16 +2007,16 @@ fn nlj_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresh
         workload: "gpu_nlj_between",
         rows,
         data_type: "int8 range containment",
-        cardinality: "outer events x 1K non-overlapping windows",
-        selectivity: "one matching window per outer event",
+        cardinality: "nullable outer events x 2K duplicated non-overlapping windows",
+        selectivity: "two matches per non-NULL event; NULL operands never match",
         result_count: format!(
             "{} joined rows accumulated to one count",
-            format_matrix_rows(outer_rows)
+            format_matrix_rows(outer_rows.saturating_mul(9) / 5)
         ),
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
         batch_count: "generic BETWEEN predicate descriptor is not admitted".to_owned(),
-        row_width: "12-byte event row + 20-byte window row",
+        row_width: "nullable 12-byte event row + nullable 20-byte window row",
         output_size: "one count row after join output",
         dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
@@ -2086,7 +2095,11 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
         data_type,
         cardinality,
         selectivity: "ORDER BY consumes selected relation",
-        result_count: output_size.to_owned(),
+        result_count: if name == "gpu_sort_multikey" {
+            format_matrix_rows(rows)
+        } else {
+            output_size.to_owned()
+        },
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
         batch_count: "sort chunks by DeviceLimits gpu_sort_max_elements".to_owned(),
@@ -2125,14 +2138,64 @@ fn window_decline_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "full row-proportional window relation",
             "full-output WindowAgg is outside the GPU-resident reducing-shape contract",
         ),
+        "window_row_number" => (
+            "window_row_number_partition_topn",
+            "int4 partition key + nullable float8 order key",
+            "100 equal partitions with explicit NULLS LAST ordering",
+            "ROW_NUMBER <= 100 emits at most 100 rows per partition",
+            "1".to_owned(),
+            "16-byte nullable window input",
+            "one count/sum digest row",
+            "partition top-N has no resident segmented-window consumer pipeline",
+        ),
+        "window_rank" => (
+            "window_rank_peer_filter",
+            "float8 order key",
+            "global ten-row peer groups",
+            "RANK <= 1000 preserves peer-group boundaries",
+            "1".to_owned(),
+            "8-byte window input",
+            "one count/sum digest row",
+            "RANK filter pushdown has no resident segmented-window consumer pipeline",
+        ),
+        "window_dense_rank" => (
+            "window_dense_rank_peer_filter",
+            "int4 partition key + float8 order key",
+            "100 partitions with deterministic two-row peers",
+            "DENSE_RANK <= 100 preserves peer groups per partition",
+            "1".to_owned(),
+            "12-byte window input",
+            "one count/sum digest row",
+            "DENSE_RANK filter pushdown has no resident segmented-window consumer pipeline",
+        ),
+        "window_running_sum" => (
+            "window_running_sum_to_aggregate",
+            "int4 partition key + nullable float8 measure",
+            "4 partitions with deterministic NULL measures",
+            "100% input rows enter WindowAgg; outer aggregate emits one row",
+            "1".to_owned(),
+            "12-byte nullable window input",
+            "one count/sum/max digest row",
+            "running SUM has no resident segmented-window consumer pipeline",
+        ),
+        "window_analytics" => (
+            "window_row_number_sum_to_aggregate",
+            "int4 partition key + timestamp order key + float8 measure",
+            "1000 deterministic partitions",
+            "100% input rows enter ROW_NUMBER/running SUM; outer aggregate emits one row",
+            "1".to_owned(),
+            "24-byte window input",
+            "one count/sum digest row",
+            "combined reducing windows have no resident segmented-window consumer pipeline",
+        ),
         "window_reducing_decline" => (
-            "window_partitioned_reducing",
+            "window_count_sum_avg_rank_reducing",
             "int4 partition/order keys + nullable int4 measure",
             "4 partitions with two-row peer groups",
             "100% input rows enter WindowAgg; outer aggregate emits one row",
             "1".to_owned(),
             "16-byte nullable window input",
-            "one aggregate row consuming running-sum and peer-rank outputs",
+            "one aggregate row consuming running COUNT/SUM/AVG and peer RANK outputs",
             "reducing output has no segmented window kernel or resident consumer pipeline",
         ),
         _ => return None,
@@ -2447,6 +2510,15 @@ fn regression_decline_matrix_entry(
             "one aggregate row",
             "shape_aggregate_modifier",
         ),
+        "aggregate_ordered_set_decline" => (
+            "aggregate_ordered_set",
+            "nullable duplicate int4 measure",
+            "global ordered-set aggregate",
+            "percentile_disc quartiles ignore NULL input and preserve duplicate frequency",
+            "nullable int4 input",
+            "one quartile/count digest row",
+            "shape_aggregate_modifier",
+        ),
         "anti_join_null_decline" => (
             "anti_join_null_semantics",
             "nullable duplicate int4 equality keys",
@@ -2455,6 +2527,24 @@ fn regression_decline_matrix_entry(
             "8-byte outer row plus nullable key",
             "one aggregate row",
             "no_gpu_resident_pipeline",
+        ),
+        "in_join_null_decline" => (
+            "in_membership_null_semantics",
+            "nullable duplicate int4 equality keys",
+            "8 outer keys, 4 inner membership keys, plus NULLs",
+            "IN returns only non-NULL outer membership matches",
+            "8-byte outer row plus nullable key",
+            "one aggregate row",
+            "no_gpu_resident_pipeline",
+        ),
+        "not_in_join_null_decline" => (
+            "not_in_membership_null_semantics",
+            "nullable duplicate int4 equality keys",
+            "8 outer keys, 4 inner membership keys, plus an inner NULL",
+            "inner NULL makes every otherwise-unmatched NOT IN result UNKNOWN",
+            "8-byte outer row plus nullable key",
+            "one zero-count aggregate row",
+            "shape_unsupported_predicate",
         ),
         "avg_nonfloat_decline" => (
             "avg_nonfloat_accumulators",
@@ -2467,11 +2557,11 @@ fn regression_decline_matrix_entry(
         ),
         "mergejoin_decline" => (
             "mergejoin_ordered_equi",
-            "int4 ordered equality key",
-            "ordered join input",
-            "merge-join shape until GPU merge join exists",
-            "narrow join rows",
-            "one aggregate row",
+            "nullable duplicate int4 ordered equality key",
+            "two copies per key with every fifth pair reduced by one NULL",
+            "merge join preserves duplicate multiplicity and rejects NULL equality matches",
+            "narrow nullable join rows",
+            "one count/min/max digest row",
             "mergejoin_no_gpu_kernel",
         ),
         "numeric_agg_decline" => (
@@ -2493,21 +2583,21 @@ fn regression_decline_matrix_entry(
             "shape_unsupported_predicate",
         ),
         "setop_intersect_decline" => (
-            "setop_intersect_full_output",
-            "int4 equality pair",
-            "two equal-size relations with approximately 50% overlap",
-            "INTERSECT distinct over the full inputs",
-            "8-byte SetOp row",
-            "approximately half of one input relation",
+            "setop_intersect_all_output",
+            "nullable int4 SetOp key",
+            "two duplicate relations with 50% key overlap and NULL rows",
+            "INTERSECT ALL preserves minimum duplicate and NULL multiplicities",
+            "nullable 4-byte SetOp row",
+            "half-scale duplicate output plus two NULL rows",
             "setop_no_gpu_kernel",
         ),
         "recursive_union_decline" => (
-            "recursive_union_linear_output",
-            "int4 recursive state",
-            "one seed expanding to the requested row count",
-            "linear UNION ALL recursion",
-            "4-byte emitted state row",
-            "full row-proportional recursive relation",
+            "recursive_union_duplicate_null_output",
+            "nullable int4 recursive state",
+            "duplicate numeric and NULL seeds expanding to the requested row count",
+            "UNION eliminates duplicate seeds while preserving one NULL state",
+            "nullable 4-byte emitted state row",
+            "requested numeric rows plus one NULL row",
             "recursiveunion_no_gpu_kernel",
         ),
         "semi_join_null_decline" => (
@@ -2528,7 +2618,11 @@ fn regression_decline_matrix_entry(
         data_type,
         cardinality,
         selectivity,
-        result_count: output_size.to_owned(),
+        result_count: match name {
+            "setop_intersect_decline" => format_matrix_rows(rows / 2 + 2),
+            "recursive_union_decline" => format_matrix_rows(rows.saturating_add(1)),
+            _ => output_size.to_owned(),
+        },
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
         batch_count: "n/a".to_owned(),
@@ -2677,15 +2771,23 @@ fn static_workload_name(name: &str) -> &'static str {
         "raster_slope" => "raster_slope",
         "raster_reclass" => "raster_reclass",
         "raster_algebra_deep" => "raster_algebra_deep",
+        "aggregate_ordered_set_decline" => "aggregate_ordered_set_decline",
         "aggregate_semantic_modifier_decline" => "aggregate_semantic_modifier_decline",
         "anti_join_null_decline" => "anti_join_null_decline",
         "avg_nonfloat_decline" => "avg_nonfloat_decline",
+        "in_join_null_decline" => "in_join_null_decline",
         "mergejoin_decline" => "mergejoin_decline",
+        "not_in_join_null_decline" => "not_in_join_null_decline",
         "numeric_agg_decline" => "numeric_agg_decline",
         "bitmap_heap_gpuexpr_decline" => "bitmap_heap_gpuexpr_decline",
         "setop_intersect_decline" => "setop_intersect_decline",
         "recursive_union_decline" => "recursive_union_decline",
         "semi_join_null_decline" => "semi_join_null_decline",
+        "window_analytics" => "window_analytics",
+        "window_row_number" => "window_row_number",
+        "window_rank" => "window_rank",
+        "window_dense_rank" => "window_dense_rank",
+        "window_running_sum" => "window_running_sum",
         "window_full_output_decline" => "window_full_output_decline",
         "window_reducing_decline" => "window_reducing_decline",
         _ => "unknown",
@@ -2790,100 +2892,46 @@ mod tests {
 
     #[test]
     fn test_phase9_documented_decline_workload_contracts() {
-        let cases: [(&str, &[usize], &str, &str, &str); 11] = [
-            (
-                "aggregate_semantic_modifier_decline",
-                &[10_000, 100_000],
-                "FILTER (WHERE keep)",
-                "shape_aggregate_modifier",
-                "hash_agg",
-            ),
-            (
-                "anti_join_null_decline",
-                &[10_000, 100_000],
-                "WHERE NOT EXISTS",
-                "no_gpu_resident_pipeline",
-                "hash_join",
-            ),
-            (
-                "avg_nonfloat_decline",
-                &[10_000, 100_000],
-                "avg(d) AS avg_interval",
-                "shape_numeric_accumulator_unavailable",
-                "reduce",
-            ),
-            (
-                "setop_intersect_decline",
-                &[10_000, 100_000],
-                "INTERSECT",
-                "setop_no_gpu_kernel",
-                "set_op",
-            ),
-            (
-                "recursive_union_decline",
-                &[10_000],
-                "WITH RECURSIVE r",
-                "recursiveunion_no_gpu_kernel",
-                "recursive_union",
-            ),
-            (
-                "mergejoin_decline",
-                &[10_000, 100_000],
-                "JOIN bench_mergejoin_r",
-                "mergejoin_no_gpu_kernel",
-                "merge_join",
-            ),
-            (
-                "gpu_sort_multikey",
-                &[10_000, 100_000],
-                "ORDER BY key1, key2, id",
-                "sort_multikey_no_gpu_kernel",
-                "sort",
-            ),
-            (
-                "window_full_output_decline",
-                &[10_000, 100_000],
-                "row_number() OVER",
-                "no_gpu_resident_pipeline",
-                "window",
-            ),
-            (
-                "window_reducing_decline",
-                &[10_000, 100_000],
-                "max(peer_rank)",
-                "no_gpu_resident_pipeline",
-                "window",
-            ),
-            (
-                "numeric_agg_decline",
-                &[10_000, 100_000],
-                "sum(n)",
-                "shape_numeric_accumulator_unavailable",
-                "unclassified",
-            ),
-            (
-                "semi_join_null_decline",
-                &[10_000, 100_000],
-                "WHERE EXISTS",
-                "no_gpu_resident_pipeline",
-                "hash_join",
-            ),
-        ];
-
-        for (name, scales, query_fragment, reason, kernel) in cases {
-            let workload = find_workload(name).unwrap_or_else(|| panic!("registered {name}"));
-            assert_eq!(workload.row_scales(), scales, "{name}");
-            assert!(workload.query_sql().contains(query_fragment), "{name}");
-            let entry = benchmark_threshold_matrix_entry(name, scales[0])
-                .unwrap_or_else(|| panic!("threshold metadata for {name}"));
-            assert_eq!(entry.expectation.decline_reason(), Some(reason), "{name}");
-            let metadata = workload_metadata(name).unwrap_or_else(|| panic!("metadata for {name}"));
-            assert_eq!(metadata.kernel_class.as_str(), kernel, "{name}");
-            assert_eq!(
-                metadata.evidence.threshold,
-                registry::ThresholdEvidenceEligibility::NativeDeclineOnly,
-                "{name}"
+        for contract in PHASE9_OPERATOR_DECLINES {
+            let query_fragment = match contract.lane {
+                Phase9OperatorLane::WindowFullOutput => "row_number() OVER",
+                Phase9OperatorLane::WindowRowNumberTopN => "WHERE rn <= 100",
+                Phase9OperatorLane::WindowRankFilter => "WHERE rnk <= 1000",
+                Phase9OperatorLane::WindowDenseRankFilter => "WHERE dr <= 100",
+                Phase9OperatorLane::WindowRunningAggregate => "sum(rsum)::bigint",
+                Phase9OperatorLane::WindowAnalytics => "sum(running_sum)",
+                Phase9OperatorLane::WindowCountSumAvgRank => "avg(value) OVER",
+                Phase9OperatorLane::ExistsMembership => "WHERE EXISTS",
+                Phase9OperatorLane::InMembership => "o.k IN",
+                Phase9OperatorLane::NotExistsMembership => "WHERE NOT EXISTS",
+                Phase9OperatorLane::NotInMembership => "o.k NOT IN",
+                Phase9OperatorLane::AggregateModifiers => "FILTER (WHERE keep)",
+                Phase9OperatorLane::AggregateOrderedSet => "WITHIN GROUP (ORDER BY v)",
+                Phase9OperatorLane::NumericAccumulator => "sum(n)",
+                Phase9OperatorLane::NonFloatAvg => "avg(d) AS avg_interval",
+                Phase9OperatorLane::SetOp => "INTERSECT ALL",
+                Phase9OperatorLane::RecursiveUnion => "WITH RECURSIVE r",
+                Phase9OperatorLane::MergeJoin => "JOIN bench_mergejoin_r",
+                Phase9OperatorLane::MultiKeySort => "key2 DESC NULLS FIRST",
+                Phase9OperatorLane::NestedLoopInequality => "e.ts >= w.lo",
+            };
+            let workload = find_workload(contract.workload)
+                .unwrap_or_else(|| panic!("registered {}", contract.workload));
+            assert!(
+                workload.query_sql().contains(query_fragment),
+                "{}",
+                contract.workload
             );
+            for &rows in workload.row_scales() {
+                let entry = benchmark_threshold_matrix_entry(contract.workload, rows)
+                    .unwrap_or_else(|| panic!("threshold metadata for {}", contract.workload));
+                assert_eq!(
+                    entry.expectation.decline_reason(),
+                    Some(contract.reason),
+                    "{} at {rows}",
+                    contract.workload
+                );
+            }
         }
 
         let merge = find_workload("mergejoin_decline").expect("merge workload");
@@ -2893,6 +2941,11 @@ mod tests {
         );
         let multikey = find_workload("gpu_sort_multikey").expect("multikey workload");
         assert!(!multikey.query_sql().contains("LIMIT"));
+        assert!(
+            multikey
+                .query_sql()
+                .contains(gpu_sort_multikey::EXPECTED_ORDER_CLAUSE)
+        );
         assert_eq!(multikey.row_scales(), &[10_000, 100_000]);
         let window = find_workload("window_full_output_decline").expect("window workload");
         assert_eq!(window.row_scales(), &[10_000, 100_000]);
@@ -2904,6 +2957,8 @@ mod tests {
     fn test_phase9_structural_decline_sql_and_native_reference_results() {
         let semi = find_workload("semi_join_null_decline").expect("semi workload");
         let anti = find_workload("anti_join_null_decline").expect("anti workload");
+        let in_membership = find_workload("in_join_null_decline").expect("IN workload");
+        let not_in_membership = find_workload("not_in_join_null_decline").expect("NOT IN workload");
         let semi_setup = semi.setup_sql(10_000).join("\n");
         assert!(semi_setup.contains("g % 10 = 0 THEN NULL"));
         assert!(semi_setup.contains("g % 5 = 0 THEN NULL"));
@@ -2911,6 +2966,8 @@ mod tests {
         assert!(semi_setup.contains("g % 4"));
         assert!(semi.query_sql().contains("i.k = o.k"));
         assert!(anti.query_sql().contains("i.k = o.k"));
+        assert!(in_membership.query_sql().contains("o.k IN"));
+        assert!(not_in_membership.query_sql().contains("o.k NOT IN"));
         assert_eq!(
             semi.pre_query_sql(),
             [
@@ -2927,6 +2984,14 @@ mod tests {
             semi_anti_null_decline::ANTI_EXPECTED_NATIVE_RESULTS,
             &[(10_000, 5_500, 4_500), (100_000, 55_000, 45_000)]
         );
+        assert_eq!(
+            semi_anti_null_decline::IN_EXPECTED_NATIVE_RESULTS,
+            &[(10_000, 4_500, 4_500), (100_000, 45_000, 45_000)]
+        );
+        assert_eq!(
+            semi_anti_null_decline::NOT_IN_EXPECTED_NATIVE_RESULTS,
+            &[(10_000, 0, 0), (100_000, 0, 0)]
+        );
 
         let aggregate = find_workload("aggregate_semantic_modifier_decline")
             .expect("aggregate modifier workload");
@@ -2942,19 +3007,77 @@ mod tests {
                 (100_000, 100_000, 5, "{3,1,1,NULL,2,2,0,NULL}")
             ]
         );
+        let ordered_set =
+            find_workload("aggregate_ordered_set_decline").expect("ordered-set aggregate workload");
+        assert!(
+            ordered_set
+                .query_sql()
+                .contains("percentile_disc(ARRAY[0.25, 0.5, 0.75])")
+        );
+        assert_eq!(
+            aggregate_semantic_modifier_decline::ORDERED_SET_EXPECTED_NATIVE_RESULTS,
+            &[(10_000, "{2,5,7}", 7_500), (100_000, "{2,5,7}", 75_000)]
+        );
 
         let window = find_workload("window_reducing_decline").expect("reducing window workload");
         let window_query = window.query_sql();
         assert!(window_query.trim_start().starts_with("SELECT count("));
         assert!(window_query.contains("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"));
         assert!(window_query.contains("rank() OVER"));
+        assert!(window_query.contains("count(value) OVER"));
         assert!(window_query.contains("max(running_sum)"));
+        assert!(window_query.contains("running_avg = 1::numeric"));
         assert!(window_query.contains("max(peer_rank)"));
         assert_eq!(
             window_reducing_decline::EXPECTED_NATIVE_RESULTS,
             &[
-                (10_000, 10_000, 2_500, 2_499),
-                (100_000, 100_000, 25_000, 24_999)
+                (10_000, 10_000, 2_500, 2_500, true, 2_499),
+                (100_000, 100_000, 25_000, 25_000, true, 24_999)
+            ]
+        );
+        assert_eq!(
+            window_variants::ROW_NUMBER_EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 10_000, 505_000),
+                (100_000, 10_000, 505_000),
+                (1_000_000, 10_000, 505_000),
+                (10_000_000, 10_000, 505_000)
+            ]
+        );
+        assert_eq!(
+            window_variants::RANK_EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 1_000, 496_000),
+                (100_000, 1_000, 496_000),
+                (1_000_000, 1_000, 496_000),
+                (10_000_000, 1_000, 496_000)
+            ]
+        );
+        assert_eq!(
+            window_variants::DENSE_RANK_EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 10_000, 255_000),
+                (100_000, 20_000, 1_010_000),
+                (1_000_000, 20_000, 1_010_000),
+                (10_000_000, 20_000, 1_010_000)
+            ]
+        );
+        assert_eq!(
+            window_variants::RUNNING_SUM_EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 10_000, 10_942_500, 2_500),
+                (100_000, 100_000, 1_093_800_000, 25_000),
+                (1_000_000, 1_000_000, 109_375_500_000, 250_000),
+                (10_000_000, 10_000_000, 10_937_505_000_000, 2_500_000)
+            ]
+        );
+        assert_eq!(
+            window_analytics::EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 10_000, 55_000, 27_472_500),
+                (100_000, 100_000, 5_050_000, 2_522_475_000),
+                (1_000_000, 1_000_000, 500_500_000, 249_999_750_000),
+                (10_000_000, 10_000_000, 50_005_000_000, 24_977_497_500_000)
             ]
         );
 
@@ -2971,6 +3094,72 @@ mod tests {
             avg_nonfloat_decline::EXPECTED_NATIVE_RESULT,
             ("2", "4", "8", "1.25", "00:00:03")
         );
+
+        assert_eq!(
+            setop_decline::EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 5_002, 5_000, 2, 2_500, 4_999),
+                (100_000, 50_002, 50_000, 2, 25_000, 49_999)
+            ]
+        );
+        assert_eq!(
+            recursive_union_decline::EXPECTED_NATIVE_RESULT,
+            (10_000, 10_001, 10_000, 1, 1, 10_000)
+        );
+        assert_eq!(
+            mergejoin_decline::EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 17_000, 17_000, 0, 4_999),
+                (100_000, 170_000, 170_000, 0, 49_999)
+            ]
+        );
+        assert_eq!(
+            gpu_sort_multikey::EXPECTED_NATIVE_ROW_COUNTS,
+            &[(10_000, 10_000), (100_000, 100_000)]
+        );
+        assert_eq!(
+            gpu_nlj_between::EXPECTED_NATIVE_RESULTS,
+            &[
+                (10_000, 18_000, 18_000, 18_000),
+                (100_000, 180_000, 180_000, 180_000)
+            ]
+        );
+
+        let setop = find_workload("setop_intersect_decline").expect("SetOp workload");
+        assert!(setop.setup_sql(10_000).join("\n").contains("VALUES (NULL)"));
+        assert!(setop.query_sql().contains("INTERSECT ALL"));
+        assert!(setop.query_sql().contains("ORDER BY k NULLS FIRST"));
+
+        let recursive = find_workload("recursive_union_decline").expect("RecursiveUnion workload");
+        let recursive_setup = recursive.setup_sql(10_000).join("\n");
+        assert!(recursive_setup.contains("(1, 10000), (1, 10000)"));
+        assert!(recursive_setup.contains("(NULL, 10000), (NULL, 10000)"));
+        assert!(recursive.query_sql().contains("ORDER BY n NULLS FIRST"));
+
+        let merge = find_workload("mergejoin_decline").expect("merge workload");
+        assert!(
+            merge
+                .setup_sql(10_000)
+                .join("\n")
+                .contains("g % 10 = 0 THEN NULL")
+        );
+        assert!(merge.query_sql().contains("count(l.k)"));
+
+        let multikey = find_workload("gpu_sort_multikey").expect("multi-key sort workload");
+        let multikey_setup = multikey.setup_sql(10_000).join("\n");
+        assert!(multikey_setup.contains("g % 11 = 0 THEN NULL"));
+        assert!(multikey_setup.contains("g % 13 = 0 THEN NULL"));
+        assert!(
+            multikey
+                .query_sql()
+                .contains(gpu_sort_multikey::EXPECTED_ORDER_CLAUSE)
+        );
+
+        let nlj = find_workload("gpu_nlj_between").expect("NLJ workload");
+        let nlj_setup = nlj.setup_sql(10_000).join("\n");
+        assert!(nlj_setup.contains("g % 10 = 0 THEN NULL"));
+        assert!(nlj_setup.contains("CROSS JOIN generate_series(0, 1)"));
+        assert!(nlj.query_sql().contains("count(w.lo)"));
     }
 
     #[test]

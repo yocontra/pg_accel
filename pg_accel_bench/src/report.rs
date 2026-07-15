@@ -6533,30 +6533,29 @@ mod tests {
 
     #[test]
     fn test_phase9_native_declines_reject_custom_scan_or_kernel_dispatch() {
-        for (name, rows) in [
-            ("aggregate_semantic_modifier_decline", 10_000),
-            ("anti_join_null_decline", 10_000),
-            ("avg_nonfloat_decline", 10_000),
-            ("semi_join_null_decline", 10_000),
-            ("window_reducing_decline", 10_000),
-        ] {
-            for (plan_selected, kernel_delta) in [(true, 0), (false, 1)] {
-                let mut workload = mock_workload_result(name, rows, 10.0, 10.0);
-                workload.plan_selected = plan_selected;
-                workload.dispatch_counter_captured = true;
-                workload.gpu_kernel_execution_delta = kernel_delta;
-                workload.accel_output_rows_consumed = kernel_delta;
-                workload.plan_snippet = plan_selected.then(|| {
-                    "Custom Scan (GpuAccelUnexpected)\n  GPU Dispatched: false".to_owned()
-                });
+        for contract in crate::workloads::PHASE9_OPERATOR_DECLINES {
+            let name = contract.workload;
+            let workload = crate::workloads::find_workload(name)
+                .unwrap_or_else(|| panic!("workload for {name}"));
+            for &rows in workload.row_scales() {
+                for (plan_selected, kernel_delta) in [(true, 0), (false, 1)] {
+                    let mut result = mock_workload_result(name, rows, 10.0, 10.0);
+                    result.plan_selected = plan_selected;
+                    result.dispatch_counter_captured = true;
+                    result.gpu_kernel_execution_delta = kernel_delta;
+                    result.accel_output_rows_consumed = kernel_delta;
+                    result.plan_snippet = plan_selected.then(|| {
+                        "Custom Scan (GpuAccelUnexpected)\n  GPU Dispatched: false".to_owned()
+                    });
 
-                let failures = mock_report(vec![workload]).evaluate_benchmark_ship_gate();
-                assert_eq!(failures.len(), 1, "{name}");
-                assert_eq!(
-                    failures[0].kind,
-                    BenchmarkShipGateFailureKind::NativeDeclineUnexpectedDispatch,
-                    "{name}"
-                );
+                    let failures = mock_report(vec![result]).evaluate_benchmark_ship_gate();
+                    assert_eq!(failures.len(), 1, "{name} at {rows}");
+                    assert_eq!(
+                        failures[0].kind,
+                        BenchmarkShipGateFailureKind::NativeDeclineUnexpectedDispatch,
+                        "{name} at {rows}"
+                    );
+                }
             }
         }
     }
@@ -6586,70 +6585,40 @@ mod tests {
 
     #[test]
     fn test_phase9_structural_decline_cells_require_planner_confirmation() {
-        for (name, rows, reason) in [
-            (
-                "aggregate_semantic_modifier_decline",
-                10_000,
-                "shape_aggregate_modifier",
-            ),
-            ("anti_join_null_decline", 10_000, "no_gpu_resident_pipeline"),
-            (
-                "avg_nonfloat_decline",
-                10_000,
-                "shape_numeric_accumulator_unavailable",
-            ),
-            ("setop_intersect_decline", 10_000, "setop_no_gpu_kernel"),
-            (
-                "recursive_union_decline",
-                10_000,
-                "recursiveunion_no_gpu_kernel",
-            ),
-            ("mergejoin_decline", 10_000, "mergejoin_no_gpu_kernel"),
-            ("gpu_sort_multikey", 10_000, "sort_multikey_no_gpu_kernel"),
-            (
-                "window_full_output_decline",
-                10_000,
-                "no_gpu_resident_pipeline",
-            ),
-            (
-                "window_reducing_decline",
-                10_000,
-                "no_gpu_resident_pipeline",
-            ),
-            (
-                "numeric_agg_decline",
-                10_000,
-                "shape_numeric_accumulator_unavailable",
-            ),
-            ("semi_join_null_decline", 10_000, "no_gpu_resident_pipeline"),
-        ] {
-            let mut workload = mark_no_dispatch(
-                mock_workload_result(name, rows, 10.0, 10.0),
-                "PostgreSQL native plan",
-                "PostgreSQL native plan",
-            );
-            workload.native_decline_evidence = Some(NativeDeclineEvidence {
-                reason: reason.to_owned(),
-                source: DeclineReasonSource::ExpectedUnconfirmed,
-            });
-            let failures = mock_report(vec![workload.clone()]).evaluate_benchmark_ship_gate();
-            assert_eq!(failures.len(), 1, "{name}");
-            assert_eq!(
-                failures[0].kind,
-                BenchmarkShipGateFailureKind::NativeDeclineReasonMissing,
-                "{name}"
-            );
+        for contract in crate::workloads::PHASE9_OPERATOR_DECLINES {
+            let name = contract.workload;
+            let reason = contract.reason;
+            let workload = crate::workloads::find_workload(name)
+                .unwrap_or_else(|| panic!("workload for {name}"));
+            for &rows in workload.row_scales() {
+                let mut result = mark_no_dispatch(
+                    mock_workload_result(name, rows, 10.0, 10.0),
+                    "PostgreSQL native plan",
+                    "PostgreSQL native plan",
+                );
+                result.native_decline_evidence = Some(NativeDeclineEvidence {
+                    reason: reason.to_owned(),
+                    source: DeclineReasonSource::ExpectedUnconfirmed,
+                });
+                let failures = mock_report(vec![result.clone()]).evaluate_benchmark_ship_gate();
+                assert_eq!(failures.len(), 1, "{name} at {rows}");
+                assert_eq!(
+                    failures[0].kind,
+                    BenchmarkShipGateFailureKind::NativeDeclineReasonMissing,
+                    "{name} at {rows}"
+                );
 
-            workload.native_decline_evidence = Some(NativeDeclineEvidence {
-                reason: reason.to_owned(),
-                source: DeclineReasonSource::PlannerReported,
-            });
-            assert!(
-                mock_report(vec![workload])
-                    .evaluate_benchmark_ship_gate()
-                    .is_empty(),
-                "{name}"
-            );
+                result.native_decline_evidence = Some(NativeDeclineEvidence {
+                    reason: reason.to_owned(),
+                    source: DeclineReasonSource::PlannerReported,
+                });
+                assert!(
+                    mock_report(vec![result])
+                        .evaluate_benchmark_ship_gate()
+                        .is_empty(),
+                    "{name} at {rows}"
+                );
+            }
         }
     }
 
