@@ -41,6 +41,7 @@ setup-tools:
     cargo install cargo-deny --locked
     cargo install cargo-audit --locked
     cargo install cargo-llvm-cov --locked
+    rustup component add llvm-tools-preview
 
 # Print system dependency hints for source PostgreSQL + AdaptiveCpp builds.
 setup-system-deps:
@@ -350,7 +351,9 @@ test-matrix:
 test: test-matrix
     @echo "All tests passed."
 
-# Run the Rust coverage gate for one PG major. Defaults to the supported PG target.
+# Run the fail-closed Rust, C++/SYCL, and SQL-extension coverage gate for one
+# PG major. This starts the pgrx PostgreSQL cluster and runs the registered GPU
+# CTest suite, so it requires the same exclusive runtime lane as gpu-test.
 coverage pg="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -362,6 +365,13 @@ coverage pg="":
         pg="${requested#pg}"
     fi
     bash scripts/coverage_gate.sh "$pg"
+
+# Validate coverage scope, source inventories, parsers, and shell syntax
+# without starting PostgreSQL or touching a GPU device.
+coverage-audit:
+    bash -n scripts/coverage_gate.sh sql/tests/run_all.sh
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_coverage_tools.py'
+    python3 scripts/coverage_tools.py audit-scope --scope coverage/scope.json --repo-root .
 
 # Run benchmark suite against local pgrx PG. The runner seeds and cleans up
 # each workload/scale itself. Long benches can fill the PG log; `log-rails`

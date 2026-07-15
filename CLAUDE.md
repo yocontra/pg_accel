@@ -22,7 +22,14 @@ just deny                # license/advisory policy
 just audit               # cargo-audit using deny.toml's ignored set
 just doc-parity          # documentation citation/GUC/capability parity
 just pg-version-audit    # PostgreSQL-version plumbing audit
+just coverage            # Rust, C++/SYCL, and SQL coverage; each layer gates at 90%
 just test                # pgrx test matrix
+just gpu-build           # build the AdaptiveCpp/SYCL kernel library
+just gpu-test            # run the standalone GPU kernel suite
+just metal-stress        # run the Apple Silicon Metal stress gate
+just package             # build an installable pgrx package
+just release-verify      # run the release verification matrix
+just release-checklist-audit # fail while release evidence is incomplete
 just ci                  # pre-commit gates plus test matrix
 ```
 

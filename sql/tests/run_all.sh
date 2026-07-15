@@ -37,6 +37,25 @@ FAILURES=0
 PASSES=0
 TOTAL=0
 FAILED_TESTS=()
+ARTIFACT_DIR="${PG_ACCEL_SQL_TEST_ARTIFACT_DIR:-}"
+RESULTS_FILE=""
+
+if [ -n "$ARTIFACT_DIR" ]; then
+    mkdir -p "$ARTIFACT_DIR/logs"
+    RESULTS_FILE="$ARTIFACT_DIR/results.tsv"
+    printf 'file\tstatus\texit_code\tlog\n' > "$RESULTS_FILE"
+fi
+
+record_result() {
+    local test_name="$1"
+    local status="$2"
+    local exit_code="$3"
+    local output="$4"
+    [ -n "$RESULTS_FILE" ] || return 0
+    local log="logs/${test_name}.log"
+    printf '%s\n' "$output" > "$ARTIFACT_DIR/$log"
+    printf '%s\t%s\t%s\t%s\n' "$test_name" "$status" "$exit_code" "$log" >> "$RESULTS_FILE"
+}
 
 sql_test_strict() {
     case "${PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION:-}" in
@@ -106,14 +125,21 @@ for test_file in "$TESTS_DIR"/[0-9]*.sql; do
     test_name=$(basename "$test_file")
     TOTAL=$((TOTAL + 1))
 
-    # Run the test file; it will RAISE EXCEPTION on failure
-    if output=$(psql "$CONNSTR" \
+    # Run the test file; it will RAISE EXCEPTION on failure. In artifact mode,
+    # retain the complete psql output and exit status for the SQL coverage
+    # inventory instead of reducing evidence to a terminal-only pass count.
+    set +e
+    output=$(psql "$CONNSTR" \
         -v ON_ERROR_STOP=1 \
-        -f "$test_file" 2>&1); then
-
+        -f "$test_file" 2>&1)
+    psql_status=$?
+    set -e
+    result_status="fail"
+    if [ "$psql_status" -eq 0 ]; then
         # Check for an explicit PASS/PASSED echo in output.
         if has_pass_marker <<<"$output"; then
             PASSES=$((PASSES + 1))
+            result_status="pass"
             echo "PASS: $test_name"
         elif sql_test_strict; then
             FAILURES=$((FAILURES + 1))
@@ -124,6 +150,7 @@ for test_file in "$TESTS_DIR"/[0-9]*.sql; do
         else
             # No PASS marker but no error either — treat as pass with warning
             PASSES=$((PASSES + 1))
+            result_status="pass"
             echo "PASS: $test_name (no explicit PASS marker)"
         fi
     else
@@ -134,6 +161,7 @@ for test_file in "$TESTS_DIR"/[0-9]*.sql; do
         echo "$output" | tail -5 | sed 's/^/  | /'
         echo ""
     fi
+    record_result "$test_name" "$result_status" "$psql_status" "$output"
 done
 
 if [ "$TOTAL" -eq 0 ]; then

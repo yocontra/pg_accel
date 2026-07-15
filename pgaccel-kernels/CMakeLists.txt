@@ -4,6 +4,23 @@ project(pgaccel_kernels LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(PGACCEL_ENABLE_COVERAGE
+    "Instrument pg_accel-owned C++/SYCL sources with Clang source coverage"
+    OFF)
+
+if(PGACCEL_ENABLE_COVERAGE)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "PGACCEL_ENABLE_COVERAGE requires Clang; got ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+    add_compile_options(
+        $<$<COMPILE_LANGUAGE:CXX>:-fprofile-instr-generate>
+        $<$<COMPILE_LANGUAGE:CXX>:-fcoverage-mapping>)
+    add_link_options(-fprofile-instr-generate)
+    message(STATUS
+        "pgaccel-kernels: Clang source coverage instrumentation enabled")
+endif()
+
 # Default to Release for optimized GPU kernels (-O3).
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)

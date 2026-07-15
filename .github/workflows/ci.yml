@@ -32,7 +32,7 @@ jobs:
   mac-arm64:
     name: macOS arm64 PG ${{ matrix.pg }}
     runs-on: macos-14
-    timeout-minutes: 120
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
@@ -120,6 +120,14 @@ jobs:
           cargo install cargo-deny --locked
           cargo install cargo-audit --locked
 
+      - name: Install three-layer coverage tooling
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --locked
+
       - name: Build pinned AdaptiveCpp Metal toolchain
         if: steps.pg-support.outputs.skip != 'true' && steps.cache-acpp.outputs.cache-hit != 'true'
         shell: bash
@@ -186,6 +194,26 @@ jobs:
         run: |
           set -euo pipefail
           just plan-shape-tests ${{ matrix.pg }}
+
+      - name: Run three-layer coverage gate
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        env:
+          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18-macos-arm64
+          COVERAGE_MIN_RUST_LINES: 90
+          COVERAGE_MIN_CPP_LINES: 90
+          COVERAGE_MIN_SQL_LINES: 90
+        run: |
+          set -euo pipefail
+          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage ${{ matrix.pg }}
+
+      - name: Upload three-layer coverage artifacts
+        if: always() && steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-three-layer-coverage-pg18-macos-arm64
+          path: artifacts/coverage-pg18-macos-arm64
+          if-no-files-found: error
 
       - name: Generate package schema artifact
         if: always() && steps.pg-support.outputs.skip != 'true'
@@ -322,13 +350,6 @@ jobs:
           scripts/pg_source.sh build ${{ matrix.pg }}
           cargo pgrx init --pg${{ matrix.pg }} "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})"
 
-      - name: Install Rust coverage tooling
-        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo install cargo-llvm-cov --locked
-
       - name: Build pinned AdaptiveCpp generic toolchain
         if: steps.pg-support.outputs.skip != 'true' && steps.cache-acpp-linux.outputs.cache-hit != 'true'
         shell: bash
@@ -356,24 +377,6 @@ jobs:
         run: |
           set -euo pipefail
           cargo test -p pg_accel_bench --locked
-
-      - name: Run Rust coverage gate
-        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
-        shell: bash
-        env:
-          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18
-          COVERAGE_MIN_LINES: 90
-        run: |
-          set -euo pipefail
-          just coverage ${{ matrix.pg }}
-
-      - name: Upload Rust coverage artifacts
-        if: always() && steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
-        uses: actions/upload-artifact@v4
-        with:
-          name: pg-accel-rust-coverage-pg18-linux-x86_64
-          path: artifacts/coverage-pg18
-          if-no-files-found: warn
 
   cuda-smoke:
     name: CUDA smoke

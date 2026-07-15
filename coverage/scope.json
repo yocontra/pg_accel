@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "minimum_line_percent": 90.0,
+  "layers": {
+    "rust": {
+      "description": "Owned Rust production code exercised by workspace and pgrx tests, including benchmark classification.",
+      "roots": [
+        "pg_accel/src",
+        "pg_accel_bench/src"
+      ],
+      "extensions": [".rs"],
+      "required_extensions": [".rs"],
+      "require_executable_mapping_only": true,
+      "exclude": [
+        "pg_accel/src/tests/**",
+        "pg_accel/src/gpu/mod_tests.rs",
+        "pg_accel/src/gpu/three_layer_tests.rs",
+        "pg_accel_bench/src/h3_protection_test.rs",
+        "pg_accel_bench/src/parallel_stress_test.rs",
+        "pg_accel_bench/src/plan_shape_test.rs",
+        "pg_accel_bench/src/resident_concurrency_test.rs",
+        "**/tests.rs",
+        "**/*_test.rs"
+      ]
+    },
+    "cpp": {
+      "description": "Owned C++/SYCL kernel implementation and inline headers exercised by standalone CTest binaries.",
+      "roots": [
+        "pgaccel-kernels/src",
+        "pgaccel-kernels/include"
+      ],
+      "extensions": [".cpp", ".hpp", ".h"],
+      "required_extensions": [".cpp", ".hpp", ".h"],
+      "require_executable_mapping_only": true,
+      "exclude": []
+    },
+    "sql": {
+      "description": "Owned Rust extension code reached exclusively by the external SQL integration suite.",
+      "roots": ["pg_accel/src"],
+      "extensions": [".rs"],
+      "required_extensions": [".rs"],
+      "require_executable_mapping_only": true,
+      "exclude": [
+        "pg_accel/src/tests/**",
+        "pg_accel/src/gpu/mod_tests.rs",
+        "pg_accel/src/gpu/three_layer_tests.rs",
+        "**/tests.rs",
+        "**/*_test.rs"
+      ]
+    }
+  }
+}

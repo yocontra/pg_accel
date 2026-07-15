@@ -52,7 +52,7 @@ jobs:
         if: steps.pg-support.outputs.skip != 'true'
         run: |
           brew update
-          brew install just cmake llvm@20 lld@20 boost libomp
+          brew install just cmake llvm@20 lld@20 boost libomp postgis
       - name: Build pinned AdaptiveCpp Metal toolchain
         if: steps.pg-support.outputs.skip != 'true'
         run: |
@@ -71,10 +71,35 @@ jobs:
         run: |
           source scripts/pg_versions.sh
           cargo install cargo-pgrx --locked --version "$PG_ACCEL_PGRX_VERSION"
+      - name: Install three-layer coverage tooling
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup component add llvm-tools-preview
+          cargo install cargo-llvm-cov --locked
       - if: steps.pg-support.outputs.skip != 'true'
         run: |
           scripts/pg_source.sh build ${{ matrix.pg }}
           cargo pgrx init --pg${{ matrix.pg }} "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})"
+      - name: Run three-layer release coverage gate
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        env:
+          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18-macos-arm64
+          COVERAGE_MIN_RUST_LINES: 90
+          COVERAGE_MIN_CPP_LINES: 90
+          COVERAGE_MIN_SQL_LINES: 90
+        run: |
+          set -euo pipefail
+          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage ${{ matrix.pg }}
+      - name: Upload three-layer release coverage artifacts
+        if: always() && steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-release-three-layer-coverage-pg18-macos-arm64
+          path: artifacts/coverage-pg18-macos-arm64
+          if-no-files-found: error
       - if: steps.pg-support.outputs.skip != 'true'
         run: |
           cargo pgrx package --package pg_accel --pg-config "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})" --no-default-features --features pg${{ matrix.pg }}
