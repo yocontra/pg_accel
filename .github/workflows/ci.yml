@@ -189,18 +189,26 @@ jobs:
 
       - name: Generate package schema artifact
         if: always() && steps.pg-support.outputs.skip != 'true'
+        id: schema
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cargo pgrx schema -p pg_accel pg${{ matrix.pg }} --no-default-features --features pg${{ matrix.pg }} -o artifacts/pg_accel--1.0.0-pg${{ matrix.pg }}.sql
+          package_version="$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python3 -c 'import json, sys; versions = [p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "pg_accel"]; len(versions) == 1 or sys.exit("expected exactly one pg_accel package"); print(versions[0])'
+          )"
+          schema_path="artifacts/pg_accel--${package_version}-pg${{ matrix.pg }}.sql"
+          echo "path=$schema_path" >> "$GITHUB_OUTPUT"
+          cargo pgrx schema -p pg_accel pg${{ matrix.pg }} --no-default-features --features pg${{ matrix.pg }} -o "$schema_path"
+          test -s "$schema_path"
 
       - name: Upload schema artifact
         if: always() && steps.pg-support.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pg-accel-schema-pg${{ matrix.pg }}-macos-arm64
-          path: artifacts/pg_accel--1.0.0-pg${{ matrix.pg }}.sql
+          path: ${{ steps.schema.outputs.path }}
           if-no-files-found: error
 
   linux-x86:

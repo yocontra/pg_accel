@@ -1,13 +1,14 @@
 ---
 name: pgrx Extension Development
-description: pgrx 0.18 entrypoints for pg_accel — _PG_init ordering, shmem LWLock thread budget, hook registration, GUCs, Custom Scan wiring. GPU-only, forked parallel workers, no CPU worker threads.
+description: pgrx 0.19.1 entrypoints for pg_accel — _PG_init ordering, shmem LWLock thread budget, hook registration, GUCs, Custom Scan wiring. GPU-only, forked parallel workers, no CPU worker threads.
 ---
 
 # pgrx Extension Development for pg_accel
 
 ## Version and crate layout
 
-- pgrx 0.18.1 (`pg_accel/Cargo.toml`).
+- pgrx and pgrx-tests 0.19.1 (`pg_accel/Cargo.toml`), with PG18 as the
+  default feature and PG18/PG19 as the required build and test matrix.
 - Crate root: `pg_accel/src/lib.rs`. Workspace member `pg_accel/` (library cdylib).
 - `pg_module_magic!()` is at `pg_accel/src/lib.rs:66`.
 - `PgHooks` safe trait was removed in pgrx 0.16 — all hooks use raw
@@ -163,7 +164,8 @@ included in the production cdylib.
 
 ## Commands (top-level `Justfile`)
 
-`just test` → the PG18 pgrx test matrix. `just check`, `just lint`, `just fmt`
-for CI. `just package` produces the installable `.so`. Never run
-`cargo pgrx init` in CI — use the Homebrew `pg_config` path (see memory
-reference `reference_pg_install.md`).
+`just test` → the PG18/PG19 pgrx test matrix. `just check`, `just lint`,
+`just fmt` for CI. `just package` produces the installable `.so`. CI must
+initialize each major through `just setup-pgrx <major>`, which binds pgrx to
+the repo's source-built `pg_config`; do not substitute an unrelated global or
+Homebrew PostgreSQL installation.

@@ -36,7 +36,10 @@ Key `Run` flags (`main.rs:54`):
 - `--skip-guc-verify` — dev-only override for `PGC_POSTMASTER` mismatch hard-fail
 - `--workload NAME` / `--category CSV` — filter
 
-Default connection: `host=localhost port=28817 dbname=postgres` (pgrx default for PG17).
+The top-level benchmark recipes default to the PG18 pgrx cluster:
+`host=localhost port=28818 dbname=postgres`. They resolve the port through
+`pg_accel_pgrx_port_for_pg`; direct binary invocations should pass
+`--connection` explicitly.
 
 ## Row Scales
 

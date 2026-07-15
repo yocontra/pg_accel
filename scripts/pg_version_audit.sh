@@ -5,8 +5,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Scan current normative surfaces. Historical changelogs and review backlogs
+# are intentionally excluded so past-version evidence remains intact.
 targets=(
     .tool-versions
+    .claude/rules
+    .claude/skills
     ARCHITECTURE.md
     Justfile
     NOTICE
@@ -37,9 +41,16 @@ if grep -RInE "$pattern" -- "${targets[@]}"; then
     exit 1
 fi
 
+# The pgrx 0.16 mention in the extension skill documents an API removal; 0.18
+# was the stale active toolchain pin and must not reappear as current policy.
 legacy_pgrx_pattern='pgrx[- ]tests[^0-9]*0\.18|cargo-pgrx[^0-9]*0\.18|pgrx[^0-9]*0\.18'
 if grep -RInE "$legacy_pgrx_pattern" -- "${targets[@]}"; then
     echo "error: stale pgrx 0.18 toolchain reference found" >&2
+    exit 1
+fi
+
+if grep -RInE 'artifacts/pg_accel--[0-9]+\.[0-9]+\.[0-9]+-pg' -- .github/workflows; then
+    echo "error: CI schema artifact paths must derive the package version from Cargo metadata" >&2
     exit 1
 fi
 

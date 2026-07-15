@@ -198,7 +198,7 @@ From `pg_accel/src/engine/gucs.rs`:
 | `pg_accel.log_level` | `notice` | Tracing filter. |
 | `pg_accel.max_workers_total` | `0` | Host-thread request budget; current executors do not spawn CPU worker threads. |
 | `pg_accel.assert_dispatch` | `false` | Benchmark-only planner-decline warning guard. |
-| `pg_accel.parallel_fused_count` | `false` | Roadmap knob; current PG18 parallel fused-count shape remains native with `parallel_fused_count_unstable`. |
+| `pg_accel.parallel_fused_count` | `false` | Roadmap knob; the current PG18/PG19 parallel fused-count shape remains native with `parallel_fused_count_unstable`. |
 | `pg_accel.otel_log_max_mb` | `256` | Trace JSONL rotation size cap, not costing. |
 | `pg_accel.otel_log_max_rotations` | `4` | Trace JSONL rotation retention, not costing. |
 | `pg_accel.fp64_enabled` | `true` | Local GUC in `src/lib.rs`; fp64 dispatch kill switch. |

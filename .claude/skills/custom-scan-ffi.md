@@ -5,15 +5,17 @@ description: How to implement PostgreSQL Custom Scan Provider in Rust via unsafe
 
 # Custom Scan Provider FFI for pg_accel
 
-All struct/callback details below are verified against PG 17 (`REL_17_STABLE`
-`src/include/nodes/extensible.h` and `src/include/executor/nodeCustom.h`).
+All struct and callback details below target the supported PG18 and PG19beta1
+ABIs through pgrx 0.19.1's per-major `pg_sys` bindings.
 
 ## Overview
 
 PG's Custom Scan Provider lets extensions inject custom execution nodes into query plans.
-It requires three vtables and two planner hooks, all via unsafe C FFI through pgrx's `pg_sys`.
+pg_accel uses the three Custom Scan vtable types and three planner hooks, all
+through unsafe C FFI via pgrx's `pg_sys`.
 
-**There is NO safe Rust wrapper for any of this.** Everything is `unsafe extern "C"`.
+**There is NO safe Rust wrapper for any of this.** Callbacks use
+`unsafe extern "C-unwind"`.
 
 ## The Three Vtables
 
@@ -78,22 +80,23 @@ _PG_init:
   1. RegisterCustomScanMethods(&GPUACCEL_SCAN_METHODS)
   2. set_rel_pathlist_hook = Some(our_hook)
   3. set_join_pathlist_hook = Some(our_join_hook)
+  4. create_upper_paths_hook = Some(our_upper_hook)
 
 Query Planning:
-  4. PG calls our_hook(root, rel, rti, rte)
-  5. We analyze rel's clauses, create CustomPath, call add_path()
-  6. PG cost-compares our path against built-in paths
-  7. If PG picks ours: calls PlanCustomPath → we return CustomScan
-  8. PG calls CreateCustomScanState → we return CustomScanState
+  5. PG calls the applicable relation, join, or upper-path hook
+  6. We analyze the shape, create CustomPath, call add_path()
+  7. PG cost-compares our path against built-in paths
+  8. If PG picks ours: calls PlanCustomPath → we return CustomScan
+  9. PG calls CreateCustomScanState → we return CustomScanState
 
 Query Execution:
-  9.  PG calls BeginCustomScan → we acquire resources
-  10. PG calls ExecCustomScan repeatedly → we return tuples
-  11. PG calls EndCustomScan → we release resources
-  12. If EXPLAIN: PG calls ExplainCustomScan → we output stats
+  10. PG calls BeginCustomScan → we acquire resources
+  11. PG calls ExecCustomScan repeatedly → we return tuples
+  12. PG calls EndCustomScan → we release resources
+  13. If EXPLAIN: PG calls ExplainCustomScan → we output stats
 ```
 
-## CustomPath / CustomScan Flags (PG 17)
+## CustomPath / CustomScan Flags (PG18/PG19)
 
 Bit mask on `CustomPath.flags` and mirrored on `CustomScan.flags`:
 
@@ -105,7 +108,7 @@ Bit mask on `CustomPath.flags` and mirrored on `CustomScan.flags`:
 
 ## Planner Hooks
 
-PG 17 signatures (from `src/include/optimizer/paths.h`):
+PG18 and PG19 use these signatures from `src/include/optimizer/paths.h`:
 
 ```c
 typedef void (*set_rel_pathlist_hook_type)(
@@ -120,7 +123,7 @@ typedef void (*set_join_pathlist_hook_type)(
 ```rust
 static mut PREV_REL_HOOK: pg_sys::set_rel_pathlist_hook_type = None;
 
-unsafe extern "C" fn gpuaccel_rel_pathlist_hook(
+unsafe extern "C-unwind" fn gpuaccel_rel_pathlist_hook(
     root: *mut pg_sys::PlannerInfo,
     rel: *mut pg_sys::RelOptInfo,
     rti: pg_sys::Index,
@@ -161,7 +164,7 @@ struct GpuAccelScanState {
     rust: *mut GpuAccelRust,         // Box::into_raw
 }
 
-unsafe extern "C" fn create_scan_state(cscan: *mut pg_sys::CustomScan) -> *mut pg_sys::Node {
+unsafe extern "C-unwind" fn create_scan_state(cscan: *mut pg_sys::CustomScan) -> *mut pg_sys::Node {
     // SAFETY: palloc0 zeroes the struct; we fix up type tag + methods below.
     let ess = pg_sys::palloc0(size_of::<GpuAccelScanState>()) as *mut GpuAccelScanState;
     (*ess).css.ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
@@ -170,7 +173,7 @@ unsafe extern "C" fn create_scan_state(cscan: *mut pg_sys::CustomScan) -> *mut p
     ess as *mut pg_sys::Node
 }
 
-unsafe extern "C" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
+unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
     let ess = node as *mut GpuAccelScanState;
     if !(*ess).rust.is_null() {
         drop(Box::from_raw((*ess).rust));  // Rust resources freed
@@ -182,18 +185,19 @@ unsafe extern "C" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
 
 ## PG Version Notes
 
-pg_accel targets PG 17. For reference, PG-version-specific fields in the
-execution-state struct: `CustomScanState.slotOps` (`TupleTableSlotOps *`) was
-added in PG 16 (commit cee1209); `CustomScanState.pscan_len` is the DSM size
-used by the `EstimateDSM` / `InitializeDSM` / `InitializeWorker` parallel
-callbacks. If/when we add back-compat for PG 15/18, the likely drift points are:
+pg_accel targets PG18 and PG19beta1. Version-specific bindings must stay behind
+the matching Cargo feature. Current known differences include PG19's extra
+`flags` argument to `table_beginscan` and removal of `UpperUniquePath`.
+`CustomScanState.pscan_len` remains the DSM size used by the `EstimateDSM`,
+`InitializeDSM`, and `InitializeWorker` parallel callbacks. Likely future drift
+points are:
 
 - `CustomExecMethods` gaining new optional callbacks (new fields appended)
-- `CustomPath` / `CustomScan` adding fields (`custom_restrictinfo` was added
-  relatively recently; present in PG 17)
+- `CustomPath` / `CustomScan` adding or removing fields
 - `ExplainCustomScan` signature stability across explain format changes
 
-Verify against `src/include/nodes/extensible.h` on the target branch.
+Verify against both configured majors' generated `pg_sys` bindings and upstream
+headers before changing shared FFI code.
 
 ## Common Pitfalls
 
