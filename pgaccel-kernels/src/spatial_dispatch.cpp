@@ -176,7 +176,6 @@ struct SpatialPipKernelSlabHeader {
   size_t points_off;
   size_t poly_off;
   size_t rings_off;
-  size_t results_off;
 };
 
 static size_t spatial_align_up(size_t value, size_t alignment) {
@@ -211,8 +210,6 @@ static uint8_t* make_spatial_pip_kernel_slab(sycl::queue& q, const float* points
   if (has_rings) {
     h.rings_off = add(ring_count * sizeof(uint32_t), alignof(uint32_t));
   }
-  h.results_off = add(point_count * sizeof(int8_t), alignof(int8_t));
-
   uint8_t* slab = pgaccel_alloc<uint8_t>(cursor, q);
   if (slab == nullptr)
     return nullptr;
@@ -241,32 +238,41 @@ static uint8_t* make_spatial_pip_kernel_slab(sycl::queue& q, const float* points
   return slab;
 }
 
-template <bool HasRings>
-static void submit_point_in_polygon_simple(sycl::queue& q, uint8_t* slab, size_t point_count) {
-  q.parallel_for(sycl::range<1>(point_count), [=](sycl::id<1> id) {
-     size_t i = id[0];
-     const auto* h = reinterpret_cast<const SpatialPipKernelSlabHeader*>(slab);
-     const auto* pts_ptr = reinterpret_cast<const float*>(slab + h->points_off);
-     const auto* poly_ptr = reinterpret_cast<const float*>(slab + h->poly_off);
-     auto* res_ptr = reinterpret_cast<int8_t*>(slab + h->results_off);
-
-     float px = pts_ptr[i * 2];
-     float py = pts_ptr[i * 2 + 1];
-     constexpr float bbox_tol = 1.0e-4f;
-     if (px < h->bbox[0] - bbox_tol || px > h->bbox[2] + bbox_tol ||
-         py < h->bbox[1] - bbox_tol || py > h->bbox[3] + bbox_tol) {
-       res_ptr[i] = -1;
-       return;
-     }
-     if constexpr (HasRings) {
-       const auto* rings_ptr = reinterpret_cast<const uint32_t*>(slab + h->rings_off);
-       res_ptr[i] = device_point_in_polygon<true>(px, py, poly_ptr, h->poly_coord_count, rings_ptr,
-                                                  h->ring_count);
-     } else {
-       res_ptr[i] =
-           device_point_in_polygon<false>(px, py, poly_ptr, h->poly_coord_count, nullptr, 0);
-     }
-   }).wait_and_throw();
+static pgaccel_status submit_point_in_polygon_simple(sycl::queue& q, uint8_t* slab,
+                                                     size_t point_count, int8_t* results) {
+  int8_t* device_results = sycl::malloc_shared<int8_t>(point_count, q);
+  if (device_results == nullptr)
+    throw std::bad_alloc();
+  try {
+    q.parallel_for(sycl::range<1>(point_count), [=](sycl::id<1> id) {
+       size_t i = id[0];
+       const auto* h = reinterpret_cast<const SpatialPipKernelSlabHeader*>(slab);
+       const auto* pts_ptr = reinterpret_cast<const float*>(slab + h->points_off);
+       const auto* poly_ptr = reinterpret_cast<const float*>(slab + h->poly_off);
+       float px = pts_ptr[i * 2];
+       float py = pts_ptr[i * 2 + 1];
+       constexpr float bbox_tol = 1.0e-4f;
+       if (px < h->bbox[0] - bbox_tol || px > h->bbox[2] + bbox_tol ||
+           py < h->bbox[1] - bbox_tol || py > h->bbox[3] + bbox_tol) {
+         device_results[i] = -1;
+         return;
+       }
+       if (h->has_rings != 0) {
+         const auto* rings_ptr = reinterpret_cast<const uint32_t*>(slab + h->rings_off);
+         device_results[i] = device_point_in_polygon<true>(
+             px, py, poly_ptr, h->poly_coord_count, rings_ptr, h->ring_count);
+       } else {
+         device_results[i] =
+             device_point_in_polygon<false>(px, py, poly_ptr, h->poly_coord_count, nullptr, 0);
+       }
+     }).wait_and_throw();
+    q.memcpy(results, device_results, point_count * sizeof(int8_t)).wait_and_throw();
+    sycl::free(device_results, q);
+    return PGACCEL_OK;
+  } catch (...) {
+    sycl::free(device_results, q);
+    throw;
+  }
 }
 
 /* GPU dispatch: parallel_for over all input points, one thread
@@ -297,20 +303,23 @@ static pgaccel_status sycl_point_in_polygon_simple(const float* points_xy, size_
     if (slab == nullptr) {
       return PGACCEL_OOM;
     }
-
-    if (slab_header.has_rings) {
-      submit_point_in_polygon_simple<true>(*q, slab, point_count);
-    } else {
-      submit_point_in_polygon_simple<false>(*q, slab, point_count);
+    const pgaccel_status submit_status =
+        submit_point_in_polygon_simple(*q, slab, point_count, results);
+    if (submit_status != PGACCEL_OK) {
+      sycl::free(slab, *q);
+      slab = nullptr;
+      return PGACCEL_ERROR;
     }
 
-    pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off),
-                point_count);
     pgaccel_record_gpu_exec();
 
     sycl::free(slab, *q);
     slab = nullptr;
     return PGACCEL_OK;
+  } catch (const std::bad_alloc&) {
+    if (slab)
+      sycl::free(slab, *q);
+    return PGACCEL_OOM;
   } catch (const sycl::exception& e) {
     if (slab)
       sycl::free(slab, *q);
@@ -324,12 +333,16 @@ static pgaccel_status sycl_point_in_polygon_simple(const float* points_xy, size_
   }
 }
 
-template <bool HasRings>
-static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t point_count) {
-  auto nd = sycl::nd_range<1>(sycl::range<1>(point_count * COOP_GROUP_SIZE),
-                              sycl::range<1>(COOP_GROUP_SIZE));
+static pgaccel_status submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab,
+                                                   size_t point_count, int8_t* results) {
+  int8_t* device_results = sycl::malloc_shared<int8_t>(point_count, q);
+  if (device_results == nullptr)
+    throw std::bad_alloc();
+  try {
+    auto nd = sycl::nd_range<1>(sycl::range<1>(point_count * COOP_GROUP_SIZE),
+                                sycl::range<1>(COOP_GROUP_SIZE));
 
-  q.submit([&](sycl::handler& h) {
+    q.submit([&](sycl::handler& h) {
      // Per-group scratch: parity bit, on_edge flag.
      sycl::local_accessor<uint32_t, 1> lparity(sycl::range<1>(1), h);
      sycl::local_accessor<uint32_t, 1> lon_edge(sycl::range<1>(1), h);
@@ -338,12 +351,10 @@ static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t p
        const auto* hdr = reinterpret_cast<const SpatialPipKernelSlabHeader*>(slab);
        const auto* pts_ptr = reinterpret_cast<const float*>(slab + hdr->points_off);
        const auto* poly_ptr = reinterpret_cast<const float*>(slab + hdr->poly_off);
-       const uint32_t* rings_ptr;
-       if constexpr (HasRings) {
+       const uint32_t* rings_ptr = nullptr;
+       if (hdr->has_rings != 0) {
          rings_ptr = reinterpret_cast<const uint32_t*>(slab + hdr->rings_off);
        }
-       auto* res_ptr = reinterpret_cast<int8_t*>(slab + hdr->results_off);
-
        const size_t lid = it.get_local_id(0);
        const size_t pi = it.get_group(0);  // point index
        const size_t gsz = it.get_local_range(0);
@@ -358,7 +369,7 @@ static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t p
        if (px < hdr->bbox[0] - bbox_tol || px > hdr->bbox[2] + bbox_tol ||
            py < hdr->bbox[1] - bbox_tol || py > hdr->bbox[3] + bbox_tol) {
          if (lid == 0) {
-           res_ptr[pi] = -1;
+           device_results[pi] = -1;
          }
          return;
        }
@@ -368,11 +379,11 @@ static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t p
        bool definitive = false;
 
        // Scan each ring cooperatively.
-       const size_t nrings = HasRings ? hdr->ring_count : 1;
+       const size_t nrings = hdr->has_rings != 0 ? hdr->ring_count : 1;
        for (size_t r = 0; !definitive && r < nrings; ++r) {
          size_t start;
          size_t end;
-         if constexpr (HasRings) {
+         if (hdr->has_rings != 0) {
            start = rings_ptr[r];
            end = (r + 1 < hdr->ring_count) ? rings_ptr[r + 1] : hdr->poly_coord_count;
          } else {
@@ -467,10 +478,17 @@ static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t p
        }
 
        if (lid == 0) {
-         res_ptr[pi] = result;
+         device_results[pi] = result;
        }
      });
-   }).wait_and_throw();
+     }).wait_and_throw();
+    q.memcpy(results, device_results, point_count * sizeof(int8_t)).wait_and_throw();
+    sycl::free(device_results, q);
+    return PGACCEL_OK;
+  } catch (...) {
+    sycl::free(device_results, q);
+    throw;
+  }
 }
 
 /* GPU dispatch: one work-group per point, threads in the group share
@@ -503,20 +521,23 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* points_xy, size_t 
     if (slab == nullptr) {
       return PGACCEL_OOM;
     }
-
-    if (slab_header.has_rings) {
-      submit_point_in_polygon_coop<true>(*q, slab, point_count);
-    } else {
-      submit_point_in_polygon_coop<false>(*q, slab, point_count);
+    const pgaccel_status submit_status =
+        submit_point_in_polygon_coop(*q, slab, point_count, results);
+    if (submit_status != PGACCEL_OK) {
+      sycl::free(slab, *q);
+      slab = nullptr;
+      return PGACCEL_ERROR;
     }
 
-    pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off),
-                point_count);
     pgaccel_record_gpu_exec();
 
     sycl::free(slab, *q);
     slab = nullptr;
     return PGACCEL_OK;
+  } catch (const std::bad_alloc&) {
+    if (slab)
+      sycl::free(slab, *q);
+    return PGACCEL_OOM;
   } catch (const sycl::exception& e) {
     if (slab)
       sycl::free(slab, *q);
@@ -566,13 +587,16 @@ struct SpatialPairwiseSlabHeader {
   size_t count;
   size_t geoms_a_off;
   size_t geoms_b_off;
-  size_t results_off;
 };
 
 struct SpatialPairwisePayloadCopy {
   size_t off;
   const void* src;
   size_t bytes;
+};
+
+struct SpatialPairwiseStaging {
+  std::vector<uint8_t> bytes;
 };
 
 static bool spatial_checked_add(size_t a, size_t b, size_t* out) {
@@ -705,6 +729,51 @@ spatial_build_pairwise_meta(const pgaccel_geometry& geom, SpatialPairwiseMeta* m
     meta->ring_count = geom.ring_count;
   }
   return true;
+}
+
+static pgaccel_status spatial_stage_pairwise_inputs(const pgaccel_geometry* geoms_a,
+                                                    const pgaccel_geometry* geoms_b, size_t count,
+                                                    SpatialPairwiseStaging* out) {
+  if (geoms_a == nullptr || geoms_b == nullptr || out == nullptr)
+    return PGACCEL_ERROR;
+
+  size_t meta_bytes = 0;
+  if (!spatial_checked_mul(count, sizeof(SpatialPairwiseMeta), &meta_bytes))
+    return PGACCEL_ERROR;
+
+  SpatialPairwiseSlabHeader header{};
+  header.count = count;
+  size_t cursor = sizeof(SpatialPairwiseSlabHeader);
+  if (!spatial_add_region(&cursor, meta_bytes, alignof(SpatialPairwiseMeta), &header.geoms_a_off) ||
+      !spatial_add_region(&cursor, meta_bytes, alignof(SpatialPairwiseMeta), &header.geoms_b_off)) {
+    return PGACCEL_ERROR;
+  }
+
+  std::vector<SpatialPairwiseMeta> metas_a(count);
+  std::vector<SpatialPairwiseMeta> metas_b(count);
+  std::vector<SpatialPairwisePayloadCopy> copies;
+  std::map<std::pair<uintptr_t, size_t>, size_t> coord_offsets;
+  std::map<std::pair<uintptr_t, size_t>, size_t> ring_offsets;
+  for (size_t i = 0; i < count; ++i) {
+    if (!spatial_build_pairwise_meta(geoms_a[i], &metas_a[i], &cursor, &coord_offsets,
+                                     &ring_offsets, &copies) ||
+        !spatial_build_pairwise_meta(geoms_b[i], &metas_b[i], &cursor, &coord_offsets,
+                                     &ring_offsets, &copies)) {
+      return PGACCEL_ERROR;
+    }
+  }
+
+  const pgaccel_platform_caps caps = pgaccel_get_caps();
+  if (caps.max_alloc_bytes > 0 && cursor > caps.max_alloc_bytes)
+    return PGACCEL_OOM;
+
+  out->bytes.assign(cursor, uint8_t{0});
+  std::memcpy(out->bytes.data(), &header, sizeof(header));
+  std::memcpy(out->bytes.data() + header.geoms_a_off, metas_a.data(), meta_bytes);
+  std::memcpy(out->bytes.data() + header.geoms_b_off, metas_b.data(), meta_bytes);
+  for (const SpatialPairwisePayloadCopy& copy : copies)
+    std::memcpy(out->bytes.data() + copy.off, copy.src, copy.bytes);
+  return PGACCEL_OK;
 }
 
 static int8_t device_pairwise_intersects(const uint8_t* slab, const SpatialPairwiseMeta& a,
@@ -2573,70 +2642,47 @@ extern "C" pgaccel_status pgaccel_spatial_intersects_pairwise(const pgaccel_geom
   if (geoms_a == nullptr || geoms_b == nullptr || results == nullptr)
     return PGACCEL_ERROR;
 
-  size_t meta_bytes = 0;
-  if (!spatial_checked_mul(count, sizeof(SpatialPairwiseMeta), &meta_bytes))
-    return PGACCEL_ERROR;
-
-  SpatialPairwiseSlabHeader header{};
-  header.count = count;
-  size_t cursor = sizeof(SpatialPairwiseSlabHeader);
-  if (!spatial_add_region(&cursor, meta_bytes, alignof(SpatialPairwiseMeta), &header.geoms_a_off) ||
-      !spatial_add_region(&cursor, meta_bytes, alignof(SpatialPairwiseMeta), &header.geoms_b_off) ||
-      !spatial_add_region(&cursor, count, alignof(int8_t), &header.results_off)) {
-    return PGACCEL_ERROR;
-  }
-
-  std::vector<SpatialPairwiseMeta> metas_a(count);
-  std::vector<SpatialPairwiseMeta> metas_b(count);
-  std::vector<SpatialPairwisePayloadCopy> copies;
-  std::map<std::pair<uintptr_t, size_t>, size_t> coord_offsets;
-  std::map<std::pair<uintptr_t, size_t>, size_t> ring_offsets;
-  for (size_t i = 0; i < count; ++i) {
-    if (!spatial_build_pairwise_meta(geoms_a[i], &metas_a[i], &cursor, &coord_offsets,
-                                     &ring_offsets, &copies) ||
-        !spatial_build_pairwise_meta(geoms_b[i], &metas_b[i], &cursor, &coord_offsets,
-                                     &ring_offsets, &copies)) {
-      return PGACCEL_ERROR;
-    }
-  }
-
-  const pgaccel_platform_caps caps = pgaccel_get_caps();
-  if (caps.max_alloc_bytes > 0 && cursor > caps.max_alloc_bytes)
+  SpatialPairwiseStaging staged{};
+  const pgaccel_status staging_status =
+      spatial_stage_pairwise_inputs(geoms_a, geoms_b, count, &staged);
+  if (staging_status == PGACCEL_OOM)
     return PGACCEL_OOM;
-
-  std::vector<uint8_t> staged(cursor, 0);
-  std::memcpy(staged.data(), &header, sizeof(header));
-  std::memcpy(staged.data() + header.geoms_a_off, metas_a.data(), meta_bytes);
-  std::memcpy(staged.data() + header.geoms_b_off, metas_b.data(), meta_bytes);
-  for (const SpatialPairwisePayloadCopy& copy : copies)
-    std::memcpy(staged.data() + copy.off, copy.src, copy.bytes);
+  if (staging_status != PGACCEL_OK)
+    return PGACCEL_ERROR;
 
   sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  uint8_t* slab = pgaccel_alloc<uint8_t>(cursor, *q);
-  if (slab == nullptr)
+  uint8_t* slab = pgaccel_alloc<uint8_t>(staged.bytes.size(), *q);
+  int8_t* device_results = sycl::malloc_shared<int8_t>(count, *q);
+  if (slab == nullptr || device_results == nullptr) {
+    if (slab != nullptr)
+      sycl::free(slab, *q);
+    if (device_results != nullptr)
+      sycl::free(device_results, *q);
     return PGACCEL_OOM;
+  }
 
   try {
-    q->memcpy(slab, staged.data(), cursor).wait_and_throw();
+    q->memcpy(slab, staged.bytes.data(), staged.bytes.size()).wait_and_throw();
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        const auto* local_header = reinterpret_cast<const SpatialPairwiseSlabHeader*>(slab);
        const auto* local_a =
            reinterpret_cast<const SpatialPairwiseMeta*>(slab + local_header->geoms_a_off);
        const auto* local_b =
            reinterpret_cast<const SpatialPairwiseMeta*>(slab + local_header->geoms_b_off);
-       auto* local_results = reinterpret_cast<int8_t*>(slab + local_header->results_off);
        const size_t i = id[0];
-       local_results[i] = device_pairwise_intersects(slab, local_a[i], local_b[i]);
+       device_results[i] = device_pairwise_intersects(slab, local_a[i], local_b[i]);
      }).wait_and_throw();
-    pgaccel_d2h(*q, results, reinterpret_cast<const int8_t*>(slab + header.results_off), count);
+    q->memcpy(results, device_results, count * sizeof(int8_t)).wait_and_throw();
     pgaccel_record_gpu_exec();
     sycl::free(slab, *q);
+    sycl::free(device_results, *q);
     return PGACCEL_OK;
   } catch (...) {
     sycl::free(slab, *q);
+    sycl::free(device_results, *q);
     throw;
   }
 } catch (const std::bad_alloc&) {
