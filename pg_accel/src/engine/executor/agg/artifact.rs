@@ -536,8 +536,16 @@ pub(super) fn artifact_column_refs(spec: &AggQuerySpec) -> Result<Vec<ResidentCo
         insert_column_ref(&mut columns, dimension.dim_key)?;
         collect_filter_column(&dimension.filter, &mut columns)?;
     }
-    if matches!(spec.fact_filter, FilterSpec::Mask { .. }) {
-        collect_filter_column(&spec.fact_filter, &mut columns)?;
+    match &spec.fact_filter {
+        FilterSpec::Mask { .. } => collect_filter_column(&spec.fact_filter, &mut columns)?,
+        FilterSpec::Spatial { left, right, .. } => {
+            for operand in [left, right] {
+                if let Some(column) = operand.column() {
+                    insert_column_ref(&mut columns, column)?;
+                }
+            }
+        }
+        FilterSpec::None | FilterSpec::Ranges { .. } | FilterSpec::Bytecode { .. } => {}
     }
     Ok(columns
         .into_iter()
@@ -835,8 +843,9 @@ pub(crate) fn estimate_descriptor_artifact_bytes_upper_bound(
             kind: MaskKind::Sql,
             ..
         } => add(fact_rows()?, 1)?,
+        FilterSpec::Spatial { .. } => add(fact_rows()?, 1)?,
         FilterSpec::None | FilterSpec::Ranges { .. } => {}
-        FilterSpec::Mask { .. } | FilterSpec::Bytecode { .. } | FilterSpec::Spatial { .. } => {
+        FilterSpec::Mask { .. } | FilterSpec::Bytecode { .. } => {
             return None;
         }
     }
@@ -1013,9 +1022,40 @@ pub(super) fn prepare_spatial_base_artifact(
     spec: &AggQuerySpec,
     requests: &[ResidentColumnRef],
     bundle: ResidentInputBundle<'_>,
+    spatial_column: ResidentColumnRef,
     max_groups: usize,
 ) -> Result<PreparedDerived<PreparedAggArtifact>, String> {
-    prepare_agg_artifact_impl(spec, requests, bundle, max_groups, true)
+    if requests.len() != bundle.columns.len() {
+        return Err("resident spatial base column count changed during preparation".to_owned());
+    }
+    let ResidentInputBundle { columns, evidence } = bundle;
+    let mut base_requests = Vec::with_capacity(requests.len().saturating_sub(1));
+    let mut base_columns = Vec::with_capacity(columns.len().saturating_sub(1));
+    let mut found_spatial = false;
+    for (request, column) in requests.iter().copied().zip(columns) {
+        if request == spatial_column {
+            if found_spatial {
+                return Err("spatial source column request is duplicated".to_owned());
+            }
+            found_spatial = true;
+        } else {
+            base_requests.push(request);
+            base_columns.push(column);
+        }
+    }
+    if !found_spatial {
+        return Err("spatial source column was not requested for artifact preparation".to_owned());
+    }
+    prepare_agg_artifact_impl(
+        spec,
+        &base_requests,
+        ResidentInputBundle {
+            columns: base_columns,
+            evidence,
+        },
+        max_groups,
+        true,
+    )
 }
 
 fn upload<T: Copy>(
@@ -1174,6 +1214,7 @@ mod tests {
     use super::*;
     use crate::engine::spec::{
         AggregateKind, AggregateOutput, AggregateSource, GroupKeyRef, MeasureExpr, MeasureSpec,
+        SpatialOperand, SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
     };
 
     fn column(relation_oid: u32, type_oid: u32) -> ColumnRef {
@@ -1219,6 +1260,28 @@ mod tests {
             fact_filter: FilterSpec::None,
             star_dims: Vec::new(),
             having: None,
+        }
+    }
+
+    fn spatial_filter() -> FilterSpec {
+        let metadata = SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: -1,
+            srid: Some(4_326),
+        };
+        let mut spatial_column = column(100, 60_001);
+        spatial_column.attno = 2;
+        FilterSpec::Spatial {
+            predicate: SpatialPredicateKind::Intersects,
+            left: SpatialOperand::Column {
+                column: spatial_column,
+                metadata,
+            },
+            right: SpatialOperand::Constant {
+                metadata,
+                bytes: vec![1_u8].into_boxed_slice(),
+            },
+            distance: None,
         }
     }
 
@@ -1288,6 +1351,43 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(u32::from(refs[0].relid), 100);
         assert_eq!(refs[0].attno, 1);
+    }
+
+    #[test]
+    fn spatial_artifact_estimator_adds_exact_mask_bytes_and_fails_on_overflow() {
+        let mut spec = count_star_spec();
+        spec.fact_filter = spatial_filter();
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(&spec, &BTreeMap::from([(100, 123)])),
+            Some(123)
+        );
+        let refs = artifact_column_refs(&spec).expect("spatial source should be resident");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(u32::from(refs[0].relid), 100);
+        assert_eq!(refs[0].attno, 2);
+
+        spec.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::FactColumn(column(100, INT4OID)),
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(&spec, &BTreeMap::from([(100, 123)])),
+            Some(123 * 5),
+            "four-byte base key plus one-byte spatial mask"
+        );
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(
+                &spec,
+                &BTreeMap::from([(100, u64::MAX / 4)])
+            ),
+            None
+        );
+        assert_eq!(
+            estimate_descriptor_artifact_bytes_upper_bound(&spec, &BTreeMap::new()),
+            None
+        );
     }
 
     #[test]

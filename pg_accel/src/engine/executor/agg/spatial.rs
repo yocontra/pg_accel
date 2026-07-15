@@ -1,7 +1,5 @@
 //! Store-neutral preparation and accounting for resident spatial aggregates.
 
-#![allow(dead_code)] // reason: descriptor dispatch consumes this bounded checkpoint next
-
 use std::any::Any;
 
 use pgrx::pg_sys;
@@ -249,7 +247,6 @@ pub(super) fn spatial_preflight(
 
 #[derive(Debug, Clone)]
 pub(super) struct SpatialTransformPlan {
-    column: ColumnRef,
     column_request: ResidentColumnRef,
     column_is_left: bool,
     predicate: ResidentSpatialPredicate,
@@ -376,7 +373,6 @@ impl SpatialTransformPlan {
         let attno = i16::try_from(column.attno)
             .map_err(|_| "spatial aggregate attribute number exceeds int16".to_owned())?;
         Ok(Self {
-            column,
             column_request: ResidentColumnRef {
                 relid: pg_sys::Oid::from(column.relation_oid),
                 attno,
@@ -398,6 +394,20 @@ impl SpatialTransformPlan {
 
     pub const fn column_request(&self) -> ResidentColumnRef {
         self.column_request
+    }
+
+    pub(super) fn verify_catalog(&self) -> Result<(), ResidentLoadError> {
+        // SAFETY: descriptor ensure/finalize runs synchronously on PostgreSQL's
+        // main backend thread.
+        let current = unsafe { resolve_postgis_catalog() }.map_err(ResidentLoadError::Loader)?;
+        if current.geometry_type_oid != self.geometry_type_oid
+            || current.fingerprint_words.as_slice() != self.catalog_fingerprint.as_ref()
+        {
+            return Err(ResidentLoadError::Loader(
+                "PostGIS catalog identity changed during spatial artifact construction".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn evidence_rows(
@@ -501,27 +511,20 @@ impl SpatialTransformPlan {
         )?;
         let mut base_spec = spec.clone();
         base_spec.fact_filter = FilterSpec::None;
-        let prepared = prepare_spatial_base_artifact(&base_spec, requests, inputs, self.max_groups)
-            .map_err(ResidentLoadError::Loader)?;
+        let prepared = prepare_spatial_base_artifact(
+            &base_spec,
+            requests,
+            inputs,
+            self.column_request,
+            self.max_groups,
+        )
+        .map_err(ResidentLoadError::Loader)?;
         validate_prepared_base_device_bytes(&preflight, prepared.device_bytes)?;
         Ok(SpatialPreparedSnapshot {
             preflight,
             prepared_base: prepared.prepared,
             exact,
         })
-    }
-
-    fn verify_catalog(&self) -> Result<(), ResidentLoadError> {
-        // SAFETY: staged finalize runs synchronously on PostgreSQL's main backend thread.
-        let current = unsafe { resolve_postgis_catalog() }.map_err(ResidentLoadError::Loader)?;
-        if current.geometry_type_oid != self.geometry_type_oid
-            || current.fingerprint_words.as_slice() != self.catalog_fingerprint.as_ref()
-        {
-            return Err(ResidentLoadError::Loader(
-                "PostGIS catalog identity changed during spatial artifact construction".to_owned(),
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -578,7 +581,12 @@ impl SpatialAggArtifact {
         base: DescriptorAggArtifact,
         final_mask: Option<ExprDeviceBuffer<i8>>,
     ) -> Result<Self, &'static str> {
-        if final_mask.as_ref().map_or(0, ExprDeviceBuffer::len) != base.fact_rows {
+        let mask_shape_matches = if base.fact_rows == 0 {
+            final_mask.is_none()
+        } else {
+            final_mask.as_ref().map(ExprDeviceBuffer::len) == Some(base.fact_rows)
+        };
+        if !mask_shape_matches {
             return Err("spatial SQL mask length does not match fact rows");
         }
         let mask_bytes = checked_mul(base.fact_rows, std::mem::size_of::<i8>())
@@ -702,7 +710,12 @@ impl SpatialWorkspace {
         prepare_spatial_resident().map_err(ResidentLoadError::Gpu)?;
         let mut base =
             DescriptorAggArtifact::build(prepared_base).map_err(ResidentLoadError::Loader)?;
-        base.resolved_spec = spec.clone();
+        base.resolved_spec.fact_filter = spec.fact_filter.clone();
+        base.resolved_spec.validate().map_err(|error| {
+            ResidentLoadError::Loader(format!(
+                "resolved spatial aggregate spec is invalid: {error}"
+            ))
+        })?;
         validate_prepared_base_device_bytes(&preflight, base.device_bytes())?;
         let constant_bytes = spatial_constant_bytes(spec).ok_or_else(|| {
             ResidentLoadError::Loader(
@@ -892,6 +905,10 @@ impl SpatialWorkspace {
                 self.borrow_failure = Some(SpatialBorrowFailure::RequestConstruction);
                 return;
             };
+            if max_referenced_bytes > self.preflight.max_referenced_bytes {
+                self.borrow_failure = Some(SpatialBorrowFailure::RequestConstruction);
+                return;
+            }
             let Ok(request) = PgaccelSpatialResidentRequest::boolean_device(
                 plan.predicate,
                 plan.distance_threshold,

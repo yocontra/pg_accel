@@ -1572,6 +1572,11 @@ mod tests {
             distance: None,
         };
         let encoded = spec.encode_i32().expect("spatial constant encodes");
+        assert_eq!(
+            AggQuerySpec::decode_i32(&encoded).expect("spatial AQS3 decodes"),
+            spec,
+            "spatial AQS3 round-trip must preserve exact operand metadata and bytes"
+        );
         let payload_index = encoded
             .iter()
             .position(|word| *word as u32 == 0x0033_2211)

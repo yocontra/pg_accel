@@ -12,17 +12,20 @@ use super::artifact::{
     prepare_agg_artifact,
 };
 use super::output::{DescriptorAggOutput, validate_h3_compact_key_buffers};
+use super::spatial::{SpatialAggArtifact, SpatialTransformPlan, SpatialWorkspace};
+use crate::engine::ffi::syscache::{PostgisCatalogIdentity, resolve_postgis_catalog};
 use crate::engine::residency::{
     ArtifactEnsureOutcome, DerivedArtifactIdentity, ResidentByteAccounting, ResidentColumnRef,
     ResidentColumnView, ResidentLoadError, ResidentRelationEvidence, ResolvedDerivedInputs,
     SelectedRelation, ensure_derived_artifact, ensure_device_derived_artifact,
-    ensure_selected_relations, with_derived_artifact_inputs,
+    ensure_selected_relations, ensure_staged_device_transform_artifact,
+    with_derived_artifact_inputs,
 };
 use crate::engine::spec::abi;
 use crate::engine::spec::{
     AggOutputProjection, AggQuerySpec, AggregateKind, AggregateSource, BinaryMeasureOp, ColumnRef,
     FilterSpec, GroupKeyEncoding, GroupKeySource, JoinMultiplicity, MaskKind, MeasureExpr,
-    ScalarValue,
+    ScalarValue, SpatialOperand,
 };
 use crate::gpu::{
     GpuError, GpuErrorDomain, GpuOperation, GpuStatusDetail, GroupedAggOutcome,
@@ -65,7 +68,12 @@ fn is_supported_group_type(type_oid: u32) -> bool {
     )
 }
 
-fn validate_filter(filter: &FilterSpec, relation_oid: u32, dimension: bool) -> Result<(), String> {
+fn validate_filter(
+    filter: &FilterSpec,
+    relation_oid: u32,
+    dimension: bool,
+    allow_internal_spatial: bool,
+) -> Result<(), String> {
     match filter {
         FilterSpec::None => Ok(()),
         FilterSpec::Ranges { input, .. }
@@ -101,6 +109,7 @@ fn validate_filter(filter: &FilterSpec, relation_oid: u32, dimension: bool) -> R
             input,
             kind: MaskKind::Sql,
         } if input.relation_oid == relation_oid && input.type_oid == BOOLOID => Ok(()),
+        FilterSpec::Spatial { .. } if !dimension && allow_internal_spatial => Ok(()),
         _ if dimension => Err("dimension filter is outside the Phase 5D descriptor subset".into()),
         _ => Err("fact filter is outside the Phase 5D descriptor subset".into()),
     }
@@ -257,9 +266,10 @@ fn validate_h3_runtime_capability(
     Ok(())
 }
 
-pub(super) fn validate_runtime_capability(
+fn validate_runtime_capability_with_spatial(
     spec: &AggQuerySpec,
     projection: &AggOutputProjection,
+    allow_internal_spatial: bool,
 ) -> Result<(), String> {
     spec.validate()
         .map_err(|error| format!("invalid aggregate query spec: {error}"))?;
@@ -308,9 +318,19 @@ pub(super) fn validate_runtime_capability(
             INT8OID => return Err("INT8 star joins are not implemented by Phase 5D".into()),
             type_oid => return Err(format!("join type OID {type_oid} is unsupported")),
         }
-        validate_filter(&dimension.filter, dimension.relation_oid, true)?;
+        validate_filter(
+            &dimension.filter,
+            dimension.relation_oid,
+            true,
+            allow_internal_spatial,
+        )?;
     }
-    validate_filter(&spec.fact_filter, spec.fact_rel, false)?;
+    validate_filter(
+        &spec.fact_filter,
+        spec.fact_rel,
+        false,
+        allow_internal_spatial,
+    )?;
     for measure in &spec.measures {
         if !matches!(measure.filter, FilterSpec::None) {
             return Err("aggregate FILTER is not implemented by Phase 5D".into());
@@ -339,6 +359,20 @@ pub(super) fn validate_runtime_capability(
         }
     }
     Ok(())
+}
+
+pub(super) fn validate_runtime_capability(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+) -> Result<(), String> {
+    validate_runtime_capability_with_spatial(spec, projection, false)
+}
+
+fn validate_internal_runtime_capability(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+) -> Result<(), String> {
+    validate_runtime_capability_with_spatial(spec, projection, true)
 }
 
 fn validate_catalog_contract(
@@ -440,6 +474,20 @@ fn validate_catalog_contract(
     for dimension in &spec.star_dims {
         validate_column(dimension.fact_key, dimension.collation_oid)?;
         validate_column(dimension.dim_key, dimension.collation_oid)?;
+    }
+    if let FilterSpec::Spatial { left, right, .. } = &spec.fact_filter {
+        for operand in [left, right] {
+            let SpatialOperand::Column { column, metadata } = operand else {
+                continue;
+            };
+            let actual_typmod = validate_column(*column, 0)?;
+            if actual_typmod != metadata.typmod {
+                return Err(format!(
+                    "spatial column ({}, {}) catalog typmod {actual_typmod} does not match planned typmod {}",
+                    column.relation_oid, column.attno, metadata.typmod
+                ));
+            }
+        }
     }
     for slot in &projection.slots {
         if let crate::engine::spec::AggOutputSource::GroupKey { key_index } = slot.source {
@@ -613,7 +661,7 @@ fn dependency_relids(spec: &AggQuerySpec) -> Vec<pg_sys::Oid> {
 }
 
 /// Begin-time plan for a generic childless aggregate.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum DescriptorArtifactKind {
     Dense,
     H3Parent {
@@ -621,6 +669,44 @@ enum DescriptorArtifactKind {
         resolution: i32,
         max_chunk_rows: usize,
     },
+    Spatial(SpatialTransformPlan),
+}
+
+fn descriptor_artifact_identity(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+    catalog_fingerprint: &[i32],
+) -> Result<DerivedArtifactIdentity, String> {
+    let mut identity_words = spec
+        .encode_i32()
+        .map_err(|error| format!("could not encode aggregate query spec: {error}"))?;
+    identity_words.extend(
+        projection
+            .encode_i32(spec)
+            .map_err(|error| format!("could not encode aggregate projection: {error}"))?,
+    );
+    identity_words.extend_from_slice(catalog_fingerprint);
+    Ok(DerivedArtifactIdentity::from_canonical_words(
+        identity_words,
+    ))
+}
+
+fn spatial_artifact_kind(
+    spec: &AggQuerySpec,
+    catalog: &PostgisCatalogIdentity,
+    max_groups: usize,
+) -> Result<DescriptorArtifactKind, String> {
+    Ok(DescriptorArtifactKind::Spatial(SpatialTransformPlan::new(
+        spec, catalog, max_groups,
+    )?))
+}
+
+fn verify_catalog_before_artifact_ensure<T>(
+    verify_catalog: impl FnOnce() -> Result<(), ResidentLoadError>,
+    ensure_artifact: impl FnOnce() -> Result<T, ResidentLoadError>,
+) -> Result<T, ResidentLoadError> {
+    verify_catalog()?;
+    ensure_artifact()
 }
 
 pub(super) struct DescriptorAggPlan {
@@ -752,41 +838,48 @@ fn selected_fact_rows(
 
 impl DescriptorAggPlan {
     pub(super) fn new(spec: AggQuerySpec, projection: AggOutputProjection) -> Result<Self, String> {
-        validate_runtime_capability(&spec, &projection)?;
+        validate_internal_runtime_capability(&spec, &projection)?;
         validate_catalog_contract(&spec, &projection)?;
-        let mut identity_words = spec
-            .encode_i32()
-            .map_err(|error| format!("could not encode aggregate query spec: {error}"))?;
-        identity_words.extend(
-            projection
-                .encode_i32(&spec)
-                .map_err(|error| format!("could not encode aggregate projection: {error}"))?,
-        );
-        if let Some((cell, _, result_type_oid)) = h3_parent_group(&spec) {
-            // SAFETY: executor Begin runs on PostgreSQL's main backend thread.
-            let catalog = unsafe { crate::engine::ffi::syscache::resolve_h3_catalog() }?;
-            if u32::from(catalog.type_oid) != cell.type_oid || cell.type_oid != result_type_oid {
-                return Err("H3 catalog identity changed after validation".to_owned());
-            }
-            identity_words.extend(catalog.fingerprint_words);
-        }
+        let limits = crate::engine::cost::device_limits();
+        let (artifact_kind, catalog_fingerprint) =
+            if let Some((cell, resolution, result_type_oid)) = h3_parent_group(&spec) {
+                // SAFETY: executor Begin runs on PostgreSQL's main backend thread.
+                let catalog = unsafe { crate::engine::ffi::syscache::resolve_h3_catalog() }?;
+                if u32::from(catalog.type_oid) != cell.type_oid || cell.type_oid != result_type_oid
+                {
+                    return Err("H3 catalog identity changed after validation".to_owned());
+                }
+                (
+                    DescriptorArtifactKind::H3Parent {
+                        cell,
+                        resolution,
+                        max_chunk_rows: limits.gpu_h3_max_chunk_rows,
+                    },
+                    catalog.fingerprint_words,
+                )
+            } else if matches!(spec.fact_filter, FilterSpec::Spatial { .. }) {
+                // SAFETY: executor Begin runs on PostgreSQL's main backend thread.
+                let catalog = unsafe { resolve_postgis_catalog() }?;
+                let artifact_kind =
+                    spatial_artifact_kind(&spec, &catalog, limits.gpu_hash_agg_max_groups)?;
+                (artifact_kind, catalog.fingerprint_words)
+            } else {
+                (DescriptorArtifactKind::Dense, Vec::new())
+            };
+        let identity = descriptor_artifact_identity(&spec, &projection, &catalog_fingerprint)?;
         let selected = selected_relations(&spec)?;
         let dependencies = dependency_relids(&spec);
         let artifact_columns = artifact_column_refs(&spec)?;
+        if let DescriptorArtifactKind::Spatial(plan) = &artifact_kind
+            && !artifact_columns.contains(&plan.column_request())
+        {
+            return Err("spatial source column is missing from artifact requests".to_owned());
+        }
         let dispatch_columns = dispatch_column_refs(&spec)?;
-        let limits = crate::engine::cost::device_limits();
-        let artifact_kind = h3_parent_group(&spec).map_or(
-            DescriptorArtifactKind::Dense,
-            |(cell, resolution, _)| DescriptorArtifactKind::H3Parent {
-                cell,
-                resolution,
-                max_chunk_rows: limits.gpu_h3_max_chunk_rows,
-            },
-        );
         Ok(Self {
             spec,
             projection,
-            identity: DerivedArtifactIdentity::from_canonical_words(identity_words),
+            identity,
             selected,
             dependencies,
             artifact_columns,
@@ -810,7 +903,7 @@ impl DescriptorAggPlan {
         let preparation_started = Instant::now();
         let selected = ensure_selected_relations(&self.selected)?;
         let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
-        let (artifact_outcome, relations, artifact_bytes) = match self.artifact_kind {
+        let (artifact_outcome, relations, artifact_bytes) = match &self.artifact_kind {
             DescriptorArtifactKind::Dense => {
                 let outcome = ensure_derived_artifact(
                     owner_relid,
@@ -851,7 +944,7 @@ impl DescriptorAggPlan {
                     .checked_mul(std::mem::size_of::<u64>())
                     .and_then(|bytes| u64::try_from(bytes).ok())
                     .ok_or_else(|| "derived H3 parent byte count overflow".to_owned())?;
-                let group_capacity = h3_group_capacity(fact_rows, resolution, self.max_groups)?;
+                let group_capacity = h3_group_capacity(fact_rows, *resolution, self.max_groups)?;
                 let declared = ResidentByteAccounting {
                     device_bytes,
                     retained_host_exact_bytes: 0,
@@ -863,7 +956,7 @@ impl DescriptorAggPlan {
                     &self.artifact_columns,
                     declared,
                     |bundle| {
-                        let view = find_view(&self.artifact_columns, &bundle.columns, cell)?;
+                        let view = find_view(&self.artifact_columns, &bundle.columns, *cell)?;
                         let (cells, nulls) = match view {
                             ResidentColumnView::Empty { type_oid }
                                 if fact_rows == 0 && u32::from(*type_oid) == cell.type_oid =>
@@ -899,7 +992,7 @@ impl DescriptorAggPlan {
                             )
                         };
                         if fact_rows != 0 {
-                            if max_chunk_rows == 0 {
+                            if *max_chunk_rows == 0 {
                                 return Err(ResidentLoadError::Loader(
                                     "H3 device chunk limit is zero".to_owned(),
                                 ));
@@ -907,8 +1000,8 @@ impl DescriptorAggPlan {
                             let output = parents.as_ref().ok_or_else(|| {
                                 "nonempty H3 parent artifact has no output".to_owned()
                             })?;
-                            for offset in (0..fact_rows).step_by(max_chunk_rows) {
-                                let count = (fact_rows - offset).min(max_chunk_rows);
+                            for offset in (0..fact_rows).step_by(*max_chunk_rows) {
+                                let count = (fact_rows - offset).min(*max_chunk_rows);
                                 // SAFETY: the matched resident/output buffers each have
                                 // `fact_rows` elements and this chunk stays in bounds.
                                 let chunk_cells = unsafe { cells.add(offset) };
@@ -927,7 +1020,7 @@ impl DescriptorAggPlan {
                                         chunk_cells,
                                         chunk_nulls,
                                         count,
-                                        resolution,
+                                        *resolution,
                                         chunk_parents,
                                     )
                                 }
@@ -950,6 +1043,41 @@ impl DescriptorAggPlan {
                 )?;
                 (outcome, relations, bytes)
             }
+            DescriptorArtifactKind::Spatial(plan) => {
+                let outcome = verify_catalog_before_artifact_ensure(
+                    || plan.verify_catalog(),
+                    || {
+                        ensure_staged_device_transform_artifact(
+                            owner_relid,
+                            &self.identity,
+                            &self.dependencies,
+                            &self.artifact_columns,
+                            |bundle| plan.preflight(&self.spec, &self.artifact_columns, bundle),
+                            |preflight, bundle| {
+                                plan.snapshot_prepare(
+                                    &self.spec,
+                                    &self.artifact_columns,
+                                    preflight,
+                                    bundle,
+                                )
+                            },
+                            |snapshot| SpatialWorkspace::build(plan, &self.spec, snapshot),
+                            |workspace, bundle| {
+                                workspace.launch(plan, bundle);
+                                Ok(())
+                            },
+                            |workspace| workspace.finalize(plan, &self.spec),
+                        )
+                    },
+                )?;
+                let (relations, bytes) = with_derived_artifact_inputs::<SpatialAggArtifact, _>(
+                    owner_relid,
+                    &self.identity,
+                    &[],
+                    |inputs| (inputs.evidence, inputs.device_bytes),
+                )?;
+                (outcome, relations, bytes)
+            }
         };
         Ok(DescriptorResidencyReport {
             artifact_outcome,
@@ -965,7 +1093,7 @@ impl DescriptorAggPlan {
     fn execute_once(
         &self,
     ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
-        match self.artifact_kind {
+        match &self.artifact_kind {
             DescriptorArtifactKind::Dense => {
                 with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
                     pg_sys::Oid::from(self.spec.fact_rel),
@@ -974,13 +1102,24 @@ impl DescriptorAggPlan {
                     |inputs| build_and_execute(inputs, &self.dispatch_columns, &self.projection),
                 )
             }
-            DescriptorArtifactKind::H3Parent { cell, .. } => {
-                with_derived_artifact_inputs::<H3ParentArtifact, _>(
+            DescriptorArtifactKind::H3Parent { cell, .. } => with_derived_artifact_inputs::<
+                H3ParentArtifact,
+                _,
+            >(
+                pg_sys::Oid::from(self.spec.fact_rel),
+                &self.identity,
+                &self.dispatch_columns,
+                |inputs| {
+                    build_and_execute_h3(inputs, &self.dispatch_columns, *cell, &self.projection)
+                },
+            ),
+            DescriptorArtifactKind::Spatial(_) => {
+                with_derived_artifact_inputs::<SpatialAggArtifact, _>(
                     pg_sys::Oid::from(self.spec.fact_rel),
                     &self.identity,
                     &self.dispatch_columns,
                     |inputs| {
-                        build_and_execute_h3(inputs, &self.dispatch_columns, cell, &self.projection)
+                        build_and_execute_spatial(inputs, &self.dispatch_columns, &self.projection)
                     },
                 )
             }
@@ -1243,31 +1382,34 @@ fn filter_measure_binding(spec: &AggQuerySpec, input: ColumnRef) -> Result<usize
         .ok_or_else(|| "fact range input has no descriptor measure binding".to_owned())
 }
 
+fn build_sql_mask_filter(
+    fact_rows: usize,
+    mask: Option<*const i8>,
+) -> Result<abi::PgaccelGroupedAggFilter, String> {
+    if fact_rows == 0 {
+        return Ok(disabled_filter());
+    }
+    let mask = mask
+        .filter(|mask| !mask.is_null())
+        .ok_or_else(|| "nonempty SQL fact mask has no derived device buffer".to_owned())?;
+    let mut filter = disabled_filter();
+    filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+    filter.mask = mask;
+    Ok(filter)
+}
+
 fn build_filter(
     spec: &AggQuerySpec,
-    artifact: &DescriptorAggArtifact,
+    fact_rows: usize,
+    fact_mask: Option<*const i8>,
 ) -> Result<abi::PgaccelGroupedAggFilter, String> {
     match &spec.fact_filter {
         FilterSpec::None => Ok(disabled_filter()),
         FilterSpec::Mask {
             kind: MaskKind::Sql,
             ..
-        } if artifact.fact_rows == 0 => Ok(disabled_filter()),
-        FilterSpec::Mask {
-            kind: MaskKind::Sql,
-            ..
-        } => {
-            let mut filter = disabled_filter();
-            filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
-            filter.mask = artifact
-                .fact_mask
-                .as_ref()
-                .map_or(std::ptr::null(), |mask| mask.as_ptr());
-            if filter.mask.is_null() {
-                return Err("nonempty SQL fact mask has no derived device buffer".into());
-            }
-            Ok(filter)
         }
+        | FilterSpec::Spatial { .. } => build_sql_mask_filter(fact_rows, fact_mask),
         FilterSpec::Ranges { input, ranges } => {
             let mut filter = disabled_filter();
             filter.predicate_measure_slot = i32::try_from(filter_measure_binding(spec, *input)?)
@@ -1285,10 +1427,11 @@ fn build_filter(
     }
 }
 
-fn build_descriptor(
+fn build_descriptor_with_fact_mask(
     artifact: &DescriptorAggArtifact,
     requests: &[ResidentColumnRef],
     views: &[ResidentColumnView<'_>],
+    fact_mask: Option<*const i8>,
 ) -> Result<abi::PgaccelGroupedAggDesc, String> {
     let spec = &artifact.resolved_spec;
     if artifact.keys.len() != spec.group_keys.len()
@@ -1413,7 +1556,7 @@ fn build_descriptor(
             pad0: 0,
         };
     }
-    desc.where_filter = build_filter(spec, artifact)?;
+    desc.where_filter = build_filter(spec, artifact.fact_rows, fact_mask)?;
     for filter in &mut desc.measure_filters {
         *filter = disabled_filter();
     }
@@ -1445,6 +1588,52 @@ fn build_descriptor(
         };
     }
     Ok(desc)
+}
+
+fn build_descriptor(
+    artifact: &DescriptorAggArtifact,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+) -> Result<abi::PgaccelGroupedAggDesc, String> {
+    build_descriptor_with_fact_mask(
+        artifact,
+        requests,
+        views,
+        artifact.fact_mask.as_ref().map(|mask| mask.as_ptr()),
+    )
+}
+
+fn build_spatial_descriptor(
+    artifact: &SpatialAggArtifact,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+) -> Result<abi::PgaccelGroupedAggDesc, String> {
+    let fact_mask = spatial_final_mask_binding(
+        artifact.base.fact_rows,
+        artifact
+            .final_mask
+            .as_ref()
+            .map(|mask| (mask.len(), mask.as_ptr())),
+    )?;
+    build_descriptor_with_fact_mask(&artifact.base, requests, views, fact_mask)
+}
+
+fn spatial_final_mask_binding(
+    fact_rows: usize,
+    mask: Option<(usize, *const i8)>,
+) -> Result<Option<*const i8>, String> {
+    match (fact_rows, mask) {
+        (0, None) => Ok(None),
+        (0, Some(_)) => Err("empty spatial artifact unexpectedly retained a final mask".to_owned()),
+        (_, None) => Err("nonempty spatial artifact has no final mask".to_owned()),
+        (rows, Some((len, _))) if len != rows => Err(format!(
+            "spatial final mask length {len} does not match fact rows {rows}"
+        )),
+        (_, Some((_, mask))) if mask.is_null() => {
+            Err("nonempty spatial final mask has a null device pointer".to_owned())
+        }
+        (_, Some((_, mask))) => Ok(Some(mask)),
+    }
 }
 
 fn build_h3_descriptor(
@@ -1557,6 +1746,41 @@ fn build_and_execute(
     Ok(DescriptorAggDispatch {
         output,
         fact_rows: inputs.artifact.fact_rows,
+        dispatch_time_us,
+        residency: None,
+    })
+}
+
+fn build_and_execute_spatial(
+    inputs: ResolvedDerivedInputs<'_, SpatialAggArtifact>,
+    requests: &[ResidentColumnRef],
+    projection: &AggOutputProjection,
+) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
+    let desc = build_spatial_descriptor(inputs.artifact, requests, &inputs.columns)
+        .map_err(DescriptorAggExecutionError::Failure)?;
+    // SAFETY: the composite artifact owns the base descriptor lanes and final
+    // SQL mask for the duration of this synchronous residency callback.
+    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
+        .map_err(|error| gpu_execution_error("spatial aggregate descriptor rejected", error))?;
+    let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
+        gpu_execution_error("spatial aggregate output allocation failed", error)
+    })?;
+    let dispatch_started = Instant::now();
+    let outcome = execute_grouped_agg_one_shot(&plan, &mut storage)
+        .map_err(|error| gpu_execution_error("spatial aggregate kernel failed", error))?;
+    let dispatch_time_us =
+        u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let output = DescriptorAggOutput::new(
+        storage,
+        outcome,
+        inputs.artifact.base.domains.clone(),
+        inputs.artifact.base.resolved_spec.clone(),
+        projection.clone(),
+    )
+    .map_err(DescriptorAggExecutionError::Failure)?;
+    Ok(DescriptorAggDispatch {
+        output,
+        fact_rows: inputs.artifact.base.fact_rows,
         dispatch_time_us,
         residency: None,
     })
@@ -1691,7 +1915,11 @@ mod tests {
     use super::*;
     use crate::engine::spec::{
         AggOutputSlot, AggOutputSource, AggregateOutput, GroupKeyRef, MeasureSpec,
+        SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
     };
+
+    const TEST_GEOMETRY_OID: u32 = 60_001;
+    const TEST_SRID: i32 = 4_326;
 
     fn column(type_oid: u32) -> ColumnRef {
         ColumnRef {
@@ -1777,6 +2005,172 @@ mod tests {
             ],
         };
         (spec, projection)
+    }
+
+    fn geometry_typmod(geometry_type: u32, srid: i32) -> i32 {
+        (srid << 8) | i32::try_from(geometry_type).expect("geometry tag fits i32") << 2
+    }
+
+    fn polygon_bytes(srid: i32) -> Box<[u8]> {
+        let srid = u32::try_from(srid).expect("test SRID is nonnegative");
+        let mut bytes = vec![
+            0,
+            0,
+            0,
+            0,
+            ((srid >> 16) & 0xff) as u8,
+            ((srid >> 8) & 0xff) as u8,
+            (srid & 0xff) as u8,
+            0,
+        ];
+        bytes.extend_from_slice(&crate::engine::residency::RESIDENT_GEOMETRY_POLYGON.to_le_bytes());
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        for (x, y) in [(0.0_f64, 0.0_f64), (4.0, 0.0), (0.0, 4.0), (0.0, 0.0)] {
+            bytes.extend_from_slice(&x.to_le_bytes());
+            bytes.extend_from_slice(&y.to_le_bytes());
+        }
+        bytes.into_boxed_slice()
+    }
+
+    fn spatial_count_shape() -> (AggQuerySpec, AggOutputProjection) {
+        let mut spec = spec(MeasureExpr::CountStar, AggregateKind::Count);
+        spec.fact_filter = FilterSpec::Spatial {
+            predicate: SpatialPredicateKind::Intersects,
+            left: SpatialOperand::Column {
+                column: column(TEST_GEOMETRY_OID),
+                metadata: SpatialValueMetadata {
+                    kind: SpatialValueKind::Geometry,
+                    typmod: geometry_typmod(
+                        crate::engine::residency::RESIDENT_GEOMETRY_POINT,
+                        TEST_SRID,
+                    ),
+                    srid: Some(TEST_SRID),
+                },
+            },
+            right: SpatialOperand::Constant {
+                metadata: SpatialValueMetadata {
+                    kind: SpatialValueKind::Geometry,
+                    typmod: -1,
+                    srid: Some(TEST_SRID),
+                },
+                bytes: polygon_bytes(TEST_SRID),
+            },
+            distance: None,
+        };
+        (
+            spec,
+            projection(AggregateKind::Count, 0, u32::from(pg_sys::INT8OID)),
+        )
+    }
+
+    fn postgis_catalog(fingerprint_words: Vec<i32>) -> PostgisCatalogIdentity {
+        PostgisCatalogIdentity {
+            extension_oid: pg_sys::Oid::from(1_u32),
+            schema_oid: pg_sys::Oid::from(2_u32),
+            geometry_type_oid: pg_sys::Oid::from(TEST_GEOMETRY_OID),
+            intersects_fn_oid: pg_sys::Oid::from(10_u32),
+            contains_fn_oid: pg_sys::Oid::from(11_u32),
+            within_fn_oid: pg_sys::Oid::from(12_u32),
+            dwithin_fn_oid: pg_sys::Oid::from(13_u32),
+            distance_fn_oid: pg_sys::Oid::from(14_u32),
+            is_valid_fn_oid: pg_sys::Oid::from(15_u32),
+            fingerprint_words,
+        }
+    }
+
+    #[test]
+    fn spatial_capability_is_internal_while_planner_validation_stays_dark() {
+        let (spec, projection) = spatial_count_shape();
+        assert!(validate_runtime_capability(&spec, &projection).is_err());
+        validate_internal_runtime_capability(&spec, &projection)
+            .expect("executor-internal spatial capability should bind");
+    }
+
+    #[test]
+    fn spatial_kind_requests_source_and_fingerprint_changes_identity() {
+        let (spec, projection) = spatial_count_shape();
+        let catalog = postgis_catalog(vec![101, 202, 303]);
+        let kind =
+            spatial_artifact_kind(&spec, &catalog, 1_024).expect("valid spatial kind should bind");
+        let DescriptorArtifactKind::Spatial(plan) = kind else {
+            panic!("spatial spec selected a nonspatial artifact kind");
+        };
+        assert_eq!(
+            plan.column_request(),
+            ResidentColumnRef {
+                relid: pg_sys::Oid::from(42_u32),
+                attno: 1,
+            }
+        );
+        let requests = artifact_column_refs(&spec).expect("spatial artifact requests bind");
+        assert!(requests.contains(&plan.column_request()));
+
+        let first = descriptor_artifact_identity(&spec, &projection, &catalog.fingerprint_words)
+            .expect("first identity encodes");
+        let second = descriptor_artifact_identity(&spec, &projection, &[101, 202, 304])
+            .expect("second identity encodes");
+        assert_ne!(first, second);
+        assert!(
+            first
+                .canonical_words()
+                .ends_with(&catalog.fingerprint_words)
+        );
+    }
+
+    #[test]
+    fn catalog_verification_precedes_cached_artifact_ensure() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let outcome = verify_catalog_before_artifact_ensure(
+            || {
+                calls.borrow_mut().push("verify");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("ensure");
+                Ok(ArtifactEnsureOutcome::Hit)
+            },
+        )
+        .expect("verified cache hit should pass");
+        assert_eq!(outcome, ArtifactEnsureOutcome::Hit);
+        assert_eq!(*calls.borrow(), ["verify", "ensure"]);
+
+        let ensure_called = std::cell::Cell::new(false);
+        let error = verify_catalog_before_artifact_ensure(
+            || Err(ResidentLoadError::Loader("catalog changed".to_owned())),
+            || {
+                ensure_called.set(true);
+                Ok(ArtifactEnsureOutcome::Hit)
+            },
+        )
+        .expect_err("catalog mismatch must reject before cache lookup");
+        assert!(!ensure_called.get());
+        assert!(error.to_string().contains("catalog changed"));
+    }
+
+    #[test]
+    fn spatial_mask_binding_rechecks_empty_and_nonempty_shape() {
+        assert_eq!(spatial_final_mask_binding(0, None), Ok(None));
+
+        let mask = [1_i8, -1_i8];
+        let mask_ptr = mask.as_ptr();
+        assert_eq!(
+            spatial_final_mask_binding(mask.len(), Some((mask.len(), mask_ptr))),
+            Ok(Some(mask_ptr))
+        );
+        assert!(spatial_final_mask_binding(2, Some((1, mask_ptr))).is_err());
+        assert!(spatial_final_mask_binding(2, Some((2, std::ptr::null()))).is_err());
+        assert!(spatial_final_mask_binding(2, None).is_err());
+        assert!(spatial_final_mask_binding(0, Some((0, mask_ptr))).is_err());
+
+        let empty = build_sql_mask_filter(0, None).expect("zero rows disable the filter");
+        assert_eq!(empty.kind, abi::PGACCEL_GROUPED_AGG_FILTER_NONE);
+        assert!(empty.mask.is_null());
+        let bound = build_sql_mask_filter(mask.len(), Some(mask_ptr))
+            .expect("nonempty mask should bind as SQL filter");
+        assert_eq!(bound.kind, abi::PGACCEL_GROUPED_AGG_FILTER_SQL);
+        assert_eq!(bound.mask, mask_ptr);
     }
 
     #[test]
