@@ -75,6 +75,15 @@ mod tests {
             .is_some_and(|source| source == "hardware_derived")
     }
 
+    fn qualifying_device_rows(limit_name: &str, floor: i64) -> i64 {
+        let minimum = Spi::get_one::<i64>(&format!(
+            "SELECT value::bigint FROM pg_accel_device_limits() WHERE name = '{limit_name}'"
+        ))
+        .expect("device limit query should succeed")
+        .unwrap_or_else(|| panic!("device limit `{limit_name}` should not be NULL"));
+        minimum.saturating_add((minimum / 4).max(1_024)).max(floor)
+    }
+
     fn serialize_gpu_tests() {
         Spi::run("SELECT pg_advisory_xact_lock(882201)")
             .expect("GPU test advisory lock should succeed");
@@ -212,8 +221,12 @@ mod tests {
 
     #[pg_test]
     fn test_guc_min_batch_size_set() {
+        // admission-audit-allow: direct min_batch_size GUC contract test
         Spi::run("SET pg_accel.min_batch_size = 512").expect("SET min_batch_size should succeed");
-        Spi::run("SET pg_accel.min_batch_size = 256").expect("reset min_batch_size should succeed");
+        // admission-audit-allow: direct min_batch_size GUC contract test
+        Spi::run("SET pg_accel.min_batch_size = 256")
+            .expect("second in-range min_batch_size should succeed");
+        Spi::run("RESET pg_accel.min_batch_size").expect("RESET min_batch_size should succeed");
     }
 
     #[pg_test]
@@ -986,11 +999,14 @@ mod tests {
         // Scalar builtins (like abs, length) are no longer registered, so should NOT inject
         // a Custom Scan — only GPU strategies benefit from batching.
         Spi::run("CREATE TABLE cscan_test (id int, val text)").expect("CREATE TABLE");
-        Spi::run("INSERT INTO cscan_test SELECT g, 'row' || g FROM generate_series(1,5000) g")
-            .expect("INSERT");
+        let rows = qualifying_device_rows("gpu_min_rows", 100_000);
+        Spi::run(&format!(
+            "INSERT INTO cscan_test SELECT g, 'row' || g FROM generate_series(1,{rows}) g"
+        ))
+        .expect("INSERT");
         Spi::run("ANALYZE cscan_test").expect("ANALYZE");
         Spi::run("SET pg_accel.enabled = on").expect("SET enabled");
-        Spi::run("SET pg_accel.min_batch_size = 100").expect("SET min_batch_size");
+        Spi::run("SET pg_accel.min_batch_size = DEFAULT").expect("restore default min batch");
 
         let plan_text = Spi::connect(|client| {
             let mut lines = Vec::new();
@@ -1019,11 +1035,14 @@ mod tests {
         // Scalar builtins no longer inject Custom Scan, so Strategy
         // field should not appear in EXPLAIN for scalar-only queries.
         Spi::run("CREATE TABLE cscan_strat (id int, val text)").expect("CREATE TABLE");
-        Spi::run("INSERT INTO cscan_strat SELECT g, 'v' || g FROM generate_series(1,5000) g")
-            .expect("INSERT");
+        let rows = qualifying_device_rows("gpu_min_rows", 100_000);
+        Spi::run(&format!(
+            "INSERT INTO cscan_strat SELECT g, 'v' || g FROM generate_series(1,{rows}) g"
+        ))
+        .expect("INSERT");
         Spi::run("ANALYZE cscan_strat").expect("ANALYZE");
         Spi::run("SET pg_accel.enabled = on").expect("SET enabled");
-        Spi::run("SET pg_accel.min_batch_size = 100").expect("SET min_batch_size");
+        Spi::run("SET pg_accel.min_batch_size = DEFAULT").expect("restore default min batch");
 
         let plan_text = Spi::connect(|client| {
             let mut lines = Vec::new();
@@ -1406,7 +1425,7 @@ mod tests {
 
     #[pg_test]
     fn test_large_batch_boundary() {
-        // Test around the default min_batch_size of 256
+        // Exercise a small input well below the documented 65,536-row default.
         Spi::run("CREATE TEMP TABLE t_boundary (x int)").expect("CREATE TABLE");
         Spi::run("INSERT INTO t_boundary SELECT generate_series(1, 257)").expect("INSERT");
         Spi::run("ANALYZE t_boundary").expect("ANALYZE");
@@ -1464,8 +1483,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("query with min_batch_size={bs} should not crash"));
         }
 
-        // Reset to default
-        Spi::run("SET pg_accel.min_batch_size = 256").expect("reset");
+        Spi::run("RESET pg_accel.min_batch_size").expect("reset to documented default");
     }
 
     #[pg_test]
@@ -2731,16 +2749,22 @@ mod tests {
         }
 
         Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
-        Spi::run(
+        let rows = qualifying_device_rows("gpu_min_rows", 100_000);
+        Spi::run(&format!(
             "SET pg_accel.enabled = on; \
-             SET pg_accel.min_batch_size = 1; \
+             SET pg_accel.min_batch_size = DEFAULT; \
              CREATE TEMP TABLE _h3_latlng_scan_decline(\
                id int4, geom point NOT NULL, res int4 NOT NULL, lng float8, lat float8); \
-             INSERT INTO _h3_latlng_scan_decline VALUES \
-               (1, point(-122.4194, 37.7749), 7, -122.4194, 37.7749), \
-               (2, point(-73.9857, 40.7484), 7, -73.9857, 40.7484); \
-             ANALYZE _h3_latlng_scan_decline",
-        )
+             INSERT INTO _h3_latlng_scan_decline \
+               SELECT g::int4, \
+                      point(-122.0 + (g % 100)::float8 / 10000.0, \
+                            37.0 + (g / 100)::float8 / 10000.0), \
+                      7, \
+                      -122.0 + (g % 100)::float8 / 10000.0, \
+                      37.0 + (g / 100)::float8 / 10000.0 \
+               FROM generate_series(1, {rows}) AS g; \
+             ANALYZE _h3_latlng_scan_decline"
+        ))
         .expect("h3 scan decline fixture should be created");
 
         for (label, sql) in [
@@ -2809,8 +2833,8 @@ mod tests {
             );
         }
 
-        Spi::run("SET pg_accel.min_batch_size = 65536; SELECT pg_accel_reset_stats()")
-            .expect("reset stats and force small-relation row gate");
+        Spi::run("SET pg_accel.min_batch_size = DEFAULT; SELECT pg_accel_reset_stats()")
+            .expect("reset stats under default admission");
         let plan = explain_text(
             "SELECT count(*) FROM _h3_latlng_scan_decline \
              WHERE h3_latlng_to_cell(geom, 7) IS NOT NULL",
@@ -2819,14 +2843,14 @@ mod tests {
             !plan.contains("GpuAccelScan")
                 && !plan.contains("Strategy: GpuH3")
                 && !plan.contains("Accel Strategy: GpuH3"),
-            "small-relation H3 predicate should stay native:\n{plan}"
+            "default-admission H3 predicate should stay native:\n{plan}"
         );
         let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
             .expect("last rejection query should succeed")
-            .expect("small-relation H3 predicate should record a decline");
+            .expect("default-admission H3 predicate should record a decline");
         assert_eq!(
             rejection, "shape_unsupported_predicate",
-            "small-relation H3 predicate should expose the exact generic predicate decline; plan:\n{plan}"
+            "default-admission H3 predicate should expose the exact generic predicate decline; plan:\n{plan}"
         );
     }
 
@@ -3265,15 +3289,16 @@ mod tests {
     #[pg_test]
     fn test_numeric_expr_where_does_not_inject_custom_scan() {
         Spi::run("SELECT setseed(0.42)").expect("seed");
-        Spi::run(
+        let rows = qualifying_device_rows("gpu_expr_min_rows", 250_000);
+        Spi::run(&format!(
             "CREATE TEMP TABLE _t_expl AS \
              SELECT i::int4 AS id, (random()*1000)::float4 AS val \
-             FROM generate_series(1, 100000) i",
-        )
+             FROM generate_series(1, {rows}) i"
+        ))
         .expect("create");
         Spi::run("ANALYZE _t_expl").expect("analyze");
         Spi::run("SET pg_accel.enabled = on").expect("on");
-        Spi::run("SET pg_accel.min_batch_size = 100").expect("batch");
+        Spi::run("SET pg_accel.min_batch_size = DEFAULT").expect("restore default min batch");
 
         let plan_text = Spi::connect(|client| {
             let mut lines = Vec::new();
@@ -3792,10 +3817,11 @@ mod tests {
     fn test_window_partial_path_records_parallel_hook_decline() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
-        Spi::run("SET max_parallel_workers_per_gather = 4").expect("parallel workers");
-        Spi::run("SET min_parallel_table_scan_size = 0").expect("parallel scan size");
-        Spi::run("SET parallel_setup_cost = 0").expect("parallel setup");
-        Spi::run("SET parallel_tuple_cost = 0").expect("parallel tuple");
+        Spi::run("SET max_parallel_workers_per_gather = DEFAULT")
+            .expect("restore parallel worker default");
+        Spi::run("RESET min_parallel_table_scan_size").expect("restore parallel scan size");
+        Spi::run("RESET parallel_setup_cost").expect("restore parallel setup cost");
+        Spi::run("RESET parallel_tuple_cost").expect("restore parallel tuple cost");
 
         Spi::run(
             "DROP TABLE IF EXISTS _wt_partial_window_decline; \
@@ -4263,8 +4289,9 @@ mod tests {
     fn test_reduce_stays_native_until_resident_pipeline_exists() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
-        Spi::run("SET pg_accel.cost_multiplier = 0.1").expect("force GPU cost in smoke");
-        Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 1.0").expect("force fp64 smoke cost");
+        Spi::run("SET pg_accel.cost_multiplier = DEFAULT").expect("restore default GPU cost");
+        Spi::run("SET pg_accel.soft_fp64_cost_multiplier = DEFAULT")
+            .expect("restore default fp64 cost");
         Spi::run("DROP TABLE IF EXISTS _gpu_reduce_t").expect("drop temp table");
         Spi::run(
             "CREATE TEMP TABLE _gpu_reduce_t AS \
@@ -4299,7 +4326,7 @@ mod tests {
     fn test_reduce_int8_sum_preserves_above_f64_exact_range() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
-        Spi::run("SET pg_accel.cost_multiplier = 0.1").expect("force GPU cost");
+        Spi::run("SET pg_accel.cost_multiplier = DEFAULT").expect("restore default GPU cost");
         Spi::run("DROP TABLE IF EXISTS _gpu_reduce_i8_t").expect("drop temp table");
         Spi::run(
             "CREATE TEMP TABLE _gpu_reduce_i8_t AS \
@@ -4336,13 +4363,14 @@ mod tests {
     fn test_sort_actually_uses_gpu() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
-        Spi::run("SET pg_accel.cost_multiplier = 0.1").expect("force GPU cost");
+        Spi::run("SET pg_accel.cost_multiplier = DEFAULT").expect("restore default GPU cost");
 
-        Spi::run(
+        let rows = qualifying_device_rows("gpu_sort_planner_min_rows", 200_000);
+        Spi::run(&format!(
             "CREATE TEMP TABLE _gpu_sort_t AS \
              SELECT (random() * 1e6)::float4 AS v \
-             FROM generate_series(1, 200000)",
-        )
+             FROM generate_series(1, {rows})"
+        ))
         .expect("create temp table");
         Spi::run("ANALYZE _gpu_sort_t").expect("analyze sort table");
 
@@ -4441,18 +4469,17 @@ mod tests {
     // Generic GpuExpr no longer exposes a standalone partial CustomPath; the
     // negative test below guards that planner behavior.
 
-    /// GpuSort partial path: EXPLAIN a sort on a table large enough to
-    /// trigger parallel planning, assert the plan contains a CustomScan
-    /// (either standalone or under Gather/Gather Merge) and did not crash.
+    /// A full-output sort under default planning must remain a typed native
+    /// decline; merely considering a partial path must not select it.
     #[pg_test]
     fn test_gpu_sort_partial_path_injects() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
-        // Force PG to consider parallel plans on small-ish tables.
-        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
-        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
-        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
-        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
+        Spi::run("RESET min_parallel_table_scan_size").expect("restore parallel scan size");
+        Spi::run("RESET parallel_setup_cost").expect("restore parallel setup cost");
+        Spi::run("RESET parallel_tuple_cost").expect("restore parallel tuple cost");
+        Spi::run("SET max_parallel_workers_per_gather = DEFAULT")
+            .expect("restore parallel worker default");
 
         Spi::run(
             "CREATE TEMP TABLE _sort_par_t AS \
@@ -4461,12 +4488,8 @@ mod tests {
         )
         .expect("create temp table");
         Spi::run("ANALYZE _sort_par_t").expect("ANALYZE");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset planner evidence");
 
-        // EXPLAIN must not panic. We don't require a specific plan shape —
-        // PG's cost model may still pick the non-parallel CustomScan.
-        // The test is a regression guard: prior to the partial-path injection,
-        // this would never produce Gather-wrapped CustomScan; we verify
-        // EXPLAIN at least succeeds now with both paths considered.
         let plan = Spi::connect(|client| {
             let mut lines = Vec::new();
             let table = client
@@ -4483,22 +4506,29 @@ mod tests {
             }
             lines.join("\n")
         });
-        // Regression: prior bug would crash in the planner when the partial
-        // path was malformed; the mere fact that EXPLAIN returns is the PASS.
         assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("Custom Scan (GpuAccelSort)"),
+            "default-planned full sort must stay native:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("default-planned full sort should record a decline");
+        assert_eq!(rejection, "sort_heap_full_output");
     }
 
-    /// Generic numeric WHERE clauses must not add standalone GpuExpr partial
-    /// paths, even when parallel scan planning is forced on.
+    /// Generic numeric WHERE clauses must remain a typed native decline under
+    /// default parallel planning.
     #[pg_test]
     fn test_numeric_expr_partial_path_does_not_inject() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
-        Spi::run("SET pg_accel.min_batch_size = 1000").expect("SET min_batch");
-        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
-        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
-        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
-        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
+        Spi::run("SET pg_accel.min_batch_size = DEFAULT").expect("restore default min batch");
+        Spi::run("RESET min_parallel_table_scan_size").expect("restore parallel scan size");
+        Spi::run("RESET parallel_setup_cost").expect("restore parallel setup cost");
+        Spi::run("RESET parallel_tuple_cost").expect("restore parallel tuple cost");
+        Spi::run("SET max_parallel_workers_per_gather = DEFAULT")
+            .expect("restore parallel worker default");
 
         Spi::run(
             "CREATE TEMP TABLE _expr_par_t AS \
@@ -4507,6 +4537,7 @@ mod tests {
         )
         .expect("create temp table");
         Spi::run("ANALYZE _expr_par_t").expect("ANALYZE");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset planner evidence");
 
         let plan = Spi::connect(|client| {
             let mut lines = Vec::new();
@@ -4529,6 +4560,10 @@ mod tests {
             !plan.contains("Custom Scan"),
             "generic numeric WHERE should not inject standalone GpuExpr partial paths:\n{plan}"
         );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("generic numeric WHERE should record a decline");
+        assert_eq!(rejection, "shape_unsupported_predicate");
     }
 
     /// Parallel partial aggregate must not wrap PostgreSQL's CPU parallel
@@ -4538,10 +4573,11 @@ mod tests {
     fn test_parallel_sum_does_not_wrap_cpu_partial_scan() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
-        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
-        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
-        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
-        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
+        Spi::run("RESET min_parallel_table_scan_size").expect("restore parallel scan size");
+        Spi::run("RESET parallel_setup_cost").expect("restore parallel setup cost");
+        Spi::run("RESET parallel_tuple_cost").expect("restore parallel tuple cost");
+        Spi::run("SET max_parallel_workers_per_gather = DEFAULT")
+            .expect("restore parallel worker default");
 
         Spi::run(
             "CREATE UNLOGGED TABLE _agg_par_t AS \
@@ -4655,8 +4691,8 @@ mod tests {
         Spi::run("DROP TABLE _preagg_dim").expect("drop dim");
     }
 
-    /// GpuHashJoin partial path: EXPLAIN a 2-table int equi-join with
-    /// parallel workers forced on. Regression guard for the Phase 3 change
+    /// GpuHashJoin partial path: EXPLAIN a 2-table int equi-join under
+    /// default parallel planning. Regression guard for the Phase 3 change
     /// in `planner_hooks/join_pathlist.rs` that adds
     /// `inject_gpu_hashjoin_partial_paths` alongside the existing
     /// `add_path`. Prior to this change, `set_join_pathlist_hook` only
@@ -4669,10 +4705,11 @@ mod tests {
     fn test_gpu_hashjoin_partial_path_injects() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
-        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
-        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
-        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
-        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
+        Spi::run("RESET min_parallel_table_scan_size").expect("restore parallel scan size");
+        Spi::run("RESET parallel_setup_cost").expect("restore parallel setup cost");
+        Spi::run("RESET parallel_tuple_cost").expect("restore parallel tuple cost");
+        Spi::run("SET max_parallel_workers_per_gather = DEFAULT")
+            .expect("restore parallel worker default");
 
         Spi::run(
             "CREATE TEMP TABLE _hj_par_outer AS \
@@ -4688,6 +4725,7 @@ mod tests {
         .expect("create inner table");
         Spi::run("ANALYZE _hj_par_outer").expect("ANALYZE outer");
         Spi::run("ANALYZE _hj_par_inner").expect("ANALYZE inner");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset planner evidence");
 
         let plan = Spi::connect(|client| {
             let mut lines = Vec::new();
@@ -4707,11 +4745,15 @@ mod tests {
             }
             lines.join("\n")
         });
-        // Regression: before the partial-path injector, the planner could
-        // still produce a plan (non-parallel CustomScan or PG HashJoin).
-        // The new code must not introduce a crash when PG evaluates the
-        // Gather ∘ Parallel HashJoin candidate against the GPU partial path.
         assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("Custom Scan (GpuAccelJoin)"),
+            "default-planned row-output hash join must stay native:\n{plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("default-planned row-output hash join should record a decline");
+        assert_eq!(rejection, RESIDENT_ONLY_REJECTION);
     }
 
     /// High-output row-returning hash joins must stay native until the join
@@ -4866,27 +4908,31 @@ mod tests {
     fn test_gpu_hashjoin_parallel_large_inner_records_rebuild_decline() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
-        Spi::run("SET min_parallel_table_scan_size = 0").expect("SET min_parallel_scan");
-        Spi::run("SET parallel_setup_cost = 0").expect("SET parallel_setup_cost");
-        Spi::run("SET parallel_tuple_cost = 0").expect("SET parallel_tuple_cost");
-        Spi::run("SET max_parallel_workers_per_gather = 4").expect("SET workers");
-        Spi::run("SET pg_accel.min_batch_size = 1").expect("SET min_batch_size");
+        Spi::run("RESET min_parallel_table_scan_size").expect("restore parallel scan size");
+        Spi::run("RESET parallel_setup_cost").expect("restore parallel setup cost");
+        Spi::run("RESET parallel_tuple_cost").expect("restore parallel tuple cost");
+        Spi::run("SET max_parallel_workers_per_gather = DEFAULT")
+            .expect("restore parallel worker default");
+        Spi::run("SET pg_accel.min_batch_size = DEFAULT").expect("restore default min batch");
 
+        let outer_rows = qualifying_device_rows("gpu_min_rows", 100_000);
+        let inner_rows = qualifying_device_rows("gpu_hash_join_build_max_rows", 60_000);
+        let match_rows = outer_rows.min(20_000);
         Spi::run("DROP TABLE IF EXISTS _hj_par_big_outer").expect("drop outer");
         Spi::run("DROP TABLE IF EXISTS _hj_par_big_inner").expect("drop inner");
-        Spi::run(
+        Spi::run(&format!(
             "CREATE UNLOGGED TABLE _hj_par_big_outer AS \
              SELECT g AS id, g AS k \
-             FROM generate_series(1, 20000) g",
-        )
+             FROM generate_series(1, {outer_rows}) g"
+        ))
         .expect("create outer table");
-        Spi::run(
+        Spi::run(&format!(
             "CREATE UNLOGGED TABLE _hj_par_big_inner AS \
              SELECT \
-               CASE WHEN g <= 20000 THEN g ELSE 1000000 + g END AS k, \
+               CASE WHEN g <= {match_rows} THEN g ELSE 1000000 + g END AS k, \
                (g * 7) AS v \
-             FROM generate_series(1, 60000) g",
-        )
+             FROM generate_series(1, {inner_rows}) g"
+        ))
         .expect("create inner table");
         Spi::run("ANALYZE _hj_par_big_outer").expect("ANALYZE outer");
         Spi::run("ANALYZE _hj_par_big_inner").expect("ANALYZE inner");

@@ -1,9 +1,8 @@
-//! 8-worker parallel stress workload.
+//! Default-planner parallel stress workload.
 //!
-//! Forces `max_parallel_workers_per_gather = 8` and `min_parallel_table_scan_size = 0`
-//! on every iteration so each query definitely goes through Gather. Combined
-//! with the zero-tolerance iteration count (see `parallel_stress_test.rs`),
-//! this exercises the fork-safety path on the pg_accel Custom Scan.
+//! Restores PostgreSQL's documented parallel defaults on every iteration.
+//! The 10M-row fixture supplies enough real work for PostgreSQL to choose
+//! parallelism without planner-cost underwrites.
 //!
 //! The bench_f32_10m fixture is shared across several tasks in this family.
 //! Setup recreates exactly 10M rows so repeated integration or benchmark runs
@@ -38,8 +37,7 @@ pub fn bench_f32_10m_setup_sql() -> Vec<String> {
     ]
 }
 
-/// 8-worker parallel stress workload — SUM/COUNT/MIN/MAX/AVG/STDDEV on 10M
-/// rows under `max_parallel_workers_per_gather = 8`.
+/// Parallel stress workload — SUM/COUNT/MIN/MAX/AVG/STDDEV on 10M rows.
 pub struct ParallelStress;
 
 impl Workload for ParallelStress {
@@ -48,7 +46,7 @@ impl Workload for ParallelStress {
     }
 
     fn description(&self) -> &'static str {
-        "6-agg combined query on 10M rows with max_parallel_workers_per_gather = 8"
+        "6-agg combined query on 10M rows under PostgreSQL parallel defaults"
     }
 
     fn setup_sql(&self, _rows: usize) -> Vec<String> {
@@ -59,10 +57,10 @@ impl Workload for ParallelStress {
 
     fn pre_query_sql(&self) -> Vec<String> {
         vec![
-            "SET max_parallel_workers_per_gather = 8".to_owned(),
-            "SET min_parallel_table_scan_size = 0".to_owned(),
-            "SET parallel_setup_cost = 0".to_owned(),
-            "SET parallel_tuple_cost = 0".to_owned(),
+            "SET max_parallel_workers_per_gather = DEFAULT".to_owned(),
+            "RESET min_parallel_table_scan_size".to_owned(),
+            "RESET parallel_setup_cost".to_owned(),
+            "RESET parallel_tuple_cost".to_owned(),
         ]
     }
 
@@ -86,7 +84,7 @@ impl Workload for ParallelStress {
     }
 }
 
-/// Grouped variant of [`ParallelStress`] — 16 groups, 8 workers.
+/// Grouped variant of [`ParallelStress`] — 16 groups.
 pub struct ParallelStressGrouped;
 
 impl Workload for ParallelStressGrouped {
@@ -95,7 +93,7 @@ impl Workload for ParallelStressGrouped {
     }
 
     fn description(&self) -> &'static str {
-        "GROUP BY 16 groups on 10M rows with max_parallel_workers_per_gather = 8"
+        "GROUP BY 16 groups on 10M rows under PostgreSQL parallel defaults"
     }
 
     fn setup_sql(&self, _rows: usize) -> Vec<String> {
@@ -104,10 +102,10 @@ impl Workload for ParallelStressGrouped {
 
     fn pre_query_sql(&self) -> Vec<String> {
         vec![
-            "SET max_parallel_workers_per_gather = 8".to_owned(),
-            "SET min_parallel_table_scan_size = 0".to_owned(),
-            "SET parallel_setup_cost = 0".to_owned(),
-            "SET parallel_tuple_cost = 0".to_owned(),
+            "SET max_parallel_workers_per_gather = DEFAULT".to_owned(),
+            "RESET min_parallel_table_scan_size".to_owned(),
+            "RESET parallel_setup_cost".to_owned(),
+            "RESET parallel_tuple_cost".to_owned(),
         ]
     }
 
@@ -131,7 +129,7 @@ impl Workload for ParallelStressGrouped {
     }
 }
 
-/// Sort variant of [`ParallelStress`] — ORDER BY LIMIT 100, 8 workers.
+/// Sort variant of [`ParallelStress`] — ORDER BY LIMIT 100.
 pub struct ParallelStressSort;
 
 impl Workload for ParallelStressSort {
@@ -140,7 +138,7 @@ impl Workload for ParallelStressSort {
     }
 
     fn description(&self) -> &'static str {
-        "ORDER BY v LIMIT 100 on 10M rows with max_parallel_workers_per_gather = 8"
+        "ORDER BY v LIMIT 100 on 10M rows under PostgreSQL parallel defaults"
     }
 
     fn setup_sql(&self, _rows: usize) -> Vec<String> {
@@ -149,10 +147,10 @@ impl Workload for ParallelStressSort {
 
     fn pre_query_sql(&self) -> Vec<String> {
         vec![
-            "SET max_parallel_workers_per_gather = 8".to_owned(),
-            "SET min_parallel_table_scan_size = 0".to_owned(),
-            "SET parallel_setup_cost = 0".to_owned(),
-            "SET parallel_tuple_cost = 0".to_owned(),
+            "SET max_parallel_workers_per_gather = DEFAULT".to_owned(),
+            "RESET min_parallel_table_scan_size".to_owned(),
+            "RESET parallel_setup_cost".to_owned(),
+            "RESET parallel_tuple_cost".to_owned(),
         ]
     }
 
@@ -178,7 +176,7 @@ impl Workload for ParallelStressWindow {
     }
 
     fn description(&self) -> &'static str {
-        "ROW_NUMBER() OVER (ORDER BY v) LIMIT 100 on 10M rows with 8 workers"
+        "ROW_NUMBER() OVER (ORDER BY v) LIMIT 100 on 10M rows under PostgreSQL parallel defaults"
     }
 
     fn setup_sql(&self, _rows: usize) -> Vec<String> {
@@ -187,10 +185,10 @@ impl Workload for ParallelStressWindow {
 
     fn pre_query_sql(&self) -> Vec<String> {
         vec![
-            "SET max_parallel_workers_per_gather = 8".to_owned(),
-            "SET min_parallel_table_scan_size = 0".to_owned(),
-            "SET parallel_setup_cost = 0".to_owned(),
-            "SET parallel_tuple_cost = 0".to_owned(),
+            "SET max_parallel_workers_per_gather = DEFAULT".to_owned(),
+            "RESET min_parallel_table_scan_size".to_owned(),
+            "RESET parallel_setup_cost".to_owned(),
+            "RESET parallel_tuple_cost".to_owned(),
         ]
     }
 

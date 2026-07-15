@@ -23,7 +23,7 @@
 - **gpu**: Route GPU dispatch through BGW to fix post-fork Metal crash
 - **bench**: Bonferroni correction, geomean, realistic GUCs, plan capture, raw timing
 - **bench**: Honest v2 benchmark + 6-agent fix wave addressing reviewer feedback
-- **preagg,bench**: Partial-state preagg + 8-worker stress bench + plan-shape tests
+- **preagg,bench**: Partial-state preagg + default-planner stress bench + plan-shape tests
 - **fp64**: Universal fp64 via soft-fp64 — infra landing + comprehensive 1.0 backlog
 - **bench**: Wire fp64_matrix workloads into registry + first calibration run
 - **bench**: EXPLAIN audit harness for parallel-path coverage ratchet

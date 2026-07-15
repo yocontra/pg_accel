@@ -2,7 +2,7 @@ use super::Workload;
 
 /// OLTP regression test: sequential scan on a small table.
 ///
-/// With only 100 rows, the batch size threshold (default 256) should prevent
+/// With only 100 rows, the batch size threshold (default 65,536) should prevent
 /// pg_accel from injecting a Custom Scan. This proves the cost model correctly
 /// avoids acceleration when per-batch overhead exceeds per-row savings.
 ///

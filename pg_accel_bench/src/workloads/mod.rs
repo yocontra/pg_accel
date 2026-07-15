@@ -70,7 +70,7 @@ mod filtered_grouped_agg;
 mod mixed_variants;
 // --- fp64 matrix (Phase 1 calibration grid: 8 workloads x 5 sizes) ---
 pub mod fp64_matrix;
-// --- Parallel stress (8-worker Gather assurance) ---
+// --- Parallel stress (default-planner Gather assurance) ---
 pub mod parallel_stress;
 // scale_sweep retired per action_items W9 (Reviewer 1 Sin #7) — the 5
 // identical rows at every scale were padding from a fixed fixture that
@@ -460,7 +460,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SsbmQ4_1),
         Box::new(SsbmQ4_2),
         Box::new(SsbmQ4_3),
-        // --- Parallel stress (fork-safety regression, 8 workers) ---
+        // --- Parallel stress (fork-safety regression, PG defaults) ---
         Box::new(ParallelStress),
         Box::new(ParallelStressGrouped),
         Box::new(ParallelStressSort),
@@ -1198,7 +1198,7 @@ fn olap_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             BenchmarkLaneExpectation::NativeDecline { .. } => GENERIC_NATIVE_DISPATCH_EVIDENCE,
         },
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
-        cache_gate: "warm median must beat forced PG parallel; cache-mode both artifact before release promotion",
+        cache_gate: "warm median must beat PostgreSQL at captured parallel defaults; cache-mode both artifact before release promotion",
         threshold_basis: profile.threshold_basis,
         expectation,
     })

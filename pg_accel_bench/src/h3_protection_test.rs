@@ -106,6 +106,18 @@ fn connect() -> Client {
     client
 }
 
+#[cfg(feature = "integration_tests")]
+fn qualifying_device_rows(c: &mut Client, limit_name: &str, floor: i64) -> i64 {
+    let minimum = c
+        .query_one(
+            "SELECT value::bigint FROM pg_accel_device_limits() WHERE name = $1",
+            &[&limit_name],
+        )
+        .unwrap_or_else(|error| panic!("read device limit `{limit_name}`: {error}"))
+        .get::<_, i64>(0);
+    minimum.saturating_add((minimum / 4).max(1_024)).max(floor)
+}
+
 /// Snapshot the per-backend monotonic GPU kernel execution counter.
 #[cfg(feature = "integration_tests")]
 fn kernel_executions(c: &mut Client) -> i64 {
@@ -833,9 +845,10 @@ fn h3_srf_grid_disk_benchmark_shape_stays_native() {
 fn h3_latlng_scan_predicates_stay_native_with_visible_declines() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
-    c.simple_query(
+    let rows = qualifying_device_rows(&mut c, "gpu_min_rows", 100_000);
+    c.simple_query(&format!(
         "SET pg_accel.enabled = on; \
-         SET pg_accel.min_batch_size = 1; \
+         SET pg_accel.min_batch_size = DEFAULT; \
          CREATE TEMP TABLE _h3_latlng_scan_decline(\
            id int4, geom point NOT NULL, res int4 NOT NULL, lng float8, lat float8); \
          INSERT INTO _h3_latlng_scan_decline \
@@ -845,9 +858,9 @@ fn h3_latlng_scan_predicates_stay_native_with_visible_declines() {
              7, \
              -122.0 + (g % 100)::float8 / 10000.0, \
               37.0 + (g / 100)::float8 / 10000.0 \
-           FROM generate_series(1, 1000) AS g; \
-         ANALYZE _h3_latlng_scan_decline",
-    )
+           FROM generate_series(1, {rows}) AS g; \
+         ANALYZE _h3_latlng_scan_decline"
+    ))
     .expect("setup H3 scan-decline fixture");
 
     for (label, sql, expected_reason) in [

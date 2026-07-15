@@ -157,7 +157,7 @@ impl ReproJit {
 ///
 /// - generated polygon path: simple ~500v vs cooperative 1024+v
 /// - target selectivity: deterministic inside/outside point split
-/// - batch count proxy: `pg_accel.min_batch_size`
+/// - batch count under the documented `pg_accel.min_batch_size` default
 /// - worker shape: table `parallel_workers` reloption
 /// - PostgreSQL JIT state
 ///
@@ -170,8 +170,6 @@ pub struct SpatialSelectivityRepro {
     pub polygon: ReproPolygon,
     /// Whole-number percent of rows generated inside the polygon.
     pub selectivity_pct: usize,
-    /// Value for `pg_accel.min_batch_size`.
-    pub min_batch_size: usize,
     /// Table reloption. `0` keeps the native side serial; values >0 request
     /// that many parallel scan workers, subject to global PG worker caps.
     pub rel_parallel_workers: usize,
@@ -210,10 +208,9 @@ impl Workload for SpatialSelectivityRepro {
             format!(
                 "COMMENT ON TABLE bench_spatial_sel_repro IS \
                  'spatial_sel_repro: {}; target_selectivity={}pct; \
-                  min_batch_size={}; rel_parallel_workers={}; {}'",
+                  min_batch_size=DEFAULT; rel_parallel_workers={}; {}'",
                 self.polygon.label(),
                 self.selectivity_pct,
-                self.min_batch_size,
                 self.rel_parallel_workers,
                 self.jit.label()
             ),
@@ -244,10 +241,11 @@ impl Workload for SpatialSelectivityRepro {
 
     fn pre_query_sql(&self) -> Vec<String> {
         let mut sql = vec![
-            format!("SET pg_accel.min_batch_size = {}", self.min_batch_size),
-            "SET min_parallel_table_scan_size = 0".to_owned(),
-            "SET parallel_setup_cost = 0".to_owned(),
-            "SET parallel_tuple_cost = 0".to_owned(),
+            "SET pg_accel.min_batch_size = DEFAULT".to_owned(),
+            "SET max_parallel_workers_per_gather = DEFAULT".to_owned(),
+            "RESET min_parallel_table_scan_size".to_owned(),
+            "RESET parallel_setup_cost".to_owned(),
+            "RESET parallel_tuple_cost".to_owned(),
         ];
         sql.extend(self.jit.sql());
         sql

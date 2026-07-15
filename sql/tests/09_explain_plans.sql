@@ -12,13 +12,21 @@ CREATE TEMP TABLE _ep_data (
     t text NOT NULL
 );
 
--- Need enough rows to exceed min_batch_size (default 256)
+-- Clear the hardware-derived generic row floor without lowering admission GUCs.
 INSERT INTO _ep_data (x, y, t)
 SELECT
     (random() * 2000 - 1000)::integer,
     random() * 100.0 + 0.01,
     CASE (i % 2) WHEN 0 THEN 'Hello' ELSE 'WORLD' END
-FROM generate_series(1, 2000) AS s(i);
+FROM generate_series(
+    1,
+    GREATEST(
+        100000,
+        (SELECT value::bigint + GREATEST(value::bigint / 4, 1024)
+         FROM pg_accel_device_limits()
+         WHERE name = 'gpu_min_rows')
+    )
+) AS s(i);
 
 ANALYZE _ep_data;
 

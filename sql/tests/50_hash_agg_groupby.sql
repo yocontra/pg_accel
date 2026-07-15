@@ -355,21 +355,28 @@ END $$;
 DROP TABLE _g10_on, _g10_off;
 
 -- =========================================================================
--- Test 11: Parallel-looking SUM(bigint) must not finalize over GpuAccelAgg
+-- Test 11: Default-planned SUM(bigint) must not finalize over GpuAccelAgg
 -- =========================================================================
 
-CREATE TEMP TABLE _agg_bigint_parallel AS
+CREATE UNLOGGED TABLE _agg_bigint_parallel AS
 SELECT i::int8 AS v
-FROM generate_series(1, 20000) i;
-ALTER TABLE _agg_bigint_parallel SET (parallel_workers = 2);
+FROM generate_series(
+    1,
+    GREATEST(
+        1000000,
+        (SELECT value::bigint + GREATEST(value::bigint / 4, 1024)
+         FROM pg_accel_device_limits()
+         WHERE name = 'gpu_reduce_min_rows')
+    )
+) i;
 ANALYZE _agg_bigint_parallel;
 
 SET pg_accel.enabled = on;
-SET max_parallel_workers_per_gather = 2;
-SET min_parallel_table_scan_size = 0;
-SET min_parallel_index_scan_size = 0;
-SET parallel_setup_cost = 0;
-SET parallel_tuple_cost = 0;
+SET max_parallel_workers_per_gather = DEFAULT;
+RESET min_parallel_table_scan_size;
+RESET min_parallel_index_scan_size;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
 
 CREATE TEMP TABLE _g11_plan (ord int, line text);
 DO $$

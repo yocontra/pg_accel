@@ -10,7 +10,7 @@
 mod tests {
     use pgrx::prelude::*;
 
-    const DEVICE_ROWS: i32 = 262_144;
+    const DEVICE_ROWS_FLOOR: i64 = 262_144;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct ResidentStatus {
@@ -37,11 +37,24 @@ mod tests {
         for statement in [
             "SET LOCAL pg_accel.enabled = on",
             "SET LOCAL pg_accel.auto_load = on",
-            "SET LOCAL pg_accel.cost_multiplier = 0.1",
-            "SET LOCAL pg_accel.min_batch_size = 65536",
+            "SET LOCAL pg_accel.cost_multiplier = DEFAULT",
+            "SET LOCAL pg_accel.min_batch_size = DEFAULT",
         ] {
             Spi::run(statement).expect(statement);
         }
+    }
+
+    fn device_fixture_rows() -> i32 {
+        let minimum = Spi::get_one::<i64>(
+            "SELECT value::bigint FROM pg_accel_device_limits() \
+             WHERE name = 'gpu_hash_agg_min_rows'",
+        )
+        .expect("grouped aggregate device limit query should succeed")
+        .expect("grouped aggregate device limit should not be NULL");
+        let rows = minimum
+            .saturating_add((minimum / 4).max(1_024))
+            .max(DEVICE_ROWS_FLOOR);
+        i32::try_from(rows).expect("grouped aggregate fixture rows fit i32")
     }
 
     fn run_in_subtransaction(sql: &str) {
@@ -264,13 +277,13 @@ mod tests {
         Spi::run(&format!("ANALYZE {table}")).expect("ANALYZE should succeed");
     }
 
-    fn pin_int4_fixture(table: &str) {
+    fn pin_int4_fixture(table: &str, expected_rows: i32) {
         let loaded = Spi::get_one::<i64>(&format!(
             "SELECT pg_accel_pin('{table}'::regclass, ARRAY['g', 'v'])"
         ))
         .expect("pg_accel_pin should succeed")
         .expect("pg_accel_pin should return a row count");
-        assert_eq!(loaded, i64::from(DEVICE_ROWS));
+        assert_eq!(loaded, i64::from(expected_rows));
 
         let status = resident_status(table);
         assert_eq!(status.column_count, 2);
@@ -321,8 +334,9 @@ mod tests {
             return;
         }
         let table = "phase2_v2_dml_t";
-        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
-        pin_int4_fixture(table);
+        let device_rows = device_fixture_rows();
+        create_int4_fixture(table, device_rows, 16, 0);
+        pin_int4_fixture(table, device_rows);
 
         let query = int4_grouped_query(table, "g", "v");
         assert_generic_matches_native(&query);
@@ -356,15 +370,16 @@ mod tests {
             return;
         }
         let table = "phase2_v2_truncate_t";
-        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
-        pin_int4_fixture(table);
+        let device_rows = device_fixture_rows();
+        create_int4_fixture(table, device_rows, 16, 0);
+        pin_int4_fixture(table, device_rows);
         let query = int4_grouped_query(table, "g", "v");
         assert_generic_matches_native(&query);
         let loaded = assert_loaded_status(table);
 
         run_in_subtransaction(&format!("TRUNCATE {table}"));
         Spi::run(&format!(
-            "INSERT INTO {table}              SELECT (i % 8)::int4, ((i % 101) + 500)::int4              FROM generate_series(1, {DEVICE_ROWS}) AS i"
+            "INSERT INTO {table}              SELECT (i % 8)::int4, ((i % 101) + 500)::int4              FROM generate_series(1, {device_rows}) AS i"
         ))
         .expect("replacement INSERT should succeed");
         Spi::run(&format!("ANALYZE {table}")).expect("ANALYZE should succeed");
@@ -381,8 +396,9 @@ mod tests {
             return;
         }
         let table = "phase2_v2_drop_t";
-        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
-        pin_int4_fixture(table);
+        let device_rows = device_fixture_rows();
+        create_int4_fixture(table, device_rows, 16, 0);
+        pin_int4_fixture(table, device_rows);
         let query = int4_grouped_query(table, "g", "v");
         assert_generic_matches_native(&query);
         let old_oid = table_oid(table);
@@ -393,7 +409,7 @@ mod tests {
             assert_eq!(old_status.derived_bytes, 0);
         }
 
-        create_int4_fixture(table, DEVICE_ROWS, 8, 1000);
+        create_int4_fixture(table, device_rows, 8, 1000);
         let new_oid = table_oid(table);
         assert_ne!(
             new_oid, old_oid,
@@ -415,8 +431,9 @@ mod tests {
         }
         let original = "phase2_v2_ddl_t";
         let renamed = "phase2_v2_ddl_t_v2";
-        create_int4_fixture(original, DEVICE_ROWS, 16, 0);
-        pin_int4_fixture(original);
+        let device_rows = device_fixture_rows();
+        create_int4_fixture(original, device_rows, 16, 0);
+        pin_int4_fixture(original, device_rows);
 
         let original_query = int4_grouped_query(original, "g", "v");
         assert_generic_matches_native(&original_query);
@@ -468,8 +485,9 @@ mod tests {
             return;
         }
         let table = "phase2_v2_omitted_group_key_t";
-        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
-        pin_int4_fixture(table);
+        let device_rows = device_fixture_rows();
+        create_int4_fixture(table, device_rows, 16, 0);
+        pin_int4_fixture(table, device_rows);
         let query = format!("SELECT sum(v) FROM {table} GROUP BY g");
 
         Spi::run("SET LOCAL pg_accel.enabled = off").expect("disable pg_accel");
@@ -506,12 +524,13 @@ mod tests {
             return;
         }
         let table = "phase2_v2_overflow_t";
+        let device_rows = device_fixture_rows();
         Spi::run(&format!(
             "CREATE UNLOGGED TABLE {table} (                  g int4 NOT NULL, lhs int4 NOT NULL, rhs int4 NOT NULL)"
         ))
         .expect("CREATE overflow table should succeed");
         Spi::run(&format!(
-            "INSERT INTO {table}              SELECT 0,                     CASE WHEN i = {DEVICE_ROWS} THEN 2147483647 ELSE 1000 END,                     2              FROM generate_series(1, {DEVICE_ROWS}) AS i"
+            "INSERT INTO {table}              SELECT 0,                     CASE WHEN i = {device_rows} THEN 2147483647 ELSE 1000 END,                     2              FROM generate_series(1, {device_rows}) AS i"
         ))
         .expect("overflow fixture INSERT should succeed");
         Spi::run(&format!("ANALYZE {table}")).expect("ANALYZE should succeed");
@@ -520,7 +539,7 @@ mod tests {
         ))
         .expect("overflow fixture pin should succeed")
         .expect("overflow fixture pin should return rows");
-        assert_eq!(loaded, i64::from(DEVICE_ROWS));
+        assert_eq!(loaded, i64::from(device_rows));
 
         let query = format!(
             "SELECT g, sum(lhs * rhs), count(*)              FROM {table} GROUP BY g ORDER BY g"
@@ -574,15 +593,16 @@ mod tests {
             return;
         }
         let table = "phase2_v2_bounded_cancel_t";
-        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
-        pin_int4_fixture(table);
+        let device_rows = device_fixture_rows();
+        create_int4_fixture(table, device_rows, 16, 0);
+        pin_int4_fixture(table, device_rows);
         let query = int4_grouped_query(table, "g", "v");
         assert_descriptor_plan(&explain_text(&query));
 
         // Warm the exact artifact and native program before measuring call
         // counts, so the test covers bounded dispatch rather than JIT setup.
         let expected_rows = result_rows(&query);
-        let expected_success_calls = usize::try_from(DEVICE_ROWS)
+        let expected_success_calls = usize::try_from(device_rows)
             .expect("fixture rows fit usize")
             .div_ceil(SUCCESS_CHUNK_ROWS)
             + 1;

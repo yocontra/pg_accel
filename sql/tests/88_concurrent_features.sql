@@ -46,7 +46,7 @@ INSERT INTO _cf_ref VALUES (ST_SetSRID(ST_MakePoint(-73.9857, 40.7484), 4326));
 -- =========================================================================
 -- 1-2. Parallel workers + spatial query
 -- =========================================================================
-SET max_parallel_workers_per_gather = 4;
+SET max_parallel_workers_per_gather = DEFAULT;
 
 SET pg_accel.enabled = on;
 CREATE TEMP TABLE _cf_plan_par (line text);

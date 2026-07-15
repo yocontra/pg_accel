@@ -1,6 +1,7 @@
 //! 20-iteration parallel stress harness.
 //!
-//! Each workload is run 20 times consecutively under 8 parallel workers
+//! Each workload is run 20 times consecutively under PostgreSQL's configured
+//! parallel defaults
 //! with zero tolerance for crashes (a crashed backend drops the libpq
 //! connection; we detect that as an `Err(_)` from `simple_query` and fail
 //! the test immediately).
@@ -88,7 +89,7 @@ fn run_stress<W: Workload + ?Sized>(wl: &W) {
 ///
 /// We only enforce equality on scalar numeric columns — text / timestamp /
 /// ROW_NUMBER-style columns are skipped because order-dependence makes
-/// them brittle under 8-worker interleaving. A true integration harness
+/// them brittle under parallel-worker interleaving. A true integration harness
 /// should hash the full row set; this function is a reasonable first
 /// approximation.
 fn assert_result_close(

@@ -12,14 +12,13 @@ impl Workload for ParallelHashJoinRebuildDecline {
     }
 
     fn description(&self) -> &'static str {
-        "parallel int4 hash join with ~60K-row inner side - partial-path planner decline \
-         (`hashjoin_parallel_inner_rebuild_too_large`) until shared GPU inner state lands"
+        "parallel int4 hash join with a device-limit-qualified oversized inner side - \
+         partial-path planner decline until shared GPU inner state lands"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
         let outer_rows = rows.max(100_000);
         let match_rows = 20_000usize;
-        let inner_rows = 60_000usize;
         vec![
             "DROP TABLE IF EXISTS bench_parallel_hj_outer".to_owned(),
             "DROP TABLE IF EXISTS bench_parallel_hj_inner".to_owned(),
@@ -27,14 +26,30 @@ impl Workload for ParallelHashJoinRebuildDecline {
             "CREATE TABLE bench_parallel_hj_inner (k int4 NOT NULL, v int4 NOT NULL)".to_owned(),
             format!(
                 "INSERT INTO bench_parallel_hj_outer (id, k) \
-                 SELECT g, g FROM generate_series(1, {outer_rows}) g"
+                 SELECT g, g \
+                 FROM generate_series(\
+                   1, \
+                   GREATEST(\
+                     {outer_rows}::bigint, \
+                     (SELECT value::bigint + GREATEST(value::bigint / 4, 1024) \
+                      FROM pg_accel_device_limits() WHERE name = 'gpu_min_rows')\
+                   )\
+                 ) g"
             ),
             format!(
                 "INSERT INTO bench_parallel_hj_inner (k, v) \
                  SELECT \
                    CASE WHEN g <= {match_rows} THEN g ELSE 1000000 + g END, \
                    g * 7 \
-                 FROM generate_series(1, {inner_rows}) g"
+                 FROM generate_series(\
+                   1, \
+                   GREATEST(\
+                     60000::bigint, \
+                     (SELECT value::bigint + GREATEST(value::bigint / 4, 1024) \
+                      FROM pg_accel_device_limits() \
+                      WHERE name = 'gpu_hash_join_build_max_rows')\
+                   )\
+                 ) g"
             ),
             "ANALYZE bench_parallel_hj_outer".to_owned(),
             "ANALYZE bench_parallel_hj_inner".to_owned(),
@@ -43,10 +58,10 @@ impl Workload for ParallelHashJoinRebuildDecline {
 
     fn pre_query_sql(&self) -> Vec<String> {
         vec![
-            "SET max_parallel_workers_per_gather = 4".to_owned(),
-            "SET min_parallel_table_scan_size = 0".to_owned(),
-            "SET parallel_setup_cost = 0".to_owned(),
-            "SET parallel_tuple_cost = 0".to_owned(),
+            "SET max_parallel_workers_per_gather = DEFAULT".to_owned(),
+            "RESET min_parallel_table_scan_size".to_owned(),
+            "RESET parallel_setup_cost".to_owned(),
+            "RESET parallel_tuple_cost".to_owned(),
         ]
     }
 

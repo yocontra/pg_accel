@@ -21,34 +21,140 @@ use crate::integration_connection::test_connection;
 use crate::workloads::parallel_stress::bench_f32_10m_setup_sql;
 
 #[test]
-fn plan_shape_cost_multiplier_settings_respect_documented_floor() {
-    const DOCUMENTED_FLOOR: f64 = 0.1;
-    let marker = ["SET pg_accel.", "cost_multiplier = "].concat();
-    let mut setting_count = 0;
+fn released_planner_evidence_uses_default_admission_settings() {
+    const EVIDENCE_SOURCES: &[(&str, &str)] = &[
+        ("plan_shape_test.rs", include_str!("plan_shape_test.rs")),
+        ("explain_audit.rs", include_str!("explain_audit.rs")),
+        (
+            "parallel_stress.rs",
+            include_str!("workloads/parallel_stress.rs"),
+        ),
+        (
+            "parallel_hashjoin_rebuild_decline.rs",
+            include_str!("workloads/parallel_hashjoin_rebuild_decline.rs"),
+        ),
+        (
+            "spatial_selectivity_sweep.rs",
+            include_str!("workloads/spatial_selectivity_sweep.rs"),
+        ),
+        (
+            "h3_protection_test.rs",
+            include_str!("h3_protection_test.rs"),
+        ),
+        (
+            "parallel_stress_test.rs",
+            include_str!("parallel_stress_test.rs"),
+        ),
+        (
+            "resident_concurrency_test.rs",
+            include_str!("resident_concurrency_test.rs"),
+        ),
+        (
+            "pg_accel/src/tests/phase2_cache.rs",
+            include_str!("../../pg_accel/src/tests/phase2_cache.rs"),
+        ),
+        (
+            "pg_accel/src/tests/mod.rs",
+            include_str!("../../pg_accel/src/tests/mod.rs"),
+        ),
+        (
+            "sql/tests/07_regression_small.sql",
+            include_str!("../../sql/tests/07_regression_small.sql"),
+        ),
+        (
+            "sql/tests/09_explain_plans.sql",
+            include_str!("../../sql/tests/09_explain_plans.sql"),
+        ),
+        (
+            "sql/tests/50_hash_agg_groupby.sql",
+            include_str!("../../sql/tests/50_hash_agg_groupby.sql"),
+        ),
+        (
+            "sql/tests/88_concurrent_features.sql",
+            include_str!("../../sql/tests/88_concurrent_features.sql"),
+        ),
+    ];
+    let banned = [
+        ["SET max_parallel_workers_per_gather = ", "0"].concat(),
+        ["SET max_parallel_workers_per_gather = ", "4"].concat(),
+        ["SET max_parallel_workers_per_gather = ", "8"].concat(),
+        ["SET min_parallel_table_scan_size = ", "0"].concat(),
+        ["SET parallel_setup_cost = ", "0"].concat(),
+        ["SET parallel_tuple_cost = ", "0"].concat(),
+    ];
+    let numeric_cost_prefixes = [
+        ["SET pg_accel.", "cost_multiplier = "].concat(),
+        ["SET LOCAL pg_accel.", "cost_multiplier = "].concat(),
+    ];
+    let numeric_min_batch_prefixes = [
+        ["SET pg_accel.", "min_batch_size = "].concat(),
+        ["SET LOCAL pg_accel.", "min_batch_size = "].concat(),
+    ];
+    let numeric_parallel_prefixes = [
+        "SET max_parallel_workers_per_gather = ",
+        "SET min_parallel_table_scan_size = ",
+        "SET min_parallel_index_scan_size = ",
+        "SET parallel_setup_cost = ",
+        "SET parallel_tuple_cost = ",
+    ];
 
-    for (line_index, line) in include_str!("plan_shape_test.rs").lines().enumerate() {
-        let Some((_, suffix)) = line.split_once(&marker) else {
-            continue;
-        };
-        let numeric = suffix
-            .chars()
-            .take_while(|ch| ch.is_ascii_digit() || *ch == '.')
-            .collect::<String>();
-        let value = numeric.parse::<f64>().unwrap_or_else(|error| {
-            panic!(
-                "plan-shape cost multiplier on line {} is not numeric: {error}",
-                line_index + 1
-            )
-        });
-        assert!(
-            value >= DOCUMENTED_FLOOR,
-            "plan-shape cost multiplier {value} on line {} is below the documented floor {DOCUMENTED_FLOOR}",
-            line_index + 1
-        );
-        setting_count += 1;
+    for (name, source) in EVIDENCE_SOURCES {
+        for marker in &banned {
+            assert!(
+                !source.contains(marker),
+                "released planner evidence `{name}` contains underwritten setting `{marker}`"
+            );
+        }
+        for (line_index, line) in source.lines().enumerate() {
+            for prefix in &numeric_cost_prefixes {
+                let Some((_, value)) = line.split_once(prefix) else {
+                    continue;
+                };
+                assert!(
+                    !value
+                        .trim_start()
+                        .starts_with(|ch: char| ch.is_ascii_digit() || ch == '-'),
+                    "released planner evidence `{name}` line {} pins a numeric cost multiplier",
+                    line_index + 1
+                );
+            }
+            for prefix in &numeric_min_batch_prefixes {
+                let Some((_, value)) = line.split_once(prefix) else {
+                    continue;
+                };
+                if !value
+                    .trim_start()
+                    .starts_with(|ch: char| ch.is_ascii_digit() || ch == '-')
+                {
+                    continue;
+                }
+                let previous_line = line_index
+                    .checked_sub(1)
+                    .and_then(|previous| source.lines().nth(previous))
+                    .unwrap_or_default();
+                assert!(
+                    line.contains("admission-audit-allow: direct min_batch_size GUC contract test")
+                        || previous_line.contains(
+                            "admission-audit-allow: direct min_batch_size GUC contract test",
+                        ),
+                    "released planner evidence `{name}` line {} pins a numeric minimum batch without a direct-contract allow marker",
+                    line_index + 1
+                );
+            }
+            for prefix in &numeric_parallel_prefixes {
+                let Some((_, value)) = line.split_once(prefix) else {
+                    continue;
+                };
+                assert!(
+                    !value
+                        .trim_start()
+                        .starts_with(|ch: char| ch.is_ascii_digit() || ch == '-'),
+                    "released planner evidence `{name}` line {} pins a numeric parallel planner setting",
+                    line_index + 1
+                );
+            }
+        }
     }
-
-    assert!(setting_count > 0, "plan-shape suite has no cost settings");
 }
 
 #[test]
@@ -79,16 +185,15 @@ fn connect() -> Client {
     client
 }
 
-/// Apply SQL settings that force the planner to prefer parallel plans
-/// regardless of table size / costs.
-fn force_parallel(c: &mut Client) {
+/// Restore the documented PostgreSQL planner defaults before plan evidence.
+fn use_default_parallel_planner(c: &mut Client) {
     for stmt in [
         "SET pg_accel.enabled = on",
-        "SET max_parallel_workers_per_gather = 8",
-        "SET min_parallel_table_scan_size = 0",
-        "SET parallel_setup_cost = 0",
-        "SET parallel_tuple_cost = 0",
-        "SET enable_nestloop = off",
+        "SET max_parallel_workers_per_gather = DEFAULT",
+        "RESET min_parallel_table_scan_size",
+        "RESET parallel_setup_cost",
+        "RESET parallel_tuple_cost",
+        "RESET enable_nestloop",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -481,10 +586,10 @@ fn ensure_gpuexpr_bigint_count_isolated_fixture(c: &mut Client, table_suffix: &s
 fn set_parallel_count_common_settings(c: &mut Client) {
     for stmt in [
         "SET jit = off",
-        "SET max_parallel_workers_per_gather = 8",
-        "SET min_parallel_table_scan_size = 0",
-        "SET parallel_setup_cost = 0",
-        "SET parallel_tuple_cost = 0",
+        "SET max_parallel_workers_per_gather = DEFAULT",
+        "RESET min_parallel_table_scan_size",
+        "RESET parallel_setup_cost",
+        "RESET parallel_tuple_cost",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -501,8 +606,8 @@ fn set_parallel_count_accel_mode(c: &mut Client) {
     for stmt in [
         "SET pg_accel.enabled = on",
         "SET pg_accel.parallel_fused_count = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -585,9 +690,9 @@ fn assert_fused_gpuexpr_count_matches_native(
 
     for stmt in [
         "SET pg_accel.enabled = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
-        "SET max_parallel_workers_per_gather = 8",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
+        "SET max_parallel_workers_per_gather = DEFAULT",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -648,9 +753,9 @@ fn assert_fused_gpuexpr_float4_reduce_matches_native(
 
     for stmt in [
         "SET pg_accel.enabled = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
-        "SET max_parallel_workers_per_gather = 8",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
+        "SET max_parallel_workers_per_gather = DEFAULT",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -708,9 +813,9 @@ fn assert_fused_gpuexpr_int8_reduce_matches_native(
 
     for stmt in [
         "SET pg_accel.enabled = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
-        "SET max_parallel_workers_per_gather = 8",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
+        "SET max_parallel_workers_per_gather = DEFAULT",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -752,6 +857,9 @@ fn assert_fused_gpuexpr_int8_reduce_matches_native(
 }
 
 fn ensure_nlj_between_fixture(c: &mut Client) {
+    let event_rows = device_limit_i64(c, "gpu_min_rows")
+        .saturating_mul(2)
+        .max(100_000);
     for stmt in [
         "CREATE UNLOGGED TABLE IF NOT EXISTS bench_nlj_events \
          (id int4 NOT NULL, ts int8 NOT NULL)",
@@ -759,18 +867,22 @@ fn ensure_nlj_between_fixture(c: &mut Client) {
          (id int4 NOT NULL, lo int8 NOT NULL, hi int8 NOT NULL)",
         "TRUNCATE bench_nlj_events",
         "TRUNCATE bench_nlj_windows",
-        "INSERT INTO bench_nlj_events \
-         SELECT g::int4, \
-                ((((g - 1) % 1000) * 1000) + ((g - 1) / 1000))::int8 \
-         FROM generate_series(1, 50000) AS g",
         "INSERT INTO bench_nlj_windows \
          SELECT i::int4, (i * 1000)::int8, (i * 1000 + 999)::int8 \
          FROM generate_series(0, 999) AS i",
-        "ANALYZE bench_nlj_events",
         "ANALYZE bench_nlj_windows",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
+    c.simple_query(&format!(
+        "INSERT INTO bench_nlj_events \
+         SELECT g::int4, \
+                ((((g - 1) % 1000) * 1000) + ((g - 1) / 1000))::int8 \
+         FROM generate_series(1, {event_rows}) AS g"
+    ))
+    .expect("populate NLJ BETWEEN event fixture");
+    c.simple_query("ANALYZE bench_nlj_events")
+        .expect("analyze NLJ BETWEEN event fixture");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -850,14 +962,24 @@ fn ensure_descriptor_groupagg_renamed_expression_fixture(c: &mut Client) {
 }
 
 fn ensure_aggregate_filter_decline_fixture(c: &mut Client) {
+    let rows = descriptor_groupagg_fixture_rows(c);
     for stmt in [
         "DROP TABLE IF EXISTS bench_rg_filter_decline",
         "CREATE UNLOGGED TABLE bench_rg_filter_decline (             id serial PRIMARY KEY,             product_id int4 NOT NULL,             price int4 NOT NULL,             discount int4 NOT NULL,             active boolean NOT NULL          )",
-        "INSERT INTO bench_rg_filter_decline (product_id, price, discount, active)          SELECT (g % 64)::int4,                 (1 + (g % 997))::int4,                 (1 + (g % 49))::int4,                 (g % 3) <> 0          FROM generate_series(1, 100000) AS g",
-        "ANALYZE bench_rg_filter_decline",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
+    c.simple_query(&format!(
+        "INSERT INTO bench_rg_filter_decline (product_id, price, discount, active) \
+         SELECT (g % 64)::int4, \
+                (1 + (g % 997))::int4, \
+                (1 + (g % 49))::int4, \
+                (g % 3) <> 0 \
+         FROM generate_series(1, {rows}) AS g"
+    ))
+    .expect("populate aggregate FILTER decline fixture");
+    c.simple_query("ANALYZE bench_rg_filter_decline")
+        .expect("analyze aggregate FILTER decline fixture");
     c.simple_query(
         "SELECT pg_accel_pin(
             'bench_rg_filter_decline'::regclass,
@@ -922,8 +1044,8 @@ fn plan_shape_descriptor_groupagg_survives_table_and_column_rename() {
     for stmt in [
         "SET pg_accel.enabled = on",
         "SET pg_accel.auto_load = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
         "SET max_parallel_workers_per_gather = DEFAULT",
         "SELECT pg_accel_reset_stats()",
     ] {
@@ -960,8 +1082,8 @@ fn plan_shape_descriptor_expression_groupagg_survives_rename() {
     for stmt in [
         "SET pg_accel.enabled = on",
         "SET pg_accel.auto_load = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
         "SET max_parallel_workers_per_gather = DEFAULT",
         "SELECT pg_accel_reset_stats()",
     ] {
@@ -1036,8 +1158,8 @@ fn resident_descriptor_backend_exit_releases_ledger_without_postmaster_restart()
              );
              SET pg_accel.enabled = on;
              SET pg_accel.auto_load = on;
-             SET pg_accel.cost_multiplier = 0.1;
-             SET pg_accel.min_batch_size = 65536;
+             SET pg_accel.cost_multiplier = DEFAULT;
+             SET pg_accel.min_batch_size = DEFAULT;
              SET max_parallel_workers_per_gather = DEFAULT;
              SELECT pg_accel_reset_stats();",
         )
@@ -1272,8 +1394,8 @@ fn plan_shape_aggregate_filter_has_precise_structural_decline() {
     for stmt in [
         "SET pg_accel.enabled = on",
         "SET pg_accel.auto_load = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
@@ -1307,7 +1429,7 @@ fn plan_shape_parallel_unsupported_float_agg_stays_native() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     ensure_fixtures(&mut c);
-    force_parallel(&mut c);
+    use_default_parallel_planner(&mut c);
 
     c.simple_query("SELECT pg_accel_reset_stats()")
         .expect("reset stats");
@@ -1338,7 +1460,7 @@ fn plan_shape_parallel_full_sort_stays_native() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     ensure_fixtures(&mut c);
-    force_parallel(&mut c);
+    use_default_parallel_planner(&mut c);
 
     c.simple_query("SELECT pg_accel_reset_stats()")
         .expect("reset stats");
@@ -1368,7 +1490,7 @@ fn plan_shape_parallel_hashjoin() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     ensure_fixtures(&mut c);
-    force_parallel(&mut c);
+    use_default_parallel_planner(&mut c);
 
     let sql = "SELECT f.*, d.name FROM bench_fact f JOIN bench_dim d USING(id)";
     assert_plan_contains(&mut c, sql, &["Hash Join"]);
@@ -1385,7 +1507,7 @@ fn plan_shape_grouped_hashagg_100k_declines_gpu() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
     ensure_hashagg_gate_fixture(&mut c);
-    force_parallel(&mut c);
+    use_default_parallel_planner(&mut c);
 
     let sql = "SELECT grp, SUM(val), COUNT(*) FROM bench_hashagg_gate GROUP BY grp";
     assert_plan_contains(&mut c, sql, &["HashAggregate"]);
@@ -1413,8 +1535,8 @@ fn plan_shape_nlj_between_unsupported_predicate_stays_native() {
 
     for stmt in [
         "SET pg_accel.enabled = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 1",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
         "RESET enable_nestloop",
         "SELECT pg_accel_reset_stats()",
     ] {
@@ -1480,7 +1602,7 @@ fn plan_shape_postgis_point_polygon_intersects_declines_until_exact_semantics() 
     ] {
         for stmt in [
             "SET pg_accel.enabled = on",
-            "SET pg_accel.cost_multiplier = 0.1",
+            "SET pg_accel.cost_multiplier = DEFAULT",
             "SELECT pg_accel_reset_stats()",
         ] {
             c.simple_query(stmt).expect(stmt);
@@ -1517,7 +1639,7 @@ fn plan_shape_postgis_intersects_unsupported_shape_stays_native() {
          FROM generate_series(1, 250000) AS g",
         "ANALYZE bench_postgis_intersects_unsupported_gate",
         "SET pg_accel.enabled = on",
-        "SET pg_accel.cost_multiplier = 0.1",
+        "SET pg_accel.cost_multiplier = DEFAULT",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
@@ -1557,9 +1679,9 @@ fn plan_shape_direct_gpuexpr_template_scan_stays_native_until_resident() {
 
     for stmt in [
         "SET pg_accel.enabled = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 8192",
-        "SET max_parallel_workers_per_gather = 8",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
+        "SET max_parallel_workers_per_gather = DEFAULT",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -1653,9 +1775,9 @@ fn plan_shape_gpu_only_declines_host_staged_fused_reduce() {
 
     for stmt in [
         "SET pg_accel.enabled = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
-        "SET max_parallel_workers_per_gather = 8",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
+        "SET max_parallel_workers_per_gather = DEFAULT",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
@@ -1799,12 +1921,12 @@ fn plan_shape_parallel_filtered_count_guc_on_stays_native_at_generic_predicate_g
     for stmt in [
         "SET pg_accel.enabled = on",
         "SET pg_accel.parallel_fused_count = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
-        "SET max_parallel_workers_per_gather = 8",
-        "SET min_parallel_table_scan_size = 0",
-        "SET parallel_setup_cost = 0",
-        "SET parallel_tuple_cost = 0",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
+        "SET max_parallel_workers_per_gather = DEFAULT",
+        "RESET min_parallel_table_scan_size",
+        "RESET parallel_setup_cost",
+        "RESET parallel_tuple_cost",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -1868,12 +1990,12 @@ fn plan_shape_parallel_filtered_count_guc_off_stays_native_at_generic_predicate_
 
     for stmt in [
         "SET pg_accel.enabled = on",
-        "SET pg_accel.cost_multiplier = 0.1",
-        "SET pg_accel.min_batch_size = 65536",
-        "SET max_parallel_workers_per_gather = 8",
-        "SET min_parallel_table_scan_size = 0",
-        "SET parallel_setup_cost = 0",
-        "SET parallel_tuple_cost = 0",
+        "SET pg_accel.cost_multiplier = DEFAULT",
+        "SET pg_accel.min_batch_size = DEFAULT",
+        "SET max_parallel_workers_per_gather = DEFAULT",
+        "RESET min_parallel_table_scan_size",
+        "RESET parallel_setup_cost",
+        "RESET parallel_tuple_cost",
     ] {
         c.simple_query(stmt).expect(stmt);
     }
@@ -1918,7 +2040,10 @@ fn plan_shape_parallel_filtered_count_guc_off_stays_native_at_generic_predicate_
 fn plan_shape_parallel_filtered_count_bounded_stays_native_at_generic_predicate_gate() {
     let _live_pg_guard = live_pg_test_lock();
     let mut c = connect();
-    let rows = 1_000_000;
+    let minimum = device_limit_i64(&mut c, "gpu_expr_min_rows");
+    let rows = minimum
+        .saturating_add((minimum / 4).max(1_024))
+        .max(1_000_000);
     let table = ensure_gpuexpr_count_isolated_fixture(&mut c, "parallel_fused_bounded", rows);
     let sql = format!("SELECT count(*) FROM {table} WHERE val > 500.0::float4");
 

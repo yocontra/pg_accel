@@ -267,10 +267,10 @@ DROP TABLE _grp, _grp_off, _grp_on;
 -- =========================================================================
 
 CREATE TEMP TABLE _mixed (id serial PRIMARY KEY, x integer);
--- Alternate NULL/non-NULL in a pattern that crosses batch boundaries (default 256).
+-- Alternate NULL/non-NULL across multiple documented-default 65,536-row batches.
 INSERT INTO _mixed (x)
 SELECT CASE WHEN g % 3 = 0 THEN NULL ELSE g END
-FROM generate_series(1, 1000) g;
+FROM generate_series(1, 131072) g;
 
 ANALYZE _mixed;
 

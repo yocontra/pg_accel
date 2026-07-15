@@ -5,8 +5,8 @@
 
 BEGIN;
 
--- Ensure min_batch_size is at default (256) so these small tables stay below threshold
-SET pg_accel.min_batch_size = 256;
+-- Restore the documented default so these small tables stay below threshold.
+SET pg_accel.min_batch_size = DEFAULT;
 
 CREATE TEMP TABLE _rs_tiny (
     id serial PRIMARY KEY,

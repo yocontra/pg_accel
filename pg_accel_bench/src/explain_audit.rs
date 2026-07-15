@@ -181,16 +181,14 @@ const COMMON_FIXTURES: &[&str] = &[
     "ANALYZE bench_part",
 ];
 
-/// Force-parallel session GUCs so the planner picks a parallel plan
-/// regardless of table size. We use 8 workers; the audit never disables
-/// parallel workers (Benchmark Rule #11).
-const FORCE_PARALLEL: &[&str] = &[
+/// Documented planner defaults used by release-plan evidence.
+const DEFAULT_PLANNER_SETTINGS: &[&str] = &[
     "SET pg_accel.enabled = on",
-    "SET max_parallel_workers_per_gather = 8",
-    "SET min_parallel_table_scan_size = 0",
-    "SET parallel_setup_cost = 0",
-    "SET parallel_tuple_cost = 0",
-    "SET enable_nestloop = off",
+    "SET max_parallel_workers_per_gather = DEFAULT",
+    "RESET min_parallel_table_scan_size",
+    "RESET parallel_setup_cost",
+    "RESET parallel_tuple_cost",
+    "RESET enable_nestloop",
 ];
 
 const SPATIAL_100K_QUARANTINE_REASON: &str = "legacy 100K spatial crash repro: chunked resident dispatch fix landed \
@@ -541,8 +539,8 @@ pub fn run_audit(connection: &str) -> Result<bool, Box<dyn std::error::Error>> {
             .simple_query(stmt)
             .map_err(|e| format!("fixture `{stmt}` failed: {e}"))?;
     }
-    // 2. Force-parallel GUCs once on the session.
-    for stmt in FORCE_PARALLEL {
+    // 2. Restore planner defaults once on the session.
+    for stmt in DEFAULT_PLANNER_SETTINGS {
         client
             .simple_query(stmt)
             .map_err(|e| format!("session GUC `{stmt}` failed: {e}"))?;
@@ -581,7 +579,7 @@ pub fn run_audit(connection: &str) -> Result<bool, Box<dyn std::error::Error>> {
         let matched = shape_has_customscan_under_gather(&explain);
         // Reset row-local GUCs by re-applying the session defaults so the
         // next row starts from a known state.
-        for stmt in FORCE_PARALLEL {
+        for stmt in DEFAULT_PLANNER_SETTINGS {
             client
                 .simple_query(stmt)
                 .map_err(|e| format!("session GUC reset `{stmt}` failed: {e}"))?;
