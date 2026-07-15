@@ -3286,30 +3286,26 @@ void fill_hashagg_streaming_metadata(uint8_t* slab, const int* value_types,
   }
 }
 
-template <typename KeyT>
-pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t* group_null_mask,
-                                          size_t row_count, int key_type,
-                                          const void* const* value_cols,
-                                          const uint8_t* const* value_nulls, const int* value_types,
-                                          const pgaccel_agg_col* agg_cols, size_t num_aggs,
-                                          pgaccel_agg_state** out_state) {
-  if (out_state == nullptr)
-    return PGACCEL_ERROR;
-  sycl::queue& q = pgaccel_require_queue();
-  const pgaccel_platform_caps caps = pgaccel_get_caps();
-  if (caps.max_alloc_bytes < sizeof(HashAggStreamingSlabHeader) * 2) {
-    *out_state = nullptr;
-    return PGACCEL_OOM;
-  }
+struct HashAggStreamingPlan {
+  HashAggStreamingSlabHeader layout{};
+  size_t chunk_capacity = 0;
+  size_t slab_bytes = 0;
+};
 
-  const size_t slab_budget = std::min(HASH_AGG_STREAM_MAX_SLAB_BYTES, caps.max_alloc_bytes / 2);
-  size_t distinct_ceiling = std::min(row_count, HASH_AGG_STREAM_MAX_TABLE_SLOTS / 2);
+template <typename KeyT>
+bool build_hashagg_streaming_plan(size_t row_count, size_t num_aggs,
+                                  const uint8_t* const* value_nulls,
+                                  const int* value_types, const pgaccel_agg_col* agg_cols,
+                                  size_t slab_budget, HashAggStreamingPlan* out) {
+  if (out == nullptr)
+    return false;
+
+  const size_t distinct_ceiling = std::min(row_count, HASH_AGG_STREAM_MAX_TABLE_SLOTS / 2);
   size_t table_need = 0;
   size_t table_capacity = 0;
   if (!checked_mul_size(distinct_ceiling, 2, &table_need) ||
       !next_power_of_two_size(std::max<size_t>(table_need, 2), &table_capacity)) {
-    *out_state = nullptr;
-    return PGACCEL_OOM;
+    return false;
   }
 
   size_t per_row_bytes = sizeof(KeyT) + sizeof(uint8_t);
@@ -3319,8 +3315,7 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
     if (!checked_add_size(per_row_bytes, value_elem_size(value_types[a]), &per_row_bytes) ||
         (value_nulls != nullptr && value_nulls[a] != nullptr &&
          !checked_add_size(per_row_bytes, sizeof(uint8_t), &per_row_bytes))) {
-      *out_state = nullptr;
-      return PGACCEL_OOM;
+      return false;
     }
   }
 
@@ -3329,18 +3324,14 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
   while (!build_hashagg_streaming_layout(table_capacity, num_aggs, 0, sizeof(KeyT), value_nulls,
                                          value_types, agg_cols, &layout, &base_bytes) ||
          base_bytes >= slab_budget) {
-    if (table_capacity <= 2) {
-      *out_state = nullptr;
-      return PGACCEL_OOM;
-    }
+    if (table_capacity <= 2)
+      return false;
     table_capacity /= 2;
   }
 
   const size_t upper = std::min(row_count, (slab_budget - base_bytes) / per_row_bytes);
-  if (upper == 0) {
-    *out_state = nullptr;
-    return PGACCEL_OOM;
-  }
+  if (upper == 0)
+    return false;
 
   size_t low = 1;
   size_t high = upper;
@@ -3361,20 +3352,50 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
       high = mid - 1;
     }
   }
-  if (chunk_capacity == 0) {
-    *out_state = nullptr;
-    return PGACCEL_OOM;
-  }
+  if (chunk_capacity == 0)
+    return false;
 
   const size_t forced_rows = hashagg_forced_test_chunk_rows();
   if (forced_rows != 0 && forced_rows < chunk_capacity) {
     chunk_capacity = forced_rows;
     if (!build_hashagg_streaming_layout(table_capacity, num_aggs, chunk_capacity, sizeof(KeyT),
                                         value_nulls, value_types, agg_cols, &layout, &slab_bytes)) {
-      *out_state = nullptr;
-      return PGACCEL_OOM;
+      return false;
     }
   }
+
+  out->layout = layout;
+  out->chunk_capacity = chunk_capacity;
+  out->slab_bytes = slab_bytes;
+  return true;
+}
+
+template <typename KeyT>
+pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t* group_null_mask,
+                                          size_t row_count, int key_type,
+                                          const void* const* value_cols,
+                                          const uint8_t* const* value_nulls, const int* value_types,
+                                          const pgaccel_agg_col* agg_cols, size_t num_aggs,
+                                          pgaccel_agg_state** out_state) {
+  if (out_state == nullptr)
+    return PGACCEL_ERROR;
+  sycl::queue& q = pgaccel_require_queue();
+  const pgaccel_platform_caps caps = pgaccel_get_caps();
+  if (caps.max_alloc_bytes < sizeof(HashAggStreamingSlabHeader) * 2) {
+    *out_state = nullptr;
+    return PGACCEL_OOM;
+  }
+
+  const size_t slab_budget = std::min(HASH_AGG_STREAM_MAX_SLAB_BYTES, caps.max_alloc_bytes / 2);
+  HashAggStreamingPlan plan;
+  if (!build_hashagg_streaming_plan<KeyT>(row_count, num_aggs, value_nulls, value_types, agg_cols,
+                                          slab_budget, &plan)) {
+    *out_state = nullptr;
+    return PGACCEL_OOM;
+  }
+  const HashAggStreamingSlabHeader& layout = plan.layout;
+  const size_t chunk_capacity = plan.chunk_capacity;
+  const size_t slab_bytes = plan.slab_bytes;
 
   uint8_t* slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
   if (slab == nullptr) {
@@ -3405,11 +3426,13 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
     for (size_t row_begin = 0; row_begin < row_count; row_begin += chunk_capacity) {
       const size_t rows = std::min(chunk_capacity, row_count - row_begin);
       q.memcpy(slab + layout.chunk_keys_off, source_keys + row_begin * sizeof(KeyT),
-               rows * sizeof(KeyT));
+               rows * sizeof(KeyT))
+          .wait_and_throw();
       if (group_null_mask != nullptr) {
-        q.memcpy(slab + layout.chunk_key_nulls_off, group_null_mask + row_begin, rows);
+        q.memcpy(slab + layout.chunk_key_nulls_off, group_null_mask + row_begin, rows)
+            .wait_and_throw();
       } else {
-        q.memset(slab + layout.chunk_key_nulls_off, 0, rows);
+        q.memset(slab + layout.chunk_key_nulls_off, 0, rows).wait_and_throw();
       }
 
       for (size_t a = 0; a < num_aggs; ++a) {
@@ -3418,15 +3441,18 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
         const size_t elem_size = value_elem_size(value_types[a]);
         const auto* source = static_cast<const uint8_t*>(value_cols[a]);
         q.memcpy(slab + layout.chunk_value_data_off + value_offsets[a],
-                 source + row_begin * elem_size, rows * elem_size);
+                 source + row_begin * elem_size, rows * elem_size)
+            .wait_and_throw();
         if (null_present[a] != 0) {
           q.memcpy(slab + layout.chunk_null_data_off + null_offsets[a], value_nulls[a] + row_begin,
-                   rows);
+                   rows)
+              .wait_and_throw();
         }
       }
       const size_t chunk_blocks = 1 + (rows - 1) / HASH_AGG_STREAM_BLOCK_ROWS;
       q.memcpy(&reinterpret_cast<HashAggStreamingSlabHeader*>(slab)->chunk_rows, &rows,
-               sizeof(rows));
+               sizeof(rows))
+          .wait_and_throw();
       q.memcpy(&reinterpret_cast<HashAggStreamingSlabHeader*>(slab)->chunk_blocks, &chunk_blocks,
                sizeof(chunk_blocks))
           .wait_and_throw();
@@ -3788,16 +3814,13 @@ pgaccel_status pgaccel_hash_agg_execute_checked(
   *out_state = nullptr;
   return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
-  if (out_state != nullptr)
-    *out_state = nullptr;
+  *out_state = nullptr;
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
-  if (out_state != nullptr)
-    *out_state = nullptr;
+  *out_state = nullptr;
   return pgaccel_kernel_failure("pgaccel_hash_agg_execute_checked", &e);
 } catch (...) {
-  if (out_state != nullptr)
-    *out_state = nullptr;
+  *out_state = nullptr;
   return pgaccel_kernel_failure("pgaccel_hash_agg_execute_checked", nullptr);
 }
 
