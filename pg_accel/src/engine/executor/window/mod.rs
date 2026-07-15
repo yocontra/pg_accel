@@ -467,6 +467,8 @@ impl WindowExecState {
         }
 
         // -- Phase 2: Extract columns needed by window specs --
+        // SAFETY: the vectorized caller supplies the live relation scratch
+        // slot, whose descriptor is shared by every tuple copied above.
         let tupdesc = unsafe { (*scratch_slot).tts_tupleDescriptor };
 
         let partition_attno = self.specs.first().map_or(0, |s| s.partition_attno);
@@ -492,6 +494,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Rank => {
+                    // SAFETY: the planned order attribute is in `tupdesc`, and
+                    // every stored tuple was copied from that same relation.
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
                     let ok =
@@ -500,6 +504,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::DenseRank => {
+                    // SAFETY: the planned order attribute is in `tupdesc`, and
+                    // every stored tuple was copied from that same relation.
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
                     let ok = gpu::window_dense_rank(&partition_starts, &sort_keys, &mut results)
@@ -508,6 +514,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Sum => {
+                    // SAFETY: the planned value attribute is in `tupdesc`, and
+                    // every stored tuple was copied from that same relation.
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
@@ -522,6 +530,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Count => {
+                    // SAFETY: the planned value attribute is in `tupdesc`, and
+                    // every stored tuple was copied from that same relation.
                     let null_mask = unsafe { self.extract_null_mask(spec.value_attno, tupdesc) };
                     let mut results = vec![0i64; n];
                     let ok =
@@ -530,6 +540,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Lag => {
+                    // SAFETY: the planned value attribute is in `tupdesc`, and
+                    // every stored tuple was copied from that same relation.
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
@@ -549,6 +561,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Lead => {
+                    // SAFETY: the planned value attribute is in `tupdesc`, and
+                    // every stored tuple was copied from that same relation.
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
@@ -652,6 +666,8 @@ impl WindowExecState {
         // from the stored MinimalTuples.
 
         // Collect unique attno requirements.
+        // SAFETY: the caller supplies a live scratch slot for the child input;
+        // all stored MinimalTuples were copied from slots with this descriptor.
         let tupdesc = unsafe { (*scratch_slot).tts_tupleDescriptor };
 
         // Build partition_starts array by extracting partition key values.
@@ -680,6 +696,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Rank => {
+                    // SAFETY: the planned order attribute is in `tupdesc`, and
+                    // every stored child tuple has that same descriptor.
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
                     let ok =
@@ -688,6 +706,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::DenseRank => {
+                    // SAFETY: the planned order attribute is in `tupdesc`, and
+                    // every stored child tuple has that same descriptor.
                     let sort_keys = unsafe { self.extract_f64_column(spec.order_attno, tupdesc) };
                     let mut results = vec![0i64; n];
                     let ok = gpu::window_dense_rank(&partition_starts, &sort_keys, &mut results)
@@ -696,6 +716,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Sum => {
+                    // SAFETY: the planned value attribute is in `tupdesc`, and
+                    // every stored child tuple has that same descriptor.
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
@@ -710,6 +732,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Count => {
+                    // SAFETY: the planned value attribute is in `tupdesc`, and
+                    // every stored child tuple has that same descriptor.
                     let null_mask = unsafe { self.extract_null_mask(spec.value_attno, tupdesc) };
                     let mut results = vec![0i64; n];
                     let ok =
@@ -718,6 +742,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Lag => {
+                    // SAFETY: the planned value attribute is in `tupdesc`, and
+                    // every stored child tuple has that same descriptor.
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
@@ -737,6 +763,8 @@ impl WindowExecState {
                     ok
                 }
                 WindowFunc::Lead => {
+                    // SAFETY: the planned value attribute is in `tupdesc`, and
+                    // every stored child tuple has that same descriptor.
                     let (values, null_mask) =
                         unsafe { self.extract_f64_column_with_nulls(spec.value_attno, tupdesc) };
                     let mut results = vec![0.0f64; n];
@@ -801,11 +829,19 @@ impl Drop for WindowExecState {
 
 impl crate::engine::executor::state::ExecutorState for WindowExecState {
     unsafe fn exec(&mut self, css: *mut pg_sys::CustomScanState) -> *mut pg_sys::TupleTableSlot {
+        // SAFETY: PostgreSQL invokes this callback with a live CustomScanState;
+        // its initialized scan slot remains valid for the call.
         let scan_slot = unsafe { (*css).ss.ss_ScanTupleSlot };
         if self.has_scan_desc() {
+            // SAFETY: `has_scan_desc` selects direct relation mode, and the
+            // live scan slot is the scratch/output slot required by this path.
             unsafe { self.next_vectorized(scan_slot) }
         } else {
+            // SAFETY: the live CustomScanState owns an optional first child;
+            // the helper bounds-checks the custom plan-state list.
             let child_ps = unsafe { crate::engine::executor::state::child_plan_state(css, 0) };
+            // SAFETY: child mode supplies the live child PlanState and scan
+            // slot obtained from this same executor callback.
             unsafe { self.next(child_ps, scan_slot) }
         }
     }
