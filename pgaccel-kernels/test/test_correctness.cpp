@@ -1075,6 +1075,134 @@ static void test_h3_cell_to_parent_higher_res() {
   ASSERT_EQ("higher res parent -> 0", parent, 0ULL);
 }
 
+template <typename K>
+using TopkFn = pgaccel_status (*)(const K*, size_t, size_t, uint8_t, uint32_t*, size_t*);
+
+template <typename K>
+static bool topk_test_less(K a, K b) {
+  const bool a_nan = a != a;
+  const bool b_nan = b != b;
+  if (a_nan)
+    return false;
+  if (b_nan)
+    return true;
+  return a < b;
+}
+
+template <typename K>
+static void check_topk(const char* tag, const std::vector<K>& keys, size_t k, bool largest,
+                       TopkFn<K> fn) {
+  std::vector<uint32_t> expected(keys.size());
+  for (size_t i = 0; i < expected.size(); ++i)
+    expected[i] = static_cast<uint32_t>(i);
+  std::stable_sort(expected.begin(), expected.end(), [&](uint32_t a, uint32_t b) {
+    return largest ? topk_test_less(keys[b], keys[a]) : topk_test_less(keys[a], keys[b]);
+  });
+
+  const size_t take = std::min(k, keys.size());
+  std::vector<uint32_t> output(take, std::numeric_limits<uint32_t>::max());
+  size_t out_count = std::numeric_limits<size_t>::max();
+  const pgaccel_status status =
+      fn(keys.data(), keys.size(), k, largest ? 1 : 0, output.data(), &out_count);
+  ASSERT_STATUS_OK(tag, status);
+  ASSERT_EQ(tag, out_count, take);
+
+  bool matches = out_count == take;
+  for (size_t i = 0; matches && i < take; ++i)
+    matches = output[i] == expected[i];
+  ASSERT_TRUE(tag, matches);
+}
+
+static void test_topk_direct() {
+  constexpr size_t count = 3073;
+  constexpr size_t k = 37;
+
+  std::vector<int32_t> i32_keys(count);
+  std::vector<int64_t> i64_keys(count);
+  std::vector<float> f32_keys(count);
+  std::vector<double> f64_keys(count);
+  for (size_t i = 0; i < count; ++i) {
+    switch (i % 11) {
+      case 0:
+        i32_keys[i] = std::numeric_limits<int32_t>::min();
+        i64_keys[i] = std::numeric_limits<int64_t>::min();
+        f32_keys[i] = -std::numeric_limits<float>::infinity();
+        f64_keys[i] = -std::numeric_limits<double>::infinity();
+        break;
+      case 1:
+        i32_keys[i] = std::numeric_limits<int32_t>::max();
+        i64_keys[i] = std::numeric_limits<int64_t>::max();
+        f32_keys[i] = std::numeric_limits<float>::infinity();
+        f64_keys[i] = std::numeric_limits<double>::infinity();
+        break;
+      case 2:
+        i32_keys[i] = 0;
+        i64_keys[i] = 0;
+        f32_keys[i] = -0.0f;
+        f64_keys[i] = -0.0;
+        break;
+      case 3:
+        i32_keys[i] = 0;
+        i64_keys[i] = 0;
+        f32_keys[i] = 0.0f;
+        f64_keys[i] = 0.0;
+        break;
+      case 4:
+      case 5:
+        i32_keys[i] = 42;
+        i64_keys[i] = 42;
+        f32_keys[i] = std::numeric_limits<float>::quiet_NaN();
+        f64_keys[i] = std::numeric_limits<double>::quiet_NaN();
+        break;
+      default:
+        i32_keys[i] = static_cast<int32_t>(i % 7) - 3;
+        i64_keys[i] = static_cast<int64_t>(i % 7) - 3;
+        f32_keys[i] = static_cast<float>(static_cast<int>(i % 7) - 3);
+        f64_keys[i] = static_cast<double>(static_cast<int>(i % 7) - 3);
+        break;
+    }
+  }
+
+  check_topk("topk i32 ascending", i32_keys, k, false, pgaccel_topk_kv_i32);
+  check_topk("topk i32 descending", i32_keys, k, true, pgaccel_topk_kv_i32);
+  check_topk("topk i64 ascending", i64_keys, k, false, pgaccel_topk_kv_i64);
+  check_topk("topk i64 descending", i64_keys, k, true, pgaccel_topk_kv_i64);
+  check_topk("topk f32 ascending", f32_keys, k, false, pgaccel_topk_kv_f32);
+  check_topk("topk f32 descending", f32_keys, k, true, pgaccel_topk_kv_f32);
+  check_topk("topk f64 ascending", f64_keys, k, false, pgaccel_topk_kv_f64);
+  check_topk("topk f64 descending", f64_keys, k, true, pgaccel_topk_kv_f64);
+
+  const std::vector<int32_t> short_keys = {3, -1, 3, 0, -1};
+  check_topk("topk k greater than count", short_keys, 99, false, pgaccel_topk_kv_i32);
+
+  size_t out_count = 99;
+  pgaccel_status status = pgaccel_topk_kv_i32(nullptr, 7, 0, 0, nullptr, &out_count);
+  ASSERT_STATUS_OK("topk k zero status", status);
+  ASSERT_EQ("topk k zero count", out_count, 0);
+
+  out_count = 99;
+  status = pgaccel_topk_kv_i32(nullptr, 0, 7, 0, nullptr, &out_count);
+  ASSERT_STATUS_OK("topk count zero status", status);
+  ASSERT_EQ("topk count zero output", out_count, 0);
+
+  uint32_t output = 99;
+  out_count = 99;
+  status = pgaccel_topk_kv_i32(short_keys.data(), short_keys.size(), 1, 0, nullptr, &out_count);
+  ASSERT_EQ("topk null output status", status, PGACCEL_ERROR);
+  ASSERT_EQ("topk null output resets count", out_count, 0);
+  status = pgaccel_topk_kv_i32(short_keys.data(), short_keys.size(), 1, 0, &output, nullptr);
+  ASSERT_EQ("topk null count status", status, PGACCEL_ERROR);
+
+  if (std::numeric_limits<size_t>::max() > std::numeric_limits<uint32_t>::max()) {
+    out_count = 99;
+    status = pgaccel_topk_kv_i32(short_keys.data(),
+                                 static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1, 1,
+                                 0, &output, &out_count);
+    ASSERT_EQ("topk oversized count status", status, PGACCEL_ERROR);
+    ASSERT_EQ("topk oversized count resets output", out_count, 0);
+  }
+}
+
 // =========================================================================
 // main
 // =========================================================================
@@ -1287,6 +1415,9 @@ int main() {
     snprintf(buf, sizeof(buf), "sort_kv_f64 N=%zu stable", N);
     ASSERT_EQ(buf, stable, true);
   }
+
+  printf("\n== direct top-k ==\n");
+  test_topk_direct();
 
   pgaccel_shutdown();
 
