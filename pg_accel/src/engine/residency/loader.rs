@@ -59,6 +59,8 @@ impl FromDatum for RawGeometryDatum {
         // SAFETY: SPI supplied a non-NULL Datum of the catalog-proved PostGIS
         // varlena type on the backend main thread.
         let original = datum.cast_mut_ptr::<pg_sys::varlena>();
+        // SAFETY: `original` is the non-null catalog-proved geometry varlena
+        // supplied by SPI and the conversion runs synchronously on its thread.
         let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
         if detoasted.is_null() {
             return Some(Self(Vec::new()));
@@ -66,6 +68,8 @@ impl FromDatum for RawGeometryDatum {
         // SAFETY: pg_detoast_datum returned a flat varlena whose complete
         // allocation is readable for VARSIZE bytes during this SPI callback.
         let length = unsafe { pgrx::varsize(detoasted.cast()) };
+        // SAFETY: `varsize` proves exactly `length` readable bytes in the flat
+        // detoasted allocation; to_vec copies them before any pfree or SPI exit.
         let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), length) }.to_vec();
         if detoasted != original {
             // SAFETY: a distinct pg_detoast_datum result is a palloc-owned
@@ -999,6 +1003,9 @@ impl ColumnBuilder {
                     .map_err(|error| format!("column {ordinal} raster read failed: {error:?}"))?;
                 let wkb = datum
                     .map(|datum| unsafe {
+                        // SAFETY: RawRasterDatum only wraps the live non-null
+                        // SPI value of the catalog-proved raster type; `catalog`
+                        // is the freshly resolved identity for its WKB exporter.
                         syscache::postgis_raster_datum_to_wkb(&builder.catalog, datum.0)
                     })
                     .transpose()
@@ -1827,6 +1834,8 @@ mod tests {
     fn raw_h3_datum_preserves_all_unsigned_bits() {
         let bits = 0xf123_4567_89ab_cdef_u64;
         let value = unsafe {
+            // SAFETY: h3index is a by-value 64-bit Datum; the explicit false
+            // null flag marks these bits as a present value for the trait hook.
             <RawH3Datum as pgrx::FromDatum>::from_polymorphic_datum(
                 pg_sys::Datum::from(bits),
                 false,
@@ -1836,6 +1845,8 @@ mod tests {
         assert_eq!(value, Some(RawH3Datum(bits)));
         assert_eq!(
             unsafe {
+                // SAFETY: the explicit true null flag means the trait hook does
+                // not interpret the supplied by-value Datum as a present value.
                 <RawH3Datum as pgrx::FromDatum>::from_polymorphic_datum(
                     pg_sys::Datum::from(bits),
                     true,

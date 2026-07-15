@@ -385,6 +385,8 @@ fn backend_can_access_shared_memory() -> bool {
         // children. Rust TLS destructors can run after ProcKill has cleared
         // MyProc, so they must leave the dead backend's ledger slot for the
         // next reservation's reclaim_dead_backends sweep.
+        // SAFETY: PostgreSQL initializes both backend globals before extension
+        // use; this read only decides whether shared-memory locking is still legal.
         unsafe { !pg_sys::IsUnderPostmaster || !pg_sys::MyProc.is_null() }
     }
 }

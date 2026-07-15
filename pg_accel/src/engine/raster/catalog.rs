@@ -73,6 +73,8 @@ fn validate_identity(
 pub unsafe fn revalidate_raster_catalog(
     spec: &RasterQuerySpec,
 ) -> Result<PostgisRasterCatalogIdentity, RasterCatalogRevalidationError> {
+    // SAFETY: this function inherits the backend-thread contract and performs
+    // the catalog resolution before any resident raster input is borrowed.
     let current = unsafe { resolve_postgis_raster_catalog() }
         .map_err(RasterCatalogRevalidationError::Lookup)?;
     validate_identity(spec, &current)?;
