@@ -1893,8 +1893,6 @@ fn execute_bounded_dense_artifact(
             // submits or dereferences those pointer values after return.
             let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
                 .map_err(|error| gpu_execution_error("grouped descriptor rejected", error))?;
-            let storage = GroupedAggOutputStorage::new(&plan)
-                .map_err(|error| gpu_execution_error("grouped output allocation failed", error))?;
             let session = GroupedAggSession::start(&plan)
                 .map_err(|error| gpu_execution_error("grouped session setup failed", error))?;
             let metadata = DescriptorExecutionMetadata {
@@ -1902,12 +1900,12 @@ fn execute_bounded_dense_artifact(
                 domains: inputs.artifact.domains.clone(),
                 resolved_spec: inputs.artifact.resolved_spec.clone(),
             };
-            Ok::<_, DescriptorAggExecutionError>((session, storage, metadata))
+            Ok::<_, DescriptorAggExecutionError>((session, metadata))
         },
     )
     .map_err(DescriptorDispatchFailure::Residency)?
     .map_err(DescriptorDispatchFailure::Execution)?;
-    let (mut session, mut storage, metadata) = initialized;
+    let (mut session, metadata) = initialized;
 
     let dispatch_started = Instant::now();
     let dispatch = run_bounded_dispatch(
@@ -1956,15 +1954,13 @@ fn execute_bounded_dense_artifact(
             BoundedDispatchError::Dispatch(error) | BoundedDispatchError::InterruptBoundary(error),
         ) => match error {
             DenseBoundedFailure::Interrupt(caught) => {
-                return cleanup_before_rethrow((session, storage), caught, |caught| {
-                    (*caught).rethrow()
-                });
+                return cleanup_before_rethrow(session, caught, |caught| (*caught).rethrow());
             }
             DenseBoundedFailure::Dispatch(error) => return Err(error),
         },
     };
 
-    let outcome = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
+    let (outcome, storage) = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
         owner_relid,
         identity,
         requests,
@@ -1976,9 +1972,16 @@ fn execute_bounded_dense_artifact(
             let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.map_err(|error| {
                 gpu_execution_error("grouped descriptor changed before finalize", error)
             })?;
-            session
+            // Output buffers carry an exact resolved-plan identity. Allocate
+            // them from this final pinned plan, not the temporary setup plan
+            // that was dropped before the bounded residency borrows began.
+            let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
+                gpu_execution_error("grouped final output allocation failed", error)
+            })?;
+            let outcome = session
                 .finalize(&plan, &mut storage)
-                .map_err(|error| gpu_execution_error("grouped finalization failed", error))
+                .map_err(|error| gpu_execution_error("grouped finalization failed", error))?;
+            Ok::<_, DescriptorAggExecutionError>((outcome, storage))
         },
     )
     .map_err(DescriptorDispatchFailure::Residency)?

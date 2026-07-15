@@ -344,6 +344,7 @@ fn filter_shape_eq(
         && left.value_cmp_opcode == right.value_cmp_opcode
         && left.pad0 == right.pad0
         && left.flags == right.flags
+        && left.mask.is_null() == right.mask.is_null()
         && val_eq(&left.value_cmp_const, &right.value_cmp_const)
         && left
             .predicate_lo
@@ -361,7 +362,9 @@ fn measure_col_shape_eq(
     left: &abi::PgaccelGroupedAggMeasureCol,
     right: &abi::PgaccelGroupedAggMeasureCol,
 ) -> bool {
-    left.physical_type == right.physical_type
+    left.values.is_null() == right.values.is_null()
+        && left.nulls.is_null() == right.nulls.is_null()
+        && left.physical_type == right.physical_type
         && left.element_bytes == right.element_bytes
         && left.scale == right.scale
         && left.flags == right.flags
@@ -384,12 +387,12 @@ fn stable_shape_matches(
     {
         return false;
     }
-    for index in 0..abi::PGACCEL_GROUPED_AGG_MAX_KEYS {
+    for index in 0..left.key_count as usize {
         let a = &left.keys[index];
         let b = &right.keys[index];
         if a.values.tag != b.values.tag
-            || (left.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
-                && a.values.nulls.is_null() != b.values.nulls.is_null())
+            || a.values.values.is_null() != b.values.values.is_null()
+            || a.values.nulls.is_null() != b.values.nulls.is_null()
             || a.lookup_by_key != b.lookup_by_key
             || a.source != b.source
             || a.code_min != b.code_min
@@ -401,7 +404,7 @@ fn stable_shape_matches(
             return false;
         }
     }
-    for index in 0..abi::PGACCEL_GROUPED_AGG_MAX_MEASURES {
+    for index in 0..left.measure_count as usize {
         let a = &left.measures[index];
         let b = &right.measures[index];
         if !measure_col_shape_eq(&a.value, &b.value)
@@ -417,10 +420,12 @@ fn stable_shape_matches(
             return false;
         }
     }
-    for index in 0..abi::PGACCEL_GROUPED_AGG_MAX_DIMS {
+    for index in 0..left.dim_count as usize {
         let a = &left.dims[index];
         let b = &right.dims[index];
         if a.fact_key.tag != b.fact_key.tag
+            || a.fact_key.values.is_null() != b.fact_key.values.is_null()
+            || a.fact_key.nulls.is_null() != b.fact_key.nulls.is_null()
             || a.match_by_key != b.match_by_key
             || a.multiplicity_by_key != b.multiplicity_by_key
             || a.key_min != b.key_min
@@ -1242,14 +1247,7 @@ impl GroupedAggSession {
     }
 
     fn validate_plan(&self, plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<()> {
-        if plan.desc.row_count != self.plan_shape.row_count
-            || !stable_shape_matches(&self.plan_shape, &plan.desc)
-        {
-            return Err(descriptor_error(
-                "resolved grouped plan changed during a bounded session",
-            ));
-        }
-        Ok(())
+        validate_session_plan(&self.plan_shape, plan)
     }
 
     pub fn accumulate(&mut self, chunk: &GroupedAggChunk<'_, '_>) -> GpuResult<()> {
@@ -1277,8 +1275,7 @@ impl GroupedAggSession {
         plan: &ResolvedGroupedAggPlan<'_>,
         output: &mut GroupedAggOutputStorage,
     ) -> GpuResult<GroupedAggOutcome> {
-        self.validate_plan(plan)?;
-        output.validate_for_plan(plan)?;
+        validate_session_finalize_inputs(&self.plan_shape, plan, output)?;
         let (flags, next) = lifecycle_flags(self.state, LifecycleAction::Finalize)?;
         match execute_call(&plan.desc, flags, &mut self.workspace, Some(output)) {
             Ok(Some(outcome)) => {
@@ -1317,6 +1314,28 @@ impl GroupedAggSession {
     pub const fn workspace(&self) -> &GroupedAggWorkspace {
         &self.workspace
     }
+}
+
+fn validate_session_plan(
+    plan_shape: &abi::PgaccelGroupedAggDesc,
+    plan: &ResolvedGroupedAggPlan<'_>,
+) -> GpuResult<()> {
+    if plan.desc.row_count != plan_shape.row_count || !stable_shape_matches(plan_shape, &plan.desc)
+    {
+        return Err(descriptor_error(
+            "resolved grouped plan changed during a bounded session",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_session_finalize_inputs(
+    plan_shape: &abi::PgaccelGroupedAggDesc,
+    plan: &ResolvedGroupedAggPlan<'_>,
+    output: &GroupedAggOutputStorage,
+) -> GpuResult<()> {
+    validate_session_plan(plan_shape, plan)?;
+    output.validate_for_plan(plan)
 }
 
 #[cfg(test)]
@@ -1476,6 +1495,26 @@ mod tests {
         let storage = GroupedAggOutputStorage::new(&other).expect("narrow output allocates");
         assert!(storage.validate_for_plan(&plan).is_err());
         assert!(storage.validate_for_plan(&other).is_ok());
+    }
+
+    #[test]
+    fn bounded_finalize_requires_storage_from_the_fresh_final_plan() {
+        let initial = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        // SAFETY: the pointer-free descriptor is used only by pure validation.
+        let final_plan = unsafe { ResolvedGroupedAggPlan::from_abi(initial.desc) }
+            .expect("fresh final plan resolves");
+
+        let initial_storage =
+            GroupedAggOutputStorage::new(&initial).expect("initial storage allocates");
+        assert!(
+            validate_session_finalize_inputs(&initial.desc, &final_plan, &initial_storage).is_err(),
+            "storage from the setup callback must not pass the final plan identity gate"
+        );
+
+        let final_storage =
+            GroupedAggOutputStorage::new(&final_plan).expect("final storage allocates");
+        validate_session_finalize_inputs(&initial.desc, &final_plan, &final_storage)
+            .expect("storage allocated from the exact final plan must pass session validation");
     }
 
     #[test]
@@ -1667,6 +1706,90 @@ mod tests {
         // SAFETY: fixture has no live pointers; rejection happens on metadata.
         let result = unsafe { GroupedAggChunk::from_abi(&plan, changed) };
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn stable_shape_matches_native_row_lane_presence_fingerprint() {
+        static KEY_VALUES: [i32; 8] = [0; 8];
+        static MEASURE_VALUES: [i64; 8] = [0; 8];
+        static RHS_VALUES: [i64; 8] = [0; 8];
+        static NULLS: [u8; 8] = [0; 8];
+        static MASK: [i8; 8] = [1; 8];
+        static DIM_VALUES: [i32; 8] = [0; 8];
+        static DIM_MATCH: [u8; 4] = [1; 4];
+        static DIM_MULTIPLICITY: [u64; 4] = [1; 4];
+
+        let mut base = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        base.row_count = 8;
+        base.keys[0].values.values = KEY_VALUES.as_ptr().cast();
+        base.keys[0].values.nulls = NULLS.as_ptr();
+        base.keys[0].null_code = 0;
+        base.measures[0].value.values = MEASURE_VALUES.as_ptr().cast();
+        base.measures[0].value.nulls = NULLS.as_ptr();
+        base.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64;
+        base.measures[0].value.element_bytes = 8;
+        base.measures[0].rhs.values = RHS_VALUES.as_ptr().cast();
+        base.measures[0].rhs.nulls = NULLS.as_ptr();
+        base.measures[0].rhs.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64;
+        base.measures[0].rhs.element_bytes = 8;
+        base.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR;
+        base.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        base.where_filter.mask = MASK.as_ptr();
+        base.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        base.measure_filters[0].mask = MASK.as_ptr();
+        base.dim_count = 1;
+        base.dims[0].fact_key.values = DIM_VALUES.as_ptr().cast();
+        base.dims[0].fact_key.nulls = NULLS.as_ptr();
+        base.dims[0].fact_key.tag = PgaccelValTag::Int32;
+        base.dims[0].match_by_key = DIM_MATCH.as_ptr();
+        base.dims[0].multiplicity_by_key = DIM_MULTIPLICITY.as_ptr();
+        base.dims[0].key_count = 4;
+
+        let mut mutations = Vec::new();
+        let mut changed = base;
+        changed.keys[0].values.values = std::ptr::null();
+        mutations.push(("key values", changed));
+        changed = base;
+        changed.keys[0].values.nulls = std::ptr::null();
+        mutations.push(("key nulls", changed));
+        changed = base;
+        changed.measures[0].value.values = std::ptr::null();
+        mutations.push(("measure values", changed));
+        changed = base;
+        changed.measures[0].value.nulls = std::ptr::null();
+        mutations.push(("measure nulls", changed));
+        changed = base;
+        changed.measures[0].rhs.values = std::ptr::null();
+        mutations.push(("rhs values", changed));
+        changed = base;
+        changed.measures[0].rhs.nulls = std::ptr::null();
+        mutations.push(("rhs nulls", changed));
+        changed = base;
+        changed.where_filter.mask = std::ptr::null();
+        mutations.push(("where SQL mask", changed));
+        changed = base;
+        changed.measure_filters[0].mask = std::ptr::null();
+        mutations.push(("measure SQL mask", changed));
+        changed = base;
+        changed.dims[0].fact_key.values = std::ptr::null();
+        mutations.push(("dimension fact values", changed));
+        changed = base;
+        changed.dims[0].fact_key.nulls = std::ptr::null();
+        mutations.push(("dimension fact nulls", changed));
+
+        for (label, changed) in mutations {
+            assert!(
+                !stable_shape_matches(&base, &changed),
+                "{label} presence drift must fail before native workspace poisoning"
+            );
+        }
+
+        let mut advanced = base;
+        advance_descriptor_rows(&mut advanced, 1).expect("advance row lanes");
+        assert!(
+            stable_shape_matches(&base, &advanced),
+            "row-lane addresses may advance when their presence and fixed lookup identity stay stable"
+        );
     }
 
     #[test]
