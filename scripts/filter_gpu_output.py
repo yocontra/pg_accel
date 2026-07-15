@@ -9,7 +9,6 @@ import datetime
 import os
 import re
 import subprocess
-import sys
 from typing import Counter
 
 
@@ -110,8 +109,12 @@ def run(args: argparse.Namespace) -> int:
     os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
     state: dict[str, bool] = {}
     counts: Counter[str] = collections.Counter()
+    raw_lines = 0
+    last_line_terminated = True
 
     with open(log_path, "w", encoding="utf-8", errors="replace") as log_file:
+        log_file.write(f"PGACCEL_TEST_START name={args.label}\n")
+        log_file.flush()
         process = subprocess.Popen(
             args.command,
             stdout=subprocess.PIPE,
@@ -123,6 +126,8 @@ def run(args: argparse.Namespace) -> int:
         )
         assert process.stdout is not None
         for line in process.stdout:
+            raw_lines += 1
+            last_line_terminated = line.endswith("\n")
             log_file.write(line)
             category = classify_noise(line, state)
             if category:
@@ -131,6 +136,13 @@ def run(args: argparse.Namespace) -> int:
             print(line, end="", flush=True)
 
         returncode = process.wait()
+        if raw_lines and not last_line_terminated:
+            log_file.write("\n")
+        result = "PASS" if returncode == 0 else "FAIL"
+        log_file.write(
+            f"PGACCEL_TEST_RESULT name={args.label} exit_code={returncode} "
+            f"result={result} raw_lines={raw_lines}\n"
+        )
 
     emit_suppression_summary(args.label, log_path, counts)
     if returncode != 0:
@@ -140,7 +152,9 @@ def run(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--label", required=True, help="short command label for summaries")
+    parser.add_argument(
+        "--label", required=True, help="short command label for summaries"
+    )
     log_target = parser.add_mutually_exclusive_group(required=True)
     log_target.add_argument("--log", help="raw combined stdout/stderr log path")
     log_target.add_argument(

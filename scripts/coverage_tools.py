@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any, Iterable
 
 
@@ -24,6 +25,13 @@ BASELINE_SQL_FILES = 52
 BASELINE_SQL_ASSERTIONS = 287
 BASELINE_CPP_SOURCES = 21
 BASELINE_CPP_TESTS = 29
+PINNED_CPP_EXECUTABLE_HEADERS = {
+    "pgaccel-kernels/include/alloc_helper.h",
+    "pgaccel-kernels/include/pgaccel_hash_agg.h",
+    "pgaccel-kernels/include/pgaccel_queue.h",
+    "pgaccel-kernels/src/h3_exact_device.hpp",
+    "pgaccel-kernels/src/h3_float_device.hpp",
+}
 EXPECTED_LAYERS = ("rust", "cpp", "sql")
 LINE_LAYERS = ("rust", "cpp")
 REQUIRED_STAGES = {
@@ -634,9 +642,13 @@ def seal_layer_evidence(args: argparse.Namespace) -> int:
         "rust": {
             "rust/raw-lcov.info",
             "rust/production-map.info",
+            "rust/production-coverage.json",
+            "rust/production-coverage.profdata",
+            "rust/production-object-manifest.json",
             "rust/raw-coverage.json",
             "rust/raw-summary.txt",
             "rust/coverage.profdata",
+            "rust/object-manifest.json",
             "rust/production-config.json",
             "rust/toolchain.json",
         },
@@ -645,6 +657,7 @@ def seal_layer_evidence(args: argparse.Namespace) -> int:
             "cpp/raw-lcov.info",
             "cpp/raw-summary.txt",
             "cpp/coverage.profdata",
+            "cpp/object-manifest.json",
             "cpp/toolchain.json",
             "cpp/ctest.log",
             "cpp/gpu-correctness-evidence.json",
@@ -670,6 +683,16 @@ def seal_layer_evidence(args: argparse.Namespace) -> int:
         for entry in entries
     ):
         errors.append("nonempty LLVM profraw evidence is missing")
+    if args.layer in LINE_LAYERS and not any(
+        entry["path"].startswith(f"{args.layer}/objects/") and entry["size"] > 0
+        for entry in entries
+    ):
+        errors.append("retained instrumented coverage objects are missing")
+    if args.layer == "rust" and not any(
+        entry["path"].startswith("rust/production-objects/") and entry["size"] > 0
+        for entry in entries
+    ):
+        errors.append("retained production instrumented objects are missing")
     if args.layer == "cpp" and not any(
         entry["path"].startswith("cpp/per-test-logs/")
         and entry["path"].endswith(".log")
@@ -1017,6 +1040,167 @@ def sql_executable_code(text: str) -> str:
     return "".join(output)
 
 
+SQL_GUARD_TOKEN = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_$]*|[0-9]+(?:\.[0-9]+)?|"
+    r"<>|!=|<=|>=|::|[-+*/%=<>()\[\],.;]"
+)
+SQL_GUARD_KEYWORDS = {
+    "ALL",
+    "AND",
+    "ANY",
+    "AS",
+    "BEGIN",
+    "BETWEEN",
+    "BY",
+    "CASE",
+    "DO",
+    "ELSE",
+    "ELSIF",
+    "END",
+    "EXCEPTION",
+    "EXISTS",
+    "FALSE",
+    "FROM",
+    "FULL",
+    "GROUP",
+    "HAVING",
+    "IF",
+    "ILIKE",
+    "IN",
+    "INNER",
+    "INTO",
+    "IS",
+    "JOIN",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "LOOP",
+    "NOT",
+    "NULL",
+    "ON",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "RAISE",
+    "RIGHT",
+    "SELECT",
+    "THEN",
+    "TRUE",
+    "UNION",
+    "USING",
+    "WHEN",
+    "WHERE",
+}
+
+
+def sql_guard_expressions(source: str) -> list[dict[str, Any]]:
+    """Return normalized PL/pgSQL IF guards that lead to RAISE EXCEPTION."""
+
+    code = sql_executable_code(source)
+    tokens = SQL_GUARD_TOKEN.findall(code)
+    upper = [token.upper() for token in tokens]
+    guards: list[dict[str, Any]] = []
+    statement_predecessors = {";", "BEGIN", "ELSE", "ELSIF", "LOOP", "THEN"}
+    for index, token in enumerate(upper):
+        if token not in {"IF", "ELSIF"}:
+            continue
+        if token == "IF" and index and upper[index - 1] not in statement_predecessors:
+            continue
+        condition_start = index + 1
+        paren_depth = 0
+        case_depth = 0
+        then_index: int | None = None
+        for cursor in range(condition_start, len(tokens)):
+            current = upper[cursor]
+            if current == "(":
+                paren_depth += 1
+            elif current == ")" and paren_depth:
+                paren_depth -= 1
+            elif current == "CASE":
+                case_depth += 1
+            elif current == "END" and case_depth:
+                case_depth -= 1
+            elif current == "THEN" and paren_depth == 0 and case_depth == 0:
+                then_index = cursor
+                break
+            elif current == ";" and paren_depth == 0 and case_depth == 0:
+                break
+        if then_index is None:
+            continue
+
+        block_depth = 1
+        has_failure = False
+        cursor = then_index + 1
+        while cursor < len(tokens):
+            current = upper[cursor]
+            previous = upper[cursor - 1] if cursor else ""
+            if current == "IF" and previous != "END":
+                block_depth += 1
+            elif (
+                current == "END"
+                and cursor + 1 < len(tokens)
+                and upper[cursor + 1] == "IF"
+            ):
+                block_depth -= 1
+                if block_depth == 0:
+                    break
+                cursor += 1
+            elif (
+                current == "RAISE"
+                and cursor + 1 < len(tokens)
+                and upper[cursor + 1] == "EXCEPTION"
+            ):
+                has_failure = True
+            cursor += 1
+        if not has_failure:
+            continue
+
+        condition = tokens[condition_start:then_index]
+        relevant = sorted(
+            {
+                value.lower()
+                for value in condition
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", value)
+                and value.upper() not in SQL_GUARD_KEYWORDS
+            }
+        )
+        if not relevant:
+            raise CoverageError(
+                "semantic assertion guard is constant or has no relevant identifier: "
+                + " ".join(condition)
+            )
+        normalized = " ".join(value.lower() for value in condition)
+        guards.append(
+            {
+                "kind": "if",
+                "sha256": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+                "tokens": relevant,
+            }
+        )
+    if not guards and any(
+        upper[index : index + 2] == ["RAISE", "EXCEPTION"]
+        for index in range(max(0, len(upper) - 1))
+    ):
+        relevant = sorted(
+            {
+                value.lower()
+                for value in tokens
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", value)
+                and value.upper() not in SQL_GUARD_KEYWORDS
+            }
+        )
+        if relevant:
+            normalized = " ".join(value.lower() for value in tokens)
+            guards.append(
+                {
+                    "kind": "exception-flow",
+                    "sha256": hashlib.sha256(normalized.encode("utf-8")).hexdigest(),
+                    "tokens": relevant,
+                }
+            )
+    return guards
+
+
 def read_sql_source_markers(
     path: pathlib.Path,
 ) -> tuple[list[dict[str, Any]], str | None, list[str]]:
@@ -1033,21 +1217,33 @@ def read_sql_source_markers(
         if assertion or assertion_notice:
             declaration = assertion or assertion_notice
             assert declaration is not None
-            guarded_source = sql_executable_code(
-                "\n".join(lines[prior_assertion_line : number - 1])
-            )
-            if (
-                re.search(r"\bRAISE\s+EXCEPTION\b", guarded_source, re.IGNORECASE)
-                is None
-            ):
+            guarded_source = "\n".join(lines[prior_assertion_line : number - 1])
+            try:
+                guards = sql_guard_expressions(guarded_source)
+            except CoverageError as exc:
+                errors.append(f"{path.name}:{number}: {exc}")
+                guards = []
+            if not guards:
                 errors.append(
                     f"{path.name}:{number}: semantic ID has no distinct preceding failure guard"
                 )
+            guard_encoding = json.dumps(
+                guards, allow_nan=False, separators=(",", ":"), sort_keys=True
+            )
             assertions.append(
                 {
                     "id": declaration.group(2),
                     "source_line": number,
                     "emission": "echo" if assertion else "notice",
+                    "guard_sha256": (
+                        hashlib.sha256(guard_encoding.encode("utf-8")).hexdigest()
+                        if guards
+                        else None
+                    ),
+                    "guard_count": len(guards),
+                    "guard_token_count": len(
+                        {token for guard in guards for token in guard.get("tokens", [])}
+                    ),
                 }
             )
             prior_assertion_line = number
@@ -1143,6 +1339,11 @@ def build_sql_manifest(args: argparse.Namespace) -> int:
             if isinstance(sql_baseline, dict)
             else None
         )
+        baseline_guards = (
+            sql_baseline.get("assertion_guards")
+            if isinstance(sql_baseline, dict)
+            else None
+        )
         if baseline_files != [entry["file"] for entry in declarations]:
             raise CoverageError(
                 "SQL file inventory differs from the immutable release baseline"
@@ -1150,6 +1351,15 @@ def build_sql_manifest(args: argparse.Namespace) -> int:
         if baseline_ids != sorted(seen):
             raise CoverageError(
                 "SQL assertion IDs differ from the immutable release baseline"
+            )
+        current_guards = {
+            assertion["id"]: assertion["guard_sha256"]
+            for entry in declarations
+            for assertion in entry["assertions"]
+        }
+        if baseline_guards != current_guards:
+            raise CoverageError(
+                "SQL assertion guards differ from the immutable release baseline"
             )
     write_json(pathlib.Path(args.output), document)
     print(f"wrote SQL semantic manifest: {len(files)} files, {len(seen)} assertions")
@@ -1244,12 +1454,15 @@ def release_baseline_document(
 ) -> dict[str, Any]:
     scope = read_json(scope_path)
     rust_scope = scope["layers"]["rust"]
+    cpp_scope = scope["layers"]["cpp"]
     rust_files, _ = source_inventory(repo_root, rust_scope)
+    cpp_files, cpp_required = source_inventory(repo_root, cpp_scope)
     cpp_sources = sorted(
         path.relative_to(repo_root).as_posix()
         for path in (repo_root / "pgaccel-kernels/src").glob("*.cpp")
     )
     cmake = (repo_root / "pgaccel-kernels/CMakeLists.txt").read_text(encoding="utf-8")
+    ctest_names = cmake_registered_tests(cmake)
     manifest, declarations, manifest_errors = validate_sql_manifest(
         manifest_path, repo_root / "sql/tests"
     )
@@ -1270,8 +1483,30 @@ def release_baseline_document(
             "required_mapping_files": sorted(rust_files),
         },
         "cpp": {
+            "roots": cpp_scope["roots"],
+            "exclude": cpp_scope.get("exclude", []),
+            "extensions": cpp_scope["extensions"],
+            "required_extensions": cpp_scope["required_extensions"],
+            "require_executable_mapping_only": cpp_scope.get(
+                "require_executable_mapping_only", False
+            ),
             "sources": cpp_sources,
-            "ctest_names": cmake_registered_tests(cmake),
+            "executable_headers": sorted(
+                path
+                for path in cpp_required
+                if pathlib.PurePosixPath(path).suffix in {".h", ".hpp"}
+            ),
+            "owned_files": sorted(cpp_files),
+            "required_mapping_files": sorted(cpp_required),
+            "ctest_names": ctest_names,
+            "ctest_evidence": {
+                name: (
+                    "device-family-dispatch-oom"
+                    if name == "test_oom_invariant"
+                    else "execution"
+                )
+                for name in ctest_names
+            },
             "oom_families": [
                 "reduce_f64",
                 "sort_f64",
@@ -1283,6 +1518,11 @@ def release_baseline_document(
         "sql": {
             "files": [entry["file"] for entry in manifest_files],
             "assertion_ids": sorted(declarations),
+            "assertion_guards": {
+                assertion["id"]: assertion["guard_sha256"]
+                for entry in manifest_files
+                for assertion in entry["assertions"]
+            },
         },
     }
 
@@ -1868,6 +2108,600 @@ def validate_aggregate_provenance(
     return document, errors
 
 
+def binary_format(path: pathlib.Path) -> str | None:
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(8)
+    except OSError:
+        return None
+    if prefix.startswith(b"\x7fELF"):
+        return "elf"
+    if prefix[:4] in {
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+    }:
+        return "mach-o"
+    if prefix.startswith(b"MZ"):
+        return "pe"
+    if prefix.startswith(b"!<arch>\n"):
+        return "archive"
+    if prefix.startswith((b"BC\xc0\xde", b"\xde\xc0\x17\x0b")):
+        return "llvm-bitcode"
+    return None
+
+
+def executable_identity(executable: str) -> dict[str, Any]:
+    path = pathlib.Path(executable).resolve()
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise CoverageError(f"tool executable is missing or empty: {executable}")
+    return {
+        "path": str(path),
+        "sha256": sha256(path),
+        "size": path.stat().st_size,
+        "format": binary_format(path),
+    }
+
+
+def validate_trusted_llvm_tools(document: dict[str, Any], layer: str) -> list[str]:
+    tools = document.get("tools")
+    if not isinstance(tools, dict):
+        return [f"{layer}: LLVM tool identities are absent"]
+    errors: list[str] = []
+    for name, entry in tools.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+            errors.append(f"{layer}: malformed executable identity for {name}")
+            continue
+        try:
+            actual = executable_identity(entry["path"])
+        except CoverageError as exc:
+            errors.append(f"{layer}: {exc}")
+            continue
+        for field in ("path", "sha256", "size", "format"):
+            if entry.get(field) != actual[field]:
+                errors.append(f"{layer}: executable identity drifted for {name}")
+                break
+        if actual["format"] not in {"elf", "mach-o", "pe"}:
+            errors.append(f"{layer}: {name} is not a native executable")
+
+    compiler_name = "rustc" if layer == "rust" else "clang"
+    compiler = tools.get(compiler_name)
+    llvm_cov = tools.get("llvm_cov")
+    llvm_profdata = tools.get("llvm_profdata")
+    if not all(
+        isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        for entry in (compiler, llvm_cov, llvm_profdata)
+    ):
+        return errors
+    assert isinstance(compiler, dict)
+    assert isinstance(llvm_cov, dict)
+    assert isinstance(llvm_profdata, dict)
+    if layer == "cpp":
+        compiler_dir = pathlib.Path(compiler["path"]).resolve().parent
+        if any(
+            pathlib.Path(entry["path"]).resolve().parent != compiler_dir
+            for entry in (llvm_cov, llvm_profdata)
+        ):
+            errors.append("cpp: LLVM coverage tools are not siblings of recorded Clang")
+    else:
+        try:
+            rustc = compiler["path"]
+            sysroot_result = subprocess.run(
+                [rustc, "--print", "sysroot"],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            host_result = subprocess.run(
+                [rustc, "-vV"], check=False, text=True, capture_output=True
+            )
+            host_match = re.search(r"^host:\s*(\S+)$", host_result.stdout, re.MULTILINE)
+            if (
+                sysroot_result.returncode != 0
+                or host_result.returncode != 0
+                or host_match is None
+            ):
+                errors.append("rust: rustc sysroot/host identity cannot be revalidated")
+            else:
+                expected_dir = (
+                    pathlib.Path(sysroot_result.stdout.strip()).resolve()
+                    / "lib"
+                    / "rustlib"
+                    / host_match.group(1)
+                    / "bin"
+                )
+                if any(
+                    pathlib.Path(entry["path"]).resolve().parent != expected_dir
+                    for entry in (llvm_cov, llvm_profdata)
+                ):
+                    errors.append(
+                        "rust: LLVM coverage tools are outside rustc's exact sysroot"
+                    )
+        except OSError as exc:
+            errors.append(f"rust: cannot revalidate rustc tool directory: {exc}")
+    return errors
+
+
+def run_llvm_export(
+    llvm_cov: str,
+    profdata: pathlib.Path,
+    objects: list[pathlib.Path],
+    output_format: str,
+) -> subprocess.CompletedProcess[str]:
+    if not objects:
+        raise CoverageError("LLVM coverage export has no retained objects")
+    command = [
+        llvm_cov,
+        "export",
+        f"-instr-profile={profdata}",
+        str(objects[0]),
+    ]
+    for path in objects[1:]:
+        command.extend(("-object", str(path)))
+    command.append(f"-format={output_format}")
+    return subprocess.run(command, check=False, text=True, capture_output=True)
+
+
+def run_llvm_report(
+    llvm_cov: str, profdata: pathlib.Path, objects: list[pathlib.Path]
+) -> subprocess.CompletedProcess[str]:
+    if not objects:
+        raise CoverageError("LLVM coverage report has no retained objects")
+    command = [
+        llvm_cov,
+        "report",
+        f"-instr-profile={profdata}",
+        str(objects[0]),
+    ]
+    for path in objects[1:]:
+        command.extend(("-object", str(path)))
+    return subprocess.run(command, check=False, text=True, capture_output=True)
+
+
+def merge_llvm_profiles(
+    llvm_profdata: str, profiles: list[pathlib.Path], output: pathlib.Path
+) -> subprocess.CompletedProcess[str]:
+    if not profiles:
+        raise CoverageError("LLVM coverage bundle has no raw profiles")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    return subprocess.run(
+        [
+            llvm_profdata,
+            "merge",
+            "-sparse",
+            *[str(path) for path in profiles],
+            "-o",
+            str(output),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+
+def capture_coverage_bundle(args: argparse.Namespace) -> int:
+    repo_root = pathlib.Path(args.repo_root).resolve()
+    scope = read_json(pathlib.Path(args.scope))["layers"][args.layer]
+    included, required = source_inventory(repo_root, scope)
+    profile_dir = pathlib.Path(args.profile_dir).resolve()
+    object_dir = pathlib.Path(args.object_dir).resolve()
+    manifest_path = pathlib.Path(args.manifest).resolve()
+    layer_dir = manifest_path.parent
+    profiles = sorted(profile_dir.glob("*.profraw"))
+    if not profiles or any(path.stat().st_size <= 0 for path in profiles):
+        raise CoverageError("coverage bundle raw profiles are absent or empty")
+
+    merge = merge_llvm_profiles(
+        args.llvm_profdata, profiles, pathlib.Path(args.profdata).resolve()
+    )
+    if merge.returncode != 0:
+        raise CoverageError(f"llvm-profdata merge failed: {merge.stderr.strip()}")
+
+    primary_candidates = [pathlib.Path(value).resolve() for value in args.object]
+    fallback_candidates: list[pathlib.Path] = []
+    if args.candidate_root:
+        candidate_root = pathlib.Path(args.candidate_root).resolve()
+        for path in candidate_root.rglob("*"):
+            if not path.is_file():
+                continue
+            file_format = binary_format(path)
+            suffix = path.suffix.lower()
+            if file_format is None and suffix not in {
+                ".o",
+                ".obj",
+                ".a",
+                ".rlib",
+                ".so",
+                ".dylib",
+                ".dll",
+                ".exe",
+            }:
+                continue
+            if path.stat().st_mode & 0o111 or suffix in {
+                ".so",
+                ".dylib",
+                ".dll",
+                ".exe",
+            }:
+                primary_candidates.append(path.resolve())
+            else:
+                fallback_candidates.append(path.resolve())
+    selected: list[tuple[pathlib.Path, str, list[str]]] = []
+    seen_hashes: set[str] = set()
+    profdata_path = pathlib.Path(args.profdata).resolve()
+
+    def inspect_candidates(candidates: Iterable[pathlib.Path]) -> None:
+        for candidate in sorted(set(candidates)):
+            if not candidate.is_file() or candidate.stat().st_size <= 0:
+                continue
+            exported = run_llvm_export(
+                args.llvm_cov, profdata_path, [candidate], "text"
+            )
+            if exported.returncode != 0:
+                continue
+            try:
+                document = json.loads(exported.stdout)
+                mapped = sorted(
+                    included.intersection(llvm_json_files(document, repo_root))
+                )
+            except (ValueError, CoverageError):
+                continue
+            if not mapped:
+                continue
+            digest = sha256(candidate)
+            if digest in seen_hashes:
+                continue
+            seen_hashes.add(digest)
+            selected.append(
+                (candidate, binary_format(candidate) or "llvm-object", mapped)
+            )
+
+    inspect_candidates(primary_candidates)
+    primary_mapped = {path for _, _, mapped in selected for path in mapped}
+    if required.difference(primary_mapped):
+        inspect_candidates(fallback_candidates)
+    if not selected:
+        raise CoverageError("no instrumented object maps an owned source file")
+
+    if object_dir.exists():
+        shutil.rmtree(object_dir)
+    object_dir.mkdir(parents=True)
+    retained: list[pathlib.Path] = []
+    object_entries: list[dict[str, Any]] = []
+    for index, (source, file_format, mapped) in enumerate(selected):
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", source.name)
+        destination = object_dir / f"{index:04d}-{safe_name}"
+        shutil.copy2(source, destination)
+        retained.append(destination)
+        object_entries.append(
+            {
+                "path": destination.relative_to(layer_dir).as_posix(),
+                "sha256": sha256(destination),
+                "size": destination.stat().st_size,
+                "format": file_format,
+                "mapped_files": mapped,
+            }
+        )
+
+    json_export = run_llvm_export(args.llvm_cov, profdata_path, retained, "text")
+    lcov_export = run_llvm_export(args.llvm_cov, profdata_path, retained, "lcov")
+    if json_export.returncode != 0 or lcov_export.returncode != 0:
+        raise CoverageError(
+            "retained object export failed: "
+            + (json_export.stderr + lcov_export.stderr).strip()
+        )
+    try:
+        json_document = json.loads(json_export.stdout)
+    except ValueError as exc:
+        raise CoverageError(f"LLVM JSON export is malformed: {exc}") from exc
+    mapped_files = sorted(
+        included.intersection(llvm_json_files(json_document, repo_root))
+    )
+    if required.difference(mapped_files):
+        raise CoverageError("retained objects omit required source mappings")
+    pathlib.Path(args.json_output).write_text(json_export.stdout, encoding="utf-8")
+    pathlib.Path(args.lcov_output).write_text(lcov_export.stdout, encoding="utf-8")
+    if included.intersection(
+        lcov_files(pathlib.Path(args.lcov_output), repo_root)
+    ) != set(mapped_files):
+        raise CoverageError("retained LLVM JSON and LCOV mappings differ")
+    summary_output = getattr(args, "summary_output", None)
+    if summary_output:
+        summary = run_llvm_report(args.llvm_cov, profdata_path, retained)
+        if summary.returncode != 0 or not summary.stdout:
+            raise CoverageError(
+                f"retained object summary failed: {summary.stderr.strip()}"
+            )
+        pathlib.Path(summary_output).write_text(summary.stdout, encoding="utf-8")
+
+    tool_entries: dict[str, dict[str, Any]] = {}
+    for name, executable in (
+        ("llvm_cov", args.llvm_cov),
+        ("llvm_profdata", args.llvm_profdata),
+    ):
+        version = subprocess.run(
+            [executable, "--version"], check=False, text=True, capture_output=True
+        )
+        output = version.stdout + version.stderr
+        if version.returncode != 0:
+            raise CoverageError(f"cannot record {name} version")
+        tool_entries[name] = {
+            **executable_identity(executable),
+            "major": extract_llvm_major(output),
+            "version_output": output.splitlines()[:12],
+        }
+    profile_entries = []
+    for profile in profiles:
+        try:
+            relative = profile.relative_to(layer_dir).as_posix()
+        except ValueError as exc:
+            raise CoverageError(
+                "coverage profiles must be retained in the layer"
+            ) from exc
+        profile_entries.append(
+            {
+                "path": relative,
+                "sha256": sha256(profile),
+                "size": profile.stat().st_size,
+            }
+        )
+    write_json(
+        manifest_path,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "coverage-object-bundle",
+            "layer_id": args.layer,
+            "role": args.role,
+            "tools": tool_entries,
+            "profiles": profile_entries,
+            "objects": object_entries,
+            "mapped_files": mapped_files,
+            "profdata": {
+                "path": profdata_path.relative_to(layer_dir).as_posix(),
+                "sha256": sha256(profdata_path),
+                "size": profdata_path.stat().st_size,
+            },
+            "exports": {
+                "json_sha256": sha256(pathlib.Path(args.json_output)),
+                "lcov_sha256": sha256(pathlib.Path(args.lcov_output)),
+                "summary_sha256": (
+                    sha256(pathlib.Path(summary_output)) if summary_output else None
+                ),
+            },
+        },
+    )
+    return 0
+
+
+def regenerate_coverage_bundle(
+    artifact_dir: pathlib.Path,
+    repo_root: pathlib.Path,
+    layer: str,
+    role: str,
+    output_dir: pathlib.Path,
+) -> tuple[dict[str, pathlib.Path], list[str]]:
+    errors: list[str] = []
+    layer_dir = artifact_dir / layer
+    prefix = "production-" if role == "production" else ""
+    manifest_path = layer_dir / f"{prefix}object-manifest.json"
+    retained_profdata = layer_dir / f"{prefix}coverage.profdata"
+    retained_json = layer_dir / f"{prefix}coverage.json"
+    retained_lcov = layer_dir / (
+        "production-map.info" if role == "production" else "raw-lcov.info"
+    )
+    retained_summary = layer_dir / "raw-summary.txt"
+    if role == "final":
+        retained_json = layer_dir / "raw-coverage.json"
+    outputs = {
+        "profdata": output_dir / f"{layer}-{role}.profdata",
+        "json": output_dir / f"{layer}-{role}.json",
+        "lcov": output_dir / f"{layer}-{role}.info",
+    }
+    try:
+        manifest = read_json(manifest_path)
+        toolchain = read_json(layer_dir / "toolchain.json")
+    except CoverageError as exc:
+        return outputs, [f"{layer}/{role}: {exc}"]
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("kind") != "coverage-object-bundle"
+        or manifest.get("layer_id") != layer
+        or manifest.get("role") != role
+    ):
+        return outputs, [f"{layer}/{role}: object bundle manifest is invalid"]
+
+    tools = manifest.get("tools")
+    toolchain_tools = toolchain.get("tools") if isinstance(toolchain, dict) else None
+    if not isinstance(tools, dict) or not isinstance(toolchain_tools, dict):
+        return outputs, [f"{layer}/{role}: LLVM tools are not sealed"]
+    for name in ("llvm_cov", "llvm_profdata"):
+        entry = tools.get(name)
+        expected = toolchain_tools.get(name)
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(expected, dict)
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(expected.get("path"), str)
+            or pathlib.Path(entry["path"]).resolve()
+            != pathlib.Path(expected["path"]).resolve()
+            or entry.get("major") != expected.get("major")
+            or any(
+                entry.get(field) != expected.get(field)
+                for field in ("sha256", "size", "format")
+            )
+        ):
+            errors.append(f"{layer}/{role}: sealed {name} differs from toolchain")
+    if errors:
+        return outputs, errors
+    llvm_cov = tools["llvm_cov"]["path"]
+    llvm_profdata = tools["llvm_profdata"]["path"]
+    for name, executable in (("llvm_cov", llvm_cov), ("llvm_profdata", llvm_profdata)):
+        version = subprocess.run(
+            [executable, "--version"], check=False, text=True, capture_output=True
+        )
+        if version.returncode != 0 or (version.stdout + version.stderr).splitlines()[
+            :12
+        ] != tools[name].get("version_output"):
+            errors.append(f"{layer}/{role}: sealed {name} version output drifted")
+
+    def sealed_paths(field: str) -> list[pathlib.Path]:
+        entries = manifest.get(field)
+        if not isinstance(entries, list) or not entries:
+            errors.append(f"{layer}/{role}: sealed {field} inventory is empty")
+            return []
+        paths: list[pathlib.Path] = []
+        seen: set[pathlib.Path] = set()
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                errors.append(f"{layer}/{role}: malformed {field} entry")
+                continue
+            path = layer_dir / entry["path"]
+            try:
+                path.resolve().relative_to(layer_dir.resolve())
+            except ValueError:
+                errors.append(f"{layer}/{role}: {field} path escapes layer")
+                continue
+            if path in seen:
+                errors.append(f"{layer}/{role}: duplicate sealed {field} path")
+                continue
+            seen.add(path)
+            if (
+                not path.is_file()
+                or not _is_int(entry.get("size"))
+                or entry["size"] <= 0
+                or path.stat().st_size != entry["size"]
+                or entry.get("sha256") != sha256(path)
+            ):
+                errors.append(f"{layer}/{role}: sealed {field} hash/size mismatch")
+                continue
+            paths.append(path)
+        return paths
+
+    profiles = sealed_paths("profiles")
+    objects = sealed_paths("objects")
+    object_entries = manifest.get("objects")
+    if isinstance(object_entries, list):
+        for entry, path in zip(object_entries, objects):
+            recorded_format = entry.get("format") if isinstance(entry, dict) else None
+            recorded_mappings = (
+                entry.get("mapped_files") if isinstance(entry, dict) else None
+            )
+            detected_format = binary_format(path)
+            if (
+                recorded_format
+                not in {"elf", "mach-o", "pe", "archive", "llvm-bitcode", "llvm-object"}
+                or (detected_format is not None and recorded_format != detected_format)
+                or (detected_format is None and recorded_format != "llvm-object")
+            ):
+                errors.append(f"{layer}/{role}: retained object format drifted")
+            if (
+                not isinstance(recorded_mappings, list)
+                or not recorded_mappings
+                or not all(isinstance(value, str) for value in recorded_mappings)
+                or recorded_mappings != sorted(set(recorded_mappings))
+            ):
+                errors.append(f"{layer}/{role}: retained object mapping is malformed")
+    actual_profiles = {
+        path.relative_to(layer_dir).as_posix()
+        for path in (
+            layer_dir / ("production-profiles" if role == "production" else "profiles")
+        ).rglob("*.profraw")
+    }
+    actual_objects = {
+        path.relative_to(layer_dir).as_posix()
+        for path in (
+            layer_dir / ("production-objects" if role == "production" else "objects")
+        ).rglob("*")
+        if path.is_file()
+    }
+    if actual_profiles != {path.relative_to(layer_dir).as_posix() for path in profiles}:
+        errors.append(f"{layer}/{role}: unsealed or unrelated raw profile present")
+    if actual_objects != {path.relative_to(layer_dir).as_posix() for path in objects}:
+        errors.append(f"{layer}/{role}: unsealed instrumented object present")
+    if errors:
+        return outputs, errors
+
+    merged = merge_llvm_profiles(llvm_profdata, profiles, outputs["profdata"])
+    if merged.returncode != 0:
+        return outputs, [
+            f"{layer}/{role}: llvm-profdata merge failed: {merged.stderr.strip()}"
+        ]
+    profdata_entry = manifest.get("profdata")
+    expected_profdata_relative = retained_profdata.relative_to(layer_dir).as_posix()
+    if (
+        not retained_profdata.is_file()
+        or not isinstance(profdata_entry, dict)
+        or profdata_entry.get("path") != expected_profdata_relative
+        or profdata_entry.get("size") != retained_profdata.stat().st_size
+        or profdata_entry.get("sha256") != sha256(retained_profdata)
+        or sha256(outputs["profdata"]) != sha256(retained_profdata)
+    ):
+        errors.append(
+            f"{layer}/{role}: regenerated profdata differs from retained output"
+        )
+    shown = subprocess.run(
+        [llvm_profdata, "show", str(outputs["profdata"])],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if shown.returncode != 0:
+        errors.append(f"{layer}/{role}: regenerated profdata format is incompatible")
+
+    json_export = run_llvm_export(llvm_cov, outputs["profdata"], objects, "text")
+    lcov_export = run_llvm_export(llvm_cov, outputs["profdata"], objects, "lcov")
+    if json_export.returncode != 0 or lcov_export.returncode != 0:
+        errors.append(
+            f"{layer}/{role}: llvm-cov export failed: "
+            + (json_export.stderr + lcov_export.stderr).strip()
+        )
+        return outputs, errors
+    outputs["json"].write_text(json_export.stdout, encoding="utf-8")
+    outputs["lcov"].write_text(lcov_export.stdout, encoding="utf-8")
+    try:
+        exports = manifest.get("exports")
+        if (
+            not isinstance(exports, dict)
+            or exports.get("json_sha256") != sha256(retained_json)
+            or exports.get("lcov_sha256") != sha256(retained_lcov)
+            or (
+                role == "final"
+                and (
+                    not retained_summary.is_file()
+                    or exports.get("summary_sha256") != sha256(retained_summary)
+                )
+            )
+            or (role == "production" and exports.get("summary_sha256") is not None)
+        ):
+            errors.append(f"{layer}/{role}: sealed export hashes are invalid")
+        scope = read_json(artifact_dir / "scope.json")["layers"][layer]
+        included, _ = source_inventory(repo_root, scope)
+        regenerated_mapped = sorted(
+            included.intersection(
+                llvm_json_files(read_json(outputs["json"]), repo_root)
+            )
+        )
+        if manifest.get("mapped_files") != regenerated_mapped:
+            errors.append(f"{layer}/{role}: sealed source mapping differs from export")
+        if read_json(outputs["json"]) != read_json(retained_json):
+            errors.append(
+                f"{layer}/{role}: regenerated JSON differs from retained export"
+            )
+        if outputs["lcov"].read_text(encoding="utf-8") != retained_lcov.read_text(
+            encoding="utf-8"
+        ):
+            errors.append(
+                f"{layer}/{role}: regenerated LCOV differs from retained export"
+            )
+    except (CoverageError, OSError) as exc:
+        errors.append(f"{layer}/{role}: retained export comparison failed: {exc}")
+    return outputs, errors
+
+
 def validate_raw_evidence_manifest(
     artifact_dir: pathlib.Path,
     layer: str,
@@ -1921,9 +2755,13 @@ def validate_raw_evidence_manifest(
         "rust": {
             "rust/raw-lcov.info",
             "rust/production-map.info",
+            "rust/production-coverage.json",
+            "rust/production-coverage.profdata",
+            "rust/production-object-manifest.json",
             "rust/raw-coverage.json",
             "rust/raw-summary.txt",
             "rust/coverage.profdata",
+            "rust/object-manifest.json",
             "rust/production-config.json",
             "rust/toolchain.json",
         },
@@ -1932,6 +2770,7 @@ def validate_raw_evidence_manifest(
             "cpp/raw-lcov.info",
             "cpp/raw-summary.txt",
             "cpp/coverage.profdata",
+            "cpp/object-manifest.json",
             "cpp/toolchain.json",
             "cpp/ctest.log",
             "cpp/gpu-correctness-evidence.json",
@@ -1967,6 +2806,8 @@ def recompute_raw_line_layer(
     repo_root: pathlib.Path,
     scope: dict[str, Any],
     baseline: dict[str, Any],
+    regenerated: dict[str, pathlib.Path] | None = None,
+    production_regenerated: dict[str, pathlib.Path] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
     layer_scope = scope["layers"][layer]
@@ -1988,11 +2829,24 @@ def recompute_raw_line_layer(
             errors.append(
                 "rust: production compiler configuration is not pg18 without pg_test"
             )
-        declared = lcov_files(artifact_dir / "rust/production-map.info", repo_root)
-        hits = lcov_files(artifact_dir / "rust/raw-lcov.info", repo_root)
-        exported = llvm_json_files(
-            read_json(artifact_dir / "rust/raw-coverage.json"), repo_root
+        final_lcov = (
+            regenerated["lcov"]
+            if regenerated is not None
+            else artifact_dir / "rust/raw-lcov.info"
         )
+        production_lcov = (
+            production_regenerated["lcov"]
+            if production_regenerated is not None
+            else artifact_dir / "rust/production-map.info"
+        )
+        final_json = (
+            regenerated["json"]
+            if regenerated is not None
+            else artifact_dir / "rust/raw-coverage.json"
+        )
+        declared = lcov_files(production_lcov, repo_root)
+        hits = lcov_files(final_lcov, repo_root)
+        exported = llvm_json_files(read_json(final_json), repo_root)
         if included.intersection(hits) != included.intersection(exported):
             errors.append("rust: raw LCOV and JSON source mappings differ")
         for relative in included.intersection(hits).intersection(exported):
@@ -2025,17 +2879,29 @@ def recompute_raw_line_layer(
         unexpected = sorted(set(declared).difference(included))
     else:
         pinned_sources = set(baseline["cpp"]["sources"])
-        required = scope_required
-        if len(pinned_sources) != BASELINE_CPP_SOURCES or not pinned_sources.issubset(
-            required
+        expected_files = set(baseline["cpp"]["owned_files"])
+        required = set(baseline["cpp"]["required_mapping_files"])
+        if (
+            len(pinned_sources) != BASELINE_CPP_SOURCES
+            or not pinned_sources.issubset(required)
+            or included != expected_files
+            or scope_required != required
         ):
             errors.append(
                 "cpp: owned sources differ from the 21-source release baseline"
             )
-        reports = llvm_json_files(
-            read_json(artifact_dir / "cpp/raw-coverage.json"), repo_root
+        final_json = (
+            regenerated["json"]
+            if regenerated is not None
+            else artifact_dir / "cpp/raw-coverage.json"
         )
-        lcov_reports = lcov_files(artifact_dir / "cpp/raw-lcov.info", repo_root)
+        final_lcov = (
+            regenerated["lcov"]
+            if regenerated is not None
+            else artifact_dir / "cpp/raw-lcov.info"
+        )
+        reports = llvm_json_files(read_json(final_json), repo_root)
+        lcov_reports = lcov_files(final_lcov, repo_root)
         if included.intersection(reports) != included.intersection(lcov_reports):
             errors.append("cpp: raw LCOV and JSON source mappings differ")
         mapped = included.intersection(reports)
@@ -2115,14 +2981,15 @@ def compare_summary_to_raw(summary: Any, layer: str, raw: dict[str, Any]) -> lis
 
 def inspect_aggregate_sql_manifest(
     document: Any,
-) -> tuple[dict[str, str], dict[str, str], list[str]]:
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], list[str]]:
     """Validate the retained manifest without trusting the SQL layer summary."""
 
     errors: list[str] = []
     owners: dict[str, str] = {}
     completions: dict[str, str] = {}
+    guards: dict[str, str] = {}
     if not isinstance(document, dict):
-        return owners, completions, ["copied SQL manifest is not an object"]
+        return owners, completions, guards, ["copied SQL manifest is not an object"]
     if (
         document.get("schema_version") != SCHEMA_VERSION
         or document.get("kind") != "sql-semantic-assertion-manifest"
@@ -2133,7 +3000,12 @@ def inspect_aggregate_sql_manifest(
         errors.append("copied SQL manifest schema or baseline is invalid")
     entries = document.get("files")
     if not isinstance(entries, list):
-        return owners, completions, errors + ["copied SQL manifest files are invalid"]
+        return (
+            owners,
+            completions,
+            guards,
+            errors + ["copied SQL manifest files are invalid"],
+        )
     for entry in entries:
         if not isinstance(entry, dict):
             errors.append("copied SQL manifest contains a non-object file entry")
@@ -2165,18 +3037,28 @@ def inspect_aggregate_sql_manifest(
             identifier = assertion.get("id")
             source_line = assertion.get("source_line")
             emission = assertion.get("emission")
+            guard_sha256 = assertion.get("guard_sha256")
+            guard_count = assertion.get("guard_count")
+            guard_token_count = assertion.get("guard_token_count")
             if (
                 not isinstance(identifier, str)
                 or re.fullmatch(r"[a-z0-9][a-z0-9_.-]*", identifier) is None
                 or not _is_int(source_line)
                 or source_line <= 0
                 or emission not in {"echo", "notice"}
+                or not isinstance(guard_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", guard_sha256) is None
+                or not _is_int(guard_count)
+                or guard_count <= 0
+                or not _is_int(guard_token_count)
+                or guard_token_count <= 0
             ):
                 errors.append(f"copied SQL manifest assertion is invalid in {name}")
                 continue
             if identifier in owners:
                 errors.append(f"copied SQL manifest duplicates assertion {identifier}")
             owners[identifier] = name
+            guards[identifier] = guard_sha256
     if (
         len(completions) < BASELINE_SQL_FILES
         or document.get("declared_files") != len(completions)
@@ -2184,7 +3066,7 @@ def inspect_aggregate_sql_manifest(
         or document.get("declared_assertions") != len(owners)
     ):
         errors.append("copied SQL manifest counts are below baseline or inconsistent")
-    return owners, completions, errors
+    return owners, completions, guards, errors
 
 
 def validate_retained_sql_evidence(
@@ -2319,6 +3201,7 @@ def validate_retained_toolchain_and_profiles(
         or not all(isinstance(entry, dict) for entry in tools.values())
     ):
         return [f"{layer}: LLVM toolchain raw evidence is invalid"]
+    errors.extend(validate_trusted_llvm_tools(document, layer))
 
     observed_majors: list[int] = []
     for name, entry in tools.items():
@@ -2375,6 +3258,7 @@ def aggregate(args: argparse.Namespace) -> int:
     layers: dict[str, Any] = {}
     found_ids: dict[str, str] = {}
     inventory: Any = None
+    regeneration_root = pathlib.Path(tempfile.mkdtemp(prefix="pgaccel-coverage-regen-"))
     provenance, provenance_errors = validate_aggregate_provenance(
         artifact_dir, repo_root
     )
@@ -2432,16 +3316,34 @@ def aggregate(args: argparse.Namespace) -> int:
             errors.append(str(exc))
         if layer in LINE_LAYERS:
             try:
+                regenerated, regeneration_errors = regenerate_coverage_bundle(
+                    artifact_dir, repo_root, layer, "final", regeneration_root
+                )
+                errors.extend(regeneration_errors)
+                production_regenerated = None
+                if layer == "rust":
+                    production_regenerated, production_errors = (
+                        regenerate_coverage_bundle(
+                            artifact_dir,
+                            repo_root,
+                            layer,
+                            "production",
+                            regeneration_root,
+                        )
+                    )
+                    errors.extend(production_errors)
                 raw, raw_errors = recompute_raw_line_layer(
                     layer,
                     artifact_dir,
                     repo_root,
                     copied_scope,
                     copied_baseline,
+                    regenerated,
+                    production_regenerated,
                 )
                 errors.extend(raw_errors)
                 errors.extend(compare_summary_to_raw(layers[layer], layer, raw))
-            except (CoverageError, KeyError, TypeError, ValueError) as exc:
+            except (CoverageError, KeyError, OSError, TypeError, ValueError) as exc:
                 errors.append(f"{layer}: raw evidence recomputation failed: {exc}")
 
     inventory_path = artifact_dir / "sql/assertion-inventory.json"
@@ -2496,8 +3398,8 @@ def aggregate(args: argparse.Namespace) -> int:
                     "copied SQL semantic assertion manifest drifted from the checkout"
                 )
             manifest_document = read_json(copied_manifest)
-            owners, completions, manifest_errors = inspect_aggregate_sql_manifest(
-                manifest_document
+            owners, completions, guards, manifest_errors = (
+                inspect_aggregate_sql_manifest(manifest_document)
             )
             errors.extend(manifest_errors)
             sql_baseline = copied_baseline.get("sql", {})
@@ -2505,6 +3407,7 @@ def aggregate(args: argparse.Namespace) -> int:
                 not isinstance(sql_baseline, dict)
                 or sorted(completions) != sql_baseline.get("files")
                 or sorted(owners) != sql_baseline.get("assertion_ids")
+                or guards != sql_baseline.get("assertion_guards")
             ):
                 errors.append(
                     "retained SQL manifest differs from the immutable baseline"
@@ -2591,6 +3494,7 @@ def aggregate(args: argparse.Namespace) -> int:
     (artifact_dir / "gate-summary.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
     )
+    shutil.rmtree(regeneration_root, ignore_errors=True)
     print("\n".join(lines))
     return 0 if passed else 1
 
@@ -2626,7 +3530,7 @@ def validate_toolchain(args: argparse.Namespace) -> int:
             if completed.returncode != 0:
                 errors.append(f"{name} --version exited {completed.returncode}")
             versions[name] = {
-                "path": executable,
+                **executable_identity(executable),
                 "major": major,
                 "output": output.splitlines()[:4],
             }
@@ -2668,7 +3572,7 @@ def validate_rust_toolchain(args: argparse.Namespace) -> int:
             if completed.returncode != 0:
                 errors.append(f"{name} version command exited {completed.returncode}")
             versions[name] = {
-                "path": executable,
+                **executable_identity(executable),
                 "major": major,
                 "output": output.splitlines()[:12],
             }
@@ -2702,6 +3606,9 @@ def inspect_gpu_evidence(
     pinned_families = (
         cpp_baseline.get("oom_families") if isinstance(cpp_baseline, dict) else None
     )
+    evidence_policy = (
+        cpp_baseline.get("ctest_evidence") if isinstance(cpp_baseline, dict) else None
+    )
     errors: list[str] = []
     if not isinstance(pinned_tests, list) or len(pinned_tests) != BASELINE_CPP_TESTS:
         pinned_tests = []
@@ -2709,6 +3616,17 @@ def inspect_gpu_evidence(
     if not isinstance(pinned_families, list) or len(pinned_families) != 5:
         pinned_families = []
         errors.append("pinned OOM family inventory is invalid")
+    if (
+        not isinstance(evidence_policy, dict)
+        or set(evidence_policy) != set(pinned_tests)
+        or evidence_policy.get("test_oom_invariant") != "device-family-dispatch-oom"
+        or any(
+            value not in {"execution", "device-family-dispatch-oom"}
+            for value in evidence_policy.values()
+        )
+    ):
+        evidence_policy = {}
+        errors.append("pinned per-test evidence policy is invalid")
     passed_tests = re.findall(
         r"Test\s+#\d+:\s+([A-Za-z0-9_.-]+)\s+\.+\s+Passed\b", log_text
     )
@@ -2723,10 +3641,39 @@ def inspect_gpu_evidence(
         if len(matches) != 1:
             errors.append(f"expected one retained raw log for {test_name}")
             continue
+        raw_text = matches[0].read_text(encoding="utf-8", errors="replace")
+        raw_lines = raw_text.splitlines()
+        starts = re.findall(
+            r"^PGACCEL_TEST_START name=([A-Za-z0-9_.-]+)$",
+            raw_text,
+            flags=re.MULTILINE,
+        )
+        results = re.findall(
+            r"^PGACCEL_TEST_RESULT name=([A-Za-z0-9_.-]+) "
+            r"exit_code=(-?[0-9]+) result=(PASS|FAIL) raw_lines=([0-9]+)$",
+            raw_text,
+            flags=re.MULTILINE,
+        )
+        expected_raw_lines = max(0, len(raw_lines) - 2)
+        if (
+            matches[0].stat().st_size <= 0
+            or starts != [test_name]
+            or raw_text.count("PGACCEL_TEST_START") != 1
+            or len(results) != 1
+            or raw_text.count("PGACCEL_TEST_RESULT") != 1
+            or results[0] != (test_name, "0", "PASS", str(expected_raw_lines))
+            or not raw_lines
+            or raw_lines[0] != f"PGACCEL_TEST_START name={test_name}"
+            or not raw_lines[-1].startswith(f"PGACCEL_TEST_RESULT name={test_name} ")
+        ):
+            errors.append(f"retained raw log envelope is invalid for {test_name}")
         raw_logs[test_name] = {
             "path": matches[0].name,
             "sha256": sha256(matches[0]),
             "size": matches[0].stat().st_size,
+            "evidence_kind": evidence_policy.get(test_name),
+            "raw_output_lines": expected_raw_lines,
+            "result": "PASS" if len(results) == 1 and results[0][2] == "PASS" else None,
         }
     oom_matches = sorted(per_test_dir.glob("test_oom_invariant-*.log"))
     oom_text = (
@@ -2739,18 +3686,19 @@ def inspect_gpu_evidence(
         or "unsupported before GPU dispatch" in oom_text
     ):
         errors.append("OOM invariant accepted an unsupported path")
-    device_match = re.search(
+    device_matches = re.findall(
         r'PGACCEL_DEVICE_PROOF device="([^"]+)" backend="([^"]+)" '
         r"compute_units=([0-9]+) max_alloc_bytes=([0-9]+) real_device=1",
         oom_text,
     )
     device: dict[str, Any] | None = None
-    if device_match:
+    if len(device_matches) == 1 and oom_text.count("PGACCEL_DEVICE_PROOF") == 1:
+        device_match = device_matches[0]
         device = {
-            "name": device_match.group(1),
-            "backend": device_match.group(2),
-            "compute_units": int(device_match.group(3)),
-            "max_alloc_bytes": int(device_match.group(4)),
+            "name": device_match[0],
+            "backend": device_match[1],
+            "compute_units": int(device_match[2]),
+            "max_alloc_bytes": int(device_match[3]),
         }
         backend = device["backend"].lower()
         if (
@@ -2762,7 +3710,7 @@ def inspect_gpu_evidence(
         ):
             errors.append("OOM proof did not identify a real accelerator")
     else:
-        errors.append("OOM proof has no real-device record")
+        errors.append("OOM proof must have exactly one real-device record")
 
     families: dict[str, dict[str, Any]] = {}
     family_pattern = re.compile(
@@ -2782,6 +3730,8 @@ def inspect_gpu_evidence(
             "rss_delta_bytes": int(match.group(5)),
             "rss_limit_bytes": int(match.group(6)),
         }
+    if oom_text.count("PGACCEL_OOM_FAMILY") != len(families):
+        errors.append("OOM proof contains malformed family evidence")
     if set(families) != set(pinned_families):
         errors.append("OOM proof family set differs from the pinned inventory")
     for name, family in families.items():
@@ -2790,18 +3740,44 @@ def inspect_gpu_evidence(
             or family["dispatches"] <= 0
             or family["peak_rss_bytes"] <= 0
             or family["rss_limit_bytes"] <= 0
+            or family["rss_delta_bytes"] > family["peak_rss_bytes"]
             or family["rss_delta_bytes"] > family["rss_limit_bytes"]
         ):
             errors.append(f"OOM proof is invalid for family {name}")
-    invariant_passed = (
-        re.search(
-            r"PGACCEL_OOM_INVARIANT result=PASS families=5 "
-            r"max_alloc_bytes=[1-9][0-9]* input_doubles=[1-9][0-9]* "
-            r"rss_limit_bytes=[1-9][0-9]*",
-            oom_text,
-        )
-        is not None
+    invariant_matches = re.findall(
+        r"PGACCEL_OOM_INVARIANT result=(PASS|FAIL) families=([0-9]+) "
+        r"max_alloc_bytes=([0-9]+) input_doubles=([0-9]+) "
+        r"rss_limit_bytes=([0-9]+)",
+        oom_text,
     )
+    invariant: dict[str, Any] | None = None
+    invariant_passed = False
+    if len(invariant_matches) == 1 and oom_text.count("PGACCEL_OOM_INVARIANT") == 1:
+        result, family_count, max_alloc, input_doubles, rss_limit = invariant_matches[0]
+        invariant = {
+            "result": result,
+            "families": int(family_count),
+            "max_alloc_bytes": int(max_alloc),
+            "input_doubles": int(input_doubles),
+            "rss_limit_bytes": int(rss_limit),
+        }
+        expected_input = min(
+            (2 * invariant["max_alloc_bytes"]) // 8,
+            256 * 1024 * 1024,
+        )
+        invariant_passed = (
+            invariant["result"] == "PASS"
+            and invariant["families"] == len(pinned_families)
+            and invariant["max_alloc_bytes"] > 0
+            and invariant["input_doubles"] == expected_input
+            and invariant["rss_limit_bytes"] == 3 * invariant["max_alloc_bytes"]
+            and device is not None
+            and device["max_alloc_bytes"] == invariant["max_alloc_bytes"]
+            and all(
+                family["rss_limit_bytes"] == invariant["rss_limit_bytes"]
+                for family in families.values()
+            )
+        )
     if not invariant_passed:
         errors.append("exact OOM invariant completion proof is absent")
     if status != 0:
@@ -2820,6 +3796,10 @@ def inspect_gpu_evidence(
         "raw_test_logs": raw_logs,
         "device": device,
         "families": families,
+        "oom_invariant": invariant,
+        "total_oom_dispatches": sum(
+            family["dispatches"] for family in families.values()
+        ),
         "oom_invariant_required": True,
         "oom_invariant_observed": bool(oom_text),
         "oom_invariant_passed": invariant_passed,
@@ -2870,8 +3850,19 @@ def audit_scope(args: argparse.Namespace) -> int:
         raise CoverageError(
             "Rust scope must include build.rs and compiler-derived pg18 production mapping"
         )
+    cpp_scope = document["layers"]["cpp"]
+    if (
+        cpp_scope.get("roots") != ["pgaccel-kernels/src", "pgaccel-kernels/include"]
+        or cpp_scope.get("extensions") != [".cpp", ".hpp", ".h"]
+        or cpp_scope.get("required_extensions") != [".cpp", ".hpp", ".h"]
+        or cpp_scope.get("require_executable_mapping_only") is not True
+        or cpp_scope.get("exclude") != []
+    ):
+        raise CoverageError(
+            "C++ scope must pin both implementation and executable-header roots"
+        )
     coverage_gate = (repo_root / "scripts/coverage_gate.sh").read_text(encoding="utf-8")
-    if coverage_gate.count("--include-build-script") != 6:
+    if coverage_gate.count("--include-build-script") != 2:
         raise CoverageError(
             "Rust coverage gate must instrument and report pg_accel/build.rs explicitly"
         )
@@ -2879,12 +3870,16 @@ def audit_scope(args: argparse.Namespace) -> int:
         "cargo build --workspace --locked --no-default-features",
         '--features "pg${pg}"',
         '"pg_test":false',
-        '--production-map "$output_dir/production-map.info"',
+        "capture-coverage-bundle",
+        "--role production",
+        '--object-dir "$output_dir/production-objects"',
+        '--object-dir "$output_dir/objects"',
         "record_stage rust supplemental_tests",
         "capture-provenance",
         "validate-rust-toolchain",
         "cargo llvm-cov clean --workspace",
         'copy_profiles "$build_dir" "$profile_dir"',
+        'copy_profiles "$build_dir" "$production_profile_dir"',
         'cmake -E remove_directory "$build_dir"',
         '--per-test-log-dir "$per_test_log_dir"',
         '--baseline "$baseline_file"',
@@ -2920,6 +3915,15 @@ def audit_scope(args: argparse.Namespace) -> int:
     if not pinned_cpp_sources.issubset(cpp_required):
         raise CoverageError(
             "C++ scope must require all 21 owned implementation sources; headers alone are insufficient"
+        )
+    executable_headers = {
+        path
+        for path in cpp_required
+        if pathlib.PurePosixPath(path).suffix in {".h", ".hpp"}
+    }
+    if executable_headers != PINNED_CPP_EXECUTABLE_HEADERS:
+        raise CoverageError(
+            "C++ executable-header membership differs from the pinned release set"
         )
     for required_text in (
         "PGACCEL_ENABLE_COVERAGE",
@@ -2977,6 +3981,8 @@ def audit_scope(args: argparse.Namespace) -> int:
         len(baseline["rust"]["owned_files"]) <= 1
         or baseline["rust"]["required_mapping_files"] != baseline["rust"]["owned_files"]
         or len(baseline["cpp"]["sources"]) != BASELINE_CPP_SOURCES
+        or set(baseline["cpp"]["executable_headers"]) != executable_headers
+        or set(baseline["cpp"]["required_mapping_files"]) != cpp_required
         or len(baseline["cpp"]["ctest_names"]) != BASELINE_CPP_TESTS
     ):
         raise CoverageError("release baseline was weakened")
@@ -3033,6 +4039,24 @@ def parser() -> argparse.ArgumentParser:
     seal.add_argument("--artifact-dir", required=True)
     seal.add_argument("--layer", choices=EXPECTED_LAYERS, required=True)
     seal.set_defaults(func=seal_layer_evidence)
+
+    bundle = commands.add_parser("capture-coverage-bundle")
+    bundle.add_argument("--layer", choices=LINE_LAYERS, required=True)
+    bundle.add_argument("--role", choices=("production", "final"), required=True)
+    bundle.add_argument("--repo-root", default=".")
+    bundle.add_argument("--scope", required=True)
+    bundle.add_argument("--llvm-cov", required=True)
+    bundle.add_argument("--llvm-profdata", required=True)
+    bundle.add_argument("--profile-dir", required=True)
+    bundle.add_argument("--candidate-root")
+    bundle.add_argument("--object", action="append", default=[])
+    bundle.add_argument("--object-dir", required=True)
+    bundle.add_argument("--manifest", required=True)
+    bundle.add_argument("--profdata", required=True)
+    bundle.add_argument("--json-output", required=True)
+    bundle.add_argument("--lcov-output", required=True)
+    bundle.add_argument("--summary-output")
+    bundle.set_defaults(func=capture_coverage_bundle)
 
     summarize = commands.add_parser("summarize")
     summarize.add_argument("--layer", choices=LINE_LAYERS, required=True)

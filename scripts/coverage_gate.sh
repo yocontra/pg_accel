@@ -279,8 +279,10 @@ rust_coverage() (
     local build_dir="$build_root/rust"
     local execution_status=0
     local profile_dir="$output_dir/profiles"
-    mkdir -p "$output_dir" "$build_dir" "$profile_dir"
+    local production_profile_dir="$output_dir/production-profiles"
+    mkdir -p "$output_dir" "$build_dir" "$profile_dir" "$production_profile_dir"
     find "$profile_dir" -type f -delete
+    find "$production_profile_dir" -type f -delete
 
     if ! command -v cargo >/dev/null 2>&1; then
         mark_layer_error rust "$rust_minimum" prerequisite \
@@ -313,6 +315,23 @@ rust_coverage() (
         return 1
     fi
     record_stage rust clean 0
+    local tools llvm_cov llvm_profdata
+    if ! tools="$(rust_llvm_tools)"; then
+        mark_layer_error rust "$rust_minimum" toolchain \
+            "matching Rust llvm-cov/llvm-profdata tools are unavailable" 1
+        return 1
+    fi
+    llvm_cov="$(printf '%s\n' "$tools" | sed -n '1p')"
+    llvm_profdata="$(printf '%s\n' "$tools" | sed -n '2p')"
+    if ! python3 scripts/coverage_tools.py validate-rust-toolchain \
+        --rustc "$(command -v rustc)" --llvm-cov "$llvm_cov" \
+        --llvm-profdata "$llvm_profdata" \
+        --output "$output_dir/toolchain.json"; then
+        mark_layer_error rust "$rust_minimum" toolchain \
+            "rustc, llvm-cov, and llvm-profdata majors do not match" 1
+        return 1
+    fi
+    record_stage rust toolchain 0
     printf '{"postgres_major":%s,"default_features":false,"features":["pg%s"],"pg_test":false}\n' \
         "$pg" "$pg" > "$output_dir/production-config.json"
     if run_logged "$output_dir/production-build.log" env \
@@ -325,11 +344,20 @@ rust_coverage() (
         record_stage rust production_build 1 \
             "production pg${pg} build without pg_test failed"
     fi
-    if run_logged "$output_dir/production-map.log" env \
-        CARGO_TARGET_DIR="$build_dir" \
-        cargo llvm-cov report --lcov --include-build-script \
-            --output-path "$output_dir/production-map.info" \
-        && [ -s "$output_dir/production-map.info" ]; then
+    if copy_profiles "$build_dir" "$production_profile_dir" \
+        > "$output_dir/copy-production-profiles.log" 2>&1 \
+        && python3 scripts/coverage_tools.py capture-coverage-bundle \
+            --layer rust --role production --repo-root "$repo_root" \
+            --scope "$scope_file" --llvm-cov "$llvm_cov" \
+            --llvm-profdata "$llvm_profdata" \
+            --profile-dir "$production_profile_dir" \
+            --candidate-root "$build_dir" \
+            --object-dir "$output_dir/production-objects" \
+            --manifest "$output_dir/production-object-manifest.json" \
+            --profdata "$output_dir/production-coverage.profdata" \
+            --json-output "$output_dir/production-coverage.json" \
+            --lcov-output "$output_dir/production-map.info" \
+            > "$output_dir/production-map.log" 2>&1; then
         record_stage rust production_mapping 0
     else
         execution_status=1
@@ -366,43 +394,24 @@ rust_coverage() (
         execution_status=1
         record_stage rust pgrx_tests 1 "cargo pgrx tests failed"
     fi
-    local tools llvm_cov llvm_profdata
-    if ! tools="$(rust_llvm_tools)"; then
-        mark_layer_error rust "$rust_minimum" toolchain \
-            "matching Rust llvm-cov/llvm-profdata tools are unavailable" 1
-        return 1
-    fi
-    llvm_cov="$(printf '%s\n' "$tools" | sed -n '1p')"
-    llvm_profdata="$(printf '%s\n' "$tools" | sed -n '2p')"
-    if ! python3 scripts/coverage_tools.py validate-rust-toolchain \
-        --rustc "$(command -v rustc)" --llvm-cov "$llvm_cov" \
-        --llvm-profdata "$llvm_profdata" \
-        --output "$output_dir/toolchain.json"; then
-        mark_layer_error rust "$rust_minimum" toolchain \
-            "rustc, llvm-cov, and llvm-profdata majors do not match" 1
-        return 1
-    fi
-    record_stage rust toolchain 0
     if ! copy_profiles "$build_dir" "$profile_dir" \
-        > "$output_dir/copy-profiles.log" 2>&1 \
-        || ! merge_profiles "$llvm_profdata" "$profile_dir" \
-            "$output_dir/coverage.profdata" \
-            > "$output_dir/llvm-profdata.log" 2>&1; then
+        > "$output_dir/copy-profiles.log" 2>&1; then
         mark_layer_error rust "$rust_minimum" profiles \
-            "Rust raw profiles could not be retained and merged" 1
+            "Rust raw profiles could not be retained" 1
         return 1
     fi
     local report_status=0
-    run_logged "$output_dir/lcov-report.log" env CARGO_TARGET_DIR="$build_dir" \
-        cargo llvm-cov report --lcov \
-            --include-build-script \
-            --output-path "$output_dir/raw-lcov.info" || report_status=1
-    run_logged "$output_dir/json-report.log" env CARGO_TARGET_DIR="$build_dir" \
-        cargo llvm-cov report --json \
-            --include-build-script \
-            --output-path "$output_dir/raw-coverage.json" || report_status=1
-    env CARGO_TARGET_DIR="$build_dir" cargo llvm-cov report --include-build-script \
-        > "$output_dir/raw-summary.txt" 2> "$output_dir/summary-report.log" || report_status=1
+    python3 scripts/coverage_tools.py capture-coverage-bundle \
+        --layer rust --role final --repo-root "$repo_root" \
+        --scope "$scope_file" --llvm-cov "$llvm_cov" \
+        --llvm-profdata "$llvm_profdata" --profile-dir "$profile_dir" \
+        --candidate-root "$build_dir" --object-dir "$output_dir/objects" \
+        --manifest "$output_dir/object-manifest.json" \
+        --profdata "$output_dir/coverage.profdata" \
+        --json-output "$output_dir/raw-coverage.json" \
+        --lcov-output "$output_dir/raw-lcov.info" \
+        --summary-output "$output_dir/raw-summary.txt" \
+        > "$output_dir/coverage-bundle.log" 2>&1 || report_status=1
     if [ "$report_status" -eq 0 ]; then
         record_stage rust coverage_report 0
     else
@@ -560,16 +569,18 @@ cpp_coverage() (
             "expected exactly one instrumented shared kernel host object; found ${#objects[@]}" 1
         return 1
     fi
-    if ! merge_profiles "$llvm_profdata" "$profile_dir" \
-        "$output_dir/coverage.profdata" \
-        > "$output_dir/llvm-profdata.log" 2>&1; then
-        mark_layer_error cpp "$cpp_minimum" profiles \
-            "C++ raw profiles could not be merged" 1
-        return 1
-    fi
     local export_status=0
-    llvm_export_artifacts "$llvm_cov" "${objects[0]}" \
-        "$output_dir/coverage.profdata" "$output_dir" || export_status=1
+    python3 scripts/coverage_tools.py capture-coverage-bundle \
+        --layer cpp --role final --repo-root "$repo_root" \
+        --scope "$scope_file" --llvm-cov "$llvm_cov" \
+        --llvm-profdata "$llvm_profdata" --profile-dir "$profile_dir" \
+        --object "${objects[0]}" --object-dir "$output_dir/objects" \
+        --manifest "$output_dir/object-manifest.json" \
+        --profdata "$output_dir/coverage.profdata" \
+        --json-output "$output_dir/raw-coverage.json" \
+        --lcov-output "$output_dir/raw-lcov.info" \
+        --summary-output "$output_dir/raw-summary.txt" \
+        > "$output_dir/coverage-bundle.log" 2>&1 || export_status=1
     if [ "$export_status" -ne 0 ]; then
         execution_status=1
     fi

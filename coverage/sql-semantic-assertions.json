@@ -8,6 +8,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "5207ac6384c3cc23543b544f6575a9e839ff5f40bc53cb3088f923743e4a2cc9",
+          "guard_token_count": 2,
           "id": "00_smoke.assert_001",
           "source_line": 12
         }
@@ -20,6 +23,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "7e6b89a98d51459a79b0473b7b23c9c178176475dfcf36947a7555f9e6adaabc",
+          "guard_token_count": 2,
           "id": "01_core_engine.assert_001",
           "source_line": 17
         }
@@ -32,6 +38,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d93b2333cd621a84a74cb8d19ab8a820ec20ecfe77b1fb046d255c6d30281e8f",
+          "guard_token_count": 16,
           "id": "02_aggregates.assert_001",
           "source_line": 104
         }
@@ -44,6 +53,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "c93357f37e9e74c796994969bb40a15eb22fc50eb543e3838b367940a9cb8f3b",
+          "guard_token_count": 20,
           "id": "03_large_table.assert_001",
           "source_line": 110
         }
@@ -56,6 +68,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 5,
+          "guard_sha256": "2d73f7082e958abd100ea21e1b987c7827e717e64932bd1bb2294ffdd2cdfc20",
+          "guard_token_count": 21,
           "id": "04_null_handling.assert_001",
           "source_line": 131
         }
@@ -68,6 +83,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "4ca4d1cfdb5412acd6a7010a5a6565ed56834da83d28d9f7a9bf2fcc11f1387c",
+          "guard_token_count": 20,
           "id": "05_quals_correctness.assert_001",
           "source_line": 139
         }
@@ -80,6 +98,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 5,
+          "guard_sha256": "8a0c75908c74715aa84eeafbad3631c29123d8f76613ad871dba62398d68bef5",
+          "guard_token_count": 26,
           "id": "06_mixed_queries.assert_001",
           "source_line": 227
         }
@@ -92,6 +113,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "329f84cc3b9a991ba137b5ec7626f2ada08f775cfac70a30c895a9f96d853086",
+          "guard_token_count": 20,
           "id": "07_regression_small.assert_001",
           "source_line": 130
         }
@@ -104,6 +128,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "2a822c1261bc0a64ef9da9336fec5509b98fca3ecda4a47a6f8037f5633bdf29",
+          "guard_token_count": 9,
           "id": "08_extension_toggle.assert_001",
           "source_line": 110
         }
@@ -116,6 +143,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "5d11e0d85e6b6886da42c7da5f887bcf97125180ebb578eaef5a2dd020ea00d9",
+          "guard_token_count": 2,
           "id": "09_explain_plans.assert_001",
           "source_line": 70
         }
@@ -128,6 +158,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "ea4f28952b9f81102ad499c6edadbb4d88102121542b9a993a253a0b21d17094",
+          "guard_token_count": 13,
           "id": "10_result_correctness.assert_001",
           "source_line": 130
         }
@@ -140,6 +173,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "5207ac6384c3cc23543b544f6575a9e839ff5f40bc53cb3088f923743e4a2cc9",
+          "guard_token_count": 2,
           "id": "11_geometry_extractor.assert_001",
           "source_line": 16
         }
@@ -152,6 +188,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "f26b4c0c86dce378f7eabf2c4725e1105ad57fc5526f26a1344977675005e7d3",
+          "guard_token_count": 1,
           "id": "12_h3_operations.assert_001",
           "source_line": 176
         }
@@ -164,6 +203,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 5,
+          "guard_sha256": "753cdaab7cbf66f80e5237697df1ed0312c1c74b0a9fcd3e80a46b50dad7b74e",
+          "guard_token_count": 25,
           "id": "13_sort_orderby.assert_001",
           "source_line": 144
         }
@@ -176,6 +218,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "53a66f75e2c414523ddc5974d25a55344099439663ce8acfb7127114b405f50a",
+          "guard_token_count": 23,
           "id": "14_complex_predicates.assert_001",
           "source_line": 163
         }
@@ -188,6 +233,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "0802cb73d42338204daf6a47a7e0be2a21169155af762c8282a99da8fe1ff452",
+          "guard_token_count": 25,
           "id": "15_distinct_having.assert_001",
           "source_line": 174
         }
@@ -200,6 +248,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 8,
+          "guard_sha256": "23ca70ffc966251115d038f05ed1eff8b96fc0c6e9bf68171083df0eea845dba",
+          "guard_token_count": 25,
           "id": "16_limit_offset.assert_001",
           "source_line": 141
         }
@@ -212,6 +263,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "e53cce66a62f563dc6ae5a067d6ea2a157b478b0b82dc3752258bd45813cbcec",
+          "guard_token_count": 20,
           "id": "17_multitable_agg.assert_001",
           "source_line": 174
         }
@@ -224,6 +278,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 4,
+          "guard_sha256": "3b63e273d75bb2cc79134853cc823f29e6dc5481c5d06928d85c44c51c056b6b",
+          "guard_token_count": 20,
           "id": "18_window_functions.assert_001",
           "source_line": 125
         }
@@ -236,6 +293,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "5d6a3f44adc0a33a53ed8424b90320eebb525aed449bf0175b7d00850712b3b3",
+          "guard_token_count": 21,
           "id": "19_spatial_predicates.assert_001",
           "source_line": 153
         }
@@ -248,6 +308,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "08b02402ffcadc2346e2b8c72e0811c611a5669a2c2f86dd9734d927a6217286",
+          "guard_token_count": 30,
           "id": "20_spatial_advanced.assert_001",
           "source_line": 245
         }
@@ -260,6 +323,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "fd2fdcc34815c4cc12a4dbdeb2fc10aa04f57aba2655b2af4e6664459c09412c",
+          "guard_token_count": 27,
           "id": "21_join_types.assert_001",
           "source_line": 215
         }
@@ -272,6 +338,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "b0956489b2f5aabfef064eba11301e117bf5a0f3a66a290c2a3d727c9982db5d",
+          "guard_token_count": 24,
           "id": "22_regression_oltp.assert_001",
           "source_line": 169
         }
@@ -284,6 +353,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "87de964e5f1681a9bfe9189480319e722bf8e748ed429d3cafb21175473774d8",
+          "guard_token_count": 11,
           "id": "23_null_edge_cases.assert_001",
           "source_line": 46
         }
@@ -296,6 +368,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "441b2e5ff7cd0fa4c8048ce96f77be76d01119edc66817a37933b73953054600",
+          "guard_token_count": 13,
           "id": "24_basic_scan.assert_001",
           "source_line": 76
         }
@@ -308,6 +383,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "841dc5e80149e3bf4bf63ae0335c83944c2ac3d56d5f0fc52fba026dc19c279e",
+          "guard_token_count": 2,
           "id": "25_spatial_sort.assert_001",
           "source_line": 65
         }
@@ -320,6 +398,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "32c2f891f503533ca57ffbf910eac69fd72dd552ac60a4d9c12587a4968f0c71",
+          "guard_token_count": 1,
           "id": "30_expr_arithmetic.assert_001",
           "source_line": 61
         }
@@ -332,6 +413,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "b30fb3b398b647341a23650955356015b1d1d7e629e629fb8e5870e3c7a831a1",
+          "guard_token_count": 2,
           "id": "31_expr_comparison.assert_001",
           "source_line": 42
         }
@@ -344,6 +428,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "b30fb3b398b647341a23650955356015b1d1d7e629e629fb8e5870e3c7a831a1",
+          "guard_token_count": 2,
           "id": "32_expr_boolean.assert_001",
           "source_line": 44
         }
@@ -356,6 +443,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "32c2f891f503533ca57ffbf910eac69fd72dd552ac60a4d9c12587a4968f0c71",
+          "guard_token_count": 1,
           "id": "33_expr_null.assert_001",
           "source_line": 46
         }
@@ -368,6 +458,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "32c2f891f503533ca57ffbf910eac69fd72dd552ac60a4d9c12587a4968f0c71",
+          "guard_token_count": 1,
           "id": "34_expr_case.assert_001",
           "source_line": 52
         }
@@ -380,46 +473,73 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d8962f9f7d6fdb81e82b9c3ca69889465b76fd3210ae6b6608c3714cf1235319",
+          "guard_token_count": 3,
           "id": "40_gpu_expr_where.assert_001",
           "source_line": 44
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d35270b1ed6fbf7d4fb449e2df2b50a7f2cf2e42fe73fd3929054005520e3a93",
+          "guard_token_count": 6,
           "id": "40_gpu_expr_where.assert_002",
           "source_line": 62
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "1d3dcaa677d8ec9b03d104c30ee43aa7f3562721051a6dbbd7334b9016e1131e",
+          "guard_token_count": 6,
           "id": "40_gpu_expr_where.assert_003",
           "source_line": 95
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "f112196e604ea66887664eac81e855389757056d2d059ef189ad0a7ddf83bc9e",
+          "guard_token_count": 6,
           "id": "40_gpu_expr_where.assert_004",
           "source_line": 128
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "f5fdd58a2eb913f3e910e2cd8c572bbb304c611927f953382ebd4dbcff822c9a",
+          "guard_token_count": 6,
           "id": "40_gpu_expr_where.assert_005",
           "source_line": 161
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "6dd601430241f8e6145152fc60da85cef25ba02b262da17abd25b781ad1a9d97",
+          "guard_token_count": 6,
           "id": "40_gpu_expr_where.assert_006",
           "source_line": 195
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "45da5cf7905630a03ef45648e95d5f38d2c391a2edac6ece17dd534883a6e3ce",
+          "guard_token_count": 7,
           "id": "40_gpu_expr_where.assert_007",
           "source_line": 234
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d48419bf9fdbfbd83e2fece0e16f4f3cd7d1970c34fa97e2e0ce97ea55d71859",
+          "guard_token_count": 6,
           "id": "40_gpu_expr_where.assert_008",
           "source_line": 269
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ddbbbdfee93d309691d06a98fcdf0dd2b085647be7ab82dcbcb9804111ccda89",
+          "guard_token_count": 6,
           "id": "40_gpu_expr_where.assert_009",
           "source_line": 302
         }
@@ -432,21 +552,33 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "392fde93de21d27111d4c06c44767b64f0bc7f617ab9fa3820bad22fcefa3ce7",
+          "guard_token_count": 6,
           "id": "41_gpu_expr_projection.assert_002",
           "source_line": 36
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "5f242e0c6f3696cdc09c84678c07faffe33a013ec9d5bc56c478954cb9a2fca4",
+          "guard_token_count": 7,
           "id": "41_gpu_expr_projection.assert_003",
           "source_line": 82
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "9de0c037ba96d7a40eda96f67e645d28ca4438fa4723ebd44a09b697a2da92c6",
+          "guard_token_count": 7,
           "id": "41_gpu_expr_projection.assert_004",
           "source_line": 119
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "fbc2dbe8e0b68932011965b87f6315e2126be02d49ddab8073907e5e733c7e19",
+          "guard_token_count": 6,
           "id": "41_gpu_expr_projection.assert_001",
           "source_line": 149
         }
@@ -459,31 +591,49 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "2686f8fc5a793c2e4cc03f51315a9588764d758fb389c40de1e7bcacbec7a987",
+          "guard_token_count": 6,
           "id": "42_gpu_expr_edge_cases.assert_002",
           "source_line": 36
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d292bd997544dca77487fa6db5ba38303036b79b596753ed7d3f3568b5f0c169",
+          "guard_token_count": 6,
           "id": "42_gpu_expr_edge_cases.assert_003",
           "source_line": 73
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "a5216662e457f398244af1fe71f6b5ae91f0104811a12714f4d3290a8b8aeb78",
+          "guard_token_count": 8,
           "id": "42_gpu_expr_edge_cases.assert_004",
           "source_line": 119
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "6545219247d443f7a5c69b3422a5fe202ef1dd73be03e06fcdc73d8c07c0425a",
+          "guard_token_count": 6,
           "id": "42_gpu_expr_edge_cases.assert_005",
           "source_line": 154
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "33bd7107233e520eb26bd68fe7c1b1e5fbdab1e49c751736b83a05c3b6c4511d",
+          "guard_token_count": 6,
           "id": "42_gpu_expr_edge_cases.assert_006",
           "source_line": 190
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "824780d3bc157f85b4100e04180b58fdf79a7a0cf9322599bc1228cc7041fbc0",
+          "guard_token_count": 6,
           "id": "42_gpu_expr_edge_cases.assert_001",
           "source_line": 224
         }
@@ -496,26 +646,41 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "6b46de94af584ee5ee7049b610a9e60fd98127d64642720d99553360dae534e7",
+          "guard_token_count": 10,
           "id": "43_sort_topk.assert_002",
           "source_line": 45
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "27edbbf5dc95319644cd46b8011eafaf1417cead10cc752af1f7ffed682e9627",
+          "guard_token_count": 10,
           "id": "43_sort_topk.assert_003",
           "source_line": 84
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "a0d69700c7c927b851d69d32eb8394a1e9eb675cfb2230d02cfccde5bc35e60e",
+          "guard_token_count": 6,
           "id": "43_sort_topk.assert_004",
           "source_line": 120
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "aab3cde8645c8d75170309f0b7a50156aecd7031e119d22bdb81dd5f39196836",
+          "guard_token_count": 6,
           "id": "43_sort_topk.assert_005",
           "source_line": 156
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d481d8fed76b1a832654f50cae443790d63c981d178e6c52ff6f3a80e6fcfdab",
+          "guard_token_count": 10,
           "id": "43_sort_topk.assert_001",
           "source_line": 192
         }
@@ -528,61 +693,97 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8e3cca5223fd46a45949677b3fbfe851989b87675c5be57ab5d923b395aac8bb",
+          "guard_token_count": 12,
           "id": "50_hash_agg_groupby.assert_002",
           "source_line": 39
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "4d47643730509cc72f9c72ed235a4e244b192f2b25791a5b52a1305ba90450e3",
+          "guard_token_count": 10,
           "id": "50_hash_agg_groupby.assert_003",
           "source_line": 73
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ccd3333a213712ac864f77357746e3dd95c5e898f8a87b27aedddcdeb7614ce9",
+          "guard_token_count": 11,
           "id": "50_hash_agg_groupby.assert_004",
           "source_line": 106
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d2ec87c26022ec0e0bb5a384f6d5294996a0c806c9775cb56562d899de741677",
+          "guard_token_count": 10,
           "id": "50_hash_agg_groupby.assert_005",
           "source_line": 137
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "37d049aac229467abc3c8df906fa113d16a2257776013d9a2ec458f01172b9d1",
+          "guard_token_count": 12,
           "id": "50_hash_agg_groupby.assert_006",
           "source_line": 170
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "19ac64d84a0e5e992b69228a0877aff37b7bcb3c3cb4f8f3fe5d7d154f31c5d6",
+          "guard_token_count": 10,
           "id": "50_hash_agg_groupby.assert_007",
           "source_line": 196
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "3fc85da09c2f19a034adb466b9ac02388e40a6649bc5f0b7dae25b573ea6b8d9",
+          "guard_token_count": 2,
           "id": "50_hash_agg_groupby.assert_001",
           "source_line": 221
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "edd5a53ae2bf0a45c95cfd09493c788685b70de2160e3f0ec5d607a38447b46a",
+          "guard_token_count": 7,
           "id": "50_hash_agg_groupby.assert_008",
           "source_line": 242
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "1d40654d855006378fcaaccc8b707c88b5d40c5b945b0b400aa36f3d677de458",
+          "guard_token_count": 8,
           "id": "50_hash_agg_groupby.assert_009",
           "source_line": 280
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "30e3bbd63167d644763518958a0243b6ffb71e817f39333a0cfe878af936f195",
+          "guard_token_count": 11,
           "id": "50_hash_agg_groupby.assert_010",
           "source_line": 320
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "9d11973d40178def1605ce2f47b66f62973d0515f16cba57b114c7cb06adb749",
+          "guard_token_count": 3,
           "id": "50_hash_agg_groupby.assert_011",
           "source_line": 355
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "eeb3286bafd704e1e80bcb9c2d6d459b6cb3d267d2410a9b6561ada2093233f4",
+          "guard_token_count": 13,
           "id": "50_hash_agg_groupby.assert_012",
           "source_line": 438
         }
@@ -595,31 +796,49 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "b12961d21f3409a6f99d98089582a31e554b4deb55ba596e6aae8ccdff5e6681",
+          "guard_token_count": 2,
           "id": "51_hash_agg_edge_cases.assert_002",
           "source_line": 38
         },
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "1f5f5d0a7d684285c0fe5199cb4e732f805f89fdab8254addba3a64c5dc6162d",
+          "guard_token_count": 2,
           "id": "51_hash_agg_edge_cases.assert_001",
           "source_line": 70
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "776ace137409e1722653e5996368627c9b124671c65b8ce4f503f3c6cfcff497",
+          "guard_token_count": 10,
           "id": "51_hash_agg_edge_cases.assert_003",
           "source_line": 80
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "135425e2cfe196c7688995fe7052bd7e7966d4d993d0ba0bbe91fd5618e5b779",
+          "guard_token_count": 10,
           "id": "51_hash_agg_edge_cases.assert_004",
           "source_line": 112
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "71e92f3c6f1c85fada273fa7a891182893c8cd3f7b41e3f0bb413af78031eb64",
+          "guard_token_count": 8,
           "id": "51_hash_agg_edge_cases.assert_005",
           "source_line": 143
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "86a0261b5c1afa22835b2c6bb5124dc713243a43c7e93c854bf00c18645c93b0",
+          "guard_token_count": 10,
           "id": "51_hash_agg_edge_cases.assert_006",
           "source_line": 174
         }
@@ -632,56 +851,89 @@
       "assertions": [
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "2244811e18005db1d16c4acf8054cf4c9fdfddfd16f2bfc505d3700e128e46a6",
+          "guard_token_count": 3,
           "id": "55_hash_join.assert_001",
           "source_line": 44
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "455b9c66b601e87cb9633f7ae7e7a926b110819ccbe886ced523a09b3bf9a197",
+          "guard_token_count": 11,
           "id": "55_hash_join.assert_002",
           "source_line": 54
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "74cf7da32bbddc25af2df075abe38189fb66410330ecd5b0a1c23982d7e206d9",
+          "guard_token_count": 4,
           "id": "55_hash_join.assert_003",
           "source_line": 90
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "de59c77275088f40ad3c3d72aa52cf829781e7dcf9a9245b2a26ccdf9099fd8e",
+          "guard_token_count": 4,
           "id": "55_hash_join.assert_004",
           "source_line": 126
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "33cc10fcbd61a876c732c08ee60042b1536d7d8ade08a858a188c33fc5073c51",
+          "guard_token_count": 3,
           "id": "55_hash_join.assert_005",
           "source_line": 165
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "9fbc4db799900023598b1cf26b2af7c52a092d0f49bcb1cf74b063dc05a1959d",
+          "guard_token_count": 9,
           "id": "55_hash_join.assert_006",
           "source_line": 201
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "2b1b6d85336586a318034cf9f41d584bd1d25aa305e62e647034e9df8a646966",
+          "guard_token_count": 11,
           "id": "55_hash_join.assert_007",
           "source_line": 234
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "1e99deb69fd0742ff0fb9b54bb7b3cfd2f16aa13177342e55dcff3eb06e9b8fe",
+          "guard_token_count": 11,
           "id": "55_hash_join.assert_008",
           "source_line": 275
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "2d81bf67bf43428b6f7c85a07d054672e0bfe94686993c16ad7b55a48af51b93",
+          "guard_token_count": 3,
           "id": "55_hash_join.assert_009",
           "source_line": 312
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "fe46387b52b5ae81646dd909b3cecfc23b820b954beca9c2a2175b5922b80572",
+          "guard_token_count": 2,
           "id": "55_hash_join.assert_010",
           "source_line": 347
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "a052f4b92415172c0e9fe252a654848af82faa2ebe00dd208408064fbfca72aa",
+          "guard_token_count": 2,
           "id": "55_hash_join.assert_011",
           "source_line": 390
         }
@@ -694,41 +946,65 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "01fc189cb446e7801a95320768f049fccb0b00892fde9b1f3d68aa29b880f890",
+          "guard_token_count": 3,
           "id": "56_hash_join_edge_cases.assert_002",
           "source_line": 32
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "713bf6bb78d44059b78b46456fdfa1d66a5e193d39948ad415c6111209725c7a",
+          "guard_token_count": 3,
           "id": "56_hash_join_edge_cases.assert_003",
           "source_line": 59
         },
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "7692cf6526199cf90e31f8f5e6c64bafcdddd81e4a019f4023abbd5e4d5c9dd9",
+          "guard_token_count": 3,
           "id": "56_hash_join_edge_cases.assert_001",
           "source_line": 83
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "dc61d8e02efa40d08bd0861a3fbe634aeb271448ed3c2ca7a7b9ad78903f84ee",
+          "guard_token_count": 2,
           "id": "56_hash_join_edge_cases.assert_004",
           "source_line": 89
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "bacfc588070531c416e13c181bf16bd1d2aee1499abe8051c36ddcb07ab852a3",
+          "guard_token_count": 3,
           "id": "56_hash_join_edge_cases.assert_005",
           "source_line": 124
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "1e57097905820b9a406533e84b093d959fe3a811f2101e420d101776f8cabd19",
+          "guard_token_count": 3,
           "id": "56_hash_join_edge_cases.assert_006",
           "source_line": 151
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8af213a7b885d16f23b4053c47a9d2dcdfe1db9860cc36610575b0464f87be0d",
+          "guard_token_count": 10,
           "id": "56_hash_join_edge_cases.assert_007",
           "source_line": 188
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "7997f07cbb46bae7facf0379b53051c5e1757ad96253499e5f93b761efbedec6",
+          "guard_token_count": 11,
           "id": "56_hash_join_edge_cases.assert_008",
           "source_line": 229
         }
@@ -741,61 +1017,97 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "68a9bfdaae7e0b5174d4e6b3ef1184bcca188093fe86a38e5cc6b40a76874453",
+          "guard_token_count": 7,
           "id": "60_window_functions.assert_002",
           "source_line": 41
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "be9e341a43f7be3be108162054515fb8c2cc08b391ba4b29036c2e21804fa8f3",
+          "guard_token_count": 7,
           "id": "60_window_functions.assert_003",
           "source_line": 74
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "0f020281775305d9fde775e93dc94b64dcd19cb8c006e966455f7d5166051d52",
+          "guard_token_count": 7,
           "id": "60_window_functions.assert_004",
           "source_line": 107
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "dbd791d4a19717fa7c66fc012dc14bcc850228596eb4052613e1c08ab940f710",
+          "guard_token_count": 8,
           "id": "60_window_functions.assert_005",
           "source_line": 133
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "4c0109fb4c65eed69e5d27d56c27ffa57ea9897b4d0f085ee1292d2ceed1c8ad",
+          "guard_token_count": 7,
           "id": "60_window_functions.assert_006",
           "source_line": 159
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ec9da20fcd4009fa6f45db5b524f36b38d24161a2e683df5a6a83748b232d78a",
+          "guard_token_count": 8,
           "id": "60_window_functions.assert_007",
           "source_line": 185
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "63e376c838179a15cbef2f7c220818ca211f0ab648eaa2698d282ab914be0595",
+          "guard_token_count": 8,
           "id": "60_window_functions.assert_008",
           "source_line": 211
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "b31f81af023a8c3cc6b33533a56078177a0eef44d7db6d2f02893e9a602b54fe",
+          "guard_token_count": 11,
           "id": "60_window_functions.assert_009",
           "source_line": 247
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "14dd44441248da22f6b2802380f153301de8642caeb99240f28d702202651ea3",
+          "guard_token_count": 7,
           "id": "60_window_functions.assert_010",
           "source_line": 273
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "111bbb9707d820424ee706f26d1a05d58f00a22e35e00ece0b24cabcc4adc4be",
+          "guard_token_count": 10,
           "id": "60_window_functions.assert_011",
           "source_line": 311
         },
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "ad88228904dfdc9bbec776f6d2825b6d15cdc3417e3359018e463dede0ca2e99",
+          "guard_token_count": 2,
           "id": "60_window_functions.assert_001",
           "source_line": 343
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "752abe6d710c446deaa473f5959d3ae7e34947a03bec048fbfb1c38d0876798f",
+          "guard_token_count": 2,
           "id": "60_window_functions.assert_012",
           "source_line": 350
         }
@@ -808,51 +1120,81 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "37ad1357f8d91984adf1bdb8abbc82580a5a3adcf202fb073a988bc00a3b5f08",
+          "guard_token_count": 3,
           "id": "61_window_edge_cases.assert_002",
           "source_line": 35
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "0cbe0271ee029b7887e34706a4fb09add2983650ddc43df4d44e50b27856578d",
+          "guard_token_count": 12,
           "id": "61_window_edge_cases.assert_003",
           "source_line": 76
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8e5db2b05fd4c0065023509f338cae5d57f2386ef0dfed06466f02d57e448542",
+          "guard_token_count": 10,
           "id": "61_window_edge_cases.assert_004",
           "source_line": 110
         },
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "7fcc5fc95b16d8decaa4b4e941a9ca0a61fff7b151b735385a185458d9fd47f2",
+          "guard_token_count": 10,
           "id": "61_window_edge_cases.assert_001",
           "source_line": 145
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "6e91f848664b088e944ae4c7b5049be7f0905a285cb2d6814fd945255e2fa8b7",
+          "guard_token_count": 2,
           "id": "61_window_edge_cases.assert_005",
           "source_line": 151
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ffb9a81e11a6db0003df66a69a1dbe1a0a422aad2203a908320165a1949fc729",
+          "guard_token_count": 9,
           "id": "61_window_edge_cases.assert_006",
           "source_line": 187
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "ccd3dfef046729f8f7093a78d4c369ee241c96907fed5f65f9196e676f99b179",
+          "guard_token_count": 8,
           "id": "61_window_edge_cases.assert_007",
           "source_line": 224
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ae2aa3789423c8771cf5c26eeefdbb7213da6a12e69d40a793e57a7b8e8e6e6e",
+          "guard_token_count": 8,
           "id": "61_window_edge_cases.assert_008",
           "source_line": 259
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "28686acc1bdc4edad6b609a1f9902f597138782f3b200c85d14bb21e728c1b95",
+          "guard_token_count": 7,
           "id": "61_window_edge_cases.assert_009",
           "source_line": 294
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "652ac75f7631dfe2331ce212fcf63b31fa99e9bc03343f67af324161888c8213",
+          "guard_token_count": 7,
           "id": "61_window_edge_cases.assert_010",
           "source_line": 329
         }
@@ -865,6 +1207,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d921d2f8e5e48878b1849645aca46a093d1ccf9930c4e39969826a9a3dfba679",
+          "guard_token_count": 1,
           "id": "70_zero_overhead_oltp.assert_001",
           "source_line": 60
         }
@@ -877,136 +1222,217 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "e5395460fd1d7c75efd623cccd5063a2a3886dd68c04ee00492151af37d3c197",
+          "guard_token_count": 2,
           "id": "80_null_exhaustive.assert_001",
           "source_line": 122
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "dc233cc31048ce41a01832657ce37b4d57e27cf887ab01ce5382f6efbbf00c3e",
+          "guard_token_count": 5,
           "id": "80_null_exhaustive.assert_002",
           "source_line": 150
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "fd933ec2cc68bc8e535f747b0543aed63329fa618a8e617f6bd63fd6d7a05a24",
+          "guard_token_count": 5,
           "id": "80_null_exhaustive.assert_003",
           "source_line": 177
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "2fb9430286f3f5dfe3e81db26c4a6dcc3323f7b066bd5b29c182e624518b6cd6",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_004",
           "source_line": 199
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "b4af44272b705313a955a8a9320c8486f2faab53d882e6b29c3bb6b9cdf936b6",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_005",
           "source_line": 248
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "2d9dde9a2b60622045b286e9c46374c8a856db8db256462d1eb86f58293065bf",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_006",
           "source_line": 269
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "7c4ac820e2be6bc1e500ba508e45ea01fcda4b479b35153d75abd8877a0d53bb",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_007",
           "source_line": 318
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "bd6b203a6c76a94e8e2aabf603da2d3bfa74344a3608ff55f88af71b592fdb8f",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_008",
           "source_line": 339
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "b0ceb82a967d262662be7e9fca287178de814a5acd3c593f649a4c00dada09ed",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_009",
           "source_line": 392
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "f15746d9732d01d6f223930afd64a032d6940c6768474dbefe92f4ce61a2f617",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_010",
           "source_line": 436
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ee20fa37e9107b50ac230e8e7df6c7be5d81e351b71d8445f5495def0d44e3e2",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_011",
           "source_line": 458
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "02534f1050e9cd20635dedd98dbe4a8e9394251c172d85a0dc79157d7a3b9674",
+          "guard_token_count": 9,
           "id": "80_null_exhaustive.assert_012",
           "source_line": 512
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "fe6bb9c12843c5717c435a35bd2a38ee659d73af976be7959d9b143c142fb545",
+          "guard_token_count": 9,
           "id": "80_null_exhaustive.assert_013",
           "source_line": 556
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "2d05b3fdb81df67c312f4257d32501ff7e75548d5bfe6b90dc0fef4afef234de",
+          "guard_token_count": 9,
           "id": "80_null_exhaustive.assert_014",
           "source_line": 600
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8415af379997b181f33eb32ac54ccec49977b41679df4c935a94e0040908dc6a",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_015",
           "source_line": 644
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "cce0a32e9a55c809b000d7890c2397f3287c4e8ea1933a52dd5b34902e8bb5b4",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_016",
           "source_line": 688
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "7e10133366eaa3fe0a55d82d3ca14290bee83afc2e07f33d01ca4686c81bd00d",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_017",
           "source_line": 733
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "5443486a42cfd3f9fc765636adc67c78d79fd8143ce154456b7915ce4c100c46",
+          "guard_token_count": 7,
           "id": "80_null_exhaustive.assert_018",
           "source_line": 784
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "89a1586be367433cbf0e8de1cd51e4359e03371d91377a3a89943a9167c822c0",
+          "guard_token_count": 5,
           "id": "80_null_exhaustive.assert_019",
           "source_line": 813
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "6bc694ca32a17fbbe7c0606639954a41a39b627a951747771794667e7a777d4c",
+          "guard_token_count": 5,
           "id": "80_null_exhaustive.assert_020",
           "source_line": 842
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ea36806ed96ab260635b5b4bfcaf1c6272f1b4348a1b111ca74dda261b2f4638",
+          "guard_token_count": 4,
           "id": "80_null_exhaustive.assert_021",
           "source_line": 875
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "481a14baf09695d5cb5372cbcc8e673dd46432539107bd80a82bb4f5432d5d9d",
+          "guard_token_count": 5,
           "id": "80_null_exhaustive.assert_022",
           "source_line": 913
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "c6ae25f36c276bcdb877677cee5563418950e11645ce13fa5d6454aa3e7ef42e",
+          "guard_token_count": 5,
           "id": "80_null_exhaustive.assert_023",
           "source_line": 942
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "f5033a4f72c648b466b86a412593bbbf7d99591176ea5e3eb144f73b80445f47",
+          "guard_token_count": 10,
           "id": "80_null_exhaustive.assert_024",
           "source_line": 975
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "7f05b00e0a8e47af83056d4ad2d3f98fd0b7fe5beb7ed2ee54537ac1042699e2",
+          "guard_token_count": 10,
           "id": "80_null_exhaustive.assert_025",
           "source_line": 1005
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "7f18d60272e7fe32daaae26772d1ac6da75cbd43de99743727bf64da32accd17",
+          "guard_token_count": 3,
           "id": "80_null_exhaustive.assert_026",
           "source_line": 1040
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "e4c172383d78c0c087681827756acbd310d28fe380e2f70e3bd87f741ebcffe0",
+          "guard_token_count": 3,
           "id": "80_null_exhaustive.assert_027",
           "source_line": 1072
         }
@@ -1019,76 +1445,121 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "27acb675bc985031d8231549b502790df92b6646258ffe88edde9d78a0407fea",
+          "guard_token_count": 2,
           "id": "81_degenerate_geometry.assert_001",
           "source_line": 118
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "9bb7c28accf6236189992ace1c1bbed5fdd1516511738637749c9fde4d291b16",
+          "guard_token_count": 5,
           "id": "81_degenerate_geometry.assert_002",
           "source_line": 145
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "f1c12571065fb7cc6da202e99bed2aadd06f6fb1b2ab7ce5ed458daf520c8745",
+          "guard_token_count": 7,
           "id": "81_degenerate_geometry.assert_003",
           "source_line": 195
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "82438814a99a437ce9934dca5a3bcc64a5e7a74e4df26f0bff460c0ecc9b12b8",
+          "guard_token_count": 7,
           "id": "81_degenerate_geometry.assert_004",
           "source_line": 245
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "9039e92c03d82d4148428385023590d6f4789115b1984313c96eedf7802e7338",
+          "guard_token_count": 7,
           "id": "81_degenerate_geometry.assert_005",
           "source_line": 298
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "515489f5b5678612156c21bfda4280d4117545a6f9769f0fa5ce3598cd0f9c00",
+          "guard_token_count": 8,
           "id": "81_degenerate_geometry.assert_006",
           "source_line": 329
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d4459c0d239510ede1e524b1fd8deb46923a6d795b4033ccdcfc405414225ae1",
+          "guard_token_count": 8,
           "id": "81_degenerate_geometry.assert_007",
           "source_line": 359
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "fd0e4bd9e19d65c1eb7903354fe02232e13fd79de5e6b6cbee4acd8b0a4ce0ad",
+          "guard_token_count": 8,
           "id": "81_degenerate_geometry.assert_008",
           "source_line": 389
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "752d45243c8a96bfcc86741f46a41a4f34650ccb7f2c4797bb198c9e462cb24d",
+          "guard_token_count": 8,
           "id": "81_degenerate_geometry.assert_009",
           "source_line": 421
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "94031c214e37bf49a94f4976225b0ea546d0ae42823e3ff4fba3be429e419912",
+          "guard_token_count": 10,
           "id": "81_degenerate_geometry.assert_010",
           "source_line": 457
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "b78de4eb8399f4a4f779927e4881a38af67ed31ccf72dce6c63947e0b052df65",
+          "guard_token_count": 7,
           "id": "81_degenerate_geometry.assert_011",
           "source_line": 545
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "b77cb73324ed20d220ed9d4cc58cb4f6d1b23296b03b2a7c4d3751beb4da3a64",
+          "guard_token_count": 5,
           "id": "81_degenerate_geometry.assert_012",
           "source_line": 575
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "31b314e8612b1cc160865a14e20a39f2660a480ddf8c46acc21f8887796d3dbc",
+          "guard_token_count": 10,
           "id": "81_degenerate_geometry.assert_013",
           "source_line": 628
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "87896dc2ebde6de18fb431854dcf4d235d14ed33ce5a53e54c9ed1f5c3a6ca21",
+          "guard_token_count": 13,
           "id": "81_degenerate_geometry.assert_014",
           "source_line": 681
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "9f981bbe2dc6431341bc9e291969defcaba3c6de84c02e2fe302a16b9146c424",
+          "guard_token_count": 7,
           "id": "81_degenerate_geometry.assert_015",
           "source_line": 721
         }
@@ -1101,86 +1572,137 @@
       "assertions": [
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "83126e5b51a5089f82bee2a4ba62851c2344e93a0a49f6a8083c72e896da00b7",
+          "guard_token_count": 3,
           "id": "82_srid_mismatch.assert_001",
           "source_line": 153
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "4752531477f917c3be381e433e718d0b7364649d5c1c314fe0049bb6df1afeba",
+          "guard_token_count": 1,
           "id": "82_srid_mismatch.assert_002",
           "source_line": 159
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d9318ad8a7cfc5ecec8138a4b9d96278825888d80f55c1d12dac5c57e975859b",
+          "guard_token_count": 3,
           "id": "82_srid_mismatch.assert_003",
           "source_line": 197
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d9318ad8a7cfc5ecec8138a4b9d96278825888d80f55c1d12dac5c57e975859b",
+          "guard_token_count": 3,
           "id": "82_srid_mismatch.assert_004",
           "source_line": 235
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d9318ad8a7cfc5ecec8138a4b9d96278825888d80f55c1d12dac5c57e975859b",
+          "guard_token_count": 3,
           "id": "82_srid_mismatch.assert_005",
           "source_line": 273
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "55d635420cad07d7042a6eb859cfbcd12e9479fa0fd3476ea17b1e2e92f9a882",
+          "guard_token_count": 7,
           "id": "82_srid_mismatch.assert_006",
           "source_line": 324
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d19230966bfecba37a5a1087555f7a53cff0dd0cdfbf0fda1019fa0b0ad08c43",
+          "guard_token_count": 5,
           "id": "82_srid_mismatch.assert_007",
           "source_line": 354
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "b54f2d0ea0826689d67e556e2f776d188c71fdb89d2938f38087bbb169bcc63d",
+          "guard_token_count": 5,
           "id": "82_srid_mismatch.assert_008",
           "source_line": 386
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "10062111f6eb459ef64e87f236f4f0649e76352207401b37864a35a006d46f13",
+          "guard_token_count": 7,
           "id": "82_srid_mismatch.assert_009",
           "source_line": 439
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "16e9773f61f6e41a12ddaca686e2f0e4892c59037207f8c8a5baf7802e5f3a5c",
+          "guard_token_count": 5,
           "id": "82_srid_mismatch.assert_010",
           "source_line": 485
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d9318ad8a7cfc5ecec8138a4b9d96278825888d80f55c1d12dac5c57e975859b",
+          "guard_token_count": 3,
           "id": "82_srid_mismatch.assert_011",
           "source_line": 529
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d9318ad8a7cfc5ecec8138a4b9d96278825888d80f55c1d12dac5c57e975859b",
+          "guard_token_count": 3,
           "id": "82_srid_mismatch.assert_012",
           "source_line": 569
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d9318ad8a7cfc5ecec8138a4b9d96278825888d80f55c1d12dac5c57e975859b",
+          "guard_token_count": 3,
           "id": "82_srid_mismatch.assert_013",
           "source_line": 609
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "ffce27165d684c282b6fdba477f8ba3f1d457b5159e36d2fec08bec3337ce097",
+          "guard_token_count": 7,
           "id": "82_srid_mismatch.assert_014",
           "source_line": 659
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "c5e0560e638fc7a45050abc3303eccfac7b4d08d127f1ec621225888a79a19a4",
+          "guard_token_count": 7,
           "id": "82_srid_mismatch.assert_015",
           "source_line": 709
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "83126e5b51a5089f82bee2a4ba62851c2344e93a0a49f6a8083c72e896da00b7",
+          "guard_token_count": 3,
           "id": "82_srid_mismatch.assert_016",
           "source_line": 746
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d9318ad8a7cfc5ecec8138a4b9d96278825888d80f55c1d12dac5c57e975859b",
+          "guard_token_count": 3,
           "id": "82_srid_mismatch.assert_017",
           "source_line": 786
         }
@@ -1193,156 +1715,249 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "a11a2e3849f6e606034f10e645a9b7a5059496f66533b8205bc5b6f438ca2543",
+          "guard_token_count": 2,
           "id": "83_plan_patterns.assert_001",
           "source_line": 81
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "1c346512fe60f1cf61fff4002d764fb52b01f40168a1c51878428fdaf989be8f",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_002",
           "source_line": 110
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "f1a9da27bc8d731f43f812c90b04d9c811e6089f65c8598c1e9f865a5d07024d",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_003",
           "source_line": 160
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "c8ba348e058106ef74380cf197ecd80da53e5e03a737b78767e94d578b43f35f",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_004",
           "source_line": 204
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d0127e0e4aad15fa6cbf4b54bebf65bbc4d6674a27677288cb1185598deb2212",
+          "guard_token_count": 9,
           "id": "83_plan_patterns.assert_005",
           "source_line": 251
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "8f3def63fe3ff45035518fb31575ff864399afab12f02b6fb860af6253f38fff",
+          "guard_token_count": 7,
           "id": "83_plan_patterns.assert_006",
           "source_line": 307
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "c8861f8d00a8a186d38d151fa5cc42c60093b9831e33273658b02b360d75efeb",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_007",
           "source_line": 363
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "ab524b25cd77ac3b30c4ad4244de16ce57d5b40ad526626fa02a957ec64a1720",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_008",
           "source_line": 419
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "1e12560c691074962dfdc413f7101094c37bb94db55a26c2e4bc14e962166b16",
+          "guard_token_count": 9,
           "id": "83_plan_patterns.assert_009",
           "source_line": 470
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "726eba1b5a03f15c7ba6d34da9b31def3908e7603a05768be93ba40da633138b",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_010",
           "source_line": 516
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "9f1058e0023f02dbdb14deabac09e7c530a96fddc2f8ad78c1a1607b6896d8b3",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_011",
           "source_line": 563
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "dd8a322c028aba141533934d74e54884c7b956c9fdbfc37ef2a98b863d8aed52",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_012",
           "source_line": 617
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d6e170fdf16afafb51c345205cf18c78b6f933fd70fc33f3243125b5a851ca0c",
+          "guard_token_count": 7,
           "id": "83_plan_patterns.assert_013",
           "source_line": 681
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "1dea55ac0034ae68bbae523a064b2a70fcca488560c3e9723558243b5aa806ec",
+          "guard_token_count": 8,
           "id": "83_plan_patterns.assert_014",
           "source_line": 734
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "348fd2cf8a77b14528c99340ea99ebab2785c28924d103027a58df4bc6645a80",
+          "guard_token_count": 9,
           "id": "83_plan_patterns.assert_015",
           "source_line": 790
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "a35d819464c0e71714beaa3bfd724ceec8f5dd51d48891c49db19d8d549566c1",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_016",
           "source_line": 858
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "341e8294bc8b148415d3f4fb245c4962dcddf2409557e49f995e4a88f3dddc01",
+          "guard_token_count": 7,
           "id": "83_plan_patterns.assert_017",
           "source_line": 909
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "696bf0f9bfab62614ca0279c276403ff54a0b9904a6022b421c641799581d20c",
+          "guard_token_count": 5,
           "id": "83_plan_patterns.assert_018",
           "source_line": 940
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "3f765a87c1609da197237513c1f0937e4c24174dbaec9bbe86add9e8df7f9745",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_019",
           "source_line": 967
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "5726ee8e7a6be8884cb0f3b59a080f98208f95311da0db23e6f4a93437d4657f",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_020",
           "source_line": 992
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "57de59c32a77267e621b0452a08b87141196d7ea49f8ba0d87525376b3f39700",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_021",
           "source_line": 1019
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "6f39723b5b571d28cc05156cb495c76a38d3b51dc6688a1d504cd10d627bcea2",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_022",
           "source_line": 1068
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "885b54bc8187214774ac1b0f79e2f0623cf040d730760c718c2da74f9a3755c2",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_023",
           "source_line": 1093
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ffa83fd037c2913fdb5a24a81b0ee1929875b4ca0624cac54348f725a89dc277",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_024",
           "source_line": 1128
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "546d7416a4326d1877739b67e81e962c30925e659c786cc3eef25d4216420702",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_025",
           "source_line": 1165
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "44ce85c42620c5175e09923c2d5ab18c70fcf7a20d3c9fa5bc333b1144c9ab30",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_026",
           "source_line": 1192
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "96bb2d4d2b94c24b9339976a00661bd5662d505067c71ef4581ac4f84069d820",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_027",
           "source_line": 1233
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "9fbfef6e34919d41059d102b863c66f4ea3ffa8bac3d8717356f50dbe67b1363",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_028",
           "source_line": 1264
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "bf26276e9a6ae501bb618755739f6478e7c20e8a6c48f0abd00097c1af664e81",
+          "guard_token_count": 4,
           "id": "83_plan_patterns.assert_029",
           "source_line": 1289
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "0bc122898d6728b1f9fbed3ec86d29c56afe279abb9002fa290997f096c6c536",
+          "guard_token_count": 6,
           "id": "83_plan_patterns.assert_030",
           "source_line": 1320
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "b60e17ed485b28c37145f51f65a15e3e0c1873bb61a7a0cc866fd8262ca58d16",
+          "guard_token_count": 5,
           "id": "83_plan_patterns.assert_031",
           "source_line": 1348
         }
@@ -1355,131 +1970,209 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "5833f9647692c50f90dc6227bdbea9359a79a4b6308a0b118e81c1a852ec7335",
+          "guard_token_count": 2,
           "id": "84_transaction_semantics.assert_002",
           "source_line": 61
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "1f72fbd1a9dfb537a1588dd3b8978636383f93f9dae1f6c12d03b5b5fab12269",
+          "guard_token_count": 26,
           "id": "84_transaction_semantics.assert_001",
           "source_line": 92
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "bcbe21cd2431e687fc518e19ebf514915878ced3f2ea35b1239ef0ab6ae4ecc4",
+          "guard_token_count": 2,
           "id": "84_transaction_semantics.assert_003",
           "source_line": 111
         },
         {
           "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "a18f075aa7956635a2917ff17651d20cdefc1edb7b61d39d766dd37d85c162b7",
+          "guard_token_count": 7,
           "id": "84_transaction_semantics.assert_004",
           "source_line": 186
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "f23f858de4172f1ed1aee0f8ac57d420a9c153db35ea5f3f4e27c8abab5144e9",
+          "guard_token_count": 2,
           "id": "84_transaction_semantics.assert_005",
           "source_line": 220
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "602058df64b63ad1fcf20f4006b4b249a0f5f1279664b9fcee65835a8792c580",
+          "guard_token_count": 9,
           "id": "84_transaction_semantics.assert_006",
           "source_line": 296
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "536468f054a645fbc010675b8c24d0aa97e7fc93722e12597fd17ae2ff6d7949",
+          "guard_token_count": 4,
           "id": "84_transaction_semantics.assert_007",
           "source_line": 334
         },
         {
           "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "20cb5d0d4eb6189ae961fe7c49af59e06d2ff5b8c1a3cc822e7fcc30362856b8",
+          "guard_token_count": 5,
           "id": "84_transaction_semantics.assert_008",
           "source_line": 396
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "84f2a4e8e1d58007fc6abd3ec52c658e501cdc881743d627c41abd7643395ad8",
+          "guard_token_count": 6,
           "id": "84_transaction_semantics.assert_009",
           "source_line": 451
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "fbfc924d44b4307596ca7d245dff943b3c26ca9207654ed7842c8dc8f1db6209",
+          "guard_token_count": 4,
           "id": "84_transaction_semantics.assert_010",
           "source_line": 479
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "2ae6df5991b86f730be09da3e90e27fb7c52162d54a178204cef2a20c11db6ee",
+          "guard_token_count": 5,
           "id": "84_transaction_semantics.assert_011",
           "source_line": 531
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "b9a3d91c7050814263d2e7c43fdb245896e87bf70bb357bb13319ededd615deb",
+          "guard_token_count": 4,
           "id": "84_transaction_semantics.assert_012",
           "source_line": 573
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "1217e77bc89a53cdb7b837cb85a96ae39a08567fc69171f3a2c45722c1a9995f",
+          "guard_token_count": 2,
           "id": "84_transaction_semantics.assert_013",
           "source_line": 610
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "6aba0b8804ca986cb5855feac5fb372e44fa36cecc305a5fccc48c724bd03d94",
+          "guard_token_count": 3,
           "id": "84_transaction_semantics.assert_014",
           "source_line": 651
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "63772676d1445b68ed2588101304af4e88467ecc70ddd1c768b501c796fa7a49",
+          "guard_token_count": 4,
           "id": "84_transaction_semantics.assert_015",
           "source_line": 676
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "7aa0d44fbc9375c5723f78558ded06d08d1149a83b916c172522bf553e01c4bb",
+          "guard_token_count": 3,
           "id": "84_transaction_semantics.assert_016",
           "source_line": 739
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "470e463b710e6a7460ff03166cfc6df30ca9dcd797a3986c2a835fefe996781a",
+          "guard_token_count": 1,
           "id": "84_transaction_semantics.assert_017",
           "source_line": 771
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "1c96656d8b9346239908e74d189953d1ff4a6dd82f0b82274378b91d4acb90e2",
+          "guard_token_count": 2,
           "id": "84_transaction_semantics.assert_018",
           "source_line": 796
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8d31bd7955856ccc01f2f726ef6924ab189be0b01a9c2da6a51d807d73cb586c",
+          "guard_token_count": 2,
           "id": "84_transaction_semantics.assert_019",
           "source_line": 825
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "37eec101265776605227d25ea36d9dfc2d86c3135300210e810ee62143f67c3b",
+          "guard_token_count": 4,
           "id": "84_transaction_semantics.assert_020",
           "source_line": 852
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "986a3de257baa688c633bb1ba9b1c0178c1fb657bb98991d70cfd76bd3129b85",
+          "guard_token_count": 4,
           "id": "84_transaction_semantics.assert_021",
           "source_line": 877
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "4da069c1d5d6573bcc7e667d1ab3e0bf41d8bcd3e669c23ea2fec815097f1f04",
+          "guard_token_count": 4,
           "id": "84_transaction_semantics.assert_022",
           "source_line": 909
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d9962a7d650a5714b3cd0b58875c70378587f62c74ec8491f60464f90e2db8a0",
+          "guard_token_count": 2,
           "id": "84_transaction_semantics.assert_023",
           "source_line": 941
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "402e3238320c70499ff97f4e2ca859fbd7194747d1481d19f3eb350ca9be59bd",
+          "guard_token_count": 2,
           "id": "84_transaction_semantics.assert_024",
           "source_line": 972
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "0bbf8e1f68f9949ecc8091ace10bf65a200fe5bdfe762a893bd0a776e94b4977",
+          "guard_token_count": 2,
           "id": "84_transaction_semantics.assert_025",
           "source_line": 996
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "11514df92bc10d09f771e42358d77566e1fe6089b98ad5ce08a61f97324cefa8",
+          "guard_token_count": 3,
           "id": "84_transaction_semantics.assert_026",
           "source_line": 1028
         }
@@ -1492,261 +2185,417 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "3b2bc55c6b8f10898c37fae88cdad134f78b2178b9462d27455bbd202a5b420f",
+          "guard_token_count": 2,
           "id": "85_function_matrix.assert_002",
           "source_line": 99
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ce3b1c24c903b76c05604854977e699cf21a14e6e97bf6c27680a3bd2448a541",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_003",
           "source_line": 122
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "6ebc9d90f219fd060d10f2ab28d4af7121065fb290ecb4cbe433246870ca57ab",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_004",
           "source_line": 145
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "22034919c0614f95c00c9947b9403c24c904991f25f38a055e7b50b8cd09321e",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_005",
           "source_line": 168
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "33ecaff6aafcaf3860e430d95aaf6233fb1d7f7ceffef9a047125e343623c4fa",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_006",
           "source_line": 191
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "2d44d38a2a773f65793b4bb950b900571ad765820745afd27b30ca1ad097b906",
+          "guard_token_count": 2,
           "id": "85_function_matrix.assert_007",
           "source_line": 216
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "9cdb6f5ec6fea6ac3ad56aeffae3e26f40b22fbd4ca0fce0efe862252da5f600",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_008",
           "source_line": 239
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "fb003c704f75a8eae817fc73be9682b0e95f2e853b80678d3ea9330be002f3d0",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_009",
           "source_line": 262
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8858637975677c9d5e65e8a11021dfaa9ec21ecc9d9b209f961094372edf1e9b",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_010",
           "source_line": 291
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "1a1e38589ac699736a1ee28b9f7dc2090fa3a02a4f1fe31bfe88cd781b79507a",
+          "guard_token_count": 2,
           "id": "85_function_matrix.assert_011",
           "source_line": 316
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8c7adb8a27fc594e98f2c085839391fedcfb62422a99b1f05e7358d5992abacf",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_020",
           "source_line": 339
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8ffd89de1e5a3474bee6dc93031dd71f86153bda950fa7784f4604795eab6365",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_012",
           "source_line": 348
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "4f763a79b770b2f9eebbdcc42f3b4d30350411d28c93d824bd7e03afdf7c6a68",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_013",
           "source_line": 375
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "7945988025f066c6b65c3ef423c83796bdc1875bcc0fcaad551a32746a8028f2",
+          "guard_token_count": 2,
           "id": "85_function_matrix.assert_014",
           "source_line": 401
         },
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "90084ff6c7a9a5697ce8760a96902b003faca470a4873eecd186e65a16efefa6",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_001",
           "source_line": 421
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "3cc1d09fa7ccd0994d24f5286b9cddde29e2b1032b99d91251dba8f7ecfc5617",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_015",
           "source_line": 427
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ce370f5e7c84eee56de5a8fad6bd863c8cd7acbcb29ba1d5a72396d6d72aad4d",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_016",
           "source_line": 452
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "d20e5f39cf022db58818877e87149dcf3e36232a1d5f6cd694a220339088a987",
+          "guard_token_count": 6,
           "id": "85_function_matrix.assert_017",
           "source_line": 477
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "9a7160cae80a8478b85ae484fc769d78b4701510cf7a08ae387055bed685027e",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_018",
           "source_line": 498
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "903d174fb54b32b4b4d3e2ea0fe6f4c343a5d0a9c40b11c35bfe150add15632c",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_019",
           "source_line": 519
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "3b7acbbb6129252e61da2904494748765d395a7ea9ad8a25629af40b2fa36ee4",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_021",
           "source_line": 593
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "0bf0e78e035227564c5d4ac8bb8f1945dd60461d7e04648db513f9a99fab8195",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_022",
           "source_line": 613
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "1c68b669d8f116dc54a166e520004a13e98caac2a67eaa02f0774908721b5396",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_023",
           "source_line": 633
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8121384dd98268839f0c7508010d3c9ddd042b8423cf071e807ae403112833c4",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_024",
           "source_line": 653
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "49b979d1dc395bca32a58cc25acad76b03b50e16100208fc21d1ed7b7c165c23",
+          "guard_token_count": 2,
           "id": "85_function_matrix.assert_025",
           "source_line": 692
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "4621fabc3802caec4bc1575a7cf6269622dc325a68abbaaa0b8172f46853719e",
+          "guard_token_count": 8,
           "id": "85_function_matrix.assert_026",
           "source_line": 718
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "7c6c233a489373f5ef64ba278ad88153536405588ef3c1434684da302d78fa03",
+          "guard_token_count": 2,
           "id": "85_function_matrix.assert_027",
           "source_line": 743
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d791567bdbb87a29f170bffdbea99aee023623997e5000f2da1e847bc16a912c",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_028",
           "source_line": 767
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "a0e9ca0b74f4d27a59c93c914beb6c0aed168486f73c3ffa000134346230b7a9",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_029",
           "source_line": 791
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "fe81f0750bcd9ed50298124d0684ef4d403aee5d615b242e5991eb27c16d9e89",
+          "guard_token_count": 8,
           "id": "85_function_matrix.assert_030",
           "source_line": 818
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "8cccc9f76f5dd97778148f59a70f57c2d2db03a66fa9524aa19b2953bc3e13e3",
+          "guard_token_count": 2,
           "id": "85_function_matrix.assert_031",
           "source_line": 856
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "f798f98c45beb99bcc631fe953c4c493eb267c29a82de3029069cfbb6a379b5a",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_032",
           "source_line": 878
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "8249a6a591e832298b7afcd465b3f86de837a0ea65f6351571ef557b121b0731",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_033",
           "source_line": 903
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "2c01afc4edfc9784d8d1a34b1f6eace48a26bfd953ce18b487893adeb4577ad7",
+          "guard_token_count": 5,
           "id": "85_function_matrix.assert_034",
           "source_line": 935
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "5ed2034ebc71c6baea9a7bc5aa0eec260760163e62a44f5cadca2e9670e28060",
+          "guard_token_count": 9,
           "id": "85_function_matrix.assert_035",
           "source_line": 973
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d9213781506f1daabb468b91b42a05f96c1cfda6f67aa62a80ef67c2816caa04",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_036",
           "source_line": 1001
         },
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "0fd01cc1d0b8d155ff402dc98140f0f8fdb6b22629967e4c68c7a7d51b2d0a93",
+          "guard_token_count": 8,
           "id": "85_function_matrix.assert_037",
           "source_line": 1064
         },
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "eb808ef31fcfafd29f6521ca45778fe84e98e819b2d6762d894081f59b08ade6",
+          "guard_token_count": 8,
           "id": "85_function_matrix.assert_051",
           "source_line": 1104
         },
         {
           "emission": "notice",
+          "guard_count": 1,
+          "guard_sha256": "674321f979975bb22d15413c7ef014c9b971816d036d071fa130ec4a7b5d24fc",
+          "guard_token_count": 8,
           "id": "85_function_matrix.assert_052",
           "source_line": 1144
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "50e8f8f880ebe777d0c3c52fda110ceb8dd8c61bca06f4fcd66b820dd832b741",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_038",
           "source_line": 1184
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "26b822fa3c7fd20213f9dbbc4b243a4a9f5ec9de187771659725603564d094fb",
+          "guard_token_count": 5,
           "id": "85_function_matrix.assert_039",
           "source_line": 1217
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "f3368346819673a3ca4159f9e2d4430ad39bec0a816f68c8689d1c4b49724f5b",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_040",
           "source_line": 1246
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "576a01535f7a62b2a4d428ba71bea4714d1fdc6aa012f748cf6ea28ff0fe9a56",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_041",
           "source_line": 1270
         },
         {
           "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "dc26936fc91b7629fad26ecad46818c0c00ce2e8d9f9f350df31a7be7fe5f986",
+          "guard_token_count": 6,
           "id": "85_function_matrix.assert_042",
           "source_line": 1295
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "a1fb22ac65e78597164720e98d3f6680cf880bea76d6c2c7cbcf20b85be5fdb6",
+          "guard_token_count": 7,
           "id": "85_function_matrix.assert_043",
           "source_line": 1321
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "c9718b9926cd8d71adf9fc318b09ebf97f3a1270cea100910e8c325a5b8a83b7",
+          "guard_token_count": 8,
           "id": "85_function_matrix.assert_044",
           "source_line": 1348
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d0f54ab2995fd793441c79e011b85c816dae18a0bc860fb7b382326b8bdce47c",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_045",
           "source_line": 1379
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ddf18f86b8e9ca59ea2ce3a31b8043711249d59982ed8c07fe997e4d5e42b1ba",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_046",
           "source_line": 1406
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "2fe6ef488e1ce6a6baf807aec3242f8e3821a2d18b53e34f8baf6879d3723443",
+          "guard_token_count": 9,
           "id": "85_function_matrix.assert_047",
           "source_line": 1442
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "cb1641fa955e3d71458891f37b548655ae8ec2cfdd55d6e9aa1b987d30a03859",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_048",
           "source_line": 1471
         },
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "b230759b5e5f31552a117cf25ca5e514854864d1354f2ca9ce21202262649e75",
+          "guard_token_count": 4,
           "id": "85_function_matrix.assert_049",
           "source_line": 1496
         },
         {
           "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "860946f3050e63752dc5af22119d82ca20d051d4831814c098170995ce5e3bec",
+          "guard_token_count": 6,
           "id": "85_function_matrix.assert_050",
           "source_line": 1531
         }
@@ -1759,6 +2608,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ea5a3b1dafb80fddf6df716f05afa9f4d2a7b1ac06eb40dd0d1830554577138b",
+          "guard_token_count": 1,
           "id": "86_batch_boundary.assert_001",
           "source_line": 36
         }
@@ -1771,6 +2623,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "7fa096131990404e9ad4b541e6f8e11b33cbef046c5ff8809ac751ece509feb9",
+          "guard_token_count": 2,
           "id": "87_type_coercion.assert_001",
           "source_line": 64
         }
@@ -1783,6 +2638,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "515c34e69bb83e82fc71bce0d5f42fa58d10a79855740f19c268cbb99654ad84",
+          "guard_token_count": 2,
           "id": "88_concurrent_features.assert_001",
           "source_line": 70
         }
@@ -1795,6 +2653,9 @@
       "assertions": [
         {
           "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "c826e0e3ad8b7137d99ef3939bcd840dce34e0cf40dd9a54eba41f93eb6640dc",
+          "guard_token_count": 1,
           "id": "89_regression_guards.assert_001",
           "source_line": 19
         }
