@@ -156,7 +156,8 @@ fn explain_metric_i64(plan: &str, metric: &str) -> Option<i64> {
     let needle = format!("{}:", metric.to_lowercase());
     plan.lines().find_map(|line| {
         let pos = line.find(&needle)?;
-        let digits: String = line[pos + needle.len()..]
+        let digits: String = line
+            .get(pos + needle.len()..)?
             .chars()
             .skip_while(char::is_ascii_whitespace)
             .take_while(char::is_ascii_digit)
@@ -324,9 +325,9 @@ fn ensure_fixtures(c: &mut Client) {
     }
 }
 
-/// Setup the grouped HashAgg crash-gate fixture. The 100K scale is the first
-/// unsafe band for grouped GPU HashAgg, so this query must stay native until
-/// a real safe implementation lands.
+/// Setup the grouped HashAgg quarantine fixture. The 100K scale is the first
+/// quarantined threshold after the observed grouped GPU HashAgg crash, so this
+/// query must stay native until a real safe implementation lands.
 fn ensure_hashagg_gate_fixture(c: &mut Client) {
     for stmt in [
         "CREATE UNLOGGED TABLE IF NOT EXISTS bench_hashagg_gate \

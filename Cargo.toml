@@ -15,19 +15,33 @@ categories = ["database"]
 readme = "README.md"
 
 [workspace.lints.rust]
+# Keep manifest-driven linting equivalent across editors, `cargo check`, and
+# CI instead of relying on individual commands to remember `-D warnings`.
+warnings = { level = "deny", priority = -2 }
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# Multiple versions are sometimes forced by pgrx's dependency graph. cargo-deny
+# owns dependency convergence and advisory policy for the workspace.
+multiple_crate_versions = "allow"
+
+# High-signal restriction lints. Enabling the entire restriction group would
+# impose mutually incompatible style policies, so keep this list intentional.
+dbg_macro = "deny"
+error_impl_error = "deny"
+infinite_loop = "deny"
+lossy_float_literal = "deny"
+string_slice = "deny"
+todo = "deny"
+unimplemented = "deny"
+
 unwrap_used = "deny"
 # expect() is allowed — it carries context. unwrap_used catches the dangerous case.
 expect_used = "allow"
-nursery = { level = "warn", priority = -1 }
 doc_markdown = "allow"
 missing_const_for_fn = "allow"
-# PostgreSQL Datum ↔ Rust conversions require platform-dependent casts.
-cast_possible_truncation = "allow"
-cast_possible_wrap = "allow"
-cast_sign_loss = "allow"
-cast_lossless = "allow"

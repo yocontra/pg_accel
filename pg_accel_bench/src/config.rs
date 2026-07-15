@@ -367,9 +367,9 @@ fn parse_pg_bytes(s: &str) -> Option<u64> {
         return None;
     }
     let (num, unit) = s
-        .chars()
-        .position(|c| !c.is_ascii_digit())
-        .map_or((s, ""), |idx| (&s[..idx], &s[idx..]));
+        .char_indices()
+        .find(|&(_, c)| !c.is_ascii_digit())
+        .map_or((s, ""), |(idx, _)| s.split_at(idx));
     let num: u64 = num.parse().ok()?;
     let mult: u64 = match unit.trim().to_ascii_lowercase().as_str() {
         "" | "b" => 1,

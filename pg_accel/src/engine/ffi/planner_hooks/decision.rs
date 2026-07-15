@@ -52,7 +52,7 @@ pub(super) enum RejectionReason {
     BitmapHeapGpuExprNoGpuPipeline,
     SpatialNoRegisteredGpuPredicate,
     SpatialIndexCheaper,
-    SpatialUnsafeRowBand,
+    SpatialQuarantinedRowRange,
     SpatialVerticesBelowBreakEven,
     SpatialWorkBelowBreakEven,
     SpatialWorkAboveMax,
@@ -124,7 +124,7 @@ impl RejectionReason {
             Self::BitmapHeapGpuExprNoGpuPipeline => "bitmap_heap_gpuexpr_no_gpu_pipeline",
             Self::SpatialNoRegisteredGpuPredicate => "spatial_no_registered_gpu_predicate",
             Self::SpatialIndexCheaper => "spatial_index_cheaper",
-            Self::SpatialUnsafeRowBand => "spatial_unsafe_row_band",
+            Self::SpatialQuarantinedRowRange => "spatial_quarantined_row_range",
             Self::SpatialVerticesBelowBreakEven => "spatial_vertices_below_break_even",
             Self::SpatialWorkBelowBreakEven => "spatial_work_below_break_even",
             Self::SpatialWorkAboveMax => "spatial_work_above_max",
@@ -545,8 +545,8 @@ mod tests {
             "spatial_index_cheaper"
         );
         assert_eq!(
-            RejectionReason::SpatialUnsafeRowBand.stats_key(),
-            "spatial_unsafe_row_band"
+            RejectionReason::SpatialQuarantinedRowRange.stats_key(),
+            "spatial_quarantined_row_range"
         );
         assert_eq!(
             RejectionReason::SpatialVerticesBelowBreakEven.stats_key(),

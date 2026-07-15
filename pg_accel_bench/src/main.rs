@@ -6,6 +6,9 @@
     clippy::literal_string_with_formatting_args,
     clippy::too_many_lines
 )]
+// Benchmark configuration and subprocess failures are user-facing; retain
+// their source error instead of replacing it with context-free text.
+#![deny(clippy::map_err_ignore)]
 
 mod artifacts;
 mod bench_model;
@@ -1124,8 +1127,8 @@ fn cmd_dry_run(
             w.setup_sql(sample_rows).len()
         );
         for (i, sql) in w.setup_sql(sample_rows).iter().enumerate() {
-            let preview = if sql.len() > 80 {
-                format!("{}...", &sql[..77])
+            let preview = if sql.chars().count() > 80 {
+                format!("{}...", sql.chars().take(77).collect::<String>())
             } else {
                 sql.clone()
             };

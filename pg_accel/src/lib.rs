@@ -20,6 +20,15 @@
 // PG row counts are i64 but cost formulas use f64; precision loss is
 // acceptable because these are estimates, not exact values. (90)
 #![allow(clippy::cast_precision_loss)]
+// PostgreSQL Datum, Oid, AttrNumber, Size, and C ABI conversions are
+// platform-dependent by definition. Keep these exceptions in the extension
+// crate so the benchmark and any future pure-Rust crates remain checked.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_lossless
+)]
 // inline(always) is used on hot-path helpers in executor fast-path loops
 // where the measured perf gain matters more than the style preference. (18)
 #![allow(clippy::inline_always)]

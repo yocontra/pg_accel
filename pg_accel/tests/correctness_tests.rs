@@ -3,6 +3,9 @@
 
 // Test code is allowed to use unwrap for assertions.
 #![allow(clippy::unwrap_used)]
+// These fixture writers intentionally reproduce PostGIS raster coercion from
+// f64 test inputs into each on-wire pixel width, including signed formats.
+#![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 use pg_accel::adapters::extractors::geometry;
 use pg_accel::adapters::extractors::raster::{self, PixelType};

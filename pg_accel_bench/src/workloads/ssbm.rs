@@ -387,7 +387,7 @@ mod tests {
 
     fn generated_yearmonthnum(offset: usize) -> i32 {
         let date = generated_date(offset);
-        date.year * 100 + date.month as i32
+        date.year * 100 + i32::try_from(date.month).expect("generated month fits i32")
     }
 
     fn generated_yearmonth(offset: usize) -> String {

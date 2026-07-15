@@ -859,8 +859,8 @@ const REDUCE_F64_BREAK_EVEN_ROWS: usize = 50_000;
 const REDUCE_I64_BREAK_EVEN_ROWS: usize = 75_000;
 const HASHJOIN_MIN_BUILD_ROWS: usize = 5_000;
 const HASHJOIN_MAX_BUILD_ROWS: usize = 99_999;
-const SPATIAL_UNSAFE_MIN_ROWS: usize = 80_000;
-const SPATIAL_UNSAFE_MAX_ROWS: usize = 150_000;
+const SPATIAL_QUARANTINE_MIN_ROWS: usize = 80_000;
+const SPATIAL_QUARANTINE_MAX_ROWS: usize = 150_000;
 const SPATIAL_MIN_VERTICES: usize = 100;
 const SPATIAL_BREAK_EVEN_VERTS_X_ROWS: u64 = 500_000_000;
 const SPATIAL_MAX_VERTS_X_ROWS: u64 = 50_000_000_000;
@@ -2305,11 +2305,11 @@ fn spatial_matrix_expectation(
         BenchmarkLaneExpectation::NativeDecline {
             reason: "spatial_vertices_below_break_even",
         }
-    } else if (SPATIAL_UNSAFE_MIN_ROWS..=SPATIAL_UNSAFE_MAX_ROWS).contains(&rows)
+    } else if (SPATIAL_QUARANTINE_MIN_ROWS..=SPATIAL_QUARANTINE_MAX_ROWS).contains(&rows)
         && vertices >= SPATIAL_MIN_VERTICES
     {
         BenchmarkLaneExpectation::NativeDecline {
-            reason: "spatial_unsafe_row_band",
+            reason: "spatial_quarantined_row_range",
         }
     } else if work_product < SPATIAL_BREAK_EVEN_VERTS_X_ROWS {
         BenchmarkLaneExpectation::NativeDecline {
@@ -3280,11 +3280,11 @@ mod tests {
             Some("spatial_work_below_break_even")
         );
 
-        let unsafe_band = benchmark_threshold_matrix_entry("vsweep_mid", 100_000)
+        let quarantined_range = benchmark_threshold_matrix_entry("vsweep_mid", 100_000)
             .expect("vsweep_mid threshold entry");
         assert_eq!(
-            unsafe_band.expectation.decline_reason(),
-            Some("spatial_unsafe_row_band")
+            quarantined_range.expectation.decline_reason(),
+            Some("spatial_quarantined_row_range")
         );
 
         let unregistered = benchmark_threshold_matrix_entry("vsweep_mid", 1_000_000)
@@ -3676,7 +3676,7 @@ mod tests {
                 trimmed.starts_with("select"),
                 "workload '{}' query does not start with SELECT: {}",
                 w.name(),
-                &query[..query.len().min(60)]
+                query.chars().take(60).collect::<String>()
             );
         }
     }

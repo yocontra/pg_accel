@@ -255,11 +255,11 @@ violations. **P2** = architecture & methodology debt. **P3** = tooling, docs, hy
   Fix: fix the kernel and restore a real threshold, or delete the branch with a tracked issue.
 
 - [ ] **Crash-workaround thresholds institutionalized in the cost model** —
-  `gpu_hash_agg_unsafe_input_rows = 100_000`, spatial "unsafe band" 80k–150k ("many
-  fixtures crash at the 100K scale"), hash-join build clamped at 99,999
-  (`engine/cost/device_limits.rs:321, 389-391, 417-421`; enforced at
-  `cost/formulas.rs:121, 523-525`). Fix: file issues, fix the kernels, surface decline
-  reasons meanwhile.
+  `gpu_hash_agg_unsafe_input_rows = 100_000`, the former spatial quarantined row
+  range was 80k–150k ("many fixtures crash at the 100K scale"; fixed by chunked
+  resident dispatch), and the hash-join build is clamped at 99,999
+  (`engine/cost/device_limits.rs`; enforced in `cost/formulas.rs`). Fix: file issues,
+  fix the kernels, and surface decline reasons meanwhile.
 
 - [ ] **Hidden CPU fallback in hash_agg**: terminal path `agg_hash` assigns groups via a
   host `std::unordered_map` loop (`pgaccel-kernels/src/hash_agg.cpp:2616-2678`,

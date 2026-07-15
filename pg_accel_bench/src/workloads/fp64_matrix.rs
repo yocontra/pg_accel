@@ -86,9 +86,9 @@ pub fn parse_size_token(raw: &str) -> Option<usize> {
         return None;
     }
     let (num_part, mult): (&str, usize) = match trimmed.chars().last()? {
-        'k' | 'K' => (&trimmed[..trimmed.len() - 1], 1_000),
-        'm' | 'M' => (&trimmed[..trimmed.len() - 1], 1_000_000),
-        'g' | 'G' | 'b' | 'B' => (&trimmed[..trimmed.len() - 1], 1_000_000_000),
+        'k' | 'K' => (trimmed.strip_suffix(['k', 'K'])?, 1_000),
+        'm' | 'M' => (trimmed.strip_suffix(['m', 'M'])?, 1_000_000),
+        'g' | 'G' | 'b' | 'B' => (trimmed.strip_suffix(['g', 'G', 'b', 'B'])?, 1_000_000_000),
         c if c.is_ascii_digit() => (trimmed, 1),
         _ => return None,
     };

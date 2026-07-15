@@ -1383,9 +1383,9 @@ fn workload_or_plan_mentions_accel_function(w: &WorkloadResult, text: &str) -> b
 fn extract_full_plan_block(plans: &str, workload: &str, rows: usize) -> Option<String> {
     let header = format!("=== {workload} @ rows={rows} ===");
     let start = plans.find(&header)?;
-    let body = &plans[start + header.len()..];
+    let body = plans.get(start + header.len()..)?;
     let end = body.find("\n=== ").unwrap_or(body.len());
-    let block = body[..end].trim();
+    let block = body.get(..end)?.trim();
     (!block.is_empty()).then(|| block.to_owned())
 }
 
@@ -5178,8 +5178,7 @@ mod tests {
     ) -> WorkloadResult {
         let iterations: Vec<IterationResult> = (0..10)
             .map(|i| {
-                #[allow(clippy::cast_precision_loss)]
-                let jitter = (i as f64) * 0.1;
+                let jitter = f64::from(i) * 0.1;
                 IterationResult {
                     accel_ms: accel_ms + jitter,
                     parallel_ms: baseline_ms + jitter,

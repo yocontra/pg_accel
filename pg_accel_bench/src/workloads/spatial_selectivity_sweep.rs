@@ -148,7 +148,7 @@ impl ReproJit {
     }
 }
 
-/// Focused spatial predicate repro matrix for the 100K crash band.
+/// Focused spatial predicate regression matrix for the legacy 100K crash repro.
 ///
 /// The harness supplies the row axis (10K, 100K, 1M, 10M), seed, timing
 /// mode, cache mode, plan snippets, and crash artifacts. These variants add

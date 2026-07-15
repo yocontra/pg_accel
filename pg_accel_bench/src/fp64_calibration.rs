@@ -150,7 +150,7 @@ pub fn parse_multiplier_list(raw: &str) -> Result<Vec<f64>, String> {
     {
         let value: f64 = token
             .parse()
-            .map_err(|_| format!("invalid fp64 multiplier token: {token:?}"))?;
+            .map_err(|error| format!("invalid fp64 multiplier token {token:?}: {error}"))?;
         if !value.is_finite() || !(1.0..=64.0).contains(&value) {
             return Err(format!(
                 "fp64 multiplier must be finite and within [1.0, 64.0]: {token}"

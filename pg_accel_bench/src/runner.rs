@@ -3563,26 +3563,23 @@ fn has_top_level_order_by(sql: &str) -> bool {
 }
 
 fn starts_with_order_by(sql: &str, start: usize) -> bool {
-    let rest = &sql[start..];
-    if rest.len() < "order by".len() || !rest[.."order by".len()].eq_ignore_ascii_case("order by") {
+    const ORDER_BY: &[u8] = b"order by";
+    let bytes = sql.as_bytes();
+    if !bytes
+        .get(start..start.saturating_add(ORDER_BY.len()))
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(ORDER_BY))
+    {
         return false;
     }
     let before_ok = start == 0
-        || !sql[..start]
-            .chars()
-            .next_back()
-            .is_some_and(is_identifier_char);
-    let after_idx = start + "order by".len();
-    let after_ok = after_idx >= sql.len()
-        || !sql[after_idx..]
-            .chars()
-            .next()
-            .is_some_and(is_identifier_char);
+        || !bytes
+            .get(start - 1)
+            .is_some_and(|&byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    let after_idx = start + ORDER_BY.len();
+    let after_ok = !bytes
+        .get(after_idx)
+        .is_some_and(|&byte| byte.is_ascii_alphanumeric() || byte == b'_');
     before_ok && after_ok
-}
-
-fn is_identifier_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn capture_and_write_pre_risk_context(
@@ -4148,9 +4145,9 @@ fn parse_execution_time(line: &str) -> Option<f64> {
 
 fn parse_actual_rows(line: &str) -> Option<u64> {
     let actual_idx = line.find("actual ")?;
-    let suffix = &line[actual_idx..];
+    let suffix = line.get(actual_idx..)?;
     let rows_idx = suffix.find(" rows=")?;
-    let value = &suffix[rows_idx + " rows=".len()..];
+    let value = suffix.get(rows_idx + " rows=".len()..)?;
     let digits: String = value.chars().take_while(char::is_ascii_digit).collect();
     (!digits.is_empty())
         .then(|| digits.parse::<u64>().ok())

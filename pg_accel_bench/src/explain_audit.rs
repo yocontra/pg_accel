@@ -41,8 +41,8 @@ pub enum RatchetExpectation {
     /// `RequiredToday` or `RequiredAfterPhase`).
     #[allow(dead_code)]
     OptionalForever,
-    /// The row is a known unsafe crash band and must be visible in the audit
-    /// report without executing EXPLAIN. This is a quarantine marker, not a
+    /// The row is explicitly quarantined and must be visible in the audit
+    /// report without executing EXPLAIN. This is an audit marker, not a
     /// production planner behavior change.
     Quarantined(&'static str),
 }
@@ -193,6 +193,11 @@ const FORCE_PARALLEL: &[&str] = &[
     "SET enable_nestloop = off",
 ];
 
+const SPATIAL_100K_QUARANTINE_REASON: &str = "legacy 100K spatial crash repro: chunked resident dispatch fix landed \
+     (PGACCEL_SPATIAL_MAX_CHUNK_ROWS); temporarily quarantined while normal \
+     spatial production admission remains dark; Phase 7 must flip this row \
+     to executed evidence";
+
 /// Build the full audit matrix. Order here is the order printed in the
 /// report, so it is intentionally aligned with the task brief table.
 fn build_matrix() -> Vec<AuditRow> {
@@ -286,26 +291,18 @@ fn build_matrix() -> Vec<AuditRow> {
             expectation: RatchetExpectation::RequiredAfterPhase("4 Append/MergeAppend injection"),
         },
         AuditRow {
-            name: "spatial_100k_simple_unsafe_band",
+            name: "spatial_100k_simple_regression_probe",
             description: "100K spatial repro, simple polygon — declined/quarantined",
             setup: vec![],
             query: "workload=spatial_sel_repro_simple_s90_b64k_w4_jiton rows=100000",
-            expectation: RatchetExpectation::Quarantined(
-                "legacy 100K crash-band repro: band fixed by chunked resident \
-                 dispatch (PGACCEL_SPATIAL_MAX_CHUNK_ROWS); row awaits the \
-                 Phase 7 registry re-baseline before flipping live",
-            ),
+            expectation: RatchetExpectation::Quarantined(SPATIAL_100K_QUARANTINE_REASON),
         },
         AuditRow {
-            name: "spatial_100k_coop1024_unsafe_band",
+            name: "spatial_100k_coop1024_regression_probe",
             description: "100K spatial repro, cooperative 1024+v polygon — declined/quarantined",
             setup: vec![],
             query: "workload=spatial_sel_repro_coop1024_s90_b64k_w4_jiton rows=100000",
-            expectation: RatchetExpectation::Quarantined(
-                "legacy 100K crash-band repro: band fixed by chunked resident \
-                 dispatch (PGACCEL_SPATIAL_MAX_CHUNK_ROWS); row awaits the \
-                 Phase 7 registry re-baseline before flipping live",
-            ),
+            expectation: RatchetExpectation::Quarantined(SPATIAL_100K_QUARANTINE_REASON),
         },
     ]
 }
@@ -565,7 +562,7 @@ pub fn run_audit(connection: &str) -> Result<bool, Box<dyn std::error::Error>> {
                 resident_audit: Vec::new(),
                 explain: format!(
                     "QUARANTINED: {reason}\n\
-                     DECLINED: known unsafe-band workload is not executed by explain-audit.\n\
+                     DECLINED: regression probe is temporarily quarantined while normal spatial production admission remains dark; Phase 7 must execute it.\n\
                      {query}\n",
                     query = row.query
                 ),
@@ -878,7 +875,7 @@ mod tests {
         let o = AuditOutcome {
             name: "x".into(),
             description: "x".into(),
-            expectation: RatchetExpectation::Quarantined("unsafe band"),
+            expectation: RatchetExpectation::Quarantined("quarantined workload"),
             shape_matched: true,
             explain: String::new(),
             resident_audit: Vec::new(),
@@ -1044,21 +1041,28 @@ Custom Scan (GpuAccelJoin)
     }
 
     #[test]
-    fn spatial_100k_unsafe_band_rows_are_quarantined() {
+    fn spatial_100k_regression_probe_rows_are_quarantined() {
         let matrix = build_matrix();
         let rows: Vec<_> = matrix
             .iter()
             .filter(|row| row.name.starts_with("spatial_100k_"))
             .collect();
         assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter().map(|row| row.name).collect::<Vec<_>>(),
+            [
+                "spatial_100k_simple_regression_probe",
+                "spatial_100k_coop1024_regression_probe",
+            ]
+        );
+        assert!(SPATIAL_100K_QUARANTINE_REASON.contains("Phase 7 must flip this row"));
         for row in rows {
             assert!(row.description.contains("declined/quarantined"));
             assert!(row.query.contains("rows=100000"));
             assert!(matches!(
                 row.expectation,
-                RatchetExpectation::Quarantined(
-                    "100K spatial crash band: do not EXPLAIN or dispatch until fixed"
-                )
+                RatchetExpectation::Quarantined(reason)
+                    if reason == SPATIAL_100K_QUARANTINE_REASON
             ));
         }
     }

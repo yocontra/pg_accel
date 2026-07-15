@@ -564,8 +564,7 @@ fn regularized_incomplete_beta(x_val: f64, alpha: f64, beta: f64) -> f64 {
     let mut cf_f = cf_d;
 
     for step in 1..=200 {
-        #[allow(clippy::cast_precision_loss)]
-        let mf = step as f64;
+        let mf = f64::from(step);
 
         // Even step
         let two_m = 2.0 * mf;
