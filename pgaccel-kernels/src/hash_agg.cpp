@@ -2139,7 +2139,7 @@ static pgaccel_agg_state* agg_hash_row_parallel(const void* group_keys,
   }
 }
 
-static pgaccel_agg_state* build_count_i64_state(const int64_t* out_keys,
+static pgaccel_agg_state* build_count_i64_state(sycl::queue& q, const int64_t* out_keys,
                                                 const int64_t* out_counts,
                                                 const double* out_results, uint32_t n_groups);
 
@@ -2372,13 +2372,18 @@ static pgaccel_agg_state* agg_count_i64_hash_device(int64_t* group_keys, size_t 
     return nullptr;
   }
 
-  pgaccel_agg_state* state =
-      build_count_i64_state(d_out_keys, d_out_counts, d_out_results, n_groups);
+  pgaccel_agg_state* state = nullptr;
+  try {
+    state = build_count_i64_state(*q, d_out_keys, d_out_counts, d_out_results, n_groups);
+  } catch (...) {
+    cleanup();
+    throw;
+  }
   cleanup();
   return state;
 }
 
-static pgaccel_agg_state* build_count_i64_state(const int64_t* out_keys,
+static pgaccel_agg_state* build_count_i64_state(sycl::queue& q, const int64_t* out_keys,
                                                 const int64_t* out_counts,
                                                 const double* out_results, uint32_t n_groups) {
   if (out_keys == nullptr || out_counts == nullptr || out_results == nullptr || n_groups == 0)
@@ -2388,19 +2393,24 @@ static pgaccel_agg_state* build_count_i64_state(const int64_t* out_keys,
   if (state == nullptr)
     return nullptr;
 
-  state->key_size = sizeof(int64_t);
-  state->key_type = 1;
-  state->group_count = n_groups;
-  state->num_aggs = 1;
-  state->group_key_buf.resize(static_cast<size_t>(n_groups) * sizeof(int64_t));
-  std::memcpy(state->group_key_buf.data(), out_keys,
-              static_cast<size_t>(n_groups) * sizeof(int64_t));
-  state->counts.resize(n_groups);
-  std::memcpy(state->counts.data(), out_counts, static_cast<size_t>(n_groups) * sizeof(int64_t));
-  state->results.resize(1);
-  state->results[0].resize(n_groups);
-  std::memcpy(state->results[0].data(), out_results,
-              static_cast<size_t>(n_groups) * sizeof(double));
+  try {
+    const size_t key_bytes = static_cast<size_t>(n_groups) * sizeof(int64_t);
+    const size_t result_bytes = static_cast<size_t>(n_groups) * sizeof(double);
+    state->key_size = sizeof(int64_t);
+    state->key_type = 1;
+    state->group_count = n_groups;
+    state->num_aggs = 1;
+    state->group_key_buf.resize(key_bytes);
+    state->counts.resize(n_groups);
+    state->results.resize(1);
+    state->results[0].resize(n_groups);
+    q.memcpy(state->group_key_buf.data(), out_keys, key_bytes).wait_and_throw();
+    q.memcpy(state->counts.data(), out_counts, key_bytes).wait_and_throw();
+    q.memcpy(state->results[0].data(), out_results, result_bytes).wait_and_throw();
+  } catch (...) {
+    delete state;
+    throw;
+  }
 
   return state;
 }
@@ -2455,7 +2465,6 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
   auto* group_count = reinterpret_cast<uint32_t*>(d_slab + group_count_off);
 
   try {
-    int64_t* keys_ptr = group_keys;
     uint32_t* counts_by_block = block_counts;
     const size_t rows = row_count;
     auto nd = sycl::nd_range<1>(sycl::range<1>(num_blocks * COUNT_COMPACT_BLOCK_ROWS),
@@ -2468,7 +2477,7 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
          const size_t i = block * COUNT_COMPACT_BLOCK_ROWS + lid;
 
          uint32_t is_start = 0;
-         if (i < rows && (i == 0 || keys_ptr[i - 1] != keys_ptr[i]))
+         if (i < rows && (i == 0 || group_keys[i - 1] != group_keys[i]))
            is_start = 1;
          starts[lid] = is_start;
          sycl::group_barrier(it.get_group());
@@ -2506,7 +2515,6 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
   }
 
   try {
-    int64_t* keys_ptr = group_keys;
     auto* out_keys = reinterpret_cast<int64_t*>(d_slab);
     auto* out_counts = reinterpret_cast<int64_t*>(d_slab + counts_off);
     auto* out_results = reinterpret_cast<double*>(d_slab + results_off);
@@ -2522,7 +2530,7 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
          const size_t i = block * COUNT_COMPACT_BLOCK_ROWS + lid;
 
          uint32_t is_start = 0;
-         if (i < rows && (i == 0 || keys_ptr[i - 1] != keys_ptr[i]))
+         if (i < rows && (i == 0 || group_keys[i - 1] != group_keys[i]))
            is_start = 1;
          starts[lid] = is_start;
          sycl::group_barrier(it.get_group());
@@ -2534,10 +2542,10 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
          for (size_t j = 0; j < lid; ++j)
            local_group += starts[j];
 
-         const int64_t key = keys_ptr[i];
+         const int64_t key = group_keys[i];
          int64_t count = 1;
          size_t j = i + 1;
-         while (j < rows && keys_ptr[j] == key) {
+         while (j < rows && group_keys[j] == key) {
            ++count;
            ++j;
          }
@@ -2562,8 +2570,13 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
   const auto* out_keys = reinterpret_cast<const int64_t*>(d_slab);
   const auto* out_counts = reinterpret_cast<const int64_t*>(d_slab + counts_off);
   const auto* out_results = reinterpret_cast<const double*>(d_slab + results_off);
-  pgaccel_agg_state* state =
-      build_count_i64_state(out_keys, out_counts, out_results, n_groups);
+  pgaccel_agg_state* state = nullptr;
+  try {
+    state = build_count_i64_state(*q, out_keys, out_counts, out_results, n_groups);
+  } catch (...) {
+    cleanup();
+    throw;
+  }
   cleanup();
   return state;
 }
@@ -3285,10 +3298,14 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
                                           const uint8_t* const* value_nulls, const int* value_types,
                                           const pgaccel_agg_col* agg_cols, size_t num_aggs,
                                           pgaccel_agg_state** out_state) {
+  if (out_state == nullptr)
+    return PGACCEL_ERROR;
   sycl::queue& q = pgaccel_require_queue();
   const pgaccel_platform_caps caps = pgaccel_get_caps();
-  if (caps.max_alloc_bytes < sizeof(HashAggStreamingSlabHeader) * 2)
+  if (caps.max_alloc_bytes < sizeof(HashAggStreamingSlabHeader) * 2) {
+    *out_state = nullptr;
     return PGACCEL_OOM;
+  }
 
   const size_t slab_budget = std::min(HASH_AGG_STREAM_MAX_SLAB_BYTES, caps.max_alloc_bytes / 2);
   size_t distinct_ceiling = std::min(row_count, HASH_AGG_STREAM_MAX_TABLE_SLOTS / 2);
@@ -3296,6 +3313,7 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
   size_t table_capacity = 0;
   if (!checked_mul_size(distinct_ceiling, 2, &table_need) ||
       !next_power_of_two_size(std::max<size_t>(table_need, 2), &table_capacity)) {
+    *out_state = nullptr;
     return PGACCEL_OOM;
   }
 
@@ -3306,6 +3324,7 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
     if (!checked_add_size(per_row_bytes, value_elem_size(value_types[a]), &per_row_bytes) ||
         (value_nulls != nullptr && value_nulls[a] != nullptr &&
          !checked_add_size(per_row_bytes, sizeof(uint8_t), &per_row_bytes))) {
+      *out_state = nullptr;
       return PGACCEL_OOM;
     }
   }
@@ -3315,14 +3334,18 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
   while (!build_hashagg_streaming_layout(table_capacity, num_aggs, 0, sizeof(KeyT), value_nulls,
                                          value_types, agg_cols, &layout, &base_bytes) ||
          base_bytes >= slab_budget) {
-    if (table_capacity <= 2)
+    if (table_capacity <= 2) {
+      *out_state = nullptr;
       return PGACCEL_OOM;
+    }
     table_capacity /= 2;
   }
 
   const size_t upper = std::min(row_count, (slab_budget - base_bytes) / per_row_bytes);
-  if (upper == 0)
+  if (upper == 0) {
+    *out_state = nullptr;
     return PGACCEL_OOM;
+  }
 
   size_t low = 1;
   size_t high = upper;
@@ -3343,21 +3366,26 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
       high = mid - 1;
     }
   }
-  if (chunk_capacity == 0)
+  if (chunk_capacity == 0) {
+    *out_state = nullptr;
     return PGACCEL_OOM;
+  }
 
   const size_t forced_rows = hashagg_forced_test_chunk_rows();
   if (forced_rows != 0 && forced_rows < chunk_capacity) {
     chunk_capacity = forced_rows;
     if (!build_hashagg_streaming_layout(table_capacity, num_aggs, chunk_capacity, sizeof(KeyT),
                                         value_nulls, value_types, agg_cols, &layout, &slab_bytes)) {
+      *out_state = nullptr;
       return PGACCEL_OOM;
     }
   }
 
   uint8_t* slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
-  if (slab == nullptr)
+  if (slab == nullptr) {
+    *out_state = nullptr;
     return PGACCEL_OOM;
+  }
   *reinterpret_cast<HashAggStreamingSlabHeader*>(slab) = layout;
   fill_hashagg_streaming_metadata(slab, value_types, value_nulls, agg_cols);
 
@@ -3670,16 +3698,19 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
                  "(code=%u groups=%u max_groups=%zu table_slots=%zu)\n",
                  h->overflow, h->group_count, h->max_groups, h->table_capacity);
     sycl::free(slab, q);
+    *out_state = nullptr;
     return PGACCEL_OOM;
   }
   if (h->group_count == 0) {
     sycl::free(slab, q);
+    *out_state = nullptr;
     return PGACCEL_ERROR;
   }
 
   auto* state = new (std::nothrow) pgaccel_agg_state();
   if (state == nullptr) {
     sycl::free(slab, q);
+    *out_state = nullptr;
     return PGACCEL_OOM;
   }
   try {
@@ -3688,19 +3719,26 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
     state->key_type = key_type;
     state->group_count = group_count;
     state->num_aggs = num_aggs;
-    const auto* persistent_keys = reinterpret_cast<const uint8_t*>(slab + h->group_keys_off);
-    state->group_key_buf.assign(persistent_keys, persistent_keys + group_count * sizeof(KeyT));
-    const auto* counts = reinterpret_cast<const int64_t*>(slab + h->group_counts_off);
-    state->counts.assign(counts, counts + group_count);
-    const auto* results = reinterpret_cast<const double*>(slab + h->results_off);
+    const size_t group_key_bytes = group_count * sizeof(KeyT);
+    state->group_key_buf.resize(group_key_bytes);
+    state->counts.resize(group_count);
     state->results.resize(num_aggs);
+    for (size_t a = 0; a < num_aggs; ++a)
+      state->results[a].resize(group_count);
+
+    const auto* persistent_keys = reinterpret_cast<const uint8_t*>(slab + h->group_keys_off);
+    const auto* counts = reinterpret_cast<const int64_t*>(slab + h->group_counts_off);
+    const auto* results = reinterpret_cast<const double*>(slab + h->results_off);
+    q.memcpy(state->group_key_buf.data(), persistent_keys, group_key_bytes).wait_and_throw();
+    q.memcpy(state->counts.data(), counts, group_count * sizeof(int64_t)).wait_and_throw();
     for (size_t a = 0; a < num_aggs; ++a) {
-      state->results[a].assign(results + a * h->max_groups,
-                               results + a * h->max_groups + group_count);
+      q.memcpy(state->results[a].data(), results + a * h->max_groups, group_count * sizeof(double))
+          .wait_and_throw();
     }
   } catch (const std::bad_alloc&) {
     delete state;
     sycl::free(slab, q);
+    *out_state = nullptr;
     return PGACCEL_OOM;
   } catch (...) {
     delete state;
@@ -3727,37 +3765,44 @@ pgaccel_status pgaccel_hash_agg_execute_checked(
     const pgaccel_agg_col* agg_cols, size_t num_aggs, pgaccel_agg_state** out_state) try {
   if (out_state == nullptr)
     return PGACCEL_ERROR;
-  *out_state = nullptr;
 
   if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
-                               num_aggs, false))
+                               num_aggs, false)) {
+    *out_state = nullptr;
     return PGACCEL_ERROR;
+  }
   if (!row_parallel_hashagg_key_supported(key_type, row_count) ||
       !row_parallel_hashagg_agg_shape_supported(value_types, agg_cols, num_aggs)) {
+    *out_state = nullptr;
     return PGACCEL_UNSUPPORTED;
   }
 
-  switch (key_type) {
-    case 0:
-      return agg_hash_streaming_numeric<int32_t>(group_keys, group_null_mask, row_count, key_type,
-                                                 value_cols, value_nulls, value_types, agg_cols,
-                                                 num_aggs, out_state);
-    case 1:
-      return agg_hash_streaming_numeric<int64_t>(group_keys, group_null_mask, row_count, key_type,
-                                                 value_cols, value_nulls, value_types, agg_cols,
-                                                 num_aggs, out_state);
-    case 2:
-      return agg_hash_streaming_numeric<double>(group_keys, group_null_mask, row_count, key_type,
-                                                value_cols, value_nulls, value_types, agg_cols,
-                                                num_aggs, out_state);
-    default:
-      return PGACCEL_UNSUPPORTED;
-  }
+  if (key_type == 0)
+    return agg_hash_streaming_numeric<int32_t>(group_keys, group_null_mask, row_count, key_type,
+                                               value_cols, value_nulls, value_types, agg_cols,
+                                               num_aggs, out_state);
+  if (key_type == 1)
+    return agg_hash_streaming_numeric<int64_t>(group_keys, group_null_mask, row_count, key_type,
+                                               value_cols, value_nulls, value_types, agg_cols,
+                                               num_aggs, out_state);
+  if (key_type == 2)
+    return agg_hash_streaming_numeric<double>(group_keys, group_null_mask, row_count, key_type,
+                                              value_cols, value_nulls, value_types, agg_cols,
+                                              num_aggs, out_state);
+
+  *out_state = nullptr;
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
+  if (out_state != nullptr)
+    *out_state = nullptr;
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
+  if (out_state != nullptr)
+    *out_state = nullptr;
   return pgaccel_kernel_failure("pgaccel_hash_agg_execute_checked", &e);
 } catch (...) {
+  if (out_state != nullptr)
+    *out_state = nullptr;
   return pgaccel_kernel_failure("pgaccel_hash_agg_execute_checked", nullptr);
 }
 
@@ -3768,11 +3813,12 @@ pgaccel_agg_state* pgaccel_hash_agg_execute(const void* group_keys, const uint8_
                                             const int* value_types, const pgaccel_agg_col* agg_cols,
                                             size_t num_aggs) {
   pgaccel_agg_state* state = nullptr;
-  return pgaccel_hash_agg_execute_checked(group_keys, group_null_mask, row_count, key_type,
-                                          value_cols, value_nulls, value_types, agg_cols, num_aggs,
-                                          &state) == PGACCEL_OK
-             ? state
-             : nullptr;
+  const pgaccel_status status =
+      pgaccel_hash_agg_execute_checked(group_keys, group_null_mask, row_count, key_type, value_cols,
+                                       value_nulls, value_types, agg_cols, num_aggs, &state);
+  if (status != PGACCEL_OK)
+    return nullptr;
+  return state;
 }
 
 pgaccel_agg_state* pgaccel_hash_count_i64_execute(const int64_t* group_keys,
