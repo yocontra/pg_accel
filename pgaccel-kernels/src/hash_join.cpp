@@ -470,34 +470,6 @@ static pgaccel_hash_table* build_device_count_typed(const K* device_keys,
   }
 }
 
-static void finalize_row_counts_kernel(sycl::queue& q, const uint32_t* d_row_counts,
-                                       size_t row_count, size_t* d_match_count,
-                                       uint32_t* d_overflow) {
-  q.single_task([=]() {
-     size_t produced = 0;
-     uint32_t overflow = 0;
-     for (size_t row = 0; row < row_count; ++row) {
-       const size_t count = static_cast<size_t>(d_row_counts[row]);
-       if (count > std::numeric_limits<size_t>::max() - produced) {
-         overflow = 1;
-         break;
-       }
-       produced += count;
-     }
-     d_match_count[0] = produced;
-     d_overflow[0] = overflow;
-   }).wait_and_throw();
-}
-
-static void finalize_probe_kernel(sycl::queue& q, const uint32_t* d_produced, uint32_t max_matches,
-                                  size_t* d_match_count, uint32_t* d_copy_count) {
-  q.single_task([=]() {
-     const uint32_t produced = d_produced[0];
-     d_match_count[0] = static_cast<size_t>(produced);
-     d_copy_count[0] = produced < max_matches ? produced : max_matches;
-   }).wait_and_throw();
-}
-
 template <typename K>
 static pgaccel_status probe_typed(const pgaccel_hash_table* ht, const K* outer_keys,
                                   const uint8_t* outer_null_mask, size_t outer_count,
@@ -506,7 +478,7 @@ static pgaccel_status probe_typed(const pgaccel_hash_table* ht, const K* outer_k
       (max_matches > 0 && match_pairs == nullptr)) {
     return PGACCEL_ERROR;
   }
-  *match_count = 0;
+  std::memset(match_count, 0, sizeof(*match_count));
   if (outer_count == 0) {
     return PGACCEL_OK;
   }
@@ -524,14 +496,14 @@ static pgaccel_status probe_typed(const pgaccel_hash_table* ht, const K* outer_k
     return PGACCEL_ERROR_NO_DEVICE;
   }
 
-  const size_t alloc_outer = outer_count > 0 ? outer_count : 1;
+  const size_t alloc_outer = outer_count;
   K* d_outer_keys = nullptr;
   uint8_t* d_outer_nulls = nullptr;
   uint32_t* d_pairs = nullptr;
   uint32_t* d_match_count = nullptr;
   uint32_t* d_overflow = nullptr;
   size_t* d_final_match_count = nullptr;
-  uint32_t* d_copy_count = nullptr;
+  pgaccel_status* d_status = nullptr;
 
   try {
     d_outer_keys = sycl::malloc_device<K>(alloc_outer, *q);
@@ -545,11 +517,11 @@ static pgaccel_status probe_typed(const pgaccel_hash_table* ht, const K* outer_k
     d_match_count = sycl::malloc_device<uint32_t>(1, *q);
     d_overflow = sycl::malloc_device<uint32_t>(1, *q);
     d_final_match_count = sycl::malloc_device<size_t>(1, *q);
-    d_copy_count = sycl::malloc_device<uint32_t>(1, *q);
+    d_status = sycl::malloc_device<pgaccel_status>(1, *q);
 
     if (d_outer_keys == nullptr || (outer_null_mask != nullptr && d_outer_nulls == nullptr) ||
         (pair_u32s > 0 && d_pairs == nullptr) || d_match_count == nullptr ||
-        d_overflow == nullptr || d_final_match_count == nullptr || d_copy_count == nullptr) {
+        d_overflow == nullptr || d_final_match_count == nullptr || d_status == nullptr) {
       if (d_outer_keys != nullptr)
         sycl::free(d_outer_keys, *q);
       if (d_outer_nulls != nullptr)
@@ -562,13 +534,15 @@ static pgaccel_status probe_typed(const pgaccel_hash_table* ht, const K* outer_k
         sycl::free(d_overflow, *q);
       if (d_final_match_count != nullptr)
         sycl::free(d_final_match_count, *q);
-      if (d_copy_count != nullptr)
-        sycl::free(d_copy_count, *q);
+      if (d_status != nullptr)
+        sycl::free(d_status, *q);
       return PGACCEL_OOM;
     }
 
     q->fill(d_match_count, 0u, 1);
     q->fill(d_overflow, 0u, 1);
+    if (pair_u32s > 0)
+      q->fill(d_pairs, 0u, pair_u32s);
     q->memcpy(d_outer_keys, outer_keys, outer_count * sizeof(K));
     if (outer_null_mask != nullptr) {
       q->memcpy(d_outer_nulls, outer_null_mask, outer_count * sizeof(uint8_t));
@@ -624,19 +598,19 @@ static pgaccel_status probe_typed(const pgaccel_hash_table* ht, const K* outer_k
        }
      }).wait_and_throw();
 
-    finalize_probe_kernel(*q, d_match_count, max_matches_u32, d_final_match_count, d_copy_count);
+    q->single_task([=]() {
+       const uint32_t produced = d_match_count[0];
+       d_final_match_count[0] = static_cast<size_t>(produced);
+       d_status[0] =
+           d_overflow[0] != 0 || produced > max_matches_u32 ? PGACCEL_UNSUPPORTED : PGACCEL_OK;
+     }).wait_and_throw();
     pgaccel_record_gpu_exec();
 
-    uint32_t copy_count = 0;
-    uint32_t overflow = 0;
-    q->memcpy(match_count, d_final_match_count, sizeof(size_t));
-    q->memcpy(&copy_count, d_copy_count, sizeof(uint32_t));
-    q->memcpy(&overflow, d_overflow, sizeof(uint32_t));
-    q->wait_and_throw();
-    if (copy_count > 0) {
-      q->memcpy(match_pairs, d_pairs, static_cast<size_t>(copy_count) * 2 * sizeof(uint32_t))
-          .wait_and_throw();
-    }
+    pgaccel_status status = PGACCEL_ERROR;
+    q->memcpy(match_count, d_final_match_count, sizeof(size_t)).wait_and_throw();
+    q->memcpy(&status, d_status, sizeof(pgaccel_status)).wait_and_throw();
+    if (pair_u32s > 0)
+      q->memcpy(match_pairs, d_pairs, pair_u32s * sizeof(uint32_t)).wait_and_throw();
 
     sycl::free(d_outer_keys, *q);
     if (d_outer_nulls != nullptr)
@@ -646,9 +620,9 @@ static pgaccel_status probe_typed(const pgaccel_hash_table* ht, const K* outer_k
     sycl::free(d_match_count, *q);
     sycl::free(d_overflow, *q);
     sycl::free(d_final_match_count, *q);
-    sycl::free(d_copy_count, *q);
+    sycl::free(d_status, *q);
 
-    return overflow != 0 ? PGACCEL_UNSUPPORTED : PGACCEL_OK;
+    return status;
   } catch (const sycl::exception& e) {
     std::fprintf(stderr, "pgaccel: hash_join probe kernel failed: %s\n", e.what());
   } catch (const std::exception& e) {
@@ -667,8 +641,8 @@ static pgaccel_status probe_typed(const pgaccel_hash_table* ht, const K* outer_k
     sycl::free(d_overflow, *q);
   if (d_final_match_count != nullptr)
     sycl::free(d_final_match_count, *q);
-  if (d_copy_count != nullptr)
-    sycl::free(d_copy_count, *q);
+  if (d_status != nullptr)
+    sycl::free(d_status, *q);
   return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -679,7 +653,7 @@ static pgaccel_status count_typed(const pgaccel_hash_table* ht, const K* outer_k
   if (ht == nullptr || outer_keys == nullptr || match_count == nullptr) {
     return PGACCEL_ERROR;
   }
-  *match_count = 0;
+  std::memset(match_count, 0, sizeof(*match_count));
   if (outer_count == 0) {
     return PGACCEL_OK;
   }
@@ -695,12 +669,12 @@ static pgaccel_status count_typed(const pgaccel_hash_table* ht, const K* outer_k
     return PGACCEL_ERROR_NO_DEVICE;
   }
 
-  const size_t alloc_outer = outer_count > 0 ? outer_count : 1;
+  const size_t alloc_outer = outer_count;
   K* d_outer_keys = nullptr;
   uint8_t* d_outer_nulls = nullptr;
   uint32_t* d_row_counts = nullptr;
   size_t* d_final_match_count = nullptr;
-  uint32_t* d_overflow = nullptr;
+  pgaccel_status* d_status = nullptr;
 
   try {
     d_outer_keys = sycl::malloc_device<K>(alloc_outer, *q);
@@ -709,10 +683,10 @@ static pgaccel_status count_typed(const pgaccel_hash_table* ht, const K* outer_k
     }
     d_row_counts = sycl::malloc_device<uint32_t>(alloc_outer, *q);
     d_final_match_count = sycl::malloc_device<size_t>(1, *q);
-    d_overflow = sycl::malloc_device<uint32_t>(1, *q);
+    d_status = sycl::malloc_device<pgaccel_status>(1, *q);
 
     if (d_outer_keys == nullptr || (outer_null_mask != nullptr && d_outer_nulls == nullptr) ||
-        d_row_counts == nullptr || d_final_match_count == nullptr || d_overflow == nullptr) {
+        d_row_counts == nullptr || d_final_match_count == nullptr || d_status == nullptr) {
       if (d_outer_keys != nullptr)
         sycl::free(d_outer_keys, *q);
       if (d_outer_nulls != nullptr)
@@ -721,8 +695,8 @@ static pgaccel_status count_typed(const pgaccel_hash_table* ht, const K* outer_k
         sycl::free(d_row_counts, *q);
       if (d_final_match_count != nullptr)
         sycl::free(d_final_match_count, *q);
-      if (d_overflow != nullptr)
-        sycl::free(d_overflow, *q);
+      if (d_status != nullptr)
+        sycl::free(d_status, *q);
       return PGACCEL_OOM;
     }
 
@@ -770,21 +744,34 @@ static pgaccel_status count_typed(const pgaccel_hash_table* ht, const K* outer_k
        }
      }).wait_and_throw();
 
-    finalize_row_counts_kernel(*q, d_row_counts, outer_count, d_final_match_count, d_overflow);
+    q->single_task([=]() {
+       size_t produced = 0;
+       uint32_t overflow = 0;
+       for (size_t row = 0; row < outer_count; ++row) {
+         const size_t count = static_cast<size_t>(d_row_counts[row]);
+         if (count > std::numeric_limits<size_t>::max() - produced) {
+           overflow = 1;
+           break;
+         }
+         produced += count;
+       }
+       d_final_match_count[0] = produced;
+       d_status[0] = overflow != 0 ? PGACCEL_UNSUPPORTED : PGACCEL_OK;
+     }).wait_and_throw();
     pgaccel_record_gpu_exec();
 
-    uint32_t overflow = 0;
-    q->memcpy(match_count, d_final_match_count, sizeof(size_t));
-    q->memcpy(&overflow, d_overflow, sizeof(uint32_t)).wait_and_throw();
+    pgaccel_status status = PGACCEL_ERROR;
+    q->memcpy(match_count, d_final_match_count, sizeof(size_t)).wait_and_throw();
+    q->memcpy(&status, d_status, sizeof(pgaccel_status)).wait_and_throw();
 
     sycl::free(d_outer_keys, *q);
     if (d_outer_nulls != nullptr)
       sycl::free(d_outer_nulls, *q);
     sycl::free(d_row_counts, *q);
     sycl::free(d_final_match_count, *q);
-    sycl::free(d_overflow, *q);
+    sycl::free(d_status, *q);
 
-    return overflow != 0 ? PGACCEL_UNSUPPORTED : PGACCEL_OK;
+    return status;
   } catch (const sycl::exception& e) {
     std::fprintf(stderr, "pgaccel: hash_join count kernel failed: %s\n", e.what());
   } catch (const std::exception& e) {
@@ -799,8 +786,8 @@ static pgaccel_status count_typed(const pgaccel_hash_table* ht, const K* outer_k
     sycl::free(d_row_counts, *q);
   if (d_final_match_count != nullptr)
     sycl::free(d_final_match_count, *q);
-  if (d_overflow != nullptr)
-    sycl::free(d_overflow, *q);
+  if (d_status != nullptr)
+    sycl::free(d_status, *q);
   return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -811,7 +798,7 @@ static pgaccel_status count_device_typed(const pgaccel_hash_table* ht, const K* 
   if (ht == nullptr || device_outer_keys == nullptr || match_count == nullptr) {
     return PGACCEL_ERROR;
   }
-  *match_count = 0;
+  std::memset(match_count, 0, sizeof(*match_count));
   if (outer_count == 0) {
     return PGACCEL_OK;
   }
@@ -829,18 +816,18 @@ static pgaccel_status count_device_typed(const pgaccel_hash_table* ht, const K* 
 
   uint32_t* d_row_counts = nullptr;
   size_t* d_final_match_count = nullptr;
-  uint32_t* d_overflow = nullptr;
+  pgaccel_status* d_status = nullptr;
   try {
     d_row_counts = sycl::malloc_device<uint32_t>(outer_count, *q);
     d_final_match_count = sycl::malloc_device<size_t>(1, *q);
-    d_overflow = sycl::malloc_device<uint32_t>(1, *q);
-    if (d_row_counts == nullptr || d_final_match_count == nullptr || d_overflow == nullptr) {
+    d_status = sycl::malloc_device<pgaccel_status>(1, *q);
+    if (d_row_counts == nullptr || d_final_match_count == nullptr || d_status == nullptr) {
       if (d_row_counts != nullptr)
         sycl::free(d_row_counts, *q);
       if (d_final_match_count != nullptr)
         sycl::free(d_final_match_count, *q);
-      if (d_overflow != nullptr)
-        sycl::free(d_overflow, *q);
+      if (d_status != nullptr)
+        sycl::free(d_status, *q);
       return PGACCEL_OOM;
     }
 
@@ -884,16 +871,29 @@ static pgaccel_status count_device_typed(const pgaccel_hash_table* ht, const K* 
        }
      }).wait_and_throw();
 
-    finalize_row_counts_kernel(*q, d_row_counts, outer_count, d_final_match_count, d_overflow);
+    q->single_task([=]() {
+       size_t produced = 0;
+       uint32_t overflow = 0;
+       for (size_t row = 0; row < outer_count; ++row) {
+         const size_t count = static_cast<size_t>(d_row_counts[row]);
+         if (count > std::numeric_limits<size_t>::max() - produced) {
+           overflow = 1;
+           break;
+         }
+         produced += count;
+       }
+       d_final_match_count[0] = produced;
+       d_status[0] = overflow != 0 ? PGACCEL_UNSUPPORTED : PGACCEL_OK;
+     }).wait_and_throw();
     pgaccel_record_gpu_exec();
 
-    uint32_t overflow = 0;
-    q->memcpy(match_count, d_final_match_count, sizeof(size_t));
-    q->memcpy(&overflow, d_overflow, sizeof(uint32_t)).wait_and_throw();
+    pgaccel_status status = PGACCEL_ERROR;
+    q->memcpy(match_count, d_final_match_count, sizeof(size_t)).wait_and_throw();
+    q->memcpy(&status, d_status, sizeof(pgaccel_status)).wait_and_throw();
     sycl::free(d_row_counts, *q);
     sycl::free(d_final_match_count, *q);
-    sycl::free(d_overflow, *q);
-    return overflow != 0 ? PGACCEL_UNSUPPORTED : PGACCEL_OK;
+    sycl::free(d_status, *q);
+    return status;
   } catch (const sycl::exception& e) {
     std::fprintf(stderr, "pgaccel: resident hash_join count kernel failed: %s\n", e.what());
   } catch (const std::exception& e) {
@@ -904,8 +904,8 @@ static pgaccel_status count_device_typed(const pgaccel_hash_table* ht, const K* 
     sycl::free(d_row_counts, *q);
   if (d_final_match_count != nullptr)
     sycl::free(d_final_match_count, *q);
-  if (d_overflow != nullptr)
-    sycl::free(d_overflow, *q);
+  if (d_status != nullptr)
+    sycl::free(d_status, *q);
   return PGACCEL_ERROR_NO_DEVICE;
 }
 
@@ -967,23 +967,17 @@ pgaccel_status pgaccel_hash_join_probe(const pgaccel_hash_table* ht, const void*
                                        const uint8_t* outer_null_mask, size_t outer_count,
                                        uint32_t* match_pairs, size_t max_matches,
                                        size_t* match_count) try {
-  if (match_count != nullptr) {
-    *match_count = 0;
-  }
   if (ht == nullptr || outer_keys == nullptr || match_count == nullptr) {
     return PGACCEL_ERROR;
   }
 
-  switch (ht->key_type) {
-    case PGACCEL_KEY_INT32:
-      return probe_typed<int32_t>(ht, static_cast<const int32_t*>(outer_keys), outer_null_mask,
-                                  outer_count, match_pairs, max_matches, match_count);
-    case PGACCEL_KEY_INT64:
-      return probe_typed<int64_t>(ht, static_cast<const int64_t*>(outer_keys), outer_null_mask,
-                                  outer_count, match_pairs, max_matches, match_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
-  }
+  if (ht->key_type == PGACCEL_KEY_INT32)
+    return probe_typed<int32_t>(ht, static_cast<const int32_t*>(outer_keys), outer_null_mask,
+                                outer_count, match_pairs, max_matches, match_count);
+  if (ht->key_type == PGACCEL_KEY_INT64)
+    return probe_typed<int64_t>(ht, static_cast<const int64_t*>(outer_keys), outer_null_mask,
+                                outer_count, match_pairs, max_matches, match_count);
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -995,23 +989,17 @@ pgaccel_status pgaccel_hash_join_probe(const pgaccel_hash_table* ht, const void*
 pgaccel_status pgaccel_hash_join_count(const pgaccel_hash_table* ht, const void* outer_keys,
                                        const uint8_t* outer_null_mask, size_t outer_count,
                                        size_t* match_count) try {
-  if (match_count != nullptr) {
-    *match_count = 0;
-  }
   if (ht == nullptr || outer_keys == nullptr || match_count == nullptr) {
     return PGACCEL_ERROR;
   }
 
-  switch (ht->key_type) {
-    case PGACCEL_KEY_INT32:
-      return count_typed<int32_t>(ht, static_cast<const int32_t*>(outer_keys), outer_null_mask,
-                                  outer_count, match_count);
-    case PGACCEL_KEY_INT64:
-      return count_typed<int64_t>(ht, static_cast<const int64_t*>(outer_keys), outer_null_mask,
-                                  outer_count, match_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
-  }
+  if (ht->key_type == PGACCEL_KEY_INT32)
+    return count_typed<int32_t>(ht, static_cast<const int32_t*>(outer_keys), outer_null_mask,
+                                outer_count, match_count);
+  if (ht->key_type == PGACCEL_KEY_INT64)
+    return count_typed<int64_t>(ht, static_cast<const int64_t*>(outer_keys), outer_null_mask,
+                                outer_count, match_count);
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1024,23 +1012,17 @@ pgaccel_status pgaccel_hash_join_count_device(const pgaccel_hash_table* ht,
                                               const void* device_outer_keys,
                                               const uint8_t* device_outer_null_mask,
                                               size_t outer_count, size_t* match_count) try {
-  if (match_count != nullptr) {
-    *match_count = 0;
-  }
   if (ht == nullptr || device_outer_keys == nullptr || match_count == nullptr) {
     return PGACCEL_ERROR;
   }
 
-  switch (ht->key_type) {
-    case PGACCEL_KEY_INT32:
-      return count_device_typed<int32_t>(ht, static_cast<const int32_t*>(device_outer_keys),
-                                         device_outer_null_mask, outer_count, match_count);
-    case PGACCEL_KEY_INT64:
-      return count_device_typed<int64_t>(ht, static_cast<const int64_t*>(device_outer_keys),
-                                         device_outer_null_mask, outer_count, match_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
-  }
+  if (ht->key_type == PGACCEL_KEY_INT32)
+    return count_device_typed<int32_t>(ht, static_cast<const int32_t*>(device_outer_keys),
+                                       device_outer_null_mask, outer_count, match_count);
+  if (ht->key_type == PGACCEL_KEY_INT64)
+    return count_device_typed<int64_t>(ht, static_cast<const int64_t*>(device_outer_keys),
+                                       device_outer_null_mask, outer_count, match_count);
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
