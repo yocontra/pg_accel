@@ -864,11 +864,18 @@ static void test_hash_count_i64_duplicate_counts_resident_gpu_path() {
   pgaccel_reset_gpu_exec_count();
   pgaccel_agg_state* state = pgaccel_hash_count_i64_device_hash_execute_bounded(
       static_cast<int64_t*>(device_keys), N, NUM_GROUPS);
+  pgaccel_agg_state* repeated = pgaccel_hash_count_i64_device_hash_execute_bounded(
+      static_cast<int64_t*>(device_keys), N, NUM_GROUPS);
   const uint64_t dispatches = pgaccel_gpu_exec_count();
   pgaccel_expr_device_free(device_keys);
   ASSERT_TRUE("resident hash_count_i64 duplicate-count state non-null", state != nullptr);
+  ASSERT_TRUE("resident hash_count_i64 repeated state non-null", repeated != nullptr);
   ASSERT_TRUE("resident hash_count_i64 duplicate-count launched GPU kernels", dispatches > 0);
-  if (!state) {
+  if (!state || !repeated) {
+    if (state)
+      pgaccel_agg_free(state);
+    if (repeated)
+      pgaccel_agg_free(repeated);
     return;
   }
 
@@ -879,6 +886,19 @@ static void test_hash_count_i64_duplicate_counts_resident_gpu_path() {
   const int64_t* row_counts = pgaccel_agg_get_counts(state);
   ASSERT_TRUE("hash_count_i64 duplicate-count output buffers non-null",
               keys_out != nullptr && counts != nullptr && row_counts != nullptr);
+
+  const auto* repeated_keys =
+      static_cast<const int64_t*>(pgaccel_agg_get_group_keys(repeated));
+  const double* repeated_results = pgaccel_agg_get_results(repeated, 0);
+  const int64_t* repeated_counts = pgaccel_agg_get_counts(repeated);
+  const bool deterministic_order =
+      pgaccel_agg_group_count(repeated) == NUM_GROUPS && keys_out != nullptr && counts != nullptr &&
+      row_counts != nullptr && repeated_keys != nullptr && repeated_results != nullptr &&
+      repeated_counts != nullptr &&
+      std::memcmp(keys_out, repeated_keys, NUM_GROUPS * sizeof(int64_t)) == 0 &&
+      std::memcmp(counts, repeated_results, NUM_GROUPS * sizeof(double)) == 0 &&
+      std::memcmp(row_counts, repeated_counts, NUM_GROUPS * sizeof(int64_t)) == 0;
+  ASSERT_TRUE("hash_count_i64 repeated output order is deterministic", deterministic_order);
 
   std::vector<uint8_t> seen(NUM_GROUPS, 0);
   bool counts_correct = true;
@@ -905,6 +925,7 @@ static void test_hash_count_i64_duplicate_counts_resident_gpu_path() {
   ASSERT_TRUE("hash_count_i64 duplicate-count counts match", counts_correct);
 
   pgaccel_agg_free(state);
+  pgaccel_agg_free(repeated);
 }
 
 // ---------------------------------------------------------------------------

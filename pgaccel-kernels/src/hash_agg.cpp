@@ -1255,6 +1255,101 @@ bool next_power_of_two_size(size_t value, size_t* out) {
   return true;
 }
 
+static constexpr size_t HASH_AGG_SCAN_BLOCK_ROWS = 256;
+
+// Deterministic device exclusive scan. Each work-group scans one fixed-size
+// block; a small device task scans the block totals before the final offset
+// add. The host only observes the completed total for bounds validation.
+bool device_exclusive_scan_u32(sycl::queue& q, const uint32_t* input, size_t count,
+                               uint32_t* output, uint32_t* total) {
+  if (input == nullptr || output == nullptr || total == nullptr || count == 0 ||
+      count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+    return false;
+
+  const size_t num_blocks = (count + HASH_AGG_SCAN_BLOCK_ROWS - 1) / HASH_AGG_SCAN_BLOCK_ROWS;
+  uint32_t* block_totals = sycl::malloc_shared<uint32_t>(num_blocks, q);
+  uint32_t* block_offsets = sycl::malloc_shared<uint32_t>(num_blocks, q);
+  if (block_totals == nullptr || block_offsets == nullptr) {
+    if (block_totals)
+      sycl::free(block_totals, q);
+    if (block_offsets)
+      sycl::free(block_offsets, q);
+    return false;
+  }
+
+  auto cleanup = [&]() {
+    sycl::free(block_totals, q);
+    sycl::free(block_offsets, q);
+  };
+
+  try {
+    const auto nd = sycl::nd_range<1>(
+        sycl::range<1>(num_blocks * HASH_AGG_SCAN_BLOCK_ROWS),
+        sycl::range<1>(HASH_AGG_SCAN_BLOCK_ROWS));
+    q.submit([&](sycl::handler& h) {
+       sycl::local_accessor<uint32_t, 1> scan(sycl::range<1>(HASH_AGG_SCAN_BLOCK_ROWS), h);
+       h.parallel_for(nd, [=](sycl::nd_item<1> it) {
+         const size_t lid = it.get_local_id(0);
+         const size_t i = it.get_global_id(0);
+         scan[lid] = i < count ? input[i] : 0u;
+         sycl::group_barrier(it.get_group());
+
+         for (size_t stride = 1; stride < HASH_AGG_SCAN_BLOCK_ROWS; stride <<= 1) {
+           const size_t index = (lid + 1) * stride * 2 - 1;
+           if (index < HASH_AGG_SCAN_BLOCK_ROWS)
+             scan[index] += scan[index - stride];
+           sycl::group_barrier(it.get_group());
+         }
+
+         if (lid == 0) {
+           block_totals[it.get_group(0)] = scan[HASH_AGG_SCAN_BLOCK_ROWS - 1];
+           scan[HASH_AGG_SCAN_BLOCK_ROWS - 1] = 0u;
+         }
+         sycl::group_barrier(it.get_group());
+
+         for (size_t stride = HASH_AGG_SCAN_BLOCK_ROWS / 2; stride > 0; stride >>= 1) {
+           const size_t index = (lid + 1) * stride * 2 - 1;
+           if (index < HASH_AGG_SCAN_BLOCK_ROWS) {
+             const uint32_t left = scan[index - stride];
+             scan[index - stride] = scan[index];
+             scan[index] += left;
+           }
+           sycl::group_barrier(it.get_group());
+         }
+
+         if (i < count)
+           output[i] = scan[lid];
+       });
+     }).wait_and_throw();
+
+    q.single_task([=]() {
+       uint32_t cursor = 0;
+       for (size_t block = 0; block < num_blocks; ++block) {
+         block_offsets[block] = cursor;
+         cursor += block_totals[block];
+       }
+       total[0] = cursor;
+     }).wait_and_throw();
+
+    q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       output[i] += block_offsets[i / HASH_AGG_SCAN_BLOCK_ROWS];
+     }).wait_and_throw();
+    pgaccel_record_gpu_exec();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg device scan failed: %s\n", e.what());
+    cleanup();
+    return false;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg device scan failed (unknown)\n");
+    cleanup();
+    return false;
+  }
+
+  cleanup();
+  return true;
+}
+
 static constexpr uint64_t HASH_AGG_SLOT_BITS_EMPTY = std::numeric_limits<uint64_t>::max();
 
 inline uint64_t group_key_bits(int32_t key) {
@@ -1290,9 +1385,7 @@ int32_t group_key_from_bits<int32_t>(uint64_t bits) {
 
 template <>
 double group_key_from_bits<double>(uint64_t bits) {
-  double value;
-  std::memcpy(&value, &bits, sizeof(value));
-  return value;
+  return sycl::bit_cast<double>(bits);
 }
 
 inline uint64_t device_hash_key(int32_t key) {
@@ -1622,35 +1715,13 @@ bool run_numeric_group_hash_kernel_nospin(sycl::queue& q, const void* group_keys
     return false;
   }
 
-  std::vector<uint32_t> slot_to_group(slot_count, HASH_AGG_GROUP_NONE);
-  uint32_t n_groups = 0;
-  for (size_t slot = 0; slot < slot_count; ++slot) {
-    const uint32_t count = d_slot_counts[slot];
-    if (count == 0)
-      continue;
-    if (static_cast<size_t>(n_groups) >= row_count) {
-      sycl::free(d_keys, q);
-      sycl::free(d_key_nulls, q);
-      sycl::free(d_slot_bits, q);
-      sycl::free(d_slot_counts, q);
-      sycl::free(d_overflow, q);
-      return false;
-    }
-    const uint32_t group_id = n_groups++;
-    slot_to_group[slot] = group_id;
-    group_counts[group_id] = count;
-    if (slot == static_cast<size_t>(null_slot)) {
-      group_key_out[group_id] = KeyT{};
-    } else if (slot == static_cast<size_t>(special_bits_slot)) {
-      group_key_out[group_id] = group_key_from_bits<KeyT>(HASH_AGG_SLOT_BITS_EMPTY);
-    } else {
-      group_key_out[group_id] = group_key_from_bits<KeyT>(d_slot_bits[slot]);
-    }
-  }
-  *out_group_count = n_groups;
-
+  uint32_t* d_slot_present = sycl::malloc_shared<uint32_t>(slot_count, q);
   uint32_t* d_slot_to_group = sycl::malloc_shared<uint32_t>(slot_count, q);
-  if (d_slot_to_group == nullptr) {
+  if (d_slot_present == nullptr || d_slot_to_group == nullptr) {
+    if (d_slot_present)
+      sycl::free(d_slot_present, q);
+    if (d_slot_to_group)
+      sycl::free(d_slot_to_group, q);
     sycl::free(d_keys, q);
     sycl::free(d_key_nulls, q);
     sycl::free(d_slot_bits, q);
@@ -1658,9 +1729,75 @@ bool run_numeric_group_hash_kernel_nospin(sycl::queue& q, const void* group_keys
     sycl::free(d_overflow, q);
     return false;
   }
-  std::memcpy(d_slot_to_group, slot_to_group.data(), slot_count * sizeof(uint32_t));
 
   try {
+    q.parallel_for(sycl::range<1>(slot_count), [=](sycl::id<1> id) {
+       const size_t slot = id[0];
+       d_slot_present[slot] = d_slot_counts[slot] != 0 ? 1u : 0u;
+     }).wait_and_throw();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg row-parallel occupancy kernel failed: %s\n",
+                 e.what());
+    sycl::free(d_slot_present, q);
+    sycl::free(d_slot_to_group, q);
+    sycl::free(d_keys, q);
+    sycl::free(d_key_nulls, q);
+    sycl::free(d_slot_bits, q);
+    sycl::free(d_slot_counts, q);
+    sycl::free(d_overflow, q);
+    return false;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg row-parallel occupancy kernel failed (unknown)\n");
+    sycl::free(d_slot_present, q);
+    sycl::free(d_slot_to_group, q);
+    sycl::free(d_keys, q);
+    sycl::free(d_key_nulls, q);
+    sycl::free(d_slot_bits, q);
+    sycl::free(d_slot_counts, q);
+    sycl::free(d_overflow, q);
+    return false;
+  }
+
+  if (!device_exclusive_scan_u32(q, d_slot_present, slot_count, d_slot_to_group,
+                                 out_group_count)) {
+    sycl::free(d_slot_present, q);
+    sycl::free(d_slot_to_group, q);
+    sycl::free(d_keys, q);
+    sycl::free(d_key_nulls, q);
+    sycl::free(d_slot_bits, q);
+    sycl::free(d_slot_counts, q);
+    sycl::free(d_overflow, q);
+    return false;
+  }
+
+  const uint32_t n_groups = *out_group_count;
+  if (n_groups == 0 || static_cast<size_t>(n_groups) > row_count) {
+    sycl::free(d_slot_present, q);
+    sycl::free(d_slot_to_group, q);
+    sycl::free(d_keys, q);
+    sycl::free(d_key_nulls, q);
+    sycl::free(d_slot_bits, q);
+    sycl::free(d_slot_counts, q);
+    sycl::free(d_overflow, q);
+    return false;
+  }
+
+  try {
+    q.parallel_for(sycl::range<1>(slot_count), [=](sycl::id<1> id) {
+       const size_t slot = id[0];
+       if (d_slot_present[slot] == 0)
+         return;
+       const uint32_t group_id = d_slot_to_group[slot];
+       group_counts[group_id] = d_slot_counts[slot];
+       if (slot == static_cast<size_t>(null_slot)) {
+         group_key_out[group_id] = KeyT{};
+       } else if (slot == static_cast<size_t>(special_bits_slot)) {
+         group_key_out[group_id] = group_key_from_bits<KeyT>(HASH_AGG_SLOT_BITS_EMPTY);
+       } else {
+         group_key_out[group_id] = group_key_from_bits<KeyT>(d_slot_bits[slot]);
+       }
+     }).wait_and_throw();
+
     q.parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
        const uint32_t r = static_cast<uint32_t>(id[0]);
        const uint32_t slot = row_to_group[r];
@@ -1669,6 +1806,7 @@ bool run_numeric_group_hash_kernel_nospin(sycl::queue& q, const void* group_keys
      }).wait_and_throw();
   } catch (const std::exception& e) {
     std::fprintf(stderr, "pgaccel: hash_agg row-parallel remap kernel failed: %s\n", e.what());
+    sycl::free(d_slot_present, q);
     sycl::free(d_slot_to_group, q);
     sycl::free(d_keys, q);
     sycl::free(d_key_nulls, q);
@@ -1678,6 +1816,7 @@ bool run_numeric_group_hash_kernel_nospin(sycl::queue& q, const void* group_keys
     return false;
   } catch (...) {
     std::fprintf(stderr, "pgaccel: hash_agg row-parallel remap kernel failed (unknown)\n");
+    sycl::free(d_slot_present, q);
     sycl::free(d_slot_to_group, q);
     sycl::free(d_keys, q);
     sycl::free(d_key_nulls, q);
@@ -1687,6 +1826,7 @@ bool run_numeric_group_hash_kernel_nospin(sycl::queue& q, const void* group_keys
     return false;
   }
 
+  sycl::free(d_slot_present, q);
   sycl::free(d_slot_to_group, q);
   sycl::free(d_keys, q);
   sycl::free(d_key_nulls, q);
@@ -1781,28 +1921,6 @@ static pgaccel_agg_state* agg_hash_row_parallel_numeric(
     return nullptr;
   }
 
-  std::vector<size_t> group_starts_h(n_groups);
-  std::vector<size_t> group_ends_h(n_groups);
-  std::vector<uint32_t> scatter_starts_h(n_groups);
-  size_t cursor = 0;
-  for (size_t g = 0; g < n_groups; ++g) {
-    group_starts_h[g] = cursor;
-    scatter_starts_h[g] = static_cast<uint32_t>(cursor);
-    cursor += static_cast<size_t>(d_group_counts[g]);
-    group_ends_h[g] = cursor;
-  }
-  if (cursor != row_count) {
-    std::fprintf(stderr,
-                 "pgaccel: hash_agg row-parallel grouping count mismatch "
-                 "(rows=%zu compacted=%zu groups=%zu)\n",
-                 row_count, cursor, n_groups);
-    sycl::free(d_row_to_group, *q);
-    sycl::free(d_group_counts, *q);
-    sycl::free(d_group_keys, *q);
-    sycl::free(d_group_count, *q);
-    return nullptr;
-  }
-
   size_t* d_group_starts = sycl::malloc_shared<size_t>(n_groups, *q);
   size_t* d_group_ends = sycl::malloc_shared<size_t>(n_groups, *q);
   uint32_t* d_scatter_offsets = sycl::malloc_shared<uint32_t>(n_groups, *q);
@@ -1823,9 +1941,56 @@ static pgaccel_agg_state* agg_hash_row_parallel_numeric(
     sycl::free(d_group_count, *q);
     return nullptr;
   }
-  std::memcpy(d_group_starts, group_starts_h.data(), n_groups * sizeof(size_t));
-  std::memcpy(d_group_ends, group_ends_h.data(), n_groups * sizeof(size_t));
-  std::memcpy(d_scatter_offsets, scatter_starts_h.data(), n_groups * sizeof(uint32_t));
+
+  if (!device_exclusive_scan_u32(*q, d_group_counts, n_groups, d_scatter_offsets,
+                                 d_group_count) ||
+      static_cast<size_t>(*d_group_count) != row_count) {
+    std::fprintf(stderr,
+                 "pgaccel: hash_agg row-parallel grouping count mismatch "
+                 "(rows=%zu compacted=%u groups=%zu)\n",
+                 row_count, *d_group_count, n_groups);
+    sycl::free(d_group_starts, *q);
+    sycl::free(d_group_ends, *q);
+    sycl::free(d_scatter_offsets, *q);
+    sycl::free(d_indices, *q);
+    sycl::free(d_row_to_group, *q);
+    sycl::free(d_group_counts, *q);
+    sycl::free(d_group_keys, *q);
+    sycl::free(d_group_count, *q);
+    return nullptr;
+  }
+
+  try {
+    q->parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+       const size_t group = id[0];
+       const size_t start = static_cast<size_t>(d_scatter_offsets[group]);
+       d_group_starts[group] = start;
+       d_group_ends[group] = start + static_cast<size_t>(d_group_counts[group]);
+     }).wait_and_throw();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_agg row-parallel boundary kernel failed: %s\n",
+                 e.what());
+    sycl::free(d_group_starts, *q);
+    sycl::free(d_group_ends, *q);
+    sycl::free(d_scatter_offsets, *q);
+    sycl::free(d_indices, *q);
+    sycl::free(d_row_to_group, *q);
+    sycl::free(d_group_counts, *q);
+    sycl::free(d_group_keys, *q);
+    sycl::free(d_group_count, *q);
+    return nullptr;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_agg row-parallel boundary kernel failed (unknown)\n");
+    sycl::free(d_group_starts, *q);
+    sycl::free(d_group_ends, *q);
+    sycl::free(d_scatter_offsets, *q);
+    sycl::free(d_indices, *q);
+    sycl::free(d_row_to_group, *q);
+    sycl::free(d_group_counts, *q);
+    sycl::free(d_group_keys, *q);
+    sycl::free(d_group_count, *q);
+    return nullptr;
+  }
 
   if (!run_group_scatter_kernel(*q, row_count, d_row_to_group, d_scatter_offsets, d_indices)) {
     sycl::free(d_group_starts, *q);
@@ -1971,9 +2136,9 @@ static pgaccel_agg_state* agg_hash_row_parallel(const void* group_keys,
   }
 }
 
-static pgaccel_agg_state* build_count_i64_state_from_u32(const int64_t* out_keys,
-                                                         const uint32_t* out_counts,
-                                                         uint32_t n_groups);
+static pgaccel_agg_state* build_count_i64_state(const int64_t* out_keys,
+                                                const int64_t* out_counts,
+                                                const double* out_results, uint32_t n_groups);
 
 static pgaccel_agg_state* agg_count_i64_hash_device(int64_t* group_keys, size_t row_count,
                                                     size_t max_distinct_hint) {
@@ -1996,8 +2161,11 @@ static pgaccel_agg_state* agg_count_i64_hash_device(int64_t* group_keys, size_t 
 
   uint32_t* d_slot_owners = sycl::malloc_shared<uint32_t>(table_capacity, *q);
   uint32_t* d_slot_counts = sycl::malloc_shared<uint32_t>(table_capacity, *q);
+  uint32_t* d_slot_present = sycl::malloc_shared<uint32_t>(table_capacity, *q);
+  uint32_t* d_slot_offsets = sycl::malloc_shared<uint32_t>(table_capacity, *q);
   int64_t* d_out_keys = sycl::malloc_shared<int64_t>(row_count, *q);
-  uint32_t* d_out_counts = sycl::malloc_shared<uint32_t>(row_count, *q);
+  int64_t* d_out_counts = sycl::malloc_shared<int64_t>(row_count, *q);
+  double* d_out_results = sycl::malloc_shared<double>(row_count, *q);
   uint32_t* d_group_count = sycl::malloc_shared<uint32_t>(1, *q);
   uint32_t* d_overflow = sycl::malloc_shared<uint32_t>(1, *q);
 
@@ -2006,28 +2174,42 @@ static pgaccel_agg_state* agg_count_i64_hash_device(int64_t* group_keys, size_t 
       sycl::free(d_slot_owners, *q);
     if (d_slot_counts)
       sycl::free(d_slot_counts, *q);
+    if (d_slot_present)
+      sycl::free(d_slot_present, *q);
+    if (d_slot_offsets)
+      sycl::free(d_slot_offsets, *q);
     if (d_out_keys)
       sycl::free(d_out_keys, *q);
     if (d_out_counts)
       sycl::free(d_out_counts, *q);
+    if (d_out_results)
+      sycl::free(d_out_results, *q);
     if (d_group_count)
       sycl::free(d_group_count, *q);
     if (d_overflow)
       sycl::free(d_overflow, *q);
   };
 
-  if (d_slot_owners == nullptr || d_slot_counts == nullptr || d_out_keys == nullptr ||
-      d_out_counts == nullptr || d_group_count == nullptr || d_overflow == nullptr) {
+  if (d_slot_owners == nullptr || d_slot_counts == nullptr || d_slot_present == nullptr ||
+      d_slot_offsets == nullptr || d_out_keys == nullptr || d_out_counts == nullptr ||
+      d_out_results == nullptr || d_group_count == nullptr || d_overflow == nullptr) {
     cleanup();
     return nullptr;
   }
 
-  std::fill(d_slot_owners, d_slot_owners + table_capacity, HASH_AGG_GROUP_NONE);
-  std::memset(d_slot_counts, 0, table_capacity * sizeof(uint32_t));
-  std::memset(d_out_keys, 0, row_count * sizeof(int64_t));
-  std::memset(d_out_counts, 0, row_count * sizeof(uint32_t));
-  *d_group_count = 0;
-  *d_overflow = 0;
+  try {
+    q->fill(d_slot_owners, HASH_AGG_GROUP_NONE, table_capacity).wait_and_throw();
+    q->fill(d_slot_counts, 0u, table_capacity).wait_and_throw();
+    q->fill(d_overflow, 0u, 1).wait_and_throw();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_count_i64 device-hash init failed: %s\n", e.what());
+    cleanup();
+    return nullptr;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_count_i64 device-hash init failed (unknown)\n");
+    cleanup();
+    return nullptr;
+  }
 
   const uint32_t mask = static_cast<uint32_t>(table_capacity - 1);
 
@@ -2091,18 +2273,41 @@ static pgaccel_agg_state* agg_count_i64_hash_device(int64_t* group_keys, size_t 
     q->parallel_for(sycl::range<1>(table_capacity), [=](sycl::id<1> id) {
        const uint32_t slot = static_cast<uint32_t>(id[0]);
        const uint32_t owner = d_slot_owners[slot];
-       if (owner == HASH_AGG_GROUP_NONE)
-         return;
-       const uint32_t count = d_slot_counts[slot];
-       if (count == 0)
-         return;
+       d_slot_present[slot] =
+           owner != HASH_AGG_GROUP_NONE && d_slot_counts[slot] != 0 ? 1u : 0u;
+     }).wait_and_throw();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_count_i64 device-hash occupancy kernel failed: %s\n",
+                 e.what());
+    cleanup();
+    return nullptr;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_count_i64 device-hash occupancy kernel failed (unknown)\n");
+    cleanup();
+    return nullptr;
+  }
 
-       sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
-                        sycl::access::address_space::global_space>
-           group_ref(d_group_count[0]);
-       const uint32_t group_id = group_ref.fetch_add(1u);
+  if (!device_exclusive_scan_u32(*q, d_slot_present, table_capacity, d_slot_offsets,
+                                 d_group_count)) {
+    cleanup();
+    return nullptr;
+  }
+
+  const uint32_t n_groups = *d_group_count;
+  if (n_groups == 0 || static_cast<size_t>(n_groups) > max_distinct ||
+      static_cast<size_t>(n_groups) > row_count) {
+    cleanup();
+    return nullptr;
+  }
+
+  try {
+    q->parallel_for(sycl::range<1>(table_capacity), [=](sycl::id<1> id) {
+       const uint32_t slot = static_cast<uint32_t>(id[0]);
+       if (d_slot_present[slot] == 0)
+         return;
+       const uint32_t group_id = d_slot_offsets[slot];
+       const uint32_t owner = d_slot_owners[slot];
        d_out_keys[group_id] = group_keys[owner];
-       d_out_counts[group_id] = count;
      }).wait_and_throw();
     pgaccel_record_gpu_exec();
   } catch (const std::exception& e) {
@@ -2116,21 +2321,64 @@ static pgaccel_agg_state* agg_count_i64_hash_device(int64_t* group_keys, size_t 
     return nullptr;
   }
 
-  const uint32_t n_groups = *d_group_count;
-  if (n_groups == 0 || static_cast<size_t>(n_groups) > row_count) {
+  // Hash-table placement depends on which colliding key wins a slot first.
+  // Sort the compacted keys, then look each key back up in the resident table
+  // so output order is deterministic without moving counts on the host.
+  if (pgaccel_sort_i64(d_out_keys, n_groups) != PGACCEL_OK) {
     cleanup();
     return nullptr;
   }
 
-  pgaccel_agg_state* state = build_count_i64_state_from_u32(d_out_keys, d_out_counts, n_groups);
+  try {
+    q->fill(d_overflow, 0u, 1).wait_and_throw();
+    q->parallel_for(sycl::range<1>(n_groups), [=](sycl::id<1> id) {
+       const uint32_t group_id = static_cast<uint32_t>(id[0]);
+       const int64_t key = d_out_keys[group_id];
+       uint32_t slot = static_cast<uint32_t>(hash64(static_cast<uint64_t>(key))) & mask;
+
+       for (uint32_t probe = 0; probe <= mask; ++probe) {
+         const uint32_t owner = d_slot_owners[slot];
+         if (owner != HASH_AGG_GROUP_NONE && group_keys[owner] == key) {
+           const int64_t count = static_cast<int64_t>(d_slot_counts[slot]);
+           d_out_counts[group_id] = count;
+           d_out_results[group_id] = static_cast<double>(count);
+           return;
+         }
+         slot = (slot + 1u) & mask;
+       }
+
+       sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                        sycl::access::address_space::global_space>
+           failure_ref(d_overflow[0]);
+       failure_ref.store(1u);
+     }).wait_and_throw();
+    pgaccel_record_gpu_exec();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: hash_count_i64 device-hash finalize kernel failed: %s\n",
+                 e.what());
+    cleanup();
+    return nullptr;
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: hash_count_i64 device-hash finalize kernel failed (unknown)\n");
+    cleanup();
+    return nullptr;
+  }
+
+  if (*d_overflow != 0) {
+    cleanup();
+    return nullptr;
+  }
+
+  pgaccel_agg_state* state =
+      build_count_i64_state(d_out_keys, d_out_counts, d_out_results, n_groups);
   cleanup();
   return state;
 }
 
-static pgaccel_agg_state* build_count_i64_state_from_u32(const int64_t* out_keys,
-                                                         const uint32_t* out_counts,
-                                                         uint32_t n_groups) {
-  if (out_keys == nullptr || out_counts == nullptr || n_groups == 0)
+static pgaccel_agg_state* build_count_i64_state(const int64_t* out_keys,
+                                                const int64_t* out_counts,
+                                                const double* out_results, uint32_t n_groups) {
+  if (out_keys == nullptr || out_counts == nullptr || out_results == nullptr || n_groups == 0)
     return nullptr;
 
   auto* state = new (std::nothrow) pgaccel_agg_state();
@@ -2144,14 +2392,12 @@ static pgaccel_agg_state* build_count_i64_state_from_u32(const int64_t* out_keys
   state->group_key_buf.resize(static_cast<size_t>(n_groups) * sizeof(int64_t));
   std::memcpy(state->group_key_buf.data(), out_keys,
               static_cast<size_t>(n_groups) * sizeof(int64_t));
-  state->counts.reserve(n_groups);
+  state->counts.resize(n_groups);
+  std::memcpy(state->counts.data(), out_counts, static_cast<size_t>(n_groups) * sizeof(int64_t));
   state->results.resize(1);
-  state->results[0].reserve(n_groups);
-  for (uint32_t i = 0; i < n_groups; ++i) {
-    const int64_t count = static_cast<int64_t>(out_counts[i]);
-    state->counts.push_back(count);
-    state->results[0].push_back(static_cast<double>(count));
-  }
+  state->results[0].resize(n_groups);
+  std::memcpy(state->results[0].data(), out_results,
+              static_cast<size_t>(n_groups) * sizeof(double));
 
   return state;
 }
@@ -2165,8 +2411,10 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
 
   size_t out_key_bytes = 0;
   size_t out_count_bytes = 0;
+  size_t out_result_bytes = 0;
   if (!checked_mul_size(row_count, sizeof(int64_t), &out_key_bytes) ||
-      !checked_mul_size(row_count, sizeof(uint32_t), &out_count_bytes)) {
+      !checked_mul_size(row_count, sizeof(int64_t), &out_count_bytes) ||
+      !checked_mul_size(row_count, sizeof(double), &out_result_bytes)) {
     return nullptr;
   }
 
@@ -2177,9 +2425,18 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
     return nullptr;
 
   const size_t counts_off = out_key_bytes;
-  const size_t block_counts_off = counts_off + out_count_bytes;
-  const size_t block_offsets_off = block_counts_off + block_bytes;
-  const size_t slab_bytes = block_offsets_off + block_bytes;
+  size_t results_off = 0;
+  size_t block_counts_off = 0;
+  size_t block_offsets_off = 0;
+  size_t group_count_off = 0;
+  size_t slab_bytes = 0;
+  if (!checked_add_size(counts_off, out_count_bytes, &results_off) ||
+      !checked_add_size(results_off, out_result_bytes, &block_counts_off) ||
+      !checked_add_size(block_counts_off, block_bytes, &block_offsets_off) ||
+      !checked_add_size(block_offsets_off, block_bytes, &group_count_off) ||
+      !checked_add_size(group_count_off, sizeof(uint32_t), &slab_bytes)) {
+    return nullptr;
+  }
 
   uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, *q);
   if (d_slab == nullptr)
@@ -2192,6 +2449,7 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
 
   auto* block_counts = reinterpret_cast<uint32_t*>(d_slab + block_counts_off);
   auto* block_offsets = reinterpret_cast<uint32_t*>(d_slab + block_offsets_off);
+  auto* group_count = reinterpret_cast<uint32_t*>(d_slab + group_count_off);
 
   try {
     int64_t* keys_ptr = group_keys;
@@ -2233,16 +2491,12 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
     return nullptr;
   }
 
-  uint32_t n_groups = 0;
-  for (size_t block = 0; block < num_blocks; ++block) {
-    block_offsets[block] = n_groups;
-    const uint32_t starts = block_counts[block];
-    if (static_cast<size_t>(n_groups) + static_cast<size_t>(starts) > row_count) {
-      cleanup();
-      return nullptr;
-    }
-    n_groups += starts;
+  if (!device_exclusive_scan_u32(*q, block_counts, num_blocks, block_offsets, group_count)) {
+    cleanup();
+    return nullptr;
   }
+
+  const uint32_t n_groups = *group_count;
   if (n_groups == 0 || static_cast<size_t>(n_groups) > row_count) {
     cleanup();
     return nullptr;
@@ -2251,7 +2505,8 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
   try {
     int64_t* keys_ptr = group_keys;
     auto* out_keys = reinterpret_cast<int64_t*>(d_slab);
-    auto* out_counts = reinterpret_cast<uint32_t*>(d_slab + counts_off);
+    auto* out_counts = reinterpret_cast<int64_t*>(d_slab + counts_off);
+    auto* out_results = reinterpret_cast<double*>(d_slab + results_off);
     uint32_t* offsets_by_block = block_offsets;
     const size_t rows = row_count;
     auto nd = sycl::nd_range<1>(sycl::range<1>(num_blocks * COUNT_COMPACT_BLOCK_ROWS),
@@ -2277,7 +2532,7 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
            local_group += starts[j];
 
          const int64_t key = keys_ptr[i];
-         uint32_t count = 1;
+         int64_t count = 1;
          size_t j = i + 1;
          while (j < rows && keys_ptr[j] == key) {
            ++count;
@@ -2287,6 +2542,7 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
          const uint32_t out_idx = offsets_by_block[block] + local_group;
          out_keys[out_idx] = key;
          out_counts[out_idx] = count;
+         out_results[out_idx] = static_cast<double>(count);
        });
      }).wait_and_throw();
     pgaccel_record_gpu_exec();
@@ -2301,8 +2557,10 @@ static pgaccel_agg_state* agg_count_i64_sorted_device(int64_t* group_keys, size_
   }
 
   const auto* out_keys = reinterpret_cast<const int64_t*>(d_slab);
-  const auto* out_counts = reinterpret_cast<const uint32_t*>(d_slab + counts_off);
-  pgaccel_agg_state* state = build_count_i64_state_from_u32(out_keys, out_counts, n_groups);
+  const auto* out_counts = reinterpret_cast<const int64_t*>(d_slab + counts_off);
+  const auto* out_results = reinterpret_cast<const double*>(d_slab + results_off);
+  pgaccel_agg_state* state =
+      build_count_i64_state(out_keys, out_counts, out_results, n_groups);
   cleanup();
   return state;
 }
