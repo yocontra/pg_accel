@@ -24,6 +24,23 @@ def audit_fixture(source: str) -> audit.FileAudit:
     return audit.audit_source(FIXTURE_PATH, textwrap.dedent(source))
 
 
+def audit_compiling_fixture(source: str) -> audit.FileAudit:
+    rendered = textwrap.dedent(source)
+    compiler = shutil.which("clang++")
+    if compiler is None:
+        raise unittest.SkipTest("clang++ is required for compile-valid regressions")
+    completed = subprocess.run(
+        [compiler, "-std=c++17", "-fsyntax-only", "-x", "c++", "-"],
+        input=rendered,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(f"fixture is not valid C++:\n{completed.stderr}")
+    return audit.audit_source(FIXTURE_PATH, rendered)
+
+
 def finding_for(result: audit.FileAudit, name: str) -> audit.Finding:
     return next(finding for finding in result.findings if finding.entrypoint == name)
 
@@ -827,6 +844,262 @@ class ControlFlowEvasionTests(unittest.TestCase):
         self.assertFalse(result.findings)
 
 
+class CompilerValidAdversarialTests(unittest.TestCase):
+    CPP_PRELUDE = r"""
+        using pgaccel_status = int;
+        constexpr pgaccel_status PGACCEL_OK = 0;
+        constexpr pgaccel_status PGACCEL_UNSUPPORTED = 9;
+        namespace std {
+        using size_t = decltype(sizeof(0));
+        using uint32_t = unsigned int;
+        template <class Output, class Size, class Value>
+        Output fill_n(Output first, Size count, const Value& value) {
+          while (count-- != 0) *first++ = value;
+          return first;
+        }
+        }
+        namespace sycl {
+        template <int> struct range { explicit range(std::size_t) {} };
+        template <int> struct id { operator std::size_t() const { return 0; } };
+        struct queue {
+          template <class Function> void parallel_for(range<1>, Function) {}
+        };
+        struct device { static void get_devices() {} };
+        }
+        void observe() {}
+    """
+
+    def test_seven_compiler_valid_output_bypasses_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.CPP_PRELUDE
+            + r"""
+            struct Holder { int* out; };
+            static void finish(int* out, std::size_t count) {
+              std::fill_n(out, count, 7);
+            }
+            static auto host_finalize = &finish;
+            #define EARLY_SUCCESS() if (flag) return PGACCEL_OK
+            #define HOST_WRITE() out[0] = 7
+
+            extern "C" pgaccel_status pgaccel_macro_early(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)mode;
+              sycl::queue q;
+              EARLY_SUCCESS();
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_macro_write(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              HOST_WRITE();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_namespaced_finalizer(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              std::fill_n(out, count, 7);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_pointer_finalizer(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              (*host_finalize)(out, count);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_false_zero(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag;
+              sycl::queue q;
+              if (mode == 0) return PGACCEL_OK;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_nested_deferred(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                auto deferred = [=]() { out[i] = 1; };
+                (void)deferred;
+              });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_member_collision(
+                bool flag, int mode, std::size_t count, int* out) {
+              (void)flag; (void)mode; (void)out;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                Holder holder{};
+                holder.out[i] = 1;
+              });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertEqual(
+            set(entries),
+            {
+                "pgaccel_macro_early",
+                "pgaccel_macro_write",
+                "pgaccel_namespaced_finalizer",
+                "pgaccel_pointer_finalizer",
+                "pgaccel_false_zero",
+                "pgaccel_nested_deferred",
+                "pgaccel_member_collision",
+            },
+        )
+        for name, entry in entries.items():
+            with self.subTest(name=name):
+                self.assertFalse(entry.ok, entry.detail)
+        self.assertIn(
+            "macro_expanded_body", entries["pgaccel_macro_early"].classifications
+        )
+        self.assertIn(
+            "host_output_write", entries["pgaccel_macro_write"].classifications
+        )
+        self.assertIn(
+            "qualified_helper", entries["pgaccel_namespaced_finalizer"].classifications
+        )
+        self.assertIn(
+            "unresolved_indirect_output_call",
+            entries["pgaccel_pointer_finalizer"].classifications,
+        )
+        self.assertNotIn("zero_work", entries["pgaccel_false_zero"].classifications)
+        self.assertIn(
+            "rejected_terminal", entries["pgaccel_nested_deferred"].classifications
+        )
+        self.assertIn(
+            "rejected_terminal", entries["pgaccel_member_collision"].classifications
+        )
+        self.assertNotIn(
+            "output_identity_shadowing",
+            entries["pgaccel_member_collision"].classifications,
+        )
+
+    def test_two_exact_signature_contract_bypasses_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.CPP_PRELUDE
+            + r"""
+            struct pgaccel_geometry {};
+            static bool runtime_skip() { return true; }
+            extern "C" pgaccel_status pgaccel_init() {
+              if (!runtime_skip()) sycl::device::get_devices();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_spatial_intersects(
+                const pgaccel_geometry*, std::size_t count_a,
+                const pgaccel_geometry*, std::size_t count_b,
+                std::uint32_t*, std::size_t*, std::uint32_t*, std::size_t*,
+                std::uint32_t*, std::size_t*) {
+              if (count_a == 0 && count_b == 0) return PGACCEL_OK;
+              if (count_a != count_b) return PGACCEL_UNSUPPORTED;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertFalse(entries["pgaccel_init"].ok)
+        self.assertIn(
+            "invalid_lifecycle_contract",
+            entries["pgaccel_init"].classifications,
+        )
+        self.assertFalse(entries["pgaccel_spatial_intersects"].ok)
+        self.assertIn(
+            "invalid_failure_only_contract",
+            entries["pgaccel_spatial_intersects"].classifications,
+        )
+
+    def test_contract_and_zero_work_adversarial_corpus_compiles(self) -> None:
+        cases = {
+            "lifecycle_runtime_conditional_evidence": r"""
+                extern "C" pgaccel_status pgaccel_init(bool skip) {
+                  if (!skip) sycl::device::get_devices();
+                  return PGACCEL_OK;
+                }
+            """,
+            "lifecycle_dead_evidence": r"""
+                extern "C" pgaccel_status pgaccel_init() {
+                  if (false) sycl::device::get_devices();
+                  return PGACCEL_OK;
+                }
+            """,
+            "lifecycle_after_return_evidence": r"""
+                extern "C" pgaccel_status pgaccel_init() {
+                  return PGACCEL_OK;
+                  sycl::device::get_devices();
+                }
+            """,
+            "fail_contract_scattered_evidence": r"""
+                extern "C" pgaccel_status pgaccel_spatial_intersects(
+                    std::size_t count_a, std::size_t count_b) {
+                  if (count_a == 0 && count_b == 0) return PGACCEL_OK;
+                  if (count_a != 0) return PGACCEL_UNSUPPORTED;
+                  return PGACCEL_OK;
+                }
+            """,
+            "fail_contract_unconditional_success_with_decoys": r"""
+                extern "C" pgaccel_status pgaccel_spatial_intersects(
+                    std::size_t count_a, std::size_t count_b) {
+                  if (count_a == 0) observe();
+                  if (count_b == 0) observe();
+                  if (count_a != count_b) return PGACCEL_UNSUPPORTED;
+                  return PGACCEL_OK;
+                }
+            """,
+            "failure_only_host_write_macro": r"""
+                #define HOST_WRITE() out[0] = 42
+                extern "C" pgaccel_status pgaccel_spatial_intersects(
+                    std::size_t count_a, std::size_t count_b, int* out) {
+                  if (count_a == 0 || count_b == 0) return PGACCEL_OK;
+                  HOST_WRITE();
+                  return PGACCEL_UNSUPPORTED;
+                }
+            """,
+            "false_zero_count_expected_conservative": r"""
+                extern "C" pgaccel_status pgaccel_case(
+                    std::size_t count, int* out) {
+                  sycl::queue q;
+                  if (count == 0) return PGACCEL_OK;
+                  q.parallel_for(sycl::range<1>(count),
+                                 [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "pointer_null_falsely_zero": r"""
+                extern "C" pgaccel_status pgaccel_case(
+                    std::size_t count, int* out) {
+                  sycl::queue q;
+                  if (out == 0) return PGACCEL_OK;
+                  q.parallel_for(sycl::range<1>(count),
+                                 [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+        }
+        for name, source in cases.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(self.CPP_PRELUDE + source)
+                entry = result.entrypoint_audits[0]
+                if name == "false_zero_count_expected_conservative":
+                    self.assertTrue(entry.ok, entry.detail)
+                    self.assertIn("zero_work", entry.classifications)
+                else:
+                    self.assertFalse(entry.ok, entry.detail)
+
+
 class HostComputationAndContractTests(unittest.TestCase):
     def test_host_loop_success_is_classified(self) -> None:
         result = audit_fixture(
@@ -1164,6 +1437,26 @@ class ReleaseWiringTests(unittest.TestCase):
             matrix.index('run_logged "cpu-cheat-audit"'),
             matrix.index('run_logged "install-pg-accel"'),
         )
+
+    def test_local_packages_run_real_audit_before_creating_artifacts(self) -> None:
+        justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
+        package = justfile[
+            justfile.index('package pg="":') : justfile.index("package-matrix:")
+        ]
+        package_matrix = justfile[
+            justfile.index("package-matrix:") : justfile.index(
+                "install-pg-accel", justfile.index("package-matrix:")
+            )
+        ]
+        self.assertLess(
+            package.index("just audit-cpu-cheats"),
+            package.index("cargo pgrx package"),
+        )
+        self.assertLess(
+            package_matrix.index("just audit-cpu-cheats"),
+            package_matrix.index("for pg in"),
+        )
+        self.assertIn("intentionally remains blocked", package)
 
     def test_green_ci_uses_integrity_suite_and_release_keeps_real_gate(self) -> None:
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

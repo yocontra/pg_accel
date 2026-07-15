@@ -780,6 +780,8 @@ plan-shape-tests pg="":
 package pg="":
     #!/usr/bin/env bash
     set -euo pipefail
+    # Packaging intentionally remains blocked until the production audit is green.
+    just audit-cpu-cheats
     source scripts/pg_versions.sh
     requested="{{pg}}"
     if [ -z "$requested" ]; then
@@ -798,6 +800,8 @@ package pg="":
 package-matrix:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Run once before the matrix creates any release artifact.
+    just audit-cpu-cheats
     source scripts/pg_versions.sh
     for pg in $(pg_accel_supported_pg_majors); do
         pg_accel_require_pgrx_support "$pg"

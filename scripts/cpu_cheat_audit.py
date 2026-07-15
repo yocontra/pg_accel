@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import hashlib
 import json
 import os
@@ -397,6 +398,88 @@ def normalize_preprocessor(
     return "".join(output), tuple(directives)
 
 
+@functools.lru_cache(maxsize=1)
+def _compiler_include_directories() -> tuple[pathlib.Path, ...]:
+    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    roots = [repo_root]
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        completed = None
+    if completed is not None and completed.returncode == 0:
+        roots.append(pathlib.Path(completed.stdout.strip()).resolve().parent)
+
+    candidates = [repo_root / "pgaccel-kernels/include"]
+    acpp_prefix = os.environ.get("ACPP_PREFIX")
+    if acpp_prefix:
+        candidates.append(pathlib.Path(acpp_prefix) / "include/AdaptiveCpp")
+    candidates.extend(
+        root / ".pgaccel/acpp/current/include/AdaptiveCpp" for root in roots
+    )
+    return tuple(dict.fromkeys(path.resolve() for path in candidates if path.is_dir()))
+
+
+@functools.lru_cache(maxsize=128)
+def _compiler_preprocess_cached(
+    source: str, source_directory: str, compiler: str
+) -> str:
+    command = [
+        compiler,
+        "-std=c++17",
+        "-E",
+        "-x",
+        "c++",
+        "-I",
+        source_directory,
+    ]
+    for include_directory in _compiler_include_directories():
+        command.extend(("-I", str(include_directory)))
+    command.append("-")
+    try:
+        completed = subprocess.run(
+            command,
+            input=source,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ParseError(f"compiler preprocessing failed: {error}") from error
+    if completed.returncode != 0:
+        diagnostic = completed.stderr.strip()[-3000:]
+        raise ParseError(
+            f"compiler preprocessing exited {completed.returncode}: {diagnostic}"
+        )
+    main_file_lines: list[str] = []
+    in_main_file = False
+    for line in completed.stdout.splitlines(keepends=True):
+        marker = re.match(r'^\s*#\s*\d+\s+"([^"]+)"', line)
+        if marker is not None:
+            in_main_file = marker.group(1) == "<stdin>"
+            continue
+        if in_main_file:
+            main_file_lines.append(line)
+    if not main_file_lines:
+        raise ParseError("compiler preprocessing emitted no main-file source")
+    return "".join(main_file_lines)
+
+
+def _compiler_preprocess_source(path: pathlib.Path, source: str) -> str:
+    compiler = os.environ.get("PGACCEL_ABI_CLANG") or shutil.which("clang++")
+    if compiler is None:
+        raise ParseError("clang++ is required to expand source macros")
+    source_directory = str(path.resolve().parent)
+    return _compiler_preprocess_cached(source, source_directory, compiler)
+
+
 @dataclasses.dataclass(frozen=True)
 class Token:
     kind: str
@@ -429,6 +512,7 @@ class Call:
     line: int
     argument_count: int | None
     explicit_template: bool
+    qualified: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1020,6 +1104,61 @@ def _contract_contains_dispatch(
     return None
 
 
+def _index_is_reachable(
+    tokens: Sequence[Token],
+    function: Function,
+    index: int,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> bool:
+    def return_ends_before(return_index: int) -> bool:
+        depth = 0
+        for cursor in range(return_index + 1, index):
+            value = tokens[cursor].value
+            if value in {"(", "[", "{"}:
+                depth += 1
+            elif value in {")", "]", "}"}:
+                depth = max(0, depth - 1)
+            elif value == ";" and depth == 0:
+                return True
+        return False
+
+    if _is_inside(index, lambda_ranges):
+        return False
+    if any(
+        region.definitely_inactive and region.start <= index <= region.end
+        for region in regions
+    ):
+        return False
+    return not any(
+        return_index < index
+        and return_ends_before(return_index)
+        and not _is_inside(return_index, lambda_ranges)
+        and _context_dominates(
+            _context(return_index, regions), _context(index, regions)
+        )
+        for return_index in range(function.body_open + 1, index)
+        if tokens[return_index].value == "return"
+    )
+
+
+def _active_contract_sequence_indices(
+    tokens: Sequence[Token],
+    function: Function,
+    sequence: Sequence[str],
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> list[int]:
+    size = len(sequence)
+    return [
+        index
+        for index in range(function.body_open + 1, function.body_close - size + 1)
+        if tuple(token.value for token in tokens[index : index + size])
+        == tuple(sequence)
+        and _index_is_reachable(tokens, function, index, regions, lambda_ranges)
+    ]
+
+
 def _active_contract_sequence(
     tokens: Sequence[Token],
     function: Function,
@@ -1027,31 +1166,39 @@ def _active_contract_sequence(
     regions: Sequence[_Region],
     lambda_ranges: Sequence[tuple[int, int]],
 ) -> bool:
-    size = len(sequence)
-    for index in range(function.body_open + 1, function.body_close - size + 1):
-        if tuple(token.value for token in tokens[index : index + size]) != tuple(
-            sequence
-        ):
-            continue
-        if _is_inside(index, lambda_ranges):
-            continue
-        if any(
-            region.definitely_inactive and region.start <= index <= region.end
-            for region in regions
-        ):
-            continue
-        if any(
-            return_index < index
-            and not _is_inside(return_index, lambda_ranges)
-            and _context_dominates(
-                _context(return_index, regions), _context(index, regions)
-            )
-            for return_index in range(function.body_open + 1, index)
-            if tokens[return_index].value == "return"
-        ):
-            continue
+    return bool(
+        _active_contract_sequence_indices(
+            tokens, function, sequence, regions, lambda_ranges
+        )
+    )
+
+
+def _return_is_explicit_failure(
+    function: Function, expression: Sequence[Token]
+) -> bool:
+    values = [token.value for token in expression]
+    if values and values[0] in FAILURE_STATUSES | {"pgaccel_kernel_failure"}:
         return True
-    return False
+    return not function.is_status and values in (["nullptr"], ["NULL"], ["0"])
+
+
+def _contract_success_terminals(
+    tokens: Sequence[Token],
+    function: Function,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> list[int]:
+    terminals = [
+        index
+        for index, expression in _returns(tokens, function, lambda_ranges)
+        if not _return_is_explicit_failure(function, expression)
+        and _index_is_reachable(tokens, function, index, regions, lambda_ranges)
+    ]
+    if function.return_spelling == "void" and _index_is_reachable(
+        tokens, function, function.body_close, regions, lambda_ranges
+    ):
+        terminals.append(function.body_close)
+    return terminals
 
 
 def _lifecycle_proof(
@@ -1061,6 +1208,8 @@ def _lifecycle_proof(
     lambda_ranges: Sequence[tuple[int, int]],
     host_writes: Sequence[tuple[int, int, bool]],
     control_lines: Sequence[tuple[str, int]],
+    output_call_hazards: Sequence[str],
+    shadow_lines: Sequence[int],
 ) -> _Proof | None:
     contract = LIFECYCLE_CONTRACTS.get(function.name)
     if contract is None:
@@ -1075,6 +1224,23 @@ def _lifecycle_proof(
             tokens, function, sequence, regions, lambda_ranges
         )
     ]
+    success_terminals = _contract_success_terminals(
+        tokens, function, regions, lambda_ranges
+    )
+    uncovered: list[tuple[tuple[str, ...], int]] = []
+    for sequence in contract.required_sequences:
+        evidence = _active_contract_sequence_indices(
+            tokens, function, sequence, regions, lambda_ranges
+        )
+        for terminal in success_terminals:
+            if not any(
+                index < terminal
+                and _context_dominates(
+                    _context(index, regions), _context(terminal, regions)
+                )
+                for index in evidence
+            ):
+                uncovered.append((sequence, tokens[terminal].line))
     forbidden: list[str] = []
     if not contract.allow_host_loops and set(values) & {"for", "while", "do"}:
         forbidden.append("host loop")
@@ -1091,6 +1257,19 @@ def _lifecycle_proof(
         forbidden.append(
             "ambiguous control flow "
             + ", ".join(f"{kind} at line {line}" for kind, line in control_lines)
+        )
+    forbidden.extend(output_call_hazards)
+    if shadow_lines:
+        forbidden.append(
+            "ABI output identity is shadowed at line(s) "
+            + ", ".join(map(str, shadow_lines))
+        )
+    if uncovered:
+        forbidden.append(
+            "required lifecycle evidence does not dominate success: "
+            + ", ".join(
+                f"{' '.join(sequence)} -> line {line}" for sequence, line in uncovered
+            )
         )
     if missing or forbidden:
         expected = " and ".join(" ".join(sequence) for sequence in missing)
@@ -1111,6 +1290,148 @@ def _lifecycle_proof(
     )
 
 
+def _zero_disjunction_names(
+    condition: Sequence[str], allowed: set[str]
+) -> set[str] | None:
+    compact = [value for value in condition if value not in {"(", ")"}]
+    chunks: list[list[str]] = [[]]
+    for value in compact:
+        if value == "||":
+            chunks.append([])
+        else:
+            chunks[-1].append(value)
+    names: set[str] = set()
+    for chunk in chunks:
+        if len(chunk) != 3 or chunk[1] != "==":
+            return None
+        left, _, right = chunk
+        if left in allowed and right in {"0", "0u", "0U"}:
+            names.add(left)
+        elif right in allowed and left in {"0", "0u", "0U"}:
+            names.add(right)
+        else:
+            return None
+    return names
+
+
+def _fail_only_path_errors(
+    tokens: Sequence[Token],
+    function: Function,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> list[str]:
+    returns = [
+        (index, tuple(token.value for token in expression))
+        for index, expression in _returns(tokens, function, lambda_ranges)
+        if _index_is_reachable(tokens, function, index, regions, lambda_ranges)
+    ]
+    if function.name == "pgaccel_spatial_intersects":
+        parameters, _ = _parameter_names(tokens, function)
+        zero_parameters = _zero_work_parameter_names(tokens, function, parameters)
+        valid_regions = [
+            region
+            for region in regions
+            if region.branch == "true"
+            and _zero_disjunction_names(region.condition, zero_parameters)
+            == {"count_a", "count_b"}
+        ]
+        success = [record for record in returns if record[1] == ("PGACCEL_OK",)]
+        unsupported = [
+            record for record in returns if record[1] == ("PGACCEL_UNSUPPORTED",)
+        ]
+        errors: list[str] = []
+        if not success or any(
+            not any(
+                region.start <= index <= region.end
+                and _context(index, regions) == ((region.key, "true"),)
+                for region in valid_regions
+            )
+            for index, _ in success
+        ):
+            errors.append(
+                "every OK return must be guarded only by exact typed count_a/count_b zero work"
+            )
+        if not unsupported or any(_context(index, regions) for index, _ in unsupported):
+            errors.append(
+                "the nonzero path must end in an unconditional unsupported return"
+            )
+        if (
+            success
+            and unsupported
+            and min(index for index, _ in unsupported)
+            < max(index for index, _ in success)
+        ):
+            errors.append("unsupported fallback precedes the zero-work success")
+        other_success = [
+            index
+            for index, expression in returns
+            if expression not in {("PGACCEL_OK",), ("PGACCEL_UNSUPPORTED",)}
+            and not (
+                expression
+                and expression[0] in FAILURE_STATUSES | {"pgaccel_kernel_failure"}
+            )
+        ]
+        if other_success:
+            errors.append("contains an unclassified success return")
+        return errors
+
+    if function.name == "pgaccel_spatial_eval_resident_ex":
+        guard_condition = ("request", "->", "count", "!=", "0")
+        guards = [
+            region
+            for region in regions
+            if region.branch == "true"
+            and tuple(value for value in region.condition if value not in {"(", ")"})
+            == guard_condition
+        ]
+        unsupported = [
+            (index, expression)
+            for index, expression in returns
+            if expression == ("PGACCEL_UNSUPPORTED",)
+        ]
+        validator_expression = (
+            "resident_validate_request_contract",
+            "(",
+            "request",
+            ",",
+            "detail",
+            ")",
+        )
+        validators = [
+            (index, expression)
+            for index, expression in returns
+            if expression == validator_expression
+        ]
+        errors = []
+        if not unsupported or any(
+            not any(region.start <= index <= region.end for region in guards)
+            for index, _ in unsupported
+        ):
+            errors.append("nonempty request work is not guarded by unsupported")
+        if (
+            len(validators) != 1
+            or _context(validators[0][0], regions)
+            or (
+                unsupported
+                and validators[0][0] < max(index for index, _ in unsupported)
+            )
+        ):
+            errors.append("zero-row validation is not the unconditional final path")
+        other_success = [
+            index
+            for index, expression in returns
+            if expression != validator_expression
+            and not (
+                expression
+                and expression[0] in FAILURE_STATUSES | {"pgaccel_kernel_failure"}
+            )
+        ]
+        if other_success:
+            errors.append("contains a success outside the zero-row validator")
+        return errors
+    return ["unknown failure-only contract path model"]
+
+
 def _fail_only_contract_proof(
     tokens: Sequence[Token],
     function: Function,
@@ -1118,6 +1439,8 @@ def _fail_only_contract_proof(
     lambda_ranges: Sequence[tuple[int, int]],
     host_writes: Sequence[tuple[int, int, bool]],
     control_lines: Sequence[tuple[str, int]],
+    output_call_hazards: Sequence[str],
+    shadow_lines: Sequence[int],
 ) -> _Proof | None:
     contract = FAIL_ONLY_CONTRACTS.get(function.name)
     if contract is None:
@@ -1132,6 +1455,7 @@ def _fail_only_contract_proof(
             tokens, function, sequence, regions, lambda_ranges
         )
     ]
+    path_errors = _fail_only_path_errors(tokens, function, regions, lambda_ranges)
     forbidden: list[str] = []
     if set(values) & {"for", "while", "do"}:
         forbidden.append("host loop")
@@ -1149,6 +1473,13 @@ def _fail_only_contract_proof(
         forbidden.append(
             "ambiguous control flow "
             + ", ".join(f"{kind} at line {line}" for kind, line in control_lines)
+        )
+    forbidden.extend(path_errors)
+    forbidden.extend(output_call_hazards)
+    if shadow_lines:
+        forbidden.append(
+            "ABI output identity is shadowed at line(s) "
+            + ", ".join(map(str, shadow_lines))
         )
     if missing or forbidden:
         details: list[str] = []
@@ -1178,6 +1509,7 @@ class _Region:
     end: int
     zero_work: bool = False
     definitely_inactive: bool = False
+    condition: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1261,7 +1593,7 @@ def _regions(
     tokens: Sequence[Token],
     function: Function,
     forward: dict[int, int],
-    parameters: set[str],
+    zero_parameters: set[str],
 ) -> list[_Region]:
     regions: list[_Region] = []
     serial = 0
@@ -1287,12 +1619,13 @@ def _regions(
             true_condition = condition in (["true"], ["1"])
             regions.append(
                 _Region(
-                    key,
-                    "true",
-                    start,
-                    end,
-                    _condition_is_zero(condition, parameters),
-                    false_condition,
+                    key=key,
+                    branch="true",
+                    start=start,
+                    end=end,
+                    zero_work=_condition_is_zero(condition, zero_parameters),
+                    definitely_inactive=false_condition,
+                    condition=tuple(condition),
                 )
             )
             if after < function.body_close and tokens[after].value == "else":
@@ -1301,12 +1634,12 @@ def _regions(
                 )
                 regions.append(
                     _Region(
-                        key,
-                        "false",
-                        false_start,
-                        false_end,
-                        False,
-                        true_condition,
+                        key=key,
+                        branch="false",
+                        start=false_start,
+                        end=false_end,
+                        definitely_inactive=true_condition,
+                        condition=tuple(condition),
                     )
                 )
         elif tokens[cursor].value == "catch":
@@ -1408,6 +1741,79 @@ def _parameter_names(
         if ("*" in before_name or "&" in before_name) and "const" not in before_name:
             mutable.add(name)
     return parameters, mutable
+
+
+def _parameter_ranges(
+    tokens: Sequence[Token], function: Function
+) -> list[tuple[int, int]]:
+    forward, _ = _delimiter_pairs(tokens)
+    ranges: list[tuple[int, int]] = []
+    segment_start = function.lparen + 1
+    cursor = segment_start
+    while cursor < function.rparen:
+        if tokens[cursor].value in {"(", "[", "{"} and cursor in forward:
+            cursor = forward[cursor] + 1
+            continue
+        if tokens[cursor].value == ",":
+            ranges.append((segment_start, cursor))
+            segment_start = cursor + 1
+        cursor += 1
+    ranges.append((segment_start, function.rparen))
+    return ranges
+
+
+def _zero_work_parameter_names(
+    tokens: Sequence[Token], function: Function, parameters: set[str]
+) -> set[str]:
+    """Return explicitly numeric ABI parameters whose names denote work counts."""
+
+    numeric_types = {
+        "size_t",
+        "ptrdiff_t",
+        "char",
+        "short",
+        "int",
+        "long",
+        "unsigned",
+        "uint8_t",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "int8_t",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+    }
+
+    def count_name(name: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"(?:n|count|size|length|rows|cols|bytes|num_.+|n_.+|"
+                r"count_.+|.+_(?:count|size|length|rows|cols|bytes))",
+                name,
+            )
+        )
+
+    result: set[str] = set()
+    for left, right in _parameter_ranges(tokens, function):
+        values = [token.value for token in tokens[left:right]]
+        names = [
+            token.value
+            for token in tokens[left:right]
+            if token.kind == "identifier" and token.value in parameters
+        ]
+        if not names:
+            continue
+        name = names[-1]
+        name_index = max(index for index, value in enumerate(values) if value == name)
+        declared_type = values[:name_index]
+        if (
+            count_name(name)
+            and not ({"*", "&", "&&", "bool"} & set(declared_type))
+            and numeric_types.intersection(declared_type)
+        ):
+            result.add(name)
+    return result
 
 
 def _scope_for(index: int, brace_ranges: Sequence[tuple[int, int]]) -> tuple[int, int]:
@@ -1522,7 +1928,16 @@ def _kernel_lambda(
             cursor = reverse[cursor] - 1
         if cursor >= left and tokens[cursor].value == "]":
             candidates.append((index, forward[index]))
-    return candidates[-1] if candidates else None
+    outermost = [
+        candidate
+        for candidate in candidates
+        if not any(
+            other[0] < candidate[0] < candidate[1] < other[1]
+            for other in candidates
+            if other != candidate
+        )
+    ]
+    return outermost[-1] if outermost else None
 
 
 def _handler_lambda(
@@ -1548,9 +1963,20 @@ def _lambda_contributes(
     tokens: Sequence[Token], bounds: tuple[int, int], mutable: set[str]
 ) -> bool:
     left, right = bounds
-    forward, _ = _delimiter_pairs(tokens)
+    forward, reverse = _delimiter_pairs(tokens)
+    nested = []
+    for brace in range(left + 1, right):
+        if tokens[brace].value != "{" or brace not in forward:
+            continue
+        cursor = brace - 1
+        if cursor >= 0 and tokens[cursor].value == ")" and cursor in reverse:
+            cursor = reverse[cursor] - 1
+        if cursor > left and tokens[cursor].value == "]":
+            nested.append((brace, forward[brace]))
     return any(
         tokens[index].value in mutable
+        and _unqualified_output_identifier(tokens, index)
+        and not _is_inside(index, nested)
         and _output_write_operator(tokens, index, right, forward) is not None
         for index in range(left + 1, right)
     )
@@ -1717,8 +2143,9 @@ def _indexed_calls(
             and tokens[index - 2].value in DISPATCH_METHODS
         ):
             continue
-        if index > 0 and tokens[index - 1].value in {".", "->", "::"}:
+        if index > 0 and tokens[index - 1].value in {".", "->"}:
             continue
+        qualified = index > 0 and tokens[index - 1].value == "::"
         cursor = index + 1
         explicit = False
         if cursor < function.body_close and tokens[cursor].value == "<":
@@ -1740,13 +2167,26 @@ def _indexed_calls(
         ):
             continue
         close = forward[cursor]
+        call_name = token.value
+        if qualified:
+            components = [token.value]
+            qualifier = index - 2
+            while qualifier >= function.body_open:
+                if tokens[qualifier].kind != "identifier":
+                    break
+                components.append(tokens[qualifier].value)
+                if qualifier < 2 or tokens[qualifier - 1].value != "::":
+                    break
+                qualifier -= 2
+            call_name = "::".join(reversed(components))
         result.append(
             _IndexedCall(
                 Call(
-                    token.value,
+                    call_name,
                     token.line,
                     _parameter_count(tokens, cursor, close),
                     explicit,
+                    qualified,
                 ),
                 index,
                 cursor,
@@ -1823,6 +2263,19 @@ def _output_write_operator(
     return None
 
 
+def _unqualified_output_identifier(tokens: Sequence[Token], index: int) -> bool:
+    return index == 0 or tokens[index - 1].value not in {".", "->", "::"}
+
+
+def _range_references_output(
+    tokens: Sequence[Token], left: int, right: int, roots: set[str]
+) -> bool:
+    return any(
+        tokens[index].value in roots and _unqualified_output_identifier(tokens, index)
+        for index in range(left, right)
+    )
+
+
 def _neutral_output_write(tokens: Sequence[Token], operator: int, limit: int) -> bool:
     if tokens[operator].value != "=":
         return False
@@ -1866,8 +2319,10 @@ def _output_aliases(
     while changed:
         changed = False
         for occurrence in range(function.body_open + 1, function.body_close):
-            if tokens[occurrence].value not in roots or _is_inside(
-                occurrence, lambda_ranges
+            if (
+                tokens[occurrence].value not in roots
+                or not _unqualified_output_identifier(tokens, occurrence)
+                or _is_inside(occurrence, lambda_ranges)
             ):
                 continue
             statement_start = occurrence - 1
@@ -1919,6 +2374,7 @@ def _host_output_accesses(
     for index in range(function.body_open + 1, function.body_close):
         if (
             tokens[index].value not in roots
+            or not _unqualified_output_identifier(tokens, index)
             or index in alias_declarations
             or _is_inside(index, lambda_ranges)
         ):
@@ -1952,7 +2408,9 @@ def _deferred_output_writes(
     forward, _ = _delimiter_pairs(tokens)
     lines: set[int] = set()
     for index in range(function.body_open + 1, function.body_close):
-        if tokens[index].value not in roots:
+        if tokens[index].value not in roots or not _unqualified_output_identifier(
+            tokens, index
+        ):
             continue
         containing = [
             bounds for bounds in lambda_ranges if bounds[0] < index < bounds[1]
@@ -1989,11 +2447,79 @@ def _unresolved_member_output_calls(
         call = _method_lparen(tokens, method_index, function.body_close, forward)
         if call is None:
             continue
-        receiver = tokens[method_index - 2].value
-        arguments = {token.value for token in tokens[call[0] + 1 : call[1]]}
-        if receiver in roots or roots.intersection(arguments):
+        receiver_index = method_index - 2
+        receiver = tokens[receiver_index].value
+        if (
+            receiver in roots and _unqualified_output_identifier(tokens, receiver_index)
+        ) or _range_references_output(tokens, call[0] + 1, call[1], roots):
             calls.add((tokens[method_index].value, tokens[method_index].line))
     return sorted(calls, key=lambda item: (item[1], item[0]))
+
+
+def _unresolved_indirect_output_calls(
+    tokens: Sequence[Token],
+    function: Function,
+    roots: set[str],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> list[tuple[str, int]]:
+    """Find parenthesized callable expressions such as ``(*fn)(out)``."""
+
+    forward, reverse = _delimiter_pairs(tokens)
+    calls: set[tuple[str, int]] = set()
+    for lparen in range(function.body_open + 1, function.body_close):
+        if (
+            tokens[lparen].value != "("
+            or lparen not in forward
+            or lparen == 0
+            or tokens[lparen - 1].value != ")"
+            or lparen - 1 not in reverse
+            or _is_inside(lparen, lambda_ranges)
+        ):
+            continue
+        callable_open = reverse[lparen - 1]
+        if callable_open < function.body_open:
+            continue
+        close = forward[lparen]
+        if not _range_references_output(tokens, lparen + 1, close, roots):
+            continue
+        callable_tokens = tokens[callable_open + 1 : lparen - 1]
+        identifiers = [
+            token.value for token in callable_tokens if token.kind == "identifier"
+        ]
+        name = identifiers[-1] if identifiers else "<indirect>"
+        calls.add((name, tokens[lparen].line))
+    return sorted(calls, key=lambda item: (item[1], item[0]))
+
+
+def _output_shadow_lines(
+    tokens: Sequence[Token], function: Function, mutable: set[str]
+) -> list[int]:
+    """Fail closed when a local declaration shadows an ABI output parameter."""
+
+    _, reverse = _delimiter_pairs(tokens)
+    lines: set[int] = set()
+    for index in range(function.body_open + 1, function.body_close):
+        if tokens[index].value not in mutable:
+            continue
+        if (
+            index >= 2
+            and tokens[index - 2].value == "("
+            and tokens[index - 1].value == "void"
+            and index + 1 < function.body_close
+            and tokens[index + 1].value == ")"
+        ):
+            continue
+        if (
+            index > 0
+            and tokens[index - 1].value == ")"
+            and index - 1 in reverse
+            and [token.value for token in tokens[reverse[index - 1] + 1 : index - 1]]
+            == ["void"]
+        ):
+            continue
+        if _declaration_kind(tokens, index, function) is not None:
+            lines.add(tokens[index].line)
+    return sorted(lines)
 
 
 def _bounded_detail(parts: Iterable[str], limit: int = 6000) -> str:
@@ -2021,6 +2547,8 @@ class _PathAuditor:
         self.cache: dict[Function, _Proof] = {}
 
     def resolve(self, call: Call) -> tuple[Function | None, str | None]:
+        if call.qualified:
+            return None, "qualified_helper"
         candidates = list(self.by_name.get(call.name, ()))
         if call.explicit_template:
             templates = [candidate for candidate in candidates if candidate.is_template]
@@ -2053,11 +2581,48 @@ class _PathAuditor:
             self.tokens, function, self.forward, self.reverse
         )
         parameters, mutable = _parameter_names(self.tokens, function)
-        regions = _regions(self.tokens, function, self.forward, parameters)
+        zero_parameters = _zero_work_parameter_names(self.tokens, function, parameters)
+        regions = _regions(self.tokens, function, self.forward, zero_parameters)
         host_writes, transfer_lines, aliases = _host_output_accesses(
             self.tokens, function, mutable, lambda_ranges
         )
         output_roots = mutable | aliases
+        shadow_lines = _output_shadow_lines(self.tokens, function, mutable)
+        calls = _indexed_calls(self.tokens, function, lambda_ranges)
+        member_output_calls = _unresolved_member_output_calls(
+            self.tokens, function, output_roots, lambda_ranges
+        )
+        indirect_output_calls = _unresolved_indirect_output_calls(
+            self.tokens, function, output_roots, lambda_ranges
+        )
+        contract = LIFECYCLE_CONTRACTS.get(function.name) or FAIL_ONLY_CONTRACTS.get(
+            function.name
+        )
+        allowed_contract_calls = (
+            {
+                sequence[-2]
+                for sequence in contract.required_sequences
+                if len(sequence) >= 2 and sequence[-1] == "("
+            }
+            if contract is not None
+            else set()
+        )
+        contract_output_call_hazards = [
+            f"unresolved output method {name} at line {line}"
+            for name, line in member_output_calls
+        ]
+        contract_output_call_hazards.extend(
+            f"unresolved indirect output call {name} at line {line}"
+            for name, line in indirect_output_calls
+        )
+        contract_output_call_hazards.extend(
+            f"unapproved output call {indexed.call.name} at line {indexed.call.line}"
+            for indexed in calls
+            if indexed.call.name.rsplit("::", 1)[-1] not in allowed_contract_calls
+            and _range_references_output(
+                self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
+            )
+        )
         control_lines = sorted(
             (
                 (token.value, token.line)
@@ -2076,6 +2641,8 @@ class _PathAuditor:
             lambda_ranges,
             host_writes,
             control_lines,
+            contract_output_call_hazards,
+            shadow_lines,
         )
         if lifecycle is not None:
             self.cache[function] = lifecycle
@@ -2087,6 +2654,8 @@ class _PathAuditor:
             lambda_ranges,
             host_writes,
             control_lines,
+            contract_output_call_hazards,
+            shadow_lines,
         )
         if fail_contract is not None:
             self.cache[function] = fail_contract
@@ -2102,10 +2671,6 @@ class _PathAuditor:
             lambda_ranges,
             device_lambdas,
         )
-        member_output_calls = _unresolved_member_output_calls(
-            self.tokens, function, output_roots, lambda_ranges
-        )
-        calls = _indexed_calls(self.tokens, function, lambda_ranges)
         classifications: set[str] = set()
         details: list[str] = []
         if direct:
@@ -2184,6 +2749,13 @@ class _PathAuditor:
             classifications.add("output_alias_tracking")
             details.append("ABI output alias(es): " + ", ".join(sorted(aliases)))
 
+        if shadow_lines:
+            classifications.update({"output_identity_shadowing", "review_required"})
+            details.append(
+                "local declaration shadows ABI output at line(s) "
+                + ", ".join(map(str, shadow_lines))
+            )
+
         if control_lines:
             classifications.update({"ambiguous_control_flow", "review_required"})
             details.append(
@@ -2204,8 +2776,14 @@ class _PathAuditor:
             f"unresolved output method {name} at line {line} may finalize or overwrite the ABI result"
             for name, line in member_output_calls
         ]
-        if member_output_calls:
+        unsafe_contributing_helpers.extend(
+            f"unresolved indirect output call {name} at line {line} may finalize or overwrite the ABI result"
+            for name, line in indirect_output_calls
+        )
+        if member_output_calls or indirect_output_calls:
             classifications.update({"unresolved_output_helper", "review_required"})
+        if indirect_output_calls:
+            classifications.add("unresolved_indirect_output_call")
         call_proofs: dict[int, tuple[_IndexedCall, _Proof | None, str | None]] = {}
         for indexed in calls:
             candidate, error = self.resolve(indexed.call)
@@ -2218,7 +2796,9 @@ class _PathAuditor:
             if (
                 proof is not None
                 and "large_input_gpu_chain" in proof.classifications
-                and output_roots.intersection(indexed.argument_values)
+                and _range_references_output(
+                    self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
+                )
             ):
                 classifications.add("large_input_gpu_chain")
                 details.append(
@@ -2229,7 +2809,9 @@ class _PathAuditor:
             if (
                 proof is not None
                 and not proof.ok
-                and output_roots.intersection(indexed.argument_values)
+                and _range_references_output(
+                    self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
+                )
             ):
                 classifications.update(proof.classifications)
                 unsafe_contributing_helpers.append(
@@ -2239,7 +2821,9 @@ class _PathAuditor:
             if (
                 proof is not None
                 and proof.ok
-                and output_roots.intersection(indexed.argument_values)
+                and _range_references_output(
+                    self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
+                )
             ):
                 call_evidence.append(
                     _DispatchEvidence(
@@ -2250,7 +2834,9 @@ class _PathAuditor:
                         _context(indexed.index, regions),
                     )
                 )
-            if proof is None and output_roots.intersection(indexed.argument_values):
+            if proof is None and _range_references_output(
+                self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
+            ):
                 classifications.update(
                     {
                         error or "unresolved_helper",
@@ -2349,6 +2935,8 @@ class _PathAuditor:
             or rejected
             or deferred_write_lines
             or member_output_calls
+            or indirect_output_calls
+            or shadow_lines
             or unsafe_contributing_helpers
         )
         if (
@@ -2384,6 +2972,7 @@ class _PathAuditor:
             or unsafe_contributing_helpers
             or control_lines
             or deferred_write_lines
+            or shadow_lines
             or "template_specialization_review" in classifications
         )
         if hard_failure:
@@ -2417,7 +3006,7 @@ class _PathAuditor:
         return proof
 
 
-def audit_source(
+def _audit_source_literal(
     path: pathlib.Path, source: str, *, require_entrypoint: bool = True
 ) -> FileAudit:
     try:
@@ -2545,6 +3134,151 @@ def audit_source(
         status_entrypoints=sum(entrypoint.is_status for entrypoint in entrypoints),
         non_status_entrypoints=sum(
             not entrypoint.is_status for entrypoint in entrypoints
+        ),
+    )
+
+
+def audit_source(
+    path: pathlib.Path, source: str, *, require_entrypoint: bool = True
+) -> FileAudit:
+    """Audit both literal and compiler-expanded main-file source views."""
+
+    literal = _audit_source_literal(path, source, require_entrypoint=require_entrypoint)
+    try:
+        _, directives = normalize_preprocessor(source)
+    except ParseError:
+        return literal
+    if not any(
+        _directive_parts(directive)[0] in {"define", "include"}
+        for directive in directives
+    ):
+        return literal
+    try:
+        expanded_source = _compiler_preprocess_source(path, source)
+        expanded = _audit_source_literal(
+            path, expanded_source, require_entrypoint=require_entrypoint
+        )
+    except ParseError as error:
+        detail = str(error)
+        entrypoint_audits = tuple(
+            dataclasses.replace(
+                entry,
+                ok=False,
+                classifications=tuple(
+                    sorted(
+                        set(entry.classifications)
+                        | {"preprocessor_expansion_error", "review_required"}
+                    )
+                ),
+                detail=_bounded_detail((entry.detail, detail)),
+            )
+            for entry in literal.entrypoint_audits
+        )
+        findings = list(literal.findings)
+        findings.extend(
+            Finding(
+                path,
+                entry.line,
+                entry.entrypoint,
+                entry.detail,
+                entry.classifications,
+            )
+            for entry in entrypoint_audits
+            if entry.ok is False
+            and not any(
+                finding.entrypoint == entry.entrypoint for finding in literal.findings
+            )
+        )
+        findings.append(
+            Finding(
+                path,
+                1,
+                "<preprocessor-expansion>",
+                detail,
+                ("preprocessor_expansion_error", "review_required"),
+            )
+        )
+        return dataclasses.replace(
+            literal,
+            entrypoint_audits=entrypoint_audits,
+            findings=tuple(findings),
+            lifecycle_contracts=0,
+        )
+
+    expanded_by_name = {entry.entrypoint: entry for entry in expanded.entrypoint_audits}
+    merged_entries: list[EntrypointAudit] = []
+    findings = list(literal.findings)
+    literal_failed = {finding.entrypoint for finding in literal.findings}
+    for entry in literal.entrypoint_audits:
+        expanded_entry = expanded_by_name.get(entry.entrypoint)
+        if expanded_entry is None:
+            merged = dataclasses.replace(
+                entry,
+                ok=False,
+                classifications=tuple(
+                    sorted(
+                        set(entry.classifications)
+                        | {"preprocessor_expansion_mismatch", "review_required"}
+                    )
+                ),
+                detail=_bounded_detail(
+                    (
+                        entry.detail,
+                        "compiler-expanded source omitted this literal export",
+                    )
+                ),
+            )
+        elif expanded_entry.ok:
+            merged = entry
+        else:
+            merged = dataclasses.replace(
+                entry,
+                ok=False,
+                classifications=tuple(
+                    sorted(
+                        set(entry.classifications)
+                        | set(expanded_entry.classifications)
+                        | {"macro_expanded_body", "review_required"}
+                    )
+                ),
+                detail=_bounded_detail(
+                    (
+                        entry.detail,
+                        "compiler-expanded body: " + expanded_entry.detail,
+                    )
+                ),
+            )
+        merged_entries.append(merged)
+        if not merged.ok and merged.entrypoint not in literal_failed:
+            findings.append(
+                Finding(
+                    path,
+                    merged.line,
+                    merged.entrypoint,
+                    merged.detail,
+                    merged.classifications,
+                )
+            )
+    literal_names = {entry.entrypoint for entry in literal.entrypoint_audits}
+    for entry in expanded.entrypoint_audits:
+        if entry.entrypoint in literal_names:
+            continue
+        findings.append(
+            Finding(
+                path,
+                entry.line,
+                entry.entrypoint,
+                "compiler expansion introduced an export absent from literal inventory",
+                ("macro_hidden_export", "preprocessor_expansion_mismatch"),
+            )
+        )
+    return dataclasses.replace(
+        literal,
+        entrypoint_audits=tuple(merged_entries),
+        findings=tuple(findings),
+        lifecycle_contracts=sum(
+            entry.ok and "lifecycle" in entry.classifications
+            for entry in merged_entries
         ),
     )
 
