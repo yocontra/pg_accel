@@ -4874,6 +4874,7 @@ class _PathAuditor:
             key=lambda item: item.index,
         )
         success_paths = 0
+        zero_success_paths = 0
         unsafe_success: list[str] = []
         returns = _returns(self.tokens, function, lambda_ranges)
         for return_index, expression in returns:
@@ -4912,6 +4913,7 @@ class _PathAuditor:
                 )
             ):
                 classifications.add("zero_work")
+                zero_success_paths += 1
                 continue
 
             returned_call = next(
@@ -4956,7 +4958,7 @@ class _PathAuditor:
 
         failure_only_hazards = bool(
             host_loop_lines
-            or host_writes
+            or unsafe_write_records
             or transfer_lines
             or counter_lines
             or control_lines
@@ -4970,13 +4972,23 @@ class _PathAuditor:
         if (
             function.is_status
             and returns
-            and success_paths == 0
+            and (success_paths == 0 or success_paths == zero_success_paths)
             and not failure_only_hazards
         ):
+            detail = (
+                "all reachable returns are explicit failure statuses"
+                if success_paths == 0
+                else "successful returns are exact zero-work paths; all nonempty paths fail explicitly"
+            )
             proof = _Proof(
                 True,
-                "all reachable returns are explicit failure statuses",
-                ("failure_only",),
+                detail,
+                tuple(
+                    sorted(
+                        {"failure_only"}
+                        | ({"zero_work"} if zero_success_paths else set())
+                    )
+                ),
             )
             self.cache[function] = proof
             return proof

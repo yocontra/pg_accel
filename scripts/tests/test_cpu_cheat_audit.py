@@ -1395,6 +1395,39 @@ class HostComputationAndContractTests(unittest.TestCase):
         self.assertFalse(result.findings)
         self.assertEqual(result.entrypoint_audits[0].classifications, ("failure_only",))
 
+    def test_zero_work_only_success_with_nonempty_failure_passes(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_zero_only(
+                const int* data, size_t count, int* out) {
+              if (count == 0) {
+                if (out != nullptr) *out = 0;
+                return PGACCEL_OK;
+              }
+              if (data == nullptr || out == nullptr) return PGACCEL_ERROR;
+              return PGACCEL_UNSUPPORTED;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        entry = result.entrypoint_audits[0]
+        self.assertIn("failure_only", entry.classifications)
+        self.assertIn("zero_work", entry.classifications)
+
+    def test_zero_work_only_contract_rejects_nonempty_host_output(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_zero_only_host(
+                const int* data, size_t count, int* out) {
+              if (count == 0) { *out = 0; return PGACCEL_OK; }
+              *out = data[0];
+              return PGACCEL_UNSUPPORTED;
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_zero_only_host")
+        self.assertIn("host_output_write", finding.classifications)
+
     def test_success_return_prevents_failure_only_classification(self) -> None:
         result = audit_fixture(
             r"""
@@ -2359,18 +2392,27 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
         self.assertEqual(self.abi.compiler["inventory_count"], 167)
+        status_names = sorted(
+            entry.entrypoint for entry in self.by_name.values() if entry.is_status
+        )[:82]
+        # Preserve the original production-name floor as code turns green: a
+        # name-specific/file-specific exemption would bless one of these exact
+        # ABI entrypoints even though its body is replaced by hostile host work.
+        mutant_source = "\n".join(
+            f"""extern "C" pgaccel_status {name}(int* out) {{
+                  *out = 42;
+                  return PGACCEL_OK;
+                }}"""
+            for name in status_names
+        )
+        mutant_audit = audit.audit_source(
+            pathlib.Path("production-name-mutants.cpp"), mutant_source
+        )
         status_failed = sum(
-            entry.is_status and not entry.ok
-            for file_audit in self.audits
-            for entry in file_audit.entrypoint_audits
+            entry.is_status and not entry.ok for entry in mutant_audit.entrypoint_audits
         )
-        non_status_failed = sum(
-            not entry.is_status and not entry.ok
-            for file_audit in self.audits
-            for entry in file_audit.entrypoint_audits
-        )
+        self.assertEqual(len(status_names), 82)
         self.assertGreaterEqual(status_failed, 82)
-        self.assertGreater(non_status_failed, 0)
 
     def test_inventory_hashes_are_deterministic(self) -> None:
         second = audit.audit_abi(
