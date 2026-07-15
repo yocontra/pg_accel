@@ -1,45 +1,46 @@
 # pg_accel
 
-GPU-accelerated query processing for PostgreSQL.
+`pg_accel` is a PostgreSQL Custom Scan extension for GPU-resident query
+execution. The current production planner surface is intentionally narrower
+than the kernel library: it can select a childless resident aggregate plan for
+covered reducing, grouped-aggregate, and star-aggregate SQL shapes. Other
+kernel families remain unavailable to normal planning until they have a
+complete resident pipeline.
 
 [![License: PostgreSQL](https://img.shields.io/badge/license-PostgreSQL-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/pg-accel/pg_accel/ci.yml?label=CI)](https://github.com/pg-accel/pg_accel/actions)
 
-## Installation
+## Build from source
 
-### Release package
+There is no prebuilt-package promise in this repository. A development build
+requires Rust, pgrx, CMake, a C/C++ toolchain, and the pinned AdaptiveCpp
+toolchain used by the repository recipes.
 
-Prebuilt pgrx package artifacts are attached to GitHub releases for supported
-PostgreSQL versions. Install the package that matches your PostgreSQL major
-version, then enable the extension as shown below.
-
-### From source
+The currently validated GPU development target is Metal on Apple Silicon:
 
 ```bash
-# Requires Rust, CMake, a C/C++ toolchain, and curl.
 just setup-system-deps
 just setup-tools
 just setup-pg-source 18
-ACPP_BACKEND=cuda just setup-gpu      # Linux/NVIDIA
-# or: ACPP_BACKEND=metal just setup-gpu # Apple Silicon/macOS
+ACPP_BACKEND=metal just setup-gpu-metal-headers
+ACPP_BACKEND=metal LLVM_PREFIX=/path/to/llvm ACPP_LLD_PATH=/path/to/ld64.lld just setup-gpu
 just setup-pgrx
 cargo pgrx install --no-default-features --features pg18
 ```
 
-PostgreSQL is built from official source tarballs into `.pgaccel/postgres`.
-The default supported extension target is PG18. Override source versions with
-`PG_ACCEL_PG18_VERSION=18.4`, `PG_ACCEL_PG19_VERSION=19beta1`, or pass an exact
-version to `just pg-build 18.4`. PG19 remains beta, but it is a required
-extension build and release-matrix target; supported-major commands fail if its
-pgrx feature or configured `pg_config` is unavailable.
+PostgreSQL 18 is the default extension target. PostgreSQL 19 beta is also a
+build/test target, not a package-availability claim. A build without a usable
+GPU can load the extension, but the planner keeps queries on PostgreSQL-native
+plans. CUDA/NVIDIA validation is owner-deferred in [TODO.md](TODO.md); this
+document makes no support claim for it.
 
-After installation, add to `postgresql.conf`:
+Add the extension to `postgresql.conf`:
 
-```
+```conf
 shared_preload_libraries = 'pg_accel'
 ```
 
-Restart PostgreSQL, then:
+Restart PostgreSQL and create the extension in the target database:
 
 ```sql
 CREATE EXTENSION pg_accel;
@@ -47,352 +48,205 @@ CREATE EXTENSION pg_accel;
 
 ## Quick start
 
+This example uses the same resident grouped-aggregate shape asserted by the
+extension test suite at
+`pg_accel/src/tests/mod.rs:569-626`.
+
 ```sql
--- Load PostGIS data
-CREATE TABLE buildings (
-    id serial PRIMARY KEY,
-    name text,
-    geom geometry(Polygon, 4326)
-);
-INSERT INTO buildings (name, geom) VALUES
-    ('HQ', ST_GeomFromText('POLYGON((-73.99 40.73, -73.99 40.74, -73.98 40.74, -73.98 40.73, -73.99 40.73))', 4326));
+CREATE TABLE pg_accel_quickstart AS
+SELECT (i % 64)::int4 AS g, (i % 1000)::int4 AS v
+FROM generate_series(1, 500000) AS i;
 
-CREATE TABLE sensors (
-    id serial PRIMARY KEY,
-    location geometry(Point, 4326)
-);
-INSERT INTO sensors (location)
-SELECT ST_SetSRID(ST_MakePoint(-74.0 + random()*0.1, 40.7 + random()*0.1), 4326)
-FROM generate_series(1, 100000);
+ANALYZE pg_accel_quickstart;
 
--- This query is automatically accelerated by pg_accel
-SELECT b.name, count(*)
-FROM sensors s
-JOIN buildings b ON ST_Contains(b.geom, s.location)
-GROUP BY b.name;
+-- Load and pin only the columns required by the selected plan.
+SELECT pg_accel_pin('pg_accel_quickstart', ARRAY['g', 'v']);
 
--- Verify acceleration is active
-EXPLAIN (COSTS OFF)
-SELECT b.name, count(*)
-FROM sensors s
-JOIN buildings b ON ST_Contains(b.geom, s.location)
-GROUP BY b.name;
--- Look for "Custom Scan (pg_accel)" nodes in the plan
+SET pg_accel.enabled = on;
+SET pg_accel.gpu_enabled = on;
+SET pg_accel.auto_load = off;
+
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT g, sum(v), count(*)
+FROM pg_accel_quickstart
+GROUP BY g
+ORDER BY g;
 ```
 
-## Requirements
+On a capable configured device, a selected plan contains this exact node and
+evidence (additional descriptor and residency properties are expected):
 
-| Requirement | Version | Notes |
-|---|---|---|
-| PostgreSQL | 18 supported; 19beta1 supported as beta | Both majors are required extension build and release targets |
-| Rust | 1.96.0+ | Required by pgrx 0.19.1 |
-| cmake | 3.20+ | For GPU kernel build |
-| Apple Silicon or NVIDIA CUDA | M1+ for Metal, NVIDIA GPU for CUDA | Runtime GPU backend |
-| AdaptiveCpp | `yocontra/AdaptiveCpp` `fork-safe-metal` @ `456ae6910720810f5fe59f160e6707d46bb8e5f0` | Required for source/package builds |
-
-Source and package builds compile the SYCL kernel library unconditionally.
-Runtime GPU acceleration requires an AdaptiveCpp backend visible to the native
-PostgreSQL process: Metal on macOS or CUDA on Linux/NVIDIA.
-
-## Benchmarks
-
-All benchmarks compare pg_accel against PostgreSQL parallel query. We do not
-publish single-threaded PostgreSQL comparisons.
-
-Latest local full-suite run: `benchmarks/artifacts/full-suite-20260702-095915`
-on PostgreSQL 18.4, Apple M2 Max, macOS 26.4.1. The harness used 10 measured
-iterations plus 5 warmups, warm-cache raw wall-clock timing, randomized
-accel/baseline ordering, deterministic seed 42, and correctness diff artifacts
-for every measured row. The generated full report is checked into
-`benchmarks/README.md`.
-
-### Current headline
-
-| Metric | Result |
-|---|---:|
-| Total measured rows | 450 |
-| GPU-dispatched Custom Scan rows | 153 |
-| Planner-declined/native rows | 297 |
-| Benchmark crashes | 0 |
-| Stock executor fallbacks inside pg_accel | 0 |
-| GPU-dispatched geomean | 4.71x |
-| GPU-dispatched geomean excluding H3 | 4.88x |
-| SSBM geomean | 11.52x |
-| GPU hash/grouped aggregate geomean | 2.90x |
-| H3 geomean | 3.49x |
-
-**Evidence-integrity caveat:** the numbers above were produced by an earlier
-version of the benchmark harness with known evidence-integrity issues —
-warm and cold iterations were pooled into a single median/speedup instead of
-being reported separately, and GPU-resident cache preload time was not
-counted or surfaced as its own column. Those issues have since been fixed in
-the harness (warm/cold subsamples are now computed and reported
-independently, and resident-cache preload cost is captured per row). The
-full suite has not yet been re-run against the fixed harness, so treat every
-number on this page as provisional until a re-baselined artifact replaces
-it.
-
-The benchmark command completed the full suite but exited non-zero because the
-release ship gate found 24 failures. In that July 2 artifact, the failures were
-not crashes: they were missed hashjoin GPU selection, missing H3 cache-mode
-evidence or threshold-policy mismatches, and one small-input filtered grouped
-aggregate threshold miss. Targeted July 3-4 artifacts have since remediated the
-count-only resident hashjoin, `gpu_hashjoin_filter`, and `mixed_join_agg` lanes,
-but the full suite still needs to be regenerated before those rows can be
-cleared from the release ledger.
-
-### Strongest current wins
-
-| Workload | Scale | Accel | PG Parallel | Speedup |
-|---|---:|---:|---:|---:|
-| `ssbm_q3_1` | 10M | 6.01 ms | 425.67 ms | 70.80x |
-| `h3_resolution_sweep` | 10M | 20.15 ms | 1340.84 ms | 66.55x |
-| `ssbm_q4_1` | 10M | 3.98 ms | 233.88 ms | 58.74x |
-| `ssbm_q2_1` | 10M | 4.15 ms | 182.19 ms | 43.93x |
-| `ssbm_q1_2` | 10M | 5.55 ms | 188.33 ms | 33.95x |
-| `filtered_grouped_agg` | 10M | 5.12 ms | 78.31 ms | 15.30x |
-| `mixed_join_agg` | 10M | 18.34 ms | 239.22 ms | 13.04x |
-| `dictionary_grouped_agg` | 10M | 26.78 ms | 206.62 ms | 7.72x |
-| `predicate_filter_expression_grouped_agg` | 10M | 25.91 ms | 174.72 ms | 6.74x |
-| `grouped_agg` | 10M | 62.46 ms | 226.15 ms | 3.62x |
-| `h3_cell_to_parent` | 10M | 68.14 ms | 184.34 ms | 2.71x |
-
-### Ship-gate gaps from the July 2 full-suite run
-
-| Area | Representative row | Classification | Speedup | What it means |
-|---|---|---|---:|---|
-| Hash joins | `hash_join` @ 1M | planner declined | 0.96x | Fixed in targeted resident-hashjoin artifacts; awaiting regenerated full-suite proof. |
-| Hashjoin build sweep | `hashjoin_10k_1m` @ 10M | planner declined | 0.98x | Count-only resident path is fixed for canonical winner cells; large-build declines still need full-suite ledger refresh. |
-| Small GPU inputs | `filtered_grouped_agg` @ 10K | GPU dispatched | 0.38x | Launch/setup overhead dominates. |
-| Windows | `window_analytics` @ 10M | planner declined | 0.98x | Needs a generic segmented window path. |
-| Sort/top-k | `large_sort` @ 10M | planner declined | 0.97x | Needs a resident generic sort/top-k path. |
-| Spatial | `spatial_contains` @ 10M | planner declined | 0.97x | Current spatial suite is mostly native parity. |
-| Mixed join/aggregate | `mixed_join_agg` @ 10M | fixed in targeted artifact | 13.04x | Generic resident star groupagg now wins; awaiting regenerated full-suite proof. |
-| Raster | `raster_ndvi` @ 100 | planner declined | 0.99x | Raster remains native/parity in this suite. |
-
-The current architecture story is clear: resident grouped aggregation and
-SSBM-style OLAP queries are strong, H3 has large wins but needs release-grade
-cache evidence, and the next broad work should focus on remaining
-filtered/high-cardinality join-aggregate cases, segmented windows, sort/top-k,
-and spatial/raster pipelines.
-
-Run benchmarks with:
-
-```bash
-just bench                        # default: all scales, 10 iterations
+```text
+Custom Scan (GpuAccelAgg)
+  Strategy: GpuAgg
+  Plan Selected: true
+  GPU Resident Pipeline: true
+  GPU Resident Operator Class: resident_groupagg
+  GPU Kernel Dispatched: true
 ```
 
-**Correctness**: Every accelerated query is verified against PostgreSQL's own
-results (accel ON vs OFF comparison). Spatial predicates use the three-result
-model (TRUE/FALSE/UNCERTAIN); uncertain rows make the accelerator path decline
-or error rather than running a CPU-backed pg_accel plan.
+`GPU Kernel Dispatched` is present only under `EXPLAIN ANALYZE`. The property
+names are emitted by
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:47-138`; the Custom Scan name is
+registered at `pg_accel/src/engine/ffi/custom_scan/mod.rs:254-278`.
 
-## What it does
+To prove the native decline boundary with the same table:
 
-pg_accel intercepts queries that use supported SQL functions (spatial predicates,
-H3 cell operations, raster algebra, sorts, aggregates, hash joins, grouped
-aggregation, window functions, and WHERE clause expressions) and re-executes
-them in batches rather than one row at a time, offloading the heavy compute to
-GPU kernels through AdaptiveCpp/SYCL. The same kernel layer targets Metal on
-Apple Silicon and CUDA on Linux/NVIDIA. The extension installs as a standard
-PostgreSQL Custom Scan Provider -- it does not replace the planner or executor,
-it extends them. Queries that do not benefit from batching are left untouched.
+```sql
+SELECT pg_accel_reset_stats();
 
-## How it works
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT * FROM pg_accel_quickstart WHERE v > 500;
 
-- **Batch-parallel evaluation.** Instead of evaluating expensive predicates row
-  by row, pg_accel accumulates rows into batches and evaluates them in a tight
-  loop (CPU) or a single kernel launch (GPU), amortizing per-row overhead.
+SELECT pg_accel_last_planner_rejection_reason();
+-- no_gpu_resident_pipeline
+```
 
-- **Custom Scan Provider.** pg_accel hooks into the PostgreSQL planner via the
-  Custom Scan interface. It injects alternative scan, join, aggregate, and sort
-  paths when the cost model predicts a net speedup. Unsupported or losing
-  shapes are left with PostgreSQL during planning; selected GPU plans do not
-  run hidden CPU fallbacks inside pg_accel.
+A base scan/filter plan does not contain a pg_accel Custom Scan. The production
+base-relation hook records the decline and leaves the PostgreSQL path intact at
+`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:483-502`.
 
-- **Three-result GPU model.** GPU kernels return `true`, `false`, or `uncertain`
-  for each row. Rows marked `uncertain` (due to floating-point edge cases or
-  precision limits) are rechecked on the CPU using the original PostgreSQL
-  function, ensuring correctness without sacrificing throughput.
+## Capability matrix
 
-## Supported operations
+Kernel or bridge presence is not equivalent to production planner selection.
+The normal upper-path hook injects only the generic aggregate candidate at
+`pg_accel/src/engine/ffi/planner_hooks/mod.rs:204-208`; base scans, row-returning
+joins, windows, and target-list SRFs explicitly remain native.
 
-### GPU-accelerated
+| Capability | Kernel or bridge | Production planner | Current boundary |
+|---|---|---|---|
+| Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. |
+| Resident star join plus aggregate | Present | Selectable | The join is represented inside one childless aggregate descriptor; this is not a row-returning join path. |
+| H3-derived group key inside a resident aggregate | Present | Selectable | Covered `h3_cell_to_parent` and `h3_latlng_to_cell` group expressions can be encoded in the aggregate descriptor. |
+| PostGIS spatial filter inside a resident aggregate | Present | Test-only | The descriptor lane is dark in normal planning and is admitted only by a test GUC. |
+| Standalone PostGIS or H3 function/SRF | Present and some names registered | Not selectable | Function and target-list SRF hooks record `no_gpu_resident_pipeline`. |
+| Base scan, WHERE filter, or projection | Present | Not selectable | The production base-relation hook injects no host-staged CustomPath. |
+| Row-returning hash or inequality join | Present | Not selectable | The production join hook injects no host-staged CustomPath. |
+| Sort or top-k | Present | Not selectable | Sort opportunities remain PostgreSQL-native without a resident producer/consumer path. |
+| Window | Present | Not selectable | The upper-window hook records a resident-pipeline decline. |
+| Raster | Present | Not selectable | Production planning is observation-only; forced admission is test-only. |
 
-| Category | Strategy | Functions |
-|---|---|---|
-| **PostGIS spatial predicates/functions** | GpuSpatial | Currently quarantined from normal registration until planner shape gates can prove exact GPU-only semantics |
-| **H3 cell operations** | GpuH3 | `h3_latlng_to_cell`, `h3_cell_to_parent`, `h3_grid_distance`, `h3_get_resolution` — bulk integer/trig math on GPU |
-| **Sort** | GpuSort | GPU key-value sort with NaN-safe PG semantics, key-index separation (single numeric key: int4, int8, float4, float8) |
-| **Aggregates** | GpuReduce | SUM, MIN, MAX, COUNT via GPU reduction kernels |
-| **Grouped aggregation** | GpuHashAgg | `GROUP BY` with SUM, MIN, MAX, COUNT, AVG — GPU hash table with per-group accumulators |
-| **Hash join** | GpuHashJoin | Equi-join (`ON a.id = b.id`) with open-addressing hash table — int4, int8, float8 keys |
-| **Window functions** | GpuWindow | Running `SUM`/`COUNT` over numeric windows when the planner can supply sorted input |
-| **WHERE expressions** | GpuExpr | Numeric/bool/date/timestamp expressions using template kernels (`col > const`, `BETWEEN`, `IS NULL`, two-col AND) + bytecode interpreter for complex expressions |
-| **Raster** | GpuRaster | Map algebra, raster clip, reclassification |
+The extension adapters currently register these names for OID discovery. This
+table is registry metadata, not a standalone SQL support promise:
 
-### PostGIS GpuSpatial matrix
-
-The PostGIS adapter currently exposes an empty normal-planning allowlist. The
-kernel library still contains spatial kernels, but unsupported or uncertain
-geometry shapes must decline before plan selection or error inside the GPU node;
-pg_accel does not run PostGIS predicate evaluation under an accelerator plan.
-
-| Function | Current GPU exposure |
+| Adapter | Registered functions |
 |---|---|
-| `ST_Intersects`, `ST_Contains`, `ST_Within`, `ST_DWithin`, `ST_Distance`, `ST_Area`, `ST_Length`, topology predicates | Quarantined from normal registration until planner-time shape gates prove exact GPU-only coverage. |
+| PostGIS | `st_intersects` |
+| H3 scalar | `h3_latlng_to_cell` |
+| H3 variable/record output | `h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_cell_to_children`, `h3_cell_to_boundary`, `h3_cells_to_multi_polygon` |
 
-### In development
+The adapter constructors are the source of truth at
+`pg_accel/src/adapters/postgis.rs:14-22` and
+`pg_accel/src/adapters/h3.rs:53-135`.
 
-| Category | Status |
-|---|---|
-| **Projections (GpuExpr)** | Expression compiler can handle projections but not yet wired into SELECT-list evaluation. |
-| **Multi-key sort** | GPU sort supports single numeric key only. Multi-key and text sort are planner-deferred to PostgreSQL. |
-| **Fused operators** | Pipeline fusion (scan→filter→agg in one kernel launch) — planned. |
+**Correctness boundary:** production resident aggregate execution has no CPU
+fallback; an uncertain aggregate result or GPU failure raises an error after
+selection. The non-production spatial descriptor test lane is the one explicit
+exception: it retains exact GSERIALIZED values and rechecks uncertain rows with
+PostGIS on the PostgreSQL backend thread before patching the device mask. See
+`pg_accel/src/engine/executor/agg/output.rs:66-80` and
+`pg_accel/src/engine/executor/agg/spatial.rs:1067-1115`.
 
-## Current limitations
+## Residency
 
-- **Sort**: Single numeric key only (int4, int8, float4, float8). Multi-key sorts are planner-deferred with `sort_multikey_no_gpu_kernel`, IncrementalSort opportunities with `sort_incremental_opportunity`, and text/full-output heap sorts stay with PostgreSQL until real GPU dispatch wins end-to-end.
-- **GPU platform**: Native PostgreSQL process with an AdaptiveCpp backend: Metal
-  on Apple Silicon or CUDA on Linux/NVIDIA. No GPU = no acceleration (queries
-  pass through to PG untouched).
-- **Spatial GPU**: Normal planning currently leaves PostGIS vector predicates and functions to PostgreSQL/PostGIS unless a future shape gate proves exact GPU-only coverage. Uncertain GPU classifications are rejected, not rechecked on CPU inside pg_accel.
-- **BitmapHeapScan + GpuExpr**: Bitmap-prefiltered scalar expression opportunities stay PostgreSQL-native with planner reason `bitmap_heap_gpuexpr_no_gpu_pipeline` until GpuExpr can fuse with GPU-resident scan batches.
-- **Unsupported expression types**: Generic GpuExpr, PreAgg filters/inputs, aggregate grouping, windows, and joins only accept their wired scalar/key types. JSON/JSONB, ARRAY, INTERVAL, DOMAIN, COMPOSITE, and user-defined custom types are planner-policy rejects, not partial GPU support.
-- **NUMERIC aggregates**: Arbitrary-precision `numeric` aggregate families stay on PostgreSQL until pg_accel has PostgreSQL-compatible multi-limb accumulator/comparator lanes. `sum`/`avg` report `shape_numeric_accumulator_unavailable`; unsupported comparator and statistics aggregates report `shape_unsupported_aggregate`.
-- **Aggregate modifiers**: `FILTER`, `DISTINCT`, aggregate-local ordering, and ordered-set aggregates stay PostgreSQL-native with `shape_aggregate_modifier` until a GPU path owns their complete NULL, duplicate, and order semantics.
-- **Hash join**: Equi-join only (single key: int4, int8, float8). Multi-key and non-equi joins use PostgreSQL.
-- **Membership joins**: `EXISTS`, `IN`, and `NOT EXISTS` currently report `no_gpu_resident_pipeline`; NULL-sensitive `NOT IN` reaches the sublink shape gate and reports `shape_sublink`. These lanes do not fall back to row-returning GPU joins.
-- **Parallel hash join**: Partial `GpuHashJoin` can use private per-worker inner builds only for small inner sides. Large-inner partial candidates decline with `hashjoin_parallel_inner_rebuild_too_large` until pg_accel can share or reuse GPU-resident inner hash tables across workers.
-- **Merge join**: Ordered equi-join opportunities are observed but stay PostgreSQL-native with planner reason `mergejoin_no_gpu_kernel` until a GPU merge-join kernel and downstream GPU-resident consumers exist.
-- **Set operations and recursion**: `SetOp` and `RecursiveUnion` stages remain PostgreSQL-native with `setop_no_gpu_kernel` and `recursiveunion_no_gpu_kernel`.
-- **Nested-loop inequalities**: BETWEEN-shaped nested-loop joins remain PostgreSQL-native with `shape_unsupported_predicate` until the executor has GPU-resident inputs, pair output, and downstream consumers.
-- **Grouped aggregation**: Single numeric group key. Multi-key GROUP BY deferred to PostgreSQL.
-- **Window functions**: Reducing/ranking shapes including `ROW_NUMBER`, peer-sensitive `RANK`/`DENSE_RANK`, and running `COUNT`/`SUM`/`AVG` currently remain PostgreSQL-native with `no_gpu_resident_pipeline`. Offset functions (`LAG`, `LEAD`) are also left to PostgreSQL after benchmark gating showed GPU loses on Apple Silicon.
+Residency is backend-local; the byte budget is enforced by a cluster-wide
+ledger. A selected plan can load missing columns when `pg_accel.auto_load` is
+on. Turning it off requires the current backend to have the needed data already
+resident, normally through `pg_accel_pin`.
 
-## GPU acceleration
+| Function | Result | Operation |
+|---|---|---|
+| `pg_accel_pin(regclass, text[] DEFAULT NULL)` | loaded row count | Load the named columns (or all supported columns) and keep the relation pinned against local LRU eviction. |
+| `pg_accel_unpin(regclass)` | boolean | Remove the pin; resident data may remain as evictable cache state. |
+| `pg_accel_refresh(regclass)` | loaded row count | Reload the pinned columns, or the columns already resident for an unpinned relation. |
+| `pg_accel_evict(regclass)` | boolean | Remove this backend's resident entry. |
+| `pg_accel_resident_status()` | set of rows | Show relation OID, attribute numbers, raw/derived bytes, pin state, generation, timestamps, and load time. |
+| `pg_accel_resident_live_bytes()` | bigint | Show the exact cluster-wide resident byte ledger at that instant. |
 
-GPU acceleration requires a native AdaptiveCpp backend visible to PostgreSQL:
-Metal on Apple Silicon or CUDA on Linux/NVIDIA. `just setup-gpu` builds the
-`yocontra/AdaptiveCpp` `fork-safe-metal` branch at
-`456ae6910720810f5fe59f160e6707d46bb8e5f0` into
-`.pgaccel/acpp/<backend>` and pins the soft-fp64 source checkout to `v1.3.0`.
-This release intentionally uses the fork-pinned setup path until the required
-Metal, fork-safety, and soft-fp64 changes are available upstream. The current
-fork is merged with upstream `develop` through `9a912721` and keeps pg_accel's
-Metal soft-fp64/fork-safety patches plus the default-targets JSON escaping fix
-on top.
-
-```bash
-# Linux/NVIDIA
-ACPP_BACKEND=cuda just setup-gpu
-
-# Apple Silicon/macOS
-ACPP_BACKEND=metal just setup-gpu-metal-headers
-ACPP_BACKEND=metal LLVM_PREFIX=/path/to/llvm ACPP_LLD_PATH=/path/to/ld64.lld just setup-gpu
-
-# Verify GPU is available
-./.pgaccel/acpp/current/bin/acpp-info
-
-# Rebuild pg_accel with the current buildable PostgreSQL ABI
-cargo pgrx install --no-default-features --features pg18
-```
-
-Without a usable GPU at runtime, pg_accel's planner hook is a no-op — all
-queries pass through to the stock PostgreSQL executor with zero overhead.
+The SQL wrappers and status tuple are defined at
+`pg_accel/src/engine/residency/store.rs:3352-3427`. Pins do not bypass
+`pg_accel.resident_memory_budget_mb`.
 
 ## Configuration
 
-All parameters live under the `pg_accel.*` namespace.
+The table below is the complete released GUC inventory. `user` means
+`PGC_USERSET`; `superuser` means `PGC_SUSET`. Test-only `pg_accel.test_*`
+settings are intentionally excluded.
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `pg_accel.enabled` | bool | `on` | Planning-time master switch. New pg_accel paths are not added while off; an already-planned Custom Scan fails closed if executed while off. |
-| `pg_accel.min_batch_size` | int | `65536` | Minimum fill target for legacy row-fed Custom Scan batches. Operator-specific device limits and costs decide admission independently. |
-| `pg_accel.gpu_enabled` | bool | `on` | Planning-time GPU-path switch. It does not rewrite an already-planned Custom Scan. |
-| `pg_accel.cost_multiplier` | float | `1.0` | Multiplier for resident generic grouped-aggregate candidate costs. Range 0.1-10.0; other path families use their calibrated costs. |
-| `pg_accel.kernel_timeout_ms` | int | `5000` | Post-call warning threshold for an instrumented synchronous GPU dispatch. Dense resident aggregation checks cancellation and `statement_timeout` between bounded calls; no in-flight call is asynchronously cancelled. |
-| `pg_accel.max_workers_total` | int | `0` | Superuser-settable cluster-wide cap for pg_accel host-thread ledger grants. `0` means unlimited; current executors request no host threads, and PostgreSQL parallel workers are not counted. |
-| `pg_accel.resident_memory_budget_mb` | int | `-1` | Superuser-settable cluster-wide cap for charged residency device bytes, retained exact host values, derived artifacts, and transient storage. `-1` derives the cap from `DeviceLimits`. |
-| `pg_accel.auto_load` | bool | `on` | Allow selected resident plans to load missing columns synchronously. Explicit pins remain authorized while off. |
-| `pg_accel.log_level` | enum | `notice` | Initial per-backend tracing filter, sampled at first Custom Scan execution. Later changes do not rebuild the subscriber; `notice` and `warning` both map to WARN. |
-| `pg_accel.assert_dispatch` | bool | `off` | Reserved no-op compatibility setting. Current benchmark gates verify plan shape and per-backend kernel deltas directly. |
-| `pg_accel.parallel_fused_count` | bool | `off` | Reserved no-op roadmap setting. The crash-gated PG18 parallel fused-count shape remains native. |
-| `pg_accel.otel_log_max_mb` | int | `256` | Per-file trace cap sampled when backend tracing starts; valid `PG_ACCEL_TRACE_FILE_MAX_BYTES` takes precedence. |
-| `pg_accel.otel_log_max_rotations` | int | `4` | Rotated trace files retained, sampled when backend tracing starts; `0` discards rotations. |
-| `pg_accel.fp64_enabled` | bool | `on` | Deprecated no-op compatibility flag. fp64 GPU dispatch is selected by operator support and cost via native fp64 or Metal soft-fp64, not by a user disable switch. |
-| `pg_accel.soft_fp64_cost_multiplier` | float | `32.0` | Extra planner cost multiplier for fp64 work on devices without native fp64. Range 1.0-64.0. |
+| Parameter | Type | Default | Context | Range | Effect |
+|---|---|---|---|---|---|
+| `pg_accel.enabled` | bool | `on` | user | - | Planning master switch. While off, new pg_accel paths are not added; an already-planned Custom Scan fails closed if it reaches execution while off. |
+| `pg_accel.min_batch_size` | int | `65536` | user | `1..16777216` | Fill target only for legacy row-fed Custom Scans. Resident descriptor calls use device-limit chunk caps and independent admission costs. |
+| `pg_accel.gpu_enabled` | bool | `on` | user | - | Planning GPU-path switch. It adds no new GPU path while off and does not rewrite an already-planned path. |
+| `pg_accel.kernel_timeout_ms` | int | `5000` | user | `100..60000` | Millisecond warning threshold measured after a synchronous dispatch returns. Bounded dense aggregation checks interrupts between calls; it does not asynchronously cancel an in-flight call. |
+| `pg_accel.max_workers_total` | int | `0` | superuser | `0..4096` | Cluster host-thread ledger cap; `0` is unlimited. Current executors request no host threads, and PostgreSQL parallel worker processes are not counted. |
+| `pg_accel.resident_memory_budget_mb` | int | `-1` | superuser | `-1..1048576` | Cluster-wide MiB cap for all charged residency bytes. `-1` derives the cap from `DeviceLimits`; pins never bypass it. |
+| `pg_accel.auto_load` | bool | `on` | user | - | Authorizes a selected resident plan to load missing columns synchronously. Explicit pin and reload of an existing pin remain authorized while off. |
+| `pg_accel.cost_multiplier` | float | `1.0` | user | `0.1..10.0` | Cost multiplier only for resident generic aggregate candidates; values above one are more conservative. |
+| `pg_accel.log_level` | enum | `notice` | user | `debug,info,notice,warning,error` | Initial per-backend trace filter, sampled when the first Custom Scan executes. Later changes do not rebuild the subscriber; `notice` and `warning` both map to WARN. |
+| `pg_accel.assert_dispatch` | bool | `off` | user | - | Reserved no-op compatibility setting; it changes neither planning nor execution. |
+| `pg_accel.parallel_fused_count` | bool | `off` | superuser | - | Reserved no-op roadmap setting; the parallel fused-count shape remains native. |
+| `pg_accel.otel_log_max_mb` | int | `256` | user | `1..65536` | Per-file trace cap in MiB, sampled at trace initialization. A valid `PG_ACCEL_TRACE_FILE_MAX_BYTES` environment value takes precedence. |
+| `pg_accel.otel_log_max_rotations` | int | `4` | user | `0..32` | Retained rotated trace files, sampled at trace initialization; `0` discards rotated copies. |
+| `pg_accel.fp64_enabled` | bool | `on` | user | - | Deprecated no-op compatibility flag; it does not disable fp64 planning or execution. |
+| `pg_accel.soft_fp64_cost_multiplier` | float | `32.0` | user | `1.0..64.0` | Extra planner cost for fp64 work when the device lacks native fp64. |
+
+Registration and authoritative descriptions live at
+`pg_accel/src/engine/gucs.rs:105-265` and
+`pg_accel/src/lib.rs:260-283`.
 
 ## Diagnostics
 
+Run diagnostics in the same backend that planned and executed the query because
+most counters and residency entries are backend-local:
+
 ```sql
--- Device and configuration info
 SELECT * FROM pg_accel_device_info();
+SELECT * FROM pg_accel_device_limits() ORDER BY name;
+SELECT * FROM pg_accel_resident_status();
+SELECT pg_accel_resident_live_bytes();
 
--- Per-backend acceleration statistics
 SELECT * FROM pg_accel_stats();
-
--- Reset counters
-SELECT pg_accel_reset_stats();
+SELECT * FROM pg_accel_gpu_failures();
+SELECT pg_accel_kernel_executions();
+SELECT pg_accel_planner_overhead_us();
+SELECT pg_accel_planner_fast_decline_count();
+SELECT pg_accel_last_planner_rejection_reason();
+SELECT pg_accel_planner_rejection_count('no_gpu_resident_pipeline');
 ```
 
-Planner declines are visible through `pg_accel_stats().planner_rejected_count`
-and the trace event `stats.planner_rejected`. Unsupported type-policy declines
-use stable reason codes including `unsupported_json_type`,
-`unsupported_jsonb_type`, `unsupported_array_type`,
-`unsupported_interval_type`, `unsupported_domain_type`,
-`unsupported_composite_type`, and `unsupported_custom_type`.
+`pg_accel_reset_stats()` resets the resettable per-backend counters and planner
+rejection state. The kernel-execution counter is monotonic and should be proved
+by a before/after delta; see `pg_accel/src/engine/stats.rs:487-525`.
 
-## FAQ
+## Benchmarks
 
-### Does this work without a GPU?
+The repository does not publish candidate performance numbers as current
+results. Use the harness to produce evidence for the installed commit:
 
-No. When no GPU is detected (or `pg_accel.gpu_enabled = off`), the planner
-hook is a no-op — no Custom Scan paths are injected and all queries pass
-through to the stock PostgreSQL executor untouched. There is zero overhead.
-
-### Does this slow down OLTP workloads?
-
-No. The cost model only injects Custom Scan paths when GPU acceleration is
-available and the estimated benefit exceeds a 30% cost threshold. Small point
-lookups, index scans, and short transactions go through the stock executor
-untouched. You can also disable the extension per-session or globally.
-
-### How is this different from PG-Strom?
-
-Both use the Custom Scan Provider interface for GPU acceleration, but differ in
-platform scope and safety model:
-
-- **Platform**: PG-Strom is CUDA-only (NVIDIA). pg_accel uses AdaptiveCpp/SYCL
-  to target Metal (Apple Silicon), CUDA, ROCm, and Level Zero from one codebase.
-- **Safety**: pg_accel's three-result model (TRUE/FALSE/UNCERTAIN) makes
-  uncertain fp32 edge cases, integer overflow, and division by zero decline or
-  error instead of silently returning wrong results.
-- **Zero overhead**: pg_accel's planner exits in <50ns for non-accelerable queries.
-  The cost model requires GPU to estimate 30% cheaper before being chosen.
-- **Scope**: pg_accel accelerates spatial predicates, H3 cell ops, sorts,
-  aggregates, hash joins, grouped aggregation, window functions, WHERE clause
-  expressions, and raster algebra. GPU projection evaluation is in development.
-
-### Which PostgreSQL versions are supported?
-
-PostgreSQL 18 is the default supported extension target. PostgreSQL 19beta1 is
-also built and packaged in the required release matrix through pgrx's `pg19`
-feature. PG19 is still beta; there are no supported code paths for older
-PostgreSQL majors.
-
-### How do I turn it off?
-
-```sql
--- Per-session
-SET pg_accel.enabled = off;
-
--- Globally (requires reload)
-ALTER SYSTEM SET pg_accel.enabled = off;
-SELECT pg_reload_conf();
+```bash
+cargo run -p pg_accel_bench -- validate --workload grouped_agg
+cargo run -p pg_accel_bench -- setup --workload grouped_agg --rows 1000000 --seed 42 \
+  --connection "host=localhost dbname=postgres"
+cargo run -p pg_accel_bench -- run --workload grouped_agg --iterations 10 --warmup 5 \
+  --seed 42 --timing both --cache-mode both --capture-plans \
+  --connection "host=localhost dbname=postgres"
 ```
+
+A benchmark workload can intentionally prove native decline; its existence is
+not evidence that the production planner selects it. See
+[docs/BENCHMARKS.md](docs/BENCHMARKS.md) for the evidence contract and
+[docs/EXPLAIN_EXAMPLES.md](docs/EXPLAIN_EXAMPLES.md) for plan interpretation.
+
+## Development references
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): resident-v2 planner, descriptor, and
+  residency contracts.
+- [docs/ADAPTER_GUIDE.md](docs/ADAPTER_GUIDE.md): current adapter metadata and
+  the work required beyond registration.
+- [docs/olap-abi.md](docs/olap-abi.md): grouped-aggregate kernel ABI notes.
+- [CONTRIBUTING.md](CONTRIBUTING.md): contribution workflow.
 
 ## License
 
-Released under the [PostgreSQL License](LICENSE), the same license used by
-PostgreSQL itself.
+Released under the [PostgreSQL License](LICENSE).

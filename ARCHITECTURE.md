@@ -1,519 +1,264 @@
 # pg_accel Architecture
 
-pg_accel is a PostgreSQL extension that accelerates spatial predicates, H3 cell
-operations, raster map-algebra, and scalar/aggregate functions by injecting
-batch-parallel Custom Scan nodes into query plans. It is written in Rust
-(pgrx 0.19.1) with C++/SYCL GPU kernels via AdaptiveCpp (one source →
-CUDA / ROCm / Level Zero / Metal).
+This document describes the resident-v2 architecture at the current source
+revision. It distinguishes production planner admission from dormant executor
+and kernel code. The public capability snapshot is in [README.md](README.md).
 
-## Bundled dependencies
+## Production boundary
 
-The build links against a forked AdaptiveCpp: `yocontra/AdaptiveCpp` branch
-`fork-safe-metal` at commit `7e79a6ca45f5a067f02a30207cb8da1b81eb5f29`. The
-1.0 release is intentionally fork-pinned until the Metal/fork/soft-fp64 fixes
-land upstream; `scripts/setup_acpp.sh`, CI, and release packaging all use that
-same `ACPP_REQUIRED_SHA`. See `NOTICE` for the full third-party attribution
-list (AdaptiveCpp BSD-2-Clause, soft-fp64 MIT, SLEEF BSL-1.0, PostgreSQL
-headers, pgrx MIT/Apache-2.0).
+`_PG_init` registers the Custom Scan provider and planner hooks at
+`pg_accel/src/lib.rs:301-305`. Normal planning currently adds one family of
+candidate: a childless resident aggregate path at `UPPERREL_GROUP_AGG`.
 
-## Four-Layer Architecture
+| Planner stage | Production behavior |
+|---|---|
+| Upper aggregate | Analyze a reducing aggregate shape and, if every gate passes, add `Custom Scan (GpuAccelAgg)`. |
+| Base relation | Observe scan/filter/sort/function opportunities, record a resident-pipeline decline, and add no path. |
+| Join relation | Observe join opportunities, record a resident-pipeline decline, and add no row-returning join path. |
+| Window upper relation | Record the missing resident pipeline and add no path. |
+| Final target-list SRF | Record the missing resident pipeline and add no path. |
+| Raster | Observe catalog/shape facts in production; forced path construction is compiled only for tests. |
 
-The system is organized into four layers, each with a clear boundary:
+The upper hook dispatch is explicit at
+`pg_accel/src/engine/ffi/planner_hooks/mod.rs:190-236`. The base and join
+boundaries are explicit at
+`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:483-502` and
+`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:123-131`.
 
-```
-+---------------------------------------------------------------+
-|  Layer 1: Adapters          pg_accel/src/adapters/            |
-|  Declare which SQL functions can be accelerated and how.      |
-|  One adapter per extension (PostGIS, h3-pg, pg_builtins...).  |
-+---------------------------------------------------------------+
-        |  FunctionAccelEntry (name, schema, strategy)
-        v
-+---------------------------------------------------------------+
-|  Layer 2: Dispatch          pg_accel/src/engine/dispatch/     |
-|  Accumulate rows into batches. Route each batch to the        |
-|  correct strategy. Evaluate predicate chains for late         |
-|  materialization.                                             |
-+---------------------------------------------------------------+
-        |  Vec<(Datum, is_null)> batches
-        v
-+---------------------------------------------------------------+
-|  Layer 3: Executor Nodes    pg_accel/src/engine/executor/     |
-|                             pg_accel/src/engine/ffi/          |
-|                               custom_scan/                    |
-|  Custom Scan Provider: three PG vtables that inject our       |
-|  batch executor into the query plan.                          |
-+---------------------------------------------------------------+
-        |  ExtractedGeometry / GpuRepr columnar data
-        v
-+---------------------------------------------------------------+
-|  Layer 4: GPU Kernels       pgaccel-kernels/                  |
-|  SYCL spatial, sort, reduce, hash-agg, hash-join, window,     |
-|  H3, raster kernels via AdaptiveCpp (CUDA / ROCm / Level Zero |
-|  / Metal). Called via C FFI (pgaccel-kernels/include/).       |
-+---------------------------------------------------------------+
-```
+A compiled kernel, FFI bridge, executor module, or adapter entry is therefore
+not sufficient to make SQL planner-selectable. Production selection also
+requires a path injection site, a complete logical contract, exact residency
+proof, runtime capability validation, and a winning cost.
 
-**Why four layers?** Each layer can be tested independently. Adapters are pure
-data declarations. Dispatch logic is testable without PG. The executor nodes are
-the only layer that touches PG internals. GPU kernels compile and test as a
-standalone C++ library (`pgaccel-kernels/CMakeLists.txt`).
+## Component map
 
-## Data Flow: Query Lifecycle
-
-```
-  SQL: SELECT * FROM buildings WHERE ST_Contains(region, geom)
-                    |
-                    v
-  1. PG Parser / Analyzer (standard PG)
-                    |
-                    v
-  2. Planner Hook (set_rel_pathlist_hook)
-     - Installed in pg_accel/src/engine/ffi/planner_hooks/mod.rs:61-62
-     - Walks qual list, looks up function OIDs in AdapterRegistry
-     - If a supported function is found and cost model says "yes":
-       add_path() with a CustomPath pointing to one of the vtables
-       in pg_accel/src/engine/ffi/custom_scan/mod.rs:144-199
-                    |
-                    v
-  3. PG Optimizer picks our CustomPath (if cheapest)
-                    |
-                    v
-  4. PlanCustomPath callback
-     - Converts CustomPath -> CustomScan plan node
-     - Serializes strategy + batch_size + fn_oid + target_attno
-       into custom_private as a List of Integer nodes
-       (pg_accel/src/engine/ffi/custom_scan/private_data.rs:70-110)
-                    |
-                    v
-  5. BeginCustomScan callback
-     - Allocates ScanExecState on Rust heap (Box::into_raw)
-       (pg_accel/src/engine/executor/scan/mod.rs:10-13)
-                    |
-                    v
-  6. ExecCustomScan callback (called once per output tuple)
-     - Delegates to ScanExecState::next()
-     - Accumulates child tuples into batch (fill_batch)
-     - Dispatches batch through strategy router
-     - Drains results one at a time back to parent node
-                    |
-                    v
-  7. EndCustomScan callback
-     - Reclaims ScanExecState via Box::from_raw
-       (pg_accel/src/engine/executor/scan/mod.rs:13, :319-)
-```
-
-## Custom Scan Provider
-
-PostgreSQL's Custom Scan API requires three vtable structs. pg_accel defines
-them as static constants with `#[repr(C)]` wrappers for `Sync` safety
-(`pg_accel/src/engine/ffi/custom_scan/mod.rs:129-199`):
-
-| Vtable | Purpose | Key Callbacks |
+| Layer | Current source | Responsibility |
 |---|---|---|
-| `CustomPathMethods` | Planner: convert path to plan | `PlanCustomPath` |
-| `CustomScanMethods` | Planner: create executor state | `CreateCustomScanState` |
-| `CustomExecMethods` | Executor: run the node | `Begin`, `Exec`, `End`, `ReScan`, `Explain` |
+| Planner hooks | `pg_accel/src/engine/ffi/planner_hooks/` | Observe PostgreSQL paths; extract, validate, cost, and inject the resident aggregate candidate. |
+| Shape model | `pg_accel/src/engine/ffi/planner_hooks/shape/` | Convert PostgreSQL planner nodes into a stable reducing-query model or a stable decline code. |
+| Neutral spec | `pg_accel/src/engine/spec/` | Own `AggQuerySpec` (AQS3), output projection (AOP2), validation, and codecs without device pointers. |
+| Plan wire | `pg_accel/src/engine/ffi/custom_scan/private_data.rs` | Serialize strategy, spec, projection, and resident proof through PostgreSQL `custom_private`. |
+| Residency | `pg_accel/src/engine/residency/` | Load columns, track generations, enforce the byte ledger, cache derived artifacts, and bind device inputs. |
+| Aggregate executor | `pg_accel/src/engine/executor/agg/` | Validate the descriptor contract, prepare artifacts, bind ABI descriptors, dispatch, and emit final tuples. |
+| Kernel ABI | `pg_accel/src/engine/spec/abi.rs` and `pgaccel-kernels/include/pgaccel_olap.h` | Define the frozen Rust/C grouped-aggregate descriptor and output layout. |
+| GPU bridge and kernels | `pg_accel/src/gpu/` and `pgaccel-kernels/src/` | Own device allocation, status conversion, synchronous calls, and kernel implementations. |
 
-**Why three vtables?** PG separates planning from execution. `CustomPathMethods`
-operates during path selection (before the final plan is chosen).
-`CustomScanMethods` bridges the planner to the executor by allocating state.
-`CustomExecMethods` runs during actual query execution. Confusing which callback
-belongs to which vtable is a common source of bugs.
+## Planner pipeline
 
-pg_accel registers **five** sets of vtables, one per Custom Scan node kind:
-`scan`, `join`, `sort`, `agg`, `window`, plus a `preagg` variant
-(`pg_accel/src/engine/ffi/custom_scan/mod.rs:144-199`). Each set has its own
-`PATH_METHODS`, `SCAN_METHODS`, and `EXEC_METHODS` triple.
+### 1. Cheap preflight
 
-Strategy metadata survives plan copying by being serialized into
-`custom_private` as a PG `List` of `Integer` nodes. The serialised layout
-is defined in `pg_accel/src/engine/ffi/custom_scan/private_data.rs:70-110`:
-`[strategy, batch_size, <reserved>, fn_oid, target_attno, accel_strategy, ...]`.
+The aggregate hook first rejects shapes that can be ruled out without device
+initialization. It then checks device usability before building the full shape.
+The ordering is visible at
+`pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:567-590`.
 
-## Batch Execution Model
+### 2. Reducing shape extraction
 
-PG's executor calls `ExecCustomScan` once per output tuple, but GPU dispatch
-needs batches. `ScanExecState`
-(`pg_accel/src/engine/executor/scan/mod.rs:37`) bridges these two models:
+The shared shape pass accepts a reducing aggregate query, not an arbitrary
+PostgreSQL plan tree. Its output is `ShapePlan`:
 
-```
-ExecCustomScan called by parent
-        |
-        v
-  +---> drain_next() -- return buffered result if available
-  |         |
-  |     (buffer empty)
-  |         |
-  |         v
-  |     fill_batch() -- pull up to batch_size tuples from child
-  |         |           ExecProcNode + ExecMaterializeSlot
-  |         v
-  |     dispatch_batch() -- route through strategy
-  |         |
-  |         v
-  |     CHECK_FOR_INTERRUPTS()
-  |         |
-  +-------- loop back to drain_next()
-```
+- `spec`: neutral aggregate semantics;
+- `projections`: ordered PostgreSQL output slots;
+- `required_relations`: relation/attribute dependencies;
+- `digest_words`: stable artifact identity input;
+- descriptor resolution and hidden measure accounting;
+- residency estimates and typed costs.
 
-**Why batch?** Per-row executor overhead dominates for cheap functions. Batching
-amortizes PG function-call setup across hundreds of rows and enables GPU kernel
-launches that need thousands of items to saturate hardware.
+The structure is defined at
+`pg_accel/src/engine/ffi/planner_hooks/shape/mod.rs:288-301`. Unsupported SQL
+features become `ShapeDecline` values with stable stats keys rather than
+partially accelerated plans; the mapping is at
+`pg_accel/src/engine/ffi/planner_hooks/shape/mod.rs:303-515`.
 
-Batch size is chosen by `optimal_batch_size`
-(`pg_accel/src/engine/cost/formulas.rs:85-88`), which clamps the estimated row
-count to `[DeviceLimits::optimal_batch_min, DeviceLimits::optimal_batch_max]`.
-Those bounds are **derived from hardware profile** at startup
-(`pg_accel/src/engine/cost/device_limits.rs:70-72, :259, :322-323`) — never
-hardcoded in executor/planner code (see CLAUDE.md rule 10). The minimum row
-threshold before the planner even considers batched execution is the GUC
-`pg_accel.min_batch_size` (default 65536, range 1-65536,
-`pg_accel/src/engine/gucs.rs:79-88`).
+The reducing shape may represent:
 
-## Spatial Predicate Pipeline
+- an aggregate over one resident fact relation;
+- grouped aggregates over covered key and measure types;
+- covered filters represented by ranges, masks, or expression bytecode;
+- a bounded star schema whose dimension joins are consumed inside the
+  aggregate descriptor;
+- covered H3 transformations used as group keys.
 
-Spatial predicates (`ST_Intersects`, `ST_Contains`, `ST_DWithin`, etc.) run
-through a three-stage pipeline implemented on the Rust side in
-`pg_accel/src/gpu/three_layer.rs:1-23`:
+It does not create a row-returning join pipeline. The aggregate is childless at
+the PostgreSQL executor boundary: relations named in the spec are read from the
+residency store, and only the bounded aggregate result is materialized.
 
-```
-Input: N geometry pairs (a[i], b[i])
-              |
-              v
-  +---------------------------+
-  | Stage 1: Bbox Filter      |
-  | AABB overlap test         |
-  +---------------------------+
-      |              |
-   disjoint       overlap
-      |              |
-      v              v
-  DEFINITE       +-----------------------------+
-  FALSE          | Stage 2: GPU Kernel         |
-                 | Exact predicate with fp32   |
-                 | or fp64 math (selected by   |
-                 | planner, see below)         |
-                 +-----------------------------+
-                     |              |
-                  resolved      uncertain
-                     |              |
-                     v              v
-                 DEFINITE    +-----------------------------+
-                 TRUE/FALSE  | Stage 3: PG Exact Recheck   |
-                             | PostGIS runs the original   |
-                             | function on the main thread |
-                             | for numerically ambiguous   |
-                             | pairs (e.g. antipodal points|
-                             | in sphere-distance)         |
-                             +-----------------------------+
-                                    |
-                                    v
-                                DEFINITE
-                                TRUE/FALSE
+### 3. Capability, residency, and cost gates
+
+The planner validates the extracted spec against the actual descriptor
+executor, estimates exact required columns and derived artifacts, checks the
+cluster budget, includes amortized load cost, compares against the cheapest
+native path, and only then adds the CustomPath. This sequence is at
+`pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:636-675`.
+
+`pg_accel.auto_load=off` is an admission constraint: every missing relation
+must already be pinned/resident in the current backend. The planner-side check
+is at `pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:235-247`.
+
+## Neutral query contract
+
+`AggQuerySpec` contains logical PostgreSQL identities and operations only:
+
+```text
+AggQuerySpec
+  fact_rel
+  group_keys[]
+  measures[]
+  fact_filter
+  star_dims[]
+  having
 ```
 
-**Three-result model.** Successful GPU kernels return `true`, `false`, or
-**`uncertain`**. "Uncertain" is a numerical-edge-case or incomplete-topology
-classification, not a precision-tier fallback:
-see `pgaccel-kernels/src/spatial_predicates.cpp:122-160` (the sphere-distance
-kernel raises `out_uncertain=1` when the inputs are near-antipodal on either
-fp32 *or* fp64). Such rows are eligible for exact PostGIS recheck on the main
-thread; a selected path without that recheck stage rejects them. This is a
-**correctness recheck for ambiguous geometry**, not a CPU fallback. Runtime,
-bridge, device, timeout, allocation, and output-contract failures return a
-typed `GpuError` and abort the selected GPU path; they can never be converted
-to an all-uncertain result (see CLAUDE.md rule 12).
+The exact definition is
+`pg_accel/src/engine/spec/mod.rs:284-292`. Column references carry relation OID,
+attribute number, and type OID. Filters, aggregate measures, dimension joins,
+and group-key expressions are typed enums. Catalog-local function OIDs and
+backend memory addresses are not wire tags.
 
-**fp32 vs fp64 selection.** Every public spatial entrypoint takes a `use_fp64`
-parameter selecting between the fp32 and fp64 template instantiations
-(`pgaccel-kernels/src/spatial_predicates.cpp:26-32, :204-210, :240-247, :284-291`).
-fp64 is always available: native on CUDA/ROCm/Level Zero, soft-fp64 on Metal
-via AdaptiveCpp's SSCP lowering (`pgaccel-kernels/src/reduce.cpp:3-9`). The
-soft-fp64 path currently has a known runtime blocker on Metal in the
-AdaptiveCpp HL-extraction phi-default path, but the
-compile/link path is green on every fp64 kernel.
+The current spec version is AQS3
+(`pg_accel/src/engine/spec/mod.rs:23`). `AggOutputProjection` is separate so the
+logical operation does not depend on the order or labels of PostgreSQL result
+slots; its public types are exported at
+`pg_accel/src/engine/spec/mod.rs:16-20`.
 
-**soft-fp64 fenv and ABI scope.** The 1.0 release contract for soft-fp64 is
-SQL value equivalence for shipped fp64 kernels, not GPU-side IEEE status flag
-observability. pg_accel does not expose floating-point exception flags,
-rounding-mode changes, or per-expression fenv state through SQL functions,
-EXPLAIN, telemetry, or benchmark artifacts. Kernels communicate ordinary value
-buffers plus the existing null, valid, and `uncertain` result flags; ambiguous
-spatial predicates are rechecked through PostGIS value semantics on the main
-thread. Extra Metal ABI attributes and fenv read-back buffers are therefore
-unnecessary for the release semantics. A future consumer that needs IEEE
-status flags must add an explicit output-buffer contract and regression tests
-before planner dispatch can depend on those flags.
+Device pointers appear only after execution-time binding to the C ABI. The ABI
+version and maximum descriptor dimensions are defined at
+`pg_accel/src/engine/spec/abi.rs:11-15`; `PgaccelGroupedAggDesc` begins at
+`pg_accel/src/engine/spec/abi.rs:141-167`.
 
-**Cost model integration.** The selected SQL path centralizes soft-fp64
-costing in the generic resident-aggregate shape model. Admission builds a
-`TypedCostModel` from the active `DeviceLimits`
-(`pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:525-530`); shape
-costing detects fp64 measure expressions and applies
-`soft_fp64_cost_multiplier` only to the aggregate kernel component when the
-device lacks native fp64
-(`pg_accel/src/engine/ffi/planner_hooks/shape/cost.rs:38-104`). That cost then
-gates childless-path injection
-(`pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:550-558`), and the
-descriptor executor maps float measures to its f64 accumulator before
-synchronous dispatch (`pg_accel/src/engine/executor/agg/descriptor.rs:1019-1029`,
-`pg_accel/src/engine/executor/agg/execute.rs:245-265`). The former standalone
-scan, HashJoin, and Window planner paths are not selected under the
-GPU-resident-only policy, so they no longer have separate soft-fp64 cost sites.
+## Plan serialization
 
-## Thread Model
+PostgreSQL copies and serializes `CustomScan.custom_private`, so Rust objects and
+raw pointers cannot be stored there. `private_data.rs` encodes a framed list of
+PostgreSQL integer nodes containing:
 
-pg_accel has no CPU worker-thread pool in the current executor. Rust planner,
-executor, dispatch, and PG FFI work runs on the main PostgreSQL backend thread;
-parallel compute happens inside SYCL/AdaptiveCpp device kernels or inside
-PostgreSQL's own forked parallel worker processes when pg_accel leaves a plan
-native.
+1. wire magic and version;
+2. execution-method identity and strategy;
+3. AQS3 logical spec;
+4. AOP2 output projection;
+5. resident proof snapshot and footer.
 
-**Rule 1: No PG C functions off the backend thread.** PostgreSQL's backend code
-is not thread-safe. All `pg_sys::*` calls, SPI, palloc, elog, and
-`CHECK_FOR_INTERRUPTS` must happen on the main backend thread only.
+The framing constants and AQS3/AOP2 sentinels are at
+`pg_accel/src/engine/ffi/custom_scan/private_data.rs:30-43`. Decoders validate
+lengths, discriminants, execution-method identity, spec/projection semantics,
+and proof fields before executor state is allocated.
 
-**Rule 2: GPU dispatch is synchronous from the backend.** The backend submits
-work through the C++ bridge and waits for the runtime call to return. PostgreSQL
-interrupts are checked between batches/dispatches, not from a background GPU
-polling thread.
+## Residency model
 
-**Thread budget skeleton.** A cluster-wide thread budget lives in PostgreSQL
-shared memory, protected by an `LWLock`
-(`pg_accel/src/engine/thread_budget.rs:38-70`):
+### Backend-local data, cluster-wide accounting
 
-```
-Shared Memory (PgLwLock<ThreadBudgetData>)
-+-------------------------------------------+
-| total_allocated: 12                       |
-| backends[0]: { pid: 1234, allocated: 4 }  |
-| backends[1]: { pid: 5678, allocated: 8 }  |
-| backends[2..]:  { pid: 0, allocated: 0 }  |
-+-------------------------------------------+
-```
+Each PostgreSQL backend owns a thread-local `RelationStore`
+(`pg_accel/src/engine/residency/store.rs:42-48`). It contains raw lossless
+columns, pin metadata, derived artifacts, relation generations, and LRU state.
+Resident pointers never cross backend processes.
 
-`request_threads(n)` reads the `pg_accel.max_workers_total` GUC and records
-per-backend allocations for callers that need a future host-thread budget. A
-value of `0` means unlimited. Current executors do not create CPU worker
-threads, so this is an accounting guard rather than an active work scheduler.
-A `before_shmem_exit` callback (`cleanup_backend`,
-`pg_accel/src/engine/thread_budget.rs:169`) reclaims recorded allocations from
-exiting backends.
+Allocation accounting is cluster-wide. Every charged raw, retained-exact,
+derived, and transient byte participates in the shared ledger. The exact live
+total is exposed by `pg_accel_resident_live_bytes()` at
+`pg_accel/src/engine/residency/store.rs:2032-2043`. A pin changes local eviction
+eligibility; it does not override the budget.
 
-**PG parallel != threads.** PostgreSQL's own parallel query uses forked
-processes, not threads. pg_accel functions are marked `PARALLEL SAFE` (safe to
-run in a parallel worker process), but pg_accel does not spawn CPU worker
-threads inside those backends.
+### Selected-plan preparation
 
-## Adapter Pattern
+At `BeginCustomScan`, the descriptor executor:
 
-Adapters are pure data declarations that map SQL functions to acceleration
-strategies. Each adapter represents one PostgreSQL extension
-(`pg_accel/src/engine/registry.rs:62-88`):
+1. processes invalidations;
+2. ensures every required relation/column as one protected dependency set;
+3. validates generation/currentness evidence;
+4. builds or reuses a dependency-stamped derived artifact;
+5. binds resident buffers into the ABI descriptor.
 
-```rust
-ExtensionAdapter {
-    name: "postgis",
-    functions: vec![
-        FunctionAccelEntry { schema: "public", name: "st_intersects",
-                             strategy: AccelStrategy::GpuSpatial },
-        // ...
-    ],
-}
-```
+The multi-relation ensure operation is
+`pg_accel/src/engine/residency/store.rs:1903-1937`. `auto_load` authorization is
+checked at `pg_accel/src/engine/residency/store.rs:1827-1865`.
 
-At extension load time, pg_accel probes `pg_extension` via SPI to discover which
-extensions are installed. For each installed extension, it resolves function
-names to OIDs via `pg_proc` lookup and populates an `AdapterRegistry` --
-a `HashMap<Oid, FunctionAccelEntry>` for O(1) lookup during planning
-(`pg_accel/src/engine/registry.rs:87-145`).
+Explicit operations are SQL wrappers over the same store:
 
-**Strategy classification** (`pg_accel/src/engine/registry.rs:24-42`):
+- `pg_accel_pin`: load selected columns and retain the pin;
+- `pg_accel_unpin`: remove the pin without requiring immediate eviction;
+- `pg_accel_refresh`: reload the pin set or currently resident columns;
+- `pg_accel_evict`: remove the backend-local relation entry;
+- `pg_accel_resident_status`: expose columns, bytes, pin, generation, and
+  timing state.
 
-| Strategy | When Used | Execution Path |
+Their SQL definitions and status tuple are at
+`pg_accel/src/engine/residency/store.rs:3352-3427`.
+
+### Resident proof
+
+A selected path carries a `ResidentProofSnapshot`. It identifies the resident
+operator class, participating stages, device column count, and permitted
+materialization boundary. Intermediate host materialization blocks resident
+admission; final bounded output materialization is allowed. The boundary rules
+are defined at `pg_accel/src/engine/residency/proof.rs:263-301`.
+
+This proof is planner/executor evidence, not ownership of a pointer. Live device
+buffers are borrowed only while synchronous descriptor binding and dispatch are
+in progress.
+
+## Descriptor execution
+
+`AggExecState` is a childless Custom Scan executor over AQS3/AOP2. Construction
+validates the neutral contract and prepares its dependency-stamped artifact;
+the first `ExecCustomScan` call dispatches and stores bounded output, and later
+calls emit PostgreSQL tuples. Rescan revalidates residency and rebuilds stale
+artifacts. The lifecycle is implemented at
+`pg_accel/src/engine/executor/agg/execute.rs:70-216`.
+
+The descriptor layer performs runtime capability validation before binding
+resident columns. It translates logical keys, measures, filters, and dimensions
+into `PgaccelGroupedAggDesc`, then uses bounded synchronous calls where required.
+Errors are raised through the Custom Scan; execution does not switch to a
+different PostgreSQL child plan.
+
+Output reconstruction is governed by AOP2, not by assumed target-list order.
+Each slot names its source (group key or aggregate result) and PostgreSQL result
+type. Descriptor output rejects uncertainty that cannot be resolved by the
+selected contract at `pg_accel/src/engine/executor/agg/output.rs:54-80`.
+
+## EXPLAIN contract
+
+Every selected Custom Scan reports strategy, selection, batch/thread metadata,
+resident proof, operator class, stage mask, and device-column count. Aggregate
+descriptors additionally report logical keys, aggregate lanes, filters, star
+dimensions, output projection, residency state, artifact outcome, generations,
+and bytes. `EXPLAIN ANALYZE` adds dispatch and row/batch counters.
+
+The common properties are emitted at
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:43-148`; descriptor-specific
+properties are emitted at
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:829-855`. See
+[docs/EXPLAIN_EXAMPLES.md](docs/EXPLAIN_EXAMPLES.md) for use.
+
+## Configuration ownership
+
+The complete released inventory and exact defaults/ranges are maintained in
+[README.md](README.md#configuration). Architecturally, the GUCs divide into:
+
+| Control plane | GUCs | Semantics |
 |---|---|---|
-| `GpuSpatial` | `ST_Intersects`, `ST_Contains`, `ST_DWithin`, … | Bbox → GPU kernel → exact recheck when available; otherwise reject `Uncertain` |
-| `GpuRaster`  | `ST_MapAlgebra`, raster clip | GPU map-algebra expression evaluator |
-| `GpuH3`      | `h3_latlng_to_cell`, grid distance | GPU H3 cell computation |
-| `GpuSort`    | `ORDER BY` on numeric columns | GPU radix / merge sort |
-| `GpuReduce`  | `SUM`, `AVG`, `MIN`, `MAX`, `COUNT` | GPU parallel reduction |
-| `GpuExpr`    | Vectorized scalar expressions | GPU expression evaluator |
-| `GpuHashJoin`| Hash-join on GPU-eligible keys | GPU build + probe |
-| `GpuWindow`  | Window functions (row_number, lag, lead, aggregate) | GPU window kernel |
+| Planning admission | `enabled`, `gpu_enabled` | Affect new plans only; `enabled=off` also fails closed if an existing Custom Scan reaches execution. |
+| Resident admission | `auto_load`, `resident_memory_budget_mb` | Authorize missing-column loads and cap all cluster residency bytes. |
+| Aggregate cost | `cost_multiplier`, `soft_fp64_cost_multiplier` | Adjust resident aggregate candidate cost; the fp64 multiplier applies only without native fp64. |
+| Legacy execution | `min_batch_size` | Row-fed fill target, not the resident descriptor admission floor. |
+| Dispatch observation | `kernel_timeout_ms` | Post-return warning threshold, not asynchronous cancellation. |
+| Host-thread ledger | `max_workers_total` | Cluster cap for pg_accel-owned host threads; current executors request none. |
+| Tracing | `log_level`, `otel_log_max_mb`, `otel_log_max_rotations` | Sampled when backend tracing initializes. |
+| Compatibility/roadmap no-ops | `assert_dispatch`, `parallel_fused_count`, `fp64_enabled` | Retained settings with no current planning or execution effect. |
 
-Performance varies widely by workload; see `pg_accel_bench` for the current
-baseline numbers.
+Production registrations are at `pg_accel/src/engine/gucs.rs:105-245` and
+`pg_accel/src/lib.rs:260-283`. Test-only settings at
+`pg_accel/src/engine/gucs.rs:247-265` are not released configuration.
 
-## Type Extractors
+## Invariants
 
-Type extractors convert between PostgreSQL's row-oriented `Datum` format and
-the columnar `GpuRepr` format needed by GPU kernels
-(`pg_accel/src/engine/type_extractor.rs:3-96`). This enables late
-materialization: cheap predicates can reject rows before expensive geometry
-deserialization occurs.
-
-```
-Row-oriented (PG Datum)          Column-oriented (GpuRepr)
-+------+------+------+          +------+------+------+
-| col1 | col2 | col3 |  row 0   | f64  | f64  | f64  |  col1 values
-| col1 | col2 | col3 |  row 1   | f64  | f64  | f64  |  col2 values
-| col1 | col2 | col3 |  row 2   | f64  | f64  | f64  |  col3 values
-+------+------+------+          +------+------+------+
-```
-
-Each `TypeExtractor` implementation handles one PG type (`Float8Extractor`,
-`Float4Extractor`, `Int4Extractor`, etc.,
-`pg_accel/src/engine/type_extractor.rs:37-96`) and provides:
-- `extract(datum, is_null) -> GpuRepr` -- datum to GPU format
-- `pack(repr) -> Option<Datum>` -- GPU format back to datum
-
-Geometry types go through the adapter-specific extractors in
-`pg_accel/src/adapters/extractors/geometry/`, which parse `GSERIALIZED` into
-`ExtractedGeometry` (bbox + flat f32 coordinate array +
-ring offsets, `pg_accel/src/gpu/three_layer.rs:67-75`) only when the GPU
-pipeline actually needs the legacy scalar path. The resident-domain contract
-instead uses validated fp64 coordinate lanes, one fixed fp64 bbox lane per row,
-row/ring offsets, fixed metadata, and retained exact GSERIALIZED bytes. Bbox
-validity is explicit; NULL and empty rows use a canonical positive-zero bbox.
-H3 uses a u64 lane. Raster retains native typed pixel bytes with literal
-PostGIS pixel tags (`32BF=10`, `64BF=11`). Exact offsets/payloads are boxed,
-NULL-correlated, and bounded per value. All three report device bytes and
-retained exact host bytes separately, and residency charges their checked sum.
-
-## Cost Model
-
-The cost model decides whether to inject a Custom Scan node. It runs during
-planning and combines three inputs:
-
-1. **Estimated row count** -- from PG's standard selectivity estimates
-2. **Per-row cost** -- derived from the function's strategy classification and
-   its fp64 usage (via `apply_fp64_penalty`,
-   `pg_accel/src/engine/cost/formulas.rs:17`)
-3. **Platform profile** -- CPU cores, GPU availability, unified memory, native
-   fp64 support (`pg_accel/src/engine/cost/platform.rs:21, :74`)
-
-Thresholds live in `DeviceLimits`
-(`pg_accel/src/engine/cost/device_limits.rs:70-175`), derived from the
-hardware profile at startup. There are **no magic constants** in the planner
-or executor — every threshold (`optimal_batch_min`, `optimal_batch_max`,
-`gpu_h3_group_min_rows`, `gpu_spatial_max_vertices_per_row`,
-`gpu_spatial_max_recheck_fraction`, `gpu_raster_max_chunk_pixels`,
-`resident_domain_max_exact_value_bytes`, `soft_fp64_cost_multiplier`, etc.) is
-a field on `DeviceLimits`. This is enforced by CLAUDE.md rule 10. Startup
-validation rejects zero capacities, incoherent ranges, non-finite fractions,
-and fractions outside `[0,1]` before the limits are published.
-
-**Batch size selection.** `optimal_batch_size`
-(`pg_accel/src/engine/cost/formulas.rs:85-88`) clamps the estimated row count
-to the device-derived bounds. Too small wastes kernel launch overhead; too
-large wastes memory and delays first-row latency.
-
-**Thread estimation.** `estimate_threads`
-(`pg_accel/src/engine/cost/formulas.rs:92-96`) grants at most `cpu_cores - 1`
-threads (always reserving one core for the main backend thread), further
-clamped by the available thread budget from shared memory.
-
-## Key Design Decisions
-
-**Batch-parallel instead of per-row.** PostgreSQL's executor protocol returns
-one tuple at a time. A naive GPU extension would launch a kernel per row,
-which is slower than CPU due to launch overhead. pg_accel accumulates tuples
-into batches (bounds set by `DeviceLimits::optimal_batch_{min,max}`),
-dispatches once, then drains results one at a time. This amortizes fixed
-costs across the batch.
-
-**Three-result model instead of boolean.** GPU spatial kernels return
-`true`/`false`/`uncertain` — see `pg_accel/src/gpu/three_layer.rs:28-34`.
-"Uncertain" marks numerically ambiguous cases (e.g. near-antipodal points in
-sphere-distance), which are then rechecked by PostGIS on the main thread.
-This is independent of fp32 vs fp64 precision: fp32 and fp64 kernels both
-raise `uncertain`, and the planner chooses fp64 when the input column is
-`float8` (applying the `soft_fp64_cost_multiplier` on non-native-fp64 devices).
-
-**PredicateChain for late materialization.** Predicates are sorted by
-`selectivity / cost` (lower is better; the standalone `predicate_chain` module was removed with the host-staged pipeline in the 2026-07 demolition — late materialization returns with the resident spatial lanes). A cheap bbox
-overlap test that eliminates most rows runs before expensive geometry
-deserialization. Rows rejected early never touch the GPU at all.
-
-**LWLock thread budget instead of per-backend limits.** A global budget prevents
-thread oversubscription when many concurrent backends use pg_accel. If backend
-A needs 8 threads but only 3 are available, it gets 3 and degrades gracefully
-rather than fighting other backends for CPU time.
-
-**Custom Scan instead of FDW or hooks.** The Custom Scan Provider API is the
-only PG mechanism that lets an extension inject arbitrary executor nodes into
-the plan tree while preserving the optimizer's ability to choose between our
-path and the standard one based on cost. FDWs cannot intercept local table
-scans. Simple executor hooks cannot add new node types.
-
-**Rust + C++/SYCL split.** PG extension glue (FFI, memory management, error
-handling) is written in Rust via pgrx for memory safety. GPU kernels are C++
-SYCL compiled by AdaptiveCpp, which targets CUDA, ROCm, Level Zero, and
-Metal from a single source. AdaptiveCpp's SSCP runtime selects the backend
-per device and caches compiled kernels (`.metallib` + `.metalar` on macOS
-arm64; see CLAUDE.md "MTLBinaryArchive cache" section). The boundary is
-the narrow C FFI declared in `pgaccel-kernels/include/` (`pgaccel_ffi.h`,
-`pgaccel_expr.h`, `pgaccel_fused.h`, `pgaccel_hash_agg.h`,
-`pgaccel_hash_join.h`, `pgaccel_window.h`).
-
-**No CPU fallbacks, enforced at compile time.** Per CLAUDE.md rule 12: the
-`gpu` Cargo feature, the `PGACCEL_HAS_SYCL` gate, `pg_accel/src/gpu/stubs.rs`,
-and the `cpu_fallback_count` FFI symbols have all been deleted. `cargo check
--p pg_accel` and `cmake --build pgaccel-kernels/build` unconditionally
-require SYCL; there is no configuration that compiles a CPU implementation of
-a GPU kernel.
-
-## Source Map
-
-```
-pg_accel/
-  pg_accel/                          Rust crate (pgrx extension)
-    src/
-      lib.rs                         Crate root, _PG_init, module declarations
-      adapters/
-        mod.rs                       Adapter module index
-        postgis.rs                   PostGIS vector function declarations
-        postgis_raster.rs            PostGIS raster function declarations
-        h3.rs                        h3-pg function declarations
-        extractors/
-          mod.rs / geometry / raster Geometry and raster type extractors
-      engine/
-        mod.rs                       Engine module index
-        registry.rs                  AccelStrategy, FunctionAccelEntry, AdapterRegistry
-        dispatch/                    Batch dispatch, PredicateChain, strategy routing
-          mod.rs / predicate_chain.rs / spatial.rs / h3.rs / raster.rs
-        cost/                        Cost model, DeviceLimits, platform profile
-          mod.rs / device_limits.rs / platform.rs / formulas.rs / availability.rs
-        thread_budget.rs             LWLock shared-memory thread budget
-        type_extractor.rs            Datum <-> GpuRepr conversion
-        batch.rs                     Batch accumulator utilities
-        columnar.rs                  Columnar batch utilities
-        function_matcher.rs          OID resolution via pg_proc
-        gucs.rs                      GUC variable definitions
-        stats.rs                     Runtime statistics counters (pg_accel_stats SRF)
-        device_info.rs               GPU device capability queries
-        ffi/
-          custom_scan/               Five Custom Scan vtable sets (scan/join/sort/agg/window + preagg)
-            mod.rs / private_data.rs / plan_partial_agg.rs / dsm.rs / explain.rs
-          planner_hooks/             set_rel_pathlist_hook + set_join_pathlist_hook wiring
-            mod.rs / rel_pathlist.rs / join_pathlist.rs / scan.rs
-            sort.rs / agg.rs / window.rs / hashjoin.rs / partial_agg.rs / preagg_partial.rs
-        executor/
-          mod.rs / state.rs
-          scan/ sort/ agg/ join/ preagg/ window/   Per-node-kind batch executors
-          sort_scan.rs / vectorized_scan.rs
-      gpu/
-        mod.rs / bridge.rs / types.rs
-        three_layer.rs               Three-layer spatial pipeline (Rust side)
-
-  pgaccel-kernels/                   Standalone C++/SYCL kernel library
-    include/                         C FFI headers consumed by the Rust bridge
-      pgaccel_ffi.h pgaccel_expr.h pgaccel_fused.h
-      pgaccel_hash_agg.h pgaccel_hash_join.h pgaccel_window.h alloc_helper.h
-    src/                             SYCL kernel implementations (AdaptiveCpp)
-      spatial_predicates.cpp spatial_dispatch.cpp bbox_ops.cpp
-      reduce.cpp sort.cpp hash_agg.cpp hash_join.cpp
-      window.cpp fused_ops.cpp expr_eval.cpp expr_templates.cpp
-      h3_ops.cpp raster_ops.cpp
-      device_manager.cpp platform_caps.cpp mem_pool.cpp
-```
+1. Planner selection requires a complete resident producer-to-consumer proof.
+2. `AggQuerySpec` contains logical identities, never device pointers.
+3. `custom_private` contains validated integer-node wire data, never Rust
+   allocations.
+4. Resident relation pointers stay inside the owning PostgreSQL backend.
+5. Pins affect eviction, not accounting or budget authorization.
+6. Only bounded final output may cross from the resident aggregate pipeline to
+   PostgreSQL tuples.
+7. Registered adapter metadata does not imply a planner path.
+8. Normal planning never uses test-only force GUCs.

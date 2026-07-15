@@ -22,9 +22,18 @@ body:
       label: Environment
       description: |
         Paste output of:
-        - SELECT pg_accel_device_info();
+        - SELECT * FROM pg_accel_device_info();
+        - SELECT * FROM pg_accel_device_limits() ORDER BY name;
+        - SELECT * FROM pg_accel_resident_status();
+        - SELECT pg_accel_resident_live_bytes();
+        - SELECT * FROM pg_accel_stats();
+        - SELECT * FROM pg_accel_gpu_failures();
+        - SELECT pg_accel_last_planner_rejection_reason();
         - SELECT version();
         - SELECT postgis_version(); (if applicable)
-        - SHOW pg_accel.workers;
+        - SELECT name, setting, unit, context, source FROM pg_settings WHERE name LIKE 'pg_accel.%' AND name NOT LIKE 'pg_accel.test_%' ORDER BY name;
+
+        Run these in the same backend/session as the reproduction. Do not enable
+        a pg_accel.test_* GUC for a production bug report.
     validations:
       required: true

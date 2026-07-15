@@ -305,12 +305,12 @@ audit:
     fi
     cargo audit "${ignore_args[@]}"
 
-# Validate file:line citations in CLAUDE.md / ARCHITECTURE.md / TODO.md.
-# Anti-cheat §10 requires citations to be verifiable; this catches drift
-# (files moved, line numbers out of range) in CI before reviewers waste
-# time chasing dead references.
+# Validate exact citations, released GUC semantics, registered adapter names,
+# and the production planner-capability matrix across authoritative docs. Run
+# focused adversarial parser tests in the same CI gate.
 doc-parity:
     ./scripts/doc_parity.sh
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_doc_parity.py
 
 # Validate that default PG-version plumbing is centralized.
 pg-version-audit:

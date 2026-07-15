@@ -1,264 +1,195 @@
-# pg_accel Benchmark Results
+# Benchmarking pg_accel
 
-## Methodology
+This document defines the evidence required for a benchmark run. It does not
+publish candidate performance numbers. Results belong to an immutable artifact
+directory tied to the tested commit, server, device, configuration, command
+line, and raw samples.
 
-### Hardware
+## What a workload proves
 
-| Property | Value |
-|----------|-------|
-| OS | TODO |
-| Architecture | TODO |
-| CPU | TODO |
-| CPU Cores | TODO |
-| Memory | TODO |
-| GPU | TODO (AdaptiveCpp backend: Metal or CUDA) |
+The harness contains both expected GPU selections and expected PostgreSQL-native
+declines. A workload name, category, kernel, adapter, or executor module is not
+evidence that normal planning selects pg_accel.
 
-### PostgreSQL Configuration
+A selected result requires all of the following from the same backend/session:
 
-| GUC | Value |
-|-----|-------|
-| `server_version` | TODO |
-| `pg_accel.enabled` | `on` |
-| `pg_accel.gpu_enabled` | `on` |
-| `pg_accel.workers` | TODO |
-| `pg_accel.min_batch_size` | TODO |
-| `pg_accel.kernel_timeout_ms` | TODO |
-| `max_parallel_workers_per_gather` | TODO |
-| `max_parallel_workers` | TODO |
-| `work_mem` | TODO |
-| `shared_buffers` | TODO |
-| `effective_cache_size` | TODO |
+1. Exact `Custom Scan (GpuAccelAgg)` plan label.
+2. `Plan Selected: true` and `GPU Resident Pipeline: true`.
+3. `GPU Resident Operator Class: resident_groupagg`.
+4. `GPU Kernel Dispatched: true` from `EXPLAIN ANALYZE`.
+5. A positive before/after delta from `pg_accel_kernel_executions()`.
+6. Consumed output rows and a PostgreSQL-native correctness oracle/diff.
+7. No hidden stock-executor fallback inside the selected Custom Scan.
 
-### Extensions
+An expected native decline requires a plan with no pg_accel Custom Scan, no
+kernel-counter delta, and a stable value from
+`pg_accel_last_planner_rejection_reason()`.
 
-| Extension | Version |
-|-----------|---------|
-| PostGIS | TODO |
-| h3-pg | TODO |
-| postgis_raster | TODO |
+The source EXPLAIN properties are emitted at
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:43-148`.
 
-### Procedure
+## Baseline contract
 
-All benchmarks use the `pg_accel_bench` harness (`pg_accel_bench/`). The harness:
+Compare two freshly planned arms using the same PostgreSQL installation,
+database, loaded extension, connection settings, data, query text, and output
+consumption:
 
-1. **Two-way comparison** — each query is measured under two modes. Comparing
-   against single-threaded PG is banned (see CLAUDE.md Benchmark Rule #11) because
-   100% of production PG uses parallel query; a PG-single arm is deceptive marketing.
-   - **PG Parallel**: `pg_accel.enabled = off`, PG parallel workers at default
-   - **pg_accel**: `pg_accel.enabled = on` (GPU + batched eval acceleration)
+- **Baseline:** set `pg_accel.enabled=off`, then plan and execute the query.
+- **Accelerated:** set `pg_accel.enabled=on` and
+  `pg_accel.gpu_enabled=on`, then plan and execute the query.
 
-2. **Randomized ordering** — measurement order (accel-first vs baseline-first) is
-   randomized per iteration to eliminate cache-warming bias.
+Do not prepare a pg_accel plan and then set `pg_accel.enabled=off`; an existing
+Custom Scan intentionally fails closed at execution. `gpu_enabled` is also a
+planning switch and does not rewrite an existing plan.
 
-3. **Cache flush** — `DISCARD PLANS` between measurements to prevent plan cache
-   carryover. Separate connections ensure buffer isolation.
+The repository benchmark contract does not add a PostgreSQL single-thread arm.
+Capture PostgreSQL's effective parallel settings in the artifact rather than
+describing an assumed worker count. There is no per-query pg_accel worker GUC;
+`pg_accel.max_workers_total` is a superuser cluster cap for pg_accel-owned host
+threads, current executors request none, and PostgreSQL parallel worker
+processes are not counted.
 
-4. **Warmup** — initial iterations are excluded from statistics.
+## Residency contract
 
-5. **Reproducible seeds** — `setseed()` is called before data generation for
-   deterministic table contents across runs.
+Resident load and derived-artifact preparation can be material costs. Report
+them explicitly instead of hiding them inside a warm timing:
 
-### Statistical Tests
+- **Cold residency:** evict or refresh under a recorded policy, then include
+  load/preparation cost.
+- **Warm residency:** pin the required columns before measurement and set
+  `pg_accel.auto_load=off` so a timed selected plan cannot silently load them.
+- **Mixed/capacity tests:** capture `pg_accel_resident_status()` and
+  `pg_accel_resident_live_bytes()` before and after each measured phase.
 
-| Test | Purpose |
-|------|---------|
-| Paired t-test (two-tailed) | Statistical significance (p < 0.05) |
-| Cohen's d | Effect size magnitude |
-| 95% CI via t-distribution | Confidence interval on mean |
-| Outlier detection (> 3 sigma) | Identifies anomalous iterations |
+`pg_accel.auto_load=off` does not forbid explicit pinning or reload of an
+existing pin. `pg_accel.resident_memory_budget_mb` charges device buffers,
+retained exact values, derived artifacts, and transient transform storage
+cluster-wide; pins never bypass it.
 
-### Running Benchmarks
+Example setup for the canonical resident aggregate:
+
+```sql
+SELECT pg_accel_pin('bench_grouped_agg', ARRAY['group_id', 'value']);
+SET pg_accel.auto_load = off;
+
+SELECT * FROM pg_accel_resident_status();
+SELECT pg_accel_resident_live_bytes();
+```
+
+Use the actual workload setup schema/columns; do not assume the illustrative
+names exist in every benchmark database.
+
+## Configuration capture
+
+Capture the complete released pg_accel configuration dynamically:
+
+```sql
+SELECT name, setting, unit, context, source
+FROM pg_settings
+WHERE name LIKE 'pg_accel.%'
+  AND name NOT LIKE 'pg_accel.test_%'
+ORDER BY name;
+
+SELECT name, value, source
+FROM pg_accel_device_limits()
+ORDER BY name;
+```
+
+Interpret the controls correctly:
+
+| GUC | Benchmark meaning |
+|---|---|
+| `pg_accel.enabled` | Planning master switch; use it before planning each arm. |
+| `pg_accel.gpu_enabled` | Planning GPU-path switch; keep it on for the accelerated arm. |
+| `pg_accel.auto_load` | Missing-residency authorization, not a cache flush. |
+| `pg_accel.resident_memory_budget_mb` | Cluster residency-byte budget; `-1` derives the cap from `DeviceLimits`. |
+| `pg_accel.cost_multiplier` | Cost adjustment only for resident generic aggregate candidates. |
+| `pg_accel.min_batch_size` | Legacy row-fed fill target; it is not the resident descriptor admission threshold. |
+| `pg_accel.kernel_timeout_ms` | Post-return warning threshold; it does not cancel an in-flight kernel. |
+| `pg_accel.max_workers_total` | pg_accel host-thread ledger cap; it is not PostgreSQL parallelism. |
+| `pg_accel.assert_dispatch` | Reserved no-op; never use it as dispatch evidence. |
+| `pg_accel.fp64_enabled` | Deprecated no-op; never use it as an fp64 disable arm. |
+| `pg_accel.soft_fp64_cost_multiplier` | Extra planning cost on a device without native fp64. |
+
+The complete inventory, defaults, contexts, and ranges are in
+[README.md](../README.md#configuration).
+
+## Running the harness
+
+First validate workload definitions without connecting:
 
 ```bash
-# Run all workloads at the standard row scales
-source scripts/pg_versions.sh
-PORT="$(pg_accel_pgrx_port_for_pg 18)"
+cargo run -p pg_accel_bench -- validate --workload grouped_agg
+```
+
+Create deterministic data, then run the same workload:
+
+```bash
+cargo run -p pg_accel_bench -- setup \
+  --workload grouped_agg \
+  --rows 1000000 \
+  --seed 42 \
+  --connection "host=localhost dbname=postgres"
+
 cargo run -p pg_accel_bench -- run \
-  --connection "host=localhost port=$PORT dbname=postgres" \
-  --iterations 30 --warmup 5 --seed 42
-
-# Run a specific workload
-cargo run -p pg_accel_bench -- run \
-  --connection "..." --workload spatial_join
-
-# Output formats: markdown (default), json, csv
-cargo run -p pg_accel_bench -- run --connection "..." --format json
+  --workload grouped_agg \
+  --iterations 10 \
+  --warmup 5 \
+  --seed 42 \
+  --timing both \
+  --cache-mode both \
+  --capture-plans \
+  --connection "host=localhost dbname=postgres"
 ```
 
----
+These values are an explicit reproducible invocation, not published performance
+evidence. `run --help` is authoritative for supported flags. `--dry-run` checks
+the generated run plan without executing measurements.
 
-## Results Summary
+## Timing and ordering
 
-> **Note:** Values below are TODO placeholders. Run `pg_accel_bench` to populate
-> with real numbers from your hardware.
+- Keep warm and cold samples separate. Do not pool their medians or ratios.
+- Randomize arm ordering with the recorded seed.
+- Replan after changing a planning GUC.
+- Consume complete query output in both arms.
+- Keep raw wall-clock and instrumented EXPLAIN timing distinct when capturing
+  both.
+- Record warmups separately and exclude them from measured statistics.
+- Preserve every raw sample; summary statistics alone are not reproducible.
+- Treat cancellation, timeout warnings, backend restarts, and kernel failures as
+  failed cells, not outliers to discard.
 
-| Workload | PG Single (ms) | PG Parallel (ms) | pg_accel (ms) | vs Single | vs Parallel | Sig? |
-|----------|-----------------|-------------------|---------------|-----------|-------------|------|
-| **Spatial Predicates** | | | | | | |
-| spatial_join | TODO | TODO | TODO | TODO | TODO | TODO |
-| proximity | TODO | TODO | TODO | TODO | TODO | TODO |
-| index_recheck | TODO | TODO | TODO | TODO | TODO | TODO |
-| **H3 Operations** | | | | | | |
-| h3_bulk | TODO | TODO | TODO | TODO | TODO | TODO |
-| **Raster Operations** | | | | | | |
-| raster_algebra | TODO | TODO | TODO | TODO | TODO | TODO |
-| **Aggregates** | | | | | | |
-| simple_agg | TODO | TODO | TODO | TODO | TODO | TODO |
-| aggregate | TODO | TODO | TODO | TODO | TODO | TODO |
-| spatial_agg | TODO | TODO | TODO | TODO | TODO | TODO |
-| **Sort** | | | | | | |
-| large_sort | TODO | TODO | TODO | TODO | TODO | TODO |
-| topk_sort | TODO | TODO | TODO | TODO | TODO | TODO |
-| spatial_sort | TODO | TODO | TODO | TODO | TODO | TODO |
-| **Joins** | | | | | | |
-| join_residual | TODO | TODO | TODO | TODO | TODO | TODO |
-| **Mixed / Full-text** | | | | | | |
-| fts_rank | TODO | TODO | TODO | TODO | TODO | TODO |
-| **Regression (expect ~1.00x)** | | | | | | |
-| oltp_point | TODO | TODO | TODO | TODO | TODO | TODO |
-| small_table | TODO | TODO | TODO | TODO | TODO | TODO |
+## Required artifact contents
 
----
+Every result intended for review must include:
 
-## Detailed Workload Descriptions
+- exact git commit and dirty-worktree state;
+- PostgreSQL build/version and extension provenance;
+- `pg_accel_device_info()` and full `pg_accel_device_limits()` output;
+- released pg_accel GUCs and relevant PostgreSQL GUCs from `pg_settings`;
+- workload, setup scale, seed, command line, cache mode, timing mode, warmups,
+  and measured-iteration count;
+- resident status/live-byte snapshots and explicit load/refresh actions;
+- raw samples and arm ordering;
+- correctness output/diff;
+- full EXPLAIN evidence and planner rejection reason where applicable;
+- kernel counter before, after, and delta;
+- GPU failure counters and PostgreSQL logs for failed cells.
 
-### Spatial Predicates
+Generated reports must not overwrite an older artifact directory. A report is a
+view of immutable raw evidence, not the primary evidence itself.
 
-#### spatial_join
-```sql
-SELECT count(*)
-FROM bench_points p, bench_polygons g
-WHERE ST_Contains(g.geom, p.geom)
-```
-**Strategy:** GpuSpatial — bbox pre-filter on GPU with exact GPU geometry gates.
-Tests cross-table spatial join with point-in-polygon containment.
+## Reading results
 
-#### proximity
-```sql
-SELECT count(*)
-FROM bench_locations
-WHERE ST_DWithin(geom,
-  ST_SetSRID(ST_MakePoint(-73.985, 40.748), 4326), 0.005)
-```
-**Strategy:** GpuSpatial — GPU sphere distance with radius filter.
-Tests single-table proximity query around a fixed point (Times Square, ~500m radius).
+Classify each row before interpreting timing:
 
-#### index_recheck
-Tests GiST index recheck with spatial predicate acceleration. The GiST index
-produces candidate rows; pg_accel batches the recheck predicate evaluation.
+| Classification | Required evidence |
+|---|---|
+| selected and dispatched | Exact pg_accel node, resident proof, dispatched flag, positive kernel delta, correct consumed output. |
+| native decline | No pg_accel node, zero kernel delta, stable decline reason, correct output. |
+| invalid evidence | Missing/mismatched plan, counter, correctness, provenance, configuration, or cache-state evidence. |
+| failed execution | Error, timeout, crash, restart, incomplete output, or GPU failure. |
 
-### H3 Operations
-
-#### h3_bulk
-```sql
-SELECT h3_latlng_to_cell(geom, 7), count(*)
-FROM bench_h3_points
-GROUP BY 1
-```
-**Strategy:** GpuH3 — bulk coordinate-to-cell conversion on GPU.
-Tests H3 cell indexing with aggregation over resolution-7 cells.
-
-### Raster Operations
-
-#### raster_algebra
-```sql
-SELECT count(*) FROM (
-  SELECT ST_MapAlgebra(rast, 1, NULL, '[rast] * 2.0') AS rast
-  FROM bench_rasters
-) sub
-```
-**Strategy:** GpuRaster — per-pixel map algebra on 32x32 tiles.
-Tests bulk raster transformation with a simple scaling expression.
-
-### Aggregates
-
-#### aggregate
-```sql
-SELECT dept, sum(salary), avg(salary), count(*)
-FROM bench_employees
-WHERE active
-GROUP BY dept
-```
-**Strategy:** GpuReduce — grouped aggregation with selective filter (~10% selectivity).
-
-#### simple_agg
-Simple `COUNT(*)` / `SUM()` over a single table. Tests aggregate reduction overhead.
-
-#### spatial_agg
-Spatial predicate combined with aggregate — tests mixed GpuSpatial + GpuReduce pipeline.
-
-### Sort
-
-#### large_sort
-```sql
-SELECT * FROM bench_sort_ints ORDER BY x DESC LIMIT 1000
-```
-**Strategy:** GpuSort — GPU radix sort with top-K extraction.
-Tests sort acceleration on 100K+ integer rows with LIMIT.
-
-#### topk_sort
-Similar to large_sort with a smaller bounded LIMIT. Tests single-key top-K
-selection; multi-key top-K remains planner-deferred until cascaded stable GPU
-sort support lands.
-
-#### spatial_sort
-Spatial distance-based ORDER BY — tests sort on computed spatial expressions.
-
-### Regression Workloads
-
-#### oltp_point
-Single-row point lookup by primary key. Expected speedup: ~1.00x (no batching benefit).
-Validates that pg_accel introduces no measurable overhead for OLTP queries.
-
-#### small_table
-Sequential scan on a very small table (<100 rows). Expected speedup: ~1.00x.
-Validates that the cost model correctly avoids GPU dispatch for trivial queries.
-
----
-
-## Interpreting Results
-
-- **vs Single** = `PG_Single_mean / pg_accel_mean`. Values > 1.0 mean pg_accel is faster.
-- **vs Parallel** = `PG_Parallel_mean / pg_accel_mean`. Values > 1.0 mean pg_accel
-  outperforms PostgreSQL's built-in parallel query.
-- **Sig?** = paired t-test result. `YES` (p < 0.01), `marginal` (p < 0.05), `no` (p >= 0.05).
-- **Regression workloads** should show ~1.00x speedup, proving no overhead for
-  queries that don't benefit from acceleration.
-- **Planner threshold matrix** reports the row count, type, cardinality,
-  selectivity, result count, index/pruning shape, retained prepared geometry,
-  batch count, row width, output size, dispatch/output evidence, correctness
-  evidence, cache gate, and measured break-even basis for each release-lane
-  benchmark cell. Expected GPU winners must prove a captured dispatch counter,
-  consumed output rows, and the operation-specific warm-run speedup threshold;
-  H3 and raster expected winners must also come from `--cache-mode both`
-  artifacts to bound cold-start cost. Native-decline cells must stay on
-  PostgreSQL-native plans and prove their exact expected decline reason in the
-  captured plan snippet. When the engine does not expose a planner rejection
-  reason, threshold-matrix declines record
-  `pg_accel benchmark threshold decline reason: ...` while the plan remains
-  native. H3 and raster rows use
-  operation-specific lanes for lat/lng-to-cell, SRF expansion, map algebra,
-  terrain slope, reclass, and deep algebra instead of generic function-dispatch
-  claims; H3 grouped winners below the measured grouped-aggregate admission
-  floor remain native-decline rows.
-  Spatial rows also record the PostGIS
-  predicate-registration gate,
-  because the normal adapter exposes no recheck-free spatial predicates until
-  the GPU geometry coverage is complete.
-- **Benchmark ship gate** fails the CLI/report path when any benchmark cell
-  crashes, selects a pg_accel Custom Scan without credited GPU dispatch,
-  misses an expected GPU winner, lacks required dispatch/output/cache evidence,
-  unexpectedly dispatches a native-decline cell, or dispatches GPU work below
-  PostgreSQL-parallel parity (`< 1.00x` median speedup). Family-specific gates,
-  such as H3 winner/parity lane checks, add advisory detail on top of this
-  generic floor.
-- **fp64 multiplier calibration** uses
-  `pg_accel_bench fp64-calibrate --multipliers 16,24,32,40,48,56,64` to run
-  the immutable 8-workload fp64 matrix at its canonical sizes. The command
-  rejects any candidate with a crash, missing GPU dispatch, stock executor
-  fallback, or median speedup below `1.00x`, then writes selected/runner-up,
-  parity-close (`<= 1.10x`), and `pg_accel.fp64_enabled=false` EXPLAIN proof
-  artifacts. `--max-size` is for local probes only and does not satisfy
-  release evidence.
-- **Outliers** (> 3 sigma) are flagged in detailed output but included in statistics.
-  Use `--format json` to inspect per-iteration timings.
+Only compare timings after the row is classified. Do not turn a native plan into
+a claimed GPU speedup, and do not publish a speedup from an invalid-evidence or
+failed row.

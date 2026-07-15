@@ -2349,7 +2349,7 @@ previously-known crash families are gated at the planner or kernel layer:
 - Grouped aggregation Metal argument-buffer crashes — slab pattern applied
   to all four hashagg kernel lambdas
   (`pgaccel-kernels/src/hash_agg.cpp:393-805`); sort-based path
-  Metal-gated off (`hash_agg.cpp:331-334`); grouped `AVG` finalize
+  Metal-gated off (`pgaccel-kernels/src/hash_agg.cpp:331-334`); grouped `AVG` finalize
   preemptively rejected (host-staged finalize path (deleted in the 2026-07 Phase 3 demolition)).
 - Hash join Metal host-pointer probe crashes — host-pointer SYCL probe path
   deleted; kernel is a fail-closed stub
@@ -2708,8 +2708,8 @@ window work.
   (`pgaccel-kernels/src/hash_agg.cpp:2467`) is O(n*g) — one
   work-item per group scanning all n rows. At 1M rows × 4096 groups
   that is ~4 billion ops, at 10M × 10K it is ~100 billion ops. The
-  100K-row planner gate (`formulas.rs:120-122
-  hashagg_input_rows_safe`) and 4096-group cap (`hash_agg.cpp:1247
+  100K-row planner gate (`pg_accel/src/engine/cost/formulas.rs:120-122
+  hashagg_input_rows_safe`) and 4096-group cap (`pgaccel-kernels/src/hash_agg.cpp:1247
   HASH_AGG_MAX_LARGE_UNSORTED_GROUPS`) are protective.
 - Evidence: the H3 count fast-path work on 2026-05-18 tried two
   Metal-targeted open-addressing kernels: a claimed/full state table and
@@ -2758,13 +2758,13 @@ window work.
   admission.
 - Work: fix grouped `AVG` finalize. Either route grouped `AVG`
   through partial-mode always (kernel already emits `[N, sum]` lanes
-  at `hash_agg.cpp:911-920`), or extend `emit_grouped_tuple`
+  at `pgaccel-kernels/src/hash_agg.cpp:911-920`), or extend `emit_grouped_tuple`
   (the deleted host-staged grouped emit path) to read the per-group counts buffer
-  (`gr.result.counts()`, `hash_agg.cpp:67`) and divide.
+  (`gr.result.counts()`, `pgaccel-kernels/src/hash_agg.cpp:67`) and divide.
 - Work: remove the planner gate and the 4096-group cap only after
   the new kernel benchmarks well at 1M/10M for
   `num_groups ∈ {10, 100, 1K, 10K}`, and rewrite the gating tests
-  in `planner_hooks/tests.rs:1315-1345`.
+  in `pg_accel/src/engine/ffi/planner_hooks/tests.rs:1315-1345`.
 - Acceptance: `grouped_agg`, `grouped_agg_high_card`,
   `gpu_hashagg_med_card`, `hashagg_10g`, `hashagg_100g`,
   `hashagg_1kg`, and `hashagg_10kg` complete at 1M and 10M with GPU
@@ -2782,7 +2782,7 @@ window work.
   (`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:19-26`, `:238-268`),
   build/probe still stages child rows and key/null buffers on the host
   (`pg_accel/src/engine/executor/join/probe.rs:327-554`, `:584-911`), and
-  partial injection duplicates work per worker (`join_pathlist.rs:434-452`,
+  partial injection duplicates work per worker (`pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:434-452`,
   `:1121-1255`).
 - Work: move build-side keys and payloads into retained device buffers, probe
   directly from GPU/columnar child batches, emit device pair buffers or

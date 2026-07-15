@@ -1,183 +1,134 @@
 # Contributing to pg_accel
 
-PostgreSQL extension for GPU-accelerated spatial predicates, H3 cell ops, raster
-operations, and batched executor nodes. Rust (pgrx 0.19.1) + C++/SYCL
-(AdaptiveCpp).
+The current production surface is a GPU-resident reducing/grouped aggregate
+Custom Scan. Read [README.md](README.md#capability-matrix) and
+[ARCHITECTURE.md](ARCHITECTURE.md) before changing planner or execution claims.
+A kernel, bridge, executor, adapter, or benchmark workload alone is not
+production planner support.
 
-## Development Setup
+## Development setup
 
-### Prerequisites
-
-- Rust 1.96.0 or newer (via asdf or rustup)
-- Repo-local PostgreSQL built from source via `just setup-pg-source`.
-  PG18 is the default supported extension target; PG19beta1 is a required beta
-  extension-build and release-matrix target.
-- cmake (for GPU kernels)
-- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19.1
-- [cargo-deny](https://github.com/EmbarkStudios/cargo-deny)
-
-### Quick Start
+Prerequisites include the pinned Rust toolchain, CMake, a C/C++ toolchain,
+pgrx, repository-built PostgreSQL, and AdaptiveCpp for kernel builds. The
+currently validated GPU development target is Metal on Apple Silicon.
+CUDA/NVIDIA validation is owner-deferred in [TODO.md](TODO.md); do not claim it
+from an unverified build.
 
 ```bash
-just setup-system-deps  # Print distro/toolchain prerequisites
-just setup              # Build source PostgreSQL and initialize pgrx
-ACPP_BACKEND=cuda just setup-gpu   # Linux/NVIDIA
-# or: ACPP_BACKEND=metal just setup-gpu
-```
-
-### Manual Setup
-
-```bash
+just setup-system-deps
+just setup-tools
 just setup-pg-source 18
-just setup-pgrx 18
-ACPP_BACKEND=cuda just setup-gpu
+ACPP_BACKEND=metal just setup-gpu-metal-headers
+ACPP_BACKEND=metal LLVM_PREFIX=/path/to/llvm ACPP_LLD_PATH=/path/to/ld64.lld just setup-gpu
+just setup-pgrx
 ```
 
-## Build Commands
+PostgreSQL 18 is the default extension target. The configured PostgreSQL 19
+beta target is a build/test target, not a release-package promise.
 
-All commands are in the [Justfile](Justfile):
+## Build and test commands
 
-| Command | Description |
+All commands are defined in the [Justfile](Justfile):
+
+| Command | Purpose |
 |---|---|
-| `just fmt` | Format code (`cargo fmt`) |
-| `just lint` | Lint (`cargo clippy -- -D warnings`) |
-| `just check` | Type check (`cargo check --all-features`) |
-| `just deny` | License + advisory check (`cargo deny check`) |
-| `just test` | Unit tests across the supported PostgreSQL matrix |
-| `just ci` | Full local CI: lint + test |
-| `just package` | Build installable `.so` (`cargo pgrx package`) |
-| `just gpu-build` | cmake build for GPU kernels (requires AdaptiveCpp) |
-| `just gpu-test` | Run standalone GPU kernel tests |
+| `just fmt` | Format Rust source. |
+| `just fmt-check` | Verify Rust formatting. |
+| `just lint` | Run clippy for the active configured PostgreSQL major. |
+| `just check` | Type-check the active configured major. |
+| `just check-matrix` | Type-check every configured supported major. |
+| `just deny` | Check dependency license/advisory policy. |
+| `just audit` | Run cargo-audit with the repository policy. |
+| `just doc-parity` | Validate exact citations, released GUC semantics, adapters, and capability docs. |
+| `just pg-version-audit` | Validate centralized PostgreSQL-version plumbing. |
+| `just test` | Run the pgrx test matrix. |
+| `just gpu-build` | Build the AdaptiveCpp/SYCL kernel library. |
+| `just gpu-test` | Run registered standalone kernel tests. |
+| `just ci` | Run pre-commit gates and the pgrx test matrix. |
 
-## Adding a new adapter
+Use `make clear-jit` when a test requires an empty Metal JIT cache.
 
-Adapters teach pg_accel which SQL functions can be accelerated and what strategy
-to use. To add support for a new extension (e.g., pgvector):
+## Making a change
 
-1. Create a new file in `src/adapters/` (e.g., `pgvector.rs`).
+Keep a patch within the existing ownership boundaries. Add abstractions only
+when they remove real cross-module complexity or match an established pattern.
 
-2. Define an `ExtensionAdapter` with a name and function list. The name must
-   match `pg_extension.extname`; the registry uses `pg_extension` for activation.
+For planner or execution work:
 
-```rust
-use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
+1. Identify the exact SQL semantics and PostgreSQL planner/executor boundary.
+2. Add a stable native-decline reason before exposing an incomplete shape.
+3. Keep AQS3/AOP2 logical data free of device pointers.
+4. Prove relation/column dependencies, generation currentness, budget, and
+   final-only materialization.
+5. Bind the frozen descriptor ABI only after capability and residency checks.
+6. Add EXPLAIN selection/dispatch evidence and native-equivalence coverage.
+7. Test failure, invalidation, rescan, cleanup, and budget behavior as relevant.
 
-pub fn adapter() -> ExtensionAdapter {
-    ExtensionAdapter {
-        name: "pgvector",
-        functions: vec![
-            FunctionAccelEntry {
-                schema: "public",
-                name: "vector_l2_squared_distance",
-                strategy: AccelStrategy::GpuSpatial,
-            },
-            FunctionAccelEntry {
-                schema: "public",
-                name: "vector_cosine_distance",
-                strategy: AccelStrategy::GpuSpatial,
-            },
-            FunctionAccelEntry {
-                schema: "public",
-                name: "vector_ip_distance",
-                strategy: AccelStrategy::GpuSpatial,
-            },
-        ],
-    }
-}
-```
+Normal production path injection currently occurs only through
+`pg_accel/src/engine/ffi/planner_hooks/mod.rs:204-208`. Changing the public
+capability matrix requires normal-GUC selection and dispatch evidence, not a
+test-only force path.
 
-3. Register the adapter in `src/adapters/mod.rs` by adding it to the adapter
-   list that gets passed to `AdapterRegistry::register_adapter`.
+## Adding adapter metadata
 
-4. If the function requires a new strategy, add a variant to `AccelStrategy`
-   in `src/engine/registry.rs` and implement the corresponding dispatch path
-   in `src/engine/dispatch.rs`.
+Adapter registration is OID/operation metadata, not the whole feature. Do not
+register a desired extension function until the complete kernel, bridge,
+resident producer/consumer, planner gates, output contract, EXPLAIN, and tests
+exist. Follow [docs/ADAPTER_GUIDE.md](docs/ADAPTER_GUIDE.md), which documents
+the current `FunctionAccelEntry` fields and both registry discovery lists.
 
-5. Write tests that exercise the new functions under acceleration.
+The only wired adapter constructors are visible at
+`pg_accel/src/engine/registry.rs:85-109`. New metadata must also participate in
+the deferred re-resolution path at
+`pg_accel/src/engine/registry.rs:194-235`.
 
-That is the complete process. Most adapters are under 50 lines.
+## Code style and safety
 
-## Running tests
+- Format with `cargo fmt`; do not hand-format around rustfmt.
+- Treat clippy warnings as errors under the repository configuration.
+- Every `unsafe` block needs a specific `// SAFETY:` explanation.
+- Do not use `unwrap()` outside tests.
+- Call PostgreSQL C APIs only on the backend main thread.
+- Check interrupts between bounded synchronous device calls.
+- Never put device pointers in plan wire data or shared process state.
+- Never convert a selected GPU error into hidden PostgreSQL executor
+  passthrough.
+- Remember that PostgreSQL parallel workers are forked processes, not Rust
+  threads.
+- Pins alter eviction eligibility, not resident budget accounting.
 
-```bash
-# Unit tests (pgrx-managed PG)
-just test
+## Tests and evidence
 
-# Full CI suite (lint + test)
-just ci
-```
+Run focused tests first, then the broadest available static/test gates. State
+which hardware-dependent tests were not run.
 
-GPU kernel tests require AdaptiveCpp:
+For a production selection claim, capture all of:
 
-```bash
-just gpu-build
-just gpu-test
-```
+- exact `Custom Scan (GpuAccelAgg)` plan label;
+- `Plan Selected: true` and resident proof/operator class;
+- `GPU Kernel Dispatched: true` under `EXPLAIN ANALYZE`;
+- positive `pg_accel_kernel_executions()` delta in the same backend;
+- completely consumed output and PostgreSQL-native correctness comparison;
+- stable native declines for unsupported neighboring shapes;
+- commit, PostgreSQL/device provenance, released GUCs, and effective device
+  limits.
 
-## Code style
+Do not use `pg_accel.test_*` settings as production evidence.
 
-- **Format**: `cargo fmt` using the project `.rustfmt.toml` (style edition 2024,
-  100 char max width).
-- **Lint**: `cargo clippy -- -D warnings`. The project enforces
-  `deny(clippy::all)`, `warn(clippy::pedantic, clippy::nursery)`, and
-  `deny(unwrap_used)`.
-- **License check**: `cargo deny check` validates dependencies against the
-  allowlist in `deny.toml`.
-- **SAFETY comments**: Every `unsafe` block must have a `// SAFETY:` comment
-  explaining why the invariants hold. No exceptions.
-- **No `unwrap()`**: Use `unwrap_or`, `?`, or explicit error handling outside
-  of test code.
+## Commits and pull requests
 
-## Commit convention
+Use a scoped conventional subject:
 
-This project uses conventional commits. The CI enforces the format.
-
-```
-feat(scope): add new capability
-fix(scope): correct a bug
-perf(scope): improve performance without changing behavior
-test(scope): add or update tests
-docs(scope): documentation only
+```text
+feat(scope): add a production capability
+fix(scope): correct behavior
+perf(scope): improve measured execution
+test(scope): add or update coverage
+docs(scope): correct documentation
 refactor(scope): restructure without behavior change
-chore(scope): build, CI, dependency updates
+chore(scope): maintain tooling or dependencies
 ```
 
-Common scopes: `adapter`, `engine`, `executor`, `gpu`, `cost`.
-
-Examples:
-
-```
-feat(adapter): add pgvector distance function support
-fix(executor): handle NULL geometry in join recheck
-perf(gpu): skip redundant bbox checks in point_in_ring kernel
-test(correctness): add degenerate polygon edge cases
-```
-
-## Architecture overview
-
-Before diving in, understand the four layers:
-
-1. **Adapters** (`src/adapters/`) -- declare which functions can be accelerated.
-2. **Dispatch** (`src/engine/dispatch.rs`) -- accumulate batches, route to strategy.
-3. **Executor Nodes** (`src/engine/executor/`) -- Custom Scan: scan, join, agg, sort.
-4. **GPU Kernels** (`pgaccel-kernels/src/`) -- C++/SYCL spatial, H3, raster kernels.
-
-Read `CLAUDE.md` for the full safety rules and architecture details.
-
-## Safety Rules
-
-1. **All PG C functions on main backend thread only.** Never call PG functions from rayon.
-2. **rayon is only for**: GPU kernel orchestration, sort-key extraction, top-k merge.
-3. **GPU strategies only**: registered acceleration paths must run a GPU kernel; uncertain rows reject/error.
-4. **Custom Scan has three vtables**: `CustomPathMethods`, `CustomScanMethods`, `CustomExecMethods`. Never confuse them.
-5. **No `unwrap()` outside tests.** Use `unwrap_or`, `?`, or explicit error handling.
-6. **`CHECK_FOR_INTERRUPTS()` between batches** on main thread.
-7. **Thread budget via shared memory LWLock.** Always release in `before_shmem_exit`.
-8. **`PARALLEL SAFE` != thread-safe.** PG parallel = forked processes, not threads.
-
-## Coordination
-
-For larger changes, split work by ownership boundary and keep each patch focused.
-Do not let two concurrent changes edit the same file unless the integration
-owner has explicitly planned the merge. Public pull requests should include the
-motivation, affected subsystems, test coverage, and any runtime behavior notes.
+Pull requests should state the motivation, affected ownership boundaries,
+behavioral contract, validation performed, hardware-dependent gaps, and any
+native-decline or public-capability changes.

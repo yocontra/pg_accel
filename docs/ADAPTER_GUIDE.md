@@ -1,287 +1,249 @@
-# Adapter Development Guide
+# Extension Adapter Guide
 
-This guide explains how to add support for new PostgreSQL extension functions
-in pg_accel. Adapters declare which SQL functions can be accelerated and which
-strategy to apply.
+An adapter declares extension-owned SQL function metadata so pg_accel can
+resolve live `pg_proc` OIDs and classify an operation. It does not add a
+PostgreSQL path. At the current revision, normal standalone PostGIS/H3
+function and SRF plans remain PostgreSQL-native because there is no complete
+resident producer/consumer path for them.
 
-## Architecture Overview
+## Current registry surface
 
-```
-┌─────────────────────┐     ┌──────────────────┐     ┌────────────────┐
-│  Adapter (declares   │────▶│  AdapterRegistry  │────▶│  Planner Hook  │
-│  functions+strategy) │     │  (OID → strategy) │     │  (inject path) │
-└─────────────────────┘     └──────────────────┘     └────────────────┘
-```
+`AdapterRegistry::init_adapters` probes only the PostGIS and H3 adapters, then
+resolves their function names against the live catalog. The constructors are
+wired at `pg_accel/src/engine/registry.rs:85-109`.
 
-1. **Adapter** — a module that returns an `ExtensionAdapter` struct listing
-   acceleratable functions and their strategies.
-2. **Registry** — at startup, probes which extensions are installed, activates
-   matching adapters, resolves function names to OIDs via `pg_proc`.
-3. **Planner hook** — at query time, does O(1) OID lookup to decide whether to
-   inject a Custom Scan path.
+| Adapter | Registered entries | Output metadata | Production standalone path |
+|---|---|---|---|
+| `postgis` | `st_intersects` | scalar | None |
+| `h3` | `h3_latlng_to_cell` | scalar | None |
+| `h3` | `h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_cell_to_children`, `h3_cell_to_boundary` | variable output | None |
+| `h3` | `h3_cells_to_multi_polygon` | two-field record | None |
 
-## Acceleration Strategies
+PostGIS deliberately registers only `st_intersects` at
+`pg_accel/src/adapters/postgis.rs:14-22`. The H3 scalar and variable/record
+lists are built at `pg_accel/src/adapters/h3.rs:53-135`.
+
+The registered H3 names are not all planner-consumed in the same way:
+
+- covered `h3_latlng_to_cell` and `h3_cell_to_parent` expressions can be
+  represented as group keys inside a selected resident aggregate;
+- the standalone scalar/function-scan path remains native;
+- variable/record SRF output remains native;
+- `h3_cell_to_parent` has a kernel/descriptor transformation but is
+  intentionally not in the standalone adapter scalar allowlist.
+
+Likewise, the PostGIS adapter entry does not expose a production base predicate
+path. The resident spatial descriptor has a test-only admission seam and is
+dark under normal GUCs.
+
+## Data types
+
+The public registry types live in
+`pg_accel/src/engine/registry/types.rs:8-161`.
 
 ```rust
 pub enum AccelStrategy {
-    GpuSpatial,     // Spatial predicates → GPU three-layer pipeline
-    GpuRaster,      // Per-pixel raster map algebra → GPU
-    GpuH3,          // H3 cell computation → GPU
-    GpuSort,        // GPU-accelerated radix sort
-    GpuReduce,      // GPU-accelerated aggregate reduction
-    GpuExpr,        // GPU expression evaluation
-    GpuHashJoin,    // GPU hash join when a real build/probe kernel exists
-    GpuWindow,      // GPU window functions
+    GpuSpatial,
+    GpuRaster,
+    GpuH3,
+    GpuSort,
+    GpuReduce,
+    GpuExpr,
+    GpuHashJoin,
+    GpuWindow,
+    GpuNestedLoopIneq,
 }
-```
 
-**Choosing a strategy:**
+pub enum OutputShape {
+    Scalar,
+    Record { field_count: u32 },
+    VarLen,
+}
 
-| Strategy | When to Use |
-|----------|------------|
-| `GpuSpatial` | Spatial predicates that benefit from GPU bbox pre-filter + parallel exact geometry testing. |
-| `GpuRaster` | Per-pixel/tile raster operations with regular memory access patterns. |
-| `GpuH3` | Pure integer/trigonometric H3 cell operations (no palloc, no PG API calls). |
-| `GpuSort` | Sort-key extraction and ordering that benefits from GPU radix sort. |
-| `GpuReduce` | Aggregate functions (SUM, AVG, MIN, MAX, COUNT) on numeric data. |
-| `GpuExpr` | Expression evaluation with a real GPU expression kernel. |
-| `GpuHashJoin` | Hash joins after a real GPU build/probe implementation exists. |
-| `GpuWindow` | Window functions with a backed GPU kernel. |
-
-Only register a GPU strategy when the matching planner path, FFI bridge, and
-kernel implementation are all present.
-
-## Core Types
-
-### `FunctionAccelEntry`
-
-Declares a single SQL function that can be accelerated:
-
-```rust
 pub struct FunctionAccelEntry {
-    pub schema: &'static str,      // "public" or "pg_catalog"
-    pub name: &'static str,         // lowercase function name
-    pub strategy: AccelStrategy,    // acceleration strategy
+    pub schema: &'static str,
+    pub name: &'static str,
+    pub strategy: AccelStrategy,
+    pub output_shape: OutputShape,
+    pub output_field_types: Vec<u32>,
+    pub output_field_names: Vec<&'static str>,
 }
-```
 
-### `ExtensionAdapter`
-
-Declares all acceleratable functions from one extension:
-
-```rust
 pub struct ExtensionAdapter {
-    pub name: &'static str,         // must match pg_extension.extname
+    pub name: &'static str,
     pub functions: Vec<FunctionAccelEntry>,
 }
 ```
 
-## Step-by-Step: Adding a New Adapter
+`FunctionAccelEntry::scalar(schema, name, strategy)` is the convenience
+constructor for a scalar entry that does not need explicit FunctionScan tuple
+metadata. Variable and record outputs must provide a shape plus field type/name
+vectors that satisfy the typed output contract in
+`pg_accel/src/engine/registry/contracts.rs:152-180`.
 
-### 1. Create the adapter module
+`AccelStrategy` is registry/kernel classification. It is not the same as the
+Custom Scan execution strategy or the resident operator class reported by
+EXPLAIN.
 
-Create `pg_accel/src/adapters/my_extension.rs`:
+## Registry lifecycle
+
+The registry cannot use SPI during `_PG_init`, so it initializes lazily on a
+planner-hook invocation. For each known adapter it:
+
+1. checks `pg_extension` for the adapter's extension name;
+2. stores the installed adapter metadata;
+3. queries `pg_proc`/`pg_namespace` for each schema/name pattern;
+4. stores cloned `FunctionAccelEntry` values by resolved OID.
+
+The resolution loop is at `pg_accel/src/engine/registry.rs:128-192`. A lookup
+miss can trigger one guarded re-resolution attempt so an extension created
+after initial registry setup can become visible in that backend; the retry is
+implemented at `pg_accel/src/engine/registry.rs:194-282`.
+
+Because the current patterns do not constrain argument types, every matching
+overload under the declared schema/name can resolve. A planner consumer must
+still prove exact input/output types, semantics, collation, and shape before
+admission.
+
+## Adding adapter metadata
+
+Do not begin by registering a desirable SQL name. Registration is the final
+metadata step after the execution contract exists.
+
+### 1. Prove the complete operation
+
+Before adding an entry, identify and test all of these:
+
+- exact SQL extension name, schema, function name, overloads, argument types,
+  return type, strictness, volatility, collation, and SRF behavior;
+- a real device kernel and Rust/C bridge with typed error/status conversion;
+- NULL, empty, overflow, invalid-value, and output-cardinality semantics;
+- exact output shape and PostgreSQL type metadata;
+- a resident input producer and downstream consumer with no blocking
+  intermediate host materialization;
+- planner-time capability and cost gates for every unsupported subtype/shape;
+- execution-time failure behavior and resource cleanup.
+
+If any item is absent, leave the function unregistered or keep it behind a
+non-production test seam. A registry entry that cannot be consumed by a
+production planner path is not user-visible acceleration.
+
+### 2. Add the adapter module
+
+Create a module under `pg_accel/src/adapters/` that returns an
+`ExtensionAdapter`. Use the scalar constructor only for a true scalar contract:
 
 ```rust
-use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
+use crate::engine::registry::{
+    AccelStrategy, ExtensionAdapter, FunctionAccelEntry,
+};
 
+#[must_use]
 pub fn adapter() -> ExtensionAdapter {
     ExtensionAdapter {
-        name: "my_extension",
-        functions: vec![
-            FunctionAccelEntry {
-                schema: "public",
-                name: "my_fast_func",
-                strategy: AccelStrategy::GpuExpr,
-            },
-            FunctionAccelEntry {
-                schema: "public",
-                name: "my_spatial_func",
-                strategy: AccelStrategy::GpuSpatial,
-            },
-        ],
+        name: "extension_name",
+        functions: vec![FunctionAccelEntry::scalar(
+            "public",
+            "function_name",
+            AccelStrategy::GpuExpr,
+        )],
     }
 }
 ```
 
-**Key points:**
-- `name` must exactly match the extension name in `pg_extension` (`SELECT extname FROM pg_extension`)
-- Function names must be lowercase and match `pg_proc.proname` exactly
-- Schema must match the schema the function is installed in (usually `public`)
+The extension name must match `pg_extension.extname`; schema and lowercase name
+must match the catalog. This example shows the data shape only. It does not make
+`GpuExpr` planner-selectable.
 
-### 2. Register the module
+For `OutputShape::Record` or `OutputShape::VarLen`, use a struct literal and
+provide exact `output_field_types` and `output_field_names`. Do not use an OID
+sentinel when the PostgreSQL result descriptor requires a stable built-in type.
 
-Add to `pg_accel/src/adapters/mod.rs`:
+### 3. Wire discovery
 
-```rust
-mod my_extension;
-pub use my_extension::adapter as my_extension_adapter;
-```
+Export the module from `pg_accel/src/adapters/mod.rs`, then add its constructor
+to both candidate lists in `AdapterRegistry`:
 
-### 3. Wire into the registry
+- initial discovery in `init_adapters`;
+- deferred discovery in `resolve_oids_again`.
 
-In `pg_accel/src/engine/registry.rs`, add your adapter to the `init_adapters()` method:
+The current two lists are visible at
+`pg_accel/src/engine/registry.rs:89-93` and
+`pg_accel/src/engine/registry.rs:205-217`. Keeping them aligned is required for
+extensions installed after the first planner pass.
 
-```rust
-fn init_adapters(&mut self) {
-    let adapters = [
-        crate::adapters::postgis::adapter(),
-        crate::adapters::postgis_raster::adapter(),
-        crate::adapters::h3::adapter(),
-        crate::adapters::pg_builtins::adapter(),
-        crate::adapters::my_extension::adapter(),  // <-- add here
-    ];
-    // ... rest of init
-}
-```
+### 4. Add a real planner consumer
 
-The registry will:
-1. Check if `my_extension` is installed via `pg_extension`
-2. If found, resolve each function name to its OID via `pg_proc`
-3. Populate the OID → strategy lookup map
+Choose the correct resident logical contract. For the current production
+surface that means extending the aggregate shape/spec/descriptor path, not
+reviving a host-staged FunctionScan:
 
-### 4. Add extension requirement (for benchmarks)
+1. Extract the exact PostgreSQL expression into a stable `AggQuerySpec` enum
+   variant or decline it.
+2. Record every required resident relation/attribute and derived artifact.
+3. Validate runtime descriptor capability before path construction.
+4. Include device, residency, first-load, output, and operation cost.
+5. Carry a `ResidentProofSnapshot` with only final output materialization.
+6. Bind live resident pointers only during executor setup/dispatch.
+7. Emit operation-specific EXPLAIN details and stable decline reasons.
 
-If you add workloads that depend on the extension, update
-`pg_accel_bench/src/workloads/mod.rs`:
+The generic aggregate admission sequence is
+`pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs:567-675`. If the
+operation needs a standalone SRF or row-returning path, it is not covered by the
+current production architecture; land and prove that resident pipeline before
+advertising the adapter entry.
 
-```rust
-pub fn extension_requirements() -> Vec<(&'static str, &'static str)> {
-    vec![
-        // ... existing entries ...
-        ("my_workload", "my_extension"),
-    ]
-}
-```
+## Required tests
 
-## Worked Example: Adding pgvector Support
+Adapter metadata tests are necessary but not sufficient.
 
-Let's walk through adding support for `pgvector`, a vector similarity search extension.
+### Registry tests
 
-### Step 1: Identify acceleratable functions
+- extension name and schema/name spelling;
+- exact entry allowlist with no duplicates;
+- strategy and output shape;
+- record/variable field-count, field-type, and field-name consistency;
+- deferred `CREATE EXTENSION` re-resolution;
+- overload behavior against the real catalog.
 
-```sql
--- Check what functions pgvector provides
-SELECT proname, pronamespace::regnamespace
-FROM pg_proc
-WHERE proname LIKE '%vector%' OR proname LIKE '%cosine%';
-```
+### Planner tests
 
-Key candidates:
-- `cosine_distance(vector, vector)` → GPU-friendly: element-wise multiply + reduce
-- `l2_distance(vector, vector)` → GPU-friendly: element-wise subtract + square + reduce
-- `inner_product(vector, vector)` → GPU-friendly: dot product
+- normal released GUCs select only the intended covered shape;
+- unsupported overloads/types/subtypes remain PostgreSQL-native;
+- absence of the supporting extension is a clean native decline;
+- exact Custom Scan name and resident proof;
+- no use of `pg_accel.test_*` in the selection proof.
 
-### Step 2: Create the adapter
+### Execution tests
 
-`pg_accel/src/adapters/pgvector.rs`:
+- native-equivalent output including NULL and edge cases;
+- positive `pg_accel_kernel_executions()` delta;
+- `GPU Kernel Dispatched: true` and consumed result rows;
+- deterministic error on injected/real device failure without executor
+  passthrough;
+- rescan, invalidation, refresh, eviction, and budget behavior where residency
+  is involved.
 
-```rust
-use crate::engine::registry::{AccelStrategy, ExtensionAdapter, FunctionAccelEntry};
-
-/// Adapter for pgvector (vector similarity search).
-///
-/// Distance functions are registered only after GPU kernels are implemented.
-pub fn adapter() -> ExtensionAdapter {
-    ExtensionAdapter {
-        name: "vector",  // pgvector's extname is "vector"
-        functions: vec![
-            FunctionAccelEntry {
-                schema: "public",
-                name: "cosine_distance",
-                strategy: AccelStrategy::GpuExpr,
-            },
-            FunctionAccelEntry {
-                schema: "public",
-                name: "l2_distance",
-                strategy: AccelStrategy::GpuExpr,
-            },
-            FunctionAccelEntry {
-                schema: "public",
-                name: "inner_product",
-                strategy: AccelStrategy::GpuExpr,
-            },
-        ],
-    }
-}
-```
-
-### Step 3: Register and wire
-
-`pg_accel/src/adapters/mod.rs`:
-```rust
-pub mod pgvector;
-```
-
-`pg_accel/src/engine/registry.rs` — add `crate::adapters::pgvector::adapter()` to the
-adapter list in `init_adapters()`.
-
-### Step 4: Test
+Run the focused tests first, followed by the configured matrix:
 
 ```bash
-# Unit tests (verify OID resolution with pgvector installed)
+just fmt-check
+just lint
+just check-matrix
 just test
-
-# Integration test
-just dev-up
-just dev-psql agent=0
-
--- In psql:
-CREATE EXTENSION vector;
-SET pg_accel.enabled = on;
-EXPLAIN ANALYZE
-SELECT cosine_distance(embedding, '[1,2,3]'::vector)
-FROM my_vectors
-ORDER BY cosine_distance(embedding, '[1,2,3]'::vector)
-LIMIT 10;
--- Look for Custom Scan (GpuAccelScan) in the plan
 ```
 
-### Step 5: Upgrade to GPU strategy (later)
+Do not use a standalone kernel benchmark, an OID lookup unit test, or a forced
+CustomPath as the sole evidence for production SQL support.
 
-Once a GPU kernel exists in `pgaccel-kernels/`, change the strategy:
+## Review checklist
 
-```rust
-FunctionAccelEntry {
-    schema: "public",
-    name: "cosine_distance",
-    strategy: AccelStrategy::GpuReduce,
-},
-```
-
-Do not register the function until the kernel-backed strategy is ready.
-
-## Existing Adapters Reference
-
-| Adapter | File | Extension | GPU Functions | Batched Functions |
-|---------|------|-----------|---------------|-------------------|
-| PostGIS | `postgis.rs` | `postgis` | st_intersects, st_contains, st_within, st_dwithin, st_distance | st_buffer, st_transform, st_simplify, st_union, st_centroid, st_asmvtgeom, st_area, st_length, st_crosses, st_overlaps, st_touches, st_x, st_y, st_srid, st_geometrytype |
-| PostGIS Raster | `postgis_raster.rs` | `postgis_raster` | st_mapalgebra, st_clip, st_reclass | st_value, st_union, st_resample, st_summarystats |
-| H3 | `h3.rs` | `h3` | h3_latlng_to_cell, h3_grid_distance, h3_cell_to_parent, h3_get_resolution | h3_cell_to_latlng, h3_cell_to_boundary, h3_grid_disk, h3_compact_cells |
-| PG Built-ins | `pg_builtins.rs` | *(none)* | *(none)* | abs, sqrt, log, length, lower, upper, btrim, date_part, age, date_trunc, jsonb_extract_path_text, jsonb_typeof |
-
-## OID Resolution Details
-
-The registry resolves function names to PostgreSQL OIDs at extension load time
-(not at query time). This happens in `AdapterRegistry::resolve_oids()`:
-
-1. For each `FunctionAccelEntry`, a query against `pg_proc` finds matching functions
-2. Schema is matched via `pg_namespace`
-3. If a function name resolves to multiple overloads, all OIDs are registered
-4. Unresolved functions are silently skipped (the extension may have a different version)
-
-At query time, `AdapterRegistry::lookup(oid)` is O(1) HashMap access — zero overhead
-for functions that aren't registered.
-
-## Safety Rules
-
-1. **Adapter code runs on the main backend thread only.** Adapter registration
-   uses SPI, which requires a PG backend context.
-2. **Never call PG functions from GPU strategy dispatch.** GPU strategies must
-   extract all needed data before dispatching to rayon/GPU threads.
-3. **Function names must be lowercase.** PostgreSQL normalizes identifiers to
-   lowercase; the registry comparison is exact.
-4. **Test with the actual extension installed.** OID resolution depends on the
-   real `pg_proc` catalog — unit tests with mock OIDs are not sufficient.
-5. **No CPU acceleration strategy.** A registered function must have a real GPU
-   path and strict thread-safety guarantees.
+- The documented registered-name list matches the adapter constructors.
+- Registry discovery lists are identical.
+- Output metadata matches the live PostgreSQL function signature.
+- Planner admission and native declines use released GUCs.
+- The selected path has a complete resident proof and bounded final output.
+- EXPLAIN proves selection and dispatch separately.
+- Correctness is compared against the extension-off PostgreSQL plan.
+- Failure, invalidation, and cleanup paths are covered.
+- README capability status changes in the same commit as production admission.

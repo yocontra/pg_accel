@@ -23,3 +23,10 @@ body:
       description: Any workarounds or alternative approaches you have considered.
     validations:
       required: false
+  - type: textarea
+    id: capability-layer
+    attributes:
+      label: Capability layer
+      description: Which layers exist and which are requested (SQL/catalog contract, adapter registration, planner path, resident proof, executor/bridge, device kernel, EXPLAIN, correctness tests, or benchmarks)? A kernel or adapter entry alone is not production planner support.
+    validations:
+      required: true

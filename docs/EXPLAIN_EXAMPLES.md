@@ -1,338 +1,240 @@
-# pg_accel EXPLAIN Output Guide
+# Reading pg_accel EXPLAIN Output
 
-This document shows how pg_accel Custom Scan nodes appear in `EXPLAIN` and
-`EXPLAIN ANALYZE` output, with annotated before/after comparisons.
+The current production planner can select a resident aggregate as
+`Custom Scan (GpuAccelAgg)`. Other Custom Scan vtables exist in the codebase,
+but normal base-scan, row-returning join, window, function/SRF, sort, and raster
+paths are not production-selectable at this revision.
 
-## Custom Scan Node Types
+## Selected resident aggregate
 
-pg_accel injects four Custom Scan node types via the planner hook:
-
-| Node | EXPLAIN Name | CustomPath Name | Use Case |
-|------|-------------|-----------------|----------|
-| Scan | `Custom Scan (GpuAccelScan)` | `GpuAccelScan` | Single-table scans with acceleratable predicates |
-| Join | `Custom Scan (GpuAccelJoin)` | `GpuAccelJoin` | Joins with spatial or other GPU predicates |
-| Agg | `Custom Scan (GpuAccelScan)` | `GpuAccelScan` | Aggregates with GpuReduce strategy |
-| Sort | `Custom Scan (GpuAccelScan)` | `GpuAccelScan` | ORDER BY with GpuSort strategy |
-
-## EXPLAIN Output Fields
-
-### Always Shown (EXPLAIN)
-
-| Field | Description |
-|-------|-------------|
-| `Strategy` | Node type: `GpuScan`, `GpuJoin`, `GpuAgg`, or `GpuSort` |
-| `Plan Selected` | `true` when PostgreSQL selected a pg_accel Custom Scan node |
-| `Batch Size` | Tuples per batch sent to the GPU/batched evaluator |
-| `Expected Threads` | Worker thread count for GPU dispatch |
-| `GPU Resident Pipeline` | Whether this node keeps intermediate data GPU-resident |
-| `GPU Resident Boundary` | If not resident, the CPU/PostgreSQL materialization boundary |
-
-### EXPLAIN ANALYZE Only
-
-| Field | Description |
-|-------|-------------|
-| `GPU Kernel Dispatched` | Runtime evidence that the selected node actually launched GPU work |
-| `Rows Returned To CPU` | Tuples emitted by the Custom Scan node to PostgreSQL |
-| `Rows Dispatched` | Cumulative tuples sent to GPU across all batches |
-| `Batches` | Total batch executions |
-| `Rows Per Batch` | Average rows processed per dispatch batch |
-| `Dispatch Time` | Total GPU dispatch time in milliseconds (3 decimal places) |
-| `Avg Dispatch Time Per Batch` | Average dispatch wall time per batch in milliseconds |
-| `Hash Join Build Count` | `GpuHashJoin` build-side hash table builds observed at runtime |
-| `Hash Join Redundant Builds` | Extra inner-side rebuilds beyond the first build |
-| `Hash Join Build Rows` | Inner rows consumed by the most recent hash build |
-| `Hash Join Build Non-Null Rows` | Non-NULL inner keys inserted into the GPU hash table |
-| `Hash Join Probe Batches` | Probe batches that used the built hash table |
-| `GPU Hash Table Reused Across Probe Batches` | Whether one build fed multiple probe batches in this node |
-| `Shared GPU Inner Reuse` | Whether the inner build is retained/shared across workers or executions |
-| `Top-K Limit` | Bounded LIMIT used by a selected `GpuSort` top-k path |
-| `Input Rows Materialized` | Heap/child tuples copied before top-k pruning |
-| `Output Tuples Retained` | Tuple copies retained for final emission |
-| `Rows Pruned After Top-K` | Materialized tuple copies discarded after selecting top-k output |
-| `Full Input Materialized` | Whether the selected sort copied the full input before output |
-
----
-
-## Example 1: Spatial Scan (ST_DWithin proximity query)
-
-### Before (vanilla PostgreSQL)
+After running the setup and pin commands from the
+[README quick start](../README.md#quick-start):
 
 ```sql
-EXPLAIN ANALYZE
-SELECT count(*) FROM bench_locations
-WHERE ST_DWithin(geom,
-  ST_SetSRID(ST_MakePoint(-73.985, 40.748), 4326), 0.005);
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT g, sum(v), count(*)
+FROM pg_accel_quickstart
+GROUP BY g
+ORDER BY g;
 ```
 
-```
-Aggregate  (cost=4520.00..4520.01 rows=1 width=8)
-           (actual time=45.123..45.124 rows=1 loops=1)
-  ->  Seq Scan on bench_locations  (cost=0.00..4500.00 rows=8000 width=0)
-                                   (actual time=0.025..44.891 rows=7823 loops=1)
-        Filter: st_dwithin(geom, '0101000020E6100000...', 0.005)
-        Rows Removed by Filter: 92177
-Planning Time: 0.185 ms
-Execution Time: 45.210 ms
-```
+The exact values depend on the relation, device limits, residency generations,
+and execution. The selected node has this structure; angle-bracketed values are
+placeholders, not expected literal output:
 
-### After (pg_accel enabled)
-
-```
-Aggregate  (cost=2520.00..2520.01 rows=1 width=8)
-           (actual time=12.456..12.457 rows=1 loops=1)
-  ->  Custom Scan (GpuAccelScan)  (cost=0.00..2500.00 rows=8000 width=0)
-                                  (actual time=0.830..12.210 rows=7823 loops=1)
-        Strategy: GpuScan
+```text
+Sort
+  Sort Key: pg_accel_quickstart.g
+  ->  Custom Scan (GpuAccelAgg)
+        Strategy: GpuAgg
         Plan Selected: true
-        Batch Size: 256
-        Expected Threads: 4
-        GPU Resident Pipeline: false
+        Batch Size: <planned batch value>
+        Expected Threads: <planned host-thread request>
+        GPU Resident Pipeline: true
+        GPU Resident Proof Version: <wire proof version>
+        GPU Resident Operator Class: resident_groupagg
+        GPU Descriptor Strategy: descriptor_grouped_aggregate
+        GPU Descriptor Group Keys: <logical key description>
+        GPU Descriptor Aggregates: <logical aggregate description>
+        GPU Descriptor Filter: <logical filter description>
+        GPU Descriptor Star Dimensions: <logical dimension description or none>
+        GPU Descriptor Output: <AOP2 slot description>
+        GPU Descriptor Residency State: <resident state>
+        GPU Descriptor Artifact: <hit, built, or rebuilt>
+        GPU Descriptor Generations: <dependency generations>
+        GPU Descriptor Bytes: <raw, derived, artifact, and total bytes>
+        GPU Resident Stage Mask: <proof stage mask>
+        GPU Resident Device Columns: <device column count>
         GPU Kernel Dispatched: true
-        Rows Returned To CPU: 7823
-        Rows Dispatched: 100000
-        Batches: 391
-        Rows Per Batch: 255.754
-        Dispatch Time: 11.240 ms
-        Avg Dispatch Time Per Batch: 0.029 ms
-        ->  Seq Scan on bench_locations  (cost=0.00..1500.00 rows=100000 width=32)
-                                         (actual time=0.012..3.456 rows=100000 loops=1)
-Planning Time: 0.210 ms
-Execution Time: 12.530 ms
+        Rows Returned To CPU: <final aggregate rows>
+        Rows Dispatched: <resident fact rows>
+        Batches: <device calls>
+        Rows Per Batch: <derived average>
+        Dispatch Time: <device call time> ms
+        Avg Dispatch Time Per Batch: <derived average> ms
 ```
 
-**What changed:**
-- The `Seq Scan` filter is replaced by a `Custom Scan (GpuAccelScan)` node
-- Strategy `GpuScan` indicates spatial predicate acceleration
-- The child `Seq Scan` feeds all rows to the Custom Scan node (no filter at scan level)
-- The Custom Scan node applies the spatial predicate in GPU-accelerated batches
-- `Rows Dispatched: 100000` — all rows passed through GPU evaluation
-- `Batches: 391` — ceil(100000 / 256) batch dispatches
-- `Dispatch Time: 11.240 ms` — total time in GPU dispatch path
+PostgreSQL may place native nodes such as `Sort`, `Limit`, or final projection
+above the Custom Scan. Selection proof is the exact `GpuAccelAgg` node and its
+properties, not the root node of the plan.
 
----
+The common property names are emitted at
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:43-148`. Descriptor fields and
+residency summaries are emitted at
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:468-609` and
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:829-855`.
 
-## Example 2: Spatial Join (ST_Contains)
+## Plain EXPLAIN versus ANALYZE
 
-### Before (vanilla PostgreSQL)
+`EXPLAIN (VERBOSE)` plans but does not dispatch. It can prove:
+
+- exact Custom Scan node name;
+- `Plan Selected`;
+- strategy and planned batch/thread metadata;
+- resident proof/operator class;
+- logical AQS3/AOP2 descriptor contents.
+
+Because execution did not initialize residency, descriptor fields may report:
+
+```text
+GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
+GPU Descriptor Artifact: not initialized
+GPU Descriptor Generations: not inspected
+GPU Descriptor Bytes: not inspected
+```
+
+Those values are defined at
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:559-571` and are not an error.
+
+`EXPLAIN (ANALYZE, VERBOSE)` executes and can additionally prove:
+
+- `GPU Kernel Dispatched`;
+- rows dispatched and final rows returned;
+- batch count and rows per batch;
+- dispatch timing;
+- actual residency/artifact outcome and dependency generations.
+
+`GPU Kernel Dispatched: false` is not dispatch evidence, even if the plan
+contains a Custom Scan. For audit-grade evidence, also record a positive
+before/after delta from the monotonic kernel counter:
 
 ```sql
-EXPLAIN ANALYZE
-SELECT count(*)
-FROM bench_points p, bench_polygons g
-WHERE ST_Contains(g.geom, p.geom);
+SELECT pg_accel_kernel_executions() AS before;
+
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT g, sum(v), count(*)
+FROM pg_accel_quickstart
+GROUP BY g
+ORDER BY g;
+
+SELECT pg_accel_kernel_executions() AS after;
 ```
 
-```
-Aggregate  (cost=125000.00..125000.01 rows=1 width=8)
-           (actual time=890.123..890.124 rows=1 loops=1)
-  ->  Nested Loop  (cost=0.28..124000.00 rows=40000 width=0)
-                   (actual time=0.450..889.500 rows=38421 loops=1)
-        ->  Seq Scan on bench_polygons g  (cost=0.00..180.00 rows=10000 width=32)
-                                          (actual time=0.010..1.200 rows=10000 loops=1)
-        ->  Index Scan using bench_points_geom_idx on bench_points p
-              (cost=0.28..12.00 rows=4 width=32)
-              (actual time=0.005..0.085 rows=4 loops=10000)
-              Index Cond: (geom && g.geom)
-              Filter: st_contains(g.geom, p.geom)
-              Rows Removed by Filter: 2
-Planning Time: 0.320 ms
-Execution Time: 890.450 ms
-```
+Run all three statements in the same backend. The counter API and reset
+behavior are documented at `pg_accel/src/engine/stats.rs:487-525`.
 
-### After (pg_accel enabled)
+## What the properties mean
 
-```
-Aggregate  (cost=65000.00..65000.01 rows=1 width=8)
-           (actual time=245.678..245.679 rows=1 loops=1)
-  ->  Custom Scan (GpuAccelJoin)  (cost=0.28..64000.00 rows=40000 width=0)
-                                  (actual time=1.200..245.100 rows=38421 loops=1)
-        Strategy: GpuJoin
-        Plan Selected: true
-        Batch Size: 256
-        Expected Threads: 4
-        GPU Resident Pipeline: false
-        GPU Kernel Dispatched: true
-        Rows Returned To CPU: 38421
-        Rows Dispatched: 60000
-        Batches: 235
-        Rows Per Batch: 255.319
-        Dispatch Time: 198.500 ms
-        Avg Dispatch Time Per Batch: 0.845 ms
-        ->  Nested Loop  (cost=0.28..50000.00 rows=60000 width=64)
-                         (actual time=0.120..42.300 rows=60000 loops=1)
-              ->  Seq Scan on bench_polygons g  (cost=0.00..180.00 rows=10000 width=32)
-                                                (actual time=0.008..1.100 rows=10000 loops=1)
-              ->  Index Scan using bench_points_geom_idx on bench_points p
-                    (cost=0.28..4.80 rows=6 width=32)
-                    (actual time=0.003..0.004 rows=6 loops=10000)
-                    Index Cond: (geom && g.geom)
-Planning Time: 0.350 ms
-Execution Time: 245.890 ms
-```
+| Property | Interpretation |
+|---|---|
+| `Strategy: GpuAgg` | The Custom Scan uses aggregate executor state. |
+| `Plan Selected: true` | PostgreSQL chose this pg_accel path. It says nothing about execution by itself. |
+| `Batch Size` | Planned executor metadata. It is not the same as the resident aggregate cost/admission floor. |
+| `Expected Threads` | pg_accel-owned host-thread request, not PostgreSQL parallel workers. Current resident aggregate executors request none. |
+| `GPU Resident Pipeline` | The plan carries a proof that no blocking intermediate host boundary exists. |
+| `GPU Resident Operator Class` | Stable proof classification; the selected aggregate reports `resident_groupagg`. |
+| `GPU Descriptor Strategy` | `descriptor_grouped_aggregate` when keys exist, otherwise `descriptor_ungrouped_aggregate`. |
+| `GPU Descriptor Output` | Ordered AOP2 mapping from logical key/aggregate results to PostgreSQL result slots. |
+| `GPU Descriptor Artifact` | Whether the dependency-stamped derived artifact was reused, built, or rebuilt during this execution. |
+| `GPU Descriptor Generations` | Relation/global/relfilenode evidence used to identify the resident inputs. |
+| `Rows Returned To CPU` | Bounded final rows materialized for PostgreSQL. This is not a CPU executor fallback. |
+| `Rows Dispatched` | Fact rows presented to resident aggregate dispatch. |
+| `Batches` | Completed bounded device aggregate calls. |
+| `GPU Kernel Dispatched` | Execution-time dispatch proof from this node. |
 
-**What changed:**
-- The `Nested Loop` with inline `ST_Contains` filter becomes the child of a
-  `Custom Scan (GpuAccelJoin)` node
-- The GiST index still provides bbox candidates (`geom && g.geom`)
-- The expensive `ST_Contains` recheck moves to GPU-accelerated batch evaluation
-- `Strategy: GpuJoin` indicates spatial join acceleration
+## Native decline example
 
-For selected `GpuHashJoin` plans, `EXPLAIN ANALYZE` also reports build-side
-reuse evidence. Today `Shared GPU Inner Reuse` is `false`; a value of
-`GPU Hash Table Reused Across Probe Batches: true` only proves per-node reuse
-after one build, not retained/shared inner buffers across workers or executions.
-
----
-
-## Example 3: Aggregate with GpuReduce
-
-### Before (vanilla PostgreSQL)
+A base scan with a WHERE clause has no production resident producer/consumer
+path. Reset the backend-local planner state, plan it, and read the reason in the
+same backend:
 
 ```sql
-EXPLAIN ANALYZE
-SELECT dept, sum(salary), avg(salary), count(*)
-FROM bench_employees WHERE active GROUP BY dept;
+SELECT pg_accel_reset_stats();
+
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT *
+FROM pg_accel_quickstart
+WHERE v > 500;
+
+SELECT pg_accel_last_planner_rejection_reason();
+-- no_gpu_resident_pipeline
+
+SELECT pg_accel_planner_rejection_count('no_gpu_resident_pipeline');
 ```
 
-```
-HashAggregate  (cost=2800.00..2801.50 rows=50 width=28)
-               (actual time=32.456..32.470 rows=50 loops=1)
-  Group Key: dept
-  Batches: 1  Memory Usage: 32kB
-  ->  Seq Scan on bench_employees  (cost=0.00..2300.00 rows=10000 width=12)
-                                   (actual time=0.015..28.900 rows=10023 loops=1)
-        Filter: active
-        Rows Removed by Filter: 89977
-Planning Time: 0.120 ms
-Execution Time: 32.560 ms
-```
+The expected plan is PostgreSQL-native and contains no `Custom Scan
+(GpuAccel...)`. The reason is recorded by the production base-relation hook at
+`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:483-502` through the
+stable stats key at
+`pg_accel/src/engine/ffi/planner_hooks/decision.rs:111-112`.
 
-### After (pg_accel enabled)
+Other native shapes can have more specific stable reasons from the shape or
+opportunity observer. Capture the returned reason; do not infer one from the SQL
+text or substitute a benchmark expectation.
 
-```
-Custom Scan (GpuAccelScan)  (cost=0.00..1800.00 rows=50 width=28)
-                            (actual time=1.200..8.910 rows=50 loops=1)
-  Strategy: GpuAgg
-  Plan Selected: true
-  Batch Size: 256
-  Expected Threads: 4
-  GPU Resident Pipeline: false
-  GPU Kernel Dispatched: true
-  Rows Returned To CPU: 50
-  Rows Dispatched: 10023
-  Batches: 40
-  Rows Per Batch: 250.575
-  Dispatch Time: 6.780 ms
-  Avg Dispatch Time Per Batch: 0.170 ms
-  ->  Seq Scan on bench_employees  (cost=0.00..2300.00 rows=10000 width=12)
-                                   (actual time=0.012..1.850 rows=10023 loops=1)
-        Filter: active
-        Rows Removed by Filter: 89977
-Planning Time: 0.135 ms
-Execution Time: 9.020 ms
-```
+## Planner GUCs and prepared plans
 
-**What changed:**
-- `HashAggregate` is replaced by `Custom Scan` with `Strategy: GpuAgg`
-- The aggregate reduction (SUM, AVG, COUNT grouped by dept) runs on GPU
-- Only qualifying rows (after the `active` filter) are dispatched
-
----
-
-## Example 4: Sort with GpuSort
-
-### Before (vanilla PostgreSQL)
-
-```sql
-EXPLAIN ANALYZE
-SELECT * FROM bench_sort_ints ORDER BY x DESC LIMIT 1000;
-```
-
-```
-Limit  (cost=4500.00..4502.50 rows=1000 width=8)
-       (actual time=68.200..68.450 rows=1000 loops=1)
-  ->  Sort  (cost=4500.00..4750.00 rows=100000 width=8)
-            (actual time=68.195..68.350 rows=1000 loops=1)
-        Sort Key: x DESC
-        Sort Method: top-N heapsort  Memory: 71kB
-        ->  Seq Scan on bench_sort_ints  (cost=0.00..1450.00 rows=100000 width=8)
-                                         (actual time=0.010..6.200 rows=100000 loops=1)
-Planning Time: 0.080 ms
-Execution Time: 68.550 ms
-```
-
-### After (pg_accel enabled)
-
-```
-Limit  (cost=2500.00..2502.50 rows=1000 width=8)
-       (actual time=15.300..15.450 rows=1000 loops=1)
-  ->  Custom Scan (GpuAccelScan)  (cost=0.00..2500.00 rows=100000 width=8)
-                                  (actual time=1.100..15.200 rows=1000 loops=1)
-        Strategy: GpuSort
-        Plan Selected: true
-        Batch Size: 256
-        Expected Threads: 4
-        GPU Resident Pipeline: false
-        GPU Kernel Dispatched: true
-        Rows Returned To CPU: 1000
-        Rows Dispatched: 100000
-        Batches: 391
-        Rows Per Batch: 255.754
-        Dispatch Time: 13.800 ms
-        Avg Dispatch Time Per Batch: 0.035 ms
-        GPU Dispatched: true
-        GPU Rows Dispatched: 100000
-        Top-K Limit: 1000
-        Input Rows Materialized: 100000
-        Output Tuples Retained: 1000
-        Rows Pruned After Top-K: 99000
-        Full Input Materialized: true
-        ->  Seq Scan on bench_sort_ints  (cost=0.00..1450.00 rows=100000 width=8)
-                                         (actual time=0.008..5.900 rows=100000 loops=1)
-Planning Time: 0.090 ms
-Execution Time: 15.520 ms
-```
-
-**What changed:**
-- `Sort` node is replaced by `Custom Scan` with `Strategy: GpuSort`
-- GPU radix sort handles the ORDER BY with top-K extraction
-- The `Limit` node still caps output at 1000 rows
-- The materialization counters show that this standalone top-k path still
-  copied all input tuples before retaining only the bounded output
-
----
-
-## Disabling pg_accel
-
-To see vanilla PostgreSQL plans for comparison:
+`pg_accel.enabled` and `pg_accel.gpu_enabled` control admission of new plans.
+Change them before `EXPLAIN` or before preparing/executing a statement that is
+expected to be replanned.
 
 ```sql
 SET pg_accel.enabled = off;
-EXPLAIN ANALYZE SELECT ...;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT g, sum(v), count(*)
+FROM pg_accel_quickstart
+GROUP BY g;
+
+SET pg_accel.enabled = on;
+SET pg_accel.gpu_enabled = on;
+EXPLAIN (VERBOSE, COSTS OFF)
+SELECT g, sum(v), count(*)
+FROM pg_accel_quickstart
+GROUP BY g;
 ```
 
-To re-enable:
+Turning `pg_accel.enabled` off after a Custom Scan was planned does not convert
+that plan to PostgreSQL execution. If the existing Custom Scan reaches
+execution, it raises an error rather than passing rows through; the guard is at
+`pg_accel/src/engine/ffi/custom_scan/mod.rs:2901-2918`.
+
+Other frequently misread GUCs:
+
+| GUC | EXPLAIN relevance |
+|---|---|
+| `pg_accel.auto_load` | Affects resident admission/preparation. With it off, pin required columns in the current backend first. |
+| `pg_accel.cost_multiplier` | Changes only resident generic aggregate candidate cost. |
+| `pg_accel.min_batch_size` | Legacy row-fed fill target; it does not force the resident descriptor path. |
+| `pg_accel.kernel_timeout_ms` | Post-return warning threshold, not cancellation or planner admission. |
+| `pg_accel.max_workers_total` | Cluster host-thread ledger cap, not PostgreSQL plan parallelism. |
+| `pg_accel.assert_dispatch` | Reserved no-op; it cannot prove or force dispatch. |
+| `pg_accel.parallel_fused_count` | Reserved no-op; it cannot expose a parallel fused-count path. |
+| `pg_accel.fp64_enabled` | Deprecated no-op; it cannot create an fp64-off comparison. |
+
+## Diagnostic capture
+
+For a plan-selection or dispatch report, include:
 
 ```sql
-SET pg_accel.enabled = on;
+SELECT * FROM pg_accel_device_info();
+SELECT * FROM pg_accel_device_limits() ORDER BY name;
+SELECT * FROM pg_accel_resident_status();
+SELECT pg_accel_resident_live_bytes();
+SELECT * FROM pg_accel_stats();
+SELECT * FROM pg_accel_gpu_failures();
+SELECT pg_accel_last_planner_rejection_reason();
 ```
 
-The cost model automatically avoids Custom Scan injection when it estimates no
-benefit (small tables, simple predicates, OLTP point lookups). To force vanilla
-plans even for large queries, use the GUC toggle above.
+Also include the complete released settings dynamically:
 
-## Reading Dispatch Statistics
+```sql
+SELECT name, setting, unit, context, source
+FROM pg_settings
+WHERE name LIKE 'pg_accel.%'
+  AND name NOT LIKE 'pg_accel.test_%'
+ORDER BY name;
+```
 
-When using `EXPLAIN ANALYZE`, the dispatch statistics help diagnose performance:
+Do not enable or report a `pg_accel.test_*` GUC as production evidence.
 
-| Scenario | What to Look For |
-|----------|-----------------|
-| `Plan Selected: true` with `GPU Kernel Dispatched: false` | Planner selected pg_accel but no GPU work was credited |
-| `Rows Returned To CPU` close to input rows | The plan may be paying full materialization cost |
-| `GPU Resident Pipeline: false` | Intermediate rows crossed back through PostgreSQL/CPU slots |
-| Low `Rows Per Batch` or high `Avg Dispatch Time Per Batch` | Dispatch overhead may dominate cheap reduce/sort work |
-| High `Dispatch Time` relative to total | GPU kernel is the bottleneck — check data transfer |
-| `Batches` much higher than expected | `Batch Size` may be too small — tune `pg_accel.min_batch_size` |
-| `Rows Dispatched` << total rows | Good selectivity — filter pushed before GPU dispatch |
-| `Rows Dispatched` == total rows | Full table sent to GPU — normal for unfiltered scans |
-| `Expected Threads: 1` | Single-threaded fallback — check `pg_accel.workers` GUC |
+## Troubleshooting
+
+| Observation | Check |
+|---|---|
+| No pg_accel node | Read `pg_accel_last_planner_rejection_reason()` immediately after planning in the same backend. |
+| Native plan and NULL rejection reason | Confirm the extension was loaded, both planning switches were on, and a capable device was visible. Some cheap preflight skips are tracked separately. |
+| `generic_auto_load_disabled` | Pin every required relation/column in this backend, or enable `pg_accel.auto_load` before replanning. |
+| Residency budget decline | Inspect the released budget GUC, `pg_accel_resident_status()`, live bytes, and effective `DeviceLimits`. Pins cannot bypass the cap. |
+| Selected but not dispatched | Use `EXPLAIN ANALYZE`, consume the result, and compare the kernel counter before/after. Treat a false flag or zero delta as failed evidence. |
+| Artifact rebuilt unexpectedly | Compare descriptor generation/relfilenode output and recent DDL/DML/refresh activity. |
+| Dispatch error | Capture PostgreSQL logs and `pg_accel_gpu_failures()`; do not retry under a forced/test path and call it success. |
