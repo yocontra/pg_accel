@@ -5,21 +5,19 @@
  * Partition boundaries are marked by a uint8_t array where 1
  * indicates the start of a new partition.
  *
- * CPU implementations with SYCL GPU path planned for segmented
- * prefix scans.
+ * Boundary discovery and every non-empty window result are computed on the
+ * device. The host only stages inputs, launches kernels, and copies outputs.
  */
 
 #include <sycl/sycl.hpp>
 
-#include <cmath>
-#include <cstdlib>
-#include <cstring>
-#include <vector>
+#include <cstddef>
+#include <cstdint>
 
+#include "pgaccel_queue.h"
 #include "pgaccel_window.h"
 
 #include "alloc_helper.h"
-#include "pgaccel_queue.h"
 
 // SAFETY: g_queue is defined in device_manager.cpp and linked into the same
 // shared library.  Written once during pgaccel_init(), read-only thereafter.
@@ -28,76 +26,87 @@ static sycl::queue* get_queue() {
   return pgaccel_get_queue();
 }
 
-static bool is_metal_backend() {
-  const pgaccel_platform_caps caps = pgaccel_get_caps();
-  return std::strcmp(caps.backend_name, "metal") == 0;
-}
-
 // ---------------------------------------------------------------------------
 // GPU dispatch threshold — below this count, CPU sequential is faster.
 // ---------------------------------------------------------------------------
 
 static constexpr size_t GPU_WINDOW_THRESHOLD = 65536;
 
-// ---------------------------------------------------------------------------
-// PG-compatible NaN-aware equality for sort keys
-// ---------------------------------------------------------------------------
-
-static inline bool pg_eq_f64(double a, double b) {
-  if (a != a && b != b)
-    return true;  // NaN == NaN
-  if (a != a || b != b)
-    return false;
-  return a == b;
-}
-
 // ===========================================================================
-// SYCL GPU implementations — embarrassingly parallel window functions
+// SYCL GPU implementations
 // ===========================================================================
 
-// ---------------------------------------------------------------------------
-// Host helper: build per-row partition-start-index array from boundary markers.
-//
-// partition_starts[i] == 1 marks row i as the first in a new partition.
-// Output: part_start_idx[i] = index of the first row in the partition
-// containing row i.
-// ---------------------------------------------------------------------------
+template <typename T>
+class device_buffer {
+ public:
+  explicit device_buffer(sycl::queue& q) : q_(q) {}
+  device_buffer(const device_buffer&) = delete;
+  device_buffer& operator=(const device_buffer&) = delete;
 
-static void build_part_start_idx(const uint8_t* partition_starts, size_t count,
-                                 size_t* part_start_idx) {
-  size_t cur = 0;
-  for (size_t i = 0; i < count; i++) {
-    if (partition_starts[i])
-      cur = i;
-    part_start_idx[i] = cur;
+  ~device_buffer() {
+    if (ptr_)
+      sycl::free(ptr_, q_);
   }
-}
 
-// ---------------------------------------------------------------------------
-// Host helper: build per-row partition-end-index array from boundary markers.
-//
-// Output: part_end_idx[i] = index of the last row in the partition
-// containing row i.
-// ---------------------------------------------------------------------------
-
-static void build_part_end_idx(const uint8_t* partition_starts, size_t count,
-                               size_t* part_end_idx) {
-  size_t current_end = count - 1;
-  for (size_t i = count; i > 0; i--) {
-    size_t idx = i - 1;
-    if (idx < count - 1 && partition_starts[idx + 1]) {
-      current_end = idx;
-    }
-    part_end_idx[idx] = current_end;
+  bool allocate(size_t count) {
+    ptr_ = pgaccel_alloc<T>(count, q_);
+    return ptr_ != nullptr;
   }
+
+  bool copy_from(const T* host_data, size_t count) {
+    ptr_ = pgaccel_alloc_input<T>(count, q_, host_data);
+    return ptr_ != nullptr;
+  }
+
+  T* get() const { return ptr_; }
+
+ private:
+  sycl::queue& q_;
+  T* ptr_ = nullptr;
+};
+
+struct device_partition_bounds {
+  explicit device_partition_bounds(sycl::queue& q) : markers(q), starts(q), ends(q) {}
+
+  device_buffer<uint8_t> markers;
+  device_buffer<size_t> starts;
+  device_buffer<size_t> ends;
+};
+
+// A single deterministic device work-item builds both boundary arrays. This is
+// linear, avoids host-derived result metadata, and is followed by parallel or
+// segmented device kernels depending on the window operation.
+static pgaccel_status build_device_partition_bounds(sycl::queue& q, const uint8_t* partition_starts,
+                                                    size_t count, device_partition_bounds& bounds) {
+  if (!bounds.markers.copy_from(partition_starts, count) || !bounds.starts.allocate(count) ||
+      !bounds.ends.allocate(count)) {
+    return PGACCEL_OOM;
+  }
+
+  const uint8_t* d_markers = bounds.markers.get();
+  size_t* d_starts = bounds.starts.get();
+  size_t* d_ends = bounds.ends.get();
+  q.single_task([=]() {
+     size_t current_start = 0;
+     for (size_t i = 0; i < count; ++i) {
+       if (d_markers[i] != 0)
+         current_start = i;
+       d_starts[i] = current_start;
+     }
+
+     size_t current_end = count - 1;
+     for (size_t remaining = count; remaining > 0; --remaining) {
+       const size_t i = remaining - 1;
+       if (i + 1 < count && d_markers[i + 1] != 0)
+         current_end = i;
+       d_ends[i] = current_end;
+     }
+   }).wait_and_throw();
+  return PGACCEL_OK;
 }
 
 // ---------------------------------------------------------------------------
 // sycl_window_row_number — GPU parallel ROW_NUMBER
-//
-// Two-pass:
-//   Pass 1 (host): scan partition_starts to build part_start_idx[]
-//   Pass 2 (GPU):  parallel_for — results[i] = i - part_start_idx[i] + 1
 // ---------------------------------------------------------------------------
 
 static pgaccel_status sycl_window_row_number(const uint8_t* partition_starts, size_t count,
@@ -106,35 +115,24 @@ static pgaccel_status sycl_window_row_number(const uint8_t* partition_starts, si
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  // Pass 1 (host): build partition start index for each row
-  std::vector<size_t> h_part_start(count);
-  build_part_start_idx(partition_starts, count, h_part_start.data());
-
   try {
-    // Allocate device buffers
-    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
-    if (!d_part_start)
+    device_partition_bounds bounds(*q);
+    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
+    if (status != PGACCEL_OK)
+      return status;
+
+    device_buffer<int64_t> result_buffer(*q);
+    if (!result_buffer.allocate(count))
       return PGACCEL_OOM;
 
-    int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
-    if (!d_results) {
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_OOM;
-    }
-
-    // Pass 2 (GPU): embarrassingly parallel row number
+    const size_t* d_part_start = bounds.starts.get();
+    int64_t* d_results = result_buffer.get();
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        size_t i = id[0];
        d_results[i] = static_cast<int64_t>(i - d_part_start[i] + 1);
      }).wait_and_throw();
 
-    // Copy results back
     pgaccel_d2h(*q, results, d_results, count);
-
-    // Cleanup
-    pgaccel_free_input(d_part_start, *q, h_part_start.data());
-    sycl::free(d_results, *q);
-
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -145,11 +143,6 @@ static pgaccel_status sycl_window_row_number(const uint8_t* partition_starts, si
 
 // ---------------------------------------------------------------------------
 // sycl_window_lag — GPU parallel LAG(value, offset, default)
-//
-// Two-pass:
-//   Pass 1 (host): build part_start_idx[]
-//   Pass 2 (GPU):  parallel_for — each thread does indexed lookup
-//                  target = i - offset; if target < part_start[i] => default
 // ---------------------------------------------------------------------------
 
 static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const double* values,
@@ -159,69 +152,44 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  // Pass 1 (host): build partition start index for each row
-  std::vector<size_t> h_part_start(count);
-  build_part_start_idx(partition_starts, count, h_part_start.data());
-
   try {
-    // Allocate device buffers for inputs
-    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
-    if (!d_part_start)
-      return PGACCEL_OOM;
+    device_partition_bounds bounds(*q);
+    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
+    if (status != PGACCEL_OK)
+      return status;
 
-    double* d_values = pgaccel_alloc_input<double>(count, *q, values);
-    if (!d_values) {
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_OOM;
-    }
-
-    // null_mask may be nullptr (no nulls)
-    uint8_t* d_null_mask = nullptr;
-    bool has_nulls = (null_mask != nullptr);
-    if (has_nulls) {
-      d_null_mask = pgaccel_alloc_input<uint8_t>(count, *q, null_mask);
-      if (!d_null_mask) {
-        pgaccel_free_input(d_values, *q, values);
-        pgaccel_free_input(d_part_start, *q, h_part_start.data());
-        return PGACCEL_OOM;
-      }
-    }
-
-    // Allocate output buffers
-    double* d_results = pgaccel_alloc<double>(count, *q);
-    uint8_t* d_result_nulls = nullptr;
-    bool has_result_nulls = (result_nulls != nullptr);
-    if (has_result_nulls) {
-      d_result_nulls = pgaccel_alloc<uint8_t>(count, *q);
-    }
-
-    if (!d_results || (has_result_nulls && !d_result_nulls)) {
-      if (d_results)
-        sycl::free(d_results, *q);
-      if (d_result_nulls)
-        sycl::free(d_result_nulls, *q);
-      if (has_nulls)
-        pgaccel_free_input(d_null_mask, *q, null_mask);
-      pgaccel_free_input(d_values, *q, values);
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+    device_buffer<double> value_buffer(*q);
+    device_buffer<uint8_t> null_buffer(*q);
+    device_buffer<double> result_buffer(*q);
+    device_buffer<uint8_t> result_null_buffer(*q);
+    const bool has_nulls = null_mask != nullptr;
+    const bool has_result_nulls = result_nulls != nullptr;
+    if (!value_buffer.copy_from(values, count) ||
+        (has_nulls && !null_buffer.copy_from(null_mask, count)) || !result_buffer.allocate(count) ||
+        (has_result_nulls && !result_null_buffer.allocate(count))) {
       return PGACCEL_OOM;
     }
 
-    int d_offset = offset;
-    double d_default = default_val;
+    const size_t* d_part_start = bounds.starts.get();
+    const double* d_values = value_buffer.get();
+    const uint8_t* d_null_mask = null_buffer.get();
+    double* d_results = result_buffer.get();
+    uint8_t* d_result_nulls = result_null_buffer.get();
+    const size_t d_offset = static_cast<size_t>(offset);
+    const double d_default = default_val;
 
-    // Pass 2 (GPU): embarrassingly parallel lag lookup
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-       size_t i = id[0];
-       size_t target = (i >= static_cast<size_t>(d_offset)) ? i - d_offset : SIZE_MAX;
-
-       if (target == SIZE_MAX || target < d_part_start[i]) {
-         // Before partition start — use default
+       const size_t i = id[0];
+       const size_t start = d_part_start[i];
+       if (d_offset > i - start) {
          d_results[i] = d_default;
          if (d_result_nulls)
            d_result_nulls[i] = 0;
-       } else if (has_nulls && d_null_mask[target]) {
-         // Source is NULL
+         return;
+       }
+
+       const size_t target = i - d_offset;
+       if (has_nulls && d_null_mask[target] != 0) {
          d_results[i] = d_default;
          if (d_result_nulls)
            d_result_nulls[i] = 1;
@@ -232,21 +200,9 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
        }
      }).wait_and_throw();
 
-    // Copy results back
     pgaccel_d2h(*q, results, d_results, count);
-    if (has_result_nulls) {
+    if (has_result_nulls)
       pgaccel_d2h(*q, result_nulls, d_result_nulls, count);
-    }
-
-    // Cleanup
-    sycl::free(d_results, *q);
-    if (d_result_nulls)
-      sycl::free(d_result_nulls, *q);
-    if (has_nulls)
-      pgaccel_free_input(d_null_mask, *q, null_mask);
-    pgaccel_free_input(d_values, *q, values);
-    pgaccel_free_input(d_part_start, *q, h_part_start.data());
-
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -257,11 +213,6 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
 
 // ---------------------------------------------------------------------------
 // sycl_window_lead — GPU parallel LEAD(value, offset, default)
-//
-// Two-pass:
-//   Pass 1 (host): build part_end_idx[]
-//   Pass 2 (GPU):  parallel_for — target = i + offset;
-//                  if target > part_end[i] => default
 // ---------------------------------------------------------------------------
 
 static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const double* values,
@@ -271,69 +222,44 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  // Pass 1 (host): build partition end index for each row
-  std::vector<size_t> h_part_end(count);
-  build_part_end_idx(partition_starts, count, h_part_end.data());
-
   try {
-    // Allocate device buffers for inputs
-    size_t* d_part_end = pgaccel_alloc_input<size_t>(count, *q, h_part_end.data());
-    if (!d_part_end)
-      return PGACCEL_OOM;
+    device_partition_bounds bounds(*q);
+    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
+    if (status != PGACCEL_OK)
+      return status;
 
-    double* d_values = pgaccel_alloc_input<double>(count, *q, values);
-    if (!d_values) {
-      pgaccel_free_input(d_part_end, *q, h_part_end.data());
-      return PGACCEL_OOM;
-    }
-
-    // null_mask may be nullptr (no nulls)
-    uint8_t* d_null_mask = nullptr;
-    bool has_nulls = (null_mask != nullptr);
-    if (has_nulls) {
-      d_null_mask = pgaccel_alloc_input<uint8_t>(count, *q, null_mask);
-      if (!d_null_mask) {
-        pgaccel_free_input(d_values, *q, values);
-        pgaccel_free_input(d_part_end, *q, h_part_end.data());
-        return PGACCEL_OOM;
-      }
-    }
-
-    // Allocate output buffers
-    double* d_results = pgaccel_alloc<double>(count, *q);
-    uint8_t* d_result_nulls = nullptr;
-    bool has_result_nulls = (result_nulls != nullptr);
-    if (has_result_nulls) {
-      d_result_nulls = pgaccel_alloc<uint8_t>(count, *q);
-    }
-
-    if (!d_results || (has_result_nulls && !d_result_nulls)) {
-      if (d_results)
-        sycl::free(d_results, *q);
-      if (d_result_nulls)
-        sycl::free(d_result_nulls, *q);
-      if (has_nulls)
-        pgaccel_free_input(d_null_mask, *q, null_mask);
-      pgaccel_free_input(d_values, *q, values);
-      pgaccel_free_input(d_part_end, *q, h_part_end.data());
+    device_buffer<double> value_buffer(*q);
+    device_buffer<uint8_t> null_buffer(*q);
+    device_buffer<double> result_buffer(*q);
+    device_buffer<uint8_t> result_null_buffer(*q);
+    const bool has_nulls = null_mask != nullptr;
+    const bool has_result_nulls = result_nulls != nullptr;
+    if (!value_buffer.copy_from(values, count) ||
+        (has_nulls && !null_buffer.copy_from(null_mask, count)) || !result_buffer.allocate(count) ||
+        (has_result_nulls && !result_null_buffer.allocate(count))) {
       return PGACCEL_OOM;
     }
 
-    int d_offset = offset;
-    double d_default = default_val;
+    const size_t* d_part_end = bounds.ends.get();
+    const double* d_values = value_buffer.get();
+    const uint8_t* d_null_mask = null_buffer.get();
+    double* d_results = result_buffer.get();
+    uint8_t* d_result_nulls = result_null_buffer.get();
+    const size_t d_offset = static_cast<size_t>(offset);
+    const double d_default = default_val;
 
-    // Pass 2 (GPU): embarrassingly parallel lead lookup
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-       size_t i = id[0];
-       size_t target = i + d_offset;
-
-       if (target > d_part_end[i]) {
-         // Past partition end — use default
+       const size_t i = id[0];
+       const size_t end = d_part_end[i];
+       if (d_offset > end - i) {
          d_results[i] = d_default;
          if (d_result_nulls)
            d_result_nulls[i] = 0;
-       } else if (has_nulls && d_null_mask[target]) {
-         // Source is NULL
+         return;
+       }
+
+       const size_t target = i + d_offset;
+       if (has_nulls && d_null_mask[target] != 0) {
          d_results[i] = d_default;
          if (d_result_nulls)
            d_result_nulls[i] = 1;
@@ -344,21 +270,9 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
        }
      }).wait_and_throw();
 
-    // Copy results back
     pgaccel_d2h(*q, results, d_results, count);
-    if (has_result_nulls) {
+    if (has_result_nulls)
       pgaccel_d2h(*q, result_nulls, d_result_nulls, count);
-    }
-
-    // Cleanup
-    sycl::free(d_results, *q);
-    if (d_result_nulls)
-      sycl::free(d_result_nulls, *q);
-    if (has_nulls)
-      pgaccel_free_input(d_null_mask, *q, null_mask);
-    pgaccel_free_input(d_values, *q, values);
-    pgaccel_free_input(d_part_end, *q, h_part_end.data());
-
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -368,16 +282,7 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
 }
 
 // ---------------------------------------------------------------------------
-// sycl_window_count — GPU parallel COUNT(*) / COUNT(value) per partition
-//
-// Two-pass:
-//   Pass 1 (host): build part_start_idx[]
-//   Pass 2 (GPU):  parallel_for — each thread counts non-null rows in
-//                  [part_start_idx[i] .. i]. This is the legacy
-//                  non-segmented implementation. Metal declines it because
-//                  one large partition can trip the interactivity watchdog;
-//                  the planner also declines Metal window paths until the
-//                  segmented prefix-scan implementation lands.
+// sycl_window_count — linear segmented COUNT(*) / COUNT(value)
 // ---------------------------------------------------------------------------
 
 static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const uint8_t* null_mask,
@@ -386,51 +291,34 @@ static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const u
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  std::vector<size_t> h_part_start(count);
-  build_part_start_idx(partition_starts, count, h_part_start.data());
-
   try {
-    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
-    if (!d_part_start)
-      return PGACCEL_OOM;
+    device_partition_bounds bounds(*q);
+    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
+    if (status != PGACCEL_OK)
+      return status;
 
-    uint8_t* d_null_mask = nullptr;
-    bool has_nulls = (null_mask != nullptr);
-    if (has_nulls) {
-      d_null_mask = pgaccel_alloc_input<uint8_t>(count, *q, null_mask);
-      if (!d_null_mask) {
-        pgaccel_free_input(d_part_start, *q, h_part_start.data());
-        return PGACCEL_OOM;
-      }
-    }
-
-    int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
-    if (!d_results) {
-      if (has_nulls)
-        pgaccel_free_input(d_null_mask, *q, null_mask);
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+    device_buffer<uint8_t> null_buffer(*q);
+    device_buffer<int64_t> result_buffer(*q);
+    const bool has_nulls = null_mask != nullptr;
+    if ((has_nulls && !null_buffer.copy_from(null_mask, count)) || !result_buffer.allocate(count)) {
       return PGACCEL_OOM;
     }
 
-    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-       const size_t i = id[0];
-       const size_t start = d_part_start[i];
-       int64_t cnt = 0;
-       for (size_t j = start; j <= i; ++j) {
-         const bool is_null = (has_nulls && d_null_mask[j]);
-         if (!is_null)
-           ++cnt;
+    const size_t* d_part_start = bounds.starts.get();
+    const uint8_t* d_null_mask = null_buffer.get();
+    int64_t* d_results = result_buffer.get();
+    q->single_task([=]() {
+       int64_t running_count = 0;
+       for (size_t i = 0; i < count; ++i) {
+         if (d_part_start[i] == i)
+           running_count = 0;
+         if (!has_nulls || d_null_mask[i] == 0)
+           ++running_count;
+         d_results[i] = running_count;
        }
-       d_results[i] = cnt;
      }).wait_and_throw();
 
     pgaccel_d2h(*q, results, d_results, count);
-
-    sycl::free(d_results, *q);
-    if (has_nulls)
-      pgaccel_free_input(d_null_mask, *q, null_mask);
-    pgaccel_free_input(d_part_start, *q, h_part_start.data());
-
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -440,12 +328,7 @@ static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const u
 }
 
 // ---------------------------------------------------------------------------
-// sycl_window_sum — GPU parallel SUM(value) per partition with Kahan
-//
-// Same per-row independent scan pattern as sycl_window_count. Each thread
-// computes a Kahan-compensated sum over [part_start_idx[i] .. i]. Metal
-// declines this legacy path because soft-fp64 plus one large partition can
-// trip the interactivity watchdog before the segmented prefix scan lands.
+// sycl_window_sum — linear segmented SUM(value) with Kahan compensation
 // ---------------------------------------------------------------------------
 
 static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const double* values,
@@ -454,65 +337,44 @@ static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const dou
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  std::vector<size_t> h_part_start(count);
-  build_part_start_idx(partition_starts, count, h_part_start.data());
-
   try {
-    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
-    if (!d_part_start)
-      return PGACCEL_OOM;
+    device_partition_bounds bounds(*q);
+    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
+    if (status != PGACCEL_OK)
+      return status;
 
-    double* d_values = pgaccel_alloc_input<double>(count, *q, values);
-    if (!d_values) {
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_OOM;
-    }
-
-    uint8_t* d_null_mask = nullptr;
-    bool has_nulls = (null_mask != nullptr);
-    if (has_nulls) {
-      d_null_mask = pgaccel_alloc_input<uint8_t>(count, *q, null_mask);
-      if (!d_null_mask) {
-        pgaccel_free_input(d_values, *q, values);
-        pgaccel_free_input(d_part_start, *q, h_part_start.data());
-        return PGACCEL_OOM;
-      }
-    }
-
-    double* d_results = pgaccel_alloc<double>(count, *q);
-    if (!d_results) {
-      if (has_nulls)
-        pgaccel_free_input(d_null_mask, *q, null_mask);
-      pgaccel_free_input(d_values, *q, values);
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
+    device_buffer<double> value_buffer(*q);
+    device_buffer<uint8_t> null_buffer(*q);
+    device_buffer<double> result_buffer(*q);
+    const bool has_nulls = null_mask != nullptr;
+    if (!value_buffer.copy_from(values, count) ||
+        (has_nulls && !null_buffer.copy_from(null_mask, count)) || !result_buffer.allocate(count)) {
       return PGACCEL_OOM;
     }
 
-    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-       const size_t i = id[0];
-       const size_t start = d_part_start[i];
-       double sum = 0.0;
-       double comp = 0.0;
-       for (size_t j = start; j <= i; ++j) {
-         const bool is_null = (has_nulls && d_null_mask[j]);
-         if (!is_null) {
-           const double y = d_values[j] - comp;
-           const double t = sum + y;
-           comp = (t - sum) - y;
-           sum = t;
+    const size_t* d_part_start = bounds.starts.get();
+    const double* d_values = value_buffer.get();
+    const uint8_t* d_null_mask = null_buffer.get();
+    double* d_results = result_buffer.get();
+    q->single_task([=]() {
+       double running_sum = 0.0;
+       double compensation = 0.0;
+       for (size_t i = 0; i < count; ++i) {
+         if (d_part_start[i] == i) {
+           running_sum = 0.0;
+           compensation = 0.0;
          }
+         if (!has_nulls || d_null_mask[i] == 0) {
+           const double adjusted = d_values[i] - compensation;
+           const double next = running_sum + adjusted;
+           compensation = (next - running_sum) - adjusted;
+           running_sum = next;
+         }
+         d_results[i] = running_sum;
        }
-       d_results[i] = sum;
      }).wait_and_throw();
 
     pgaccel_d2h(*q, results, d_results, count);
-
-    sycl::free(d_results, *q);
-    if (has_nulls)
-      pgaccel_free_input(d_null_mask, *q, null_mask);
-    pgaccel_free_input(d_values, *q, values);
-    pgaccel_free_input(d_part_start, *q, h_part_start.data());
-
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -522,14 +384,8 @@ static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const dou
 }
 
 // ---------------------------------------------------------------------------
-// sycl_window_rank / sycl_window_dense_rank — GPU parallel ranking
-//
-// Per-row independent scan: each thread walks [part_start..i] counting
-// distinct sort-key transitions ahead of row i. rank uses 1 + count of
-// strict predecessors with a different key (gap rank); dense_rank uses
-// 1 + count of distinct keys before i.
-//
-// Uses pg_eq_f64 NaN-aware equality matching the host implementation.
+// sycl_window_rank / sycl_window_dense_rank — linear segmented ranking.
+// NaNs compare as peers, matching PostgreSQL's float equality for ranking.
 // ---------------------------------------------------------------------------
 
 static pgaccel_status sycl_window_rank(const uint8_t* partition_starts, const double* sort_keys,
@@ -538,54 +394,39 @@ static pgaccel_status sycl_window_rank(const uint8_t* partition_starts, const do
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  std::vector<size_t> h_part_start(count);
-  build_part_start_idx(partition_starts, count, h_part_start.data());
-
   try {
-    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
-    if (!d_part_start)
+    device_partition_bounds bounds(*q);
+    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
+    if (status != PGACCEL_OK)
+      return status;
+
+    device_buffer<double> key_buffer(*q);
+    device_buffer<int64_t> result_buffer(*q);
+    if (!key_buffer.copy_from(sort_keys, count) || !result_buffer.allocate(count))
       return PGACCEL_OOM;
 
-    double* d_keys = pgaccel_alloc_input<double>(count, *q, sort_keys);
-    if (!d_keys) {
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_OOM;
-    }
-
-    int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
-    if (!d_results) {
-      pgaccel_free_input(d_keys, *q, sort_keys);
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_OOM;
-    }
-
-    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-       const size_t i = id[0];
-       const size_t start = d_part_start[i];
-       const double my_key = d_keys[i];
-       // Gap rank: 1 + (i - start - count_of_predecessors_with_same_key_as_i)
-       // Equivalent: 1 + count of predecessors with strictly different rank,
-       // computed as the position where the *first* predecessor with my_key
-       // appears within the partition.
-       int64_t r = 1;
-       for (size_t j = start; j < i; ++j) {
-         const double k_j = d_keys[j];
-         // pg_eq_f64 inline: NaN==NaN, otherwise IEEE
-         const bool eq = (k_j != k_j && my_key != my_key) ||
-                         (!(k_j != k_j) && !(my_key != my_key) && k_j == my_key);
-         if (!eq) {
-           ++r;
+    const size_t* d_part_start = bounds.starts.get();
+    const double* d_keys = key_buffer.get();
+    int64_t* d_results = result_buffer.get();
+    q->single_task([=]() {
+       int64_t current_rank = 1;
+       for (size_t i = 0; i < count; ++i) {
+         const size_t start = d_part_start[i];
+         if (start == i) {
+           current_rank = 1;
+         } else {
+           const double previous = d_keys[i - 1];
+           const double current = d_keys[i];
+           const bool both_nan = previous != previous && current != current;
+           const bool equal = both_nan || (previous == current);
+           if (!equal)
+             current_rank = static_cast<int64_t>(i - start + 1);
          }
+         d_results[i] = current_rank;
        }
-       d_results[i] = r;
      }).wait_and_throw();
 
     pgaccel_d2h(*q, results, d_results, count);
-
-    sycl::free(d_results, *q);
-    pgaccel_free_input(d_keys, *q, sort_keys);
-    pgaccel_free_input(d_part_start, *q, h_part_start.data());
-
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -601,52 +442,38 @@ static pgaccel_status sycl_window_dense_rank(const uint8_t* partition_starts,
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  std::vector<size_t> h_part_start(count);
-  build_part_start_idx(partition_starts, count, h_part_start.data());
-
   try {
-    size_t* d_part_start = pgaccel_alloc_input<size_t>(count, *q, h_part_start.data());
-    if (!d_part_start)
+    device_partition_bounds bounds(*q);
+    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
+    if (status != PGACCEL_OK)
+      return status;
+
+    device_buffer<double> key_buffer(*q);
+    device_buffer<int64_t> result_buffer(*q);
+    if (!key_buffer.copy_from(sort_keys, count) || !result_buffer.allocate(count))
       return PGACCEL_OOM;
 
-    double* d_keys = pgaccel_alloc_input<double>(count, *q, sort_keys);
-    if (!d_keys) {
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_OOM;
-    }
-
-    int64_t* d_results = pgaccel_alloc<int64_t>(count, *q);
-    if (!d_results) {
-      pgaccel_free_input(d_keys, *q, sort_keys);
-      pgaccel_free_input(d_part_start, *q, h_part_start.data());
-      return PGACCEL_OOM;
-    }
-
-    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-       const size_t i = id[0];
-       const size_t start = d_part_start[i];
-       // Dense rank: 1 + count of distinct keys strictly before i in
-       // [start..i). A key transition (k_{j-1} != k_j) bumps the rank.
-       // Walk the prefix, count transitions, +1 for the row itself.
-       int64_t r = 1;
-       for (size_t j = start + 1; j <= i; ++j) {
-         const double k_prev = d_keys[j - 1];
-         const double k_curr = d_keys[j];
-         const bool eq = (k_prev != k_prev && k_curr != k_curr) ||
-                         (!(k_prev != k_prev) && !(k_curr != k_curr) && k_prev == k_curr);
-         if (!eq) {
-           ++r;
+    const size_t* d_part_start = bounds.starts.get();
+    const double* d_keys = key_buffer.get();
+    int64_t* d_results = result_buffer.get();
+    q->single_task([=]() {
+       int64_t dense_rank = 1;
+       for (size_t i = 0; i < count; ++i) {
+         if (d_part_start[i] == i) {
+           dense_rank = 1;
+         } else {
+           const double previous = d_keys[i - 1];
+           const double current = d_keys[i];
+           const bool both_nan = previous != previous && current != current;
+           const bool equal = both_nan || (previous == current);
+           if (!equal)
+             ++dense_rank;
          }
+         d_results[i] = dense_rank;
        }
-       d_results[i] = r;
      }).wait_and_throw();
 
     pgaccel_d2h(*q, results, d_results, count);
-
-    sycl::free(d_results, *q);
-    pgaccel_free_input(d_keys, *q, sort_keys);
-    pgaccel_free_input(d_part_start, *q, h_part_start.data());
-
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -669,7 +496,7 @@ pgaccel_status pgaccel_window_row_number(const uint8_t* partition_starts, size_t
     return PGACCEL_OK;
 
   if (count < GPU_WINDOW_THRESHOLD)
-    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+    return PGACCEL_UNSUPPORTED; /* below GPU break-even: decline, not a device failure */
   pgaccel_status st = sycl_window_row_number(partition_starts, count, results);
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
@@ -691,9 +518,7 @@ pgaccel_status pgaccel_window_rank(const uint8_t* partition_starts, const double
     return PGACCEL_OK;
 
   if (count < GPU_WINDOW_THRESHOLD)
-    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
-  if (is_metal_backend())
-    return PGACCEL_UNSUPPORTED;  /* Metal quarantine for this function (see helper notes) */
+    return PGACCEL_UNSUPPORTED; /* below GPU break-even: decline, not a device failure */
   pgaccel_status st = sycl_window_rank(partition_starts, sort_keys, count, results);
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
@@ -715,9 +540,7 @@ pgaccel_status pgaccel_window_dense_rank(const uint8_t* partition_starts, const 
     return PGACCEL_OK;
 
   if (count < GPU_WINDOW_THRESHOLD)
-    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
-  if (is_metal_backend())
-    return PGACCEL_UNSUPPORTED;  /* Metal quarantine for this function (see helper notes) */
+    return PGACCEL_UNSUPPORTED; /* below GPU break-even: decline, not a device failure */
   pgaccel_status st = sycl_window_dense_rank(partition_starts, sort_keys, count, results);
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
@@ -739,9 +562,7 @@ pgaccel_status pgaccel_window_sum(const uint8_t* partition_starts, const double*
     return PGACCEL_OK;
 
   if (count < GPU_WINDOW_THRESHOLD)
-    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
-  if (is_metal_backend())
-    return PGACCEL_UNSUPPORTED;  /* Metal quarantine for this function (see helper notes) */
+    return PGACCEL_UNSUPPORTED; /* below GPU break-even: decline, not a device failure */
   pgaccel_status st = sycl_window_sum(partition_starts, values, null_mask, count, results);
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
@@ -762,9 +583,7 @@ pgaccel_status pgaccel_window_count(const uint8_t* partition_starts, const uint8
     return PGACCEL_OK;
 
   if (count < GPU_WINDOW_THRESHOLD)
-    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
-  if (is_metal_backend())
-    return PGACCEL_UNSUPPORTED;  /* Metal quarantine for this function (see helper notes) */
+    return PGACCEL_UNSUPPORTED; /* below GPU break-even: decline, not a device failure */
   pgaccel_status st = sycl_window_count(partition_starts, null_mask, count, results);
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
@@ -789,9 +608,9 @@ pgaccel_status pgaccel_window_lag(const uint8_t* partition_starts, const double*
     return PGACCEL_ERROR;
 
   if (count < GPU_WINDOW_THRESHOLD)
-    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+    return PGACCEL_UNSUPPORTED; /* below GPU break-even: decline, not a device failure */
   pgaccel_status st = sycl_window_lag(partition_starts, values, null_mask, count, offset,
-                                        default_val, results, result_nulls);
+                                      default_val, results, result_nulls);
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;
@@ -815,9 +634,9 @@ pgaccel_status pgaccel_window_lead(const uint8_t* partition_starts, const double
     return PGACCEL_ERROR;
 
   if (count < GPU_WINDOW_THRESHOLD)
-    return PGACCEL_UNSUPPORTED;  /* below GPU break-even: decline, not a device failure */
+    return PGACCEL_UNSUPPORTED; /* below GPU break-even: decline, not a device failure */
   pgaccel_status st = sycl_window_lead(partition_starts, values, null_mask, count, offset,
-                                         default_val, results, result_nulls);
+                                       default_val, results, result_nulls);
   if (st == PGACCEL_OK)
     pgaccel_record_gpu_exec();
   return st;

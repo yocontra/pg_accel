@@ -1,15 +1,9 @@
-// Standalone correctness tests for the window-function SYCL kernels in
-// pgaccel-kernels/src/window.cpp. Closes the kernel-level coverage gap
-// for `pgaccel_window_row_number`, `pgaccel_window_count`,
-// `pgaccel_window_sum`, `pgaccel_window_rank`, `pgaccel_window_dense_rank`
-// — none of these had any standalone test coverage before this file.
+// Standalone correctness tests for the window-function SYCL kernels.
 //
 // Each kernel gates on `count >= GPU_WINDOW_THRESHOLD == 65536` and
-// returns PGACCEL_UNSUPPORTED below that. On Metal, the legacy
-// non-segmented count/sum/rank kernels also return PGACCEL_UNSUPPORTED at
-// the threshold because one large partition can trip the command-buffer
-// interactivity watchdog; production planning declines that path until
-// segmented prefix scans replace it.
+// returns PGACCEL_UNSUPPORTED below that. At and above the threshold every
+// supported backend, including Metal, dispatches device boundary discovery
+// followed by a parallel or segmented device result pass.
 //
 // Status-honesty note (2026-07 kernel-safety pass): these decline gates
 // used to return PGACCEL_ERROR_NO_DEVICE, conflating "planner should not
@@ -21,7 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
+#include <limits>
 #include <vector>
 
 #include "pgaccel_ffi.h"
@@ -29,11 +23,6 @@
 
 static int g_pass = 0;
 static int g_fail = 0;
-
-static bool is_metal_backend() {
-  const pgaccel_platform_caps caps = pgaccel_get_caps();
-  return std::strcmp(caps.backend_name, "metal") == 0;
-}
 
 #define ASSERT_STATUS_OK(desc, status)                                                \
   do {                                                                                \
@@ -73,210 +62,402 @@ static bool is_metal_backend() {
 // partition_starts[i] is 1 iff row i is the first row of a new partition;
 // row_number = (i - prev_start) + 1.
 //
-// Layout: 65536 rows, two partitions of 32768 each. Each partition's
-// row_number sequence runs 1..32768.
+// Includes an implicit first partition (starts[0] == 0), adjacent singleton
+// partitions, ordinary partitions, and a singleton final partition.
 static void test_window_row_number() {
   printf("--- test_window_row_number ---\n");
 
   constexpr size_t N = 65536;
   std::vector<uint8_t> starts(N, 0);
-  starts[0] = 1;
+  starts[1] = 1;
+  starts[2] = 1;
+  starts[17] = 1;
+  starts[18] = 1;
   starts[N / 2] = 1;
+  starts[N - 1] = 1;
 
   std::vector<int64_t> results(N, -1);
   pgaccel_status s = pgaccel_window_row_number(starts.data(), N, results.data());
   ASSERT_STATUS_OK("window_row_number 65536 status", s);
 
   bool ok = true;
-  for (size_t i = 0; i < N / 2; i++) {
-    if (results[i] != static_cast<int64_t>(i + 1)) {
-      fprintf(stderr, "  partition 0 row %zu got %lld, expected %lld\n", i, (long long)results[i],
-              (long long)(i + 1));
+  size_t partition_start = 0;
+  for (size_t i = 0; i < N; ++i) {
+    if (starts[i] != 0)
+      partition_start = i;
+    const int64_t expected = static_cast<int64_t>(i - partition_start + 1);
+    if (results[i] != expected) {
+      fprintf(stderr, "  row %zu got %lld, expected %lld\n", i, (long long)results[i],
+              (long long)expected);
       ok = false;
       break;
     }
   }
-  ASSERT_TRUE("window_row_number partition 0 sequence 1..32768", ok);
-
-  ok = true;
-  for (size_t i = 0; i < N / 2; i++) {
-    int64_t expect = static_cast<int64_t>(i + 1);
-    if (results[N / 2 + i] != expect) {
-      fprintf(stderr, "  partition 1 row %zu got %lld, expected %lld\n", i,
-              (long long)results[N / 2 + i], (long long)expect);
-      ok = false;
-      break;
-    }
-  }
-  ASSERT_TRUE("window_row_number partition 1 sequence 1..32768", ok);
+  ASSERT_TRUE("window_row_number honors implicit, adjacent, and final partitions", ok);
 }
 
 // ---------------------------------------------------------------------------
 // Test: window_count
 // ---------------------------------------------------------------------------
 //
-// Cumulative count of non-null values within partition. With null_mask
-// pattern null=1 every other row, count should advance only on non-null.
+// Cumulative count of non-null values over singleton, all-null, and ordinary
+// partitions. A second dispatch covers COUNT(*) with a null mask omitted.
 static void test_window_count() {
   printf("--- test_window_count ---\n");
 
   constexpr size_t N = 65536;
   std::vector<uint8_t> starts(N, 0);
   starts[0] = 1;
+  starts[1] = 1;
+  starts[9] = 1;
+  starts[21] = 1;
+  starts[N / 3] = 1;
+  starts[N / 3 + 64] = 1;
+  starts[N - 1] = 1;
 
   std::vector<uint8_t> nulls(N, 0);
-  for (size_t i = 0; i < N; i++)
+  for (size_t i = 0; i < N; ++i)
     nulls[i] = static_cast<uint8_t>(i & 1);
+  for (size_t i = 9; i < 21; ++i)
+    nulls[i] = 1;
 
   std::vector<int64_t> results(N, -1);
   pgaccel_status s = pgaccel_window_count(starts.data(), nulls.data(), N, results.data());
-  if (is_metal_backend()) {
-    ASSERT_TRUE("window_count Metal non-segmented path declines with UNSUPPORTED",
-                s == PGACCEL_UNSUPPORTED);
-    return;
-  }
   ASSERT_STATUS_OK("window_count 65536 status", s);
 
-  // Cumulative-count semantics (Postgres): count[i] = number of non-null
-  // values in [partition_start..=i]. With null=1 every odd i, the count
-  // increments only at even i's, but reads the same at the next odd i.
-  //   i=0 (not null): count = 1
-  //   i=1 (null):     count = 1 (carries forward)
-  //   i=2 (not null): count = 2
-  //   i=3 (null):     count = 2
-  //   ...
-  // → count[i] = (i / 2) + 1 with integer division.
   bool ok = true;
-  for (size_t i = 0; i < N; i++) {
-    int64_t expect = static_cast<int64_t>((i / 2) + 1);
-    if (results[i] != expect) {
+  int64_t running = 0;
+  for (size_t i = 0; i < N; ++i) {
+    if (starts[i] != 0)
+      running = 0;
+    if (nulls[i] == 0)
+      ++running;
+    if (results[i] != running) {
       fprintf(stderr, "  row %zu got %lld, expected %lld\n", i, (long long)results[i],
-              (long long)expect);
+              (long long)running);
       ok = false;
       break;
     }
   }
-  ASSERT_TRUE("window_count alternating-null cumulative count", ok);
+  ASSERT_TRUE("window_count segmented mixed/all-null cumulative count", ok);
+  ASSERT_EQ_I64("window_count all-null partition stays zero", results[20], 0);
 
-  for (size_t i = 0; i < N; i++)
-    nulls[i] = 0;
-  s = pgaccel_window_count(starts.data(), nulls.data(), N, results.data());
-  ASSERT_STATUS_OK("window_count all-non-null status", s);
-  ASSERT_EQ_I64("window_count last row counts every row", results[N - 1], static_cast<int64_t>(N));
+  s = pgaccel_window_count(starts.data(), nullptr, N, results.data());
+  ASSERT_STATUS_OK("window_count COUNT(*) status", s);
+  ok = true;
+  size_t partition_start = 0;
+  for (size_t i = 0; i < N; ++i) {
+    if (starts[i] != 0)
+      partition_start = i;
+    const int64_t expected = static_cast<int64_t>(i - partition_start + 1);
+    if (results[i] != expected) {
+      ok = false;
+      break;
+    }
+  }
+  ASSERT_TRUE("window_count COUNT(*) resets at every device boundary", ok);
 }
 
 // ---------------------------------------------------------------------------
 // Test: window_sum
 // ---------------------------------------------------------------------------
 //
-// Cumulative sum within partition. Inputs all 1.0 → results are 1, 2, 3,...
+// Cumulative Kahan sum over ordinary, singleton, and all-null partitions.
 static void test_window_sum() {
   printf("--- test_window_sum ---\n");
 
   constexpr size_t N = 65536;
   std::vector<uint8_t> starts(N, 0);
   starts[0] = 1;
+  starts[1] = 1;
+  starts[7] = 1;
+  starts[15] = 1;
   starts[N / 2] = 1;
+  starts[N - 1] = 1;
 
-  std::vector<double> values(N, 1.0);
+  std::vector<double> values(N);
+  std::vector<uint8_t> nulls(N, 0);
+  for (size_t i = 0; i < N; ++i) {
+    values[i] = static_cast<double>(static_cast<int>(i % 11) - 5) * 0.25;
+    nulls[i] = static_cast<uint8_t>((i % 13) == 0);
+  }
+  for (size_t i = 7; i < 15; ++i)
+    nulls[i] = 1;
   std::vector<double> results(N, -1.0);
 
-  pgaccel_status s = pgaccel_window_sum(starts.data(), values.data(), nullptr, N, results.data());
-  if (is_metal_backend()) {
-    ASSERT_TRUE("window_sum Metal non-segmented path declines with UNSUPPORTED",
-                s == PGACCEL_UNSUPPORTED);
-    return;
-  }
+  pgaccel_status s =
+      pgaccel_window_sum(starts.data(), values.data(), nulls.data(), N, results.data());
   ASSERT_STATUS_OK("window_sum 65536 status", s);
 
-  ASSERT_TRUE("window_sum partition 0 last == 32768.0", results[N / 2 - 1] == 32768.0);
-  ASSERT_TRUE("window_sum partition 1 first == 1.0", results[N / 2] == 1.0);
-  ASSERT_TRUE("window_sum partition 1 last == 32768.0", results[N - 1] == 32768.0);
+  bool ok = true;
+  double running_sum = 0.0;
+  double compensation = 0.0;
+  for (size_t i = 0; i < N; ++i) {
+    if (starts[i] != 0) {
+      running_sum = 0.0;
+      compensation = 0.0;
+    }
+    if (nulls[i] == 0) {
+      const double adjusted = values[i] - compensation;
+      const double next = running_sum + adjusted;
+      compensation = (next - running_sum) - adjusted;
+      running_sum = next;
+    }
+    if (results[i] != running_sum) {
+      fprintf(stderr, "  row %zu got %.17g, expected %.17g\n", i, results[i], running_sum);
+      ok = false;
+      break;
+    }
+  }
+  ASSERT_TRUE("window_sum segmented values match Kahan reference", ok);
+  ASSERT_TRUE("window_sum all-null partition stays zero", results[14] == 0.0);
+  ASSERT_TRUE("window_sum singleton final partition resets", results[N - 1] == values[N - 1]);
 }
 
 // ---------------------------------------------------------------------------
 // Test: window_rank
 // ---------------------------------------------------------------------------
 //
-// `rank` = 1 + number of strictly-less-than rows in partition.
-// Layout: single partition, sort_keys = floor(i/4) so every 4-row group
-// shares a key. Expected ranks: 1, 1, 1, 1, 5, 5, 5, 5, 9, 9, 9, 9, ...
+static bool peer_equal(double left, double right) {
+  const bool both_nan = left != left && right != right;
+  return both_nan || left == right;
+}
+
+static void make_rank_case(std::vector<uint8_t>& starts, std::vector<double>& keys) {
+  const size_t count = starts.size();
+  starts[0] = 1;
+  starts[1] = 1;
+  starts[2] = 1;
+  starts[257] = 1;
+  starts[count / 2] = 1;
+  starts[count - 1] = 1;
+
+  size_t partition_start = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (starts[i] != 0)
+      partition_start = i;
+    keys[i] = static_cast<double>((i - partition_start) / 4);
+  }
+
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  keys[0] = nan;
+  keys[1] = nan;
+  for (size_t i = 253; i < 257; ++i)
+    keys[i] = nan;
+  for (size_t i = count / 2 - 4; i < count / 2; ++i)
+    keys[i] = nan;
+  for (size_t i = count - 5; i < count - 1; ++i)
+    keys[i] = nan;
+  keys[count - 1] = nan;
+}
+
+// Multi-partition RANK with adjacent singletons, ties, and NaN peer groups.
 static void test_window_rank() {
   printf("--- test_window_rank ---\n");
 
   constexpr size_t N = 65536;
   std::vector<uint8_t> starts(N, 0);
-  starts[0] = 1;
-
-  std::vector<double> sort_keys(N);
-  for (size_t i = 0; i < N; i++)
-    sort_keys[i] = static_cast<double>(i / 4);
+  std::vector<double> sort_keys(N, 0.0);
+  make_rank_case(starts, sort_keys);
 
   std::vector<int64_t> results(N, -1);
   pgaccel_status s = pgaccel_window_rank(starts.data(), sort_keys.data(), N, results.data());
-  if (is_metal_backend()) {
-    ASSERT_TRUE("window_rank Metal non-segmented path declines with UNSUPPORTED",
-                s == PGACCEL_UNSUPPORTED);
-    return;
-  }
   ASSERT_STATUS_OK("window_rank 65536 status", s);
 
   bool ok = true;
-  for (size_t i = 0; i < N; i++) {
-    int64_t expect = static_cast<int64_t>((i / 4) * 4 + 1);
-    if (results[i] != expect) {
+  int64_t row_number = 0;
+  int64_t rank = 1;
+  bool first = true;
+  double previous = 0.0;
+  for (size_t i = 0; i < N; ++i) {
+    if (starts[i] != 0) {
+      row_number = 0;
+      rank = 1;
+      first = true;
+    }
+    ++row_number;
+    if (first) {
+      first = false;
+    } else if (!peer_equal(previous, sort_keys[i])) {
+      rank = row_number;
+    }
+    if (results[i] != rank) {
       fprintf(stderr, "  row %zu got %lld, expected %lld\n", i, (long long)results[i],
-              (long long)expect);
+              (long long)rank);
       ok = false;
       break;
     }
+    previous = sort_keys[i];
   }
-  ASSERT_TRUE("window_rank tied-by-4 sequence 1,1,1,1,5,5,5,5,...", ok);
+  ASSERT_TRUE("window_rank segmented ties and NaN peers", ok);
 }
 
 // ---------------------------------------------------------------------------
 // Test: window_dense_rank
 // ---------------------------------------------------------------------------
 //
-// Same layout as window_rank but no gap on ties: 1, 1, 1, 1, 2, 2, 2, 2,...
+// Same adversarial layout as RANK, with no gaps between peer groups.
 static void test_window_dense_rank() {
   printf("--- test_window_dense_rank ---\n");
 
   constexpr size_t N = 65536;
   std::vector<uint8_t> starts(N, 0);
-  starts[0] = 1;
-
-  std::vector<double> sort_keys(N);
-  for (size_t i = 0; i < N; i++)
-    sort_keys[i] = static_cast<double>(i / 4);
+  std::vector<double> sort_keys(N, 0.0);
+  make_rank_case(starts, sort_keys);
 
   std::vector<int64_t> results(N, -1);
   pgaccel_status s = pgaccel_window_dense_rank(starts.data(), sort_keys.data(), N, results.data());
-  if (is_metal_backend()) {
-    ASSERT_TRUE("window_dense_rank Metal non-segmented path declines with UNSUPPORTED",
-                s == PGACCEL_UNSUPPORTED);
-    return;
-  }
   ASSERT_STATUS_OK("window_dense_rank 65536 status", s);
 
   bool ok = true;
-  for (size_t i = 0; i < N; i++) {
-    int64_t expect = static_cast<int64_t>((i / 4) + 1);
-    if (results[i] != expect) {
+  int64_t dense_rank = 0;
+  bool first = true;
+  double previous = 0.0;
+  for (size_t i = 0; i < N; ++i) {
+    if (starts[i] != 0) {
+      dense_rank = 0;
+      first = true;
+    }
+    if (first || !peer_equal(previous, sort_keys[i])) {
+      ++dense_rank;
+      first = false;
+    }
+    if (results[i] != dense_rank) {
       fprintf(stderr, "  row %zu got %lld, expected %lld\n", i, (long long)results[i],
-              (long long)expect);
+              (long long)dense_rank);
       ok = false;
       break;
     }
+    previous = sort_keys[i];
   }
-  ASSERT_TRUE("window_dense_rank tied-by-4 sequence 1,1,1,1,2,2,2,2,...", ok);
+  ASSERT_TRUE("window_dense_rank segmented ties and NaN peers", ok);
+}
+
+static void make_offset_case(std::vector<uint8_t>& starts, std::vector<double>& values,
+                             std::vector<uint8_t>& nulls) {
+  const size_t count = starts.size();
+  starts[0] = 1;
+  starts[1] = 1;
+  starts[4] = 1;
+  starts[19] = 1;
+  starts[20] = 1;
+  starts[count / 2] = 1;
+  starts[count - 1] = 1;
+  for (size_t i = 0; i < count; ++i) {
+    values[i] = static_cast<double>(i) * 0.5;
+    nulls[i] = static_cast<uint8_t>((i % 17) == 0);
+  }
+  for (size_t i = 4; i < 19; ++i)
+    nulls[i] = 1;
+}
+
+// LAG offsets 0, an in-range/cross-boundary offset, and an offset larger than
+// every partition. NULL source rows preserve the output null marker while an
+// out-of-partition lookup yields the non-null default.
+static void test_window_lag() {
+  printf("--- test_window_lag ---\n");
+
+  constexpr size_t N = 65536;
+  constexpr double DEFAULT_VALUE = -77.25;
+  std::vector<uint8_t> starts(N, 0);
+  std::vector<double> values(N, 0.0);
+  std::vector<uint8_t> nulls(N, 0);
+  make_offset_case(starts, values, nulls);
+
+  std::vector<size_t> partition_start(N, 0);
+  size_t start = 0;
+  for (size_t i = 0; i < N; ++i) {
+    if (starts[i] != 0)
+      start = i;
+    partition_start[i] = start;
+  }
+
+  std::vector<double> results(N, 0.0);
+  std::vector<uint8_t> result_nulls(N, 0xff);
+  for (const int offset : {0, 3, static_cast<int>(N)}) {
+    pgaccel_status status =
+        pgaccel_window_lag(starts.data(), values.data(), nulls.data(), N, offset, DEFAULT_VALUE,
+                           results.data(), result_nulls.data());
+    ASSERT_STATUS_OK("window_lag adversarial offset status", status);
+
+    bool ok = status == PGACCEL_OK;
+    const size_t distance = static_cast<size_t>(offset);
+    for (size_t i = 0; ok && i < N; ++i) {
+      double expected_value = DEFAULT_VALUE;
+      uint8_t expected_null = 0;
+      if (distance <= i - partition_start[i]) {
+        const size_t target = i - distance;
+        if (nulls[target] != 0) {
+          expected_null = 1;
+        } else {
+          expected_value = values[target];
+        }
+      }
+      if (results[i] != expected_value || result_nulls[i] != expected_null) {
+        fprintf(stderr, "  lag offset %d row %zu got (%.17g,%u), expected (%.17g,%u)\n", offset, i,
+                results[i], (unsigned)result_nulls[i], expected_value, (unsigned)expected_null);
+        ok = false;
+      }
+    }
+    ASSERT_TRUE("window_lag values/defaults/nulls stay within partitions", ok);
+  }
+}
+
+static void test_window_lead() {
+  printf("--- test_window_lead ---\n");
+
+  constexpr size_t N = 65536;
+  constexpr double DEFAULT_VALUE = 91.5;
+  std::vector<uint8_t> starts(N, 0);
+  std::vector<double> values(N, 0.0);
+  std::vector<uint8_t> nulls(N, 0);
+  make_offset_case(starts, values, nulls);
+
+  std::vector<size_t> partition_end(N, N - 1);
+  size_t end = N - 1;
+  for (size_t remaining = N; remaining > 0; --remaining) {
+    const size_t i = remaining - 1;
+    if (i + 1 < N && starts[i + 1] != 0)
+      end = i;
+    partition_end[i] = end;
+  }
+
+  std::vector<double> results(N, 0.0);
+  std::vector<uint8_t> result_nulls(N, 0xff);
+  for (const int offset : {0, 3, static_cast<int>(N)}) {
+    pgaccel_status status =
+        pgaccel_window_lead(starts.data(), values.data(), nulls.data(), N, offset, DEFAULT_VALUE,
+                            results.data(), result_nulls.data());
+    ASSERT_STATUS_OK("window_lead adversarial offset status", status);
+
+    bool ok = status == PGACCEL_OK;
+    const size_t distance = static_cast<size_t>(offset);
+    for (size_t i = 0; ok && i < N; ++i) {
+      double expected_value = DEFAULT_VALUE;
+      uint8_t expected_null = 0;
+      if (distance <= partition_end[i] - i) {
+        const size_t target = i + distance;
+        if (nulls[target] != 0) {
+          expected_null = 1;
+        } else {
+          expected_value = values[target];
+        }
+      }
+      if (results[i] != expected_value || result_nulls[i] != expected_null) {
+        fprintf(stderr, "  lead offset %d row %zu got (%.17g,%u), expected (%.17g,%u)\n", offset, i,
+                results[i], (unsigned)result_nulls[i], expected_value, (unsigned)expected_null);
+        ok = false;
+      }
+    }
+    ASSERT_TRUE("window_lead values/defaults/nulls stay within partitions", ok);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Test: below-threshold gating
 // ---------------------------------------------------------------------------
 //
-// All 5 kernels return PGACCEL_UNSUPPORTED for count < 65536; the
+// All seven kernels return PGACCEL_UNSUPPORTED for count < 65536; the
 // dispatcher uses that to fall back to the host implementation. Confirm
 // the gate fires (and reports itself as a decline, not a missing device).
 static void test_below_threshold_gates() {
@@ -288,6 +469,7 @@ static void test_below_threshold_gates() {
   std::vector<int64_t> i64_results(N, 0);
   std::vector<double> d_results(N, 0.0);
   std::vector<double> d_values(N, 1.0);
+  std::vector<uint8_t> result_nulls(N, 0);
 
   pgaccel_status s;
   s = pgaccel_window_row_number(starts.data(), N, i64_results.data());
@@ -304,6 +486,39 @@ static void test_below_threshold_gates() {
 
   s = pgaccel_window_dense_rank(starts.data(), d_values.data(), N, i64_results.data());
   ASSERT_TRUE("dense_rank N=1024 declines with UNSUPPORTED", s == PGACCEL_UNSUPPORTED);
+
+  s = pgaccel_window_lag(starts.data(), d_values.data(), nullptr, N, 1, 0.0, d_results.data(),
+                         result_nulls.data());
+  ASSERT_TRUE("lag N=1024 declines with UNSUPPORTED", s == PGACCEL_UNSUPPORTED);
+
+  s = pgaccel_window_lead(starts.data(), d_values.data(), nullptr, N, 1, 0.0, d_results.data(),
+                          result_nulls.data());
+  ASSERT_TRUE("lead N=1024 declines with UNSUPPORTED", s == PGACCEL_UNSUPPORTED);
+}
+
+static void test_empty_identities() {
+  printf("--- test_empty_identities ---\n");
+
+  uint8_t starts = 1;
+  uint8_t null_mask = 0;
+  uint8_t result_null = 0x7f;
+  double value = 4.5;
+  double double_result = 123.0;
+  int64_t integer_result = 456;
+
+  ASSERT_STATUS_OK("empty row_number", pgaccel_window_row_number(&starts, 0, &integer_result));
+  ASSERT_STATUS_OK("empty rank", pgaccel_window_rank(&starts, &value, 0, &integer_result));
+  ASSERT_STATUS_OK("empty dense_rank",
+                   pgaccel_window_dense_rank(&starts, &value, 0, &integer_result));
+  ASSERT_STATUS_OK("empty sum", pgaccel_window_sum(&starts, &value, &null_mask, 0, &double_result));
+  ASSERT_STATUS_OK("empty count", pgaccel_window_count(&starts, &null_mask, 0, &integer_result));
+  ASSERT_STATUS_OK("empty lag", pgaccel_window_lag(&starts, &value, &null_mask, 0, 1, -1.0,
+                                                   &double_result, &result_null));
+  ASSERT_STATUS_OK("empty lead", pgaccel_window_lead(&starts, &value, &null_mask, 0, 1, -1.0,
+                                                     &double_result, &result_null));
+  ASSERT_EQ_I64("empty integer output unchanged", integer_result, 456);
+  ASSERT_TRUE("empty double output unchanged", double_result == 123.0);
+  ASSERT_TRUE("empty null output unchanged", result_null == 0x7f);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,11 +533,14 @@ int main() {
   }
 
   test_below_threshold_gates();
+  test_empty_identities();
   test_window_row_number();
   test_window_count();
   test_window_sum();
   test_window_rank();
   test_window_dense_rank();
+  test_window_lag();
+  test_window_lead();
 
   printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
