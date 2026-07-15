@@ -342,8 +342,9 @@ static void free_radix_scan_storage(sycl::queue& q, RadixScanStorage& storage) {
   storage = {};
 }
 
-static void scan_radix_histograms_device(sycl::queue& q, uint32_t* group_hist, size_t group_count,
-                                         const RadixScanStorage& storage) {
+static pgaccel_status scan_radix_histograms_device(sycl::queue& q, uint32_t* group_hist,
+                                                   size_t group_count,
+                                                   const RadixScanStorage& storage) {
   const size_t chunk_count = storage.chunk_count;
   uint32_t* chunk_sums = storage.chunk_sums;
   auto nd = sycl::nd_range<1>(sycl::range<1>(chunk_count * RADIX_BINS * RADIX_SCAN_GROUP_SIZE),
@@ -399,6 +400,7 @@ static void scan_radix_histograms_device(sycl::queue& q, uint32_t* group_hist, s
        }
      });
    }).wait_and_throw();
+  return PGACCEL_OK;
 }
 
 /// GPU radix sort for uint32 keys + uint32 indices (key-value variant).
@@ -439,6 +441,8 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
   uint32_t* buf_keys_b = nullptr;
   uint32_t* buf_idx_a = nullptr;
   uint32_t* buf_idx_b = nullptr;
+  uint32_t* result_keys = nullptr;
+  uint32_t* result_indices = nullptr;
   uint32_t* d_group_hist = nullptr;
   RadixScanStorage scan;
   auto release = [&]() {
@@ -450,6 +454,10 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
       sycl::free(buf_idx_a, *q);
     if (buf_idx_b)
       sycl::free(buf_idx_b, *q);
+    if (result_keys)
+      sycl::free(result_keys, *q);
+    if (result_indices)
+      sycl::free(result_indices, *q);
     if (d_group_hist)
       sycl::free(d_group_hist, *q);
     free_radix_scan_storage(*q, scan);
@@ -457,6 +465,8 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
     buf_keys_b = nullptr;
     buf_idx_a = nullptr;
     buf_idx_b = nullptr;
+    result_keys = nullptr;
+    result_indices = nullptr;
     d_group_hist = nullptr;
   };
 
@@ -467,13 +477,15 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
     buf_keys_b = alloc_u32(padded);
     buf_idx_a = alloc_u32(padded);
     buf_idx_b = alloc_u32(padded);
+    result_keys = sycl::malloc_device<uint32_t>(count, *q);
+    result_indices = sycl::malloc_device<uint32_t>(count, *q);
 
     // Per-group histogram / scatter base: ngroups × 256 uints.
     d_group_hist = sycl::malloc_device<uint32_t>(ngroups * RADIX_BINS, *q);
     const bool scan_allocated = allocate_radix_scan_storage(*q, ngroups, scan);
 
-    if (!buf_keys_a || !buf_keys_b || !buf_idx_a || !buf_idx_b || !d_group_hist ||
-        !scan_allocated) {
+    if (!buf_keys_a || !buf_keys_b || !buf_idx_a || !buf_idx_b || !result_keys || !result_indices ||
+        !d_group_hist || !scan_allocated) {
       release();
       return PGACCEL_OOM;
     }
@@ -495,7 +507,8 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
 
     // Up to 4 passes × 8 bits for 32-bit keys. Dense callers can request
     // fewer passes when all normalized keys fit in fewer low bytes.
-    for (int pass = 0; pass < pass_count; ++pass) {
+    int pass = 0;
+    do {
       const int shift = pass * 8;
       const uint32_t shift_u = static_cast<uint32_t>(shift);
 
@@ -635,11 +648,16 @@ static pgaccel_status sycl_radix_sort_kv_u32(uint32_t* keys, uint32_t* indices, 
 
       std::swap(src_keys, dst_keys);
       std::swap(src_idx, dst_idx);
-    }
+      ++pass;
+    } while (pass < pass_count);
 
-    // After 4 passes, src_{keys,idx} hold the sorted result.
-    q->memcpy(keys, src_keys, count * sizeof(uint32_t)).wait_and_throw();
-    q->memcpy(indices, src_idx, count * sizeof(uint32_t)).wait_and_throw();
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       result_keys[i] = src_keys[i];
+       result_indices[i] = src_idx[i];
+     }).wait_and_throw();
+    q->memcpy(keys, result_keys, count * sizeof(uint32_t)).wait_and_throw();
+    q->memcpy(indices, result_indices, count * sizeof(uint32_t)).wait_and_throw();
 
     release();
     return PGACCEL_OK;
@@ -679,6 +697,8 @@ static pgaccel_status sycl_radix_sort_kv_u64(uint64_t* keys, uint32_t* indices, 
   uint64_t* buf_keys_b = nullptr;
   uint32_t* buf_idx_a = nullptr;
   uint32_t* buf_idx_b = nullptr;
+  uint64_t* result_keys = nullptr;
+  uint32_t* result_indices = nullptr;
   uint32_t* d_group_hist = nullptr;
   RadixScanStorage scan;
   auto release = [&]() {
@@ -690,6 +710,10 @@ static pgaccel_status sycl_radix_sort_kv_u64(uint64_t* keys, uint32_t* indices, 
       sycl::free(buf_idx_a, *q);
     if (buf_idx_b)
       sycl::free(buf_idx_b, *q);
+    if (result_keys)
+      sycl::free(result_keys, *q);
+    if (result_indices)
+      sycl::free(result_indices, *q);
     if (d_group_hist)
       sycl::free(d_group_hist, *q);
     free_radix_scan_storage(*q, scan);
@@ -697,6 +721,8 @@ static pgaccel_status sycl_radix_sort_kv_u64(uint64_t* keys, uint32_t* indices, 
     buf_keys_b = nullptr;
     buf_idx_a = nullptr;
     buf_idx_b = nullptr;
+    result_keys = nullptr;
+    result_indices = nullptr;
     d_group_hist = nullptr;
   };
 
@@ -708,11 +734,13 @@ static pgaccel_status sycl_radix_sort_kv_u64(uint64_t* keys, uint32_t* indices, 
     buf_keys_b = alloc_u64(padded);
     buf_idx_a = alloc_u32(padded);
     buf_idx_b = alloc_u32(padded);
+    result_keys = sycl::malloc_device<uint64_t>(count, *q);
+    result_indices = sycl::malloc_device<uint32_t>(count, *q);
     d_group_hist = sycl::malloc_device<uint32_t>(ngroups * RADIX_BINS, *q);
     const bool scan_allocated = allocate_radix_scan_storage(*q, ngroups, scan);
 
-    if (!buf_keys_a || !buf_keys_b || !buf_idx_a || !buf_idx_b || !d_group_hist ||
-        !scan_allocated) {
+    if (!buf_keys_a || !buf_keys_b || !buf_idx_a || !buf_idx_b || !result_keys || !result_indices ||
+        !d_group_hist || !scan_allocated) {
       release();
       return PGACCEL_OOM;
     }
@@ -730,7 +758,8 @@ static pgaccel_status sycl_radix_sort_kv_u64(uint64_t* keys, uint32_t* indices, 
     uint32_t* src_idx = buf_idx_a;
     uint32_t* dst_idx = buf_idx_b;
 
-    for (int pass = 0; pass < 8; ++pass) {
+    int pass = 0;
+    do {
       const int shift = pass * 8;
       const uint64_t shift_u = static_cast<uint64_t>(shift);
 
@@ -831,10 +860,16 @@ static pgaccel_status sycl_radix_sort_kv_u64(uint64_t* keys, uint32_t* indices, 
 
       std::swap(src_keys, dst_keys);
       std::swap(src_idx, dst_idx);
-    }
+      ++pass;
+    } while (pass < 8);
 
-    q->memcpy(keys, src_keys, count * sizeof(uint64_t)).wait_and_throw();
-    q->memcpy(indices, src_idx, count * sizeof(uint32_t)).wait_and_throw();
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       result_keys[i] = src_keys[i];
+       result_indices[i] = src_idx[i];
+     }).wait_and_throw();
+    q->memcpy(keys, result_keys, count * sizeof(uint64_t)).wait_and_throw();
+    q->memcpy(indices, result_indices, count * sizeof(uint32_t)).wait_and_throw();
 
     release();
     return PGACCEL_OK;
@@ -860,6 +895,7 @@ static pgaccel_status sycl_radix_sort_u64(uint64_t* keys, size_t count) {
 
   uint64_t* buf_keys_a = nullptr;
   uint64_t* buf_keys_b = nullptr;
+  uint64_t* result_keys = nullptr;
   uint32_t* d_group_hist = nullptr;
   RadixScanStorage scan;
   auto release = [&]() {
@@ -867,11 +903,14 @@ static pgaccel_status sycl_radix_sort_u64(uint64_t* keys, size_t count) {
       sycl::free(buf_keys_a, *q);
     if (buf_keys_b)
       sycl::free(buf_keys_b, *q);
+    if (result_keys)
+      sycl::free(result_keys, *q);
     if (d_group_hist)
       sycl::free(d_group_hist, *q);
     free_radix_scan_storage(*q, scan);
     buf_keys_a = nullptr;
     buf_keys_b = nullptr;
+    result_keys = nullptr;
     d_group_hist = nullptr;
   };
 
@@ -880,10 +919,11 @@ static pgaccel_status sycl_radix_sort_u64(uint64_t* keys, size_t count) {
 
     buf_keys_a = alloc_u64(padded);
     buf_keys_b = alloc_u64(padded);
+    result_keys = sycl::malloc_device<uint64_t>(count, *q);
     d_group_hist = sycl::malloc_device<uint32_t>(ngroups * RADIX_BINS, *q);
     const bool scan_allocated = allocate_radix_scan_storage(*q, ngroups, scan);
 
-    if (!buf_keys_a || !buf_keys_b || !d_group_hist || !scan_allocated) {
+    if (!buf_keys_a || !buf_keys_b || !result_keys || !d_group_hist || !scan_allocated) {
       release();
       return PGACCEL_OOM;
     }
@@ -896,7 +936,8 @@ static pgaccel_status sycl_radix_sort_u64(uint64_t* keys, size_t count) {
 
     uint64_t* src_keys = buf_keys_a;
     uint64_t* dst_keys = buf_keys_b;
-    for (int pass = 0; pass < 8; ++pass) {
+    int pass = 0;
+    do {
       const int shift = pass * 8;
       const uint64_t shift_u = static_cast<uint64_t>(shift);
 
@@ -991,9 +1032,14 @@ static pgaccel_status sycl_radix_sort_u64(uint64_t* keys, size_t count) {
       }
 
       std::swap(src_keys, dst_keys);
-    }
+      ++pass;
+    } while (pass < 8);
 
-    q->memcpy(keys, src_keys, count * sizeof(uint64_t)).wait_and_throw();
+    q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       result_keys[i] = src_keys[i];
+     }).wait_and_throw();
+    q->memcpy(keys, result_keys, count * sizeof(uint64_t)).wait_and_throw();
 
     release();
     return PGACCEL_OK;
