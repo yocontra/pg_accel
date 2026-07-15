@@ -1,5 +1,9 @@
 //! Store-neutral artifact boundary for childless resident raster execution.
 
+use std::time::Instant;
+
+use pgrx::pg_sys;
+
 use crate::engine::raster::{
     RasterExecutionError, RasterExecutionPreflight, RasterExecutionSizing, RasterExecutionSnapshot,
     RasterQuerySpec, RasterReclassRule, RasterReconstructedOutput, RasterSpecCodecError,
@@ -209,6 +213,211 @@ pub struct RasterExecReady {
     pub artifact: ArtifactEnsureOutcome,
     pub row_count: usize,
     pub accounting: ResidentByteAccounting,
+}
+
+/// Childless CustomScan state for one exact RQS2 transform.
+pub struct RasterExecState {
+    plan: RasterExecPlan,
+    cursor: RasterOutputCursor,
+    ready: RasterExecReady,
+    rows_dispatched: u64,
+    batches_executed: u64,
+    dispatch_time_us: u64,
+}
+
+impl RasterExecState {
+    /// Build the generation-stamped result before PostgreSQL requests a row.
+    ///
+    /// # Safety
+    /// Must run on the PostgreSQL backend main thread. `output_slot` must be
+    /// the initialized scan slot for the childless raster CustomScan.
+    pub unsafe fn begin(
+        plan: RasterExecPlan,
+        output_slot: *mut pg_sys::TupleTableSlot,
+    ) -> Result<Self, ResidentLoadError> {
+        unsafe { validate_output_slot(&plan, output_slot) }?;
+        let started = Instant::now();
+        let ready = unsafe { plan.ensure_ready() }?;
+        let (rows_dispatched, batches_executed, dispatch_time_us) =
+            execution_counters(&ready, started.elapsed());
+        Ok(Self {
+            plan,
+            cursor: RasterOutputCursor::new(),
+            ready,
+            rows_dispatched,
+            batches_executed,
+            dispatch_time_us,
+        })
+    }
+
+    /// Reprove catalog and resident generations, resolve/rebuild the exact
+    /// artifact, and only then rewind output.
+    ///
+    /// # Safety
+    /// Must run on the PostgreSQL backend main thread.
+    pub unsafe fn reset_for_rescan(&mut self) -> Result<(), ResidentLoadError> {
+        let started = Instant::now();
+        let ready = unsafe { self.plan.ensure_ready() }?;
+        let (rows_dispatched, batches_executed, dispatch_time_us) =
+            execution_counters(&ready, started.elapsed());
+        self.ready = ready;
+        self.cursor.reset();
+        self.rows_dispatched = rows_dispatched;
+        self.batches_executed = batches_executed;
+        self.dispatch_time_us = dispatch_time_us;
+        Ok(())
+    }
+
+    /// Materialize the next reconstructed raster into a one-column virtual
+    /// tuple. The derived artifact and its raw dependency remain pinned under
+    /// the store borrow until any non-NULL bytes have been copied to a Datum.
+    ///
+    /// # Safety
+    /// Must run on the PostgreSQL backend main thread. `output_slot` must be
+    /// the initialized scan slot validated by [`Self::begin`].
+    unsafe fn next(
+        &mut self,
+        output_slot: *mut pg_sys::TupleTableSlot,
+    ) -> Result<*mut pg_sys::TupleTableSlot, ResidentLoadError> {
+        let owner = self.plan.selected_relation.relid;
+        let value = with_derived_artifact_inputs::<RasterOutputArtifact, _>(
+            owner,
+            &self.plan.identity,
+            std::slice::from_ref(&self.plan.column),
+            |resolved| match self.cursor.next(resolved.artifact) {
+                Some(RasterOutputValue::Null) => Ok(Some((pg_sys::Datum::from(0), true))),
+                Some(RasterOutputValue::Wkb(wkb)) => {
+                    // SAFETY: executor callbacks run on the backend main thread;
+                    // the WKB slice remains valid for this complete store borrow.
+                    unsafe { raster_datum_from_wkb(wkb) }.map(|datum| Some((datum, false)))
+                }
+                None => Ok(None),
+            },
+        )??;
+        // SAFETY: output_slot was validated at BeginCustomScan and remains
+        // owned by this plan state until EndCustomScan.
+        unsafe { pg_sys::ExecClearTuple(output_slot) };
+        let Some((datum, is_null)) = value else {
+            return Ok(output_slot);
+        };
+        // SAFETY: the exact one-column slot shape and storage pointers were
+        // validated at BeginCustomScan.
+        unsafe {
+            *(*output_slot).tts_values = datum;
+            *(*output_slot).tts_isnull = is_null;
+            pg_sys::ExecStoreVirtualTuple(output_slot);
+        }
+        Ok(output_slot)
+    }
+
+    #[must_use]
+    pub const fn plan(&self) -> &RasterExecPlan {
+        &self.plan
+    }
+
+    #[must_use]
+    pub const fn ready(&self) -> &RasterExecReady {
+        &self.ready
+    }
+}
+
+fn execution_counters(ready: &RasterExecReady, elapsed: std::time::Duration) -> (u64, u64, u64) {
+    let built = !matches!(ready.artifact, ArtifactEnsureOutcome::Hit);
+    let rows = if built {
+        u64::try_from(ready.row_count).unwrap_or(u64::MAX)
+    } else {
+        0
+    };
+    let batches = u64::from(built && ready.row_count > 0);
+    let elapsed_us = if batches == 0 {
+        0
+    } else {
+        u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX)
+    };
+    (rows, batches, elapsed_us)
+}
+
+unsafe fn validate_output_slot(
+    plan: &RasterExecPlan,
+    output_slot: *mut pg_sys::TupleTableSlot,
+) -> Result<(), ResidentLoadError> {
+    if output_slot.is_null() {
+        return Err(ResidentLoadError::Loader(
+            "raster CustomScan has no output slot".to_owned(),
+        ));
+    }
+    // SAFETY: caller promises an initialized executor-owned slot.
+    let descriptor = unsafe { (*output_slot).tts_tupleDescriptor };
+    if descriptor.is_null() || unsafe { (*descriptor).natts } != 1 {
+        return Err(ResidentLoadError::Loader(
+            "raster CustomScan output must contain exactly one attribute".to_owned(),
+        ));
+    }
+    // SAFETY: the descriptor has exactly one valid attribute.
+    let attribute = unsafe { &*crate::engine::pg_compat::tuple_desc_attr(descriptor, 0) };
+    if u32::from(attribute.atttypid) != plan.spec.raster_type_oid {
+        return Err(ResidentLoadError::Loader(
+            "raster CustomScan output type does not match its RQS2 contract".to_owned(),
+        ));
+    }
+    // SAFETY: output_slot is initialized and valid for field reads.
+    if unsafe { (*output_slot).tts_values.is_null() || (*output_slot).tts_isnull.is_null() } {
+        return Err(ResidentLoadError::Loader(
+            "raster CustomScan output slot has no value storage".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Wrap a reconstructed PostGIS raster payload in a flat four-byte varlena.
+///
+/// # Safety
+/// Must run on the PostgreSQL backend main thread in the output tuple's live
+/// memory context.
+unsafe fn raster_datum_from_wkb(wkb: &[u8]) -> Result<pg_sys::Datum, ResidentLoadError> {
+    const VARHDRSZ: usize = std::mem::size_of::<pg_sys::int32>();
+    let total = VARHDRSZ
+        .checked_add(wkb.len())
+        .ok_or_else(|| ResidentLoadError::Loader("raster output size overflow".to_owned()))?;
+    let total_u32 = u32::try_from(total)
+        .ok()
+        .filter(|total| *total <= 0x3fff_ffff)
+        .ok_or_else(|| {
+            ResidentLoadError::Loader("raster output exceeds varlena size".to_owned())
+        })?;
+    // SAFETY: palloc runs on the backend main thread and either returns a
+    // `total`-byte allocation or raises PostgreSQL ERROR.
+    let output = unsafe { pg_sys::palloc(total) }.cast::<u8>();
+    // SAFETY: output owns `total` writable bytes and WKB begins after VARHDRSZ.
+    unsafe {
+        std::ptr::write_unaligned(output.cast::<u32>(), total_u32 << 2);
+        std::ptr::copy_nonoverlapping(wkb.as_ptr(), output.add(VARHDRSZ), wkb.len());
+    }
+    Ok(pg_sys::Datum::from(output))
+}
+
+impl crate::engine::executor::state::ExecutorState for RasterExecState {
+    unsafe fn exec(&mut self, css: *mut pg_sys::CustomScanState) -> *mut pg_sys::TupleTableSlot {
+        // SAFETY: trait contract guarantees a valid CustomScanState and the
+        // scan slot validated by RasterExecState::begin.
+        let slot = unsafe { (*css).ss.ss_ScanTupleSlot };
+        // SAFETY: same trait contract; errors are hard execution failures and
+        // must never fall through to the native PostGIS expression.
+        unsafe { self.next(slot) }
+            .unwrap_or_else(|error| pgrx::error!("pg_accel: raster execution failed: {error}"))
+    }
+
+    fn rows_dispatched(&self) -> u64 {
+        self.rows_dispatched
+    }
+
+    fn batches_executed(&self) -> u64 {
+        self.batches_executed
+    }
+
+    fn dispatch_time_us(&self) -> u64 {
+        self.dispatch_time_us
+    }
 }
 
 fn canonical_empty_snapshot() -> RasterExecutionSnapshot {
@@ -1397,6 +1606,41 @@ mod tests {
         assert_eq!(cursor.position(), 0);
         assert_eq!(plan.identity(), &identity);
         assert_eq!(plan.selected_relation(), &relation);
+    }
+
+    #[test]
+    fn executor_counters_charge_only_nonempty_builds() {
+        let ready = |artifact, row_count| RasterExecReady {
+            selected: SelectedRelationsEnsureOutcome {
+                evidence: Vec::new(),
+                loaded_relations: Vec::new(),
+                raw_load_ms: 0.0,
+            },
+            artifact,
+            row_count,
+            accounting: ResidentByteAccounting::default(),
+        };
+        assert_eq!(
+            execution_counters(
+                &ready(ArtifactEnsureOutcome::Built, 3),
+                std::time::Duration::from_micros(17),
+            ),
+            (3, 1, 17)
+        );
+        assert_eq!(
+            execution_counters(
+                &ready(ArtifactEnsureOutcome::Rebuilt, 0),
+                std::time::Duration::from_micros(17),
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            execution_counters(
+                &ready(ArtifactEnsureOutcome::Hit, 3),
+                std::time::Duration::from_micros(17),
+            ),
+            (0, 0, 0)
+        );
     }
 
     #[test]

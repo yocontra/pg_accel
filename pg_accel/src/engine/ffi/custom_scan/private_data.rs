@@ -8,11 +8,14 @@ use std::ffi::c_int;
 use pgrx::pg_sys;
 
 use super::{GpuStrategy, OutputShapeDisc};
+use crate::engine::executor::raster::RasterExecPlan;
 use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSpec};
 use crate::engine::gucs;
+use crate::engine::raster::{RASTER_QUERY_SPEC_MAX_WORDS, RasterSpecCodecError};
 use crate::engine::registry::AccelStrategy;
 use crate::engine::residency::{
-    CpuBoundaryReason, ResidentMaterializationKind, ResidentOperatorClass, ResidentProofSnapshot,
+    CpuBoundaryReason, ResidentMaterializationKind, ResidentOperatorClass, ResidentOperatorStage,
+    ResidentProofSnapshot,
 };
 use crate::engine::spec::{
     AGG_OUTPUT_PROJECTION_MAX_WORDS, AGG_QUERY_SPEC_MAX_WORDS, AggOutputProjection, AggQuerySpec,
@@ -50,6 +53,7 @@ pub(super) enum PlanExecMethod {
     Window = 4,
     FunctionScan = 5,
     SrfTargetList = 6,
+    Raster = 7,
 }
 
 impl PlanExecMethod {
@@ -61,6 +65,7 @@ impl PlanExecMethod {
             4 => Some(Self::Window),
             5 => Some(Self::FunctionScan),
             6 => Some(Self::SrfTargetList),
+            7 => Some(Self::Raster),
             _ => None,
         }
     }
@@ -73,6 +78,7 @@ impl PlanExecMethod {
             GpuStrategy::Window => Some(Self::Window),
             GpuStrategy::FunctionScan => Some(Self::FunctionScan),
             GpuStrategy::SrfTargetList => Some(Self::SrfTargetList),
+            GpuStrategy::Raster => Some(Self::Raster),
             GpuStrategy::Sort | GpuStrategy::PreAgg => None,
         }
     }
@@ -148,6 +154,10 @@ pub(super) enum DecodeError {
     },
     InvalidAggQuerySpec(SpecCodecError),
     InvalidAggOutputProjection(ProjectionCodecError),
+    InvalidRasterQuerySpec(RasterSpecCodecError),
+    RasterPlanHeaderMismatch {
+        field: &'static str,
+    },
     AllocationFailed {
         field: &'static str,
     },
@@ -177,6 +187,12 @@ impl From<ProjectionCodecError> for DecodeError {
     }
 }
 
+impl From<RasterSpecCodecError> for DecodeError {
+    fn from(value: RasterSpecCodecError) -> Self {
+        Self::InvalidRasterQuerySpec(value)
+    }
+}
+
 /// Decode a `GpuStrategy` from the current integer wire layout.
 pub(super) const fn decode_gpu_strategy(raw: c_int) -> Result<GpuStrategy, DecodeError> {
     match raw {
@@ -188,6 +204,7 @@ pub(super) const fn decode_gpu_strategy(raw: c_int) -> Result<GpuStrategy, Decod
         5 => Ok(GpuStrategy::PreAgg),
         6 => Ok(GpuStrategy::FunctionScan),
         7 => Ok(GpuStrategy::SrfTargetList),
+        8 => Ok(GpuStrategy::Raster),
         _ => Err(DecodeError::InvalidGpuStrategy { raw }),
     }
 }
@@ -246,6 +263,7 @@ fn validate_strategy_accel(strategy: GpuStrategy, accel: AccelStrategy) -> Resul
             accel,
             AccelStrategy::GpuSpatial | AccelStrategy::GpuRaster | AccelStrategy::GpuH3
         ),
+        GpuStrategy::Raster => accel == AccelStrategy::GpuRaster,
         GpuStrategy::Sort | GpuStrategy::PreAgg => false,
     };
     if valid {
@@ -390,6 +408,9 @@ impl PlanPrivate {
 #[cfg(test)]
 mod typed_private_tests {
     use super::*;
+    use crate::engine::raster::{
+        RasterPixelType, RasterQuerySpec, RasterReclassRule, RasterReclassSpec,
+    };
     use crate::engine::residency::ResidentOperatorStage;
     use crate::engine::spec::{
         AggOutputProjection, AggOutputSlot, AggOutputSource, AggregateKind, AggregateOutput,
@@ -464,6 +485,34 @@ mod typed_private_tests {
         frame(words, GpuStrategy::Agg, PlanExecMethod::Agg)
     }
 
+    fn raster_plan() -> RasterExecPlan {
+        RasterExecPlan::from_spec(RasterQuerySpec {
+            relation_oid: 42,
+            raster_attno: 2,
+            raster_type_oid: 1_234,
+            function_oid: 5_678,
+            catalog_fingerprint: vec![11, 22, 33].into_boxed_slice(),
+            reclass: RasterReclassSpec {
+                output_pixel_type: RasterPixelType::Int16,
+                rules: vec![RasterReclassRule {
+                    source: 7,
+                    destination: 9,
+                }]
+                .into_boxed_slice(),
+            },
+        })
+        .expect("raster plan")
+    }
+
+    fn raster_frame() -> Vec<i32> {
+        let plan = raster_plan();
+        let mut words = header(GpuStrategy::Raster, AccelStrategy::GpuRaster);
+        words[3] = plan.spec().function_oid as i32;
+        words[4] = plan.spec().raster_attno;
+        words.extend(plan.spec().encode_words().expect("RQS2 encodes"));
+        frame(words, GpuStrategy::Raster, PlanExecMethod::Raster)
+    }
+
     fn valid_plan_frames() -> Vec<(PlanExecMethod, Vec<i32>)> {
         let scan = frame(
             header(GpuStrategy::Scan, AccelStrategy::GpuSpatial),
@@ -517,6 +566,7 @@ mod typed_private_tests {
             (PlanExecMethod::Window, window),
             (PlanExecMethod::FunctionScan, function),
             (PlanExecMethod::SrfTargetList, srf),
+            (PlanExecMethod::Raster, raster_frame()),
         ]
     }
 
@@ -531,6 +581,7 @@ mod typed_private_tests {
             GpuStrategy::PreAgg,
             GpuStrategy::FunctionScan,
             GpuStrategy::SrfTargetList,
+            GpuStrategy::Raster,
         ] {
             assert_eq!(
                 decode_gpu_strategy(strategy as c_int),
@@ -612,6 +663,7 @@ mod typed_private_tests {
             PlanExecMethod::Window,
             PlanExecMethod::FunctionScan,
             PlanExecMethod::SrfTargetList,
+            PlanExecMethod::Raster,
         ];
         for (actual, words) in valid_plan_frames() {
             for expected in methods {
@@ -687,6 +739,72 @@ mod typed_private_tests {
         assert_eq!(spec.measures.len(), 1);
         assert_eq!(projection.slots.len(), 1);
         projection.validate(&spec).expect("projection matches spec");
+    }
+
+    #[test]
+    fn raster_plan_frame_decodes_exact_rqs2_identity() {
+        let frame = raster_frame();
+        let validated = validate_plan_wire_from_reader(
+            &IntListReader::from_slice(&frame),
+            Some(PlanExecMethod::Raster),
+        )
+        .expect("raster frame");
+        assert_eq!(validated.raster_exec_plan, Some(raster_plan()));
+        assert_eq!(validated.resident_proof, raster_resident_proof());
+    }
+
+    #[test]
+    fn raster_plan_rejects_header_or_proof_identity_drift() {
+        let mut bad_function = raster_frame();
+        bad_function[3] += 1;
+        assert!(matches!(
+            validate_plan_wire_from_reader(
+                &IntListReader::from_slice(&bad_function),
+                Some(PlanExecMethod::Raster),
+            ),
+            Err(DecodeError::RasterPlanHeaderMismatch {
+                field: "function OID"
+            })
+        ));
+
+        let mut bad_attno = raster_frame();
+        bad_attno[4] += 1;
+        assert!(matches!(
+            validate_plan_wire_from_reader(
+                &IntListReader::from_slice(&bad_attno),
+                Some(PlanExecMethod::Raster),
+            ),
+            Err(DecodeError::RasterPlanHeaderMismatch {
+                field: "raster attribute number"
+            })
+        ));
+
+        let mut bad_proof = raster_frame();
+        let proof = bad_proof.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
+        bad_proof[proof + 7] = 0;
+        assert!(matches!(
+            validate_plan_wire_slice(&bad_proof, PlanExecMethod::Raster),
+            Err(DecodeError::InvalidResidentProof {
+                field: "raster resident pipeline"
+            })
+        ));
+    }
+
+    #[test]
+    fn raster_path_is_exact_rqs2_followed_by_exact_proof() {
+        let plan = raster_plan();
+        let mut words = plan.spec().encode_words().expect("RQS2 encodes");
+        append_proof_words(&mut words, raster_resident_proof());
+        assert_eq!(
+            decode_raster_exec_path_plan_from_reader(&IntListReader::from_slice(&words)),
+            Ok(plan)
+        );
+
+        let proof = words.len() - RESIDENT_PROOF_TRAILER_INTS;
+        words.insert(proof, 0);
+        assert!(
+            decode_raster_exec_path_plan_from_reader(&IntListReader::from_slice(&words)).is_err()
+        );
     }
 
     #[test]
@@ -994,6 +1112,24 @@ mod typed_private_tests {
             assert!(proof.cpu_boundary.blocks_resident_pipeline());
         }
     }
+
+    #[test]
+    fn raster_default_proof_is_exact_and_gpu_resident() {
+        let proof = resident_proof_default_for_strategy(GpuStrategy::Raster);
+        assert_eq!(proof, raster_resident_proof());
+        assert!(proof.gpu_resident_pipeline());
+        assert_eq!(
+            proof.operator_class,
+            ResidentOperatorClass::ResidentExpression
+        );
+        assert_eq!(
+            proof.materialization_kind,
+            ResidentMaterializationKind::FinalOutput
+        );
+        assert_eq!(proof.device_columns, 1);
+        assert!(!proof.has_device_selection);
+        assert!(proof.has_device_projection);
+    }
 }
 
 /// Deserialized acceleration metadata from `custom_private`.
@@ -1033,6 +1169,8 @@ pub(super) struct CustomPrivateData {
     pub(super) agg_query_spec: Option<AggQuerySpec>,
     /// Ordered PostgreSQL result slots for the neutral aggregate contract.
     pub(super) agg_output_projection: Option<AggOutputProjection>,
+    /// Exact canonical childless raster execution contract carried as RQS2.
+    pub(super) raster_exec_plan: Option<RasterExecPlan>,
     /// Versioned resident-pipeline proof decoded from the plan trailer.
     pub(super) resident_proof: ResidentProofSnapshot,
 }
@@ -1158,6 +1296,7 @@ struct ValidatedPlanWire {
     resident_proof: ResidentProofSnapshot,
     agg_query_spec: Option<AggQuerySpec>,
     agg_output_projection: Option<AggOutputProjection>,
+    raster_exec_plan: Option<RasterExecPlan>,
 }
 
 fn strict_word(
@@ -1750,6 +1889,57 @@ fn validate_agg_payload(
     Ok((Some(spec), Some(projection)))
 }
 
+fn decode_raster_exec_plan_at(
+    fields: &IntListReader<'_>,
+    start: usize,
+    payload_end: usize,
+) -> Result<RasterExecPlan, DecodeError> {
+    let word_count = payload_end
+        .checked_sub(start)
+        .ok_or(DecodeError::TrailingPayload {
+            index: start,
+            payload_end,
+        })?;
+    if word_count > RASTER_QUERY_SPEC_MAX_WORDS {
+        return Err(DecodeError::LimitExceeded {
+            index: start,
+            field: "raster query spec words",
+            declared: word_count,
+            maximum: RASTER_QUERY_SPEC_MAX_WORDS,
+        });
+    }
+    let mut words = Vec::new();
+    words
+        .try_reserve_exact(word_count)
+        .map_err(|_| DecodeError::AllocationFailed {
+            field: "raster query spec words",
+        })?;
+    for index in start..payload_end {
+        words.push(strict_word(fields, index, "raster query spec word")?);
+    }
+    RasterExecPlan::decode_words(&words).map_err(DecodeError::from)
+}
+
+fn validate_raster_payload(
+    fields: &IntListReader<'_>,
+    start: usize,
+    payload_end: usize,
+    plan_private: PlanPrivate,
+) -> Result<RasterExecPlan, DecodeError> {
+    let plan = decode_raster_exec_plan_at(fields, start, payload_end)?;
+    if u32::from(plan_private.fn_oid) != plan.spec().function_oid {
+        return Err(DecodeError::RasterPlanHeaderMismatch {
+            field: "function OID",
+        });
+    }
+    if plan_private.target_attno != plan.spec().raster_attno {
+        return Err(DecodeError::RasterPlanHeaderMismatch {
+            field: "raster attribute number",
+        });
+    }
+    Ok(plan)
+}
+
 fn validate_plan_wire_from_reader(
     fields: &IntListReader<'_>,
     expected_method: Option<PlanExecMethod>,
@@ -1820,27 +2010,40 @@ fn validate_plan_wire_from_reader(
     let proof_start = footer - RESIDENT_PROOF_TRAILER_INTS;
     let resident_proof = decode_resident_proof_at(fields, proof_start)?;
 
-    let (agg_query_spec, agg_output_projection) = match method {
+    let (agg_query_spec, agg_output_projection, raster_exec_plan) = match method {
         PlanExecMethod::Scan => {
             require_payload_end(PLAN_PAYLOAD_START, proof_start)?;
-            (None, None)
+            (None, None, None)
         }
         PlanExecMethod::Join => {
             validate_join_payload(fields, PLAN_PAYLOAD_START, proof_start, plan_private)?;
-            (None, None)
+            (None, None, None)
         }
-        PlanExecMethod::Agg => validate_agg_payload(fields, PLAN_PAYLOAD_START, proof_start)?,
+        PlanExecMethod::Agg => {
+            let (spec, projection) = validate_agg_payload(fields, PLAN_PAYLOAD_START, proof_start)?;
+            (spec, projection, None)
+        }
         PlanExecMethod::Window => {
             validate_window_payload(fields, PLAN_PAYLOAD_START, proof_start)?;
-            (None, None)
+            (None, None, None)
         }
         PlanExecMethod::FunctionScan => {
             validate_function_payload(fields, PLAN_PAYLOAD_START, proof_start)?;
-            (None, None)
+            (None, None, None)
         }
         PlanExecMethod::SrfTargetList => {
             validate_srf_payload(fields, PLAN_PAYLOAD_START, proof_start)?;
-            (None, None)
+            (None, None, None)
+        }
+        PlanExecMethod::Raster => {
+            if resident_proof != raster_resident_proof() {
+                return Err(DecodeError::InvalidResidentProof {
+                    field: "raster resident pipeline",
+                });
+            }
+            let plan =
+                validate_raster_payload(fields, PLAN_PAYLOAD_START, proof_start, plan_private)?;
+            (None, None, Some(plan))
         }
     };
 
@@ -1849,6 +2052,7 @@ fn validate_plan_wire_from_reader(
         resident_proof,
         agg_query_spec,
         agg_output_projection,
+        raster_exec_plan,
     })
 }
 
@@ -2041,6 +2245,43 @@ pub(super) unsafe fn validate_custom_private_wire(
     Ok(())
 }
 
+fn decode_raster_exec_path_plan_from_reader(
+    fields: &IntListReader<'_>,
+) -> Result<RasterExecPlan, DecodeError> {
+    if fields.len() < RESIDENT_PROOF_TRAILER_INTS {
+        return Err(DecodeError::Truncated {
+            index: fields.len(),
+            field: "raster CustomPath resident proof",
+        });
+    }
+    let proof_start = fields.len() - RESIDENT_PROOF_TRAILER_INTS;
+    let proof = decode_resident_proof_at(fields, proof_start)?;
+    if proof != raster_resident_proof() {
+        return Err(DecodeError::InvalidResidentProof {
+            field: "raster resident pipeline",
+        });
+    }
+    decode_raster_exec_plan_at(fields, 0, proof_start)
+}
+
+/// Decode the exact RQS2 prefix of a raster planner path.
+///
+/// # Safety
+/// `path_private` must be a valid planner-owned `List<Integer>`.
+pub(super) unsafe fn deserialize_raster_exec_path_plan(
+    path_private: *mut pg_sys::List,
+) -> Result<RasterExecPlan, DecodeError> {
+    if path_private.is_null() {
+        return Err(DecodeError::Truncated {
+            index: 0,
+            field: "raster CustomPath private data",
+        });
+    }
+    // SAFETY: caller guarantees a valid planner-owned List<Integer>.
+    let fields = unsafe { IntListReader::from_pg_list(path_private) };
+    decode_raster_exec_path_plan_from_reader(&fields)
+}
+
 /// Deserialize strategy, batch size, and accel context from
 /// `custom_private`.
 ///
@@ -2142,6 +2383,7 @@ pub(super) unsafe fn deserialize_custom_private(
         window_scan_relid,
         agg_query_spec: validated.agg_query_spec,
         agg_output_projection: validated.agg_output_projection,
+        raster_exec_plan: validated.raster_exec_plan,
         resident_proof,
     }
 }
@@ -2184,6 +2426,25 @@ pub(in crate::engine::ffi) unsafe fn append_agg_query_plan(
     writer.into_list()
 }
 
+/// Append the canonical RQS2 payload for a childless raster plan.
+///
+/// # Safety
+/// Must be called in a valid PostgreSQL planner memory context.
+pub(in crate::engine::ffi) unsafe fn append_raster_exec_plan(
+    list: *mut pg_sys::List,
+    plan: &RasterExecPlan,
+) -> *mut pg_sys::List {
+    let words = plan
+        .spec()
+        .encode_words()
+        .unwrap_or_else(|error| pgrx::error!("pg_accel: invalid raster query spec: {error}"));
+    let mut writer = PgListWriter::from_existing(list);
+    for word in words {
+        writer.push_int(word);
+    }
+    writer.into_list()
+}
+
 /// Seal a plan-private list with the required v2 footer.
 ///
 /// # Safety
@@ -2220,24 +2481,44 @@ pub(in crate::engine::ffi) const RESIDENT_PROOF_SENTINEL: c_int = 0x5250_5246; /
 pub(in crate::engine::ffi) const RESIDENT_PROOF_VERSION: c_int = 2;
 pub(super) const RESIDENT_PROOF_TRAILER_INTS: usize = 9;
 
-/// Strategy-local default proof for currently selected host-staged executors.
-///
-/// This is intentionally conservative: until a planner path provides a stronger
-/// proof snapshot, selected CustomScans report a blocking CPU boundary.
+/// Exact resident-pipeline proof required by every raster path and plan.
+#[must_use]
+pub(in crate::engine::ffi) const fn raster_resident_proof() -> ResidentProofSnapshot {
+    ResidentProofSnapshot {
+        operator_class: ResidentOperatorClass::ResidentExpression,
+        stage_mask: ResidentOperatorStage::Scan.bit()
+            | ResidentOperatorStage::Raster.bit()
+            | ResidentOperatorStage::VariableOutput.bit()
+            | ResidentOperatorStage::FinalMaterialization.bit(),
+        materialization_kind: ResidentMaterializationKind::FinalOutput,
+        device_columns: 1,
+        has_device_selection: false,
+        has_device_projection: true,
+        cpu_boundary: CpuBoundaryReason::None,
+    }
+}
+
+/// Strategy-local default proof used before executor state is initialized.
 #[must_use]
 pub(in crate::engine::ffi) const fn resident_proof_default_for_strategy(
     strategy: GpuStrategy,
 ) -> ResidentProofSnapshot {
-    ResidentProofSnapshot::host_staged(match strategy {
-        GpuStrategy::Scan => CpuBoundaryReason::HostInputStaging,
-        GpuStrategy::Join => CpuBoundaryReason::ExecProcNodeInput,
-        GpuStrategy::Agg => CpuBoundaryReason::HostInputStaging,
-        GpuStrategy::Sort => CpuBoundaryReason::HostTupleReconstruction,
-        GpuStrategy::Window => CpuBoundaryReason::HostTupleReconstruction,
-        GpuStrategy::PreAgg => CpuBoundaryReason::HostHashState,
-        GpuStrategy::FunctionScan => CpuBoundaryReason::HostVariableOutput,
-        GpuStrategy::SrfTargetList => CpuBoundaryReason::ExecProcNodeInput,
-    })
+    match strategy {
+        GpuStrategy::Raster => raster_resident_proof(),
+        GpuStrategy::Scan | GpuStrategy::Agg => {
+            ResidentProofSnapshot::host_staged(CpuBoundaryReason::HostInputStaging)
+        }
+        GpuStrategy::Join | GpuStrategy::SrfTargetList => {
+            ResidentProofSnapshot::host_staged(CpuBoundaryReason::ExecProcNodeInput)
+        }
+        GpuStrategy::Sort | GpuStrategy::Window => {
+            ResidentProofSnapshot::host_staged(CpuBoundaryReason::HostTupleReconstruction)
+        }
+        GpuStrategy::PreAgg => ResidentProofSnapshot::host_staged(CpuBoundaryReason::HostHashState),
+        GpuStrategy::FunctionScan => {
+            ResidentProofSnapshot::host_staged(CpuBoundaryReason::HostVariableOutput)
+        }
+    }
 }
 
 /// Append a resident-proof snapshot as a versioned trailer.

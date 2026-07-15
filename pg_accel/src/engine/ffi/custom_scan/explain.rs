@@ -342,9 +342,11 @@ unsafe fn gpu_kernel_dispatched_for_explain(
         // GpuPreAgg retired: begin_custom_scan rejects the strategy before an
         // executor exists, so EXPLAIN can never reach this arm.
         GpuStrategy::PreAgg => false,
-        GpuStrategy::Scan | GpuStrategy::Join | GpuStrategy::Agg | GpuStrategy::Window => unsafe {
-            (*state).accel.batches_executed > 0
-        },
+        GpuStrategy::Scan
+        | GpuStrategy::Join
+        | GpuStrategy::Agg
+        | GpuStrategy::Window
+        | GpuStrategy::Raster => unsafe { (*state).accel.batches_executed > 0 },
     }
 }
 
@@ -387,6 +389,7 @@ fn gpu_resident_boundary_reason(strategy: GpuStrategy) -> &'static CStr {
         GpuStrategy::PreAgg => c"GpuPreAgg strategy retired; no plan can carry it",
         GpuStrategy::FunctionScan => c"GpuFunctionScan dispatches constant arguments once, buffers host Datums, and drains output through PostgreSQL slots",
         GpuStrategy::SrfTargetList => c"GpuAccelSrfTargetList drives ProjectSet input through ExecProcNode, buffers per-row SRF output, and emits expanded PostgreSQL tuples",
+        GpuStrategy::Raster => c"GpuRaster reads a generation-stamped resident raster column, retains only reconstructed output WKB, and materializes PostgreSQL raster values at final output",
     }
 }
 

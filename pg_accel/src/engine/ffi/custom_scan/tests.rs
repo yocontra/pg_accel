@@ -19,6 +19,7 @@ fn strategy_labels() {
     assert_eq!(GpuStrategy::Join.label(), c"GpuJoin");
     assert_eq!(GpuStrategy::Agg.label(), c"GpuAgg");
     assert_eq!(GpuStrategy::Sort.label(), c"GpuSort");
+    assert_eq!(GpuStrategy::Raster.label(), c"GpuRaster");
 }
 
 #[test]
@@ -42,13 +43,14 @@ fn strategy_from_i32_all_valid_values() {
     assert_eq!(GpuStrategy::from_i32(5), Some(GpuStrategy::PreAgg));
     assert_eq!(GpuStrategy::from_i32(6), Some(GpuStrategy::FunctionScan));
     assert_eq!(GpuStrategy::from_i32(7), Some(GpuStrategy::SrfTargetList));
+    assert_eq!(GpuStrategy::from_i32(8), Some(GpuStrategy::Raster));
 }
 
 #[test]
 fn strategy_from_i32_boundary_values() {
     assert_eq!(GpuStrategy::from_i32(i32::MIN), None);
     assert_eq!(GpuStrategy::from_i32(-100), None);
-    assert_eq!(GpuStrategy::from_i32(8), None);
+    assert_eq!(GpuStrategy::from_i32(9), None);
     assert_eq!(GpuStrategy::from_i32(i32::MAX), None);
 }
 
@@ -150,10 +152,10 @@ fn strategy_window_debug() {
 
 #[test]
 fn strategy_from_i32_above_functionscan_is_invalid() {
-    // Phase 2 F3 added FunctionScan=6; the SRF target-list strategy is 7.
+    // Phase 2 F3 added FunctionScan=6; SRF target-list is 7 and Raster is 8.
     assert_eq!(GpuStrategy::from_i32(6), Some(GpuStrategy::FunctionScan));
     assert_eq!(GpuStrategy::from_i32(7), Some(GpuStrategy::SrfTargetList));
-    assert_eq!(GpuStrategy::from_i32(8), None);
+    assert_eq!(GpuStrategy::from_i32(8), Some(GpuStrategy::Raster));
     assert_eq!(GpuStrategy::from_i32(100), None);
 }
 
@@ -169,6 +171,7 @@ fn strategy_roundtrip_all_variants() {
         GpuStrategy::Agg,
         GpuStrategy::Sort,
         GpuStrategy::Window,
+        GpuStrategy::Raster,
     ] {
         let raw = variant as i32;
         let recovered = GpuStrategy::from_i32(raw);
@@ -212,6 +215,7 @@ fn strategy_labels_are_unique_across_variants() {
         GpuStrategy::Agg,
         GpuStrategy::Sort,
         GpuStrategy::Window,
+        GpuStrategy::Raster,
     ];
     for (i, a) in all.iter().enumerate() {
         for (j, b) in all.iter().enumerate() {
@@ -234,6 +238,7 @@ fn strategy_labels_start_with_gpu() {
         GpuStrategy::Agg,
         GpuStrategy::Sort,
         GpuStrategy::Window,
+        GpuStrategy::Raster,
     ] {
         let label = variant.label().to_str().unwrap();
         assert!(
@@ -466,6 +471,7 @@ fn custom_private_data_typed_fields() {
         window_scan_relid: 0,
         agg_query_spec: None,
         agg_output_projection: None,
+        raster_exec_plan: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
     assert_eq!(data.gpu_strategy, GpuStrategy::Scan);
@@ -507,6 +513,7 @@ fn custom_private_data_hash_join_fields() {
         window_scan_relid: 0,
         agg_query_spec: None,
         agg_output_projection: None,
+        raster_exec_plan: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
     assert_eq!(data.hash_inner_attno, 3);
@@ -537,6 +544,7 @@ fn custom_private_data_hash_join_validation_rejects_malformed_layout() {
         window_scan_relid: 0,
         agg_query_spec: None,
         agg_output_projection: None,
+        raster_exec_plan: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
 
@@ -615,6 +623,7 @@ fn custom_private_data_with_window_specs() {
         window_scan_relid: 0,
         agg_query_spec: None,
         agg_output_projection: None,
+        raster_exec_plan: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
     assert_eq!(data.window_specs.len(), 2);
@@ -645,6 +654,7 @@ fn custom_private_data_empty_window_specs_for_non_window() {
         window_scan_relid: 0,
         agg_query_spec: None,
         agg_output_projection: None,
+        raster_exec_plan: None,
         resident_proof: ResidentProofSnapshot::not_proven(),
     };
     assert!(data.window_specs.is_empty());
@@ -667,12 +677,19 @@ fn window_path_methods_non_null() {
 }
 
 #[test]
+fn raster_path_methods_non_null() {
+    let methods = raster_path_methods();
+    assert!(!methods.is_null());
+}
+
+#[test]
 fn all_path_methods_are_distinct() {
     let ptrs = [
         scan_path_methods(),
         join_path_methods(),
         agg_path_methods(),
         window_path_methods(),
+        raster_path_methods(),
     ];
     for i in 0..ptrs.len() {
         for j in (i + 1)..ptrs.len() {
@@ -699,6 +716,9 @@ fn vtable_custom_names_are_valid_c_strings() {
 
     let window_name = unsafe { std::ffi::CStr::from_ptr(WINDOW_PATH_METHODS.0.CustomName) };
     assert_eq!(window_name, c"GpuAccelWindow");
+
+    let raster_name = unsafe { std::ffi::CStr::from_ptr(RASTER_PATH_METHODS.0.CustomName) };
+    assert_eq!(raster_name, c"GpuAccelRaster");
 }
 
 #[test]
@@ -720,6 +740,10 @@ fn scan_methods_custom_names_match_path_methods() {
     let window_path = unsafe { std::ffi::CStr::from_ptr(WINDOW_PATH_METHODS.0.CustomName) };
     let window_scan = unsafe { std::ffi::CStr::from_ptr(WINDOW_SCAN_METHODS.0.CustomName) };
     assert_eq!(window_path, window_scan);
+
+    let raster_path = unsafe { std::ffi::CStr::from_ptr(RASTER_PATH_METHODS.0.CustomName) };
+    let raster_scan = unsafe { std::ffi::CStr::from_ptr(RASTER_SCAN_METHODS.0.CustomName) };
+    assert_eq!(raster_path, raster_scan);
 }
 
 #[test]
@@ -731,6 +755,7 @@ fn exec_methods_has_required_callbacks() {
         &WINDOW_EXEC_METHODS,
         &FUNCTION_EXEC_METHODS,
         &SRF_TARGET_LIST_EXEC_METHODS,
+        &RASTER_EXEC_METHODS,
     ] {
         assert!(methods.0.BeginCustomScan.is_some());
         assert!(methods.0.ExecCustomScan.is_some());

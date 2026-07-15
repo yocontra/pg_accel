@@ -18,6 +18,7 @@ use pgrx::pg_sys;
 use super::super::gucs;
 use crate::engine::executor::agg::AggExecState;
 use crate::engine::executor::join::JoinExecState;
+use crate::engine::executor::raster::RasterExecState;
 use crate::engine::executor::scan::ScanExecState;
 use crate::engine::executor::window::{
     WINDOW_SPEC_INTS, WindowExecState, WindowFunc, WindowFuncSpec,
@@ -47,9 +48,13 @@ use private_data::{
     validate_custom_private_wire, validate_projection_tuple_desc,
 };
 pub(in crate::engine::ffi) use private_data::{
-    append_resident_proof_snapshot, resident_proof_default_for_strategy,
+    append_raster_exec_plan, append_resident_proof_snapshot, raster_resident_proof,
+    resident_proof_default_for_strategy,
 };
-use private_data::{deserialize_custom_private, deserialize_resident_proof_snapshot};
+use private_data::{
+    deserialize_custom_private, deserialize_raster_exec_path_plan,
+    deserialize_resident_proof_snapshot,
+};
 // SRF executor (Round 3 follow-up) — public re-exports for the planner
 // hook in `srf_target_list.rs` and the executor module in `srf_target_list.rs`.
 pub use private_data::{
@@ -123,6 +128,9 @@ pub enum GpuStrategy {
     /// each input row's SRF call into multiple output tuples while
     /// preserving non-SRF target-list columns.
     SrfTargetList = 7,
+    /// Childless resident PostGIS Raster transform backed by an exact RQS2
+    /// contract and generation-stamped reconstructed-output artifact.
+    Raster = 8,
 }
 
 impl GpuStrategy {
@@ -138,6 +146,7 @@ impl GpuStrategy {
             5 => Some(Self::PreAgg),
             6 => Some(Self::FunctionScan),
             7 => Some(Self::SrfTargetList),
+            8 => Some(Self::Raster),
             _ => None,
         }
     }
@@ -160,6 +169,7 @@ impl GpuStrategy {
             Self::PreAgg => c"GpuPreAgg",
             Self::FunctionScan => c"GpuFunctionScan",
             Self::SrfTargetList => c"GpuAccelSrfTargetList",
+            Self::Raster => c"GpuRaster",
         }
     }
 }
@@ -247,6 +257,12 @@ static AGG_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMet
     ReparameterizeCustomPathByChild: None,
 });
 
+static RASTER_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
+    CustomName: c"GpuAccelRaster".as_ptr(),
+    PlanCustomPath: Some(plan_custom_path_raster),
+    ReparameterizeCustomPathByChild: None,
+});
+
 static SCAN_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
     CustomName: c"GpuAccelScan".as_ptr(),
     CreateCustomScanState: Some(create_scan_state),
@@ -260,6 +276,11 @@ static JOIN_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMe
 static AGG_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
     CustomName: c"GpuAccelAgg".as_ptr(),
     CreateCustomScanState: Some(create_agg_state),
+});
+
+static RASTER_SCAN_METHODS: SyncScanMethods = SyncScanMethods(pg_sys::CustomScanMethods {
+    CustomName: c"GpuAccelRaster".as_ptr(),
+    CreateCustomScanState: Some(create_raster_state),
 });
 
 static WINDOW_PATH_METHODS: SyncPathMethods = SyncPathMethods(pg_sys::CustomPathMethods {
@@ -321,6 +342,7 @@ exec_methods!(AGG_EXEC_METHODS, c"GpuAccelAgg");
 exec_methods!(WINDOW_EXEC_METHODS, c"GpuAccelWindow");
 exec_methods!(FUNCTION_EXEC_METHODS, c"GpuAccelFunctionScan");
 exec_methods!(SRF_TARGET_LIST_EXEC_METHODS, c"GpuAccelSrfTargetList");
+exec_methods!(RASTER_EXEC_METHODS, c"GpuAccelRaster");
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -345,6 +367,13 @@ pub fn join_path_methods() -> *const pg_sys::CustomPathMethods {
 #[must_use]
 pub fn agg_path_methods() -> *const pg_sys::CustomPathMethods {
     &raw const AGG_PATH_METHODS.0
+}
+
+/// Pointer to childless raster `CustomPathMethods` vtable.
+#[inline]
+#[must_use]
+pub fn raster_path_methods() -> *const pg_sys::CustomPathMethods {
+    &raw const RASTER_PATH_METHODS.0
 }
 
 /// Pointer to window `CustomPathMethods` vtable.
@@ -380,6 +409,7 @@ pub fn register() {
         pg_sys::RegisterCustomScanMethods(&raw const WINDOW_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const FUNCTION_SCAN_METHODS.0);
         pg_sys::RegisterCustomScanMethods(&raw const SRF_TARGET_LIST_SCAN_METHODS.0);
+        pg_sys::RegisterCustomScanMethods(&raw const RASTER_SCAN_METHODS.0);
     }
 }
 
@@ -427,6 +457,90 @@ unsafe extern "C-unwind" fn plan_custom_path_join(
         unsafe { make_custom_scan_plan(root, rel, best_path, tlist, clauses, custom_plans, false) };
     tracing::info!("plan_custom_path_join: end");
     plan
+}
+
+/// Convert an exact childless RQS2 path into its distinct raster CustomScan.
+///
+/// # Safety
+/// Called by the PostgreSQL planner on the main backend thread.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn plan_custom_path_raster(
+    _root: *mut pg_sys::PlannerInfo,
+    _rel: *mut pg_sys::RelOptInfo,
+    best_path: *mut pg_sys::CustomPath,
+    tlist: *mut pg_sys::List,
+    clauses: *mut pg_sys::List,
+    custom_plans: *mut pg_sys::List,
+) -> *mut pg_sys::Plan {
+    let _span = tracing::debug_span!("ffi.plan_custom_path_raster").entered();
+    // SAFETY: best_path and its private list are planner-owned values supplied
+    // to this exact CustomPathMethods callback.
+    let path_private = unsafe { (*best_path).custom_private };
+    // SAFETY: the selected raster path owns a List<Integer> emitted by pg_accel.
+    let raster_plan = unsafe { deserialize_raster_exec_path_plan(path_private) }
+        .unwrap_or_else(|error| pgrx::error!("pg_accel: malformed raster RQS2 path: {error}"));
+
+    if !custom_plans.is_null() && unsafe { pg_sys::list_length(custom_plans) } != 0 {
+        pgrx::error!("pg_accel: childless raster path unexpectedly has child plans");
+    }
+    if !clauses.is_null() && unsafe { pg_sys::list_length(clauses) } != 0 {
+        pgrx::error!("pg_accel: childless raster path unexpectedly has executor clauses");
+    }
+    if tlist.is_null() || unsafe { pg_sys::list_length(tlist) } != 1 {
+        pgrx::error!("pg_accel: childless raster path must have exactly one output expression");
+    }
+    // SAFETY: the target list was checked to contain exactly one planner-owned node.
+    let target = unsafe { pg_sys::list_nth(tlist, 0).cast::<pg_sys::TargetEntry>() };
+    if target.is_null() || unsafe { (*target).resjunk || (*target).expr.is_null() } {
+        pgrx::error!("pg_accel: childless raster path has an invalid output target");
+    }
+    // SAFETY: target is a valid TargetEntry with a non-null expression.
+    let output_type = unsafe { pg_sys::exprType((*target).expr.cast()) };
+    if u32::from(output_type) != raster_plan.spec().raster_type_oid {
+        pgrx::error!("pg_accel: raster output target type does not match its RQS2 contract");
+    }
+
+    // SAFETY: palloc0 returns zeroed memory in CurrentMemoryContext.
+    let cscan = unsafe {
+        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomScan>()).cast::<pg_sys::CustomScan>()
+    };
+    // SAFETY: cscan is freshly allocated; all source pointers are planner-owned.
+    unsafe {
+        (*cscan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
+        (*cscan).custom_scan_tlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).scan.plan.targetlist = pg_sys::copyObjectImpl(tlist.cast()).cast();
+        (*cscan).scan.plan.qual = std::ptr::null_mut();
+        (*cscan).scan.plan.startup_cost = (*best_path).path.startup_cost;
+        (*cscan).scan.plan.total_cost = (*best_path).path.total_cost;
+        (*cscan).scan.plan.plan_rows = (*best_path).path.rows;
+        (*cscan).custom_plans = std::ptr::null_mut();
+        (*cscan).flags = (*best_path).flags;
+        (*cscan).scan.scanrelid = 0;
+        (*cscan).methods = &raw const RASTER_SCAN_METHODS.0;
+
+        let mut private: *mut pg_sys::List = std::ptr::null_mut();
+        private = pg_sys::lappend(
+            private,
+            pg_sys::makeInteger(GpuStrategy::Raster as c_int).cast(),
+        );
+        private = pg_sys::lappend(private, pg_sys::makeInteger(gucs::min_batch_size()).cast());
+        private = pg_sys::lappend(private, pg_sys::makeInteger(resolve_thread_count()).cast());
+        private = pg_sys::lappend(
+            private,
+            pg_sys::makeInteger(raster_plan.spec().function_oid as c_int).cast(),
+        );
+        private = pg_sys::lappend(
+            private,
+            pg_sys::makeInteger(raster_plan.spec().raster_attno).cast(),
+        );
+        private = pg_sys::lappend(
+            private,
+            pg_sys::makeInteger(AccelStrategy::GpuRaster as c_int).cast(),
+        );
+        private = append_raster_exec_plan(private, &raster_plan);
+        seal_custom_scan_private(cscan, private, path_private, GpuStrategy::Raster);
+    }
+    cscan.cast()
 }
 
 /// Append the proof carried by a planner CustomPath and seal the v2 frame.
@@ -1414,6 +1528,11 @@ create_state_callback!(create_scan_state, PlanExecMethod::Scan, SCAN_EXEC_METHOD
 create_state_callback!(create_join_state, PlanExecMethod::Join, JOIN_EXEC_METHODS);
 create_state_callback!(create_agg_state, PlanExecMethod::Agg, AGG_EXEC_METHODS);
 create_state_callback!(
+    create_raster_state,
+    PlanExecMethod::Raster,
+    RASTER_EXEC_METHODS
+);
+create_state_callback!(
     create_window_state,
     PlanExecMethod::Window,
     WINDOW_EXEC_METHODS
@@ -2300,6 +2419,41 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         pgrx::error!("pg_accel: validated batch size does not fit executor usize")
     });
 
+    if privdata.gpu_strategy == GpuStrategy::Raster {
+        // This executor reads only from the pinned resident relation named by
+        // RQS2. A child executor would silently add a second source of truth.
+        // SAFETY: node and cscan belong to this initialized CustomScanState.
+        if unsafe {
+            (!(*node).custom_ps.is_null() && pg_sys::list_length((*node).custom_ps) != 0)
+                || (!(*cscan).custom_plans.is_null()
+                    && pg_sys::list_length((*cscan).custom_plans) != 0)
+        } {
+            pgrx::error!("pg_accel: childless raster CustomScan has child executor state");
+        }
+        let plan = privdata.raster_exec_plan.unwrap_or_else(|| {
+            pgrx::error!("pg_accel: raster CustomScan is missing its exact RQS2 contract")
+        });
+        // SAFETY: ExecInitCustomScan initialized the scan slot and this callback
+        // runs on the PostgreSQL backend main thread.
+        let exec = unsafe { RasterExecState::begin(plan, (*node).ss.ss_ScanTupleSlot) }
+            .unwrap_or_else(|error| {
+                pgrx::error!(
+                    "pg_accel: raster BeginCustomScan failed ({error}); refusing CPU fallback"
+                )
+            });
+        let rows = crate::engine::executor::ExecutorState::rows_dispatched(&exec);
+        let batches = crate::engine::executor::ExecutorState::batches_executed(&exec);
+        let dispatch_time = crate::engine::executor::ExecutorState::dispatch_time_us(&exec);
+        // SAFETY: state is the extended state allocated by create_raster_state.
+        unsafe {
+            (*state).accel.executor = Box::into_raw(Box::new(exec)).cast();
+            (*state).accel.rows_dispatched = rows;
+            (*state).accel.batches_executed = batches;
+            (*state).accel.dispatch_time_us = dispatch_time;
+        }
+        return;
+    }
+
     // FunctionScan: short-circuit before allocating scan/aggregate/sort
     // executor states (the FunctionScan flow doesn't share their
     // ScanExecState / AggExecState shapes). init_state builds the TupleDesc,
@@ -2700,6 +2854,19 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         (*state).accel.parallel_agg_rows_dispatched = 0;
         (*state).accel.parallel_agg_batches_executed = 0;
         (*state).accel.parallel_agg_dispatch_time_us = 0;
+        if GpuStrategy::decode((*state).accel.strategy) == GpuStrategy::Raster {
+            if (*state).accel.executor.is_null() {
+                pgrx::error!("pg_accel: raster rescan lost its executor state");
+            }
+            // SAFETY: reset_executor_state preserves the RasterExecState box.
+            let raster = &*(*state).accel.executor.cast::<RasterExecState>();
+            (*state).accel.rows_dispatched =
+                crate::engine::executor::ExecutorState::rows_dispatched(raster);
+            (*state).accel.batches_executed =
+                crate::engine::executor::ExecutorState::batches_executed(raster);
+            (*state).accel.dispatch_time_us =
+                crate::engine::executor::ExecutorState::dispatch_time_us(raster);
+        }
     }
 }
 
@@ -2777,6 +2944,7 @@ unsafe extern "C-unwind" fn exec_custom_scan(
             ),
             GpuStrategy::Window => &mut *executor.cast::<WindowExecState>(),
             GpuStrategy::Join => &mut *executor.cast::<JoinExecState>(),
+            GpuStrategy::Raster => &mut *executor.cast::<RasterExecState>(),
             GpuStrategy::FunctionScan => unreachable!(
                 "FunctionScan handled by short-circuit above; dyn ExecutorState match unreachable"
             ),
@@ -2871,6 +3039,10 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     // The descriptor aggregate owns no heap scan descriptors.
                     let agg = Box::from_raw((*state).accel.executor.cast::<AggExecState>());
                     drop(agg);
+                } else if gpu_strategy == GpuStrategy::Raster {
+                    // SAFETY: executor was Box::into_raw'd as RasterExecState.
+                    let raster = Box::from_raw((*state).accel.executor.cast::<RasterExecState>());
+                    drop(raster);
                 } else if gpu_strategy == GpuStrategy::Window {
                     // SAFETY: executor was Box::into_raw'd as WindowExecState.
                     let win = Box::from_raw((*state).accel.executor.cast::<WindowExecState>());
@@ -2959,7 +3131,19 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
             return;
         }
 
-        if gpu_strategy == GpuStrategy::Agg {
+        if gpu_strategy == GpuStrategy::Raster {
+            if (*state).accel.executor.is_null() {
+                pgrx::error!("pg_accel: raster rescan found no executor state");
+            }
+            // SAFETY: BeginCustomScan allocated this pointer as RasterExecState.
+            (*(*state).accel.executor.cast::<RasterExecState>())
+                .reset_for_rescan()
+                .unwrap_or_else(|error| {
+                    pgrx::error!(
+                        "pg_accel: raster ReScanCustomScan failed ({error}); refusing CPU fallback"
+                    );
+                });
+        } else if gpu_strategy == GpuStrategy::Agg {
             if (*state).accel.executor.is_null() {
                 pgrx::error!("pg_accel: aggregate rescan found no executor state");
             }
