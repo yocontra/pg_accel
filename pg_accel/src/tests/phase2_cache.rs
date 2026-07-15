@@ -12,7 +12,7 @@ mod tests {
 
     const DEVICE_ROWS: i32 = 262_144;
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct ResidentStatus {
         column_count: i32,
         raw_bytes: i64,
@@ -110,6 +110,64 @@ mod tests {
         Spi::get_one::<i64>("SELECT pg_accel_kernel_executions()")
             .expect("kernel execution query should succeed")
             .expect("kernel execution count should not be NULL")
+    }
+
+    fn resident_live_bytes() -> i64 {
+        Spi::get_one::<i64>("SELECT pg_accel_resident_live_bytes()")
+            .expect("resident live-byte query should succeed")
+            .expect("resident live-byte count should not be NULL")
+    }
+
+    fn accelerated_and_stock_counts() -> (i64, i64) {
+        Spi::connect(|client| {
+            let mut rows = client
+                .select(
+                    "SELECT queries_accelerated, stock_exec_count FROM pg_accel_stats()",
+                    None,
+                    &[],
+                )
+                .expect("pg_accel_stats query should succeed");
+            let row = rows.next().expect("pg_accel_stats should return one row");
+            (
+                row.get::<i64>(1)
+                    .expect("accelerated count read")
+                    .expect("accelerated count should not be NULL"),
+                row.get::<i64>(2)
+                    .expect("stock count read")
+                    .expect("stock count should not be NULL"),
+            )
+        })
+    }
+
+    #[cfg(feature = "pg_test")]
+    struct DenseDispatchTestGuard {
+        previous: (usize, usize),
+    }
+
+    #[cfg(feature = "pg_test")]
+    impl DenseDispatchTestGuard {
+        fn new(chunk_rows: usize, timeout_after_calls: usize) -> Self {
+            Self {
+                previous: crate::engine::executor::agg::configure_dense_dispatch_test(
+                    chunk_rows,
+                    timeout_after_calls,
+                ),
+            }
+        }
+
+        fn completed_calls(&self) -> usize {
+            crate::engine::executor::agg::dense_dispatch_test_completed_calls()
+        }
+    }
+
+    #[cfg(feature = "pg_test")]
+    impl Drop for DenseDispatchTestGuard {
+        fn drop(&mut self) {
+            crate::engine::executor::agg::configure_dense_dispatch_test(
+                self.previous.0,
+                self.previous.1,
+            );
+        }
     }
 
     fn explain_text(query: &str) -> String {
@@ -486,5 +544,115 @@ mod tests {
             after > before,
             "numeric overflow must be reported after a device dispatch: before={before} after={after}"
         );
+    }
+
+    #[cfg(feature = "pg_test")]
+    #[pg_test]
+    fn test_bounded_dense_statement_timeout_is_exact_and_recoverable() {
+        use pgrx::pg_sys::panic::CaughtError;
+        use pgrx::prelude::{PgSqlErrorCode, PgTryBuilder};
+
+        const SUCCESS_CHUNK_ROWS: usize = 65_536;
+        const CANCEL_AFTER_CALLS: usize = 3;
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum Attempt {
+            Completed(usize),
+            Error(PgSqlErrorCode),
+        }
+
+        fn error_code(caught: &CaughtError) -> PgSqlErrorCode {
+            match caught {
+                CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
+                    report.sql_error_code()
+                }
+                CaughtError::RustPanic { ereport, .. } => ereport.sql_error_code(),
+            }
+        }
+
+        if !begin_gpu_test() {
+            return;
+        }
+        let table = "phase2_v2_bounded_cancel_t";
+        create_int4_fixture(table, DEVICE_ROWS, 16, 0);
+        pin_int4_fixture(table);
+        let query = int4_grouped_query(table, "g", "v");
+        assert_descriptor_plan(&explain_text(&query));
+
+        // Warm the exact artifact and native program before measuring call
+        // counts, so the test covers bounded dispatch rather than JIT setup.
+        let expected_rows = result_rows(&query);
+        let expected_success_calls = usize::try_from(DEVICE_ROWS)
+            .expect("fixture rows fit usize")
+            .div_ceil(SUCCESS_CHUNK_ROWS)
+            + 1;
+
+        {
+            let fixture = DenseDispatchTestGuard::new(SUCCESS_CHUNK_ROWS, 0);
+            let before = kernel_executions();
+            assert_eq!(result_rows(&query), expected_rows);
+            let after = kernel_executions();
+            assert_eq!(fixture.completed_calls(), expected_success_calls);
+            assert_eq!(after - before, expected_success_calls as i64);
+        }
+
+        let live_before_cancel = resident_live_bytes();
+        let status_before_cancel = resident_status(table);
+        Spi::run("SELECT pg_accel_reset_stats()")
+            .expect("reset counters before cancellation attempt");
+        let panic_artifact = crate::engine::panic_hook::PanicLogTestArtifact::fresh()
+            .expect("create a test-unique panic artifact");
+
+        {
+            let fixture = DenseDispatchTestGuard::new(1, CANCEL_AFTER_CALLS);
+            let kernels_before = kernel_executions();
+            let attempt = PgTryBuilder::new(|| Attempt::Completed(result_rows(&query).len()))
+                .catch_others(|caught| Attempt::Error(error_code(&caught)))
+                .execute();
+            let kernels_after = kernel_executions();
+
+            assert_eq!(
+                attempt,
+                Attempt::Error(PgSqlErrorCode::ERRCODE_QUERY_CANCELED),
+                "bounded dispatch must surface SQLSTATE 57014 without a result"
+            );
+            assert_eq!(fixture.completed_calls(), CANCEL_AFTER_CALLS);
+            assert_eq!(
+                kernels_after - kernels_before,
+                CANCEL_AFTER_CALLS as i64,
+                "cancellation must occur between completed calls and before finalize"
+            );
+        }
+
+        assert_eq!(accelerated_and_stock_counts(), (1, 0));
+        assert_eq!(resident_live_bytes(), live_before_cancel);
+        assert_eq!(resident_status(table), status_before_cancel);
+        let panic_contents = panic_artifact
+            .contents()
+            .expect("read test-unique panic artifact");
+        assert!(
+            panic_contents.is_empty(),
+            "SQLSTATE 57014 contaminated {} with: {panic_contents}",
+            panic_artifact.path()
+        );
+
+        let backend_probe = Spi::get_one::<i32>("SELECT 42")
+            .expect("backend probe should succeed after cancellation");
+        assert_eq!(backend_probe, Some(42));
+
+        // A second exact GPU run proves that the interrupted session and its
+        // workspace were dropped and did not poison backend-local state.
+        {
+            let fixture = DenseDispatchTestGuard::new(SUCCESS_CHUNK_ROWS, 0);
+            let kernels_before = kernel_executions();
+            assert_eq!(result_rows(&query), expected_rows);
+            let kernels_after = kernel_executions();
+            assert_eq!(fixture.completed_calls(), expected_success_calls);
+            assert_eq!(
+                kernels_after - kernels_before,
+                expected_success_calls as i64
+            );
+        }
+        assert_eq!(resident_live_bytes(), live_before_cancel);
     }
 }

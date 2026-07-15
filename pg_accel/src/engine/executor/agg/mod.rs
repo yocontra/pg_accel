@@ -20,6 +20,9 @@ mod spatial;
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
 pub use execute::AggExecState;
 
+#[cfg(feature = "pg_test")]
+pub(crate) use descriptor::{configure_dense_dispatch_test, dense_dispatch_test_completed_calls};
+
 pub(crate) fn validate_descriptor_capability(
     spec: &crate::engine::spec::AggQuerySpec,
     projection: &crate::engine::spec::AggOutputProjection,

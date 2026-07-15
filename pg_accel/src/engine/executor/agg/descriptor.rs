@@ -5,6 +5,9 @@ use std::ffi::c_void;
 use std::fmt;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "pg_test")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use pgrx::pg_sys;
 
 use super::artifact::{
@@ -14,8 +17,8 @@ use super::artifact::{
 use super::output::{DescriptorAggOutput, validate_h3_compact_key_buffers};
 use super::spatial::{SpatialAggArtifact, SpatialTransformPlan, SpatialWorkspace};
 use crate::engine::executor::bounded::{
-    BoundedDispatchError, cleanup_before_rethrow, dispatch_warning_threshold_exceeded,
-    run_bounded_dispatch,
+    BoundedDispatchError, bounded_dispatch_call_count, cleanup_before_rethrow,
+    dispatch_warning_threshold_exceeded, run_bounded_dispatch,
 };
 use crate::engine::ffi::syscache::{PostgisCatalogIdentity, resolve_postgis_catalog};
 use crate::engine::gucs;
@@ -1859,6 +1862,83 @@ enum DenseBoundedFailure {
     Interrupt(Box<pg_sys::panic::CaughtError>),
 }
 
+#[cfg(feature = "pg_test")]
+static TEST_DENSE_CHUNK_ROWS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "pg_test")]
+static TEST_DENSE_TIMEOUT_AFTER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "pg_test")]
+static TEST_DENSE_COMPLETED_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Configure the live PostgreSQL cancellation fixture. A zero chunk override
+/// preserves the production device limit; a zero timeout count disables the
+/// timeout arm. This code is absent from release builds.
+#[cfg(feature = "pg_test")]
+pub(crate) fn configure_dense_dispatch_test(
+    chunk_rows: usize,
+    timeout_after_calls: usize,
+) -> (usize, usize) {
+    let previous_chunk_rows = TEST_DENSE_CHUNK_ROWS.swap(chunk_rows, Ordering::SeqCst);
+    let previous_timeout_after =
+        TEST_DENSE_TIMEOUT_AFTER_CALLS.swap(timeout_after_calls, Ordering::SeqCst);
+    TEST_DENSE_COMPLETED_CALLS.store(0, Ordering::SeqCst);
+    (previous_chunk_rows, previous_timeout_after)
+}
+
+#[cfg(feature = "pg_test")]
+#[must_use]
+pub(crate) fn dense_dispatch_test_completed_calls() -> usize {
+    TEST_DENSE_COMPLETED_CALLS.load(Ordering::SeqCst)
+}
+
+fn effective_dense_chunk_rows(device_limit: usize) -> usize {
+    #[cfg(feature = "pg_test")]
+    {
+        let test_limit = TEST_DENSE_CHUNK_ROWS.load(Ordering::SeqCst);
+        if test_limit != 0 {
+            return test_limit.min(device_limit);
+        }
+    }
+    device_limit
+}
+
+#[cfg(feature = "pg_test")]
+unsafe extern "C" {
+    fn enable_timeout_after(id: std::ffi::c_int, delay_ms: std::ffi::c_int);
+    fn get_timeout_indicator(id: std::ffi::c_int, reset_indicator: bool) -> bool;
+}
+
+#[cfg(feature = "pg_test")]
+fn note_dense_test_call_and_maybe_arm_timeout() {
+    const STATEMENT_TIMEOUT_ID: std::ffi::c_int = 3;
+
+    let completed = TEST_DENSE_COMPLETED_CALLS.fetch_add(1, Ordering::SeqCst) + 1;
+    if completed != TEST_DENSE_TIMEOUT_AFTER_CALLS.load(Ordering::SeqCst) {
+        return;
+    }
+
+    // SAFETY: this pg_test-only hook runs on the initialized PostgreSQL main
+    // backend thread. TimeoutId::STATEMENT_TIMEOUT has stable discriminant 3.
+    unsafe { enable_timeout_after(STATEMENT_TIMEOUT_ID, 1) };
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        // SAFETY: same backend-thread contract as enable_timeout_after. The
+        // indicator remains set so the normal interrupt boundary consumes it.
+        if unsafe { get_timeout_indicator(STATEMENT_TIMEOUT_ID, false) } {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "PostgreSQL statement timeout did not become pending"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(not(feature = "pg_test"))]
+fn note_dense_test_call_and_maybe_arm_timeout() {}
+
 fn capture_postgres_interrupt() -> Option<pg_sys::panic::CaughtError> {
     pg_sys::PgTryBuilder::new(|| {
         pgrx::check_for_interrupts!();
@@ -1886,6 +1966,7 @@ fn execute_bounded_dense_artifact(
     projection: &AggOutputProjection,
     max_chunk_rows: usize,
 ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
+    let max_chunk_rows = effective_dense_chunk_rows(max_chunk_rows);
     if max_chunk_rows == 0 {
         return Err(DescriptorDispatchFailure::Execution(
             DescriptorAggExecutionError::Failure(
@@ -1954,6 +2035,7 @@ fn execute_bounded_dense_artifact(
             .and_then(|result| result.map_err(DescriptorDispatchFailure::Execution))
             .map_err(DenseBoundedFailure::Dispatch)?;
             warn_if_grouped_dispatch_slow("accumulate chunk", elapsed);
+            note_dense_test_call_and_maybe_arm_timeout();
             Ok(())
         },
         || {
@@ -2002,6 +2084,7 @@ fn execute_bounded_dense_artifact(
     })
     .map_err(DescriptorDispatchFailure::Residency)?
     .map_err(DescriptorDispatchFailure::Execution)?;
+    note_dense_test_call_and_maybe_arm_timeout();
     warn_if_grouped_dispatch_slow("finalize", finalize_elapsed);
     // Finalize is another synchronous native call. Capture only after its
     // store guard has been released, then release detached resources before
@@ -2012,6 +2095,13 @@ fn execute_bounded_dense_artifact(
 
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let completed_calls = bounded_dispatch_call_count(metadata.fact_rows, max_chunk_rows)
+        .ok_or_else(|| {
+            DescriptorDispatchFailure::Execution(DescriptorAggExecutionError::Failure(
+                "grouped aggregate bounded dispatch call count overflowed".to_owned(),
+            ))
+        })?;
+    debug_assert_eq!(completed_calls, launches.saturating_add(1));
     let output = DescriptorAggOutput::new(
         storage,
         outcome,
@@ -2024,9 +2114,7 @@ fn execute_bounded_dense_artifact(
     Ok(DescriptorAggDispatch {
         output,
         fact_rows: metadata.fact_rows,
-        batches_executed: u64::try_from(launches)
-            .unwrap_or(u64::MAX)
-            .saturating_add(1),
+        batches_executed: u64::try_from(completed_calls).unwrap_or(u64::MAX),
         dispatch_time_us,
         residency: None,
     })

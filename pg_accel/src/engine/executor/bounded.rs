@@ -63,6 +63,17 @@ pub(super) fn cleanup_before_rethrow<C, E, R>(
     rethrow(error)
 }
 
+/// Exact number of completed synchronous calls for a successful bounded
+/// dense aggregate: one call per nonempty input chunk and one finalization
+/// call. Empty input still submits one combined RESET|FINALIZE call.
+#[must_use]
+pub(super) fn bounded_dispatch_call_count(row_count: usize, chunk_limit: usize) -> Option<usize> {
+    if chunk_limit == 0 {
+        return None;
+    }
+    row_count.div_ceil(chunk_limit).checked_add(1)
+}
+
 /// Whether a completed synchronous dispatch call crossed its warning
 /// threshold. This never claims to cancel an in-flight call.
 #[must_use]
@@ -259,5 +270,15 @@ mod tests {
             Duration::from_micros(100_001),
             100
         ));
+    }
+
+    #[test]
+    fn successful_call_count_includes_finalize_and_empty_reset_finalize() {
+        assert_eq!(bounded_dispatch_call_count(0, 64), Some(1));
+        assert_eq!(bounded_dispatch_call_count(1, 64), Some(2));
+        assert_eq!(bounded_dispatch_call_count(64, 64), Some(2));
+        assert_eq!(bounded_dispatch_call_count(65, 64), Some(3));
+        assert_eq!(bounded_dispatch_call_count(10, 0), None);
+        assert_eq!(bounded_dispatch_call_count(usize::MAX, 1), None);
     }
 }

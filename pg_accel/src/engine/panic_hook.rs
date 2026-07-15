@@ -12,14 +12,18 @@
 //! before the process aborts. It also prints a `PGACCEL PANIC:` line to
 //! stderr so it's visible in terminal runs.
 //!
-//! The hook WRAPS the existing default hook (chain, never replace), and is
-//! allocation-light so it works under panic pressure.
+//! The hook wraps the existing hook for genuine Rust panics. Ordinary pgrx
+//! and PostgreSQL ERROR payloads are control flow: they are neither recorded
+//! nor chained, so a caught SQL error cannot contaminate release panic logs.
 //!
 //! Call [`install`] exactly once at the top of `_PG_init`.
 
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(feature = "pg_test")]
+use std::cell::RefCell;
 
 /// Per-process install flag. AtomicBool (not Once) so forked backends that
 /// inherit the installed hook via COW don't re-install a second one — and
@@ -38,6 +42,10 @@ pub fn install() {
 
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        if is_postgres_error_control_flow(info.payload()) {
+            return;
+        }
+
         // Never let the hook itself panic — wrap the body in catch_unwind.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             write_panic_record(info);
@@ -48,8 +56,34 @@ pub fn install() {
     }));
 }
 
+fn is_postgres_error_control_flow(payload: &(dyn std::any::Any + Send)) -> bool {
+    use pgrx::pg_sys::panic::{CaughtError, ErrorReport, ErrorReportWithLevel};
+
+    if payload.is::<ErrorReport>() || payload.is::<ErrorReportWithLevel>() {
+        return true;
+    }
+    matches!(
+        payload.downcast_ref::<CaughtError>(),
+        Some(CaughtError::PostgresError(_) | CaughtError::ErrorReport(_))
+    )
+}
+
+#[cfg(feature = "pg_test")]
+thread_local! {
+    static TEST_PANIC_LOG_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
 /// Where the panic log goes. Mirrors `otel::trace_file_path`.
 fn panic_log_path() -> String {
+    #[cfg(feature = "pg_test")]
+    if let Some(path) = TEST_PANIC_LOG_PATH.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
+
+    default_panic_log_path()
+}
+
+fn default_panic_log_path() -> String {
     // SAFETY: DataDir is set early in postmaster startup before extensions load.
     let data_dir = unsafe { pgrx::pg_sys::DataDir };
     if !data_dir.is_null() {
@@ -60,6 +94,58 @@ fn panic_log_path() -> String {
         }
     }
     "/tmp/pg_accel_panic.log".to_string()
+}
+
+/// Test-only unique panic artifact. The path override is backend-thread local,
+/// so this never truncates or hides an existing release log. Dropping the
+/// guard restores the previous path and deliberately preserves the artifact.
+#[cfg(feature = "pg_test")]
+pub(crate) struct PanicLogTestArtifact {
+    path: String,
+    previous: Option<String>,
+}
+
+#[cfg(feature = "pg_test")]
+impl PanicLogTestArtifact {
+    pub(crate) fn fresh() -> std::io::Result<Self> {
+        let default_path = std::path::PathBuf::from(default_panic_log_path());
+        let parent = default_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("/tmp"));
+        let unique = format!(
+            "pg_accel_panic.cancel.{}.{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        );
+        let path = parent.join(unique).to_string_lossy().into_owned();
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.sync_all()?;
+        let previous = TEST_PANIC_LOG_PATH.with(|slot| slot.replace(Some(path.clone())));
+        Ok(Self { path, previous })
+    }
+
+    pub(crate) fn contents(&self) -> std::io::Result<String> {
+        std::fs::read_to_string(&self.path)
+    }
+
+    #[must_use]
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+#[cfg(feature = "pg_test")]
+impl Drop for PanicLogTestArtifact {
+    fn drop(&mut self) {
+        TEST_PANIC_LOG_PATH.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
 }
 
 fn write_panic_record(info: &std::panic::PanicHookInfo<'_>) {
@@ -142,5 +228,62 @@ impl std::fmt::Display for JsonStr<'_> {
             }
         }
         f.write_str("\"")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pgrx::PgLogLevel;
+    use pgrx::pg_sys::panic::{CaughtError, ErrorReport, ErrorReportWithLevel};
+    use pgrx::prelude::PgSqlErrorCode;
+
+    fn error_report_with_level_payload() -> Box<dyn std::any::Any + Send> {
+        std::panic::catch_unwind(|| {
+            ErrorReport::new(
+                PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+                "test cancellation",
+                "panic_hook_test",
+            )
+            .report(PgLogLevel::ERROR);
+        })
+        .expect_err("ERROR report should use pgrx panic control flow")
+    }
+
+    fn error_report_with_level() -> ErrorReportWithLevel {
+        *error_report_with_level_payload()
+            .downcast::<ErrorReportWithLevel>()
+            .expect("pgrx ERROR payload should retain its typed report")
+    }
+
+    #[test]
+    fn postgres_error_payloads_are_control_flow() {
+        let bare = ErrorReport::new(
+            PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+            "bare cancellation",
+            "panic_hook_test",
+        );
+        assert!(is_postgres_error_control_flow(&bare));
+
+        let report = error_report_with_level_payload();
+        assert!(is_postgres_error_control_flow(report.as_ref()));
+
+        let postgres = CaughtError::PostgresError(error_report_with_level());
+        assert!(is_postgres_error_control_flow(&postgres));
+
+        let rust_report = CaughtError::ErrorReport(error_report_with_level());
+        assert!(is_postgres_error_control_flow(&rust_report));
+    }
+
+    #[test]
+    fn genuine_rust_panics_remain_recordable() {
+        assert!(!is_postgres_error_control_flow(&"rust panic"));
+        assert!(!is_postgres_error_control_flow(&String::from("rust panic")));
+
+        let caught = CaughtError::RustPanic {
+            ereport: error_report_with_level(),
+            payload: Box::new(String::from("rust panic")),
+        };
+        assert!(!is_postgres_error_control_flow(&caught));
     }
 }
