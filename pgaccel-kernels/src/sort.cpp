@@ -1054,6 +1054,14 @@ static pgaccel_status sycl_radix_sort_u64(uint64_t* keys, size_t count) {
   }
 }
 
+static pgaccel_status radix_sort_staged(uint32_t* keys, uint32_t* indices, size_t count) {
+  return sycl_radix_sort_kv_u32(keys, indices, count);
+}
+
+static pgaccel_status radix_sort_staged(uint64_t* keys, uint32_t* indices, size_t count) {
+  return sycl_radix_sort_kv_u64(keys, indices, count);
+}
+
 template <typename Signed, typename Sortable>
 static pgaccel_status sycl_radix_sort_signed_host(Signed* keys, uint32_t* indices, size_t count) {
   sycl::queue* q = get_queue();
@@ -1064,24 +1072,33 @@ static pgaccel_status sycl_radix_sort_signed_host(Signed* keys, uint32_t* indice
 
   Sortable* d_sortable = nullptr;
   uint32_t* d_indices = nullptr;
+  Signed* d_result_keys = nullptr;
+  uint32_t* d_result_indices = nullptr;
   auto release = [&]() {
     if (d_sortable)
       sycl::free(d_sortable, *q);
     if (d_indices)
       sycl::free(d_indices, *q);
+    if (d_result_keys)
+      sycl::free(d_result_keys, *q);
+    if (d_result_indices)
+      sycl::free(d_result_indices, *q);
   };
 
   try {
     d_sortable = sycl::malloc_device<Sortable>(count, *q);
     d_indices = sycl::malloc_device<uint32_t>(count, *q);
-    if (!d_sortable || !d_indices) {
+    d_result_keys = sycl::malloc_device<Signed>(count, *q);
+    if (indices)
+      d_result_indices = sycl::malloc_device<uint32_t>(count, *q);
+    if (!d_sortable || !d_indices || !d_result_keys || (indices && !d_result_indices)) {
       release();
       return PGACCEL_OOM;
     }
 
-    q->memcpy(d_sortable, keys, count * sizeof(Sortable));
+    q->memcpy(d_sortable, keys, count * sizeof(Sortable)).wait_and_throw();
     if (indices)
-      q->memcpy(d_indices, indices, count * sizeof(uint32_t));
+      q->memcpy(d_indices, indices, count * sizeof(uint32_t)).wait_and_throw();
 
     constexpr Sortable sign_bit = Sortable{1} << (sizeof(Sortable) * 8 - 1);
     const bool fill_indices = indices == nullptr;
@@ -1092,25 +1109,30 @@ static pgaccel_status sycl_radix_sort_signed_host(Signed* keys, uint32_t* indice
          d_indices[i] = static_cast<uint32_t>(i);
      }).wait_and_throw();
 
-    pgaccel_status st;
-    if constexpr (std::is_same_v<Sortable, uint32_t>)
-      st = sycl_radix_sort_kv_u32(d_sortable, d_indices, count);
-    else if (indices)
-      st = sycl_radix_sort_kv_u64(d_sortable, d_indices, count);
-    else
-      st = sycl_radix_sort_u64(d_sortable, count);
+    const pgaccel_status st = radix_sort_staged(d_sortable, d_indices, count);
+    if (st == PGACCEL_OOM) {
+      release();
+      return PGACCEL_OOM;
+    }
+    if (st == PGACCEL_ERROR) {
+      release();
+      return PGACCEL_ERROR;
+    }
     if (st != PGACCEL_OK) {
       release();
-      return st;
+      return PGACCEL_UNSUPPORTED;
     }
 
+    const bool publish_indices = indices != nullptr;
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-       d_sortable[id[0]] ^= sign_bit;
+       const size_t i = id[0];
+       d_result_keys[i] = sycl::bit_cast<Signed>(d_sortable[i] ^ sign_bit);
+       if (publish_indices)
+         d_result_indices[i] = d_indices[i];
      }).wait_and_throw();
-    q->memcpy(keys, d_sortable, count * sizeof(Signed));
+    q->memcpy(keys, d_result_keys, count * sizeof(Signed)).wait_and_throw();
     if (indices)
-      q->memcpy(indices, d_indices, count * sizeof(uint32_t));
-    q->wait_and_throw();
+      q->memcpy(indices, d_result_indices, count * sizeof(uint32_t)).wait_and_throw();
     release();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
@@ -1201,6 +1223,7 @@ static pgaccel_status sycl_radix_sort_float_host(Float* keys, uint32_t* indices,
   uint32_t* d_original_indices = nullptr;
   Sortable* d_sortable = nullptr;
   uint32_t* d_order = nullptr;
+  Float* d_sorted_keys = nullptr;
   auto release = [&]() {
     if (d_original_keys)
       sycl::free(d_original_keys, *q);
@@ -1210,22 +1233,26 @@ static pgaccel_status sycl_radix_sort_float_host(Float* keys, uint32_t* indices,
       sycl::free(d_sortable, *q);
     if (d_order)
       sycl::free(d_order, *q);
+    if (d_sorted_keys)
+      sycl::free(d_sorted_keys, *q);
   };
 
   try {
     d_original_keys = sycl::malloc_device<Float>(count, *q);
     d_sortable = sycl::malloc_device<Sortable>(count, *q);
     d_order = sycl::malloc_device<uint32_t>(count, *q);
+    d_sorted_keys = sycl::malloc_device<Float>(count, *q);
     if (indices)
       d_original_indices = sycl::malloc_device<uint32_t>(count, *q);
-    if (!d_original_keys || !d_sortable || !d_order || (indices && !d_original_indices)) {
+    if (!d_original_keys || !d_sortable || !d_order || !d_sorted_keys ||
+        (indices && !d_original_indices)) {
       release();
       return PGACCEL_OOM;
     }
 
-    q->memcpy(d_original_keys, keys, count * sizeof(Float));
+    q->memcpy(d_original_keys, keys, count * sizeof(Float)).wait_and_throw();
     if (indices)
-      q->memcpy(d_original_indices, indices, count * sizeof(uint32_t));
+      q->memcpy(d_original_indices, indices, count * sizeof(uint32_t)).wait_and_throw();
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        const size_t i = id[0];
        if constexpr (std::is_same_v<Float, float>)
@@ -1235,17 +1262,20 @@ static pgaccel_status sycl_radix_sort_float_host(Float* keys, uint32_t* indices,
        d_order[i] = static_cast<uint32_t>(i);
      }).wait_and_throw();
 
-    pgaccel_status st;
-    if constexpr (std::is_same_v<Sortable, uint32_t>)
-      st = sycl_radix_sort_kv_u32(d_sortable, d_order, count);
-    else
-      st = sycl_radix_sort_kv_u64(d_sortable, d_order, count);
+    const pgaccel_status st = radix_sort_staged(d_sortable, d_order, count);
+    if (st == PGACCEL_OOM) {
+      release();
+      return PGACCEL_OOM;
+    }
+    if (st == PGACCEL_ERROR) {
+      release();
+      return PGACCEL_ERROR;
+    }
     if (st != PGACCEL_OK) {
       release();
-      return st;
+      return PGACCEL_UNSUPPORTED;
     }
 
-    Float* d_sorted_keys = reinterpret_cast<Float*>(d_sortable);
     const bool gather_indices = indices != nullptr;
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        const size_t i = id[0];
@@ -1254,10 +1284,9 @@ static pgaccel_status sycl_radix_sort_float_host(Float* keys, uint32_t* indices,
        if (gather_indices)
          d_order[i] = d_original_indices[source];
      }).wait_and_throw();
-    q->memcpy(keys, d_sorted_keys, count * sizeof(Float));
+    q->memcpy(keys, d_sorted_keys, count * sizeof(Float)).wait_and_throw();
     if (indices)
-      q->memcpy(indices, d_order, count * sizeof(uint32_t));
-    q->wait_and_throw();
+      q->memcpy(indices, d_order, count * sizeof(uint32_t)).wait_and_throw();
     release();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
