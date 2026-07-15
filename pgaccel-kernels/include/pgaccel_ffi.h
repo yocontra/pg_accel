@@ -804,44 +804,27 @@ pgaccel_status pgaccel_h3_lat_lng_count_resident_bulk(
  * type matches `DispatchResult::AcceleratedVarLen` consumers
  * (`uint64_t*` for cell IDs, `double*` for lat/lng coord pairs).
  *
- * Implementation lives in `pgaccel-kernels/src/h3_ops.cpp` (Agent 5A);
- * this header just publishes the contract every other agent depends on.
+ * A size or emit pass may return PGACCEL_ERROR_UNSUPPORTED without writing
+ * output when exact device semantics are unavailable. Such operations must
+ * remain outside production planner registration.
  */
 
-/* h3_grid_disk: outputs all H3 cells within k-ring distance of each input.
- * Per-cell output count = 1 + sum(6*i for i in 1..=k) for hexagons; pentagons
- * have one fewer neighbour at each ring. Two-pass:
- *   size: writes cumulative offsets into `out_offsets[count+1]`.
- *   emit: writes cells into `out_cells[out_offsets[count]]`. */
+/* h3_grid_disk ABI reservation. Nonempty work returns UNSUPPORTED until exact
+ * cross-face device neighbor traversal is implemented. */
 pgaccel_status pgaccel_h3_grid_disk_output_size(const uint64_t* cells, size_t count, int32_t k,
                                                 uint32_t* out_offsets);
 pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_t count, int32_t k,
                                          const uint32_t* offsets, uint64_t* out_cells);
 
-/* h3_grid_ring_unsafe: outputs only the cells exactly at distance `k`
- * from each input cell (the "k-th ring" — no inner cells). Smaller fan-out
- * than `grid_disk`. Returns PGACCEL_UNSUPPORTED if the input cell is a
- * pentagon (ring traversal across pentagon distortion is undefined). */
+/* h3_grid_ring_unsafe ABI reservation. Nonempty work returns UNSUPPORTED until
+ * exact cross-face device neighbor traversal is implemented. */
 pgaccel_status pgaccel_h3_grid_ring_unsafe_output_size(const uint64_t* cells, size_t count,
                                                        int32_t k, uint32_t* out_offsets);
 pgaccel_status pgaccel_h3_grid_ring_unsafe_emit(const uint64_t* cells, size_t count, int32_t k,
                                                 const uint32_t* offsets, uint64_t* out_cells);
 
-/* h3_polyfill: outputs all H3 cells whose centre lies inside the input
- * polygon at the requested resolution. Input is CSR-style polygon coords
- * (mirrors `pgaccel_st_area_bulk` shape) — a flat float xy array indexed
- * by `ring_offsets`, plus the target resolution. Output count is bounded
- * by `polygon_bbox_area / cell_area(resolution)` and computed exactly in
- * the size pass.
- *
- * `coords`        — flat fp32 [x0,y0,x1,y1,...] in lon/lat degrees.
- * `ring_offsets`  — [ring_count + 1] CSR offsets into coords.
- * `ring_count`    — number of polygons (one ring per polygon for the
- *                   first cut; multi-ring polygons land in a follow-up).
- * `resolution`    — target H3 resolution (0..=15).
- * `out_offsets`   — [ring_count + 1] cumulative cell counts.
- * `out_cells`     — output H3 cell IDs.
- */
+/* h3_polyfill ABI reservation. Nonempty work returns UNSUPPORTED until exact
+ * H3 containment and polygon topology are implemented on device. */
 pgaccel_status pgaccel_h3_polyfill_output_size(const float* coords, const uint32_t* ring_offsets,
                                                size_t ring_count, int32_t resolution,
                                                uint32_t* out_offsets);
@@ -861,33 +844,15 @@ pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells, size_t co
                                                 int32_t child_res, const uint32_t* offsets,
                                                 uint64_t* out_children);
 
-/* h3_cell_to_boundary: outputs lat/lng vertex pairs of each input cell's
- * polygon boundary. Hexagons emit 6 vertex pairs (12 doubles); pentagons
- * emit 5 vertex pairs (10 doubles). Output buffer type is `double*`
- * (lat/lng pairs in radians or degrees per the kernel's documented
- * convention — see h3_ops.cpp for the exact unit).
- *
- *   size: writes cumulative DOUBLE offsets (i.e. 12 per hexagon, 10 per
- *         pentagon) so `out_offsets[count]` is the total fp64 count.
- *   emit: writes interleaved lat/lng pairs into `out_coords[]`. */
+/* h3_cell_to_boundary ABI reservation. Nonempty work returns UNSUPPORTED until
+ * exact icosahedral edge correction is implemented on device. */
 pgaccel_status pgaccel_h3_cell_to_boundary_output_size(const uint64_t* cells, size_t count,
                                                        uint32_t* out_offsets);
 pgaccel_status pgaccel_h3_cell_to_boundary_emit(const uint64_t* cells, size_t count,
                                                 const uint32_t* offsets, double* out_coords);
 
-/* h3_cells_to_multi_polygon: outputs the union of input cell boundaries
- * as a flat polygon-vertex CSR. `cells` is a single multi-cell input;
- * the output is a CSR over polygon rings.
- *
- *   size: walks edge dedup and writes cumulative ring offsets:
- *         `out_ring_offsets[ring_count + 1]`. `*out_ring_count` returns
- *         the number of rings the kernel will emit.
- *   emit: writes interleaved lat/lng pairs into `out_coords[]` indexed
- *         by `ring_offsets`.
- *
- * Coordinate Agent 5A's kernel implementation with this signature; the
- * caller (Phase B Agent 1B) is responsible for re-encoding the rings as
- * a PostGIS GSERIALIZED multipolygon. */
+/* h3_cells_to_multi_polygon ABI reservation. Nonempty work returns
+ * UNSUPPORTED until exact device edge cancellation and ring linking land. */
 pgaccel_status pgaccel_h3_cells_to_multi_polygon_output_size(const uint64_t* cells, size_t count,
                                                              uint32_t* out_ring_offsets,
                                                              uint32_t* out_ring_count);

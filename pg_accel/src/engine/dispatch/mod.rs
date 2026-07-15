@@ -89,12 +89,7 @@ impl H3DispatchOp {
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "h3_latlng_to_cell" => Some(Self::LatLngToCell),
-            "h3_grid_disk" => Some(Self::GridDisk),
-            "h3_grid_ring_unsafe" => Some(Self::GridRingUnsafe),
             "h3_cell_to_children" => Some(Self::CellToChildren),
-            "h3_cell_to_boundary" => Some(Self::CellToBoundary),
-            "h3_cells_to_multi_polygon" => Some(Self::CellsToMultiPolygon),
-            "h3_polyfill" => Some(Self::Polyfill),
             "h3_get_resolution" => Some(Self::GetResolution),
             "h3_get_base_cell" => Some(Self::GetBaseCell),
             "h3_is_valid_cell" => Some(Self::IsValidCell),
@@ -185,8 +180,8 @@ fn resolve_dispatch_operation(
 /// `Accelerated` for 1-Datum-per-row scalars, `AcceleratedRecord` for
 /// multi-scalar / record returns (e.g. an H3 boundary coordinate pair),
 /// and `AcceleratedVarLen` for CSR-style variable-length outputs (e.g. H3
-/// `grid_disk`, `polyfill`, `cell_to_boundary` where each input row produces
-/// a different number of output cells/coords).
+/// `cell_to_children` where each input row produces a different number of
+/// output cells).
 #[derive(Debug)]
 pub enum DispatchResult {
     /// The batch was evaluated by an accelerated path. One Datum per input
@@ -209,8 +204,7 @@ pub enum DispatchResult {
     /// `datums[offsets[i] .. offsets[i + 1]]`; an empty range encodes "no
     /// output for this input". `offsets[0] == 0` and
     /// `*offsets.last() == datums.len() as u32` MUST hold. Used by H3
-    /// var-output ops (`grid_disk`, `grid_ring_unsafe`, `polyfill`,
-    /// `cell_to_children`, `cell_to_boundary`, `cells_to_multi_polygon`).
+    /// exact var-output ops such as `cell_to_children`.
     AcceleratedVarLen {
         /// CSR offsets indexing `datums`. Length is `input_row_count + 1`.
         offsets: Vec<u32>,

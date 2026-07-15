@@ -182,8 +182,7 @@ static void h3_run_exact_split_to_common_slab(sycl::queue& q, uint8_t* d_slab, s
 
        const double* d_lats = reinterpret_cast<const double*>(d_slab + layout.lat64_off);
        const double* d_lngs = reinterpret_cast<const double*>(d_slab + layout.lng64_off);
-       auto* d_fijk =
-           reinterpret_cast<pgaccel_h3_exact::FaceIJK*>(d_slab + layout.face_ijk_off);
+       auto* d_fijk = reinterpret_cast<pgaccel_h3_exact::FaceIJK*>(d_slab + layout.face_ijk_off);
        auto* d_out = reinterpret_cast<uint64_t*>(d_slab + layout.out_off);
        uint8_t* d_valid = d_slab + layout.valid_off;
 
@@ -242,7 +241,7 @@ static void h3_validate_common_slab_keys(sycl::queue& q, uint8_t* d_slab, size_t
          invalid_ref.store(1u);
        }
      });
-  }).wait_and_throw();
+   }).wait_and_throw();
 }
 
 static void h3_run_fast_f32_device_to_common_slab(sycl::queue& q, uint8_t* d_slab,
@@ -286,8 +285,7 @@ static void h3_run_exact_split_device_to_common_slab(sycl::queue& q, uint8_t* d_
          const size_t i = id[0];
          const H3LatLngCellSlabLayout layout = h3_lat_lng_cell_slab_layout(row_count);
 
-         auto* d_fijk =
-             reinterpret_cast<pgaccel_h3_exact::FaceIJK*>(d_slab + layout.face_ijk_off);
+         auto* d_fijk = reinterpret_cast<pgaccel_h3_exact::FaceIJK*>(d_slab + layout.face_ijk_off);
          auto* d_out = reinterpret_cast<uint64_t*>(d_slab + layout.out_off);
          uint8_t* d_valid = d_slab + layout.valid_off;
 
@@ -308,8 +306,7 @@ static void h3_run_exact_split_device_to_common_slab(sycl::queue& q, uint8_t* d_
          const size_t i = id[0];
          const H3LatLngCellSlabLayout layout = h3_lat_lng_cell_slab_layout(row_count);
 
-         auto* d_fijk =
-             reinterpret_cast<pgaccel_h3_exact::FaceIJK*>(d_slab + layout.face_ijk_off);
+         auto* d_fijk = reinterpret_cast<pgaccel_h3_exact::FaceIJK*>(d_slab + layout.face_ijk_off);
          auto* d_out = reinterpret_cast<uint64_t*>(d_slab + layout.out_off);
          uint8_t* d_valid = d_slab + layout.valid_off;
 
@@ -350,30 +347,6 @@ static void h3_run_exact_split_device_to_common_slab(sycl::queue& q, uint8_t* d_
      });
    }).wait_and_throw();
 }
-
-// ---------------------------------------------------------------------------
-// Icosahedron constants for lat/lng -> cell conversion
-// ---------------------------------------------------------------------------
-// 20 icosahedron face centers (lat, lng) in radians — derived from H3 source.
-// These are the gnomonic projection centers for each face.
-static const double FACE_CENTER_LAT[20] = {
-    0.803582649718989,  0.803582649718989,  0.803582649718989,  0.803582649718989,
-    0.803582649718989,  0.261799387799149,  0.261799387799149,  0.261799387799149,
-    0.261799387799149,  0.261799387799149,  -0.261799387799149, -0.261799387799149,
-    -0.261799387799149, -0.261799387799149, -0.261799387799149, -0.803582649718989,
-    -0.803582649718989, -0.803582649718989, -0.803582649718989, -0.803582649718989,
-};
-
-static const double FACE_CENTER_LNG[20] = {
-    0.536587643738040,  1.608762931214121,  -2.765166789498600, -1.692991502022519,
-    -0.620816214546437, 1.069678592508498,  -0.003515038517793, -1.076708669533783,
-    2.135635021497113,  3.207809972626500,  0.536587643738040,  1.608762931214121,
-    -2.765166789498600, -1.692991502022519, -0.620816214546437, 1.069678592508498,
-    -0.003515038517793, -1.076708669533783, 2.135635021497113,  3.207809972626500,
-};
-
-// Hex area at each resolution in km^2 (approximate, from H3 docs)
-// Used only for sanity reference; not in hot path.
 
 // ---------------------------------------------------------------------------
 // Inline helpers
@@ -1236,7 +1209,8 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* c
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_center_child_bulk(const uint64_t* cells, size_t count,
-                                                               int child_res, uint64_t* children) try {
+                                                               int child_res,
+                                                               uint64_t* children) try {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || children == nullptr)
@@ -1597,8 +1571,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
 
            const double* d_lats = reinterpret_cast<const double*>(d_slab + k_lat_off);
            const double* d_lngs = reinterpret_cast<const double*>(d_slab + k_lng_off);
-           auto* d_fijk =
-               reinterpret_cast<pgaccel_h3_exact::FaceIJK*>(d_slab + k_face_ijk_off);
+           auto* d_fijk = reinterpret_cast<pgaccel_h3_exact::FaceIJK*>(d_slab + k_face_ijk_off);
            uint8_t* d_valid = d_slab + k_valid_off;
 
            double lat_deg = d_lats[i];
@@ -1819,9 +1792,11 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_count_bulk(const double* lat_array,
   return pgaccel_kernel_failure("pgaccel_h3_lat_lng_count_bulk", nullptr);
 }
 
-extern "C" pgaccel_status pgaccel_h3_lat_lng_count_bulk_f32_exact(
-    const float* lat_f32_array, const float* lng_f32_array, const double* lat_exact_array,
-    const double* lng_exact_array, size_t count, int resolution, pgaccel_agg_state** out_state) try {
+extern "C" pgaccel_status
+pgaccel_h3_lat_lng_count_bulk_f32_exact(const float* lat_f32_array, const float* lng_f32_array,
+                                        const double* lat_exact_array,
+                                        const double* lng_exact_array, size_t count, int resolution,
+                                        pgaccel_agg_state** out_state) try {
   if (out_state == nullptr)
     return PGACCEL_ERROR_INIT;
   *out_state = nullptr;
@@ -1938,69 +1913,19 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_count_resident_bulk(
 //      out_buf[out_offsets[i] .. out_offsets[i+1]] using the offsets buffer
 //      computed in pass 1.
 //
-// Where neighbour traversal is needed (grid_disk / grid_ring_unsafe), we
-// follow the project's existing simplified-IJK + same-base-cell convention:
-// the size pass is the analytical hex/pentagon formula, so the offset table
-// is geometrically correct; the emit pass writes deterministic, distinct,
-// valid H3 cell IDs derived from the input cell. For inputs whose true H3
-// neighbour would land in a different base cell, we emit cells generated by
-// digit toggling within the input's base cell — these are guaranteed valid
-// H3 IDs but are NOT the geometrically correct neighbours that a faithful
-// H3 lookup would produce. Landing the full H3 neighbour table is a
-// follow-up that does not change this FFI contract.
+// A variable-output ABI may return PGACCEL_ERROR_UNSUPPORTED before either
+// pass writes output. This is the fail-closed contract for operations that do
+// not yet have exact device semantics. Callers must keep those operations out
+// of production planner registration and leave the query on h3-pg's native
+// implementation.
 // ---------------------------------------------------------------------------
-
-// Pentagon test on host. Mirrors the kernel-side pentagon test in
-// pgaccel_h3_is_pentagon_bulk: base in pentagon set AND all sub-resolution
-// digits == 0.
-static inline bool h3_is_pentagon_host(uint64_t cell) {
-  if (cell == 0)
-    return false;
-  int base = static_cast<int>((cell >> 45) & 0x7F);
-  bool is_pent_base = (base < 64) ? ((H3_PENTAGON_BASE_LOW >> base) & 1ULL) != 0
-                                  : ((H3_PENTAGON_BASE_HIGH >> (base - 64)) & 1ULL) != 0;
-  if (!is_pent_base)
-    return false;
-  int res = h3_get_resolution(cell);
-  for (int r = 1; r <= res; r++) {
-    if (h3_get_digit(cell, r) != 0)
-      return false;
-  }
-  return true;
-}
-
-// h3_grid_disk per-cell output count: 1 + 3k(k+1) for hexagons,
-// 1 + 5k(k+1)/2 for pentagons (one fewer neighbour at each ring step).
-static inline uint32_t h3_grid_disk_count(uint64_t cell, int32_t k) {
-  if (cell == 0 || k < 0)
-    return 0;
-  if (k == 0)
-    return 1;
-  bool pent = h3_is_pentagon_host(cell);
-  uint32_t ring_sum = 0;
-  for (int i = 1; i <= k; i++) {
-    ring_sum += pent ? static_cast<uint32_t>(5 * i) : static_cast<uint32_t>(6 * i);
-  }
-  return 1u + ring_sum;
-}
-
-// h3_grid_ring per-cell output count: 6*k for hexagons, 5*k for pentagons.
-// k == 0 returns 1 (the cell itself).
-static inline uint32_t h3_grid_ring_count(uint64_t cell, int32_t k) {
-  if (cell == 0 || k < 0)
-    return 0;
-  if (k == 0)
-    return 1;
-  bool pent = h3_is_pentagon_host(cell);
-  return pent ? static_cast<uint32_t>(5 * k) : static_cast<uint32_t>(6 * k);
-}
 
 // ---------------------------------------------------------------------------
 // h3_grid_disk
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_h3_grid_disk_output_size(const uint64_t* cells, size_t count,
-                                                           int32_t k, uint32_t* out_offsets) try {
+                                                           int32_t k, uint32_t* out_offsets) {
   if (count == 0) {
     if (out_offsets != nullptr)
       out_offsets[0] = 0;
@@ -2008,137 +1933,18 @@ extern "C" pgaccel_status pgaccel_h3_grid_disk_output_size(const uint64_t* cells
   }
   if (cells == nullptr || out_offsets == nullptr)
     return PGACCEL_ERROR_INIT;
-
-  // Host-side per-cell count via the `h3_grid_disk_count` helper above.
-  // The previous SYCL implementation hit an AdaptiveCpp Metal SSCP codegen
-  // bug (`LLVMToMetal: MetalEmitter failed: Error: Unsupported integer
-  // bit width: 33`) caused by an LLVM-IR temporary produced from the
-  // `1u + ring_sum` accumulation pattern; the kernel failed JIT for ANY
-  // count (including count=1, which surfaced in pgrx integration tests
-  // as `gpu::h3_grid_disk_bulk(&[cell], 1) -> None`). The work is trivial
-  // bit ops over a flat cell array — no GPU benefit even at large counts.
-  // Mirrors the pattern in `pgaccel_h3_cells_to_multi_polygon_output_size`
-  // (line ~2530) which already does host-side per-cell pentagon detection.
-  out_offsets[0] = 0;
-  uint64_t acc = 0;
-  for (size_t i = 0; i < count; i++) {
-    acc += h3_grid_disk_count(cells[i], k);
-    if (acc > UINT32_MAX)
-      return PGACCEL_ERROR_UNSUPPORTED;
-    out_offsets[i + 1] = static_cast<uint32_t>(acc);
-  }
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_grid_disk_output_size", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_grid_disk_output_size", nullptr);
+  (void)k;
+  return PGACCEL_ERROR_UNSUPPORTED;
 }
 
 extern "C" pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_t count, int32_t k,
-                                                    const uint32_t* offsets, uint64_t* out_cells) try {
+                                                    const uint32_t* offsets, uint64_t* out_cells) {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || offsets == nullptr || out_cells == nullptr)
     return PGACCEL_ERROR_INIT;
-  if (k < 0)
-    return PGACCEL_ERROR_UNSUPPORTED;
-
-  const size_t total = offsets[count];
-  if (total == 0)
-    return PGACCEL_OK;
-
-  try {
-    sycl::queue& q = get_queue();
-
-    // Shared USM avoids Metal queue::memcpy blits while keeping emission on the GPU.
-    uint64_t* d_cells = sycl::malloc_shared<uint64_t>(count, q);
-    uint32_t* d_offsets = sycl::malloc_shared<uint32_t>(count + 1, q);
-    uint64_t* d_out = sycl::malloc_shared<uint64_t>(total, q);
-
-    if (!d_cells || !d_offsets || !d_out) {
-      sycl::free(d_cells, q);
-      sycl::free(d_offsets, q);
-      sycl::free(d_out, q);
-      return PGACCEL_ERROR_OOM;
-    }
-
-    std::memcpy(d_cells, cells, count * sizeof(uint64_t));
-    std::memcpy(d_offsets, offsets, (count + 1) * sizeof(uint32_t));
-
-    const int max_res = H3_MAX_RESOLUTION;
-
-    q.submit([&](sycl::handler& h) {
-       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-         const size_t i = id[0];
-         const uint64_t cell = d_cells[i];
-         const uint32_t start = d_offsets[i];
-         const uint32_t end = d_offsets[i + 1];
-         const uint32_t want = end - start;
-         if (want == 0)
-           return;
-
-         d_out[start] = cell;
-         if (want == 1)
-           return;
-         if (cell == 0)
-           return;
-
-         const int res = static_cast<int>((cell >> 52) & 0xF);
-         // Enumerate distinct neighbour cells by toggling digits.
-         // Walk resolutions from finest to coarsest; at each, try the 6
-         // non-origin non-unused digit values. Produces deterministic,
-         // distinct, valid H3 cell IDs derived from the input.
-         uint32_t out_idx = 1;
-         for (int r = res; r >= 1 && out_idx < want; r--) {
-           const int shift = (max_res - r) * 3;
-           const uint64_t orig_digit = (cell >> shift) & 0x7;
-           for (int d = 1; d <= 6 && out_idx < want; d++) {
-             if (static_cast<uint64_t>(d) == orig_digit)
-               continue;
-             const uint64_t mask = uint64_t{0x7} << shift;
-             const uint64_t neighbour = (cell & ~mask) | (static_cast<uint64_t>(d) << shift);
-             d_out[start + out_idx] = neighbour;
-             out_idx++;
-           }
-         }
-         while (out_idx < want) {
-           d_out[start + out_idx] = cell;
-           out_idx++;
-         }
-       });
-     }).wait_and_throw();
-
-    std::memcpy(out_cells, d_out, total * sizeof(uint64_t));
-
-    sycl::free(d_cells, q);
-    sycl::free(d_offsets, q);
-    sycl::free(d_out, q);
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
-  } catch (const pgaccel_no_device_error&) {
-    return PGACCEL_ERROR_NO_DEVICE;
-  } catch (const std::exception& ex) {
-    fprintf(stderr,
-            "pgaccel_h3_grid_disk_emit: SYCL exception: %s "
-            "(count=%zu, k=%d, total=%zu) — surfaces as PGACCEL_ERROR\n",
-            ex.what(), count, (int)k, total);
-    return PGACCEL_ERROR;
-  } catch (...) {
-    fprintf(stderr,
-            "pgaccel_h3_grid_disk_emit: unknown exception "
-            "(count=%zu, k=%d, total=%zu) — surfaces as PGACCEL_ERROR\n",
-            count, (int)k, total);
-    return PGACCEL_ERROR;
-  }
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_grid_disk_emit", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_grid_disk_emit", nullptr);
+  (void)k;
+  return PGACCEL_ERROR_UNSUPPORTED;
 }
 
 // ---------------------------------------------------------------------------
@@ -2147,7 +1953,7 @@ extern "C" pgaccel_status pgaccel_h3_grid_disk_emit(const uint64_t* cells, size_
 
 extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_output_size(const uint64_t* cells,
                                                                   size_t count, int32_t k,
-                                                                  uint32_t* out_offsets) try {
+                                                                  uint32_t* out_offsets) {
   if (count == 0) {
     if (out_offsets != nullptr)
       out_offsets[0] = 0;
@@ -2155,129 +1961,19 @@ extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_output_size(const uint64_t
   }
   if (cells == nullptr || out_offsets == nullptr)
     return PGACCEL_ERROR_INIT;
-
-  // Host-side per-cell count via `h3_grid_ring_count`. Same rationale as
-  // `pgaccel_h3_grid_disk_output_size` above — keeping the size pass on
-  // host removes a class of AdaptiveCpp Metal SSCP emitter risk for
-  // arithmetic-on-small-integers shapes and saves a JIT compile on cold
-  // start. Pentagon input still surfaces a 0-row entry per the FFI
-  // contract (grid_ring is documented as pentagon-unsupported but we
-  // emit an empty CSR slot rather than an out-of-band error to keep the
-  // executor branch-free).
-  out_offsets[0] = 0;
-  uint64_t acc = 0;
-  for (size_t i = 0; i < count; i++) {
-    acc += h3_grid_ring_count(cells[i], k);
-    if (acc > UINT32_MAX)
-      return PGACCEL_ERROR_UNSUPPORTED;
-    out_offsets[i + 1] = static_cast<uint32_t>(acc);
-  }
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_grid_ring_unsafe_output_size", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_grid_ring_unsafe_output_size", nullptr);
+  (void)k;
+  return PGACCEL_ERROR_UNSUPPORTED;
 }
 
 extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_emit(const uint64_t* cells, size_t count,
                                                            int32_t k, const uint32_t* offsets,
-                                                           uint64_t* out_cells) try {
+                                                           uint64_t* out_cells) {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || offsets == nullptr || out_cells == nullptr)
     return PGACCEL_ERROR_INIT;
-  if (k < 0)
-    return PGACCEL_ERROR_UNSUPPORTED;
-
-  const size_t total = offsets[count];
-  if (total == 0)
-    return PGACCEL_OK;
-
-  try {
-    sycl::queue& q = get_queue();
-
-    // Shared USM avoids Metal queue::memcpy blits while keeping emission on the GPU.
-    uint64_t* d_cells = sycl::malloc_shared<uint64_t>(count, q);
-    uint32_t* d_offsets = sycl::malloc_shared<uint32_t>(count + 1, q);
-    uint64_t* d_out = sycl::malloc_shared<uint64_t>(total, q);
-
-    if (!d_cells || !d_offsets || !d_out) {
-      sycl::free(d_cells, q);
-      sycl::free(d_offsets, q);
-      sycl::free(d_out, q);
-      return PGACCEL_ERROR_OOM;
-    }
-
-    std::memcpy(d_cells, cells, count * sizeof(uint64_t));
-    std::memcpy(d_offsets, offsets, (count + 1) * sizeof(uint32_t));
-
-    const int max_res = H3_MAX_RESOLUTION;
-    const int32_t k_val = k;
-
-    q.submit([&](sycl::handler& h) {
-       h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
-         const size_t i = id[0];
-         const uint64_t cell = d_cells[i];
-         const uint32_t start = d_offsets[i];
-         const uint32_t end = d_offsets[i + 1];
-         const uint32_t want = end - start;
-         if (want == 0)
-           return;
-
-         if (k_val == 0) {
-           d_out[start] = cell;
-           return;
-         }
-         if (cell == 0)
-           return;
-
-         const int res = static_cast<int>((cell >> 52) & 0xF);
-         // Same digit-toggling strategy as grid_disk, but skip the origin
-         // cell (ring-k excludes the centre). Walk finest -> coarsest.
-         uint32_t out_idx = 0;
-         for (int r = res; r >= 1 && out_idx < want; r--) {
-           const int shift = (max_res - r) * 3;
-           const uint64_t orig_digit = (cell >> shift) & 0x7;
-           for (int d = 1; d <= 6 && out_idx < want; d++) {
-             if (static_cast<uint64_t>(d) == orig_digit)
-               continue;
-             const uint64_t mask = uint64_t{0x7} << shift;
-             const uint64_t neighbour = (cell & ~mask) | (static_cast<uint64_t>(d) << shift);
-             d_out[start + out_idx] = neighbour;
-             out_idx++;
-           }
-         }
-         while (out_idx < want) {
-           d_out[start + out_idx] = cell;
-           out_idx++;
-         }
-       });
-     }).wait_and_throw();
-
-    std::memcpy(out_cells, d_out, total * sizeof(uint64_t));
-
-    sycl::free(d_cells, q);
-    sycl::free(d_offsets, q);
-    sycl::free(d_out, q);
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
-  } catch (const pgaccel_no_device_error&) {
-    return PGACCEL_ERROR_NO_DEVICE;
-  } catch (const std::exception& e) {
-    return pgaccel_kernel_failure(__func__, &e);
-  } catch (...) {
-    return pgaccel_kernel_failure(__func__, nullptr);
-  }
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_grid_ring_unsafe_emit", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_grid_ring_unsafe_emit", nullptr);
+  (void)k;
+  return PGACCEL_ERROR_UNSUPPORTED;
 }
 
 // ---------------------------------------------------------------------------
@@ -2614,24 +2310,15 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells
 // h3_cell_to_boundary
 // ---------------------------------------------------------------------------
 //
-// Outputs the polygon-boundary vertex pairs (lat, lng in radians) for each
-// input cell. Hexagon emits 6 vertex pairs (12 doubles); pentagon emits 5
-// vertex pairs (10 doubles). The size pass writes `out_offsets` in DOUBLE
-// units (12 per hex, 10 per pent) so the emit pass can write directly.
-//
-// The boundary vertices are computed from the cell's centre lat/lng (via
-// the inverse of the gnomonic projection used by lat_lng_to_cell) and the
-// six (or five) hex vertex offsets in face-local coordinates, then rotated
-// back to lat/lng. Because lat_lng_to_cell here is a simplified gnomonic
-// approximation, this boundary is also approximate; faithful H3 boundary
-// vertex generation requires the full icosahedral-edge correction. The
-// outputs are still distinct lat/lng pairs around a centre point, which is
-// what downstream PostGIS GSERIALIZED encoding requires geometrically.
+// Exact boundary generation requires H3's icosahedral edge corrections. The
+// former implementation produced an approximate host-side polygon and
+// counted it as GPU work. Until exact device semantics land, both passes are
+// deliberately unavailable for nonempty input.
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_output_size(const uint64_t* cells,
                                                                   size_t count,
-                                                                  uint32_t* out_offsets) try {
+                                                                  uint32_t* out_offsets) {
   if (count == 0) {
     if (out_offsets != nullptr)
       out_offsets[0] = 0;
@@ -2639,181 +2326,32 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_output_size(const uint64_t
   }
   if (cells == nullptr || out_offsets == nullptr)
     return PGACCEL_ERROR_INIT;
-
-  // Host-side per-cell vertex count. Mirrors the host implementation in
-  // `pgaccel_h3_cells_to_multi_polygon_output_size` (which already lives
-  // entirely on host). Paired with the now-host
-  // `pgaccel_h3_cell_to_boundary_emit` (see comment at the head of that
-  // function for the AdaptiveCpp Metal SSCP emitter bug). Keeping size
-  // and emit on host together avoids cold-start JIT entirely and keeps
-  // both passes consistent on pentagon detection.
-  out_offsets[0] = 0;
-  uint64_t acc = 0;
-  for (size_t i = 0; i < count; i++) {
-    const uint64_t cell = cells[i];
-    if (cell == 0) {
-      out_offsets[i + 1] = static_cast<uint32_t>(acc);
-      continue;
-    }
-    const bool pent = h3_is_pentagon_host(cell);
-    // 6 hex vertices × 2 doubles = 12; 5 pent vertices × 2 = 10
-    acc += pent ? 10u : 12u;
-    if (acc > UINT32_MAX)
-      return PGACCEL_ERROR_UNSUPPORTED;
-    out_offsets[i + 1] = static_cast<uint32_t>(acc);
-  }
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_cell_to_boundary_output_size", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_cell_to_boundary_output_size", nullptr);
+  return PGACCEL_ERROR_UNSUPPORTED;
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_boundary_emit(const uint64_t* cells, size_t count,
                                                            const uint32_t* offsets,
-                                                           double* out_coords) try {
+                                                           double* out_coords) {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || offsets == nullptr || out_coords == nullptr)
     return PGACCEL_ERROR_INIT;
-
-  const size_t total = offsets[count];
-  if (total == 0)
-    return PGACCEL_OK;
-
-  // Host-only implementation. The previous SYCL kernel hit an AdaptiveCpp
-  // Metal SSCP emitter bug where `[2 x double]` PHI-node literals
-  // containing `{1.0, 0.0}` (produced by `sycl::cos(0)` / `sycl::sin(0)`
-  // and the `atan2` polynomial reduction) were referenced in the emitted
-  // Metal source by a name like
-  // `t_double__1_000000e_00__double__0_000000e_00_` but never declared,
-  // so the Metal compiler rejected the module with `use of undeclared
-  // identifier`. JIT failed for ALL counts (including count=1; the
-  // user-visible symptom in pg_test was SIGABRT in
-  // `pgaccel_h3_cells_to_multi_polygon_emit` which delegates to this
-  // kernel for multi-cell input).
-  //
-  // The math is pure per-cell scalar work: pentagon detection (bit ops)
-  // + digit-replay loop (≤ 15 iterations) + 5/6 vertex inverse-gnomonic
-  // projections. For typical batch sizes the host cost is negligible
-  // relative to the GPU launch overhead saved. Delegated callers
-  // (`pgaccel_h3_cells_to_multi_polygon_emit`) inherit the fix
-  // automatically.
-  static constexpr double H3_CX[7] = {0.0, 1.0, 0.5, -0.5, -1.0, -0.5, 0.5};
-  static constexpr double H3_CY[7] = {0.0,
-                                      0.0,
-                                      0.866025403784438646,
-                                      0.866025403784438646,
-                                      0.0,
-                                      -0.866025403784438646,
-                                      -0.866025403784438646};
-  const double SQRT7 = 2.6457513110645906;
-  const double TWO_PI = 6.28318530717958647692;
-  const int max_res = H3_MAX_RESOLUTION;
-
-  for (size_t i = 0; i < count; i++) {
-    const uint64_t cell = cells[i];
-    const uint32_t start = offsets[i];
-    const uint32_t end = offsets[i + 1];
-    const uint32_t want = (end >= start) ? (end - start) : 0u;
-    if (want == 0 || cell == 0)
-      continue;
-
-    const int base = static_cast<int>((cell >> 45) & 0x7F);
-    const bool pent = h3_is_pentagon_host(cell);
-    const int res = static_cast<int>((cell >> 52) & 0xF);
-    const int n_verts = pent ? 5 : 6;
-
-    int face = base;
-    if (face < 0 || face >= 20)
-      face = 0;
-    const double clat = FACE_CENTER_LAT[face];
-    const double clng = FACE_CENTER_LNG[face];
-    const double cos_clat = std::cos(clat);
-    const double sin_clat = std::sin(clat);
-
-    double x = 0.0, y = 0.0;
-    double scale = 1.0;
-    for (int r = 1; r <= res; r++) {
-      scale /= SQRT7;
-      const int shift = (max_res - r) * 3;
-      const int d = static_cast<int>((cell >> shift) & 0x7);
-      const int dd = (d < 0 || d > 6) ? 0 : d;
-      x += H3_CX[dd] * scale;
-      y += H3_CY[dd] * scale;
-    }
-
-    for (int v = 0; v < n_verts; v++) {
-      const double ang = (TWO_PI * static_cast<double>(v)) / static_cast<double>(n_verts);
-      const double vx = x + scale * std::cos(ang);
-      const double vy = y + scale * std::sin(ang);
-      const double rho = std::sqrt(vx * vx + vy * vy);
-      double lat_v, lng_v;
-      if (rho < 1e-12) {
-        lat_v = clat;
-        lng_v = clng;
-      } else {
-        const double cc = std::atan(rho);
-        const double sin_cc = std::sin(cc);
-        const double cos_cc = std::cos(cc);
-        lat_v = std::asin(cos_cc * sin_clat + (vy * sin_cc * cos_clat) / rho);
-        lng_v = clng + std::atan2(vx * sin_cc, rho * cos_clat * cos_cc - vy * sin_clat * sin_cc);
-      }
-      const uint32_t base_idx = start + static_cast<uint32_t>(v) * 2u;
-      if (base_idx + 1u >= start + want)
-        break;
-      out_coords[base_idx + 0] = lat_v;
-      out_coords[base_idx + 1] = lng_v;
-    }
-  }
-
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_cell_to_boundary_emit", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_cell_to_boundary_emit", nullptr);
+  return PGACCEL_ERROR_UNSUPPORTED;
 }
 
 // ---------------------------------------------------------------------------
 // h3_polyfill
 // ---------------------------------------------------------------------------
 //
-// Outputs all H3 cells whose centre falls inside the input polygon at the
-// requested resolution. Implementation strategy:
-//
-//   1. Compute polygon bbox in lon/lat degrees.
-//   2. For the requested resolution, compute approximate hex spacing at
-//      that resolution (2^-res * face-scale, derived from the same SQRT7
-//      progression used in lat_lng_to_cell).
-//   3. Step through bbox at hex-spacing intervals; for each candidate
-//      lat/lng, run point_in_ring (host helper port), and if inside,
-//      convert lat/lng -> cell ID via the same simplified gnomonic
-//      logic used in lat_lng_to_cell.
-//
-// Size pass: this requires running the full polyfill once on the device to
-// know how many cells fall inside. We do that and store the count; emit
-// pass replays the same scan and writes the cells. To avoid double work,
-// we cache the candidate list in a host vector between size and emit calls
-// — but the FFI contract requires the two passes to be independent, so we
-// just replay the scan in each. The overestimate of bbox-area / cell-area
-// is computed in the size pass; the emit pass writes only the cells that
-// pass point_in_ring.
-//
-// This is the most expensive of the var-output kernels because it requires
-// candidate enumeration over the bbox. For typical small polygons at low
-// resolution it is bounded.
+// Exact polygon-to-cells needs H3's containment and topology semantics. The
+// former bbox sampler was host-computed and only approximate, so nonempty
+// calls now fail closed until an exact device implementation is available.
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_h3_polyfill_output_size(const float* coords,
                                                           const uint32_t* ring_offsets,
                                                           size_t ring_count, int32_t resolution,
-                                                          uint32_t* out_offsets) try {
+                                                          uint32_t* out_offsets) {
   if (ring_count == 0) {
     if (out_offsets != nullptr)
       out_offsets[0] = 0;
@@ -2821,228 +2359,35 @@ extern "C" pgaccel_status pgaccel_h3_polyfill_output_size(const float* coords,
   }
   if (coords == nullptr || ring_offsets == nullptr || out_offsets == nullptr)
     return PGACCEL_ERROR_INIT;
-  if (resolution < 0 || resolution > H3_MAX_RESOLUTION)
-    return PGACCEL_ERROR_UNSUPPORTED;
-
-  // Compute per-polygon bbox-area / cell-area as the size estimate. This is
-  // an OVERESTIMATE per the FFI contract; the emit pass writes the precise
-  // cells (or 0 sentinels for slots whose centre falls outside the polygon).
-  // Picking a generous overestimate keeps the size pass branch-free and
-  // entirely on the host (no GPU launch needed for a per-polygon scalar).
-  //
-  // Approximate cell side length in degrees at resolution `r`:
-  //   side_deg ≈ 60.0 / SQRT7^r  (very rough; H3 hexes near equator span
-  //   about that many degrees at res 0; SQRT7 per resolution step).
-  const double SQRT7 = 2.6457513110645906;
-  double side_deg = 60.0;
-  for (int i = 0; i < resolution; i++)
-    side_deg /= SQRT7;
-  if (side_deg <= 0.0)
-    side_deg = 1e-9;
-  const double cell_area = side_deg * side_deg;  // degrees^2
-
-  out_offsets[0] = 0;
-  uint64_t acc = 0;
-  for (size_t i = 0; i < ring_count; i++) {
-    const uint32_t start = ring_offsets[i];
-    const uint32_t end = ring_offsets[i + 1];
-    if (end <= start) {
-      out_offsets[i + 1] = static_cast<uint32_t>(acc);
-      continue;
-    }
-    // Compute bbox
-    float min_x = coords[start * 2 + 0];
-    float max_x = min_x;
-    float min_y = coords[start * 2 + 1];
-    float max_y = min_y;
-    for (uint32_t v = start; v < end; v++) {
-      float vx = coords[v * 2 + 0];
-      float vy = coords[v * 2 + 1];
-      if (vx < min_x)
-        min_x = vx;
-      if (vx > max_x)
-        max_x = vx;
-      if (vy < min_y)
-        min_y = vy;
-      if (vy > max_y)
-        max_y = vy;
-    }
-    const double bbox_area =
-        static_cast<double>(max_x - min_x) * static_cast<double>(max_y - min_y);
-    uint64_t est = static_cast<uint64_t>(bbox_area / cell_area) + 1;
-    if (est > 1u << 20)
-      est = 1u << 20;  // cap: 1M cells per polygon, prevents pathological alloc
-    acc += est;
-    if (acc > UINT32_MAX)
-      return PGACCEL_ERROR_UNSUPPORTED;
-    out_offsets[i + 1] = static_cast<uint32_t>(acc);
-  }
-
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_polyfill_output_size", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_polyfill_output_size", nullptr);
-}
-
-// Host-side ray-casting point_in_ring (matches spatial_predicates.cpp logic
-// minus the eps-uncertain branch — we want a hard inside/outside answer).
-static inline bool point_in_polygon_xy(double px, double py, const float* coords, uint32_t start,
-                                       uint32_t end) {
-  if (end - start < 4)
-    return false;
-  bool inside = false;
-  for (uint32_t i = start, j = end - 1; i < end; j = i++) {
-    const double ax = coords[i * 2 + 0];
-    const double ay = coords[i * 2 + 1];
-    const double bx = coords[j * 2 + 0];
-    const double by = coords[j * 2 + 1];
-    if (((ay > py) != (by > py)) && (px < (bx - ax) * (py - ay) / (by - ay) + ax)) {
-      inside = !inside;
-    }
-  }
-  return inside;
+  (void)resolution;
+  return PGACCEL_ERROR_UNSUPPORTED;
 }
 
 extern "C" pgaccel_status pgaccel_h3_polyfill_emit(const float* coords,
                                                    const uint32_t* ring_offsets, size_t ring_count,
                                                    int32_t resolution, const uint32_t* offsets,
-                                                   uint64_t* out_cells) try {
+                                                   uint64_t* out_cells) {
   if (ring_count == 0)
     return PGACCEL_OK;
   if (coords == nullptr || ring_offsets == nullptr || offsets == nullptr || out_cells == nullptr)
     return PGACCEL_ERROR_INIT;
-  if (resolution < 0 || resolution > H3_MAX_RESOLUTION)
-    return PGACCEL_ERROR_UNSUPPORTED;
-
-  const size_t total = offsets[ring_count];
-  if (total == 0)
-    return PGACCEL_OK;
-
-  // Initialise output buffer to 0 (sentinel for "no cell"). Slots that the
-  // emit pass actually fills get overwritten with valid cell IDs; slots
-  // unused due to the size-pass overestimate stay at 0 so the executor can
-  // distinguish them.
-  for (size_t i = 0; i < total; i++)
-    out_cells[i] = 0;
-
-  const double SQRT7 = 2.6457513110645906;
-  double side_deg = 60.0;
-  for (int i = 0; i < resolution; i++)
-    side_deg /= SQRT7;
-  if (side_deg <= 0.0)
-    side_deg = 1e-9;
-  const double step = side_deg;
-
-  // For each polygon, scan its bbox, point_in_polygon-test, and run
-  // lat_lng_to_cell on the inside points. To stay within the FFI contract
-  // (which says we can use the GPU lat_lng_to_cell kernel), we batch all
-  // candidate inside-points per polygon and dispatch a single
-  // pgaccel_h3_lat_lng_to_cell_bulk call.
-  for (size_t pi = 0; pi < ring_count; pi++) {
-    const uint32_t r_start = ring_offsets[pi];
-    const uint32_t r_end = ring_offsets[pi + 1];
-    if (r_end <= r_start)
-      continue;
-    const uint32_t out_start = offsets[pi];
-    const uint32_t out_end = offsets[pi + 1];
-    const uint32_t cap = out_end - out_start;
-    if (cap == 0)
-      continue;
-
-    float min_x = coords[r_start * 2 + 0];
-    float max_x = min_x;
-    float min_y = coords[r_start * 2 + 1];
-    float max_y = min_y;
-    for (uint32_t v = r_start; v < r_end; v++) {
-      const float vx = coords[v * 2 + 0];
-      const float vy = coords[v * 2 + 1];
-      if (vx < min_x)
-        min_x = vx;
-      if (vx > max_x)
-        max_x = vx;
-      if (vy < min_y)
-        min_y = vy;
-      if (vy > max_y)
-        max_y = vy;
-    }
-
-    // Walk bbox at `step` spacing (approximate cell pitch); collect inside
-    // point centres.
-    std::vector<double> inside_lats;
-    std::vector<double> inside_lngs;
-    inside_lats.reserve(static_cast<size_t>(cap));
-    inside_lngs.reserve(static_cast<size_t>(cap));
-    for (double y = static_cast<double>(min_y);
-         y <= static_cast<double>(max_y) && inside_lats.size() < cap; y += step) {
-      for (double x = static_cast<double>(min_x);
-           x <= static_cast<double>(max_x) && inside_lats.size() < cap; x += step) {
-        if (point_in_polygon_xy(x, y, coords, r_start, r_end)) {
-          // x,y are lon,lat in degrees per the FFI contract
-          inside_lats.push_back(y);
-          inside_lngs.push_back(x);
-        }
-      }
-    }
-
-    if (inside_lats.empty())
-      continue;
-
-    // Batch dispatch lat_lng_to_cell — reuse the existing GPU kernel.
-    std::vector<uint64_t> cell_buf(inside_lats.size(), 0);
-    std::vector<uint8_t> valid_buf(inside_lats.size(), 0);
-    pgaccel_status s = pgaccel_h3_lat_lng_to_cell_bulk(
-        inside_lats.data(), inside_lngs.data(), inside_lats.size(), resolution,
-        /*use_fp64=*/resolution >= 12 ? 1 : 0, cell_buf.data(), valid_buf.data());
-    if (s != PGACCEL_OK)
-      return s;
-
-    uint32_t out_idx = 0;
-    for (size_t k = 0; k < inside_lats.size() && out_idx < cap; k++) {
-      if (valid_buf[k]) {
-        out_cells[out_start + out_idx] = cell_buf[k];
-        out_idx++;
-      }
-    }
-  }
-
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_polyfill_emit", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_polyfill_emit", nullptr);
+  (void)resolution;
+  return PGACCEL_ERROR_UNSUPPORTED;
 }
 
 // ---------------------------------------------------------------------------
 // h3_cells_to_multi_polygon
 // ---------------------------------------------------------------------------
 //
-// Outputs the union of input cell boundaries as a flat polygon-vertex CSR.
-// Faithful H3 cellsToMultiPolygon walks each cell's six edges, dedups
-// shared edges (those appearing on two adjacent cells), and links remaining
-// edges into closed rings. Implementing edge dedup correctly requires a
-// lookup-table of which cell pairs share which edge index — large and
-// non-trivial.
-//
-// Pragmatic approximation: emit one polygon ring per input cell using the
-// cell's boundary vertices (as computed by cell_to_boundary). The output
-// CSR has `ring_count == count` rings, each with 6 (or 5) vertex pairs.
-// Shared edges are NOT deduped — the executor receives a multipolygon that
-// is the geometric union of overlapping per-cell polygons. This is a
-// documented approximation suitable as a kernel scaffold; landing the full
-// edge-dedup is a follow-up that doesn't change the FFI contract.
+// Exact multi-polygon output requires shared-edge cancellation and faithful
+// ring linking. Emitting one approximate ring per input cell is not equivalent
+// to h3-pg, so nonempty calls fail closed until exact device topology lands.
 // ---------------------------------------------------------------------------
 
 extern "C" pgaccel_status pgaccel_h3_cells_to_multi_polygon_output_size(const uint64_t* cells,
                                                                         size_t count,
                                                                         uint32_t* out_ring_offsets,
-                                                                        uint32_t* out_ring_count) try {
+                                                                        uint32_t* out_ring_count) {
   if (count == 0) {
     if (out_ring_count != nullptr)
       *out_ring_count = 0;
@@ -3052,58 +2397,18 @@ extern "C" pgaccel_status pgaccel_h3_cells_to_multi_polygon_output_size(const ui
   }
   if (cells == nullptr || out_ring_offsets == nullptr || out_ring_count == nullptr)
     return PGACCEL_ERROR_INIT;
-
-  // One ring per input cell (per the documented approximation above).
-  *out_ring_count = static_cast<uint32_t>(count);
-
-  // Compute per-cell vertex count using the boundary kernel's logic
-  // (12 doubles for hex, 10 for pent). We stream through cells on host
-  // since this is just bit checks — no GPU launch needed.
-  out_ring_offsets[0] = 0;
-  uint64_t acc = 0;
-  for (size_t i = 0; i < count; i++) {
-    const uint64_t cell = cells[i];
-    if (cell == 0) {
-      out_ring_offsets[i + 1] = static_cast<uint32_t>(acc);
-      continue;
-    }
-    const bool pent = h3_is_pentagon_host(cell);
-    acc += pent ? 10u : 12u;
-    if (acc > UINT32_MAX)
-      return PGACCEL_ERROR_UNSUPPORTED;
-    out_ring_offsets[i + 1] = static_cast<uint32_t>(acc);
-  }
-
-  pgaccel_record_gpu_exec();
-  return PGACCEL_OK;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_cells_to_multi_polygon_output_size", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_cells_to_multi_polygon_output_size", nullptr);
+  return PGACCEL_ERROR_UNSUPPORTED;
 }
 
 extern "C" pgaccel_status pgaccel_h3_cells_to_multi_polygon_emit(const uint64_t* cells,
                                                                  size_t count,
                                                                  const uint32_t* ring_offsets,
                                                                  uint32_t ring_count,
-                                                                 double* out_coords) try {
+                                                                 double* out_coords) {
   if (count == 0)
     return PGACCEL_OK;
   if (cells == nullptr || ring_offsets == nullptr || out_coords == nullptr)
     return PGACCEL_ERROR_INIT;
-  if (ring_count != static_cast<uint32_t>(count))
-    return PGACCEL_ERROR_UNSUPPORTED;
-
-  // Delegate to cell_to_boundary_emit — this gives us the per-cell vertex
-  // pairs in the same CSR layout. The polygon-edge-dedup approximation
-  // documented above means each cell becomes its own ring.
-  return pgaccel_h3_cell_to_boundary_emit(cells, count, ring_offsets, out_coords);
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_h3_cells_to_multi_polygon_emit", &e);
-} catch (...) {
-  return pgaccel_kernel_failure("pgaccel_h3_cells_to_multi_polygon_emit", nullptr);
+  (void)ring_count;
+  return PGACCEL_ERROR_UNSUPPORTED;
 }

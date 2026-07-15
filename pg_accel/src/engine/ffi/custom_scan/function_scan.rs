@@ -565,6 +565,8 @@ pub(super) unsafe fn dispatched_ok(executor: *mut std::ffi::c_void) -> bool {
 mod tests {
     use pgrx::prelude::{Spi, pg_test};
 
+    use crate::gpu;
+
     /// Helper: returns true iff the named extension is installed (or could be
     /// CREATE EXTENSION'd) in this pgrx PG instance. Used to skip tests
     /// cleanly on CI hosts without the H3 / PostGIS adapters available.
@@ -587,76 +589,93 @@ mod tests {
         Spi::get_one::<i64>(&q).ok().flatten().unwrap_or(0) > 0
     }
 
-    /// `SELECT count(*) FROM h3_cell_to_boundary($cell)` returns exactly
-    /// one row.
-    ///
-    /// **Known dispatch shape mismatch:** the h3-pg extension declares
-    /// `h3_cell_to_boundary` as returning the PG built-in `polygon` type,
-    /// but `dispatch_gpu_h3_cell_to_boundary` (h3.rs:530) emits PostGIS
-    /// GSERIALIZED varlena bytes (the `varlena_from_gserialized` helper).
-    /// Counting the row exercises the FunctionScan dispatch + tuple
-    /// emission path without forcing PG to interpret the value bytes; a
-    /// follow-up bug ticket will retarget the kernel output to the
-    /// declared return type.
-    ///
-    /// This test confirms the FunctionScan executor: builds a TupleDesc,
-    /// dispatches the kernel, emits exactly one tuple via
-    /// `ExecStoreVirtualTuple`. If the dispatch silently failed (zero rows)
-    /// or the executor crashed (no rows + error), this assertion fails.
-    #[pg_test]
-    fn function_scan_h3_cell_to_boundary_emits_one_row() {
-        if !ensure_extension("h3") {
-            return;
-        }
+    fn explain_text(query: &str) -> String {
+        Spi::connect(|client| {
+            let mut lines = Vec::new();
+            let sql = format!("EXPLAIN (FORMAT TEXT) {query}");
+            let table = client
+                .select(&sql, None, &[])
+                .expect("EXPLAIN query should succeed");
+            for row in table {
+                if let Some(line) = row.get::<String>(1).ok().flatten() {
+                    lines.push(line);
+                }
+            }
+            lines.join("\n")
+        })
+    }
 
-        // Trigger registry init by running a small h3 query first so the
-        // h3_cell_to_boundary OID is registered before the FunctionScan
-        // injection chain fires.
-        Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
-
-        let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM h3_cell_to_boundary('8a2a1072b59ffff'::h3index)",
-        )
-        .expect("count query ok")
-        .expect("count not null");
-        assert_eq!(
-            count, 1,
-            "h3_cell_to_boundary FunctionScan must emit exactly one row, got {count}",
+    fn assert_native_h3_plan(plan: &str, operation: &str) {
+        assert!(!plan.is_empty(), "{operation} EXPLAIN returned no rows");
+        assert!(
+            !plan.contains("GpuFunctionScan")
+                && !plan.contains("GpuAccelFunctionScan")
+                && !plan.contains("Strategy: GpuH3"),
+            "quarantined H3 topology op `{operation}` selected a GPU plan:\n{plan}",
         );
     }
 
-    /// `SELECT count(*) FROM h3_grid_disk(<cell>, 1)` returns the H3
-    /// "k-ring" of a cell (the cell + its 6 neighbours = 7 cells).
-    ///
-    /// Replaces the originally-planned `h3_polyfill` test because the
-    /// installed h3-pg version registers `h3_polyfill(polygon, polygon[],
-    /// integer)` (PG built-in `polygon`) instead of the geometry-arg
-    /// version the pg_accel dispatch arm expects (geometry, integer).
-    /// `h3_grid_disk(h3index, integer)` is a cleaner shape match:
-    /// h3index→h3index is a single-type SETOF emit that exercises the
-    /// VarLen `AcceleratedVarLen` path without any geometry-vs-polygon
-    /// shape ambiguity.
-    ///
-    /// A non-pentagonal cell at any resolution has 6 immediate neighbours;
-    /// `k=1` includes the origin → exactly 7 output cells. We verify that
-    /// count to exercise the per-row Datum drain in `next_tuple`.
+    /// Boundary topology stays on h3-pg and produces an exact six-vertex
+    /// polygon without incrementing pg_accel's kernel counter.
     #[pg_test]
-    fn function_scan_h3_grid_disk_emits_seven_cells_for_k1() {
+    fn h3_cell_to_boundary_uses_native_plan_without_dispatch() {
         if !ensure_extension("h3") {
             return;
         }
 
-        // Trigger registry init.
-        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
+        Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
 
-        let count =
-            Spi::get_one::<i64>("SELECT count(*) FROM h3_grid_disk('8928308280fffff'::h3index, 1)")
-                .expect("h3_grid_disk count query ok")
-                .expect("count not null");
-
+        let query = "SELECT npoints(h3_cell_to_boundary('8a2a1072b59ffff'::h3index))";
+        assert_native_h3_plan(&explain_text(query), "h3_cell_to_boundary");
+        gpu::reset_gpu_exec_count();
+        let npoints = Spi::get_one::<i32>(query)
+            .expect("native h3_cell_to_boundary query should succeed")
+            .expect("native boundary should not be NULL");
+        assert_eq!(npoints, 6, "native H3 hex boundary must have six vertices");
         assert_eq!(
-            count, 7,
-            "h3_grid_disk(<non-pentagon>, 1) must emit 7 cells (origin + 6 neighbours), got {count}",
+            gpu::gpu_exec_count(),
+            0,
+            "native h3_cell_to_boundary must record zero pg_accel dispatches",
+        );
+    }
+
+    /// Grid traversal stays on h3-pg. The native k=1 disk has seven distinct
+    /// cells, includes its origin, and records no pg_accel dispatch.
+    #[pg_test]
+    fn h3_grid_disk_uses_native_plan_without_dispatch() {
+        if !ensure_extension("h3") {
+            return;
+        }
+
+        Spi::run("SELECT h3_get_resolution('8928308280fffff'::h3index)").expect("h3 ping");
+        let query = "SELECT count(*) FROM h3_grid_disk('8928308280fffff'::h3index, 1)";
+        assert_native_h3_plan(&explain_text(query), "h3_grid_disk");
+        gpu::reset_gpu_exec_count();
+        let count = Spi::get_one::<i64>(query)
+            .expect("native h3_grid_disk count should succeed")
+            .expect("native h3_grid_disk count should not be NULL");
+        let distinct = Spi::get_one::<i64>(
+            "SELECT count(DISTINCT cell) FROM \
+             h3_grid_disk('8928308280fffff'::h3index, 1) AS cell",
+        )
+        .expect("native distinct count should succeed")
+        .expect("native distinct count should not be NULL");
+        let contains_origin = Spi::get_one::<bool>(
+            "SELECT bool_or(cell = '8928308280fffff'::h3index) FROM \
+             h3_grid_disk('8928308280fffff'::h3index, 1) AS cell",
+        )
+        .expect("native origin membership should succeed")
+        .expect("native origin membership should not be NULL");
+        assert_eq!(count, 7, "native k=1 grid disk must contain seven cells");
+        assert_eq!(distinct, 7, "native k=1 grid disk cells must be distinct");
+        assert!(
+            contains_origin,
+            "native k=1 grid disk must include its origin"
+        );
+        assert_eq!(
+            gpu::gpu_exec_count(),
+            0,
+            "native h3_grid_disk must record zero pg_accel dispatches",
         );
     }
 
@@ -715,49 +734,21 @@ mod tests {
         );
     }
 
-    /// `EXPLAIN SELECT count(*) FROM h3_cell_to_boundary(...)` must
-    /// complete successfully without crashing the backend — regression
-    /// guard for the original `ExecSetSlotDescriptor` crash, which also
-    /// affected bare `EXPLAIN` because PG's `standard_ExplainOneQuery`
-    /// calls `ExecutorStart` to walk the plan tree.
-    ///
-    /// We don't strictly assert that the plan contains
-    /// `Custom Scan (GpuAccelFunctionScan)` because PG's planner may
-    /// inline a const-arg single-row SRF as a bare `Result` node
-    /// before the `set_rel_pathlist_hook` ever fires (no FunctionScan
-    /// rel is built). The PASS condition is: EXPLAIN returns a
-    /// non-empty plan without crash. That covers the original crash
-    /// (`signal 6` during `ExecutorStart`) which would manifest as a
-    /// closed connection here.
+    /// Repeated planning must keep the same native decline for quarantined
+    /// topology functions; registry retries must not re-admit the function.
     #[pg_test]
-    fn function_scan_explain_does_not_crash_for_cell_to_boundary() {
+    fn h3_topology_native_decline_is_stable_across_replanning() {
         if !ensure_extension("h3") {
             return;
         }
-        // Trigger registry init.
         Spi::run("SELECT h3_get_resolution('8a2a1072b59ffff'::h3index)").expect("h3 ping");
 
-        let plan = Spi::connect(|client| {
-            let mut lines: Vec<String> = Vec::new();
-            let table = client
-                .select(
-                    "EXPLAIN (FORMAT TEXT) SELECT count(*) FROM \
-                     h3_cell_to_boundary('8a2a1072b59ffff'::h3index)",
-                    None,
-                    &[],
-                )
-                .expect("EXPLAIN query ok");
-            for row in table {
-                if let Some(line) = row.get::<String>(1).ok().flatten() {
-                    lines.push(line);
-                }
-            }
-            lines.join("\n")
-        });
-        assert!(
-            !plan.is_empty(),
-            "EXPLAIN returned no rows (likely backend crash); \
-             this regresses the ExecSetSlotDescriptor / TTS_FLAG_FIXED fix",
-        );
+        let query = "SELECT count(*) FROM \
+                     h3_cell_to_boundary('8a2a1072b59ffff'::h3index)";
+        let first = explain_text(query);
+        let second = explain_text(query);
+        assert_native_h3_plan(&first, "h3_cell_to_boundary first plan");
+        assert_native_h3_plan(&second, "h3_cell_to_boundary second plan");
+        assert_eq!(first, second, "native topology decline plan must be stable");
     }
 }

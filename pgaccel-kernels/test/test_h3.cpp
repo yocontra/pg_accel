@@ -1621,138 +1621,53 @@ static uint64_t make_pentagon_cell(int resolution) {
   return make_cell(4, resolution, digits);
 }
 
-// Test: grid_disk — output_size formula and emit consistency.
+// Exact neighbor traversal is not implemented on device. Both passes must
+// fail closed without mutating caller buffers or claiming a GPU dispatch.
 static void test_grid_disk() {
   printf("--- test_grid_disk ---\n");
 
   int digits[15] = {0};
-  uint64_t cells[2] = {
-      make_cell(57, 5, digits),  // hexagon (base 57 not in pentagon set)
-      make_pentagon_cell(5),     // pentagon
-  };
+  uint64_t cells[2] = {make_cell(57, 5, digits), make_pentagon_cell(5)};
+  uint32_t offsets[3] = {0xA5A5A5A5u, 0xA5A5A5A5u, 0xA5A5A5A5u};
+  uint64_t output[3] = {0xDEADBEEF, 0xDEADBEEF, 0xDEADBEEF};
 
-  // k = 1: hex disk = 7, pent disk = 6.
-  {
-    uint32_t off[3] = {99, 99, 99};
-    pgaccel_status s = pgaccel_h3_grid_disk_output_size(cells, 2, 1, off);
-    ASSERT_STATUS_OK("grid_disk k=1 size status", s);
-    ASSERT_EQ("grid_disk k=1 off[0]", off[0], 0);
-    ASSERT_EQ("grid_disk k=1 hex count", off[1], 7);
-    ASSERT_EQ("grid_disk k=1 total (hex+pent)", off[2], 13);
+  pgaccel_reset_gpu_exec_count();
+  ASSERT_EQ("grid_disk size fails closed", pgaccel_h3_grid_disk_output_size(cells, 2, 1, offsets),
+            PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_EQ("grid_disk size leaves offset[0] untouched", offsets[0], 0xA5A5A5A5u);
+  ASSERT_EQ("grid_disk size leaves offset[2] untouched", offsets[2], 0xA5A5A5A5u);
+  ASSERT_EQ("grid_disk emit fails closed", pgaccel_h3_grid_disk_emit(cells, 2, 1, offsets, output),
+            PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_EQ("grid_disk emit leaves output untouched", output[0], 0xDEADBEEFu);
+  ASSERT_EQ("grid_disk quarantine records zero GPU dispatches", pgaccel_gpu_exec_count(), 0u);
 
-    std::vector<uint64_t> out(off[2], 0);
-    s = pgaccel_h3_grid_disk_emit(cells, 2, 1, off, out.data());
-    ASSERT_STATUS_OK("grid_disk k=1 emit status", s);
-    // Origin at slot 0 of each input
-    ASSERT_TRUE("grid_disk k=1 hex origin emitted", out[0] == cells[0]);
-    ASSERT_TRUE("grid_disk k=1 pent origin emitted", out[off[1]] == cells[1]);
-    // All emitted cells are non-zero (valid IDs)
-    bool all_nonzero = true;
-    for (uint32_t i = 0; i < off[2]; i++) {
-      if (out[i] == 0) {
-        all_nonzero = false;
-        break;
-      }
-    }
-    ASSERT_TRUE("grid_disk k=1 all outputs non-zero", all_nonzero);
-  }
-
-  // k = 0: every input emits exactly itself.
-  {
-    uint32_t off[3] = {99, 99, 99};
-    pgaccel_status s = pgaccel_h3_grid_disk_output_size(cells, 2, 0, off);
-    ASSERT_STATUS_OK("grid_disk k=0 size status", s);
-    ASSERT_EQ("grid_disk k=0 total", off[2], 2);
-
-    std::vector<uint64_t> out(2, 0);
-    s = pgaccel_h3_grid_disk_emit(cells, 2, 0, off, out.data());
-    ASSERT_STATUS_OK("grid_disk k=0 emit status", s);
-    ASSERT_TRUE("grid_disk k=0 emits hex itself", out[0] == cells[0]);
-    ASSERT_TRUE("grid_disk k=0 emits pent itself", out[1] == cells[1]);
-  }
-
-  // k = 2: hex disk = 1 + 6 + 12 = 19; pent disk = 1 + 5 + 10 = 16.
-  {
-    uint32_t off[3] = {0, 0, 0};
-    pgaccel_status s = pgaccel_h3_grid_disk_output_size(cells, 2, 2, off);
-    ASSERT_STATUS_OK("grid_disk k=2 size status", s);
-    ASSERT_EQ("grid_disk k=2 hex count", off[1], 19);
-    ASSERT_EQ("grid_disk k=2 total", off[2], 35);
-
-    std::vector<uint64_t> out(off[2], 0);
-    s = pgaccel_h3_grid_disk_emit(cells, 2, 2, off, out.data());
-    ASSERT_STATUS_OK("grid_disk k=2 emit status", s);
-    // The disk size pass + emit pass write count must match.
-    ASSERT_EQ("grid_disk k=2 emit==size sum", out.size(), off[2]);
-  }
-
-  // Zero cell input → zero count.
-  {
-    uint64_t z[1] = {0};
-    uint32_t off[2] = {99, 99};
-    pgaccel_status s = pgaccel_h3_grid_disk_output_size(z, 1, 3, off);
-    ASSERT_STATUS_OK("grid_disk zero-cell status", s);
-    ASSERT_EQ("grid_disk zero-cell count", off[1], 0);
-  }
+  uint32_t empty_offset = 99;
+  ASSERT_STATUS_OK("grid_disk empty size remains valid",
+                   pgaccel_h3_grid_disk_output_size(nullptr, 0, 1, &empty_offset));
+  ASSERT_EQ("grid_disk empty size writes zero", empty_offset, 0u);
+  ASSERT_STATUS_OK("grid_disk empty emit remains valid",
+                   pgaccel_h3_grid_disk_emit(nullptr, 0, 1, nullptr, nullptr));
 }
 
-// Test: grid_ring_unsafe — output_size formula and emit consistency.
+// Ring traversal has the same fail-closed contract as grid_disk.
 static void test_grid_ring_unsafe() {
   printf("--- test_grid_ring_unsafe ---\n");
 
   int digits[15] = {0};
-  uint64_t cells[2] = {
-      make_cell(57, 5, digits),  // hexagon
-      make_pentagon_cell(5),     // pentagon
-  };
+  uint64_t cell = make_cell(57, 5, digits);
+  uint32_t offsets[2] = {0xA5A5A5A5u, 0xA5A5A5A5u};
+  uint64_t output = 0xDEADBEEF;
 
-  // k = 1: hex ring = 6, pent ring = 5.
-  {
-    uint32_t off[3] = {99, 99, 99};
-    pgaccel_status s = pgaccel_h3_grid_ring_unsafe_output_size(cells, 2, 1, off);
-    ASSERT_STATUS_OK("grid_ring k=1 size status", s);
-    ASSERT_EQ("grid_ring k=1 hex count", off[1], 6);
-    ASSERT_EQ("grid_ring k=1 total", off[2], 11);
-
-    std::vector<uint64_t> out(off[2], 0);
-    s = pgaccel_h3_grid_ring_unsafe_emit(cells, 2, 1, off, out.data());
-    ASSERT_STATUS_OK("grid_ring k=1 emit status", s);
-    bool all_nonzero = true;
-    for (uint32_t i = 0; i < off[2]; i++) {
-      if (out[i] == 0) {
-        all_nonzero = false;
-        break;
-      }
-    }
-    ASSERT_TRUE("grid_ring k=1 all outputs non-zero", all_nonzero);
-  }
-
-  // k = 3: hex ring = 18, pent ring = 15.
-  {
-    uint32_t off[3] = {0, 0, 0};
-    pgaccel_status s = pgaccel_h3_grid_ring_unsafe_output_size(cells, 2, 3, off);
-    ASSERT_STATUS_OK("grid_ring k=3 size status", s);
-    ASSERT_EQ("grid_ring k=3 hex count", off[1], 18);
-    ASSERT_EQ("grid_ring k=3 total", off[2], 33);
-
-    std::vector<uint64_t> out(off[2], 0);
-    s = pgaccel_h3_grid_ring_unsafe_emit(cells, 2, 3, off, out.data());
-    ASSERT_STATUS_OK("grid_ring k=3 emit status", s);
-    ASSERT_EQ("grid_ring k=3 emit==size sum", out.size(), off[2]);
-  }
-
-  // k = 0: ring-0 = single cell (the input).
-  {
-    uint32_t off[2] = {99, 99};
-    pgaccel_status s = pgaccel_h3_grid_ring_unsafe_output_size(cells, 1, 0, off);
-    ASSERT_STATUS_OK("grid_ring k=0 size status", s);
-    ASSERT_EQ("grid_ring k=0 hex count", off[1], 1);
-
-    uint64_t out[1] = {0};
-    s = pgaccel_h3_grid_ring_unsafe_emit(cells, 1, 0, off, out);
-    ASSERT_STATUS_OK("grid_ring k=0 emit status", s);
-    ASSERT_TRUE("grid_ring k=0 emits cell itself", out[0] == cells[0]);
-  }
+  pgaccel_reset_gpu_exec_count();
+  ASSERT_EQ("grid_ring size fails closed",
+            pgaccel_h3_grid_ring_unsafe_output_size(&cell, 1, 1, offsets),
+            PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_EQ("grid_ring size leaves offsets untouched", offsets[0], 0xA5A5A5A5u);
+  ASSERT_EQ("grid_ring emit fails closed",
+            pgaccel_h3_grid_ring_unsafe_emit(&cell, 1, 1, offsets, &output),
+            PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_EQ("grid_ring emit leaves output untouched", output, 0xDEADBEEFu);
+  ASSERT_EQ("grid_ring quarantine records zero GPU dispatches", pgaccel_gpu_exec_count(), 0u);
 }
 
 // Test: cell_to_children — count formula and same-res passthrough.
@@ -1866,304 +1781,71 @@ static void test_cell_to_children() {
   }
 }
 
-// Test: cell_to_boundary — vertex count and finite values.
+// Exact boundary geometry is unavailable on device and must fail closed.
 static void test_cell_to_boundary() {
   printf("--- test_cell_to_boundary ---\n");
 
   int digits[15] = {0};
-  uint64_t cells[2] = {
-      make_cell(5, 3, digits),  // hexagon (base 5 not in pentagon set)
-      make_pentagon_cell(3),    // pentagon
-  };
+  uint64_t cells[2] = {make_cell(5, 3, digits), make_pentagon_cell(3)};
+  uint32_t offsets[3] = {0xA5A5A5A5u, 0xA5A5A5A5u, 0xA5A5A5A5u};
+  double output[2] = {123.5, -456.25};
 
-  uint32_t off[3] = {99, 99, 99};
-  pgaccel_status s = pgaccel_h3_cell_to_boundary_output_size(cells, 2, off);
-  ASSERT_STATUS_OK("boundary size status", s);
-  ASSERT_EQ("boundary off[0]", off[0], 0);
-  ASSERT_EQ("boundary hex doubles", off[1], 12);    // 6 verts × 2 doubles
-  ASSERT_EQ("boundary total doubles", off[2], 22);  // 12 + 10
-
-  std::vector<double> out(off[2], 0.0);
-  s = pgaccel_h3_cell_to_boundary_emit(cells, 2, off, out.data());
-  ASSERT_STATUS_OK("boundary emit status", s);
-
-  // All hex vertices should be finite
-  bool hex_finite = true;
-  for (uint32_t i = 0; i < off[1]; i++) {
-    if (!std::isfinite(out[i])) {
-      hex_finite = false;
-      break;
-    }
-  }
-  ASSERT_TRUE("boundary hex vertices finite", hex_finite);
-
-  // Hex should have 6 distinct (lat,lng) pairs (vertices of a hexagon)
-  bool hex_distinct = true;
-  for (int v1 = 0; v1 < 6; v1++) {
-    for (int v2 = v1 + 1; v2 < 6; v2++) {
-      double lat1 = out[v1 * 2 + 0];
-      double lng1 = out[v1 * 2 + 1];
-      double lat2 = out[v2 * 2 + 0];
-      double lng2 = out[v2 * 2 + 1];
-      double dist = std::abs(lat1 - lat2) + std::abs(lng1 - lng2);
-      if (dist < 1e-12) {
-        hex_distinct = false;
-        break;
-      }
-    }
-  }
-  ASSERT_TRUE("boundary hex vertices distinct", hex_distinct);
+  pgaccel_reset_gpu_exec_count();
+  ASSERT_EQ("boundary size fails closed",
+            pgaccel_h3_cell_to_boundary_output_size(cells, 2, offsets), PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_EQ("boundary size leaves offsets untouched", offsets[0], 0xA5A5A5A5u);
+  ASSERT_EQ("boundary emit fails closed",
+            pgaccel_h3_cell_to_boundary_emit(cells, 2, offsets, output), PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_TRUE("boundary emit leaves coordinates untouched",
+              output[0] == 123.5 && output[1] == -456.25);
+  ASSERT_EQ("boundary quarantine records zero GPU dispatches", pgaccel_gpu_exec_count(), 0u);
 }
 
-// Test: polyfill — large polygon at low resolution.
+// Exact polygon containment is unavailable on device and must fail closed.
 static void test_polyfill() {
   printf("--- test_polyfill ---\n");
 
-  // Define a large rectangular polygon spanning multiple grid steps at the
-  // chosen resolution. Coords are interleaved [x0,y0, x1,y1, ...] in
-  // lon/lat degrees, ring closed.
-  //
-  // At res 4, the kernel's candidate-step is ~60/SQRT7^4 = 60/49 ≈ 1.22°.
-  // Using a 50x50° polygon at res 4 yields ~40x40 candidate points well
-  // inside the bbox, so at least some must land inside the polygon
-  // interior.
-  float coords[] = {
-      -25.0f, -25.0f, 25.0f, -25.0f, 25.0f, 25.0f, -25.0f, 25.0f, -25.0f, -25.0f,  // close
-  };
+  float coords[] = {-25.0f, -25.0f, 25.0f, -25.0f, 25.0f, 25.0f, -25.0f, 25.0f, -25.0f, -25.0f};
   uint32_t ring_offsets[2] = {0, 5};
+  uint32_t out_offsets[2] = {0xA5A5A5A5u, 0xA5A5A5A5u};
+  uint64_t output = 0xDEADBEEF;
 
-  uint32_t out_offsets[2] = {99, 99};
-  pgaccel_status s = pgaccel_h3_polyfill_output_size(coords, ring_offsets, 1, 4, out_offsets);
-  ASSERT_STATUS_OK("polyfill size status", s);
-  ASSERT_EQ("polyfill out_offsets[0]", out_offsets[0], 0);
-  ASSERT_TRUE("polyfill positive size estimate", out_offsets[1] > 0);
-
-  std::vector<uint64_t> out(out_offsets[1], 0);
-  s = pgaccel_h3_polyfill_emit(coords, ring_offsets, 1, 4, out_offsets, out.data());
-  ASSERT_STATUS_OK("polyfill emit status", s);
-
-  // Some cells should be filled (non-zero). Allow zero-sentinel slots from
-  // the size-pass overestimate, but require at least one filled cell to
-  // verify the kernel actually executed and found inside-points.
-  uint32_t filled = 0;
-  for (uint64_t c : out) {
-    if (c != 0)
-      filled++;
-  }
-  ASSERT_TRUE("polyfill at least one cell filled", filled > 0);
+  pgaccel_reset_gpu_exec_count();
+  ASSERT_EQ("polyfill size fails closed",
+            pgaccel_h3_polyfill_output_size(coords, ring_offsets, 1, 4, out_offsets),
+            PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_EQ("polyfill size leaves offsets untouched", out_offsets[0], 0xA5A5A5A5u);
+  ASSERT_EQ("polyfill emit fails closed",
+            pgaccel_h3_polyfill_emit(coords, ring_offsets, 1, 4, out_offsets, &output),
+            PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_EQ("polyfill emit leaves output untouched", output, 0xDEADBEEFu);
+  ASSERT_EQ("polyfill quarantine records zero GPU dispatches", pgaccel_gpu_exec_count(), 0u);
 }
 
-// Test: cells_to_multi_polygon — round-trip CSR layout.
+// Exact union topology is unavailable on device and must fail closed.
 static void test_cells_to_multi_polygon() {
   printf("--- test_cells_to_multi_polygon ---\n");
 
   int digits[15] = {0};
-  uint64_t cells[3] = {
-      make_cell(5, 3, digits),
-      make_cell(6, 3, digits),
-      make_pentagon_cell(3),
-  };
+  uint64_t cells[2] = {make_cell(5, 3, digits), make_cell(6, 3, digits)};
+  uint32_t ring_offsets[3] = {0xA5A5A5A5u, 0xA5A5A5A5u, 0xA5A5A5A5u};
+  uint32_t ring_count = 0xA5A5A5A5u;
+  double output = 123.5;
 
-  uint32_t ring_offsets[4] = {99, 99, 99, 99};
-  uint32_t ring_count = 99;
-  pgaccel_status s =
-      pgaccel_h3_cells_to_multi_polygon_output_size(cells, 3, ring_offsets, &ring_count);
-  ASSERT_STATUS_OK("c2mp size status", s);
-  ASSERT_EQ("c2mp ring_count == cells", ring_count, 3);
-  ASSERT_EQ("c2mp ring_offsets[0]", ring_offsets[0], 0);
-  ASSERT_EQ("c2mp ring_offsets[1] hex", ring_offsets[1], 12);
-  ASSERT_EQ("c2mp ring_offsets[2] hex+hex", ring_offsets[2], 24);
-  ASSERT_EQ("c2mp ring_offsets[3] +pent", ring_offsets[3], 34);
-
-  std::vector<double> coords(ring_offsets[3], 0.0);
-  s = pgaccel_h3_cells_to_multi_polygon_emit(cells, 3, ring_offsets, ring_count, coords.data());
-  ASSERT_STATUS_OK("c2mp emit status", s);
-
-  bool all_finite = true;
-  for (double v : coords) {
-    if (!std::isfinite(v)) {
-      all_finite = false;
-      break;
-    }
-  }
-  ASSERT_TRUE("c2mp all coords finite", all_finite);
+  pgaccel_reset_gpu_exec_count();
+  ASSERT_EQ("multi_polygon size fails closed",
+            pgaccel_h3_cells_to_multi_polygon_output_size(cells, 2, ring_offsets, &ring_count),
+            PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_EQ("multi_polygon size leaves ring count untouched", ring_count, 0xA5A5A5A5u);
+  ASSERT_EQ("multi_polygon size leaves offsets untouched", ring_offsets[0], 0xA5A5A5A5u);
+  ASSERT_EQ("multi_polygon emit fails closed",
+            pgaccel_h3_cells_to_multi_polygon_emit(cells, 2, ring_offsets, 2, &output),
+            PGACCEL_ERROR_UNSUPPORTED);
+  ASSERT_TRUE("multi_polygon emit leaves output untouched", output == 123.5);
+  ASSERT_EQ("multi_polygon quarantine records zero GPU dispatches", pgaccel_gpu_exec_count(), 0u);
 }
 
 // ---------------------------------------------------------------------------
-// Test: grid_disk single-cell input (regression for Agent K Round 3 Bug 1).
-// ---------------------------------------------------------------------------
-// The original SYCL `pgaccel_h3_grid_disk_output_size` kernel JIT-failed
-// on AdaptiveCpp Metal SSCP with `LLVMToMetal: MetalEmitter failed:
-// Error: Unsupported integer bit width: 33` for ANY count (including
-// count=1). This surfaced in pg_test as
-// `gpu::h3_grid_disk_bulk(&[cell], 1) -> None` and triggered the
-// dispatch-side `pgrx::error!` "GPU kernel failed; refusing CPU
-// fallback". The fix moved the size pass to the host-side
-// `h3_grid_disk_count` helper. This test pins the single-cell path so a
-// regression that re-introduces a kernel-side size pass tripping the
-// i33 emitter is caught here at kernel-test time, before reaching
-// `function_scan_h3_grid_disk_emits_seven_cells_for_k1` in pg_test.
-static void test_grid_disk_single_cell_input() {
-  printf("--- test_grid_disk_single_cell_input ---\n");
-
-  int digits[15] = {0};
-  uint64_t hex = make_cell(57, 5, digits);
-
-  // k=0: single cell emits itself.
-  {
-    uint32_t off[2] = {99, 99};
-    pgaccel_status s = pgaccel_h3_grid_disk_output_size(&hex, 1, 0, off);
-    ASSERT_STATUS_OK("single-cell k=0 size status", s);
-    ASSERT_EQ("single-cell k=0 off[0]", off[0], 0);
-    ASSERT_EQ("single-cell k=0 off[1]", off[1], 1);
-
-    uint64_t out[1] = {0};
-    s = pgaccel_h3_grid_disk_emit(&hex, 1, 0, off, out);
-    ASSERT_STATUS_OK("single-cell k=0 emit status", s);
-    ASSERT_TRUE("single-cell k=0 emits self", out[0] == hex);
-  }
-
-  // k=1: hex k-ring = 7 (origin + 6 neighbours). This is the exact case
-  // exercised by `function_scan_h3_grid_disk_emits_seven_cells_for_k1`.
-  {
-    uint32_t off[2] = {99, 99};
-    pgaccel_status s = pgaccel_h3_grid_disk_output_size(&hex, 1, 1, off);
-    ASSERT_STATUS_OK("single-cell k=1 size status", s);
-    ASSERT_EQ("single-cell k=1 total (1+6)", off[1], 7);
-
-    std::vector<uint64_t> out(7, 0);
-    s = pgaccel_h3_grid_disk_emit(&hex, 1, 1, off, out.data());
-    ASSERT_STATUS_OK("single-cell k=1 emit status", s);
-    ASSERT_TRUE("single-cell k=1 origin at slot 0", out[0] == hex);
-    bool all_nonzero = true;
-    for (uint64_t v : out) {
-      if (v == 0) {
-        all_nonzero = false;
-        break;
-      }
-    }
-    ASSERT_TRUE("single-cell k=1 all 7 outputs non-zero", all_nonzero);
-  }
-
-  // k=2: hex disk = 1 + 6 + 12 = 19.
-  {
-    uint32_t off[2] = {99, 99};
-    pgaccel_status s = pgaccel_h3_grid_disk_output_size(&hex, 1, 2, off);
-    ASSERT_STATUS_OK("single-cell k=2 size status", s);
-    ASSERT_EQ("single-cell k=2 total (1+6+12)", off[1], 19);
-
-    std::vector<uint64_t> out(19, 0);
-    s = pgaccel_h3_grid_disk_emit(&hex, 1, 2, off, out.data());
-    ASSERT_STATUS_OK("single-cell k=2 emit status", s);
-    bool all_nonzero = true;
-    for (uint64_t v : out) {
-      if (v == 0) {
-        all_nonzero = false;
-        break;
-      }
-    }
-    ASSERT_TRUE("single-cell k=2 all 19 outputs non-zero", all_nonzero);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Test: cell_to_boundary multi-cell emit (regression for Agent K Bug 2).
-// ---------------------------------------------------------------------------
-// The original SYCL `pgaccel_h3_cell_to_boundary_emit` kernel JIT-failed
-// with `use of undeclared identifier 't_double__1_000000e_00__double__0_000000e_00_'`
-// — an AdaptiveCpp Metal SSCP emitter bug where the `[2 x double]
-// {1.0, 0.0}` PHI-node literal produced by `sycl::cos(0)` / `sycl::sin(0)`
-// inside the inverse-gnomonic projection was referenced by name but
-// never declared in the generated `.metal` source. Failure occurred for
-// ALL counts; the user-visible symptom was SIGABRT in
-// `pgaccel_h3_cells_to_multi_polygon_emit` (which delegates to this
-// kernel) when called with multi-cell input. The fix ports the entire
-// boundary kernel (and its delegated multi_polygon caller) to host
-// code. This test exercises the multi-cell emit path with sizes
-// 2/3/5/10 to pin the behaviour.
-static void test_cell_to_boundary_multi_cell_emit() {
-  printf("--- test_cell_to_boundary_multi_cell_emit ---\n");
-
-  // Build N hex cells at varying base cells / digits to ensure we exercise
-  // the full digit-replay path (not just a single cached cell).
-  int d_a[15] = {1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  int d_b[15] = {2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  int d_c[15] = {3, 4, 5, 6, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  int d_d[15] = {0};
-
-  // Pick non-pentagon base cells (H3 pentagons are 4, 14, 24, 33, 49, 50,
-  // 58, 63, 72, 83, 97, 107, 117). Stride through 5,6,7,8,9,10,11,12,13,15
-  // so at N=10 we still avoid 14 (a pentagon).
-  const int hex_bases[10] = {5, 6, 7, 8, 9, 10, 11, 12, 13, 15};
-
-  for (size_t N : {(size_t)2, (size_t)3, (size_t)5, (size_t)10}) {
-    std::vector<uint64_t> cells(N);
-    for (size_t i = 0; i < N; i++) {
-      const int* dig = (i % 4 == 0) ? d_d : (i % 4 == 1) ? d_a : (i % 4 == 2) ? d_b : d_c;
-      cells[i] = make_cell(hex_bases[i], 5, dig);
-    }
-
-    std::vector<uint32_t> off(N + 1, 99);
-    pgaccel_status s = pgaccel_h3_cell_to_boundary_output_size(cells.data(), N, off.data());
-    ASSERT_STATUS_OK("multi-cell boundary size status", s);
-    ASSERT_EQ("multi-cell boundary off[0]", off[0], 0);
-    // All inputs are hexagons (non-pentagon bases) → 12 doubles each.
-    ASSERT_EQ("multi-cell boundary total = 12 * N", off[N], 12u * N);
-
-    std::vector<double> out(off[N], 0.0);
-    s = pgaccel_h3_cell_to_boundary_emit(cells.data(), N, off.data(), out.data());
-    ASSERT_STATUS_OK("multi-cell boundary emit status", s);
-
-    // Every coordinate must be finite (NaN/inf would indicate the emit
-    // path silently skipped writing — the original SIGABRT scenario).
-    bool all_finite = true;
-    for (double v : out) {
-      if (!std::isfinite(v)) {
-        all_finite = false;
-        break;
-      }
-    }
-    ASSERT_TRUE("multi-cell boundary all coords finite", all_finite);
-
-    // First cell's first vertex must be a real (non-zero) lat/lng pair —
-    // a zero pair would mean the emit pass never wrote (the silent
-    // SIGABRT-then-zero fallthrough mode).
-    const double lat0 = out[0];
-    const double lng0 = out[1];
-    ASSERT_TRUE("multi-cell boundary first vertex non-zero", (lat0 != 0.0) || (lng0 != 0.0));
-  }
-
-  // Also verify the cells_to_multi_polygon delegated path works for
-  // multi-cell input — this is the user-visible path that was crashing
-  // in pg_test (`h3_cells_to_multi_polygon_emits_one_row`).
-  for (size_t N : {(size_t)2, (size_t)3, (size_t)5}) {
-    std::vector<uint64_t> cells(N);
-    for (size_t i = 0; i < N; i++)
-      cells[i] = make_cell(hex_bases[i], 5, d_d);
-
-    std::vector<uint32_t> ring_off(N + 1, 99);
-    uint32_t ring_count = 99;
-    pgaccel_status s = pgaccel_h3_cells_to_multi_polygon_output_size(cells.data(), N,
-                                                                     ring_off.data(), &ring_count);
-    ASSERT_STATUS_OK("multi-cell c2mp size status", s);
-    ASSERT_EQ("multi-cell c2mp ring_count == N", ring_count, static_cast<uint32_t>(N));
-    ASSERT_EQ("multi-cell c2mp total = 12 * N", ring_off[N], 12u * N);
-
-    std::vector<double> coords(ring_off[N], 0.0);
-    s = pgaccel_h3_cells_to_multi_polygon_emit(cells.data(), N, ring_off.data(), ring_count,
-                                               coords.data());
-    ASSERT_STATUS_OK("multi-cell c2mp emit status", s);
-    bool all_finite = true;
-    for (double v : coords) {
-      if (!std::isfinite(v)) {
-        all_finite = false;
-        break;
-      }
-    }
-    ASSERT_TRUE("multi-cell c2mp all coords finite", all_finite);
-  }
-}
-
 static const char* selected_test(int argc, char** argv) {
   const char* filter = std::getenv("PGACCEL_H3_TEST");
   for (int i = 1; i < argc; i++) {
@@ -2216,17 +1898,13 @@ int main(int argc, char** argv) {
   RUN_TEST(test_lat_lng_to_cell_fp64_bulk);
   RUN_TEST(test_null_pointers);
 
-  // Variable-output kernels (Agent 5A)
+  // Exact variable-output kernel plus topology fail-closed contracts.
   RUN_TEST(test_grid_disk);
   RUN_TEST(test_grid_ring_unsafe);
   RUN_TEST(test_cell_to_children);
   RUN_TEST(test_cell_to_boundary);
   RUN_TEST(test_polyfill);
   RUN_TEST(test_cells_to_multi_polygon);
-
-  // Regression tests for Agent K Round 3 kernel-layer bugs.
-  RUN_TEST(test_grid_disk_single_cell_input);
-  RUN_TEST(test_cell_to_boundary_multi_cell_emit);
 
 #undef RUN_TEST
 

@@ -344,11 +344,30 @@ fn dispatch_routing_gpu_spatial_is_not_deferred() {
 
 #[test]
 fn dispatch_resolution_maps_only_proved_generic_names_to_typed_ops() {
-    let h3_entry = FunctionAccelEntry::scalar("public", "h3_grid_disk", AccelStrategy::GpuH3);
+    let h3_entry =
+        FunctionAccelEntry::scalar("public", "h3_cell_to_children", AccelStrategy::GpuH3);
     assert!(matches!(
         resolve_dispatch_operation(AccelStrategy::GpuH3, Some(&h3_entry)),
-        DispatchOperation::H3(H3DispatchOp::GridDisk)
+        DispatchOperation::H3(H3DispatchOp::CellToChildren)
     ));
+
+    for name in [
+        "h3_grid_disk",
+        "h3_grid_ring_unsafe",
+        "h3_cell_to_boundary",
+        "h3_polygon_to_cells",
+        "h3_polyfill",
+        "h3_cells_to_multi_polygon",
+    ] {
+        let quarantined = FunctionAccelEntry::scalar("public", name, AccelStrategy::GpuH3);
+        assert!(
+            matches!(
+                resolve_dispatch_operation(AccelStrategy::GpuH3, Some(&quarantined)),
+                DispatchOperation::Deferred
+            ),
+            "quarantined H3 topology op `{name}` must not resolve to GPU dispatch",
+        );
+    }
 
     let raster_entry =
         FunctionAccelEntry::scalar("public", "st_summarystats", AccelStrategy::GpuRaster);
