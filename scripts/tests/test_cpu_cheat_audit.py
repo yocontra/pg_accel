@@ -1177,10 +1177,19 @@ class ControlFlowEvasionTests(unittest.TestCase):
             extern "C" int pgaccel_integer_zero_mutant() {
               return 0;
             }
+            pgaccel_status clean_gpu_helper(int* out) {
+              sycl::queue q;
+              q.single_task<HelperThenNull>([=]() { *out = 1; }).wait();
+              return PGACCEL_OK;
+            }
+            extern "C" void* pgaccel_helper_then_null_mutant(int* out) {
+              (void)clean_gpu_helper(out);
+              return nullptr;
+            }
             """
         )
-        self.assertEqual(result.entrypoints, 5)
-        self.assertEqual(len(result.findings), 5)
+        self.assertEqual(result.entrypoints, 6)
+        self.assertEqual(len(result.findings), 6)
         entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
         for entry in entries.values():
             self.assertFalse(entry.ok, entry.detail)

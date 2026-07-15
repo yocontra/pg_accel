@@ -5636,6 +5636,7 @@ class _PathAuditor:
             )
             and not failure_only_hazards
             and not raw_launches
+            and not calls
         )
         if (
             exact_null_decline
