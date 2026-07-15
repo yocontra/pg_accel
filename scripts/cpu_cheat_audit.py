@@ -1532,12 +1532,27 @@ def _index_is_reachable(
         for region in regions
     ):
         return False
+    target_context = _context(index, regions)
+    target_catches = {
+        key: branch for key, branch in target_context if key.startswith("catch:")
+    }
+
+    def same_exception_region(return_index: int) -> bool:
+        if not target_catches:
+            return True
+        return any(
+            target_catches.get(key) == branch
+            for key, branch in _context(return_index, regions)
+            if key.startswith("catch:")
+        )
+
     return not any(
         return_index < index
         and return_ends_before(return_index)
         and not _is_inside(return_index, lambda_ranges)
+        and same_exception_region(return_index)
         and _context_dominates(
-            _context(return_index, regions), _context(index, regions)
+            _context(return_index, regions), target_context
         )
         for return_index in range(function.body_open + 1, index)
         if tokens[return_index].value == "return"
@@ -3518,6 +3533,130 @@ def _device_orchestration_do_loops(
     return proven
 
 
+def _device_queue_orchestration_loops(
+    tokens: Sequence[Token],
+    function: Function,
+    protected_roots: set[str],
+    device_output_roots: set[str],
+    proven_transfer_calls: set[int],
+    lambda_ranges: Sequence[tuple[int, int]],
+    forward: dict[int, int],
+) -> set[int]:
+    """Prove host loops only stage data and await queue work.
+
+    This accepts ordinary streaming ``for``/``while`` loops, but fails closed
+    on host buffer writes, unawaited queue operations, or helper calls that can
+    mutate protected USM/resource storage.
+    """
+
+    def loop_body(loop_index: int) -> tuple[int, int] | None:
+        if tokens[loop_index].value in {"for", "while"}:
+            condition = loop_index + 1
+            if tokens[condition].value != "(" or condition not in forward:
+                return None
+            start, end, _ = _statement_range(
+                tokens, forward[condition] + 1, function.body_close, forward
+            )
+            return start, end
+        if tokens[loop_index].value == "do":
+            start, end, _ = _statement_range(
+                tokens, loop_index + 1, function.body_close, forward
+            )
+            return start, end
+        return None
+
+    indexed_calls = _indexed_calls(tokens, function, lambda_ranges)
+    proven: set[int] = set()
+    queue_methods = DISPATCH_METHODS | {"memcpy", "memset"}
+    for loop_index in range(function.body_open + 1, function.body_close):
+        if tokens[loop_index].value != "do" or _is_inside(loop_index, lambda_ranges):
+            continue
+        body = loop_body(loop_index)
+        if body is None:
+            continue
+        body_start, body_end = body
+        actions: set[int] = set()
+        unsafe = False
+        for method_index in range(body_start, body_end + 1):
+            if (
+                _is_inside(method_index, lambda_ranges)
+                or tokens[method_index].value not in queue_methods
+                or method_index < 2
+                or tokens[method_index - 1].value not in {".", "->"}
+            ):
+                continue
+            call = _method_lparen(tokens, method_index, body_end + 1, forward)
+            if (
+                call is None
+                or _receiver_kind(
+                    tokens,
+                    function,
+                    tokens[method_index - 2].value,
+                    method_index,
+                    forward,
+                )
+                != "queue"
+                or not _call_is_awaited(tokens, call[1], body_end + 1, forward)
+            ):
+                unsafe = True
+                break
+            if tokens[method_index].value in {"memcpy", "memset"}:
+                arguments = _call_argument_ranges(
+                    tokens, call[0], call[1], forward
+                )
+                if method_index not in proven_transfer_calls and any(
+                    tokens[index].value in device_output_roots
+                    and _unqualified_output_identifier(tokens, index)
+                    for left, right in arguments
+                    for index in range(left, right)
+                ):
+                    unsafe = True
+                    break
+            actions.add(method_index)
+        if unsafe or not actions:
+            continue
+        if any(tokens[index].value == "submit" for index in actions):
+            # Command-group lambdas can contain ordinary host staging; the
+            # stricter submit-aware recognizer above must prove those loops.
+            continue
+
+        for index in range(body_start, body_end + 1):
+            if _is_inside(index, lambda_ranges) or tokens[index].kind != "identifier":
+                continue
+            operator = _output_write_operator(tokens, index, body_end + 1, forward)
+            if operator is None:
+                continue
+            values = {token.value for token in tokens[index:operator]}
+            if (
+                tokens[index].value in protected_roots
+                or "[" in values
+                or ({".", "->"} & values)
+                or (
+                    index > body_start
+                    and tokens[index - 1].value == "*"
+                    and _declaration_kind(tokens, index, function) is None
+                )
+            ):
+                unsafe = True
+                break
+        if unsafe:
+            continue
+
+        for indexed in indexed_calls:
+            if not (body_start <= indexed.index <= body_end):
+                continue
+            if indexed.index in actions:
+                continue
+            short_name = indexed.call.name.rsplit("::", 1)[-1]
+            if short_name in {"wait", "wait_and_throw", "range", "nd_range"}:
+                continue
+            unsafe = True
+            break
+        if not unsafe:
+            proven.add(loop_index)
+    return proven
+
+
 def _lambda_nonempty(tokens: Sequence[Token], bounds: tuple[int, int]) -> bool:
     left, right = bounds
     return any(token.value != ";" for token in tokens[left + 1 : right])
@@ -4619,11 +4758,11 @@ def _local_usm_provenance(
     tokens: Sequence[Token],
     function: Function,
     lambda_ranges: Sequence[tuple[int, int]],
-) -> dict[str, tuple[str, int]]:
+) -> dict[str, tuple[str, int, str]]:
     """Track local pointers/aggregates rooted in shared or device USM."""
 
     forward, _ = _delimiter_pairs(tokens)
-    provenance: dict[str, tuple[str, int]] = {}
+    provenance: dict[str, tuple[str, int, str]] = {}
 
     def statement_left(index: int) -> int:
         cursor = index - 1
@@ -4680,7 +4819,7 @@ def _local_usm_provenance(
             if initializer:
                 target = tokens[max(initializer) - 1].value
         if target is not None:
-            provenance[target] = (kind, index)
+            provenance[target] = (kind, index, target)
 
     # Exact allocation helpers expose their result through the final pointer
     # argument rather than a C++ assignment expression.
@@ -4708,7 +4847,8 @@ def _local_usm_provenance(
             if tokens[cursor].kind == "identifier"
         ]
         if candidates:
-            provenance[candidates[-1]] = (kind, index)
+            target = candidates[-1]
+            provenance[target] = (kind, index, target)
 
     # Propagate through typed/cast pointer declarations and aggregate members.
     changed = True
@@ -4720,6 +4860,9 @@ def _local_usm_provenance(
             left = statement_left(equals)
             target = target_before(equals, left)
             if target is None or target in provenance:
+                continue
+            lhs_values = {token.value for token in tokens[left:equals]}
+            if "*" not in lhs_values and not ({".", "->"} & lhs_values):
                 continue
             end = equals + 1
             depth = 0
@@ -4735,8 +4878,20 @@ def _local_usm_provenance(
             source = _exact_pointer_root(
                 tokens, equals + 1, end, set(provenance), forward
             )
+            if source is None:
+                source = _pointer_provenance_root(
+                    tokens,
+                    equals + 1,
+                    end,
+                    {name: item[2] for name, item in provenance.items()},
+                    forward,
+                )
             if source is not None:
-                provenance[target] = (provenance[source[0]][0], equals)
+                provenance[target] = (
+                    provenance[source[0]][0],
+                    equals,
+                    provenance[source[0]][2],
+                )
                 changed = True
     return provenance
 
@@ -4864,6 +5019,75 @@ def _exact_pointer_root(
         if root_offset == 2 and nonnegative_integer_literal(values[0]):
             return root
     return None
+
+
+def _pointer_provenance_root(
+    tokens: Sequence[Token],
+    left: int,
+    right: int,
+    allowed_roots: Mapping[str, str] | set[str],
+    forward: dict[int, int],
+) -> tuple[str, int] | None:
+    """Recognize one pointer expression rooted in known storage.
+
+    Unlike ABI publication, local USM projections may use reviewed runtime
+    byte offsets. Calls, selection, assignment, and multiple storage roots
+    remain fail-closed.
+    """
+
+    canonical_roots = (
+        dict(allowed_roots)
+        if isinstance(allowed_roots, Mapping)
+        else {root: root for root in allowed_roots}
+    )
+    exact = _exact_pointer_root(tokens, left, right, set(canonical_roots), forward)
+    if exact is not None:
+        return exact
+    roots = [
+        (tokens[index].value, index)
+        for index in range(left, right)
+        if tokens[index].value in canonical_roots
+        and _unqualified_output_identifier(tokens, index)
+    ]
+    if not roots or len({canonical_roots[root] for root, _ in roots}) != 1:
+        return None
+    root = roots[0]
+    values = [token.value for token in tokens[left:right]]
+    if set(values) & {
+        ",",
+        "?",
+        ":",
+        "&&",
+        "||",
+        "=",
+        "+=",
+        "-=",
+        "*=",
+        "/=",
+        "%=",
+        "&=",
+        "|=",
+        "^=",
+        "++",
+        "--",
+    }:
+        return None
+    if root[1] > left and tokens[root[1] - 1].value == "*":
+        return None
+    casts = {"const_cast", "dynamic_cast", "reinterpret_cast", "static_cast"}
+    for index in range(left, right):
+        if tokens[index].value != "(" or index == left:
+            continue
+        previous = tokens[index - 1].value
+        if previous in casts | {"sizeof", "alignof", "decltype"}:
+            continue
+        if index < root[1] and any(
+            tokens[cursor].value in casts for cursor in range(left, index)
+        ):
+            continue
+        if tokens[index - 1].kind == "identifier" or previous in {")", "]", ">", ">>"}:
+            return None
+    return root
 
 
 def _transfer_size_is_positive(
@@ -5063,6 +5287,484 @@ def _proven_output_transfers(
         proven_call_indices.add(method_index)
         destinations[method_index] = frozenset(destination_roots)
     return evidence, proven_destination_indices, proven_call_indices, destinations
+
+
+def _local_new_resources(
+    tokens: Sequence[Token],
+    function: Function,
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> dict[str, int]:
+    resources: dict[str, int] = {}
+    for index in range(function.body_open + 1, function.body_close):
+        if tokens[index].value != "new" or _is_inside(index, lambda_ranges):
+            continue
+        left = index - 1
+        while left > function.body_open and tokens[left].value not in {";", "{", "}"}:
+            left -= 1
+        equals = next(
+            (
+                cursor
+                for cursor in range(left + 1, index)
+                if tokens[cursor].value == "="
+            ),
+            None,
+        )
+        if equals is None:
+            continue
+        names = [
+            (cursor, tokens[cursor].value)
+            for cursor in range(left + 1, equals)
+            if tokens[cursor].kind == "identifier"
+            and tokens[cursor].value not in CALL_KEYWORDS
+        ]
+        if not names:
+            continue
+        target_index, target = names[-1]
+        declaration = {token.value for token in tokens[left + 1 : target_index]}
+        if "*" not in declaration and "auto" not in declaration:
+            continue
+        resources[target] = index
+    return resources
+
+
+def _resource_data_destination(
+    tokens: Sequence[Token],
+    left: int,
+    right: int,
+    resources: set[str],
+    forward: dict[int, int],
+) -> tuple[str, int, str] | None:
+    roots = [
+        (tokens[index].value, index)
+        for index in range(left, right)
+        if tokens[index].value in resources
+        and _unqualified_output_identifier(tokens, index)
+    ]
+    if len(roots) != 1:
+        return None
+    root = roots[0]
+    member = next(
+        (
+            tokens[index + 1].value
+            for index in range(root[1] + 1, right - 1)
+            if tokens[index].value in {".", "->"}
+            and tokens[index + 1].kind == "identifier"
+        ),
+        None,
+    )
+    if member is None:
+        return None
+    data_calls = [
+        index
+        for index in range(root[1] + 1, right - 1)
+        if tokens[index].value == "data"
+        and tokens[index - 1].value in {".", "->"}
+        and tokens[index + 1].value == "("
+        and forward.get(index + 1) is not None
+        and forward[index + 1] < right
+    ]
+    if len(data_calls) != 1:
+        return None
+    data_call = data_calls[0]
+    if forward[data_call + 1] != right - 1:
+        return None
+    values = {token.value for token in tokens[left:right]}
+    if values & {",", "?", ":", "=", "+=", "-=", "++", "--"}:
+        return None
+    return root[0], root[1], member
+
+
+def _proven_opaque_resource_handoffs(
+    tokens: Sequence[Token],
+    function: Function,
+    output_roots: set[str],
+    lambda_ranges: Sequence[tuple[int, int]],
+    regions: Sequence[_Region],
+    kernel_writes: Sequence[_KernelWriteEvidence],
+    host_writes: Sequence[tuple[int, int, bool]],
+) -> tuple[
+    list[_DispatchEvidence],
+    set[int],
+    dict[int, _DispatchEvidence],
+    set[int],
+    set[str],
+    set[int],
+]:
+    """Prove a kernel-derived opaque object reaches return or an ABI handle."""
+
+    resources = _local_new_resources(tokens, function, lambda_ranges)
+    if not resources:
+        return [], set(), {}, set(), set(), set()
+    forward, _ = _delimiter_pairs(tokens)
+    provenance = _local_usm_provenance(tokens, function, lambda_ranges)
+    transfers: dict[str, list[tuple[str, _DispatchEvidence]]] = defaultdict(list)
+    transfer_calls: set[int] = set()
+    usm_host_overwrites: list[tuple[int, str]] = []
+
+    for method_index in range(function.body_open + 1, function.body_close):
+        if tokens[method_index].value not in {"memcpy", "memset"} or _is_inside(
+            method_index, lambda_ranges
+        ):
+            continue
+        if (
+            method_index < 2
+            or tokens[method_index - 1].value not in {".", "->"}
+            or _receiver_kind(
+                tokens,
+                function,
+                tokens[method_index - 2].value,
+                method_index,
+                forward,
+            )
+            != "queue"
+        ):
+            continue
+        call = _method_lparen(tokens, method_index, function.body_close, forward)
+        if call is None:
+            continue
+        arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
+        if not arguments:
+            continue
+        destination = _pointer_provenance_root(
+            tokens,
+            *arguments[0],
+            {name: item[2] for name, item in provenance.items()},
+            forward,
+        )
+        if destination is not None:
+            usm_host_overwrites.append(
+                (method_index, provenance[destination[0]][2])
+            )
+
+    for method_index in range(function.body_open + 1, function.body_close):
+        if tokens[method_index].value != "memcpy" or _is_inside(
+            method_index, lambda_ranges
+        ):
+            continue
+        if (
+            method_index < 2
+            or tokens[method_index - 1].value not in {".", "->"}
+        ):
+            continue
+        call = _method_lparen(tokens, method_index, function.body_close, forward)
+        if call is None or not _call_is_awaited(
+            tokens, call[1], function.body_close, forward
+        ):
+            continue
+        if (
+            _receiver_kind(
+                tokens,
+                function,
+                tokens[method_index - 2].value,
+                method_index,
+                forward,
+            )
+            != "queue"
+        ):
+            continue
+        arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
+        if len(arguments) != 3 or not _transfer_size_is_positive(
+            tokens, *arguments[2], forward
+        ):
+            continue
+        destination = _resource_data_destination(
+            tokens, *arguments[0], set(resources), forward
+        )
+        source = _pointer_provenance_root(
+            tokens,
+            *arguments[1],
+            {name: item[2] for name, item in provenance.items()},
+            forward,
+        )
+        if destination is None or source is None:
+            continue
+        resource, _, destination_member = destination
+        if resources[resource] >= method_index:
+            continue
+        source_base = provenance[source[0]][2]
+        transfer_context = _context(method_index, regions)
+        producers = [
+            launch
+            for launch in kernel_writes
+            if launch.index < method_index
+            and launch.awaited
+            and source_base
+            in {
+                provenance[root][2]
+                for root in launch.roots
+                if root in provenance
+            }
+            and _context_dominates(launch.context, transfer_context)
+            and launch.index
+            > max(
+                (
+                    overwrite_index
+                    for overwrite_index, overwrite_root in usm_host_overwrites
+                    if overwrite_root == source_base and overwrite_index < method_index
+                ),
+                default=-1,
+            )
+        ]
+        if not producers:
+            continue
+        transfers[resource].append(
+            (
+                destination_member,
+                _DispatchEvidence(
+                method_index,
+                tokens[method_index].line,
+                "opaque_resource_copy",
+                f"kernel-written {source_base} reaches opaque resource "
+                f"{resource}->{destination_member} "
+                f"via awaited queue memcpy at line {tokens[method_index].line}",
+                transfer_context,
+                ),
+            )
+        )
+        transfer_calls.add(method_index)
+
+    def resource_content_is_device_derived(
+        resource: str,
+        terminal: int,
+        candidates: Sequence[tuple[str, _DispatchEvidence]],
+    ) -> bool:
+        terminal_context = _context(terminal, regions)
+        transferred = {member for member, _ in candidates}
+        shaped: set[str] = set()
+        invalid: set[str] = set()
+        direct_assignments: set[str] = set()
+        for index in range(resources[resource] + 1, terminal):
+            if (
+                tokens[index].value != resource
+                or not _unqualified_output_identifier(tokens, index)
+                or _is_inside(index, lambda_ranges)
+            ):
+                continue
+            context = _context(index, regions)
+            if any(
+                key.startswith("catch:") and key not in dict(terminal_context)
+                for key, _ in context
+            ):
+                continue
+            statement_end = index + 1
+            while statement_end < terminal and tokens[statement_end].value != ";":
+                statement_end += 1
+            member_index = next(
+                (
+                    cursor + 1
+                    for cursor in range(index + 1, statement_end - 1)
+                    if tokens[cursor].value in {".", "->"}
+                    and tokens[cursor + 1].kind == "identifier"
+                ),
+                None,
+            )
+            if member_index is None:
+                continue
+            member = tokens[member_index].value
+            operator = _output_write_operator(tokens, index, statement_end, forward)
+            if operator is not None:
+                direct_assignments.add(member)
+                if any(
+                    tokens[cursor].value == "["
+                    for cursor in range(index + 1, operator)
+                ):
+                    invalid.add(member)
+            shape_methods = {"reserve", "resize"}
+            content_methods = {
+                "assign",
+                "clear",
+                "emplace",
+                "emplace_back",
+                "insert",
+                "push_back",
+                "swap",
+            }
+            for cursor in range(member_index + 1, statement_end):
+                if tokens[cursor - 1].value not in {".", "->"}:
+                    continue
+                if tokens[cursor].value in shape_methods:
+                    shaped.add(member)
+                elif tokens[cursor].value in content_methods:
+                    invalid.add(member)
+            for cursor in range(max(function.body_open + 1, index - 12), index):
+                if tokens[cursor].value not in {"copy", "fill", "memcpy"}:
+                    continue
+                call = _method_lparen(tokens, cursor, statement_end, forward)
+                if call is not None and call[0] < index < call[1] and cursor not in transfer_calls:
+                    invalid.add(member)
+            enclosing_calls = []
+            for lparen, rparen in forward.items():
+                if (
+                    tokens[lparen].value != "("
+                    or not (lparen < index < rparen)
+                    or rparen > statement_end
+                ):
+                    continue
+                name_index = _name_before_lparen(tokens, lparen)
+                if (
+                    name_index is not None
+                    and tokens[name_index].value not in CALL_KEYWORDS
+                ):
+                    enclosing_calls.append(name_index)
+            if enclosing_calls and not any(
+                call_index in transfer_calls for call_index in enclosing_calls
+            ):
+                invalid.add(member)
+        invalid.update(direct_assignments & (shaped | transferred))
+        return not invalid and shaped.issubset(transferred)
+
+    safe_shape_loops: set[int] = set()
+    transferred_members = {
+        resource: {member for member, _ in candidates}
+        for resource, candidates in transfers.items()
+    }
+    for loop_index in range(function.body_open + 1, function.body_close):
+        if tokens[loop_index].value not in {"for", "while", "do"} or _is_inside(
+            loop_index, lambda_ranges
+        ):
+            continue
+        if tokens[loop_index].value == "do":
+            body_start, body_end, _ = _statement_range(
+                tokens, loop_index + 1, function.body_close, forward
+            )
+        else:
+            condition = loop_index + 1
+            if tokens[condition].value != "(" or condition not in forward:
+                continue
+            body_start, body_end, _ = _statement_range(
+                tokens, forward[condition] + 1, function.body_close, forward
+            )
+        touched: list[tuple[str, str]] = []
+        unsafe = False
+        for index in range(body_start, body_end + 1):
+            if (
+                tokens[index].value not in resources
+                or not _unqualified_output_identifier(tokens, index)
+                or _is_inside(index, lambda_ranges)
+            ):
+                continue
+            member_index = next(
+                (
+                    cursor + 1
+                    for cursor in range(index + 1, body_end)
+                    if tokens[cursor].value in {".", "->"}
+                    and tokens[cursor + 1].kind == "identifier"
+                ),
+                None,
+            )
+            if member_index is None:
+                unsafe = True
+                break
+            touched.append((tokens[index].value, tokens[member_index].value))
+        if unsafe or not touched:
+            continue
+        if any(
+            member not in transferred_members.get(resource, set())
+            for resource, member in touched
+        ):
+            continue
+        calls_in_body = [
+            index
+            for index in range(body_start, body_end + 1)
+            if tokens[index].kind == "identifier"
+            and _method_lparen(tokens, index, body_end + 1, forward) is not None
+        ]
+        if not calls_in_body or any(
+            tokens[index].value not in {"resize", "reserve"}
+            for index in calls_in_body
+        ):
+            continue
+        if any(
+            _output_write_operator(tokens, index, body_end + 1, forward) is not None
+            for index in range(body_start, body_end + 1)
+            if tokens[index].value in resources
+        ):
+            continue
+        safe_shape_loops.add(loop_index)
+
+    publication_evidence: list[_DispatchEvidence] = []
+    proven_host_writes: set[int] = set()
+    for index, _, _ in host_writes:
+        if tokens[index].value not in output_roots:
+            continue
+        operator = _output_write_operator(tokens, index, function.body_close, forward)
+        if operator is None or tokens[operator].value != "=":
+            continue
+        end = operator + 1
+        while end < function.body_close and tokens[end].value != ";":
+            end += 1
+        resource = _exact_pointer_root(
+            tokens, operator + 1, end, set(resources), forward
+        )
+        if resource is None:
+            continue
+        candidates = [
+            (member, transfer)
+            for member, transfer in transfers.get(resource[0], ())
+            if transfer.index < index
+            and _context_dominates(transfer.context, _context(index, regions))
+        ]
+        if not candidates:
+            continue
+        if not resource_content_is_device_derived(resource[0], index, candidates):
+            continue
+        proven_host_writes.add(index)
+        publication_evidence.append(
+            _DispatchEvidence(
+                index,
+                tokens[index].line,
+                "opaque_resource_publication",
+                f"kernel-derived opaque resource {resource[0]} reaches ABI output "
+                f"at line {tokens[index].line}",
+                _context(index, regions),
+            )
+        )
+
+    resource_returns: dict[int, _DispatchEvidence] = {}
+    for return_index, expression in _returns(tokens, function, lambda_ranges):
+        if not _index_is_reachable(
+            tokens, function, return_index, regions, lambda_ranges
+        ):
+            continue
+        resource = _exact_pointer_root(
+            expression,
+            0,
+            len(expression),
+            set(resources),
+            _delimiter_pairs(expression)[0],
+        )
+        if resource is None:
+            continue
+        candidates = [
+            (member, transfer)
+            for member, transfer in transfers.get(resource[0], ())
+            if transfer.index < return_index
+            and _context_dominates(
+                transfer.context, _context(return_index, regions)
+            )
+        ]
+        if not candidates:
+            continue
+        if not resource_content_is_device_derived(
+            resource[0], return_index, candidates
+        ):
+            continue
+        resource_returns[return_index] = _DispatchEvidence(
+            return_index,
+            tokens[return_index].line,
+            "opaque_resource_return",
+            f"return transfers kernel-derived opaque resource {resource[0]} at "
+            f"line {tokens[return_index].line}",
+            _context(return_index, regions),
+        )
+    return (
+        publication_evidence,
+        proven_host_writes,
+        resource_returns,
+        transfer_calls,
+        set(transfers),
+        safe_shape_loops,
+    )
 
 
 def _deferred_output_writes(
@@ -5485,10 +6187,27 @@ class _PathAuditor:
             regions,
             kernel_writes,
         )
+        (
+            resource_publications,
+            proven_resource_writes,
+            resource_returns,
+            resource_transfer_calls,
+            resource_roots,
+            resource_shape_loops,
+        ) = _proven_opaque_resource_handoffs(
+            self.tokens,
+            function,
+            output_roots,
+            lambda_ranges,
+            regions,
+            kernel_writes,
+            host_writes,
+        )
+        proven_transfer_calls.update(resource_transfer_calls)
         host_writes = [
             record
             for record in host_writes
-            if record[0] not in proven_destination_indices
+            if record[0] not in proven_destination_indices | proven_resource_writes
         ]
         transfer_records = [
             record
@@ -5656,6 +6375,49 @@ class _PathAuditor:
             else:
                 proof = None
             call_proofs[indexed.index] = (indexed, proof, error)
+        helper_resource_roots: dict[str, list[_DispatchEvidence]] = defaultdict(list)
+        for indexed, proof, _ in call_proofs.values():
+            if (
+                proof is None
+                or not proof.ok
+                or "opaque_device_resource" not in proof.classifications
+            ):
+                continue
+            candidate, _ = self.resolve(indexed.call)
+            if isinstance(candidate, Function):
+                mutable_positions = _mutable_parameter_positions(
+                    self.tokens, candidate
+                )
+            elif isinstance(candidate, _ExternalProof):
+                mutable_positions = candidate.mutable_parameter_positions
+            else:
+                continue
+            arguments = _call_argument_ranges(
+                self.tokens, indexed.lparen, indexed.rparen, self.forward
+            )
+            for position in mutable_positions:
+                if position >= len(arguments):
+                    continue
+                left, right = arguments[position]
+                values = [token.value for token in self.tokens[left:right]]
+                while len(values) >= 2 and values[0] == "(" and values[-1] == ")":
+                    values = values[1:-1]
+                if (
+                    len(values) == 2
+                    and values[0] == "&"
+                    and re.fullmatch(r"[A-Za-z_]\w*", values[1])
+                ):
+                    helper_resource_roots[values[1]].append(
+                        _DispatchEvidence(
+                            indexed.index,
+                            indexed.call.line,
+                            "opaque_resource_helper",
+                            f"{indexed.call.name} publishes kernel-derived opaque "
+                            f"resource through local {values[1]} at line "
+                            f"{indexed.call.line}",
+                            _context(indexed.index, regions),
+                        )
+                    )
         safe_ternaries = _proven_device_selection_ternaries(
             self.tokens,
             function,
@@ -5690,6 +6452,9 @@ class _PathAuditor:
             for index, (_, proof, _) in call_proofs.items()
             if proof is not None and proof.ok
             for root in call_output_roots.get(index, frozenset())
+        )
+        device_output_roots.update(
+            self.tokens[item.index].value for item in resource_publications
         )
         validation_write_indices = _validation_metadata_write_indices(
             self.tokens,
@@ -5741,7 +6506,7 @@ class _PathAuditor:
         if counter_lines:
             classifications.add(
                 "gpu_exec_observability"
-                if direct or copyback_evidence
+                if direct or copyback_evidence or resource_publications or resource_returns
                 else "fake_gpu_counter"
             )
             details.append(
@@ -5763,10 +6528,24 @@ class _PathAuditor:
             self.forward,
             self.reverse,
         )
+        orchestration_loops.update(
+            _device_queue_orchestration_loops(
+                self.tokens,
+                function,
+                output_roots | resource_roots | set(_local_usm_provenance(
+                    self.tokens, function, lambda_ranges
+                )),
+                output_roots | resource_roots,
+                proven_transfer_calls,
+                lambda_ranges,
+                self.forward,
+            )
+        )
+        orchestration_loops.update(resource_shape_loops)
         if orchestration_loops:
             classifications.add("device_launch_orchestration")
             details.append(
-                "guaranteed-once host loop(s) only orchestrate awaited device launches at line(s) "
+                "host loop(s) only prepare device resources or orchestrate awaited queue work at line(s) "
                 + ", ".join(
                     str(self.tokens[index].line)
                     for index in sorted(orchestration_loops)
@@ -5980,7 +6759,7 @@ class _PathAuditor:
                 )
 
         all_evidence = sorted(
-            direct + copyback_evidence + call_evidence,
+            direct + copyback_evidence + resource_publications + call_evidence,
             key=lambda item: item.index,
         )
         success_paths = 0
@@ -6026,6 +6805,23 @@ class _PathAuditor:
                 zero_success_paths += 1
                 continue
 
+            if return_index in resource_returns:
+                classifications.add("opaque_device_resource")
+                details.append(resource_returns[return_index].detail)
+                continue
+
+            returned_resource_name = values[0] if len(values) == 1 else None
+            helper_resource = [
+                item
+                for item in helper_resource_roots.get(returned_resource_name or "", ())
+                if item.index < return_index
+                and _context_dominates(item.context, return_context)
+            ]
+            if helper_resource:
+                classifications.add("opaque_device_resource")
+                details.append(max(helper_resource, key=lambda item: item.index).detail)
+                continue
+
             returned_call = next(
                 (
                     record
@@ -6054,6 +6850,13 @@ class _PathAuditor:
                     unsafe_success.append(
                         f"{error or 'unresolved helper'} {indexed.call.name} at line {indexed.call.line}"
                     )
+                continue
+
+            if not function.is_status and "*" in function.return_spelling:
+                unsafe_success.append(
+                    f"pointer success at line {self.tokens[return_index].line} "
+                    "lacks opaque resource provenance"
+                )
                 continue
 
             dominating = [
@@ -6158,11 +6961,18 @@ class _PathAuditor:
                 _bounded_detail(details) or "success path is not device-proven",
                 tuple(sorted(classifications)),
             )
-        elif success_paths and all_evidence:
+        elif success_paths and (
+            all_evidence
+            or resource_returns
+            or resource_publications
+            or helper_resource_roots
+        ):
             details.extend(
                 item.detail for item in all_evidence if item.detail not in details
             )
             classifications.discard("missing_device_terminal")
+            if resource_publications or resource_returns or helper_resource_roots:
+                classifications.add("opaque_device_resource")
             proof = _Proof(
                 True,
                 _bounded_detail(details),

@@ -205,6 +205,225 @@ class DeviceTerminalTests(unittest.TestCase):
 
 
 class CallGraphTests(unittest.TestCase):
+    def test_kernel_derived_opaque_resource_return_and_publication_pass(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            OpaqueState* build_device_state(int* input, size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueBuild>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]] * 2;
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_direct(int* input, size_t count) {
+              return build_device_state(input, count);
+            }
+            extern "C" pgaccel_status pgaccel_opaque_checked(
+                int* input, size_t count, OpaqueState** out) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueChecked>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]] * 3;
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_checked_wrapper(
+                int* input, size_t count) {
+              OpaqueState* state = nullptr;
+              const pgaccel_status status =
+                  pgaccel_opaque_checked(input, count, &state);
+              if (status != PGACCEL_OK) return nullptr;
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_streamed(
+                int* input, size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              size_t begin = 0;
+              do {
+                q.parallel_for<OpaqueStream>(sycl::range<1>(1), [=](sycl::id<1>) {
+                  device_result[begin] = input[begin] * 4;
+                }).wait();
+                ++begin;
+              } while (begin < count);
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              return state;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 4)
+        self.assertFalse(result.findings)
+        for entry in result.entrypoint_audits:
+            self.assertIn("opaque_device_resource", entry.classifications)
+
+    def test_opaque_resource_hostile_provenance_mutants_fail(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            extern "C" OpaqueState* pgaccel_opaque_host_created(size_t count) {
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              state->payload[0] = 42;
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_host_overwrite(
+                int* input, size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueOverwrite>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              state->payload[0] = 42;
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_unawaited(
+                int* input, size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueUnawaited>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int));
+              return state;
+            }
+            pgaccel_status publish_to_second(
+                OpaqueState* const* ignored, OpaqueState** out, int* input, size_t count) {
+              (void)ignored;
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OpaqueSecond>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_wrong_binding(
+                int* input, size_t count) {
+              OpaqueState* state = nullptr;
+              OpaqueState* other = nullptr;
+              (void)publish_to_second(&state, &other, input, count);
+              return state;
+            }
+            struct SplitState {
+              std::vector<int> counts;
+              std::vector<double> results;
+            };
+            extern "C" SplitState* pgaccel_opaque_dummy_copy_direct(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyDirect>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new SplitState();
+              state->counts.resize(count);
+              state->results.resize(count);
+              state->results[0] = host_value;
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            extern "C" SplitState* pgaccel_opaque_dummy_copy_fill(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyFill>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new SplitState();
+              state->counts.resize(count);
+              state->results.resize(count);
+              std::fill(state->results.begin(), state->results.end(), host_value);
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            extern "C" SplitState* pgaccel_opaque_dummy_copy_memcpy(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyMemcpy>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new SplitState();
+              state->counts.resize(count);
+              state->results.resize(count);
+              std::memcpy(state->results.data(), &host_value, sizeof(host_value));
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            void host_finalize(std::vector<double>& values, double host_value) {
+              values[0] = host_value;
+            }
+            extern "C" SplitState* pgaccel_opaque_dummy_copy_helper(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyHelper>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new SplitState();
+              state->counts.resize(count);
+              state->results.resize(count);
+              host_finalize(state->results, host_value);
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            struct FixedState {
+              std::vector<int> counts;
+              double result[1];
+            };
+            extern "C" FixedState* pgaccel_opaque_dummy_copy_fixed_array(
+                int* input, size_t count, double host_value) {
+              sycl::queue q;
+              int* device_counts = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DummyFixed>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_counts[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new FixedState();
+              state->counts.resize(count);
+              state->result[0] = host_value;
+              q.memcpy(state->counts.data(), device_counts, count * sizeof(int)).wait();
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_opaque_usm_overwrite_after_kernel(
+                int* input, size_t count, int host_value) {
+              sycl::queue q;
+              int* shared_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<OverwriteAfterKernel>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                shared_result[id[0]] = input[id[0]];
+              }).wait();
+              q.memcpy(shared_result, &host_value, sizeof(host_value)).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), shared_result, count * sizeof(int)).wait();
+              return state;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 10)
+        self.assertEqual(len(result.findings), 10)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertNotIn("opaque_device_resource", entry.classifications)
+
     def test_cross_file_calls_require_unique_clean_device_proof_and_output_binding(
         self,
     ) -> None:
