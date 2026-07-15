@@ -171,7 +171,7 @@ extern "C" pgaccel_status pgaccel_init(void) {
   // installed and a signal arriving mid-enumeration is deferred until the
   // mask is restored, then delivered to PG's own handler. The previous
   // blanket SIG_DFL reset meant a SIGTERM in this window killed the backend
-  // outright, bypassing PG's shmem cleanup (TODO-REVIEW P1).
+  // outright, bypassing PostgreSQL shared-memory cleanup.
   //
   // shared_preload_libraries ensures libacpp-rt.dylib was loaded in the
   // postmaster before fork, so the child inherits the loaded library and

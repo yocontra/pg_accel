@@ -175,8 +175,8 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         return;
     }
 
-    // Phase 0 audit: time this invocation (TODO.md 2026-05-14). Bench harness
-    // reads `pg_accel_planner_overhead_us()` to detect no-dispatch regressions.
+    // Time this invocation so the benchmark harness can detect no-dispatch
+    // planner-overhead regressions through `pg_accel_planner_overhead_us()`.
     let _hook_finish = HookElapsedGuard::new("upper_paths");
 
     // SAFETY: root is the planner-provided pointer for this hook invocation.

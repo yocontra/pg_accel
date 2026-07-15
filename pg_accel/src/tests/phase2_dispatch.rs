@@ -1,4 +1,4 @@
-//! Phase 2 dispatch-correctness integration tests (Agent 2B).
+//! Phase 2 dispatch-correctness integration tests.
 //!
 //! These `#[pg_test]`s exercise the Rust dispatch/extractor layer against
 //! **real PostGIS** output rather than the in-crate test builders, so a wrong
@@ -15,10 +15,9 @@
 //! All tests skip cleanly (with a `NOTICE`) when `postgis_raster` is not
 //! installable in the pgrx test DB — same idiom as the h3 dispatch tests.
 
-// Wired into the build from `adapters/mod.rs` (a file this agent owns) via a
-// `#[path]` module so `src/tests/mod.rs` — owned by another agent this phase —
-// is not touched. pgrx `#[pg_test]` discovery is inventory-based, so the module
-// location does not affect test collection.
+// Wired into the build from `adapters/mod.rs` via a `#[path]` module. pgrx
+// `#[pg_test]` discovery is inventory-based, so the module location does not
+// affect test collection.
 #[cfg(any(test, feature = "pg_test"))]
 #[allow(clippy::unwrap_used)]
 // NOTE: module MUST be named `tests` — the pgrx test runner hardcodes SQL

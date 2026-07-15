@@ -553,7 +553,7 @@ fn child_exhausted_flag_prevents_further_batches() {
     assert!(state.child_exhausted);
 }
 
-// ── Multi-arg dispatch carrier (Phase II Agent F1) ──────────────────
+// ── Multi-argument dispatch carrier ─────────────────────────────────
 //
 // These tests exercise the executor's `qual_datums` carrier directly
 // (the FFI-side `extract_const_datum` ordering is covered by the

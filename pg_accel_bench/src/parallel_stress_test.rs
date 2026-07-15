@@ -144,7 +144,7 @@ fn extract_rows(msgs: &[postgres::SimpleQueryMessage]) -> Vec<Vec<Option<String>
 
 // ---------------------------------------------------------------------------
 // Test entry points — gated on the `integration_tests` feature so they only
-// run when an agent explicitly opts in with a running PG on the bench port.
+// run only when explicitly enabled against a running PostgreSQL instance.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "integration_tests")]

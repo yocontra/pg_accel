@@ -202,7 +202,7 @@ int main() {
   st = pgaccel_reduce_sum_f32(big, BIG, &big_sum);
   printf("big N=%zu: status=%d sum=%f (expected 1000000.0)\n", BIG, st, big_sum);
 
-  // Test 5: fused multi-reduce f32 (Fix Agent 4, 2026-04-11).
+  // Test 5: fused multi-reduce f32.
   // Input: [1, 2, 3, ..., 100] → sum=5050, min=1, max=100, count=100.
   const size_t M = 100;
   float* ramp = new float[M];

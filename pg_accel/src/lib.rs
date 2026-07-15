@@ -3,9 +3,9 @@
 // that no longer fired were removed, and those already covered by
 // `[workspace.lints.clippy]` (doc_markdown, cast_possible_truncation/wrap,
 // cast_sign_loss, cast_lossless) were dropped as redundant. Firing counts are
-// noted per lint. These stay at crate scope rather than item scope because
-// their firing sites are spread across files owned by other Phase-3 agents;
-// item-scoping them would require edits outside this crate-root file.
+// noted per lint. These stay at crate scope because their firing sites are
+// spread across planner, executor, adapter, and bridge modules. Shrinking the
+// allow set remains a separate audited change.
 
 // Test modules use `use super::*;` defensively; not every test uses every item. (83)
 #![allow(unused_imports)]
@@ -42,7 +42,7 @@
 // sentinel values. (62)
 #![allow(clippy::float_cmp)]
 // Large pedantic/nursery warnings we've decided to live with. Dominant
-// sources are the executor and ffi/planner layers (other agents' files).
+// sources are the executor and FFI/planner layers.
 #![allow(
     clippy::too_many_lines,             // 94
     clippy::needless_pass_by_value,     // 68
@@ -470,14 +470,13 @@ mod soft_fp64_cap_tests {
 
     #[test]
     fn hard_cap_constant_is_64() {
-        // The cap is documented in CLAUDE.md / TODO.md / feedback memory as
-        // `64.0`. Raising it requires explicit user sign-off and profiler
-        // evidence (feedback_dont_disable_gpu.md). This test makes the
+        // `64.0` is the documented release ceiling. Raising it requires
+        // explicit cost-model evidence and review. This test makes the
         // "don't silently bump the cap" rule a compile-time-checked fact.
         assert!(
             (SOFT_FP64_COST_MULTIPLIER_HARD_CAP - 64.0).abs() < f64::EPSILON,
             "SOFT_FP64_COST_MULTIPLIER_HARD_CAP must stay at 64.0 — raising it \
-             is a parity-floor cheat vector; see feedback_dont_disable_gpu.md"
+             is a parity-floor cheat vector and requires measured review"
         );
     }
 

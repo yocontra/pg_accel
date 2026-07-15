@@ -1,7 +1,7 @@
 //! `EXPLAIN (VERBOSE)` audit harness — Phase 9 ship gate.
 //!
-//! Builds the fixed query matrix described in `TODO.md` Phase 9 ("EXPLAIN
-//! (VERBOSE) audit") and verifies, for each query, that the parallel plan
+//! Builds the fixed `EXPLAIN (VERBOSE)` query matrix and verifies, for each
+//! query, that the parallel plan
 //! shape includes pg_accel's `CustomScan` node underneath a `Gather` /
 //! `Gather Merge`. Each row carries a [`RatchetExpectation`] telling the
 //! harness whether the assertion is required to pass *today* or is gated
@@ -18,8 +18,7 @@
 //! Anti-cheat note: do **not** flip a `RequiredToday` row to
 //! `RequiredAfterPhase(...)` to dodge a real failure. If a row fails today
 //! that is a bug we want to surface, not paper over. See
-//! `.claude/rules/anti-cheat.md` ban #2 ("No weakening tests") and the
-//! task brief ("STOP and report it").
+//! `.claude/rules/anti-cheat.md` ban #2 ("No weakening tests").
 
 use postgres::{Client, NoTls};
 
@@ -197,7 +196,7 @@ const SPATIAL_100K_QUARANTINE_REASON: &str = "legacy 100K spatial crash repro: c
      to executed evidence";
 
 /// Build the full audit matrix. Order here is the order printed in the
-/// report, so it is intentionally aligned with the task brief table.
+/// report, so the order is an intentional stable contract.
 fn build_matrix() -> Vec<AuditRow> {
     vec![
         AuditRow {

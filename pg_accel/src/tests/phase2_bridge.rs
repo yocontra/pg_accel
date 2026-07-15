@@ -1,4 +1,4 @@
-//! Phase 2 GPU bridge FFI safety tests (agent 2C).
+//! Phase 2 GPU bridge FFI safety tests.
 //!
 //! Pure unit tests — no PostgreSQL instance and no GPU dispatch required, so
 //! they run under plain `cargo test -p pg_accel --lib`. Covered here:
@@ -11,11 +11,11 @@
 //!    non-OK status bumps the per-domain failure counter.
 //! 3. Struct size **and field offset** pins for the shared FFI structs,
 //!    derived from the C headers (`pgaccel_ffi.h`, `pgaccel_expr.h`,
-//!    `pgaccel_hash_agg.h`, `pgaccel_fused.h`) on LP64 targets. Agent 2A
-//!    mirrors the same numbers as C-side `static_assert`s.
+//!    `pgaccel_hash_agg.h`, `pgaccel_fused.h`) on LP64 targets. The C side
+//!    mirrors the same numbers with `static_assert`s.
 //! 4. `expr` batch guard — caller-supplied `num_rows` that disagrees with
 //!    `batch.num_rows` is rejected before any FFI call (heap-overflow
-//!    foot-gun from TODO-REVIEW P1).
+//!    fieldless-enum FFI foot-gun).
 
 #![allow(clippy::unwrap_used)] // reason: test module
 

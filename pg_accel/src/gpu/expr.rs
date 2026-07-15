@@ -330,8 +330,8 @@ pub fn expr_template_cmp_const(
 }
 
 /// Template: evaluate `col1 <cmp1> const1 AND col2 <cmp2> const2` on a
-/// batch via Agent 4A's struct-packed kernel (single dispatch, no Rust-side
-/// AND combiner). Three-valued: `+1=TRUE, -1=FALSE, 0=UNCERTAIN`.
+/// batch via the struct-packed kernel (single dispatch, no Rust-side AND
+/// combiner). Three-valued: `+1=TRUE, -1=FALSE, 0=UNCERTAIN`.
 #[allow(dead_code)] // reason: fused Metal launch aborts on macOS; executor uses two cmp_const launches
 #[allow(clippy::too_many_arguments)]
 pub fn expr_template_two_pred_and(

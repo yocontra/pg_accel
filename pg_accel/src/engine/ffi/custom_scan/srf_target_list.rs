@@ -40,8 +40,8 @@
 //!
 //! ## Anti-cheat ban #6 / #9 compliance
 //!
-//! - `nodeProjectSet.c` (`/Users/contra/.pgrx/17.9/src/backend/executor/nodeProjectSet.c`)
-//!   was read in full before writing this module.
+//! - The implementation follows PostgreSQL's `nodeProjectSet.c` executor
+//!   lifecycle and row-expansion semantics.
 //! - Multi-SRF target lists (`SELECT srf1(c), srf2(c) FROM t` with cartesian
 //!   semantics) are NOT supported; the planner hook restricts injection
 //!   to single-SRF tlists. If a multi-SRF query gets routed here the

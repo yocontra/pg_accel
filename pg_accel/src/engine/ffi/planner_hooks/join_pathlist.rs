@@ -42,10 +42,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
-    // Phase 0 planner-hook overhead audit: time every invocation so the
-    // bench harness can detect no-dispatch queries that pay
-    // disproportionate hook overhead (TODO.md 2026-05-14 star-schema
-    // diagnosis: 37-40 ms planning vs 0.2 ms with `pg_accel.enabled=off`).
+    // Time every invocation so the benchmark harness can detect no-dispatch
+    // queries that pay disproportionate planner-hook overhead.
     let _hook_finish = HookElapsedGuard::new("join_pathlist");
 
     // Record this planner hook invocation (main backend thread only).
@@ -80,10 +78,9 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // max-output gate AND before the fast-decline. NLJ inequality joins
     // typically produce O(n*m) rows and almost always exceed
     // `gpu_join_max_output_rows`, so deferring the observer past either gate
-    // would hide the entire opportunity class. The NLJ scalar inequality
-    // kernel is the launchpad for TODO.md Phase 4 "NestedLoop scalar
-    // recognition"; the counter `nestloop_scalar_no_gpu_kernel` tells the
-    // next implementor how many of these the planner sees.
+    // would hide the entire opportunity class. The
+    // `nestloop_scalar_no_gpu_kernel` counter records how often the planner
+    // sees this currently unsupported shape.
     //
     // We only run this for INNER joins — outer/semi/anti NLJ have richer
     // null-padding semantics that the eventual GPU kernel would need to
@@ -594,8 +591,8 @@ unsafe fn observe_gated_nlj_between_opportunity(
     let n_rows_est = joinrel_ref.rows.max(0.0) as u64;
     pgrx::debug1!(
         "pg_accel join: GpuNestedLoopIneq BETWEEN skipped: selected host-boundary \
-         path is crash-gated (rows~={n_rows_est}); see TODO.md Phase 4 \
-         'NestedLoop scalar-inequality join'"
+         path is crash-gated (rows~={n_rows_est}); no safe resident GPU \
+         nested-loop implementation exists"
     );
     stats::increment_planner_rejected(
         super::RejectionReason::NljBetweenHostBoundaryUnsafe.stats_key(),
@@ -690,8 +687,7 @@ unsafe fn observe_nestloop_scalar_opportunity(
             "pg_accel join: NestedLoop scalar-inequality opportunity skipped: \
              {nest_count} T_NestPath candidate(s), {ineq_count} cross-rel \
              scalar inequality qual(s), output rows~={n_rows_est}; no selected \
-             safe GPU nested-loop implementation exists (see TODO.md Phase 4 \
-             'NestedLoop scalar recognition')"
+             safe resident GPU nested-loop implementation exists"
         );
         stats::increment_planner_rejected("nestloop_scalar_no_gpu_kernel", n_rows_est);
     }

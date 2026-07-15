@@ -722,7 +722,7 @@ extern "C" pgaccel_status pgaccel_reduce_count(const uint8_t* mask, size_t count
 }
 
 // ---------------------------------------------------------------------------
-// Fused multi-aggregate reduction (Fix Agent 4)
+// Fused multi-aggregate reduction
 //
 // Single-pass kernel that computes SUM+MIN+MAX+COUNT over one input buffer
 // in a single launch. Replaces four sequential kernel launches per chunk,

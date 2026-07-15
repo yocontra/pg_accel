@@ -53,9 +53,8 @@ thread_local! {
 /// whether the injection succeeded. Denominator for the rejection ratio.
 static PLANNER_CONSIDERED: AtomicU64 = AtomicU64::new(0);
 
-/// Number of paths the planner evaluated and declined to inject. Reviewer 3
-/// needs this to distinguish "GPU ran and tied" from "planner silently
-/// declined to inject". See `benchmarks/action_items.md` §C3.
+/// Number of paths the planner evaluated and declined to inject. Reports use
+/// this to distinguish "GPU ran and tied" from "planner declined to inject".
 static PLANNER_REJECTED: AtomicU64 = AtomicU64::new(0);
 
 /// Number of times the degenerate-geometry guard in the three-layer
@@ -63,9 +62,9 @@ static PLANNER_REJECTED: AtomicU64 = AtomicU64::new(0);
 /// call sites that detect degenerate geometries before GPU dispatch.
 static DEGENERATE_GUARD_TRIGGERS: AtomicU64 = AtomicU64::new(0);
 
-/// GPU input buffer cache hits (persistent per-column device buffer cache
-/// owned by Fix Agent 4). Call sites live in the executor agg/hashjoin
-/// layer; this module only provides the increment helper.
+/// GPU input buffer cache hits for the persistent per-column device cache.
+/// Call sites live in the aggregate/hash-join executors; this module only
+/// provides the increment helper.
 static GPU_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 
 /// GPU input buffer cache misses — a column was requested but had to be
@@ -234,9 +233,8 @@ pub fn read_planner_rejection_reason_count(reason: &str) -> u64 {
 
 /// Increment the degenerate-guard trigger counter.
 ///
-/// Wired from Fix Agent 1's `three_layer.rs` once its accessor lands. Until
-/// then, any call site that notices a degenerate-geometry short-circuit can
-/// hit this helper to keep the SRF column non-zero in tests.
+/// Call sites that detect a degenerate-geometry short-circuit use this helper
+/// to expose the event through the statistics surface.
 #[inline]
 pub fn increment_degenerate_guard() {
     DEGENERATE_GUARD_TRIGGERS.fetch_add(1, Ordering::Relaxed);
@@ -251,8 +249,8 @@ pub fn read_degenerate_guard() -> u64 {
 
 /// Increment the GPU input buffer cache hit counter.
 ///
-/// Call site: Fix Agent 4's persistent GPU buffer cache, when a column upload
-/// is skipped because the device buffer is already populated.
+/// Called by the persistent GPU buffer cache when a column upload is skipped
+/// because the device buffer is already populated.
 #[inline]
 pub fn increment_gpu_cache_hit() {
     GPU_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -260,8 +258,8 @@ pub fn increment_gpu_cache_hit() {
 
 /// Increment the GPU input buffer cache miss counter.
 ///
-/// Call site: Fix Agent 4's persistent GPU buffer cache, when a column upload
-/// has to happen because no cached device buffer exists.
+/// Called by the persistent GPU buffer cache when a column must be uploaded
+/// because no cached device buffer exists.
 #[inline]
 pub fn increment_gpu_cache_miss() {
     GPU_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
@@ -465,10 +463,9 @@ fn pg_accel_stats() -> TableIterator<
 }
 
 /// Returns the cumulative microseconds spent inside pg_accel planner hooks
-/// since the backend started. Cheap atomic load. The Phase 0 planner-hook
-/// overhead audit (TODO.md 2026-05-14) uses this to spot regressions in
-/// no-dispatch query overhead without re-decoding the full `pg_accel_stats()`
-/// SRF.
+/// since the backend started. This cheap atomic load lets the benchmark audit
+/// detect no-dispatch planner-overhead regressions without re-decoding the full
+/// `pg_accel_stats()` SRF.
 #[pg_extern]
 fn pg_accel_planner_overhead_us() -> i64 {
     read_planner_hook_total_us() as i64

@@ -442,9 +442,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         return;
     }
 
-    // Phase 0 audit: time this hook invocation (TODO.md 2026-05-14). Bench
-    // harness reads `pg_accel_planner_overhead_us()` to detect star-schema
-    // no-dispatch regressions in planner overhead.
+    // Time this hook invocation so the benchmark harness can detect
+    // star-schema no-dispatch regressions in planner overhead.
     let _hook_finish = super::HookElapsedGuard::new("rel_pathlist");
 
     // Record this planner hook invocation (main backend thread only).
@@ -691,8 +690,8 @@ pub(super) fn min_max_rewrite_shape(limit_tuples: f64, num_pathkeys: i32) -> boo
 ///
 /// Used by [`try_inject_gpu_sort_path`] to decide between full-sort
 /// injection, a no-op (PG sees the sort as free), and an IncrementalSort
-/// opportunity we currently decline (tracked in TODO.md Phase 4
-/// "IncrementalSort injection").
+/// opportunity the production planner currently declines because no complete
+/// resident IncrementalSort pipeline exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SortShape {
     /// No existing child path has any pathkey prefix of `sort_pathkeys`.

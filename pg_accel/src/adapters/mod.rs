@@ -10,10 +10,9 @@ pub mod extractors;
 pub mod h3;
 pub mod postgis;
 
-// Phase 2 dispatch-correctness `#[pg_test]`s (Agent 2B). Included here — a file
-// this agent owns — via `#[path]` so `src/tests/mod.rs` (owned by another agent
-// this phase) is not edited. pgrx `#[pg_test]` discovery is inventory-based, so
-// the module location does not affect collection; run with the filter
+// Dispatch-correctness `#[pg_test]`s are included here via `#[path]`. pgrx
+// `#[pg_test]` discovery is inventory-based, so the module location does not
+// affect collection; run with the filter
 // `cargo pgrx test pg18 phase2_dispatch`.
 #[cfg(feature = "pg_test")]
 #[path = "../tests/phase2_dispatch.rs"]

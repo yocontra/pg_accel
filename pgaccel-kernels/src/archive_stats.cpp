@@ -3,8 +3,7 @@
 // into pgaccel_kernels so its FFI lives next to the rest of the kernel
 // surface that depends on the AdaptiveCpp runtime layout.
 //
-// Phase 2 "Metal pipeline-state XPC edge case" — see TODO.md and the
-// "MTLBinaryArchive cache" section of CLAUDE.md.
+// This supports the Metal pipeline-state and binary-archive evidence gates.
 
 #include <cerrno>
 #include <cstdio>

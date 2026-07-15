@@ -1,4 +1,4 @@
-//! Phase 2 engine-hardening integration tests (Agent 2F).
+//! Phase 2 engine-hardening integration tests.
 //!
 //! These `#[pg_test]`s run against a live PostgreSQL backend and exercise the
 //! runtime-observable behaviour of the Phase 2 fixes in `lib.rs`,

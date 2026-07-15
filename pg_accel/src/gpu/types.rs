@@ -125,7 +125,7 @@ const _: () = assert!(std::mem::size_of::<PgaccelDeviceInfo>() == 216);
 //   - `pgaccel_hash_agg.h` — pgaccel_agg_col
 //   - `pgaccel_fused.h`    — pgaccel_reduce_col
 // If one fires, the two sides drifted — fix the drift, never the number.
-// Agent 2A mirrors the same numbers as C-side static_asserts.
+// The C headers mirror the same values with static assertions.
 // ---------------------------------------------------------------------------
 #[cfg(target_pointer_width = "64")]
 mod abi_size_pins {

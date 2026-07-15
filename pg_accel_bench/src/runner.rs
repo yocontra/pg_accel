@@ -1100,8 +1100,8 @@ fn system_time_unix_secs(time: SystemTime) -> Option<u64> {
 /// should document the fallback in the report). Errors are fatal — never
 /// silently swallow a broken cache-clearing path.
 ///
-/// Reviewer 2 §3(ii) / action_items M2: `DISCARD ALL` does NOT clear the
-/// OS page cache. It only resets session state.
+/// `DISCARD ALL` does not clear the OS page cache; it only resets session
+/// state.
 #[allow(dead_code)]
 pub fn purge_os_page_cache() -> Result<bool, Box<dyn std::error::Error>> {
     #[cfg(target_os = "macos")]
@@ -1178,9 +1178,8 @@ const fn combine_purge_states(a: CachePurgeState, b: CachePurgeState) -> CachePu
     if rank(a) >= rank(b) { a } else { b }
 }
 
-/// Capture thermal state before a workload runs. Used by the report to
-/// flag workloads that ran under thermal pressure (action_items M13 /
-/// Reviewer 1 Sin #18).
+/// Capture thermal state before a workload runs. Used by the report to flag
+/// workloads that ran under thermal pressure.
 ///
 /// On macOS: `pmset -g therm` parses `CPU_Scheduler_Limit` and
 /// `CPU_Speed_Limit` (values < 100 mean throttled).
@@ -1248,7 +1247,7 @@ fn parse_pmset_limit(text: &str, key: &str) -> Option<u32> {
 
 /// Run `VACUUM (ANALYZE, VERBOSE)` on every table created by a workload's
 /// setup and capture `relpages` / `reltuples` / max `n_distinct` from
-/// `pg_class` / `pg_stats`. Action_items C6 / Reviewer 2 §3(iii).
+/// `pg_class` / `pg_stats`.
 #[allow(clippy::unnecessary_wraps)] // signature kept stable for future fallible ops
 pub fn vacuum_and_capture_stats(
     client: &mut Client,
@@ -1464,9 +1463,9 @@ pub fn run_with_timing_and_cache(
     };
 
     let query = workload.query_sql();
-    // Reviewer 1 §4 / action_items §0: some workloads (h3) need a different
-    // SQL on the PgParallel baseline side so the planner cannot intercept
-    // the call. Default is `None` (use the accel query for both).
+    // Some workloads (notably H3) need different SQL on the PostgreSQL
+    // baseline side so the extension cannot intercept the call. Default is
+    // `None` (use the accelerated query text for both).
     let baseline_query = workload
         .baseline_query_sql()
         .unwrap_or_else(|| query.clone());
@@ -1866,8 +1865,8 @@ fn run_with_mode(
         TimingMode::RawWallClock => run_raw_wall_clock(client, query),
         TimingMode::Both => {
             // Run both mechanisms back-to-back on the same connection.
-            // We report the raw wall-clock value (per action_items M1
-            // default) but also capture the EXPLAIN ANALYZE figure to
+            // We report the raw wall-clock value but also capture the EXPLAIN
+            // ANALYZE figure to
             // stderr so operators can audit the gap.
             let raw = run_raw_wall_clock(client, query)?;
             match run_explain_analyze(client, query) {
@@ -2312,8 +2311,8 @@ fn prepare_run_context(
             record_setup_failure(artifacts.as_ref(), "guc-apply", &format!("{e}"));
             return Err(e);
         }
-        // Verify observed values match; hard-fail on postmaster-setting
-        // drift (action_items C4, Reviewer 2 §1) unless --skip-guc-verify.
+        // Verify observed values match; hard-fail on postmaster-setting drift
+        // unless --skip-guc-verify is explicit.
         match verify_and_capture_gucs(connection, profile, config.skip_guc_verify) {
             Ok(snapshot) => {
                 eprintln!(
@@ -2900,8 +2899,7 @@ fn run_workload_with_config(
 ) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
     setup(connection, workload, rows, config.seed)?;
 
-    // VACUUM (ANALYZE, VERBOSE) after load, before timing begins
-    // (action_items C6 / Reviewer 2 §3(iii)). This proves the parallel
+    // VACUUM (ANALYZE, VERBOSE) after load, before timing begins. This proves the parallel
     // baseline's planner had fresh stats for every measured row — otherwise
     // `parallel_mean` is suspect.
     let tables = workload_tables(workload, rows);
@@ -2911,7 +2909,7 @@ fn run_workload_with_config(
     };
     let sanity_checks = capture_benchmark_sanity_checks(connection, workload)?;
 
-    // Capture thermal state BEFORE the timed loop (action_items M13).
+    // Capture thermal state before the timed loop.
     let thermal = capture_thermal_state();
 
     if let Some(artifact_writer) = artifacts
@@ -2938,8 +2936,7 @@ fn run_workload_with_config(
 
     // Always capture a plan snippet so the runner can tag the workload
     // as dispatched/not-dispatched even if --capture-plans is off. This
-    // feeds the dispatch classification (action_items C8 / Reviewer 1
-    // Sin #5). The full-plans file (plans.txt) is still written if
+    // feeds the dispatch classification. The full-plans file is still written if
     // plans_capture_path is set.
     let accel_plan = capture_plan_snippet(connection, workload, rows, BenchMode::Accel).ok();
     let baseline_plan =
@@ -4678,8 +4675,7 @@ mod tests {
 
     #[test]
     fn test_row_scales_constant() {
-        // 1K scale dropped per action_items M11 (Reviewer 1 Sin #15) —
-        // below instrument noise floor.
+        // The 1K scale is below the instrument noise floor.
         assert_eq!(ROW_SCALES, &[10_000, 100_000, 1_000_000, 10_000_000]);
     }
 
@@ -4687,7 +4683,7 @@ mod tests {
     fn test_row_scales_min_10k() {
         assert!(
             ROW_SCALES.iter().min().copied().unwrap_or(0) >= 10_000,
-            "minimum reportable scale is 10K (action_items M11)"
+            "minimum reportable scale is 10K by benchmark policy"
         );
     }
 

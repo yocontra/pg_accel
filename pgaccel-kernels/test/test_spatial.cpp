@@ -188,7 +188,7 @@ static void test_point_in_ring_fp32() {
 static void test_sphere_distance_basic() {
   printf("--- sphere_distance: basic ---\n");
 
-  // fp32 + fp64 paths both supported as of Agent 2A's split (Phase A).
+  // Both fp32 and fp64 paths are covered after the typed-kernel split.
   // Templated `sphere_distance_bulk_sycl<T>` was replaced with two
   // non-templated kernels (`_f32` / `_f64`) — see spatial_predicates.cpp
   // for the Metal-SSCP template-instantiation hang background.
@@ -264,7 +264,7 @@ static void test_sphere_distance_edge_cases() {
   }
 
   // fp64 path now lives — split from templated kernel to avoid the
-  // Metal SSCP template-instantiation hang (Agent 2A task 1). NYC->London
+  // Metal SSCP template-instantiation regression. NYC->London
   // distance ≈ 5570 km via Haversine. Definite (not uncertain) because
   // the points are >> 1 mm apart.
   {
@@ -305,7 +305,7 @@ static void test_sphere_distance_fp32() {
 }
 
 // fp64 path tests — exercises the split non-templated `_f64` kernel that
-// replaced the templated form (Agent 2A task 1). The fp64 kernel is the
+// replaced the templated form. The fp64 kernel is the
 // one that used to return PGACCEL_ERROR_NO_DEVICE; these assertions
 // confirm it now returns real distances.
 static void test_sphere_distance_fp64() {

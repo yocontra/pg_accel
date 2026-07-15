@@ -682,10 +682,9 @@ impl DeviceLimits {
             // across all pairs, so the marginal per-pair charge is
             // small. 1e-7 / pair × 1M pairs = 0.1 PG cost units, which
             // is in the same ballpark as a CPU per-row tuple cost
-            // (`cpu_tuple_cost` is ~0.01 / row). Calibration TODO when
-            // the executor lands and we have measured device throughput;
-            // until then the value is a conservative ceiling so the
-            // planner is biased toward declining marginal cases.
+            // (`cpu_tuple_cost` is ~0.01 / row). This value remains a
+            // conservative ceiling until the executor has measured device
+            // throughput, biasing the planner toward declining marginal cases.
             gpu_nlj_per_pair_cost: 1.0e-7,
 
             // fp64 emulation cost gate. `from_profile` is the only entry

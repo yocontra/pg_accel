@@ -1,8 +1,7 @@
 // test_kernel_failure_status.cpp — induced-failure honesty gate.
 //
-// Pins the 2026-07 kernel-safety fixes (TODO-REVIEW P0 "Async kernel
-// failures produce PGACCEL_OK + zeroed results" and P1 "No try/catch at
-// extern C boundary"):
+// Pins the kernel-safety contracts for async failure propagation and
+// exception containment at extern-C boundaries:
 //
 //   1. A dispatch whose staging allocation cannot possibly succeed
 //      (multiple exabyte-sized buffers) must surface an error status —

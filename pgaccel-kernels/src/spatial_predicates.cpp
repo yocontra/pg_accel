@@ -217,14 +217,14 @@ static int8_t segment_intersects_one(T p1x, T p1y, T p2x, T p2y, T p3x, T p3y, T
 // `sycl::fmin`, `sycl::fmax`) instead of `std::*` so AdaptiveCpp's SSCP
 // path picks up the Metal libkernel forwarders for fp64.
 //
-// Known soft-fp64 issue surfaced by this kernel (Phase 7 follow-up):
+// Known soft-fp64 limitation surfaced by this kernel:
 //   With Metal soft-fp64 lowering on a 4-vertex (triangle) ring, the
 //   `len_sq = dx*dx + dy*dy` accumulator collapses to 0 inside the
 //   per-edge loop even though the loop reads ax/ay/bx/by and dx/dy
 //   correctly when traced into a debug buffer. Equivalently, the
 //   `near_edge = (cross² < eps²·len_sq)` comparison fires spuriously
 //   for the small-ring case. `test_point_in_ring_triangle` is the
-//   reproducer — see TODO.md Phase 1 / Phase 7. Larger rings
+//   focused reproducer. Larger rings
 //   (1k–1M, 1001-vertex circle) are unaffected and pass cleanly with
 //   this kernel. Investigation is upstream-AdaptiveCpp territory; the
 //   kernel itself is a faithful port of the host `point_in_ring_one`

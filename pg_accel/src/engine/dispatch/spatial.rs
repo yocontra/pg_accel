@@ -359,11 +359,10 @@ pub unsafe fn dispatch_gpu_spatial(
     // - st_contains / st_within / st_equals / st_touches / st_crosses /
     //   st_overlaps: route through `three_layer::spatial_eval` so each
     //   predicate hits its dedicated `pgaccel_st_*_bulk` SYCL kernel
-    //   (Contains has its own point-in-ring fast path; the four
-    //   algorithmic predicates were landed by Agent 2A).
+    //   (Contains has its own point-in-ring fast path.)
     // - st_dwithin: 3-arg predicate `ST_DWithin(geom, geom, threshold)`.
-    //   The threshold rides on `qual_datums[1]` (the new multi-arg
-    //   carrier wired by Phase II Agent F1) and is passed into
+    //   The threshold rides on `qual_datums[1]` in the multi-argument
+    //   carrier and is passed into
     //   `SpatialPredicate::DWithin` so the Haversine kernel uses the
     //   correct distance gate instead of a wrong Intersects fallback.
     let predicate = match op {
@@ -686,8 +685,8 @@ unsafe fn dispatch_gpu_st_area(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dispatc
     use crate::gpu::bridge::{self, PgaccelStatus};
     // SAFETY: coords / row_offsets / areas are valid Rust-owned slices
     // of the declared lengths. This dispatch still uses the f32 geometry
-    // contract; the typed-geometry FP64 TODO tracks preserving PostGIS f64
-    // coordinates through area/length paths.
+    // contract; preserving PostGIS f64 coordinates through area/length paths
+    // remains an explicit typed-geometry limitation.
     let status = unsafe {
         bridge::pgaccel_st_area_bulk(
             coords.as_ptr().cast(),
@@ -729,8 +728,8 @@ unsafe fn dispatch_gpu_st_area(batch: &[(pgrx::pg_sys::Datum, bool)]) -> Dispatc
 /// pay one extra dispatch but stay correct.
 ///
 /// This dispatch still uses the f32 geometry contract. The C++ kernel has an
-/// fp64 branch; the typed-geometry FP64 TODO tracks preserving PostGIS f64
-/// coordinates through this path.
+/// fp64 branch; preserving PostGIS f64 coordinates through this path remains
+/// an explicit typed-geometry limitation.
 ///
 /// # Safety
 ///
@@ -894,7 +893,7 @@ unsafe fn dispatch_gpu_st_distance(
     // ── Polygon × Polygon path ─────────────────────────────────────
     // When the constant geom_b is a single-ring Polygon, build a CSR
     // batch of per-row polygon coords and call
-    // pgaccel_st_distance_polygon_polygon_bulk (Agent 2A task 3). The
+    // pgaccel_st_distance_polygon_polygon_bulk. The
     // kernel returns Euclidean min-vertex-to-edge distance + an uncertainty
     // flag for boundary touch / overlap. Uncertainty is refused under
     // GPU-only execution.
@@ -978,7 +977,7 @@ unsafe fn dispatch_gpu_st_distance(
     DispatchResult::Accelerated(results)
 }
 
-/// Polygon × Polygon `st_distance` via Agent 2A's
+/// Polygon × Polygon `st_distance` via
 /// `pgaccel_st_distance_polygon_polygon_bulk`. CSR-laid out the same way as
 /// `pgaccel_st_area_bulk`: per-row coords concatenated in a flat fp32
 /// buffer indexed by `row_offsets[N+1]`. The kernel emits one f32 distance

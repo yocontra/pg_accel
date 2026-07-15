@@ -4,12 +4,9 @@
 //! tracks the fp64-unlock-plan contract and must not be modified without user
 //! sign-off. Adding/removing/renaming rows is a rejection-worthy change.
 //!
-//! Scaffold-only while Phase 1 (Metal Emitter fp64 value-op gaps) is
-//! open. Items here are wired into the bench runner as part of
-//! Phase 1 Done-when / Phase 9 verification (`TODO.md`). Until then
-//! the symbols below are intentionally dead-code from the compiler's
-//! view but asserted against in-module by the 18 unit tests that prove
-//! the assertion mechanism works before any real bench run.
+//! The rows are wired into the benchmark registry and their assertion logic is
+//! covered by focused unit tests. A release claim still requires a fresh live
+//! run on the exact candidate and device.
 //!
 //! Responsibilities of this module:
 //!   1. Expose the 8 [`Workload`] implementations at 5 sizes.

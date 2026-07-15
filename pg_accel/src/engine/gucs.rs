@@ -62,7 +62,7 @@ static PARALLEL_FUSED_COUNT: GucSetting<bool> = GucSetting::<bool>::new(false);
 /// `pg_accel.otel_log_max_rotations`, and starts a fresh active file.
 /// Default 256 MiB matches `DEFAULT_OTEL_LOG_MAX_MB` in
 /// `src/engine/otel.rs`. The 2026-05-13 benchmark caught this file at
-/// ~17.9 GiB on a long-running session that never rotated — see TODO.md.
+/// ~17.9 GiB on an observed long-running session that never rotated.
 static OTEL_LOG_MAX_MB: GucSetting<i32> = GucSetting::<i32>::new(256);
 
 /// Number of rotated copies of each JSONL trace artifact to retain. A

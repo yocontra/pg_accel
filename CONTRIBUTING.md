@@ -9,7 +9,9 @@ production planner support.
 ## Development setup
 
 Prerequisites include the pinned Rust toolchain, CMake, a C/C++ toolchain,
-pgrx, repository-built PostgreSQL, and AdaptiveCpp for kernel builds. The
+pgrx, repository-built PostgreSQL, and the exact AdaptiveCpp commit in
+[`.acpp-version`](.acpp-version) for kernel builds. Setup scripts and CI read
+that file directly; do not substitute the head of `fork-safe-metal`. The
 currently validated GPU development target is Metal on Apple Silicon.
 CUDA/NVIDIA validation is owner-deferred in [TODO.md](TODO.md); do not claim it
 from an unverified build.
@@ -132,3 +134,7 @@ chore(scope): maintain tooling or dependencies
 Pull requests should state the motivation, affected ownership boundaries,
 behavioral contract, validation performed, hardware-dependent gaps, and any
 native-decline or public-capability changes.
+
+Use [GitHub issues](https://github.com/yocontra/pg_accel/issues) for ordinary
+bugs and feature requests. Security reports follow [SECURITY.md](SECURITY.md)
+and must not be posted as public issues.

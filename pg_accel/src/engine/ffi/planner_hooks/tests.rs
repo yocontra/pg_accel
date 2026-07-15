@@ -955,7 +955,7 @@ fn window_cost_helper_applies_multiplier_on_soft_fp64_device() {
 }
 
 // =====================================================================
-// IncrementalSort detect-and-decline smoke (TODO.md Phase 4)
+// IncrementalSort detect-and-decline smoke
 // =====================================================================
 //
 // The GPU sort executor is single-key (see `GPU_SORT_MAX_PATHKEYS` in
@@ -1188,7 +1188,7 @@ mod min_max_rewrite_decline {
 }
 
 // =====================================================================
-// MergeJoin detect-and-decline smoke (TODO.md Phase 4)
+// MergeJoin detect-and-decline smoke
 // =====================================================================
 //
 // No GPU merge-join kernel exists in `pgaccel-kernels/src/` (verified by
@@ -1683,7 +1683,7 @@ mod append_inject {
 }
 
 // =====================================================================
-// Phase 0: planner-hook overhead audit (TODO.md 2026-05-14)
+// Planner-hook overhead audit
 // =====================================================================
 //
 // A 2026-05-14 four-way star-schema diagnosis found planning time inflated to

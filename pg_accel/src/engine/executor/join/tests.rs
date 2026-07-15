@@ -618,8 +618,8 @@ fn resolve_none_is_none() {
 fn resolve_unknown_predicates_are_none_not_intersects() {
     // These are the predicates the adapter deliberately does NOT register
     // because no GPU path exists. The executor must NOT silently treat them
-    // as `Intersects`. See adapters/postgis.rs:gpu_spatial_entries audit
-    // table and the Phase 4 TODO entry.
+    // as `Intersects`. See the `gpu_spatial_entries` audit table in
+    // `adapters/postgis.rs`.
     //
     for name in [
         "st_dwithin",

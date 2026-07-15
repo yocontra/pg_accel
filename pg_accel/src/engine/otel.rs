@@ -4,7 +4,7 @@
 //! 1. **OTel JSONL file** — OTLP JSON spans written to `$PGDATA/pg_accel_otel.jsonl`,
 //!    compatible with `otel-tui --from-json-file` for live span viewing.
 //! 2. **tracing JSONL file** — tracing-subscriber JSON written to
-//!    `$PGDATA/pg_accel_traces.jsonl` for Claude agent `Read` tool.
+//!    `$PGDATA/pg_accel_traces.jsonl` for local diagnostics and artifact capture.
 //! 3. **stderr** — compact human-readable format for PG log / terminal
 //!
 //! Controlled by `pg_accel.log_level` GUC (debug/info/notice/warning/error).
@@ -91,7 +91,7 @@ fn try_init() -> Result<(), Box<dyn std::error::Error>> {
     let trace_path = trace_file_path("pg_accel_traces.jsonl");
     let policy = trace_rotation_policy();
 
-    // tracing-subscriber JSON layer → JSONL file for Claude agents.
+    // tracing-subscriber JSON layer -> local JSONL diagnostics.
     let trace_file = Arc::new(BoundedFile::open(trace_path.clone(), policy)?);
 
     // Stash the file handle so `flush_tracing` can fsync it on exit /
@@ -317,8 +317,8 @@ fn mb_to_bytes(mb: i32) -> u64 {
 ///     [`SIZE_RECHECK_INTERVAL_BYTES`] of writes, or when the running
 ///     counter alone would push past the cap. Long benchmark sessions
 ///     therefore amortize stat() down to ~one syscall per 64 KiB of
-///     traces (vs. one syscall per span event in the prior impl that
-///     allowed the 17.9 GiB blowup recorded in TODO.md).
+///     traces (vs. one syscall per span event in the prior implementation,
+///     which allowed an observed long-running session to grow to 17.9 GiB).
 struct BoundedFile {
     path: PathBuf,
     policy: RotationPolicy,

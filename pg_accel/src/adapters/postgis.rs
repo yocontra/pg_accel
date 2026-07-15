@@ -25,8 +25,8 @@ pub fn adapter() -> ExtensionAdapter {
 /// GPU-accelerated spatial predicate functions.
 ///
 /// Only functions with a functionally-complete GPU planner lane are registered.
-/// The full TODO.md Phase 4 candidate list was audited against
-/// `pgaccel-kernels/src/spatial_*.cpp` and `src/gpu/three_layer.rs`; partial
+/// Candidate functions are audited against `pgaccel-kernels/src/spatial_*.cpp`
+/// and `src/gpu/three_layer.rs`; partial
 /// lanes that depend on PostGIS host-side evaluation are intentionally left out.
 ///
 /// # Geometry-pair coverage inside the dormant `st_intersects` kernel

@@ -8,7 +8,7 @@
 // AdaptiveCpp runtime's archive failure markers; archive cache state is
 // snapshotted before/after.
 //
-// Acceptance gate (TODO.md Phase 2): an N=8 × M=20 stress run shows
+// Acceptance gate: an N=8 × M=20 stress run shows
 // **zero** XPC errors. The harness exits non-zero if any child surfaced
 // an `MTLCompilerService` / pipeline-state failure / archive load
 // failure log line, or if the per-child dispatch matrix produced wrong
@@ -42,7 +42,7 @@
 #include "pgaccel_ffi.h"
 
 // ──────────────────────────────────────────────────────────────────────
-// Stress parameters. The task brief pins N=8, M=20 as the acceptance
+// Stress parameters. The acceptance contract pins N=8, M=20 as the
 // matrix. Override via env for diagnostics / extended soak.
 // ──────────────────────────────────────────────────────────────────────
 

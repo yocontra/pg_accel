@@ -8,13 +8,14 @@ kernel families remain unavailable to normal planning until they have a
 complete resident pipeline.
 
 [![License: PostgreSQL](https://img.shields.io/badge/license-PostgreSQL-blue.svg)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/pg-accel/pg_accel/ci.yml?label=CI)](https://github.com/pg-accel/pg_accel/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/yocontra/pg_accel/ci.yml?label=CI)](https://github.com/yocontra/pg_accel/actions)
 
 ## Build from source
 
 There is no prebuilt-package promise in this repository. A development build
-requires Rust, pgrx, CMake, a C/C++ toolchain, and the pinned AdaptiveCpp
-toolchain used by the repository recipes.
+requires Rust, pgrx, CMake, a C/C++ toolchain, and the AdaptiveCpp commit pinned
+by [`.acpp-version`](.acpp-version). The setup and CI recipes read that file
+directly; a branch name alone is not sufficient provenance.
 
 The currently validated GPU development target is Metal on Apple Silicon:
 

@@ -68,12 +68,13 @@ pub enum SpatialPredicate {
     /// uncertain pairs stay uncertain and are rejected by GPU-only callers).
     Disjoint,
     /// `ST_Equals` — do the two geometries have the same point set?
-    /// Routes to `pgaccel_st_equals_bulk` (Agent 2A task 4). The
+    /// Routes to `pgaccel_st_equals_bulk`. The
     /// kernel surfaces DEFINITE for identical Point/Point coords,
     /// identical Polygon/Polygon ring vertex sets, and disjoint-bbox
     /// shortcuts; everything else falls to UNCERTAIN and is rejected by
     /// GPU-only callers.
-    #[allow(dead_code)] // Phase B Agent 1B wires per-row dispatch
+    #[allow(dead_code)]
+    // reason: dormant until admitted by a complete per-row resident pipeline
     Equals,
     /// `ST_Touches` — do the boundaries intersect with disjoint interiors?
     /// Routes to `pgaccel_st_touches_bulk`. Cheap shortcuts: disjoint

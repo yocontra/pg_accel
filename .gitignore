@@ -46,3 +46,15 @@ pgaccel-kernels/build/
 # Python helper, test, and coverage bytecode
 __pycache__/
 *.py[cod]
+
+# Machine-local agent/editor permissions
+/.claude/settings.local.json
+
+# Generated diagnostics and benchmark output
+/build.rs
+/pgaccel-kernels/test/*.cpp.ll
+/benchmarks/last_run.*
+/benchmarks/*_results.md
+/benchmarks/README.md
+/benchmarks/runs/
+/.pgaccel/logs/

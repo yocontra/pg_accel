@@ -6,8 +6,8 @@ use postgres::{Client, NoTls};
 /// the entire suite always runs at all four for reproducible, comparable
 /// results.
 ///
-/// **Why no 1K scale:** Reviewer 1 Sin #15 -- 160-microsecond measurements
-/// taken over the libpq wire protocol are below the instrument noise floor.
+/// **Why no 1K scale:** 160-microsecond measurements taken over the libpq wire
+/// protocol are below the instrument noise floor.
 /// The protocol round-trip floor on localhost is tens of microseconds, and
 /// libpq buffering / kernel scheduling jitter eats the rest. 1K-row rows
 /// measure the client harness, not the database. Gray's rule: measurements
@@ -21,8 +21,8 @@ pub const ROW_SCALES: &[usize] = &[10_000, 100_000, 1_000_000, 10_000_000];
 /// penalizes non-custom-scan plans more than Custom Scan plans because a
 /// Custom Scan Provider's Next() path can report row-counts essentially for
 /// free, while a parallel Seq Scan + Gather + HashAgg pays the per-tuple
-/// instrumentation cost in every worker. This advantages pg_accel by
-/// ~15-25% on agg/reduce categories (Reviewer 2 section 3(i) / action_items M1).
+/// instrumentation cost in every worker. This can advantage pg_accel on
+/// aggregate/reduce categories, so raw wall-clock timing is the default.
 ///
 /// `RawWallClock` submits the query via `client.simple_query()` and measures
 /// wall-clock time with `Instant::now()` on the client side. No `EXPLAIN
@@ -48,14 +48,13 @@ pub enum TimingMode {
 
 /// Cache cleanliness mode for a single measurement.
 ///
-/// `Warm` runs after `BenchConfig::warmup` iterations (>=5 in reviewer-
-/// recommended profile, action_items M14). Page cache and shared buffers
-/// are expected to hold the working set.
+/// `Warm` runs after at least five `BenchConfig::warmup` iterations. Page cache
+/// and shared buffers are expected to hold the working set.
 ///
 /// `Cold` invokes `sync && purge` (macOS) or `echo 3 >
 /// /proc/sys/vm/drop_caches` (Linux, requires root) between iterations
-/// -- `DISCARD ALL` does **not** clear the OS page cache (Reviewer 2
-/// section 3(ii) / action_items M2). On Linux without root, we document the
+/// -- `DISCARD ALL` does **not** clear the OS page cache. On Linux without
+/// root, we document the
 /// limitation in the report and proceed with warm-only measurement.
 ///
 /// `Both` produces side-by-side cold and warm columns in the report.
@@ -134,8 +133,8 @@ impl GucProfile {
 
     /// Production-sized profile for a 64 GB / 12-core workstation.
     ///
-    /// Reviewer 2's recommended publication profile (action_items M4 and
-    /// review_2.md lines 115-135). 16 GB `shared_buffers`, 512 MB
+    /// Publication profile for the documented 64 GB / 12-core workstation:
+    /// 16 GB `shared_buffers`, 512 MB
     /// `work_mem`, 48 GB `effective_cache_size`, 12 parallel workers,
     /// 2 GB `maintenance_work_mem`.
     #[must_use]
@@ -228,8 +227,8 @@ impl GucProfile {
 /// -- because `shared_buffers` is `PGC_POSTMASTER` and the `ALTER SYSTEM SET`
 /// won't take effect until restart.
 ///
-/// Reviewer 2 section 1 / action_items C4: publishing a settings table that
-/// doesn't match the running postmaster is worse than no table at all.
+/// Publishing a settings table that does not match the running postmaster is
+/// worse than omitting the table.
 #[derive(Debug, Clone)]
 pub struct ObservedGucs {
     /// Settings read via `SHOW name` from inside a benchmarked session.
@@ -296,7 +295,7 @@ fn show_all_gucs(
 /// Returns a `PostmasterMismatch` error if any postmaster setting does
 /// not match the requested profile (e.g. `shared_buffers` reads `128MB`
 /// but was requested at `16GB`). Unless `skip_verify` is true, this aborts
-/// the harness -- see Reviewer 2 section 1 / action_items C4.
+/// the harness.
 pub fn verify_and_capture_gucs(
     connection: &str,
     profile: &GucProfile,
@@ -401,8 +400,8 @@ pub struct BenchConfig {
     /// If set, this profile is applied via `ALTER SYSTEM SET` before the
     /// first workload runs.
     pub guc_profile: Option<GucProfile>,
-    /// If true, skip the postmaster-GUC mismatch hard-fail check
-    /// (action_items C4). Only intended for developer iteration.
+    /// If true, skip the postmaster-GUC mismatch hard-fail check. Only
+    /// intended for developer iteration.
     pub skip_guc_verify: bool,
     /// If set, persist reports, crash inventories, plan snippets, GUCs, and
     /// bounded log tails under this directory.
@@ -413,8 +412,7 @@ impl Default for BenchConfig {
     fn default() -> Self {
         Self {
             iterations: 10,
-            // action_items M14 / Reviewer 1 Sin #14: warmup raised from 1
-            // to 5 so shader compile + kernel launch jitter is amortized
+            // Five warmups amortize shader compilation and kernel-launch jitter
             // before the first timed iteration.
             warmup: 5,
             seed: 42,

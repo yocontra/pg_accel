@@ -1,17 +1,18 @@
 pg_accel NOTICE
 ===============
 
-This file attributes every third-party component bundled into the pg_accel
-build artifacts (the Rust crate, the GPU kernel shared library, and the
-Metal/CUDA/ROCm/L0 binary archives produced at install time). SPDX
-identifiers follow https://spdx.org/licenses/.
+This file attributes third-party components incorporated into or linked by
+pg_accel source and release packages. The exact runtime libraries and generated
+device artifacts vary by selected AdaptiveCpp backend. SPDX identifiers follow
+https://spdx.org/licenses/.
 
 The AdaptiveCpp fork pin referenced below is:
   repository: https://github.com/yocontra/AdaptiveCpp
   branch:     fork-safe-metal
-  commit:     7e79a6ca45f5a067f02a30207cb8da1b81eb5f29
-Source bundles for any license linked below can be obtained from that pin
-(the `external/`, `src/`, and `LICENSE`/`COPYING` files under that tree).
+  commit:     456ae6910720810f5fe59f160e6707d46bb8e5f0
+The repository-root `.acpp-version` file is the source of truth for this exact
+pin. AdaptiveCpp license and bundled-component sources are available from that
+commit under its `external/`, `src/`, and license files.
 
 ----------------------------------------------------------------------
 
@@ -52,12 +53,11 @@ License text (MIT):
 2. AdaptiveCpp
 ----------------------------------------------------------------------
 SPDX:    BSD-2-Clause
-Role:    SYCL runtime + compiler toolchain. The `libacpp-rt.dylib`
-         runtime ships next to the extension, and the `acpp` / clang
-         compiler frontend produces the device code cached in
-         `~/.acpp/apps/global/jit-cache/`.
+Role:    SYCL runtime + compiler toolchain. Backend-specific AdaptiveCpp
+         runtime libraries are linked or installed by the package build, and
+         the `acpp`/clang frontend produces cached device code at runtime.
 Source:  https://github.com/yocontra/AdaptiveCpp (branch fork-safe-metal,
-         commit 7e79a6ca45f5a067f02a30207cb8da1b81eb5f29). Verbatim
+         commit 456ae6910720810f5fe59f160e6707d46bb8e5f0). Verbatim
          license text is in the `LICENSE` file at the root of that tree.
 
 License text (BSD-2-Clause):
@@ -213,8 +213,8 @@ License text (Apache-2.0):
 
 Other dependencies
 ----------------------------------------------------------------------
-The full transitive crate graph (283 crates as of the current Cargo.lock)
-is license-audited by `cargo deny check` against the allow list in
-`deny.toml`; `cargo audit` scans the same graph for RustSec advisories.
-Both commands run as part of `just ci`. The license summary for every
-crate in the graph can be reproduced with `cargo deny list`.
+The full transitive crate graph is pinned by `Cargo.lock` and license-audited by
+`cargo deny check` against `deny.toml`; `cargo audit` scans the same graph for
+RustSec advisories. The repository exposes these required release checks as
+`just deny` and `just audit`. A license summary can be reproduced with
+`cargo deny list`.

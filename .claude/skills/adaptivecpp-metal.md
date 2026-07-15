@@ -80,7 +80,9 @@ Also settable via `ACPP_TARGETS` env var or `-DACPP_TARGETS=` CMake variable.
 4. **No USM pointer indirection** — pass pointers as top-level kernel args. **Permanent MSL constraint** (Metal 4 does NOT enable this). Worked example: `pgaccel-kernels/src/expr_eval.cpp`.
 5. **Parallel sort** via `acpp::sort_into` (bitonic, in-tree at `include/hipSYCL/algorithms/sort/`). Power-of-2 sizes recommended; caller pads non-power-of-2 with sentinels. Not stable — use pg_accel's native Metal sort in `src/engine/executor/sort.rs` for stability-critical sorts.
 6. No `sycl::stream` / printf (no MSL `printf`).
-7. Build from the `fork-safe-metal` branch of AdaptiveCpp at `/Users/contra/Projects/AdaptiveCpp` — atomic64, soft-fp64 aspect probes, bitonic sort, and llvm.minnum/maxnum NaN-preserving lowering live there.
+7. Build the exact `.acpp-version` commit in the repository-managed
+   `.pgaccel/src/AdaptiveCpp` checkout; a branch head alone is not reproducible
+   provenance.
 
 ## Environment Variables (runtime)
 

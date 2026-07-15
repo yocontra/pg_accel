@@ -85,9 +85,8 @@ enum Command {
         iterations: usize,
 
         /// Number of warmup iterations (excluded from statistics). Must
-        /// be at least 5 for warm-cache measurements (action_items M14 /
-        /// Reviewer 1 Sin #14) to amortize shader compile and kernel
-        /// launch jitter.
+        /// be at least 5 for warm-cache measurements to amortize shader
+        /// compilation and kernel-launch jitter.
         #[arg(long, default_value_t = 5)]
         warmup: usize,
 
@@ -132,13 +131,12 @@ enum Command {
         /// iterations), `cold` (`sync && purge` before every timed
         /// iteration), or `both` (cold+warm columns side-by-side).
         ///
-        /// Reviewer 2 §3(ii) / action_items M2: `DISCARD ALL` does not
-        /// clear the OS page cache. Use `cold` or `both` for any report
-        /// published externally.
+        /// `DISCARD ALL` does not clear the OS page cache. Use `cold` or
+        /// `both` for any report published externally.
         #[arg(long, default_value = "warm")]
         cache_mode: CacheModeArg,
 
-        /// Skip the postmaster-GUC mismatch hard-fail (action_items C4).
+        /// Skip the postmaster-GUC mismatch hard-fail.
         /// By default the harness refuses to run if `shared_buffers` or
         /// any other `PGC_POSTMASTER` setting drifts from the requested
         /// profile — because publishing a settings table that doesn't
@@ -265,8 +263,8 @@ enum Command {
     ///
     /// For every row, run `EXPLAIN (VERBOSE) <query>` and assert that a
     /// `Custom Scan (GpuAccel...)` node appears underneath a `Gather` /
-    /// `Gather Merge`. Rows ratchet by phase — see
-    /// `pg_accel_bench/src/explain_audit.rs` and `TODO.md` Phase 9.
+    /// `Gather Merge`. Row expectations are defined in
+    /// `pg_accel_bench/src/explain_audit.rs`.
     /// Exits non-zero iff any `RequiredToday` row fails.
     ExplainAudit {
         /// PostgreSQL connection string.

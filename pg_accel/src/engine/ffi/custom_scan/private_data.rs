@@ -2613,12 +2613,10 @@ pub const FUNCTIONSCAN_SENTINEL: c_int = 0x4653_4341; // b"FSCA"
 /// so that the metadata can survive the planner's `List *` round-trip
 /// alongside other strategies' private data.
 ///
-/// **Note (Phase 2 F3 status):** the planner-side hook
-/// (`projectset.rs::pgaccel_set_function_pathlist`) and the executor-side
-/// `begin_custom_scan` arm that consume this struct are escalated per
-/// anti-cheat ban #9; the type + (de)serializers are landed here so the
-/// follow-up wiring agent can plug in without re-touching the
-/// custom_private layout.
+/// The planner-side hook and executor arm that consume this structure are not
+/// admitted by the production planner. The type and codec remain stable so a
+/// future complete resident function pipeline need not alter the
+/// `custom_private` layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionScanPrivData {
     /// OID of the registered SRF / record-returning function.

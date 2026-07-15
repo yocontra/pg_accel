@@ -1,54 +1,43 @@
 # Security Policy
 
-## Reporting security issues
+## Supported versions
 
-Report security vulnerabilities through the repository's private vulnerability
-reporting channel. If private vulnerability reporting is not enabled on the
-repository host, contact the maintainer team through a private channel listed
-in the project profile. Please include a description of the issue, steps to
-reproduce, and any relevant logs or stack traces. You should receive an initial
-response within 72 hours.
+pg_accel has not made a public release. Security fixes currently target the
+latest commit on the repository's active development branch. A supported
+release-version table will be added when the first release is published.
 
-Do not open public GitHub issues for security vulnerabilities.
+## Reporting a vulnerability
 
-## Dependency security
+Use [GitHub private vulnerability
+reporting](https://github.com/yocontra/pg_accel/security/advisories/new). Include
+the affected commit, PostgreSQL version, device/backend, reproduction steps,
+and the smallest useful logs or SQL input. Do not include credentials or
+production data.
 
-Release candidates must keep `Cargo.lock` committed and pass
-`cargo metadata --locked` plus `cargo deny check`. Run `cargo audit` when the
-tool is available for the active Rust toolchain; if an advisory is ignored, the
-ignore must be documented with the transitive dependency owner and a revisit
-condition.
+Do not open a public issue, discussion, or pull request containing vulnerability
+details. Private vulnerability reporting must be enabled and verified before a
+public release; if the link above is unavailable, the repository does not yet
+publish a separate source-backed private security address. That missing channel
+is a release blocker, not permission to disclose the issue publicly.
 
-## Unsafe code
+## Security gates
 
-pg_accel uses `unsafe` in two areas:
+Release candidates keep `Cargo.lock` committed and must pass
+`cargo metadata --locked`, `just deny`, and `just audit`. Any ignored advisory
+must identify the transitive dependency owner, why the affected path is not
+reachable or accepted temporarily, and a concrete revisit condition.
 
-1. **PostgreSQL FFI.** The pgrx framework requires unsafe calls to interact with
-   PostgreSQL internals (SPI, Custom Scan vtables, shared memory, LWLocks).
-   Every unsafe block has a `// SAFETY:` comment explaining why the invariants
-   hold.
+Unsafe Rust is concentrated around PostgreSQL FFI, shared-memory lifecycle, and
+the C++/SYCL bridge. Each boundary must document its invariants and remain under
+the repository's strict lint and source-audit gates; this policy does not treat
+the mere presence of a `SAFETY` comment as proof.
 
-2. **GPU kernel bridge.** The C++/SYCL kernel interface uses FFI to pass
-   buffers between Rust and the GPU runtime. Buffer lifetimes are managed by
-   the dispatch layer and are scoped to a single batch execution.
+PostgreSQL APIs are called on the backend main thread. Current resident
+execution submits synchronous device work from that thread; PostgreSQL parallel
+workers are separate processes. The AdaptiveCpp runtime may manage internal
+threads, but those threads must not call PostgreSQL APIs.
 
-All unsafe usage is auditable via `cargo clippy` and `grep -r "unsafe"`.
-
-## Thread safety model
-
-PostgreSQL backends are single-threaded processes. pg_accel spawns worker
-threads only for GPU kernel orchestration, sort-key extraction, and top-k
-merge -- never for calling PostgreSQL C functions. A shared-memory LWLock
-enforces a cluster-wide thread budget so backends do not oversubscribe the
-system.
-
-Worker threads are blocked from receiving PostgreSQL signals via signal
-masking. `CHECK_FOR_INTERRUPTS()` is called between batches on the main
-backend thread.
-
-## Shared memory
-
-pg_accel allocates a small shared memory segment during `_PG_init` to hold
-the global thread budget counter. Access is protected by a PostgreSQL LWLock.
-The lock is always released in a `before_shmem_exit` callback to prevent
-deadlocks on backend crash.
+The extension registers PostgreSQL shared-memory state for the cluster thread
+budget and resident-byte ledger. Access is serialized by PostgreSQL LWLocks,
+and backend-local resource owners, GPU state, thread allocations, and tracing
+are cleaned up through ordered `before_shmem_exit` callbacks.

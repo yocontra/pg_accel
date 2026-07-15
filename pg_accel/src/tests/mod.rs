@@ -251,9 +251,7 @@ mod tests {
     // pgrx's `define_float_guc`, which wires straight to PG's
     // `DefineCustomRealVariable`. PG rejects out-of-range SETs with a
     // `22023` (invalid_parameter_value) ERROR at assign time. These tests
-    // assert that prose-only documentation of the cap is now enforced by
-    // the GUC machinery itself (TODO.md Phase 5 item "`soft_fp64_cost_multiplier`
-    // hard-cap enforcement in code").
+    // assert that the documented cap is enforced by the GUC machinery itself.
     // -------------------------------------------------------------------------
 
     #[pg_test]
@@ -277,7 +275,7 @@ mod tests {
 
         // Any value > 64.0 must be rejected by PG's DefineCustomRealVariable
         // range check — this is the parity-floor cheat defense: a misconfig
-        // (or agent under pressure) cannot silently set the multiplier to
+        // cannot silently set the multiplier to
         // 1000 to make a failing fp64 benchmark "pass".
         let result = PgTryBuilder::new(|| {
             Spi::run("SET pg_accel.soft_fp64_cost_multiplier = 100.0")

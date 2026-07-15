@@ -1,5 +1,5 @@
 //! Phase 2 correctness tests — kernels track.
-//! Owned by the phase-2 kernels agent; no other agent edits this file.
+//! Focused GPU-kernel integration coverage.
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
