@@ -42,3 +42,7 @@ artifacts/
 benchmarks/artifacts/
 pgaccel-kernels/build/
 .claude/worktrees/
+
+# Python helper/test bytecode
+__pycache__/
+*.py[cod]

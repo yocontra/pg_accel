@@ -316,8 +316,8 @@ doc-parity:
 pg-version-audit:
     ./scripts/pg_version_audit.sh
 
-# Pre-commit checks: fmt, lint, type-check matrix, deny, audit, doc-parity
-pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit
+# Pre-commit checks: fmt, lint, type-check matrix, deny, audits, doc-parity
+pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit audit-cpu-cheats-test
     @echo "Pre-commit checks passed."
 
 # Run pgrx unit tests against one PG major. Defaults to the repo target PG major.
@@ -675,47 +675,23 @@ release-verify pg="":
 release-checklist-audit:
     bash scripts/release_checklist_audit.sh
 
-# Audit pgaccel-kernels/src/*.cpp for `extern "C" pgaccel_*` symbols
-# that are labelled GPU-accelerated but whose body is a host-side
-# `for` loop with no `q.submit` / `parallel_for` / sycl_ helper call.
-# This is the post-cheat-audit hygiene check called out in TODO.md
-# Next Up — re-run after every kernel-layer change.
-#
-# A clean run prints only `pgaccel_shutdown` (queue teardown — not a
-# kernel; whitelist below). Any other match is a CPU cheat that
-# violates CLAUDE.md rules 11 / 12 and must be either converted to
-# SYCL or surfaced as PGACCEL_ERROR_NO_DEVICE.
-audit-cpu-cheats:
+# Prove the structural C++ audit against synthetic positive and adversarial fixtures.
+# This target is independent of current production findings and must stay green.
+audit-cpu-cheats-test:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
+
+# Structurally audit every extern-C pgaccel_status entrypoint in the kernel layer.
+# Compute entrypoints must recursively reach a typed SYCL launch. The analyzer
+# rejects unresolved/ambiguous/cyclic helper chains, comments or strings posing as
+# dispatch, and host-success paths. Only exact, source-validated lifecycle and
+# fail-only ABI contracts are exempt. A complete JSON inventory is always written.
+audit-cpu-cheats: audit-cpu-cheats-test
     #!/usr/bin/env bash
     set -euo pipefail
-    found_any=0
-    for f in pgaccel-kernels/src/*.cpp; do
-        matches=$(awk '
-            /^extern "C" pgaccel_status pgaccel_/ {
-                name = $0; in_fn = 1; body = ""; start_line = NR
-            }
-            in_fn { body = body "\n" $0 }
-            in_fn && /^}/ {
-                in_fn = 0
-                if (body !~ /q\.submit|q->submit|parallel_for|return PGACCEL_ERROR|sycl_/) {
-                    if (name !~ /pgaccel_shutdown/) {
-                        print FILENAME ":" start_line " — " name
-                    }
-                }
-                body = ""
-            }
-        ' "$f")
-        if [ -n "$matches" ]; then
-            echo "$matches"
-            found_any=1
-        fi
-    done
-    if [ "$found_any" -eq 0 ]; then
-        echo "audit-cpu-cheats: PASS — every extern \"C\" pgaccel_* symbol dispatches via SYCL."
-    else
-        echo "audit-cpu-cheats: FAIL — see hits above. CLAUDE.md rules 11/12 violated."
-        exit 1
-    fi
+    report="${CPU_CHEAT_AUDIT_REPORT:-target/cpu-cheat-audit.json}"
+    python3 scripts/cpu_cheat_audit.py \
+        --json-report "$report" \
+        pgaccel-kernels/src/*.cpp
 
 # === CI ===
 
