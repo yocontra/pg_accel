@@ -2,7 +2,9 @@
 //!
 //! This module recognizes replacement-sensitive PostGIS Raster calls and
 //! records deterministic declines. It deliberately has no path-construction
-//! API: Phase 6 costing is uncalibrated and runtime selection remains dark.
+//! API in production: Phase 6 costing is uncalibrated and runtime selection
+//! remains dark. The `pg_test` feature exposes a scoped forced path solely for
+//! end-to-end executor proof.
 
 use pgrx::FromDatum;
 use pgrx::pg_sys::{self, Node, NodeTag};
@@ -19,6 +21,11 @@ use crate::engine::residency::{ResidentColumnView, with_resident_column};
 use crate::engine::stats;
 
 use super::{RejectionReason, find_cheapest_path};
+
+#[cfg(feature = "pg_test")]
+use super::{add_gpu_path_with_resident_proof, custom_scan};
+#[cfg(feature = "pg_test")]
+use crate::engine::executor::raster::RasterExecPlan;
 
 const RECLASS_NAME: &str = "st_reclass";
 const SUMMARY_STATS_NAME: &str = "st_summarystats";
@@ -536,6 +543,54 @@ unsafe fn validated_candidate(
     build_raster_query_spec(shape, &catalog).map_err(|decline| planner_decline_reason(&decline))
 }
 
+#[cfg(feature = "pg_test")]
+thread_local! {
+    static FORCED_RASTER_PATH_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static TAMPERED_RASTER_CATALOG_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Scope forced raster path construction to one pg_test planner invocation.
+#[cfg(feature = "pg_test")]
+pub(crate) fn with_forced_raster_path<R>(f: impl FnOnce() -> R) -> R {
+    struct ForceGuard;
+
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            FORCED_RASTER_PATH_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    FORCED_RASTER_PATH_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+    let _guard = ForceGuard;
+    f()
+}
+
+#[cfg(feature = "pg_test")]
+fn forced_raster_path_enabled() -> bool {
+    FORCED_RASTER_PATH_DEPTH.with(|depth| depth.get() > 0)
+}
+
+/// Scope an invalid planned importer OID to one pg_test planner invocation.
+#[cfg(feature = "pg_test")]
+pub(crate) fn with_tampered_raster_catalog_oid<R>(f: impl FnOnce() -> R) -> R {
+    struct TamperGuard;
+
+    impl Drop for TamperGuard {
+        fn drop(&mut self) {
+            TAMPERED_RASTER_CATALOG_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    TAMPERED_RASTER_CATALOG_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+    let _guard = TamperGuard;
+    f()
+}
+
+#[cfg(feature = "pg_test")]
+fn tampered_raster_catalog_enabled() -> bool {
+    TAMPERED_RASTER_CATALOG_DEPTH.with(|depth| depth.get() > 0)
+}
+
 /// Observe one base relation for an exact raster target and record why the
 /// native plan remains selected. This function never constructs a CustomPath.
 ///
@@ -576,6 +631,10 @@ pub(super) unsafe fn observe(
             return true;
         }
     };
+    #[cfg(feature = "pg_test")]
+    if forced_raster_path_enabled() {
+        return true;
+    }
     let cheapest = unsafe { find_cheapest_path(rel_ref.pathlist) };
     let native_total_cost = if cheapest.is_null() {
         PgCost::new(0.0)
@@ -593,8 +652,91 @@ pub(super) unsafe fn observe(
     true
 }
 
+/// Inject the exact validated RQS2 path only while a pg_test force guard is
+/// active. This symbol and its only callsite do not exist in production.
+///
+/// # Safety
+/// Pointers must be the live objects supplied to `create_upper_paths_hook`.
+#[cfg(feature = "pg_test")]
+pub(super) unsafe fn try_force_inject(
+    root: *mut pg_sys::PlannerInfo,
+    output_rel: *mut pg_sys::RelOptInfo,
+) -> bool {
+    if !forced_raster_path_enabled() || root.is_null() || output_rel.is_null() {
+        return false;
+    }
+    let root_ref = unsafe { &*root };
+    if root_ref.parse.is_null()
+        || root_ref.simple_rel_array.is_null()
+        || root_ref.simple_rel_array_size <= 1
+    {
+        return false;
+    }
+    let query = unsafe { &*root_ref.parse };
+    let Some(prefilter) = (unsafe { raster_target_function(query) }) else {
+        return false;
+    };
+    let rel = unsafe { *root_ref.simple_rel_array.add(1) };
+    let Some(rte) = (unsafe { list_item::<pg_sys::RangeTblEntry>(query.rtable, 0) }) else {
+        return false;
+    };
+    if rel.is_null() {
+        return false;
+    }
+    let mut candidate = match unsafe { validated_candidate(query, &*rel, 1, &*rte, prefilter) } {
+        Ok(candidate) => candidate,
+        Err(_) => return false,
+    };
+    if !matches!(
+        exact_resident_work(&candidate.spec),
+        RasterWorkEstimate::ResidentExact(work) if work.zero_grid_present_band_rows == 0
+    ) {
+        return false;
+    }
+    if tampered_raster_catalog_enabled() {
+        candidate.spec.rast_from_wkb_fn_oid =
+            candidate.spec.rast_from_wkb_fn_oid.wrapping_add(1).max(1);
+    }
+    let final_target = root_ref.upper_targets[pg_sys::UpperRelationKind::UPPERREL_FINAL as usize];
+    if final_target.is_null() || unsafe { list_len((*final_target).exprs) } != 1 {
+        return false;
+    }
+    let plan = RasterExecPlan::from_spec(candidate.spec)
+        .unwrap_or_else(|error| pgrx::error!("pg_accel: invalid forced raster plan: {error}"));
+    let cpath = unsafe {
+        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomPath>()).cast::<pg_sys::CustomPath>()
+    };
+    unsafe {
+        (*cpath).path.type_ = NodeTag::T_CustomPath;
+        (*cpath).path.pathtype = NodeTag::T_CustomScan;
+        (*cpath).path.parent = output_rel;
+        (*cpath).path.pathtarget = final_target;
+        (*cpath).path.param_info = std::ptr::null_mut();
+        (*cpath).path.parallel_aware = false;
+        (*cpath).path.parallel_safe = false;
+        (*cpath).path.parallel_workers = 0;
+        (*cpath).path.rows = candidate.estimated_rows as f64;
+        (*cpath).path.startup_cost = 0.0;
+        (*cpath).path.total_cost = 0.0;
+        (*cpath).path.pathkeys = std::ptr::null_mut();
+        (*cpath).flags = 0;
+        (*cpath).custom_paths = std::ptr::null_mut();
+        (*cpath).custom_restrictinfo = std::ptr::null_mut();
+        (*cpath).methods = custom_scan::raster_path_methods();
+        (*cpath).custom_private = custom_scan::append_raster_exec_plan(std::ptr::null_mut(), &plan);
+    }
+    unsafe {
+        add_gpu_path_with_resident_proof(
+            "pg_test_forced_raster",
+            output_rel,
+            cpath,
+            custom_scan::raster_resident_proof(),
+        )
+    }
+}
+
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
 
     #[test]
@@ -653,14 +795,42 @@ mod tests {
 
 #[cfg(feature = "pg_test")]
 #[pgrx::pg_schema]
-mod live_tests {
+mod tests {
     use pgrx::prelude::*;
+
+    #[derive(Debug, Clone, Copy)]
+    struct TestRasterDatum(pg_sys::Datum);
+
+    impl FromDatum for TestRasterDatum {
+        unsafe fn from_polymorphic_datum(
+            datum: pg_sys::Datum,
+            is_null: bool,
+            _type_oid: pg_sys::Oid,
+        ) -> Option<Self> {
+            (!is_null && datum.value() != 0).then_some(Self(datum))
+        }
+    }
+
+    impl IntoDatum for TestRasterDatum {
+        fn into_datum(self) -> Option<pg_sys::Datum> {
+            Some(self.0)
+        }
+
+        fn type_oid() -> pg_sys::Oid {
+            pg_sys::InvalidOid
+        }
+
+        fn is_compatible_with(_other: pg_sys::Oid) -> bool {
+            true
+        }
+    }
 
     const RASTER_REASONS: &[&str] = &[
         "raster_unsupported_shape",
         "raster_catalog_proof_failed",
         "raster_summarystats_bit_exact_unavailable",
         "raster_resident_metadata_unavailable",
+        "raster_zero_grid_wkb_non_roundtrippable",
         "raster_selected_band_missing",
         "raster_cost_uncalibrated",
         "raster_runtime_unavailable",
@@ -686,6 +856,57 @@ mod live_tests {
         .expect("create raster observer fixture");
     }
 
+    fn setup_raster_matrix() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS postgis")
+            .expect("PostGIS must be available for raster executor tests");
+        Spi::run("CREATE EXTENSION IF NOT EXISTS postgis_raster")
+            .expect("PostGIS Raster must be available for raster executor tests");
+        Spi::run(
+            "SET pg_accel.enabled = on; \
+             SET pg_accel.gpu_enabled = on; \
+             SET pg_accel.auto_load = off; \
+             DROP TABLE IF EXISTS pgaccel_raster_matrix; \
+             CREATE TEMP TABLE pgaccel_raster_matrix(id int4, rast raster); \
+             INSERT INTO pgaccel_raster_matrix VALUES \
+               (1, NULL), \
+               (2, ST_MakeEmptyRaster(2, 2, 0, 0, 1, -1, 0, 0, 4326)), \
+               (3, ST_SetValue(ST_SetValue(ST_AddBand( \
+                     ST_MakeEmptyRaster(2, 2, 0, 0, 1, -1, 0, 0, 4326), \
+                     '8BUI'::text, 0, 255), 1, 1, 1, 7), 1, 2, 1, 8)), \
+               (4, ST_SetValue(ST_AddBand( \
+                     ST_MakeEmptyRaster(2, 1, 0, 0, 1, -1, 0, 0, 4326), \
+                     '8BUI'::text, 255, 255), 1, 1, 1, 7)), \
+               (5, ST_AddBand(ST_AddBand( \
+                     ST_MakeEmptyRaster(2, 1, 0, 0, 1, -1, 0, 0, 4326), \
+                     '8BUI'::text, 7, 255), '16BSI'::text, 22, -999)); \
+             ANALYZE pgaccel_raster_matrix; \
+             SELECT pg_accel_pin( \
+               'pgaccel_raster_matrix'::regclass, ARRAY['rast'])",
+        )
+        .expect("create and pin raster executor matrix");
+    }
+
+    fn setup_zero_grid_band_fixture() {
+        Spi::run("CREATE EXTENSION IF NOT EXISTS postgis")
+            .expect("PostGIS must be available for zero-grid raster tests");
+        Spi::run("CREATE EXTENSION IF NOT EXISTS postgis_raster")
+            .expect("PostGIS Raster must be available for zero-grid raster tests");
+        Spi::run(
+            "SET pg_accel.enabled = on; \
+             SET pg_accel.gpu_enabled = on; \
+             SET pg_accel.auto_load = off; \
+             DROP TABLE IF EXISTS pgaccel_raster_zero_grid; \
+             CREATE TEMP TABLE pgaccel_raster_zero_grid(rast raster); \
+             INSERT INTO pgaccel_raster_zero_grid VALUES ( \
+               ST_AddBand( \
+                 ST_MakeEmptyRaster(0, 0, 0, 0, 1, -1, 0, 0, 4326), \
+                 '8BUI'::text, 0, 255)); \
+             SELECT pg_accel_pin( \
+               'pgaccel_raster_zero_grid'::regclass, ARRAY['rast'])",
+        )
+        .expect("create and pin zero-grid present-band fixture");
+    }
+
     fn explain(sql: &str) -> String {
         Spi::connect(|client| {
             client
@@ -696,6 +917,206 @@ mod live_tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         })
+    }
+
+    fn explain_analyze(sql: &str) -> String {
+        Spi::connect(|client| {
+            client
+                .select(
+                    &format!("EXPLAIN (ANALYZE, COSTS OFF, FORMAT TEXT) {sql}"),
+                    None,
+                    &[],
+                )
+                .expect("EXPLAIN ANALYZE raster candidate")
+                .filter_map(|row| row.get::<String>(1).expect("read EXPLAIN ANALYZE row"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
+    fn raster_wkb_row(
+        row: &pgrx::spi::SpiHeapTupleData<'_>,
+        catalog: &crate::engine::ffi::syscache::PostgisRasterCatalogIdentity,
+    ) -> Option<Vec<u8>> {
+        let entry = row
+            .get_datum_by_ordinal(1)
+            .expect("read raster result entry");
+        assert_eq!(
+            entry.oid(),
+            catalog.raster_type_oid,
+            "forced result descriptor must retain the exact raster type"
+        );
+        entry
+            .value::<TestRasterDatum>()
+            .expect("read raw raster result Datum")
+            .map(|datum| {
+                // SAFETY: the SPI entry proves the exact raster type and
+                // remains live for this synchronous call.
+                unsafe {
+                    crate::engine::ffi::syscache::postgis_raster_datum_to_wkb(catalog, datum.0)
+                }
+                .expect("export raster result through exact PostGIS st_aswkb")
+            })
+    }
+
+    fn raster_wkb_rows(sql: &str) -> Vec<Option<Vec<u8>>> {
+        // SAFETY: pg_tests run synchronously on the PostgreSQL backend main
+        // thread and the exact catalog identity is held for this SPI scan.
+        let catalog = unsafe { crate::engine::ffi::syscache::resolve_postgis_raster_catalog() }
+            .expect("resolve exact PostGIS Raster catalog for result collection");
+        Spi::connect(|client| {
+            client
+                .select(sql, None, &[])
+                .expect("execute raster result query")
+                .map(|row| raster_wkb_row(&row, &catalog))
+                .collect()
+        })
+    }
+
+    fn raster_wkb_cursor_rows(sql: &str) -> Vec<Option<Vec<u8>>> {
+        // SAFETY: same catalog and backend-thread proof as raster_wkb_rows.
+        let catalog = unsafe { crate::engine::ffi::syscache::resolve_postgis_raster_catalog() }
+            .expect("resolve exact PostGIS Raster catalog for cursor collection");
+        Spi::connect_mut(|client| {
+            let mut cursor = client
+                .try_open_cursor(sql, &[])
+                .expect("open forced raster result cursor");
+            let mut output = Vec::new();
+            loop {
+                let rows = cursor.fetch(2).expect("fetch raster result cursor batch");
+                if rows.is_empty() {
+                    drop(rows);
+                    let repeated_eof = cursor.fetch(2).expect("repeat raster cursor EOF fetch");
+                    assert!(
+                        repeated_eof.is_empty(),
+                        "raster cursor must remain exhausted after EOF"
+                    );
+                    break;
+                }
+                output.extend(rows.map(|row| raster_wkb_row(&row, &catalog)));
+            }
+            output
+        })
+    }
+
+    fn capture_sql_error(sql: &str) -> Option<(String, String)> {
+        Spi::run(
+            "CREATE TEMP TABLE IF NOT EXISTS pgaccel_raster_caught_error( \
+               state text NOT NULL, message text NOT NULL) ON COMMIT DROP; \
+             TRUNCATE pgaccel_raster_caught_error",
+        )
+        .expect("initialize SQL error capture");
+        Spi::run(&format!(
+            "DO $pgaccel$ \
+             BEGIN \
+               BEGIN \
+                 EXECUTE $pgaccel_query${sql}$pgaccel_query$; \
+               EXCEPTION WHEN OTHERS THEN \
+                 INSERT INTO pgaccel_raster_caught_error VALUES (SQLSTATE, SQLERRM); \
+               END; \
+             END \
+             $pgaccel$"
+        ))
+        .expect("execute SQL under an exception boundary");
+        Spi::connect(|client| {
+            let mut rows = client
+                .select(
+                    "SELECT state, message FROM pgaccel_raster_caught_error",
+                    None,
+                    &[],
+                )
+                .expect("read captured SQL error");
+            let row = rows.next()?;
+            Some((
+                row.get::<String>(1)
+                    .expect("read captured SQLSTATE")
+                    .expect("captured SQLSTATE is non-NULL"),
+                row.get::<String>(2)
+                    .expect("read captured SQLERRM")
+                    .expect("captured SQLERRM is non-NULL"),
+            ))
+        })
+    }
+
+    fn raster_derived_bytes() -> i64 {
+        Spi::get_one::<i64>(
+            "SELECT derived_bytes FROM pg_accel_resident_status() \
+             WHERE relid = 'pgaccel_raster_observer'::regclass",
+        )
+        .expect("read resident raster artifact bytes")
+        .expect("pinned raster relation must be resident")
+    }
+
+    fn raster_resident_status(table: &str) -> (i64, i64, i64) {
+        Spi::connect(|client| {
+            let mut rows = client
+                .select(
+                    &format!(
+                        "SELECT raw_bytes, derived_bytes, generation \
+                         FROM pg_accel_resident_status() \
+                         WHERE relid = '{table}'::regclass"
+                    ),
+                    None,
+                    &[],
+                )
+                .expect("read raster resident status");
+            let row = rows.next().expect("pinned raster relation has status");
+            (
+                row.get::<i64>(1)
+                    .expect("read resident raw bytes")
+                    .expect("resident raw bytes are non-NULL"),
+                row.get::<i64>(2)
+                    .expect("read resident derived bytes")
+                    .expect("resident derived bytes are non-NULL"),
+                row.get::<i64>(3)
+                    .expect("read resident generation")
+                    .expect("resident generation is non-NULL"),
+            )
+        })
+    }
+
+    unsafe fn rewind_named_raster_cursor() {
+        struct ActiveSnapshotGuard;
+
+        impl Drop for ActiveSnapshotGuard {
+            fn drop(&mut self) {
+                // SAFETY: this guard is constructed only after one matching
+                // PushActiveSnapshot call in the same backend callback.
+                unsafe { pg_sys::PopActiveSnapshot() };
+            }
+        }
+
+        let portal = unsafe { pg_sys::GetPortalByName(c"pgaccel_raster_rescan".as_ptr()) };
+        assert!(!portal.is_null(), "named raster cursor portal must exist");
+        // SAFETY: GetPortalByName returned the live named portal.
+        let query_desc = unsafe { (*portal).queryDesc };
+        assert!(
+            !query_desc.is_null(),
+            "named raster cursor must retain its QueryDesc"
+        );
+        // SAFETY: query_desc is the live SELECT descriptor owned by the portal.
+        let plan_state = unsafe { (*query_desc).planstate };
+        assert!(!plan_state.is_null(), "raster cursor must have a PlanState");
+        assert_eq!(
+            unsafe { (*plan_state).type_ },
+            pg_sys::NodeTag::T_CustomScanState,
+            "the cursor top node must be the forced childless CustomScan"
+        );
+        let snapshot = unsafe { (*query_desc).snapshot };
+        assert!(!snapshot.is_null(), "raster cursor must retain a snapshot");
+        // SAFETY: the portal owns this registered snapshot through its QueryDesc.
+        unsafe { pg_sys::PushActiveSnapshot(snapshot) };
+        let snapshot_guard = ActiveSnapshotGuard;
+        // SAFETY: the live SELECT QueryDesc has an initialized CustomScanState.
+        unsafe { pg_sys::ExecutorRewind(query_desc) };
+        drop(snapshot_guard);
+        // SAFETY: ExecutorRewind reset the executor; these portal position
+        // fields make the next forward FETCH consume that rewound state.
+        unsafe {
+            (*portal).atStart = true;
+            (*portal).atEnd = false;
+            (*portal).portalPos = 0;
+        }
     }
 
     fn reason_count(reason: &str) -> i64 {
@@ -727,6 +1148,320 @@ mod live_tests {
             Some(expected)
         );
         plan
+    }
+
+    #[pg_test]
+    fn forced_exact_reclass_builds_only_the_test_raster_path() {
+        setup_extension_and_fixture();
+        let sql = "SELECT ST_Reclass(rast, '0:1', '8BUI') FROM pgaccel_raster_observer";
+        let native_result = raster_wkb_rows(sql);
+        Spi::run(
+            "SELECT pg_accel_pin( \
+               'pgaccel_raster_observer'::regclass, ARRAY['rast'])",
+        )
+        .expect("pin forced raster fixture");
+        let native = explain(sql);
+        assert!(
+            !native.contains("GpuAccelRaster") && !native.contains("Custom Scan"),
+            "ordinary raster planning must remain dark:\n{native}"
+        );
+        assert_eq!(raster_derived_bytes(), 0);
+        crate::gpu::reset_gpu_exec_count();
+        let forced = super::with_forced_raster_path(|| explain(sql));
+        assert!(
+            forced.contains("GpuAccelRaster"),
+            "test force guard must select the exact raster path:\n{forced}"
+        );
+        assert!(
+            forced.contains("GpuRaster"),
+            "forced EXPLAIN must identify the raster strategy:\n{forced}"
+        );
+        assert_eq!(
+            crate::gpu::gpu_exec_count(),
+            0,
+            "plain EXPLAIN must not dispatch a raster kernel"
+        );
+        assert_eq!(
+            raster_derived_bytes(),
+            0,
+            "plain EXPLAIN must not publish a raster artifact"
+        );
+        let analyzed = super::with_forced_raster_path(|| explain_analyze(sql));
+        for field in [
+            "Custom Scan (GpuAccelRaster)",
+            "Strategy: GpuRaster",
+            "GPU Resident Pipeline: true",
+            "GPU Kernel Dispatched: true",
+            "Rows Dispatched: 1",
+            "Batches: 1",
+        ] {
+            assert!(
+                analyzed.contains(field),
+                "forced EXPLAIN ANALYZE must report {field:?}:\n{analyzed}"
+            );
+        }
+        crate::gpu::assert_gpu_executed(1);
+        assert!(
+            raster_derived_bytes() > 0,
+            "EXPLAIN ANALYZE must publish the reconstructed raster artifact"
+        );
+        let forced_result = super::with_forced_raster_path(|| raster_wkb_rows(sql));
+        assert_eq!(
+            forced_result, native_result,
+            "forced raster Datum/WKB output must equal native ST_Reclass byte-for-byte"
+        );
+    }
+
+    #[pg_test]
+    fn forced_reclass_matrix_widths_and_cursor_eof() {
+        use crate::adapters::extractors::raster::{PixelType, parse_resident_raster};
+
+        setup_raster_matrix();
+        let queries = [
+            (
+                "SELECT ST_Reclass(rast, '0:1,7:2,8:3,22:5,255:4', '8BUI') \
+                 FROM pgaccel_raster_matrix",
+                PixelType::UInt8,
+            ),
+            (
+                "SELECT ST_Reclass(rast, '0:100,7:-200,8:300,22:500,255:400', \
+                                   '16BSI') FROM pgaccel_raster_matrix",
+                PixelType::Int16,
+            ),
+        ];
+        let mut width_results = Vec::new();
+        for (sql, output_type) in queries {
+            let native = raster_wkb_rows(sql);
+            let forced = super::with_forced_raster_path(|| raster_wkb_cursor_rows(sql));
+            assert_eq!(forced.len(), 5, "forced cursor must return every input row");
+            assert_eq!(
+                forced, native,
+                "forced raster rows must preserve byte/order parity"
+            );
+            assert!(forced[0].is_none(), "first insertion-ordered row is NULL");
+            assert!(forced[1..].iter().all(Option::is_some));
+
+            let zero_band = parse_resident_raster(forced[1].as_deref().expect("zero-band WKB"))
+                .expect("zero-band output parses");
+            assert_eq!(zero_band.header.num_bands, 0);
+            let nodata = parse_resident_raster(forced[3].as_deref().expect("nodata WKB"))
+                .expect("nodata output parses");
+            assert!(
+                !nodata.bands[0].has_nodata,
+                "three-argument ST_Reclass maps source nodata as an ordinary pixel"
+            );
+            let multiband = parse_resident_raster(forced[4].as_deref().expect("multiband WKB"))
+                .expect("multiband output parses");
+            assert_eq!(multiband.header.num_bands, 2);
+            assert_eq!(multiband.bands[0].pixel_type, output_type);
+            assert_eq!(multiband.bands[1].pixel_type, PixelType::Int16);
+            width_results.push(forced);
+        }
+        assert_eq!(
+            width_results[0][1], width_results[1][1],
+            "missing-band output must pass through unchanged for either width"
+        );
+        assert_ne!(
+            width_results[0][2], width_results[1][2],
+            "populated output must encode the selected pixel width"
+        );
+    }
+
+    #[pg_test]
+    fn forced_reclass_executor_rewind_reproves() {
+        setup_raster_matrix();
+        let sql = "SELECT ST_Reclass( \
+                     rast, '0:1,7:2,8:3,22:5,255:4', '8BUI') \
+                   FROM pgaccel_raster_matrix";
+        let native = raster_wkb_rows(sql);
+        crate::gpu::reset_gpu_exec_count();
+        super::with_forced_raster_path(|| {
+            Spi::run(&format!(
+                "DECLARE pgaccel_raster_rescan NO SCROLL CURSOR FOR {sql}"
+            ))
+            .expect("declare forced raster rescan cursor");
+        });
+        let first = raster_wkb_rows("FETCH FORWARD ALL FROM pgaccel_raster_rescan");
+        assert_eq!(first, native, "first cursor pass must match native output");
+
+        // SAFETY: the named cursor is live in this pg_test transaction and the
+        // helper validates its QueryDesc and top CustomScanState before rewind.
+        unsafe { rewind_named_raster_cursor() };
+        let second = raster_wkb_rows("FETCH FORWARD ALL FROM pgaccel_raster_rescan");
+        assert_eq!(second, first, "ExecReScan must rewind every raster row");
+        assert!(
+            raster_wkb_rows("FETCH FORWARD ALL FROM pgaccel_raster_rescan").is_empty(),
+            "rewound cursor must reach stable EOF"
+        );
+        crate::gpu::assert_gpu_executed(1);
+        Spi::run("CLOSE pgaccel_raster_rescan").expect("close forced raster rescan cursor");
+    }
+
+    #[pg_test]
+    fn prepared_reclass_refreshes_after_dml() {
+        setup_raster_matrix();
+        let sql = "SELECT ST_Reclass( \
+                     rast, '0:1,7:2,8:3,22:5,255:4', '8BUI') \
+                   FROM pgaccel_raster_matrix";
+        let native_before = raster_wkb_rows(sql);
+        super::with_forced_raster_path(|| {
+            Spi::run(&format!("PREPARE pgaccel_raster_prepared AS {sql}"))
+                .expect("prepare exact raster query");
+        });
+        let first =
+            super::with_forced_raster_path(|| raster_wkb_rows("EXECUTE pgaccel_raster_prepared"));
+        assert_eq!(first, native_before);
+        let cached_plan = explain("EXECUTE pgaccel_raster_prepared");
+        assert!(
+            cached_plan.contains("GpuAccelRaster"),
+            "prepared statement must retain its forced raster plan:\n{cached_plan}"
+        );
+        let (raw_before, derived_before, generation_before) =
+            raster_resident_status("pgaccel_raster_matrix");
+        assert!(raw_before > 0 && derived_before > 0);
+
+        Spi::run(
+            "UPDATE pgaccel_raster_matrix \
+             SET rast = ST_SetValue(rast, 1, 1, 1, 22) WHERE id = 3",
+        )
+        .expect("mutate prepared raster input");
+        let (invalid_raw, invalid_derived, invalid_generation) =
+            raster_resident_status("pgaccel_raster_matrix");
+        assert_eq!((invalid_raw, invalid_derived), (0, 0));
+        assert!(invalid_generation > generation_before);
+
+        let native_after = raster_wkb_rows(sql);
+        assert_ne!(
+            native_after, native_before,
+            "DML must change the exact output"
+        );
+        crate::gpu::reset_gpu_exec_count();
+        let refreshed = raster_wkb_rows("EXECUTE pgaccel_raster_prepared");
+        assert_eq!(
+            refreshed, native_after,
+            "prepared CustomScan must reprove and reload the new generation"
+        );
+        crate::gpu::assert_gpu_executed(1);
+        let (raw_after, derived_after, generation_after) =
+            raster_resident_status("pgaccel_raster_matrix");
+        assert!(raw_after > 0 && derived_after > 0);
+        assert!(generation_after >= invalid_generation);
+        Spi::run("DEALLOCATE pgaccel_raster_prepared").expect("deallocate raster statement");
+    }
+
+    #[pg_test]
+    fn planned_catalog_oid_mismatch_is_hard_error() {
+        setup_extension_and_fixture();
+        let sql = "SELECT ST_Reclass(rast, '0:1', '8BUI') \
+                   FROM pgaccel_raster_observer";
+        let native = raster_wkb_rows(sql);
+        Spi::run(
+            "SELECT pg_accel_pin( \
+               'pgaccel_raster_observer'::regclass, ARRAY['rast'])",
+        )
+        .expect("pin catalog mismatch fixture");
+        crate::gpu::reset_gpu_exec_count();
+        let (sqlstate, message) = super::with_tampered_raster_catalog_oid(|| {
+            super::with_forced_raster_path(|| capture_sql_error(sql))
+        })
+        .expect("tampered catalog OID must raise a hard execution error");
+        assert_eq!(sqlstate, "XX000");
+        assert!(
+            message.contains("RastFromWkbFunctionChanged"),
+            "unexpected catalog revalidation error: {message}"
+        );
+        assert_eq!(crate::gpu::gpu_exec_count(), 0);
+        assert_eq!(raster_derived_bytes(), 0);
+        assert_eq!(
+            raster_wkb_rows(sql),
+            native,
+            "native execution remains valid"
+        );
+    }
+
+    #[pg_test]
+    fn injected_raster_failure_has_no_native_fallback() {
+        use crate::gpu::{GpuFailureDomain, kernel_failure_count};
+
+        setup_extension_and_fixture();
+        let sql = "SELECT ST_Reclass(rast, '0:1', '8BUI') \
+                   FROM pgaccel_raster_observer";
+        let native = raster_wkb_rows(sql);
+        Spi::run(
+            "SELECT pg_accel_pin( \
+               'pgaccel_raster_observer'::regclass, ARRAY['rast'])",
+        )
+        .expect("pin injected failure fixture");
+        let failures_before = kernel_failure_count(GpuFailureDomain::Raster);
+        crate::gpu::reset_gpu_exec_count();
+        let (sqlstate, message) =
+            crate::engine::executor::raster::with_test_raster_kernel_failure(|| {
+                super::with_forced_raster_path(|| capture_sql_error(sql))
+            })
+            .expect("injected raster status must raise a hard execution error");
+        assert_eq!(sqlstate, "XX000");
+        assert!(
+            message.contains(
+                "GPU raster kernel(raster_reclass_resident) failed with execution_failed"
+            ),
+            "unexpected injected raster error: {message}"
+        );
+        crate::gpu::assert_gpu_executed(1);
+        assert_eq!(
+            kernel_failure_count(GpuFailureDomain::Raster),
+            failures_before + 1,
+            "the injected raw failure must be counted exactly once"
+        );
+        assert_eq!(
+            raster_derived_bytes(),
+            0,
+            "a failed raster transform must not publish an artifact"
+        );
+        assert_eq!(
+            raster_wkb_rows(sql),
+            native,
+            "native execution remains valid"
+        );
+    }
+
+    #[pg_test]
+    fn zero_grid_present_band_declines_before_dispatch() {
+        use crate::adapters::extractors::raster::parse_resident_raster;
+
+        setup_zero_grid_band_fixture();
+        let sql = "SELECT ST_Reclass(rast, '0:1', '8BUI') \
+                   FROM pgaccel_raster_zero_grid";
+        let native = raster_wkb_rows(sql);
+        assert_eq!(native.len(), 1);
+        let parsed = parse_resident_raster(native[0].as_deref().expect("native zero-grid WKB"))
+            .expect("native zero-grid output parses");
+        assert_eq!((parsed.header.width, parsed.header.height), (0, 0));
+        assert_eq!(parsed.header.num_bands, 1);
+
+        assert_raster_decline(sql, "raster_zero_grid_wkb_non_roundtrippable");
+        crate::gpu::reset_gpu_exec_count();
+        let forced = super::with_forced_raster_path(|| explain(sql));
+        assert!(
+            !forced.contains("GpuAccel") && !forced.contains("Custom Scan"),
+            "the pg_test force guard must not bypass the zero-grid gate:\n{forced}"
+        );
+        assert_eq!(
+            crate::gpu::gpu_exec_count(),
+            0,
+            "zero-grid present-band decline must happen before dispatch"
+        );
+
+        let (sqlstate, importer_error) = capture_sql_error(
+            "SELECT ST_RastFromWKB(ST_AsWKB( \
+               ST_Reclass(rast, '0:1', '8BUI'))) \
+             FROM pgaccel_raster_zero_grid",
+        )
+        .expect("PostGIS must reject its own zero-grid present-band WKB round trip");
+        assert_eq!(sqlstate, "XX000");
+        assert!(
+            importer_error.contains("Premature end of WKB on band novalue reading"),
+            "unexpected PostGIS zero-grid importer error: {importer_error}"
+        );
     }
 
     #[pg_test]
@@ -839,7 +1574,7 @@ mod live_tests {
         );
         assert_raster_decline(
             "SELECT ST_Reclass(rast, '0:1', '8BUI') FROM pgaccel_raster_band_present",
-            "raster_cost_uncalibrated",
+            "raster_zero_grid_wkb_non_roundtrippable",
         );
     }
 

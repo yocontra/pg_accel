@@ -19,6 +19,8 @@ use crate::engine::residency::{
     StagedTransformWorkspace, ensure_selected_relations, ensure_staged_device_transform_artifact,
     with_derived_artifact_inputs,
 };
+#[cfg(feature = "pg_test")]
+use crate::gpu::injected_raster_resident_failure;
 use crate::gpu::{
     ExprDeviceBuffer, GpuError, GpuErrorDomain, GpuOperation, GpuResult, GpuStatusDetail,
     PGACCEL_RESIDENT_RASTER_ABI_VERSION, PgaccelRasterReclassResidentRequest,
@@ -77,6 +79,32 @@ assert_abi_field_offset!(ResidentRasterRow, PgaccelResidentRasterRow, skew_y);
 assert_abi_field_offset!(ResidentRasterBand, PgaccelResidentRasterBand, pixel_type);
 assert_abi_field_offset!(ResidentRasterBand, PgaccelResidentRasterBand, flags);
 assert_abi_field_offset!(ResidentRasterBand, PgaccelResidentRasterBand, nodata);
+
+#[cfg(feature = "pg_test")]
+thread_local! {
+    static TEST_RASTER_KERNEL_FAILURE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Inject a failing raw result after the real resident kernel has returned.
+#[cfg(feature = "pg_test")]
+pub(crate) fn with_test_raster_kernel_failure<R>(f: impl FnOnce() -> R) -> R {
+    struct FailureGuard;
+
+    impl Drop for FailureGuard {
+        fn drop(&mut self) {
+            TEST_RASTER_KERNEL_FAILURE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    TEST_RASTER_KERNEL_FAILURE_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+    let _guard = FailureGuard;
+    f()
+}
+
+#[cfg(feature = "pg_test")]
+fn test_raster_kernel_failure_enabled() -> bool {
+    TEST_RASTER_KERNEL_FAILURE_DEPTH.with(|depth| depth.get() > 0)
+}
 
 /// Fully decoded childless raster execution contract. The canonical RQS2
 /// words are also the complete derived-artifact cache identity.
@@ -1152,8 +1180,14 @@ impl RasterLaunchWorkspace {
         // SAFETY: every request pointer is owned either by this workspace or
         // by the live resident column borrow, and the process queue was
         // prepared before the borrow was acquired.
-        self.borrow_outcome =
-            RasterBorrowOutcome::Native(unsafe { raster_reclass_resident_launch(&request) });
+        let outcome = unsafe { raster_reclass_resident_launch(&request) };
+        #[cfg(feature = "pg_test")]
+        let outcome = if test_raster_kernel_failure_enabled() {
+            injected_raster_resident_failure()
+        } else {
+            outcome
+        };
+        self.borrow_outcome = RasterBorrowOutcome::Native(outcome);
         self.borrow_outcome
     }
 

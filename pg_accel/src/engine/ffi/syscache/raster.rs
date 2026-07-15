@@ -1609,6 +1609,8 @@ mod tests {
         assert_ne!(identity.raster_type_oid, pg_sys::InvalidOid);
         assert_ne!(identity.reclass_fn_oid, pg_sys::InvalidOid);
         assert_ne!(identity.summary_stats_fn_oid, pg_sys::InvalidOid);
+        assert_ne!(identity.as_wkb_fn_oid, pg_sys::InvalidOid);
+        assert_ne!(identity.rast_from_wkb_fn_oid, pg_sys::InvalidOid);
         assert!(!identity.fingerprint_words.is_empty());
     }
 
@@ -1628,6 +1630,99 @@ mod tests {
         assert!(
             error.contains("wrapper body"),
             "unexpected proof error: {error}"
+        );
+    }
+
+    #[pg_test]
+    fn exporter_same_signature_replacement_is_rejected() {
+        ensure_postgis_raster();
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION public.st_aswkb( \
+               public.raster, outasin boolean DEFAULT false) \
+             RETURNS bytea LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS \
+             $$ SELECT decode('', 'hex') $$",
+        )
+        .expect("replace exact WKB exporter signature");
+        // SAFETY: pg_test runs on the PostgreSQL backend main thread.
+        let error = unsafe { resolve_postgis_raster_catalog() }
+            .expect_err("same-signature exporter replacement must fail exact proof");
+        assert!(
+            error.contains("st_aswkb"),
+            "unexpected proof error: {error}"
+        );
+    }
+
+    #[pg_test]
+    fn importer_same_signature_replacement_is_rejected() {
+        ensure_postgis_raster();
+        Spi::run(
+            "CREATE OR REPLACE FUNCTION public.st_rastfromwkb(bytea) \
+             RETURNS public.raster LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS \
+             $$ SELECT NULL::public.raster $$",
+        )
+        .expect("replace exact WKB importer signature");
+        // SAFETY: pg_test runs on the PostgreSQL backend main thread.
+        let error = unsafe { resolve_postgis_raster_catalog() }
+            .expect_err("same-signature importer replacement must fail exact proof");
+        assert!(
+            error.contains("st_rastfromwkb"),
+            "unexpected proof error: {error}"
+        );
+    }
+
+    #[pg_test]
+    fn malformed_wkb_error_is_caught_and_backend_remains_usable() {
+        ensure_postgis_raster();
+        Spi::run(
+            "CREATE TEMP TABLE pgaccel_raster_import_error( \
+               state text NOT NULL, message text NOT NULL) ON COMMIT DROP; \
+             DO $pgaccel$ \
+             BEGIN \
+               BEGIN \
+                 PERFORM ST_RastFromWKB(decode('00', 'hex')); \
+               EXCEPTION WHEN OTHERS THEN \
+                 INSERT INTO pgaccel_raster_import_error VALUES (SQLSTATE, SQLERRM); \
+               END; \
+             END \
+             $pgaccel$",
+        )
+        .expect("capture exact malformed WKB SQL error");
+        let (sqlstate, sqlerrm) = Spi::connect(|client| {
+            let mut rows = client
+                .select(
+                    "SELECT state, message FROM pgaccel_raster_import_error",
+                    None,
+                    &[],
+                )
+                .expect("read exact malformed WKB SQL error");
+            let row = rows.next().expect("malformed WKB must raise SQL ERROR");
+            (
+                row.get::<String>(1)
+                    .expect("read malformed WKB SQLSTATE")
+                    .expect("malformed WKB SQLSTATE is non-NULL"),
+                row.get::<String>(2)
+                    .expect("read malformed WKB SQLERRM")
+                    .expect("malformed WKB SQLERRM is non-NULL"),
+            )
+        });
+        assert_eq!(sqlstate, "XX000");
+        assert_eq!(sqlerrm, "rt_raster_from_wkb: wkb size (1) < min size (61)");
+        // SAFETY: pg_test runs on the PostgreSQL backend main thread.
+        let identity = unsafe { resolve_postgis_raster_catalog() }
+            .expect("resolve exact catalog for malformed WKB proof");
+        // SAFETY: pg_test runs on the backend main thread and identity is the
+        // freshly proved exact importer. Malformed external bytes are a valid
+        // hostile input to its public bytea boundary.
+        let import_error = unsafe { postgis_raster_datum_from_wkb(&identity, &[0]) }
+            .expect_err("malformed WKB ERROR must become a Rust error");
+        assert_eq!(
+            import_error,
+            "PostGIS st_rastfromwkb raised ERROR: \
+             rt_raster_from_wkb: wkb size (1) < min size (61)"
+        );
+        assert_eq!(
+            Spi::get_one::<i32>("SELECT 42").expect("backend remains usable"),
+            Some(42)
         );
     }
 }

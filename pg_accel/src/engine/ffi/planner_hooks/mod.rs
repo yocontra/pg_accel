@@ -217,6 +217,10 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // When `gpu_enabled` is off, pg_accel injects nothing here.
         }
         pg_sys::UpperRelationKind::UPPERREL_FINAL => {
+            #[cfg(feature = "pg_test")]
+            if unsafe { raster::try_force_inject(root, output_rel) } {
+                return;
+            }
             // Most final upper-rel hooks have no SRF work at all. Check the
             // parse flag before GPU/SPI gates so native ORDER BY/LIMIT queries
             // do not initialize the GPU runtime just to decline.
