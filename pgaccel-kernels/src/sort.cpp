@@ -149,8 +149,10 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
 
     // Bitonic sort network. The queue is in-order, so sequential
     // submissions execute in order without explicit per-step waits.
-    for (size_t k = 2; k <= padded; k *= 2) {
-      for (size_t j = k / 2; j > 0; j /= 2) {
+    size_t k = 2;
+    do {
+      size_t j = k / 2;
+      do {
         q->parallel_for(sycl::range<1>(padded), [=](sycl::id<1> id) {
            const size_t i = id[0];
            const size_t partner = i ^ j;
@@ -164,8 +166,10 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
              }
            }
          }).wait_and_throw();
-      }
-    }
+        j /= 2;
+      } while (j > 0);
+      k *= 2;
+    } while (k <= padded);
 
     // Copy sorted data back (only the original count).
     q->memcpy(data, d_buf, count * sizeof(T)).wait_and_throw();
@@ -217,8 +221,10 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices, size_t co
 
     // Bitonic sort network — stable for equal keys by using index as
     // tiebreaker. Queue is in-order: no per-step wait needed.
-    for (size_t k = 2; k <= padded; k *= 2) {
-      for (size_t j = k / 2; j > 0; j /= 2) {
+    size_t k = 2;
+    do {
+      size_t j = k / 2;
+      do {
         q->parallel_for(sycl::range<1>(padded), [=](sycl::id<1> id) {
            const size_t i = id[0];
            const size_t partner = i ^ j;
@@ -250,8 +256,10 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices, size_t co
              }
            }
          }).wait_and_throw();
-      }
-    }
+        j /= 2;
+      } while (j > 0);
+      k *= 2;
+    } while (k <= padded);
 
     q->memcpy(keys, d_keys, count * sizeof(K)).wait_and_throw();
     q->memcpy(indices, d_idx, count * sizeof(uint32_t)).wait_and_throw();
