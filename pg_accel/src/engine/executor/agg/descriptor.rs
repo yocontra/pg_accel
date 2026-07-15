@@ -1564,6 +1564,8 @@ fn build_descriptor_with_fact_mask(
                 abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR,
                 // SAFETY: inactive measure columns must be bytewise zero.
                 unsafe { std::mem::zeroed() },
+                // SAFETY: COUNT(*) has no right-hand input column, and the ABI
+                // requires its inactive column descriptor to be all zeroes.
                 unsafe { std::mem::zeroed() },
                 abi::PGACCEL_GROUPED_AGG_ACCUM_I64,
             ),
@@ -1572,6 +1574,8 @@ fn build_descriptor_with_fact_mask(
                 (
                     abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
                     measure_column(view, artifact.fact_rows)?,
+                    // SAFETY: a unary column measure has no right-hand input;
+                    // the ABI requires that inactive descriptor to be zeroed.
                     unsafe { std::mem::zeroed() },
                     if matches!(column.type_oid, FLOAT4OID | FLOAT8OID) {
                         abi::PGACCEL_GROUPED_AGG_ACCUM_F64
@@ -1753,6 +1757,8 @@ fn build_h3_descriptor(
     desc.measures[0] = abi::PgaccelGroupedAggMeasure {
         // SAFETY: COUNT(*) has no input columns.
         value: unsafe { std::mem::zeroed() },
+        // SAFETY: COUNT(*) has no right-hand input column, so its inactive ABI
+        // descriptor must be represented by the all-zero value.
         rhs: unsafe { std::mem::zeroed() },
         op: abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR,
         agg_mask: abi::PGACCEL_GROUPED_AGG_LANE_COUNT,

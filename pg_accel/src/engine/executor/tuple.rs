@@ -59,7 +59,11 @@ impl OwnedMinimalTuple {
     /// slot containing a tuple that `ExecCopySlotMinimalTuple` can copy.
     #[must_use]
     pub unsafe fn copy_from_slot(slot: *mut pg_sys::TupleTableSlot) -> Self {
+        // SAFETY: the caller supplies a live backend slot containing a tuple
+        // whose descriptor supports PostgreSQL's minimal-tuple copy routine.
         let tuple = unsafe { pg_sys::ExecCopySlotMinimalTuple(slot) };
+        // SAFETY: ExecCopySlotMinimalTuple returns a backend-owned allocation
+        // that this wrapper will release once with pfree.
         unsafe { Self::from_raw(tuple) }
     }
 
@@ -108,6 +112,8 @@ impl Drop for OwnedMinimalTuple {
     fn drop(&mut self) {
         if !self.tuple.is_null() {
             unsafe {
+                // SAFETY: a non-null pointer held here came from the PostgreSQL
+                // allocator and ownership has not been transferred by take/into_raw.
                 pg_sys::pfree(self.tuple.cast());
             }
             self.tuple = std::ptr::null_mut();

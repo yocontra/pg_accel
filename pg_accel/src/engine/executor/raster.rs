@@ -433,6 +433,8 @@ impl RasterExecState {
         output_slot: *mut pg_sys::TupleTableSlot,
         query_context: pg_sys::MemoryContext,
     ) -> Result<Self, ResidentLoadError> {
+        // SAFETY: BeginCustomScan supplies this childless scan's initialized
+        // output slot on the backend thread, exactly as `begin` requires.
         unsafe { validate_output_slot(&plan, output_slot) }?;
         Ok(Self {
             plan,
@@ -469,6 +471,8 @@ impl RasterExecState {
             return Ok(());
         }
         let started = Instant::now();
+        // SAFETY: this method inherits the backend-thread requirement, and the
+        // plan remains owned by this live executor state for the call.
         let ready = unsafe { self.plan.ensure_ready() }?;
         let (rows_dispatched, batches_executed, dispatch_time_us) =
             execution_counters(&ready, started.elapsed());
@@ -591,7 +595,13 @@ unsafe fn validate_output_slot(
     }
     // SAFETY: caller promises an initialized executor-owned slot.
     let descriptor = unsafe { (*output_slot).tts_tupleDescriptor };
-    if descriptor.is_null() || unsafe { (*descriptor).natts } != 1 {
+    if descriptor.is_null()
+        || unsafe {
+            // SAFETY: the short-circuit above proves the slot's live tuple
+            // descriptor is non-null before reading its attribute count.
+            (*descriptor).natts
+        } != 1
+    {
         return Err(ResidentLoadError::Loader(
             "raster CustomScan output must contain exactly one attribute".to_owned(),
         ));

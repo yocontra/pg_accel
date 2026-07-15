@@ -109,6 +109,8 @@ impl ResultDrain {
         let idx = self.next_index(tuples, mask, |tuple| !tuple.is_null())?;
 
         unsafe {
+            // SAFETY: `next_index` selected a non-null tuple whose storage
+            // outlives the valid slot; ownership remains with the caller.
             pg_sys::ExecForceStoreMinimalTuple(tuples[idx], slot, false);
         }
 

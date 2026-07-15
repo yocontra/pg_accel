@@ -47,6 +47,8 @@ pub unsafe fn child_plan_state(
     idx: i32,
 ) -> *mut pg_sys::PlanState {
     unsafe {
+        // SAFETY: `css` is a live CustomScanState on the backend thread; after
+        // the length check, `idx` names an existing custom_ps list cell.
         let custom_ps = (*css).custom_ps;
         if custom_ps.is_null() || pg_sys::list_length(custom_ps) <= idx {
             std::ptr::null_mut()
