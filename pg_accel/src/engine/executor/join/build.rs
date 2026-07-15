@@ -100,8 +100,11 @@ impl JoinExecState {
         // SAFETY: cscan is valid.
         let tlist = unsafe { (*cscan).custom_scan_tlist };
         if !tlist.is_null() {
+            // SAFETY: `tlist` is the live PostgreSQL List owned by `cscan`.
             let tlen = unsafe { pg_sys::list_length(tlist) };
             for j in 0..tlen {
+                // SAFETY: `j` is bounded by list_length, so this cell exists;
+                // custom_scan_tlist cells contain TargetEntry pointers.
                 let tle = unsafe { pg_sys::list_nth(tlist, j).cast::<pg_sys::TargetEntry>() };
                 if tle.is_null() {
                     self.tlist_map.push(TlistMapEntry {
@@ -110,12 +113,20 @@ impl JoinExecState {
                     });
                     continue;
                 }
+                // SAFETY: a non-null custom_scan_tlist entry has TargetEntry
+                // layout, so its expression field is valid to read.
                 let expr = unsafe { (*tle).expr };
                 if !expr.is_null()
-                    && unsafe { (*expr.cast::<pg_sys::Node>()).type_ } == pg_sys::NodeTag::T_Var
+                    && unsafe {
+                        // SAFETY: every PostgreSQL Expr begins with a NodeTag;
+                        // the null check proves the node pointer is readable.
+                        (*expr.cast::<pg_sys::Node>()).type_
+                    } == pg_sys::NodeTag::T_Var
                 {
                     let var = expr.cast::<pg_sys::Var>();
+                    // SAFETY: the checked T_Var tag proves `expr` has Var layout.
                     let varno = unsafe { (*var).varno };
+                    // SAFETY: the checked T_Var tag proves `expr` has Var layout.
                     let varattno = unsafe { (*var).varattno };
 
                     // Handle already-remapped Vars (INNER_VAR/OUTER_VAR).
@@ -146,6 +157,8 @@ impl JoinExecState {
                             child_attno: inner_pos,
                         });
                     } else {
+                        // SAFETY: `outer_ps` is the live outer child PlanState;
+                        // `varno` and `varattno` came from the checked Var node.
                         let outer_pos =
                             unsafe { Self::find_child_output_pos(outer_ps, varno, varattno) };
                         self.tlist_map.push(TlistMapEntry {
@@ -166,6 +179,9 @@ impl JoinExecState {
         // SAFETY: Child plan states have valid result slots.
         if !outer_ps.is_null() {
             let outer_desc = unsafe {
+                // SAFETY: the caller supplies a live outer PlanState. Its
+                // initialized result slot, or scan slot when absent, owns the
+                // tuple descriptor used to construct our minimal-tuple slot.
                 let slot = (*outer_ps).ps_ResultTupleSlot;
                 if slot.is_null() {
                     let ss = outer_ps.cast::<pg_sys::ScanState>();
@@ -176,6 +192,8 @@ impl JoinExecState {
             };
             if !outer_desc.is_null() {
                 self.hash_outer_slot = unsafe {
+                    // SAFETY: `outer_desc` is a live child descriptor and the
+                    // selected PostgreSQL slot ops accept MinimalTuples.
                     pg_sys::MakeSingleTupleTableSlot(
                         outer_desc,
                         &raw const pg_sys::TTSOpsMinimalTuple,
@@ -185,6 +203,9 @@ impl JoinExecState {
         }
         if !inner_ps.is_null() {
             let inner_desc = unsafe {
+                // SAFETY: the caller supplies a live inner PlanState. Its
+                // initialized result slot, or scan slot when absent, owns the
+                // tuple descriptor used to construct our minimal-tuple slot.
                 let slot = (*inner_ps).ps_ResultTupleSlot;
                 if slot.is_null() {
                     let ss = inner_ps.cast::<pg_sys::ScanState>();
@@ -195,6 +216,8 @@ impl JoinExecState {
             };
             if !inner_desc.is_null() {
                 self.hash_inner_slot = unsafe {
+                    // SAFETY: `inner_desc` is a live child descriptor and the
+                    // selected PostgreSQL slot ops accept MinimalTuples.
                     pg_sys::MakeSingleTupleTableSlot(
                         inner_desc,
                         &raw const pg_sys::TTSOpsMinimalTuple,
