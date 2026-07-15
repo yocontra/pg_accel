@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <type_traits>
 
@@ -151,22 +152,20 @@ static pgaccel_status sycl_bitonic_sort(T* data, size_t count) {
     for (size_t k = 2; k <= padded; k *= 2) {
       for (size_t j = k / 2; j > 0; j /= 2) {
         q->parallel_for(sycl::range<1>(padded), [=](sycl::id<1> id) {
-          const size_t i = id[0];
-          const size_t partner = i ^ j;
-          if (partner > i && partner < padded) {
-            const bool ascending = ((i & k) == 0);
-            const T vi = d_buf[i];
-            const T vp = d_buf[partner];
-            if ((ascending && pg_float_less(vp, vi)) || (!ascending && pg_float_less(vi, vp))) {
-              d_buf[i] = vp;
-              d_buf[partner] = vi;
-            }
-          }
-        });
+           const size_t i = id[0];
+           const size_t partner = i ^ j;
+           if (partner > i && partner < padded) {
+             const bool ascending = ((i & k) == 0);
+             const T vi = d_buf[i];
+             const T vp = d_buf[partner];
+             if ((ascending && pg_float_less(vp, vi)) || (!ascending && pg_float_less(vi, vp))) {
+               d_buf[i] = vp;
+               d_buf[partner] = vi;
+             }
+           }
+         }).wait_and_throw();
       }
     }
-    // Single wait after all bitonic steps complete.
-    q->wait_and_throw();
 
     // Copy sorted data back (only the original count).
     q->memcpy(data, d_buf, count * sizeof(T)).wait_and_throw();
@@ -221,40 +220,38 @@ static pgaccel_status sycl_bitonic_sort_kv(K* keys, uint32_t* indices, size_t co
     for (size_t k = 2; k <= padded; k *= 2) {
       for (size_t j = k / 2; j > 0; j /= 2) {
         q->parallel_for(sycl::range<1>(padded), [=](sycl::id<1> id) {
-          const size_t i = id[0];
-          const size_t partner = i ^ j;
-          if (partner > i && partner < padded) {
-            const bool ascending = ((i & k) == 0);
-            const K ki = d_keys[i];
-            const K kp = d_keys[partner];
-            const uint32_t ii = d_idx[i];
-            const uint32_t ip = d_idx[partner];
+           const size_t i = id[0];
+           const size_t partner = i ^ j;
+           if (partner > i && partner < padded) {
+             const bool ascending = ((i & k) == 0);
+             const K ki = d_keys[i];
+             const K kp = d_keys[partner];
+             const uint32_t ii = d_idx[i];
+             const uint32_t ip = d_idx[partner];
 
-            // Compare keys with NaN-aware PG semantics;
-            // break ties by original index for stability.
-            const bool ki_nan = (ki != ki);
-            const bool kp_nan = (kp != kp);
-            // NaN-aware equality: both NaN, or both
-            // non-NaN and IEEE-equal.
-            const bool eq = (ki_nan && kp_nan) || (!ki_nan && !kp_nan && ki == kp);
-            bool should_swap = false;
-            if (ascending) {
-              should_swap = pg_float_less(kp, ki) || (eq && ii > ip);
-            } else {
-              should_swap = pg_float_less(ki, kp) || (eq && ii < ip);
-            }
-            if (should_swap) {
-              d_keys[i] = kp;
-              d_keys[partner] = ki;
-              d_idx[i] = ip;
-              d_idx[partner] = ii;
-            }
-          }
-        });
+             // Compare keys with NaN-aware PG semantics;
+             // break ties by original index for stability.
+             const bool ki_nan = (ki != ki);
+             const bool kp_nan = (kp != kp);
+             // NaN-aware equality: both NaN, or both
+             // non-NaN and IEEE-equal.
+             const bool eq = (ki_nan && kp_nan) || (!ki_nan && !kp_nan && ki == kp);
+             bool should_swap = false;
+             if (ascending) {
+               should_swap = pg_float_less(kp, ki) || (eq && ii > ip);
+             } else {
+               should_swap = pg_float_less(ki, kp) || (eq && ii < ip);
+             }
+             if (should_swap) {
+               d_keys[i] = kp;
+               d_keys[partner] = ki;
+               d_idx[i] = ip;
+               d_idx[partner] = ii;
+             }
+           }
+         }).wait_and_throw();
       }
     }
-    // Single wait after all bitonic steps complete.
-    q->wait_and_throw();
 
     q->memcpy(keys, d_keys, count * sizeof(K)).wait_and_throw();
     q->memcpy(indices, d_idx, count * sizeof(uint32_t)).wait_and_throw();
@@ -1479,6 +1476,62 @@ static inline bool topk_order_less(K a, uint32_t ai, K b, uint32_t bi, bool larg
   return largest ? pg_float_less(b, a) : pg_float_less(a, b);
 }
 
+static pgaccel_status sort_topk_candidates(float* keys, uint32_t* indices, size_t count,
+                                           bool largest, void*& sortable_storage, sycl::queue& q) {
+  auto* sortable = sycl::malloc_device<uint32_t>(count, q);
+  sortable_storage = sortable;
+  if (sortable == nullptr)
+    return PGACCEL_OOM;
+  q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+     const size_t i = id[0];
+     const uint32_t normalized = f32_to_sortable(keys[i]);
+     sortable[i] = largest ? ~normalized : normalized;
+   }).wait_and_throw();
+  return sycl_radix_sort_kv_u32(sortable, indices, count);
+}
+
+static pgaccel_status sort_topk_candidates(int32_t* keys, uint32_t* indices, size_t count,
+                                           bool largest, void*& sortable_storage, sycl::queue& q) {
+  auto* sortable = sycl::malloc_device<uint32_t>(count, q);
+  sortable_storage = sortable;
+  if (sortable == nullptr)
+    return PGACCEL_OOM;
+  q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+     const size_t i = id[0];
+     const uint32_t normalized = i32_to_sortable(keys[i]);
+     sortable[i] = largest ? ~normalized : normalized;
+   }).wait_and_throw();
+  return sycl_radix_sort_kv_u32(sortable, indices, count);
+}
+
+static pgaccel_status sort_topk_candidates(double* keys, uint32_t* indices, size_t count,
+                                           bool largest, void*& sortable_storage, sycl::queue& q) {
+  auto* sortable = sycl::malloc_device<uint64_t>(count, q);
+  sortable_storage = sortable;
+  if (sortable == nullptr)
+    return PGACCEL_OOM;
+  q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+     const size_t i = id[0];
+     const uint64_t normalized = f64_to_sortable(keys[i]);
+     sortable[i] = largest ? ~normalized : normalized;
+   }).wait_and_throw();
+  return sycl_radix_sort_kv_u64(sortable, indices, count);
+}
+
+static pgaccel_status sort_topk_candidates(int64_t* keys, uint32_t* indices, size_t count,
+                                           bool largest, void*& sortable_storage, sycl::queue& q) {
+  auto* sortable = sycl::malloc_device<uint64_t>(count, q);
+  sortable_storage = sortable;
+  if (sortable == nullptr)
+    return PGACCEL_OOM;
+  q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+     const size_t i = id[0];
+     const uint64_t normalized = i64_to_sortable(keys[i]);
+     sortable[i] = largest ? ~normalized : normalized;
+   }).wait_and_throw();
+  return sycl_radix_sort_kv_u64(sortable, indices, count);
+}
+
 template <typename K>
 static pgaccel_status sycl_topk_device(const K* keys, size_t count, size_t k, bool largest,
                                        uint32_t* out_indices, size_t candidate_count,
@@ -1486,8 +1539,6 @@ static pgaccel_status sycl_topk_device(const K* keys, size_t count, size_t k, bo
   sycl::queue* q = get_queue();
   if (q == nullptr)
     return PGACCEL_UNSUPPORTED;
-  if (count == 0 || k == 0)
-    return PGACCEL_OK;
 
   const size_t num_tiles = (count + TOPK_TILE - 1) / TOPK_TILE;
   const size_t local_k = std::min(k, TOPK_TILE);
@@ -1497,6 +1548,7 @@ static pgaccel_status sycl_topk_device(const K* keys, size_t count, size_t k, bo
   K* d_keys = nullptr;
   K* d_cand_keys = nullptr;
   uint32_t* d_cand_indices = nullptr;
+  uint32_t* d_result_indices = nullptr;
   void* d_sortable = nullptr;
   auto release = [&]() {
     if (d_keys)
@@ -1505,11 +1557,14 @@ static pgaccel_status sycl_topk_device(const K* keys, size_t count, size_t k, bo
       sycl::free(d_cand_keys, *q);
     if (d_cand_indices)
       sycl::free(d_cand_indices, *q);
+    if (d_result_indices)
+      sycl::free(d_result_indices, *q);
     if (d_sortable)
       sycl::free(d_sortable, *q);
     d_keys = nullptr;
     d_cand_keys = nullptr;
     d_cand_indices = nullptr;
+    d_result_indices = nullptr;
     d_sortable = nullptr;
   };
 
@@ -1517,7 +1572,8 @@ static pgaccel_status sycl_topk_device(const K* keys, size_t count, size_t k, bo
     d_keys = sycl::malloc_device<K>(count, *q);
     d_cand_keys = sycl::malloc_device<K>(candidate_capacity, *q);
     d_cand_indices = sycl::malloc_device<uint32_t>(candidate_capacity, *q);
-    if (!d_keys || !d_cand_keys || !d_cand_indices) {
+    d_result_indices = sycl::malloc_device<uint32_t>(k, *q);
+    if (!d_keys || !d_cand_keys || !d_cand_indices || !d_result_indices) {
       release();
       return PGACCEL_OOM;
     }
@@ -1596,52 +1652,26 @@ static pgaccel_status sycl_topk_device(const K* keys, size_t count, size_t k, bo
     sycl::free(d_keys, *q);
     d_keys = nullptr;
 
-    pgaccel_status st = PGACCEL_UNSUPPORTED;
-    if constexpr (sizeof(K) == sizeof(uint32_t)) {
-      auto* sortable = sycl::malloc_device<uint32_t>(candidate_count, *q);
-      d_sortable = sortable;
-      if (!sortable) {
-        release();
-        return PGACCEL_OOM;
-      }
-      q->parallel_for(sycl::range<1>(candidate_count), [=](sycl::id<1> id) {
-         const size_t i = id[0];
-         uint32_t normalized;
-         if constexpr (std::is_same_v<K, float>)
-           normalized = f32_to_sortable(d_cand_keys[i]);
-         else
-           normalized = i32_to_sortable(d_cand_keys[i]);
-         sortable[i] = want_largest ? ~normalized : normalized;
-       }).wait_and_throw();
-      sycl::free(d_cand_keys, *q);
-      d_cand_keys = nullptr;
-      st = sycl_radix_sort_kv_u32(sortable, d_cand_indices, candidate_count);
-    } else {
-      auto* sortable = sycl::malloc_device<uint64_t>(candidate_count, *q);
-      d_sortable = sortable;
-      if (!sortable) {
-        release();
-        return PGACCEL_OOM;
-      }
-      q->parallel_for(sycl::range<1>(candidate_count), [=](sycl::id<1> id) {
-         const size_t i = id[0];
-         uint64_t normalized;
-         if constexpr (std::is_same_v<K, double>)
-           normalized = f64_to_sortable(d_cand_keys[i]);
-         else
-           normalized = i64_to_sortable(d_cand_keys[i]);
-         sortable[i] = want_largest ? ~normalized : normalized;
-       }).wait_and_throw();
-      sycl::free(d_cand_keys, *q);
-      d_cand_keys = nullptr;
-      st = sycl_radix_sort_kv_u64(sortable, d_cand_indices, candidate_count);
-    }
+    const pgaccel_status st = sort_topk_candidates(d_cand_keys, d_cand_indices, candidate_count,
+                                                   want_largest, d_sortable, *q);
 
+    if (st == PGACCEL_OOM) {
+      release();
+      return PGACCEL_OOM;
+    }
+    if (st == PGACCEL_ERROR) {
+      release();
+      return PGACCEL_ERROR;
+    }
     if (st != PGACCEL_OK) {
       release();
-      return st;
+      return PGACCEL_UNSUPPORTED;
     }
-    q->memcpy(out_indices, d_cand_indices, k * sizeof(uint32_t)).wait_and_throw();
+    q->parallel_for(sycl::range<1>(k), [=](sycl::id<1> id) {
+       const size_t i = id[0];
+       d_result_indices[i] = d_cand_indices[i];
+     }).wait_and_throw();
+    q->memcpy(out_indices, d_result_indices, k * sizeof(uint32_t)).wait_and_throw();
     release();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
@@ -1656,19 +1686,21 @@ static pgaccel_status sycl_topk_device(const K* keys, size_t count, size_t k, bo
 }
 
 template <typename K>
-static pgaccel_status dispatch_topk_kv(const K* keys, size_t count, size_t k, bool largest,
-                                       uint32_t* out_indices, size_t* out_count) {
+static pgaccel_status dispatch_topk_kv(const K* keys, size_t count, size_t requested_count,
+                                       bool largest, uint32_t* out_indices, size_t* out_count) {
   if (out_count == nullptr)
     return PGACCEL_ERROR;
-  *out_count = 0;
-  if (k == 0 || count == 0)
+  std::memset(out_count, 0, sizeof(*out_count));
+  if (requested_count == 0)
+    return PGACCEL_OK;
+  if (count == 0)
     return PGACCEL_OK;
   if (keys == nullptr || out_indices == nullptr)
     return PGACCEL_ERROR;
   if (count > std::numeric_limits<uint32_t>::max())
     return PGACCEL_ERROR;
 
-  const size_t take = std::min(k, count);
+  const size_t take = std::min(requested_count, count);
   const size_t num_tiles = (count + TOPK_TILE - 1) / TOPK_TILE;
   const size_t local_k = std::min(take, TOPK_TILE);
   const size_t last_tile_count = count - (num_tiles - 1) * TOPK_TILE;
@@ -1678,10 +1710,28 @@ static pgaccel_status dispatch_topk_kv(const K* keys, size_t count, size_t k, bo
 
   const pgaccel_status st = sycl_topk_device(keys, count, take, largest, out_indices,
                                              candidate_count, candidate_capacity);
+  if (st == PGACCEL_OOM)
+    return PGACCEL_OOM;
+  if (st == PGACCEL_ERROR)
+    return PGACCEL_ERROR;
   if (st != PGACCEL_OK)
-    return st;
+    return PGACCEL_UNSUPPORTED;
 
-  *out_count = take;
+  sycl::queue* q = get_queue();
+  if (q == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  size_t* d_result_count = sycl::malloc_device<size_t>(1, *q);
+  if (d_result_count == nullptr)
+    return PGACCEL_OOM;
+  try {
+    q->single_task([=]() { d_result_count[0] = take; }).wait_and_throw();
+    q->memcpy(out_count, d_result_count, sizeof(size_t)).wait_and_throw();
+    sycl::free(d_result_count, *q);
+  } catch (...) {
+    sycl::free(d_result_count, *q);
+    throw;
+  }
+
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 }
