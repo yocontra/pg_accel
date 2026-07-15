@@ -205,12 +205,93 @@ build_h3_pg_from_source() {
     cmake --install "$build" --component h3-pg
 }
 
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+build_postgis_from_source() {
+    local version url expected_sha archive src build jobs actual_sha tmp
+    local path_value pkg_config_value dependency dependency_prefix directory
+    version="${PG_ACCEL_POSTGIS_VERSION:-3.6.4}"
+    url="${PG_ACCEL_POSTGIS_URL:-https://download.osgeo.org/postgis/source/postgis-${version}.tar.gz}"
+    expected_sha="${PG_ACCEL_POSTGIS_SHA256:-ed8dc6679f1e06f7b113592b04cde2a7e00f1b1e681294c8ca2204058990cec6}"
+    archive="$PG_ACCEL_REPO_ROOT/.pgaccel/distfiles/postgis-${version}.tar.gz"
+    src="$PG_ACCEL_REPO_ROOT/.pgaccel/build/postgis-${version}-src"
+    build="$PG_ACCEL_REPO_ROOT/.pgaccel/build/postgis-${version}-pg${pg_version}"
+    jobs="${PG_ACCEL_EXT_MAKE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+
+    mkdir -p "$(dirname "$archive")" "$(dirname "$src")"
+    if [ ! -f "$archive" ]; then
+        tmp="${archive}.tmp.$$"
+        echo "Downloading PostGIS ${version} source..."
+        if ! curl -fL --retry 3 --retry-delay 1 "$url" -o "$tmp"; then
+            rm -f "$tmp"
+            return 1
+        fi
+        mv "$tmp" "$archive"
+    fi
+
+    actual_sha="$(sha256_file "$archive")"
+    if [ "$actual_sha" != "$expected_sha" ]; then
+        echo "error: PostGIS ${version} source checksum mismatch" >&2
+        echo "  expected: $expected_sha" >&2
+        echo "  actual:   $actual_sha" >&2
+        echo "  archive:  $archive" >&2
+        return 1
+    fi
+
+    if [ ! -f "$src/.pgaccel-source-${expected_sha}" ]; then
+        rm -rf "$src"
+        mkdir -p "$src"
+        tar -xzf "$archive" --strip-components=1 -C "$src"
+        touch "$src/.pgaccel-source-${expected_sha}"
+    fi
+    mkdir -p "$build"
+
+    path_value="$PATH"
+    pkg_config_value="${PKG_CONFIG_PATH:-}"
+    if command -v brew >/dev/null 2>&1; then
+        for dependency in geos gdal proj libxml2 json-c pcre2 gettext; do
+            dependency_prefix="$(brew --prefix "$dependency" 2>/dev/null || true)"
+            [ -n "$dependency_prefix" ] || continue
+            [ ! -d "$dependency_prefix/bin" ] || path_value="$dependency_prefix/bin:$path_value"
+            for directory in lib/pkgconfig share/pkgconfig; do
+                [ ! -d "$dependency_prefix/$directory" ] || \
+                    pkg_config_value="$dependency_prefix/$directory${pkg_config_value:+:$pkg_config_value}"
+            done
+        done
+    fi
+
+    echo "Building PostGIS ${version} for PostgreSQL ${pg_version}..."
+    (
+        cd "$build"
+        export PATH="$bindir:$path_value"
+        export PKG_CONFIG_PATH="$pkg_config_value"
+        "$src/configure" \
+            --with-pgconfig="$pg_config" \
+            --without-topology \
+            --without-address-standardizer \
+            --without-protobuf \
+            --without-sfcgal
+        make -j "$jobs"
+        make install
+    )
+}
+
 collect_packaged_dirs
 maybe_install_postgis_package
 collect_packaged_dirs
 
 if ! have_postgis; then
     install_packaged_postgis
+fi
+
+if ! have_postgis; then
+    build_postgis_from_source
 fi
 
 if ! have_postgis; then
@@ -223,7 +304,8 @@ Install same-major PostGIS package artifacts, then rerun:
 
 You can also point PG_ACCEL_PG_EXTENSION_SHARE_DIRS and
 PG_ACCEL_PG_EXTENSION_LIB_DIRS at directories containing postgis.control and
-postgis-3.{so,dylib}.
+postgis-3.{so,dylib}, or override PG_ACCEL_POSTGIS_URL and
+PG_ACCEL_POSTGIS_SHA256 for a different source archive.
 EOF
     exit 1
 fi

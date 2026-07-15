@@ -2169,7 +2169,7 @@ mod tests {
             (
                 "constructor array wrapper",
                 "SELECT count(*) FROM _postgis_constructor_decline \
-                 WHERE ARRAY[ST_Buffer(geom, 0.25)] IS NOT NULL",
+                 WHERE (ARRAY[ST_Buffer(geom, 0.25)])[1] IS NOT NULL",
             ),
             (
                 "constructor geometry-array argument",
