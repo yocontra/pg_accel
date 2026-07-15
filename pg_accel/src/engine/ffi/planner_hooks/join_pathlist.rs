@@ -435,8 +435,7 @@ unsafe fn find_nlj_between_key(
         }
 
         // SAFETY: unwrap_var returned non-null planner-owned Var nodes.
-        let (left_varno, right_varno) =
-            unsafe { ((*left_var).varno as i32, (*right_var).varno as i32) };
+        let (left_varno, right_varno) = unsafe { ((*left_var).varno, (*right_var).varno) };
         // SAFETY: all four Bitmapset membership checks use relation-id sets
         // copied from live RelOptInfo nodes and nonnegative planner varnos.
         let (left_outer, left_inner, right_outer, right_inner) = unsafe {

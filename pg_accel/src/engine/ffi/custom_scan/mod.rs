@@ -225,14 +225,20 @@ pub(super) struct GpuAccelState {
 // accesses them from the main backend thread.
 #[repr(transparent)]
 struct SyncPathMethods(pg_sys::CustomPathMethods);
+// SAFETY: CustomPathMethods is a const-initialized vtable containing only a
+// static name pointer and immutable function pointers; PostgreSQL never mutates it.
 unsafe impl Sync for SyncPathMethods {}
 
 #[repr(transparent)]
 struct SyncScanMethods(pg_sys::CustomScanMethods);
+// SAFETY: CustomScanMethods is a const-initialized vtable containing only a
+// static name pointer and immutable function pointers; PostgreSQL never mutates it.
 unsafe impl Sync for SyncScanMethods {}
 
 #[repr(transparent)]
 struct SyncExecMethods(pg_sys::CustomExecMethods);
+// SAFETY: CustomExecMethods is a const-initialized vtable containing only a
+// static name pointer and immutable function pointers; PostgreSQL never mutates it.
 unsafe impl Sync for SyncExecMethods {}
 
 // ---------------------------------------------------------------------------
