@@ -1,5 +1,5 @@
 diff --git a/src/compiler/sscp/TargetSeparationPass.cpp b/src/compiler/sscp/TargetSeparationPass.cpp
-index f3202ceb..fdb65877 100644
+index f3202ceb..a529d3c4 100644
 --- a/src/compiler/sscp/TargetSeparationPass.cpp
 +++ b/src/compiler/sscp/TargetSeparationPass.cpp
 @@ -38,6 +38,7 @@
@@ -73,7 +73,15 @@ index f3202ceb..fdb65877 100644
    
    llvm::LoopAnalysisManager LAM;
    llvm::FunctionAnalysisManager FAM;
-@@ -476,6 +526,8 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
+@@ -325,6 +375,7 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
+   // Fix attributes for generic IR representation
+   llvm::SmallVector<llvm::Attribute::AttrKind, 16> AttrsToRemove;
+   llvm::SmallVector<std::string, 16> StringAttrsToRemove;
++  AttrsToRemove.push_back(llvm::Attribute::AttrKind::OptimizeNone);
+   AttrsToRemove.push_back(llvm::Attribute::AttrKind::UWTable);
+   AttrsToRemove.push_back(llvm::Attribute::AttrKind::StackProtectStrong);
+   AttrsToRemove.push_back(llvm::Attribute::AttrKind::StackProtect);
+@@ -476,6 +527,8 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
      KernelInfoOutput.push_back(KI);
    }
  
