@@ -1674,14 +1674,51 @@ fn plan_contains_resident_groupagg_logical_evidence(plan: &str) -> bool {
             "gpu_resident_groupagg_aggregate_mask",
         ],
     );
-    operator_class.is_some_and(|class| class.eq_ignore_ascii_case("resident_groupagg"))
-        && key.is_some_and(|key| !key.eq_ignore_ascii_case("unspecified"))
+    let resident_groupagg =
+        operator_class.is_some_and(|class| class.eq_ignore_ascii_case("resident_groupagg"));
+    let legacy_logical_spec = key.is_some_and(|key| !key.eq_ignore_ascii_case("unspecified"))
         && measure.is_some_and(|measure| !measure.eq_ignore_ascii_case("unspecified"))
         && filter.is_some_and(|filter| !filter.eq_ignore_ascii_case("unspecified"))
         && predicate_guard.is_some_and(|guard| !guard.eq_ignore_ascii_case("unspecified"))
         && value_predicate.is_some_and(|predicate| !predicate.eq_ignore_ascii_case("unspecified"))
         && predicate_ir.is_some_and(|ir| !ir.eq_ignore_ascii_case("unspecified"))
-        && aggregate_mask.is_some_and(|mask| mask > 0)
+        && aggregate_mask.is_some_and(|mask| mask > 0);
+
+    let descriptor_strategy = plan_text_property(
+        plan,
+        &["gpu descriptor strategy", "gpu_descriptor_strategy"],
+    );
+    let descriptor_group_keys = plan_text_property(
+        plan,
+        &["gpu descriptor group keys", "gpu_descriptor_group_keys"],
+    );
+    let descriptor_aggregates = plan_text_property(
+        plan,
+        &["gpu descriptor aggregates", "gpu_descriptor_aggregates"],
+    );
+    let descriptor_filter =
+        plan_text_property(plan, &["gpu descriptor filter", "gpu_descriptor_filter"]);
+    let descriptor_output =
+        plan_text_property(plan, &["gpu descriptor output", "gpu_descriptor_output"]);
+    let descriptor_logical_spec = descriptor_strategy
+        .is_some_and(|strategy| strategy.eq_ignore_ascii_case("descriptor_grouped_aggregate"))
+        && descriptor_property_is_concrete(descriptor_group_keys, false)
+        && descriptor_property_is_concrete(descriptor_aggregates, false)
+        && descriptor_property_is_concrete(descriptor_filter, true)
+        && descriptor_property_is_concrete(descriptor_output, false);
+
+    resident_groupagg && (legacy_logical_spec || descriptor_logical_spec)
+}
+
+fn descriptor_property_is_concrete(value: Option<String>, allow_none: bool) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        let lower = value.to_ascii_lowercase();
+        !value.is_empty()
+            && !value.eq_ignore_ascii_case("unspecified")
+            && !lower.starts_with("not initialized")
+            && (allow_none || !value.eq_ignore_ascii_case("none"))
+    })
 }
 
 fn plan_integer_property(plan: &str, keys: &[&str]) -> Option<i64> {
@@ -6271,6 +6308,26 @@ mod tests {
         let report = mock_report(vec![workload]);
 
         assert!(report.evaluate_benchmark_ship_gate().is_empty());
+    }
+
+    #[test]
+    fn test_current_descriptor_proves_groupagg_logical_spec() {
+        let plan = "Custom Scan (GpuAccelAgg)\n  \
+                    GPU Resident Operator Class: resident_groupagg\n  \
+                    GPU Descriptor Strategy: descriptor_grouped_aggregate\n  \
+                    GPU Descriptor Group Keys: k0:h3_cell_to_parent(cell, 0) type=16396\n  \
+                    GPU Descriptor Aggregates: m0:count_star -> value.count\n  \
+                    GPU Descriptor Filter: fact=none; measures=[m0=none]; dimensions=[none]\n  \
+                    GPU Descriptor Output: slot0:group[k0]; slot1:aggregate[m0].value.count";
+        assert!(plan_contains_resident_groupagg_logical_evidence(plan));
+
+        let incomplete = plan.replace(
+            "GPU Descriptor Output: slot0:group[k0]; slot1:aggregate[m0].value.count",
+            "GPU Descriptor Output: none",
+        );
+        assert!(!plan_contains_resident_groupagg_logical_evidence(
+            &incomplete
+        ));
     }
 
     #[test]

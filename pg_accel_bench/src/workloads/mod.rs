@@ -1456,21 +1456,25 @@ fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresho
     let profile = h3_matrix_profile(name)?;
     let class = h3_lane_class(name)?;
     let resident_rollup = h3_resident_rollup_required(name);
-    let current_generic_rte_decline = name == "h3_bulk" && rows == 100_000;
-    let expectation = match class {
-        _ if current_generic_rte_decline => BenchmarkLaneExpectation::NativeDecline {
-            reason: "shape_unsupported_rte",
-        },
-        H3LaneClass::Winning { min_warm_speedup } if rows >= H3_GROUPED_WINNER_MIN_ROWS => {
-            BenchmarkLaneExpectation::GpuWinner { min_warm_speedup }
-        }
-        H3LaneClass::Winning { .. } => BenchmarkLaneExpectation::NativeDecline {
-            reason: "h3_rows_below_grouped_agg_min",
-        },
-        H3LaneClass::Parity => BenchmarkLaneExpectation::NativeDecline {
-            reason: profile.decline_reason,
-        },
+    let current_phase6_decline = match (name, rows) {
+        ("h3_bulk", 100_000) => Some("shape_unsupported_rte"),
+        ("h3_resolution_sweep" | "h3_latlng_res15", 100_000) => Some("shape_group_expression"),
+        _ => None,
     };
+    let expectation = current_phase6_decline.map_or_else(
+        || match class {
+            H3LaneClass::Winning { min_warm_speedup } if rows >= H3_GROUPED_WINNER_MIN_ROWS => {
+                BenchmarkLaneExpectation::GpuWinner { min_warm_speedup }
+            }
+            H3LaneClass::Winning { .. } => BenchmarkLaneExpectation::NativeDecline {
+                reason: "h3_rows_below_grouped_agg_min",
+            },
+            H3LaneClass::Parity => BenchmarkLaneExpectation::NativeDecline {
+                reason: profile.decline_reason,
+            },
+        },
+        |reason| BenchmarkLaneExpectation::NativeDecline { reason },
+    );
     Some(BenchmarkThresholdMatrixEntry {
         lane: profile.lane,
         workload: static_workload_name(name),
@@ -1507,8 +1511,8 @@ fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresho
                 "native or below-floor lane; no GPU cold-start cost admitted"
             }
         },
-        threshold_basis: if current_generic_rte_decline {
-            "current generic RTE preflight keeps the measured 100K H3 bulk cell native"
+        threshold_basis: if current_phase6_decline.is_some() {
+            "current PG18 planner preflight keeps the measured Phase 6 cell native"
         } else {
             profile.threshold_basis
         },
@@ -1623,7 +1627,7 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             row_width: "16-byte h3index pair + 4-byte distance",
             output_size: "one sum/avg aggregate row",
             threshold_basis: "H3 grid-distance parity lane; standalone GPU path not a stable win",
-            decline_reason: "h3_grid_distance_parity_lane",
+            decline_reason: "shape_numeric_accumulator_unavailable",
         },
         "h3_parent_deep" => H3MatrixProfile {
             lane: "h3_cell_to_parent_deep_native_parity",
@@ -1635,7 +1639,7 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             row_width: "8-byte h3index input and output",
             output_size: "parent h3index group key plus count rows",
             threshold_basis: "H3 deep-parent parity lane; standalone GPU path not a stable win",
-            decline_reason: "h3_cell_to_parent_parity_lane",
+            decline_reason: "shape_unsupported_rte",
         },
         "h3_srf_grid_disk" => H3MatrixProfile {
             lane: "h3_grid_disk_srf_k2_native_output_gate",
@@ -1647,7 +1651,7 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             row_width: "8-byte h3index input; variable expanded h3index output",
             output_size: "aggregate over expanded SRF rows",
             threshold_basis: "H3 SRF output-return gate; small selected SRF covered by integration test",
-            decline_reason: "h3_srf_output_returns_to_cpu",
+            decline_reason: "shape_unsupported_rte",
         },
         _ => return None,
     })
@@ -1656,7 +1660,7 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
 fn raster_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = raster_matrix_profile(name)?;
     let pixels = raster_total_pixels(rows);
-    let current_generic_rte_decline = name == "raster_reclass" && rows == 100;
+    let current_generic_rte_decline = rows == 100;
     let expectation = if current_generic_rte_decline {
         BenchmarkLaneExpectation::NativeDecline {
             reason: "shape_unsupported_rte",
@@ -2278,19 +2282,24 @@ fn spatial_threshold_matrix_entry(
 ) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = spatial_matrix_profile(name)?;
     let work_product = (profile.vertices as u64).saturating_mul(rows as u64);
-    let current_generic_predicate_decline = name == "spatial_filter" && rows == 100_000;
-    let expectation = if current_generic_predicate_decline {
-        BenchmarkLaneExpectation::NativeDecline {
-            reason: "shape_unsupported_predicate",
-        }
+    let current_planner_decline = if name == "spatial_filter" && rows == 100_000 {
+        Some("shape_unsupported_predicate")
+    } else if phase6_spatial_generic_descriptor_cell(name, rows) {
+        Some("generic_descriptor_capability")
     } else {
-        spatial_matrix_expectation(
-            rows,
-            profile.vertices,
-            profile.selectivity_pct,
-            profile.registered_gpu_predicate,
-        )
+        None
     };
+    let expectation = current_planner_decline.map_or_else(
+        || {
+            spatial_matrix_expectation(
+                rows,
+                profile.vertices,
+                profile.selectivity_pct,
+                profile.registered_gpu_predicate,
+            )
+        },
+        |reason| BenchmarkLaneExpectation::NativeDecline { reason },
+    );
     Some(BenchmarkThresholdMatrixEntry {
         lane: profile.lane,
         workload: static_workload_name(name),
@@ -2312,13 +2321,31 @@ fn spatial_threshold_matrix_entry(
         },
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
         cache_gate: GENERIC_CACHE_GATE,
-        threshold_basis: if current_generic_predicate_decline {
-            "current generic predicate descriptor preflight keeps the measured 100K cell native"
+        threshold_basis: if current_planner_decline.is_some() {
+            "current PG18 descriptor preflight keeps the measured planner cell native"
         } else {
             spatial_threshold_basis(&profile, work_product)
         },
         expectation,
     })
+}
+
+fn phase6_spatial_generic_descriptor_cell(name: &str, rows: usize) -> bool {
+    match name {
+        "spatial_mega_1kv" | "spatial_sel_10pct" => {
+            matches!(rows, 80_000 | 100_000 | 150_000)
+        }
+        "spatial_filter"
+        | "spatial_selectivity"
+        | "vsweep_low"
+        | "vsweep_mid"
+        | "vsweep_high"
+        | "vsweep_pathological"
+        | "spatial_sel_1pct"
+        | "spatial_sel_50pct"
+        | "spatial_sel_90pct" => rows == 10_000,
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -3245,14 +3272,9 @@ mod tests {
             assert_eq!(workload.row_scales(), &[100], "{}", workload.name());
             let entry = benchmark_threshold_matrix_entry(workload.name(), 100)
                 .expect("raster threshold matrix entry");
-            let expected_reason = if workload.name() == "raster_reclass" {
-                "shape_unsupported_rte"
-            } else {
-                "raster_rows_below_standalone_min"
-            };
             assert_eq!(
                 entry.expectation.decline_reason(),
-                Some(expected_reason),
+                Some("shape_unsupported_rte"),
                 "{}",
                 workload.name()
             );
@@ -3616,7 +3638,7 @@ mod tests {
             .expect("vsweep_mid threshold entry");
         assert_eq!(
             small.expectation.decline_reason(),
-            Some("spatial_work_below_break_even")
+            Some("generic_descriptor_capability")
         );
 
         let former_crash_band = benchmark_threshold_matrix_entry("vsweep_mid", 100_000)
@@ -3695,9 +3717,44 @@ mod tests {
         assert_eq!(srf.lane, "h3_grid_disk_srf_k2_native_output_gate");
         assert_eq!(
             srf.expectation.decline_reason(),
-            Some("h3_srf_output_returns_to_cpu")
+            Some("shape_unsupported_rte")
         );
         assert!(srf.result_count.contains("190K expanded h3index SRF rows"));
+    }
+
+    #[test]
+    fn test_phase6_domain_cells_pin_live_pg18_decline_reasons() {
+        for (name, rows, reason) in [
+            ("spatial_filter", 10_000, "generic_descriptor_capability"),
+            ("spatial_mega_1kv", 80_000, "generic_descriptor_capability"),
+            (
+                "spatial_sel_10pct",
+                150_000,
+                "generic_descriptor_capability",
+            ),
+            ("h3_bulk", 100_000, "shape_unsupported_rte"),
+            ("h3_resolution_sweep", 100_000, "shape_group_expression"),
+            ("h3_latlng_res15", 100_000, "shape_group_expression"),
+            (
+                "h3_grid_distance",
+                10_000,
+                "shape_numeric_accumulator_unavailable",
+            ),
+            ("h3_srf_grid_disk", 10_000, "shape_unsupported_rte"),
+            ("h3_parent_deep", 10_000, "shape_unsupported_rte"),
+            ("raster_ndvi", 100, "shape_unsupported_rte"),
+            ("raster_slope", 100, "shape_unsupported_rte"),
+            ("raster_reclass", 100, "shape_unsupported_rte"),
+            ("raster_algebra_deep", 100, "shape_unsupported_rte"),
+        ] {
+            let entry = benchmark_threshold_matrix_entry(name, rows)
+                .unwrap_or_else(|| panic!("{name}/{rows} threshold entry"));
+            assert_eq!(
+                entry.expectation.decline_reason(),
+                Some(reason),
+                "{name}/{rows}"
+            );
+        }
     }
 
     #[test]
