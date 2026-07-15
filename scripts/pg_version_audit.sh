@@ -105,6 +105,62 @@ validate_contract() {
     local root="$1"
     local view="$2"
 
+    python3 - "$root" "$view" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+root = Path(sys.argv[1])
+view = sys.argv[2]
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"error: {view} {message}")
+
+
+tool_versions_path = root / ".tool-versions"
+try:
+    tool_lines = tool_versions_path.read_text(encoding="utf-8").splitlines()
+except OSError as error:
+    fail(f"could not read .tool-versions: {error}")
+
+rust_entries = []
+for line in tool_lines:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        continue
+    fields = stripped.split()
+    if fields[0] == "rust":
+        rust_entries.append(fields[1:])
+if rust_entries != [["1.96.0"]]:
+    fail(f"must contain exactly one Rust tool entry at 1.96.0, found {rust_entries!r}")
+
+cargo_toml_path = root / "pg_accel" / "Cargo.toml"
+try:
+    with cargo_toml_path.open("rb") as cargo_toml:
+        manifest = tomllib.load(cargo_toml)
+except (OSError, tomllib.TOMLDecodeError) as error:
+    fail(f"could not parse pg_accel/Cargo.toml: {error}")
+
+dependencies = manifest.get("dependencies")
+if not isinstance(dependencies, dict) or dependencies.get("pgrx") != "=0.19.1":
+    fail("[dependencies].pgrx must equal '=0.19.1'")
+
+dev_dependencies = manifest.get("dev-dependencies")
+if not isinstance(dev_dependencies, dict) or dev_dependencies.get("pgrx-tests") != "=0.19.1":
+    fail("[dev-dependencies].pgrx-tests must equal '=0.19.1'")
+
+expected_features = {
+    "default": ["pg18"],
+    "pg18": ["pgrx/pg18", "pgrx-tests/pg18"],
+    "pg19": ["pgrx/pg19", "pgrx-tests/pg19"],
+    "pg_test": [],
+}
+features = manifest.get("features")
+if features != expected_features:
+    fail(f"[features] must equal {expected_features!r}, found {features!r}")
+PY
+
     require_exact_line "$root" "$view" .tool-versions 'rust 1.96.0'
     require_exact_line "$root" "$view" pg_accel/Cargo.toml 'pgrx = "=0.19.1"'
     require_exact_line "$root" "$view" pg_accel/Cargo.toml 'pgrx-tests = "=0.19.1"'
@@ -121,6 +177,22 @@ validate_contract() {
         unset PG_ACCEL_SOURCE_PG_MAJORS
         export PG_ACCEL_REPO_ROOT="$root"
         source scripts/pg_versions.sh
+
+        require_shell_value() {
+            local name="$1"
+            local expected="$2"
+            local actual="${!name-}"
+            if [ "$actual" != "$expected" ]; then
+                echo "error: $view $name must equal [$expected], found [$actual]" >&2
+                exit 1
+            fi
+        }
+
+        require_shell_value PG_ACCEL_DEFAULT_PG_MAJOR "18"
+        require_shell_value PG_ACCEL_SUPPORTED_PG_MAJORS "18 19"
+        require_shell_value PG_ACCEL_SOURCE_PG_MAJORS "18 19"
+        require_shell_value PG_ACCEL_PREVIEW_PG_MAJORS "19"
+        require_shell_value PG_ACCEL_PGRX_VERSION "0.19.1"
 
         if ! pg_accel_require_pgrx_support 18; then
             echo "error: $view does not satisfy the PostgreSQL 18 pgrx contract" >&2
