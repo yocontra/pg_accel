@@ -4135,6 +4135,95 @@ def _validation_metadata_write_indices(
     return safe
 
 
+def _failure_terminal_neutral_write_indices(
+    tokens: Sequence[Token],
+    function: Function,
+    mutable: set[str],
+    host_writes: Sequence[tuple[int, int, bool]],
+    lambda_ranges: Sequence[tuple[int, int]],
+    regions: Sequence[_Region],
+) -> set[int]:
+    """Accept direct neutral initialization only when failure is inevitable."""
+
+    forward, _ = _delimiter_pairs(tokens)
+    returns = [
+        (index, _return_is_explicit_failure(function, expression))
+        for index, expression in _returns(tokens, function, lambda_ranges)
+        if _index_is_reachable(tokens, function, index, regions, lambda_ranges)
+    ]
+
+    def is_exact_zero_write(index: int) -> bool:
+        operator = _output_write_operator(tokens, index, function.body_close, forward)
+        if operator is None or tokens[operator].value != "=":
+            return False
+        cursor = operator + 1
+        values: list[str] = []
+        depth = 0
+        while cursor < function.body_close:
+            value = tokens[cursor].value
+            if value in {"(", "[", "{"}:
+                depth += 1
+            elif value in {")", "]", "}"}:
+                if depth == 0:
+                    break
+                depth -= 1
+            if value in {";", ","} and depth == 0:
+                break
+            values.append(value)
+            cursor += 1
+        compact = tuple(value for value in values if value not in {"(", ")"})
+        return compact in {("false",), ("nullptr",), ("NULL",)} or (
+            len(compact) == 1
+            and re.fullmatch(
+                r"(?:0+[uUlL]*|0[xX]0+[uUlL]*|"
+                r"(?:0+\.0*|0*\.0+)(?:[eE][+-]?0+)?[fFlL]?|"
+                r"0+[eE][+-]?0+[fFlL]?)",
+                compact[0],
+            )
+            is not None
+        )
+
+    def contexts_compatible(
+        left: tuple[tuple[str, str], ...], right: tuple[tuple[str, str], ...]
+    ) -> bool:
+        right_map = dict(right)
+        return all(key not in right_map or right_map[key] == branch for key, branch in left)
+
+    safe: set[int] = set()
+    for index, _, neutral in host_writes:
+        if (
+            not neutral
+            or tokens[index].value not in mutable
+            or not is_exact_zero_write(index)
+        ):
+            continue
+        write_context = _context(index, regions)
+        candidates = [
+            return_index
+            for return_index, failure in returns
+            if failure
+            and index < return_index
+            and _context_dominates(_context(return_index, regions), write_context)
+        ]
+        for return_index in candidates:
+            if any(
+                index < other_index < return_index
+                and not failure
+                and contexts_compatible(_context(other_index, regions), write_context)
+                for other_index, failure in returns
+            ):
+                continue
+            if any(
+                tokens[cursor].value in {"break", "continue", "goto", "throw"}
+                and not _is_inside(cursor, lambda_ranges)
+                for cursor in range(index + 1, return_index)
+            ):
+                continue
+            safe.add(index)
+            break
+    return safe
+
+
 def _local_usm_provenance(
     tokens: Sequence[Token],
     function: Function,
@@ -5264,10 +5353,19 @@ class _PathAuditor:
             )
 
         zero_ranges = [region for region in regions if region.zero_work]
+        failure_neutral_write_indices = _failure_terminal_neutral_write_indices(
+            self.tokens,
+            function,
+            mutable,
+            host_writes,
+            lambda_ranges,
+            regions,
+        )
         unsafe_write_records = [
             record
             for record in host_writes
             if record[0] not in validation_write_indices
+            and record[0] not in failure_neutral_write_indices
             and not (
                 record[2]
                 and any(
@@ -5289,6 +5387,15 @@ class _PathAuditor:
                 + ", ".join(
                     str(self.tokens[index].line)
                     for index in sorted(validation_write_indices)
+                )
+            )
+        if failure_neutral_write_indices:
+            classifications.add("failure_neutral_init")
+            details.append(
+                "neutral ABI initialization reaches only explicit failure at line(s) "
+                + ", ".join(
+                    str(self.tokens[index].line)
+                    for index in sorted(failure_neutral_write_indices)
                 )
             )
         if transfer_lines:

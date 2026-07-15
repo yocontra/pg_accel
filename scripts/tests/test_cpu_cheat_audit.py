@@ -1498,6 +1498,121 @@ class HostComputationAndContractTests(unittest.TestCase):
         self.assertFalse(result.findings)
         self.assertEqual(result.entrypoint_audits[0].classifications, ("failure_only",))
 
+    def test_neutral_output_init_on_unconditional_failure_edge(self) -> None:
+        valid = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_failure_init(
+                int* out, size_t count, bool invalid) {
+              if (invalid) {
+                if (out != nullptr) *out = 0;
+                return PGACCEL_ERROR;
+              }
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                  [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertIn(
+            "failure_neutral_init", valid.entrypoint_audits[0].classifications
+        )
+
+        hostile = {
+            "non_neutral": r"""
+                extern "C" pgaccel_status pgaccel_non_neutral(
+                    int* out, size_t count, bool invalid) {
+                  if (invalid) { *out = 42; return PGACCEL_ERROR; }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "conditional_failure": r"""
+                extern "C" pgaccel_status pgaccel_conditional_failure(
+                    int* out, size_t count, bool invalid, bool fatal) {
+                  if (invalid) {
+                    *out = 0;
+                    if (fatal) return PGACCEL_ERROR;
+                  }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "early_success": r"""
+                extern "C" pgaccel_status pgaccel_early_success(
+                    int* out, size_t count, bool invalid, bool recover) {
+                  if (invalid) {
+                    *out = 0;
+                    if (recover) return PGACCEL_OK;
+                    return PGACCEL_ERROR;
+                  }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "later_failure": r"""
+                extern "C" pgaccel_status pgaccel_later_failure(
+                    int* out, size_t count, bool invalid, bool fatal) {
+                  if (invalid) *out = 0;
+                  if (fatal) return PGACCEL_ERROR;
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "break_escape": r"""
+                extern "C" pgaccel_status pgaccel_break_escape(
+                    int* out, size_t count, bool invalid, bool recover) {
+                  if (invalid) {
+                    while (recover) { *out = 0; break; }
+                    return PGACCEL_ERROR;
+                  }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+            "goto_escape": r"""
+                extern "C" pgaccel_status pgaccel_goto_escape(
+                    int* out, size_t count, bool invalid) {
+                  if (invalid) { *out = 0; goto failed; }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                failed:
+                  return PGACCEL_ERROR;
+                }
+            """,
+            "escaping_alias": r"""
+                extern "C" pgaccel_status pgaccel_alias_failure_init(
+                    int* out, size_t count, bool invalid) {
+                  int* alias = out;
+                  if (invalid) { *alias = 0; return PGACCEL_ERROR; }
+                  sycl::queue q;
+                  q.parallel_for(sycl::range<1>(count),
+                      [=](sycl::id<1> i) { out[i] = 1; });
+                  return PGACCEL_OK;
+                }
+            """,
+        }
+        for name, source in hostile.items():
+            with self.subTest(name):
+                result = audit_fixture(source)
+                self.assertTrue(result.findings)
+                self.assertIn(
+                    "host_output_write", result.entrypoint_audits[0].classifications
+                )
+
     def test_zero_work_only_success_with_nonempty_failure_passes(self) -> None:
         result = audit_fixture(
             r"""
