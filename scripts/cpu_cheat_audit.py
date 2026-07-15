@@ -2972,6 +2972,125 @@ def _call_is_awaited(
     )
 
 
+def _device_orchestration_do_loops(
+    tokens: Sequence[Token],
+    function: Function,
+    output_roots: set[str],
+    lambda_ranges: Sequence[tuple[int, int]],
+    device_lambdas: set[tuple[int, int]],
+    forward: dict[int, int],
+    reverse: dict[int, int],
+) -> set[int]:
+    """Prove guaranteed-once host loops only orchestrate awaited device launches."""
+
+    indexed_calls = _indexed_calls(tokens, function, lambda_ranges)
+    proven: set[int] = set()
+    for loop_index in range(function.body_open + 1, function.body_close):
+        if tokens[loop_index].value != "do" or _is_inside(loop_index, lambda_ranges):
+            continue
+
+        body_start, body_end, after = _statement_range(
+            tokens, loop_index + 1, function.body_close, forward
+        )
+        if (
+            after + 1 >= function.body_close
+            or tokens[after].value != "while"
+            or tokens[after + 1].value != "("
+            or after + 1 not in forward
+        ):
+            continue
+        condition_end = forward[after + 1]
+        if (
+            condition_end + 1 >= function.body_close
+            or tokens[condition_end + 1].value != ";"
+        ):
+            continue
+
+        # A host lambda could hide semantic publication from the body scan.
+        if any(
+            body_start < left < right < body_end and (left, right) not in device_lambdas
+            for left, right in lambda_ranges
+        ):
+            continue
+
+        launch_calls: dict[int, tuple[int, int]] = {}
+        allowed_call_indices: set[int] = set()
+        capture_ranges: list[tuple[int, int]] = []
+        for left, right in device_lambdas:
+            if not (body_start < left < right < body_end):
+                continue
+            capture_close = _lambda_capture_before_body(
+                tokens, left, body_start, reverse
+            )
+            if capture_close is not None and capture_close in reverse:
+                capture_ranges.append((reverse[capture_close], capture_close))
+
+        for method_index in range(body_start + 1, body_end):
+            if (
+                tokens[method_index].value not in DISPATCH_METHODS
+                or _is_inside(method_index, lambda_ranges)
+                or method_index < 2
+                or tokens[method_index - 1].value not in {".", "->"}
+            ):
+                continue
+            receiver = tokens[method_index - 2].value
+            if (
+                _receiver_kind(tokens, function, receiver, method_index, forward)
+                != "queue"
+            ):
+                continue
+            call = _method_lparen(tokens, method_index, body_end, forward)
+            if call is None or not _call_is_awaited(tokens, call[1], body_end, forward):
+                continue
+            launch_calls[method_index] = call
+            allowed_call_indices.add(method_index)
+            allowed_call_indices.add(call[1] + 2)
+
+        if not launch_calls:
+            continue
+
+        unsafe = False
+        for index in range(body_start + 1, condition_end):
+            if _is_inside(index, device_lambdas) or any(
+                left <= index <= right for left, right in capture_ranges
+            ):
+                continue
+            value = tokens[index].value
+            if value in output_roots and _unqualified_output_identifier(tokens, index):
+                unsafe = True
+                break
+            if value in {"return", "break", "continue", "goto", "throw", "switch"}:
+                unsafe = True
+                break
+            if value in {"[", "]"}:
+                unsafe = True
+                break
+            if value == "*":
+                previous = tokens[index - 1].value if index > body_start else ""
+                if previous in {"", "=", "(", "{", ";", ",", ":", "?"}:
+                    unsafe = True
+                    break
+        if unsafe:
+            continue
+
+        for indexed in indexed_calls:
+            if not (body_start < indexed.index < condition_end):
+                continue
+            if indexed.index in allowed_call_indices:
+                continue
+            if any(
+                left < indexed.index < right
+                and indexed.call.name.rsplit("::", 1)[-1] in {"range", "nd_range"}
+                for left, right in launch_calls.values()
+            ):
+                continue
+            unsafe = True
+            break
+        if not unsafe:
+            proven.add(loop_index)
+    return proven
+
+
 def _lambda_nonempty(tokens: Sequence[Token], bounds: tuple[int, int]) -> bool:
     left, right = bounds
     return any(token.value != ";" for token in tokens[left + 1 : right])
@@ -4910,6 +5029,24 @@ class _PathAuditor:
                 + ", ".join(map(str, counter_lines))
             )
 
+        orchestration_loops = _device_orchestration_do_loops(
+            self.tokens,
+            function,
+            output_roots,
+            lambda_ranges,
+            device_lambdas,
+            self.forward,
+            self.reverse,
+        )
+        if orchestration_loops:
+            classifications.add("device_launch_orchestration")
+            details.append(
+                "guaranteed-once host loop(s) only orchestrate awaited device launches at line(s) "
+                + ", ".join(
+                    str(self.tokens[index].line)
+                    for index in sorted(orchestration_loops)
+                )
+            )
         host_loop_lines = sorted(
             {
                 token.line
@@ -4917,6 +5054,22 @@ class _PathAuditor:
                 if function.body_open < index < function.body_close
                 and token.value in {"for", "while", "do"}
                 and not _is_inside(index, lambda_ranges)
+                and index not in orchestration_loops
+                and not (
+                    token.value == "while"
+                    and any(
+                        after == index
+                        for loop_index in orchestration_loops
+                        for _start, _end, after in [
+                            _statement_range(
+                                self.tokens,
+                                loop_index + 1,
+                                function.body_close,
+                                self.forward,
+                            )
+                        ]
+                    )
+                )
             }
         )
         if host_loop_lines:

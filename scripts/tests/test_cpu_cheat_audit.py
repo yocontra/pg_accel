@@ -1664,6 +1664,124 @@ class ResidentV5RegressionTests(unittest.TestCase):
         for entry in result.entrypoint_audits:
             self.assertIn("device_copyback", entry.classifications)
 
+    def test_guaranteed_once_device_launch_orchestration_is_proven(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_orchestrated_copyback(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t stage = 0;
+              do {
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = static_cast<int>(stage + 1);
+                }).wait_and_throw();
+                ++stage;
+              } while (stage < 2);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "device_launch_orchestration",
+            result.entrypoint_audits[0].classifications,
+        )
+
+    def test_device_launch_orchestration_mutants_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static void host_prepare(const int*) {}
+
+            extern "C" pgaccel_status pgaccel_zero_iteration_loop(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              for (size_t stage = 0; stage < 2; ++stage) {
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                }).wait_and_throw();
+              }
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_host_output(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                out[0] = 7;
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_host_staging(
+                const int* input, size_t count, int* out) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                device_result[0] = input[0];
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_host_helper(
+                const int* input, size_t count, int* out) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                host_prepare(input);
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                }).wait_and_throw();
+              } while (false);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_loop_unawaited_launch(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              do {
+                q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                  device_result[i] = 1;
+                });
+              } while (false);
+              q.memcpy(out, device_result, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 5)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.entrypoint)
+            self.assertIn("host_computation", entry.classifications)
+
     def test_unawaited_wrong_space_and_unwritten_copybacks_fail(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE
