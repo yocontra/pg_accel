@@ -23,6 +23,7 @@
 // real machine, deterministically.
 
 #include <cinttypes>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -113,12 +114,78 @@ int main() {
   {
     HugeBatch small(4);
     int8_t results[4] = {99, 99, 99, 99};
-    pgaccel_status st = pgaccel_expr_template_cmp_const(
-        &small.batch, 0, PGACCEL_EXPR_OP_GT, 2.0, results);
+    pgaccel_status st =
+        pgaccel_expr_template_cmp_const(&small.batch, 0, PGACCEL_EXPR_OP_GT, 2.0, results);
     ASSERT_TRUE("positive control: cmp_const on 4 rows returns OK", st == PGACCEL_OK);
     ASSERT_TRUE("positive control: cmp_const results correct",
                 results[0] == PGACCEL_EXPR_FALSE && results[1] == PGACCEL_EXPR_FALSE &&
                     results[2] == PGACCEL_EXPR_TRUE && results[3] == PGACCEL_EXPR_TRUE);
+
+    pgaccel_val constant = {};
+    constant.tag = PGACCEL_VAL_INT32;
+    constant.data.i32 = 2;
+    pgaccel_expr_instruction predicate_insts[3] = {};
+    predicate_insts[0].opcode = PGACCEL_EXPR_OP_LOAD_COL;
+    predicate_insts[0].arg = 0;
+    predicate_insts[1].opcode = PGACCEL_EXPR_OP_LOAD_CONST;
+    predicate_insts[1].arg = 0;
+    predicate_insts[2].opcode = PGACCEL_EXPR_OP_GT;
+    pgaccel_expr_program predicate = {};
+    predicate.instructions = predicate_insts;
+    predicate.inst_count = 3;
+    predicate.const_pool = &constant;
+    predicate.const_count = 1;
+    predicate.max_stack = 2;
+    predicate.num_cols = 1;
+
+    std::memset(results, 99, sizeof(results));
+    st = pgaccel_expr_eval_predicate(&predicate, &small.batch, results);
+    ASSERT_TRUE("positive control: bytecode predicate returns OK", st == PGACCEL_OK);
+    ASSERT_TRUE("positive control: bytecode predicate copyback correct",
+                results[0] == PGACCEL_EXPR_FALSE && results[1] == PGACCEL_EXPR_FALSE &&
+                    results[2] == PGACCEL_EXPR_TRUE && results[3] == PGACCEL_EXPR_TRUE);
+
+    pgaccel_expr_instruction project_inst = {};
+    project_inst.opcode = PGACCEL_EXPR_OP_LOAD_COL;
+    project_inst.arg = 0;
+    pgaccel_expr_program project = {};
+    project.instructions = &project_inst;
+    project.inst_count = 1;
+    project.max_stack = 1;
+    project.num_cols = 1;
+    pgaccel_val projected[4] = {};
+    uint8_t uncertain[4] = {99, 99, 99, 99};
+    st = pgaccel_expr_eval_project(&project, &small.batch, projected, uncertain);
+    ASSERT_TRUE("positive control: bytecode projection returns OK", st == PGACCEL_OK);
+    const bool projected_values =
+        projected[0].tag == PGACCEL_VAL_INT32 && projected[0].data.i32 == 1 &&
+        projected[1].tag == PGACCEL_VAL_INT32 && projected[1].data.i32 == 2 &&
+        projected[2].tag == PGACCEL_VAL_INT32 && projected[2].data.i32 == 3 &&
+        projected[3].tag == PGACCEL_VAL_INT32 && projected[3].data.i32 == 4;
+    ASSERT_TRUE("positive control: bytecode projection copyback correct", projected_values);
+    ASSERT_TRUE("positive control: bytecode projection uncertainty clear",
+                uncertain[0] == 0 && uncertain[1] == 0 && uncertain[2] == 0 && uncertain[3] == 0);
+
+    double round_values[4] = {-1.5, -0.0, 1.5, 2.4};
+    void* round_columns[1] = {round_values};
+    uint8_t* round_nulls[1] = {nullptr};
+    pgaccel_val_tag round_types[1] = {PGACCEL_VAL_FLOAT64};
+    pgaccel_batch round_batch = {4, 1, round_columns, round_nulls, round_types};
+    pgaccel_expr_instruction round_insts[2] = {};
+    round_insts[0].opcode = PGACCEL_EXPR_OP_LOAD_COL;
+    round_insts[0].arg = 0;
+    round_insts[1].opcode = PGACCEL_EXPR_OP_ROUND_F64;
+    pgaccel_expr_program round_program = {};
+    round_program.instructions = round_insts;
+    round_program.inst_count = 2;
+    round_program.max_stack = 1;
+    round_program.num_cols = 1;
+    st = pgaccel_expr_eval_project(&round_program, &round_batch, projected, uncertain);
+    ASSERT_TRUE("positive control: bytecode round returns OK", st == PGACCEL_OK);
+    ASSERT_TRUE("positive control: bytecode round is half-away-from-zero",
+                projected[0].data.f64 == -2.0 && projected[1].data.f64 == 0.0 &&
+                    std::signbit(projected[1].data.f64) && projected[2].data.f64 == 2.0 &&
+                    projected[3].data.f64 == 2.0);
   }
 
   // 2^59 rows: staging needs num_rows * 8B (f64 stage) + num_rows * 1B
@@ -129,8 +196,8 @@ int main() {
   {
     HugeBatch huge(kHugeRows);
     int8_t results[4] = {0, 0, 0, 0};
-    pgaccel_status st = pgaccel_expr_template_cmp_const(
-        &huge.batch, 0, PGACCEL_EXPR_OP_GT, 2.0, results);
+    pgaccel_status st =
+        pgaccel_expr_template_cmp_const(&huge.batch, 0, PGACCEL_EXPR_OP_GT, 2.0, results);
     assert_honest_failure("cmp_const with 2^59-row staging", st);
   }
 
@@ -174,8 +241,8 @@ int main() {
   {
     HugeBatch small(4);
     int8_t results[4] = {99, 99, 99, 99};
-    pgaccel_status st = pgaccel_expr_template_cmp_const(
-        &small.batch, 0, PGACCEL_EXPR_OP_LE, 2.0, results);
+    pgaccel_status st =
+        pgaccel_expr_template_cmp_const(&small.batch, 0, PGACCEL_EXPR_OP_LE, 2.0, results);
     ASSERT_TRUE("post-failure control: cmp_const still returns OK", st == PGACCEL_OK);
     ASSERT_TRUE("post-failure control: results correct",
                 results[0] == PGACCEL_EXPR_TRUE && results[1] == PGACCEL_EXPR_TRUE &&

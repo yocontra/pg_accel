@@ -769,8 +769,13 @@ static eval_result eval_row(const pgaccel_expr_program* prog, const pgaccel_batc
       }
       case PGACCEL_EXPR_OP_ROUND_F64: {
         pgaccel_val& a = stack[sp - 1];
-        if (!is_null(a))
-          a = make_f64(round(a.data.f64));
+        if (!is_null(a)) {
+          const double value = a.data.f64;
+          const double rounded = value == 0.0  ? value
+                                 : value > 0.0 ? floor(value + 0.5)
+                                               : ceil(value - 0.5);
+          a = make_f64(rounded);
+        }
         break;
       }
 
@@ -1034,7 +1039,7 @@ static StagedExprDispatch* stage_dispatch(sycl::queue& q, const pgaccel_expr_pro
   return s;
 }
 
-// RAII guard for a shared-USM allocation so every error/exception path in
+// RAII guard for a USM allocation so every error/exception path in
 // the extern "C" entry points below frees staged buffers exactly once.
 struct UsmGuard {
   sycl::queue& q;
@@ -1078,10 +1083,10 @@ pgaccel_status pgaccel_expr_eval_predicate(const pgaccel_expr_program* program,
     if (s == nullptr)
       return PGACCEL_OOM;
 
-    UsmGuard results_guard{*q, sycl::malloc_shared<int8_t>(batch->num_rows, *q)};
-    if (results_guard.p == nullptr)
+    int8_t* d_results = sycl::malloc_device<int8_t>(batch->num_rows, *q);
+    UsmGuard results_guard{*q, d_results};
+    if (d_results == nullptr)
       return PGACCEL_OOM;
-    int8_t* d_results = static_cast<int8_t*>(results_guard.p);
 
     pgaccel_expr_program* d_prog = s->d_prog;
     pgaccel_batch* d_batch = s->d_batch;
@@ -1100,7 +1105,7 @@ pgaccel_status pgaccel_expr_eval_predicate(const pgaccel_expr_program* program,
        }
      }).wait_and_throw();
 
-    std::memcpy(results, d_results, batch->num_rows * sizeof(int8_t));
+    q->memcpy(results, d_results, batch->num_rows * sizeof(int8_t)).wait_and_throw();
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const std::exception& e) {
@@ -1127,12 +1132,12 @@ pgaccel_status pgaccel_expr_eval_project(const pgaccel_expr_program* program,
     if (s == nullptr)
       return PGACCEL_OOM;
 
-    UsmGuard output_guard{*q, sycl::malloc_shared<pgaccel_val>(batch->num_rows, *q)};
-    UsmGuard uncertain_guard{*q, sycl::malloc_shared<uint8_t>(batch->num_rows, *q)};
-    if (output_guard.p == nullptr || uncertain_guard.p == nullptr)
+    pgaccel_val* d_output = sycl::malloc_device<pgaccel_val>(batch->num_rows, *q);
+    uint8_t* d_uncertain = sycl::malloc_device<uint8_t>(batch->num_rows, *q);
+    UsmGuard output_guard{*q, d_output};
+    UsmGuard uncertain_guard{*q, d_uncertain};
+    if (d_output == nullptr || d_uncertain == nullptr)
       return PGACCEL_OOM;
-    pgaccel_val* d_output = static_cast<pgaccel_val*>(output_guard.p);
-    uint8_t* d_uncertain = static_cast<uint8_t*>(uncertain_guard.p);
 
     pgaccel_expr_program* d_prog = s->d_prog;
     pgaccel_batch* d_batch = s->d_batch;
@@ -1144,9 +1149,9 @@ pgaccel_status pgaccel_expr_eval_project(const pgaccel_expr_program* program,
        d_uncertain[row] = er.uncertain ? 1 : 0;
      }).wait_and_throw();
 
-    std::memcpy(output, d_output, batch->num_rows * sizeof(pgaccel_val));
+    q->memcpy(output, d_output, batch->num_rows * sizeof(pgaccel_val)).wait_and_throw();
     if (uncertain_mask != nullptr)
-      std::memcpy(uncertain_mask, d_uncertain, batch->num_rows);
+      q->memcpy(uncertain_mask, d_uncertain, batch->num_rows).wait_and_throw();
 
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
