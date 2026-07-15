@@ -924,7 +924,7 @@ fn plan_shape_descriptor_groupagg_survives_table_and_column_rename() {
         "SET pg_accel.auto_load = on",
         "SET pg_accel.cost_multiplier = 0.1",
         "SET pg_accel.min_batch_size = 65536",
-        "SET max_parallel_workers_per_gather = 0",
+        "SET max_parallel_workers_per_gather = DEFAULT",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
@@ -962,7 +962,7 @@ fn plan_shape_descriptor_expression_groupagg_survives_rename() {
         "SET pg_accel.auto_load = on",
         "SET pg_accel.cost_multiplier = 0.1",
         "SET pg_accel.min_batch_size = 65536",
-        "SET max_parallel_workers_per_gather = 0",
+        "SET max_parallel_workers_per_gather = DEFAULT",
         "SELECT pg_accel_reset_stats()",
     ] {
         c.simple_query(stmt).expect(stmt);
@@ -1038,7 +1038,7 @@ fn resident_descriptor_backend_exit_releases_ledger_without_postmaster_restart()
              SET pg_accel.auto_load = on;
              SET pg_accel.cost_multiplier = 0.1;
              SET pg_accel.min_batch_size = 65536;
-             SET max_parallel_workers_per_gather = 0;
+             SET max_parallel_workers_per_gather = DEFAULT;
              SELECT pg_accel_reset_stats();",
         )
         .expect("pin and configure backend-exit fixture");
