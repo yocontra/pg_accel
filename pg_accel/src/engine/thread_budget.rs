@@ -9,10 +9,12 @@
 
 use crate::engine::gucs;
 use pgrx::lwlock::PgLwLock;
+#[cfg(not(test))]
 use pgrx::pg_shmem_init;
 #[cfg(not(test))]
 use pgrx::prelude::*;
 use pgrx::shmem::PGRXSharedMemory;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -87,27 +89,72 @@ pub static BUDGET: PgLwLock<ThreadBudgetData> =
     // SAFETY: Initialised in `init_shmem()` which is called from `_PG_init`.
     unsafe { PgLwLock::new(c"pg_accel_thread_budget") };
 
+/// Set in the postmaster after the real shared-memory registration path runs
+/// and inherited by forked backends. It prevents early-exit or standalone
+/// test paths from touching an uninitialized `PgLwLock`.
+static SHMEM_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(all(feature = "pg_test", not(test)))]
+const SHMEM_REGISTRATION_COMPILED: bool = true;
+
+#[cfg(test)]
+const SHMEM_REGISTRATION_COMPILED: bool = false;
+
+// `cargo pgrx test` builds the loadable extension with `feature=pg_test` but
+// without `cfg(test)`. Pin that build to the real registration path.
+#[cfg(all(feature = "pg_test", not(test)))]
+const _: () = assert!(SHMEM_REGISTRATION_COMPILED);
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 /// Register the shared-memory segment. **Must be called from `_PG_init`.**
 ///
-/// Gated behind `#[cfg(not(test))]` because the test binary links as a
-/// standalone executable where PG server symbols (`shmem_request_hook`, etc.)
-/// are unavailable. The actual extension `.so` loaded by PG is built as
-/// `cdylib` without the `test` cfg and includes this code.
+/// Gated only by `#[cfg(not(test))]`: the standalone Rust test binary cannot
+/// link PostgreSQL server symbols, while both production and the pg_test
+/// loadable cdylib must register the real lock.
 #[cfg(not(test))]
-#[cfg(not(feature = "pg_test"))]
 #[allow(unexpected_cfgs)]
 pub fn init_shmem() {
     pg_shmem_init!(BUDGET);
+    SHMEM_REGISTERED.store(true, Ordering::Release);
 }
 
 /// No-op stub used by the test binary so that `_PG_init` compiles without
 /// referencing PG server-internal shared-memory symbols.
+#[cfg(test)]
+pub fn init_shmem() {
+    SHMEM_REGISTERED.store(false, Ordering::Release);
+}
+
+#[inline]
+fn shmem_registered() -> bool {
+    SHMEM_REGISTERED.load(Ordering::Acquire)
+}
+
 #[cfg(feature = "pg_test")]
-pub fn init_shmem() {}
+#[must_use]
+pub(crate) fn shmem_registered_for_test() -> bool {
+    shmem_registered()
+}
+
+#[cfg(feature = "pg_test")]
+#[must_use]
+pub(crate) fn current_backend_allocation_for_test() -> Option<i32> {
+    if !shmem_registered() {
+        return None;
+    }
+    let pid = current_pid();
+    let shared = BUDGET.share();
+    Some(
+        shared
+            .backends
+            .iter()
+            .find(|slot| slot.pid == pid)
+            .map_or(0, |slot| slot.allocated),
+    )
+}
 
 /// Request `n` worker threads from the cluster-wide budget.
 ///
@@ -118,7 +165,7 @@ pub fn init_shmem() {}
 ///
 /// Non-positive requests are treated as no-ops and return 0.
 pub fn request_threads(n: i32) -> i32 {
-    if n <= 0 {
+    if n <= 0 || !shmem_registered() {
         return 0;
     }
 
@@ -157,7 +204,7 @@ pub fn request_threads(n: i32) -> i32 {
 /// If `n` exceeds the backend's current allocation the allocation is clamped
 /// to zero (never goes negative).
 pub fn release_threads(n: i32) {
-    if n <= 0 {
+    if n <= 0 || !shmem_registered() {
         return;
     }
 
@@ -188,6 +235,10 @@ pub fn release_threads(n: i32) {
 /// Intended to be called from a `before_shmem_exit` callback so that a
 /// crashing backend does not leak budget.
 pub fn cleanup_backend() {
+    if !shmem_registered() {
+        return;
+    }
+
     // This runs from a `before_shmem_exit` callback at backend termination.
     // If shared memory was never wired up (e.g. extension loaded without
     // `shared_preload_libraries`, or during early startup failure) the
@@ -447,7 +498,7 @@ fn grant_from_budget(requested: i32, max: i32, total_allocated: i32) -> i32 {
 // Pure-logic unit tests (no PG required)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "pg_test")]
+#[cfg(test)]
 #[allow(clippy::unwrap_used, dead_code)]
 mod tests {
     use super::*;
@@ -455,6 +506,16 @@ mod tests {
     /// Helper: build a default `ThreadBudgetData` for testing.
     fn empty_budget() -> ThreadBudgetData {
         ThreadBudgetData::default()
+    }
+
+    #[test]
+    fn standalone_test_build_never_touches_the_uninitialized_pg_lock() {
+        init_shmem();
+        assert!(!SHMEM_REGISTRATION_COMPILED);
+        assert!(!shmem_registered());
+        assert_eq!(request_threads(1), 0);
+        release_threads(1);
+        cleanup_backend();
     }
 
     #[test]

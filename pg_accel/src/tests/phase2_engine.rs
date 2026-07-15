@@ -120,6 +120,40 @@ mod tests {
         );
     }
 
+    #[pg_test]
+    fn thread_budget_pg_test_cdylib_initializes_and_cleans_shared_lock() {
+        use crate::engine::thread_budget;
+
+        Spi::run("SET LOCAL pg_accel.max_workers_total = 0")
+            .expect("use unlimited thread budget for lifecycle test");
+        assert!(
+            thread_budget::shmem_registered_for_test(),
+            "the feature=pg_test cdylib must run pg_shmem_init, not the standalone-test stub"
+        );
+
+        assert_eq!(thread_budget::request_threads(2), 2);
+        assert_eq!(
+            thread_budget::current_backend_allocation_for_test(),
+            Some(2)
+        );
+        thread_budget::cleanup_backend();
+        assert_eq!(
+            thread_budget::current_backend_allocation_for_test(),
+            Some(0)
+        );
+
+        assert_eq!(thread_budget::request_threads(1), 1);
+        assert_eq!(
+            thread_budget::current_backend_allocation_for_test(),
+            Some(1)
+        );
+        thread_budget::release_threads(1);
+        assert_eq!(
+            thread_budget::current_backend_allocation_for_test(),
+            Some(0)
+        );
+    }
+
     // -- Fix 1: soft_fp64_cost_multiplier stays finite and in-range -----------
 
     #[pg_test]
