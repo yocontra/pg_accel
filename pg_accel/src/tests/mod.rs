@@ -16,6 +16,7 @@ mod phase2_cache;
 mod phase2_engine;
 mod phase2_kernels;
 mod phase2_window;
+mod phase6_spatial;
 
 #[cfg(any(test, feature = "pg_test"))]
 #[pgrx::pg_schema]
