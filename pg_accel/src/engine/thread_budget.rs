@@ -503,6 +503,8 @@ fn grant_from_budget(requested: i32, max: i32, total_allocated: i32) -> i32 {
 mod tests {
     use super::*;
 
+    const _: () = assert!(!SHMEM_REGISTRATION_COMPILED);
+
     /// Helper: build a default `ThreadBudgetData` for testing.
     fn empty_budget() -> ThreadBudgetData {
         ThreadBudgetData::default()
@@ -511,7 +513,6 @@ mod tests {
     #[test]
     fn standalone_test_build_never_touches_the_uninitialized_pg_lock() {
         init_shmem();
-        assert!(!SHMEM_REGISTRATION_COMPILED);
         assert!(!shmem_registered());
         assert_eq!(request_threads(1), 0);
         release_threads(1);

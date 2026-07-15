@@ -102,7 +102,7 @@ fn exact_backend_budget(
         ));
     }
     let backend_count = u64::try_from(backend_count)
-        .map_err(|_| "resident backend count does not fit u64".to_owned())?;
+        .map_err(|error| format!("resident backend count does not fit u64: {error}"))?;
     let workers = backend_bytes
         .checked_mul(backend_count)
         .ok_or_else(|| "resident worker charge overflow".to_owned())?;
@@ -130,8 +130,9 @@ fn exact_backend_budget(
              {spare_bytes}; a ninth backend would not prove budget enforcement"
         ));
     }
-    let mib = i32::try_from(mib_u64)
-        .map_err(|_| "resident concurrency budget does not fit the GUC type".to_owned())?;
+    let mib = i32::try_from(mib_u64).map_err(|error| {
+        format!("resident concurrency budget does not fit the GUC type: {error}")
+    })?;
     Ok(ExactBudget {
         mib,
         bytes,
