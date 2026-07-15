@@ -124,7 +124,7 @@ joins, windows, and target-list SRFs explicitly remain native.
 | Base scan, WHERE filter, or projection | Present | Not selectable | The production base-relation hook injects no host-staged CustomPath. |
 | Row-returning hash or inequality join | Present | Not selectable | The production join hook injects no host-staged CustomPath. |
 | Sort or top-k | Present | Not selectable | Sort opportunities remain PostgreSQL-native without a resident producer/consumer path. |
-| Window | Present | Not selectable | The upper-window hook records a resident-pipeline decline. |
+| Window | Present | Not selectable | Segmented Metal kernels dispatch in device coverage; planner-visible full/reducing window SQL records `no_gpu_resident_pipeline` because no resident consumer exists. |
 | Raster | Present | Not selectable | Production planning is observation-only; forced admission is test-only. |
 
 The extension adapters currently register these names for OID discovery. This
@@ -134,7 +134,7 @@ table is registry metadata, not a standalone SQL support promise:
 |---|---|
 | PostGIS | `st_intersects` |
 | H3 scalar | `h3_latlng_to_cell` |
-| H3 variable/record output | `h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_cell_to_children`, `h3_cell_to_boundary`, `h3_cells_to_multi_polygon` |
+| H3 variable/record output | `h3_cell_to_children` |
 
 The adapter constructors are the source of truth at
 `pg_accel/src/adapters/postgis.rs:14-22` and

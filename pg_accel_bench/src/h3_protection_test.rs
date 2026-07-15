@@ -1,7 +1,7 @@
 //! H3 integration assertions across the resident descriptor cut-over.
 //!
-//! These tests guard the H3 wins documented in `TODO.md` Phase 5 against
-//! silent regression by exercising the running pgrx PostgreSQL backend:
+//! These tests guard the canonical H3 winning and parity lanes against silent
+//! regression by exercising the running pgrx PostgreSQL backend:
 //!
 //! 1. **Plan-shape guards** - the exact resident
 //!    `h3_cell_to_parent(cell, const), COUNT(*)` shape dispatches after one
@@ -585,8 +585,8 @@ fn h3_protection_parity_lane_names_resolve() {
     }
 }
 
-/// `h3_bulk` and `h3_resolution_sweep` are the two canonical Phase 5
-/// winning lanes. The integration suite below names them explicitly; if
+/// `h3_bulk` and `h3_resolution_sweep` are canonical winning lanes. The
+/// integration suite below names them explicitly; if
 /// either is renamed, this test fails and the integration tests need to
 /// be updated rather than silently skipping the workload.
 #[test]
@@ -594,20 +594,20 @@ fn h3_protection_canonical_winning_names_registered() {
     for name in ["h3_bulk", "h3_resolution_sweep", "h3_cell_to_parent"] {
         assert!(
             find_workload(name).is_some(),
-            "canonical Phase 5 winning lane `{name}` is not registered in the workload list"
+            "canonical winning lane `{name}` is not registered in the workload list"
         );
     }
 }
 
-/// `h3_grid_distance` and the deep parent variant remain canonical Phase 5
-/// parity lanes. The canonical `h3_cell_to_parent` workload is now the fused
+/// `h3_grid_distance` and the deep parent variant remain canonical parity
+/// lanes. The canonical `h3_cell_to_parent` workload is the fused
 /// grouped-count winner.
 #[test]
 fn h3_protection_canonical_parity_names_registered() {
     for name in ["h3_grid_distance", "h3_parent_deep"] {
         assert!(
             find_workload(name).is_some(),
-            "canonical Phase 5 parity lane `{name}` is not registered in the workload list"
+            "canonical parity lane `{name}` is not registered in the workload list"
         );
     }
 }
@@ -944,8 +944,7 @@ fn h3_latlng_scan_predicates_stay_native_with_visible_declines() {
 /// `h3_latlng_to_cell` must return the same cell indices regardless of
 /// whether pg_accel intercepts the call. This is the most direct check that
 /// the GPU H3 kernel's output is byte-identical to stock h3-pg's C
-/// implementation, which is the assumption underlying every Phase 5 winning
-/// lane.
+/// implementation, which is the assumption underlying every winning lane.
 ///
 /// Uses a fixed `setseed` so the random point fixture is reproducible.
 #[cfg(feature = "integration_tests")]

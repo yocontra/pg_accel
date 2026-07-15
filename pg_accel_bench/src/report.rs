@@ -2847,7 +2847,7 @@ impl BenchReport {
         self.render_kernel_coverage(&mut out);
 
         // -------------------------------------------------------------------
-        // Benchmark ship gate (TODO Phase 7 Benchmark win plan)
+        // Benchmark ship gate
         // -------------------------------------------------------------------
         //
         // Renders when any selected pg_accel row crashes, misses GPU dispatch,
@@ -2856,7 +2856,7 @@ impl BenchReport {
         self.render_benchmark_ship_gate(&mut out);
 
         // -------------------------------------------------------------------
-        // H3 lane gate (TODO Phase 5 H3 winning lane protection)
+        // H3 winning-lane gate
         // -------------------------------------------------------------------
         //
         // Renders the `### H3 Lane Gate Failures` section when any H3 Winner
@@ -3541,7 +3541,7 @@ impl BenchReport {
         );
         out.push('\n');
 
-        // ----- Per-dispatch-source split (TODO Phase 0 acceptance) ---------
+        // ----- Per-dispatch-source split ------------------------------------
         //
         // Custom Scan dispatch and Function/SRF kernel dispatch share the
         // headline geomean, but a single combined number hides which path
@@ -4240,7 +4240,7 @@ impl BenchReport {
     ///
     /// 1. **Winner below floor**: every H3 [`Winning`](crate::workloads::H3LaneClass::Winning)
     ///    row that DID dispatch a GPU kernel must have a median speedup of at
-    ///    least [`H3_LANE_GATE_MIN_WARM_SPEEDUP`]. This is the Phase 0 ship bar
+    ///    least [`H3_LANE_GATE_MIN_WARM_SPEEDUP`]. This is the minimum ship bar
     ///    — a Winner that drops below PG-parallel parity is, by definition,
     ///    not winning.
     /// 2. **Winner missed dispatch**: every H3 Winner row that did NOT dispatch
@@ -4349,7 +4349,7 @@ impl BenchReport {
 
     /// Evaluate the benchmark-wide ship gate.
     ///
-    /// This is the generic Phase 7 ratchet: any selected pg_accel row that
+    /// This is the generic selected-row ratchet: any selected pg_accel row that
     /// crashes, fails to prove GPU dispatch, or dispatches below PostgreSQL
     /// parallel parity is a release-blocking failure. Expected-lane selection
     /// requirements that are workload-family-specific, such as H3 Winners,
@@ -4680,7 +4680,7 @@ impl BenchReport {
 /// fails. Per-Winner advisory thresholds (from
 /// [`crate::workloads::h3_winner_min_warm_speedup`]) are reported next to
 /// each failing row but do NOT participate in the pass/fail decision —
-/// the gate boundary stays at the Phase 0 ship bar.
+/// the gate boundary stays at the minimum ship bar.
 pub const H3_LANE_GATE_MIN_WARM_SPEEDUP: f64 = 1.0;
 
 /// Generic release gate floor for selected GPU benchmark rows.
@@ -6846,10 +6846,10 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 5 H3 winning-lane protection — dispatch classification gates
+    // H3 winning-lane protection dispatch-classification gates
     //
-    // These tests pin the report classifier behavior for the H3 winning lanes
-    // documented in TODO.md Phase 5. They are unit tests against
+    // These tests pin the report classifier behavior for the H3 winning lanes.
+    // They are unit tests against
     // `dispatch_classification`, not live-PG runs — so they fail loudly if
     // anyone weakens the criterion for crediting an H3 winner OR weakens
     // the rejection of a parity-only row that lacks dispatch evidence.
@@ -6978,7 +6978,7 @@ mod tests {
     /// If a stock-executor fallback fires (`pg_accel_stock_exec_delta > 0`),
     /// the row must NOT be credited as GPU-dispatched even when the kernel
     /// counter is positive. This catches the silent "GPU ran AND CPU
-    /// fell back" path which is a Phase 1 anti-cheat rail.
+    /// fell back" path, which is a crash-accounting anti-cheat rail.
     #[test]
     fn test_h3_bulk_with_stock_exec_fallback_is_not_dispatched() {
         let mut workload = mock_h3_winning_workload("h3_bulk", 1_000_000);
@@ -7074,7 +7074,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 5 H3 winning-lane protection — report-level hard gate
+    // H3 winning-lane protection report-level hard gate
     //
     // These three tests pin `BenchReport::evaluate_h3_lane_gate` to the
     // contract documented on the function: a Winner that regresses below
@@ -7361,7 +7361,7 @@ mod tests {
         );
     }
 
-    /// Phase 5 acceptance: every canonical H3 winning lane must be classified
+    /// Acceptance contract: every canonical H3 winning lane must be classified
     /// as Winning by `h3_lane_class` (a cross-module pin so the report tests
     /// stay aligned with the workload registry).
     #[test]

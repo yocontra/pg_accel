@@ -748,7 +748,7 @@ fn check_balanced_parens(sql: &str, label: &str, issues: &mut Vec<String>) {
 }
 
 // ---------------------------------------------------------------------------
-// H3 winning-lane vs parity-lane classifier (TODO Phase 5)
+// H3 winning-lane vs parity-lane classifier
 //
 // `h3_bulk` and `h3_resolution_sweep` are the strongest GPU lanes the bench
 // suite exposes today (`h3_bulk @ 10M` ~6s accel vs 90s PG parallel,
@@ -787,7 +787,7 @@ pub fn h3_lane_class(name: &str) -> Option<H3LaneClass> {
 ///
 /// The bench report uses this for the per-row advisory column under the
 /// `### H3 Lane Gate` section. The hard gate predicate itself uses a uniform
-/// floor (`1.0x` — the Phase 0 ship bar) so a Winner that regresses below
+/// floor (`1.0x`, the minimum ship bar) so a Winner that regresses below
 /// PG-parallel parity ALWAYS fails the gate, regardless of its individual
 /// `min_warm_speedup`. Per-Winner thresholds are richer evidence but are not
 /// the gate boundary — see `H3_LANE_GATE_MIN_WARM_SPEEDUP` in `report.rs`.
@@ -827,7 +827,7 @@ pub fn h3_parity_lane_names() -> Vec<&'static str> {
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark win-plan threshold matrix (TODO Phase 7)
+// Benchmark win-plan threshold matrix
 // ---------------------------------------------------------------------------
 
 /// Expected release behavior for one benchmark threshold-matrix cell.
@@ -862,7 +862,7 @@ impl BenchmarkLaneExpectation {
 
 /// One reportable planner threshold-matrix cell.
 ///
-/// The dimensions match the Phase 7 benchmark-win plan: row count, type,
+/// The dimensions match the benchmark threshold contract: row count, type,
 /// cardinality, selectivity, row width, and output size. The matrix is used by
 /// the report renderer and the generic ship gate, so planner admission is tied
 /// to explicit measured break-even rows instead of a broad "large input" label.
@@ -3282,7 +3282,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 7 benchmark threshold matrix
+    // Benchmark threshold matrix
     // -----------------------------------------------------------------------
 
     #[test]
@@ -3800,7 +3800,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // H3 lane classifier (TODO Phase 5 H3 winning lane protection)
+    // H3 winning-lane protection classifier
     // -----------------------------------------------------------------------
 
     /// Every registered H3 workload (category `gpu_h3` or name prefix `h3_`)
@@ -3823,7 +3823,7 @@ mod tests {
             unclassified.is_empty(),
             "H3 workloads missing from h3_lane_class(): {unclassified:?}. \
              Every H3 workload must be classified as Winning {{ min_warm_speedup }} \
-             or Parity so Phase 5 protection gates apply uniformly."
+             or Parity so the protection gates apply uniformly."
         );
     }
 
@@ -3868,8 +3868,8 @@ mod tests {
         for canonical in ["h3_bulk", "h3_resolution_sweep"] {
             assert!(
                 winners.contains(&canonical),
-                "canonical Phase 5 winning lane `{canonical}` missing from h3_winning_lane_names(); \
-                 see TODO.md Phase 5 `H3 winning lane protection`."
+                "canonical winning lane `{canonical}` missing from h3_winning_lane_names(); \
+                 the winning-lane contract must enumerate it."
             );
         }
     }
@@ -3884,7 +3884,7 @@ mod tests {
         for canonical in ["h3_grid_distance", "h3_parent_deep"] {
             assert!(
                 parity.contains(&canonical),
-                "canonical Phase 5 parity lane `{canonical}` missing from h3_parity_lane_names(); \
+                "canonical parity lane `{canonical}` missing from h3_parity_lane_names(); \
                  these scalar H3 ops must remain quarantined."
             );
         }

@@ -245,16 +245,15 @@ add_fp64_transcendental_probe(test_fp64_probe_haversine 7)
 add_executable(test_oom_invariant test/test_oom_invariant.cpp)
 target_link_libraries(test_oom_invariant PRIVATE pgaccel_kernels_shared)
 
-# NLJ scalar-inequality kernel coverage (Phase 4 NestedLoop recognition
-# launchpad — pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs
-# `observe_nestloop_scalar_opportunity`).
+# Scalar-inequality NLJ kernel coverage for planner-recognized NestedLoop
+# shapes observed by `observe_nestloop_scalar_opportunity`.
 add_executable(test_nested_loop_ineq test/test_nested_loop_ineq.cpp)
 target_link_libraries(test_nested_loop_ineq PRIVATE pgaccel_kernels_shared)
 
 # Induced-failure honesty gate: a dispatch whose staging cannot succeed
 # must return PGACCEL_OOM / PGACCEL_ERROR — never PGACCEL_OK over unwritten
-# output, never SIGABRT through the C ABI, never a fake NO_DEVICE. Pins the
-# wait_and_throw + extern-C try/catch fixes (TODO-REVIEW 2026-07).
+# output, never SIGABRT through the C ABI, never a fake NO_DEVICE. This is
+# regression coverage for synchronous queue errors crossing the extern-C ABI.
 add_executable(test_kernel_failure_status test/test_kernel_failure_status.cpp)
 target_link_libraries(test_kernel_failure_status PRIVATE pgaccel_kernels_shared)
 

@@ -1228,7 +1228,7 @@ fn enforce_benchmark_ship_gate(report: &BenchReport) -> Result<(), Box<dyn std::
 /// non-zero process exit code so CI catches the regression. Without this,
 /// a Winner regressing below `H3_LANE_GATE_MIN_WARM_SPEEDUP` would print
 /// red text and still let CI go green — exactly the regression vector the
-/// gate exists to close (see TODO.md Phase 5 H3 winning lane protection).
+/// durable H3 winning-lane contract exists to close.
 fn enforce_h3_lane_gate(report: &BenchReport) -> Result<(), Box<dyn std::error::Error>> {
     let failures = report.evaluate_h3_lane_gate();
     if failures.is_empty() {
