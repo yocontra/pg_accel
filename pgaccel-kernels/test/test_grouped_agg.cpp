@@ -1000,6 +1000,125 @@ void test_parallel_dense_count_star_lifecycle() {
   CHECK(invalid_code.measures[0].count[0] == OutputStorage::kSentinel);
 }
 
+void test_parallel_dense_integer_phase2_shape() {
+  std::printf("--- parallel dense Phase2 integer lanes ---\n");
+  constexpr size_t rows = 262144;
+  constexpr size_t groups = 17;
+  std::vector<int32_t> host_keys(rows);
+  std::vector<int32_t> host_values(rows);
+  std::vector<uint8_t> host_nulls(rows);
+  std::array<int64_t, groups> expected_sum{};
+  std::array<int64_t, groups> expected_min{};
+  std::array<int64_t, groups> expected_max{};
+  std::array<uint64_t, groups> expected_nonnull{};
+  std::array<uint64_t, groups> expected_count{};
+  expected_min.fill(INT64_MAX);
+  expected_max.fill(INT64_MIN);
+  for (size_t row = 0; row < rows; ++row) {
+    const size_t group = row % groups;
+    host_keys[row] = static_cast<int32_t>(group);
+    host_nulls[row] = row % 127 == 0 ? 1 : 0;
+    const int32_t value =
+        row % 257 == 0 ? INT32_MAX
+                       : (row % 263 == 0 ? INT32_MIN : static_cast<int32_t>(row % 997) - 498);
+    host_values[row] = value;
+    ++expected_count[group];
+    if (host_nulls[row] != 0)
+      continue;
+    expected_sum[group] += value;
+    expected_min[group] = std::min(expected_min[group], static_cast<int64_t>(value));
+    expected_max[group] = std::max(expected_max[group], static_cast<int64_t>(value));
+    ++expected_nonnull[group];
+  }
+
+  SharedArray<int32_t> keys(host_keys);
+  SharedArray<int32_t> values(host_values);
+  SharedArray<uint8_t> nulls(host_nulls);
+  pgaccel_grouped_agg_desc desc = base_desc(rows);
+  set_fact_key(desc, 0, keys.data(), nullptr, 0, groups);
+  set_i32_view(desc.measures[0].value, values.data(), nulls.data());
+  finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                     PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                         PGACCEL_GROUPED_AGG_LANE_MAX);
+  set_count_star(desc, 1);
+
+  OutputStorage one_shot(desc, true, true);
+  CHECK_STATUS(execute_external(desc, &one_shot.out), PGACCEL_OK);
+  CHECK(one_shot.out.selected_count == rows);
+  CHECK(one_shot.out.uncertain_count == 0);
+  CHECK(one_shot.out.emitted_group_count == groups);
+  CHECK(one_shot.active == std::vector<uint8_t>(groups, 1));
+  for (size_t group = 0; group < groups; ++group) {
+    CHECK(one_shot.i64(one_shot.measures[0].sum, group) == expected_sum[group]);
+    CHECK(one_shot.i64(one_shot.measures[0].min, group) == expected_min[group]);
+    CHECK(one_shot.i64(one_shot.measures[0].max, group) == expected_max[group]);
+    CHECK(one_shot.measures[0].nonnull[group] == expected_nonnull[group]);
+    CHECK(one_shot.measures[1].count[group] == expected_count[group]);
+  }
+
+  OutputStorage timed(desc, true, true);
+  const auto timed_start = std::chrono::steady_clock::now();
+  CHECK_STATUS(execute_external(desc, &timed.out), PGACCEL_OK);
+  const auto timed_end = std::chrono::steady_clock::now();
+  const double timed_ms =
+      std::chrono::duration<double, std::milli>(timed_end - timed_start).count();
+  std::printf("parallel dense SUM/MIN/MAX+COUNT(*) %zu rows/%zu groups: %.3f ms\n", rows, groups,
+              timed_ms);
+  check_outputs_equal(timed, one_shot, desc.measure_count);
+
+  const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+  SharedWorkspace workspace(req.bytes, req.alignment);
+  constexpr std::array<size_t, 3> chunk_rows = {65537, 100003, rows - 165540};
+  size_t first_row = 0;
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  for (size_t index = 0; index < chunk_rows.size(); ++index) {
+    pgaccel_grouped_agg_desc chunk = row_slice(desc, first_row, chunk_rows[index]);
+    chunk.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    if (index == 0)
+      chunk.execution_flags |= PGACCEL_GROUPED_AGG_EXEC_RESET;
+    CHECK_STATUS(execute_in_workspace(chunk, req, workspace, nullptr, &detail), PGACCEL_OK);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+    first_row += chunk_rows[index];
+  }
+  pgaccel_grouped_agg_desc finalize = row_slice(desc, 0, 0);
+  finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+  OutputStorage chunked(desc, true, true);
+  CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &chunked.out, &detail), PGACCEL_OK);
+  check_outputs_equal(chunked, one_shot, desc.measure_count);
+
+  nulls[31] = 2;
+  OutputStorage invalid_null(desc);
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_external_ex(desc, &invalid_null.out, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  CHECK(invalid_null.measures[0].sum[0] == OutputStorage::kSentinel);
+  nulls[31] = host_nulls[31];
+
+  keys[41] = 99;
+  pgaccel_grouped_agg_desc invalid_key = row_slice(desc, 41, 1);
+  invalid_key.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_in_workspace(invalid_key, req, workspace, nullptr, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  pgaccel_grouped_agg_desc poisoned = row_slice(desc, 42, 1);
+  poisoned.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  CHECK_STATUS(execute_in_workspace(poisoned, req, workspace, nullptr, &detail), PGACCEL_ERROR);
+  keys[41] = host_keys[41];
+  OutputStorage recovered(desc, true, true);
+  CHECK_STATUS(execute_in_workspace(desc, req, workspace, &recovered.out, &detail), PGACCEL_OK);
+  check_outputs_equal(recovered, one_shot, desc.measure_count);
+
+  pgaccel_grouped_agg_desc capped = desc;
+  capped.row_count = 10'000'000;
+  const pgaccel_grouped_agg_workspace_req capped_req = workspace_req(capped);
+  pgaccel_grouped_agg_desc empty = desc;
+  empty.row_count = 0;
+  const pgaccel_grouped_agg_workspace_req empty_req = workspace_req(empty);
+  CHECK(capped_req.bytes == empty_req.bytes);
+  CHECK(req.bytes > empty_req.bytes);
+}
+
 void test_i64_four_measure_lanes() {
   std::printf("--- dense I64 four-measure lanes ---\n");
   SharedArray<int64_t> values0({5, -2, 7, 9, 1});
@@ -1486,6 +1605,35 @@ void test_integer_expression_overflow_semantics() {
     CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
     CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
   }
+
+  {
+    SharedArray<int64_t> values({std::numeric_limits<int64_t>::max(), 1});
+    pgaccel_grouped_agg_desc desc = base_desc(2);
+    set_i64_view(desc.measures[0].value, values.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN, PGACCEL_GROUPED_AGG_LANE_SUM);
+    const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+    SharedWorkspace workspace(req.bytes, req.alignment);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+    pgaccel_grouped_agg_desc first = row_slice(desc, 0, 1);
+    first.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    CHECK_STATUS(execute_in_workspace(first, req, workspace, nullptr, &detail), PGACCEL_OK);
+    pgaccel_grouped_agg_desc second = row_slice(desc, 1, 1);
+    second.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    CHECK_STATUS(execute_in_workspace(second, req, workspace, nullptr, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
+    pgaccel_grouped_agg_desc finalize = row_slice(desc, 0, 0);
+    finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+    OutputStorage poisoned(desc);
+    CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &poisoned.out, &detail),
+                 PGACCEL_ERROR);
+    CHECK(poisoned.measures[0].sum[0] == OutputStorage::kSentinel);
+
+    pgaccel_grouped_agg_desc reset = row_slice(desc, 1, 1);
+    reset.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN;
+    OutputStorage recovered(desc);
+    CHECK_STATUS(execute_in_workspace(reset, req, workspace, &recovered.out, &detail), PGACCEL_OK);
+    CHECK(recovered.i64(recovered.measures[0].sum, 0) == 1);
+  }
 }
 
 void test_error_and_unsupported_statuses() {
@@ -1927,6 +2075,7 @@ int main() {
     test_dense_chunk_lifecycle_fail_closed();
     test_empty_ungrouped_active();
     test_parallel_dense_count_star_lifecycle();
+    test_parallel_dense_integer_phase2_shape();
     test_i64_four_measure_lanes();
     test_f64_stats_pair_and_nan_ordering();
     test_global_and_measure_filters();

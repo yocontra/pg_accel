@@ -2,8 +2,8 @@
  * Generic dense grouped aggregation for the frozen OLAP descriptor ABI.
  *
  * Order-sensitive general aggregates retain the deterministic serial device
- * path.  The ordinary dense COUNT(*) shape uses parallel row classification
- * and per-group chunk counters, followed by a checked 64-bit state commit.
+ * path.  Ordinary dense COUNT(*) and int4 SUM/MIN/MAX+COUNT(*) shapes use
+ * parallel row classification and checked per-group state commits.
  * No row is interpreted or aggregated on the host; the device publishes a
  * completion record and the host only performs its awaited copybacks.
  */
@@ -28,6 +28,9 @@ constexpr size_t kNoOffset = std::numeric_limits<size_t>::max();
 constexpr uint32_t kHashEmptyOwner = UINT32_MAX;
 constexpr size_t kHashMaxRows = UINT32_MAX;
 constexpr size_t kHashMaxGroupCapacity = size_t{1} << 30;
+constexpr size_t kDenseIntegerChunkRows = 1024;
+constexpr size_t kDenseIntegerMaxGroups = 64;
+constexpr size_t kDenseIntegerMaxPartialBytes = 8 * 1024 * 1024;
 constexpr uint32_t kFailureInvalid = 1u << 0;
 constexpr uint32_t kFailureNumericOverflow = 1u << 1;
 constexpr uint32_t kFailureCapacity = 1u << 2;
@@ -165,6 +168,18 @@ struct DeviceMeta {
   uint32_t lifecycle_state;
 };
 
+struct DenseIntegerPartial {
+  int64_t sum;
+  int64_t prefix_min;
+  int64_t prefix_max;
+  int64_t min;
+  int64_t max;
+  uint32_t rows;
+  uint32_t nonnull;
+  uint32_t failure_flags;
+  uint32_t _pad0;
+};
+
 struct DeviceCopyCommand {
   size_t source_offset;
   uint64_t destination;
@@ -243,6 +258,8 @@ struct KernelParams {
   uint32_t* hash_counts;
   uint32_t* hash_group_count;
   uint32_t* dense_chunk_counts;
+  DenseIntegerPartial* dense_integer_partials;
+  size_t dense_integer_chunk_count;
   DeviceMeta* meta;
 };
 
@@ -271,6 +288,10 @@ struct WorkspaceLayout {
   size_t hash_counts = kNoOffset;
   size_t hash_group_count = kNoOffset;
   size_t dense_chunk_counts = kNoOffset;
+  size_t dense_integer_partials = kNoOffset;
+  size_t dense_integer_chunk_count = 0;
+  size_t dense_integer_partial_count = 0;
+  bool dense_integer_parallel = false;
   size_t meta = kNoOffset;
   size_t publish_params = kNoOffset;
   size_t completion = kNoOffset;
@@ -319,6 +340,48 @@ bool parallel_dense_count_star_shape(const pgaccel_grouped_agg_desc& desc) {
     if (desc.keys[key].source != PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT)
       return false;
   }
+  return true;
+}
+
+bool parallel_dense_integer_structure(const pgaccel_grouped_agg_desc& desc) {
+  if (desc.grouping_mode != PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX ||
+      desc.output_mode != PGACCEL_GROUPED_AGG_OUTPUT_DENSE || desc.group_capacity == 0 ||
+      desc.group_capacity > kDenseIntegerMaxGroups || desc.measure_count != 2 ||
+      desc.dim_count != 0 || !canonical_disabled_filter(desc.where_filter) ||
+      !canonical_disabled_filter(desc.measure_filters[0]) ||
+      !canonical_disabled_filter(desc.measure_filters[1]))
+    return false;
+  const pgaccel_grouped_agg_measure& value = desc.measures[0];
+  const pgaccel_grouped_agg_measure& count = desc.measures[1];
+  if (value.op != PGACCEL_GROUPED_AGG_MEASURE_COLUMN ||
+      value.agg_mask != (PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                         PGACCEL_GROUPED_AGG_LANE_MAX) ||
+      value.accumulator_kind != PGACCEL_GROUPED_AGG_ACCUM_I64 ||
+      value.state_bytes != sizeof(int64_t) ||
+      value.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 ||
+      value.value.element_bytes != sizeof(int32_t) ||
+      count.op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR ||
+      count.agg_mask != PGACCEL_GROUPED_AGG_LANE_COUNT)
+    return false;
+  for (size_t key = 0; key < desc.key_count; ++key) {
+    if (desc.keys[key].source != PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT)
+      return false;
+  }
+  return true;
+}
+
+bool dense_integer_partial_shape(const pgaccel_grouped_agg_desc& desc, size_t* chunk_count,
+                                 size_t* partial_count) {
+  const size_t chunks = desc.row_count / kDenseIntegerChunkRows +
+                        (desc.row_count % kDenseIntegerChunkRows != 0 ? 1 : 0);
+  size_t partials = 0;
+  size_t bytes = 0;
+  if (!checked_mul_size(desc.group_capacity, chunks, &partials) ||
+      !checked_mul_size(partials, sizeof(DenseIntegerPartial), &bytes) ||
+      bytes > kDenseIntegerMaxPartialBytes)
+    return false;
+  *chunk_count = chunks;
+  *partial_count = partials;
   return true;
 }
 
@@ -433,6 +496,15 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
         !arena.add<uint32_t>(layout->hash_slot_count, &layout->hash_owners) ||
         !arena.add<uint32_t>(layout->hash_slot_count, &layout->hash_counts) ||
         !arena.add<uint32_t>(1, &layout->hash_group_count))
+      return false;
+  }
+  if (parallel_dense_integer_structure(desc) &&
+      dense_integer_partial_shape(desc, &layout->dense_integer_chunk_count,
+                                  &layout->dense_integer_partial_count)) {
+    layout->dense_integer_parallel = true;
+    if (layout->dense_integer_partial_count != 0 &&
+        !arena.add<DenseIntegerPartial>(layout->dense_integer_partial_count,
+                                        &layout->dense_integer_partials))
       return false;
   }
   layout->bytes = arena.size();
@@ -1380,6 +1452,24 @@ inline void record_failure(DeviceMeta& meta, uint32_t failure) {
   failures.fetch_or(failure);
 }
 
+inline bool dense_group_for_row(const KernelParams& params, size_t row, size_t* group_out) {
+  size_t group = 0;
+  for (size_t key_index = 0; key_index < params.key_count; ++key_index) {
+    const pgaccel_grouped_agg_key& key = params.keys[key_index];
+    bool is_null = false;
+    if (!null_at(key.values.nulls, row, &is_null))
+      return false;
+    const int32_t raw =
+        is_null ? key.null_code : static_cast<const int32_t*>(key.values.values)[row];
+    const int64_t digit = static_cast<int64_t>(raw) - key.code_min;
+    if (digit < 0 || static_cast<uint64_t>(digit) >= key.cardinality)
+      return false;
+    group = group * key.cardinality + static_cast<size_t>(digit);
+  }
+  *group_out = group;
+  return true;
+}
+
 inline bool atomic_increment_u32(uint32_t* value) {
   DeviceAtomic<uint32_t> count(*value);
   // Hash validation caps row_count at UINT32_MAX, and each row increments
@@ -1578,21 +1668,9 @@ inline void run_dense_count_prepare_kernel(KernelParams* params_ptr) {
 inline void run_dense_count_row(KernelParams* params_ptr, size_t row) {
   KernelParams& params = *params_ptr;
   size_t group = 0;
-  for (size_t key_index = 0; key_index < params.key_count; ++key_index) {
-    const pgaccel_grouped_agg_key& key = params.keys[key_index];
-    bool is_null = false;
-    if (!null_at(key.values.nulls, row, &is_null)) {
-      record_failure(*params.meta, kFailureInvalid);
-      return;
-    }
-    const int32_t raw =
-        is_null ? key.null_code : static_cast<const int32_t*>(key.values.values)[row];
-    const int64_t digit = static_cast<int64_t>(raw) - key.code_min;
-    if (digit < 0 || static_cast<uint64_t>(digit) >= key.cardinality) {
-      record_failure(*params.meta, kFailureInvalid);
-      return;
-    }
-    group = group * key.cardinality + static_cast<size_t>(digit);
+  if (!dense_group_for_row(params, row, &group)) {
+    record_failure(*params.meta, kFailureInvalid);
+    return;
   }
 
   DeviceAtomic<uint32_t> count(params.dense_chunk_counts[group]);
@@ -1629,6 +1707,174 @@ inline void run_dense_count_commit_kernel(KernelParams* params_ptr) {
       params.buffers[0].count[group] = next;
       params.active[group] = 1;
     }
+  }
+  if (!finalize)
+    return;
+
+  meta.emitted = 0;
+  for (size_t group = 0; group < params.group_capacity; ++group) {
+    stage_keys(params, group, group);
+    if (params.active[group] != 0)
+      ++meta.emitted;
+  }
+  meta.lifecycle_state = kLifecycleFinalized;
+}
+
+inline void run_dense_integer_prepare_kernel(KernelParams* params_ptr) {
+  KernelParams& params = *params_ptr;
+  DeviceMeta& meta = *params.meta;
+  const bool reset = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_RESET) != 0;
+
+  if (reset) {
+    meta = {};
+    meta.lifecycle_cookie = kLifecycleCookie;
+    meta.shape_fingerprint = params.shape_fingerprint;
+    meta.lifecycle_state = kLifecycleActive;
+    for (size_t group = 0; group < params.group_capacity; ++group) {
+      params.active[group] = 0;
+      for (size_t measure = 0; measure < params.measure_count; ++measure) {
+        DeviceMeasureBuffers& buffers = params.buffers[measure];
+        if (buffers.sum != nullptr)
+          buffers.sum[group] = 0;
+        if (buffers.min != nullptr)
+          buffers.min[group] = 0;
+        if (buffers.max != nullptr)
+          buffers.max[group] = 0;
+        if (buffers.count != nullptr)
+          buffers.count[group] = 0;
+        if (buffers.nonnull != nullptr)
+          buffers.nonnull[group] = 0;
+      }
+    }
+    if (params.key_count == 0)
+      params.active[0] = 1;
+    return;
+  }
+
+  if (meta.lifecycle_cookie != kLifecycleCookie ||
+      meta.shape_fingerprint != params.shape_fingerprint ||
+      meta.lifecycle_state != kLifecycleActive || meta.failure_flags != 0) {
+    meta.failure_flags |= kFailureInvalid;
+    meta.lifecycle_state = kLifecycleFailed;
+  }
+}
+
+inline void run_dense_integer_partial(KernelParams* params_ptr, size_t partial_index) {
+  KernelParams& params = *params_ptr;
+  const size_t chunk_count = params.dense_integer_chunk_count;
+  const size_t group = partial_index / chunk_count;
+  const size_t chunk = partial_index % chunk_count;
+  const size_t first_row = chunk * kDenseIntegerChunkRows;
+  const size_t remaining = params.row_count - first_row;
+  const size_t chunk_rows = remaining < kDenseIntegerChunkRows ? remaining : kDenseIntegerChunkRows;
+  DenseIntegerPartial partial{};
+
+  for (size_t offset = 0; offset < chunk_rows; ++offset) {
+    const size_t row = first_row + offset;
+    size_t row_group = 0;
+    if (!dense_group_for_row(params, row, &row_group)) {
+      partial.failure_flags = kFailureInvalid;
+      break;
+    }
+    if (row_group != group)
+      continue;
+    ++partial.rows;
+
+    bool is_null = false;
+    if (!null_at(params.measures[0].value.nulls, row, &is_null)) {
+      partial.failure_flags = kFailureInvalid;
+      break;
+    }
+    if (is_null)
+      continue;
+    const int64_t value = static_cast<const int32_t*>(params.measures[0].value.values)[row];
+    int64_t next_sum = 0;
+    if (!add_i64(partial.sum, value, &next_sum)) {
+      partial.failure_flags = kFailureNumericOverflow;
+      break;
+    }
+    partial.sum = next_sum;
+    if (partial.sum < partial.prefix_min)
+      partial.prefix_min = partial.sum;
+    if (partial.sum > partial.prefix_max)
+      partial.prefix_max = partial.sum;
+    if (partial.nonnull == 0 || value < partial.min)
+      partial.min = value;
+    if (partial.nonnull == 0 || value > partial.max)
+      partial.max = value;
+    ++partial.nonnull;
+  }
+  params.dense_integer_partials[partial_index] = partial;
+}
+
+inline void run_dense_integer_reduce(KernelParams* params_ptr, size_t group) {
+  KernelParams& params = *params_ptr;
+  DeviceMeasureBuffers& value_buffers = params.buffers[0];
+  DeviceMeasureBuffers& count_buffers = params.buffers[1];
+  int64_t sum = sycl::bit_cast<int64_t>(value_buffers.sum[group]);
+  int64_t min = sycl::bit_cast<int64_t>(value_buffers.min[group]);
+  int64_t max = sycl::bit_cast<int64_t>(value_buffers.max[group]);
+  uint64_t nonnull = value_buffers.nonnull[group];
+  uint64_t count = count_buffers.count[group];
+  bool active = params.active[group] != 0;
+  const size_t first_partial = group * params.dense_integer_chunk_count;
+
+  for (size_t chunk = 0; chunk < params.dense_integer_chunk_count; ++chunk) {
+    const DenseIntegerPartial& partial = params.dense_integer_partials[first_partial + chunk];
+    if (partial.failure_flags != 0) {
+      record_failure(*params.meta, partial.failure_flags);
+      return;
+    }
+    active |= partial.rows != 0;
+    uint64_t next_count = 0;
+    if (!add_u64(count, partial.rows, &next_count)) {
+      record_failure(*params.meta, kFailureNumericOverflow);
+      return;
+    }
+    count = next_count;
+    if (partial.nonnull == 0)
+      continue;
+
+    int64_t ignored = 0;
+    int64_t next_sum = 0;
+    uint64_t next_nonnull = 0;
+    if (!add_i64(sum, partial.prefix_min, &ignored) ||
+        !add_i64(sum, partial.prefix_max, &ignored) || !add_i64(sum, partial.sum, &next_sum) ||
+        !add_u64(nonnull, partial.nonnull, &next_nonnull)) {
+      record_failure(*params.meta, kFailureNumericOverflow);
+      return;
+    }
+    sum = next_sum;
+    if (nonnull == 0 || partial.min < min)
+      min = partial.min;
+    if (nonnull == 0 || partial.max > max)
+      max = partial.max;
+    nonnull = next_nonnull;
+  }
+
+  value_buffers.sum[group] = sycl::bit_cast<uint64_t>(sum);
+  value_buffers.min[group] = sycl::bit_cast<uint64_t>(min);
+  value_buffers.max[group] = sycl::bit_cast<uint64_t>(max);
+  value_buffers.nonnull[group] = nonnull;
+  count_buffers.count[group] = count;
+  params.active[group] = active ? 1 : 0;
+}
+
+inline void run_dense_integer_commit_kernel(KernelParams* params_ptr) {
+  KernelParams& params = *params_ptr;
+  DeviceMeta& meta = *params.meta;
+  const bool accumulate = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0;
+  const bool finalize = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
+
+  if (meta.failure_flags != 0) {
+    meta.lifecycle_state = kLifecycleFailed;
+    return;
+  }
+  if (accumulate &&
+      !add_u64(meta.selected, static_cast<uint64_t>(params.row_count), &meta.selected)) {
+    meta.failure_flags = kFailureNumericOverflow;
+    meta.lifecycle_state = kLifecycleFailed;
+    return;
   }
   if (!finalize)
     return;
@@ -1972,6 +2218,9 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   params->hash_counts = arena_ptr<uint32_t>(scratch, layout.hash_counts);
   params->hash_group_count = arena_ptr<uint32_t>(scratch, layout.hash_group_count);
   params->dense_chunk_counts = arena_ptr<uint32_t>(scratch, layout.dense_chunk_counts);
+  params->dense_integer_partials =
+      arena_ptr<DenseIntegerPartial>(scratch, layout.dense_integer_partials);
+  params->dense_integer_chunk_count = layout.dense_integer_chunk_count;
   params->meta = arena_ptr<DeviceMeta>(scratch, layout.meta);
   for (size_t k = 0; k < desc.key_count; ++k) {
     params->staged_key_values[k] = arena_ptr<uint8_t>(scratch, layout.staged_key_values[k]);
@@ -2394,6 +2643,10 @@ class GroupedAggDenseKernel;
 class GroupedAggDenseCountPrepareKernel;
 class GroupedAggDenseCountRowsKernel;
 class GroupedAggDenseCountCommitKernel;
+class GroupedAggDenseIntegerPrepareKernel;
+class GroupedAggDenseIntegerPartialsKernel;
+class GroupedAggDenseIntegerReduceKernel;
+class GroupedAggDenseIntegerCommitKernel;
 class GroupedAggHashKernel;
 class GroupedAggHashInitKernel;
 class GroupedAggHashCompactKernel;
@@ -2496,6 +2749,7 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
 
     const bool parallel_dense_count =
         parallel_dense_count_star_shape(*desc) && desc->row_count <= UINT32_MAX;
+    const bool parallel_dense_integer = layout.dense_integer_parallel;
     if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
       queue.single_task<GroupedAggHashInitKernel>([=]() { run_hash_init_kernel(device_params); });
       queue.fill(host_params.hash_owners, kHashEmptyOwner, layout.hash_slot_count);
@@ -2521,6 +2775,20 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
       }
       queue.single_task<GroupedAggDenseCountCommitKernel>(
           [=]() { run_dense_count_commit_kernel(device_params); });
+    } else if (parallel_dense_integer) {
+      queue.single_task<GroupedAggDenseIntegerPrepareKernel>(
+          [=]() { run_dense_integer_prepare_kernel(device_params); });
+      if ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0 &&
+          layout.dense_integer_partial_count != 0) {
+        queue.parallel_for<GroupedAggDenseIntegerPartialsKernel>(
+            sycl::range<1>(layout.dense_integer_partial_count),
+            [=](sycl::id<1> id) { run_dense_integer_partial(device_params, id[0]); });
+        queue.parallel_for<GroupedAggDenseIntegerReduceKernel>(
+            sycl::range<1>(desc->group_capacity),
+            [=](sycl::id<1> id) { run_dense_integer_reduce(device_params, id[0]); });
+      }
+      queue.single_task<GroupedAggDenseIntegerCommitKernel>(
+          [=]() { run_dense_integer_commit_kernel(device_params); });
     } else {
       queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
     }
