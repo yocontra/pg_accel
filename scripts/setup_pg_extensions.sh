@@ -19,8 +19,9 @@ pg_accel_require_pgrx_support "$pg"
 
 pg_config="$(pg_accel_source_pg_config_for_required_pg "$pg")"
 pg_version="$("$pg_config" --version | awk '{print $2}')"
-pg_major="${pg_version%%.*}"
+pg_major="$(pg_accel_pg_major_from_version "$pg_version")"
 bindir="$("$pg_config" --bindir)"
+prefix="$(dirname "$bindir")"
 sharedir="$("$pg_config" --sharedir)"
 pkglibdir="$("$pg_config" --pkglibdir)"
 extdir="$sharedir/extension"
@@ -95,6 +96,7 @@ collect_packaged_dirs() {
 
 candidate_has_ext_file() {
     local pattern="$1" dir src
+    ((${#EXT_DIRS[@]} > 0)) || return 1
     for dir in "${EXT_DIRS[@]}"; do
         for src in "$dir"/$pattern; do
             [ -e "$src" ] && return 0
@@ -117,6 +119,7 @@ maybe_install_postgis_package() {
 
 copy_ext_patterns() {
     local pattern dir src target copied=0
+    ((${#EXT_DIRS[@]} > 0)) || return 1
     for dir in "${EXT_DIRS[@]}"; do
         for pattern in "$@"; do
             for src in "$dir"/$pattern; do
@@ -133,6 +136,7 @@ copy_ext_patterns() {
 
 copy_lib_patterns() {
     local pattern dir src target copied=0
+    ((${#LIB_DIRS[@]} > 0)) || return 1
     for dir in "${LIB_DIRS[@]}"; do
         for pattern in "$@"; do
             for src in "$dir"/$pattern; do
@@ -211,7 +215,7 @@ fi
 
 if ! have_postgis; then
     cat >&2 <<EOF
-error: could not install PostGIS into $("$pg_config" --prefix)
+error: could not install PostGIS into $prefix
 
 Install same-major PostGIS package artifacts, then rerun:
   macOS/Homebrew: brew install postgis
@@ -234,7 +238,7 @@ if ! have_h3; then
 fi
 
 if ! have_h3; then
-    echo "error: h3-pg install did not produce h3.control and h3 module in $("$pg_config" --prefix)" >&2
+    echo "error: h3-pg install did not produce h3.control and h3 module in $prefix" >&2
     exit 1
 fi
 

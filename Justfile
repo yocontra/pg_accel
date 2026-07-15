@@ -316,6 +316,7 @@ doc-parity:
 # Validate that default PG-version plumbing is centralized.
 pg-version-audit:
     ./scripts/pg_version_audit.sh
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_pg_source.py
 
 # Pre-commit checks: fmt, lint, type-check matrix, deny, audits, doc-parity
 pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit audit-cpu-cheats-test
@@ -819,7 +820,6 @@ package pg="":
     fi
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
-    scripts/setup_pg_extensions.sh "$pg"
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
     cargo pgrx package --package pg_accel --pg-config "$pg_config" --no-default-features --features "pg$pg"
     cp LICENSE NOTICE .acpp-version "target/release/pg_accel-pg$pg/"

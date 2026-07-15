@@ -13,7 +13,12 @@ PG_ACCEL_PG_CONFIGURE_FLAGS="${PG_ACCEL_PG_CONFIGURE_FLAGS:---without-icu}"
 
 pg_accel_pg_major_from_version() {
     local version="${1#pg}"
-    printf '%s\n' "${version%%.*}"
+    if [[ "$version" =~ ^([0-9]+) ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    echo "error: invalid PostgreSQL version: $1" >&2
+    return 1
 }
 
 pg_accel_pg_version_for_pg() {
@@ -49,6 +54,38 @@ pg_accel_source_pg_config_for_pg() {
     local prefix
     prefix="$(pg_accel_pg_prefix_for_pg "$1")"
     printf '%s/bin/pg_config\n' "$prefix"
+}
+
+pg_accel_pg_install_is_usable() {
+    local pg_config="$1"
+    local platform="${2:-$(uname -s)}"
+    local cppflags token sysroot="" expect_sysroot=0
+
+    [ -x "$pg_config" ] || return 1
+    [ "$platform" = "Darwin" ] || return 0
+
+    cppflags="$("$pg_config" --cppflags 2>/dev/null)" || return 1
+    for token in $cppflags; do
+        if [ "$expect_sysroot" -eq 1 ]; then
+            sysroot="$token"
+            break
+        fi
+        case "$token" in
+            -isysroot)
+                expect_sysroot=1
+                ;;
+            -isysroot*)
+                sysroot="${token#-isysroot}"
+                break
+                ;;
+        esac
+    done
+
+    if [ -n "$sysroot" ] && [ ! -d "$sysroot" ]; then
+        echo "PostgreSQL pg_config references missing macOS SDK: $sysroot" >&2
+        return 1
+    fi
+    return 0
 }
 
 pg_accel_pg_tarball_for_version() {
@@ -90,22 +127,30 @@ pg_accel_unpack_pg() {
 
 pg_accel_build_pg_version() {
     local version="$1"
-    local source_dir build_dir prefix
+    local source_dir build_dir prefix pg_config stale_install=0
     source_dir="$(pg_accel_pg_source_dir_for_version "$version")"
     build_dir="$PG_ACCEL_PG_ROOT/build/$version"
     prefix="$(pg_accel_pg_prefix_for_version "$version")"
+    pg_config="$prefix/bin/pg_config"
 
     pg_accel_download_pg "$version"
     pg_accel_unpack_pg "$version"
 
-    if [ -x "$prefix/bin/pg_config" ]; then
+    if pg_accel_pg_install_is_usable "$pg_config"; then
         echo "PostgreSQL $version already installed: $prefix"
         return 0
+    fi
+    if [ -x "$pg_config" ]; then
+        stale_install=1
+        echo "PostgreSQL $version install is stale; rebuilding in place: $prefix"
     fi
 
     mkdir -p "$build_dir" "$prefix"
     (
         cd "$build_dir"
+        if [ "$stale_install" -eq 1 ] && [ -f Makefile ]; then
+            make clean
+        fi
         "$source_dir/configure" \
             --prefix="$prefix" \
             --enable-debug \
