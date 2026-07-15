@@ -463,8 +463,12 @@ impl JoinExecState {
             AccelStrategy::GpuHashJoin => {
                 // SAFETY: Caller guarantees main backend thread.
                 if self.hash_count_only {
+                    // SAFETY: both child states and the result slot are live
+                    // for this executor callback; count mode owns their use.
                     unsafe { self.next_hash_join_count(outer_ps, inner_ps, result_slot) }
                 } else {
+                    // SAFETY: both child states and the result slot are live
+                    // for this executor callback and match the join plan.
                     unsafe { self.next_hash_join(outer_ps, inner_ps, result_slot) }
                 }
             }
@@ -571,33 +575,48 @@ impl JoinExecState {
         // For CustomScan nodes (scanrelid=0), check custom_scan_tlist first
         // since plan.targetlist uses INDEX_VAR references.
         let scan = plan.cast::<pg_sys::Scan>();
+        // SAFETY: join children passed here are scan-derived Plan nodes, whose
+        // common Scan prefix contains the relation identifier.
         let scanrelid = unsafe { (*scan).scanrelid };
         if scanrelid == 0 {
             // Try custom_scan_tlist (has original relation Vars).
+            // SAFETY: every live PostgreSQL Plan begins with a readable NodeTag.
             let node_tag = unsafe { (*plan.cast::<pg_sys::Node>()).type_ };
             if node_tag == pg_sys::NodeTag::T_CustomScan {
                 let cscan = plan.cast::<pg_sys::CustomScan>();
+                // SAFETY: the checked T_CustomScan tag proves `plan` has
+                // CustomScan layout and its custom target list is readable.
                 let cst = unsafe { (*cscan).custom_scan_tlist };
                 if !cst.is_null() {
+                    // SAFETY: `cst` is the live PostgreSQL List owned by cscan.
                     let clen = unsafe { pg_sys::list_length(cst) };
                     for j in 0..clen {
+                        // SAFETY: `j` is bounded by list_length and custom scan
+                        // target-list cells contain TargetEntry pointers.
                         let tle = unsafe { pg_sys::list_nth(cst, j).cast::<pg_sys::TargetEntry>() };
                         if tle.is_null() {
                             continue;
                         }
+                        // SAFETY: a non-null target-list cell has TargetEntry
+                        // layout, so its expression pointer is valid to read.
                         let expr = unsafe { (*tle).expr };
                         if expr.is_null() {
                             continue;
                         }
+                        // SAFETY: every non-null PostgreSQL Expr begins with a
+                        // readable NodeTag used here to validate its layout.
                         if unsafe { (*expr.cast::<pg_sys::Node>()).type_ } != pg_sys::NodeTag::T_Var
                         {
                             continue;
                         }
                         let var = expr.cast::<pg_sys::Var>();
+                        // SAFETY: the checked T_Var tag proves Var layout.
                         let vno = unsafe { (*var).varno };
+                        // SAFETY: the checked T_Var tag proves Var layout.
                         let vatt = unsafe { (*var).varattno };
                         if vno == target_varno && vatt == target_attno {
                             // resno is 1-based output position.
+                            // SAFETY: `tle` remains a live TargetEntry from cst.
                             return unsafe { (*tle).resno };
                         }
                     }
@@ -614,26 +633,37 @@ impl JoinExecState {
         if target_varno > 0 && scanrelid as i32 != target_varno {
             return 0;
         }
+        // SAFETY: `plan` is the live child Plan and owns this target list for
+        // the duration of executor initialization.
         let tlist = unsafe { (*plan).targetlist };
         if tlist.is_null() {
             return 0;
         }
+        // SAFETY: `tlist` is the live PostgreSQL List owned by `plan`.
         let tlen = unsafe { pg_sys::list_length(tlist) };
         for i in 0..tlen {
+            // SAFETY: `i` is bounded by list_length and plan target-list cells
+            // contain TargetEntry pointers.
             let tle = unsafe { pg_sys::list_nth(tlist, i).cast::<pg_sys::TargetEntry>() };
             if tle.is_null() {
                 continue;
             }
+            // SAFETY: a non-null target-list cell has TargetEntry layout, so
+            // its expression pointer is valid to read.
             let expr = unsafe { (*tle).expr };
             if expr.is_null() {
                 continue;
             }
+            // SAFETY: every non-null PostgreSQL Expr begins with a readable
+            // NodeTag used here to validate its concrete layout.
             if unsafe { (*expr.cast::<pg_sys::Node>()).type_ } != pg_sys::NodeTag::T_Var {
                 continue;
             }
             let var = expr.cast::<pg_sys::Var>();
+            // SAFETY: the checked T_Var tag proves `expr` has Var layout.
             let vatt = unsafe { (*var).varattno };
             if vatt == target_attno {
+                // SAFETY: `tle` remains a live TargetEntry from `tlist`.
                 return unsafe { (*tle).resno };
             }
         }
@@ -688,6 +718,8 @@ impl JoinExecState {
         self.hash_built = false;
         for mt in &self.hash_inner_tuples {
             if !mt.is_null() {
+                // SAFETY: each non-null inner tuple is an owned palloc copy
+                // made during hash build and has not been released elsewhere.
                 unsafe { pg_sys::pfree((*mt).cast()) };
             }
         }
@@ -697,9 +729,17 @@ impl JoinExecState {
 
 impl crate::engine::executor::state::ExecutorState for JoinExecState {
     unsafe fn exec(&mut self, css: *mut pg_sys::CustomScanState) -> *mut pg_sys::TupleTableSlot {
+        // SAFETY: PostgreSQL supplies a live CustomScanState; child 0 is
+        // bounds-checked by the shared list helper.
         let outer_ps = unsafe { crate::engine::executor::state::child_plan_state(css, 0) };
+        // SAFETY: PostgreSQL supplies a live CustomScanState; child 1 is
+        // bounds-checked by the shared list helper.
         let inner_ps = unsafe { crate::engine::executor::state::child_plan_state(css, 1) };
+        // SAFETY: the live CustomScanState owns its initialized scan tuple slot
+        // for the duration of this executor callback.
         let scan_slot = unsafe { (*css).ss.ss_ScanTupleSlot };
+        // SAFETY: both child pointers come from this state's custom_ps list and
+        // `scan_slot` is the matching live result slot.
         unsafe { self.next(outer_ps, inner_ps, scan_slot) }
     }
     fn rows_dispatched(&self) -> u64 {
