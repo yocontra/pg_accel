@@ -11,8 +11,9 @@ use crate::engine::cost::{PgCost, device_limits};
 use crate::engine::ffi::syscache::{PostgisRasterCatalogIdentity, resolve_postgis_raster_catalog};
 use crate::engine::raster::{
     RasterCallShape, RasterCatalogContract, RasterCommandShape, RasterCostGate, RasterCostInput,
-    RasterPlannerDecline, RasterQueryFeatures, RasterRelationShape, RasterResidentWork,
-    RasterShapeInput, RasterWorkEstimate, build_raster_query_spec, estimate_raster_cost,
+    RasterPlannerCandidate, RasterPlannerDecline, RasterQueryFeatures, RasterRelationShape,
+    RasterResidentWork, RasterShapeInput, RasterWorkEstimate, build_raster_query_spec,
+    estimate_raster_cost,
 };
 use crate::engine::residency::{ResidentColumnView, with_resident_column};
 use crate::engine::stats;
@@ -419,6 +420,9 @@ fn planner_decline_reason(decline: &RasterPlannerDecline) -> RejectionReason {
 fn cost_decline_reason(gate: RasterCostGate) -> RejectionReason {
     match gate {
         RasterCostGate::SelectedBandMissing { .. } => RejectionReason::RasterSelectedBandMissing,
+        RasterCostGate::NonRoundtrippableZeroGridBand { .. } => {
+            RejectionReason::RasterZeroGridWkbNonRoundtrippable
+        }
         RasterCostGate::ExactResidentMetadataUnavailable
         | RasterCostGate::ResidentMetadataOverflow
         | RasterCostGate::InvalidResidentMetadata
@@ -458,6 +462,7 @@ fn exact_resident_work(spec: &crate::engine::raster::RasterQuerySpec) -> RasterW
                 RasterWorkEstimate::ResidentExact(RasterResidentWork {
                     row_count: stats.row_count,
                     non_null_rows: stats.non_null_rows,
+                    zero_grid_present_band_rows: stats.zero_grid_present_band_rows,
                     selected_band_rows,
                     selected_pixels,
                     input_wkb_bytes: stats.input_wkb_bytes,
@@ -482,6 +487,53 @@ fn record(reason: RejectionReason, rows: u64) {
 
 fn is_observer_owner(rti: pg_sys::Index, reloptkind: pg_sys::RelOptKind::Type) -> bool {
     rti == 1 && reloptkind == pg_sys::RelOptKind::RELOPT_BASEREL
+}
+
+unsafe fn validated_candidate(
+    query: &pg_sys::Query,
+    rel: &pg_sys::RelOptInfo,
+    rti: pg_sys::Index,
+    rte: &pg_sys::RangeTblEntry,
+    prefilter: RasterNamePrefilterTarget,
+) -> Result<RasterPlannerCandidate, RejectionReason> {
+    let identity = unsafe { resolve_postgis_raster_catalog() }
+        .map_err(|_| RejectionReason::RasterCatalogProofFailed)?;
+    let function = unsafe { &*prefilter.function };
+    if prefilter.wrapped {
+        let exact_oid = function.funcid == identity.reclass_fn_oid
+            || function.funcid == identity.summary_stats_fn_oid
+            || function.funcid == identity.summary_stats_default_band_fn_oid;
+        return Err(if exact_oid {
+            RejectionReason::RasterUnsupportedShape
+        } else {
+            RejectionReason::RasterCatalogProofFailed
+        });
+    }
+    let call = unsafe { extract_call(function, &identity, rti, rte) }
+        .map_err(|()| RejectionReason::RasterUnsupportedShape)?;
+    let catalog = RasterCatalogContract {
+        raster_type_oid: u32::from(identity.raster_type_oid),
+        summary_stats_type_oid: u32::from(identity.summary_stats_type_oid),
+        reclass_fn_oid: u32::from(identity.reclass_fn_oid),
+        summary_stats_fn_oid: u32::from(identity.summary_stats_fn_oid),
+        summary_stats_default_band_fn_oid: u32::from(identity.summary_stats_default_band_fn_oid),
+        as_wkb_fn_oid: u32::from(identity.as_wkb_fn_oid),
+        rast_from_wkb_fn_oid: u32::from(identity.rast_from_wkb_fn_oid),
+        fingerprint: identity.fingerprint_words.into_boxed_slice(),
+    };
+    let shape = RasterShapeInput {
+        command: if query.commandType == pg_sys::CmdType::CMD_SELECT {
+            RasterCommandShape::Select
+        } else {
+            RasterCommandShape::Unsupported
+        },
+        relation: unsafe { relation_shape(query, rel, rti, rte) },
+        features: unsafe { query_features(query, rel, rte) },
+        nonjunk_target_count: prefilter.nonjunk_count,
+        call,
+        estimated_rows: rows_estimate(rel.rows),
+    };
+    build_raster_query_spec(shape, &catalog).map_err(|decline| planner_decline_reason(&decline))
 }
 
 /// Observe one base relation for an exact raster target and record why the
@@ -517,53 +569,10 @@ pub(super) unsafe fn observe(
         return true;
     }
     let rows = rows_estimate(rel_ref.rows);
-    let Ok(identity) = (unsafe { resolve_postgis_raster_catalog() }) else {
-        record(RejectionReason::RasterCatalogProofFailed, rows);
-        return true;
-    };
-    let function = unsafe { &*prefilter.function };
-    if prefilter.wrapped {
-        let exact_oid = function.funcid == identity.reclass_fn_oid
-            || function.funcid == identity.summary_stats_fn_oid
-            || function.funcid == identity.summary_stats_default_band_fn_oid;
-        record(
-            if exact_oid {
-                RejectionReason::RasterUnsupportedShape
-            } else {
-                RejectionReason::RasterCatalogProofFailed
-            },
-            rows,
-        );
-        return true;
-    }
-    let Ok(call) = (unsafe { extract_call(function, &identity, rti, rte_ref) }) else {
-        record(RejectionReason::RasterUnsupportedShape, rows);
-        return true;
-    };
-    let catalog = RasterCatalogContract {
-        raster_type_oid: u32::from(identity.raster_type_oid),
-        summary_stats_type_oid: u32::from(identity.summary_stats_type_oid),
-        reclass_fn_oid: u32::from(identity.reclass_fn_oid),
-        summary_stats_fn_oid: u32::from(identity.summary_stats_fn_oid),
-        summary_stats_default_band_fn_oid: u32::from(identity.summary_stats_default_band_fn_oid),
-        fingerprint: identity.fingerprint_words.into_boxed_slice(),
-    };
-    let shape = RasterShapeInput {
-        command: if query.commandType == pg_sys::CmdType::CMD_SELECT {
-            RasterCommandShape::Select
-        } else {
-            RasterCommandShape::Unsupported
-        },
-        relation: unsafe { relation_shape(query, rel_ref, rti, rte_ref) },
-        features: unsafe { query_features(query, rel_ref, rte_ref) },
-        nonjunk_target_count: prefilter.nonjunk_count,
-        call,
-        estimated_rows: rows,
-    };
-    let candidate = match build_raster_query_spec(shape, &catalog) {
+    let candidate = match unsafe { validated_candidate(query, rel_ref, rti, rte_ref, prefilter) } {
         Ok(candidate) => candidate,
-        Err(decline) => {
-            record(planner_decline_reason(&decline), rows);
+        Err(reason) => {
+            record(reason, rows);
             return true;
         }
     };
@@ -616,6 +625,14 @@ mod tests {
                 required_rows: 2,
             }),
             RejectionReason::RasterSelectedBandMissing
+        );
+        assert_eq!(
+            cost_decline_reason(RasterCostGate::NonRoundtrippableZeroGridBand { rows: 1 }),
+            RejectionReason::RasterZeroGridWkbNonRoundtrippable
+        );
+        assert_eq!(
+            RejectionReason::RasterZeroGridWkbNonRoundtrippable.stats_key(),
+            "raster_zero_grid_wkb_non_roundtrippable"
         );
         assert_eq!(
             cost_decline_reason(RasterCostGate::UncalibratedCoefficients),

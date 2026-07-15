@@ -91,6 +91,8 @@ pub struct RasterCatalogContract {
     pub reclass_fn_oid: u32,
     pub summary_stats_fn_oid: u32,
     pub summary_stats_default_band_fn_oid: u32,
+    pub as_wkb_fn_oid: u32,
+    pub rast_from_wkb_fn_oid: u32,
     pub fingerprint: Box<[i32]>,
 }
 
@@ -256,6 +258,8 @@ pub fn build_raster_query_spec(
         raster_attno,
         raster_type_oid,
         function_oid,
+        as_wkb_fn_oid: catalog.as_wkb_fn_oid,
+        rast_from_wkb_fn_oid: catalog.rast_from_wkb_fn_oid,
         catalog_fingerprint: catalog.fingerprint.clone(),
         reclass,
     };
@@ -277,6 +281,8 @@ mod tests {
             reclass_fn_oid: 61_001,
             summary_stats_fn_oid: 61_002,
             summary_stats_default_band_fn_oid: 61_003,
+            as_wkb_fn_oid: 61_004,
+            rast_from_wkb_fn_oid: 61_005,
             fingerprint: vec![1, 2, 3].into_boxed_slice(),
         }
     }

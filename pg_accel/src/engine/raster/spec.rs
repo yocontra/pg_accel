@@ -172,6 +172,8 @@ pub struct RasterQuerySpec {
     pub raster_attno: i32,
     pub raster_type_oid: u32,
     pub function_oid: u32,
+    pub as_wkb_fn_oid: u32,
+    pub rast_from_wkb_fn_oid: u32,
     pub catalog_fingerprint: Box<[i32]>,
     pub reclass: RasterReclassSpec,
 }
@@ -240,6 +242,8 @@ pub enum RasterSpecError {
     InvalidRasterAttno(i32),
     MissingRasterTypeOid,
     MissingFunctionOid,
+    MissingAsWkbFunctionOid,
+    MissingRastFromWkbFunctionOid,
     EmptyCatalogFingerprint,
     CatalogFingerprintTooLong(usize),
     EmptyReclassRules,
@@ -274,6 +278,12 @@ impl RasterQuerySpec {
         }
         if self.function_oid == 0 {
             return Err(RasterSpecError::MissingFunctionOid);
+        }
+        if self.as_wkb_fn_oid == 0 {
+            return Err(RasterSpecError::MissingAsWkbFunctionOid);
+        }
+        if self.rast_from_wkb_fn_oid == 0 {
+            return Err(RasterSpecError::MissingRastFromWkbFunctionOid);
         }
         if self.catalog_fingerprint.is_empty() {
             return Err(RasterSpecError::EmptyCatalogFingerprint);
@@ -571,6 +581,8 @@ mod tests {
             raster_attno: 2,
             raster_type_oid: 20,
             function_oid: 30,
+            as_wkb_fn_oid: 31,
+            rast_from_wkb_fn_oid: 32,
             catalog_fingerprint: vec![1, 2, 3].into_boxed_slice(),
             reclass: parse_exact_reclass_spec("0:1", "8BUI").expect("canonical reclass"),
         }

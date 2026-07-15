@@ -3136,13 +3136,7 @@ unsafe fn reset_executor_state(state: *mut GpuAccelScanState) {
                 pgrx::error!("pg_accel: raster rescan found no executor state");
             }
             // SAFETY: BeginCustomScan allocated this pointer as RasterExecState.
-            (*(*state).accel.executor.cast::<RasterExecState>())
-                .reset_for_rescan()
-                .unwrap_or_else(|error| {
-                    pgrx::error!(
-                        "pg_accel: raster ReScanCustomScan failed ({error}); refusing CPU fallback"
-                    );
-                });
+            (*(*state).accel.executor.cast::<RasterExecState>()).reset_for_rescan();
         } else if gpu_strategy == GpuStrategy::Agg {
             if (*state).accel.executor.is_null() {
                 pgrx::error!("pg_accel: aggregate rescan found no executor state");

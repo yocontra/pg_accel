@@ -1,4 +1,4 @@
-//! Begin/rescan revalidation of replacement-sensitive raster catalog proof.
+//! Execution-time revalidation of replacement-sensitive raster catalog proof.
 
 use crate::engine::ffi::syscache::{PostgisRasterCatalogIdentity, resolve_postgis_raster_catalog};
 
@@ -11,6 +11,8 @@ pub enum RasterCatalogRevalidationError {
     FingerprintChanged,
     RasterTypeChanged { expected: u32, current: u32 },
     FunctionChanged { expected: u32, current: u32 },
+    AsWkbFunctionChanged { expected: u32, current: u32 },
+    RastFromWkbFunctionChanged { expected: u32, current: u32 },
 }
 
 impl std::fmt::Display for RasterCatalogRevalidationError {
@@ -44,6 +46,20 @@ fn validate_identity(
             current: current_function,
         });
     }
+    let current_as_wkb = u32::from(current.as_wkb_fn_oid);
+    if spec.as_wkb_fn_oid != current_as_wkb {
+        return Err(RasterCatalogRevalidationError::AsWkbFunctionChanged {
+            expected: spec.as_wkb_fn_oid,
+            current: current_as_wkb,
+        });
+    }
+    let current_rast_from_wkb = u32::from(current.rast_from_wkb_fn_oid);
+    if spec.rast_from_wkb_fn_oid != current_rast_from_wkb {
+        return Err(RasterCatalogRevalidationError::RastFromWkbFunctionChanged {
+            expected: spec.rast_from_wkb_fn_oid,
+            current: current_rast_from_wkb,
+        });
+    }
     Ok(())
 }
 
@@ -51,8 +67,9 @@ fn validate_identity(
 /// exact match with the planned Reclass-only RQS2 fingerprint.
 ///
 /// # Safety
-/// Must run on the PostgreSQL backend main thread at both BeginCustomScan and
-/// ReScanCustomScan before any resident input is borrowed.
+/// Must run on the PostgreSQL backend main thread on the first tuple request
+/// after BeginCustomScan and every ReScanCustomScan, before resident input is
+/// borrowed.
 pub unsafe fn revalidate_raster_catalog(
     spec: &RasterQuerySpec,
 ) -> Result<PostgisRasterCatalogIdentity, RasterCatalogRevalidationError> {
@@ -78,8 +95,10 @@ mod tests {
             reclass_fn_oid: pg_sys::Oid::from(5),
             summary_stats_fn_oid: pg_sys::Oid::from(6),
             summary_stats_default_band_fn_oid: pg_sys::Oid::from(7),
-            reclass_impl_fn_oid: pg_sys::Oid::from(8),
-            summary_stats_impl_fn_oid: pg_sys::Oid::from(9),
+            as_wkb_fn_oid: pg_sys::Oid::from(8),
+            rast_from_wkb_fn_oid: pg_sys::Oid::from(9),
+            reclass_impl_fn_oid: pg_sys::Oid::from(10),
+            summary_stats_impl_fn_oid: pg_sys::Oid::from(11),
             fingerprint_words: vec![10, 11],
         }
     }
@@ -90,6 +109,8 @@ mod tests {
             raster_attno: 1,
             raster_type_oid: 3,
             function_oid: 5,
+            as_wkb_fn_oid: 8,
+            rast_from_wkb_fn_oid: 9,
             catalog_fingerprint: vec![10, 11].into_boxed_slice(),
             reclass: parse_exact_reclass_spec("0:1", "8BUI").expect("test mapping is canonical"),
         }
@@ -122,6 +143,20 @@ mod tests {
         assert!(matches!(
             validate_identity(&wrong_function, &identity),
             Err(RasterCatalogRevalidationError::FunctionChanged { .. })
+        ));
+
+        let mut wrong_export = spec();
+        wrong_export.as_wkb_fn_oid = 80;
+        assert!(matches!(
+            validate_identity(&wrong_export, &identity),
+            Err(RasterCatalogRevalidationError::AsWkbFunctionChanged { .. })
+        ));
+
+        let mut wrong_import = spec();
+        wrong_import.rast_from_wkb_fn_oid = 90;
+        assert!(matches!(
+            validate_identity(&wrong_import, &identity),
+            Err(RasterCatalogRevalidationError::RastFromWkbFunctionChanged { .. })
         ));
     }
 

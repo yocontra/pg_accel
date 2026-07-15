@@ -503,6 +503,10 @@ pub struct ResidentRasterWorkRow {
 pub struct ResidentRasterStats {
     pub row_count: u64,
     pub non_null_rows: u64,
+    /// Rows with band one present but a zero-cell grid. PostGIS 3.6.4 exports
+    /// these values to WKB but rejects that same WKB in ST_RastFromWKB, so
+    /// they cannot cross the executor's public conversion boundary.
+    pub zero_grid_present_band_rows: u64,
     pub total_grid_pixels: u64,
     pub total_band_pixels: u64,
     pub input_wkb_bytes: u64,
@@ -523,6 +527,7 @@ impl ResidentRasterStats {
         Self {
             row_count: 0,
             non_null_rows: 0,
+            zero_grid_present_band_rows: 0,
             total_grid_pixels: 0,
             total_band_pixels: 0,
             input_wkb_bytes: 0,
@@ -631,6 +636,7 @@ impl ResidentRasterData {
             DomainContractError::Invalid("resident raster statistics allocation failed")
         })?;
         let mut non_null_rows = 0_u64;
+        let mut zero_grid_present_band_rows = 0_u64;
         let mut total_grid_pixels = 0_u64;
         let mut total_band_pixels = 0_u64;
         let mut input_wkb_bytes = 0_u64;
@@ -702,6 +708,11 @@ impl ResidentRasterData {
                 });
                 continue;
             }
+            if pixels == 0 {
+                zero_grid_present_band_rows = zero_grid_present_band_rows
+                    .checked_add(1)
+                    .ok_or(DomainContractError::ByteCountOverflow)?;
+            }
             let first_band = usize::try_from(row.first_band)
                 .map_err(|_| DomainContractError::ByteCountOverflow)?;
             let source_pixel_width = self
@@ -750,6 +761,7 @@ impl ResidentRasterData {
             row_count: u64::try_from(self.rows.len())
                 .map_err(|_| DomainContractError::ByteCountOverflow)?,
             non_null_rows,
+            zero_grid_present_band_rows,
             total_grid_pixels,
             total_band_pixels,
             input_wkb_bytes,
@@ -1199,6 +1211,7 @@ mod tests {
             ResidentRasterStats {
                 row_count: 1,
                 non_null_rows: 1,
+                zero_grid_present_band_rows: 0,
                 total_grid_pixels: 4,
                 total_band_pixels: 4,
                 input_wkb_bytes: 64,
@@ -1271,6 +1284,7 @@ mod tests {
             .expect("zero-dimensional raster rows validate");
         let stats = raster.stats().expect("statistics are exact");
         assert_eq!(stats.non_null_rows, 2);
+        assert_eq!(stats.zero_grid_present_band_rows, 1);
         assert_eq!(stats.selected_band_pixels(1), Some(0));
         assert_eq!(stats.selected_band_rows(1), Some(1));
         assert_eq!(stats.work_rows[0].action, RESIDENT_RASTER_WORK_RECLASS);

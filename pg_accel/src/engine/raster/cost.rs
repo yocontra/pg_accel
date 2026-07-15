@@ -7,6 +7,7 @@ use crate::engine::cost::{DeviceLimits, PgCost};
 pub struct RasterResidentWork {
     pub row_count: u64,
     pub non_null_rows: u64,
+    pub zero_grid_present_band_rows: u64,
     pub selected_band_rows: u64,
     pub selected_pixels: u64,
     pub input_wkb_bytes: u64,
@@ -37,6 +38,9 @@ pub enum RasterCostGate {
     ExactResidentMetadataUnavailable,
     ResidentMetadataOverflow,
     InvalidResidentMetadata,
+    NonRoundtrippableZeroGridBand {
+        rows: u64,
+    },
     SelectedBandMissing {
         present_rows: u64,
         required_rows: u64,
@@ -90,10 +94,19 @@ pub fn estimate_raster_cost(input: RasterCostInput, limits: &DeviceLimits) -> Ra
         }
     };
     if work.non_null_rows > work.row_count
+        || work.zero_grid_present_band_rows > work.selected_band_rows
         || work.selected_band_rows > work.non_null_rows
         || work.selected_band_rows == 0 && work.selected_pixels != 0
     {
         return declined(input, RasterCostGate::InvalidResidentMetadata);
+    }
+    if work.zero_grid_present_band_rows != 0 {
+        return declined(
+            input,
+            RasterCostGate::NonRoundtrippableZeroGridBand {
+                rows: work.zero_grid_present_band_rows,
+            },
+        );
     }
     if work.selected_band_rows != work.non_null_rows {
         return declined(
@@ -149,6 +162,7 @@ mod tests {
         RasterResidentWork {
             row_count: 1_000,
             non_null_rows: 999,
+            zero_grid_present_band_rows: 0,
             selected_band_rows: 999,
             selected_pixels: pixels,
             input_wkb_bytes: 1_000_000,
@@ -213,6 +227,22 @@ mod tests {
         assert_eq!(
             cost.wkb_construction_bytes,
             resident.reclass_output_wkb_bytes
+        );
+    }
+
+    #[test]
+    fn zero_grid_present_band_is_not_roundtrippable() {
+        let limits = DeviceLimits::cpu_only();
+        let mut resident =
+            work(u64::try_from(limits.gpu_raster_min_pixels).expect("device minimum fits u64"));
+        resident.zero_grid_present_band_rows = 1;
+        assert_eq!(
+            estimate_raster_cost(
+                input(RasterWorkEstimate::ResidentExact(resident), 1_000_000.0),
+                &limits,
+            )
+            .gate,
+            RasterCostGate::NonRoundtrippableZeroGridBand { rows: 1 }
         );
     }
 

@@ -462,6 +462,11 @@ pub fn size_raster_execution(
             "resident raster snapshot lengths or offsets are invalid",
         ));
     }
+    if stats.zero_grid_present_band_rows != 0 {
+        return Err(RasterExecutionError::InvalidSnapshot(
+            "zero-grid raster bands cannot cross the exact PostGIS WKB importer",
+        ));
+    }
 
     let mut output_pixels_bytes = 0_u64;
     let mut output_wkb_bytes = 0_u64;
@@ -897,6 +902,8 @@ mod tests {
             raster_attno: 1,
             raster_type_oid: 20,
             function_oid: 30,
+            as_wkb_fn_oid: 31,
+            rast_from_wkb_fn_oid: 32,
             catalog_fingerprint: vec![1, 2, 3].into_boxed_slice(),
             reclass: RasterReclassSpec {
                 output_pixel_type,
@@ -1049,27 +1056,20 @@ mod tests {
     }
 
     #[test]
-    fn null_zero_band_and_present_zero_pixel_remain_distinct() {
+    fn present_zero_pixel_band_fails_before_native_dispatch() {
         let zero_band = wkb(true, 2, 3, &[]);
         let zero_pixel_band = wkb(true, 0, 7, &[(4, 0x40, vec![255], vec![])]);
-        let preflight = preflight_raster_execution(
+        let error = preflight_raster_execution(
             &spec(RasterPixelType::UInt16),
-            snapshot(&[None, Some(zero_band.clone()), Some(zero_pixel_band.clone())]),
+            snapshot(&[None, Some(zero_band), Some(zero_pixel_band)]),
         )
-        .expect("mixed no-pixel preflight");
-        assert_eq!(preflight.layout.output_offsets(), &[0, 0, 0, 0]);
-        assert_eq!(preflight.layout.total_pixels(), 0);
-        let output = reconstruct_raster_output(&preflight, &[], &[0, 1, 2])
-            .expect("mixed no-pixel reconstruction");
-        assert_eq!(output.value(0), None);
-        assert_eq!(output.value(1), Some(zero_band.as_slice()));
-        let rewritten = output.value(2).expect("present band output");
+        .expect_err("zero-grid present bands cannot cross the public importer");
         assert_eq!(
-            &rewritten[..RASTER_WKB_HEADER_BYTES],
-            &zero_pixel_band[..RASTER_WKB_HEADER_BYTES]
+            error,
+            RasterExecutionError::InvalidSnapshot(
+                "zero-grid raster bands cannot cross the exact PostGIS WKB importer"
+            )
         );
-        assert_eq!(rewritten[RASTER_WKB_HEADER_BYTES], 6);
-        assert_eq!(&rewritten[RASTER_WKB_HEADER_BYTES + 1..], &[0, 0]);
     }
 
     #[test]

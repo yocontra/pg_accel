@@ -4,13 +4,14 @@ use super::{
     FromDatum, H3FunctionShape, H3TypeShape, fnv1a64, function_fingerprint, oid_word, pg_sys,
     read_h3_function_shape, read_h3_type_shape, type_fingerprint, u32_word, u64_words,
 };
+use pgrx::IntoDatum;
 
 const POSTGIS_RASTER_EXTENSION_NAME: &str = "postgis_raster";
 const POSTGIS_RASTER_TYPE_NAME: &str = "raster";
 const POSTGIS_RASTER_SUMMARY_TYPE_NAME: &str = "summarystats";
 const POSTGIS_RASTER_RECLASS_ARG_TYPE_NAME: &str = "reclassarg";
 const POSTGIS_RASTER_LIBRARY: &str = "$libdir/postgis_raster-3";
-const POSTGIS_RASTER_FINGERPRINT_VERSION: u32 = 1;
+const POSTGIS_RASTER_FINGERPRINT_VERSION: u32 = 2;
 
 /// Exact public PostGIS Raster overload accepted by the resident planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,8 @@ pub struct PostgisRasterCatalogIdentity {
     pub reclass_fn_oid: pg_sys::Oid,
     pub summary_stats_fn_oid: pg_sys::Oid,
     pub summary_stats_default_band_fn_oid: pg_sys::Oid,
+    pub as_wkb_fn_oid: pg_sys::Oid,
+    pub rast_from_wkb_fn_oid: pg_sys::Oid,
     pub reclass_impl_fn_oid: pg_sys::Oid,
     pub summary_stats_impl_fn_oid: pg_sys::Oid,
     pub fingerprint_words: Vec<i32>,
@@ -833,6 +836,19 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
     };
     // SAFETY: main-thread overload resolution in the proven extension schema, per
     // this function's contract.
+    let as_wkb_fn_oid = unsafe {
+        find_function_oid(
+            extension.schema_oid,
+            "st_aswkb",
+            &[raster_type_oid, pg_sys::BOOLOID],
+        )?
+    };
+    // SAFETY: main-thread overload resolution in the proven extension schema, per
+    // this function's contract.
+    let rast_from_wkb_fn_oid =
+        unsafe { find_function_oid(extension.schema_oid, "st_rastfromwkb", &[pg_sys::BYTEAOID])? };
+    // SAFETY: main-thread overload resolution in the proven extension schema, per
+    // this function's contract.
     let reclass_variadic_fn_oid = unsafe {
         find_function_oid(
             extension.schema_oid,
@@ -970,6 +986,34 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
     if summary_impl.variadic_type != pg_sys::InvalidOid {
         return Err("PostGIS Raster _st_summarystats became variadic".to_owned());
     }
+    let as_wkb = unsafe { read_h3_function_shape(as_wkb_fn_oid)? };
+    validate_raster_c_function(
+        &as_wkb,
+        extension.schema_oid,
+        "st_aswkb",
+        &[raster_type_oid, pg_sys::BOOLOID],
+        pg_sys::BYTEAOID,
+        true,
+        1,
+        "RASTER_asWKB",
+    )?;
+    if as_wkb.variadic_type != pg_sys::InvalidOid {
+        return Err("PostGIS Raster st_aswkb became variadic".to_owned());
+    }
+    let rast_from_wkb = unsafe { read_h3_function_shape(rast_from_wkb_fn_oid)? };
+    validate_raster_c_function(
+        &rast_from_wkb,
+        extension.schema_oid,
+        "st_rastfromwkb",
+        &[pg_sys::BYTEAOID],
+        raster_type_oid,
+        true,
+        0,
+        "RASTER_fromWKB",
+    )?;
+    if rast_from_wkb.variadic_type != pg_sys::InvalidOid {
+        return Err("PostGIS Raster st_rastfromwkb became variadic".to_owned());
+    }
     for (oid, label) in [
         (reclass_fn_oid, "st_reclass wrapper"),
         (summary_stats_fn_oid, "st_summarystats wrapper"),
@@ -980,6 +1024,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
         (reclass_variadic_fn_oid, "st_reclass variadic wrapper"),
         (reclass_impl_fn_oid, "_st_reclass implementation"),
         (summary_stats_impl_fn_oid, "_st_summarystats implementation"),
+        (as_wkb_fn_oid, "st_aswkb WKB exporter"),
+        (rast_from_wkb_fn_oid, "st_rastfromwkb WKB importer"),
     ] {
         require_extension_member(
             extension.extension_oid,
@@ -1016,6 +1062,8 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
     fingerprint_words.extend(function_fingerprint(&summary));
     fingerprint_words.extend(function_fingerprint(&summary_default));
     fingerprint_words.extend(function_fingerprint(&summary_impl));
+    fingerprint_words.extend(function_fingerprint(&as_wkb));
+    fingerprint_words.extend(function_fingerprint(&rast_from_wkb));
 
     Ok(PostgisRasterCatalogIdentity {
         extension_oid: extension.extension_oid,
@@ -1025,10 +1073,125 @@ pub unsafe fn resolve_postgis_raster_catalog() -> Result<PostgisRasterCatalogIde
         reclass_fn_oid,
         summary_stats_fn_oid,
         summary_stats_default_band_fn_oid,
+        as_wkb_fn_oid,
+        rast_from_wkb_fn_oid,
         reclass_impl_fn_oid,
         summary_stats_impl_fn_oid,
         fingerprint_words,
     })
+}
+
+fn caught_error_message(caught: &pgrx::pg_sys::panic::CaughtError) -> String {
+    use pgrx::pg_sys::panic::CaughtError;
+    match caught {
+        CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => {
+            error.message().to_owned()
+        }
+        CaughtError::RustPanic { ereport, .. } => ereport.message().to_owned(),
+    }
+}
+
+/// Convert an exact PostGIS internal raster Datum to owned external WKB.
+///
+/// The caller must pass a freshly resolved catalog identity. PostgreSQL ERRORs
+/// raised by the catalog-proved C conversion function are caught and returned
+/// so executor callers can issue one contextual hard ERROR without falling
+/// through to native execution.
+///
+/// # Safety
+/// `raster` must be a live non-NULL Datum of `identity.raster_type_oid` on the
+/// PostgreSQL backend main thread.
+pub unsafe fn postgis_raster_datum_to_wkb(
+    identity: &PostgisRasterCatalogIdentity,
+    raster: pg_sys::Datum,
+) -> Result<Vec<u8>, String> {
+    if identity.as_wkb_fn_oid == pg_sys::InvalidOid || raster.value() == 0 {
+        return Err("PostGIS Raster WKB export received an invalid identity or Datum".to_owned());
+    }
+    pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: the identity proves strict st_aswkb(raster, boolean) with a
+        // bytea result, and the caller proves the raster argument type.
+        let bytea = unsafe {
+            pg_sys::OidFunctionCall2Coll(
+                identity.as_wkb_fn_oid,
+                pg_sys::InvalidOid,
+                raster,
+                pg_sys::BoolGetDatum(false),
+            )
+        };
+        if bytea.value() == 0 {
+            return Err("catalog-proved PostGIS st_aswkb returned NULL".to_owned());
+        }
+        let original = bytea.cast_mut_ptr::<pg_sys::varlena>();
+        // SAFETY: the catalog proof fixes the result type as a freshly
+        // allocated bytea. Detoast supplies one flat readable value.
+        let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
+        if detoasted.is_null() {
+            // SAFETY: exact RASTER_asWKB returned this palloc-owned bytea.
+            unsafe { pg_sys::pfree(original.cast()) };
+            return Err("could not detoast catalog-proved PostGIS raster WKB".to_owned());
+        }
+        // SAFETY: detoasted is a flat bytea valid for its reported payload.
+        let len = unsafe { pgrx::varsize_any_exhdr(detoasted) };
+        let data = unsafe { pgrx::vardata_any(detoasted).cast::<u8>() };
+        let wkb = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
+        if detoasted != original {
+            // SAFETY: a distinct detoast result is palloc-owned by this call.
+            unsafe { pg_sys::pfree(detoasted.cast()) };
+        }
+        // SAFETY: exact RASTER_asWKB returns a fresh palloc-owned bytea and the
+        // payload has already been copied into Rust-owned storage.
+        unsafe { pg_sys::pfree(original.cast()) };
+        Ok(wkb)
+    }))
+    .catch_others(|caught| {
+        Err(format!(
+            "PostGIS st_aswkb raised ERROR: {}",
+            caught_error_message(&caught)
+        ))
+    })
+    .execute()
+}
+
+/// Convert reconstructed external WKB to an exact PostGIS internal raster
+/// Datum through the catalog-proved importer.
+///
+/// # Safety
+/// The identity must be freshly revalidated and this must run on the
+/// PostgreSQL backend main thread in the output tuple's live memory context.
+pub unsafe fn postgis_raster_datum_from_wkb(
+    identity: &PostgisRasterCatalogIdentity,
+    wkb: &[u8],
+) -> Result<pg_sys::Datum, String> {
+    if identity.rast_from_wkb_fn_oid == pg_sys::InvalidOid {
+        return Err("PostGIS Raster WKB import has no catalog-proved function".to_owned());
+    }
+    let bytea = wkb
+        .into_datum()
+        .ok_or_else(|| "could not allocate reconstructed raster WKB bytea".to_owned())?;
+    let result = pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: the identity proves strict st_rastfromwkb(bytea) with the
+        // exact PostGIS raster result type.
+        let raster = unsafe {
+            pg_sys::OidFunctionCall1Coll(identity.rast_from_wkb_fn_oid, pg_sys::InvalidOid, bytea)
+        };
+        if raster.value() == 0 {
+            Err("catalog-proved PostGIS st_rastfromwkb returned NULL".to_owned())
+        } else {
+            Ok(raster)
+        }
+    }))
+    .catch_others(|caught| {
+        Err(format!(
+            "PostGIS st_rastfromwkb raised ERROR: {}",
+            caught_error_message(&caught)
+        ))
+    })
+    .execute();
+    // SAFETY: IntoDatum allocated this temporary bytea in the current memory
+    // context and the strict importer has returned or its ERROR was caught.
+    unsafe { pg_sys::pfree(bytea.cast_mut_ptr::<std::ffi::c_void>()) };
+    result
 }
 
 /// Resolve one function OID to the exact public PostGIS Raster overload.
@@ -1289,6 +1452,85 @@ mod postgis_raster_tests {
                 true,
                 0,
                 "RASTER_reclass",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raster_wkb_converters_require_exact_c_implementations() {
+        let raster_oid = oid(60_001);
+        let mut exporter = valid_function(
+            "st_aswkb",
+            vec![raster_oid, pg_sys::BOOLOID],
+            pg_sys::BYTEAOID,
+            "RASTER_asWKB",
+        );
+        exporter.language_name = "c".to_owned();
+        exporter.binary = Some(POSTGIS_RASTER_LIBRARY.to_owned());
+        exporter.argument_defaults = 1;
+        assert_eq!(
+            validate_raster_c_function(
+                &exporter,
+                exporter.schema_oid,
+                "st_aswkb",
+                &exporter.argument_types,
+                pg_sys::BYTEAOID,
+                true,
+                1,
+                "RASTER_asWKB",
+            ),
+            Ok(())
+        );
+        let mut replaced_exporter = exporter;
+        replaced_exporter.source = "test_aswkb".to_owned();
+        assert!(
+            validate_raster_c_function(
+                &replaced_exporter,
+                replaced_exporter.schema_oid,
+                "st_aswkb",
+                &replaced_exporter.argument_types,
+                pg_sys::BYTEAOID,
+                true,
+                1,
+                "RASTER_asWKB",
+            )
+            .is_err()
+        );
+
+        let mut importer = valid_function(
+            "st_rastfromwkb",
+            vec![pg_sys::BYTEAOID],
+            raster_oid,
+            "RASTER_fromWKB",
+        );
+        importer.language_name = "c".to_owned();
+        importer.binary = Some(POSTGIS_RASTER_LIBRARY.to_owned());
+        assert_eq!(
+            validate_raster_c_function(
+                &importer,
+                importer.schema_oid,
+                "st_rastfromwkb",
+                &importer.argument_types,
+                raster_oid,
+                true,
+                0,
+                "RASTER_fromWKB",
+            ),
+            Ok(())
+        );
+        let mut replaced_importer = importer;
+        replaced_importer.binary = Some("$libdir/impostor".to_owned());
+        assert!(
+            validate_raster_c_function(
+                &replaced_importer,
+                replaced_importer.schema_oid,
+                "st_rastfromwkb",
+                &replaced_importer.argument_types,
+                raster_oid,
+                true,
+                0,
+                "RASTER_fromWKB",
             )
             .is_err()
         );

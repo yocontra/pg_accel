@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use pgrx::pg_sys;
 
+use crate::engine::ffi::syscache::{PostgisRasterCatalogIdentity, postgis_raster_datum_from_wkb};
 use crate::engine::raster::{
     RasterExecutionError, RasterExecutionPreflight, RasterExecutionSizing, RasterExecutionSnapshot,
     RasterQuerySpec, RasterReclassRule, RasterReconstructedOutput, RasterSpecCodecError,
@@ -131,9 +132,10 @@ impl RasterExecPlan {
         self.column
     }
 
-    /// Begin/rescan boundary: reprove the replacement-sensitive catalog,
-    /// ensure the exact resident relation generation, and build or resolve
-    /// the generation-stamped output artifact.
+    /// First-execution boundary after Begin/rescan: reprove the
+    /// replacement-sensitive catalog, ensure the exact resident relation
+    /// generation, and build or resolve the generation-stamped output
+    /// artifact.
     ///
     /// # Safety
     /// Must run on the PostgreSQL backend main thread.
@@ -141,7 +143,7 @@ impl RasterExecPlan {
         // SAFETY: ensure_ready's contract puts us on the PostgreSQL backend main
         // thread at the Begin/ReScan boundary, which is exactly
         // revalidate_raster_catalog's requirement.
-        unsafe { revalidate_raster_catalog(&self.spec) }.map_err(|error| {
+        let catalog = unsafe { revalidate_raster_catalog(&self.spec) }.map_err(|error| {
             ResidentLoadError::Loader(format!("raster catalog revalidation failed: {error}"))
         })?;
         let selected = ensure_selected_relations(std::slice::from_ref(&self.selected_relation))?;
@@ -153,6 +155,7 @@ impl RasterExecPlan {
             |resolved| (resolved.artifact.row_count(), resolved.accounting),
         )?;
         Ok(RasterExecReady {
+            catalog,
             selected,
             artifact,
             row_count,
@@ -206,9 +209,11 @@ impl RasterExecPlan {
     }
 }
 
-/// Evidence returned at both BeginCustomScan and ReScanCustomScan.
+/// Evidence established on the first tuple request after BeginCustomScan or
+/// ReScanCustomScan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RasterExecReady {
+    pub catalog: PostgisRasterCatalogIdentity,
     pub selected: SelectedRelationsEnsureOutcome,
     pub artifact: ArtifactEnsureOutcome,
     pub row_count: usize,
@@ -219,14 +224,16 @@ pub struct RasterExecReady {
 pub struct RasterExecState {
     plan: RasterExecPlan,
     cursor: RasterOutputCursor,
-    ready: RasterExecReady,
+    ready: Option<RasterExecReady>,
     rows_dispatched: u64,
     batches_executed: u64,
     dispatch_time_us: u64,
 }
 
 impl RasterExecState {
-    /// Build the generation-stamped result before PostgreSQL requests a row.
+    /// Validate the immutable plan/slot contract without loading, dispatching,
+    /// or publishing a derived artifact. PostgreSQL invokes BeginCustomScan
+    /// for plain EXPLAIN, so all execution work must remain lazy.
     ///
     /// # Safety
     /// Must run on the PostgreSQL backend main thread. `output_slot` must be
@@ -236,32 +243,39 @@ impl RasterExecState {
         output_slot: *mut pg_sys::TupleTableSlot,
     ) -> Result<Self, ResidentLoadError> {
         unsafe { validate_output_slot(&plan, output_slot) }?;
-        let started = Instant::now();
-        let ready = unsafe { plan.ensure_ready() }?;
-        let (rows_dispatched, batches_executed, dispatch_time_us) =
-            execution_counters(&ready, started.elapsed());
         Ok(Self {
             plan,
             cursor: RasterOutputCursor::new(),
-            ready,
-            rows_dispatched,
-            batches_executed,
-            dispatch_time_us,
+            ready: None,
+            rows_dispatched: 0,
+            batches_executed: 0,
+            dispatch_time_us: 0,
         })
     }
 
-    /// Reprove catalog and resident generations, resolve/rebuild the exact
-    /// artifact, and only then rewind output.
+    /// Invalidate readiness and rewind output. The first subsequent tuple
+    /// request must reprove catalog and resident generations before use.
+    pub fn reset_for_rescan(&mut self) {
+        self.ready = None;
+        self.cursor.reset();
+        self.rows_dispatched = 0;
+        self.batches_executed = 0;
+        self.dispatch_time_us = 0;
+    }
+
+    /// Establish the exact execution snapshot once for the current scan pass.
     ///
     /// # Safety
     /// Must run on the PostgreSQL backend main thread.
-    pub unsafe fn reset_for_rescan(&mut self) -> Result<(), ResidentLoadError> {
+    unsafe fn ensure_ready_for_execution(&mut self) -> Result<(), ResidentLoadError> {
+        if self.ready.is_some() {
+            return Ok(());
+        }
         let started = Instant::now();
         let ready = unsafe { self.plan.ensure_ready() }?;
         let (rows_dispatched, batches_executed, dispatch_time_us) =
             execution_counters(&ready, started.elapsed());
-        self.ready = ready;
-        self.cursor.reset();
+        self.ready = Some(ready);
         self.rows_dispatched = rows_dispatched;
         self.batches_executed = batches_executed;
         self.dispatch_time_us = dispatch_time_us;
@@ -279,7 +293,13 @@ impl RasterExecState {
         &mut self,
         output_slot: *mut pg_sys::TupleTableSlot,
     ) -> Result<*mut pg_sys::TupleTableSlot, ResidentLoadError> {
+        unsafe { self.ensure_ready_for_execution() }?;
         let owner = self.plan.selected_relation.relid;
+        let catalog = &self
+            .ready
+            .as_ref()
+            .expect("raster execution readiness was just established")
+            .catalog;
         let value = with_derived_artifact_inputs::<RasterOutputArtifact, _>(
             owner,
             &self.plan.identity,
@@ -288,8 +308,12 @@ impl RasterExecState {
                 Some(RasterOutputValue::Null) => Ok(Some((pg_sys::Datum::from(0), true))),
                 Some(RasterOutputValue::Wkb(wkb)) => {
                     // SAFETY: executor callbacks run on the backend main thread;
-                    // the WKB slice remains valid for this complete store borrow.
-                    unsafe { raster_datum_from_wkb(wkb) }.map(|datum| Some((datum, false)))
+                    // the WKB slice remains valid for this complete store borrow
+                    // and first execution after Begin/ReScan proved this exact
+                    // PostGIS importer.
+                    unsafe { postgis_raster_datum_from_wkb(catalog, wkb) }
+                        .map_err(ResidentLoadError::Loader)
+                        .map(|datum| Some((datum, false)))
                 }
                 None => Ok(None),
             },
@@ -316,8 +340,8 @@ impl RasterExecState {
     }
 
     #[must_use]
-    pub const fn ready(&self) -> &RasterExecReady {
-        &self.ready
+    pub const fn ready(&self) -> Option<&RasterExecReady> {
+        self.ready.as_ref()
     }
 }
 
@@ -367,33 +391,6 @@ unsafe fn validate_output_slot(
         ));
     }
     Ok(())
-}
-
-/// Wrap a reconstructed PostGIS raster payload in a flat four-byte varlena.
-///
-/// # Safety
-/// Must run on the PostgreSQL backend main thread in the output tuple's live
-/// memory context.
-unsafe fn raster_datum_from_wkb(wkb: &[u8]) -> Result<pg_sys::Datum, ResidentLoadError> {
-    const VARHDRSZ: usize = std::mem::size_of::<pg_sys::int32>();
-    let total = VARHDRSZ
-        .checked_add(wkb.len())
-        .ok_or_else(|| ResidentLoadError::Loader("raster output size overflow".to_owned()))?;
-    let total_u32 = u32::try_from(total)
-        .ok()
-        .filter(|total| *total <= 0x3fff_ffff)
-        .ok_or_else(|| {
-            ResidentLoadError::Loader("raster output exceeds varlena size".to_owned())
-        })?;
-    // SAFETY: palloc runs on the backend main thread and either returns a
-    // `total`-byte allocation or raises PostgreSQL ERROR.
-    let output = unsafe { pg_sys::palloc(total) }.cast::<u8>();
-    // SAFETY: output owns `total` writable bytes and WKB begins after VARHDRSZ.
-    unsafe {
-        std::ptr::write_unaligned(output.cast::<u32>(), total_u32 << 2);
-        std::ptr::copy_nonoverlapping(wkb.as_ptr(), output.add(VARHDRSZ), wkb.len());
-    }
-    Ok(pg_sys::Datum::from(output))
 }
 
 impl crate::engine::executor::state::ExecutorState for RasterExecState {
@@ -1383,12 +1380,31 @@ mod tests {
 
     const HEADER_BYTES: usize = 61;
 
+    fn catalog_identity() -> PostgisRasterCatalogIdentity {
+        PostgisRasterCatalogIdentity {
+            extension_oid: pg_sys::Oid::from(10),
+            schema_oid: pg_sys::Oid::from(11),
+            raster_type_oid: pg_sys::Oid::from(2),
+            summary_stats_type_oid: pg_sys::Oid::from(12),
+            reclass_fn_oid: pg_sys::Oid::from(3),
+            summary_stats_fn_oid: pg_sys::Oid::from(13),
+            summary_stats_default_band_fn_oid: pg_sys::Oid::from(14),
+            as_wkb_fn_oid: pg_sys::Oid::from(6),
+            rast_from_wkb_fn_oid: pg_sys::Oid::from(7),
+            reclass_impl_fn_oid: pg_sys::Oid::from(15),
+            summary_stats_impl_fn_oid: pg_sys::Oid::from(16),
+            fingerprint_words: vec![4, 5],
+        }
+    }
+
     fn spec(rule_destination: i64) -> RasterQuerySpec {
         RasterQuerySpec {
             relation_oid: 1,
             raster_attno: 1,
             raster_type_oid: 2,
             function_oid: 3,
+            as_wkb_fn_oid: 6,
+            rast_from_wkb_fn_oid: 7,
             catalog_fingerprint: vec![4, 5].into_boxed_slice(),
             reclass: RasterReclassSpec {
                 output_pixel_type: RasterPixelType::UInt8,
@@ -1597,20 +1613,42 @@ mod tests {
     }
 
     #[test]
-    fn rescan_reuses_the_canonical_plan_identity_and_rewinds_output_only() {
+    fn rescan_reuses_the_canonical_plan_identity_and_invalidates_readiness() {
         let plan = RasterExecPlan::from_spec(spec(7)).expect("executor plan");
         let identity = plan.identity().clone();
         let relation = plan.selected_relation().clone();
-        let mut cursor = RasterOutputCursor { next_row: 9 };
-        cursor.reset();
-        assert_eq!(cursor.position(), 0);
-        assert_eq!(plan.identity(), &identity);
-        assert_eq!(plan.selected_relation(), &relation);
+        let mut state = RasterExecState {
+            plan,
+            cursor: RasterOutputCursor { next_row: 9 },
+            ready: Some(RasterExecReady {
+                catalog: catalog_identity(),
+                selected: SelectedRelationsEnsureOutcome {
+                    evidence: Vec::new(),
+                    loaded_relations: Vec::new(),
+                    raw_load_ms: 0.0,
+                },
+                artifact: ArtifactEnsureOutcome::Built,
+                row_count: 9,
+                accounting: ResidentByteAccounting::default(),
+            }),
+            rows_dispatched: 9,
+            batches_executed: 1,
+            dispatch_time_us: 17,
+        };
+        state.reset_for_rescan();
+        assert_eq!(state.cursor.position(), 0);
+        assert!(state.ready().is_none());
+        assert_eq!(state.rows_dispatched, 0);
+        assert_eq!(state.batches_executed, 0);
+        assert_eq!(state.dispatch_time_us, 0);
+        assert_eq!(state.plan.identity(), &identity);
+        assert_eq!(state.plan.selected_relation(), &relation);
     }
 
     #[test]
     fn executor_counters_charge_only_nonempty_builds() {
         let ready = |artifact, row_count| RasterExecReady {
+            catalog: catalog_identity(),
             selected: SelectedRelationsEnsureOutcome {
                 evidence: Vec::new(),
                 loaded_relations: Vec::new(),

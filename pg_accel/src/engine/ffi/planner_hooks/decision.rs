@@ -65,6 +65,7 @@ pub(super) enum RejectionReason {
     RasterCatalogProofFailed,
     RasterSummaryStatsBitExactUnavailable,
     RasterResidentMetadataUnavailable,
+    RasterZeroGridWkbNonRoundtrippable,
     RasterSelectedBandMissing,
     RasterCostUncalibrated,
     RasterRuntimeUnavailable,
@@ -141,6 +142,7 @@ impl RejectionReason {
                 "raster_summarystats_bit_exact_unavailable"
             }
             Self::RasterResidentMetadataUnavailable => "raster_resident_metadata_unavailable",
+            Self::RasterZeroGridWkbNonRoundtrippable => "raster_zero_grid_wkb_non_roundtrippable",
             Self::RasterSelectedBandMissing => "raster_selected_band_missing",
             Self::RasterCostUncalibrated => "raster_cost_uncalibrated",
             Self::RasterRuntimeUnavailable => "raster_runtime_unavailable",

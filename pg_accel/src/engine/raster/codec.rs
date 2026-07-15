@@ -7,7 +7,7 @@ use super::spec::{
 
 pub const RASTER_QUERY_SPEC_WIRE_MAGIC: i32 = 0x5251_5332; // "RQS2"
 const RASTER_QUERY_SPEC_HEADER_WORDS: usize = 3;
-const RASTER_QUERY_SPEC_FIXED_WORDS: usize = 4;
+const RASTER_QUERY_SPEC_FIXED_WORDS: usize = 6;
 const RASTER_RECLASS_FIXED_WORDS: usize = 2;
 const RASTER_RECLASS_RULE_WORDS: usize = 4;
 
@@ -186,6 +186,8 @@ impl RasterQuerySpec {
         encoder.push(self.raster_attno);
         encoder.push_u32(self.raster_type_oid);
         encoder.push_u32(self.function_oid);
+        encoder.push_u32(self.as_wkb_fn_oid);
+        encoder.push_u32(self.rast_from_wkb_fn_oid);
         encoder.push_len(self.catalog_fingerprint.len())?;
         encoder.words.extend_from_slice(&self.catalog_fingerprint);
         encoder.push_u32(self.reclass.output_pixel_type.tag());
@@ -233,6 +235,8 @@ impl RasterQuerySpec {
         let raster_attno = reader.next("raster attribute number")?;
         let raster_type_oid = reader.u32("raster type OID")?;
         let function_oid = reader.u32("function OID")?;
+        let as_wkb_fn_oid = reader.u32("st_aswkb function OID")?;
+        let rast_from_wkb_fn_oid = reader.u32("st_rastfromwkb function OID")?;
         let fingerprint_len = reader.len(
             "catalog fingerprint words",
             MAX_RASTER_CATALOG_FINGERPRINT_WORDS,
@@ -285,6 +289,8 @@ impl RasterQuerySpec {
             raster_attno,
             raster_type_oid,
             function_oid,
+            as_wkb_fn_oid,
+            rast_from_wkb_fn_oid,
             catalog_fingerprint: catalog_fingerprint.into_boxed_slice(),
             reclass: RasterReclassSpec {
                 output_pixel_type,
@@ -309,6 +315,8 @@ mod tests {
             raster_attno: 2,
             raster_type_oid: 22,
             function_oid: 33,
+            as_wkb_fn_oid: 34,
+            rast_from_wkb_fn_oid: 35,
             catalog_fingerprint: vec![i32::MIN, 0, i32::MAX].into_boxed_slice(),
             reclass: RasterReclassSpec {
                 output_pixel_type: RasterPixelType::Int16,
@@ -369,7 +377,10 @@ mod tests {
         ));
 
         let mut words = reclass_spec().encode_words().expect("valid encoding");
-        let pixel_tag_index = 8 + reclass_spec().catalog_fingerprint.len();
+        let pixel_tag_index = RASTER_QUERY_SPEC_HEADER_WORDS
+            + RASTER_QUERY_SPEC_FIXED_WORDS
+            + 1
+            + reclass_spec().catalog_fingerprint.len();
         words[pixel_tag_index] = 99;
         assert!(RasterQuerySpec::decode_words(&words).is_err());
 
@@ -395,8 +406,11 @@ mod tests {
     #[test]
     fn fingerprint_length_has_one_bounded_canonical_encoding() {
         let mut empty = reclass_spec().encode_words().expect("valid encoding");
-        empty.drain(8..11);
-        empty[7] = 0;
+        let length_index = RASTER_QUERY_SPEC_HEADER_WORDS + RASTER_QUERY_SPEC_FIXED_WORDS;
+        let fingerprint_start = length_index + 1;
+        let fingerprint_end = fingerprint_start + reclass_spec().catalog_fingerprint.len();
+        empty.drain(fingerprint_start..fingerprint_end);
+        empty[length_index] = 0;
         empty[2] = i32::try_from(empty.len()).expect("short test wire");
         assert!(matches!(
             RasterQuerySpec::decode_words(&empty),
@@ -406,7 +420,7 @@ mod tests {
         ));
 
         let mut negative = reclass_spec().encode_words().expect("valid encoding");
-        negative[7] = -1;
+        negative[length_index] = -1;
         assert!(matches!(
             RasterQuerySpec::decode_words(&negative),
             Err(RasterSpecCodecError::InvalidValue {
@@ -416,7 +430,7 @@ mod tests {
         ));
 
         let mut oversized = reclass_spec().encode_words().expect("valid encoding");
-        oversized[7] = 4_097;
+        oversized[length_index] = 4_097;
         assert!(matches!(
             RasterQuerySpec::decode_words(&oversized),
             Err(RasterSpecCodecError::LimitExceeded {

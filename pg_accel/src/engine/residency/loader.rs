@@ -104,10 +104,11 @@ impl IntoDatum for RawH3Datum {
     }
 }
 
-/// Owned detoasted PostGIS Raster WKB. The exact type proof is completed
-/// before SPI asks `FromDatum` to interpret the by-reference value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RawRasterDatum(Vec<u8>);
+/// Borrowed PostGIS Raster Datum marker. The pointer is consumed
+/// synchronously through the catalog-proved WKB exporter while its SPI row is
+/// still live; no private PostGIS bytes are interpreted directly.
+#[derive(Debug, Clone, Copy)]
+struct RawRasterDatum(pg_sys::Datum);
 
 impl FromDatum for RawRasterDatum {
     unsafe fn from_polymorphic_datum(
@@ -115,32 +116,13 @@ impl FromDatum for RawRasterDatum {
         is_null: bool,
         _type_oid: pg_sys::Oid,
     ) -> Option<Self> {
-        if is_null || datum.value() == 0 {
-            return None;
-        }
-        let original = datum.cast_mut_ptr::<pg_sys::varlena>();
-        // SAFETY: the exact catalog proof establishes a varlena, pass-by-ref
-        // raster Datum and this runs on the PostgreSQL backend main thread.
-        let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
-        if detoasted.is_null() {
-            return None;
-        }
-        // SAFETY: detoast returns a flat varlena whose payload is valid for the
-        // reported length. Copying makes its lifetime independent of SPI.
-        let len = unsafe { pgrx::varsize_any_exhdr(detoasted) };
-        let data = unsafe { pgrx::vardata_any(detoasted).cast::<u8>() };
-        let bytes = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
-        if detoasted != original {
-            // SAFETY: a distinct detoast result is palloc-owned by this call.
-            unsafe { pg_sys::pfree(detoasted.cast()) };
-        }
-        Some(Self(bytes))
+        (!is_null && datum.value() != 0).then_some(Self(datum))
     }
 }
 
 impl IntoDatum for RawRasterDatum {
     fn into_datum(self) -> Option<pg_sys::Datum> {
-        None
+        Some(self.0)
     }
 
     fn type_oid() -> pg_sys::Oid {
@@ -524,6 +506,7 @@ impl StagedRelation {
 
 struct RasterColumnBuilder {
     type_oid: pg_sys::Oid,
+    catalog: syscache::PostgisRasterCatalogIdentity,
     pixels: Vec<u8>,
     band_offsets: Vec<u64>,
     rows: Vec<ResidentRasterRow>,
@@ -536,9 +519,10 @@ struct RasterColumnBuilder {
 }
 
 impl RasterColumnBuilder {
-    fn new(type_oid: pg_sys::Oid, max_exact_value_bytes: usize) -> Self {
+    fn new(catalog: syscache::PostgisRasterCatalogIdentity, max_exact_value_bytes: usize) -> Self {
         Self {
-            type_oid,
+            type_oid: catalog.raster_type_oid,
+            catalog,
             pixels: Vec::new(),
             band_offsets: vec![0],
             rows: Vec::new(),
@@ -654,6 +638,17 @@ impl RasterColumnBuilder {
     }
 
     fn finish(self) -> Result<StagedColumn, String> {
+        // SAFETY: staging and publication run synchronously on the backend
+        // main thread. A changed exporter/importer must invalidate the load.
+        let current = unsafe { syscache::resolve_postgis_raster_catalog() }
+            .map_err(|error| format!("resident raster catalog revalidation failed: {error}"))?;
+        if current != self.catalog {
+            return Err("PostGIS Raster catalog changed during resident staging".to_owned());
+        }
+        self.finish_after_catalog_proof()
+    }
+
+    fn finish_after_catalog_proof(self) -> Result<StagedColumn, String> {
         let data = ResidentRasterData {
             pixels: self.pixels,
             band_offsets: self.band_offsets,
@@ -672,6 +667,11 @@ impl RasterColumnBuilder {
             data,
             max_exact_value_bytes: self.max_exact_value_bytes,
         })
+    }
+
+    #[cfg(test)]
+    fn finish_for_test(self) -> Result<StagedColumn, String> {
+        self.finish_after_catalog_proof()
     }
 }
 
@@ -755,11 +755,11 @@ fn validate_geometry_column_type(type_oid: pg_sys::Oid) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ExtensionColumnKind {
     H3,
     Geometry,
-    Raster,
+    Raster(syscache::PostgisRasterCatalogIdentity),
 }
 
 fn classify_extension_column_type(type_oid: pg_sys::Oid) -> Result<ExtensionColumnKind, String> {
@@ -771,15 +771,26 @@ fn classify_extension_column_type(type_oid: pg_sys::Oid) -> Result<ExtensionColu
     }
 
     // SAFETY: residency resolution and load run on the backend main thread.
-    match unsafe { syscache::validate_postgis_raster_type(type_oid) } {
-        Ok(_) => Ok(ExtensionColumnKind::Raster),
-        Err(raster_detail) => match validate_h3_column_type(type_oid) {
-            Ok(()) => Ok(ExtensionColumnKind::H3),
-            Err(h3_detail) => Err(format!(
-                "type OID {} is not supported by residency v2; exact PostGIS Raster validation failed: {raster_detail}; exact H3 validation failed: {h3_detail}",
-                u32::from(type_oid)
-            )),
-        },
+    match unsafe { syscache::resolve_postgis_raster_catalog() } {
+        Ok(catalog) if catalog.raster_type_oid == type_oid => {
+            Ok(ExtensionColumnKind::Raster(catalog))
+        }
+        result => {
+            let raster_detail = match result {
+                Ok(catalog) => format!(
+                    "the catalog-proved raster type is OID {}",
+                    u32::from(catalog.raster_type_oid)
+                ),
+                Err(error) => error,
+            };
+            match validate_h3_column_type(type_oid) {
+                Ok(()) => Ok(ExtensionColumnKind::H3),
+                Err(h3_detail) => Err(format!(
+                    "type OID {} is not supported by residency v2; exact PostGIS Raster validation failed: {raster_detail}; exact H3 validation failed: {h3_detail}",
+                    u32::from(type_oid)
+                )),
+            }
+        }
     }
 }
 
@@ -860,8 +871,8 @@ impl ColumnBuilder {
                         ),
                     })
                 }
-                ExtensionColumnKind::Raster => Ok(Self::Raster(RasterColumnBuilder::new(
-                    type_oid,
+                ExtensionColumnKind::Raster(catalog) => Ok(Self::Raster(RasterColumnBuilder::new(
+                    catalog,
                     device_limits().resident_domain_max_exact_value_bytes,
                 ))),
             },
@@ -980,10 +991,18 @@ impl ColumnBuilder {
                 builder.push(value.map(|value| value.0))?;
             }
             Self::Raster(builder) => {
-                let value = row
+                let datum = row
                     .get::<RawRasterDatum>(ordinal)
                     .map_err(|error| format!("column {ordinal} raster read failed: {error:?}"))?;
-                builder.push_value(value.as_ref().map(|value| value.0.as_slice()))?;
+                let wkb = datum
+                    .map(|datum| unsafe {
+                        syscache::postgis_raster_datum_to_wkb(&builder.catalog, datum.0)
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        format!("column {ordinal} raster WKB conversion failed: {error}")
+                    })?;
+                builder.push_value(wkb.as_deref())?;
             }
             Self::F32 {
                 values,
@@ -1428,7 +1447,7 @@ pub(super) fn estimate_resident_bytes(
                         .and_then(|bytes| bytes.checked_add(72))
                         .ok_or_else(|| "resident geometry width estimate overflow".to_owned())?
                 }
-                ExtensionColumnKind::Raster => {
+                ExtensionColumnKind::Raster(_) => {
                     // The exact charge is computed after staging. This planner
                     // estimate uses catalog width for both retained WKB and
                     // native pixels, plus fixed row/offset/band overhead.
@@ -1747,6 +1766,23 @@ fn now_us() -> i64 {
 mod tests {
     use super::*;
 
+    fn raster_catalog_identity() -> syscache::PostgisRasterCatalogIdentity {
+        syscache::PostgisRasterCatalogIdentity {
+            extension_oid: pg_sys::Oid::from(60_000),
+            schema_oid: pg_sys::Oid::from(60_002),
+            raster_type_oid: pg_sys::Oid::from(60_001),
+            summary_stats_type_oid: pg_sys::Oid::from(60_003),
+            reclass_fn_oid: pg_sys::Oid::from(60_004),
+            summary_stats_fn_oid: pg_sys::Oid::from(60_005),
+            summary_stats_default_band_fn_oid: pg_sys::Oid::from(60_006),
+            as_wkb_fn_oid: pg_sys::Oid::from(60_007),
+            rast_from_wkb_fn_oid: pg_sys::Oid::from(60_008),
+            reclass_impl_fn_oid: pg_sys::Oid::from(60_009),
+            summary_stats_impl_fn_oid: pg_sys::Oid::from(60_010),
+            fingerprint_words: vec![1, 2, 3],
+        }
+    }
+
     #[test]
     fn count_only_projection_scans_one_constant_per_visible_row() {
         assert_eq!(scan_projection(&[]), "1");
@@ -1852,12 +1888,12 @@ mod tests {
     #[test]
     fn raster_staging_retains_exact_wkb_and_charges_host_plus_device_bytes() {
         let wkb = multiband_raster();
-        let mut builder = RasterColumnBuilder::new(pg_sys::Oid::from(60_001), 1_024);
+        let mut builder = RasterColumnBuilder::new(raster_catalog_identity(), 1_024);
         builder.push_value(None).expect("NULL raster stages");
         builder
             .push_value(Some(&wkb))
             .expect("valid multiband raster stages");
-        let staged = builder.finish().expect("raster domain validates");
+        let staged = builder.finish_for_test().expect("raster domain validates");
         let declared = staged
             .accounting()
             .expect("raster accounting validates")
@@ -1939,11 +1975,12 @@ mod tests {
     #[test]
     fn raster_staging_preserves_empty_zero_band_values() {
         let wkb = raster_header(0, 0, 0);
-        let mut builder = RasterColumnBuilder::new(pg_sys::Oid::from(60_001), 1_024);
+        let mut builder = RasterColumnBuilder::new(raster_catalog_identity(), 1_024);
         builder
             .push_value(Some(&wkb))
             .expect("zero-band raster is a non-NULL value");
-        let StagedColumn::Raster { data, .. } = builder.finish().expect("empty raster validates")
+        let StagedColumn::Raster { data, .. } =
+            builder.finish_for_test().expect("empty raster validates")
         else {
             panic!("raster builder changed staging representation");
         };
@@ -1972,7 +2009,7 @@ mod tests {
             (reserved, "raster WKB contains invalid band flags"),
             (unknown, "raster WKB contains an unknown pixel type"),
         ] {
-            let mut builder = RasterColumnBuilder::new(pg_sys::Oid::from(60_001), 1_024);
+            let mut builder = RasterColumnBuilder::new(raster_catalog_identity(), 1_024);
             let error = builder
                 .push_value(Some(&value))
                 .expect_err("unsupported raster must decline during staging");
@@ -1982,7 +2019,7 @@ mod tests {
             assert_eq!(builder.exact_offsets, vec![0]);
         }
 
-        let mut capped = RasterColumnBuilder::new(pg_sys::Oid::from(60_001), valid.len() - 1);
+        let mut capped = RasterColumnBuilder::new(raster_catalog_identity(), valid.len() - 1);
         let error = capped
             .push_value(Some(&valid))
             .expect_err("oversized exact value must decline during staging");

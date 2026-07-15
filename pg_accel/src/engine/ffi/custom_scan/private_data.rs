@@ -491,6 +491,8 @@ mod typed_private_tests {
             raster_attno: 2,
             raster_type_oid: 1_234,
             function_oid: 5_678,
+            as_wkb_fn_oid: 5_679,
+            rast_from_wkb_fn_oid: 5_680,
             catalog_fingerprint: vec![11, 22, 33].into_boxed_slice(),
             reclass: RasterReclassSpec {
                 output_pixel_type: RasterPixelType::Int16,
