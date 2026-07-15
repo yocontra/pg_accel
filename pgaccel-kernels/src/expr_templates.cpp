@@ -57,6 +57,12 @@ bool is_supported_cmp(uint16_t opcode) {
          opcode == OP_EQ || opcode == OP_NE;
 }
 
+bool is_supported_predicate_type(pgaccel_val_tag type) {
+  return type == PGACCEL_VAL_INT32 || type == PGACCEL_VAL_DATE || type == PGACCEL_VAL_INT64 ||
+         type == PGACCEL_VAL_TIMESTAMP || type == PGACCEL_VAL_FLOAT32 ||
+         type == PGACCEL_VAL_FLOAT64;
+}
+
 size_t count_num_groups(size_t row_count) {
   return row_count / COUNT_GROUP_ROWS + ((row_count % COUNT_GROUP_ROWS) != 0);
 }
@@ -508,27 +514,26 @@ pgaccel_status finalize_count_partials_on_device(sycl::queue& q, const uint32_t*
   try {
     q.submit([&](sycl::handler& h) {
        sycl::local_accessor<size_t, 1> local_mem(COUNT_WG_SIZE, h);
-       h.parallel_for(sycl::nd_range<1>(COUNT_WG_SIZE, COUNT_WG_SIZE),
-                      [=](sycl::nd_item<1> item) {
-                        const size_t lid = item.get_local_id(0);
-                        size_t local_count = 0;
-                        for (size_t group = lid; group < num_groups; group += COUNT_WG_SIZE) {
-                          local_count += static_cast<size_t>(partials[group]);
-                        }
-                        local_mem[lid] = local_count;
-                        item.barrier(sycl::access::fence_space::local_space);
+       h.parallel_for(sycl::nd_range<1>(COUNT_WG_SIZE, COUNT_WG_SIZE), [=](sycl::nd_item<1> item) {
+         const size_t lid = item.get_local_id(0);
+         size_t local_count = 0;
+         for (size_t group = lid; group < num_groups; group += COUNT_WG_SIZE) {
+           local_count += static_cast<size_t>(partials[group]);
+         }
+         local_mem[lid] = local_count;
+         item.barrier(sycl::access::fence_space::local_space);
 
-                        for (size_t stride = COUNT_WG_SIZE / 2; stride > 0; stride >>= 1) {
-                          if (lid < stride) {
-                            local_mem[lid] += local_mem[lid + stride];
-                          }
-                          item.barrier(sycl::access::fence_space::local_space);
-                        }
+         for (size_t stride = COUNT_WG_SIZE / 2; stride > 0; stride >>= 1) {
+           if (lid < stride) {
+             local_mem[lid] += local_mem[lid + stride];
+           }
+           item.barrier(sycl::access::fence_space::local_space);
+         }
 
-                        if (lid == 0) {
-                          final_count[0] = local_mem[0];
-                        }
-                      });
+         if (lid == 0) {
+           final_count[0] = local_mem[0];
+         }
+       });
      }).wait_and_throw();
     q.memcpy(true_count, final_count, sizeof(*true_count)).wait_and_throw();
   } catch (const std::exception& e) {
@@ -538,6 +543,31 @@ pgaccel_status finalize_count_partials_on_device(sycl::queue& q, const uint32_t*
   }
 
   sycl::free(final_count, q);
+  return PGACCEL_OK;
+}
+
+pgaccel_status publish_zero_count_on_device(size_t* output, const char* kernel_name) {
+  if (output == nullptr)
+    return PGACCEL_ERROR;
+
+  sycl::queue* q = pgaccel_get_queue();
+  if (q == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+
+  size_t* d_zero = sycl::malloc_device<size_t>(1, *q);
+  if (d_zero == nullptr)
+    return PGACCEL_OOM;
+
+  try {
+    q->single_task([=]() { d_zero[0] = 0; }).wait_and_throw();
+    q->memcpy(output, d_zero, sizeof(*output)).wait_and_throw();
+  } catch (const std::exception& e) {
+    sycl::free(d_zero, *q);
+    std::fprintf(stderr, "pgaccel: %s zero publication failed: %s\n", kernel_name, e.what());
+    return PGACCEL_ERROR;
+  }
+
+  sycl::free(d_zero, *q);
   return PGACCEL_OK;
 }
 
@@ -689,15 +719,6 @@ pgaccel_status launch_cmp_const_count_usm_typed(const T* d_col, const uint8_t* d
     return PGACCEL_OK;
   if (d_col == nullptr)
     return PGACCEL_ERROR;
-  if constexpr (std::is_same_v<T, float>) {
-    uint32_t const_bits = 0;
-    std::memcpy(&const_bits, &const_val, sizeof(const_bits));
-    if (host_bits_is_nan_f32(const_bits)) {
-      return launch_cmp_const_count_f32_nan_const(d_col, d_null, n, cmp_opcode, true_count,
-                                                  kernel_name);
-    }
-  }
-
   sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1072,15 +1093,6 @@ pgaccel_status launch_cmp_const_mask_usm_typed(const T* d_col, const uint8_t* d_
     return PGACCEL_OK;
   if (d_col == nullptr || selection == nullptr)
     return PGACCEL_ERROR;
-  if constexpr (std::is_same_v<T, float>) {
-    uint32_t const_bits = 0;
-    std::memcpy(&const_bits, &const_val, sizeof(const_bits));
-    if (host_bits_is_nan_f32(const_bits)) {
-      return launch_cmp_const_mask_f32_nan_const(d_col, d_null, n, cmp_opcode, selection,
-                                                 true_count, kernel_name);
-    }
-  }
-
   sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1393,7 +1405,7 @@ pgaccel_status launch_cmp_const_count_typed(const pgaccel_batch* batch, uint32_t
                                             pgaccel_val_tag expected_tag, size_t* true_count,
                                             const char* kernel_name) {
   const size_t n = batch->num_rows;
-  if (n == 0)
+  if (batch->num_rows == 0)
     return PGACCEL_OK;
 
   sycl::queue* q = pgaccel_get_queue();
@@ -1401,11 +1413,10 @@ pgaccel_status launch_cmp_const_count_typed(const pgaccel_batch* batch, uint32_t
     return PGACCEL_ERROR_NO_DEVICE;
 
   const bool has_nulls = batch_col_null_mask(batch, col_idx) != nullptr;
-  CountOneColTypedScratch<T> s{
-      sycl::malloc_shared<T>(n, *q),
-      has_nulls ? sycl::malloc_shared<uint8_t>(n, *q) : nullptr,
-      q,
-  };
+  uint8_t* d_null = nullptr;
+  if (has_nulls)
+    d_null = sycl::malloc_shared<uint8_t>(n, *q);
+  CountOneColTypedScratch<T> s{sycl::malloc_shared<T>(n, *q), d_null, q};
   if (s.d_col == nullptr || (has_nulls && s.d_null == nullptr))
     return PGACCEL_OOM;
 
@@ -1421,7 +1432,7 @@ launch_two_pred_and_count_typed(const pgaccel_batch* batch, uint32_t col1_idx, u
                                 uint16_t cmp2_opcode, T2 const2_val, pgaccel_val_tag tag2,
                                 size_t* true_count, const char* kernel_name) {
   const size_t n = batch->num_rows;
-  if (n == 0)
+  if (batch->num_rows == 0)
     return PGACCEL_OK;
 
   sycl::queue* q = pgaccel_get_queue();
@@ -1430,13 +1441,14 @@ launch_two_pred_and_count_typed(const pgaccel_batch* batch, uint32_t col1_idx, u
 
   const bool has_nulls1 = batch_col_null_mask(batch, col1_idx) != nullptr;
   const bool has_nulls2 = batch_col_null_mask(batch, col2_idx) != nullptr;
-  CountTwoColTypedScratch<T1, T2> s{
-      sycl::malloc_shared<T1>(n, *q),
-      has_nulls1 ? sycl::malloc_shared<uint8_t>(n, *q) : nullptr,
-      sycl::malloc_shared<T2>(n, *q),
-      has_nulls2 ? sycl::malloc_shared<uint8_t>(n, *q) : nullptr,
-      q,
-  };
+  uint8_t* d_null1 = nullptr;
+  uint8_t* d_null2 = nullptr;
+  if (has_nulls1)
+    d_null1 = sycl::malloc_shared<uint8_t>(n, *q);
+  if (has_nulls2)
+    d_null2 = sycl::malloc_shared<uint8_t>(n, *q);
+  CountTwoColTypedScratch<T1, T2> s{sycl::malloc_shared<T1>(n, *q), d_null1,
+                                    sycl::malloc_shared<T2>(n, *q), d_null2, q};
   if (s.d_col1 == nullptr || (has_nulls1 && s.d_null1 == nullptr) || s.d_col2 == nullptr ||
       (has_nulls2 && s.d_null2 == nullptr))
     return PGACCEL_OOM;
@@ -1464,23 +1476,6 @@ bool const_to_typed(double value, T* out) {
   } else {
     return false;
   }
-}
-
-void reset_f32_reduce_outputs(float* out_sum, float* out_min, float* out_max,
-                              int64_t* out_value_count, size_t* true_count,
-                              size_t* uncertain_count) {
-  if (out_sum != nullptr)
-    *out_sum = 0.0f;
-  if (out_min != nullptr)
-    *out_min = 0.0f;
-  if (out_max != nullptr)
-    *out_max = 0.0f;
-  if (out_value_count != nullptr)
-    *out_value_count = 0;
-  if (true_count != nullptr)
-    *true_count = 0;
-  if (uncertain_count != nullptr)
-    *uncertain_count = 0;
 }
 
 bool reduce_predicate_shape_supported(pgaccel_expr_usm_col col, double const_val) {
@@ -1513,14 +1508,6 @@ pgaccel_status dispatch_cmp_const_count_usm(pgaccel_expr_usm_col col, size_t row
                                             uint16_t cmp_opcode, double const_val,
                                             size_t* true_count) {
   const T* values = static_cast<const T*>(col.values);
-  if constexpr (std::is_same_v<T, float>) {
-    uint64_t const_bits = 0;
-    std::memcpy(&const_bits, &const_val, sizeof(const_bits));
-    if (host_bits_is_nan_f64(const_bits)) {
-      return launch_cmp_const_count_f32_nan_const(values, col.nulls, row_count, cmp_opcode,
-                                                  true_count, "expr_template_cmp_const_count_usm");
-    }
-  }
   T typed_const{};
   if (const_to_typed<T>(const_val, &typed_const)) {
     return launch_cmp_const_count_usm_typed<T>(values, col.nulls, row_count, cmp_opcode,
@@ -1537,15 +1524,6 @@ pgaccel_status dispatch_cmp_const_mask_usm(pgaccel_expr_usm_col col, size_t row_
                                            uint16_t cmp_opcode, double const_val,
                                            uint8_t* selection, size_t* true_count) {
   const T* values = static_cast<const T*>(col.values);
-  if constexpr (std::is_same_v<T, float>) {
-    uint64_t const_bits = 0;
-    std::memcpy(&const_bits, &const_val, sizeof(const_bits));
-    if (host_bits_is_nan_f64(const_bits)) {
-      return launch_cmp_const_mask_f32_nan_const(values, col.nulls, row_count, cmp_opcode,
-                                                 selection, true_count,
-                                                 "expr_template_cmp_const_mask_usm");
-    }
-  }
   T typed_const{};
   if (const_to_typed<T>(const_val, &typed_const)) {
     return launch_cmp_const_mask_usm_typed<T>(values, col.nulls, row_count, cmp_opcode, typed_const,
@@ -1603,24 +1581,19 @@ pgaccel_status dispatch_two_pred_and_count_usm_col2(pgaccel_expr_usm_col col1, u
                                                     double const1_val, pgaccel_expr_usm_col col2,
                                                     uint16_t cmp2_opcode, double const2_val,
                                                     size_t row_count, size_t* true_count) {
-  switch (col2.type) {
-    case PGACCEL_VAL_INT32:
-    case PGACCEL_VAL_DATE:
-      return dispatch_two_pred_and_count_usm_pair<T1, int32_t>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
-    case PGACCEL_VAL_INT64:
-    case PGACCEL_VAL_TIMESTAMP:
-      return dispatch_two_pred_and_count_usm_pair<T1, int64_t>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
-    case PGACCEL_VAL_FLOAT32:
-      return dispatch_two_pred_and_count_usm_pair<T1, float>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
-    case PGACCEL_VAL_FLOAT64:
-      return dispatch_two_pred_and_count_usm_pair<T1, double>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
-  }
+  if (col2.type == PGACCEL_VAL_INT32 || col2.type == PGACCEL_VAL_DATE)
+    return dispatch_two_pred_and_count_usm_pair<T1, int32_t>(
+        col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
+  if (col2.type == PGACCEL_VAL_INT64 || col2.type == PGACCEL_VAL_TIMESTAMP)
+    return dispatch_two_pred_and_count_usm_pair<T1, int64_t>(
+        col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
+  if (col2.type == PGACCEL_VAL_FLOAT32)
+    return dispatch_two_pred_and_count_usm_pair<T1, float>(
+        col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
+  if (col2.type == PGACCEL_VAL_FLOAT64)
+    return dispatch_two_pred_and_count_usm_pair<T1, double>(
+        col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
+  return PGACCEL_UNSUPPORTED;
 }
 
 template <typename T1>
@@ -1629,52 +1602,42 @@ pgaccel_status dispatch_two_pred_and_mask_usm_col2(pgaccel_expr_usm_col col1, ui
                                                    uint16_t cmp2_opcode, double const2_val,
                                                    size_t row_count, uint8_t* selection,
                                                    size_t* true_count) {
-  switch (col2.type) {
-    case PGACCEL_VAL_INT32:
-    case PGACCEL_VAL_DATE:
-      return dispatch_two_pred_and_mask_usm_pair<T1, int32_t>(col1, cmp1_opcode, const1_val, col2,
-                                                              cmp2_opcode, const2_val, row_count,
-                                                              selection, true_count);
-    case PGACCEL_VAL_INT64:
-    case PGACCEL_VAL_TIMESTAMP:
-      return dispatch_two_pred_and_mask_usm_pair<T1, int64_t>(col1, cmp1_opcode, const1_val, col2,
-                                                              cmp2_opcode, const2_val, row_count,
-                                                              selection, true_count);
-    case PGACCEL_VAL_FLOAT32:
-      return dispatch_two_pred_and_mask_usm_pair<T1, float>(col1, cmp1_opcode, const1_val, col2,
+  if (col2.type == PGACCEL_VAL_INT32 || col2.type == PGACCEL_VAL_DATE)
+    return dispatch_two_pred_and_mask_usm_pair<T1, int32_t>(col1, cmp1_opcode, const1_val, col2,
                                                             cmp2_opcode, const2_val, row_count,
                                                             selection, true_count);
-    case PGACCEL_VAL_FLOAT64:
-      return dispatch_two_pred_and_mask_usm_pair<T1, double>(col1, cmp1_opcode, const1_val, col2,
-                                                             cmp2_opcode, const2_val, row_count,
-                                                             selection, true_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
-  }
+  if (col2.type == PGACCEL_VAL_INT64 || col2.type == PGACCEL_VAL_TIMESTAMP)
+    return dispatch_two_pred_and_mask_usm_pair<T1, int64_t>(col1, cmp1_opcode, const1_val, col2,
+                                                            cmp2_opcode, const2_val, row_count,
+                                                            selection, true_count);
+  if (col2.type == PGACCEL_VAL_FLOAT32)
+    return dispatch_two_pred_and_mask_usm_pair<T1, float>(col1, cmp1_opcode, const1_val, col2,
+                                                          cmp2_opcode, const2_val, row_count,
+                                                          selection, true_count);
+  if (col2.type == PGACCEL_VAL_FLOAT64)
+    return dispatch_two_pred_and_mask_usm_pair<T1, double>(col1, cmp1_opcode, const1_val, col2,
+                                                           cmp2_opcode, const2_val, row_count,
+                                                           selection, true_count);
+  return PGACCEL_UNSUPPORTED;
 }
 
 pgaccel_status dispatch_two_pred_and_count_usm(pgaccel_expr_usm_col col1, uint16_t cmp1_opcode,
                                                double const1_val, pgaccel_expr_usm_col col2,
                                                uint16_t cmp2_opcode, double const2_val,
                                                size_t row_count, size_t* true_count) {
-  switch (col1.type) {
-    case PGACCEL_VAL_INT32:
-    case PGACCEL_VAL_DATE:
-      return dispatch_two_pred_and_count_usm_col2<int32_t>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
-    case PGACCEL_VAL_INT64:
-    case PGACCEL_VAL_TIMESTAMP:
-      return dispatch_two_pred_and_count_usm_col2<int64_t>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
-    case PGACCEL_VAL_FLOAT32:
-      return dispatch_two_pred_and_count_usm_col2<float>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
-    case PGACCEL_VAL_FLOAT64:
-      return dispatch_two_pred_and_count_usm_col2<double>(
-          col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
-  }
+  if (col1.type == PGACCEL_VAL_INT32 || col1.type == PGACCEL_VAL_DATE)
+    return dispatch_two_pred_and_count_usm_col2<int32_t>(
+        col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
+  if (col1.type == PGACCEL_VAL_INT64 || col1.type == PGACCEL_VAL_TIMESTAMP)
+    return dispatch_two_pred_and_count_usm_col2<int64_t>(
+        col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
+  if (col1.type == PGACCEL_VAL_FLOAT32)
+    return dispatch_two_pred_and_count_usm_col2<float>(
+        col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
+  if (col1.type == PGACCEL_VAL_FLOAT64)
+    return dispatch_two_pred_and_count_usm_col2<double>(
+        col1, cmp1_opcode, const1_val, col2, cmp2_opcode, const2_val, row_count, true_count);
+  return PGACCEL_UNSUPPORTED;
 }
 
 pgaccel_status dispatch_two_pred_and_mask_usm(pgaccel_expr_usm_col col1, uint16_t cmp1_opcode,
@@ -1682,28 +1645,23 @@ pgaccel_status dispatch_two_pred_and_mask_usm(pgaccel_expr_usm_col col1, uint16_
                                               uint16_t cmp2_opcode, double const2_val,
                                               size_t row_count, uint8_t* selection,
                                               size_t* true_count) {
-  switch (col1.type) {
-    case PGACCEL_VAL_INT32:
-    case PGACCEL_VAL_DATE:
-      return dispatch_two_pred_and_mask_usm_col2<int32_t>(col1, cmp1_opcode, const1_val, col2,
-                                                          cmp2_opcode, const2_val, row_count,
-                                                          selection, true_count);
-    case PGACCEL_VAL_INT64:
-    case PGACCEL_VAL_TIMESTAMP:
-      return dispatch_two_pred_and_mask_usm_col2<int64_t>(col1, cmp1_opcode, const1_val, col2,
-                                                          cmp2_opcode, const2_val, row_count,
-                                                          selection, true_count);
-    case PGACCEL_VAL_FLOAT32:
-      return dispatch_two_pred_and_mask_usm_col2<float>(col1, cmp1_opcode, const1_val, col2,
+  if (col1.type == PGACCEL_VAL_INT32 || col1.type == PGACCEL_VAL_DATE)
+    return dispatch_two_pred_and_mask_usm_col2<int32_t>(col1, cmp1_opcode, const1_val, col2,
                                                         cmp2_opcode, const2_val, row_count,
                                                         selection, true_count);
-    case PGACCEL_VAL_FLOAT64:
-      return dispatch_two_pred_and_mask_usm_col2<double>(col1, cmp1_opcode, const1_val, col2,
-                                                         cmp2_opcode, const2_val, row_count,
-                                                         selection, true_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
-  }
+  if (col1.type == PGACCEL_VAL_INT64 || col1.type == PGACCEL_VAL_TIMESTAMP)
+    return dispatch_two_pred_and_mask_usm_col2<int64_t>(col1, cmp1_opcode, const1_val, col2,
+                                                        cmp2_opcode, const2_val, row_count,
+                                                        selection, true_count);
+  if (col1.type == PGACCEL_VAL_FLOAT32)
+    return dispatch_two_pred_and_mask_usm_col2<float>(col1, cmp1_opcode, const1_val, col2,
+                                                      cmp2_opcode, const2_val, row_count, selection,
+                                                      true_count);
+  if (col1.type == PGACCEL_VAL_FLOAT64)
+    return dispatch_two_pred_and_mask_usm_col2<double>(col1, cmp1_opcode, const1_val, col2,
+                                                       cmp2_opcode, const2_val, row_count,
+                                                       selection, true_count);
+  return PGACCEL_UNSUPPORTED;
 }
 
 }  // namespace
@@ -1950,36 +1908,64 @@ extern "C" pgaccel_status
 pgaccel_expr_template_cmp_const_count_usm(pgaccel_expr_usm_col col, size_t row_count,
                                           uint16_t cmp_opcode, double const_val, size_t* true_count,
                                           size_t* uncertain_count) try {
-  if (true_count != nullptr)
-    *true_count = 0;
-  if (uncertain_count != nullptr)
-    *uncertain_count = 0;
-  if (true_count == nullptr)
+  if (true_count == nullptr) {
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_ERROR;
-  if (!is_supported_cmp(cmp_opcode))
-    return PGACCEL_UNSUPPORTED;
-  if (row_count == 0 || col.type == PGACCEL_VAL_NULL)
-    return PGACCEL_OK;
-  if (col.values == nullptr)
-    return PGACCEL_ERROR;
-
-  switch (col.type) {
-    case PGACCEL_VAL_INT32:
-    case PGACCEL_VAL_DATE:
-      return dispatch_cmp_const_count_usm<int32_t>(col, row_count, cmp_opcode, const_val,
-                                                   true_count);
-    case PGACCEL_VAL_INT64:
-    case PGACCEL_VAL_TIMESTAMP:
-      return dispatch_cmp_const_count_usm<int64_t>(col, row_count, cmp_opcode, const_val,
-                                                   true_count);
-    case PGACCEL_VAL_FLOAT32:
-      return dispatch_cmp_const_count_usm<float>(col, row_count, cmp_opcode, const_val, true_count);
-    case PGACCEL_VAL_FLOAT64:
-      return dispatch_cmp_const_count_usm<double>(col, row_count, cmp_opcode, const_val,
-                                                  true_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
   }
+  if (!is_supported_cmp(cmp_opcode)) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_UNSUPPORTED;
+  }
+  if (row_count == 0) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_OK;
+  }
+  if (col.type == PGACCEL_VAL_NULL) {
+    pgaccel_status st =
+        publish_zero_count_on_device(true_count, "expr_template_cmp_const_count_usm");
+    if (st != PGACCEL_OK)
+      return st;
+    if (uncertain_count != nullptr) {
+      st = publish_zero_count_on_device(uncertain_count, "expr_template_cmp_const_count_usm");
+      if (st != PGACCEL_OK)
+        return st;
+    }
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  }
+  if (!is_supported_predicate_type(col.type)) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_UNSUPPORTED;
+  }
+  if (col.values == nullptr) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_ERROR;
+  }
+  if (uncertain_count != nullptr) {
+    const pgaccel_status st =
+        publish_zero_count_on_device(uncertain_count, "expr_template_cmp_const_count_usm");
+    if (st != PGACCEL_OK)
+      return st;
+  }
+
+  if (col.type == PGACCEL_VAL_INT32 || col.type == PGACCEL_VAL_DATE)
+    return dispatch_cmp_const_count_usm<int32_t>(col, row_count, cmp_opcode, const_val, true_count);
+  if (col.type == PGACCEL_VAL_INT64 || col.type == PGACCEL_VAL_TIMESTAMP)
+    return dispatch_cmp_const_count_usm<int64_t>(col, row_count, cmp_opcode, const_val, true_count);
+  if (col.type == PGACCEL_VAL_FLOAT32)
+    return dispatch_cmp_const_count_usm<float>(col, row_count, cmp_opcode, const_val, true_count);
+  if (col.type == PGACCEL_VAL_FLOAT64)
+    return dispatch_cmp_const_count_usm<double>(col, row_count, cmp_opcode, const_val, true_count);
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -1992,37 +1978,80 @@ extern "C" pgaccel_status
 pgaccel_expr_template_cmp_const_mask_usm(pgaccel_expr_usm_col col, size_t row_count,
                                          uint16_t cmp_opcode, double const_val, uint8_t* selection,
                                          size_t* true_count, size_t* uncertain_count) try {
-  if (true_count != nullptr)
-    *true_count = 0;
-  if (uncertain_count != nullptr)
-    *uncertain_count = 0;
-  if (true_count == nullptr)
+  if (true_count == nullptr) {
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_ERROR;
-  if (!is_supported_cmp(cmp_opcode))
-    return PGACCEL_UNSUPPORTED;
-  if (row_count == 0 || col.type == PGACCEL_VAL_NULL)
-    return PGACCEL_OK;
-  if (col.values == nullptr || selection == nullptr)
-    return PGACCEL_ERROR;
-
-  switch (col.type) {
-    case PGACCEL_VAL_INT32:
-    case PGACCEL_VAL_DATE:
-      return dispatch_cmp_const_mask_usm<int32_t>(col, row_count, cmp_opcode, const_val, selection,
-                                                  true_count);
-    case PGACCEL_VAL_INT64:
-    case PGACCEL_VAL_TIMESTAMP:
-      return dispatch_cmp_const_mask_usm<int64_t>(col, row_count, cmp_opcode, const_val, selection,
-                                                  true_count);
-    case PGACCEL_VAL_FLOAT32:
-      return dispatch_cmp_const_mask_usm<float>(col, row_count, cmp_opcode, const_val, selection,
-                                                true_count);
-    case PGACCEL_VAL_FLOAT64:
-      return dispatch_cmp_const_mask_usm<double>(col, row_count, cmp_opcode, const_val, selection,
-                                                 true_count);
-    default:
-      return PGACCEL_UNSUPPORTED;
   }
+  if (!is_supported_cmp(cmp_opcode)) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_UNSUPPORTED;
+  }
+  if (row_count == 0) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_OK;
+  }
+  if (selection == nullptr) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_ERROR;
+  }
+  if (col.type == PGACCEL_VAL_NULL) {
+    sycl::queue* q = pgaccel_get_queue();
+    if (q == nullptr)
+      return PGACCEL_ERROR_NO_DEVICE;
+    q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+       selection[id[0]] = 0;
+     }).wait_and_throw();
+    pgaccel_status st =
+        publish_zero_count_on_device(true_count, "expr_template_cmp_const_mask_usm");
+    if (st != PGACCEL_OK)
+      return st;
+    if (uncertain_count != nullptr) {
+      st = publish_zero_count_on_device(uncertain_count, "expr_template_cmp_const_mask_usm");
+      if (st != PGACCEL_OK)
+        return st;
+    }
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  }
+  if (!is_supported_predicate_type(col.type)) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_UNSUPPORTED;
+  }
+  if (col.values == nullptr) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_ERROR;
+  }
+  if (uncertain_count != nullptr) {
+    const pgaccel_status st =
+        publish_zero_count_on_device(uncertain_count, "expr_template_cmp_const_mask_usm");
+    if (st != PGACCEL_OK)
+      return st;
+  }
+
+  if (col.type == PGACCEL_VAL_INT32 || col.type == PGACCEL_VAL_DATE)
+    return dispatch_cmp_const_mask_usm<int32_t>(col, row_count, cmp_opcode, const_val, selection,
+                                                true_count);
+  if (col.type == PGACCEL_VAL_INT64 || col.type == PGACCEL_VAL_TIMESTAMP)
+    return dispatch_cmp_const_mask_usm<int64_t>(col, row_count, cmp_opcode, const_val, selection,
+                                                true_count);
+  if (col.type == PGACCEL_VAL_FLOAT32)
+    return dispatch_cmp_const_mask_usm<float>(col, row_count, cmp_opcode, const_val, selection,
+                                              true_count);
+  if (col.type == PGACCEL_VAL_FLOAT64)
+    return dispatch_cmp_const_mask_usm<double>(col, row_count, cmp_opcode, const_val, selection,
+                                               true_count);
+  return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -2036,36 +2065,26 @@ extern "C" pgaccel_status pgaccel_expr_template_cmp_const_reduce_f32_usm(
     pgaccel_expr_usm_col value_col, size_t row_count, float* out_sum, float* out_min,
     float* out_max, int64_t* out_value_count, size_t* true_count, size_t* uncertain_count) try {
   if (out_sum == nullptr || out_min == nullptr || out_max == nullptr ||
-      out_value_count == nullptr || true_count == nullptr) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+      out_value_count == nullptr || true_count == nullptr)
     return PGACCEL_ERROR;
-  }
-  if (!is_supported_cmp(cmp_opcode)) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+  if (!is_supported_cmp(cmp_opcode))
     return PGACCEL_UNSUPPORTED;
-  }
-  if (row_count == 0 || pred_col.type == PGACCEL_VAL_NULL) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+  if (row_count == 0) {
+    *out_sum = 0.0f;
+    *out_min = 0.0f;
+    *out_max = 0.0f;
+    *out_value_count = 0;
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_OK;
   }
-  if (value_col.type != PGACCEL_VAL_FLOAT32) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+  if (pred_col.type == PGACCEL_VAL_NULL || value_col.type != PGACCEL_VAL_FLOAT32)
     return PGACCEL_UNSUPPORTED;
-  }
-  if (pred_col.values == nullptr || value_col.values == nullptr) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+  if (pred_col.values == nullptr || value_col.values == nullptr)
     return PGACCEL_ERROR;
-  }
-  if (!reduce_predicate_shape_supported(pred_col, const_val)) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+  if (!reduce_predicate_shape_supported(pred_col, const_val))
     return PGACCEL_UNSUPPORTED;
-  }
   return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
@@ -2079,18 +2098,54 @@ extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_count_usm(
     pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
     uint16_t cmp2_opcode, double const2_val, size_t row_count, size_t* true_count,
     size_t* uncertain_count) try {
-  if (true_count != nullptr)
+  if (true_count == nullptr) {
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_ERROR;
+  }
+  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode)) {
     *true_count = 0;
-  if (uncertain_count != nullptr)
-    *uncertain_count = 0;
-  if (true_count == nullptr)
-    return PGACCEL_ERROR;
-  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode))
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_UNSUPPORTED;
-  if (row_count == 0 || col1.type == PGACCEL_VAL_NULL || col2.type == PGACCEL_VAL_NULL)
+  }
+  if (row_count == 0) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_OK;
-  if (col1.values == nullptr || col2.values == nullptr)
+  }
+  if (col1.type == PGACCEL_VAL_NULL || col2.type == PGACCEL_VAL_NULL) {
+    pgaccel_status st =
+        publish_zero_count_on_device(true_count, "expr_template_two_pred_and_count_usm");
+    if (st != PGACCEL_OK)
+      return st;
+    if (uncertain_count != nullptr) {
+      st = publish_zero_count_on_device(uncertain_count, "expr_template_two_pred_and_count_usm");
+      if (st != PGACCEL_OK)
+        return st;
+    }
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  }
+  if (!is_supported_predicate_type(col1.type) || !is_supported_predicate_type(col2.type)) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_UNSUPPORTED;
+  }
+  if (col1.values == nullptr || col2.values == nullptr) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_ERROR;
+  }
+  if (uncertain_count != nullptr) {
+    const pgaccel_status st =
+        publish_zero_count_on_device(uncertain_count, "expr_template_two_pred_and_count_usm");
+    if (st != PGACCEL_OK)
+      return st;
+  }
 
   return dispatch_two_pred_and_count_usm(col1, cmp1_opcode, const1_val, col2, cmp2_opcode,
                                          const2_val, row_count, true_count);
@@ -2106,18 +2161,66 @@ extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_mask_usm(
     pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
     uint16_t cmp2_opcode, double const2_val, size_t row_count, uint8_t* selection,
     size_t* true_count, size_t* uncertain_count) try {
-  if (true_count != nullptr)
+  if (true_count == nullptr) {
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_ERROR;
+  }
+  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode)) {
     *true_count = 0;
-  if (uncertain_count != nullptr)
-    *uncertain_count = 0;
-  if (true_count == nullptr)
-    return PGACCEL_ERROR;
-  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode))
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_UNSUPPORTED;
-  if (row_count == 0 || col1.type == PGACCEL_VAL_NULL || col2.type == PGACCEL_VAL_NULL)
+  }
+  if (row_count == 0) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_OK;
-  if (col1.values == nullptr || col2.values == nullptr || selection == nullptr)
+  }
+  if (selection == nullptr) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_ERROR;
+  }
+  if (col1.type == PGACCEL_VAL_NULL || col2.type == PGACCEL_VAL_NULL) {
+    sycl::queue* q = pgaccel_get_queue();
+    if (q == nullptr)
+      return PGACCEL_ERROR_NO_DEVICE;
+    q->parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
+       selection[id[0]] = 0;
+     }).wait_and_throw();
+    pgaccel_status st =
+        publish_zero_count_on_device(true_count, "expr_template_two_pred_and_mask_usm");
+    if (st != PGACCEL_OK)
+      return st;
+    if (uncertain_count != nullptr) {
+      st = publish_zero_count_on_device(uncertain_count, "expr_template_two_pred_and_mask_usm");
+      if (st != PGACCEL_OK)
+        return st;
+    }
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
+  }
+  if (!is_supported_predicate_type(col1.type) || !is_supported_predicate_type(col2.type)) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_UNSUPPORTED;
+  }
+  if (col1.values == nullptr || col2.values == nullptr) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
+    return PGACCEL_ERROR;
+  }
+  if (uncertain_count != nullptr) {
+    const pgaccel_status st =
+        publish_zero_count_on_device(uncertain_count, "expr_template_two_pred_and_mask_usm");
+    if (st != PGACCEL_OK)
+      return st;
+  }
 
   return dispatch_two_pred_and_mask_usm(col1, cmp1_opcode, const1_val, col2, cmp2_opcode,
                                         const2_val, row_count, selection, true_count);
@@ -2135,37 +2238,28 @@ extern "C" pgaccel_status pgaccel_expr_template_two_pred_and_reduce_f32_usm(
     float* out_sum, float* out_min, float* out_max, int64_t* out_value_count, size_t* true_count,
     size_t* uncertain_count) try {
   if (out_sum == nullptr || out_min == nullptr || out_max == nullptr ||
-      out_value_count == nullptr || true_count == nullptr) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+      out_value_count == nullptr || true_count == nullptr)
     return PGACCEL_ERROR;
-  }
-  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode)) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode))
     return PGACCEL_UNSUPPORTED;
-  }
-  if (row_count == 0 || col1.type == PGACCEL_VAL_NULL || col2.type == PGACCEL_VAL_NULL) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+  if (row_count == 0) {
+    *out_sum = 0.0f;
+    *out_min = 0.0f;
+    *out_max = 0.0f;
+    *out_value_count = 0;
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_OK;
   }
-  if (value_col.type != PGACCEL_VAL_FLOAT32) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+  if (col1.type == PGACCEL_VAL_NULL || col2.type == PGACCEL_VAL_NULL ||
+      value_col.type != PGACCEL_VAL_FLOAT32)
     return PGACCEL_UNSUPPORTED;
-  }
-  if (col1.values == nullptr || col2.values == nullptr || value_col.values == nullptr) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+  if (col1.values == nullptr || col2.values == nullptr || value_col.values == nullptr)
     return PGACCEL_ERROR;
-  }
   if (!reduce_predicate_shape_supported(col1, const1_val) ||
-      !reduce_predicate_shape_supported(col2, const2_val)) {
-    reset_f32_reduce_outputs(out_sum, out_min, out_max, out_value_count, true_count,
-                             uncertain_count);
+      !reduce_predicate_shape_supported(col2, const2_val))
     return PGACCEL_UNSUPPORTED;
-  }
   return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
@@ -2188,19 +2282,16 @@ extern "C" pgaccel_status pgaccel_expr_template_cmp_const(const pgaccel_batch* b
     return PGACCEL_UNSUPPORTED;
 
   const size_t n = batch->num_rows;
-  if (n == 0)
+  if (batch->num_rows == 0)
     return PGACCEL_OK;
 
   sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  OneColScratch s{
-      sycl::malloc_shared<double>(n, *q),
-      sycl::malloc_shared<uint8_t>(n, *q),
-      sycl::malloc_shared<int8_t>(n, *q),
-      q,
-  };
+  int8_t* d_res = sycl::malloc_device<int8_t>(n, *q);
+  OneColScratch s{sycl::malloc_shared<double>(n, *q), sycl::malloc_shared<uint8_t>(n, *q), d_res,
+                  q};
   if (s.d_col == nullptr || s.d_null == nullptr || s.d_res == nullptr)
     return PGACCEL_OOM;
 
@@ -2210,7 +2301,6 @@ extern "C" pgaccel_status pgaccel_expr_template_cmp_const(const pgaccel_batch* b
   const uint16_t op = cmp_opcode;
   double* d_col = s.d_col;
   uint8_t* d_null = s.d_null;
-  int8_t* d_res = s.d_res;
 
   q->parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
      const size_t i = id[0];
@@ -2221,7 +2311,7 @@ extern "C" pgaccel_status pgaccel_expr_template_cmp_const(const pgaccel_batch* b
      }
    }).wait_and_throw();
 
-  std::memcpy(results, s.d_res, n * sizeof(int8_t));
+  q->memcpy(results, d_res, n * sizeof(int8_t)).wait_and_throw();
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 } catch (const pgaccel_no_device_error&) {
@@ -2236,18 +2326,33 @@ extern "C" pgaccel_status
 pgaccel_expr_template_cmp_const_count(const pgaccel_batch* batch, uint32_t col_idx,
                                       uint16_t cmp_opcode, double const_val, size_t* true_count,
                                       size_t* uncertain_count) try {
-  if (true_count != nullptr)
-    *true_count = 0;
-  if (uncertain_count != nullptr)
-    *uncertain_count = 0;
-  if (batch == nullptr || true_count == nullptr)
+  if (batch == nullptr || true_count == nullptr) {
+    if (true_count != nullptr)
+      *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_ERROR;
-  if (!is_supported_cmp(cmp_opcode))
+  }
+  if (!is_supported_cmp(cmp_opcode)) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_UNSUPPORTED;
+  }
 
   const size_t n = batch->num_rows;
-  if (n == 0)
+  if (batch->num_rows == 0) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_OK;
+  }
+  if (uncertain_count != nullptr) {
+    const pgaccel_status st =
+        publish_zero_count_on_device(uncertain_count, "expr_template_cmp_const_count");
+    if (st != PGACCEL_OK)
+      return st;
+  }
 
   const pgaccel_val_tag tag = batch_col_tag(batch, col_idx);
   float cv_f32 = 0.0f;
@@ -2302,19 +2407,16 @@ extern "C" pgaccel_status pgaccel_expr_template_between(const pgaccel_batch* bat
     return PGACCEL_ERROR;
 
   const size_t n = batch->num_rows;
-  if (n == 0)
+  if (batch->num_rows == 0)
     return PGACCEL_OK;
 
   sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  OneColScratch s{
-      sycl::malloc_shared<double>(n, *q),
-      sycl::malloc_shared<uint8_t>(n, *q),
-      sycl::malloc_shared<int8_t>(n, *q),
-      q,
-  };
+  int8_t* d_res = sycl::malloc_device<int8_t>(n, *q);
+  OneColScratch s{sycl::malloc_shared<double>(n, *q), sycl::malloc_shared<uint8_t>(n, *q), d_res,
+                  q};
   if (s.d_col == nullptr || s.d_null == nullptr || s.d_res == nullptr)
     return PGACCEL_OOM;
 
@@ -2324,7 +2426,6 @@ extern "C" pgaccel_status pgaccel_expr_template_between(const pgaccel_batch* bat
   const double chi = hi;
   double* d_col = s.d_col;
   uint8_t* d_null = s.d_null;
-  int8_t* d_res = s.d_res;
 
   q->parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
      const size_t i = id[0];
@@ -2337,7 +2438,7 @@ extern "C" pgaccel_status pgaccel_expr_template_between(const pgaccel_batch* bat
      }
    }).wait_and_throw();
 
-  std::memcpy(results, s.d_res, n * sizeof(int8_t));
+  q->memcpy(results, d_res, n * sizeof(int8_t)).wait_and_throw();
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
 } catch (const pgaccel_no_device_error&) {
@@ -2361,19 +2462,16 @@ extern "C" pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* bat
     return PGACCEL_UNSUPPORTED;
 
   const size_t n = batch->num_rows;
-  if (n == 0)
+  if (batch->num_rows == 0)
     return PGACCEL_OK;
 
   sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  OneColScratch s{
-      sycl::malloc_shared<double>(n, *q),
-      sycl::malloc_shared<uint8_t>(n, *q),
-      sycl::malloc_shared<int8_t>(n, *q),
-      q,
-  };
+  int8_t* d_res = sycl::malloc_device<int8_t>(n, *q);
+  OneColScratch s{sycl::malloc_shared<double>(n, *q), sycl::malloc_shared<uint8_t>(n, *q), d_res,
+                  q};
   // Need a separate device-accessible copy of the IN-list values.
   double* d_vals = sycl::malloc_shared<double>(value_count, *q);
   if (s.d_col == nullptr || s.d_null == nullptr || s.d_res == nullptr || d_vals == nullptr) {
@@ -2387,7 +2485,6 @@ extern "C" pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* bat
   const size_t vc = value_count;
   double* d_col = s.d_col;
   uint8_t* d_null = s.d_null;
-  int8_t* d_res = s.d_res;
 
   q->parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
      const size_t i = id[0];
@@ -2406,7 +2503,7 @@ extern "C" pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* bat
      d_res[i] = found ? PGACCEL_EXPR_TRUE : PGACCEL_EXPR_FALSE;
    }).wait_and_throw();
 
-  std::memcpy(results, s.d_res, n * sizeof(int8_t));
+  q->memcpy(results, d_res, n * sizeof(int8_t)).wait_and_throw();
   sycl::free(d_vals, *q);
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
@@ -2429,7 +2526,7 @@ extern "C" pgaccel_status pgaccel_expr_template_is_null(const pgaccel_batch* bat
     return PGACCEL_ERROR;
 
   const size_t n = batch->num_rows;
-  if (n == 0)
+  if (batch->num_rows == 0)
     return PGACCEL_OK;
 
   sycl::queue* q = pgaccel_get_queue();
@@ -2447,17 +2544,20 @@ extern "C" pgaccel_status pgaccel_expr_template_is_null(const pgaccel_batch* bat
   }
 
   stage_null_mask(batch, col_idx, n, d_null);
-  const int8_t hit = check_not_null ? PGACCEL_EXPR_FALSE : PGACCEL_EXPR_TRUE;
-  const int8_t miss = check_not_null ? PGACCEL_EXPR_TRUE : PGACCEL_EXPR_FALSE;
+  int8_t hit = PGACCEL_EXPR_TRUE;
+  int8_t miss = PGACCEL_EXPR_FALSE;
+  if (check_not_null) {
+    hit = PGACCEL_EXPR_FALSE;
+    miss = PGACCEL_EXPR_TRUE;
+  }
   uint8_t* dn = d_null;
-  int8_t* dr = d_res;
 
   q->parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
      const size_t i = id[0];
-     dr[i] = dn[i] ? hit : miss;
+     d_res[i] = dn[i] ? hit : miss;
    }).wait_and_throw();
 
-  std::memcpy(results, d_res, n * sizeof(int8_t));
+  q->memcpy(results, d_res, n * sizeof(int8_t)).wait_and_throw();
   sycl::free(d_null, *q);
   sycl::free(d_res, *q);
   pgaccel_record_gpu_exec();
@@ -2514,7 +2614,7 @@ pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx
     return PGACCEL_UNSUPPORTED;
 
   const size_t n = batch->num_rows;
-  if (n == 0)
+  if (batch->num_rows == 0)
     return PGACCEL_OK;
 
   sycl::queue* q = pgaccel_get_queue();
@@ -2560,17 +2660,17 @@ pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx
      const double cv1 = sycl::bit_cast<double>(p.cv1_bits);
      const double cv2 = sycl::bit_cast<double>(p.cv2_bits);
      if (p.null1[i] || !pg_cmp(p.op1, p.col1[i], cv1)) {
-       p.res[i] = PGACCEL_EXPR_FALSE;
+       d_res[i] = PGACCEL_EXPR_FALSE;
        return;
      }
      if (p.null2[i] || !pg_cmp(p.op2, p.col2[i], cv2)) {
-       p.res[i] = PGACCEL_EXPR_FALSE;
+       d_res[i] = PGACCEL_EXPR_FALSE;
        return;
      }
-     p.res[i] = PGACCEL_EXPR_TRUE;
+     d_res[i] = PGACCEL_EXPR_TRUE;
    }).wait_and_throw();
 
-  std::memcpy(results, d_res, n * sizeof(int8_t));
+  q->memcpy(results, d_res, n * sizeof(int8_t)).wait_and_throw();
   sycl::free(d_col1, *q);
   sycl::free(d_null1, *q);
   sycl::free(d_col2, *q);
@@ -2591,18 +2691,33 @@ pgaccel_expr_template_two_pred_and_count(const pgaccel_batch* batch, uint32_t co
                                          uint16_t cmp1_opcode, double const1_val, uint32_t col2_idx,
                                          uint16_t cmp2_opcode, double const2_val,
                                          size_t* true_count, size_t* uncertain_count) try {
-  if (true_count != nullptr)
-    *true_count = 0;
-  if (uncertain_count != nullptr)
-    *uncertain_count = 0;
-  if (batch == nullptr || true_count == nullptr)
+  if (batch == nullptr || true_count == nullptr) {
+    if (true_count != nullptr)
+      *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_ERROR;
-  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode))
+  }
+  if (!is_supported_cmp(cmp1_opcode) || !is_supported_cmp(cmp2_opcode)) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_UNSUPPORTED;
+  }
 
   const size_t n = batch->num_rows;
-  if (n == 0)
+  if (batch->num_rows == 0) {
+    *true_count = 0;
+    if (uncertain_count != nullptr)
+      *uncertain_count = 0;
     return PGACCEL_OK;
+  }
+  if (uncertain_count != nullptr) {
+    const pgaccel_status st =
+        publish_zero_count_on_device(uncertain_count, "expr_template_two_pred_and_count");
+    if (st != PGACCEL_OK)
+      return st;
+  }
 
   const pgaccel_val_tag tag1 = batch_col_tag(batch, col1_idx);
   const pgaccel_val_tag tag2 = batch_col_tag(batch, col2_idx);
