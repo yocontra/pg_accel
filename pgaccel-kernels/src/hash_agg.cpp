@@ -3379,6 +3379,10 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
                                           pgaccel_agg_state** out_state) {
   if (out_state == nullptr)
     return PGACCEL_ERROR;
+  if (row_count == 0 || num_aggs == 0) {
+    *out_state = nullptr;
+    return PGACCEL_ERROR;
+  }
   sycl::queue& q = pgaccel_require_queue();
   const pgaccel_platform_caps caps = pgaccel_get_caps();
   if (caps.max_alloc_bytes < sizeof(HashAggStreamingSlabHeader) * 2) {
@@ -3423,8 +3427,11 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
     const auto* null_offsets = reinterpret_cast<const size_t*>(slab + layout.null_offsets_off);
     const auto* null_present = reinterpret_cast<const uint8_t*>(slab + layout.null_present_off);
 
-    for (size_t row_begin = 0; row_begin < row_count; row_begin += chunk_capacity) {
-      const size_t rows = std::min(chunk_capacity, row_count - row_begin);
+    size_t row_begin = 0;
+    do {
+      size_t rows = row_count - row_begin;
+      if (rows > chunk_capacity)
+        rows = chunk_capacity;
       q.memcpy(slab + layout.chunk_keys_off, source_keys + row_begin * sizeof(KeyT),
                rows * sizeof(KeyT))
           .wait_and_throw();
@@ -3435,20 +3442,24 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
         q.memset(slab + layout.chunk_key_nulls_off, 0, rows).wait_and_throw();
       }
 
-      for (size_t a = 0; a < num_aggs; ++a) {
-        if (!agg_reads_value(agg_cols[a].func, agg_cols[a].col_idx))
-          continue;
-        const size_t elem_size = value_elem_size(value_types[a]);
-        const auto* source = static_cast<const uint8_t*>(value_cols[a]);
-        q.memcpy(slab + layout.chunk_value_data_off + value_offsets[a],
-                 source + row_begin * elem_size, rows * elem_size)
-            .wait_and_throw();
-        if (null_present[a] != 0) {
-          q.memcpy(slab + layout.chunk_null_data_off + null_offsets[a], value_nulls[a] + row_begin,
-                   rows)
+      size_t staged_agg = 0;
+      do {
+        const bool reads_value = agg_cols[staged_agg].func != PGACCEL_AGG_COUNT ||
+                                 agg_cols[staged_agg].col_idx != SIZE_MAX;
+        if (reads_value) {
+          const size_t elem_size = sizeof(double);
+          const auto* source = static_cast<const uint8_t*>(value_cols[staged_agg]);
+          q.memcpy(slab + layout.chunk_value_data_off + value_offsets[staged_agg],
+                   source + row_begin * elem_size, rows * elem_size)
               .wait_and_throw();
+          if (null_present[staged_agg] != 0) {
+            q.memcpy(slab + layout.chunk_null_data_off + null_offsets[staged_agg],
+                     value_nulls[staged_agg] + row_begin, rows)
+                .wait_and_throw();
+          }
         }
-      }
+        ++staged_agg;
+      } while (staged_agg < num_aggs);
       const size_t chunk_blocks = 1 + (rows - 1) / HASH_AGG_STREAM_BLOCK_ROWS;
       q.memcpy(&reinterpret_cast<HashAggStreamingSlabHeader*>(slab)->chunk_rows, &rows,
                sizeof(rows))
@@ -3706,7 +3717,8 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
       pgaccel_record_gpu_exec();
       if (reinterpret_cast<HashAggStreamingSlabHeader*>(slab)->overflow != 0)
         break;
-    }
+      row_begin += chunk_capacity;
+    } while (row_begin < row_count);
   } catch (...) {
     sycl::free(slab, q);
     throw;
@@ -3744,18 +3756,24 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
     state->group_key_buf.resize(group_key_bytes);
     state->counts.resize(group_count);
     state->results.resize(num_aggs);
-    for (size_t a = 0; a < num_aggs; ++a)
-      state->results[a].resize(group_count);
+    size_t result_index = 0;
+    do {
+      state->results[result_index].resize(group_count);
+      ++result_index;
+    } while (result_index < num_aggs);
 
     const auto* persistent_keys = reinterpret_cast<const uint8_t*>(slab + h->group_keys_off);
     const auto* counts = reinterpret_cast<const int64_t*>(slab + h->group_counts_off);
     const auto* results = reinterpret_cast<const double*>(slab + h->results_off);
     q.memcpy(state->group_key_buf.data(), persistent_keys, group_key_bytes).wait_and_throw();
     q.memcpy(state->counts.data(), counts, group_count * sizeof(int64_t)).wait_and_throw();
-    for (size_t a = 0; a < num_aggs; ++a) {
-      q.memcpy(state->results[a].data(), results + a * h->max_groups, group_count * sizeof(double))
+    result_index = 0;
+    do {
+      q.memcpy(state->results[result_index].data(), results + result_index * h->max_groups,
+               group_count * sizeof(double))
           .wait_and_throw();
-    }
+      ++result_index;
+    } while (result_index < num_aggs);
   } catch (const std::bad_alloc&) {
     delete state;
     sycl::free(slab, q);
