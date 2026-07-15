@@ -5628,6 +5628,7 @@ class _PathAuditor:
         ]
         exact_null_decline = bool(
             not function.is_status
+            and "*" in function.return_spelling
             and reachable_returns
             and all(
                 values in (["nullptr"], ["NULL"], ["0"])
