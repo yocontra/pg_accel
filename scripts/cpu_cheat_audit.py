@@ -696,6 +696,43 @@ def _compiler_include_directories() -> tuple[pathlib.Path, ...]:
     return tuple(dict.fromkeys(path.resolve() for path in candidates if path.is_dir()))
 
 
+def _quoted_include_sources(
+    path: pathlib.Path, directives: Sequence[PreprocessorDirective]
+) -> tuple[str, ...]:
+    """Load direct project headers needed for literal-view type provenance."""
+
+    search_roots = (path.resolve().parent, *_compiler_include_directories())
+    sources: list[str] = []
+    seen: set[pathlib.Path] = set()
+    for directive in directives:
+        command, argument = _directive_parts(directive)
+        if command != "include":
+            continue
+        match = re.fullmatch(r'"([^"\n]+)"', argument)
+        if match is None:
+            continue
+        include_name = pathlib.Path(match.group(1))
+        resolved = next(
+            (
+                candidate.resolve()
+                for root in search_roots
+                for candidate in (root / include_name,)
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if resolved is None or resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            sources.append(resolved.read_text(encoding="utf-8"))
+        except OSError as error:
+            raise ParseError(
+                f"cannot read included type declarations {resolved}: {error}"
+            ) from error
+    return tuple(sources)
+
+
 @functools.lru_cache(maxsize=128)
 def _compiler_preprocess_cached(
     source: str, source_directory: str, compiler: str
@@ -2599,6 +2636,139 @@ def _context_dominates(
     return all(success_map.get(key) == branch for key, branch in evidence)
 
 
+def _record_mutable_pointer_members(
+    token_sources: Sequence[Sequence[Token]],
+) -> dict[str, frozenset[str]]:
+    """Map record types to exact members declared as pointers to mutable data."""
+
+    collected: dict[str, set[str]] = defaultdict(set)
+    for tokens in token_sources:
+        forward, _ = _delimiter_pairs(tokens)
+        for index, token in enumerate(tokens):
+            if token.value not in {"struct", "class"}:
+                continue
+            brace = next(
+                (
+                    cursor
+                    for cursor in range(index + 1, len(tokens))
+                    if tokens[cursor].value in {"{", ";"}
+                ),
+                None,
+            )
+            if brace is None or tokens[brace].value != "{" or brace not in forward:
+                continue
+            close = forward[brace]
+            statement_left = index - 1
+            while statement_left >= 0 and tokens[statement_left].value not in {
+                ";",
+                "{",
+                "}",
+            }:
+                statement_left -= 1
+            is_typedef = any(
+                item.value == "typedef" for item in tokens[statement_left + 1 : index]
+            )
+            names: set[str] = set()
+            tag = next(
+                (
+                    item.value
+                    for item in tokens[index + 1 : brace]
+                    if item.kind == "identifier"
+                ),
+                None,
+            )
+            if tag is not None:
+                names.add(tag)
+            if is_typedef:
+                cursor = close + 1
+                while cursor < len(tokens) and tokens[cursor].value != ";":
+                    if tokens[cursor].kind == "identifier":
+                        names.add(tokens[cursor].value)
+                    cursor += 1
+
+            members: set[str] = set()
+            segment_start = brace + 1
+            cursor = segment_start
+            while cursor < close:
+                if tokens[cursor].value in {"{", "(", "["} and cursor in forward:
+                    cursor = forward[cursor] + 1
+                    continue
+                if tokens[cursor].value != ";":
+                    cursor += 1
+                    continue
+                segment = tokens[segment_start:cursor]
+                segment_start = cursor + 1
+                cursor += 1
+                if not segment or any(item.value in {"(", ")"} for item in segment):
+                    continue
+                for star in (
+                    offset for offset, item in enumerate(segment) if item.value == "*"
+                ):
+                    member = star + 1
+                    while member < len(segment) and segment[member].value in {
+                        "const",
+                        "volatile",
+                        "*",
+                        "&",
+                    }:
+                        member += 1
+                    if member >= len(segment) or segment[member].kind != "identifier":
+                        continue
+                    if any(item.value == "const" for item in segment[:star]):
+                        continue
+                    members.add(segment[member].value)
+            for name in names:
+                collected[name].update(members)
+    return {name: frozenset(members) for name, members in collected.items()}
+
+
+def _parameter_mutable_pointer_members(
+    tokens: Sequence[Token],
+    function: Function,
+    record_members: Mapping[str, frozenset[str]],
+) -> dict[str, frozenset[str]]:
+    """Bind record-member provenance to the matching named parameters."""
+
+    parameters, _ = _parameter_names(tokens, function)
+    result: dict[str, frozenset[str]] = {}
+    for left, right in _parameter_ranges(tokens, function):
+        names = [
+            (index, tokens[index].value)
+            for index in range(left, right)
+            if tokens[index].kind == "identifier" and tokens[index].value in parameters
+        ]
+        if not names:
+            continue
+        name_index, name = names[-1]
+        members = frozenset().union(
+            *(
+                record_members[tokens[index].value]
+                for index in range(left, name_index)
+                if tokens[index].kind == "identifier"
+                and tokens[index].value in record_members
+            )
+        )
+        if members:
+            result[name] = members
+    return result
+
+
+def _is_mutable_member_projection(
+    tokens: Sequence[Token],
+    index: int,
+    member_parameters: Mapping[str, frozenset[str]],
+) -> bool:
+    """Recognize only ``typed_parameter->declared_mutable_pointer_member``."""
+
+    return bool(
+        tokens[index].value in member_parameters
+        and _unqualified_output_identifier(tokens, index)
+        and index + 2 < len(tokens)
+        and tokens[index + 1].value in {".", "->"}
+        and tokens[index + 2].value in member_parameters[tokens[index].value]
+    )
+
+
 def _parameter_names(
     tokens: Sequence[Token], function: Function
 ) -> tuple[set[str], set[str]]:
@@ -2953,7 +3123,7 @@ def _lambda_written_roots(tokens: Sequence[Token], bounds: tuple[int, int]) -> s
             continue
         if _lambda_capture_before_body(tokens, brace, left + 1, reverse) is not None:
             nested.append((brace, forward[brace]))
-    return {
+    written = {
         tokens[index].value
         for index in range(left + 1, right)
         if tokens[index].kind == "identifier"
@@ -2962,6 +3132,72 @@ def _lambda_written_roots(tokens: Sequence[Token], bounds: tuple[int, int]) -> s
         and not any(start <= index <= end for start, end in inactive)
         and _output_write_operator(tokens, index, right, forward) is not None
     }
+    atomic_mutations = {
+        "compare_exchange_strong",
+        "compare_exchange_weak",
+        "exchange",
+        "fetch_add",
+        "fetch_and",
+        "fetch_max",
+        "fetch_min",
+        "fetch_or",
+        "fetch_sub",
+        "fetch_xor",
+        "store",
+    }
+    for index in range(left + 1, right):
+        if (
+            tokens[index].kind != "identifier"
+            or not _unqualified_output_identifier(tokens, index)
+            or _is_inside(index, nested)
+            or any(start <= index <= end for start, end in inactive)
+        ):
+            continue
+        initializers = [
+            open_index
+            for open_index, close_index in forward.items()
+            if tokens[open_index].value in {"(", "{"}
+            and left < open_index < index < close_index < right
+            and open_index > left
+            and tokens[open_index - 1].kind == "identifier"
+        ]
+        if not initializers:
+            continue
+        initializer = max(initializers)
+        statement_left = initializer - 1
+        while statement_left > left and tokens[statement_left].value not in {
+            ";",
+            "{",
+            "}",
+        }:
+            statement_left -= 1
+        if not any(
+            tokens[cursor].value == "atomic_ref"
+            and cursor >= statement_left + 2
+            and tokens[cursor - 1].value == "::"
+            and tokens[cursor - 2].value == "sycl"
+            for cursor in range(statement_left + 1, initializer)
+        ):
+            continue
+        target = initializer + 1
+        if target < right and tokens[target].value in {"*", "&"}:
+            target += 1
+        if target != index:
+            continue
+        atomic_name = tokens[initializer - 1].value
+        initializer_close = forward[initializer]
+        if any(
+            tokens[cursor].value == atomic_name
+            and cursor + 3 < right
+            and tokens[cursor + 1].value in {".", "->"}
+            and tokens[cursor + 2].value in atomic_mutations
+            and tokens[cursor + 3].value == "("
+            and not _is_inside(cursor, nested)
+            and not any(start <= cursor <= end for start, end in inactive)
+            for cursor in range(initializer_close + 1, right - 3)
+        ):
+            written.add(tokens[index].value)
+    return written
 
 
 def _lambda_contributes(
@@ -3858,6 +4094,7 @@ def _output_aliases(
     function: Function,
     mutable: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
+    member_parameters: Mapping[str, frozenset[str]],
 ) -> tuple[set[str], set[int]]:
     forward, _ = _delimiter_pairs(tokens)
     roots = set(mutable)
@@ -3922,6 +4159,30 @@ def _output_aliases(
             cursor -= 2
         return cursor if tokens[cursor].kind == "identifier" else None
 
+    def exact_member_initializer(equals: int, occurrence: int) -> bool:
+        expression_left = equals + 1
+        expression_right = next(
+            (
+                cursor
+                for cursor in range(expression_left, function.body_close)
+                if tokens[cursor].value == ";"
+            ),
+            function.body_close,
+        )
+        while (
+            expression_left < expression_right
+            and tokens[expression_left].value == "("
+            and expression_left in forward
+            and forward[expression_left] == expression_right - 1
+        ):
+            expression_left += 1
+            expression_right -= 1
+        return bool(
+            expression_right - expression_left == 3
+            and occurrence == expression_left
+            and _is_mutable_member_projection(tokens, occurrence, member_parameters)
+        )
+
     # Remember pointer-shaped declarations for a later ``alias = out``.
     for delimiter in range(function.body_open + 1, function.body_close):
         if tokens[delimiter].value not in {"=", ";", "{"}:
@@ -3935,11 +4196,16 @@ def _output_aliases(
     while changed:
         changed = False
         for occurrence in range(function.body_open + 1, function.body_close):
+            member_projection = _is_mutable_member_projection(
+                tokens, occurrence, member_parameters
+            )
             if (
-                tokens[occurrence].value not in roots
-                or not _unqualified_output_identifier(tokens, occurrence)
-                or _is_inside(occurrence, lambda_ranges)
-            ):
+                (
+                    tokens[occurrence].value not in roots
+                    or not _unqualified_output_identifier(tokens, occurrence)
+                )
+                and not member_projection
+            ) or _is_inside(occurrence, lambda_ranges):
                 continue
             left = statement_left(occurrence)
             candidate: int | None = None
@@ -3951,11 +4217,18 @@ def _output_aliases(
                 ),
                 None,
             )
+            if member_projection and (
+                equals is None or not exact_member_initializer(equals, occurrence)
+            ):
+                continue
             if equals is not None:
                 declaration = declaration_candidate(left, equals)
                 if declaration is not None and declaration[1]:
                     candidate = declaration[0]
-                elif (base := member_base(left, equals)) is not None:
+                elif (
+                    not member_projection
+                    and (base := member_base(left, equals)) is not None
+                ):
                     candidate = base
                 elif equals > left and tokens[equals - 1].kind == "identifier":
                     name = tokens[equals - 1].value
@@ -3966,7 +4239,7 @@ def _output_aliases(
             # both ``auto alias{out}`` and an aggregate such as
             # ``Holder holder{out}``. Member projections from that aggregate
             # are conservatively treated as output aliases.
-            if candidate is None:
+            if candidate is None and not member_projection:
                 for brace in range(left, occurrence):
                     if (
                         tokens[brace].value == "{"
@@ -4003,6 +4276,7 @@ def _host_output_accesses(
     function: Function,
     mutable: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
+    member_parameters: Mapping[str, frozenset[str]],
 ) -> tuple[list[tuple[int, int, bool]], list[tuple[int, int]], set[str]]:
     forward, _ = _delimiter_pairs(tokens)
     identity_identifiers = {
@@ -4039,15 +4313,23 @@ def _host_output_accesses(
             ):
                 identity_identifiers.add(tokens[index + 1].value)
     aliases, alias_declarations = _output_aliases(
-        tokens, function, mutable, lambda_ranges
+        tokens, function, mutable, lambda_ranges, member_parameters
     )
     roots = mutable | aliases
     writes: dict[int, tuple[int, int, bool]] = {}
     transfers: dict[int, tuple[int, int]] = {}
     for index in range(function.body_open + 1, function.body_close):
+        member_projection = _is_mutable_member_projection(
+            tokens, index, member_parameters
+        )
         if (
-            tokens[index].value not in roots
-            or not _unqualified_output_identifier(tokens, index)
+            (
+                (
+                    tokens[index].value not in roots
+                    or not _unqualified_output_identifier(tokens, index)
+                )
+                and not member_projection
+            )
             or index in alias_declarations
             or _is_inside(index, lambda_ranges)
         ):
@@ -4206,7 +4488,9 @@ def _failure_terminal_neutral_write_indices(
         left: tuple[tuple[str, str], ...], right: tuple[tuple[str, str], ...]
     ) -> bool:
         right_map = dict(right)
-        return all(key not in right_map or right_map[key] == branch for key, branch in left)
+        return all(
+            key not in right_map or right_map[key] == branch for key, branch in left
+        )
 
     safe: set[int] = set()
     for index, _, neutral in host_writes:
@@ -4229,6 +4513,94 @@ def _failure_terminal_neutral_write_indices(
                 index < other_index < return_index
                 and not failure
                 and contexts_compatible(_context(other_index, regions), write_context)
+                for other_index, failure in returns
+            ):
+                continue
+            if any(
+                tokens[cursor].value in {"break", "continue", "goto", "throw"}
+                and not _is_inside(cursor, lambda_ranges)
+                for cursor in range(index + 1, return_index)
+            ):
+                continue
+            safe.add(index)
+            break
+    return safe
+
+
+def _failure_terminal_diagnostic_write_indices(
+    tokens: Sequence[Token],
+    function: Function,
+    mutable: set[str],
+    host_writes: Sequence[tuple[int, int, bool]],
+    lambda_ranges: Sequence[tuple[int, int]],
+    regions: Sequence[_Region],
+) -> set[int]:
+    """Accept named detail diagnostics only on paths that cannot succeed."""
+
+    forward, _ = _delimiter_pairs(tokens)
+    returns = [
+        (index, _return_is_explicit_failure(function, expression))
+        for index, expression in _returns(tokens, function, lambda_ranges)
+        if _index_is_reachable(tokens, function, index, regions, lambda_ranges)
+    ]
+
+    def named_detail_write(index: int) -> bool:
+        if tokens[index].value != "detail" or "detail" not in mutable:
+            return False
+        operator = _output_write_operator(tokens, index, function.body_close, forward)
+        if operator is None or tokens[operator].value != "=":
+            return False
+        direct_dereference = (
+            index > function.body_open
+            and tokens[index - 1].value == "*"
+            and operator == index + 1
+        )
+        direct_zero_index = bool(
+            index + 1 < function.body_close
+            and tokens[index + 1].value == "["
+            and index + 1 in forward
+            and forward[index + 1] + 1 == operator
+            and forward[index + 1] == index + 3
+            and re.fullmatch(r"0+[uUlL]*", tokens[index + 2].value)
+        )
+        if not direct_dereference and not direct_zero_index:
+            return False
+        cursor = operator + 1
+        expression: list[Token] = []
+        depth = 0
+        while cursor < function.body_close:
+            value = tokens[cursor].value
+            if value in {"(", "[", "{"}:
+                depth += 1
+            elif value in {")", "]", "}"}:
+                if depth == 0:
+                    break
+                depth -= 1
+            if value in {";", ","} and depth == 0:
+                break
+            expression.append(tokens[cursor])
+            cursor += 1
+        return bool(
+            len(expression) == 1
+            and expression[0].kind == "identifier"
+            and re.fullmatch(r"PGACCEL_[A-Z0-9_]*DETAIL[A-Z0-9_]*", expression[0].value)
+        )
+
+    safe: set[int] = set()
+    for index, _, _ in host_writes:
+        if not named_detail_write(index):
+            continue
+        write_context = _context(index, regions)
+        candidates = [
+            return_index
+            for return_index, failure in returns
+            if failure
+            and index < return_index
+            and _context(return_index, regions) == write_context
+        ]
+        for return_index in candidates:
+            if any(
+                index < other_index < return_index and not failure
                 for other_index, failure in returns
             ):
                 continue
@@ -5011,11 +5383,13 @@ class _PathAuditor:
         path: pathlib.Path,
         tokens: Sequence[Token],
         functions: Sequence[Function],
+        record_members: Mapping[str, frozenset[str]],
         external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
     ):
         self.path = path
         self.tokens = tokens
         self.functions = functions
+        self.record_members = record_members
         self.forward, self.reverse = _delimiter_pairs(tokens)
         self.by_name: dict[str, list[Function]] = defaultdict(list)
         for function in functions:
@@ -5080,6 +5454,9 @@ class _PathAuditor:
             self.tokens, function, self.forward, self.reverse
         )
         parameters, mutable = _parameter_names(self.tokens, function)
+        member_parameters = _parameter_mutable_pointer_members(
+            self.tokens, function, self.record_members
+        )
         zero_parameters = _zero_work_parameter_names(self.tokens, function, parameters)
         regions = _regions(
             self.tokens,
@@ -5089,7 +5466,7 @@ class _PathAuditor:
             parameters,
         )
         host_writes, transfer_lines, aliases = _host_output_accesses(
-            self.tokens, function, mutable, lambda_ranges
+            self.tokens, function, mutable, lambda_ranges, member_parameters
         )
         output_roots = mutable | aliases
         direct, raw_launches, rejected, device_lambdas, kernel_writes = (
@@ -5120,6 +5497,14 @@ class _PathAuditor:
         ]
         transfer_lines = sorted({line for _, line in transfer_records})
         shadow_lines = _output_shadow_lines(self.tokens, function, mutable)
+        failure_diagnostic_write_indices = _failure_terminal_diagnostic_write_indices(
+            self.tokens,
+            function,
+            mutable,
+            host_writes,
+            lambda_ranges,
+            regions,
+        )
         calls = _indexed_calls(self.tokens, function, lambda_ranges)
         safe_initializer_calls: set[int] = set()
         for indexed in calls:
@@ -5219,12 +5604,35 @@ class _PathAuditor:
             function,
             regions,
             lambda_ranges,
-            host_writes,
+            [
+                record
+                for record in host_writes
+                if record[0] not in failure_diagnostic_write_indices
+            ],
             control_lines,
             contract_output_call_hazards,
             shadow_lines,
         )
         if fail_contract is not None:
+            if fail_contract.ok and failure_diagnostic_write_indices:
+                fail_contract = _Proof(
+                    True,
+                    _bounded_detail(
+                        (
+                            fail_contract.detail,
+                            "failure-only named detail diagnostic at line(s) "
+                            + ", ".join(
+                                str(self.tokens[index].line)
+                                for index in sorted(failure_diagnostic_write_indices)
+                            ),
+                        )
+                    ),
+                    tuple(
+                        sorted(
+                            set(fail_contract.classifications) | {"failure_diagnostic"}
+                        )
+                    ),
+                )
             self.cache[function] = fail_contract
             return fail_contract
 
@@ -5409,6 +5817,7 @@ class _PathAuditor:
             for record in host_writes
             if record[0] not in validation_write_indices
             and record[0] not in failure_neutral_write_indices
+            and record[0] not in failure_diagnostic_write_indices
             and not (
                 record[2]
                 and any(
@@ -5439,6 +5848,15 @@ class _PathAuditor:
                 + ", ".join(
                     str(self.tokens[index].line)
                     for index in sorted(failure_neutral_write_indices)
+                )
+            )
+        if failure_diagnostic_write_indices:
+            classifications.add("failure_diagnostic")
+            details.append(
+                "named detail diagnostics reach only explicit failure at line(s) "
+                + ", ".join(
+                    str(self.tokens[index].line)
+                    for index in sorted(failure_diagnostic_write_indices)
                 )
             )
         if transfer_lines:
@@ -5665,9 +6083,7 @@ class _PathAuditor:
         reachable_returns = [
             (index, [token.value for token in expression])
             for index, expression in returns
-            if _index_is_reachable(
-                self.tokens, function, index, regions, lambda_ranges
-            )
+            if _index_is_reachable(self.tokens, function, index, regions, lambda_ranges)
         ]
         exact_null_decline = bool(
             not function.is_status
@@ -5681,14 +6097,11 @@ class _PathAuditor:
             and not raw_launches
             and not calls
         )
-        if (
-            exact_null_decline
-            or (
-                function.is_status
-                and returns
-                and (success_paths == 0 or success_paths == zero_success_paths)
-                and not failure_only_hazards
-            )
+        if exact_null_decline or (
+            function.is_status
+            and returns
+            and (success_paths == 0 or success_paths == zero_success_paths)
+            and not failure_only_hazards
         ):
             if exact_null_decline:
                 detail = (
@@ -5773,11 +6186,26 @@ def _audit_source_literal(
     *,
     require_entrypoint: bool = True,
     external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
+    inherited_record_members: Mapping[str, frozenset[str]] | None = None,
 ) -> FileAudit:
     try:
         normalized_source, directives = normalize_preprocessor(source)
         tokens = lex_cpp(normalized_source)
         functions = parse_functions(tokens)
+        type_token_sources = [tokens]
+        type_token_sources.extend(
+            lex_cpp(include_source)
+            for include_source in _quoted_include_sources(path, directives)
+        )
+        record_members = _record_mutable_pointer_members(type_token_sources)
+        if inherited_record_members:
+            record_members = {
+                name: frozenset(
+                    record_members.get(name, frozenset())
+                    | inherited_record_members.get(name, frozenset())
+                )
+                for name in set(record_members) | set(inherited_record_members)
+            }
     except ParseError as error:
         finding = Finding(path, 1, "<parser>", str(error), ("parser_error",))
         return FileAudit(path, 0, 0, 0, (), (finding,))
@@ -5823,7 +6251,7 @@ def _audit_source_literal(
             )
         )
 
-    auditor = _PathAuditor(path, tokens, functions, external_proofs)
+    auditor = _PathAuditor(path, tokens, functions, record_members, external_proofs)
     entrypoint_audits: list[EntrypointAudit] = []
     for entrypoint in sorted(entrypoints, key=lambda function: function.line):
         if entrypoint.name in duplicate_entries:
@@ -5929,11 +6357,18 @@ def audit_source(
         return literal
     try:
         expanded_source = _compiler_preprocess_source(path, source)
+        inherited_record_members = _record_mutable_pointer_members(
+            [
+                lex_cpp(include_source)
+                for include_source in _quoted_include_sources(path, directives)
+            ]
+        )
         expanded = _audit_source_literal(
             path,
             expanded_source,
             require_entrypoint=require_entrypoint,
             external_proofs=external_proofs,
+            inherited_record_members=inherited_record_members,
         )
     except ParseError as error:
         detail = str(error)
@@ -6103,9 +6538,7 @@ def _external_device_proofs(
         except (OSError, UnicodeError, ParseError):
             continue
         definitions.extend(
-            (path, tokens, function)
-            for function in functions
-            if function.is_export
+            (path, tokens, function) for function in functions if function.is_export
         )
 
     counts = Counter(function.name for _, _, function in definitions)
@@ -6138,9 +6571,7 @@ def _external_device_proofs(
                     f"independently audited device export {function.name} in {path}: "
                     + entry.detail,
                     tuple(
-                        sorted(
-                            set(entry.classifications) | {"audited_external_call"}
-                        )
+                        sorted(set(entry.classifications) | {"audited_external_call"})
                     ),
                 ),
             )
@@ -6174,11 +6605,7 @@ def _audit_paths_once(
 def audit_paths(paths: Sequence[pathlib.Path]) -> list[FileAudit]:
     initial = _audit_paths_once(paths)
     external_proofs = _external_device_proofs(paths, initial)
-    audits = (
-        _audit_paths_once(paths, external_proofs)
-        if external_proofs
-        else initial
-    )
+    audits = _audit_paths_once(paths, external_proofs) if external_proofs else initial
     if audits and not any(audit.entrypoints for audit in audits):
         first = audits[0]
         finding = Finding(

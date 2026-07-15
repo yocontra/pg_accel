@@ -1951,6 +1951,295 @@ class HostComputationAndContractTests(unittest.TestCase):
         finding = finding_for(invalid, "pgaccel_spatial_intersects")
         self.assertIn("invalid_failure_only_contract", finding.classifications)
 
+    def test_failure_only_named_detail_is_diagnostic_only(self) -> None:
+        valid = audit_compiling_fixture(
+            r"""
+            using pgaccel_status = int;
+            constexpr pgaccel_status PGACCEL_OK = 0;
+            constexpr pgaccel_status PGACCEL_ERROR = 1;
+            constexpr pgaccel_status PGACCEL_UNSUPPORTED = 2;
+            constexpr int PGACCEL_WIDGET_DETAIL_INVALID = 9;
+            extern "C" pgaccel_status pgaccel_detail_decline(bool invalid, int* detail) {
+              if (invalid) {
+                *detail = PGACCEL_WIDGET_DETAIL_INVALID;
+                return PGACCEL_ERROR;
+              }
+              return PGACCEL_UNSUPPORTED;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+
+        hostile = {
+            "numeric": r"""
+                using pgaccel_status = int;
+                constexpr pgaccel_status PGACCEL_ERROR = 1;
+                extern "C" pgaccel_status pgaccel_numeric_detail(int* detail) {
+                  *detail = 9;
+                  return PGACCEL_ERROR;
+                }
+            """,
+            "result": r"""
+                using pgaccel_status = int;
+                constexpr pgaccel_status PGACCEL_ERROR = 1;
+                constexpr int PGACCEL_WIDGET_DETAIL_INVALID = 9;
+                extern "C" pgaccel_status pgaccel_named_result(int* result) {
+                  *result = PGACCEL_WIDGET_DETAIL_INVALID;
+                  return PGACCEL_ERROR;
+                }
+            """,
+            "detail_offset": r"""
+                using pgaccel_status = int;
+                constexpr pgaccel_status PGACCEL_ERROR = 1;
+                constexpr int PGACCEL_WIDGET_DETAIL_INVALID = 9;
+                extern "C" pgaccel_status pgaccel_detail_offset(int* detail) {
+                  detail[1] = PGACCEL_WIDGET_DETAIL_INVALID;
+                  return PGACCEL_ERROR;
+                }
+            """,
+            "success": r"""
+                using pgaccel_status = int;
+                constexpr pgaccel_status PGACCEL_OK = 0;
+                constexpr pgaccel_status PGACCEL_ERROR = 1;
+                constexpr int PGACCEL_WIDGET_DETAIL_INVALID = 9;
+                extern "C" pgaccel_status pgaccel_detail_success(bool invalid, int* detail) {
+                  *detail = PGACCEL_WIDGET_DETAIL_INVALID;
+                  if (invalid) return PGACCEL_ERROR;
+                  return PGACCEL_OK;
+                }
+            """,
+        }
+        for name, source in hostile.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(source)
+                self.assertTrue(result.findings)
+                self.assertIn(
+                    "host_output_write", result.entrypoint_audits[0].classifications
+                )
+
+    def test_zero_row_contract_allows_only_failure_terminal_detail(self) -> None:
+        result = audit_compiling_fixture(
+            r"""
+            using pgaccel_status = int;
+            constexpr pgaccel_status PGACCEL_OK = 0;
+            constexpr pgaccel_status PGACCEL_UNSUPPORTED = 1;
+            constexpr pgaccel_status PGACCEL_INVALID_ARGUMENT = 2;
+            constexpr int PGACCEL_SPATIAL_DETAIL_NONE = 0;
+            constexpr int PGACCEL_SPATIAL_DETAIL_CONTRACT = 1;
+            struct Request { unsigned long count; };
+            static pgaccel_status resident_validate_request_contract(
+                const Request* request, int* detail) {
+              if (request == nullptr) return PGACCEL_INVALID_ARGUMENT;
+              *detail = PGACCEL_SPATIAL_DETAIL_NONE;
+              return request->count == 0 ? PGACCEL_OK : PGACCEL_INVALID_ARGUMENT;
+            }
+            extern "C" pgaccel_status pgaccel_spatial_eval_resident_ex(
+                const Request* request, int* detail) {
+              if (detail == nullptr) return PGACCEL_INVALID_ARGUMENT;
+              if (request == nullptr) {
+                *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+                return PGACCEL_INVALID_ARGUMENT;
+              }
+              if (request->count != 0) {
+                *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+                return PGACCEL_UNSUPPORTED;
+              }
+              return resident_validate_request_contract(request, detail);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("failure_diagnostic", result.entrypoint_audits[0].classifications)
+
+
+class ConstDescriptorMemberProvenanceTests(unittest.TestCase):
+    def test_only_exact_mutable_pointer_member_alias_proves_output(self) -> None:
+        result = audit_compiling_fixture(
+            CompilerValidAdversarialTests.CPP_PRELUDE
+            + r"""
+            typedef struct {
+              int* output;
+              const int* input;
+              int scalar;
+            } Descriptor;
+
+            extern "C" pgaccel_status pgaccel_member_alias(
+                const Descriptor* descriptor, std::size_t count) {
+              int* output = descriptor->output;
+              sycl::queue queue;
+              queue.parallel_for(sycl::range<1>(count),
+                  [=](sycl::id<1> id) { output[id] = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "output_alias_tracking", result.entrypoint_audits[0].classifications
+        )
+
+    def test_atomic_ref_mutation_preserves_derived_output_provenance(self) -> None:
+        prelude = (
+            CompilerValidAdversarialTests.CPP_PRELUDE
+            + r"""
+            namespace sycl {
+            template <class T> struct atomic_ref {
+              T& value;
+              explicit atomic_ref(T& target) : value(target) {}
+              T fetch_or(T operand) {
+                T previous = value; value |= operand; return previous;
+              }
+              T load() const { return value; }
+            };
+            }
+            struct Descriptor { unsigned int* flags; };
+            """
+        )
+        valid = audit_compiling_fixture(
+            prelude
+            + r"""
+            extern "C" pgaccel_status pgaccel_atomic_write(
+                const Descriptor* descriptor, std::size_t count) {
+              unsigned int* flags = descriptor->flags;
+              sycl::queue queue;
+              queue.parallel_for(sycl::range<1>(count), [=](sycl::id<1>) {
+                sycl::atomic_ref<unsigned int> atomic(flags[0]);
+                atomic.fetch_or(1u);
+              });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+
+        load_only = audit_compiling_fixture(
+            prelude
+            + r"""
+            extern "C" pgaccel_status pgaccel_atomic_load(
+                const Descriptor* descriptor, std::size_t count) {
+              unsigned int* flags = descriptor->flags;
+              sycl::queue queue;
+              queue.parallel_for(sycl::range<1>(count), [=](sycl::id<1>) {
+                sycl::atomic_ref<unsigned int> atomic(flags[0]);
+                (void)atomic.load();
+              });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = load_only.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("rejected_terminal", entry.classifications)
+
+        hostile = {
+            "host": r"""
+                unsigned int* flags = descriptor->flags;
+                sycl::atomic_ref<unsigned int> atomic(flags[0]);
+                atomic.fetch_or(1u);
+            """,
+            "direct_root": r"""
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count), [=](sycl::id<1>) {
+                  sycl::atomic_ref<unsigned int> atomic(descriptor->flags[0]);
+                  atomic.fetch_or(1u);
+                });
+            """,
+        }
+        for name, body in hostile.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(
+                    prelude
+                    + f"""extern "C" pgaccel_status pgaccel_atomic_{name}(
+                            const Descriptor* descriptor, std::size_t count) {{
+                          {body}
+                          return PGACCEL_OK;
+                        }}"""
+                )
+                self.assertFalse(result.entrypoint_audits[0].ok)
+
+    def test_const_and_unselected_descriptor_members_stay_red(self) -> None:
+        sources = {
+            "const_member": r"""
+                const int* input = descriptor->input;
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count),
+                    [=](sycl::id<1> id) { (void)input[id]; });
+            """,
+            "direct_root": r"""
+                const Descriptor* alias = descriptor;
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count),
+                    [=](sycl::id<1> id) { alias->output[id] = 1; });
+            """,
+            "aggregate_view": r"""
+                View view{descriptor->output};
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count),
+                    [=](sycl::id<1> id) { view.output[id] = 1; });
+            """,
+            "assigned_view": r"""
+                View view{};
+                view.output = descriptor->output;
+                sycl::queue queue;
+                queue.parallel_for(sycl::range<1>(count),
+                    [=](sycl::id<1> id) { view.output[id] = 1; });
+            """,
+        }
+        prelude = (
+            CompilerValidAdversarialTests.CPP_PRELUDE
+            + r"""
+            struct Descriptor { int* output; const int* input; int scalar; };
+            struct View { int* output; };
+            """
+        )
+        for name, body in sources.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(
+                    prelude
+                    + f"""extern "C" pgaccel_status pgaccel_{name}(
+                            const Descriptor* descriptor, std::size_t count) {{
+                          {body}
+                          return PGACCEL_OK;
+                        }}"""
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("missing_device_terminal", entry.classifications)
+
+    def test_member_alias_selection_and_unrelated_calls_stay_red(self) -> None:
+        prelude = (
+            CompilerValidAdversarialTests.CPP_PRELUDE
+            + r"""
+            struct Descriptor { int* output; };
+            static int* pick_host(int* host, int*) { return host; }
+            static void observe_pointer(int*) {}
+            """
+        )
+        initializers = {
+            "ternary": "choose_host ? host : descriptor->output",
+            "helper": "pick_host(host, descriptor->output)",
+            "unrelated_call": "(observe_pointer(descriptor->output), host)",
+        }
+        for name, initializer in initializers.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(
+                    prelude
+                    + f"""extern "C" pgaccel_status pgaccel_member_{name}(
+                            const Descriptor* descriptor, bool choose_host,
+                            std::size_t count) {{
+                          int host_value = 0;
+                          int* host = &host_value;
+                          int* output = {initializer};
+                          sycl::queue queue;
+                          queue.parallel_for(sycl::range<1>(count),
+                              [=](sycl::id<1> id) {{ output[id] = 1; }});
+                          return PGACCEL_OK;
+                        }}"""
+                )
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("output_alias_tracking", entry.classifications)
+
 
 class ResidentV5RegressionTests(unittest.TestCase):
     COPYBACK_PRELUDE = r"""
@@ -3144,12 +3433,12 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertEqual(second.declaration_hash, self.abi.declaration_hash)
         self.assertEqual(second.per_file, self.abi.per_file)
 
-    def test_point_in_polygon_all_outside_success_is_flagged(self) -> None:
-        finding = self.findings["pgaccel_point_in_polygon_bulk"]
-        self.assertEqual(finding.path.name, "spatial_dispatch.cpp")
-        self.assertEqual(finding.entrypoint, "pgaccel_point_in_polygon_bulk")
-        self.assertIn("missing_device_terminal", finding.classifications)
-        self.assertIn("undominated_success", finding.classifications)
+    def test_point_in_polygon_staged_copyback_is_proven(self) -> None:
+        entry = self.by_name["pgaccel_point_in_polygon_bulk"]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.path.name, "spatial_dispatch.cpp")
+        self.assertIn("large_input_gpu_chain", entry.classifications)
+        self.assertIn("awaited queue memcpy", entry.detail)
 
     def test_sort_i64_uses_independently_proven_concrete_dispatch(self) -> None:
         entry = self.by_name["pgaccel_sort_i64"]
