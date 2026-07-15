@@ -1,10 +1,6 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload};
 
 const AVG_NONFLOAT_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
-
-#[cfg(test)]
-pub(super) const EXPECTED_NATIVE_RESULT: (&str, &str, &str, &str, &str) =
-    ("2", "4", "8", "1.25", "00:00:03");
 
 /// Integer, NUMERIC, and interval AVG variants that require native accumulators.
 pub struct AvgNonfloatDecline;
@@ -55,6 +51,22 @@ impl Workload for AvgNonfloatDecline {
 
     fn row_scales(&self) -> &'static [usize] {
         AVG_NONFLOAT_DECLINE_ROW_SCALES
+    }
+
+    fn result_oracle(&self, _rows: usize) -> Option<ResultOracle> {
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT round(avg_i2, 6)::text, round(avg_i4, 6)::text, \
+                        round(avg_i8, 6)::text, round(avg_numeric, 6)::text, \
+                        avg_interval::text \
+                 FROM ({}) AS result",
+                self.query_sql()
+            ),
+            ["2.000000", "4.000000", "8.000000", "1.250000", "00:00:03"]
+                .into_iter()
+                .map(|value| Value::Text(value.to_owned()))
+                .collect(),
+        ))
     }
 
     fn cleanup_sql(&self) -> Vec<String> {

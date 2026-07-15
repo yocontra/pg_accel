@@ -18,7 +18,7 @@ pub use crate::config::{
     verify_and_capture_gucs,
 };
 use crate::report::{self, IterationResult, WorkloadResult};
-use crate::workloads::Workload;
+use crate::workloads::{ExpectedResultValue, ResultOracle, Workload};
 
 const PROVENANCE_SCHEMA_VERSION: u32 = 1;
 const CORRECTNESS_DIFF_SCHEMA_VERSION: u32 = 1;
@@ -2932,6 +2932,7 @@ fn run_workload_with_config(
             artifact_writer,
         )?)
     } else {
+        validate_result_oracle_from_connection(connection, workload, rows)?;
         None
     };
 
@@ -3201,6 +3202,9 @@ fn capture_correctness_diff(
         CORRECTNESS_BASELINE_TABLE,
         CORRECTNESS_ACCEL_TABLE,
     )?;
+    if let Some(oracle) = workload.result_oracle(rows) {
+        validate_result_oracle(&mut client, workload, rows, &oracle)?;
+    }
     client.batch_execute(
         "DROP TABLE IF EXISTS pg_temp.pgaccel_correctness_accel; \
          DROP TABLE IF EXISTS pg_temp.pgaccel_correctness_baseline",
@@ -3228,6 +3232,85 @@ fn capture_correctness_diff(
         baseline_query_sql,
         error: None,
     })
+}
+
+fn validate_result_oracle_from_connection(
+    connection: &str,
+    workload: &dyn Workload,
+    rows: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(oracle) = workload.result_oracle(rows) else {
+        return Ok(());
+    };
+    let mut client = Client::connect(connection, NoTls)?;
+    apply_benchmark_safety_settings(&mut client)?;
+    validate_result_oracle(&mut client, workload, rows, &oracle)
+}
+
+fn validate_result_oracle(
+    client: &mut Client,
+    workload: &dyn Workload,
+    rows: usize,
+    oracle: &ResultOracle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if oracle.expected_row.is_empty() {
+        return Err(format!(
+            "result oracle for {} @ {rows} rows has no expected columns",
+            workload.name()
+        )
+        .into());
+    }
+
+    for sql in workload.pre_query_sql() {
+        client.batch_execute(&sql)?;
+    }
+    client.batch_execute(
+        "SET pg_accel.enabled = off; \
+         SET max_parallel_workers_per_gather = DEFAULT",
+    )?;
+    let actual_rows = client.query(&oracle.query_sql, &[])?;
+    if actual_rows.len() != 1 {
+        return Err(format!(
+            "result oracle for {} @ {rows} rows returned {} rows; expected exactly one",
+            workload.name(),
+            actual_rows.len()
+        )
+        .into());
+    }
+
+    let actual_row = &actual_rows[0];
+    if actual_row.len() != oracle.expected_row.len() {
+        return Err(format!(
+            "result oracle for {} @ {rows} rows returned {} columns; expected {}",
+            workload.name(),
+            actual_row.len(),
+            oracle.expected_row.len()
+        )
+        .into());
+    }
+
+    for (column, expected) in oracle.expected_row.iter().enumerate() {
+        let actual = match expected {
+            ExpectedResultValue::I32(_) => ExpectedResultValue::I32(actual_row.try_get(column)?),
+            ExpectedResultValue::I64(_) => ExpectedResultValue::I64(actual_row.try_get(column)?),
+            ExpectedResultValue::Bool(_) => ExpectedResultValue::Bool(actual_row.try_get(column)?),
+            ExpectedResultValue::Text(_) => ExpectedResultValue::Text(actual_row.try_get(column)?),
+            ExpectedResultValue::I32Array(_) => {
+                ExpectedResultValue::I32Array(actual_row.try_get(column)?)
+            }
+            ExpectedResultValue::NullableI32Array(_) => {
+                ExpectedResultValue::NullableI32Array(actual_row.try_get(column)?)
+            }
+        };
+        if &actual != expected {
+            return Err(format!(
+                "result oracle mismatch for {} @ {rows} rows column {column}: expected {expected:?}, got {actual:?}",
+                workload.name()
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn create_correctness_table(

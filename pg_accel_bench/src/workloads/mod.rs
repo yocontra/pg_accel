@@ -167,6 +167,47 @@ pub use window_analytics::WindowAnalytics;
 pub use window_full_output_decline::WindowFullOutputDecline;
 pub use window_reducing_decline::WindowReducingDecline;
 
+/// One typed value in an independently computed workload result oracle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedResultValue {
+    I32(i32),
+    I64(i64),
+    Bool(bool),
+    Text(String),
+    I32Array(Vec<i32>),
+    NullableI32Array(Vec<Option<i32>>),
+}
+
+pub fn usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).expect("benchmark value must fit in PostgreSQL int8")
+}
+
+pub fn usize_to_i32(value: usize) -> i32 {
+    i32::try_from(value).expect("benchmark value must fit in PostgreSQL int4")
+}
+
+/// A one-row query and its independently computed typed result.
+///
+/// The runner executes this query with pg_accel disabled during runtime result
+/// validation. With correctness artifacts enabled it runs after the ordinary
+/// accel-vs-native diff, catching fixture or query drift that affects both
+/// sides of that differential equally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultOracle {
+    pub query_sql: String,
+    pub expected_row: Vec<ExpectedResultValue>,
+}
+
+impl ResultOracle {
+    #[must_use]
+    pub fn one_row(query_sql: String, expected_row: Vec<ExpectedResultValue>) -> Self {
+        Self {
+            query_sql,
+            expected_row,
+        }
+    }
+}
+
 /// A benchmark workload that can set up tables, run a query, and clean up.
 pub trait Workload: Send + Sync {
     /// Short identifier for this workload (e.g. `"gpu_reduce_sum"`).
@@ -229,6 +270,15 @@ pub trait Workload: Send + Sync {
     /// exception so the default suite remains bounded.
     fn row_scales(&self) -> &'static [usize] {
         ROW_SCALES
+    }
+
+    /// Independently computed exact result for release-sensitive workloads.
+    ///
+    /// Workloads without a closed-form oracle may return `None` and still use
+    /// the ordinary accel-vs-native correctness diff. Phase 9 structural
+    /// declines require an oracle at every registered scale.
+    fn result_oracle(&self, _rows: usize) -> Option<ResultOracle> {
+        None
     }
 
     /// SQL statements to tear down benchmark tables.
@@ -2544,7 +2594,7 @@ fn regression_decline_matrix_entry(
             "inner NULL makes every otherwise-unmatched NOT IN result UNKNOWN",
             "8-byte outer row plus nullable key",
             "one zero-count aggregate row",
-            "shape_unsupported_predicate",
+            "shape_sublink",
         ),
         "avg_nonfloat_decline" => (
             "avg_nonfloat_accumulators",
@@ -2976,22 +3026,26 @@ mod tests {
                 "SET enable_nestloop = off"
             ]
         );
-        assert_eq!(
-            semi_anti_null_decline::SEMI_EXPECTED_NATIVE_RESULTS,
-            &[(10_000, 4_500, 4_500), (100_000, 45_000, 45_000)]
-        );
-        assert_eq!(
-            semi_anti_null_decline::ANTI_EXPECTED_NATIVE_RESULTS,
-            &[(10_000, 5_500, 4_500), (100_000, 55_000, 45_000)]
-        );
-        assert_eq!(
-            semi_anti_null_decline::IN_EXPECTED_NATIVE_RESULTS,
-            &[(10_000, 4_500, 4_500), (100_000, 45_000, 45_000)]
-        );
-        assert_eq!(
-            semi_anti_null_decline::NOT_IN_EXPECTED_NATIVE_RESULTS,
-            &[(10_000, 0, 0), (100_000, 0, 0)]
-        );
+
+        for contract in PHASE9_OPERATOR_DECLINES {
+            let workload = find_workload(contract.workload)
+                .unwrap_or_else(|| panic!("registered {}", contract.workload));
+            for &rows in workload.row_scales() {
+                let oracle = workload.result_oracle(rows).unwrap_or_else(|| {
+                    panic!("typed result oracle for {} at {rows}", contract.workload)
+                });
+                assert!(
+                    !oracle.expected_row.is_empty(),
+                    "{} at {rows}",
+                    contract.workload
+                );
+                assert!(
+                    oracle.query_sql.contains(&workload.query_sql()),
+                    "oracle must execute the workload query for {} at {rows}",
+                    contract.workload
+                );
+            }
+        }
 
         let aggregate = find_workload("aggregate_semantic_modifier_decline")
             .expect("aggregate modifier workload");
@@ -3000,23 +3054,12 @@ mod tests {
         assert!(aggregate_query.contains("count(DISTINCT distinct_key)"));
         assert!(aggregate_query.contains("array_agg(distinct_key ORDER BY order_key, id)"));
         assert!(aggregate_query.contains("FILTER (WHERE id <= 8)"));
-        assert_eq!(
-            aggregate_semantic_modifier_decline::EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 10_000, 5, "{3,1,1,NULL,2,2,0,NULL}"),
-                (100_000, 100_000, 5, "{3,1,1,NULL,2,2,0,NULL}")
-            ]
-        );
         let ordered_set =
             find_workload("aggregate_ordered_set_decline").expect("ordered-set aggregate workload");
         assert!(
             ordered_set
                 .query_sql()
                 .contains("percentile_disc(ARRAY[0.25, 0.5, 0.75])")
-        );
-        assert_eq!(
-            aggregate_semantic_modifier_decline::ORDERED_SET_EXPECTED_NATIVE_RESULTS,
-            &[(10_000, "{2,5,7}", 7_500), (100_000, "{2,5,7}", 75_000)]
         );
 
         let window = find_workload("window_reducing_decline").expect("reducing window workload");
@@ -3028,58 +3071,6 @@ mod tests {
         assert!(window_query.contains("max(running_sum)"));
         assert!(window_query.contains("running_avg = 1::numeric"));
         assert!(window_query.contains("max(peer_rank)"));
-        assert_eq!(
-            window_reducing_decline::EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 10_000, 2_500, 2_500, true, 2_499),
-                (100_000, 100_000, 25_000, 25_000, true, 24_999)
-            ]
-        );
-        assert_eq!(
-            window_variants::ROW_NUMBER_EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 10_000, 505_000),
-                (100_000, 10_000, 505_000),
-                (1_000_000, 10_000, 505_000),
-                (10_000_000, 10_000, 505_000)
-            ]
-        );
-        assert_eq!(
-            window_variants::RANK_EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 1_000, 496_000),
-                (100_000, 1_000, 496_000),
-                (1_000_000, 1_000, 496_000),
-                (10_000_000, 1_000, 496_000)
-            ]
-        );
-        assert_eq!(
-            window_variants::DENSE_RANK_EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 10_000, 255_000),
-                (100_000, 20_000, 1_010_000),
-                (1_000_000, 20_000, 1_010_000),
-                (10_000_000, 20_000, 1_010_000)
-            ]
-        );
-        assert_eq!(
-            window_variants::RUNNING_SUM_EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 10_000, 10_942_500, 2_500),
-                (100_000, 100_000, 1_093_800_000, 25_000),
-                (1_000_000, 1_000_000, 109_375_500_000, 250_000),
-                (10_000_000, 10_000_000, 10_937_505_000_000, 2_500_000)
-            ]
-        );
-        assert_eq!(
-            window_analytics::EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 10_000, 55_000, 27_472_500),
-                (100_000, 100_000, 5_050_000, 2_522_475_000),
-                (1_000_000, 1_000_000, 500_500_000, 249_999_750_000),
-                (10_000_000, 10_000_000, 50_005_000_000, 24_977_497_500_000)
-            ]
-        );
 
         let avg = find_workload("avg_nonfloat_decline").expect("non-float AVG workload");
         let avg_setup = avg.setup_sql(10_000).join("\n");
@@ -3090,40 +3081,6 @@ mod tests {
         for column in ["i2", "i4", "i8", "n", "d"] {
             assert!(avg_query.contains(&format!("avg({column})")));
         }
-        assert_eq!(
-            avg_nonfloat_decline::EXPECTED_NATIVE_RESULT,
-            ("2", "4", "8", "1.25", "00:00:03")
-        );
-
-        assert_eq!(
-            setop_decline::EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 5_002, 5_000, 2, 2_500, 4_999),
-                (100_000, 50_002, 50_000, 2, 25_000, 49_999)
-            ]
-        );
-        assert_eq!(
-            recursive_union_decline::EXPECTED_NATIVE_RESULT,
-            (10_000, 10_001, 10_000, 1, 1, 10_000)
-        );
-        assert_eq!(
-            mergejoin_decline::EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 17_000, 17_000, 0, 4_999),
-                (100_000, 170_000, 170_000, 0, 49_999)
-            ]
-        );
-        assert_eq!(
-            gpu_sort_multikey::EXPECTED_NATIVE_ROW_COUNTS,
-            &[(10_000, 10_000), (100_000, 100_000)]
-        );
-        assert_eq!(
-            gpu_nlj_between::EXPECTED_NATIVE_RESULTS,
-            &[
-                (10_000, 18_000, 18_000, 18_000),
-                (100_000, 180_000, 180_000, 180_000)
-            ]
-        );
 
         let setop = find_workload("setop_intersect_decline").expect("SetOp workload");
         assert!(setop.setup_sql(10_000).join("\n").contains("VALUES (NULL)"));

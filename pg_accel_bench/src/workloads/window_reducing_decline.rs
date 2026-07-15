@@ -1,12 +1,6 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i64};
 
 const WINDOW_REDUCING_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
-
-#[cfg(test)]
-pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i64, bool, i64)] = &[
-    (10_000, 10_000, 2_500, 2_500, true, 2_499),
-    (100_000, 100_000, 25_000, 25_000, true, 24_999),
-];
 
 /// Reducing-output window lane without a segmented GPU implementation.
 pub struct WindowReducingDecline;
@@ -75,6 +69,21 @@ impl Workload for WindowReducingDecline {
 
     fn row_scales(&self) -> &'static [usize] {
         WINDOW_REDUCING_DECLINE_ROW_SCALES
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let rows = usize_to_i64(rows);
+        let partition_rows = rows / 4;
+        Some(ResultOracle::one_row(
+            self.query_sql(),
+            vec![
+                Value::I64(rows),
+                Value::I64(partition_rows),
+                Value::I64(partition_rows),
+                Value::Bool(true),
+                Value::I64(partition_rows - 1),
+            ],
+        ))
     }
 
     fn cleanup_sql(&self) -> Vec<String> {

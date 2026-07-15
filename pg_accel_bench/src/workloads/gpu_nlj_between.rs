@@ -1,12 +1,6 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i64};
 
 const GPU_NLJ_BETWEEN_ROW_SCALES: &[usize] = &[10_000, 100_000];
-
-#[cfg(test)]
-pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i64)] = &[
-    (10_000, 18_000, 18_000, 18_000),
-    (100_000, 180_000, 180_000, 180_000),
-];
 
 /// NULL- and duplicate-sensitive nested-loop inequality BETWEEN decline.
 pub struct GpuNljBetween;
@@ -59,6 +53,19 @@ impl Workload for GpuNljBetween {
          JOIN bench_nlj_windows w \
            ON e.ts >= w.lo AND e.ts <= w.hi"
             .to_owned()
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let outer_rows = usize_to_i64(rows.max(1_000));
+        let matched_pairs = (outer_rows - outer_rows / 10) * 2;
+        Some(ResultOracle::one_row(
+            self.query_sql(),
+            vec![
+                Value::I64(matched_pairs),
+                Value::I64(matched_pairs),
+                Value::I64(matched_pairs),
+            ],
+        ))
     }
 
     fn row_scales(&self) -> &'static [usize] {

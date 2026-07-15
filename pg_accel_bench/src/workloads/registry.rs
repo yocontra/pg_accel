@@ -308,7 +308,7 @@ pub const PHASE9_OPERATOR_DECLINES: &[Phase9DeclineContract] = &[
     Phase9DeclineContract {
         lane: Phase9OperatorLane::NotInMembership,
         workload: "not_in_join_null_decline",
-        reason: "shape_unsupported_predicate",
+        reason: "shape_sublink",
     },
     Phase9DeclineContract {
         lane: Phase9OperatorLane::AggregateModifiers,
@@ -1139,6 +1139,14 @@ mod tests {
         let mut lanes = BTreeSet::new();
         let mut workloads = BTreeSet::new();
         let runtime = super::super::all_workloads();
+
+        assert_eq!(
+            PHASE9_OPERATOR_DECLINES
+                .iter()
+                .find(|contract| contract.lane == Phase9OperatorLane::NotInMembership)
+                .map(|contract| contract.reason),
+            Some("shape_sublink")
+        );
 
         for contract in PHASE9_OPERATOR_DECLINES {
             assert!(lanes.insert(contract.lane), "duplicate Phase 9 lane");

@@ -1,17 +1,65 @@
-use super::Workload;
+use std::collections::BTreeSet;
+
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i32, usize_to_i64};
 
 const AGGREGATE_SEMANTIC_MODIFIER_ROW_SCALES: &[usize] = &[10_000, 100_000];
 const AGGREGATE_ORDERED_SET_ROW_SCALES: &[usize] = &[10_000, 100_000];
 
-#[cfg(test)]
-pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, &str)] = &[
-    (10_000, 10_000, 5, "{3,1,1,NULL,2,2,0,NULL}"),
-    (100_000, 100_000, 5, "{3,1,1,NULL,2,2,0,NULL}"),
-];
+fn format_pg_int_array(values: &[Option<i32>]) -> String {
+    let body = values
+        .iter()
+        .map(|value| value.map_or_else(|| "NULL".to_owned(), |value| value.to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{body}}}")
+}
 
-#[cfg(test)]
-pub(super) const ORDERED_SET_EXPECTED_NATIVE_RESULTS: &[(usize, &str, i64)] =
-    &[(10_000, "{2,5,7}", 7_500), (100_000, "{2,5,7}", 75_000)];
+fn aggregate_modifier_expected(rows: usize) -> (i64, i64, Vec<Option<i32>>) {
+    let mut filtered_sum = 0_i64;
+    let mut distinct_keys = BTreeSet::new();
+    let mut ordered_sample = Vec::new();
+    for g in 1..=rows {
+        let value = (g % 4 != 0).then_some(usize_to_i32(g % 10));
+        let distinct_key = (g % 4 != 0).then_some(usize_to_i32(g % 5));
+        if g % 2 == 0 {
+            filtered_sum += i64::from(value.unwrap_or(0));
+        }
+        if let Some(key) = distinct_key {
+            distinct_keys.insert(key);
+        }
+        if g <= 8 {
+            ordered_sample.push((g % 3, g, distinct_key));
+        }
+    }
+    ordered_sample.sort_by_key(|(order_key, id, _)| (*order_key, *id));
+    let ordered_values = ordered_sample
+        .into_iter()
+        .map(|(_, _, value)| value)
+        .collect::<Vec<_>>();
+    (
+        filtered_sum,
+        usize_to_i64(distinct_keys.len()),
+        ordered_values,
+    )
+}
+
+fn ordered_set_expected(rows: usize) -> (String, i64) {
+    let mut values = (1..=rows)
+        .filter(|g| g % 4 != 0)
+        .map(|g| usize_to_i32(g % 10))
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    let percentile = |numerator: usize, denominator: usize| {
+        let rank = (values.len() * numerator).div_ceil(denominator);
+        values[rank - 1]
+    };
+    let quartiles = [
+        Some(percentile(1, 4)),
+        Some(percentile(1, 2)),
+        Some(percentile(3, 4)),
+    ];
+    (format_pg_int_array(&quartiles), usize_to_i64(values.len()))
+}
 
 /// FILTER, DISTINCT, and aggregate-local ORDER BY semantics that must stay native.
 pub struct AggregateSemanticModifierDecline;
@@ -64,6 +112,18 @@ impl Workload for AggregateSemanticModifierDecline {
         AGGREGATE_SEMANTIC_MODIFIER_ROW_SCALES
     }
 
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let (filtered_sum, distinct_keys, ordered_sample) = aggregate_modifier_expected(rows);
+        Some(ResultOracle::one_row(
+            self.query_sql(),
+            vec![
+                Value::I64(filtered_sum),
+                Value::I64(distinct_keys),
+                Value::NullableI32Array(ordered_sample),
+            ],
+        ))
+    }
+
     fn cleanup_sql(&self) -> Vec<String> {
         vec!["DROP TABLE IF EXISTS bench_aggregate_semantic_modifier".to_owned()]
     }
@@ -104,6 +164,14 @@ impl Workload for AggregateOrderedSetDecline {
 
     fn row_scales(&self) -> &'static [usize] {
         AGGREGATE_ORDERED_SET_ROW_SCALES
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let (quartiles, nonnull_rows) = ordered_set_expected(rows);
+        Some(ResultOracle::one_row(
+            self.query_sql(),
+            vec![Value::Text(quartiles), Value::I64(nonnull_rows)],
+        ))
     }
 
     fn cleanup_sql(&self) -> Vec<String> {

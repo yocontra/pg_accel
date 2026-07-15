@@ -1,12 +1,6 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i32, usize_to_i64};
 
 const SETOP_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
-
-#[cfg(test)]
-pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i64, i32, i32)] = &[
-    (10_000, 5_002, 5_000, 2, 2_500, 4_999),
-    (100_000, 50_002, 50_000, 2, 25_000, 49_999),
-];
 
 /// Duplicate- and NULL-sensitive INTERSECT ALL lane without a GPU SetOp.
 pub struct SetOpDecline;
@@ -58,6 +52,28 @@ impl Workload for SetOpDecline {
          ) intersected \
          ORDER BY k NULLS FIRST"
             .to_owned()
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let groups = (rows / 2).max(2);
+        let overlap_start = groups / 2;
+        let overlap_end = groups - 1;
+        let nonnull_rows = usize_to_i64(overlap_end - overlap_start + 1) * 2;
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT count(*)::bigint, count(k)::bigint, \
+                        count(*) FILTER (WHERE k IS NULL)::bigint, min(k), max(k) \
+                 FROM ({}) AS result_rows",
+                self.query_sql()
+            ),
+            vec![
+                Value::I64(nonnull_rows + 2),
+                Value::I64(nonnull_rows),
+                Value::I64(2),
+                Value::I32(usize_to_i32(overlap_start)),
+                Value::I32(usize_to_i32(overlap_end)),
+            ],
+        ))
     }
 
     fn row_scales(&self) -> &'static [usize] {

@@ -19,6 +19,9 @@
   and ordering semantics, including `IN`/NULL-poisoned `NOT IN`, actual
   ordered-set `WITHIN GROUP`, `INTERSECT ALL`, recursive `UNION`, nullable
   duplicate merge keys, and total-order multi-key sorting.
+- Phase 9 ship validation now runs each workload's typed exact-result oracle,
+  requires captured dispatch-counter evidence for native declines, and records
+  the reachable `shape_sublink` reason for NULL-poisoned `NOT IN`.
 - Public setup, release packaging, and attribution docs now pin AdaptiveCpp to
   `yocontra/AdaptiveCpp` `fork-safe-metal`
   `7e79a6ca45f5a067f02a30207cb8da1b81eb5f29`, with the fork-pinned install

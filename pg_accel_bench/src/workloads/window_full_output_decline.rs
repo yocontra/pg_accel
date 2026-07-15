@@ -1,4 +1,4 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i64};
 
 const WINDOW_FULL_OUTPUT_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
 
@@ -46,6 +46,45 @@ impl Workload for WindowFullOutputDecline {
                 ) AS running_sum \
          FROM bench_window_full_output"
             .to_owned()
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let mut partitions = vec![Vec::new(); 256];
+        let rows_i64 = usize_to_i64(rows);
+        let modulus = rows_i64.max(1);
+        for id in 1..=rows_i64 {
+            let partition_key = id.rem_euclid(256) as usize;
+            let order_key = (id * 104_729).rem_euclid(modulus);
+            let value = (id * 17).rem_euclid(10_007);
+            partitions[partition_key].push((order_key, id, value));
+        }
+
+        let mut row_number_sum = 0_i64;
+        let mut running_sum_total = 0_i64;
+        for partition in &mut partitions {
+            partition.sort_unstable_by_key(|&(order_key, id, _)| (order_key, id));
+            let mut running_sum = 0_i64;
+            for (index, &(_, _, value)) in partition.iter().enumerate() {
+                row_number_sum += usize_to_i64(index) + 1;
+                running_sum += value;
+                running_sum_total += running_sum;
+            }
+        }
+
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT count(*)::bigint, count(DISTINCT id)::bigint, \
+                        sum(partition_row_number)::bigint, sum(running_sum)::bigint \
+                 FROM ({}) AS result_rows",
+                self.query_sql()
+            ),
+            vec![
+                Value::I64(rows_i64),
+                Value::I64(rows_i64),
+                Value::I64(row_number_sum),
+                Value::I64(running_sum_total),
+            ],
+        ))
     }
 
     fn row_scales(&self) -> &'static [usize] {

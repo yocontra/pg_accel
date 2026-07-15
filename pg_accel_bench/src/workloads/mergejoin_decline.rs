@@ -1,12 +1,6 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i32};
 
 const MERGEJOIN_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
-
-#[cfg(test)]
-pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i32, i32)] = &[
-    (10_000, 17_000, 17_000, 0, 4_999),
-    (100_000, 170_000, 170_000, 0, 49_999),
-];
 
 /// Ordered duplicate- and NULL-sensitive equi-join without a GPU merge join.
 pub struct MergeJoinDecline;
@@ -55,6 +49,25 @@ impl Workload for MergeJoinDecline {
          FROM bench_mergejoin_l l \
          JOIN bench_mergejoin_r r ON l.k = r.k"
             .to_owned()
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let keys = rows / 2;
+        let joined_rows = (0..keys)
+            .map(|key| {
+                let multiplicity = if key % 5 == 4 { 1_i64 } else { 2_i64 };
+                multiplicity * multiplicity
+            })
+            .sum();
+        Some(ResultOracle::one_row(
+            self.query_sql(),
+            vec![
+                Value::I64(joined_rows),
+                Value::I64(joined_rows),
+                Value::I32(0),
+                Value::I32(usize_to_i32(keys.saturating_sub(1))),
+            ],
+        ))
     }
 
     fn pre_query_sql(&self) -> Vec<String> {

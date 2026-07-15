@@ -4447,6 +4447,23 @@ impl BenchReport {
                         }
                     }
                     crate::workloads::BenchmarkLaneExpectation::NativeDecline { reason } => {
+                        if !w.dispatch_counter_captured {
+                            failures.push(BenchmarkShipGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: BenchmarkShipGateFailureKind::NativeDeclineDispatchCounterUnavailable,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+                                detail: format!(
+                                    "native-decline lane `{}` did not capture the GPU dispatch \
+                                     counter, so a zero kernel delta cannot prove absence of GPU \
+                                     work (counter_error={})",
+                                    entry.lane,
+                                    w.dispatch_counter_error.as_deref().unwrap_or("-")
+                                ),
+                            });
+                            continue;
+                        }
                         if w.plan_selected
                             || w.gpu_kernel_dispatched
                             || w.gpu_kernel_execution_delta > 0
@@ -4667,6 +4684,9 @@ pub enum BenchmarkShipGateFailureKind {
     ExpectedWinnerMissingCacheEvidence,
     /// A benchmark matrix cell declared as native-decline dispatched GPU work.
     NativeDeclineUnexpectedDispatch,
+    /// A native-decline matrix cell did not capture the dispatch counter, so
+    /// its zero dispatch delta is not admissible evidence.
+    NativeDeclineDispatchCounterUnavailable,
     /// A native-decline matrix cell did not prove its expected planner reason.
     NativeDeclineReasonMissing,
 }
@@ -4687,6 +4707,9 @@ impl BenchmarkShipGateFailureKind {
             }
             Self::ExpectedWinnerMissingCacheEvidence => "expected_winner_missing_cache_evidence",
             Self::NativeDeclineUnexpectedDispatch => "native_decline_unexpected_dispatch",
+            Self::NativeDeclineDispatchCounterUnavailable => {
+                "native_decline_dispatch_counter_unavailable"
+            }
             Self::NativeDeclineReasonMissing => "native_decline_reason_missing",
         }
     }
@@ -5305,6 +5328,7 @@ mod tests {
         result.plan_selected = false;
         result.gpu_kernel_dispatched = false;
         result.function_srf_kernel_dispatched = false;
+        result.dispatch_counter_captured = true;
         result.plan_snippet = Some(accel_plan.to_owned());
         result.baseline_plan_snippet = Some(baseline_plan.to_owned());
         result
@@ -6556,6 +6580,37 @@ mod tests {
                         "{name} at {rows}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_phase9_native_declines_require_dispatch_counter_capture() {
+        for contract in crate::workloads::PHASE9_OPERATOR_DECLINES {
+            let name = contract.workload;
+            let workload = crate::workloads::find_workload(name)
+                .unwrap_or_else(|| panic!("workload for {name}"));
+            for &rows in workload.row_scales() {
+                let mut result = mark_no_dispatch(
+                    mock_workload_result(name, rows, 10.0, 10.0),
+                    "PostgreSQL native plan",
+                    "PostgreSQL native plan",
+                );
+                result.dispatch_counter_captured = false;
+                result.dispatch_counter_error = Some("counter query unavailable".to_owned());
+                result.native_decline_evidence = Some(NativeDeclineEvidence {
+                    reason: contract.reason.to_owned(),
+                    source: DeclineReasonSource::PlannerReported,
+                });
+
+                let failures = mock_report(vec![result]).evaluate_benchmark_ship_gate();
+                assert_eq!(failures.len(), 1, "{name} at {rows}");
+                assert_eq!(
+                    failures[0].kind,
+                    BenchmarkShipGateFailureKind::NativeDeclineDispatchCounterUnavailable,
+                    "{name} at {rows}"
+                );
+                assert!(failures[0].detail.contains("counter query unavailable"));
             }
         }
     }

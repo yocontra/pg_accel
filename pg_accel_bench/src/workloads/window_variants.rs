@@ -1,4 +1,4 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i64};
 
 /// Parametric window function benchmark.
 pub struct WindowVariant {
@@ -9,37 +9,32 @@ pub struct WindowVariant {
     pub value_expr: &'static str,
 }
 
-#[cfg(test)]
-pub(super) const ROW_NUMBER_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] = &[
-    (10_000, 10_000, 505_000),
-    (100_000, 10_000, 505_000),
-    (1_000_000, 10_000, 505_000),
-    (10_000_000, 10_000, 505_000),
-];
+fn dense_rank_expected(rows: usize) -> (i64, i64) {
+    let peer_groups_per_partition = usize_to_i64((rows / 200).min(100));
+    let rows_per_peer_group = 2_i64;
+    let partitions = 100_i64;
+    let count = partitions * rows_per_peer_group * peer_groups_per_partition;
+    let rank_sum = partitions
+        * rows_per_peer_group
+        * peer_groups_per_partition
+        * (peer_groups_per_partition + 1)
+        / 2;
+    (count, rank_sum)
+}
 
-#[cfg(test)]
-pub(super) const RANK_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] = &[
-    (10_000, 1_000, 496_000),
-    (100_000, 1_000, 496_000),
-    (1_000_000, 1_000, 496_000),
-    (10_000_000, 1_000, 496_000),
-];
-
-#[cfg(test)]
-pub(super) const DENSE_RANK_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] = &[
-    (10_000, 10_000, 255_000),
-    (100_000, 20_000, 1_010_000),
-    (1_000_000, 20_000, 1_010_000),
-    (10_000_000, 20_000, 1_010_000),
-];
-
-#[cfg(test)]
-pub(super) const RUNNING_SUM_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i64)] = &[
-    (10_000, 10_000, 10_942_500, 2_500),
-    (100_000, 100_000, 1_093_800_000, 25_000),
-    (1_000_000, 1_000_000, 109_375_500_000, 250_000),
-    (10_000_000, 10_000_000, 10_937_505_000_000, 2_500_000),
-];
+fn running_sum_expected(rows: usize) -> (i64, i64, i64) {
+    let rows = usize_to_i64(rows);
+    let partition_rows = rows / 4;
+    let nullable_partition_nonnull_rows = rows / 8;
+    let three_full_partitions = 3 * partition_rows * (partition_rows + 1) / 2;
+    let nullable_partition =
+        nullable_partition_nonnull_rows * (nullable_partition_nonnull_rows + 1);
+    (
+        rows,
+        three_full_partitions + nullable_partition,
+        partition_rows,
+    )
+}
 
 impl Workload for WindowVariant {
     fn name(&self) -> &'static str {
@@ -72,6 +67,23 @@ impl Workload for WindowVariant {
 
     fn query_sql(&self) -> String {
         self.query.to_owned()
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let expected_row = match self.name {
+            "window_row_number" => vec![Value::I64(10_000), Value::I64(505_000)],
+            "window_rank" => vec![Value::I64(1_000), Value::I64(496_000)],
+            "window_dense_rank" => {
+                let (count, rank_sum) = dense_rank_expected(rows);
+                vec![Value::I64(count), Value::I64(rank_sum)]
+            }
+            "window_running_sum" => {
+                let (count, sum, max) = running_sum_expected(rows);
+                vec![Value::I64(count), Value::I64(sum), Value::I64(max)]
+            }
+            _ => return None,
+        };
+        Some(ResultOracle::one_row(self.query_sql(), expected_row))
     }
 
     fn cleanup_sql(&self) -> Vec<String> {

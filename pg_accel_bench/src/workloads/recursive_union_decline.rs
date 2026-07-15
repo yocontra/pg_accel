@@ -1,10 +1,6 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i32, usize_to_i64};
 
 const RECURSIVE_UNION_DECLINE_ROW_SCALES: &[usize] = &[10_000];
-
-#[cfg(test)]
-pub(super) const EXPECTED_NATIVE_RESULT: (usize, i64, i64, i64, i32, i32) =
-    (10_000, 10_001, 10_000, 1, 1, 10_000);
 
 /// Recursive CTE with duplicate seeds and a NULL state.
 pub struct RecursiveUnionDecline;
@@ -44,6 +40,26 @@ impl Workload for RecursiveUnionDecline {
          ) recursive_rows \
          ORDER BY n NULLS FIRST"
             .to_owned()
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let max_n = rows.max(1);
+        let max_n_i64 = usize_to_i64(max_n);
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT count(*)::bigint, count(n)::bigint, \
+                        count(*) FILTER (WHERE n IS NULL)::bigint, min(n), max(n) \
+                 FROM ({}) AS result_rows",
+                self.query_sql()
+            ),
+            vec![
+                Value::I64(max_n_i64 + 1),
+                Value::I64(max_n_i64),
+                Value::I64(1),
+                Value::I32(1),
+                Value::I32(usize_to_i32(max_n)),
+            ],
+        ))
     }
 
     fn row_scales(&self) -> &'static [usize] {

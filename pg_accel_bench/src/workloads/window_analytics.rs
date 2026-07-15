@@ -1,12 +1,4 @@
-use super::Workload;
-
-#[cfg(test)]
-pub(super) const EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64, i64)] = &[
-    (10_000, 10_000, 55_000, 27_472_500),
-    (100_000, 100_000, 5_050_000, 2_522_475_000),
-    (1_000_000, 1_000_000, 500_500_000, 249_999_750_000),
-    (10_000_000, 10_000_000, 50_005_000_000, 24_977_497_500_000),
-];
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i64};
 
 /// Tests GPU window function acceleration with ROW_NUMBER and running SUM.
 pub struct WindowAnalytics;
@@ -55,6 +47,24 @@ impl Workload for WindowAnalytics {
            FROM bench_win_events\
          ) t"
         .to_owned()
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        let rows_i64 = usize_to_i64(rows);
+        let rows_per_partition = rows_i64 / 1_000;
+        let triangular = rows_per_partition * (rows_per_partition + 1) / 2;
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT n::bigint, rn_sum::bigint, running_sum_total::bigint \
+                 FROM ({}) AS result(n, rn_sum, running_sum_total)",
+                self.query_sql()
+            ),
+            vec![
+                Value::I64(rows_i64),
+                Value::I64(1_000 * triangular),
+                Value::I64(499_500 * triangular),
+            ],
+        ))
     }
 
     fn cleanup_sql(&self) -> Vec<String> {

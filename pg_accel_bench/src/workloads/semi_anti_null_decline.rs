@@ -1,22 +1,58 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload};
 
 const SEMI_ANTI_NULL_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
 
-#[cfg(test)]
-pub(super) const SEMI_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] =
-    &[(10_000, 4_500, 4_500), (100_000, 45_000, 45_000)];
+#[derive(Clone, Copy)]
+enum MembershipSemantics {
+    Exists,
+    NotExists,
+    In,
+    NotIn,
+}
 
-#[cfg(test)]
-pub(super) const ANTI_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] =
-    &[(10_000, 5_500, 4_500), (100_000, 55_000, 45_000)];
+fn expected_membership_counts(rows: usize, semantics: MembershipSemantics) -> (i64, i64) {
+    let inner_rows = (rows / 4).max(32);
+    let mut inner_values = [false; 8];
+    let mut inner_has_null = false;
+    for g in 1..=inner_rows {
+        if g % 5 == 0 {
+            inner_has_null = true;
+        } else {
+            inner_values[g % 4] = true;
+        }
+    }
 
-#[cfg(test)]
-pub(super) const IN_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] =
-    &[(10_000, 4_500, 4_500), (100_000, 45_000, 45_000)];
+    let mut rows_kept = 0_i64;
+    let mut nonnull_keys_kept = 0_i64;
+    for g in 1..=rows {
+        let key = (g % 10 != 0).then_some(g % 8);
+        let matches = key.is_some_and(|key| inner_values[key]);
+        let keep = match semantics {
+            MembershipSemantics::Exists | MembershipSemantics::In => matches,
+            MembershipSemantics::NotExists => !matches,
+            MembershipSemantics::NotIn => key.is_some() && !matches && !inner_has_null,
+        };
+        if keep {
+            rows_kept += 1;
+            if key.is_some() {
+                nonnull_keys_kept += 1;
+            }
+        }
+    }
+    (rows_kept, nonnull_keys_kept)
+}
 
-#[cfg(test)]
-pub(super) const NOT_IN_EXPECTED_NATIVE_RESULTS: &[(usize, i64, i64)] =
-    &[(10_000, 0, 0), (100_000, 0, 0)];
+fn membership_oracle(
+    query_sql: String,
+    rows: usize,
+    semantics: MembershipSemantics,
+) -> ResultOracle {
+    let (rows_kept, nonnull_keys_kept) = expected_membership_counts(rows, semantics);
+    ResultOracle::one_row(
+        query_sql,
+        vec![Value::I64(rows_kept), Value::I64(nonnull_keys_kept)],
+    )
+}
 
 fn setup_semi_anti_tables(rows: usize) -> Vec<String> {
     let inner_rows = (rows / 4).max(32);
@@ -95,6 +131,14 @@ impl Workload for SemiJoinNullDecline {
         SEMI_ANTI_NULL_DECLINE_ROW_SCALES
     }
 
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        Some(membership_oracle(
+            self.query_sql(),
+            rows,
+            MembershipSemantics::Exists,
+        ))
+    }
+
     fn cleanup_sql(&self) -> Vec<String> {
         cleanup_semi_anti_tables()
     }
@@ -135,6 +179,14 @@ impl Workload for AntiJoinNullDecline {
         SEMI_ANTI_NULL_DECLINE_ROW_SCALES
     }
 
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        Some(membership_oracle(
+            self.query_sql(),
+            rows,
+            MembershipSemantics::NotExists,
+        ))
+    }
+
     fn cleanup_sql(&self) -> Vec<String> {
         cleanup_semi_anti_tables()
     }
@@ -172,6 +224,14 @@ impl Workload for InJoinNullDecline {
         SEMI_ANTI_NULL_DECLINE_ROW_SCALES
     }
 
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        Some(membership_oracle(
+            self.query_sql(),
+            rows,
+            MembershipSemantics::In,
+        ))
+    }
+
     fn cleanup_sql(&self) -> Vec<String> {
         cleanup_semi_anti_tables()
     }
@@ -186,7 +246,7 @@ impl Workload for NotInJoinNullDecline {
     }
 
     fn description(&self) -> &'static str {
-        "NULL-poisoned NOT IN over duplicate int4 keys - native planner decline (`shape_unsupported_predicate`) until GPU membership implements SQL three-valued logic"
+        "NULL-poisoned NOT IN over duplicate int4 keys - native planner decline (`shape_sublink`) until GPU membership implements SQL three-valued logic"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -207,6 +267,14 @@ impl Workload for NotInJoinNullDecline {
 
     fn row_scales(&self) -> &'static [usize] {
         SEMI_ANTI_NULL_DECLINE_ROW_SCALES
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        Some(membership_oracle(
+            self.query_sql(),
+            rows,
+            MembershipSemantics::NotIn,
+        ))
     }
 
     fn cleanup_sql(&self) -> Vec<String> {

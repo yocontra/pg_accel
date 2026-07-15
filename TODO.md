@@ -2824,10 +2824,10 @@ window work.
 - Progress (2026-07-15): the resident-v2 release matrix now covers `EXISTS`,
   `IN`, `NOT EXISTS`, and NULL-poisoned `NOT IN` with deterministic duplicate
   and NULL fixtures. The first three lanes decline with
-  `no_gpu_resident_pipeline`; `NOT IN` declines at the unsupported predicate
-  gate with `shape_unsupported_predicate`. Every cell is native-decline-only
-  and requires the exact result digest, no CustomScan, and a zero GPU-kernel
-  counter delta.
+  `no_gpu_resident_pipeline`; `NOT IN` reaches the sublink shape gate and
+  declines with `shape_sublink`. Every cell is native-decline-only and
+  requires its typed exact result oracle, no CustomScan, and a captured zero
+  GPU-kernel counter delta.
 
 ### NestedLoop inequality pure-GPU follow-up
 
