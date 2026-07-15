@@ -27,6 +27,7 @@ mod runner;
 mod stats;
 mod workloads;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -270,6 +271,21 @@ enum Command {
         /// PostgreSQL connection string.
         #[arg(long, default_value = DEFAULT_CONNECTION)]
         connection: String,
+    },
+
+    /// Run the exhaustive Phase 6 spatial, H3, and raster domain gate.
+    ///
+    /// Every registered release-domain workload is checked against its native
+    /// extension oracle with plan, dispatch-counter, and correctness artifacts.
+    Phase6Gate {
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+
+        /// Directory for the aggregate Phase 6 evidence bundle. If omitted, a
+        /// fresh `benchmarks/artifacts/phase6-gate-<timestamp>` directory is used.
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
     },
 
     /// Run the Phase 9 operator-breadth release gate at the canonical 10K scale.
@@ -570,6 +586,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rows,
         } => cmd_validate(workload.as_deref(), category.as_deref(), rows),
         Command::ExplainAudit { connection } => cmd_explain_audit(&connection),
+        Command::Phase6Gate {
+            connection,
+            artifacts_dir,
+        } => cmd_phase6_gate(&connection, artifacts_dir),
         Command::Phase9Gate {
             connection,
             artifacts_dir,
@@ -627,6 +647,203 @@ fn cmd_explain_audit(connection: &str) -> Result<(), Box<dyn std::error::Error>>
     } else {
         Err("explain-audit: at least one RequiredToday row failed".into())
     }
+}
+
+fn phase6_gate_workloads() -> Result<Vec<Box<dyn workloads::Workload>>, Box<dyn std::error::Error>>
+{
+    workloads::PHASE6_DOMAIN_CONTRACTS
+        .iter()
+        .map(|contract| {
+            workloads::find_workload(contract.workload).ok_or_else(|| {
+                format!(
+                    "Phase 6 domain contract references missing workload `{}`",
+                    contract.workload
+                )
+                .into()
+            })
+        })
+        .collect()
+}
+
+fn enforce_phase6_matrix_complete(report: &BenchReport) -> Result<(), Box<dyn std::error::Error>> {
+    let expected = workloads::PHASE6_DOMAIN_CONTRACTS
+        .iter()
+        .flat_map(|contract| {
+            contract
+                .verification_rows
+                .iter()
+                .map(move |rows| (contract.workload, *rows))
+        })
+        .collect::<BTreeSet<_>>();
+    let observed = report
+        .workloads
+        .iter()
+        .map(|result| (result.name.as_str(), result.rows))
+        .collect::<Vec<_>>();
+    let mut gaps = Vec::new();
+
+    for (workload, rows) in &expected {
+        let matches = observed
+            .iter()
+            .filter(|cell| cell.0 == *workload && cell.1 == *rows)
+            .count();
+        if matches != 1 {
+            gaps.push(format!(
+                "`{workload}` @ {rows}: expected one result, found {matches}"
+            ));
+        }
+    }
+    for (workload, rows) in &observed {
+        if !expected.contains(&(*workload, *rows)) {
+            gaps.push(format!("unexpected result `{workload}` @ {rows}"));
+        }
+    }
+    for crash in &report.crashes {
+        gaps.push(format!(
+            "{} @ {} crashed: {}",
+            crash.workload, crash.rows, crash.error
+        ));
+    }
+
+    if gaps.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Phase 6 domain matrix is incomplete:\n{}", gaps.join("\n")).into())
+    }
+}
+
+fn enforce_phase6_evidence(report: &BenchReport) -> Result<(), Box<dyn std::error::Error>> {
+    let mut failures = Vec::new();
+    for result in &report.workloads {
+        let Some(contract) = workloads::PHASE6_DOMAIN_CONTRACTS.iter().find(|contract| {
+            contract.workload == result.name && contract.verification_rows.contains(&result.rows)
+        }) else {
+            failures.push(format!(
+                "{} @ {} has no typed Phase 6 contract",
+                result.name, result.rows
+            ));
+            continue;
+        };
+
+        if result.correctness_diff_artifact.is_none() {
+            failures.push(format!(
+                "{} @ {} has no native-oracle correctness artifact",
+                result.name, result.rows
+            ));
+        }
+        if result.plan_snippet.is_none() || result.baseline_plan_snippet.is_none() {
+            failures.push(format!(
+                "{} @ {} is missing accel or native plan evidence",
+                result.name, result.rows
+            ));
+        }
+        if !result.dispatch_counter_captured {
+            failures.push(format!(
+                "{} @ {} has no dispatch-counter evidence: {}",
+                result.name,
+                result.rows,
+                result
+                    .dispatch_counter_error
+                    .as_deref()
+                    .unwrap_or("unknown error")
+            ));
+        }
+        if result.pg_accel_stock_exec_delta != 0 {
+            failures.push(format!(
+                "{} @ {} used {} stock executor fallback(s)",
+                result.name, result.rows, result.pg_accel_stock_exec_delta
+            ));
+        }
+        let verified_native_decline = matches!(
+            result.native_decline_evidence.as_ref(),
+            Some(report::NativeDeclineEvidence {
+                source: report::DeclineReasonSource::PlannerReported,
+                ..
+            })
+        );
+        if !result.gpu_kernel_dispatched && !verified_native_decline {
+            failures.push(format!(
+                "{} @ {} stayed native without a planner-reported decline",
+                result.name, result.rows
+            ));
+        }
+
+        match contract.oracle {
+            workloads::Phase6DomainOracle::PostgisExactRecheck => {
+                if result.gpu_kernel_dispatched {
+                    let proves_spatial_descriptor = result
+                        .plan_snippet
+                        .as_deref()
+                        .is_some_and(|plan| plan.contains("GPU Descriptor Filter: spatial("));
+                    if !proves_spatial_descriptor {
+                        failures.push(format!(
+                            "{} @ {} dispatched without a spatial descriptor/recheck contract",
+                            result.name, result.rows
+                        ));
+                    }
+                }
+            }
+            workloads::Phase6DomainOracle::NativeH3FailClosed => {
+                if result.plan_selected
+                    || result.gpu_kernel_dispatched
+                    || result.gpu_kernel_execution_delta != 0
+                {
+                    failures.push(format!(
+                        "{} @ {} violated the fail-closed H3 topology lane",
+                        result.name, result.rows
+                    ));
+                }
+            }
+            workloads::Phase6DomainOracle::NativeH3
+            | workloads::Phase6DomainOracle::PostgisRaster => {}
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("Phase 6 evidence gate failed:\n{}", failures.join("\n")).into())
+    }
+}
+
+fn cmd_phase6_gate(
+    connection: &str,
+    artifacts_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workloads = phase6_gate_workloads()?;
+    let artifact_root = artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir("phase6-gate"));
+    let mut cells = Vec::new();
+    for (contract, workload) in workloads::PHASE6_DOMAIN_CONTRACTS.iter().zip(&workloads) {
+        for rows in contract.verification_rows {
+            cells.push(runner::WorkloadRunCell {
+                workload: workload.as_ref(),
+                rows: *rows,
+            });
+        }
+    }
+    let config = runner::BenchConfig {
+        iterations: 1,
+        warmup: 0,
+        seed: 42,
+        timing_mode: runner::TimingMode::RawWallClock,
+        cache_mode: runner::CacheMode::Both,
+        plans_capture_path: Some(artifact_root.join("plans.txt")),
+        guc_profile: None,
+        skip_guc_verify: false,
+        artifacts_dir: Some(artifact_root),
+    };
+
+    let report = runner::run_cells_with_config(connection, &cells, &config)?;
+    print_report(&report, &ReportFormat::Markdown)?;
+    enforce_phase6_matrix_complete(&report)?;
+    enforce_phase6_evidence(&report)?;
+    enforce_benchmark_ship_gate(&report)?;
+    enforce_h3_lane_gate(&report)?;
+    eprintln!(
+        "[phase6-gate] PASS: all {} domain cells produced native-oracle, plan, dispatch, and decline/recheck evidence",
+        cells.len()
+    );
+    Ok(())
 }
 
 const PHASE9_VERIFICATION_ROWS: usize = 10_000;
@@ -1274,6 +1491,25 @@ fn print_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase6_gate_registry_resolves_every_typed_cell() {
+        let gate_workloads = phase6_gate_workloads().expect("Phase 6 workloads should resolve");
+        assert_eq!(
+            gate_workloads.len(),
+            workloads::PHASE6_DOMAIN_CONTRACTS.len()
+        );
+        let cell_count = gate_workloads
+            .iter()
+            .zip(workloads::PHASE6_DOMAIN_CONTRACTS)
+            .map(|(workload, contract)| {
+                assert_eq!(workload.name(), contract.workload);
+                assert_eq!(workload.category(), contract.category.as_str());
+                contract.verification_rows.len()
+            })
+            .sum::<usize>();
+        assert_eq!(cell_count, 33);
+    }
 
     #[test]
     fn phase9_gate_registry_is_live_at_canonical_scale() {

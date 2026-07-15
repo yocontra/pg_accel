@@ -248,6 +248,229 @@ pub struct Phase9DeclineContract {
     pub reason: &'static str,
 }
 
+/// Independent oracle and execution policy for one Phase 6 domain lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase6DomainOracle {
+    /// Compare the accelerated result with PostGIS while preserving the exact
+    /// PostGIS recheck contract for any GPU-classified spatial row.
+    PostgisExactRecheck,
+    /// Compare with an h3-pg spelling that pg_accel does not intercept.
+    NativeH3,
+    /// Keep unsupported row-expanding/topology H3 operations PostgreSQL-native.
+    NativeH3FailClosed,
+    /// Compare raster output with PostGIS Raster while pg_accel is disabled.
+    PostgisRaster,
+}
+
+/// Canonical live verification cells for one registered Phase 6 workload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Phase6DomainContract {
+    pub workload: &'static str,
+    pub category: WorkloadCategory,
+    pub oracle: Phase6DomainOracle,
+    pub verification_rows: &'static [usize],
+}
+
+const PHASE6_SMOKE_ROWS: &[usize] = &[10_000];
+const PHASE6_H3_WINNER_ROWS: &[usize] = &[100_000];
+const PHASE6_RASTER_ROWS: &[usize] = &[100];
+
+/// The old spatial unsafe-row quarantine covered this interval. The executor
+/// now dispatches in bounded 65,536-row chunks, so these are positive live
+/// verification cells rather than planner exclusions.
+pub const PHASE6_SPATIAL_CRASH_BAND_ROWS: &[usize] = &[80_000, 100_000, 150_000];
+
+macro_rules! phase6_contract {
+    ($workload:literal, $category:expr, $oracle:expr, $rows:expr) => {
+        Phase6DomainContract {
+            workload: $workload,
+            category: $category,
+            oracle: $oracle,
+            verification_rows: $rows,
+        }
+    };
+}
+
+/// Exhaustive Phase 6 live matrix. Every workload registered in a release
+/// domain category appears exactly once; representative simple/cooperative
+/// point-in-ring lanes additionally span the complete historical crash band.
+pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
+    phase6_contract!(
+        "spatial_filter",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_complex_poly",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_selectivity",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_mega_1kv",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SPATIAL_CRASH_BAND_ROWS
+    ),
+    phase6_contract!(
+        "vsweep_low",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "vsweep_mid",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "vsweep_high",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "vsweep_pathological",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_concentric",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_star_1kv",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_multihole",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_zigzag",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_sel_1pct",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_sel_10pct",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SPATIAL_CRASH_BAND_ROWS
+    ),
+    phase6_contract!(
+        "spatial_sel_50pct",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "spatial_sel_90pct",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "h3_bulk",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        PHASE6_H3_WINNER_ROWS
+    ),
+    phase6_contract!(
+        "h3_cell_to_parent",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        PHASE6_H3_WINNER_ROWS
+    ),
+    phase6_contract!(
+        "h3_grid_distance",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3FailClosed,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "h3_resolution_sweep",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        PHASE6_H3_WINNER_ROWS
+    ),
+    phase6_contract!(
+        "h3_srf_grid_disk",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3FailClosed,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "h3_latlng_res15",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3,
+        PHASE6_H3_WINNER_ROWS
+    ),
+    phase6_contract!(
+        "h3_dist_near",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3FailClosed,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "h3_dist_far",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3FailClosed,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "h3_parent_deep",
+        WorkloadCategory::GpuH3,
+        Phase6DomainOracle::NativeH3FailClosed,
+        PHASE6_SMOKE_ROWS
+    ),
+    phase6_contract!(
+        "raster_ndvi",
+        WorkloadCategory::GpuRaster,
+        Phase6DomainOracle::PostgisRaster,
+        PHASE6_RASTER_ROWS
+    ),
+    phase6_contract!(
+        "raster_slope",
+        WorkloadCategory::GpuRaster,
+        Phase6DomainOracle::PostgisRaster,
+        PHASE6_RASTER_ROWS
+    ),
+    phase6_contract!(
+        "raster_reclass",
+        WorkloadCategory::GpuRaster,
+        Phase6DomainOracle::PostgisRaster,
+        PHASE6_RASTER_ROWS
+    ),
+    phase6_contract!(
+        "raster_algebra_deep",
+        WorkloadCategory::GpuRaster,
+        Phase6DomainOracle::PostgisRaster,
+        PHASE6_RASTER_ROWS
+    ),
+];
+
 /// Exhaustive Phase 9 native-decline disposition. A lane may leave this table
 /// only when it gains a differential-correct selected GPU workload.
 pub const PHASE9_OPERATOR_DECLINES: &[Phase9DeclineContract] = &[
@@ -1128,6 +1351,68 @@ mod tests {
     fn lookup_is_exact() {
         assert!(workload_metadata("h3_bulk").is_some());
         assert!(workload_metadata("H3_BULK").is_none());
+    }
+
+    #[test]
+    fn phase6_domain_registry_is_exhaustive_and_typed() {
+        let release_categories = [C::GpuSpatial, C::GpuH3, C::GpuRaster];
+        let expected = WORKLOAD_REGISTRY
+            .iter()
+            .filter(|entry| release_categories.contains(&entry.category))
+            .map(|entry| entry.name)
+            .collect::<BTreeSet<_>>();
+        let actual = PHASE6_DOMAIN_CONTRACTS
+            .iter()
+            .map(|contract| contract.workload)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), PHASE6_DOMAIN_CONTRACTS.len());
+
+        let runtime = super::super::all_workloads();
+        for contract in PHASE6_DOMAIN_CONTRACTS {
+            let metadata = workload_metadata(contract.workload).expect("Phase 6 metadata");
+            assert_eq!(
+                metadata.category, contract.category,
+                "{}",
+                contract.workload
+            );
+            assert!(
+                !contract.verification_rows.is_empty(),
+                "{}",
+                contract.workload
+            );
+            assert!(
+                contract
+                    .verification_rows
+                    .windows(2)
+                    .all(|rows| rows[0] < rows[1]),
+                "{} has duplicate or unordered verification rows",
+                contract.workload
+            );
+            let workload = runtime
+                .iter()
+                .find(|workload| workload.name() == contract.workload)
+                .unwrap_or_else(|| panic!("missing Phase 6 workload `{}`", contract.workload));
+            if matches!(
+                contract.oracle,
+                Phase6DomainOracle::NativeH3 | Phase6DomainOracle::NativeH3FailClosed
+            ) {
+                assert!(
+                    workload.baseline_query_sql().is_some(),
+                    "{} must name an independent h3-pg oracle",
+                    contract.workload
+                );
+            }
+        }
+
+        for workload in ["spatial_mega_1kv", "spatial_sel_10pct"] {
+            let crash_band = PHASE6_DOMAIN_CONTRACTS
+                .iter()
+                .find(|contract| contract.workload == workload)
+                .expect("spatial crash-band contract");
+            assert_eq!(crash_band.verification_rows, PHASE6_SPATIAL_CRASH_BAND_ROWS);
+        }
+        assert_eq!(PHASE6_SPATIAL_CRASH_BAND_ROWS, &[80_000, 100_000, 150_000]);
     }
 
     #[test]

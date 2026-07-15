@@ -142,8 +142,8 @@ pub use recursive_union_decline::RecursiveUnionDecline;
 #[cfg(test)]
 pub use registry::Phase9OperatorLane;
 pub use registry::{
-    H3LaneClass, PHASE9_OPERATOR_DECLINES, ResidentPinSpec, ThresholdEvidenceEligibility,
-    WorkloadCategory, workload_metadata,
+    H3LaneClass, PHASE6_DOMAIN_CONTRACTS, PHASE9_OPERATOR_DECLINES, Phase6DomainOracle,
+    ResidentPinSpec, ThresholdEvidenceEligibility, WorkloadCategory, workload_metadata,
 };
 pub use semi_anti_null_decline::{
     AntiJoinNullDecline, InJoinNullDecline, NotInJoinNullDecline, SemiJoinNullDecline,
@@ -934,8 +934,6 @@ const REDUCE_F64_BREAK_EVEN_ROWS: usize = 50_000;
 const REDUCE_I64_BREAK_EVEN_ROWS: usize = 75_000;
 const HASHJOIN_MIN_BUILD_ROWS: usize = 5_000;
 const HASHJOIN_MAX_BUILD_ROWS: usize = 99_999;
-const SPATIAL_QUARANTINE_MIN_ROWS: usize = 80_000;
-const SPATIAL_QUARANTINE_MAX_ROWS: usize = 150_000;
 const SPATIAL_MIN_VERTICES: usize = 100;
 const SPATIAL_BREAK_EVEN_VERTS_X_ROWS: u64 = 500_000_000;
 const SPATIAL_MAX_VERTS_X_ROWS: u64 = 50_000_000_000;
@@ -2463,12 +2461,6 @@ fn spatial_matrix_expectation(
         BenchmarkLaneExpectation::NativeDecline {
             reason: "spatial_vertices_below_break_even",
         }
-    } else if (SPATIAL_QUARANTINE_MIN_ROWS..=SPATIAL_QUARANTINE_MAX_ROWS).contains(&rows)
-        && vertices >= SPATIAL_MIN_VERTICES
-    {
-        BenchmarkLaneExpectation::NativeDecline {
-            reason: "spatial_quarantined_row_range",
-        }
     } else if work_product < SPATIAL_BREAK_EVEN_VERTS_X_ROWS {
         BenchmarkLaneExpectation::NativeDecline {
             reason: "spatial_work_below_break_even",
@@ -3627,11 +3619,11 @@ mod tests {
             Some("spatial_work_below_break_even")
         );
 
-        let quarantined_range = benchmark_threshold_matrix_entry("vsweep_mid", 100_000)
+        let former_crash_band = benchmark_threshold_matrix_entry("vsweep_mid", 100_000)
             .expect("vsweep_mid threshold entry");
         assert_eq!(
-            quarantined_range.expectation.decline_reason(),
-            Some("spatial_quarantined_row_range")
+            former_crash_band.expectation.decline_reason(),
+            Some("spatial_work_below_break_even")
         );
 
         let unregistered = benchmark_threshold_matrix_entry("vsweep_mid", 1_000_000)
