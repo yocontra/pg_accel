@@ -2185,6 +2185,69 @@ class ImmutableBaselineTests(unittest.TestCase):
                     self.audit(REPO_ROOT / "coverage/scope.json", baseline_path)
 
 
+class RustCompilerMappingTests(unittest.TestCase):
+    def test_dep_info_classifies_zero_region_and_test_only_sources(self) -> None:
+        required = {"src/live.rs", "src/constants.rs", "src/test_stub.rs"}
+        production = {"src/live.rs", "src/constants.rs"}
+        configuration = required
+        classified, pending = coverage_tools.classify_rust_unmapped(
+            required, {"src/live.rs"}, production, configuration
+        )
+        self.assertEqual(pending, [])
+        self.assertEqual(
+            classified,
+            [
+                {
+                    "path": "src/constants.rs",
+                    "reason": "compiler_dependency_without_llvm_coverage_region",
+                },
+                {
+                    "path": "src/test_stub.rs",
+                    "reason": "non_production_configuration_only",
+                },
+            ],
+        )
+
+    def test_hidden_executable_source_without_compiler_evidence_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            hidden = pathlib.Path(directory) / "hidden.rs"
+            hidden.write_text("pub fn hidden() -> bool { true }\n", encoding="utf-8")
+            self.assertTrue(coverage_tools.has_executable_mapping_candidate(hidden))
+            with self.assertRaisesRegex(
+                coverage_tools.CoverageError,
+                "absent from compiler dependency evidence",
+            ):
+                coverage_tools.classify_rust_unmapped(
+                    {"src/hidden.rs"}, set(), set(), set()
+                )
+
+    def test_compiler_observed_mapping_cannot_disappear_from_retained_objects(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            coverage_tools.CoverageError, "compiler-observed source mappings"
+        ):
+            coverage_tools.require_retained_compiler_mappings(
+                {"src/live.rs"}, set()
+            )
+
+    def test_dep_info_inventory_is_compiler_derived(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "src/live.rs"
+            source.parent.mkdir()
+            source.write_text("pub fn live() {}\n", encoding="utf-8")
+            dep_info = root / "target/debug/live.d"
+            dep_info.parent.mkdir(parents=True)
+            dep_info.write_text(
+                f"{root / 'target/debug/live'}: {source}\n", encoding="utf-8"
+            )
+            entries = coverage_tools.collect_rust_dep_info(
+                root / "target", root, {"src/live.rs"}
+            )
+            self.assertEqual(entries, [(dep_info.resolve(), ["src/live.rs"])])
+
+
 class ArtifactAndToolchainTests(unittest.TestCase):
     def test_initial_artifacts_are_schema_valid_and_red(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

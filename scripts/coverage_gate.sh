@@ -315,7 +315,7 @@ rust_coverage() (
         return 1
     fi
     record_stage rust clean 0
-    local tools llvm_cov llvm_profdata
+    local tools llvm_cov llvm_profdata rustc_native
     if ! tools="$(rust_llvm_tools)"; then
         mark_layer_error rust "$rust_minimum" toolchain \
             "matching Rust llvm-cov/llvm-profdata tools are unavailable" 1
@@ -323,8 +323,14 @@ rust_coverage() (
     fi
     llvm_cov="$(printf '%s\n' "$tools" | sed -n '1p')"
     llvm_profdata="$(printf '%s\n' "$tools" | sed -n '2p')"
+    rustc_native="$(rustc --print sysroot)/bin/rustc"
+    if [ ! -x "$rustc_native" ]; then
+        mark_layer_error rust "$rust_minimum" toolchain \
+            "native rustc executable is unavailable beneath the active sysroot" 1
+        return 1
+    fi
     if ! python3 scripts/coverage_tools.py validate-rust-toolchain \
-        --rustc "$(command -v rustc)" --llvm-cov "$llvm_cov" \
+        --rustc "$rustc_native" --llvm-cov "$llvm_cov" \
         --llvm-profdata "$llvm_profdata" \
         --output "$output_dir/toolchain.json"; then
         mark_layer_error rust "$rust_minimum" toolchain \
@@ -344,6 +350,7 @@ rust_coverage() (
         record_stage rust production_build 1 \
             "production pg${pg} build without pg_test failed"
     fi
+    local production_capture_status=0
     if copy_profiles "$build_dir" "$production_profile_dir" \
         > "$output_dir/copy-production-profiles.log" 2>&1 \
         && python3 scripts/coverage_tools.py capture-coverage-bundle \
@@ -358,11 +365,10 @@ rust_coverage() (
             --json-output "$output_dir/production-coverage.json" \
             --lcov-output "$output_dir/production-map.info" \
             > "$output_dir/production-map.log" 2>&1; then
-        record_stage rust production_mapping 0
+        :
     else
         execution_status=1
-        record_stage rust production_mapping 1 \
-            "compiler-derived production LCOV map was not generated"
+        production_capture_status=1
     fi
     if run_logged "$output_dir/production-test.log" env \
         CARGO_TARGET_DIR="$build_dir" RUST_TEST_THREADS="$test_threads" \
@@ -374,6 +380,18 @@ rust_coverage() (
         execution_status=1
         record_stage rust production_tests 1 \
             "workspace tests without pg_test failed"
+    fi
+    if [ "$production_capture_status" -eq 0 ] \
+        && python3 scripts/coverage_tools.py finalize-rust-production-map \
+            --repo-root "$repo_root" --scope "$scope_file" \
+            --candidate-root "$build_dir" \
+            --manifest "$output_dir/production-object-manifest.json" \
+            > "$output_dir/production-map-finalize.log" 2>&1; then
+        record_stage rust production_mapping 0
+    else
+        execution_status=1
+        record_stage rust production_mapping 1 \
+            "compiler-derived production LCOV map was not generated"
     fi
     if run_logged "$output_dir/supplemental-test.log" env \
         CARGO_TARGET_DIR="$build_dir" RUST_TEST_THREADS="$test_threads" \
@@ -428,6 +446,7 @@ rust_coverage() (
         --layer rust --format lcov \
         --input "$output_dir/raw-lcov.info" \
         --production-map "$output_dir/production-map.info" \
+        --production-manifest "$output_dir/production-object-manifest.json" \
         --scope "$scope_file" --repo-root "$repo_root" \
         --threshold "$rust_minimum" \
         --execution-status "$execution_status" \

@@ -13,6 +13,7 @@ import json
 import math
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -394,6 +395,7 @@ def initial_mapping() -> dict[str, Any]:
         "owned_files": 0,
         "required_files": 0,
         "mapped_files": 0,
+        "non_executable_files": 0,
         "missing_required_files": [],
         "unexpected_owned_report_files": [],
     }
@@ -859,6 +861,7 @@ def summarize_layer(args: argparse.Namespace) -> int:
     included, required = source_inventory(repo_root, layer_scope)
 
     production_reports: dict[str, dict[int, int]] | None = None
+    non_executable: set[str] = set()
     if args.format == "lcov":
         reports: dict[str, Any] = lcov_files(pathlib.Path(args.input), repo_root)
     else:
@@ -875,10 +878,21 @@ def summarize_layer(args: argparse.Namespace) -> int:
         ):
             raise CoverageError("Rust production mapping policy drifted")
         production_reports = lcov_files(pathlib.Path(production_map), repo_root)
+        production_manifest = getattr(args, "production_manifest", None)
+        if production_manifest:
+            manifest = read_json(pathlib.Path(production_manifest))
+            non_executable = validate_rust_non_executable_manifest(
+                manifest,
+                repo_root,
+                required,
+                included.intersection(production_reports),
+            )
 
     declared_reports = production_reports if production_reports is not None else reports
     mapped = sorted(included.intersection(declared_reports))
-    missing_required = sorted(required.difference(declared_reports))
+    missing_required = sorted(
+        required.difference(declared_reports).difference(non_executable)
+    )
     unexpected_owned = sorted(set(declared_reports).difference(included))
     count = 0
     covered = 0
@@ -961,6 +975,7 @@ def summarize_layer(args: argparse.Namespace) -> int:
                 "owned_files": len(included),
                 "required_files": len(required),
                 "mapped_files": len(mapped),
+                "non_executable_files": len(non_executable),
                 "missing_required_files": missing_required,
                 "unexpected_owned_report_files": unexpected_owned,
             },
@@ -2367,10 +2382,14 @@ def validate_layer_summary(summary: Any, expected: str) -> list[str]:
             owned = mapping.get("owned_files")
             required = mapping.get("required_files")
             mapped = mapping.get("mapped_files")
+            non_executable = mapping.get("non_executable_files", 0)
             missing = mapping.get("missing_required_files")
             unexpected = mapping.get("unexpected_owned_report_files")
             if (
-                not all(_is_int(v) and v >= 0 for v in (owned, required, mapped))
+                not all(
+                    _is_int(v) and v >= 0
+                    for v in (owned, required, mapped, non_executable)
+                )
                 or not isinstance(missing, list)
                 or not isinstance(unexpected, list)
             ):
@@ -2382,7 +2401,7 @@ def validate_layer_summary(summary: Any, expected: str) -> list[str]:
                 or len(missing) > required
                 or not all(isinstance(value, str) for value in missing)
                 or len(set(missing)) != len(missing)
-                or required - len(missing) > mapped
+                or required - len(missing) > mapped + non_executable
             ):
                 errors.append(f"{prefix} impossible mapping summary")
                 mapping_ok = False
@@ -2752,6 +2771,171 @@ def merge_llvm_profiles(
     )
 
 
+def rust_dep_info_sources(
+    path: pathlib.Path, repo_root: pathlib.Path, included: set[str]
+) -> list[str]:
+    """Return owned sources named by one compiler-emitted Cargo dep-info file."""
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        tokens = shlex.split(text.replace("\\\n", " "), posix=True)
+    except (OSError, ValueError) as exc:
+        raise CoverageError(f"cannot parse Rust dep-info {path}: {exc}") from exc
+    sources: set[str] = set()
+    for token in tokens:
+        relative = normalize_repo_path(repo_root, token.rstrip(":"))
+        if relative in included:
+            sources.add(relative)
+    return sorted(sources)
+
+
+def collect_rust_dep_info(
+    candidate_root: pathlib.Path, repo_root: pathlib.Path, included: set[str]
+) -> list[tuple[pathlib.Path, list[str]]]:
+    entries: list[tuple[pathlib.Path, list[str]]] = []
+    for path in sorted(candidate_root.rglob("*.d")):
+        if not path.is_file() or path.stat().st_size <= 0:
+            continue
+        sources = rust_dep_info_sources(path, repo_root, included)
+        if sources:
+            entries.append((path.resolve(), sources))
+    return entries
+
+
+def retain_rust_dep_info(
+    entries: list[tuple[pathlib.Path, list[str]]],
+    output_dir: pathlib.Path,
+    layer_dir: pathlib.Path,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    retained: list[dict[str, Any]] = []
+    dependencies: set[str] = set()
+    for index, (source, source_files) in enumerate(entries):
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", source.name)
+        destination = output_dir / f"{index:04d}-{safe_name}"
+        shutil.copy2(source, destination)
+        dependencies.update(source_files)
+        retained.append(
+            {
+                "path": destination.relative_to(layer_dir).as_posix(),
+                "sha256": sha256(destination),
+                "size": destination.stat().st_size,
+                "source_files": source_files,
+            }
+        )
+    return retained, dependencies
+
+
+def classify_rust_unmapped(
+    required: set[str],
+    mapped: set[str],
+    production_dependencies: set[str],
+    configuration_dependencies: set[str] | None,
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Classify zero-region or configuration-only Rust files from compiler evidence."""
+
+    non_executable: list[dict[str, str]] = []
+    pending: list[str] = []
+    for relative in sorted(required.difference(mapped)):
+        if relative in production_dependencies:
+            non_executable.append(
+                {
+                    "path": relative,
+                    "reason": "compiler_dependency_without_llvm_coverage_region",
+                }
+            )
+        elif configuration_dependencies is None:
+            pending.append(relative)
+        elif relative in configuration_dependencies:
+            non_executable.append(
+                {
+                    "path": relative,
+                    "reason": "non_production_configuration_only",
+                }
+            )
+        else:
+            raise CoverageError(
+                f"owned Rust source is absent from compiler dependency evidence: {relative}"
+            )
+    return non_executable, pending
+
+
+def require_retained_compiler_mappings(
+    candidate_mapped: set[str], retained_mapped: set[str]
+) -> None:
+    missing = sorted(candidate_mapped.difference(retained_mapped))
+    if missing:
+        raise CoverageError(
+            "retained objects omit compiler-observed source mappings: "
+            + ", ".join(missing)
+        )
+
+
+def validate_rust_non_executable_manifest(
+    manifest: dict[str, Any],
+    repo_root: pathlib.Path,
+    required: set[str],
+    mapped: set[str],
+) -> set[str]:
+    entries = manifest.get("non_executable_files")
+    if not isinstance(entries, list):
+        raise CoverageError("Rust non-executable source evidence is absent")
+    if manifest.get("pending_files") != []:
+        raise CoverageError("Rust compiler-derived source classification is incomplete")
+    classified: set[str] = set()
+    production_value = manifest.get("compiler_dependencies")
+    configuration_value = manifest.get("configuration_dependencies", production_value)
+    if (
+        not isinstance(production_value, list)
+        or production_value != sorted(set(production_value))
+        or not all(isinstance(value, str) for value in production_value)
+        or not isinstance(configuration_value, list)
+        or configuration_value != sorted(set(configuration_value))
+        or not all(isinstance(value, str) for value in configuration_value)
+    ):
+        raise CoverageError("Rust compiler dependency inventory is malformed")
+    production_dependencies = set(production_value)
+    configuration_dependencies = set(configuration_value)
+    allowed_reasons = {
+        "compiler_dependency_without_llvm_coverage_region",
+        "non_production_configuration_only",
+    }
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or entry.get("reason") not in allowed_reasons
+            or not isinstance(entry.get("sha256"), str)
+        ):
+            raise CoverageError("Rust non-executable source evidence is malformed")
+        relative = entry["path"]
+        if relative in classified or relative not in required or relative in mapped:
+            raise CoverageError("Rust non-executable source evidence is inconsistent")
+        source = repo_root / relative
+        if not source.is_file() or sha256(source) != entry["sha256"]:
+            raise CoverageError(
+                f"Rust non-executable source hash drifted: {relative}"
+            )
+        if entry["reason"] == "compiler_dependency_without_llvm_coverage_region":
+            if relative not in production_dependencies:
+                raise CoverageError(
+                    f"Rust zero-region classification lacks production dep-info: {relative}"
+                )
+        elif (
+            relative in production_dependencies
+            or relative not in configuration_dependencies
+        ):
+            raise CoverageError(
+                f"Rust configuration-only classification lacks compiler evidence: {relative}"
+            )
+        classified.add(relative)
+    if required.difference(mapped).difference(classified):
+        raise CoverageError("Rust compiler evidence does not account for owned sources")
+    return classified
+
+
 def capture_coverage_bundle(args: argparse.Namespace) -> int:
     repo_root = pathlib.Path(args.repo_root).resolve()
     scope = read_json(pathlib.Path(args.scope))["layers"][args.layer]
@@ -2772,6 +2956,7 @@ def capture_coverage_bundle(args: argparse.Namespace) -> int:
 
     primary_candidates = [pathlib.Path(value).resolve() for value in args.object]
     fallback_candidates: list[pathlib.Path] = []
+    candidate_root: pathlib.Path | None = None
     if args.candidate_root:
         candidate_root = pathlib.Path(args.candidate_root).resolve()
         for path in candidate_root.rglob("*"):
@@ -2870,7 +3055,41 @@ def capture_coverage_bundle(args: argparse.Namespace) -> int:
     mapped_files = sorted(
         included.intersection(llvm_json_files(json_document, repo_root))
     )
-    if required.difference(mapped_files):
+    candidate_mapped = {path for _, _, mappings in selected for path in mappings}
+    require_retained_compiler_mappings(candidate_mapped, set(mapped_files))
+
+    dependency_entries: list[dict[str, Any]] = []
+    compiler_dependencies: set[str] = set()
+    non_executable_files: list[dict[str, str]] = []
+    pending_files: list[str] = []
+    if args.layer == "rust":
+        if candidate_root is None:
+            if required.difference(mapped_files):
+                raise CoverageError(
+                    "Rust source mappings are incomplete without compiler dep-info"
+                )
+        else:
+            dep_info = collect_rust_dep_info(candidate_root, repo_root, included)
+            dep_dir_name = (
+                "production-dep-info" if args.role == "production" else "dep-info"
+            )
+            dependency_entries, compiler_dependencies = retain_rust_dep_info(
+                dep_info, layer_dir / dep_dir_name, layer_dir
+            )
+            non_executable_files, pending_files = classify_rust_unmapped(
+                required,
+                set(mapped_files),
+                compiler_dependencies,
+                None if args.role == "production" else compiler_dependencies,
+            )
+            non_executable_files = [
+                {
+                    **entry,
+                    "sha256": sha256(repo_root / entry["path"]),
+                }
+                for entry in non_executable_files
+            ]
+    elif required.difference(mapped_files):
         raise CoverageError("retained objects omit required source mappings")
     pathlib.Path(args.json_output).write_text(json_export.stdout, encoding="utf-8")
     pathlib.Path(args.lcov_output).write_text(lcov_export.stdout, encoding="utf-8")
@@ -2929,6 +3148,10 @@ def capture_coverage_bundle(args: argparse.Namespace) -> int:
             "profiles": profile_entries,
             "objects": object_entries,
             "mapped_files": mapped_files,
+            "compiler_dependencies": sorted(compiler_dependencies),
+            "dependency_files": dependency_entries,
+            "non_executable_files": non_executable_files,
+            "pending_files": pending_files,
             "profdata": {
                 "path": profdata_path.relative_to(layer_dir).as_posix(),
                 "sha256": sha256(profdata_path),
@@ -2943,6 +3166,55 @@ def capture_coverage_bundle(args: argparse.Namespace) -> int:
             },
         },
     )
+    return 0
+
+
+def finalize_rust_production_map(args: argparse.Namespace) -> int:
+    repo_root = pathlib.Path(args.repo_root).resolve()
+    scope = read_json(pathlib.Path(args.scope))["layers"]["rust"]
+    included, required = source_inventory(repo_root, scope)
+    manifest_path = pathlib.Path(args.manifest).resolve()
+    manifest = read_json(manifest_path)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("kind") != "coverage-object-bundle"
+        or manifest.get("layer_id") != "rust"
+        or manifest.get("role") != "production"
+    ):
+        raise CoverageError("Rust production object manifest is invalid")
+    mapped_value = manifest.get("mapped_files")
+    production_value = manifest.get("compiler_dependencies")
+    if (
+        not isinstance(mapped_value, list)
+        or not all(isinstance(value, str) for value in mapped_value)
+        or not isinstance(production_value, list)
+        or not all(isinstance(value, str) for value in production_value)
+    ):
+        raise CoverageError("Rust production compiler evidence is malformed")
+    mapped = set(mapped_value)
+    production_dependencies = set(production_value)
+    candidate_root = pathlib.Path(args.candidate_root).resolve()
+    dep_info = collect_rust_dep_info(candidate_root, repo_root, included)
+    dependency_entries, configuration_dependencies = retain_rust_dep_info(
+        dep_info, manifest_path.parent / "configuration-dep-info", manifest_path.parent
+    )
+    non_executable, pending = classify_rust_unmapped(
+        required,
+        mapped,
+        production_dependencies,
+        configuration_dependencies,
+    )
+    if pending:
+        raise CoverageError("Rust compiler-derived source classification is incomplete")
+    manifest["configuration_dependencies"] = sorted(configuration_dependencies)
+    manifest["configuration_dependency_files"] = dependency_entries
+    manifest["non_executable_files"] = [
+        {**entry, "sha256": sha256(repo_root / entry["path"])}
+        for entry in non_executable
+    ]
+    manifest["pending_files"] = []
+    validate_rust_non_executable_manifest(manifest, repo_root, required, mapped)
+    write_json(manifest_path, manifest)
     return 0
 
 
@@ -3280,6 +3552,7 @@ def recompute_raw_line_layer(
     production_regenerated: dict[str, pathlib.Path] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     errors: list[str] = []
+    non_executable: set[str] = set()
     layer_scope = scope["layers"][layer]
     included, scope_required = source_inventory(repo_root, layer_scope)
     if layer == "rust":
@@ -3329,7 +3602,13 @@ def recompute_raw_line_layer(
             ):
                 errors.append(f"rust: raw LCOV and JSON totals differ for {relative}")
         mapped = included.intersection(declared)
-        missing = required.difference(declared)
+        production_manifest = read_json(
+            artifact_dir / "rust/production-object-manifest.json"
+        )
+        non_executable = validate_rust_non_executable_manifest(
+            production_manifest, repo_root, required, mapped
+        )
+        missing = required.difference(declared).difference(non_executable)
         total = 0
         covered = 0
         for relative in mapped:
@@ -3417,6 +3696,7 @@ def recompute_raw_line_layer(
             "owned_files": len(included),
             "required_files": len(required),
             "mapped_files": len(mapped),
+            "non_executable_files": len(non_executable),
             "missing_required_files": sorted(missing),
             "unexpected_owned_report_files": unexpected,
         },
@@ -3440,6 +3720,7 @@ def compare_summary_to_raw(summary: Any, layer: str, raw: dict[str, Any]) -> lis
         "owned_files",
         "required_files",
         "mapped_files",
+        "non_executable_files",
         "missing_required_files",
         "unexpected_owned_report_files",
     ):
@@ -4649,10 +4930,18 @@ def parser() -> argparse.ArgumentParser:
     bundle.add_argument("--summary-output")
     bundle.set_defaults(func=capture_coverage_bundle)
 
+    finalize_rust = commands.add_parser("finalize-rust-production-map")
+    finalize_rust.add_argument("--repo-root", default=".")
+    finalize_rust.add_argument("--scope", required=True)
+    finalize_rust.add_argument("--candidate-root", required=True)
+    finalize_rust.add_argument("--manifest", required=True)
+    finalize_rust.set_defaults(func=finalize_rust_production_map)
+
     summarize = commands.add_parser("summarize")
     summarize.add_argument("--layer", choices=LINE_LAYERS, required=True)
     summarize.add_argument("--input", required=True)
     summarize.add_argument("--production-map")
+    summarize.add_argument("--production-manifest")
     summarize.add_argument("--format", choices=("json", "lcov"), required=True)
     summarize.add_argument("--scope", required=True)
     summarize.add_argument("--repo-root", default=".")
