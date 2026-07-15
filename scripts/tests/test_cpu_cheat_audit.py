@@ -318,6 +318,109 @@ class CallGraphTests(unittest.TestCase):
         )
         finding = finding_for(result, "pgaccel_queue_context_host")
         self.assertIn("host_output_write", finding.classifications)
+
+    def test_const_helper_argument_is_validation_not_output_contribution(self) -> None:
+        result = audit_fixture(
+            r"""
+            bool validate_value(const int* value) { return *value >= 0; }
+            extern "C" pgaccel_status pgaccel_const_validation(
+                int* out, size_t count) {
+              if (!validate_value(out)) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for<Kernel>(sycl::range<1>(count),
+                  [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+
+    def test_cast_away_const_helper_remains_output_contributing(self) -> None:
+        result = audit_fixture(
+            r"""
+            pgaccel_status mutate_value(const int* value) {
+              *const_cast<int*>(value) = 42;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_const_mutation(
+                int* out, int* decoy) {
+              sycl::queue q;
+              q.single_task<Kernel>([=]() { *decoy = 1; });
+              pgaccel_status st = mutate_value(out);
+              return st;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+        self.assertIn("output helper mutate_value", entry.detail)
+
+    def test_else_output_assignment_is_not_a_shadow_declaration(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_else_assignment(
+                bool first, int* out) {
+              if (first) *out = 0; else *out = 1;
+              return PGACCEL_ERROR;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertNotIn("output_identity_shadowing", entry.classifications)
+
+    def test_symbolic_validation_detail_can_accompany_device_output(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_validation_detail(
+                int* out, int* detail, size_t count) {
+              if (detail == nullptr) return PGACCEL_ERROR;
+              *detail = PGACCEL_TEST_DETAIL_NONE;
+              if (count == 0) return PGACCEL_OK;
+              if (out == nullptr) {
+                *detail = PGACCEL_TEST_DETAIL_CONTRACT;
+                return PGACCEL_INVALID_ARGUMENT;
+              }
+              sycl::queue q;
+              q.parallel_for<Kernel>(sycl::range<1>(count),
+                  [=](sycl::id<1> i) { out[i] = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "validation_metadata", result.entrypoint_audits[0].classifications
+        )
+
+    def test_validation_detail_rejects_input_or_result_writes(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_computed_detail(
+                const int* data, int* out, int* detail, size_t count) {
+              *detail = PGACCEL_TEST_DETAIL_NONE;
+              if (data == nullptr) {
+                *detail = count;
+                return PGACCEL_INVALID_ARGUMENT;
+              }
+              sycl::queue q;
+              q.single_task<Kernel>([=]() { *out = data[0]; });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_detail_decoy(
+                int* result, int* decoy) {
+              *result = PGACCEL_TEST_DETAIL_NONE;
+              sycl::queue q;
+              q.single_task<Decoy>([=]() { *decoy = 1; });
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("host_output_write", entry.classifications)
         self.assertFalse(result.entrypoint_audits[0].ok)
 
     def test_explicit_trailing_return_device_lambda_is_structural(self) -> None:

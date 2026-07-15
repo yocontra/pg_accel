@@ -2783,7 +2783,7 @@ def _declaration_kind(
             break
         left -= 1
     prefix = [token.value for token in tokens[left + 1 : name_index]]
-    if set(prefix) & CALL_KEYWORDS:
+    if set(prefix) & (CALL_KEYWORDS | {"else", "return", "case", "default", "throw"}):
         return None
     # Do not mistake an assignment following a single-statement control body
     # for a declaration, as in ``if (out) *out = 0``.
@@ -3210,6 +3210,99 @@ def _indexed_calls(
             )
         )
     return result
+
+
+def _call_mutable_output_roots(
+    tokens: Sequence[Token],
+    indexed: _IndexedCall,
+    candidate: Function | None,
+    output_roots: set[str],
+    forward: dict[int, int],
+) -> frozenset[str]:
+    """Bind caller outputs only to mutable callee parameter positions."""
+
+    arguments = _call_argument_ranges(tokens, indexed.lparen, indexed.rparen, forward)
+
+    referenced = [
+        frozenset(
+            root
+            for root in output_roots
+            if _range_references_output(tokens, left, right, {root})
+        )
+        for left, right in arguments
+    ]
+    if candidate is None:
+        return frozenset().union(*referenced)
+
+    parameters, mutable = _parameter_names(tokens, candidate)
+    parameter_segments = _parameter_ranges(tokens, candidate)
+    parameter_names: list[str | None] = []
+    for left, right in parameter_segments:
+        names = [
+            token.value
+            for token in tokens[left:right]
+            if token.kind == "identifier" and token.value in parameters
+        ]
+        parameter_names.append(names[-1] if names else None)
+
+    def casts_away_const(name: str) -> bool:
+        reverse = {close: open_index for open_index, close in forward.items()}
+        for index in range(candidate.body_open + 1, candidate.body_close):
+            if tokens[index].value != name:
+                continue
+            left = index - 1
+            while left > candidate.body_open and tokens[left].value not in {
+                ";",
+                "{",
+                "}",
+            }:
+                left -= 1
+            if (
+                _output_write_operator(tokens, index, candidate.body_close, forward)
+                is not None
+            ):
+                return True
+            for cast in range(left + 1, index):
+                if (
+                    tokens[cast].value
+                    not in {"const_cast", "reinterpret_cast", "dynamic_cast"}
+                    or tokens[cast + 1].value != "<"
+                ):
+                    continue
+                close = cast + 2
+                depth = 1
+                while close < index and depth:
+                    if tokens[close].value == "<":
+                        depth += 1
+                    elif tokens[close].value == ">":
+                        depth -= 1
+                    elif tokens[close].value == ">>":
+                        depth = max(0, depth - 2)
+                    close += 1
+                target = {token.value for token in tokens[cast + 2 : close - 1]}
+                if depth == 0 and target & {"*", "&"} and "const" not in target:
+                    return True
+            if index > left + 1 and tokens[index - 1].value == ")":
+                cast_open = reverse.get(index - 1)
+                if cast_open is not None and cast_open > left:
+                    target = {
+                        token.value for token in tokens[cast_open + 1 : index - 1]
+                    }
+                    if target & {"*", "&"} and "const" not in target:
+                        return True
+        return False
+
+    contributing: set[str] = set()
+    for position, roots in enumerate(referenced):
+        if not roots:
+            continue
+        if position >= len(parameter_names) or parameter_names[position] is None:
+            contributing.update(roots)
+            continue
+        name = parameter_names[position]
+        if name in mutable or casts_away_const(name):
+            contributing.update(roots)
+    return frozenset(contributing)
 
 
 def _returns(
@@ -3661,6 +3754,86 @@ def _host_output_accesses(
             else:
                 writes[index] = (index, tokens[index].line, False)
     return sorted(writes.values()), sorted(transfers.values()), aliases
+
+
+def _validation_metadata_write_indices(
+    tokens: Sequence[Token],
+    function: Function,
+    mutable: set[str],
+    output_roots: set[str],
+    host_writes: Sequence[tuple[int, int, bool]],
+    lambda_ranges: Sequence[tuple[int, int]],
+    regions: Sequence[_Region],
+    device_output_roots: set[str],
+    forward: dict[int, int],
+) -> set[int]:
+    """Prove symbolic detail outputs used only to explain validation failures."""
+
+    returns = [
+        (index, expression)
+        for index, expression in _returns(tokens, function, lambda_ranges)
+        if _return_is_explicit_failure(function, expression)
+    ]
+    by_root: dict[str, list[tuple[int, str]]] = defaultdict(list)
+    for index, _, _ in host_writes:
+        root = tokens[index].value
+        if root not in mutable:
+            continue
+        operator = _output_write_operator(tokens, index, function.body_close, forward)
+        if operator is None or tokens[operator].value != "=":
+            continue
+        cursor = operator + 1
+        expression: list[Token] = []
+        depth = 0
+        while cursor < function.body_close:
+            value = tokens[cursor].value
+            if value in {"(", "[", "{"}:
+                depth += 1
+            elif value in {")", "]", "}"}:
+                if depth == 0:
+                    break
+                depth -= 1
+            if value in {";", ","} and depth == 0:
+                break
+            expression.append(tokens[cursor])
+            cursor += 1
+        if (
+            len(expression) == 1
+            and expression[0].kind == "identifier"
+            and re.fullmatch(r"PGACCEL_[A-Z0-9_]*DETAIL[A-Z0-9_]*", expression[0].value)
+        ):
+            by_root[root].append((index, expression[0].value))
+
+    safe: set[int] = set()
+    for root, writes in by_root.items():
+        root_records = [
+            record for record in host_writes if tokens[record[0]].value == root
+        ]
+        if len(writes) != len(root_records) or len({value for _, value in writes}) < 2:
+            continue
+        if root in device_output_roots:
+            continue
+        if not (device_output_roots & (output_roots - {root})):
+            continue
+        unconditional = [index for index, _ in writes if not _context(index, regions)]
+        if len(unconditional) != 1 or unconditional[0] != min(
+            index for index, _ in writes
+        ):
+            continue
+        if any(
+            index != unconditional[0]
+            and not any(
+                index < return_index
+                and _context_dominates(
+                    _context(return_index, regions), _context(index, regions)
+                )
+                for return_index, _ in returns
+            )
+            for index, _ in writes
+        ):
+            continue
+        safe.update(index for index, _ in writes)
+    return safe
 
 
 def _local_usm_provenance(
@@ -4252,6 +4425,7 @@ def _proven_device_selection_ternaries(
     output_roots: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
     call_proofs: Mapping[int, tuple[_IndexedCall, _Proof | None, str | None]],
+    call_output_roots: Mapping[int, frozenset[str]],
     forward: dict[int, int],
 ) -> set[int]:
     """Recognize exact ternaries whose every successful arm is device-proven."""
@@ -4302,13 +4476,7 @@ def _proven_device_selection_ternaries(
                 or indexed.rparen + 1 != right
             ):
                 continue
-            roots = frozenset(
-                root
-                for root in output_roots
-                if _range_references_output(
-                    tokens, indexed.lparen + 1, indexed.rparen, {root}
-                )
-            )
+            roots = call_output_roots.get(indexed.index, frozenset())
             if roots:
                 return indexed, roots
         return None
@@ -4631,10 +4799,18 @@ class _PathAuditor:
             return fail_contract
 
         call_proofs: dict[int, tuple[_IndexedCall, _Proof | None, str | None]] = {}
+        call_output_roots: dict[int, frozenset[str]] = {}
         for indexed in calls:
             if indexed.index in proven_transfer_calls | safe_initializer_calls:
                 continue
             candidate, error = self.resolve(indexed.call)
+            call_output_roots[indexed.index] = _call_mutable_output_roots(
+                self.tokens,
+                indexed,
+                candidate,
+                output_roots,
+                self.forward,
+            )
             proof = (
                 self.prove(candidate, stack + (function,))
                 if candidate is not None
@@ -4647,6 +4823,7 @@ class _PathAuditor:
             output_roots,
             lambda_ranges,
             call_proofs,
+            call_output_roots,
             self.forward,
         )
         control_lines = sorted(
@@ -4656,6 +4833,35 @@ class _PathAuditor:
                 if index not in safe_ternaries
             ),
             key=lambda item: (item[1], item[0]),
+        )
+        device_output_roots = {
+            root
+            for launch in kernel_writes
+            for root in launch.roots
+            if root in output_roots
+        }
+        device_output_roots.update(
+            root
+            for roots in copyback_destinations.values()
+            for root in roots
+            if root in output_roots
+        )
+        device_output_roots.update(
+            root
+            for index, (_, proof, _) in call_proofs.items()
+            if proof is not None and proof.ok
+            for root in call_output_roots.get(index, frozenset())
+        )
+        validation_write_indices = _validation_metadata_write_indices(
+            self.tokens,
+            function,
+            mutable,
+            output_roots,
+            host_writes,
+            lambda_ranges,
+            regions,
+            device_output_roots,
+            self.forward,
         )
 
         deferred_write_lines = _deferred_output_writes(
@@ -4723,7 +4929,8 @@ class _PathAuditor:
         unsafe_write_records = [
             record
             for record in host_writes
-            if not (
+            if record[0] not in validation_write_indices
+            and not (
                 record[2]
                 and any(
                     region.start <= record[0] <= region.end for region in zero_ranges
@@ -4736,6 +4943,15 @@ class _PathAuditor:
             details.append(
                 "host writes ABI output at line(s) "
                 + ", ".join(map(str, unsafe_write_lines))
+            )
+        if validation_write_indices:
+            classifications.add("validation_metadata")
+            details.append(
+                "symbolic validation detail writes at line(s) "
+                + ", ".join(
+                    str(self.tokens[index].line)
+                    for index in sorted(validation_write_indices)
+                )
             )
         if transfer_lines:
             classifications.update({"host_staging_review", "review_required"})
@@ -4816,9 +5032,7 @@ class _PathAuditor:
             if (
                 proof is not None
                 and "large_input_gpu_chain" in proof.classifications
-                and _range_references_output(
-                    self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
-                )
+                and call_output_roots.get(indexed.index)
             ):
                 classifications.add("large_input_gpu_chain")
                 details.append(
@@ -4829,22 +5043,14 @@ class _PathAuditor:
             if (
                 proof is not None
                 and not proof.ok
-                and _range_references_output(
-                    self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
-                )
+                and call_output_roots.get(indexed.index)
             ):
                 classifications.update(proof.classifications)
                 unsafe_contributing_helpers.append(
                     f"output helper {indexed.call.name} at line {indexed.call.line} is not "
                     "independently device-proven"
                 )
-            if (
-                proof is not None
-                and proof.ok
-                and _range_references_output(
-                    self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
-                )
-            ):
+            if proof is not None and proof.ok and call_output_roots.get(indexed.index):
                 call_evidence.append(
                     _DispatchEvidence(
                         indexed.index,
@@ -4854,9 +5060,7 @@ class _PathAuditor:
                         _context(indexed.index, regions),
                     )
                 )
-            if proof is None and _range_references_output(
-                self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
-            ):
+            if proof is None and call_output_roots.get(indexed.index):
                 classifications.update(
                     {
                         error or "unresolved_helper",
@@ -4922,6 +5126,7 @@ class _PathAuditor:
                     for index, record in call_proofs.items()
                     if return_index < index
                     and index < return_index + len(expression) + 2
+                    and call_output_roots.get(index)
                 ),
                 None,
             )
