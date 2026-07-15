@@ -87,20 +87,55 @@ audit_banned_pattern \
     .github/workflows
 
 require_exact_line() {
-    local file="$1"
-    local line="$2"
-    if ! grep -Fqx "$line" "$file"; then
-        echo "error: $file must contain exact policy line: $line" >&2
+    local root="$1"
+    local view="$2"
+    local file="$3"
+    local line="$4"
+    if [ ! -f "$root/$file" ]; then
+        echo "error: $view is missing required policy file: $file" >&2
+        exit 1
+    fi
+    if ! grep -Fqx "$line" "$root/$file"; then
+        echo "error: $view $file must contain exact policy line: $line" >&2
         exit 1
     fi
 }
 
-require_exact_line .tool-versions 'rust 1.96.0'
-require_exact_line pg_accel/Cargo.toml 'pgrx = "=0.19.1"'
-require_exact_line pg_accel/Cargo.toml 'pgrx-tests = "=0.19.1"'
-require_exact_line pg_accel/Cargo.toml 'pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]'
-require_exact_line pg_accel/Cargo.toml 'pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]'
-require_exact_line scripts/pg_versions.sh 'PG_ACCEL_PGRX_VERSION="${PG_ACCEL_PGRX_VERSION:-0.19.1}"'
+validate_contract() {
+    local root="$1"
+    local view="$2"
+
+    require_exact_line "$root" "$view" .tool-versions 'rust 1.96.0'
+    require_exact_line "$root" "$view" pg_accel/Cargo.toml 'pgrx = "=0.19.1"'
+    require_exact_line "$root" "$view" pg_accel/Cargo.toml 'pgrx-tests = "=0.19.1"'
+    require_exact_line "$root" "$view" pg_accel/Cargo.toml 'pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]'
+    require_exact_line "$root" "$view" pg_accel/Cargo.toml 'pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]'
+    require_exact_line "$root" "$view" scripts/pg_versions.sh 'PG_ACCEL_PGRX_VERSION="${PG_ACCEL_PGRX_VERSION:-0.19.1}"'
+
+    (
+        cd "$root"
+        unset PG_ACCEL_DEFAULT_PG_MAJOR
+        unset PG_ACCEL_SUPPORTED_PG_MAJORS
+        unset PG_ACCEL_PREVIEW_PG_MAJORS
+        unset PG_ACCEL_PGRX_VERSION
+        unset PG_ACCEL_SOURCE_PG_MAJORS
+        export PG_ACCEL_REPO_ROOT="$root"
+        source scripts/pg_versions.sh
+
+        if ! pg_accel_require_pgrx_support 18; then
+            echo "error: $view does not satisfy the PostgreSQL 18 pgrx contract" >&2
+            exit 1
+        fi
+        if ! pg_accel_require_pgrx_support 19; then
+            echo "error: $view does not satisfy the PostgreSQL 19 pgrx contract" >&2
+            exit 1
+        fi
+        if pg_accel_skip_if_preview_without_pgrx 19; then
+            echo "error: $view resolves PostgreSQL 19 through a successful preview skip" >&2
+            exit 1
+        fi
+    )
+}
 
 preview_skip_pattern='PG_ACCEL_ENABLE_PREVIEW|SKIP: PostgreSQL .*preview'
 audit_banned_pattern \
@@ -108,12 +143,19 @@ audit_banned_pattern \
     "supported PostgreSQL release targets must not have successful preview skips" \
     "${targets[@]}"
 
-source scripts/pg_versions.sh
-pg_accel_require_pgrx_support 18
-pg_accel_require_pgrx_support 19
-if pg_accel_skip_if_preview_without_pgrx 19; then
-    echo "error: PostgreSQL 19 resolved through the legacy successful-skip path" >&2
+repo_root="$(pwd -P)"
+index_root="$(mktemp -d "${TMPDIR:-/tmp}/pg-accel-version-audit.XXXXXX")"
+cleanup() {
+    rm -rf "$index_root"
+}
+trap cleanup EXIT
+
+if ! git checkout-index --all --prefix="$index_root/"; then
+    echo "error: could not materialize the Git index for version-policy validation" >&2
     exit 1
 fi
+
+validate_contract "$repo_root" "worktree"
+validate_contract "$index_root" "Git index"
 
 echo "pg-version-audit: PASS"
