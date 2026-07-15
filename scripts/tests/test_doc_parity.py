@@ -131,7 +131,7 @@ class CapabilityParityTests(unittest.TestCase):
 
         self.assertEqual(errors, [])
         self.assertEqual(capability_count, 10)
-        self.assertEqual(adapter_count, 7)
+        self.assertEqual(adapter_count, 3)
 
 
 if __name__ == "__main__":

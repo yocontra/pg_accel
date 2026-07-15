@@ -16,21 +16,21 @@ wired at `pg_accel/src/engine/registry.rs:85-109`.
 |---|---|---|---|
 | `postgis` | `st_intersects` | scalar | None |
 | `h3` | `h3_latlng_to_cell` | scalar | None |
-| `h3` | `h3_grid_disk`, `h3_grid_ring_unsafe`, `h3_cell_to_children`, `h3_cell_to_boundary` | variable output | None |
-| `h3` | `h3_cells_to_multi_polygon` | two-field record | None |
+| `h3` | `h3_cell_to_children` | variable output | None |
 
 PostGIS deliberately registers only `st_intersects` at
-`pg_accel/src/adapters/postgis.rs:14-22`. The H3 scalar and variable/record
-lists are built at `pg_accel/src/adapters/h3.rs:53-135`.
+`pg_accel/src/adapters/postgis.rs:14-22`. The H3 scalar and variable lists are
+built at `pg_accel/src/adapters/h3.rs:64-120`.
 
 The registered H3 names are not all planner-consumed in the same way:
 
-- covered `h3_latlng_to_cell` and `h3_cell_to_parent` expressions can be
-  represented as group keys inside a selected resident aggregate;
+- a catalog-proved `h3_latlng_to_cell` expression can be represented as a group
+  key inside a selected resident aggregate;
 - the standalone scalar/function-scan path remains native;
-- variable/record SRF output remains native;
-- `h3_cell_to_parent` has a kernel/descriptor transformation but is
-  intentionally not in the standalone adapter scalar allowlist.
+- variable-output `h3_cell_to_children` remains native because there is no
+  resident consumer;
+- `h3_cell_to_parent` has a fused kernel/descriptor transformation but is
+  intentionally absent from the standalone adapter scalar allowlist.
 
 Likewise, the PostGIS adapter entry does not expose a production base predicate
 path. The resident spatial descriptor has a test-only admission seam and is
