@@ -3913,11 +3913,9 @@ mod tests {
                  alias so pg_accel cannot intercept it: {baseline}"
             );
             assert!(
-                lower.contains(" as cell")
-                    && lower.contains("group_count")
-                    && lower.contains("input_rows"),
-                "baseline for `{name}` must return the same bounded digest \
-                 columns as the accel query: {baseline}"
+                lower.contains(" as cell") && lower.contains("count(*) as n"),
+                "baseline for `{name}` must return grouped cells and counts \
+                 matching the accel query: {baseline}"
             );
         }
     }

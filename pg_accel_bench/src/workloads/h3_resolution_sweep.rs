@@ -38,16 +38,8 @@ impl Workload for H3ResolutionSweep {
     }
 
     fn query_sql(&self) -> String {
-        "SELECT count(*) AS group_count, \
-                sum(n)::bigint AS input_rows, \
-                min(cell::text) AS min_cell, \
-                max(cell::text) AS max_cell, \
-                sum(hashtextextended(cell::text || ':' || n::text, 0)::numeric) \
-                  AS cell_count_checksum \
-         FROM (\
-           SELECT h3_latlng_to_cell(geom, 9) AS cell, COUNT(*) AS n \
-           FROM bench_h3_sweep GROUP BY 1\
-         ) grouped"
+        "SELECT h3_latlng_to_cell(geom, 9) AS cell, COUNT(*) AS n \
+         FROM bench_h3_sweep GROUP BY 1"
             .to_owned()
     }
 
@@ -55,16 +47,8 @@ impl Workload for H3ResolutionSweep {
         // h3-pg alias `h3_lat_lng_to_cell` is not in pg_accel's
         // adapter list — guaranteed bypass of the planner hook.
         Some(
-            "SELECT count(*) AS group_count, \
-                    sum(n)::bigint AS input_rows, \
-                    min(cell::text) AS min_cell, \
-                    max(cell::text) AS max_cell, \
-                    sum(hashtextextended(cell::text || ':' || n::text, 0)::numeric) \
-                      AS cell_count_checksum \
-             FROM (\
-               SELECT public.h3_lat_lng_to_cell(geom, 9) AS cell, COUNT(*) AS n \
-               FROM bench_h3_sweep GROUP BY 1\
-             ) grouped"
+            "SELECT public.h3_lat_lng_to_cell(geom, 9) AS cell, COUNT(*) AS n \
+             FROM bench_h3_sweep GROUP BY 1"
                 .to_owned(),
         )
     }

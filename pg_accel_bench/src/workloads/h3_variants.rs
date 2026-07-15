@@ -146,26 +146,10 @@ pub const H3_LATLNG_RES15: H3Variant = H3Variant {
     description: "h3_latlng_to_cell at resolution 15 — finest grid, maximum compute. \
                   Baseline uses h3-pg `h3_lat_lng_to_cell` alias (stock C impl).",
     setup_extra: "",
-    query: "SELECT count(*) AS group_count, \
-                   sum(n)::bigint AS input_rows, \
-                   min(cell::text) AS min_cell, \
-                   max(cell::text) AS max_cell, \
-                   sum(hashtextextended(cell::text || ':' || n::text, 0)::numeric) \
-                     AS cell_count_checksum \
-            FROM (\
-              SELECT h3_latlng_to_cell(geom, 15) AS cell, count(*) AS n \
-              FROM bench_h3_var GROUP BY 1\
-            ) grouped",
-    baseline_query: "SELECT count(*) AS group_count, \
-                            sum(n)::bigint AS input_rows, \
-                            min(cell::text) AS min_cell, \
-                            max(cell::text) AS max_cell, \
-                            sum(hashtextextended(cell::text || ':' || n::text, 0)::numeric) \
-                              AS cell_count_checksum \
-                     FROM (\
-                       SELECT public.h3_lat_lng_to_cell(geom, 15) AS cell, count(*) AS n \
-                       FROM bench_h3_var GROUP BY 1\
-                     ) grouped",
+    query: "SELECT h3_latlng_to_cell(geom, 15) AS cell, count(*) AS n \
+            FROM bench_h3_var GROUP BY 1",
+    baseline_query: "SELECT public.h3_lat_lng_to_cell(geom, 15) AS cell, count(*) AS n \
+                     FROM bench_h3_var GROUP BY 1",
     row_scales: DEFAULT_ROW_SCALES,
     cleanup_extra: "",
 };

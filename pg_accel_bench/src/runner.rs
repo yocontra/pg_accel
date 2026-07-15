@@ -1704,7 +1704,7 @@ fn prime_workload_accel_backend(
             .map(|column| (*column).to_owned())
             .collect::<Vec<_>>();
         let row = client.query_one(
-            "SELECT pg_accel_pin($1::regclass, $2::text[])::bigint",
+            "SELECT pg_accel_pin($1::text::regclass, $2::text[])::bigint",
             &[&pin.table, &columns],
         )?;
         let loaded_rows: i64 = row.get(0);
@@ -1719,14 +1719,14 @@ fn prime_workload_accel_backend(
         let material: bool = client
             .query_one(
                 "SELECT COALESCE(bool_or(raw_bytes > 0 AND loaded_at IS NOT NULL), false) \
-                 FROM pg_accel_resident_status() WHERE relid = $1::regclass::oid",
+                 FROM pg_accel_resident_status() WHERE relid = $1::text::regclass::oid",
                 &[&pin.table],
             )?
             .get(0);
         if !material {
             let refreshed_rows: i64 = client
                 .query_one(
-                    "SELECT pg_accel_refresh($1::regclass)::bigint",
+                    "SELECT pg_accel_refresh($1::text::regclass)::bigint",
                     &[&pin.table],
                 )?
                 .get(0);
