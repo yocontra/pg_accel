@@ -1077,48 +1077,201 @@ static int8_t resident_polygon_polygon(const SpatialResidentGeometry& left,
   return uncertain ? 0 : -1;
 }
 
-static int8_t resident_intersects(const SpatialResidentGeometry& left,
-                                  const SpatialResidentGeometry& right) {
-  if (left.is_null || right.is_null || left.is_empty || right.is_empty)
-    return -1;
-  if (resident_bbox_disjoint(left, right))
-    return -1;
-  const uint32_t left_type = left.row.geom_type;
-  const uint32_t right_type = right.row.geom_type;
-  if (left_type == PGACCEL_RESIDENT_GEOMETRY_POINT &&
-      right_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
+enum class SpatialResidentGeometryPair : uint32_t {
+  PointPoint,
+  PointLineString,
+  PointPolygon,
+  LineStringLineString,
+  LineStringPolygon,
+  PolygonPolygon,
+};
+
+template <SpatialResidentGeometryPair Pair>
+static constexpr bool resident_geometry_pair_matches(uint32_t left_type, uint32_t right_type) {
+  if constexpr (Pair == SpatialResidentGeometryPair::PointPoint) {
+    return left_type == PGACCEL_RESIDENT_GEOMETRY_POINT &&
+           right_type == PGACCEL_RESIDENT_GEOMETRY_POINT;
+  } else if constexpr (Pair == SpatialResidentGeometryPair::PointLineString) {
+    return (left_type == PGACCEL_RESIDENT_GEOMETRY_POINT &&
+            right_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING) ||
+           (left_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
+            right_type == PGACCEL_RESIDENT_GEOMETRY_POINT);
+  } else if constexpr (Pair == SpatialResidentGeometryPair::PointPolygon) {
+    return (left_type == PGACCEL_RESIDENT_GEOMETRY_POINT &&
+            right_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON) ||
+           (left_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
+            right_type == PGACCEL_RESIDENT_GEOMETRY_POINT);
+  } else if constexpr (Pair == SpatialResidentGeometryPair::LineStringLineString) {
+    return left_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
+           right_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING;
+  } else if constexpr (Pair == SpatialResidentGeometryPair::LineStringPolygon) {
+    return (left_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
+            right_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON) ||
+           (left_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
+            right_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING);
+  } else {
+    static_assert(Pair == SpatialResidentGeometryPair::PolygonPolygon);
+    return left_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
+           right_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON;
+  }
+}
+
+template <SpatialResidentGeometryPair Pair>
+static int8_t resident_intersects_pair(const SpatialResidentGeometry& left,
+                                       const SpatialResidentGeometry& right) {
+  if constexpr (Pair == SpatialResidentGeometryPair::PointPoint) {
     return resident_same_point(left.view->coordinates + left.coordinate_begin * 2,
                                right.view->coordinates + right.coordinate_begin * 2)
                ? 1
                : -1;
-  }
-  if (left_type == PGACCEL_RESIDENT_GEOMETRY_POINT &&
-      right_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING)
-    return resident_point_linestring(left.view->coordinates + left.coordinate_begin * 2, right);
-  if (left_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
-      right_type == PGACCEL_RESIDENT_GEOMETRY_POINT)
-    return resident_point_linestring(right.view->coordinates + right.coordinate_begin * 2, left);
-  if (left_type == PGACCEL_RESIDENT_GEOMETRY_POINT &&
-      right_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON) {
-    const double* point = left.view->coordinates + left.coordinate_begin * 2;
-    return resident_point_polygon(point[0], point[1], right);
-  }
-  if (left_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
-      right_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
-    const double* point = right.view->coordinates + right.coordinate_begin * 2;
-    return resident_point_polygon(point[0], point[1], left);
-  }
-  if (left_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
-      right_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING)
+  } else if constexpr (Pair == SpatialResidentGeometryPair::PointLineString) {
+    return left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT
+               ? resident_point_linestring(left.view->coordinates + left.coordinate_begin * 2,
+                                           right)
+               : resident_point_linestring(right.view->coordinates + right.coordinate_begin * 2,
+                                           left);
+  } else if constexpr (Pair == SpatialResidentGeometryPair::PointPolygon) {
+    const bool left_is_point = left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT;
+    const SpatialResidentGeometry& point = left_is_point ? left : right;
+    const SpatialResidentGeometry& polygon = left_is_point ? right : left;
+    const double* coordinates = point.view->coordinates + point.coordinate_begin * 2;
+    return resident_point_polygon(coordinates[0], coordinates[1], polygon);
+  } else if constexpr (Pair == SpatialResidentGeometryPair::LineStringLineString) {
     return resident_linestring_linestring(left, right);
-  if (left_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
-      right_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON)
-    return resident_linestring_polygon(left, right);
-  if (left_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
-      right_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING)
-    return resident_linestring_polygon(right, left);
-  return resident_polygon_polygon(left, right);
+  } else if constexpr (Pair == SpatialResidentGeometryPair::LineStringPolygon) {
+    return left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING
+               ? resident_linestring_polygon(left, right)
+               : resident_linestring_polygon(right, left);
+  } else {
+    static_assert(Pair == SpatialResidentGeometryPair::PolygonPolygon);
+    return resident_polygon_polygon(left, right);
+  }
 }
+
+static constexpr size_t resident_geometry_pair_match_count(uint32_t left_type,
+                                                           uint32_t right_type) {
+  return static_cast<size_t>(
+             resident_geometry_pair_matches<SpatialResidentGeometryPair::PointPoint>(left_type,
+                                                                                     right_type)) +
+         static_cast<size_t>(
+             resident_geometry_pair_matches<SpatialResidentGeometryPair::PointLineString>(
+                 left_type, right_type)) +
+         static_cast<size_t>(
+             resident_geometry_pair_matches<SpatialResidentGeometryPair::PointPolygon>(
+                 left_type, right_type)) +
+         static_cast<size_t>(
+             resident_geometry_pair_matches<SpatialResidentGeometryPair::LineStringLineString>(
+                 left_type, right_type)) +
+         static_cast<size_t>(
+             resident_geometry_pair_matches<SpatialResidentGeometryPair::LineStringPolygon>(
+                 left_type, right_type)) +
+         static_cast<size_t>(
+             resident_geometry_pair_matches<SpatialResidentGeometryPair::PolygonPolygon>(
+                 left_type, right_type));
+}
+
+static_assert(resident_geometry_pair_match_count(PGACCEL_RESIDENT_GEOMETRY_POINT,
+                                                 PGACCEL_RESIDENT_GEOMETRY_POINT) == 1);
+static_assert(resident_geometry_pair_match_count(PGACCEL_RESIDENT_GEOMETRY_POINT,
+                                                 PGACCEL_RESIDENT_GEOMETRY_LINESTRING) == 1);
+static_assert(resident_geometry_pair_match_count(PGACCEL_RESIDENT_GEOMETRY_POINT,
+                                                 PGACCEL_RESIDENT_GEOMETRY_POLYGON) == 1);
+static_assert(resident_geometry_pair_match_count(PGACCEL_RESIDENT_GEOMETRY_LINESTRING,
+                                                 PGACCEL_RESIDENT_GEOMETRY_POINT) == 1);
+static_assert(resident_geometry_pair_match_count(PGACCEL_RESIDENT_GEOMETRY_LINESTRING,
+                                                 PGACCEL_RESIDENT_GEOMETRY_LINESTRING) == 1);
+static_assert(resident_geometry_pair_match_count(PGACCEL_RESIDENT_GEOMETRY_LINESTRING,
+                                                 PGACCEL_RESIDENT_GEOMETRY_POLYGON) == 1);
+static_assert(resident_geometry_pair_match_count(PGACCEL_RESIDENT_GEOMETRY_POLYGON,
+                                                 PGACCEL_RESIDENT_GEOMETRY_POINT) == 1);
+static_assert(resident_geometry_pair_match_count(PGACCEL_RESIDENT_GEOMETRY_POLYGON,
+                                                 PGACCEL_RESIDENT_GEOMETRY_LINESTRING) == 1);
+static_assert(resident_geometry_pair_match_count(PGACCEL_RESIDENT_GEOMETRY_POLYGON,
+                                                 PGACCEL_RESIDENT_GEOMETRY_POLYGON) == 1);
+
+enum class SpatialResidentGeometryPairFamily : uint32_t {
+  PointPairs,
+  LinearPairs,
+  PolygonPair,
+};
+
+template <SpatialResidentGeometryPairFamily Family>
+static constexpr bool resident_geometry_pair_family_matches(uint32_t left_type,
+                                                            uint32_t right_type) {
+  if constexpr (Family == SpatialResidentGeometryPairFamily::PointPairs) {
+    return left_type == PGACCEL_RESIDENT_GEOMETRY_POINT ||
+           right_type == PGACCEL_RESIDENT_GEOMETRY_POINT;
+  } else if constexpr (Family == SpatialResidentGeometryPairFamily::LinearPairs) {
+    return left_type != PGACCEL_RESIDENT_GEOMETRY_POINT &&
+           right_type != PGACCEL_RESIDENT_GEOMETRY_POINT &&
+           (left_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING ||
+            right_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING);
+  } else {
+    static_assert(Family == SpatialResidentGeometryPairFamily::PolygonPair);
+    return left_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
+           right_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON;
+  }
+}
+
+template <SpatialResidentGeometryPairFamily Family>
+static int8_t resident_intersects_family(const SpatialResidentGeometry& left,
+                                         const SpatialResidentGeometry& right) {
+  const uint32_t left_type = left.row.geom_type;
+  const uint32_t right_type = right.row.geom_type;
+  if constexpr (Family == SpatialResidentGeometryPairFamily::PointPairs) {
+    if (resident_geometry_pair_matches<SpatialResidentGeometryPair::PointPoint>(left_type,
+                                                                                right_type)) {
+      return resident_intersects_pair<SpatialResidentGeometryPair::PointPoint>(left, right);
+    }
+    if (resident_geometry_pair_matches<SpatialResidentGeometryPair::PointLineString>(left_type,
+                                                                                     right_type)) {
+      return resident_intersects_pair<SpatialResidentGeometryPair::PointLineString>(left, right);
+    }
+    return resident_intersects_pair<SpatialResidentGeometryPair::PointPolygon>(left, right);
+  } else if constexpr (Family == SpatialResidentGeometryPairFamily::LinearPairs) {
+    if (resident_geometry_pair_matches<SpatialResidentGeometryPair::LineStringLineString>(
+            left_type, right_type)) {
+      return resident_intersects_pair<SpatialResidentGeometryPair::LineStringLineString>(left,
+                                                                                         right);
+    }
+    return resident_intersects_pair<SpatialResidentGeometryPair::LineStringPolygon>(left, right);
+  } else {
+    static_assert(Family == SpatialResidentGeometryPairFamily::PolygonPair);
+    return resident_intersects_pair<SpatialResidentGeometryPair::PolygonPolygon>(left, right);
+  }
+}
+
+static constexpr size_t resident_geometry_pair_family_match_count(uint32_t left_type,
+                                                                  uint32_t right_type) {
+  return static_cast<size_t>(
+             resident_geometry_pair_family_matches<SpatialResidentGeometryPairFamily::PointPairs>(
+                 left_type, right_type)) +
+         static_cast<size_t>(
+             resident_geometry_pair_family_matches<SpatialResidentGeometryPairFamily::LinearPairs>(
+                 left_type, right_type)) +
+         static_cast<size_t>(
+             resident_geometry_pair_family_matches<SpatialResidentGeometryPairFamily::PolygonPair>(
+                 left_type, right_type));
+}
+
+static_assert(resident_geometry_pair_family_match_count(PGACCEL_RESIDENT_GEOMETRY_POINT,
+                                                        PGACCEL_RESIDENT_GEOMETRY_POINT) == 1);
+static_assert(resident_geometry_pair_family_match_count(PGACCEL_RESIDENT_GEOMETRY_POINT,
+                                                        PGACCEL_RESIDENT_GEOMETRY_LINESTRING) == 1);
+static_assert(resident_geometry_pair_family_match_count(PGACCEL_RESIDENT_GEOMETRY_POINT,
+                                                        PGACCEL_RESIDENT_GEOMETRY_POLYGON) == 1);
+static_assert(resident_geometry_pair_family_match_count(PGACCEL_RESIDENT_GEOMETRY_LINESTRING,
+                                                        PGACCEL_RESIDENT_GEOMETRY_POINT) == 1);
+static_assert(resident_geometry_pair_family_match_count(PGACCEL_RESIDENT_GEOMETRY_LINESTRING,
+                                                        PGACCEL_RESIDENT_GEOMETRY_LINESTRING) == 1);
+static_assert(resident_geometry_pair_family_match_count(PGACCEL_RESIDENT_GEOMETRY_LINESTRING,
+                                                        PGACCEL_RESIDENT_GEOMETRY_POLYGON) == 1);
+static_assert(resident_geometry_pair_family_match_count(PGACCEL_RESIDENT_GEOMETRY_POLYGON,
+                                                        PGACCEL_RESIDENT_GEOMETRY_POINT) == 1);
+static_assert(resident_geometry_pair_family_match_count(PGACCEL_RESIDENT_GEOMETRY_POLYGON,
+                                                        PGACCEL_RESIDENT_GEOMETRY_LINESTRING) == 1);
+static_assert(resident_geometry_pair_family_match_count(PGACCEL_RESIDENT_GEOMETRY_POLYGON,
+                                                        PGACCEL_RESIDENT_GEOMETRY_POLYGON) == 1);
 
 static int8_t resident_line_contains_point(const SpatialResidentGeometry& line,
                                            const double* point) {
@@ -1279,28 +1432,27 @@ static SpatialResidentDistance resident_segment_distance(double a0x, double a0y,
 }
 
 static SpatialResidentDistance
-resident_point_geometry_distance(const double* point, const SpatialResidentGeometry& geometry) {
-  if (geometry.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
-    const double* other = geometry.view->coordinates + geometry.coordinate_begin * 2;
-    return resident_point_distance(point[0], point[1], other[0], other[1]);
-  }
+resident_point_linestring_distance(const double* point, const SpatialResidentGeometry& line) {
   SpatialResidentDistance minimum{DBL_MAX, 0};
-  if (geometry.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING) {
-    for (size_t index = geometry.coordinate_begin; index + 1 < geometry.coordinate_end; ++index) {
-      const double* first = geometry.view->coordinates + index * 2;
-      const double* second = geometry.view->coordinates + (index + 1) * 2;
-      minimum = resident_distance_min(
-          minimum, resident_point_segment_distance(point[0], point[1], first[0], first[1],
-                                                   second[0], second[1]));
-    }
-    return minimum;
+  for (size_t index = line.coordinate_begin; index + 1 < line.coordinate_end; ++index) {
+    const double* first = line.view->coordinates + index * 2;
+    const double* second = line.view->coordinates + (index + 1) * 2;
+    minimum = resident_distance_min(minimum, resident_point_segment_distance(point[0], point[1],
+                                                                             first[0], first[1],
+                                                                             second[0], second[1]));
   }
-  for (size_t ring = 0; ring < geometry.ring_end - geometry.ring_begin; ++ring) {
-    const size_t begin = resident_ring_start(geometry, ring);
-    const size_t end = resident_ring_end(geometry, ring);
+  return minimum;
+}
+
+static SpatialResidentDistance
+resident_point_polygon_distance(const double* point, const SpatialResidentGeometry& polygon) {
+  SpatialResidentDistance minimum{DBL_MAX, 0};
+  for (size_t ring = 0; ring < polygon.ring_end - polygon.ring_begin; ++ring) {
+    const size_t begin = resident_ring_start(polygon, ring);
+    const size_t end = resident_ring_end(polygon, ring);
     for (size_t edge = begin; edge + 1 < end; ++edge) {
-      const double* first = geometry.view->coordinates + edge * 2;
-      const double* second = geometry.view->coordinates + (edge + 1) * 2;
+      const double* first = polygon.view->coordinates + edge * 2;
+      const double* second = polygon.view->coordinates + (edge + 1) * 2;
       minimum = resident_distance_min(
           minimum, resident_point_segment_distance(point[0], point[1], first[0], first[1],
                                                    second[0], second[1]));
@@ -1309,29 +1461,28 @@ resident_point_geometry_distance(const double* point, const SpatialResidentGeome
   return minimum;
 }
 
-static SpatialResidentDistance resident_linear_distance(const SpatialResidentGeometry& left,
-                                                        const SpatialResidentGeometry& right) {
+static SpatialResidentDistance
+resident_linestring_linestring_distance(const SpatialResidentGeometry& left,
+                                        const SpatialResidentGeometry& right) {
   SpatialResidentDistance minimum{DBL_MAX, 0};
-  if (left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING &&
-      right.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING) {
-    for (size_t a = left.coordinate_begin; a + 1 < left.coordinate_end; ++a) {
-      const double* a0 = left.view->coordinates + a * 2;
-      const double* a1 = left.view->coordinates + (a + 1) * 2;
-      for (size_t b = right.coordinate_begin; b + 1 < right.coordinate_end; ++b) {
-        const double* b0 = right.view->coordinates + b * 2;
-        const double* b1 = right.view->coordinates + (b + 1) * 2;
-        minimum =
-            resident_distance_min(minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1],
-                                                                     b0[0], b0[1], b1[0], b1[1]));
-      }
+  for (size_t a = left.coordinate_begin; a + 1 < left.coordinate_end; ++a) {
+    const double* a0 = left.view->coordinates + a * 2;
+    const double* a1 = left.view->coordinates + (a + 1) * 2;
+    for (size_t b = right.coordinate_begin; b + 1 < right.coordinate_end; ++b) {
+      const double* b0 = right.view->coordinates + b * 2;
+      const double* b1 = right.view->coordinates + (b + 1) * 2;
+      minimum =
+          resident_distance_min(minimum, resident_segment_distance(a0[0], a0[1], a1[0], a1[1],
+                                                                   b0[0], b0[1], b1[0], b1[1]));
     }
-    return minimum;
   }
+  return minimum;
+}
 
-  const SpatialResidentGeometry& line =
-      left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING ? left : right;
-  const SpatialResidentGeometry& polygon =
-      left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON ? left : right;
+static SpatialResidentDistance
+resident_linestring_polygon_distance(const SpatialResidentGeometry& line,
+                                     const SpatialResidentGeometry& polygon) {
+  SpatialResidentDistance minimum{DBL_MAX, 0};
   for (size_t line_index = line.coordinate_begin; line_index + 1 < line.coordinate_end;
        ++line_index) {
     const double* line_a = line.view->coordinates + line_index * 2;
@@ -1376,35 +1527,71 @@ static SpatialResidentDistance resident_polygon_distance(const SpatialResidentGe
   return minimum;
 }
 
-static SpatialResidentDistance resident_distance(const SpatialResidentGeometry& left,
-                                                 const SpatialResidentGeometry& right) {
-  if (left.is_null || right.is_null || left.is_empty || right.is_empty)
-    return {0.0, 1};
-  const int8_t intersection = resident_intersects(left, right);
-  if (intersection > 0)
-    return {0.0, 0};
-  if (intersection == 0)
-    return {0.0, 1};
-
-  if (left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
-    return resident_point_geometry_distance(left.view->coordinates + left.coordinate_begin * 2,
-                                            right);
-  }
-  if (right.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT) {
-    return resident_point_geometry_distance(right.view->coordinates + right.coordinate_begin * 2,
-                                            left);
-  }
-  if (left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON &&
-      right.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POLYGON)
+template <SpatialResidentGeometryPair Pair>
+static SpatialResidentDistance resident_metric_distance_pair(const SpatialResidentGeometry& left,
+                                                             const SpatialResidentGeometry& right) {
+  if constexpr (Pair == SpatialResidentGeometryPair::PointPoint) {
+    const double* left_point = left.view->coordinates + left.coordinate_begin * 2;
+    const double* right_point = right.view->coordinates + right.coordinate_begin * 2;
+    return resident_point_distance(left_point[0], left_point[1], right_point[0], right_point[1]);
+  } else if constexpr (Pair == SpatialResidentGeometryPair::PointLineString) {
+    const bool left_is_point = left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT;
+    const SpatialResidentGeometry& point = left_is_point ? left : right;
+    const SpatialResidentGeometry& line = left_is_point ? right : left;
+    return resident_point_linestring_distance(point.view->coordinates + point.coordinate_begin * 2,
+                                              line);
+  } else if constexpr (Pair == SpatialResidentGeometryPair::PointPolygon) {
+    const bool left_is_point = left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_POINT;
+    const SpatialResidentGeometry& point = left_is_point ? left : right;
+    const SpatialResidentGeometry& polygon = left_is_point ? right : left;
+    return resident_point_polygon_distance(point.view->coordinates + point.coordinate_begin * 2,
+                                           polygon);
+  } else if constexpr (Pair == SpatialResidentGeometryPair::LineStringLineString) {
+    return resident_linestring_linestring_distance(left, right);
+  } else if constexpr (Pair == SpatialResidentGeometryPair::LineStringPolygon) {
+    const bool left_is_line = left.row.geom_type == PGACCEL_RESIDENT_GEOMETRY_LINESTRING;
+    return left_is_line ? resident_linestring_polygon_distance(left, right)
+                        : resident_linestring_polygon_distance(right, left);
+  } else {
+    static_assert(Pair == SpatialResidentGeometryPair::PolygonPolygon);
     return resident_polygon_distance(left, right);
-  return resident_linear_distance(left, right);
+  }
 }
 
-static int8_t resident_dwithin(const SpatialResidentGeometry& left,
-                               const SpatialResidentGeometry& right, double threshold) {
-  if (left.is_null || right.is_null || left.is_empty || right.is_empty)
-    return -1;
-  const SpatialResidentDistance distance = resident_distance(left, right);
+template <SpatialResidentGeometryPairFamily Family>
+static SpatialResidentDistance
+resident_metric_distance_family(const SpatialResidentGeometry& left,
+                                const SpatialResidentGeometry& right) {
+  const uint32_t left_type = left.row.geom_type;
+  const uint32_t right_type = right.row.geom_type;
+  if constexpr (Family == SpatialResidentGeometryPairFamily::PointPairs) {
+    if (resident_geometry_pair_matches<SpatialResidentGeometryPair::PointPoint>(left_type,
+                                                                                right_type)) {
+      return resident_metric_distance_pair<SpatialResidentGeometryPair::PointPoint>(left, right);
+    }
+    if (resident_geometry_pair_matches<SpatialResidentGeometryPair::PointLineString>(left_type,
+                                                                                     right_type)) {
+      return resident_metric_distance_pair<SpatialResidentGeometryPair::PointLineString>(left,
+                                                                                         right);
+    }
+    return resident_metric_distance_pair<SpatialResidentGeometryPair::PointPolygon>(left, right);
+  } else if constexpr (Family == SpatialResidentGeometryPairFamily::LinearPairs) {
+    if (resident_geometry_pair_matches<SpatialResidentGeometryPair::LineStringLineString>(
+            left_type, right_type)) {
+      return resident_metric_distance_pair<SpatialResidentGeometryPair::LineStringLineString>(
+          left, right);
+    }
+    return resident_metric_distance_pair<SpatialResidentGeometryPair::LineStringPolygon>(left,
+                                                                                         right);
+  } else {
+    static_assert(Family == SpatialResidentGeometryPairFamily::PolygonPair);
+    return resident_metric_distance_pair<SpatialResidentGeometryPair::PolygonPolygon>(left, right);
+  }
+}
+
+static int8_t resident_classify_dwithin(const SpatialResidentGeometry& left,
+                                        const SpatialResidentGeometry& right,
+                                        SpatialResidentDistance distance, double threshold) {
   if (distance.uncertain != 0) {
     double dx = 0.0;
     double dy = 0.0;
@@ -1794,7 +1981,11 @@ static void resident_stage_control(sycl::queue& queue, const pgaccel_spatial_wor
 }
 
 class SpatialResidentValidateKernel;
-class SpatialResidentEvaluateKernel;
+class SpatialResidentContainsKernel;
+template <SpatialResidentGeometryPairFamily Family>
+class SpatialResidentIntersectsKernel;
+template <SpatialResidentGeometryPairFamily Family>
+class SpatialResidentMetricKernel;
 class SpatialResidentCompactKernel;
 class SpatialResidentPatchKernel;
 
@@ -1844,6 +2035,139 @@ resident_validate_request_contract(const pgaccel_spatial_resident_request* reque
   return PGACCEL_OK;
 }
 
+static void resident_launch_contains(sycl::queue& queue, SpatialResidentKernelArgs* args,
+                                     uint32_t* failure_flags, size_t count) {
+  for (size_t first = 0; first < count; first += SPATIAL_RESIDENT_MAX_CHUNK_ROWS) {
+    const size_t remaining = count - first;
+    const size_t chunk_count =
+        remaining < SPATIAL_RESIDENT_MAX_CHUNK_ROWS ? remaining : SPATIAL_RESIDENT_MAX_CHUNK_ROWS;
+    queue.parallel_for<SpatialResidentContainsKernel>(
+        sycl::range<1>(chunk_count), [=](sycl::id<1> id) {
+          if (resident_has_failure(failure_flags))
+            return;
+          const size_t output_index = first + id[0];
+          const SpatialResidentGeometry left =
+              resident_load_geometry(args->request.left, output_index);
+          const SpatialResidentGeometry right =
+              resident_load_geometry(args->request.right, output_index);
+          args->request.predicate_results[output_index] = resident_contains(left, right);
+        });
+  }
+}
+
+static int8_t* resident_intersection_results(SpatialResidentKernelArgs* args) {
+  return args->request.predicate == PGACCEL_SPATIAL_PREDICATE_DISTANCE
+             ? reinterpret_cast<int8_t*>(args->request.distance_uncertain)
+             : args->request.predicate_results;
+}
+
+template <SpatialResidentGeometryPairFamily Family>
+static void resident_launch_intersects_family(sycl::queue& queue, SpatialResidentKernelArgs* args,
+                                              uint32_t* failure_flags, size_t count) {
+  for (size_t first = 0; first < count; first += SPATIAL_RESIDENT_MAX_CHUNK_ROWS) {
+    const size_t remaining = count - first;
+    const size_t chunk_count =
+        remaining < SPATIAL_RESIDENT_MAX_CHUNK_ROWS ? remaining : SPATIAL_RESIDENT_MAX_CHUNK_ROWS;
+    queue.parallel_for<SpatialResidentIntersectsKernel<Family>>(
+        sycl::range<1>(chunk_count), [=](sycl::id<1> id) {
+          if (resident_has_failure(failure_flags))
+            return;
+          const size_t output_index = first + id[0];
+          int8_t* results = resident_intersection_results(args);
+          if constexpr (Family == SpatialResidentGeometryPairFamily::PointPairs) {
+            results[output_index] = -1;
+            if (args->request.predicate == PGACCEL_SPATIAL_PREDICATE_DISTANCE)
+              args->request.distances[output_index] = 0.0;
+          }
+
+          const SpatialResidentGeometry left =
+              resident_load_geometry(args->request.left, output_index);
+          const SpatialResidentGeometry right =
+              resident_load_geometry(args->request.right, output_index);
+          if (left.is_null || right.is_null || left.is_empty || right.is_empty ||
+              resident_bbox_disjoint(left, right) ||
+              !resident_geometry_pair_family_matches<Family>(left.row.geom_type,
+                                                             right.row.geom_type)) {
+            return;
+          }
+          results[output_index] = resident_intersects_family<Family>(left, right);
+        });
+  }
+}
+
+static void resident_launch_intersects(sycl::queue& queue, SpatialResidentKernelArgs* args,
+                                       uint32_t* failure_flags, size_t count) {
+  resident_launch_intersects_family<SpatialResidentGeometryPairFamily::PointPairs>(
+      queue, args, failure_flags, count);
+  resident_launch_intersects_family<SpatialResidentGeometryPairFamily::LinearPairs>(
+      queue, args, failure_flags, count);
+  resident_launch_intersects_family<SpatialResidentGeometryPairFamily::PolygonPair>(
+      queue, args, failure_flags, count);
+}
+
+template <SpatialResidentGeometryPairFamily Family>
+static void resident_launch_metric_family(sycl::queue& queue, SpatialResidentKernelArgs* args,
+                                          uint32_t* failure_flags, size_t count) {
+  for (size_t first = 0; first < count; first += SPATIAL_RESIDENT_MAX_CHUNK_ROWS) {
+    const size_t remaining = count - first;
+    const size_t chunk_count =
+        remaining < SPATIAL_RESIDENT_MAX_CHUNK_ROWS ? remaining : SPATIAL_RESIDENT_MAX_CHUNK_ROWS;
+    queue.parallel_for<SpatialResidentMetricKernel<Family>>(
+        sycl::range<1>(chunk_count), [=](sycl::id<1> id) {
+          if (resident_has_failure(failure_flags))
+            return;
+          const size_t output_index = first + id[0];
+          int8_t* intersection_results = resident_intersection_results(args);
+          const int8_t intersection = intersection_results[output_index];
+          const SpatialResidentGeometry left =
+              resident_load_geometry(args->request.left, output_index);
+          const SpatialResidentGeometry right =
+              resident_load_geometry(args->request.right, output_index);
+          const bool distance_operation =
+              args->request.predicate == PGACCEL_SPATIAL_PREDICATE_DISTANCE;
+
+          if (left.is_null || right.is_null) {
+            if constexpr (Family == SpatialResidentGeometryPairFamily::PointPairs) {
+              if (distance_operation)
+                args->request.distance_uncertain[output_index] = 1;
+            }
+            return;
+          }
+          if (!resident_geometry_pair_family_matches<Family>(left.row.geom_type,
+                                                             right.row.geom_type)) {
+            return;
+          }
+          if (left.is_empty || right.is_empty) {
+            if (distance_operation)
+              args->request.distance_uncertain[output_index] = 1;
+            return;
+          }
+
+          const SpatialResidentDistance distance =
+              intersection > 0    ? SpatialResidentDistance{0.0, 0}
+              : intersection == 0 ? SpatialResidentDistance{0.0, 1}
+                                  : resident_metric_distance_family<Family>(left, right);
+          if (distance_operation) {
+            args->request.distances[output_index] = distance.value;
+            args->request.distance_uncertain[output_index] = distance.uncertain;
+          } else {
+            args->request.predicate_results[output_index] =
+                resident_classify_dwithin(left, right, distance, args->request.distance_threshold);
+          }
+        });
+  }
+}
+
+static void resident_launch_metric(sycl::queue& queue, SpatialResidentKernelArgs* args,
+                                   uint32_t* failure_flags, size_t count) {
+  resident_launch_metric_family<SpatialResidentGeometryPairFamily::PointPairs>(
+      queue, args, failure_flags, count);
+  resident_launch_metric_family<SpatialResidentGeometryPairFamily::LinearPairs>(
+      queue, args, failure_flags, count);
+  resident_launch_metric_family<SpatialResidentGeometryPairFamily::PolygonPair>(
+      queue, args, failure_flags, count);
+}
+
 extern "C" pgaccel_status
 pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* request,
                                      const pgaccel_spatial_workspace* workspace,
@@ -1851,6 +2175,12 @@ pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* req
   const pgaccel_status contract = resident_validate_request_contract(request, detail);
   if (contract != PGACCEL_OK || request->count == 0)
     return contract;
+  const int32_t predicate = request->predicate;
+  if (predicate < PGACCEL_SPATIAL_PREDICATE_INTERSECTS ||
+      predicate > PGACCEL_SPATIAL_PREDICATE_DISTANCE) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
 
   sycl::queue* queue_pointer = pgaccel_get_queue();
   if (queue_pointer == nullptr)
@@ -1963,41 +2293,29 @@ pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* req
   /* g_queue is in-order: every validation chunk completes before any
    * evaluation chunk. Each evaluation item checks the shared failure word,
    * so a failure anywhere suppresses every output write. */
-  for (size_t first = 0; first < request->count; first += SPATIAL_RESIDENT_MAX_CHUNK_ROWS) {
-    const size_t remaining = request->count - first;
-    const size_t chunk_count =
-        remaining < SPATIAL_RESIDENT_MAX_CHUNK_ROWS ? remaining : SPATIAL_RESIDENT_MAX_CHUNK_ROWS;
-    queue.parallel_for<SpatialResidentEvaluateKernel>(
-        sycl::range<1>(chunk_count), [=](sycl::id<1> id) {
-          if (resident_has_failure(failure_flags))
-            return;
-          const size_t output_index = first + id[0];
-          const SpatialResidentGeometry left =
-              resident_load_geometry(args->request.left, output_index);
-          const SpatialResidentGeometry right =
-              resident_load_geometry(args->request.right, output_index);
-          switch (args->request.predicate) {
-            case PGACCEL_SPATIAL_PREDICATE_INTERSECTS:
-              args->request.predicate_results[output_index] = resident_intersects(left, right);
-              break;
-            case PGACCEL_SPATIAL_PREDICATE_CONTAINS:
-              args->request.predicate_results[output_index] = resident_contains(left, right);
-              break;
-            case PGACCEL_SPATIAL_PREDICATE_WITHIN:
-              args->request.predicate_results[output_index] = resident_contains(right, left);
-              break;
-            case PGACCEL_SPATIAL_PREDICATE_DWITHIN:
-              args->request.predicate_results[output_index] =
-                  resident_dwithin(left, right, args->request.distance_threshold);
-              break;
-            case PGACCEL_SPATIAL_PREDICATE_DISTANCE: {
-              const SpatialResidentDistance distance = resident_distance(left, right);
-              args->request.distances[output_index] = distance.value;
-              args->request.distance_uncertain[output_index] = distance.uncertain;
-              break;
-            }
-          }
-        });
+  if (predicate == PGACCEL_SPATIAL_PREDICATE_WITHIN) {
+    pgaccel_spatial_resident_request normalized = *request;
+    std::swap(normalized.left, normalized.right);
+    normalized.predicate = PGACCEL_SPATIAL_PREDICATE_CONTAINS;
+    resident_stage_control(queue, *workspace, normalized, false);
+  }
+  switch (predicate) {
+    case PGACCEL_SPATIAL_PREDICATE_INTERSECTS:
+      resident_launch_intersects(queue, args, failure_flags, request->count);
+      break;
+    case PGACCEL_SPATIAL_PREDICATE_CONTAINS:
+    case PGACCEL_SPATIAL_PREDICATE_WITHIN:
+      resident_launch_contains(queue, args, failure_flags, request->count);
+      break;
+    case PGACCEL_SPATIAL_PREDICATE_DWITHIN:
+    case PGACCEL_SPATIAL_PREDICATE_DISTANCE:
+      resident_launch_intersects(queue, args, failure_flags, request->count);
+      resident_launch_metric(queue, args, failure_flags, request->count);
+      break;
+    default:
+      queue.wait_and_throw();
+      *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+      return PGACCEL_INVALID_ARGUMENT;
   }
   queue.wait_and_throw();
   pgaccel_record_gpu_exec();

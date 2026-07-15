@@ -359,6 +359,20 @@ void test_intersects_pair_matrix() {
       "Polygon/Polygon reverse",
       run_predicate(square, true, polygons, false, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
       {1, -1, 0});
+
+  const DeviceLane mixed_left =
+      make_lane({point(1, 1), point(0, 0), point(1, 1), line({0, 0, 2, 0}), line({0, 0, 2, 2}),
+                 line({-1, 1, 3, 1}), polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0}),
+                 polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0}), polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0})});
+  const DeviceLane mixed_right =
+      make_lane({point(1, 1), line({0, 0, 2, 0}), polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0}),
+                 point(0, 0), line({0, 2, 2, 0}), polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0}),
+                 point(1, 1), line({-1, 1, 3, 1}), polygon({1, 1, 3, 1, 3, 3, 1, 3, 1, 1})});
+  pgaccel_reset_gpu_exec_count();
+  const PredicateRun mixed =
+      run_predicate(mixed_left, false, mixed_right, false, 9, PGACCEL_SPATIAL_PREDICATE_INTERSECTS);
+  check_results("mixed ordered geometry-pair batch", mixed, {1, 1, 1, 1, 1, 1, 1, 1, 1});
+  CHECK("mixed geometry-pair batch records one aggregate execution", pgaccel_gpu_exec_count() == 1);
 }
 
 void test_holes_boundaries_and_predicates() {
@@ -455,6 +469,33 @@ void test_distance() {
                 run_predicate(projection_point, true, overflowing_segment, true, 1,
                               PGACCEL_SPATIAL_PREDICATE_DWITHIN, 1.0),
                 {-1});
+
+  const DeviceLane mixed_left =
+      make_lane({point(0, 0), point(0, 0), point(0, 0), line({0, 0, 0, 1}), line({0, 0, 0, 1}),
+                 line({0, 0, 0, 1}), polygon({0, 0, 1, 0, 1, 1, 0, 1, 0, 0}),
+                 polygon({0, 0, 1, 0, 1, 1, 0, 1, 0, 0}), polygon({0, 0, 1, 0, 1, 1, 0, 1, 0, 0})});
+  const DeviceLane mixed_right =
+      make_lane({point(3, 0), line({3, 0, 3, 1}), polygon({3, 0, 4, 0, 4, 1, 3, 1, 3, 0}),
+                 point(3, 0), line({3, 0, 3, 1}), polygon({3, 0, 4, 0, 4, 1, 3, 1, 3, 0}),
+                 point(3, 0), line({3, 0, 3, 1}), polygon({3, 0, 4, 0, 4, 1, 3, 1, 3, 0})});
+  pgaccel_reset_gpu_exec_count();
+  const DistanceRun mixed_distance = run_distance(mixed_left, false, mixed_right, false, 9);
+  const std::vector<double> expected_distance = {3, 3, 3, 3, 3, 3, 2, 2, 2};
+  bool mixed_distance_matches = mixed_distance.status == PGACCEL_OK &&
+                                mixed_distance.distances.size() == expected_distance.size() &&
+                                mixed_distance.uncertain == std::vector<uint8_t>(9, 0);
+  for (size_t index = 0; mixed_distance_matches && index < expected_distance.size(); ++index)
+    mixed_distance_matches =
+        std::fabs(mixed_distance.distances[index] - expected_distance[index]) < 1e-12;
+  CHECK("mixed ordered geometry-pair distance batch", mixed_distance_matches);
+  CHECK("mixed distance batch records one aggregate execution", pgaccel_gpu_exec_count() == 1);
+
+  pgaccel_reset_gpu_exec_count();
+  check_results("mixed ordered geometry-pair DWithin batch",
+                run_predicate(mixed_left, false, mixed_right, false, 9,
+                              PGACCEL_SPATIAL_PREDICATE_DWITHIN, 2.5),
+                {-1, -1, -1, -1, -1, -1, 1, 1, 1});
+  CHECK("mixed DWithin batch records one aggregate execution", pgaccel_gpu_exec_count() == 1);
 }
 
 void test_hard_failures() {
@@ -526,7 +567,22 @@ void test_hard_failures() {
         run_resident_request(&request, &detail) == PGACCEL_INVALID_ARGUMENT &&
             detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
 
+  DeviceBuffer<int8_t> invalid_predicate_output(std::vector<int8_t>{77});
+  request.predicate = static_cast<pgaccel_spatial_predicate>(
+      static_cast<int>(PGACCEL_SPATIAL_PREDICATE_DISTANCE) + 1);
+  request.predicate_results = invalid_predicate_output.get();
+  request.predicate_results_bytes = sizeof(int8_t);
+  request.output_capacity = 1;
+  pgaccel_reset_gpu_exec_count();
+  detail = -1;
+  CHECK("unsupported predicate is hard before dispatch",
+        run_resident_request(&request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT &&
+            invalid_predicate_output.to_host() == std::vector<int8_t>({77}) &&
+            pgaccel_gpu_exec_count() == 0);
+
   int8_t host_output = 99;
+  request.predicate = PGACCEL_SPATIAL_PREDICATE_INTERSECTS;
   request.output_capacity = 1;
   request.predicate_results = &host_output;
   detail = -1;
