@@ -36,6 +36,9 @@ impl JoinExecState {
                 self.pending_cursor += 1;
 
                 unsafe {
+                    // SAFETY: pending tuples are owned live MinimalTuple copies;
+                    // the join slots and result slot were initialized from the
+                    // matching child/output descriptors on this backend thread.
                     if !self.hash_outer_slot.is_null() && !m.outer_tuple.is_null() {
                         pg_sys::ExecForceStoreMinimalTuple(
                             m.outer_tuple,
@@ -74,13 +77,21 @@ impl JoinExecState {
 
             let outer_slot = Self::plan_result_slot(outer_ps, result_slot);
             let inner_slot = Self::plan_result_slot(inner_ps, result_slot);
+            // SAFETY: the selected outer slot is a live child/result slot for
+            // this executor call and owns its tuple descriptor.
             let outer_tupdesc = unsafe { (*outer_slot).tts_tupleDescriptor };
+            // SAFETY: the selected inner slot is a live child/result slot for
+            // this executor call and owns its tuple descriptor.
             let inner_tupdesc = unsafe { (*inner_slot).tts_tupleDescriptor };
             Self::validate_attno(outer_tupdesc, self.nlj_outer_value_attno, "outer value");
             Self::validate_attno(inner_tupdesc, self.nlj_inner_lo_attno, "inner lower");
             Self::validate_attno(inner_tupdesc, self.nlj_inner_hi_attno, "inner upper");
 
+            // SAFETY: `outer_ps` is the live outer child on the backend thread;
+            // collected tuples are copied into newly owned allocations.
             let outer_tuples = unsafe { Self::collect_child_tuples(outer_ps) };
+            // SAFETY: `inner_ps` is the live inner child on the backend thread;
+            // collected tuples are copied into newly owned allocations.
             let inner_tuples = unsafe { Self::collect_child_tuples(inner_ps) };
             self.rows_dispatched = outer_tuples.len() as u64;
             Self::validate_nlj_kernel_indices(outer_tuples.len(), inner_tuples.len());
@@ -95,6 +106,8 @@ impl JoinExecState {
             let max_pairs = self.nlj_max_pairs();
             let pairs = match self.nlj_key_type {
                 PgaccelKeyType::Int32 | PgaccelKeyType::Int64 => unsafe {
+                    // SAFETY: attnos were range-checked against both live
+                    // descriptors, and all tuple copies match those schemas.
                     self.dispatch_between_i64(
                         &outer_tuples,
                         &inner_tuples,
@@ -106,6 +119,8 @@ impl JoinExecState {
                     )
                 },
                 PgaccelKeyType::Float64 => unsafe {
+                    // SAFETY: attnos were range-checked against both live
+                    // descriptors, and all tuple copies match those schemas.
                     self.dispatch_between_f64(
                         &outer_tuples,
                         &inner_tuples,
@@ -130,11 +145,15 @@ impl JoinExecState {
                         let inner_idx = pair.inner as usize;
                         if outer_idx < outer_tuples.len() && inner_idx < inner_tuples.len() {
                             let outer_copy = unsafe {
+                                // SAFETY: the GPU index was bounds-checked and
+                                // names a live MinimalTuple in outer_tuples.
                                 crate::engine::pg_compat::heap_copy_minimal_tuple(
                                     outer_tuples[outer_idx],
                                 )
                             };
                             let inner_copy = unsafe {
+                                // SAFETY: the GPU index was bounds-checked and
+                                // names a live MinimalTuple in inner_tuples.
                                 crate::engine::pg_compat::heap_copy_minimal_tuple(
                                     inner_tuples[inner_idx],
                                 )
@@ -181,14 +200,26 @@ impl JoinExecState {
         inner_slot: *mut pg_sys::TupleTableSlot,
         max_pairs: usize,
     ) -> NljDispatchResult {
+        // SAFETY: the outer attno was range-checked against this descriptor,
+        // which matches every tuple and fallback slot in the outer batch.
         let outer_info = unsafe { AttExtractInfo::new(outer_tupdesc, self.nlj_outer_value_attno) };
+        // SAFETY: the lower attno was range-checked against the live inner
+        // descriptor shared by every tuple and the fallback slot.
         let lo_info = unsafe { AttExtractInfo::new(inner_tupdesc, self.nlj_inner_lo_attno) };
+        // SAFETY: the upper attno was range-checked against the live inner
+        // descriptor shared by every tuple and the fallback slot.
         let hi_info = unsafe { AttExtractInfo::new(inner_tupdesc, self.nlj_inner_hi_attno) };
 
+        // SAFETY: outer tuples match outer_info and outer_slot is the valid
+        // fallback-deformation slot for that descriptor.
         let (outer_keys, outer_nulls) =
             unsafe { extract_integral_as_i64(outer_tuples, &outer_info, outer_slot) };
+        // SAFETY: inner tuples match lo_info and inner_slot is their valid
+        // fallback-deformation slot.
         let (inner_lo, lo_nulls) =
             unsafe { extract_integral_as_i64(inner_tuples, &lo_info, inner_slot) };
+        // SAFETY: inner tuples match hi_info and inner_slot is their valid
+        // fallback-deformation slot.
         let (inner_hi, hi_nulls) =
             unsafe { extract_integral_as_i64(inner_tuples, &hi_info, inner_slot) };
 
@@ -212,14 +243,26 @@ impl JoinExecState {
         inner_slot: *mut pg_sys::TupleTableSlot,
         max_pairs: usize,
     ) -> NljDispatchResult {
+        // SAFETY: the outer attno was range-checked against this descriptor,
+        // which matches every tuple and fallback slot in the outer batch.
         let outer_info = unsafe { AttExtractInfo::new(outer_tupdesc, self.nlj_outer_value_attno) };
+        // SAFETY: the lower attno was range-checked against the live inner
+        // descriptor shared by every tuple and the fallback slot.
         let lo_info = unsafe { AttExtractInfo::new(inner_tupdesc, self.nlj_inner_lo_attno) };
+        // SAFETY: the upper attno was range-checked against the live inner
+        // descriptor shared by every tuple and the fallback slot.
         let hi_info = unsafe { AttExtractInfo::new(inner_tupdesc, self.nlj_inner_hi_attno) };
 
+        // SAFETY: outer tuples match outer_info and outer_slot is their valid
+        // fallback-deformation slot.
         let (outer_keys, outer_nulls) =
             unsafe { tuple_extract::extract_f64(outer_tuples, &outer_info, outer_slot) };
+        // SAFETY: inner tuples match lo_info and inner_slot is their valid
+        // fallback-deformation slot.
         let (inner_lo, lo_nulls) =
             unsafe { tuple_extract::extract_f64(inner_tuples, &lo_info, inner_slot) };
+        // SAFETY: inner tuples match hi_info and inner_slot is their valid
+        // fallback-deformation slot.
         let (inner_hi, hi_nulls) =
             unsafe { tuple_extract::extract_f64(inner_tuples, &hi_info, inner_slot) };
 
@@ -235,10 +278,19 @@ impl JoinExecState {
     unsafe fn collect_child_tuples(ps: *mut pg_sys::PlanState) -> Vec<pg_sys::MinimalTuple> {
         let mut tuples = Vec::new();
         loop {
+            // SAFETY: `ps` is a live child PlanState on the backend thread.
             let slot = unsafe { pg_sys::ExecProcNode(ps) };
-            if slot.is_null() || unsafe { Self::slot_is_empty(slot) } {
+            if slot.is_null()
+                || unsafe {
+                    // SAFETY: short-circuiting proves the returned executor
+                    // slot is non-null and live until the next child pull.
+                    Self::slot_is_empty(slot)
+                }
+            {
                 break;
             }
+            // SAFETY: the non-empty child slot is live; PostgreSQL returns a
+            // new palloc-owned MinimalTuple copy.
             tuples.push(unsafe { pg_sys::ExecCopySlotMinimalTuple(slot) });
             if tuples.len().is_multiple_of(10_000) {
                 pgrx::check_for_interrupts!();
@@ -250,6 +302,8 @@ impl JoinExecState {
     fn free_tuple_vec(tuples: Vec<pg_sys::MinimalTuple>) {
         for mt in tuples {
             if !mt.is_null() {
+                // SAFETY: collected tuples are palloc-owned copies created by
+                // ExecCopySlotMinimalTuple and consumed exactly once here.
                 unsafe { pg_sys::pfree(mt.cast()) };
             }
         }
@@ -259,6 +313,8 @@ impl JoinExecState {
         if tupdesc.is_null() {
             pgrx::error!("pg_accel: NLJ {label} slot has no tuple descriptor");
         }
+        // SAFETY: the error branch above proves the executor-owned tuple
+        // descriptor is non-null and live while validating the plan attno.
         let natts = unsafe { (*tupdesc).natts };
         if attno <= 0 || attno > natts {
             pgrx::error!(
@@ -285,10 +341,13 @@ impl JoinExecState {
         if ps.is_null() {
             return fallback;
         }
+        // SAFETY: callers pass a live child PlanState for this executor call.
         let slot = unsafe { (*ps).ps_ResultTupleSlot };
         if !slot.is_null() {
             return slot;
         }
+        // SAFETY: join children without a result slot are scan-derived states;
+        // their common ScanState prefix owns the live scan tuple slot.
         let scan_slot = unsafe { (*ps.cast::<pg_sys::ScanState>()).ss_ScanTupleSlot };
         if scan_slot.is_null() {
             fallback
@@ -299,6 +358,9 @@ impl JoinExecState {
 
     unsafe fn store_join_projection(&self, result_slot: *mut pg_sys::TupleTableSlot) {
         unsafe {
+            // SAFETY: `result_slot` is a live executor slot; its descriptor,
+            // value/null arrays, and both mapped child slots remain valid for
+            // this projection, with iteration bounded by result natts.
             pg_sys::ExecClearTuple(result_slot);
             let natts = (*(*result_slot).tts_tupleDescriptor).natts as usize;
             for (i, entry) in self.tlist_map.iter().enumerate() {
@@ -334,9 +396,13 @@ unsafe fn extract_integral_as_i64(
     slot: *mut pg_sys::TupleTableSlot,
 ) -> (Vec<i64>, Vec<u8>) {
     if matches!(info.typid, pg_sys::INT2OID | pg_sys::INT4OID) {
+        // SAFETY: tuples and fallback slot share the descriptor used to build
+        // `info`, whose type OID selects the i32 extractor.
         let (values, nulls) = unsafe { tuple_extract::extract_i32(tuples, info, slot) };
         (values.into_iter().map(i64::from).collect(), nulls)
     } else {
+        // SAFETY: tuples and fallback slot share the descriptor used to build
+        // `info`, whose remaining integral type selects the i64 extractor.
         unsafe { tuple_extract::extract_i64(tuples, info, slot) }
     }
 }
