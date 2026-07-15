@@ -320,8 +320,11 @@ pub unsafe fn parse_array(datum: pg_sys::Datum) -> Result<PgArray<'static>, Pars
     // stub in `pg_stubs.rs`, which is correct because tests only pass flat
     // varlenas.
     #[cfg(not(test))]
-    let detoasted: *mut pg_sys::varlena =
-        unsafe { pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pg_sys::varlena>()) };
+    let detoasted: *mut pg_sys::varlena = unsafe {
+        // SAFETY: the nonzero Datum is a valid ArrayType varlena by contract,
+        // and this function runs on the PostgreSQL backend thread.
+        pg_sys::pg_detoast_datum(datum.cast_mut_ptr::<pg_sys::varlena>())
+    };
     #[cfg(test)]
     let detoasted: *mut pg_sys::varlena = {
         unsafe extern "C" {
@@ -345,6 +348,8 @@ pub unsafe fn parse_array(datum: pg_sys::Datum) -> Result<PgArray<'static>, Pars
     // SAFETY: total >= header_size, so the ArrayType header bytes are
     // readable. We project the raw varlena pointer to ArrayType.
     let array_ptr = detoasted.cast::<pg_sys::ArrayType>();
+    // SAFETY: the total-size check proves a complete, suitably aligned
+    // ArrayType header is readable at the detoasted varlena pointer.
     let header = unsafe { *array_ptr };
 
     let ndim_signed = header.ndim;

@@ -31,7 +31,11 @@ pub(super) fn datum_to_gserialized_bytes(datum: Datum) -> Option<Vec<u8>> {
         unsafe extern "C" {
             fn pg_detoast_datum(datum: *mut pgrx::pg_sys::varlena) -> *mut pgrx::pg_sys::varlena;
         }
-        unsafe { pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>()) }
+        unsafe {
+            // SAFETY: tests pass a nonzero flat GSERIALIZED varlena and this
+            // symbol resolves to the identity detoast stub described above.
+            pg_detoast_datum(datum.cast_mut_ptr::<pgrx::pg_sys::varlena>())
+        }
     };
     if detoasted.is_null() {
         return None;
@@ -49,6 +53,8 @@ pub(super) fn datum_to_gserialized_bytes(datum: Datum) -> Option<Vec<u8>> {
     // varlena payload. Copy into owned Vec — PG memory may be freed
     // after tuple processing.
     let ptr = detoasted as *const u8;
+    // SAFETY: `varsize` reported exactly `total_size` readable bytes for this
+    // flat varlena; the slice is copied before PostgreSQL can reclaim it.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, total_size) };
     Some(bytes.to_vec())
 }

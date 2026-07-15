@@ -309,6 +309,8 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     //    When the extension is loaded inside a regular backend or parallel
     //    worker, this is no longer "pre-fork" work and it shows up as native
     //    query planning/execution overhead for planner-declined queries.
+    // SAFETY: PostgreSQL initializes this process-global flag before extension
+    // loading; `_PG_init` reads it once on the main backend/postmaster thread.
     if !unsafe { pgrx::pg_sys::IsUnderPostmaster } {
         crate::gpu::prefork_warmup();
     }

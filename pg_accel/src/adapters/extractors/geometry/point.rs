@@ -177,6 +177,8 @@ pub fn extract_point_xy_f32(datum: Datum) -> Option<(f32, f32)> {
             *ptr.add(x_off + 7),
         ]
     });
+    // SAFETY: the validated GSERIALIZED/WKB bounds cover all eight bytes of
+    // the point's Y coordinate at offsets x_off + 8 through x_off + 15.
     let y = f64::from_le_bytes(unsafe {
         [
             *ptr.add(x_off + 8),
