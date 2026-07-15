@@ -140,10 +140,9 @@ pub use predicate_filter_expression_grouped_agg::PredicateFilterExpressionGroupe
 pub use proximity::Proximity;
 pub use recursive_union_decline::RecursiveUnionDecline;
 pub use registry::{
-    H3LaneClass, ResidentPinSpec, ThresholdEvidenceEligibility, WorkloadCategory, workload_metadata,
+    H3LaneClass, PHASE9_OPERATOR_DECLINES, Phase9OperatorLane, ResidentPinSpec,
+    ThresholdEvidenceEligibility, WorkloadCategory, workload_metadata,
 };
-#[cfg(test)]
-pub use registry::{PHASE9_OPERATOR_DECLINES, Phase9OperatorLane};
 pub use semi_anti_null_decline::{
     AntiJoinNullDecline, InJoinNullDecline, NotInJoinNullDecline, SemiJoinNullDecline,
 };

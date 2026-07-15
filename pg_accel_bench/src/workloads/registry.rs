@@ -188,7 +188,6 @@ pub struct WorkloadMetadata {
 }
 
 /// Phase 9 operator lanes that intentionally remain PostgreSQL-native.
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Phase9OperatorLane {
     WindowFullOutput,
@@ -213,7 +212,6 @@ pub enum Phase9OperatorLane {
     NestedLoopInequality,
 }
 
-#[cfg(test)]
 impl Phase9OperatorLane {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -243,7 +241,6 @@ impl Phase9OperatorLane {
 }
 
 /// Exact benchmark and planner-reason contract for one Phase 9 lane.
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Phase9DeclineContract {
     pub lane: Phase9OperatorLane,
@@ -253,7 +250,6 @@ pub struct Phase9DeclineContract {
 
 /// Exhaustive Phase 9 native-decline disposition. A lane may leave this table
 /// only when it gains a differential-correct selected GPU workload.
-#[cfg(test)]
 pub const PHASE9_OPERATOR_DECLINES: &[Phase9DeclineContract] = &[
     Phase9DeclineContract {
         lane: Phase9OperatorLane::WindowFullOutput,

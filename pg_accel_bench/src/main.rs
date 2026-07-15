@@ -272,6 +272,21 @@ enum Command {
         connection: String,
     },
 
+    /// Run the Phase 9 operator-breadth release gate at the canonical 10K scale.
+    ///
+    /// Every typed Phase 9 lane is checked against an exact result oracle and
+    /// must produce its planner-reported native decline with zero GPU dispatch.
+    Phase9Gate {
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+
+        /// Directory for the aggregate Phase 9 evidence bundle. If omitted, a
+        /// fresh `benchmarks/artifacts/phase9-gate-<timestamp>` directory is used.
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
+    },
+
     /// Run the pg_accel install/provenance gate without benchmarks.
     ///
     /// Checks that the live backend is loading the expected extension SQL,
@@ -555,6 +570,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             rows,
         } => cmd_validate(workload.as_deref(), category.as_deref(), rows),
         Command::ExplainAudit { connection } => cmd_explain_audit(&connection),
+        Command::Phase9Gate {
+            connection,
+            artifacts_dir,
+        } => cmd_phase9_gate(&connection, artifacts_dir),
         Command::Provenance { connection } => cmd_provenance(&connection),
         Command::Fp64Calibrate {
             connection,
@@ -608,6 +627,97 @@ fn cmd_explain_audit(connection: &str) -> Result<(), Box<dyn std::error::Error>>
     } else {
         Err("explain-audit: at least one RequiredToday row failed".into())
     }
+}
+
+const PHASE9_VERIFICATION_ROWS: usize = 10_000;
+
+fn phase9_gate_workloads() -> Result<Vec<Box<dyn workloads::Workload>>, Box<dyn std::error::Error>>
+{
+    workloads::PHASE9_OPERATOR_DECLINES
+        .iter()
+        .map(|contract| {
+            workloads::find_workload(contract.workload).ok_or_else(|| {
+                format!(
+                    "Phase 9 lane `{}` references missing workload `{}`",
+                    contract.lane.as_str(),
+                    contract.workload
+                )
+                .into()
+            })
+        })
+        .collect()
+}
+
+fn enforce_phase9_matrix_complete(report: &BenchReport) -> Result<(), Box<dyn std::error::Error>> {
+    let mut gaps = Vec::new();
+    for contract in workloads::PHASE9_OPERATOR_DECLINES {
+        let matches = report
+            .workloads
+            .iter()
+            .filter(|result| {
+                result.name == contract.workload && result.rows == PHASE9_VERIFICATION_ROWS
+            })
+            .count();
+        if matches != 1 {
+            gaps.push(format!(
+                "{} (`{}`): expected one {}-row result, found {matches}",
+                contract.lane.as_str(),
+                contract.workload,
+                PHASE9_VERIFICATION_ROWS
+            ));
+        }
+    }
+    for crash in &report.crashes {
+        gaps.push(format!(
+            "{}: crashed at {} rows ({})",
+            crash.workload, crash.rows, crash.error
+        ));
+    }
+    if gaps.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "Phase 9 operator matrix is incomplete:\n{}",
+        gaps.join("\n")
+    )
+    .into())
+}
+
+fn cmd_phase9_gate(
+    connection: &str,
+    artifacts_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workloads = phase9_gate_workloads()?;
+    let artifact_root = artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir("phase9-gate"));
+    let cells = workloads
+        .iter()
+        .map(|workload| runner::WorkloadRunCell {
+            workload: workload.as_ref(),
+            rows: PHASE9_VERIFICATION_ROWS,
+        })
+        .collect::<Vec<_>>();
+    let config = runner::BenchConfig {
+        iterations: 1,
+        warmup: 0,
+        seed: 42,
+        timing_mode: runner::TimingMode::RawWallClock,
+        cache_mode: runner::CacheMode::Warm,
+        plans_capture_path: Some(artifact_root.join("plans.txt")),
+        guc_profile: None,
+        skip_guc_verify: false,
+        artifacts_dir: Some(artifact_root),
+    };
+
+    let report = runner::run_cells_with_config(connection, &cells, &config)?;
+    print_report(&report, &ReportFormat::Markdown)?;
+    enforce_phase9_matrix_complete(&report)?;
+    enforce_benchmark_ship_gate(&report)?;
+    eprintln!(
+        "[phase9-gate] PASS: all {} operator lanes produced exact-oracle and planner/dispatch evidence at {} rows",
+        workloads::PHASE9_OPERATOR_DECLINES.len(),
+        PHASE9_VERIFICATION_ROWS
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1164,6 +1274,31 @@ fn print_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phase9_gate_registry_is_live_at_canonical_scale() {
+        let gate_workloads = phase9_gate_workloads().expect("Phase 9 workloads should resolve");
+        assert_eq!(
+            gate_workloads.len(),
+            workloads::PHASE9_OPERATOR_DECLINES.len()
+        );
+        for (workload, contract) in gate_workloads
+            .iter()
+            .zip(workloads::PHASE9_OPERATOR_DECLINES)
+        {
+            assert_eq!(workload.name(), contract.workload);
+            assert!(
+                workload.row_scales().contains(&PHASE9_VERIFICATION_ROWS),
+                "{} must support the canonical Phase 9 scale",
+                contract.workload
+            );
+            assert!(
+                workload.result_oracle(PHASE9_VERIFICATION_ROWS).is_some(),
+                "{} must provide an exact Phase 9 oracle",
+                contract.workload
+            );
+        }
+    }
 
     #[test]
     fn h3_repro_rows_must_match_workload_scales() {
