@@ -480,17 +480,25 @@ unsafe extern "C-unwind" fn plan_custom_path_raster(
     let raster_plan = unsafe { deserialize_raster_exec_path_plan(path_private) }
         .unwrap_or_else(|error| pgrx::error!("pg_accel: malformed raster RQS2 path: {error}"));
 
+    // SAFETY: a non-null `custom_plans` is the planner-owned List supplied to
+    // this callback and remains valid while its length is inspected.
     if !custom_plans.is_null() && unsafe { pg_sys::list_length(custom_plans) } != 0 {
         pgrx::error!("pg_accel: childless raster path unexpectedly has child plans");
     }
+    // SAFETY: a non-null `clauses` is the planner-owned List supplied to this
+    // callback and remains valid while its length is inspected.
     if !clauses.is_null() && unsafe { pg_sys::list_length(clauses) } != 0 {
         pgrx::error!("pg_accel: childless raster path unexpectedly has executor clauses");
     }
+    // SAFETY: a non-null `tlist` is the planner-owned target List supplied to
+    // this callback and remains valid while its cardinality is checked.
     if tlist.is_null() || unsafe { pg_sys::list_length(tlist) } != 1 {
         pgrx::error!("pg_accel: childless raster path must have exactly one output expression");
     }
     // SAFETY: the target list was checked to contain exactly one planner-owned node.
     let target = unsafe { pg_sys::list_nth(tlist, 0).cast::<pg_sys::TargetEntry>() };
+    // SAFETY: the singleton list entry is a planner-owned TargetEntry; the
+    // null check short-circuits before its fields are inspected.
     if target.is_null() || unsafe { (*target).resjunk || (*target).expr.is_null() } {
         pgrx::error!("pg_accel: childless raster path has an invalid output target");
     }
@@ -899,6 +907,8 @@ unsafe fn build_function_scan_tlist(
         // SAFETY: var is freshly allocated; makeTargetEntry takes ownership
         // of the resname pointer (palloc'd via pstrdup).
         let resname = unsafe { pg_sys::pstrdup(cname.as_ptr()) };
+        // SAFETY: `var` and `resname` were allocated in CurrentMemoryContext;
+        // the new TargetEntry takes the expression and copied name pointers.
         let te = unsafe {
             pg_sys::makeTargetEntry(
                 var.cast::<pg_sys::Expr>(),
@@ -1458,6 +1468,8 @@ unsafe fn make_custom_scan_plan(
 ///
 /// `child` must point to a valid PostgreSQL `Plan` node.
 unsafe fn strip_child_cpu_quals(child: *mut pg_sys::Plan) {
+    // SAFETY: the caller supplies a live, mutable child Plan in the current
+    // planner context before the plan tree is handed to the executor.
     unsafe {
         (*child).qual = std::ptr::null_mut();
     }
@@ -1615,8 +1627,12 @@ fn find_accel_in_node(
         pg_sys::NodeTag::T_FuncExpr => {
             // SAFETY: tag confirmed FuncExpr.
             let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            // SAFETY: the node tag proves `funcexpr` has PostgreSQL's
+            // FuncExpr layout and remains owned by the expression tree.
             let oid = unsafe { (*funcexpr).funcid };
             if let Some(entry) = reg.lookup(oid) {
+                // SAFETY: the confirmed FuncExpr owns this planner-lifetime
+                // argument List, which is only borrowed during traversal.
                 let args = unsafe { (*funcexpr).args };
                 let attno = extract_var_attno(args);
                 // SAFETY: args is a valid List; extract_const_datum reads Const nodes.
@@ -1634,7 +1650,11 @@ fn find_accel_in_node(
         pg_sys::NodeTag::T_OpExpr => {
             // SAFETY: tag confirmed OpExpr; force-resolve opfuncid.
             let opexpr = node.cast::<pg_sys::OpExpr>();
+            // SAFETY: `opexpr` has the confirmed OpExpr layout and PostgreSQL
+            // permits set_opfuncid to populate its cached function OID here.
             unsafe { pg_sys::set_opfuncid(opexpr) };
+            // SAFETY: set_opfuncid just initialized `opfuncid` in this live
+            // planner-owned OpExpr.
             let oid = unsafe { (*opexpr).opfuncid };
             if let Some(entry) = reg.lookup(oid) {
                 // SAFETY: tag confirmed OpExpr; reading args list.
@@ -1698,6 +1718,8 @@ fn extract_var_attno(args: *mut pg_sys::List) -> i32 {
         if unsafe { (*node).type_ } == pg_sys::NodeTag::T_Var {
             // SAFETY: tag confirmed Var; reading varattno.
             let var = node.cast::<pg_sys::Var>();
+            // SAFETY: the tag check proves the planner-owned node has Var
+            // layout, so reading its attribute number is valid.
             return i32::from(unsafe { (*var).varattno });
         }
     }
@@ -1735,9 +1757,10 @@ unsafe fn extract_const_datum(args: *mut pg_sys::List) -> Vec<(pg_sys::Datum, bo
             // SAFETY: tag confirmed Const; reading constvalue, constisnull,
             // and consttype.
             let cst = node.cast::<pg_sys::Const>();
-            let datum = unsafe { (*cst).constvalue };
-            let is_null = unsafe { (*cst).constisnull };
-            let typid = unsafe { (*cst).consttype };
+            // SAFETY: the tag check proves `cst` has Const layout; all three
+            // scalar fields are read while the planner expression stays live.
+            let (datum, is_null, typid) =
+                unsafe { ((*cst).constvalue, (*cst).constisnull, (*cst).consttype) };
             out.push((datum, is_null, typid));
         }
     }
@@ -1778,6 +1801,8 @@ unsafe fn compile_qual_list(
     if len == 1 {
         // SAFETY: qual has exactly 1 element.
         let node = unsafe { pg_sys::list_nth(qual, 0).cast::<pg_sys::Node>() };
+        // SAFETY: `node` is the sole live expression from the validated qual
+        // List, satisfying the template matcher contract.
         if let Some(tmpl) = unsafe { try_template_match(node) } {
             return CompiledExpr::Template(tmpl);
         }
@@ -1787,15 +1812,21 @@ unsafe fn compile_qual_list(
     // Handles both: single BoolExpr(AND) wrapping two OpExpr (len==1),
     // and PG's implicit AND with two separate OpExpr nodes (len==2).
     if len == 1 {
+        // SAFETY: `len == 1` proves index zero is valid in the planner qual List.
         let node = unsafe { pg_sys::list_nth(qual, 0).cast::<pg_sys::Node>() };
+        // SAFETY: `node` is a live expression from the validated qual List.
         if let Some(tmpl) = unsafe { try_two_pred_and_template(node) } {
             return CompiledExpr::Template(tmpl);
         }
     }
     if len == 2 {
+        // SAFETY: `len == 2` proves index zero is valid in the qual List.
         let n0 = unsafe { pg_sys::list_nth(qual, 0).cast::<pg_sys::Node>() };
+        // SAFETY: `len == 2` proves index one is valid in the qual List.
         let n1 = unsafe { pg_sys::list_nth(qual, 1).cast::<pg_sys::Node>() };
+        // SAFETY: `n0` is a live planner expression obtained from `qual`.
         let t0 = unsafe { try_template_match(n0) };
+        // SAFETY: `n1` is a live planner expression obtained from `qual`.
         let t1 = unsafe { try_template_match(n1) };
         if let (
             Some(expr_compiler::TemplateKernel::CmpConst {
@@ -1828,6 +1859,8 @@ unsafe fn compile_qual_list(
     for i in 0..len {
         // SAFETY: i is in [0, len).
         let node = unsafe { pg_sys::list_nth(qual, i).cast::<pg_sys::Node>() };
+        // SAFETY: each `node` comes from the live qual List and the builder is
+        // uniquely borrowed for this recursive compilation step.
         if !unsafe { compile_node(node, &mut builder) } {
             pgrx::debug1!("pg_accel: expr compile bail at qual node {i}");
             return CompiledExpr::DeferToPg;
@@ -1882,6 +1915,8 @@ unsafe fn try_template_match(
             let opexpr = node.cast::<pg_sys::OpExpr>();
             // SAFETY: tag confirmed OpExpr.
             let args = unsafe { (*opexpr).args };
+            // SAFETY: a non-null OpExpr argument pointer is a planner-owned
+            // List that remains live during template matching.
             if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
                 return None;
             }
@@ -1891,6 +1926,8 @@ unsafe fn try_template_match(
             if op_name_ptr.is_null() {
                 return None;
             }
+            // SAFETY: get_opname returned a non-null NUL-terminated name in
+            // PostgreSQL-managed memory valid in the current memory context.
             let op_name = unsafe { std::ffi::CStr::from_ptr(op_name_ptr) }
                 .to_str()
                 .ok()?;
@@ -1898,9 +1935,12 @@ unsafe fn try_template_match(
 
             // SAFETY: args has 2 elements.
             let arg0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+            // SAFETY: the verified two-element List makes index one valid.
             let arg1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
 
             // Pattern: Var <cmp> Const, or Const <cmp> Var with opcode flip.
+            // SAFETY: both nodes are live entries from the planner-owned
+            // two-element OpExpr argument List.
             let (col_idx, const_val, flip_cmp) = unsafe { extract_var_const_pair(arg0, arg1) }?;
             let cmp_opcode = if flip_cmp {
                 expr_compiler::flip_cmp_opcode(cmp_opcode)
@@ -1918,8 +1958,13 @@ unsafe fn try_template_match(
         pg_sys::NodeTag::T_NullTest => {
             // SAFETY: tag confirmed NullTest.
             let nt = node.cast::<pg_sys::NullTest>();
+            // SAFETY: the node tag proves NullTest layout and its argument is
+            // retained by the planner expression tree.
             let arg = unsafe { (*nt).arg.cast::<pg_sys::Node>() };
+            // SAFETY: the NullTest argument is a live expression node.
             let col_idx = unsafe { node_as_var_col(arg) }?;
+            // SAFETY: the tag check proves `nt` has NullTest layout, making
+            // its enum discriminator readable.
             let check_not_null = unsafe { (*nt).nulltesttype } == pg_sys::NullTestType::IS_NOT_NULL;
             Some(TemplateKernel::IsNull {
                 col_idx,
@@ -1952,17 +1997,23 @@ unsafe fn try_two_pred_and_template(
     if unsafe { (*boolexpr).boolop } != pg_sys::BoolExprType::AND_EXPR {
         return None;
     }
+    // SAFETY: the node tag established BoolExpr layout; its argument List is
+    // planner-owned for the expression-tree lifetime.
     let args = unsafe { (*boolexpr).args };
+    // SAFETY: a non-null BoolExpr argument pointer is a valid PostgreSQL List.
     if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
         return None;
     }
 
     // SAFETY: args has 2 elements.
     let n0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+    // SAFETY: the verified two-element List makes index one valid.
     let n1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
 
     // Both children must be CmpConst-matchable OpExprs.
+    // SAFETY: `n0` is a live expression from the BoolExpr argument List.
     let t0 = unsafe { try_template_match(n0) };
+    // SAFETY: `n1` is a live expression from the BoolExpr argument List.
     let t1 = unsafe { try_template_match(n1) };
 
     match (t0, t1) {
@@ -2001,16 +2052,20 @@ unsafe fn extract_var_const_pair(
     arg1: *mut pg_sys::Node,
 ) -> Option<(u32, f64, bool)> {
     // Try Var, Const order.
-    if let Some(col) = unsafe { node_as_var_col(arg0) }
-        && let Some(val) = unsafe { node_as_const_f64(arg1) }
-    {
-        return Some((col, val, false));
+    // SAFETY: the caller guarantees `arg0` is a live PostgreSQL expression node.
+    if let Some(col) = unsafe { node_as_var_col(arg0) } {
+        // SAFETY: the caller likewise guarantees `arg1` is a live expression node.
+        if let Some(val) = unsafe { node_as_const_f64(arg1) } {
+            return Some((col, val, false));
+        }
     }
     // Try Const, Var order.
-    if let Some(col) = unsafe { node_as_var_col(arg1) }
-        && let Some(val) = unsafe { node_as_const_f64(arg0) }
-    {
-        return Some((col, val, true));
+    // SAFETY: `arg1` remains a live PostgreSQL expression node.
+    if let Some(col) = unsafe { node_as_var_col(arg1) } {
+        // SAFETY: `arg0` remains a live PostgreSQL expression node.
+        if let Some(val) = unsafe { node_as_const_f64(arg0) } {
+            return Some((col, val, true));
+        }
     }
     None
 }
@@ -2031,6 +2086,8 @@ unsafe fn node_as_var_col(node: *mut pg_sys::Node) -> Option<u32> {
         pg_sys::NodeTag::T_Var => {
             // SAFETY: tag confirmed Var.
             let var = node.cast::<pg_sys::Var>();
+            // SAFETY: the node tag proves Var layout and the expression tree
+            // retains the node while its attribute number is read.
             let attno = unsafe { (*var).varattno };
             if attno <= 0 {
                 return None; // system column
@@ -2040,6 +2097,7 @@ unsafe fn node_as_var_col(node: *mut pg_sys::Node) -> Option<u32> {
         pg_sys::NodeTag::T_RelabelType => {
             // SAFETY: tag confirmed RelabelType; unwrap and recurse.
             let arg = unsafe { (*node.cast::<pg_sys::RelabelType>()).arg };
+            // SAFETY: the RelabelType owns a live inner expression node.
             unsafe { node_as_var_col(arg.cast::<pg_sys::Node>()) }
         }
         _ => None,
@@ -2065,8 +2123,10 @@ unsafe fn node_as_const_f64(node: *mut pg_sys::Node) -> Option<f64> {
     if unsafe { (*cst).constisnull } {
         return None;
     }
-    let datum = unsafe { (*cst).constvalue };
-    let typid = u32::from(unsafe { (*cst).consttype });
+    // SAFETY: the tag check proved Const layout and the non-null Const remains
+    // planner-owned while its Datum and type OID are copied.
+    let (datum, consttype) = unsafe { ((*cst).constvalue, (*cst).consttype) };
+    let typid = u32::from(consttype);
 
     // PG type OIDs for numeric types.
     const INT2OID: u32 = 21;
@@ -2108,6 +2168,7 @@ unsafe fn compile_node(
 
     match tag {
         pg_sys::NodeTag::T_Var => {
+            // SAFETY: the dispatch tag proves `node` is a live Var expression.
             let col = match unsafe { node_as_var_col(node) } {
                 Some(c) => c,
                 None => return false,
@@ -2118,10 +2179,13 @@ unsafe fn compile_node(
         pg_sys::NodeTag::T_Const => {
             // SAFETY: tag confirmed Const.
             let cst = node.cast::<pg_sys::Const>();
+            // SAFETY: the dispatch tag proves Const layout, so its null flag
+            // may be read while the planner expression is live.
             if unsafe { (*cst).constisnull } {
                 builder.emit_load_null();
                 return true;
             }
+            // SAFETY: `node` is the same live Const established by the tag.
             match unsafe { node_as_const_f64(node) } {
                 Some(val) => {
                     builder.emit_load_const(crate::gpu::PgaccelVal::from_f64(val));
@@ -2133,10 +2197,13 @@ unsafe fn compile_node(
         pg_sys::NodeTag::T_OpExpr => {
             // SAFETY: tag confirmed OpExpr.
             let opexpr = node.cast::<pg_sys::OpExpr>();
+            // SAFETY: the dispatch tag proves OpExpr layout and its argument
+            // List is retained by the planner expression tree.
             let args = unsafe { (*opexpr).args };
             if args.is_null() {
                 return false;
             }
+            // SAFETY: the null check proves `args` is a valid PostgreSQL List.
             let nargs = unsafe { pg_sys::list_length(args) };
             if nargs != 2 {
                 return false;
@@ -2148,6 +2215,8 @@ unsafe fn compile_node(
             if op_name_ptr.is_null() {
                 return false;
             }
+            // SAFETY: get_opname returned a non-null NUL-terminated string in
+            // PostgreSQL-managed memory for the current context.
             let op_name = match unsafe { std::ffi::CStr::from_ptr(op_name_ptr) }.to_str() {
                 Ok(s) => s,
                 Err(_) => return false,
@@ -2156,11 +2225,14 @@ unsafe fn compile_node(
             // Compile both arguments.
             // SAFETY: args has 2 elements.
             let arg0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+            // SAFETY: the validated two-element List makes index one valid.
             let arg1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
 
+            // SAFETY: `arg0` is a live expression from the OpExpr argument List.
             if !unsafe { compile_node(arg0, builder) } {
                 return false;
             }
+            // SAFETY: `arg1` is a live expression from the OpExpr argument List.
             if !unsafe { compile_node(arg1, builder) } {
                 return false;
             }
@@ -2185,6 +2257,8 @@ unsafe fn compile_node(
         pg_sys::NodeTag::T_FuncExpr => {
             // SAFETY: tag confirmed FuncExpr.
             let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            // SAFETY: the dispatch tag proves FuncExpr layout while the
+            // planner-owned expression remains live.
             let funcid = unsafe { (*funcexpr).funcid };
 
             // Look up function name in pg_proc.
@@ -2193,6 +2267,8 @@ unsafe fn compile_node(
             if name_ptr.is_null() {
                 return false;
             }
+            // SAFETY: get_func_name returned a non-null NUL-terminated name in
+            // PostgreSQL-managed memory for the current context.
             let func_name = match unsafe { std::ffi::CStr::from_ptr(name_ptr) }.to_str() {
                 Ok(s) => s,
                 Err(_) => return false,
@@ -2204,21 +2280,28 @@ unsafe fn compile_node(
                 None => return false,
             };
 
+            // SAFETY: the confirmed FuncExpr owns this planner-lifetime
+            // argument List.
             let args = unsafe { (*funcexpr).args };
             if args.is_null() {
                 return false;
             }
+            // SAFETY: the null check proves `args` is a valid PostgreSQL List.
             let nargs = unsafe { pg_sys::list_length(args) };
 
             if is_binary {
                 if nargs != 2 {
                     return false;
                 }
+                // SAFETY: `nargs == 2` makes index zero valid.
                 let a0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+                // SAFETY: `nargs == 2` makes index one valid.
                 let a1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
+                // SAFETY: `a0` is a live FuncExpr argument node.
                 if !unsafe { compile_node(a0, builder) } {
                     return false;
                 }
+                // SAFETY: `a1` is a live FuncExpr argument node.
                 if !unsafe { compile_node(a1, builder) } {
                     return false;
                 }
@@ -2227,7 +2310,9 @@ unsafe fn compile_node(
                 if nargs != 1 {
                     return false;
                 }
+                // SAFETY: `nargs == 1` makes index zero valid.
                 let a0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+                // SAFETY: `a0` is the live unary FuncExpr argument node.
                 if !unsafe { compile_node(a0, builder) } {
                     return false;
                 }
@@ -2238,11 +2323,13 @@ unsafe fn compile_node(
         pg_sys::NodeTag::T_BoolExpr => {
             // SAFETY: tag confirmed BoolExpr.
             let boolexpr = node.cast::<pg_sys::BoolExpr>();
-            let boolop = unsafe { (*boolexpr).boolop };
-            let args = unsafe { (*boolexpr).args };
+            // SAFETY: the dispatch tag proves BoolExpr layout; copy its
+            // discriminator and planner-owned argument List together.
+            let (boolop, args) = unsafe { ((*boolexpr).boolop, (*boolexpr).args) };
             if args.is_null() {
                 return false;
             }
+            // SAFETY: the null check proves `args` is a valid PostgreSQL List.
             let nargs = unsafe { pg_sys::list_length(args) };
 
             match boolop {
@@ -2257,13 +2344,17 @@ unsafe fn compile_node(
                     };
 
                     // Compile first arg.
+                    // SAFETY: `nargs >= 2` makes index zero valid.
                     let first = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+                    // SAFETY: `first` is a live BoolExpr argument node.
                     if !unsafe { compile_node(first, builder) } {
                         return false;
                     }
                     // Compile remaining args, emitting AND/OR between each pair.
                     for i in 1..nargs {
+                        // SAFETY: the loop bounds keep `i` within the List.
                         let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+                        // SAFETY: `child` is a live BoolExpr argument node.
                         if !unsafe { compile_node(child, builder) } {
                             return false;
                         }
@@ -2275,7 +2366,9 @@ unsafe fn compile_node(
                     if nargs != 1 {
                         return false;
                     }
+                    // SAFETY: `nargs == 1` makes index zero valid.
                     let child = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+                    // SAFETY: `child` is the live NOT argument expression.
                     if !unsafe { compile_node(child, builder) } {
                         return false;
                     }
@@ -2288,10 +2381,15 @@ unsafe fn compile_node(
         pg_sys::NodeTag::T_NullTest => {
             // SAFETY: tag confirmed NullTest.
             let nt = node.cast::<pg_sys::NullTest>();
+            // SAFETY: the dispatch tag proves NullTest layout and its argument
+            // is retained by the planner expression tree.
             let arg = unsafe { (*nt).arg.cast::<pg_sys::Node>() };
+            // SAFETY: `arg` is the live NullTest argument expression.
             if !unsafe { compile_node(arg, builder) } {
                 return false;
             }
+            // SAFETY: the dispatch tag proves `nt` has NullTest layout, making
+            // its enum discriminator readable.
             let nt_opcode = if unsafe { (*nt).nulltesttype } == pg_sys::NullTestType::IS_NOT_NULL {
                 opcode::IS_NOT_NULL
             } else {
@@ -2304,6 +2402,8 @@ unsafe fn compile_node(
             // Unwrap type relabeling and compile the inner expression.
             // SAFETY: tag confirmed RelabelType.
             let arg = unsafe { (*node.cast::<pg_sys::RelabelType>()).arg };
+            // SAFETY: the RelabelType owns a live inner expression node and
+            // the builder remains uniquely borrowed for recursive compilation.
             unsafe { compile_node(arg.cast::<pg_sys::Node>(), builder) }
         }
         _ => false,
@@ -2320,6 +2420,8 @@ unsafe fn begin_default_table_scan(
 ) -> pg_sys::TableScanDesc {
     #[cfg(feature = "pg18")]
     {
+        // SAFETY: the executor supplies a live open Relation and active
+        // Snapshot; zero scan keys denotes an unqualified table scan.
         unsafe { pg_sys::table_beginscan(relation, snapshot, 0, std::ptr::null_mut()) }
     }
     #[cfg(feature = "pg19")]
@@ -3007,6 +3109,8 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         if !proj_info.is_null() {
             // SAFETY: proj_info is a valid ProjectionInfo set by PG.
             let econtext = unsafe { (*proj_info).pi_exprContext };
+            // SAFETY: `node` is the live CustomScanState supplied to the
+            // executor callback; PostgreSQL owns its scan slot for this node.
             let scan_slot = unsafe { (*node).ss.ss_ScanTupleSlot };
             // SAFETY: econtext is a valid ExprContext; scan_slot holds the
             // current tuple produced by the trait dispatch above.
