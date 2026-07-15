@@ -2196,7 +2196,7 @@ fn window_decline_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "1".to_owned(),
             "16-byte nullable window input",
             "one count/sum digest row",
-            "partition top-N has no resident segmented-window consumer pipeline",
+            "partition top-N has no GPU-resident downstream consumer pipeline",
         ),
         "window_rank" => (
             "window_rank_peer_filter",
@@ -2206,7 +2206,7 @@ fn window_decline_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "1".to_owned(),
             "8-byte window input",
             "one count/sum digest row",
-            "RANK filter pushdown has no resident segmented-window consumer pipeline",
+            "RANK filter pushdown has no GPU-resident downstream consumer pipeline",
         ),
         "window_dense_rank" => (
             "window_dense_rank_peer_filter",
@@ -2216,7 +2216,7 @@ fn window_decline_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "1".to_owned(),
             "12-byte window input",
             "one count/sum digest row",
-            "DENSE_RANK filter pushdown has no resident segmented-window consumer pipeline",
+            "DENSE_RANK filter pushdown has no GPU-resident downstream consumer pipeline",
         ),
         "window_running_sum" => (
             "window_running_sum_to_aggregate",
@@ -2226,7 +2226,7 @@ fn window_decline_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "1".to_owned(),
             "12-byte nullable window input",
             "one count/sum/max digest row",
-            "running SUM has no resident segmented-window consumer pipeline",
+            "running SUM has no GPU-resident downstream consumer pipeline",
         ),
         "window_analytics" => (
             "window_row_number_sum_to_aggregate",
@@ -2236,7 +2236,7 @@ fn window_decline_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "1".to_owned(),
             "24-byte window input",
             "one count/sum digest row",
-            "combined reducing windows have no resident segmented-window consumer pipeline",
+            "combined reducing windows have no GPU-resident downstream consumer pipeline",
         ),
         "window_reducing_decline" => (
             "window_count_sum_avg_rank_reducing",
@@ -2246,7 +2246,7 @@ fn window_decline_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "1".to_owned(),
             "16-byte nullable window input",
             "one aggregate row consuming running COUNT/SUM/AVG and peer RANK outputs",
-            "reducing output has no segmented window kernel or resident consumer pipeline",
+            "device window output has no GPU-resident downstream consumer pipeline",
         ),
         _ => return None,
     };

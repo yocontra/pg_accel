@@ -2,7 +2,7 @@ use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i64};
 
 const WINDOW_REDUCING_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
 
-/// Reducing-output window lane without a segmented GPU implementation.
+/// Reducing-output window lane without a GPU-resident downstream consumer.
 pub struct WindowReducingDecline;
 
 impl Workload for WindowReducingDecline {
@@ -12,7 +12,7 @@ impl Workload for WindowReducingDecline {
 
     fn description(&self) -> &'static str {
         "NULL-sensitive running COUNT/SUM/AVG and peer RANK reduced to one row - native planner decline \
-         (`no_gpu_resident_pipeline`) until segmented window kernels feed a resident consumer"
+         (`no_gpu_resident_pipeline`) until device window results feed a resident consumer"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

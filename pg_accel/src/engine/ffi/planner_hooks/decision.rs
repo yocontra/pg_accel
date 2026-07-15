@@ -41,7 +41,6 @@ pub(super) enum RejectionReason {
     NoGpuResidentPipeline,
     GroupedAvgNoGpuFinalize,
     AggSemanticModifierNoGpuKernel,
-    WindowFunctionNoSegmentedKernel,
     WindowPartialPathNoParallelHook,
     H3LateralSrfNoBatchedExpansion,
     H3LatLngUnsupportedShape,
@@ -112,7 +111,6 @@ impl RejectionReason {
             Self::NoGpuResidentPipeline => "no_gpu_resident_pipeline",
             Self::GroupedAvgNoGpuFinalize => "grouped_avg_no_gpu_finalize",
             Self::AggSemanticModifierNoGpuKernel => "agg_semantic_modifier_no_gpu_kernel",
-            Self::WindowFunctionNoSegmentedKernel => "window_function_no_segmented_kernel",
             Self::WindowPartialPathNoParallelHook => "window_partial_path_no_parallel_hook",
             Self::H3LateralSrfNoBatchedExpansion => "h3_lateral_srf_no_batched_expansion",
             Self::H3LatLngUnsupportedShape => "h3_latlng_unsupported_shape",
@@ -503,8 +501,8 @@ mod tests {
             "agg_semantic_modifier_no_gpu_kernel"
         );
         assert_eq!(
-            RejectionReason::WindowFunctionNoSegmentedKernel.stats_key(),
-            "window_function_no_segmented_kernel"
+            RejectionReason::NoGpuResidentPipeline.stats_key(),
+            "no_gpu_resident_pipeline"
         );
         assert_eq!(
             RejectionReason::WindowPartialPathNoParallelHook.stats_key(),

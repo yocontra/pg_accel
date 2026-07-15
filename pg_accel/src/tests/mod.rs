@@ -3786,7 +3786,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn test_window_row_number_records_segmented_kernel_decline() {
+    fn test_window_shapes_record_resident_pipeline_decline() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
 
@@ -3799,22 +3799,45 @@ mod tests {
         Spi::run("ANALYZE _wt_row_number_decline").expect("ANALYZE");
         Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
 
-        let plan = explain_text(
+        let full_output_plan = explain_text(
             "SELECT row_number() OVER (PARTITION BY dept ORDER BY id) \
              FROM _wt_row_number_decline",
         );
 
-        assert!(!plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(!full_output_plan.is_empty(), "EXPLAIN returned no rows");
         assert!(
-            !plan.contains("Strategy: GpuWindow"),
-            "ROW_NUMBER should stay native until segmented window kernels win:\n{plan}"
+            !full_output_plan.contains("Strategy: GpuWindow"),
+            "full-output ROW_NUMBER must stay native until it has a resident output pipeline:\n\
+             {full_output_plan}"
         );
         let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
             .expect("last rejection query should succeed")
             .expect("ROW_NUMBER window decline should record a reason");
         assert_eq!(
             rejection, RESIDENT_ONLY_REJECTION,
-            "ROW_NUMBER should expose the resident-only gate before legacy window lanes; plan:\n{plan}"
+            "full-output ROW_NUMBER should expose the resident-only gate; plan:\n\
+             {full_output_plan}"
+        );
+
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
+        let reducing_plan = explain_text(
+            "SELECT sum(rn)::bigint FROM (\
+               SELECT row_number() OVER (PARTITION BY dept ORDER BY id) AS rn \
+               FROM _wt_row_number_decline\
+             ) windowed",
+        );
+        assert!(!reducing_plan.is_empty(), "EXPLAIN returned no rows");
+        assert!(
+            !reducing_plan.contains("Strategy: GpuWindow"),
+            "reducing ROW_NUMBER must stay native without a resident downstream consumer:\n\
+             {reducing_plan}"
+        );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("reducing ROW_NUMBER decline should record a reason");
+        assert_eq!(
+            rejection, RESIDENT_ONLY_REJECTION,
+            "reducing ROW_NUMBER should expose the resident-only gate; plan:\n{reducing_plan}"
         );
     }
 
