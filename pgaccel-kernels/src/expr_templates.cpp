@@ -1840,6 +1840,17 @@ extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(void* dst, const vo
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
   try {
+#if defined(__APPLE__)
+    // Resident inputs use shared USM on Apple Silicon. Submitting a Metal
+    // blit for host-visible memory is unnecessary and can enter CoreAnalytics
+    // from a PostgreSQL post-fork backend. The allocation is host-authored and
+    // callers synchronize each device dispatch before replacing its contents.
+    const sycl::usm::alloc allocation = sycl::get_pointer_type(dst, q->get_context());
+    if (allocation == sycl::usm::alloc::shared || allocation == sycl::usm::alloc::host) {
+      std::memcpy(dst, src, bytes);
+      return PGACCEL_OK;
+    }
+#endif
     q->memcpy(dst, src, bytes).wait_and_throw();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
@@ -1870,6 +1881,16 @@ extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(void* dst, const void
   if (q == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
   try {
+#if defined(__APPLE__)
+    // pgaccel_expr_device_alloc_copy() returns shared USM on Apple Silicon.
+    // Reading that immutable resident input directly avoids the Metal blit
+    // path that is unsafe in a PostgreSQL post-fork child.
+    const sycl::usm::alloc allocation = sycl::get_pointer_type(src, q->get_context());
+    if (allocation == sycl::usm::alloc::shared || allocation == sycl::usm::alloc::host) {
+      std::memcpy(dst, src, bytes);
+      return PGACCEL_OK;
+    }
+#endif
     q->memcpy(dst, src, bytes).wait_and_throw();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {

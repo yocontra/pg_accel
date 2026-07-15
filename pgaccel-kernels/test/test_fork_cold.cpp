@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <system_error>
 #include <vector>
@@ -147,6 +148,41 @@ int main() {
       fprintf(stderr, "\nRESULT: FAIL — No GPU compute units detected.\n");
       fprintf(stderr, "Cold Metal init after fork does NOT work.\n");
       _exit(2);
+    }
+
+    // Exercise the first resident transfer before any kernel submission.
+    // PostgreSQL reaches this exact path while constructing a derived
+    // aggregate artifact from host-authored shared USM.
+    {
+      const int64_t initial[] = {11, 22, 33, 44};
+      const int64_t replacement[] = {-5, -6, -7, -8};
+      int64_t observed[4] = {};
+      void* resident = nullptr;
+      st = pgaccel_expr_device_alloc_copy(initial, sizeof(initial), &resident);
+      if (st != PGACCEL_OK || resident == nullptr) {
+        fprintf(stderr, "Child: cold resident allocation failed: status=%d\n", st);
+        _exit(20);
+      }
+      st = pgaccel_expr_device_copy_to_host(observed, resident, sizeof(observed));
+      if (st != PGACCEL_OK || std::memcmp(observed, initial, sizeof(initial)) != 0) {
+        fprintf(stderr, "Child: cold resident copy-to-host failed: status=%d\n", st);
+        pgaccel_expr_device_free(resident);
+        _exit(21);
+      }
+      st = pgaccel_expr_device_copy_from_host(resident, replacement, sizeof(replacement));
+      if (st != PGACCEL_OK) {
+        fprintf(stderr, "Child: cold resident copy-from-host failed: status=%d\n", st);
+        pgaccel_expr_device_free(resident);
+        _exit(22);
+      }
+      st = pgaccel_expr_device_copy_to_host(observed, resident, sizeof(observed));
+      if (st != PGACCEL_OK || std::memcmp(observed, replacement, sizeof(replacement)) != 0) {
+        fprintf(stderr, "Child: cold resident round trip failed: status=%d\n", st);
+        pgaccel_expr_device_free(resident);
+        _exit(23);
+      }
+      pgaccel_expr_device_free(resident);
+      printf("Child: cold resident shared-USM round trip OK\n");
     }
 
     // Reset counter
