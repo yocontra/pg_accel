@@ -31,18 +31,21 @@ jobs:
         run: |
           set -euo pipefail
           echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Detect pgrx support for PostgreSQL ${{ matrix.pg }}
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal
+          rustup default "$rust_version"
+      - name: Validate pgrx support for PostgreSQL ${{ matrix.pg }}
         id: pg-support
         shell: bash
         run: |
           set -euo pipefail
           source scripts/pg_versions.sh
-          if pg_accel_skip_if_preview_without_pgrx "${{ matrix.pg }}"; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          pg_accel_require_pgrx_support "${{ matrix.pg }}"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
         if: steps.pg-support.outputs.skip != 'true'
       - name: Install macOS build dependencies

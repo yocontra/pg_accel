@@ -211,7 +211,7 @@ pub unsafe fn type_oid_in_schema(schema: &str, type_name: &str) -> Option<pg_sys
     let tuple = unsafe {
         pg_sys::SearchSysCache2(
             pg_sys::SysCacheIdentifier::TYPENAMENSP as ::core::ffi::c_int,
-            pg_sys::PointerGetDatum(type_name_cstr.as_ptr().cast()),
+            pg_sys::Datum::from(type_name_cstr.as_ptr()),
             pg_sys::ObjectIdGetDatum(namespace_oid),
         )
     };
@@ -651,8 +651,8 @@ unsafe fn find_exact_function(
     let tuple = unsafe {
         pg_sys::SearchSysCache3(
             pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as ::core::ffi::c_int,
-            pg_sys::PointerGetDatum(function_name_c.as_ptr().cast()),
-            pg_sys::PointerGetDatum(argument_vector.cast()),
+            pg_sys::Datum::from(function_name_c.as_ptr()),
+            pg_sys::Datum::from(argument_vector),
             pg_sys::ObjectIdGetDatum(schema_oid),
         )
     };
@@ -677,7 +677,7 @@ unsafe fn find_h3_type_oid(schema_oid: pg_sys::Oid) -> Result<pg_sys::Oid, Strin
     let tuple = unsafe {
         pg_sys::SearchSysCache2(
             pg_sys::SysCacheIdentifier::TYPENAMENSP as ::core::ffi::c_int,
-            pg_sys::PointerGetDatum(type_name.as_ptr().cast()),
+            pg_sys::Datum::from(type_name.as_ptr()),
             pg_sys::ObjectIdGetDatum(schema_oid),
         )
     };
@@ -767,8 +767,8 @@ unsafe fn find_h3_parent_function(
     let tuple = unsafe {
         pg_sys::SearchSysCache3(
             pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as ::core::ffi::c_int,
-            pg_sys::PointerGetDatum(function_name.as_ptr().cast()),
-            pg_sys::PointerGetDatum(argument_vector.cast()),
+            pg_sys::Datum::from(function_name.as_ptr()),
+            pg_sys::Datum::from(argument_vector),
             pg_sys::ObjectIdGetDatum(schema_oid),
         )
     };

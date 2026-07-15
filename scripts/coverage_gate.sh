@@ -6,11 +6,7 @@ pg="${1:-$(pg_accel_default_pg_major)}"
 min_lines="${COVERAGE_MIN_LINES:-90}"
 artifact_dir="${COVERAGE_ARTIFACT_DIR:-artifacts/coverage}"
 pg="${pg#pg}"
-pg_accel_require_supported_pg "$pg"
-if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-    echo "coverage: skipping PostgreSQL $pg because pgrx support is unavailable"
-    exit 0
-fi
+pg_accel_require_pgrx_support "$pg"
 pg_accel_require_pgrx_pg_config "$pg"
 
 if ! cargo llvm-cov --version >/dev/null 2>&1; then

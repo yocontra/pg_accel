@@ -223,7 +223,7 @@ unsafe fn find_postgis_geometry_type(schema_oid: pg_sys::Oid) -> Result<pg_sys::
     let tuple = unsafe {
         pg_sys::SearchSysCache2(
             pg_sys::SysCacheIdentifier::TYPENAMENSP as ::core::ffi::c_int,
-            pg_sys::PointerGetDatum(type_name.as_ptr().cast()),
+            pg_sys::Datum::from(type_name.as_ptr()),
             pg_sys::ObjectIdGetDatum(schema_oid),
         )
     };

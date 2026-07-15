@@ -94,9 +94,7 @@ setup-pg-extensions pg="":
         majors="$(pg_accel_supported_pg_majors)"
     fi
     for pg in $majors; do
-        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-            continue
-        fi
+        pg_accel_require_pgrx_support "$pg"
         scripts/pg_source.sh build "$pg"
         scripts/setup_pg_extensions.sh "$pg"
     done
@@ -157,9 +155,7 @@ setup-pgrx pg="":
         majors="$(pg_accel_supported_pg_majors)"
     fi
     for pg in $majors; do
-        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-            continue
-        fi
+        pg_accel_require_pgrx_support "$pg"
         scripts/pg_source.sh build "$pg"
         pg_config="$(pg_accel_source_pg_config_for_required_pg "$pg")"
         cargo pgrx init "--pg$pg" "$pg_config"
@@ -248,10 +244,7 @@ lint pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     cargo clippy --workspace --no-default-features --features "pg$pg" --all-targets -- -D warnings
 
@@ -266,10 +259,7 @@ check pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     cargo check --workspace --no-default-features --features "pg$pg" --all-targets
 
@@ -279,9 +269,7 @@ check-matrix:
     set -euo pipefail
     source scripts/pg_versions.sh
     for pg in $(pg_accel_supported_pg_majors); do
-        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-            continue
-        fi
+        pg_accel_require_pgrx_support "$pg"
         pg_accel_require_pgrx_pg_config "$pg"
         cargo check --workspace --no-default-features --features "pg$pg" --all-targets
     done
@@ -343,10 +331,7 @@ test-unit pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     scripts/setup_pg_extensions.sh "$pg"
     RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" cargo pgrx test --package pg_accel "pg$pg"
@@ -357,9 +342,7 @@ test-matrix:
     set -euo pipefail
     source scripts/pg_versions.sh
     for pg in $(pg_accel_supported_pg_majors); do
-        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-            continue
-        fi
+        pg_accel_require_pgrx_support "$pg"
         just test-unit "$pg"
     done
 
@@ -398,10 +381,7 @@ bench iterations="10" warmup="5" pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     just install-pg-accel "$pg"
     just log-rails "$pg"
@@ -426,10 +406,7 @@ bench-dev iterations="10" warmup="5" pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     just install-pg-accel "$pg"
     just log-rails "$pg"
@@ -452,10 +429,7 @@ bench-rigorous iterations="30" warmup="5" pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     just install-pg-accel "$pg"
     just log-rails "$pg"
@@ -759,10 +733,7 @@ sql-test pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     scripts/setup_pg_extensions.sh "$pg"
     just install-pg-accel "$pg"
@@ -792,10 +763,7 @@ plan-shape-tests pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     scripts/setup_pg_extensions.sh "$pg"
     just install-pg-accel "$pg"
@@ -827,10 +795,7 @@ package pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     scripts/setup_pg_extensions.sh "$pg"
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
@@ -843,9 +808,7 @@ package-matrix:
     set -euo pipefail
     source scripts/pg_versions.sh
     for pg in $(pg_accel_supported_pg_majors); do
-        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-            continue
-        fi
+        pg_accel_require_pgrx_support "$pg"
         pg_accel_require_pgrx_pg_config "$pg"
         pg_config="$(pg_accel_pg_config_for_pg "$pg")"
         cargo pgrx package --package pg_accel --pg-config "$pg_config" --no-default-features --features "pg$pg"
@@ -864,10 +827,7 @@ install-pg-accel pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     scripts/setup_pg_extensions.sh "$pg"
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
@@ -975,10 +935,7 @@ extension-smoke pg="":
     else
         pg="${requested#pg}"
     fi
-    pg_accel_require_supported_pg "$pg"
-    if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-        exit 0
-    fi
+    pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     just install-pg-accel "$pg"
     port="$(pg_accel_pgrx_port_for_pg "$pg")"
@@ -998,9 +955,7 @@ extension-smoke-matrix:
     set -euo pipefail
     source scripts/pg_versions.sh
     for pg in $(pg_accel_supported_pg_majors); do
-        if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-            continue
-        fi
+        pg_accel_require_pgrx_support "$pg"
         just extension-smoke "$pg"
     done
 

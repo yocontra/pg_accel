@@ -3,7 +3,7 @@
 pg_accel is a PostgreSQL extension that accelerates spatial predicates, H3 cell
 operations, raster map-algebra, and scalar/aggregate functions by injecting
 batch-parallel Custom Scan nodes into query plans. It is written in Rust
-(pgrx 0.18) with C++/SYCL GPU kernels via AdaptiveCpp (one source →
+(pgrx 0.19.1) with C++/SYCL GPU kernels via AdaptiveCpp (one source →
 CUDA / ROCm / Level Zero / Metal).
 
 ## Bundled dependencies

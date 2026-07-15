@@ -15,10 +15,7 @@ else
     pg="${requested#pg}"
 fi
 
-pg_accel_require_supported_pg "$pg"
-if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-    exit 0
-fi
+pg_accel_require_pgrx_support "$pg"
 
 pg_config="$(pg_accel_source_pg_config_for_required_pg "$pg")"
 pg_version="$("$pg_config" --version | awk '{print $2}')"

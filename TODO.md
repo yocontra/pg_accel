@@ -3,21 +3,20 @@
 Open work only. When an item is finished, remove it from this file; use
 `git log`, `CHANGELOG.md`, and release notes for audit history.
 
-pg_accel is a PostgreSQL 18 GPU accelerator extension, with PG19 source-smoke
-preview pending a real pgrx `pg19` feature. Selected pg_accel plans must
+pg_accel is a PostgreSQL 18 GPU accelerator extension with a required PG19beta1
+release lane through pgrx's real `pg19` feature. Selected pg_accel plans must
 dispatch real GPU work through AdaptiveCpp kernels and must never represent
 CPU-backed execution as a pg_accel plan. If a query shape cannot be accelerated
 on GPU, the planner should decline it and let PostgreSQL plan it natively.
 
 Current integration pins:
 
-- PostgreSQL support: PG18 is the supported pgrx extension target. PG19
-  source smoke testing uses `19beta1`, but PG19 extension builds stay pending
-  until pgrx exposes a real `pg19` feature. Older majors are not supported.
-- PG version gate: keep `scripts/pg_version_audit.sh` passing, run PG18 pgrx
-  extension tests as the default support gate, and run PG19 source smoke until
-  pgrx exposes `pg19`; when pgrx adds `pg19`, add the real Cargo feature and
-  CI extension build before claiming PG19 extension support.
+- PostgreSQL support: PG18 is the default pgrx extension target. PG19beta1 is a
+  required beta extension-build and release-matrix target. Older majors are not
+  supported.
+- PG version gate: keep `scripts/pg_version_audit.sh` passing and run both PG18
+  and PG19 pgrx build/package lanes. Supported-major commands must fail rather
+  than silently skip when a Cargo feature or `pg_config` is unavailable.
 - AdaptiveCpp: `yocontra/AdaptiveCpp`, branch `fork-safe-metal`, minimum
   SHA `456ae6910720810f5fe59f160e6707d46bb8e5f0`.
   As of 2026-07-04 this fork is merged with upstream `develop` through
@@ -1349,13 +1348,10 @@ pgaccel-kernels/build --target test_olap_ssbm -j 8`, `ctest --test-dir
 pgaccel-kernels/build -R '^test_olap_ssbm$' --output-on-failure`, `just
 install-pg-accel 18`, and the crash-repro benchmarks above.
 
-Progress (2026-06-28 PG18-only pgrx baseline and expression SUM/COUNT ABI):
-the local extension toolchain is now PG18-first instead of trying to preserve a
-PG17 install path. `pg_accel/Cargo.toml` defaults to `pg18`, depends on
-`pgrx`/`pgrx-tests` `0.18.1`, drops the stale `pgrx_embed_pg_accel` bin target,
-and `scripts/pg_versions.sh` defaults supported pgrx builds to PG18 with PG19
-kept as source-smoke preview until pgrx exposes a real `pg19` feature. The
-active install path is the local PG18.4 pgrx cluster on port 28818.
+Progress (2026-06-28 PG18-only baseline, superseded by the PG19 release lane):
+the local extension toolchain moved to PG18-first instead of preserving a PG17
+install path and dropped the stale `pgrx_embed_pg_accel` bin target. The current
+toolchain is pgrx 0.19.1 with required PG18 and PG19beta1 build/package gates.
 
 The resident dense grouped expression path now has a direct 129-256 group
 multiply SUM/COUNT ABI for `SUM(lhs * rhs)` plus `COUNT(*)`, with filter modes

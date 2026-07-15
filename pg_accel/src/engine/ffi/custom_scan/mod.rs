@@ -2314,6 +2314,20 @@ unsafe fn compile_node(
 // Executor callbacks
 // ---------------------------------------------------------------------------
 
+unsafe fn begin_default_table_scan(
+    relation: pg_sys::Relation,
+    snapshot: pg_sys::Snapshot,
+) -> pg_sys::TableScanDesc {
+    #[cfg(feature = "pg18")]
+    {
+        unsafe { pg_sys::table_beginscan(relation, snapshot, 0, std::ptr::null_mut()) }
+    }
+    #[cfg(feature = "pg19")]
+    {
+        unsafe { pg_sys::table_beginscan(relation, snapshot, 0, std::ptr::null_mut(), 0) }
+    }
+}
+
 /// `BeginCustomScan`: one-time init before the first tuple fetch.
 ///
 /// PG's `ExecInitCustomScan` already initialized child plan states in
@@ -2660,7 +2674,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                         pg_sys::ExecOpenScanRelation(estate, privdata.window_scan_relid, eflags);
                     let snap = (*estate).es_snapshot;
                     // SAFETY: rel and snap are valid; main backend thread.
-                    let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
+                    let sd = begin_default_table_scan(rel, snap);
                     exec.set_scan_desc(sd);
                     pgrx::debug1!(
                         "pg_accel: begin_custom_scan: Window vectorized scan, relid={}",
@@ -2813,7 +2827,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     };
                     // SAFETY: rel was opened by ExecOpenScanRelation during
                     // ExecInitCustomScan. snap is a valid snapshot.
-                    let sd = pg_sys::table_beginscan(rel, snap, 0, std::ptr::null_mut());
+                    let sd = begin_default_table_scan(rel, snap);
                     exec.set_scan_desc(sd, rel);
                     pgrx::debug1!(
                         "pg_accel: begin_custom_scan: GpuExpr direct heap scan, scanrelid={}",

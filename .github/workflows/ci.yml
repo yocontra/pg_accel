@@ -56,17 +56,14 @@ jobs:
           rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
           rustup default "$rust_version"
 
-      - name: Detect pgrx support for PostgreSQL ${{ matrix.pg }}
+      - name: Validate pgrx support for PostgreSQL ${{ matrix.pg }}
         id: pg-support
         shell: bash
         run: |
           set -euo pipefail
           source scripts/pg_versions.sh
-          if pg_accel_skip_if_preview_without_pgrx "${{ matrix.pg }}"; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          pg_accel_require_pgrx_support "${{ matrix.pg }}"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo artifacts
         if: steps.pg-support.outputs.skip != 'true'
@@ -233,17 +230,14 @@ jobs:
           rustup toolchain install "$rust_version" --profile minimal --component clippy,rustfmt
           rustup default "$rust_version"
 
-      - name: Detect pgrx support for PostgreSQL ${{ matrix.pg }}
+      - name: Validate pgrx support for PostgreSQL ${{ matrix.pg }}
         id: pg-support
         shell: bash
         run: |
           set -euo pipefail
           source scripts/pg_versions.sh
-          if pg_accel_skip_if_preview_without_pgrx "${{ matrix.pg }}"; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
+          pg_accel_require_pgrx_support "${{ matrix.pg }}"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo artifacts
         if: steps.pg-support.outputs.skip != 'true'

@@ -19,16 +19,16 @@ publish = false
 crate-type = ["cdylib", "lib"]
 
 [features]
-# PostgreSQL 18 is the active pgrx extension target. PostgreSQL 19 beta source
-# builds are wired through scripts/pg_source.sh, but pgrx 0.18.x does not expose
-# a pg19 feature yet, so do not declare a fake pg19 ABI here.
+# PostgreSQL 18 remains the default extension target. PostgreSQL 19 is a beta
+# release target backed by pgrx's real pg19 ABI feature.
 default = ["pg18"]
 pg18 = ["pgrx/pg18", "pgrx-tests/pg18"]
+pg19 = ["pgrx/pg19", "pgrx-tests/pg19"]
 pg_test = []
 
 [dependencies]
 libc = "0.2"
-pgrx = "0.18.1"
+pgrx = "=0.19.1"
 opentelemetry = { version = "0.31", features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", features = ["trace"] }
 serde = { version = "1", features = ["derive"] }
@@ -42,7 +42,7 @@ tracing-subscriber = { version = "0.3", features = [
 ] }
 
 [dev-dependencies]
-pgrx-tests = "0.18.1"
+pgrx-tests = "=0.19.1"
 static_assertions = "1"
 
 [build-dependencies]

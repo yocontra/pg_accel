@@ -1,7 +1,7 @@
 # pg_accel
 
 PostgreSQL extension: GPU-accelerated spatial predicates, h3 cell ops, raster operations,
-and batched executor nodes via Custom Scan Provider. Rust (pgrx 0.18) + C++/SYCL via AdaptiveCpp
+and batched executor nodes via Custom Scan Provider. Rust (pgrx 0.19.1) + C++/SYCL via AdaptiveCpp
 (one source → CUDA / ROCm / Level Zero / Metal).
 
 ## Build & Test Commands
@@ -11,7 +11,7 @@ just fmt              # cargo fmt
 just lint             # cargo clippy -- -D warnings
 just check            # cargo check --all-features
 just deny             # cargo deny check (licenses + advisories)
-just test             # cargo pgrx test matrix (PG18; PG19 when pgrx supports it)
+just test             # cargo pgrx test matrix (PG18 + PG19beta1)
 just coverage         # cargo-llvm-cov gate; writes LCOV/JSON/summary artifacts and fails below 90% lines
 just bench            # run benchmark suite against local pgrx PG
 
@@ -146,7 +146,7 @@ just traces-last 20
 ```
 
 Claude agents: use `just traces` / `just traces-last` or inspect
-`~/.pgrx/data-19/pg_accel_traces.jsonl` for the repo-default PG target.
+`~/.pgrx/data-18/pg_accel_traces.jsonl` for the repo-default PG target.
 
 ### Key span names
 
@@ -164,9 +164,9 @@ Claude agents: use `just traces` / `just traces-last` or inspect
 
 ### Crash diagnosis workflow
 
-1. **Check PG logs:** `tail -50 ~/.pgrx/data-19/pg.log` — look for `signal 6` (SIGABRT), `signal 11` (SIGSEGV)
+1. **Check PG logs:** `tail -50 ~/.pgrx/18.log` — look for `signal 6` (SIGABRT), `signal 11` (SIGSEGV)
 2. **Check macOS crash reports:** `ls -lt ~/Library/Logs/DiagnosticReports/postgres-*.ips | head -5` — parse with `grep "symbol"` for stack frames
-3. **Check trace file:** `cat ~/.pgrx/data-19/pg_accel_traces.jsonl` — last completed span shows where execution reached before crash
+3. **Check trace file:** `cat ~/.pgrx/data-18/pg_accel_traces.jsonl` — last completed span shows where execution reached before crash
 4. **Check stats:** `SELECT * FROM pg_accel_stats();` — counters for hook calls, skips, GPU failures
 5. **Common crash patterns:**
    - `apply_tlist_labeling` assert → target list mismatch in `PlanCustomPath` callback

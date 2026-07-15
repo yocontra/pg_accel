@@ -188,7 +188,7 @@ License text (Apache-2.0) — identical to the Apache-2.0 text under entry 6.
 ----------------------------------------------------------------------
 SPDX:    MIT OR Apache-2.0
 Role:    Rust extension framework. Links into the compiled `.so` /
-         `.dylib` as a regular cargo dependency (pgrx 0.18).
+         `.dylib` as a regular cargo dependency (pgrx 0.19.1).
 Source:  https://github.com/pgcentralfoundation/pgrx — verbatim license
          text in `LICENSE-MIT` and `LICENSE-APACHE` at the repository
          root.

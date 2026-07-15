@@ -160,7 +160,7 @@ unsafe fn find_type_oid(schema_oid: pg_sys::Oid, name: &str) -> Result<pg_sys::O
     let tuple = unsafe {
         pg_sys::SearchSysCache2(
             pg_sys::SysCacheIdentifier::TYPENAMENSP as ::core::ffi::c_int,
-            pg_sys::PointerGetDatum(name.as_ptr().cast()),
+            pg_sys::Datum::from(name.as_ptr()),
             pg_sys::ObjectIdGetDatum(schema_oid),
         )
     };
@@ -503,8 +503,8 @@ unsafe fn find_function_oid(
     let tuple = unsafe {
         pg_sys::SearchSysCache3(
             pg_sys::SysCacheIdentifier::PROCNAMEARGSNSP as ::core::ffi::c_int,
-            pg_sys::PointerGetDatum(name.as_ptr().cast()),
-            pg_sys::PointerGetDatum(vector.cast()),
+            pg_sys::Datum::from(name.as_ptr()),
+            pg_sys::Datum::from(vector),
             pg_sys::ObjectIdGetDatum(schema_oid),
         )
     };

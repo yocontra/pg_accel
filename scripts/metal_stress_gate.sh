@@ -9,11 +9,7 @@ if [ -z "$requested" ]; then
 else
     pg="${requested#pg}"
 fi
-pg_accel_require_supported_pg "$pg"
-if pg_accel_skip_if_preview_without_pgrx "$pg"; then
-    echo "metal-stress: skipping PostgreSQL $pg because pgrx support is unavailable"
-    exit 0
-fi
+pg_accel_require_pgrx_support "$pg"
 pg_accel_require_pgrx_pg_config "$pg"
 
 if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then

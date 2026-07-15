@@ -89,6 +89,7 @@ fn path_node_size_all_match_arms_return_positive() {
         std::mem::size_of::<pg_sys::ProjectSetPath>(),
         std::mem::size_of::<pg_sys::SortPath>(),
         std::mem::size_of::<pg_sys::GroupPath>(),
+        #[cfg(feature = "pg18")]
         std::mem::size_of::<pg_sys::UpperUniquePath>(),
         std::mem::size_of::<pg_sys::AggPath>(),
         std::mem::size_of::<pg_sys::GroupingSetsPath>(),

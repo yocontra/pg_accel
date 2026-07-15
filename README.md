@@ -29,10 +29,9 @@ cargo pgrx install --no-default-features --features pg18
 PostgreSQL is built from official source tarballs into `.pgaccel/postgres`.
 The default supported extension target is PG18. Override source versions with
 `PG_ACCEL_PG18_VERSION=18.4`, `PG_ACCEL_PG19_VERSION=19beta1`, or pass an exact
-version to `just pg-build 18.4`. PG19 source smoke testing is wired, but PG19
-extension builds stay pending until pgrx publishes a real `pg19` feature.
-Preview majors are skipped by default in extension tasks; use
-`PG_ACCEL_ENABLE_PREVIEW=1` when working on those ports.
+version to `just pg-build 18.4`. PG19 remains beta, but it is a required
+extension build and release-matrix target; supported-major commands fail if its
+pgrx feature or configured `pg_config` is unavailable.
 
 After installation, add to `postgresql.conf`:
 
@@ -85,8 +84,8 @@ GROUP BY b.name;
 
 | Requirement | Version | Notes |
 |---|---|---|
-| PostgreSQL | 18 supported; 19 source-smoke preview | PG19 extension builds activate when pgrx exposes `pg19` |
-| Rust | stable | For building from source |
+| PostgreSQL | 18 supported; 19beta1 supported as beta | Both majors are required extension build and release targets |
+| Rust | 1.96.0+ | Required by pgrx 0.19.1 |
 | cmake | 3.20+ | For GPU kernel build |
 | Apple Silicon or NVIDIA CUDA | M1+ for Metal, NVIDIA GPU for CUDA | Runtime GPU backend |
 | AdaptiveCpp | `yocontra/AdaptiveCpp` `fork-safe-metal` @ `456ae6910720810f5fe59f160e6707d46bb8e5f0` | Required for source/package builds |
@@ -377,9 +376,10 @@ platform scope and safety model:
 
 ### Which PostgreSQL versions are supported?
 
-PostgreSQL 18 is the active supported extension target. PostgreSQL 19 source
-smoke testing is configured, but PG19 extension builds are pending pgrx `pg19`
-support. There are no supported code paths for older PostgreSQL majors.
+PostgreSQL 18 is the default supported extension target. PostgreSQL 19beta1 is
+also built and packaged in the required release matrix through pgrx's `pg19`
+feature. PG19 is still beta; there are no supported code paths for older
+PostgreSQL majors.
 
 ### How do I turn it off?
 

@@ -1474,8 +1474,12 @@ pub(super) fn estimate_resident_bytes(
 
 pub(super) fn current_relfilenode(relid: pg_sys::Oid) -> Option<pg_sys::Oid> {
     // SAFETY: called on the backend main thread in planner/executor/SRF context.
-    let tuple =
-        unsafe { pg_sys::SearchSysCache1(pg_sys::SysCacheIdentifier::RELOID as i32, relid.into()) };
+    let tuple = unsafe {
+        pg_sys::SearchSysCache1(
+            pg_sys::SysCacheIdentifier::RELOID as ::core::ffi::c_int,
+            relid.into(),
+        )
+    };
     if tuple.is_null() {
         return None;
     }

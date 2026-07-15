@@ -1,18 +1,19 @@
 # Contributing to pg_accel
 
 PostgreSQL extension for GPU-accelerated spatial predicates, H3 cell ops, raster
-operations, and batched executor nodes. Rust (pgrx 0.18) + C++/SYCL (AdaptiveCpp).
+operations, and batched executor nodes. Rust (pgrx 0.19.1) + C++/SYCL
+(AdaptiveCpp).
 
 ## Development Setup
 
 ### Prerequisites
 
-- Rust stable (via asdf or rustup)
+- Rust 1.96.0 or newer (via asdf or rustup)
 - Repo-local PostgreSQL built from source via `just setup-pg-source`.
-  PG18 is the default supported extension target; PG19 source smoke testing is
-  opt-in until pgrx exposes a real `pg19` feature.
+  PG18 is the default supported extension target; PG19beta1 is a required beta
+  extension-build and release-matrix target.
 - cmake (for GPU kernels)
-- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.18
+- [cargo-pgrx](https://github.com/pgcentralfoundation/pgrx) 0.19.1
 - [cargo-deny](https://github.com/EmbarkStudios/cargo-deny)
 
 ### Quick Start

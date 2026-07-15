@@ -566,7 +566,7 @@ unsafe fn column_is_nullable(column: PlannerColumn) -> bool {
     // attno came from a catalog-validated Var.
     let tuple = unsafe {
         pg_sys::SearchSysCache2(
-            pg_sys::SysCacheIdentifier::ATTNUM as i32,
+            pg_sys::SysCacheIdentifier::ATTNUM as ::core::ffi::c_int,
             pg_sys::Oid::from(column.column.relation_oid).into(),
             pg_sys::Datum::from(i16::try_from(column.column.attno).unwrap_or(i16::MAX)),
         )

@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
 # Canonical PostgreSQL version policy for pg_accel build/test tooling.
 #
-# PostgreSQL 18 is the active pgrx extension build target. PostgreSQL 19 beta
-# source builds are available for smoke testing, but extension builds wait on
-# pgrx exposing a real pg19 feature.
+# PostgreSQL 18 is the default pgrx extension target. PostgreSQL 19 beta is a
+# required release-matrix target backed by pgrx's real pg19 feature.
 
 set -euo pipefail
 
 PG_ACCEL_DEFAULT_PG_MAJOR="${PG_ACCEL_DEFAULT_PG_MAJOR:-18}"
 PG_ACCEL_SUPPORTED_PG_MAJORS="${PG_ACCEL_SUPPORTED_PG_MAJORS:-18 19}"
 PG_ACCEL_PREVIEW_PG_MAJORS="${PG_ACCEL_PREVIEW_PG_MAJORS:-19}"
-PG_ACCEL_PGRX_VERSION="${PG_ACCEL_PGRX_VERSION:-0.18.1}"
+PG_ACCEL_PGRX_VERSION="${PG_ACCEL_PGRX_VERSION:-0.19.1}"
 PG_ACCEL_REPO_ROOT="${PG_ACCEL_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-# Source-built PostgreSQL defaults are independent of the pgrx extension
-# support matrix: PG19 beta can be built and smoke-tested even before pgrx
-# exposes a pg19 feature for extension builds.
+# Source-built PostgreSQL defaults match the pgrx extension support matrix.
 PG_ACCEL_SOURCE_PG_MAJORS="${PG_ACCEL_SOURCE_PG_MAJORS:-18 19}"
 PG_ACCEL_ACPP_PREFIX="${PG_ACCEL_ACPP_PREFIX:-$PG_ACCEL_REPO_ROOT/.pgaccel/acpp/current}"
 
@@ -75,6 +72,15 @@ pg_accel_pgrx_supports_pg() {
     grep -Eq "^[[:space:]]*${feature}[[:space:]]*=" "$PG_ACCEL_REPO_ROOT/pg_accel/Cargo.toml"
 }
 
+pg_accel_require_pgrx_support() {
+    local pg="${1#pg}"
+    pg_accel_require_supported_pg "$pg" || return 1
+    if ! pg_accel_pgrx_supports_pg "$pg"; then
+        echo "error: PostgreSQL $pg is supported by pg_accel policy but cannot resolve pgrx feature pg$pg" >&2
+        return 1
+    fi
+}
+
 pg_accel_highest_buildable_pg_major() {
     local pg
     local highest=""
@@ -130,19 +136,12 @@ pg_accel_buildable_default_pg_major() {
 
 pg_accel_skip_if_preview_without_pgrx() {
     local pg="${1#pg}"
-    if pg_accel_is_preview_pg "$pg" && ! pg_accel_pgrx_supports_pg "$pg"; then
-        echo "SKIP: PostgreSQL $pg is configured as a preview target, but pgrx does not expose feature pg$pg yet."
-        return 0
-    fi
-    if pg_accel_is_preview_pg "$pg" && [ "${PG_ACCEL_ENABLE_PREVIEW:-0}" != "1" ]; then
-        echo "SKIP: PostgreSQL $pg is configured as a preview target. Set PG_ACCEL_ENABLE_PREVIEW=1 to exercise it."
-        return 0
-    fi
-    if pg_accel_pgrx_supports_pg "$pg"; then
+    if pg_accel_require_pgrx_support "$pg"; then
         return 1
     fi
-    echo "error: PostgreSQL $pg is supported by pg_accel policy but cannot resolve pgrx feature pg$pg" >&2
-    return 2
+    # Legacy callers use this function in an `if`, where a nonzero return would
+    # otherwise be swallowed. Missing support is a hard policy failure now.
+    exit 1
 }
 
 pg_accel_pg_config_for_pg() {
