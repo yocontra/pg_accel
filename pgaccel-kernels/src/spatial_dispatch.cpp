@@ -168,10 +168,11 @@ static constexpr size_t SPATIAL_PIP_NO_OFFSET = static_cast<size_t>(-1);
  * Keep PIP kernels to one slab pointer and recover typed views from offsets
  * inside the kernel, matching the hash-agg workaround pattern. */
 struct SpatialPipKernelSlabHeader {
-  size_t surv_count;
+  size_t point_count;
   size_t poly_coord_count;
   size_t ring_count;
   uint32_t has_rings;
+  float bbox[4];
   size_t points_off;
   size_t poly_off;
   size_t rings_off;
@@ -182,18 +183,19 @@ static size_t spatial_align_up(size_t value, size_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
 
-static uint8_t* make_spatial_pip_kernel_slab(sycl::queue& q, const float* surv_pts,
-                                             size_t surv_count, const float* poly_coords,
-                                             size_t poly_coord_count, const uint32_t* ring_offsets,
-                                             size_t ring_count,
+static uint8_t* make_spatial_pip_kernel_slab(sycl::queue& q, const float* points_xy,
+                                             size_t point_count, const float* poly_bbox,
+                                             const float* poly_coords, size_t poly_coord_count,
+                                             const uint32_t* ring_offsets, size_t ring_count,
                                              SpatialPipKernelSlabHeader* out_header) {
   const bool has_rings = (ring_offsets != nullptr && ring_count > 0);
 
   SpatialPipKernelSlabHeader h{};
-  h.surv_count = surv_count;
+  h.point_count = point_count;
   h.poly_coord_count = poly_coord_count;
   h.ring_count = has_rings ? ring_count : 0;
   h.has_rings = has_rings ? 1u : 0u;
+  std::memcpy(h.bbox, poly_bbox, sizeof(h.bbox));
   h.rings_off = SPATIAL_PIP_NO_OFFSET;
 
   size_t cursor = spatial_align_up(sizeof(SpatialPipKernelSlabHeader), alignof(float));
@@ -204,12 +206,12 @@ static uint8_t* make_spatial_pip_kernel_slab(sycl::queue& q, const float* surv_p
     return off;
   };
 
-  h.points_off = add(surv_count * 2 * sizeof(float), alignof(float));
+  h.points_off = add(point_count * 2 * sizeof(float), alignof(float));
   h.poly_off = add(poly_coord_count * 2 * sizeof(float), alignof(float));
   if (has_rings) {
     h.rings_off = add(ring_count * sizeof(uint32_t), alignof(uint32_t));
   }
-  h.results_off = add(surv_count * sizeof(int8_t), alignof(int8_t));
+  h.results_off = add(point_count * sizeof(int8_t), alignof(int8_t));
 
   uint8_t* slab = pgaccel_alloc<uint8_t>(cursor, q);
   if (slab == nullptr)
@@ -218,7 +220,7 @@ static uint8_t* make_spatial_pip_kernel_slab(sycl::queue& q, const float* surv_p
   auto fill = [&](uint8_t* dst) {
     std::memset(dst, 0, cursor);
     std::memcpy(dst, &h, sizeof(h));
-    std::memcpy(dst + h.points_off, surv_pts, surv_count * 2 * sizeof(float));
+    std::memcpy(dst + h.points_off, points_xy, point_count * 2 * sizeof(float));
     std::memcpy(dst + h.poly_off, poly_coords, poly_coord_count * 2 * sizeof(float));
     if (has_rings) {
       std::memcpy(dst + h.rings_off, ring_offsets, ring_count * sizeof(uint32_t));
@@ -240,8 +242,8 @@ static uint8_t* make_spatial_pip_kernel_slab(sycl::queue& q, const float* surv_p
 }
 
 template <bool HasRings>
-static void submit_point_in_polygon_simple(sycl::queue& q, uint8_t* slab, size_t surv_count) {
-  q.parallel_for(sycl::range<1>(surv_count), [=](sycl::id<1> id) {
+static void submit_point_in_polygon_simple(sycl::queue& q, uint8_t* slab, size_t point_count) {
+  q.parallel_for(sycl::range<1>(point_count), [=](sycl::id<1> id) {
      size_t i = id[0];
      const auto* h = reinterpret_cast<const SpatialPipKernelSlabHeader*>(slab);
      const auto* pts_ptr = reinterpret_cast<const float*>(slab + h->points_off);
@@ -250,6 +252,12 @@ static void submit_point_in_polygon_simple(sycl::queue& q, uint8_t* slab, size_t
 
      float px = pts_ptr[i * 2];
      float py = pts_ptr[i * 2 + 1];
+     constexpr float bbox_tol = 1.0e-4f;
+     if (px < h->bbox[0] - bbox_tol || px > h->bbox[2] + bbox_tol ||
+         py < h->bbox[1] - bbox_tol || py > h->bbox[3] + bbox_tol) {
+       res_ptr[i] = -1;
+       return;
+     }
      if constexpr (HasRings) {
        const auto* rings_ptr = reinterpret_cast<const uint32_t*>(slab + h->rings_off);
        res_ptr[i] = device_point_in_polygon<true>(px, py, poly_ptr, h->poly_coord_count, rings_ptr,
@@ -261,7 +269,7 @@ static void submit_point_in_polygon_simple(sycl::queue& q, uint8_t* slab, size_t
    }).wait_and_throw();
 }
 
-/* GPU dispatch: parallel_for over all surviving points, one thread
+/* GPU dispatch: parallel_for over all input points, one thread
  * per point. Good when polygons are small.
  *
  * Each thread:
@@ -272,8 +280,8 @@ static void submit_point_in_polygon_simple(sycl::queue& q, uint8_t* slab, size_t
  * Scales poorly when vc (vertex count) is tens of thousands — each
  * thread does vc serial ops. For megapolygons see the cooperative
  * kernel below. */
-static pgaccel_status sycl_point_in_polygon_simple(const float* surv_pts, size_t surv_count,
-                                                   const float* poly_coords,
+static pgaccel_status sycl_point_in_polygon_simple(const float* points_xy, size_t point_count,
+                                                   const float* poly_bbox, const float* poly_coords,
                                                    size_t poly_coord_count,
                                                    const uint32_t* ring_offsets, size_t ring_count,
                                                    int8_t* results) {
@@ -284,19 +292,20 @@ static pgaccel_status sycl_point_in_polygon_simple(const float* surv_pts, size_t
   uint8_t* slab = nullptr;
   try {
     SpatialPipKernelSlabHeader slab_header{};
-    slab = make_spatial_pip_kernel_slab(*q, surv_pts, surv_count, poly_coords, poly_coord_count,
-                                        ring_offsets, ring_count, &slab_header);
+    slab = make_spatial_pip_kernel_slab(*q, points_xy, point_count, poly_bbox, poly_coords,
+                                        poly_coord_count, ring_offsets, ring_count, &slab_header);
     if (slab == nullptr) {
       return PGACCEL_OOM;
     }
 
     if (slab_header.has_rings) {
-      submit_point_in_polygon_simple<true>(*q, slab, surv_count);
+      submit_point_in_polygon_simple<true>(*q, slab, point_count);
     } else {
-      submit_point_in_polygon_simple<false>(*q, slab, surv_count);
+      submit_point_in_polygon_simple<false>(*q, slab, point_count);
     }
 
-    pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off), surv_count);
+    pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off),
+                point_count);
     pgaccel_record_gpu_exec();
 
     sycl::free(slab, *q);
@@ -316,8 +325,8 @@ static pgaccel_status sycl_point_in_polygon_simple(const float* surv_pts, size_t
 }
 
 template <bool HasRings>
-static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t surv_count) {
-  auto nd = sycl::nd_range<1>(sycl::range<1>(surv_count * COOP_GROUP_SIZE),
+static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t point_count) {
+  auto nd = sycl::nd_range<1>(sycl::range<1>(point_count * COOP_GROUP_SIZE),
                               sycl::range<1>(COOP_GROUP_SIZE));
 
   q.submit([&](sycl::handler& h) {
@@ -341,6 +350,18 @@ static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t s
 
        const float px = pts_ptr[pi * 2];
        const float py = pts_ptr[pi * 2 + 1];
+
+       // The bbox decision is uniform across the work-group because every
+       // lane handles the same point. All lanes may therefore return before
+       // the first barrier without creating divergent barrier participation.
+       constexpr float bbox_tol = 1.0e-4f;
+       if (px < hdr->bbox[0] - bbox_tol || px > hdr->bbox[2] + bbox_tol ||
+           py < hdr->bbox[1] - bbox_tol || py > hdr->bbox[3] + bbox_tol) {
+         if (lid == 0) {
+           res_ptr[pi] = -1;
+         }
+         return;
+       }
 
        // Final result bits collected across rings.
        int8_t result = 1;  // assume inside; will be updated.
@@ -453,8 +474,8 @@ static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t s
 }
 
 /* GPU dispatch: one work-group per point, threads in the group share
- * the vertex scan. For a 100k-vertex polygon and 128-thread groups,
- * each thread handles ~780 edges instead of all 100k.
+ * the vertex scan after a device bbox gate. For a 100k-vertex polygon and
+ * 128-thread groups, each thread handles ~780 edges instead of all 100k.
  *
  * Per-ring reduction pattern:
  *   - Each thread strides its subset of edges (i = lid, lid+gsz, ...)
@@ -465,8 +486,9 @@ static void submit_point_in_polygon_coop(sycl::queue& q, uint8_t* slab, size_t s
  *
  * This serialises strictly within the work-group (group_barrier + local
  * XOR), so it's safe under Metal's memory model. No global atomics. */
-static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t surv_count,
-                                                 const float* poly_coords, size_t poly_coord_count,
+static pgaccel_status sycl_point_in_polygon_coop(const float* points_xy, size_t point_count,
+                                                 const float* poly_bbox, const float* poly_coords,
+                                                 size_t poly_coord_count,
                                                  const uint32_t* ring_offsets, size_t ring_count,
                                                  int8_t* results) {
   sycl::queue* q = pgaccel_get_queue();
@@ -476,19 +498,20 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
   uint8_t* slab = nullptr;
   try {
     SpatialPipKernelSlabHeader slab_header{};
-    slab = make_spatial_pip_kernel_slab(*q, surv_pts, surv_count, poly_coords, poly_coord_count,
-                                        ring_offsets, ring_count, &slab_header);
+    slab = make_spatial_pip_kernel_slab(*q, points_xy, point_count, poly_bbox, poly_coords,
+                                        poly_coord_count, ring_offsets, ring_count, &slab_header);
     if (slab == nullptr) {
       return PGACCEL_OOM;
     }
 
     if (slab_header.has_rings) {
-      submit_point_in_polygon_coop<true>(*q, slab, surv_count);
+      submit_point_in_polygon_coop<true>(*q, slab, point_count);
     } else {
-      submit_point_in_polygon_coop<false>(*q, slab, surv_count);
+      submit_point_in_polygon_coop<false>(*q, slab, point_count);
     }
 
-    pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off), surv_count);
+    pgaccel_d2h(*q, results, reinterpret_cast<int8_t*>(slab + slab_header.results_off),
+                point_count);
     pgaccel_record_gpu_exec();
 
     sycl::free(slab, *q);
@@ -509,16 +532,17 @@ static pgaccel_status sycl_point_in_polygon_coop(const float* surv_pts, size_t s
 
 /* Top-level GPU dispatch: pick simple vs cooperative kernel based on
  * the polygon's total vertex count. */
-static pgaccel_status sycl_point_in_polygon_bulk(const float* surv_pts, size_t surv_count,
-                                                 const float* poly_coords, size_t poly_coord_count,
+static pgaccel_status sycl_point_in_polygon_bulk(const float* points_xy, size_t point_count,
+                                                 const float* poly_bbox, const float* poly_coords,
+                                                 size_t poly_coord_count,
                                                  const uint32_t* ring_offsets, size_t ring_count,
                                                  int8_t* results) {
   if (poly_coord_count >= COOP_VERTEX_THRESHOLD) {
-    return sycl_point_in_polygon_coop(surv_pts, surv_count, poly_coords, poly_coord_count,
-                                      ring_offsets, ring_count, results);
+    return sycl_point_in_polygon_coop(points_xy, point_count, poly_bbox, poly_coords,
+                                      poly_coord_count, ring_offsets, ring_count, results);
   }
-  return sycl_point_in_polygon_simple(surv_pts, surv_count, poly_coords, poly_coord_count,
-                                      ring_offsets, ring_count, results);
+  return sycl_point_in_polygon_simple(points_xy, point_count, poly_bbox, poly_coords,
+                                      poly_coord_count, ring_offsets, ring_count, results);
 }
 
 /* ================================================================
@@ -2655,7 +2679,7 @@ pgaccel_spatial_intersects(const pgaccel_geometry* geoms_a, size_t count_a,
  * pgaccel_point_in_polygon_bulk — dedicated fast path
  *
  * Takes a flat array of point x,y pairs and a single polygon.
- * Inline bbox pre-filter, then SYCL GPU dispatch for survivors.
+ * Device-side bbox pre-filter and topology evaluation in one SYCL dispatch.
  * Tiny batches are rejected by the upstream planner gate; this
  * kernel always dispatches to SYCL when called.
  * ================================================================ */
@@ -2667,56 +2691,11 @@ extern "C" pgaccel_status pgaccel_point_in_polygon_bulk(
   if (!points_xy || !poly_coords || !poly_bbox || !results)
     return PGACCEL_ERROR;
 
-  static constexpr float BBOX_TOL = 1.0e-4f;
-
-  float bxmin = poly_bbox[0] - BBOX_TOL;
-  float bymin = poly_bbox[1] - BBOX_TOL;
-  float bxmax = poly_bbox[2] + BBOX_TOL;
-  float bymax = poly_bbox[3] + BBOX_TOL;
-
-  /* Pass 1: bbox pre-filter — mark points outside polygon bbox as -1.
-   * Collect surviving indices for the expensive point-in-ring pass. */
-  std::vector<uint32_t> surviving;
-  surviving.reserve(point_count);
-
-  for (size_t i = 0; i < point_count; ++i) {
-    float px = points_xy[i * 2];
-    float py = points_xy[i * 2 + 1];
-    if (px < bxmin || px > bxmax || py < bymin || py > bymax) {
-      results[i] = -1;
-    } else {
-      results[i] = 0; /* placeholder */
-      surviving.push_back(static_cast<uint32_t>(i));
-    }
-  }
-
-  if (surviving.empty())
-    return PGACCEL_OK;
-
-  /* Build flat point array for survivors only. */
-  std::vector<float> surv_pts(surviving.size() * 2);
-  for (size_t k = 0; k < surviving.size(); ++k) {
-    uint32_t idx = surviving[k];
-    surv_pts[k * 2] = points_xy[idx * 2];
-    surv_pts[k * 2 + 1] = points_xy[idx * 2 + 1];
-  }
-
   if (pgaccel_get_queue() == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  std::vector<int8_t> pir_results(surviving.size());
-
-  pgaccel_status st =
-      sycl_point_in_polygon_bulk(surv_pts.data(), surviving.size(), poly_coords, poly_coord_count,
-                                 ring_offsets, ring_count, pir_results.data());
-  if (st != PGACCEL_OK)
-    return st;
-
-  for (size_t k = 0; k < surviving.size(); ++k) {
-    results[surviving[k]] = pir_results[k];
-  }
-
-  return PGACCEL_OK;
+  return sycl_point_in_polygon_bulk(points_xy, point_count, poly_bbox, poly_coords,
+                                    poly_coord_count, ring_offsets, ring_count, results);
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {

@@ -694,6 +694,33 @@ static void test_point_in_polygon_bulk_simple_path() {
   ASSERT_EQ("simple PIP boundary vertex", results[4], 0);
 }
 
+static void test_point_in_polygon_bulk_all_outside_still_dispatches() {
+  printf("--- point_in_polygon_bulk: all bbox-outside device dispatch ---\n");
+
+  const float bbox[] = {0.0f, 0.0f, 10.0f, 10.0f};
+  const float polygon[] = {
+      0.0f, 0.0f, 10.0f, 0.0f, 10.0f, 10.0f, 0.0f, 10.0f, 0.0f, 0.0f,
+  };
+  const uint32_t rings[] = {0};
+  const float points[] = {
+      -50.0f, -50.0f, 20.0f, 20.0f, 100.0f, 5.0f, 5.0f, -100.0f,
+  };
+  int8_t results[] = {99, 99, 99, 99};
+
+  pgaccel_reset_gpu_exec_count();
+  const uint64_t before = pgaccel_gpu_exec_count();
+  const pgaccel_status status =
+      pgaccel_point_in_polygon_bulk(points, 4, bbox, polygon, 5, rings, 1, results);
+
+  ASSERT_EQ("all-outside PIP status OK", status, PGACCEL_OK);
+  ASSERT_EQ("all-outside PIP dispatched device work", (int)(pgaccel_gpu_exec_count() == before + 1),
+            1);
+  ASSERT_EQ("all-outside PIP result[0]", results[0], -1);
+  ASSERT_EQ("all-outside PIP result[1]", results[1], -1);
+  ASSERT_EQ("all-outside PIP result[2]", results[2], -1);
+  ASSERT_EQ("all-outside PIP result[3]", results[3], -1);
+}
+
 static void test_point_in_polygon_bulk_simple_hole_boundary() {
   printf("--- point_in_polygon_bulk: simple kernel hole boundary ---\n");
 
@@ -1174,7 +1201,7 @@ static void test_st_distance_polygon_polygon_degenerate() {
 // Algorithmic predicate tests (st_equals / _touches / _crosses / _overlaps).
 //
 // All four kernels classify pairs into DEFINITE TRUE (1), DEFINITE FALSE
-// (-1), or UNCERTAIN (0). The host-side fast-path covers identical
+// (-1), or UNCERTAIN (0). The device fast path covers identical
 // Point/Point coords, identical Polygon/Polygon ring vertex sets, and
 // disjoint bboxes. Everything else routes to UNCERTAIN.
 // ---------------------------------------------------------------------------
@@ -1246,6 +1273,65 @@ static void test_st_equals_bulk() {
   ASSERT_EQ("Point=Point disjoint → -1", results[1], -1);
   ASSERT_EQ("Polygon=Polygon identical → 1", results[2], 1);
   ASSERT_EQ("Point/Polygon mixed-dim → -1", results[3], -1);
+}
+
+static void test_algorithmic_predicate_device_equality_adversarial() {
+  printf("--- algorithmic predicates: device equality adversarial cases ---\n");
+
+  const float bbox[] = {0.0f, 0.0f, 2.0f, 2.0f};
+  const float square[] = {
+      0.0f, 0.0f, 2.0f, 0.0f, 2.0f, 2.0f, 0.0f, 2.0f, 0.0f, 0.0f,
+  };
+  const float rotated[] = {
+      2.0f, 2.0f, 0.0f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 2.0f, 2.0f,
+  };
+  const float reversed[] = {
+      0.0f, 0.0f, 0.0f, 2.0f, 2.0f, 2.0f, 2.0f, 0.0f, 0.0f, 0.0f,
+  };
+  const float changed[] = {
+      0.0f, 0.0f, 2.0f, 0.0f, 1.5f, 2.0f, 0.0f, 2.0f, 0.0f, 0.0f,
+  };
+  const float with_hole[] = {
+      0.0f, 0.0f, 2.0f, 0.0f, 2.0f, 2.0f, 0.0f, 2.0f, 0.0f, 0.0f,
+      0.5f, 0.5f, 1.5f, 0.5f, 1.5f, 1.5f, 0.5f, 1.5f, 0.5f, 0.5f,
+  };
+  const uint32_t hole_rings[] = {0, 5};
+  const float point[] = {0.25f, 0.75f};
+
+  pgaccel_geometry a[5];
+  pgaccel_geometry b[5];
+  a[0] = make_polygon_geom(square, 5, bbox);
+  b[0] = make_polygon_geom(rotated, 5, bbox);
+  a[1] = make_polygon_geom(square, 5, bbox);
+  b[1] = make_polygon_geom(reversed, 5, bbox);
+  a[2] = make_polygon_geom(square, 5, bbox);
+  b[2] = make_polygon_geom(changed, 5, bbox);
+  a[3] = make_polygon_geom(with_hole, 10, bbox);
+  b[3] = make_polygon_geom(with_hole, 10, bbox);
+  a[3].ring_offsets = hole_rings;
+  b[3].ring_offsets = hole_rings;
+  a[3].ring_count = 2;
+  b[3].ring_count = 2;
+  a[4] = make_point_geom(point, nullptr);
+  b[4] = make_point_geom(point, nullptr);
+
+  int8_t equals[] = {99, 99, 99, 99, 99};
+  pgaccel_status status = pgaccel_st_equals_bulk(a, b, 5, equals);
+  ASSERT_EQ("adversarial equals status OK", status, PGACCEL_OK);
+  ASSERT_EQ("rotated closed ring equals", equals[0], 1);
+  ASSERT_EQ("reversed closed ring equals", equals[1], 1);
+  ASSERT_EQ("changed ring remains uncertain", equals[2], 0);
+  ASSERT_EQ("multi-ring equality remains uncertain", equals[3], 0);
+  ASSERT_EQ("point equality does not require bbox", equals[4], 1);
+
+  int8_t overlaps[] = {99, 99, 99, 99, 99};
+  status = pgaccel_st_overlaps_bulk(a, b, 5, overlaps);
+  ASSERT_EQ("adversarial overlaps status OK", status, PGACCEL_OK);
+  ASSERT_EQ("rotated identical ring does not overlap", overlaps[0], -1);
+  ASSERT_EQ("reversed identical ring does not overlap", overlaps[1], -1);
+  ASSERT_EQ("changed ring overlap remains uncertain", overlaps[2], 0);
+  ASSERT_EQ("multi-ring overlap remains uncertain", overlaps[3], 0);
+  ASSERT_EQ("identical points do not overlap", overlaps[4], -1);
 }
 
 static void test_st_touches_bulk() {
@@ -1407,6 +1493,7 @@ int main() {
   test_point_in_ring_fp64_bulk();
   test_point_in_ring_fp64_gpu_dispatch();
   test_point_in_polygon_bulk_simple_path();
+  test_point_in_polygon_bulk_all_outside_still_dispatches();
   test_point_in_polygon_bulk_simple_hole_boundary();
   test_point_in_polygon_bulk_simple_slab_large_batch();
   test_point_in_polygon_bulk_coop_path();
@@ -1436,6 +1523,7 @@ int main() {
   test_st_distance_polygon_polygon_degenerate();
 
   test_st_equals_bulk();
+  test_algorithmic_predicate_device_equality_adversarial();
   test_st_touches_bulk();
   test_st_crosses_bulk();
   test_st_overlaps_bulk();

@@ -1364,7 +1364,8 @@ pgaccel_st_distance_polygon_polygon_bulk(const float* coords_a, const uint32_t* 
 // reference PostGIS implementation. The kernels exercise only the cheap-
 // to-evaluate portions of DE-9IM topology — bbox disjoint, vertex-set
 // equality on Point/Point pairs, ring-vertex equality on Polygon/Polygon
-// pairs — and route every other case to UNCERTAIN. Full DE-9IM topology
+// pairs — entirely on the device, and route every other case to UNCERTAIN.
+// Full DE-9IM topology
 // is genuinely complex and remains a follow-up; per CLAUDE.md anti-cheat
 // ban #9 ("when stuck, say so") we surface UNCERTAIN rather than fake
 // results, which is the documented escape hatch (see CLAUDE.md rule 11
@@ -1384,12 +1385,10 @@ pgaccel_st_distance_polygon_polygon_bulk(const float* coords_a, const uint32_t* 
 
 namespace {
 
-// Maximum ring vertex count for which we'll attempt the O(N²) ring-
-// equality fast path on the host. Beyond this, the kernel falls through
-// to UNCERTAIN immediately. Sized small intentionally — the cost of
-// building per-row coordinate buffers on the GPU outweighs the win for
-// fat rings.
+// Maximum ring vertex count for which the device attempts the O(N^2)
+// rotation/reversal equality fast path. Larger rings remain UNCERTAIN.
 constexpr size_t RING_EQUAL_FAST_PATH_LIMIT = 32;
+constexpr size_t ALGORITHMIC_NO_COORDS = std::numeric_limits<size_t>::max();
 
 enum class AlgorithmicPredicate {
   Equals,
@@ -1399,18 +1398,106 @@ enum class AlgorithmicPredicate {
 };
 
 struct AlgorithmicPredicateKernelSlabHeader {
-  size_t bboxes_a_off;
-  size_t bboxes_b_off;
-  size_t types_a_off;
-  size_t types_b_off;
-  size_t point_eq_off;
-  size_t ring_eq_off;
+  size_t count;
+  size_t geoms_a_off;
+  size_t geoms_b_off;
   size_t results_off;
   int pred_id;
 };
 
-static size_t align_up_size(size_t value, size_t alignment) {
-  return (value + alignment - 1) & ~(alignment - 1);
+struct AlgorithmicPredicateGeometryMeta {
+  int type;
+  uint32_t has_bbox;
+  float bbox[4];
+  size_t coords_off;
+  size_t coord_count;
+};
+
+struct AlgorithmicPredicatePayloadCopy {
+  size_t off;
+  const void* src;
+  size_t bytes;
+};
+
+static bool algorithmic_checked_add(size_t a, size_t b, size_t* out) {
+  if (out == nullptr || b > std::numeric_limits<size_t>::max() - a)
+    return false;
+  *out = a + b;
+  return true;
+}
+
+static bool algorithmic_checked_mul(size_t a, size_t b, size_t* out) {
+  if (out == nullptr || (a != 0 && b > std::numeric_limits<size_t>::max() / a))
+    return false;
+  *out = a * b;
+  return true;
+}
+
+static bool algorithmic_add_region(size_t* cursor, size_t bytes, size_t alignment,
+                                   size_t* out_off) {
+  if (cursor == nullptr || out_off == nullptr || alignment == 0 || bytes == 0)
+    return false;
+  const size_t remainder = *cursor % alignment;
+  const size_t padding = remainder == 0 ? 0 : alignment - remainder;
+  size_t aligned = 0;
+  size_t next = 0;
+  if (!algorithmic_checked_add(*cursor, padding, &aligned) ||
+      !algorithmic_checked_add(aligned, bytes, &next)) {
+    return false;
+  }
+  *out_off = aligned;
+  *cursor = next;
+  return true;
+}
+
+static bool algorithmic_device_coord_equal(float ax, float ay, float bx, float by) {
+  const float dx = ax - bx;
+  const float dy = ay - by;
+  return dx > -EPS_FP32 && dx < EPS_FP32 && dy > -EPS_FP32 && dy < EPS_FP32;
+}
+
+static size_t algorithmic_device_open_ring_count(const float* coords, size_t count) {
+  if (count > 1 && algorithmic_device_coord_equal(coords[0], coords[1], coords[(count - 1) * 2],
+                                                  coords[(count - 1) * 2 + 1])) {
+    return count - 1;
+  }
+  return count;
+}
+
+static bool algorithmic_device_ring_equal(const uint8_t* slab,
+                                          const AlgorithmicPredicateGeometryMeta& a,
+                                          const AlgorithmicPredicateGeometryMeta& b) {
+  if (a.coords_off == ALGORITHMIC_NO_COORDS || b.coords_off == ALGORITHMIC_NO_COORDS)
+    return false;
+
+  const auto* coords_a = reinterpret_cast<const float*>(slab + a.coords_off);
+  const auto* coords_b = reinterpret_cast<const float*>(slab + b.coords_off);
+  const size_t count_a = algorithmic_device_open_ring_count(coords_a, a.coord_count);
+  const size_t count_b = algorithmic_device_open_ring_count(coords_b, b.coord_count);
+  if (count_a != count_b || count_a < 3)
+    return false;
+
+  for (size_t start = 0; start < count_a; ++start) {
+    bool forward = true;
+    bool reverse = true;
+    for (size_t k = 0; k < count_a; ++k) {
+      const size_t forward_i = (start + k) % count_a;
+      const size_t reverse_i = (start + count_a - k) % count_a;
+      if (!algorithmic_device_coord_equal(coords_a[k * 2], coords_a[k * 2 + 1],
+                                          coords_b[forward_i * 2], coords_b[forward_i * 2 + 1])) {
+        forward = false;
+      }
+      if (!algorithmic_device_coord_equal(coords_a[k * 2], coords_a[k * 2 + 1],
+                                          coords_b[reverse_i * 2], coords_b[reverse_i * 2 + 1])) {
+        reverse = false;
+      }
+      if (!forward && !reverse)
+        break;
+    }
+    if (forward || reverse)
+      return true;
+  }
+  return false;
 }
 
 pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms_a,
@@ -1425,133 +1512,105 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
+  uint8_t* d_slab = nullptr;
   try {
-    // Keep the Metal kernel ABI low-capture: one shared USM slab is captured,
-    // and typed views are reconstructed from header offsets inside the kernel.
-    // Polygon ring equality is computed host-side because per-row ring buffers
-    // would require variable-stride USM per element.
     AlgorithmicPredicateKernelSlabHeader header{};
-    size_t cursor = align_up_size(sizeof(header), alignof(float));
-    header.bboxes_a_off = cursor;
-    cursor += count * 4 * sizeof(float);
-    cursor = align_up_size(cursor, alignof(float));
-    header.bboxes_b_off = cursor;
-    cursor += count * 4 * sizeof(float);
-    cursor = align_up_size(cursor, alignof(int));
-    header.types_a_off = cursor;
-    cursor += count * sizeof(int);
-    cursor = align_up_size(cursor, alignof(int));
-    header.types_b_off = cursor;
-    cursor += count * sizeof(int);
-    cursor = align_up_size(cursor, alignof(uint8_t));
-    header.point_eq_off = cursor;
-    cursor += count * sizeof(uint8_t);
-    cursor = align_up_size(cursor, alignof(uint8_t));
-    header.ring_eq_off = cursor;
-    cursor += count * sizeof(uint8_t);
-    cursor = align_up_size(cursor, alignof(int8_t));
-    header.results_off = cursor;
-    cursor += count * sizeof(int8_t);
+    header.count = count;
     header.pred_id = static_cast<int>(pred);
 
-    uint8_t* d_slab = sycl::malloc_shared<uint8_t>(cursor, *q);
-    if (!d_slab) {
+    size_t meta_bytes = 0;
+    size_t result_bytes = 0;
+    if (!algorithmic_checked_mul(count, sizeof(AlgorithmicPredicateGeometryMeta), &meta_bytes) ||
+        !algorithmic_checked_mul(count, sizeof(int8_t), &result_bytes)) {
       return PGACCEL_OOM;
     }
-    std::memset(d_slab, 0, cursor);
-    std::memcpy(d_slab, &header, sizeof(header));
 
-    float* d_bboxes_a = reinterpret_cast<float*>(d_slab + header.bboxes_a_off);
-    float* d_bboxes_b = reinterpret_cast<float*>(d_slab + header.bboxes_b_off);
-    int* d_types_a = reinterpret_cast<int*>(d_slab + header.types_a_off);
-    int* d_types_b = reinterpret_cast<int*>(d_slab + header.types_b_off);
-    uint8_t* d_point_eq = d_slab + header.point_eq_off;
-    uint8_t* d_ring_eq = d_slab + header.ring_eq_off;
+    size_t cursor = sizeof(header);
+    if (!algorithmic_add_region(&cursor, meta_bytes, alignof(AlgorithmicPredicateGeometryMeta),
+                                &header.geoms_a_off) ||
+        !algorithmic_add_region(&cursor, meta_bytes, alignof(AlgorithmicPredicateGeometryMeta),
+                                &header.geoms_b_off) ||
+        !algorithmic_add_region(&cursor, result_bytes, alignof(int8_t), &header.results_off)) {
+      return PGACCEL_OOM;
+    }
+
+    std::vector<AlgorithmicPredicateGeometryMeta> meta_a(count);
+    std::vector<AlgorithmicPredicateGeometryMeta> meta_b(count);
+    std::vector<AlgorithmicPredicatePayloadCopy> payloads;
+
+    // This pass only validates descriptors and serializes their byte payloads.
+    // Spatial comparisons and result classification are exclusively device work.
+    auto stage_geometry = [&](const pgaccel_geometry& geom,
+                              AlgorithmicPredicateGeometryMeta* meta) -> bool {
+      *meta = AlgorithmicPredicateGeometryMeta{};
+      meta->type = static_cast<int>(geom.type);
+      meta->coords_off = ALGORITHMIC_NO_COORDS;
+      if (geom.bbox != nullptr) {
+        meta->has_bbox = 1;
+        std::memcpy(meta->bbox, geom.bbox, sizeof(meta->bbox));
+      }
+
+      size_t copied_coord_count = 0;
+      if (geom.type == PGACCEL_GEOM_POINT && geom.coords != nullptr && geom.coord_count >= 1) {
+        copied_coord_count = 1;
+      } else if (geom.type == PGACCEL_GEOM_POLYGON && geom.coords != nullptr &&
+                 geom.coord_count >= 3 && geom.coord_count <= RING_EQUAL_FAST_PATH_LIMIT) {
+        const bool single_ring =
+            geom.ring_count == 0 ||
+            (geom.ring_count == 1 && geom.ring_offsets != nullptr && geom.ring_offsets[0] == 0);
+        if (single_ring) {
+          copied_coord_count = geom.coord_count;
+        }
+      }
+
+      if (copied_coord_count == 0)
+        return true;
+
+      size_t value_count = 0;
+      size_t coord_bytes = 0;
+      if (!algorithmic_checked_mul(copied_coord_count, size_t{2}, &value_count) ||
+          !algorithmic_checked_mul(value_count, sizeof(float), &coord_bytes) ||
+          !algorithmic_add_region(&cursor, coord_bytes, alignof(float), &meta->coords_off)) {
+        return false;
+      }
+      meta->coord_count = copied_coord_count;
+      payloads.push_back({meta->coords_off, geom.coords, coord_bytes});
+      return true;
+    };
 
     for (size_t i = 0; i < count; ++i) {
-      const pgaccel_geometry& a = geoms_a[i];
-      const pgaccel_geometry& b = geoms_b[i];
-      if (a.bbox) {
-        std::memcpy(&d_bboxes_a[i * 4], a.bbox, 4 * sizeof(float));
-      } else {
-        d_bboxes_a[i * 4 + 0] = 0.0f;
-        d_bboxes_a[i * 4 + 1] = 0.0f;
-        d_bboxes_a[i * 4 + 2] = 0.0f;
-        d_bboxes_a[i * 4 + 3] = 0.0f;
+      if (!stage_geometry(geoms_a[i], &meta_a[i]) || !stage_geometry(geoms_b[i], &meta_b[i])) {
+        return PGACCEL_OOM;
       }
-      if (b.bbox) {
-        std::memcpy(&d_bboxes_b[i * 4], b.bbox, 4 * sizeof(float));
-      } else {
-        d_bboxes_b[i * 4 + 0] = 0.0f;
-        d_bboxes_b[i * 4 + 1] = 0.0f;
-        d_bboxes_b[i * 4 + 2] = 0.0f;
-        d_bboxes_b[i * 4 + 3] = 0.0f;
-      }
-      d_types_a[i] = static_cast<int>(a.type);
-      d_types_b[i] = static_cast<int>(b.type);
-
-      uint8_t pt_eq = 0;
-      if (a.type == PGACCEL_GEOM_POINT && b.type == PGACCEL_GEOM_POINT && a.coords && b.coords &&
-          a.coord_count >= 1 && b.coord_count >= 1) {
-        const float dx = a.coords[0] - b.coords[0];
-        const float dy = a.coords[1] - b.coords[1];
-        if (std::abs(dx) < EPS_FP32 && std::abs(dy) < EPS_FP32) {
-          pt_eq = 1;
-        }
-      }
-      d_point_eq[i] = pt_eq;
-
-      uint8_t ring_eq = 0;
-      if (a.type == PGACCEL_GEOM_POLYGON && b.type == PGACCEL_GEOM_POLYGON && a.coords &&
-          b.coords && a.coord_count >= 3 && b.coord_count >= 3 &&
-          a.coord_count <= RING_EQUAL_FAST_PATH_LIMIT &&
-          b.coord_count <= RING_EQUAL_FAST_PATH_LIMIT && a.coord_count == b.coord_count) {
-        // Walk all rotations forward and reverse.
-        bool found = false;
-        const size_t n = a.coord_count;
-        for (size_t start = 0; start < n && !found; ++start) {
-          bool fwd = true;
-          bool rev = true;
-          for (size_t k = 0; k < n; ++k) {
-            const size_t fi = (start + k) % n;
-            const size_t ri = (start + n - k) % n;
-            if (std::abs(a.coords[k * 2] - b.coords[fi * 2]) >= EPS_FP32 ||
-                std::abs(a.coords[k * 2 + 1] - b.coords[fi * 2 + 1]) >= EPS_FP32) {
-              fwd = false;
-            }
-            if (std::abs(a.coords[k * 2] - b.coords[ri * 2]) >= EPS_FP32 ||
-                std::abs(a.coords[k * 2 + 1] - b.coords[ri * 2 + 1]) >= EPS_FP32) {
-              rev = false;
-            }
-            if (!fwd && !rev)
-              break;
-          }
-          if (fwd || rev)
-            found = true;
-        }
-        if (found) {
-          ring_eq = 1;
-        }
-      }
-      d_ring_eq[i] = ring_eq;
     }
+
+    std::vector<uint8_t> staged(cursor, 0);
+    std::memcpy(staged.data(), &header, sizeof(header));
+    std::memcpy(staged.data() + header.geoms_a_off, meta_a.data(), meta_bytes);
+    std::memcpy(staged.data() + header.geoms_b_off, meta_b.data(), meta_bytes);
+    for (const auto& payload : payloads) {
+      std::memcpy(staged.data() + payload.off, payload.src, payload.bytes);
+    }
+
+    // Keep the Metal kernel ABI low-capture: one shared USM slab is captured,
+    // and typed views are reconstructed from offsets inside the kernel.
+    d_slab = sycl::malloc_shared<uint8_t>(cursor, *q);
+    if (!d_slab)
+      return PGACCEL_OOM;
+    q->memcpy(d_slab, staged.data(), cursor).wait_and_throw();
 
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        const auto* h = reinterpret_cast<const AlgorithmicPredicateKernelSlabHeader*>(d_slab);
-       const auto* bboxes_a = reinterpret_cast<const float*>(d_slab + h->bboxes_a_off);
-       const auto* bboxes_b = reinterpret_cast<const float*>(d_slab + h->bboxes_b_off);
-       const auto* types_a = reinterpret_cast<const int*>(d_slab + h->types_a_off);
-       const auto* types_b = reinterpret_cast<const int*>(d_slab + h->types_b_off);
-       const uint8_t* point_eq = d_slab + h->point_eq_off;
-       const uint8_t* ring_eqs = d_slab + h->ring_eq_off;
+       const auto* device_meta_a =
+           reinterpret_cast<const AlgorithmicPredicateGeometryMeta*>(d_slab + h->geoms_a_off);
+       const auto* device_meta_b =
+           reinterpret_cast<const AlgorithmicPredicateGeometryMeta*>(d_slab + h->geoms_b_off);
        auto* slab_results = reinterpret_cast<int8_t*>(d_slab + h->results_off);
        const size_t i = id[0];
-       const float* ba = &bboxes_a[i * 4];
-       const float* bb = &bboxes_b[i * 4];
-       const int ta = types_a[i];
-       const int tb = types_b[i];
-       const uint8_t pt_eq = point_eq[i];
-       const uint8_t ring_eq = ring_eqs[i];
+       const AlgorithmicPredicateGeometryMeta a = device_meta_a[i];
+       const AlgorithmicPredicateGeometryMeta b = device_meta_b[i];
+       const int ta = a.type;
+       const int tb = b.type;
 
        if (ta == static_cast<int>(PGACCEL_GEOM_UNKNOWN) ||
            tb == static_cast<int>(PGACCEL_GEOM_UNKNOWN)) {
@@ -1559,8 +1618,22 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
          return;
        }
 
-       const bool disjoint =
-           (ba[2] < bb[0]) || (bb[2] < ba[0]) || (ba[3] < bb[1]) || (bb[3] < ba[1]);
+       const bool disjoint = a.has_bbox != 0 && b.has_bbox != 0 &&
+                             ((a.bbox[2] < b.bbox[0]) || (b.bbox[2] < a.bbox[0]) ||
+                              (a.bbox[3] < b.bbox[1]) || (b.bbox[3] < a.bbox[1]));
+       const bool point_comparable =
+           a.coords_off != ALGORITHMIC_NO_COORDS && b.coords_off != ALGORITHMIC_NO_COORDS;
+       bool point_equal = false;
+       if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
+           tb == static_cast<int>(PGACCEL_GEOM_POINT) && point_comparable) {
+         const auto* point_a = reinterpret_cast<const float*>(d_slab + a.coords_off);
+         const auto* point_b = reinterpret_cast<const float*>(d_slab + b.coords_off);
+         point_equal =
+             algorithmic_device_coord_equal(point_a[0], point_a[1], point_b[0], point_b[1]);
+       }
+       const bool ring_equal = ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
+                               tb == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
+                               algorithmic_device_ring_equal(d_slab, a, b);
 
        if (h->pred_id == static_cast<int>(AlgorithmicPredicate::Equals)) {
          if (disjoint) {
@@ -1569,11 +1642,11 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POINT) &&
              tb == static_cast<int>(PGACCEL_GEOM_POINT)) {
-           slab_results[i] = pt_eq ? int8_t(1) : int8_t(-1);
+           slab_results[i] = point_comparable ? (point_equal ? int8_t(1) : int8_t(-1)) : int8_t(0);
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
-             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_equal) {
            slab_results[i] = 1;
            return;
          }
@@ -1593,7 +1666,7 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
-             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_equal) {
            slab_results[i] = -1;
            return;
          }
@@ -1609,7 +1682,7 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
            return;
          }
          if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) &&
-             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+             tb == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_equal) {
            slab_results[i] = -1;
            return;
          }
@@ -1623,11 +1696,11 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
            slab_results[i] = -1;
            return;
          }
-         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) && pt_eq) {
+         if (ta == static_cast<int>(PGACCEL_GEOM_POINT) && point_equal) {
            slab_results[i] = -1;
            return;
          }
-         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_eq) {
+         if (ta == static_cast<int>(PGACCEL_GEOM_POLYGON) && ring_equal) {
            slab_results[i] = -1;
            return;
          }
@@ -1635,15 +1708,20 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
        }
      }).wait_and_throw();
 
-    std::memcpy(results, d_slab + header.results_off, count * sizeof(int8_t));
+    q->memcpy(results, d_slab + header.results_off, result_bytes).wait_and_throw();
     sycl::free(d_slab, *q);
+    d_slab = nullptr;
 
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
+    if (d_slab)
+      sycl::free(d_slab, *q);
     fprintf(stderr, "pgaccel: SYCL sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
+    if (d_slab)
+      sycl::free(d_slab, *q);
     fprintf(stderr, "pgaccel: sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
