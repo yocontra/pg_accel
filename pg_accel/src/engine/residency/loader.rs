@@ -24,7 +24,7 @@ use super::geometry::{
     ResidentGeometryBuilder, ResidentGeometryColumn, ResidentGeometryReferencedBytes,
 };
 use super::ledger::{self, GenerationStamp, LedgerCharge};
-use super::store::{ResidentColumn, ResidentRelation};
+use super::store::{RelationFingerprint, ResidentColumn, ResidentRelation};
 
 const LOAD_INTERRUPT_CHECK_ROWS: usize = 8192;
 
@@ -407,6 +407,7 @@ fn copy_optional_nulls(
 pub(super) struct StagedRelation {
     relid: pg_sys::Oid,
     relfilenode: pg_sys::Oid,
+    fingerprint: RelationFingerprint,
     generation: GenerationStamp,
     columns: BTreeMap<i16, StagedColumn>,
     row_count: u64,
@@ -488,6 +489,7 @@ impl StagedRelation {
         Ok(ResidentRelation {
             relid: self.relid,
             relfilenode: self.relfilenode,
+            fingerprint: self.fingerprint,
             generation: self.generation,
             columns,
             row_count: self.row_count,
@@ -499,6 +501,7 @@ impl StagedRelation {
             raw_charge: charge,
             raw_accounting: accounting,
             first_use_scope: None,
+            relcache_suspect: false,
             derived: Vec::new(),
         })
     }
@@ -1472,6 +1475,7 @@ pub(super) fn estimate_resident_bytes(
     })
 }
 
+#[cfg_attr(all(test, not(feature = "pg_test")), allow(dead_code))]
 pub(super) fn current_relfilenode(relid: pg_sys::Oid) -> Option<pg_sys::Oid> {
     // SAFETY: called on the backend main thread in planner/executor/SRF context.
     let tuple = unsafe {
@@ -1570,12 +1574,13 @@ pub(super) fn stage_relation(
 ) -> Result<StagedRelation, String> {
     for attempt in 0..2 {
         let generation_before = ledger::generation_stamp(relid);
-        let relfilenode_before = current_relfilenode(relid).ok_or_else(|| {
+        let fingerprint_before = RelationFingerprint::capture(relid, requests).ok_or_else(|| {
             format!(
-                "relation OID {} disappeared before resident load",
+                "relation OID {} or one of its requested columns disappeared before resident load",
                 u32::from(relid)
             )
         })?;
+        let relfilenode_before = fingerprint_before.relfilenode();
         let started = Instant::now();
         let qualified = qualified_relation_name(relid)?;
         let estimated_bytes = estimate_resident_bytes(relid, requests)?;
@@ -1594,8 +1599,10 @@ pub(super) fn stage_relation(
             .collect::<Result<Vec<_>, _>>()?;
         let row_count = scan_with_detached_cursor(&query, &qualified, &mut builders)?;
         let generation_after = ledger::generation_stamp(relid);
-        let relfilenode_after = current_relfilenode(relid);
-        if generation_before != generation_after || relfilenode_after != Some(relfilenode_before) {
+        let fingerprint_after = RelationFingerprint::capture(relid, requests);
+        if generation_before != generation_after
+            || fingerprint_after.as_ref() != Some(&fingerprint_before)
+        {
             if attempt == 0 {
                 continue;
             }
@@ -1622,6 +1629,7 @@ pub(super) fn stage_relation(
         return Ok(StagedRelation {
             relid,
             relfilenode: relfilenode_before,
+            fingerprint: fingerprint_before,
             generation: generation_after,
             columns,
             row_count,

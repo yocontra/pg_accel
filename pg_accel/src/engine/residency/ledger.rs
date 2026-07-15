@@ -82,7 +82,31 @@ mod shared {
     }
 }
 
-#[cfg(any(test, feature = "pg_test"))]
+#[cfg(test)]
+mod shared {
+    use std::cell::RefCell;
+
+    use super::ResidencyLedger;
+
+    // A Rust test thread models one PostgreSQL backend, just like the
+    // backend-local residency STORE. Shared-ledger algorithms are tested
+    // directly below; live PostgreSQL tests exercise the process-shared path.
+    thread_local! {
+        static LEDGER: RefCell<ResidencyLedger> = RefCell::new(ResidencyLedger::default());
+    }
+
+    pub(super) fn init() {}
+
+    pub(super) fn with_mut<R>(f: impl FnOnce(&mut ResidencyLedger) -> R) -> R {
+        LEDGER.with(|ledger| f(&mut ledger.borrow_mut()))
+    }
+
+    pub(super) fn with_ref<R>(f: impl FnOnce(&ResidencyLedger) -> R) -> R {
+        LEDGER.with(|ledger| f(&ledger.borrow()))
+    }
+}
+
+#[cfg(all(not(test), feature = "pg_test"))]
 mod shared {
     use std::sync::{LazyLock, Mutex};
 

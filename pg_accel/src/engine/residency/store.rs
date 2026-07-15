@@ -877,9 +877,116 @@ pub struct ResolvedArtifactBundle<'a, T> {
     pub evidence: Vec<ResidentRelationEvidence>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AttributeFingerprint {
+    attno: i16,
+    type_oid: pg_sys::Oid,
+    dropped: bool,
+}
+
+/// Catalog shape that determines whether a resident snapshot is still valid.
+///
+/// Names are deliberately excluded: rename-only relcache invalidations do not
+/// change the data addressed by an OID/attribute number pair. Relnatts and the
+/// cached attribute types/dropped flags cover relfilenode-stable schema edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RelationFingerprint {
+    relid: pg_sys::Oid,
+    relfilenode: pg_sys::Oid,
+    relnatts: i16,
+    attributes: Box<[AttributeFingerprint]>,
+}
+
+impl RelationFingerprint {
+    pub(super) fn capture(relid: pg_sys::Oid, requests: &[ColumnRequest]) -> Option<Self> {
+        // SAFETY: normal backend planner/executor/SRF context. RELOID takes
+        // one OID key and the returned syscache pin is released below.
+        let tuple = unsafe {
+            pg_sys::SearchSysCache1(
+                pg_sys::SysCacheIdentifier::RELOID as ::core::ffi::c_int,
+                relid.into(),
+            )
+        };
+        if tuple.is_null() {
+            return None;
+        }
+        // SAFETY: `tuple` is the pinned pg_class tuple returned above.
+        let (relfilenode, relnatts) = unsafe {
+            let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_class>();
+            ((*form).relfilenode, (*form).relnatts)
+        };
+        // SAFETY: releases exactly the RELOID syscache pin acquired above.
+        unsafe { pg_sys::ReleaseSysCache(tuple) };
+
+        let attributes = requests
+            .iter()
+            .map(|request| {
+                // SAFETY: normal backend context. ATTNUM takes relation OID
+                // and attribute number keys; the resulting pin is released.
+                let tuple = unsafe {
+                    pg_sys::SearchSysCache2(
+                        pg_sys::SysCacheIdentifier::ATTNUM as ::core::ffi::c_int,
+                        relid.into(),
+                        pg_sys::Datum::from(request.attno),
+                    )
+                };
+                if tuple.is_null() {
+                    return None;
+                }
+                // SAFETY: `tuple` is the pinned pg_attribute tuple above.
+                let (type_oid, dropped) = unsafe {
+                    let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_attribute>();
+                    ((*form).atttypid, (*form).attisdropped)
+                };
+                // SAFETY: releases exactly the ATTNUM syscache pin above.
+                unsafe { pg_sys::ReleaseSysCache(tuple) };
+                (type_oid == request.type_oid && !dropped).then_some(AttributeFingerprint {
+                    attno: request.attno,
+                    type_oid,
+                    dropped,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            relid,
+            relfilenode,
+            relnatts,
+            attributes: attributes.into_boxed_slice(),
+        })
+    }
+
+    pub(super) const fn relfilenode(&self) -> pg_sys::Oid {
+        self.relfilenode
+    }
+
+    #[cfg(not(test))]
+    fn still_matches(&self) -> bool {
+        let requests = self
+            .attributes
+            .iter()
+            .map(|attribute| ColumnRequest {
+                attno: attribute.attno,
+                type_oid: attribute.type_oid,
+            })
+            .collect::<Vec<_>>();
+        Self::capture(self.relid, &requests).as_ref() == Some(self)
+    }
+
+    #[cfg(test)]
+    fn synthetic(relid: u32) -> Self {
+        Self {
+            relid: pg_sys::Oid::from(relid),
+            relfilenode: pg_sys::Oid::from(relid + 100),
+            relnatts: 0,
+            attributes: Box::default(),
+        }
+    }
+}
+
 pub(super) struct ResidentRelation {
     pub(super) relid: pg_sys::Oid,
     pub(super) relfilenode: pg_sys::Oid,
+    pub(super) fingerprint: RelationFingerprint,
     pub(super) generation: GenerationStamp,
     pub(super) columns: BTreeMap<i16, ResidentColumn>,
     pub(super) row_count: u64,
@@ -891,6 +998,7 @@ pub(super) struct ResidentRelation {
     pub(super) raw_charge: LedgerCharge,
     pub(super) raw_accounting: ResidentByteAccounting,
     pub(super) first_use_scope: Option<CommandScope>,
+    pub(super) relcache_suspect: bool,
     pub(super) derived: Vec<DerivedEntry>,
 }
 
@@ -1330,6 +1438,79 @@ fn ensure_relcache_callback() {
     RELCACHE_CALLBACK_REGISTERED.with(|registered| registered.set(true));
 }
 
+#[derive(Clone)]
+struct ResidentRevalidationSnapshot {
+    relid: pg_sys::Oid,
+    fingerprint: RelationFingerprint,
+    generation: GenerationStamp,
+    first_use_scope: Option<CommandScope>,
+    relcache_suspect: bool,
+}
+
+impl From<&ResidentRelation> for ResidentRevalidationSnapshot {
+    fn from(entry: &ResidentRelation) -> Self {
+        Self {
+            relid: entry.relid,
+            fingerprint: entry.fingerprint.clone(),
+            generation: entry.generation,
+            first_use_scope: entry.first_use_scope,
+            relcache_suspect: entry.relcache_suspect,
+        }
+    }
+}
+
+fn mark_relcache_suspects(
+    store: &mut RelationStore,
+    clear_all: bool,
+    pending: &PendingRelcacheInvalidations,
+) {
+    for entry in &mut store.entries {
+        if clear_all || pending.contains(u32::from(entry.relid)) {
+            entry.relcache_suspect = true;
+        }
+    }
+}
+
+fn revalidation_keeps_snapshot(
+    snapshot: &ResidentRevalidationSnapshot,
+    command_scope: CommandScope,
+    current_generation: GenerationStamp,
+    current_relfilenode: Option<pg_sys::Oid>,
+    fingerprint_matches: bool,
+) -> bool {
+    fingerprint_matches
+        && snapshot.generation == current_generation
+        && current_relfilenode == Some(snapshot.fingerprint.relfilenode())
+        && snapshot
+            .first_use_scope
+            .is_none_or(|scope| scope == command_scope)
+}
+
+fn apply_revalidation_decisions(
+    store: &mut RelationStore,
+    decisions: Vec<(ResidentRevalidationSnapshot, bool)>,
+) {
+    for (snapshot, keep) in decisions {
+        let Some(index) = store
+            .entries
+            .iter()
+            .position(|entry| entry.relid == snapshot.relid)
+        else {
+            continue;
+        };
+        let entry = &store.entries[index];
+        if entry.generation != snapshot.generation || entry.fingerprint != snapshot.fingerprint {
+            continue;
+        }
+        if keep {
+            store.entries[index].relcache_suspect = false;
+        } else {
+            store.entries.remove(index).release();
+        }
+    }
+}
+
+#[cfg(test)]
 fn prune_invalid_relations(
     store: &mut RelationStore,
     clear_all: bool,
@@ -1337,25 +1518,27 @@ fn prune_invalid_relations(
     command_scope: CommandScope,
     mut generation_stamp: impl FnMut(pg_sys::Oid) -> GenerationStamp,
     mut current_relfilenode: impl FnMut(pg_sys::Oid) -> Option<pg_sys::Oid>,
+    mut fingerprint_matches: impl FnMut(&RelationFingerprint) -> bool,
 ) {
-    let mut index = 0;
-    while index < store.entries.len() {
-        let keep = {
-            let entry = &store.entries[index];
-            !clear_all
-                && !pending.contains(u32::from(entry.relid))
-                && entry.generation == generation_stamp(entry.relid)
-                && current_relfilenode(entry.relid) == Some(entry.relfilenode)
-                && entry
-                    .first_use_scope
-                    .is_none_or(|scope| scope == command_scope)
-        };
-        if keep {
-            index += 1;
-        } else {
-            store.entries.remove(index).release();
-        }
-    }
+    mark_relcache_suspects(store, clear_all, pending);
+    let decisions = store
+        .entries
+        .iter()
+        .map(|entry| {
+            let snapshot = ResidentRevalidationSnapshot::from(entry);
+            let fingerprint_matches =
+                !snapshot.relcache_suspect || fingerprint_matches(&snapshot.fingerprint);
+            let keep = revalidation_keeps_snapshot(
+                &snapshot,
+                command_scope,
+                generation_stamp(snapshot.relid),
+                current_relfilenode(snapshot.relid),
+                fingerprint_matches,
+            );
+            (snapshot, keep)
+        })
+        .collect();
+    apply_revalidation_decisions(store, decisions);
 }
 
 #[cfg(not(test))]
@@ -1365,15 +1548,48 @@ fn process_invalidations() {
     let pending =
         PENDING_RELCACHE.with(|pending| pending.replace(PendingRelcacheInvalidations::empty()));
     let command_scope = current_command_scope();
+    let snapshots = STORE.with(|store| {
+        let mut store = store.borrow_mut();
+        mark_relcache_suspects(&mut store, clear_all, &pending);
+        let mut snapshots = Vec::new();
+        let mut index = 0;
+        while index < store.entries.len() {
+            if store.entries[index].relcache_suspect {
+                snapshots.push(ResidentRevalidationSnapshot::from(&store.entries[index]));
+                index += 1;
+                continue;
+            }
+            let entry = &store.entries[index];
+            let keep = entry.generation == ledger::generation_stamp(entry.relid)
+                && loader::current_relfilenode(entry.relid) == Some(entry.relfilenode)
+                && entry
+                    .first_use_scope
+                    .is_none_or(|scope| scope == command_scope);
+            if keep {
+                index += 1;
+            } else {
+                store.entries.remove(index).release();
+            }
+        }
+        snapshots
+    });
+    let decisions = snapshots
+        .into_iter()
+        .map(|snapshot| {
+            let fingerprint_matches =
+                !snapshot.relcache_suspect || snapshot.fingerprint.still_matches();
+            let keep = revalidation_keeps_snapshot(
+                &snapshot,
+                command_scope,
+                ledger::generation_stamp(snapshot.relid),
+                loader::current_relfilenode(snapshot.relid),
+                fingerprint_matches,
+            );
+            (snapshot, keep)
+        })
+        .collect();
     STORE.with(|store| {
-        prune_invalid_relations(
-            &mut store.borrow_mut(),
-            clear_all,
-            &pending,
-            command_scope,
-            ledger::generation_stamp,
-            loader::current_relfilenode,
-        );
+        apply_revalidation_decisions(&mut store.borrow_mut(), decisions);
     });
 }
 
@@ -2970,6 +3186,28 @@ pub fn shape_digest(words: &[i32]) -> u64 {
     hash
 }
 
+#[cfg(feature = "pg_test")]
+pub(super) fn test_derived_artifact_identities(relid: pg_sys::Oid) -> Vec<(u64, Vec<i32>)> {
+    process_invalidations();
+    STORE.with(|store| {
+        let store = store.borrow();
+        let mut identities = store
+            .entries
+            .iter()
+            .find(|entry| entry.relid == relid)
+            .map(|entry| {
+                entry
+                    .derived
+                    .iter()
+                    .map(|artifact| (artifact.digest, artifact.canonical_words.to_vec()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        identities.sort();
+        identities
+    })
+}
+
 fn pin_relation(
     relid: pg_sys::Oid,
     columns: Option<Vec<String>>,
@@ -3355,6 +3593,12 @@ pub(super) mod tests {
     static RESERVED_LIFECYCLE_TEST_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
+    fn reserved_lifecycle_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        RESERVED_LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn shape_digest_is_stable_and_order_sensitive() {
         assert_eq!(shape_digest(&[1, -2, 3]), shape_digest(&[1, -2, 3]));
@@ -3468,6 +3712,7 @@ pub(super) mod tests {
                 relation: 1,
             },
             |relid| Some(pg_sys::Oid::from(u32::from(relid) + 100)),
+            |_| true,
         );
 
         assert_eq!(store.entries.len(), 1);
@@ -3501,6 +3746,7 @@ pub(super) mod tests {
                 relation: 2,
             },
             |_| Some(pg_sys::Oid::from(195_u32)),
+            |_| true,
         );
 
         assert!(store.entries.is_empty());
@@ -3542,6 +3788,7 @@ pub(super) mod tests {
                 60 => None,
                 raw => Some(pg_sys::Oid::from(raw + 100)),
             },
+            |fingerprint| u32::from(fingerprint.relid) != 20,
         );
 
         assert_eq!(store.entries.len(), 1);
@@ -3549,7 +3796,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn invalidation_clear_all_does_not_consult_catalog_state() {
+    fn invalidation_clear_all_evicts_a_fingerprint_mismatch() {
         let mut store = RelationStore::default();
         store.entries.push(empty_relation(70, false, 1));
         prune_invalid_relations(
@@ -3560,10 +3807,124 @@ pub(super) mod tests {
                 xid: 1,
                 command_id: 1,
             },
-            |_| panic!("clear-all must not read a generation"),
-            |_| panic!("clear-all must not read a relfilenode"),
+            |_| GenerationStamp {
+                global: 1,
+                relation: 1,
+            },
+            |relid| Some(pg_sys::Oid::from(u32::from(relid) + 100)),
+            |_| false,
         );
         assert!(store.entries.is_empty());
+    }
+
+    #[test]
+    fn benign_relcache_invalidation_keeps_exact_pinned_residency() {
+        let mut store = RelationStore::default();
+        store.entries.push(empty_relation(71, true, 1));
+        let mut pending = PendingRelcacheInvalidations::empty();
+        pending.relids[0] = 71;
+        pending.len = 1;
+
+        prune_invalid_relations(
+            &mut store,
+            false,
+            &pending,
+            CommandScope {
+                xid: 1,
+                command_id: 1,
+            },
+            |_| GenerationStamp {
+                global: 1,
+                relation: 1,
+            },
+            |relid| Some(pg_sys::Oid::from(u32::from(relid) + 100)),
+            |_| true,
+        );
+
+        assert_eq!(store.entries.len(), 1);
+        assert!(store.entries[0].pinned);
+        assert!(!store.entries[0].relcache_suspect);
+    }
+
+    #[test]
+    fn clear_all_revalidates_and_keeps_an_exact_fingerprint() {
+        let mut store = RelationStore::default();
+        store.entries.push(empty_relation(72, true, 1));
+
+        prune_invalid_relations(
+            &mut store,
+            true,
+            &PendingRelcacheInvalidations::empty(),
+            CommandScope {
+                xid: 1,
+                command_id: 1,
+            },
+            |_| GenerationStamp {
+                global: 1,
+                relation: 1,
+            },
+            |relid| Some(pg_sys::Oid::from(u32::from(relid) + 100)),
+            |_| true,
+        );
+
+        assert_eq!(store.entries.len(), 1);
+        assert!(!store.entries[0].relcache_suspect);
+    }
+
+    #[test]
+    fn relation_fingerprint_detects_every_structural_mismatch_lane() {
+        let original = RelationFingerprint {
+            relid: pg_sys::Oid::from(73_u32),
+            relfilenode: pg_sys::Oid::from(173_u32),
+            relnatts: 2,
+            attributes: vec![AttributeFingerprint {
+                attno: 1,
+                type_oid: pg_sys::INT4OID,
+                dropped: false,
+            }]
+            .into_boxed_slice(),
+        };
+        let mut mismatches = Vec::new();
+
+        let mut relfilenode = original.clone();
+        relfilenode.relfilenode = pg_sys::Oid::from(174_u32);
+        mismatches.push(relfilenode);
+
+        let mut relnatts = original.clone();
+        relnatts.relnatts = 3;
+        mismatches.push(relnatts);
+
+        let mut type_oid = original.clone();
+        type_oid.attributes[0].type_oid = pg_sys::INT8OID;
+        mismatches.push(type_oid);
+
+        let mut dropped = original.clone();
+        dropped.attributes[0].dropped = true;
+        mismatches.push(dropped);
+
+        let snapshot = ResidentRevalidationSnapshot {
+            relid: original.relid,
+            fingerprint: original.clone(),
+            generation: GenerationStamp {
+                global: 1,
+                relation: 1,
+            },
+            first_use_scope: None,
+            relcache_suspect: true,
+        };
+        assert!(mismatches.iter().all(|current| {
+            current != &original
+                && !revalidation_keeps_snapshot(
+                    &snapshot,
+                    CommandScope {
+                        xid: 1,
+                        command_id: 1,
+                    },
+                    snapshot.generation,
+                    Some(snapshot.fingerprint.relfilenode()),
+                    current == &snapshot.fingerprint,
+                )
+        }));
     }
 
     #[test]
@@ -3744,6 +4105,7 @@ pub(super) mod tests {
         ResidentRelation {
             relid: pg_sys::Oid::from(relid),
             relfilenode: pg_sys::Oid::from(relid + 100),
+            fingerprint: RelationFingerprint::synthetic(relid),
             generation: GenerationStamp {
                 global: 1,
                 relation: 1,
@@ -3758,6 +4120,7 @@ pub(super) mod tests {
             raw_charge: LedgerCharge::reserve(0, 0).expect("zero-byte charge"),
             raw_accounting: ResidentByteAccounting::default(),
             first_use_scope: None,
+            relcache_suspect: false,
             derived: Vec::new(),
         }
     }
@@ -4479,7 +4842,7 @@ pub(super) mod tests {
 
     #[test]
     fn staged_device_lifecycle_prepares_only_on_miss_and_outside_raw_dispatch_borrow() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
         install_test_relations(&[1_151]);
         let owner = pg_sys::Oid::from(1_151_u32);
         let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 151]);
@@ -4566,7 +4929,7 @@ pub(super) mod tests {
 
     #[test]
     fn staged_transform_lifecycle_holds_distinct_exact_charges_and_publishes_only_persistent() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
         install_test_relations(&[1_164]);
         let owner = pg_sys::Oid::from(1_164_u32);
         let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 164]);
@@ -4681,7 +5044,7 @@ pub(super) mod tests {
 
     #[test]
     fn staged_transform_failures_release_both_charges_without_publication() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
 
         fn assert_clean(owner_raw: u32, identity_word: i32, fail_stage: u8) {
             install_test_relations(&[owner_raw]);
@@ -4810,7 +5173,7 @@ pub(super) mod tests {
 
     #[test]
     fn staged_transform_accounting_overflow_prevents_reservation_and_callbacks() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
         install_test_relations(&[1_174]);
         let owner = pg_sys::Oid::from(1_174_u32);
         let before = ledger::total_bytes();
@@ -4957,7 +5320,7 @@ pub(super) mod tests {
 
     #[test]
     fn staged_device_lifecycle_rejects_dispatch_generation_mismatch() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
         install_test_relations(&[1_152]);
         let owner = pg_sys::Oid::from(1_152_u32);
         let identity = DerivedArtifactIdentity::from_canonical_words(vec![9, 152]);
@@ -5001,7 +5364,7 @@ pub(super) mod tests {
 
     #[test]
     fn staged_device_lifecycle_failures_release_charge_without_publication() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
         fn assert_clean(owner_raw: u32, identity_word: i32, fail_stage: u8) {
             install_test_relations(&[owner_raw]);
             let owner = pg_sys::Oid::from(owner_raw);
@@ -5067,7 +5430,7 @@ pub(super) mod tests {
 
     #[test]
     fn dependency_change_during_finalize_prevents_reserved_publication() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
         install_test_relations(&[1_156]);
         let owner = pg_sys::Oid::from(1_156_u32);
         let identity = DerivedArtifactIdentity::from_canonical_words(vec![156]);
@@ -5110,7 +5473,7 @@ pub(super) mod tests {
 
     #[test]
     fn staged_composite_accounting_matches_device_and_host_categories_exactly() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
         install_test_relations(&[1_159]);
         let owner = pg_sys::Oid::from(1_159_u32);
         let exact_identity = DerivedArtifactIdentity::from_canonical_words(vec![159, 1]);
@@ -5201,7 +5564,7 @@ pub(super) mod tests {
 
     #[test]
     fn exact_geometry_snapshot_accounts_padded_storage_bit_exactly() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
         let column = ResidentColumnRef {
             relid: pg_sys::Oid::from(1_157_u32),
             attno: 3,
@@ -5235,7 +5598,7 @@ pub(super) mod tests {
 
     #[test]
     fn staged_geometry_snapshot_uses_supplied_borrow_and_captured_dependency() {
-        let _guard = RESERVED_LIFECYCLE_TEST_LOCK.lock().expect("test lock");
+        let _guard = reserved_lifecycle_test_guard();
         let owner = pg_sys::Oid::from(1_162_u32);
         let column = ResidentColumnRef {
             relid: owner,
@@ -5510,6 +5873,7 @@ pub(super) mod tests {
 mod pg_tests {
     #[pgrx::pg_schema]
     mod tests {
+        use std::cell::Cell;
         use std::collections::BTreeMap;
 
         use pgrx::{
@@ -5541,6 +5905,8 @@ mod pg_tests {
                 store.entries.push(ResidentRelation {
                     relid,
                     relfilenode,
+                    fingerprint: super::super::RelationFingerprint::capture(relid, &[])
+                        .expect("relation fingerprint exists"),
                     generation: ledger::generation_stamp(relid),
                     columns: BTreeMap::new(),
                     row_count: 0,
@@ -5552,6 +5918,7 @@ mod pg_tests {
                     raw_charge: LedgerCharge::reserve(0, 0).expect("zero-byte charge"),
                     raw_accounting: super::super::ResidentByteAccounting::default(),
                     first_use_scope: None,
+                    relcache_suspect: false,
                     derived: Vec::new(),
                 });
             });
@@ -5571,6 +5938,38 @@ mod pg_tests {
                 pg_sys::MemoryContextSwitchTo(old_context);
                 pg_sys::CurrentResourceOwner = old_owner;
             }
+        }
+
+        #[pg_test]
+        fn live_analyze_relcache_invalidation_keeps_unchanged_pinned_entry() {
+            cleanup_backend();
+            Spi::run(
+                "CREATE TEMP TABLE pgaccel_residency_live_analyze (value int4); \
+                 INSERT INTO pgaccel_residency_live_analyze \
+                 SELECT g FROM generate_series(1, 1000) AS g",
+            )
+            .expect("temporary analyze fixture creation succeeds");
+            let relid = test_relation_oid("pgaccel_residency_live_analyze");
+            install_catalog_backed_entry(relid);
+            STORE.with(|store| store.borrow_mut().entries[0].pinned = true);
+            process_invalidations();
+
+            Spi::run("ANALYZE pgaccel_residency_live_analyze").expect("ANALYZE succeeds");
+            let callback_queued = PENDING_RELCACHE_CLEAR_ALL.with(Cell::get)
+                || PENDING_RELCACHE.with(|pending| pending.get().contains(u32::from(relid)));
+            assert!(
+                callback_queued,
+                "ANALYZE must exercise the benign relcache callback path"
+            );
+
+            process_invalidations();
+            STORE.with(|store| {
+                let store = store.borrow();
+                assert_eq!(store.entries.len(), 1);
+                assert!(store.entries[0].pinned);
+                assert!(!store.entries[0].relcache_suspect);
+            });
+            cleanup_backend();
         }
 
         #[pg_test]

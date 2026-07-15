@@ -131,6 +131,11 @@ mod tests {
             .expect("resident live-byte count should not be NULL")
     }
 
+    fn derived_artifact_identities(table: &str) -> Vec<(u64, Vec<i32>)> {
+        let relid = u32::try_from(table_oid(table)).expect("table OID fits u32");
+        crate::engine::residency::test_derived_artifact_identities(pg_sys::Oid::from(relid))
+    }
+
     fn accelerated_and_stock_counts() -> (i64, i64) {
         Spi::connect(|client| {
             let mut rows = client
@@ -220,6 +225,7 @@ mod tests {
     }
 
     fn assert_descriptor_plan(plan: &str) {
+        let last_rejection = crate::engine::stats::read_last_planner_rejection_reason();
         for expected in [
             "custom scan (gpuaccelagg)",
             "strategy: gpuagg",
@@ -227,7 +233,8 @@ mod tests {
         ] {
             assert!(
                 plan.contains(expected),
-                "generic aggregate plan missing '{expected}':\n{plan}"
+                "generic aggregate plan missing '{expected}' (last planner rejection: \
+                 {last_rejection:?}):\n{plan}"
             );
         }
     }
@@ -250,6 +257,33 @@ mod tests {
         assert_eq!(
             accelerated, native,
             "generic aggregate result differs from native PostgreSQL"
+        );
+    }
+
+    fn assert_default_cost_decline_matches_native(query: &str) {
+        Spi::run("SET LOCAL pg_accel.enabled = off").expect("disable pg_accel");
+        let native = result_rows(query);
+
+        Spi::run("SET LOCAL pg_accel.enabled = on").expect("enable pg_accel");
+        let before = kernel_executions();
+        let plan = explain_text(query);
+        assert!(
+            !plan.contains("custom scan (gpuaccelagg)"),
+            "cold default-cost query unexpectedly selected GPU:\n{plan}"
+        );
+        assert_eq!(
+            crate::engine::stats::read_last_planner_rejection_reason(),
+            Some("generic_cost_not_competitive")
+        );
+        let default_result = result_rows(query);
+        let after = kernel_executions();
+        assert_eq!(
+            after, before,
+            "default cost decline must not dispatch a GPU kernel"
+        );
+        assert_eq!(
+            default_result, native,
+            "default cost-declined result differs from native PostgreSQL"
         );
     }
 
@@ -443,26 +477,65 @@ mod tests {
             .expect("ALTER TABLE ADD COLUMN should succeed");
         let invalidated = resident_status(original);
         assert_eq!(invalidated.raw_bytes, 0);
+        assert_eq!(invalidated.derived_bytes, 0);
         assert!(invalidated.pinned);
+        assert_default_cost_decline_matches_native(&original_query);
+        assert_eq!(
+            Spi::get_one::<i64>(&format!("SELECT pg_accel_refresh('{original}'::regclass)"))
+                .expect("refresh after ADD COLUMN should succeed")
+                .expect("refresh row count should not be NULL"),
+            i64::from(device_rows)
+        );
         assert_generic_matches_native(&original_query);
         let loaded = assert_loaded_status(original);
+        let live_before_rename = resident_live_bytes();
+        let artifacts_before_rename = derived_artifact_identities(original);
+        assert!(
+            !artifacts_before_rename.is_empty(),
+            "descriptor aggregate must publish an identity before rename"
+        );
 
-        for statement in [
-            format!("ALTER TABLE {original} RENAME TO {renamed}"),
-            format!("ALTER TABLE {renamed} RENAME COLUMN g TO grp"),
-            format!("ALTER TABLE {renamed} RENAME COLUMN v TO val"),
+        for (statement, current_name) in [
+            (
+                format!("ALTER TABLE {original} RENAME TO {renamed}"),
+                renamed,
+            ),
+            (
+                format!("ALTER TABLE {renamed} RENAME COLUMN g TO grp"),
+                renamed,
+            ),
+            (
+                format!("ALTER TABLE {renamed} RENAME COLUMN v TO val"),
+                renamed,
+            ),
         ] {
             Spi::run(&statement).expect("rename should succeed");
+            assert_eq!(
+                resident_status(current_name),
+                loaded,
+                "rename-only DDL must preserve the exact resident fingerprint"
+            );
+            assert_eq!(
+                resident_live_bytes(),
+                live_before_rename,
+                "rename-only DDL must preserve the exact cluster ledger charge"
+            );
+            assert_eq!(
+                derived_artifact_identities(current_name),
+                artifacts_before_rename,
+                "rename-only DDL must preserve the exact derived artifact identity"
+            );
         }
         let renamed_status = resident_status(renamed);
-        assert_eq!(renamed_status.raw_bytes, 0);
-        assert!(renamed_status.pinned);
+        assert_eq!(renamed_status, loaded);
         let renamed_query = int4_grouped_query(renamed, "grp", "val");
         assert_generic_matches_native(&renamed_query);
         let after_rename = assert_loaded_status(renamed);
+        assert_eq!(after_rename, loaded);
+        assert_eq!(resident_live_bytes(), live_before_rename);
         assert_eq!(
-            after_rename.generation, loaded.generation,
-            "rename-only DDL should preserve the relation generation"
+            derived_artifact_identities(renamed),
+            artifacts_before_rename
         );
 
         Spi::run(&format!(
@@ -471,9 +544,17 @@ mod tests {
         .expect("ALTER COLUMN TYPE should succeed");
         let type_invalidated = resident_status(renamed);
         assert_eq!(type_invalidated.raw_bytes, 0);
+        assert_eq!(type_invalidated.derived_bytes, 0);
         assert!(type_invalidated.pinned);
-
         let int8_query = int8_grouped_query(renamed, "grp", "val");
+        assert_default_cost_decline_matches_native(&int8_query);
+        assert_eq!(
+            Spi::get_one::<i64>(&format!("SELECT pg_accel_refresh('{renamed}'::regclass)"))
+                .expect("refresh after ALTER COLUMN TYPE should succeed")
+                .expect("refresh row count should not be NULL"),
+            i64::from(device_rows)
+        );
+
         assert_generic_matches_native(&int8_query);
         let type_reloaded = assert_loaded_status(renamed);
         assert!(type_reloaded.raw_bytes > 0);

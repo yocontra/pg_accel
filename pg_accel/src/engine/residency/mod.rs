@@ -15,6 +15,11 @@ mod store;
 #[cfg(test)]
 pub(crate) use store::tests::{begin_test_allocation_count, finish_test_allocation_count};
 
+#[cfg(feature = "pg_test")]
+pub(crate) fn test_derived_artifact_identities(relid: pgrx::pg_sys::Oid) -> Vec<(u64, Vec<i32>)> {
+    store::test_derived_artifact_identities(relid)
+}
+
 pub use domain::*;
 pub use geometry::{ResidentGeometryColumn, ResidentGeometryColumnView};
 pub(crate) use geometry::{

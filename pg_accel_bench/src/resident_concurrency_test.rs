@@ -20,6 +20,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "integration_tests")]
+use postgres::fallible_iterator::FallibleIterator;
+#[cfg(feature = "integration_tests")]
 use postgres::{CancelToken, Client, NoTls};
 #[cfg(feature = "integration_tests")]
 use serde::Serialize;
@@ -56,12 +58,30 @@ const SOAK_ITERATIONS: usize = 20;
 #[cfg(feature = "integration_tests")]
 const FIXTURE: &str = "pg_accel_resident_concurrency";
 #[cfg(feature = "integration_tests")]
+const CANCEL_FIXTURE: &str = "pg_accel_resident_user_cancel";
+#[cfg(feature = "integration_tests")]
 const APPLICATION_PREFIX: &str = "pg_accel_resident_concurrency_";
 #[cfg(feature = "integration_tests")]
-const QUERY: &str = "SELECT grp, SUM(measure), MIN(measure), MAX(measure), COUNT(*) \
+const QUERY_TAG: &str = "pg_accel_resident_soak";
+#[cfg(feature = "integration_tests")]
+const QUERY: &str = "/* pg_accel_resident_soak */ \
+                     SELECT grp, SUM(measure), MIN(measure), MAX(measure), COUNT(*) \
                      FROM pg_accel_resident_concurrency \
                      GROUP BY grp \
                      ORDER BY grp";
+#[cfg(feature = "integration_tests")]
+const CANCEL_BASE_QUERY: &str = "SELECT grp, SUM(measure), MIN(measure), MAX(measure), COUNT(*) \
+                                FROM pg_accel_resident_user_cancel \
+                                GROUP BY grp \
+                                ORDER BY grp";
+#[cfg(feature = "integration_tests")]
+const CANCEL_QUERY_TAG: &str = "pg_accel_real_user_cancel";
+#[cfg(feature = "integration_tests")]
+// The 256-branch control hit the 10-minute statement timeout at 605.27s on Metal;
+// 64 retains a multi-minute deterministic cancel window while keeping the control bounded.
+const CANCEL_QUERY_BRANCHES: usize = 64;
+#[cfg(feature = "integration_tests")]
+const SOAK_BARRIER_KEY: i64 = 0x5047_4131_305F_5632;
 #[cfg(feature = "integration_tests")]
 const OPERATION_TIMEOUT: Duration = Duration::from_mins(10);
 #[cfg(feature = "integration_tests")]
@@ -74,6 +94,38 @@ const GRACEFUL_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 const CANCEL_JOIN_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(feature = "integration_tests")]
 const MONITOR_CANCEL_GRACE: Duration = Duration::from_secs(2);
+
+#[cfg(any(test, feature = "integration_tests"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "integration_tests", derive(Serialize))]
+struct MonotonicInterval {
+    start_us: u64,
+    end_us: u64,
+}
+
+#[cfg(any(test, feature = "integration_tests"))]
+fn strict_common_overlap(intervals: &[MonotonicInterval]) -> Option<MonotonicInterval> {
+    let start_us = intervals.iter().map(|interval| interval.start_us).max()?;
+    let end_us = intervals.iter().map(|interval| interval.end_us).min()?;
+    (start_us < end_us).then_some(MonotonicInterval { start_us, end_us })
+}
+
+#[cfg(any(test, feature = "integration_tests"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancellationClass {
+    QueryCanceled,
+    OtherSqlState,
+    NotDatabaseError,
+}
+
+#[cfg(any(test, feature = "integration_tests"))]
+fn classify_cancellation_code(code: Option<&str>) -> CancellationClass {
+    match code {
+        Some("57014") => CancellationClass::QueryCanceled,
+        Some(_) => CancellationClass::OtherSqlState,
+        None => CancellationClass::NotDatabaseError,
+    }
+}
 
 #[cfg(any(test, feature = "integration_tests"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,8 +226,9 @@ struct GroupRow {
     count: i64,
 }
 
-#[cfg(feature = "integration_tests")]
-#[derive(Debug, Clone, Copy)]
+#[cfg(any(test, feature = "integration_tests"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "integration_tests", derive(Serialize))]
 struct AccelCounters {
     kernels: i64,
     accelerated: i64,
@@ -183,7 +236,7 @@ struct AccelCounters {
 }
 
 #[cfg(feature = "integration_tests")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct LocalStatus {
     rows: i64,
     raw_bytes: i64,
@@ -201,6 +254,74 @@ impl LocalStatus {
 }
 
 #[cfg(feature = "integration_tests")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ResidentFingerprint {
+    relid: i64,
+    columns: Vec<i32>,
+    raw_bytes: i64,
+    derived_bytes: i64,
+    pinned: bool,
+    generation: i64,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DeviceArtifactRecord {
+    path: String,
+    bytes: u64,
+    fnv1a64: u64,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DeviceArtifactSnapshot {
+    root: String,
+    records: Vec<DeviceArtifactRecord>,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Serialize)]
+struct CancellationEvidence {
+    postmaster_started_at: String,
+    backend_pid: i32,
+    fixture_rows: i64,
+    repeated_branches: usize,
+    full_result_rows: usize,
+    full_kernel_dispatches: i64,
+    canceled_rows_received: usize,
+    canceled_kernel_dispatches: i64,
+    canceled_queries_accelerated: i64,
+    sqlstate: String,
+    activity_observation: ServerActivityObservation,
+    plan_fingerprint: u64,
+    resident_fingerprint: ResidentFingerprint,
+    cluster_bytes: i64,
+    device_artifacts: DeviceArtifactSnapshot,
+    recovery_kernel_dispatches: i64,
+}
+
+#[cfg(feature = "integration_tests")]
+struct CancelWorkerContext {
+    query: String,
+    plan: String,
+    expected: Vec<GroupRow>,
+    postmaster_started_at: String,
+    backend_pid: i32,
+    fixture_rows: i64,
+    full_result_rows: usize,
+    full_kernel_dispatches: i64,
+    counters_before: AccelCounters,
+    resident_before: ResidentFingerprint,
+    cluster_before: i64,
+    artifacts_before: DeviceArtifactSnapshot,
+}
+
+#[cfg(feature = "integration_tests")]
+struct CancelReady {
+    first_row: GroupRow,
+}
+
+#[cfg(feature = "integration_tests")]
 #[derive(Debug, Clone, Serialize)]
 struct WorkerSnapshot {
     slot: usize,
@@ -212,6 +333,7 @@ struct WorkerSnapshot {
     kernel_executions: i64,
     queries_accelerated: i64,
     stock_exec_count: i64,
+    phase_interval: Option<MonotonicInterval>,
 }
 
 #[cfg(feature = "integration_tests")]
@@ -228,6 +350,7 @@ enum WorkerCommand {
         phase: WorkerPhase,
         iterations: usize,
         start_at: Instant,
+        barrier_key: Option<i64>,
     },
     Exit,
 }
@@ -251,6 +374,7 @@ struct WorkerPool {
     cancel_tokens: Vec<Option<CancelToken>>,
     pids: Vec<i32>,
     reports: mpsc::Receiver<WorkerReport>,
+    clock_origin: Instant,
 }
 
 #[cfg(feature = "integration_tests")]
@@ -261,6 +385,23 @@ struct WorkerSpec {
     expected: Arc<Vec<GroupRow>>,
     budget_mib: i32,
     pid: i32,
+    clock_origin: Instant,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Clone, Serialize)]
+struct ServerActivityObservation {
+    observed_us: u64,
+    pids: Vec<i32>,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Clone, Serialize)]
+struct SoakOverlapEvidence {
+    barrier_key: i64,
+    barrier_wait: ServerActivityObservation,
+    aggregate_active: ServerActivityObservation,
+    strict_common_interval: MonotonicInterval,
 }
 
 #[cfg(feature = "integration_tests")]
@@ -274,12 +415,14 @@ impl WorkerPool {
     ) -> Result<Self, String> {
         let (report_tx, reports) = mpsc::channel();
         let expected = Arc::new(expected.to_vec());
+        let clock_origin = Instant::now();
         let mut pool = Self {
             controls: Vec::with_capacity(BACKEND_COUNT),
             handles: Vec::with_capacity(BACKEND_COUNT),
             cancel_tokens: Vec::with_capacity(BACKEND_COUNT),
             pids: Vec::with_capacity(BACKEND_COUNT),
             reports,
+            clock_origin,
         };
         for slot in 0..BACKEND_COUNT {
             let (control_tx, control_rx) = mpsc::channel();
@@ -294,6 +437,7 @@ impl WorkerPool {
                 expected: Arc::clone(&expected),
                 budget_mib,
                 pid,
+                clock_origin,
             };
             let worker_reports = report_tx.clone();
             let handle = thread::Builder::new()
@@ -361,11 +505,102 @@ impl WorkerPool {
                     phase,
                     iterations,
                     start_at,
+                    barrier_key: None,
                 })
                 .map_err(|error| format!("send {phase:?} command to worker {slot}: {error}"))?;
             sent += 1;
         }
         self.collect_phase(phase, sent)
+    }
+
+    fn run_synchronized_soak(
+        &self,
+        monitor: &mut Client,
+        iterations: usize,
+    ) -> Result<(Vec<WorkerSnapshot>, SoakOverlapEvidence), String> {
+        let active_slots = self
+            .controls
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, control)| control.as_ref().map(|_| slot))
+            .collect::<Vec<_>>();
+        if active_slots.len() != BACKEND_COUNT {
+            return Err(format!(
+                "synchronized soak needs {BACKEND_COUNT} live workers, found {}",
+                active_slots.len()
+            ));
+        }
+        let pids = active_slots
+            .iter()
+            .map(|&slot| self.pids[slot])
+            .collect::<Vec<_>>();
+
+        monitor
+            .query_one("SELECT pg_advisory_lock($1)", &[&SOAK_BARRIER_KEY])
+            .map_err(|error| format!("acquire resident soak monitor barrier: {error}"))?;
+        let start_at = Instant::now() + Duration::from_millis(100);
+        for &slot in &active_slots {
+            if let Err(error) = self.controls[slot]
+                .as_ref()
+                .expect("active worker slot has a control channel")
+                .send(WorkerCommand::Run {
+                    phase: WorkerPhase::Soak,
+                    iterations,
+                    start_at,
+                    barrier_key: Some(SOAK_BARRIER_KEY),
+                })
+            {
+                let _ = release_soak_barrier(monitor);
+                return Err(format!(
+                    "send synchronized soak command to worker {slot}: {error}"
+                ));
+            }
+        }
+
+        let barrier_wait = match wait_for_activity_set(
+            monitor,
+            &pids,
+            "pg_advisory_xact_lock_shared",
+            true,
+            self.clock_origin,
+        ) {
+            Ok(observation) => observation,
+            Err(error) => {
+                return match release_soak_barrier(monitor) {
+                    Ok(()) => Err(error),
+                    Err(unlock) => Err(format!("{error}; barrier release also failed: {unlock}")),
+                };
+            }
+        };
+        release_soak_barrier(monitor)?;
+
+        let aggregate_active =
+            wait_for_activity_set(monitor, &pids, QUERY_TAG, false, self.clock_origin)?;
+        let snapshots = self.collect_phase(WorkerPhase::Soak, active_slots.len())?;
+        let intervals = snapshots
+            .iter()
+            .map(|snapshot| {
+                snapshot.phase_interval.ok_or_else(|| {
+                    format!(
+                        "worker {} omitted its synchronized soak interval",
+                        snapshot.slot
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let strict_common_interval = strict_common_overlap(&intervals).ok_or_else(|| {
+            format!("eight worker soak intervals do not strictly overlap: {intervals:?}")
+        })?;
+
+        Ok((
+            snapshots,
+            SoakOverlapEvidence {
+                barrier_key: SOAK_BARRIER_KEY,
+                barrier_wait,
+                aggregate_active,
+                strict_common_interval,
+            },
+        ))
     }
 
     fn stop(&mut self, slot: usize) -> Result<(), String> {
@@ -441,6 +676,98 @@ impl WorkerPool {
 }
 
 #[cfg(feature = "integration_tests")]
+fn release_soak_barrier(monitor: &mut Client) -> Result<(), String> {
+    let unlocked = monitor
+        .query_one("SELECT pg_advisory_unlock($1)", &[&SOAK_BARRIER_KEY])
+        .map_err(|error| format!("release resident soak monitor barrier: {error}"))?
+        .try_get::<_, bool>(0)
+        .map_err(|error| format!("decode resident soak barrier release: {error}"))?;
+    if !unlocked {
+        return Err("resident soak monitor did not own the advisory barrier".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "integration_tests")]
+fn matching_activity_pids(
+    monitor: &mut Client,
+    pids: &[i32],
+    query_needle: &str,
+    require_lock_wait: bool,
+) -> Result<BTreeSet<i32>, String> {
+    if pids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let pid_list = pids
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let lock_clause = if require_lock_wait {
+        "AND wait_event_type = 'Lock'"
+    } else {
+        ""
+    };
+    monitor
+        .query(
+            &format!(
+                "SELECT pid
+                 FROM pg_stat_activity
+                 WHERE pid IN ({pid_list})
+                   AND state = 'active'
+                   AND strpos(query, $1) > 0
+                   {lock_clause}
+                 ORDER BY pid"
+            ),
+            &[&query_needle],
+        )
+        .map_err(|error| format!("read synchronized worker activity: {error}"))?
+        .into_iter()
+        .map(|row| {
+            row.try_get(0)
+                .map_err(|error| format!("decode synchronized worker PID: {error}"))
+        })
+        .collect()
+}
+
+#[cfg(feature = "integration_tests")]
+fn wait_for_activity_set(
+    monitor: &mut Client,
+    pids: &[i32],
+    query_needle: &str,
+    require_lock_wait: bool,
+    clock_origin: Instant,
+) -> Result<ServerActivityObservation, String> {
+    let expected = pids.iter().copied().collect::<BTreeSet<_>>();
+    if expected.len() != pids.len() {
+        return Err(format!(
+            "activity proof has duplicate backend PIDs: {pids:?}"
+        ));
+    }
+    let deadline = Instant::now() + EXIT_TIMEOUT;
+    let mut best = BTreeSet::new();
+    loop {
+        let observed = matching_activity_pids(monitor, pids, query_needle, require_lock_wait)?;
+        if observed.len() > best.len() {
+            best.clone_from(&observed);
+        }
+        if observed == expected {
+            return Ok(ServerActivityObservation {
+                observed_us: clock_offset_us(clock_origin)?,
+                pids: observed.into_iter().collect(),
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "never observed all {} backends active for `{query_needle}`; best={best:?}, expected={expected:?}",
+                pids.len()
+            ));
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(feature = "integration_tests")]
 impl Drop for WorkerPool {
     fn drop(&mut self) {
         for control in self.controls.iter_mut().filter_map(Option::take) {
@@ -466,8 +793,8 @@ impl Drop for WorkerPool {
 }
 
 #[cfg(feature = "integration_tests")]
-fn wait_for_worker_finish(
-    handle: &thread::JoinHandle<Result<(), String>>,
+fn wait_for_worker_finish<T>(
+    handle: &thread::JoinHandle<Result<T, String>>,
     timeout: Duration,
 ) -> bool {
     let deadline = Instant::now() + timeout;
@@ -496,6 +823,68 @@ fn panic_payload_text(payload: &Box<dyn std::any::Any + Send>) -> &str {
         .copied()
         .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
         .unwrap_or("non-string panic payload")
+}
+
+#[cfg(feature = "integration_tests")]
+fn clock_offset_us(clock_origin: Instant) -> Result<u64, String> {
+    u64::try_from(clock_origin.elapsed().as_micros())
+        .map_err(|error| format!("monotonic evidence timestamp does not fit u64: {error}"))
+}
+
+#[cfg(feature = "integration_tests")]
+fn run_worker_phase(
+    client: &mut Client,
+    spec: &WorkerSpec,
+    phase: WorkerPhase,
+    iterations: usize,
+    barrier_key: Option<i64>,
+) -> Result<MonotonicInterval, String> {
+    let run = |client: &mut Client| {
+        let start_us = clock_offset_us(spec.clock_origin)?;
+        run_exact_iterations(client, QUERY, &spec.expected, iterations, spec.slot, phase)?;
+        let end_us = clock_offset_us(spec.clock_origin)?;
+        if start_us >= end_us {
+            return Err(format!(
+                "worker {} {phase:?} has non-positive monotonic interval {start_us}..{end_us}",
+                spec.slot
+            ));
+        }
+        Ok(MonotonicInterval { start_us, end_us })
+    };
+
+    let Some(barrier_key) = barrier_key else {
+        return run(client);
+    };
+
+    client
+        .batch_execute("BEGIN")
+        .map_err(|error| format!("begin synchronized {phase:?} worker {}: {error}", spec.slot))?;
+    let result = (|| {
+        client
+            .query_one("SELECT pg_advisory_xact_lock_shared($1)", &[&barrier_key])
+            .map_err(|error| {
+                format!(
+                    "worker {} wait on synchronized {phase:?} barrier: {error}",
+                    spec.slot
+                )
+            })?;
+        run(client)
+    })();
+    match result {
+        Ok(interval) => {
+            client.batch_execute("COMMIT").map_err(|error| {
+                format!(
+                    "commit synchronized {phase:?} worker {}: {error}",
+                    spec.slot
+                )
+            })?;
+            Ok(interval)
+        }
+        Err(error) => match client.batch_execute("ROLLBACK") {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(format!("{error}; rollback also failed: {rollback}")),
+        },
+    }
 }
 
 #[cfg(feature = "integration_tests")]
@@ -544,7 +933,7 @@ fn worker_loop(
     reports
         .send(WorkerReport::Completed {
             phase: WorkerPhase::Ready,
-            snapshot: worker_snapshot(&mut client, slot, pid)?,
+            snapshot: worker_snapshot(&mut client, slot, pid, None)?,
         })
         .map_err(|error| format!("send ready report from worker {slot}: {error}"))?;
 
@@ -557,16 +946,18 @@ fn worker_loop(
                 phase,
                 iterations,
                 start_at,
+                barrier_key,
             } => {
                 let delay = start_at.saturating_duration_since(Instant::now());
                 if !delay.is_zero() {
                     thread::sleep(delay);
                 }
-                run_exact_iterations(&mut client, QUERY, &spec.expected, iterations, slot, phase)?;
+                let phase_interval =
+                    run_worker_phase(&mut client, spec, phase, iterations, barrier_key)?;
                 reports
                     .send(WorkerReport::Completed {
                         phase,
-                        snapshot: worker_snapshot(&mut client, slot, pid)?,
+                        snapshot: worker_snapshot(&mut client, slot, pid, Some(phase_interval))?,
                     })
                     .map_err(|error| {
                         format!("send {phase:?} report from worker {slot}: {error}")
@@ -665,7 +1056,7 @@ fn backend_pid(client: &mut Client) -> Result<i32, String> {
 fn pin_fixture(client: &mut Client, table: &str, fixture_rows: i64) -> Result<(), String> {
     let row = client
         .query_one(
-            "SELECT pg_accel_pin($1::regclass, ARRAY['grp', 'measure'])",
+            "SELECT pg_accel_pin($1::text::regclass, ARRAY['grp', 'measure'])",
             &[&table],
         )
         .map_err(|error| format!("pin resident concurrency fixture: {error}"))?;
@@ -739,6 +1130,263 @@ fn grouped_rows(client: &mut Client, sql: &str) -> Result<Vec<GroupRow>, String>
             })
         })
         .collect()
+}
+
+#[cfg(feature = "integration_tests")]
+fn group_row_at(row: &postgres::Row, offset: usize) -> Result<GroupRow, String> {
+    Ok(GroupRow {
+        group_key: row
+            .try_get(offset)
+            .map_err(|error| format!("decode group key: {error}"))?,
+        sum: row
+            .try_get(offset + 1)
+            .map_err(|error| format!("decode group sum: {error}"))?,
+        min: row
+            .try_get(offset + 2)
+            .map_err(|error| format!("decode group min: {error}"))?,
+        max: row
+            .try_get(offset + 3)
+            .map_err(|error| format!("decode group max: {error}"))?,
+        count: row
+            .try_get(offset + 4)
+            .map_err(|error| format!("decode group count: {error}"))?,
+    })
+}
+
+#[cfg(any(test, feature = "integration_tests"))]
+fn monotonic_delta(after: i64, before: i64, label: &str) -> Result<i64, String> {
+    if after < before {
+        return Err(format!(
+            "{label} counter moved backwards: before={before}, after={after}"
+        ));
+    }
+    after
+        .checked_sub(before)
+        .ok_or_else(|| format!("{label} counter delta overflowed: before={before}, after={after}"))
+}
+
+#[cfg(any(test, feature = "integration_tests"))]
+fn counter_delta(after: AccelCounters, before: AccelCounters) -> Result<AccelCounters, String> {
+    Ok(AccelCounters {
+        kernels: monotonic_delta(after.kernels, before.kernels, "kernel execution")?,
+        accelerated: monotonic_delta(after.accelerated, before.accelerated, "accelerated query")?,
+        stock: monotonic_delta(after.stock, before.stock, "stock execution")?,
+    })
+}
+
+#[cfg(feature = "integration_tests")]
+fn resident_fingerprint(client: &mut Client, table: &str) -> Result<ResidentFingerprint, String> {
+    let row = client
+        .query_one(
+            "SELECT relid::bigint, columns, raw_bytes, derived_bytes, pinned, generation
+             FROM pg_accel_resident_status()
+             WHERE relid = $1::text::regclass::oid",
+            &[&table],
+        )
+        .map_err(|error| format!("read resident cancellation fingerprint: {error}"))?;
+    Ok(ResidentFingerprint {
+        relid: row
+            .try_get(0)
+            .map_err(|error| format!("decode resident fingerprint relid: {error}"))?,
+        columns: row
+            .try_get(1)
+            .map_err(|error| format!("decode resident fingerprint columns: {error}"))?,
+        raw_bytes: row
+            .try_get(2)
+            .map_err(|error| format!("decode resident fingerprint raw bytes: {error}"))?,
+        derived_bytes: row
+            .try_get(3)
+            .map_err(|error| format!("decode resident fingerprint derived bytes: {error}"))?,
+        pinned: row
+            .try_get(4)
+            .map_err(|error| format!("decode resident fingerprint pin state: {error}"))?,
+        generation: row
+            .try_get(5)
+            .map_err(|error| format!("decode resident fingerprint generation: {error}"))?,
+    })
+}
+
+#[cfg(feature = "integration_tests")]
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+#[cfg(feature = "integration_tests")]
+fn collect_device_artifacts(
+    root: &Path,
+    directory: &Path,
+    records: &mut Vec<DeviceArtifactRecord>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(directory).map_err(|error| {
+        format!(
+            "read AdaptiveCpp artifact directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            format!(
+                "read AdaptiveCpp artifact entry under {}: {error}",
+                directory.display()
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("read artifact type for {}: {error}", path.display()))?;
+        if file_type.is_dir() {
+            collect_device_artifacts(root, &path, records)?;
+            continue;
+        }
+        if !file_type.is_file()
+            || !matches!(
+                path.extension().and_then(std::ffi::OsStr::to_str),
+                Some("jit" | "metallib" | "metalar")
+            )
+        {
+            continue;
+        }
+        let contents = fs::read(&path)
+            .map_err(|error| format!("read device artifact {}: {error}", path.display()))?;
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| format!("relativize device artifact {}: {error}", path.display()))?;
+        records.push(DeviceArtifactRecord {
+            path: relative.to_string_lossy().into_owned(),
+            bytes: u64::try_from(contents.len())
+                .map_err(|error| format!("device artifact length does not fit u64: {error}"))?,
+            fnv1a64: fnv1a64(&contents),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(feature = "integration_tests")]
+fn device_artifact_snapshot() -> Result<DeviceArtifactSnapshot, String> {
+    let root = std::env::var_os("ACPP_APPDB_DIR").map_or_else(
+        || {
+            std::env::var_os("HOME").map(PathBuf::from).map(|home| {
+                home.join(".acpp")
+                    .join("apps")
+                    .join("global")
+                    .join("jit-cache")
+            })
+        },
+        |root| Some(PathBuf::from(root)),
+    );
+    let root = root.ok_or_else(|| {
+        "device artifact proof needs ACPP_APPDB_DIR or HOME to resolve the JIT cache".to_owned()
+    })?;
+    let mut records = Vec::new();
+    if root.is_dir() {
+        collect_device_artifacts(&root, &root, &mut records)?;
+    }
+    records.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(DeviceArtifactSnapshot {
+        root: root.display().to_string(),
+        records,
+    })
+}
+
+#[cfg(feature = "integration_tests")]
+fn stable_device_artifact_snapshot() -> Result<DeviceArtifactSnapshot, String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut previous = device_artifact_snapshot()?;
+    loop {
+        thread::sleep(Duration::from_millis(25));
+        let current = device_artifact_snapshot()?;
+        if current == previous {
+            return Ok(current);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "AdaptiveCpp device artifacts did not settle within 5s: previous={previous:?}, \
+                 current={current:?}"
+            ));
+        }
+        previous = current;
+    }
+}
+
+#[cfg(feature = "integration_tests")]
+fn repeated_cancel_query(branches: usize) -> Result<String, String> {
+    if branches < 2 {
+        return Err("real cancellation query needs at least two GPU branches".to_owned());
+    }
+    let branches = (0..branches)
+        .map(|branch| {
+            format!(
+                "SELECT {branch}::int4 AS branch_id, grouped.grp, grouped.sum, grouped.min, \
+                 grouped.max, grouped.count \
+                 FROM ({CANCEL_BASE_QUERY}) AS grouped(grp, sum, min, max, count)"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    Ok(format!("/* {CANCEL_QUERY_TAG} */ {branches}"))
+}
+
+#[cfg(feature = "integration_tests")]
+fn require_repeated_descriptor_plan(plan: &str, branches: usize) -> Result<(), String> {
+    for (needle, label) in [
+        ("custom scan (gpuaccelagg)", "CustomScan"),
+        ("strategy: gpuagg", "GPU strategy"),
+        (
+            "gpu descriptor strategy: descriptor_grouped_aggregate",
+            "descriptor strategy",
+        ),
+    ] {
+        let observed = plan.matches(needle).count();
+        if observed != branches {
+            return Err(format!(
+                "real cancellation plan has {observed} {label} nodes, expected {branches}; \
+                 fallback is forbidden:\n{plan}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "integration_tests")]
+fn validate_repeated_rows(
+    rows: &[postgres::Row],
+    expected: &[GroupRow],
+    branches: usize,
+) -> Result<(), String> {
+    let expected_len = expected
+        .len()
+        .checked_mul(branches)
+        .ok_or_else(|| "repeated cancellation result row count overflow".to_owned())?;
+    if rows.len() != expected_len {
+        return Err(format!(
+            "full cancellation control returned {} rows, expected {expected_len}",
+            rows.len()
+        ));
+    }
+    let mut by_branch = vec![Vec::with_capacity(expected.len()); branches];
+    for row in rows {
+        let branch = row
+            .try_get::<_, i32>(0)
+            .map_err(|error| format!("decode cancellation branch id: {error}"))?;
+        let branch = usize::try_from(branch)
+            .map_err(|error| format!("cancellation branch id is negative: {error}"))?;
+        let bucket = by_branch
+            .get_mut(branch)
+            .ok_or_else(|| format!("cancellation result returned out-of-range branch {branch}"))?;
+        bucket.push(group_row_at(row, 1)?);
+    }
+    for (branch, actual) in by_branch.iter_mut().enumerate() {
+        actual.sort_by_key(|row| row.group_key);
+        if actual != expected {
+            return Err(format!(
+                "full cancellation control branch {branch} differs from native PostgreSQL: \
+                 expected={expected:?}, actual={actual:?}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "integration_tests")]
@@ -847,7 +1495,12 @@ fn cluster_bytes(client: &mut Client) -> Result<i64, String> {
 }
 
 #[cfg(feature = "integration_tests")]
-fn worker_snapshot(client: &mut Client, slot: usize, pid: i32) -> Result<WorkerSnapshot, String> {
+fn worker_snapshot(
+    client: &mut Client,
+    slot: usize,
+    pid: i32,
+    phase_interval: Option<MonotonicInterval>,
+) -> Result<WorkerSnapshot, String> {
     let status = local_status(client)?;
     if status.rows != 1 || !status.all_pinned || status.raw_bytes <= 0 || status.derived_bytes <= 0
     {
@@ -871,6 +1524,7 @@ fn worker_snapshot(client: &mut Client, slot: usize, pid: i32) -> Result<WorkerS
         kernel_executions: counters.kernels,
         queries_accelerated: counters.accelerated,
         stock_exec_count: counters.stock,
+        phase_interval,
     })
 }
 
@@ -1081,7 +1735,7 @@ fn wait_for_backend_exit(
 }
 
 #[cfg(feature = "integration_tests")]
-fn create_fixture(monitor: &mut Client) -> Result<i64, String> {
+fn create_named_fixture(monitor: &mut Client, fixture: &str) -> Result<i64, String> {
     let minimum_rows = monitor
         .query_one(
             "SELECT value::bigint FROM pg_accel_device_limits() \
@@ -1096,8 +1750,8 @@ fn create_fixture(monitor: &mut Client) -> Result<i64, String> {
         .max(250_000);
     monitor
         .batch_execute(&format!(
-            "DROP TABLE IF EXISTS {FIXTURE};
-             CREATE UNLOGGED TABLE {FIXTURE} (
+            "DROP TABLE IF EXISTS {fixture};
+             CREATE UNLOGGED TABLE {fixture} (
                  id int8 PRIMARY KEY,
                  grp int4 NOT NULL,
                  measure int4 NOT NULL
@@ -1107,7 +1761,7 @@ fn create_fixture(monitor: &mut Client) -> Result<i64, String> {
     monitor
         .execute(
             &format!(
-                "INSERT INTO {FIXTURE} (id, grp, measure)
+                "INSERT INTO {fixture} (id, grp, measure)
                  SELECT g, (g % 64)::int4, (1000 + (g % 1000))::int4
                  FROM generate_series(1::bigint, $1::bigint) AS g"
             ),
@@ -1115,9 +1769,14 @@ fn create_fixture(monitor: &mut Client) -> Result<i64, String> {
         )
         .map_err(|error| format!("populate resident concurrency fixture: {error}"))?;
     monitor
-        .batch_execute(&format!("ANALYZE {FIXTURE}"))
+        .batch_execute(&format!("ANALYZE {fixture}"))
         .map_err(|error| format!("analyze resident concurrency fixture: {error}"))?;
     Ok(fixture_rows)
+}
+
+#[cfg(feature = "integration_tests")]
+fn create_fixture(monitor: &mut Client) -> Result<i64, String> {
+    create_named_fixture(monitor, FIXTURE)
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1140,7 +1799,7 @@ fn calibrate_backend(
         BACKEND_COUNT,
         WorkerPhase::Ready,
     )?;
-    let snapshot = worker_snapshot(&mut client, BACKEND_COUNT, pid)?;
+    let snapshot = worker_snapshot(&mut client, BACKEND_COUNT, pid, None)?;
     Ok((snapshot, client))
 }
 
@@ -1247,7 +1906,7 @@ fn reject_ninth_backend(
     }
     let error = ninth
         .query_one(
-            "SELECT pg_accel_pin($1::regclass, ARRAY['grp', 'measure'])",
+            "SELECT pg_accel_pin($1::text::regclass, ARRAY['grp', 'measure'])",
             &[&FIXTURE],
         )
         .err()
@@ -1308,6 +1967,7 @@ struct ConcurrencyEvidence {
     calibration: WorkerSnapshot,
     ready: Vec<WorkerSnapshot>,
     soak: Vec<WorkerSnapshot>,
+    soak_overlap: SoakOverlapEvidence,
     released_slot: usize,
     released_pid: i32,
     post_release_cluster_bytes: i64,
@@ -1370,9 +2030,9 @@ fn run_concurrency_proof(
     wait_for_backend_exit(monitor, &postmaster_started_at, &[calibration_pid], 0)?;
 
     let raw_bytes = u64::try_from(calibration.raw_bytes)
-        .map_err(|_| "calibrated raw resident bytes are negative".to_owned())?;
+        .map_err(|error| format!("calibrated raw resident bytes are negative: {error}"))?;
     let backend_bytes = u64::try_from(calibration.local_bytes)
-        .map_err(|_| "calibrated total resident bytes are negative".to_owned())?;
+        .map_err(|error| format!("calibrated total resident bytes are negative: {error}"))?;
     let budget = exact_backend_budget(0, backend_bytes, raw_bytes, BACKEND_COUNT)?;
 
     let mut pool = WorkerPool::spawn(connection, FIXTURE, fixture_rows, &expected, budget.mib)?;
@@ -1384,14 +2044,17 @@ fn run_concurrency_proof(
         .iter()
         .map(|snapshot| snapshot.pid)
         .collect::<BTreeSet<_>>();
+    let expected_backend_count = i64::try_from(BACKEND_COUNT)
+        .map_err(|error| format!("resident backend count does not fit i64: {error}"))?;
     if active_pid_count(monitor, &ready_pids.iter().copied().collect::<Vec<_>>())?
-        != BACKEND_COUNT as i64
+        != expected_backend_count
     {
         return Err("one or more ready resident backend PIDs are not active".to_owned());
     }
     let ready_state = monitor_state(monitor)?;
     require_monitor_state(&ready_state, &postmaster_started_at, ready_total)?;
-    if u64::try_from(ready_total).map_err(|_| "ready resident total is negative".to_owned())?
+    if u64::try_from(ready_total)
+        .map_err(|error| format!("ready resident total is negative: {error}"))?
         != budget.required_bytes
     {
         return Err(format!(
@@ -1409,7 +2072,7 @@ fn run_concurrency_proof(
         ready_total,
     )?;
 
-    let mut soak = pool.run_active(WorkerPhase::Soak, SOAK_ITERATIONS)?;
+    let (mut soak, soak_overlap) = pool.run_synchronized_soak(monitor, SOAK_ITERATIONS)?;
     soak.sort_by_key(|snapshot| snapshot.slot);
     let soak_total = validate_worker_snapshots(&soak, &all_slots, &calibration)?;
     if soak_total != ready_total {
@@ -1489,6 +2152,7 @@ fn run_concurrency_proof(
         calibration,
         ready,
         soak,
+        soak_overlap,
         released_slot: released.slot,
         released_pid: released.pid,
         post_release_cluster_bytes,
@@ -1499,9 +2163,379 @@ fn run_concurrency_proof(
 }
 
 #[cfg(feature = "integration_tests")]
-fn concurrency_artifacts(monitor: &mut Client) -> Result<ArtifactWriter, String> {
-    let root = std::env::var_os("PG_ACCEL_RESIDENT_CONCURRENCY_ARTIFACT_DIR")
-        .map_or_else(|| default_run_dir("resident-concurrency"), PathBuf::from);
+fn run_cancel_worker(
+    mut client: Client,
+    context: CancelWorkerContext,
+    ready: &mpsc::SyncSender<CancelReady>,
+    resume: &mpsc::Receiver<ServerActivityObservation>,
+) -> Result<CancellationEvidence, String> {
+    let mut rows = client
+        .query_raw(
+            &context.query,
+            std::iter::empty::<&(dyn postgres::types::ToSql + Sync)>(),
+        )
+        .map_err(|error| format!("start real user-cancel query: {error}"))?;
+    let first = rows
+        .next()
+        .map_err(|error| format!("real user-cancel query failed before its first row: {error}"))?
+        .ok_or_else(|| "real user-cancel query completed without rows".to_owned())?;
+    let first_branch = first
+        .try_get::<_, i32>(0)
+        .map_err(|error| format!("decode first cancellation branch id: {error}"))?;
+    if !(0..i32::try_from(CANCEL_QUERY_BRANCHES)
+        .map_err(|error| format!("cancel branch count does not fit i32: {error}"))?)
+        .contains(&first_branch)
+    {
+        return Err(format!(
+            "first cancellation row has out-of-range branch {first_branch}"
+        ));
+    }
+    let first_row = group_row_at(&first, 1)?;
+    if !context.expected.contains(&first_row) {
+        return Err(format!(
+            "first streamed GPU row differs from native PostgreSQL: {first_row:?}"
+        ));
+    }
+    ready
+        .send(CancelReady { first_row })
+        .map_err(|error| format!("publish real GPU dispatch readiness: {error}"))?;
+    let activity_observation = resume
+        .recv_timeout(EXIT_TIMEOUT)
+        .map_err(|error| format!("wait for real CancelToken request: {error}"))?;
+
+    let mut canceled_rows_received = 1_usize;
+    let terminal_error = loop {
+        match rows.next() {
+            Ok(Some(_)) => {
+                canceled_rows_received = canceled_rows_received
+                    .checked_add(1)
+                    .ok_or_else(|| "canceled row count overflow".to_owned())?;
+            }
+            Ok(None) => {
+                return Err(format!(
+                    "real user-cancel query completed all {canceled_rows_received} rows without SQLSTATE 57014"
+                ));
+            }
+            Err(error) => break error,
+        }
+    };
+    drop(rows);
+
+    let sqlstate = terminal_error.code().map(postgres::error::SqlState::code);
+    if classify_cancellation_code(sqlstate) != CancellationClass::QueryCanceled {
+        return Err(format!(
+            "real CancelToken produced {sqlstate:?}, expected exact SQLSTATE 57014: {terminal_error}"
+        ));
+    }
+    let sqlstate = sqlstate
+        .ok_or_else(|| "query-canceled error omitted its SQLSTATE".to_owned())?
+        .to_owned();
+
+    let after_cancel = accel_counters(&mut client)?;
+    let cancel_delta = counter_delta(after_cancel, context.counters_before)?;
+    if cancel_delta.kernels <= 0 || cancel_delta.kernels >= context.full_kernel_dispatches {
+        return Err(format!(
+            "real cancel completed {} GPU dispatches; expected >0 and < full control {}",
+            cancel_delta.kernels, context.full_kernel_dispatches
+        ));
+    }
+    if cancel_delta.accelerated <= 0 {
+        return Err("real cancel did not increment queries_accelerated".to_owned());
+    }
+    if after_cancel.stock != 0 || cancel_delta.stock != 0 {
+        return Err(format!(
+            "real cancel used native stock execution: after={after_cancel:?}, delta={cancel_delta:?}"
+        ));
+    }
+    let resident_after_cancel = resident_fingerprint(&mut client, CANCEL_FIXTURE)?;
+    if resident_after_cancel != context.resident_before {
+        return Err(format!(
+            "real cancel changed resident fingerprint: before={:?}, after={resident_after_cancel:?}",
+            context.resident_before
+        ));
+    }
+    let cluster_after_cancel = cluster_bytes(&mut client)?;
+    if cluster_after_cancel != context.cluster_before {
+        return Err(format!(
+            "real cancel changed cluster ledger: before={}, after={cluster_after_cancel}",
+            context.cluster_before
+        ));
+    }
+    let plan_after_cancel = explain_text(&mut client, &context.query)?;
+    if plan_after_cancel != context.plan {
+        return Err("real cancel changed the repeated descriptor plan fingerprint".to_owned());
+    }
+    let artifacts_after_cancel = stable_device_artifact_snapshot()?;
+    if artifacts_after_cancel != context.artifacts_before {
+        return Err(format!(
+            "real cancel changed AdaptiveCpp device artifacts: before={:?}, after={artifacts_after_cancel:?}",
+            context.artifacts_before
+        ));
+    }
+
+    let probe = client
+        .query_one("SELECT 42::int4", &[])
+        .map_err(|error| format!("backend probe after real cancel: {error}"))?
+        .try_get::<_, i32>(0)
+        .map_err(|error| format!("decode backend probe after real cancel: {error}"))?;
+    if probe != 42 {
+        return Err(format!("backend probe after real cancel returned {probe}"));
+    }
+    let recovery_before = accel_counters(&mut client)?;
+    let recovered = grouped_rows(&mut client, CANCEL_BASE_QUERY)?;
+    if recovered != context.expected {
+        return Err(format!(
+            "GPU recovery query differs from native PostgreSQL: expected={:?}, actual={recovered:?}",
+            context.expected
+        ));
+    }
+    let recovery_after = accel_counters(&mut client)?;
+    let recovery_delta = counter_delta(recovery_after, recovery_before)?;
+    if recovery_delta.kernels <= 0 || recovery_delta.accelerated <= 0 || recovery_after.stock != 0 {
+        return Err(format!(
+            "backend did not recover on GPU after real cancel: after={recovery_after:?}, delta={recovery_delta:?}"
+        ));
+    }
+    if resident_fingerprint(&mut client, CANCEL_FIXTURE)? != context.resident_before {
+        return Err("GPU recovery changed the resident fingerprint".to_owned());
+    }
+    if cluster_bytes(&mut client)? != context.cluster_before {
+        return Err("GPU recovery changed the cluster resident ledger".to_owned());
+    }
+    if stable_device_artifact_snapshot()? != context.artifacts_before {
+        return Err("GPU recovery changed the warmed AdaptiveCpp device artifacts".to_owned());
+    }
+
+    Ok(CancellationEvidence {
+        postmaster_started_at: context.postmaster_started_at,
+        backend_pid: context.backend_pid,
+        fixture_rows: context.fixture_rows,
+        repeated_branches: CANCEL_QUERY_BRANCHES,
+        full_result_rows: context.full_result_rows,
+        full_kernel_dispatches: context.full_kernel_dispatches,
+        canceled_rows_received,
+        canceled_kernel_dispatches: cancel_delta.kernels,
+        canceled_queries_accelerated: cancel_delta.accelerated,
+        sqlstate,
+        activity_observation,
+        plan_fingerprint: fnv1a64(context.plan.as_bytes()),
+        resident_fingerprint: context.resident_before,
+        cluster_bytes: context.cluster_before,
+        device_artifacts: context.artifacts_before,
+        recovery_kernel_dispatches: recovery_delta.kernels,
+    })
+}
+
+#[cfg(feature = "integration_tests")]
+fn join_cancel_worker(
+    handle: thread::JoinHandle<Result<CancellationEvidence, String>>,
+) -> Result<CancellationEvidence, String> {
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => Err(format!(
+            "real user-cancel worker panicked: {}",
+            panic_payload_text(&payload)
+        )),
+    }
+}
+
+#[cfg(feature = "integration_tests")]
+fn run_user_cancel_proof(
+    monitor: &mut Client,
+    connection: &str,
+) -> Result<CancellationEvidence, String> {
+    monitor
+        .batch_execute(
+            "SET statement_timeout = '10min';
+             SET lock_timeout = '30s';
+             SET pg_accel.gpu_enabled = off;
+             SELECT 1 FROM pg_accel_stats() LIMIT 1;",
+        )
+        .map_err(|error| format!("configure GPU-idle cancellation monitor: {error}"))?;
+    let initial = monitor_state(monitor)?;
+    require_monitor_state(&initial, &initial.postmaster_started_at, 0)?;
+    let stale_pids = tagged_backend_pids(monitor)?;
+    if !stale_pids.is_empty() {
+        return Err(format!(
+            "real cancellation proof found stale tagged backends: {stale_pids:?}"
+        ));
+    }
+    let postmaster_started_at = initial.postmaster_started_at;
+    let fixture_rows = create_named_fixture(monitor, CANCEL_FIXTURE)?;
+    monitor
+        .batch_execute("SET pg_accel.enabled = off")
+        .map_err(|error| format!("disable pg_accel for cancellation native reference: {error}"))?;
+    let expected = grouped_rows(monitor, CANCEL_BASE_QUERY)?;
+    if expected.len() != 64 {
+        return Err(format!(
+            "cancellation native grouped reference returned {} rows, expected 64",
+            expected.len()
+        ));
+    }
+
+    let slot = BACKEND_COUNT + 2;
+    let application_name = format!("{APPLICATION_PREFIX}{slot}");
+    let mut client = open_named_client(connection, &application_name)?;
+    configure_accel_backend(&mut client, slot, -1)?;
+    let backend_pid = backend_pid(&mut client)?;
+    pin_fixture(&mut client, CANCEL_FIXTURE, fixture_rows)?;
+    require_descriptor_plan(&mut client, CANCEL_BASE_QUERY)?;
+    run_exact_iterations(
+        &mut client,
+        CANCEL_BASE_QUERY,
+        &expected,
+        1,
+        slot,
+        WorkerPhase::Ready,
+    )?;
+
+    let query = repeated_cancel_query(CANCEL_QUERY_BRANCHES)?;
+    let plan = explain_text(&mut client, &query)?;
+    require_repeated_descriptor_plan(&plan, CANCEL_QUERY_BRANCHES)?;
+    client
+        .batch_execute("SELECT pg_accel_reset_stats()")
+        .map_err(|error| format!("reset stats before full cancellation control: {error}"))?;
+    let full_before = accel_counters(&mut client)?;
+    let full_rows = client
+        .query(&query, &[])
+        .map_err(|error| format!("run full cancellation control query: {error}"))?;
+    validate_repeated_rows(&full_rows, &expected, CANCEL_QUERY_BRANCHES)?;
+    let full_after = accel_counters(&mut client)?;
+    let full_delta = counter_delta(full_after, full_before)?;
+    if full_delta.kernels <= 0 || full_delta.accelerated <= 0 || full_after.stock != 0 {
+        return Err(format!(
+            "full cancellation control did not use only GPU execution: after={full_after:?}, delta={full_delta:?}"
+        ));
+    }
+    let full_result_rows = full_rows.len();
+
+    client
+        .batch_execute("SELECT pg_accel_reset_stats()")
+        .map_err(|error| format!("reset stats before real user cancel: {error}"))?;
+    let counters_before = accel_counters(&mut client)?;
+    if counters_before.kernels <= 0 {
+        return Err(format!(
+            "full control left no monotonic kernel baseline: {counters_before:?}"
+        ));
+    }
+    if counters_before.accelerated != 0 || counters_before.stock != 0 {
+        return Err(format!(
+            "real cancel stats reset left resettable counters nonzero: {counters_before:?}"
+        ));
+    }
+    let resident_before = resident_fingerprint(&mut client, CANCEL_FIXTURE)?;
+    let cluster_before = cluster_bytes(&mut client)?;
+    if cluster_before <= 0 {
+        return Err(format!(
+            "real cancel worker owns no cluster resident bytes: {cluster_before}"
+        ));
+    }
+    let artifacts_before = stable_device_artifact_snapshot()?;
+    for extension in ["jit", "metallib", "metalar"] {
+        if !artifacts_before.records.iter().any(|record| {
+            Path::new(&record.path)
+                .extension()
+                .and_then(std::ffi::OsStr::to_str)
+                == Some(extension)
+        }) {
+            return Err(format!(
+                "full GPU control did not warm any .{extension} AdaptiveCpp device artifact"
+            ));
+        }
+    }
+    let cancel_token = client.cancel_token();
+    let context = CancelWorkerContext {
+        query,
+        plan,
+        expected,
+        postmaster_started_at: postmaster_started_at.clone(),
+        backend_pid,
+        fixture_rows,
+        full_result_rows,
+        full_kernel_dispatches: full_delta.kernels,
+        counters_before,
+        resident_before,
+        cluster_before,
+        artifacts_before,
+    };
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let handle = thread::Builder::new()
+        .name("resident-real-user-cancel".to_owned())
+        .spawn(move || run_cancel_worker(client, context, &ready_tx, &resume_rx))
+        .map_err(|error| format!("spawn real user-cancel worker: {error}"))?;
+
+    let controller_result = (|| {
+        let ready = ready_rx
+            .recv_timeout(OPERATION_TIMEOUT)
+            .map_err(|error| format!("wait for first streamed GPU result: {error}"))?;
+        if !ready.first_row.count.is_positive() {
+            return Err(format!(
+                "first streamed GPU result has non-positive count: {:?}",
+                ready.first_row
+            ));
+        }
+        let clock_origin = Instant::now();
+        let activity = wait_for_activity_set(
+            monitor,
+            &[backend_pid],
+            CANCEL_QUERY_TAG,
+            false,
+            clock_origin,
+        )?;
+        cancel_token
+            .cancel_query(NoTls)
+            .map_err(|error| format!("send real PostgreSQL CancelRequest: {error}"))?;
+        resume_tx
+            .send(activity)
+            .map_err(|error| format!("release canceled query row iterator: {error}"))?;
+        Ok(())
+    })();
+
+    if let Err(controller_error) = controller_result {
+        let _ = cancel_token.cancel_query(NoTls);
+        drop(resume_tx);
+        if !wait_for_worker_finish(&handle, CANCEL_JOIN_TIMEOUT) {
+            drop(handle);
+            return Err(format!(
+                "{controller_error}; real user-cancel worker did not stop within {CANCEL_JOIN_TIMEOUT:?}"
+            ));
+        }
+        let worker_error = join_cancel_worker(handle).err();
+        return match worker_error {
+            None => Err(controller_error),
+            Some(worker_error) => Err(format!(
+                "{controller_error}; worker also failed: {worker_error}"
+            )),
+        };
+    }
+
+    if !wait_for_worker_finish(&handle, CANCEL_JOIN_TIMEOUT) {
+        let second_cancel = cancel_token.cancel_query(NoTls).err();
+        if !wait_for_worker_finish(&handle, CANCEL_JOIN_TIMEOUT) {
+            drop(handle);
+            return Err(format!(
+                "real user-cancel worker did not stop after two {CANCEL_JOIN_TIMEOUT:?} windows{}",
+                second_cancel.map_or_else(String::new, |error| format!(
+                    "; second cancel failed: {error}"
+                ))
+            ));
+        }
+    }
+    let evidence = join_cancel_worker(handle)?;
+    wait_for_backend_exit(monitor, &postmaster_started_at, &[backend_pid], 0)?;
+    require_monitor_state(&monitor_state(monitor)?, &postmaster_started_at, 0)?;
+    Ok(evidence)
+}
+
+#[cfg(feature = "integration_tests")]
+fn resident_test_artifacts(
+    monitor: &mut Client,
+    artifact_env: &str,
+    default_label: &str,
+) -> Result<ArtifactWriter, String> {
+    let root = std::env::var_os(artifact_env)
+        .map_or_else(|| default_run_dir(default_label), PathBuf::from);
     let mut candidates = Vec::new();
     if let Some(path) = std::env::var_os("PG_ACCEL_TEST_POSTGRES_LOG") {
         candidates.push(PathBuf::from(path));
@@ -1529,7 +2563,25 @@ fn concurrency_artifacts(monitor: &mut Client) -> Result<ArtifactWriter, String>
         .map_err(|error| format!("decode PostgreSQL data_directory: {error}"))?;
     append_pgdata_log_candidates(&mut candidates, Path::new(&data_dir));
     ArtifactWriter::new(root, candidates)
-        .map_err(|error| format!("create resident concurrency artifacts: {error}"))
+        .map_err(|error| format!("create {default_label} artifacts: {error}"))
+}
+
+#[cfg(feature = "integration_tests")]
+fn concurrency_artifacts(monitor: &mut Client) -> Result<ArtifactWriter, String> {
+    resident_test_artifacts(
+        monitor,
+        "PG_ACCEL_RESIDENT_CONCURRENCY_ARTIFACT_DIR",
+        "resident-concurrency",
+    )
+}
+
+#[cfg(feature = "integration_tests")]
+fn cancellation_artifacts(monitor: &mut Client) -> Result<ArtifactWriter, String> {
+    resident_test_artifacts(
+        monitor,
+        "PG_ACCEL_RESIDENT_CANCEL_ARTIFACT_DIR",
+        "resident-user-cancel",
+    )
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1548,6 +2600,64 @@ fn audit_complete_log_deltas(writer: &ArtifactWriter) -> Result<(), String> {
 #[cfg(feature = "integration_tests")]
 fn append_failure(failures: &mut Vec<String>, context: &str, error: impl std::fmt::Display) {
     failures.push(format!("{context}: {error}"));
+}
+
+#[cfg(feature = "integration_tests")]
+#[test]
+fn resident_real_user_cancel_is_bounded_exact_and_recoverable() {
+    let _live_pg_guard = live_pg_test_lock();
+    let connection = test_connection();
+    let mut monitor = open_client(&connection).expect("connect resident cancellation monitor");
+    let writer = cancellation_artifacts(&mut monitor).expect("prepare cancellation artifacts");
+    let postmaster_started_at = monitor
+        .query_one("SELECT pg_postmaster_start_time()::text", &[])
+        .expect("read cancellation postmaster start time")
+        .get::<_, String>(0);
+    let mut failures = Vec::new();
+
+    match run_user_cancel_proof(&mut monitor, &connection) {
+        Ok(evidence) => match serde_json::to_string_pretty(&evidence) {
+            Ok(json) => {
+                if let Err(error) = fs::write(
+                    writer.root().join("resident-user-cancel-proof.json"),
+                    format!("{json}\n"),
+                ) {
+                    append_failure(&mut failures, "write cancellation proof", error);
+                }
+            }
+            Err(error) => append_failure(&mut failures, "serialize cancellation proof", error),
+        },
+        Err(error) => append_failure(&mut failures, "real resident user cancel", error),
+    }
+
+    if let Err(error) = cleanup_tagged_backends(&mut monitor, &postmaster_started_at) {
+        append_failure(&mut failures, "bounded cancellation backend cleanup", error);
+    }
+    if let Err(error) = monitor.batch_execute(&format!("DROP TABLE IF EXISTS {CANCEL_FIXTURE}")) {
+        append_failure(&mut failures, "drop cancellation fixture", error);
+    }
+    if !failures.is_empty() {
+        let _ = writer.write_failure("resident-user-cancel", &failures.join("\n"));
+    }
+    match writer.capture_log_tails("resident-user-cancel") {
+        Ok(_) => {}
+        Err(error) => append_failure(&mut failures, "capture cancellation log deltas", error),
+    }
+    if let Err(error) = audit_complete_log_deltas(&writer) {
+        append_failure(
+            &mut failures,
+            "complete cancellation log delta audit",
+            error,
+        );
+    }
+    if !failures.is_empty() {
+        let _ = writer.write_failure("resident-user-cancel", &failures.join("\n"));
+        panic!(
+            "resident user-cancel gate failed; artifacts={}:\n{}",
+            writer.root().display(),
+            failures.join("\n")
+        );
+    }
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1664,6 +2774,132 @@ mod tests {
 
         assert_eq!(log_delta_failure("postgres.log", body), None);
         assert_eq!(log_delta_failure("/tmp/pg_accel_panic.log", ""), None);
+    }
+
+    #[test]
+    fn strict_common_overlap_requires_one_positive_eight_way_interval() {
+        let intervals = [
+            MonotonicInterval {
+                start_us: 10,
+                end_us: 100,
+            },
+            MonotonicInterval {
+                start_us: 20,
+                end_us: 90,
+            },
+            MonotonicInterval {
+                start_us: 30,
+                end_us: 80,
+            },
+            MonotonicInterval {
+                start_us: 40,
+                end_us: 70,
+            },
+            MonotonicInterval {
+                start_us: 41,
+                end_us: 69,
+            },
+            MonotonicInterval {
+                start_us: 42,
+                end_us: 68,
+            },
+            MonotonicInterval {
+                start_us: 43,
+                end_us: 67,
+            },
+            MonotonicInterval {
+                start_us: 44,
+                end_us: 66,
+            },
+        ];
+
+        assert_eq!(
+            strict_common_overlap(&intervals),
+            Some(MonotonicInterval {
+                start_us: 44,
+                end_us: 66,
+            })
+        );
+    }
+
+    #[test]
+    fn strict_common_overlap_rejects_serial_touching_and_empty_intervals() {
+        assert_eq!(strict_common_overlap(&[]), None);
+        assert_eq!(
+            strict_common_overlap(&[
+                MonotonicInterval {
+                    start_us: 0,
+                    end_us: 10,
+                },
+                MonotonicInterval {
+                    start_us: 10,
+                    end_us: 20,
+                },
+            ]),
+            None
+        );
+        assert_eq!(
+            strict_common_overlap(&[
+                MonotonicInterval {
+                    start_us: 0,
+                    end_us: 9,
+                },
+                MonotonicInterval {
+                    start_us: 10,
+                    end_us: 20,
+                },
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn cancellation_classification_requires_exact_query_canceled_sqlstate() {
+        assert_eq!(
+            classify_cancellation_code(Some("57014")),
+            CancellationClass::QueryCanceled
+        );
+        assert_eq!(
+            classify_cancellation_code(Some("57000")),
+            CancellationClass::OtherSqlState
+        );
+        assert_eq!(
+            classify_cancellation_code(None),
+            CancellationClass::NotDatabaseError
+        );
+    }
+
+    #[test]
+    fn counter_delta_preserves_nonzero_monotonic_kernel_baseline() {
+        let before = AccelCounters {
+            kernels: 195,
+            accelerated: 0,
+            stock: 0,
+        };
+        let after = AccelCounters {
+            kernels: 198,
+            accelerated: 1,
+            stock: 0,
+        };
+
+        assert_eq!(
+            counter_delta(after, before).expect("monotonic counter delta"),
+            AccelCounters {
+                kernels: 3,
+                accelerated: 1,
+                stock: 0,
+            }
+        );
+        assert_eq!(
+            counter_delta(before, before).expect("equal monotonic counters"),
+            AccelCounters {
+                kernels: 0,
+                accelerated: 0,
+                stock: 0,
+            }
+        );
+        assert!(counter_delta(before, after).is_err());
+        assert!(monotonic_delta(i64::MAX, i64::MIN, "overflow test").is_err());
     }
 
     #[cfg(feature = "integration_tests")]
