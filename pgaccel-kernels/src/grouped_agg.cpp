@@ -30,6 +30,10 @@ constexpr size_t kHashMaxGroupCapacity = size_t{1} << 30;
 constexpr uint32_t kFailureInvalid = 1u << 0;
 constexpr uint32_t kFailureNumericOverflow = 1u << 1;
 constexpr uint32_t kFailureCapacity = 1u << 2;
+constexpr uint64_t kLifecycleCookie = UINT64_C(0x7067616363656c32);
+constexpr uint32_t kLifecycleActive = 1;
+constexpr uint32_t kLifecycleFinalized = 2;
+constexpr uint32_t kLifecycleFailed = 3;
 constexpr uint16_t kOpEq = PGACCEL_EXPR_OP_EQ;
 constexpr uint16_t kOpNe = PGACCEL_EXPR_OP_NE;
 constexpr uint16_t kOpLt = PGACCEL_EXPR_OP_LT;
@@ -141,8 +145,10 @@ struct DeviceMeta {
   size_t emitted;
   uint64_t selected;
   uint64_t uncertain;
+  uint64_t lifecycle_cookie;
+  uint64_t shape_fingerprint;
   uint32_t failure_flags;
-  uint32_t _pad;
+  uint32_t lifecycle_state;
 };
 
 static_assert(kFailureInvalid == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
@@ -151,9 +157,11 @@ static_assert(kFailureNumericOverflow == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERI
 struct KernelParams {
   size_t row_count;
   size_t group_capacity;
+  uint64_t shape_fingerprint;
   uint32_t key_count;
   uint32_t measure_count;
   uint32_t dim_count;
+  uint32_t execution_flags;
   int32_t grouping_mode;
   int32_t output_mode;
   size_t hash_slot_count;
@@ -275,7 +283,9 @@ bool hash_slot_capacity(size_t group_capacity, size_t* slot_count) {
 
 bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) {
   ArenaSizer arena;
-  if (!arena.add<KernelParams>(1, &layout->params) ||
+  // Lifecycle metadata stays at a shape-independent offset so a changed
+  // descriptor cannot reinterpret some other workspace lane as session state.
+  if (!arena.add<KernelParams>(1, &layout->params) || !arena.add<DeviceMeta>(1, &layout->meta) ||
       !arena.add<uint8_t>(desc.group_capacity, &layout->active))
     return false;
 
@@ -336,8 +346,6 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
         !arena.add<uint32_t>(1, &layout->hash_group_count))
       return false;
   }
-  if (!arena.add<DeviceMeta>(1, &layout->meta))
-    return false;
   layout->bytes = arena.size();
   return layout->bytes != 0;
 }
@@ -592,6 +600,116 @@ bool validate_filter(const pgaccel_grouped_agg_filter& filter,
   return true;
 }
 
+void fingerprint_mix(uint64_t* fingerprint, uint64_t value) {
+  *fingerprint ^= value + UINT64_C(0x9e3779b97f4a7c15) + (*fingerprint << 6) +
+                  (*fingerprint >> 2);
+}
+
+void fingerprint_pointer(uint64_t* fingerprint, const void* pointer) {
+  fingerprint_mix(fingerprint, static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pointer)));
+}
+
+void fingerprint_value(uint64_t* fingerprint, const pgaccel_val& value) {
+  fingerprint_mix(fingerprint, static_cast<uint64_t>(value.tag));
+  uint64_t payload = 0;
+  switch (value.tag) {
+    case PGACCEL_VAL_BOOL:
+      payload = value.data.b ? 1 : 0;
+      break;
+    case PGACCEL_VAL_INT32:
+    case PGACCEL_VAL_DATE:
+      payload = static_cast<uint32_t>(value.data.i32);
+      break;
+    case PGACCEL_VAL_INT64:
+    case PGACCEL_VAL_TIMESTAMP:
+      std::memcpy(&payload, &value.data.i64, sizeof(payload));
+      break;
+    case PGACCEL_VAL_FLOAT32: {
+      uint32_t bits = 0;
+      std::memcpy(&bits, &value.data.f32, sizeof(bits));
+      payload = bits;
+      break;
+    }
+    case PGACCEL_VAL_FLOAT64:
+      std::memcpy(&payload, &value.data.f64, sizeof(payload));
+      break;
+    default:
+      break;
+  }
+  fingerprint_mix(fingerprint, payload);
+}
+
+void fingerprint_filter(uint64_t* fingerprint, const pgaccel_grouped_agg_filter& filter) {
+  fingerprint_mix(fingerprint, static_cast<uint64_t>(filter.kind));
+  fingerprint_mix(fingerprint, static_cast<uint64_t>(filter.predicate_source));
+  fingerprint_mix(fingerprint, static_cast<uint64_t>(filter.predicate_measure_slot));
+  fingerprint_mix(fingerprint, static_cast<uint64_t>(filter.predicate_range_count));
+  fingerprint_mix(fingerprint, filter.value_cmp_opcode);
+  fingerprint_mix(fingerprint, filter.flags);
+  fingerprint_mix(fingerprint, filter.mask == nullptr ? 0 : 1);
+  fingerprint_value(fingerprint, filter.value_cmp_const);
+  for (size_t i = 0; i < PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES; ++i) {
+    fingerprint_value(fingerprint, filter.predicate_lo[i]);
+    fingerprint_value(fingerprint, filter.predicate_hi[i]);
+  }
+}
+
+uint64_t descriptor_shape_fingerprint(const pgaccel_grouped_agg_desc& desc) {
+  uint64_t fingerprint = UINT64_C(0x243f6a8885a308d3);
+  fingerprint_mix(&fingerprint, desc.abi_version);
+  fingerprint_mix(&fingerprint, desc.size_bytes);
+  fingerprint_mix(&fingerprint, static_cast<uint64_t>(desc.grouping_mode));
+  fingerprint_mix(&fingerprint, static_cast<uint64_t>(desc.output_mode));
+  fingerprint_mix(&fingerprint, desc.key_count);
+  fingerprint_mix(&fingerprint, desc.group_capacity);
+  fingerprint_mix(&fingerprint, desc.measure_count);
+  fingerprint_mix(&fingerprint, desc.flags);
+  fingerprint_mix(&fingerprint, desc.dim_count);
+  for (size_t i = 0; i < desc.key_count; ++i) {
+    const pgaccel_grouped_agg_key& key = desc.keys[i];
+    fingerprint_mix(&fingerprint, static_cast<uint64_t>(key.values.type));
+    fingerprint_mix(&fingerprint, key.values.values == nullptr ? 0 : 1);
+    fingerprint_mix(&fingerprint, key.values.nulls == nullptr ? 0 : 1);
+    fingerprint_pointer(&fingerprint, key.lookup_by_key);
+    fingerprint_mix(&fingerprint, static_cast<uint64_t>(key.source));
+    fingerprint_mix(&fingerprint, static_cast<uint32_t>(key.code_min));
+    fingerprint_mix(&fingerprint, key.cardinality);
+    fingerprint_mix(&fingerprint, static_cast<uint32_t>(key.null_code));
+    fingerprint_mix(&fingerprint, key.flags);
+  }
+  for (size_t i = 0; i < desc.measure_count; ++i) {
+    const pgaccel_grouped_agg_measure& measure = desc.measures[i];
+    const pgaccel_grouped_agg_measure_col* columns[] = {&measure.value, &measure.rhs};
+    for (const pgaccel_grouped_agg_measure_col* column : columns) {
+      fingerprint_mix(&fingerprint, column->values == nullptr ? 0 : 1);
+      fingerprint_mix(&fingerprint, column->nulls == nullptr ? 0 : 1);
+      fingerprint_mix(&fingerprint, static_cast<uint64_t>(column->physical_type));
+      fingerprint_mix(&fingerprint, column->element_bytes);
+      fingerprint_mix(&fingerprint, static_cast<uint32_t>(column->scale));
+      fingerprint_mix(&fingerprint, column->flags);
+    }
+    fingerprint_mix(&fingerprint, static_cast<uint64_t>(measure.op));
+    fingerprint_mix(&fingerprint, measure.agg_mask);
+    fingerprint_mix(&fingerprint, static_cast<uint64_t>(measure.accumulator_kind));
+    fingerprint_mix(&fingerprint, measure.state_bytes);
+    fingerprint_mix(&fingerprint, measure.flags);
+    fingerprint_filter(&fingerprint, desc.measure_filters[i]);
+  }
+  fingerprint_filter(&fingerprint, desc.where_filter);
+  for (size_t i = 0; i < desc.dim_count; ++i) {
+    const pgaccel_grouped_agg_dim& dim = desc.dims[i];
+    fingerprint_mix(&fingerprint, static_cast<uint64_t>(dim.fact_key.type));
+    fingerprint_mix(&fingerprint, dim.fact_key.values == nullptr ? 0 : 1);
+    fingerprint_mix(&fingerprint, dim.fact_key.nulls == nullptr ? 0 : 1);
+    fingerprint_pointer(&fingerprint, dim.match_by_key);
+    fingerprint_pointer(&fingerprint, dim.multiplicity_by_key);
+    fingerprint_mix(&fingerprint, static_cast<uint32_t>(dim.key_min));
+    fingerprint_mix(&fingerprint, dim.key_count);
+    fingerprint_mix(&fingerprint, dim.flags);
+  }
+  return fingerprint;
+}
+
 pgaccel_status validate_desc(const pgaccel_grouped_agg_desc* desc, Validation* validation,
                              WorkspaceLayout* layout) {
   if (desc == nullptr || desc->abi_version != PGACCEL_OLAP_ABI_VERSION ||
@@ -694,12 +812,13 @@ pgaccel_status validate_desc(const pgaccel_grouped_agg_desc* desc, Validation* v
         desc->row_count <= kHashMaxRows && desc->group_capacity <= kHashMaxGroupCapacity &&
         canonical_disabled_filter(desc->where_filter) &&
         canonical_disabled_filter(desc->measure_filters[0]);
-    if (!minimal_hash_slice)
+    // Hash owners identify rows in the current input pointer range. Reusing
+    // them across chunks would dereference owners against a different range,
+    // so hash/H3 remains deliberately one-shot until that state is redesigned.
+    if (!minimal_hash_slice || desc->execution_flags != PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN)
       validation->supported = false;
   }
 
-  if (desc->execution_flags != PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN)
-    validation->supported = false;
   if (!validation->supported)
     return PGACCEL_UNSUPPORTED;
   return make_layout(*desc, layout) ? PGACCEL_OK : PGACCEL_ERROR;
@@ -1336,35 +1455,50 @@ inline void run_hash_compact_kernel(KernelParams* params_ptr) {
 inline void run_dense_kernel(KernelParams* params_ptr) {
   KernelParams& params = *params_ptr;
   DeviceMeta& meta = *params.meta;
-  meta = {};
-  for (size_t group = 0; group < params.group_capacity; ++group) {
-    params.active[group] = 0;
-    for (size_t m = 0; m < params.measure_count; ++m) {
-      DeviceMeasureBuffers& buffers = params.buffers[m];
-      if (buffers.sum != nullptr)
-        buffers.sum[group] = 0;
-      if (buffers.min != nullptr)
-        buffers.min[group] = 0;
-      if (buffers.max != nullptr)
-        buffers.max[group] = 0;
-      if (buffers.sumsq != nullptr)
-        buffers.sumsq[group] = 0;
-      if (buffers.count != nullptr)
-        buffers.count[group] = 0;
-      if (buffers.nonnull != nullptr)
-        buffers.nonnull[group] = 0;
-      if (buffers.rhs_sum != nullptr)
-        buffers.rhs_sum[group] = 0;
-      if (buffers.rhs_count != nullptr)
-        buffers.rhs_count[group] = 0;
-      if (buffers.rhs_nonnull != nullptr)
-        buffers.rhs_nonnull[group] = 0;
-    }
-  }
-  if (params.key_count == 0)
-    params.active[0] = 1;
+  const bool reset = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_RESET) != 0;
+  const bool accumulate = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0;
+  const bool finalize = (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
 
-  for (size_t row = 0; row < params.row_count && meta.failure_flags == 0; ++row) {
+  if (reset) {
+    meta = {};
+    meta.lifecycle_cookie = kLifecycleCookie;
+    meta.shape_fingerprint = params.shape_fingerprint;
+    meta.lifecycle_state = kLifecycleActive;
+    for (size_t group = 0; group < params.group_capacity; ++group) {
+      params.active[group] = 0;
+      for (size_t m = 0; m < params.measure_count; ++m) {
+        DeviceMeasureBuffers& buffers = params.buffers[m];
+        if (buffers.sum != nullptr)
+          buffers.sum[group] = 0;
+        if (buffers.min != nullptr)
+          buffers.min[group] = 0;
+        if (buffers.max != nullptr)
+          buffers.max[group] = 0;
+        if (buffers.sumsq != nullptr)
+          buffers.sumsq[group] = 0;
+        if (buffers.count != nullptr)
+          buffers.count[group] = 0;
+        if (buffers.nonnull != nullptr)
+          buffers.nonnull[group] = 0;
+        if (buffers.rhs_sum != nullptr)
+          buffers.rhs_sum[group] = 0;
+        if (buffers.rhs_count != nullptr)
+          buffers.rhs_count[group] = 0;
+        if (buffers.rhs_nonnull != nullptr)
+          buffers.rhs_nonnull[group] = 0;
+      }
+    }
+    if (params.key_count == 0)
+      params.active[0] = 1;
+  } else if (meta.lifecycle_cookie != kLifecycleCookie ||
+             meta.shape_fingerprint != params.shape_fingerprint ||
+             meta.lifecycle_state != kLifecycleActive || meta.failure_flags != 0) {
+    meta.failure_flags |= kFailureInvalid;
+    meta.lifecycle_state = kLifecycleFailed;
+    return;
+  }
+
+  for (size_t row = 0; accumulate && row < params.row_count && meta.failure_flags == 0; ++row) {
     size_t dim_indexes[PGACCEL_GROUPED_AGG_MAX_DIMS] = {};
     uint64_t weight = 1;
     bool rejected = false;
@@ -1502,8 +1636,13 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       meta.failure_flags = kFailureNumericOverflow;
   }
 
-  if (meta.failure_flags != 0)
+  if (meta.failure_flags != 0) {
+    meta.lifecycle_state = kLifecycleFailed;
     return;
+  }
+  if (!finalize)
+    return;
+  meta.emitted = 0;
   for (size_t group = 0; group < params.group_capacity; ++group) {
     if (params.output_mode == PGACCEL_GROUPED_AGG_OUTPUT_DENSE)
       stage_keys(params, group, group);
@@ -1519,6 +1658,7 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
       stage_keys(params, group, output_group);
     ++meta.emitted;
   }
+  meta.lifecycle_state = kLifecycleFinalized;
 }
 
 template <typename T>
@@ -1531,9 +1671,11 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   *params = {};
   params->row_count = desc.row_count;
   params->group_capacity = desc.group_capacity;
+  params->shape_fingerprint = descriptor_shape_fingerprint(desc);
   params->key_count = desc.key_count;
   params->measure_count = desc.measure_count;
   params->dim_count = desc.dim_count;
+  params->execution_flags = desc.execution_flags;
   params->grouping_mode = desc.grouping_mode;
   params->output_mode = desc.output_mode;
   params->hash_slot_count = layout.hash_slot_count;
@@ -1960,16 +2102,20 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
     *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     return PGACCEL_ERROR;
   }
-  if ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0) {
+  const bool finalize = (desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
+  if (finalize) {
     if (!validate_out(*desc, out) || !validate_aliases(*desc, *out)) {
       *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
       return PGACCEL_ERROR;
     }
+  } else if (out != nullptr) {
+    *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+    return PGACCEL_ERROR;
   }
   try {
     sycl::queue& queue = pgaccel_require_queue();
     if (!validate_input_usm(queue, *desc) || !validate_scratch_usm(queue, *desc) ||
-        !validate_output_usm(queue, *desc, *out)) {
+        (finalize && !validate_output_usm(queue, *desc, *out))) {
       *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
       return PGACCEL_ERROR;
     }
@@ -2033,7 +2179,8 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
         return PGACCEL_ERROR;
       }
     }
-    publish_output(queue, *desc, layout, scratch, meta, out);
+    if (finalize)
+      publish_output(queue, *desc, layout, scratch, meta, out);
     return PGACCEL_OK;
   } catch (const pgaccel_no_device_error&) {
     return PGACCEL_ERROR_NO_DEVICE;

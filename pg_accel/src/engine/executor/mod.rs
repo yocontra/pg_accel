@@ -13,6 +13,7 @@
 //!   reusable executor primitives for executor state ownership.
 
 pub mod agg;
+mod bounded;
 pub mod join;
 pub mod metrics;
 pub mod raster;

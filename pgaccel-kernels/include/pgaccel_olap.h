@@ -33,8 +33,9 @@ extern "C" {
 #define PGACCEL_GROUPED_AGG_LANE_ALL_KNOWN 0x7fu
 
 /* Chunk lifecycle bits. One-shot execution sets all three. A reusable
- * workspace permits RESET|ACCUMULATE, zero or more ACCUMULATE calls, then
- * ACCUMULATE|FINALIZE or FINALIZE. */
+ * workspace's first execute must include RESET; it then permits zero or more
+ * ACCUMULATE calls followed by ACCUMULATE|FINALIZE or FINALIZE. Calls after a
+ * failure or FINALIZE also require RESET. */
 #define PGACCEL_GROUPED_AGG_EXEC_RESET (1u << 0)
 #define PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE (1u << 1)
 #define PGACCEL_GROUPED_AGG_EXEC_FINALIZE (1u << 2)
@@ -335,7 +336,7 @@ typedef struct {
 pgaccel_status pgaccel_grouped_agg_workspace_requirements(
     const pgaccel_grouped_agg_desc* desc, pgaccel_grouped_agg_workspace_req* out);
 
-/* Allocate/free an aligned workspace in the same AdaptiveCpp context used by
+/* Allocate/free a zero-initialized aligned workspace in the same AdaptiveCpp context used by
  * grouped aggregation. `space` accepts SHARED_USM or DEVICE, never HOST.
  * `alignment` must be a nonzero power of two. A zero-byte request succeeds
  * with `*out == NULL`; every nonzero successful result satisfies the requested

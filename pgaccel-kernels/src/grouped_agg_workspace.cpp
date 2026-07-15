@@ -44,6 +44,12 @@ extern "C" pgaccel_status pgaccel_grouped_agg_workspace_alloc(size_t bytes, size
     ptr = sycl::aligned_alloc_device(effective_alignment, bytes, *q);
   if (ptr == nullptr)
     return PGACCEL_OOM;
+  try {
+    q->memset(ptr, 0, bytes).wait_and_throw();
+  } catch (...) {
+    sycl::free(ptr, *q);
+    throw;
+  }
   *out = ptr;
   return PGACCEL_OK;
 } catch (const pgaccel_no_device_error&) {

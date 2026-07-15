@@ -197,7 +197,7 @@ impl AggExecState {
                     "pg_accel: generic aggregate fact row count exceeds EXPLAIN counter capacity"
                 )
             });
-            self.batches_executed = 1;
+            self.batches_executed = dispatch.batches_executed;
             self.gpu_dispatched = true;
             if let Some(latest) = dispatch.residency {
                 merge_residency_report(&mut self.descriptor.residency, latest);

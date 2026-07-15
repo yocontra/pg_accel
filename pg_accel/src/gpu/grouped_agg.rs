@@ -148,6 +148,149 @@ impl<'input> ResolvedGroupedAggPlan<'input> {
             _not_send_sync: PhantomData,
         }
     }
+
+    /// Resolve one bounded contiguous row range from this plan.
+    ///
+    /// All row-shaped pointers are advanced together. Dictionary and
+    /// dimension lookup pointers remain fixed because they describe the
+    /// session-wide grouping shape, not fact-row storage.
+    pub fn row_chunk(
+        &self,
+        first_row: usize,
+        row_count: usize,
+    ) -> GpuResult<GroupedAggChunk<'_, 'input>> {
+        let end = first_row
+            .checked_add(row_count)
+            .ok_or_else(|| descriptor_error("grouped chunk row range overflow"))?;
+        if end > self.desc.row_count {
+            return Err(descriptor_error(
+                "grouped chunk row range exceeds the resolved input",
+            ));
+        }
+
+        let mut desc = self.desc;
+        desc.row_count = row_count;
+        advance_descriptor_rows(&mut desc, first_row)?;
+        // SAFETY: `from_abi` established that every active pointer spans the
+        // plan's full logical row count. The checked subrange above advances
+        // only row-shaped pointers and retains the frozen session shape.
+        unsafe { GroupedAggChunk::from_abi(self, desc) }
+    }
+}
+
+fn value_width(tag: PgaccelValTag) -> GpuResult<usize> {
+    match tag {
+        PgaccelValTag::Bool => Ok(1),
+        PgaccelValTag::Int32 | PgaccelValTag::Float32 | PgaccelValTag::Date => Ok(4),
+        PgaccelValTag::Int64 | PgaccelValTag::Float64 | PgaccelValTag::Timestamp => Ok(8),
+        PgaccelValTag::Null => Err(descriptor_error(
+            "active grouped row column has a NULL physical tag",
+        )),
+    }
+}
+
+fn checked_byte_offset(rows: usize, element_bytes: usize) -> GpuResult<usize> {
+    let bytes = rows
+        .checked_mul(element_bytes)
+        .ok_or_else(|| descriptor_error("grouped chunk pointer offset overflow"))?;
+    if bytes > isize::MAX as usize {
+        return Err(descriptor_error(
+            "grouped chunk pointer offset exceeds Rust allocation bounds",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn advance_byte_pointer<T>(pointer: *const T, rows: usize) -> GpuResult<*const T> {
+    if pointer.is_null() {
+        return Ok(pointer);
+    }
+    let offset = checked_byte_offset(rows, std::mem::size_of::<T>())?;
+    // SAFETY: the resolved-plan constructor requires every active pointer to
+    // span its full logical row count, and the caller checked this subrange.
+    Ok(unsafe { pointer.cast::<u8>().add(offset).cast::<T>() })
+}
+
+fn advance_usm_column(column: &mut super::PgaccelExprUsmCol, rows: usize) -> GpuResult<()> {
+    if !column.values.is_null() {
+        let offset = checked_byte_offset(rows, value_width(column.tag)?)?;
+        // SAFETY: the resolved-plan constructor pins the complete typed input
+        // span and `offset` names a checked row boundary inside that span.
+        column.values = unsafe { column.values.cast::<u8>().add(offset).cast() };
+    }
+    column.nulls = advance_byte_pointer(column.nulls, rows)?;
+    Ok(())
+}
+
+fn advance_measure_column(
+    column: &mut abi::PgaccelGroupedAggMeasureCol,
+    rows: usize,
+) -> GpuResult<()> {
+    if !column.values.is_null() {
+        let element_bytes = usize::try_from(column.element_bytes)
+            .map_err(|_| descriptor_error("grouped measure width does not fit usize"))?;
+        if element_bytes == 0 {
+            return Err(descriptor_error(
+                "active grouped measure has zero element width",
+            ));
+        }
+        let offset = checked_byte_offset(rows, element_bytes)?;
+        // SAFETY: the resolved-plan constructor pins the complete measure
+        // span and the checked row range cannot exceed it.
+        column.values = unsafe { column.values.cast::<u8>().add(offset).cast() };
+    }
+    column.nulls = advance_byte_pointer(column.nulls, rows)?;
+    Ok(())
+}
+
+fn advance_filter(filter: &mut abi::PgaccelGroupedAggFilter, rows: usize) -> GpuResult<()> {
+    filter.mask = advance_byte_pointer(filter.mask, rows)?;
+    Ok(())
+}
+
+fn advance_descriptor_rows(
+    desc: &mut abi::PgaccelGroupedAggDesc,
+    first_row: usize,
+) -> GpuResult<()> {
+    let key_count = usize::try_from(desc.key_count)
+        .map_err(|_| descriptor_error("group key count does not fit usize"))?;
+    for key in desc
+        .keys
+        .get_mut(..key_count)
+        .ok_or_else(|| descriptor_error("grouped chunk key count exceeds the frozen descriptor"))?
+    {
+        if key.source == abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT {
+            advance_usm_column(&mut key.values, first_row)?;
+        }
+    }
+
+    let measure_count = usize::try_from(desc.measure_count)
+        .map_err(|_| descriptor_error("measure count does not fit usize"))?;
+    for measure in desc.measures.get_mut(..measure_count).ok_or_else(|| {
+        descriptor_error("grouped chunk measure count exceeds the frozen descriptor")
+    })? {
+        advance_measure_column(&mut measure.value, first_row)?;
+        advance_measure_column(&mut measure.rhs, first_row)?;
+    }
+    advance_filter(&mut desc.where_filter, first_row)?;
+    for filter in desc
+        .measure_filters
+        .get_mut(..measure_count)
+        .ok_or_else(|| {
+            descriptor_error("grouped chunk filter count exceeds the frozen descriptor")
+        })?
+    {
+        advance_filter(filter, first_row)?;
+    }
+
+    let dimension_count = usize::try_from(desc.dim_count)
+        .map_err(|_| descriptor_error("dimension count does not fit usize"))?;
+    for dimension in desc.dims.get_mut(..dimension_count).ok_or_else(|| {
+        descriptor_error("grouped chunk dimension count exceeds the frozen descriptor")
+    })? {
+        advance_usm_column(&mut dimension.fact_key, first_row)?;
+    }
+    Ok(())
 }
 
 /// One row-pointer/count slice for a multi-call grouped aggregation.
@@ -981,16 +1124,25 @@ fn grouped_agg_kernel_error(status: PgaccelStatus, detail: i32) -> GpuError {
     }
 }
 
-fn execute_call(
-    mut desc: abi::PgaccelGroupedAggDesc,
+fn lifecycle_call_descriptor(
+    desc: &abi::PgaccelGroupedAggDesc,
     flags: u32,
-    workspace: &mut GroupedAggWorkspace,
-    mut output: Option<&mut GroupedAggOutputStorage>,
-) -> GpuResult<Option<GroupedAggOutcome>> {
+) -> abi::PgaccelGroupedAggDesc {
+    let mut desc = *desc;
     desc.execution_flags = flags;
     if flags & abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE == 0 {
         desc.row_count = 0;
     }
+    desc
+}
+
+fn execute_call(
+    desc: &abi::PgaccelGroupedAggDesc,
+    flags: u32,
+    workspace: &mut GroupedAggWorkspace,
+    mut output: Option<&mut GroupedAggOutputStorage>,
+) -> GpuResult<Option<GroupedAggOutcome>> {
+    let mut desc = lifecycle_call_descriptor(desc, flags);
     workspace.apply_to(&mut desc)?;
     let mut raw_output = output.as_deref_mut().map(GroupedAggOutputStorage::raw);
     let output_ptr = raw_output
@@ -1053,7 +1205,7 @@ pub fn execute_grouped_agg_one_shot(
     output.validate_for_plan(plan)?;
     let mut workspace = GroupedAggWorkspace::allocate(plan)?;
     execute_call(
-        plan.desc,
+        &plan.desc,
         abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN,
         &mut workspace,
         Some(output),
@@ -1062,29 +1214,50 @@ pub fn execute_grouped_agg_one_shot(
 }
 
 /// Stateful multi-call facade reserved by the frozen chunk lifecycle.
-pub struct GroupedAggSession<'plan, 'input> {
-    plan: &'plan ResolvedGroupedAggPlan<'input>,
+///
+/// The session owns no input pointer. `plan_shape` retains raw pointer values
+/// only as equality tokens and is never submitted to native code. Every
+/// accumulate/finalize/reset call must supply a freshly pinned plan or chunk,
+/// which lets residency release its store borrow between synchronous calls.
+pub struct GroupedAggSession {
+    plan_shape: abi::PgaccelGroupedAggDesc,
     workspace: GroupedAggWorkspace,
     state: LifecycleState,
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
-impl<'plan, 'input> GroupedAggSession<'plan, 'input> {
-    pub fn start(plan: &'plan ResolvedGroupedAggPlan<'input>) -> GpuResult<Self> {
+impl GroupedAggSession {
+    pub fn start(plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<Self> {
+        if plan.desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX {
+            return Err(descriptor_error(
+                "hash grouped aggregation is one-shot because workspace owners are chunk-relative",
+            ));
+        }
         Ok(Self {
-            plan,
+            plan_shape: plan.desc,
             workspace: GroupedAggWorkspace::allocate(plan)?,
             state: LifecycleState::Ready,
             _not_send_sync: PhantomData,
         })
     }
 
-    pub fn accumulate(&mut self, chunk: &GroupedAggChunk<'_, 'input>) -> GpuResult<()> {
-        if !stable_shape_matches(&self.plan.desc, &chunk.desc) {
+    fn validate_plan(&self, plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<()> {
+        if plan.desc.row_count != self.plan_shape.row_count
+            || !stable_shape_matches(&self.plan_shape, &plan.desc)
+        {
+            return Err(descriptor_error(
+                "resolved grouped plan changed during a bounded session",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn accumulate(&mut self, chunk: &GroupedAggChunk<'_, '_>) -> GpuResult<()> {
+        if !stable_shape_matches(&self.plan_shape, &chunk.desc) {
             return Err(descriptor_error("chunk does not match session plan"));
         }
         let (flags, next) = lifecycle_flags(self.state, LifecycleAction::Accumulate)?;
-        match execute_call(chunk.desc, flags, &mut self.workspace, None) {
+        match execute_call(&chunk.desc, flags, &mut self.workspace, None) {
             Ok(None) => {
                 self.state = next;
                 Ok(())
@@ -1101,11 +1274,13 @@ impl<'plan, 'input> GroupedAggSession<'plan, 'input> {
 
     pub fn finalize(
         &mut self,
+        plan: &ResolvedGroupedAggPlan<'_>,
         output: &mut GroupedAggOutputStorage,
     ) -> GpuResult<GroupedAggOutcome> {
-        output.validate_for_plan(self.plan)?;
+        self.validate_plan(plan)?;
+        output.validate_for_plan(plan)?;
         let (flags, next) = lifecycle_flags(self.state, LifecycleAction::Finalize)?;
-        match execute_call(self.plan.desc, flags, &mut self.workspace, Some(output)) {
+        match execute_call(&plan.desc, flags, &mut self.workspace, Some(output)) {
             Ok(Some(outcome)) => {
                 self.state = next;
                 Ok(outcome)
@@ -1120,9 +1295,10 @@ impl<'plan, 'input> GroupedAggSession<'plan, 'input> {
         }
     }
 
-    pub fn reset(&mut self) -> GpuResult<()> {
+    pub fn reset(&mut self, plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<()> {
+        self.validate_plan(plan)?;
         let (flags, next) = lifecycle_flags(self.state, LifecycleAction::Reset)?;
-        match execute_call(self.plan.desc, flags, &mut self.workspace, None) {
+        match execute_call(&plan.desc, flags, &mut self.workspace, None) {
             Ok(None) => {
                 self.state = next;
                 Ok(())
@@ -1391,6 +1567,17 @@ mod tests {
     }
 
     #[test]
+    fn hash_session_is_rejected_before_workspace_allocation() {
+        let mut descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
+        descriptor.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+        descriptor.keys[0].values.tag = PgaccelValTag::Int64;
+        // SAFETY: pointer-free zero-row fixture is rejected before dispatch.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
+            .expect("hash fixture is structurally valid");
+        assert!(GroupedAggSession::start(&plan).is_err());
+    }
+
+    #[test]
     fn lifecycle_flags_reject_use_after_finalize_and_allow_reset() {
         let (first, accumulating) =
             lifecycle_flags(LifecycleState::Ready, LifecycleAction::Accumulate)
@@ -1409,6 +1596,31 @@ mod tests {
                 .1,
             LifecycleState::Ready
         );
+    }
+
+    #[test]
+    fn non_accumulating_lifecycle_calls_submit_zero_rows() {
+        let mut descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        descriptor.row_count = 37;
+
+        let finalize =
+            lifecycle_call_descriptor(&descriptor, abi::PGACCEL_GROUPED_AGG_EXEC_FINALIZE);
+        assert_eq!(finalize.row_count, 0);
+        assert_eq!(
+            finalize.execution_flags,
+            abi::PGACCEL_GROUPED_AGG_EXEC_FINALIZE
+        );
+
+        let reset = lifecycle_call_descriptor(&descriptor, abi::PGACCEL_GROUPED_AGG_EXEC_RESET);
+        assert_eq!(reset.row_count, 0);
+        assert_eq!(reset.execution_flags, abi::PGACCEL_GROUPED_AGG_EXEC_RESET);
+
+        let accumulate =
+            lifecycle_call_descriptor(&descriptor, abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE);
+        assert_eq!(accumulate.row_count, 37);
+        let one_shot =
+            lifecycle_call_descriptor(&descriptor, abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN);
+        assert_eq!(one_shot.row_count, 37);
     }
 
     #[test]
@@ -1474,6 +1686,79 @@ mod tests {
         smaller.row_count = 4;
         // SAFETY: fixture is pointer-free and the smaller shape is not dispatched.
         assert!(unsafe { GroupedAggChunk::from_abi(&plan, smaller) }.is_ok());
+    }
+
+    #[test]
+    fn row_chunk_advances_every_fact_row_lane_and_keeps_lookups_fixed() {
+        static KEYS: [i32; 8] = [0; 8];
+        static VALUES: [i64; 8] = [0; 8];
+        static NULLS: [u8; 8] = [0; 8];
+        static MASK: [i8; 8] = [1; 8];
+        static DIM_FACT_KEYS: [i32; 8] = [0; 8];
+        static KEY_LOOKUP: [i32; 4] = [0; 4];
+        static DIM_MATCH: [u8; 4] = [1; 4];
+
+        let mut descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        descriptor.row_count = 8;
+        descriptor.keys[0].values.values = KEYS.as_ptr().cast();
+        descriptor.keys[0].values.nulls = NULLS.as_ptr();
+        descriptor.keys[0].lookup_by_key = KEY_LOOKUP.as_ptr();
+        descriptor.measures[0].value.values = VALUES.as_ptr().cast();
+        descriptor.measures[0].value.nulls = NULLS.as_ptr();
+        descriptor.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64;
+        descriptor.measures[0].value.element_bytes = 8;
+        descriptor.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        descriptor.where_filter.mask = MASK.as_ptr();
+        descriptor.measure_filters[0].kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        descriptor.measure_filters[0].mask = MASK.as_ptr();
+        descriptor.dim_count = 1;
+        descriptor.dims[0].fact_key.values = DIM_FACT_KEYS.as_ptr().cast();
+        descriptor.dims[0].fact_key.nulls = NULLS.as_ptr();
+        descriptor.dims[0].fact_key.tag = PgaccelValTag::Int32;
+        descriptor.dims[0].match_by_key = DIM_MATCH.as_ptr();
+
+        // SAFETY: all static row lanes span the declared eight rows. This test
+        // only inspects the derived descriptor and performs no GPU dispatch.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
+            .expect("row-shaped fixture is structurally valid");
+        let chunk = plan.row_chunk(3, 2).expect("bounded row chunk resolves");
+
+        assert_eq!(chunk.desc.row_count, 2);
+        // SAFETY: index three is inside every eight-element static fixture.
+        unsafe {
+            assert_eq!(
+                chunk.desc.keys[0].values.values,
+                KEYS.as_ptr().add(3).cast()
+            );
+            assert_eq!(chunk.desc.keys[0].values.nulls, NULLS.as_ptr().add(3));
+            assert_eq!(
+                chunk.desc.measures[0].value.values,
+                VALUES.as_ptr().add(3).cast()
+            );
+            assert_eq!(chunk.desc.measures[0].value.nulls, NULLS.as_ptr().add(3));
+            assert_eq!(chunk.desc.where_filter.mask, MASK.as_ptr().add(3));
+            assert_eq!(chunk.desc.measure_filters[0].mask, MASK.as_ptr().add(3));
+            assert_eq!(
+                chunk.desc.dims[0].fact_key.values,
+                DIM_FACT_KEYS.as_ptr().add(3).cast()
+            );
+            assert_eq!(chunk.desc.dims[0].fact_key.nulls, NULLS.as_ptr().add(3));
+        }
+        assert_eq!(chunk.desc.keys[0].lookup_by_key, KEY_LOOKUP.as_ptr());
+        assert_eq!(chunk.desc.dims[0].match_by_key, DIM_MATCH.as_ptr());
+    }
+
+    #[test]
+    fn row_chunk_rejects_overflow_and_out_of_bounds_ranges() {
+        let mut descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        descriptor.row_count = 8;
+        // SAFETY: pointer-free fixture is never dispatched.
+        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
+            .expect("fixture is structurally valid");
+
+        assert!(plan.row_chunk(7, 2).is_err());
+        assert!(plan.row_chunk(usize::MAX, 2).is_err());
+        assert!(plan.row_chunk(8, 0).is_ok());
     }
 
     #[test]

@@ -13,6 +13,9 @@ use super::artifact::{
 };
 use super::output::{DescriptorAggOutput, validate_h3_compact_key_buffers};
 use super::spatial::{SpatialAggArtifact, SpatialTransformPlan, SpatialWorkspace};
+use crate::engine::executor::bounded::{
+    BoundedDispatchError, cleanup_before_rethrow, run_bounded_dispatch,
+};
 use crate::engine::ffi::syscache::{PostgisCatalogIdentity, resolve_postgis_catalog};
 use crate::engine::residency::{
     ArtifactEnsureOutcome, DerivedArtifactIdentity, ResidentByteAccounting, ResidentColumnRef,
@@ -29,8 +32,8 @@ use crate::engine::spec::{
 };
 use crate::gpu::{
     GpuError, GpuErrorDomain, GpuOperation, GpuStatusDetail, GroupedAggOutcome,
-    GroupedAggOutputStorage, PgaccelExprUsmCol, PgaccelVal, PgaccelValTag, ResolvedGroupedAggPlan,
-    execute_grouped_agg_one_shot,
+    GroupedAggOutputStorage, GroupedAggSession, PgaccelExprUsmCol, PgaccelVal, PgaccelValTag,
+    ResolvedGroupedAggPlan, execute_grouped_agg_one_shot,
 };
 
 const BOOLOID: u32 = 16;
@@ -729,6 +732,7 @@ pub(super) struct DescriptorAggPlan {
     artifact_columns: Vec<ResidentColumnRef>,
     dispatch_columns: Vec<ResidentColumnRef>,
     max_groups: usize,
+    dispatch_chunk_rows: usize,
     artifact_kind: DescriptorArtifactKind,
 }
 
@@ -887,6 +891,11 @@ impl DescriptorAggPlan {
             return Err("spatial source column is missing from artifact requests".to_owned());
         }
         let dispatch_columns = dispatch_column_refs(&spec)?;
+        let dispatch_chunk_rows = if h3_parent_group(&spec).is_some() {
+            limits.gpu_h3_max_chunk_rows
+        } else {
+            limits.gpu_reduce_max_chunk
+        };
         Ok(Self {
             spec,
             projection,
@@ -896,6 +905,7 @@ impl DescriptorAggPlan {
             artifact_columns,
             dispatch_columns,
             max_groups: limits.gpu_hash_agg_max_groups,
+            dispatch_chunk_rows,
             artifact_kind,
         })
     }
@@ -1112,36 +1122,56 @@ impl DescriptorAggPlan {
     fn execute_once(
         &self,
     ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
-        match &self.artifact_kind {
-            DescriptorArtifactKind::Dense => {
-                with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
-                    pg_sys::Oid::from(self.spec.fact_rel),
+        let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
+        let result: Result<DescriptorAggDispatch, DescriptorDispatchFailure> =
+            match &self.artifact_kind {
+                DescriptorArtifactKind::Dense => execute_bounded_dense_artifact(
+                    owner_relid,
                     &self.identity,
                     &self.dispatch_columns,
-                    |inputs| build_and_execute(inputs, &self.dispatch_columns, &self.projection),
-                )
-            }
-            DescriptorArtifactKind::H3Parent { cell, .. } => with_derived_artifact_inputs::<
-                H3ParentArtifact,
-                _,
-            >(
-                pg_sys::Oid::from(self.spec.fact_rel),
-                &self.identity,
-                &self.dispatch_columns,
-                |inputs| {
-                    build_and_execute_h3(inputs, &self.dispatch_columns, *cell, &self.projection)
-                },
-            ),
-            DescriptorArtifactKind::Spatial(_) => {
-                with_derived_artifact_inputs::<SpatialAggArtifact, _>(
-                    pg_sys::Oid::from(self.spec.fact_rel),
-                    &self.identity,
-                    &self.dispatch_columns,
-                    |inputs| {
-                        build_and_execute_spatial(inputs, &self.dispatch_columns, &self.projection)
-                    },
-                )
-            }
+                    &self.projection,
+                    self.dispatch_chunk_rows,
+                ),
+                DescriptorArtifactKind::H3Parent { cell, .. } => {
+                    match with_derived_artifact_inputs::<H3ParentArtifact, _>(
+                        owner_relid,
+                        &self.identity,
+                        &self.dispatch_columns,
+                        |inputs| {
+                            build_and_execute_h3_one_shot(
+                                inputs,
+                                &self.dispatch_columns,
+                                *cell,
+                                &self.projection,
+                            )
+                        },
+                    ) {
+                        Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
+                        Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
+                    }
+                }
+                DescriptorArtifactKind::Spatial(_) => {
+                    match with_derived_artifact_inputs::<SpatialAggArtifact, _>(
+                        owner_relid,
+                        &self.identity,
+                        &self.dispatch_columns,
+                        |inputs| {
+                            build_and_execute_spatial(
+                                inputs,
+                                &self.dispatch_columns,
+                                &self.projection,
+                            )
+                        },
+                    ) {
+                        Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
+                        Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
+                    }
+                }
+            };
+        match result {
+            Ok(dispatch) => Ok(Ok(dispatch)),
+            Err(DescriptorDispatchFailure::Residency(error)) => Err(error),
+            Err(DescriptorDispatchFailure::Execution(error)) => Ok(Err(error)),
         }
     }
 
@@ -1167,6 +1197,7 @@ impl DescriptorAggPlan {
 pub(super) struct DescriptorAggDispatch {
     pub output: DescriptorAggOutput,
     pub fact_rows: usize,
+    pub batches_executed: u64,
     pub dispatch_time_us: u64,
     pub residency: Option<DescriptorResidencyReport>,
 }
@@ -1735,41 +1766,6 @@ fn build_h3_descriptor(
     Ok(desc)
 }
 
-fn build_and_execute(
-    inputs: ResolvedDerivedInputs<'_, DescriptorAggArtifact>,
-    requests: &[ResidentColumnRef],
-    projection: &AggOutputProjection,
-) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
-    let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
-        .map_err(DescriptorAggExecutionError::Failure)?;
-    // SAFETY: every active pointer is owned by the artifact/raw resident views
-    // held by this residency callback and the kernel call below is synchronous.
-    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
-        .map_err(|error| gpu_execution_error("generic aggregate descriptor rejected", error))?;
-    let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
-        gpu_execution_error("generic aggregate output allocation failed", error)
-    })?;
-    let dispatch_started = Instant::now();
-    let outcome = execute_grouped_agg_one_shot(&plan, &mut storage)
-        .map_err(|error| gpu_execution_error("generic aggregate kernel failed", error))?;
-    let dispatch_time_us =
-        u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    let output = DescriptorAggOutput::new(
-        storage,
-        outcome,
-        inputs.artifact.domains.clone(),
-        inputs.artifact.resolved_spec.clone(),
-        projection.clone(),
-    )
-    .map_err(DescriptorAggExecutionError::Failure)?;
-    Ok(DescriptorAggDispatch {
-        output,
-        fact_rows: inputs.artifact.fact_rows,
-        dispatch_time_us,
-        residency: None,
-    })
-}
-
 fn build_and_execute_spatial(
     inputs: ResolvedDerivedInputs<'_, SpatialAggArtifact>,
     requests: &[ResidentColumnRef],
@@ -1800,12 +1796,13 @@ fn build_and_execute_spatial(
     Ok(DescriptorAggDispatch {
         output,
         fact_rows: inputs.artifact.base.fact_rows,
+        batches_executed: 1,
         dispatch_time_us,
         residency: None,
     })
 }
 
-fn build_and_execute_h3(
+fn build_and_execute_h3_one_shot(
     inputs: ResolvedDerivedInputs<'_, H3ParentArtifact>,
     requests: &[ResidentColumnRef],
     cell: ColumnRef,
@@ -1813,8 +1810,9 @@ fn build_and_execute_h3(
 ) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
     let desc = build_h3_descriptor(inputs.artifact, requests, &inputs.columns, cell)
         .map_err(DescriptorAggExecutionError::Failure)?;
-    // SAFETY: every active pointer remains pinned by the residency callback
-    // through the synchronous grouped-aggregate lifecycle below.
+    // SAFETY: hash/H3 is deliberately one-shot because its native owner
+    // indexes are relative to this exact row pointer range. Every pointer is
+    // pinned by the active residency callback through the synchronous call.
     let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
         .map_err(|error| gpu_execution_error("H3 grouped descriptor rejected", error))?;
     let mut storage = GroupedAggOutputStorage::new(&plan)
@@ -1837,6 +1835,178 @@ fn build_and_execute_h3(
     Ok(DescriptorAggDispatch {
         output,
         fact_rows: inputs.artifact.fact_rows,
+        batches_executed: 1,
+        dispatch_time_us,
+        residency: None,
+    })
+}
+
+struct DescriptorExecutionMetadata {
+    fact_rows: usize,
+    domains: std::rc::Rc<[super::artifact::GroupDomain]>,
+    resolved_spec: AggQuerySpec,
+}
+
+enum DescriptorDispatchFailure {
+    Residency(ResidentLoadError),
+    Execution(DescriptorAggExecutionError),
+}
+
+enum DenseBoundedFailure {
+    Dispatch(DescriptorDispatchFailure),
+    Interrupt(Box<pg_sys::panic::CaughtError>),
+}
+
+fn capture_postgres_interrupt() -> Option<pg_sys::panic::CaughtError> {
+    pg_sys::PgTryBuilder::new(|| {
+        pgrx::check_for_interrupts!();
+        None
+    })
+    .catch_others(Some)
+    .execute()
+}
+
+fn execute_bounded_dense_artifact(
+    owner_relid: pg_sys::Oid,
+    identity: &DerivedArtifactIdentity,
+    requests: &[ResidentColumnRef],
+    projection: &AggOutputProjection,
+    max_chunk_rows: usize,
+) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
+    if max_chunk_rows == 0 {
+        return Err(DescriptorDispatchFailure::Execution(
+            DescriptorAggExecutionError::Failure(
+                "grouped aggregate chunk limit is zero".to_owned(),
+            ),
+        ));
+    }
+
+    let initialized = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
+        owner_relid,
+        identity,
+        requests,
+        |inputs| {
+            let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
+                .map_err(DescriptorAggExecutionError::Failure)?;
+            // SAFETY: every active pointer is pinned by this exact residency
+            // callback. The session copies only shape identity; it never
+            // submits or dereferences those pointer values after return.
+            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
+                .map_err(|error| gpu_execution_error("grouped descriptor rejected", error))?;
+            let storage = GroupedAggOutputStorage::new(&plan)
+                .map_err(|error| gpu_execution_error("grouped output allocation failed", error))?;
+            let session = GroupedAggSession::start(&plan)
+                .map_err(|error| gpu_execution_error("grouped session setup failed", error))?;
+            let metadata = DescriptorExecutionMetadata {
+                fact_rows: inputs.artifact.fact_rows,
+                domains: inputs.artifact.domains.clone(),
+                resolved_spec: inputs.artifact.resolved_spec.clone(),
+            };
+            Ok::<_, DescriptorAggExecutionError>((session, storage, metadata))
+        },
+    )
+    .map_err(DescriptorDispatchFailure::Residency)?
+    .map_err(DescriptorDispatchFailure::Execution)?;
+    let (mut session, mut storage, metadata) = initialized;
+
+    let dispatch_started = Instant::now();
+    let dispatch = run_bounded_dispatch(
+        metadata.fact_rows,
+        max_chunk_rows,
+        |range| {
+            with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
+                owner_relid,
+                identity,
+                requests,
+                |inputs| {
+                    let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
+                        .map_err(DescriptorAggExecutionError::Failure)?;
+                    // SAFETY: the descriptor is used only during this synchronous
+                    // callback while all row pointers remain pinned.
+                    let plan =
+                        unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.map_err(|error| {
+                            gpu_execution_error("grouped descriptor changed between chunks", error)
+                        })?;
+                    let chunk =
+                        plan.row_chunk(range.first_row, range.row_count)
+                            .map_err(|error| {
+                                gpu_execution_error("grouped chunk descriptor rejected", error)
+                            })?;
+                    session
+                        .accumulate(&chunk)
+                        .map_err(|error| gpu_execution_error("grouped chunk kernel failed", error))
+                },
+            )
+            .map_err(DescriptorDispatchFailure::Residency)
+            .and_then(|result| result.map_err(DescriptorDispatchFailure::Execution))
+            .map_err(DenseBoundedFailure::Dispatch)
+        },
+        || {
+            // This closure runs only after the preceding residency callback
+            // returned and its RefCell guard was dropped.
+            capture_postgres_interrupt().map_or(Ok(()), |caught| {
+                Err(DenseBoundedFailure::Interrupt(Box::new(caught)))
+            })
+        },
+    );
+    let launches = match dispatch {
+        Ok(launches) => launches,
+        Err(BoundedDispatchError::ZeroChunkLimit) => unreachable!("checked before setup"),
+        Err(
+            BoundedDispatchError::Dispatch(error) | BoundedDispatchError::InterruptBoundary(error),
+        ) => match error {
+            DenseBoundedFailure::Interrupt(caught) => {
+                return cleanup_before_rethrow((session, storage), caught, |caught| {
+                    (*caught).rethrow()
+                });
+            }
+            DenseBoundedFailure::Dispatch(error) => return Err(error),
+        },
+    };
+
+    let outcome = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
+        owner_relid,
+        identity,
+        requests,
+        |inputs| {
+            let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
+                .map_err(DescriptorAggExecutionError::Failure)?;
+            // SAFETY: finalization is synchronous and this fresh plan remains
+            // pinned until the callback returns.
+            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.map_err(|error| {
+                gpu_execution_error("grouped descriptor changed before finalize", error)
+            })?;
+            session
+                .finalize(&plan, &mut storage)
+                .map_err(|error| gpu_execution_error("grouped finalization failed", error))
+        },
+    )
+    .map_err(DescriptorDispatchFailure::Residency)?
+    .map_err(DescriptorDispatchFailure::Execution)?;
+    // Finalize is another synchronous native call. Capture only after its
+    // store guard has been released, then release detached resources before
+    // preserving the original PostgreSQL error and SQLSTATE.
+    if let Some(caught) = capture_postgres_interrupt() {
+        return cleanup_before_rethrow((session, storage), caught, |caught| caught.rethrow());
+    }
+
+    let dispatch_time_us =
+        u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let output = DescriptorAggOutput::new(
+        storage,
+        outcome,
+        metadata.domains,
+        metadata.resolved_spec,
+        projection.clone(),
+    )
+    .map_err(DescriptorAggExecutionError::Failure)
+    .map_err(DescriptorDispatchFailure::Execution)?;
+    Ok(DescriptorAggDispatch {
+        output,
+        fact_rows: metadata.fact_rows,
+        batches_executed: u64::try_from(launches)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
         dispatch_time_us,
         residency: None,
     })
