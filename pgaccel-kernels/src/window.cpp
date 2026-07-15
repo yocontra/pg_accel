@@ -40,6 +40,7 @@ template <typename T>
 class device_buffer {
  public:
   explicit device_buffer(sycl::queue& q) : q_(q) {}
+  device_buffer(sycl::queue& q, T* ptr) : q_(q), ptr_(ptr) {}
   device_buffer(const device_buffer&) = delete;
   device_buffer& operator=(const device_buffer&) = delete;
 
@@ -117,22 +118,21 @@ static pgaccel_status sycl_window_row_number(const uint8_t* partition_starts, si
 
   try {
     device_partition_bounds bounds(*q);
-    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
-    if (status != PGACCEL_OK)
-      return status;
+    if (build_device_partition_bounds(*q, partition_starts, count, bounds) != PGACCEL_OK)
+      return PGACCEL_OOM;
 
-    device_buffer<int64_t> result_buffer(*q);
-    if (!result_buffer.allocate(count))
+    int64_t* d_results = sycl::malloc_device<int64_t>(count, *q);
+    device_buffer<int64_t> result_buffer(*q, d_results);
+    if (!d_results)
       return PGACCEL_OOM;
 
     const size_t* d_part_start = bounds.starts.get();
-    int64_t* d_results = result_buffer.get();
     q->parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
        size_t i = id[0];
        d_results[i] = static_cast<int64_t>(i - d_part_start[i] + 1);
      }).wait_and_throw();
 
-    pgaccel_d2h(*q, results, d_results, count);
+    q->memcpy(results, d_results, count * sizeof(int64_t)).wait_and_throw();
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -154,27 +154,28 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
 
   try {
     device_partition_bounds bounds(*q);
-    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
-    if (status != PGACCEL_OK)
-      return status;
+    if (build_device_partition_bounds(*q, partition_starts, count, bounds) != PGACCEL_OK)
+      return PGACCEL_OOM;
 
     device_buffer<double> value_buffer(*q);
     device_buffer<uint8_t> null_buffer(*q);
-    device_buffer<double> result_buffer(*q);
-    device_buffer<uint8_t> result_null_buffer(*q);
     const bool has_nulls = null_mask != nullptr;
     const bool has_result_nulls = result_nulls != nullptr;
+    double* d_results = sycl::malloc_device<double>(count, *q);
+    uint8_t* d_result_nulls = nullptr;
+    if (has_result_nulls)
+      d_result_nulls = sycl::malloc_device<uint8_t>(count, *q);
+    device_buffer<double> result_buffer(*q, d_results);
+    device_buffer<uint8_t> result_null_buffer(*q, d_result_nulls);
     if (!value_buffer.copy_from(values, count) ||
-        (has_nulls && !null_buffer.copy_from(null_mask, count)) || !result_buffer.allocate(count) ||
-        (has_result_nulls && !result_null_buffer.allocate(count))) {
+        (has_nulls && !null_buffer.copy_from(null_mask, count)) || !d_results ||
+        (has_result_nulls && !d_result_nulls)) {
       return PGACCEL_OOM;
     }
 
     const size_t* d_part_start = bounds.starts.get();
     const double* d_values = value_buffer.get();
     const uint8_t* d_null_mask = null_buffer.get();
-    double* d_results = result_buffer.get();
-    uint8_t* d_result_nulls = result_null_buffer.get();
     const size_t d_offset = static_cast<size_t>(offset);
     const double d_default = default_val;
 
@@ -200,9 +201,9 @@ static pgaccel_status sycl_window_lag(const uint8_t* partition_starts, const dou
        }
      }).wait_and_throw();
 
-    pgaccel_d2h(*q, results, d_results, count);
+    q->memcpy(results, d_results, count * sizeof(double)).wait_and_throw();
     if (has_result_nulls)
-      pgaccel_d2h(*q, result_nulls, d_result_nulls, count);
+      q->memcpy(result_nulls, d_result_nulls, count * sizeof(uint8_t)).wait_and_throw();
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -224,27 +225,28 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
 
   try {
     device_partition_bounds bounds(*q);
-    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
-    if (status != PGACCEL_OK)
-      return status;
+    if (build_device_partition_bounds(*q, partition_starts, count, bounds) != PGACCEL_OK)
+      return PGACCEL_OOM;
 
     device_buffer<double> value_buffer(*q);
     device_buffer<uint8_t> null_buffer(*q);
-    device_buffer<double> result_buffer(*q);
-    device_buffer<uint8_t> result_null_buffer(*q);
     const bool has_nulls = null_mask != nullptr;
     const bool has_result_nulls = result_nulls != nullptr;
+    double* d_results = sycl::malloc_device<double>(count, *q);
+    uint8_t* d_result_nulls = nullptr;
+    if (has_result_nulls)
+      d_result_nulls = sycl::malloc_device<uint8_t>(count, *q);
+    device_buffer<double> result_buffer(*q, d_results);
+    device_buffer<uint8_t> result_null_buffer(*q, d_result_nulls);
     if (!value_buffer.copy_from(values, count) ||
-        (has_nulls && !null_buffer.copy_from(null_mask, count)) || !result_buffer.allocate(count) ||
-        (has_result_nulls && !result_null_buffer.allocate(count))) {
+        (has_nulls && !null_buffer.copy_from(null_mask, count)) || !d_results ||
+        (has_result_nulls && !d_result_nulls)) {
       return PGACCEL_OOM;
     }
 
     const size_t* d_part_end = bounds.ends.get();
     const double* d_values = value_buffer.get();
     const uint8_t* d_null_mask = null_buffer.get();
-    double* d_results = result_buffer.get();
-    uint8_t* d_result_nulls = result_null_buffer.get();
     const size_t d_offset = static_cast<size_t>(offset);
     const double d_default = default_val;
 
@@ -270,9 +272,9 @@ static pgaccel_status sycl_window_lead(const uint8_t* partition_starts, const do
        }
      }).wait_and_throw();
 
-    pgaccel_d2h(*q, results, d_results, count);
+    q->memcpy(results, d_results, count * sizeof(double)).wait_and_throw();
     if (has_result_nulls)
-      pgaccel_d2h(*q, result_nulls, d_result_nulls, count);
+      q->memcpy(result_nulls, d_result_nulls, count * sizeof(uint8_t)).wait_and_throw();
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -293,20 +295,19 @@ static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const u
 
   try {
     device_partition_bounds bounds(*q);
-    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
-    if (status != PGACCEL_OK)
-      return status;
+    if (build_device_partition_bounds(*q, partition_starts, count, bounds) != PGACCEL_OK)
+      return PGACCEL_OOM;
 
     device_buffer<uint8_t> null_buffer(*q);
-    device_buffer<int64_t> result_buffer(*q);
     const bool has_nulls = null_mask != nullptr;
-    if ((has_nulls && !null_buffer.copy_from(null_mask, count)) || !result_buffer.allocate(count)) {
+    int64_t* d_results = sycl::malloc_device<int64_t>(count, *q);
+    device_buffer<int64_t> result_buffer(*q, d_results);
+    if ((has_nulls && !null_buffer.copy_from(null_mask, count)) || !d_results) {
       return PGACCEL_OOM;
     }
 
     const size_t* d_part_start = bounds.starts.get();
     const uint8_t* d_null_mask = null_buffer.get();
-    int64_t* d_results = result_buffer.get();
     q->single_task([=]() {
        int64_t running_count = 0;
        for (size_t i = 0; i < count; ++i) {
@@ -318,7 +319,7 @@ static pgaccel_status sycl_window_count(const uint8_t* partition_starts, const u
        }
      }).wait_and_throw();
 
-    pgaccel_d2h(*q, results, d_results, count);
+    q->memcpy(results, d_results, count * sizeof(int64_t)).wait_and_throw();
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -339,23 +340,22 @@ static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const dou
 
   try {
     device_partition_bounds bounds(*q);
-    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
-    if (status != PGACCEL_OK)
-      return status;
+    if (build_device_partition_bounds(*q, partition_starts, count, bounds) != PGACCEL_OK)
+      return PGACCEL_OOM;
 
     device_buffer<double> value_buffer(*q);
     device_buffer<uint8_t> null_buffer(*q);
-    device_buffer<double> result_buffer(*q);
     const bool has_nulls = null_mask != nullptr;
+    double* d_results = sycl::malloc_device<double>(count, *q);
+    device_buffer<double> result_buffer(*q, d_results);
     if (!value_buffer.copy_from(values, count) ||
-        (has_nulls && !null_buffer.copy_from(null_mask, count)) || !result_buffer.allocate(count)) {
+        (has_nulls && !null_buffer.copy_from(null_mask, count)) || !d_results) {
       return PGACCEL_OOM;
     }
 
     const size_t* d_part_start = bounds.starts.get();
     const double* d_values = value_buffer.get();
     const uint8_t* d_null_mask = null_buffer.get();
-    double* d_results = result_buffer.get();
     q->single_task([=]() {
        double running_sum = 0.0;
        double compensation = 0.0;
@@ -374,7 +374,7 @@ static pgaccel_status sycl_window_sum(const uint8_t* partition_starts, const dou
        }
      }).wait_and_throw();
 
-    pgaccel_d2h(*q, results, d_results, count);
+    q->memcpy(results, d_results, count * sizeof(double)).wait_and_throw();
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -396,18 +396,17 @@ static pgaccel_status sycl_window_rank(const uint8_t* partition_starts, const do
 
   try {
     device_partition_bounds bounds(*q);
-    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
-    if (status != PGACCEL_OK)
-      return status;
+    if (build_device_partition_bounds(*q, partition_starts, count, bounds) != PGACCEL_OK)
+      return PGACCEL_OOM;
 
     device_buffer<double> key_buffer(*q);
-    device_buffer<int64_t> result_buffer(*q);
-    if (!key_buffer.copy_from(sort_keys, count) || !result_buffer.allocate(count))
+    int64_t* d_results = sycl::malloc_device<int64_t>(count, *q);
+    device_buffer<int64_t> result_buffer(*q, d_results);
+    if (!key_buffer.copy_from(sort_keys, count) || !d_results)
       return PGACCEL_OOM;
 
     const size_t* d_part_start = bounds.starts.get();
     const double* d_keys = key_buffer.get();
-    int64_t* d_results = result_buffer.get();
     q->single_task([=]() {
        int64_t current_rank = 1;
        for (size_t i = 0; i < count; ++i) {
@@ -426,7 +425,7 @@ static pgaccel_status sycl_window_rank(const uint8_t* partition_starts, const do
        }
      }).wait_and_throw();
 
-    pgaccel_d2h(*q, results, d_results, count);
+    q->memcpy(results, d_results, count * sizeof(int64_t)).wait_and_throw();
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
@@ -444,18 +443,17 @@ static pgaccel_status sycl_window_dense_rank(const uint8_t* partition_starts,
 
   try {
     device_partition_bounds bounds(*q);
-    pgaccel_status status = build_device_partition_bounds(*q, partition_starts, count, bounds);
-    if (status != PGACCEL_OK)
-      return status;
+    if (build_device_partition_bounds(*q, partition_starts, count, bounds) != PGACCEL_OK)
+      return PGACCEL_OOM;
 
     device_buffer<double> key_buffer(*q);
-    device_buffer<int64_t> result_buffer(*q);
-    if (!key_buffer.copy_from(sort_keys, count) || !result_buffer.allocate(count))
+    int64_t* d_results = sycl::malloc_device<int64_t>(count, *q);
+    device_buffer<int64_t> result_buffer(*q, d_results);
+    if (!key_buffer.copy_from(sort_keys, count) || !d_results)
       return PGACCEL_OOM;
 
     const size_t* d_part_start = bounds.starts.get();
     const double* d_keys = key_buffer.get();
-    int64_t* d_results = result_buffer.get();
     q->single_task([=]() {
        int64_t dense_rank = 1;
        for (size_t i = 0; i < count; ++i) {
@@ -473,7 +471,7 @@ static pgaccel_status sycl_window_dense_rank(const uint8_t* partition_starts,
        }
      }).wait_and_throw();
 
-    pgaccel_d2h(*q, results, d_results, count);
+    q->memcpy(results, d_results, count * sizeof(int64_t)).wait_and_throw();
     return PGACCEL_OK;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure(__func__, &e);
