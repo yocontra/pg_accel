@@ -5619,17 +5619,43 @@ class _PathAuditor:
             or shadow_lines
             or unsafe_contributing_helpers
         )
-        if (
-            function.is_status
-            and returns
-            and (success_paths == 0 or success_paths == zero_success_paths)
-            and not failure_only_hazards
-        ):
-            detail = (
-                "all reachable returns are explicit failure statuses"
-                if success_paths == 0
-                else "successful returns are exact zero-work paths; all nonempty paths fail explicitly"
+        reachable_returns = [
+            (index, [token.value for token in expression])
+            for index, expression in returns
+            if _index_is_reachable(
+                self.tokens, function, index, regions, lambda_ranges
             )
+        ]
+        exact_null_decline = bool(
+            not function.is_status
+            and reachable_returns
+            and all(
+                values in (["nullptr"], ["NULL"], ["0"])
+                for _, values in reachable_returns
+            )
+            and not failure_only_hazards
+            and not raw_launches
+        )
+        if (
+            exact_null_decline
+            or (
+                function.is_status
+                and returns
+                and (success_paths == 0 or success_paths == zero_success_paths)
+                and not failure_only_hazards
+            )
+        ):
+            if exact_null_decline:
+                detail = (
+                    "all reachable returns are exact null values and no device work "
+                    "is launched"
+                )
+            else:
+                detail = (
+                    "all reachable returns are explicit failure statuses"
+                    if success_paths == 0
+                    else "successful returns are exact zero-work paths; all nonempty paths fail explicitly"
+                )
             proof = _Proof(
                 True,
                 detail,

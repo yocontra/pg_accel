@@ -1133,6 +1133,71 @@ class ControlFlowEvasionTests(unittest.TestCase):
         self.assertIn("unresolved_helper", finding.classifications)
         self.assertIn("missing_device_helper", finding.message)
 
+    def test_nonstatus_exact_null_decline_is_failure_only(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" void* pgaccel_decline_nullptr(const int* data, size_t count) {
+              (void)data;
+              (void)count;
+              return nullptr;
+            }
+            extern "C" void* pgaccel_decline_null(const int* data) {
+              (void)data;
+              return NULL;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 2)
+        self.assertFalse(result.findings)
+        for entry in result.entrypoint_audits:
+            self.assertIn("failure_only", entry.classifications)
+            self.assertIn("exact null", entry.detail)
+
+    def test_nonstatus_decline_hostile_success_and_gpu_mutants_fail(self) -> None:
+        result = audit_fixture(
+            r"""
+            extern "C" void* pgaccel_nonnull_mutant() {
+              static int value = 1;
+              return &value;
+            }
+            extern "C" void* pgaccel_conditional_mutant(bool succeed) {
+              static int value = 1;
+              if (succeed) return &value;
+              return nullptr;
+            }
+            extern "C" void* pgaccel_launch_then_null_mutant(int* out) {
+              sycl::queue q;
+              q.single_task<LaunchThenNull>([=]() { *out = 1; }).wait();
+              return nullptr;
+            }
+            extern "C" void* pgaccel_counter_then_null_mutant() {
+              pgaccel_record_gpu_exec();
+              return nullptr;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 4)
+        self.assertEqual(len(result.findings), 4)
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        for entry in entries.values():
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertNotIn("failure_only", entry.classifications)
+        self.assertIn(
+            "missing_device_terminal", entries["pgaccel_nonnull_mutant"].classifications
+        )
+        self.assertIn(
+            "missing_device_terminal",
+            entries["pgaccel_conditional_mutant"].classifications,
+        )
+        self.assertIn(
+            "device_dispatch",
+            entries["pgaccel_launch_then_null_mutant"].classifications,
+        )
+        self.assertIn(
+            "fake_gpu_counter",
+            entries["pgaccel_counter_then_null_mutant"].classifications,
+        )
+
     def test_recursive_helper_cycle_fails(self) -> None:
         result = audit_fixture(
             r"""
