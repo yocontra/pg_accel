@@ -1,0 +1,84 @@
+diff --git a/src/compiler/sscp/TargetSeparationPass.cpp b/src/compiler/sscp/TargetSeparationPass.cpp
+index f3202ceb..fdb65877 100644
+--- a/src/compiler/sscp/TargetSeparationPass.cpp
++++ b/src/compiler/sscp/TargetSeparationPass.cpp
+@@ -38,6 +38,7 @@
+ #include <llvm/Bitcode/BitcodeWriter.h>
+ #include <llvm/Passes/OptimizationLevel.h>
+ #include <llvm/Passes/PassBuilder.h>
++#include <llvm/Support/ErrorHandling.h>
+ #include <llvm/Support/raw_ostream.h>
+ #include <llvm/Transforms/Utils/Cloning.h>
+ #include <llvm/Support/CommandLine.h>
+@@ -278,6 +279,54 @@ void removeLinkerOptionsByPrefixes(
+   }
+ }
+ 
++static bool isHostProfileIntrinsic(const llvm::Function &F) {
++  return llvmutils::starts_with(F.getName(), "llvm.instrprof.");
++}
++
++static void requireNoHostProfileInstrumentation(const llvm::Module &M) {
++  for(const auto& F : M) {
++    if(isHostProfileIntrinsic(F)) {
++      llvm::report_fatal_error(
++          "host profiling intrinsic survived SSCP device separation: " +
++          F.getName());
++    }
++  }
++}
++
++static void stripHostProfileInstrumentation(llvm::Module &M) {
++  llvm::SmallVector<llvm::Function *, 8> ProfileIntrinsics;
++  for(auto& F : M) {
++    if(isHostProfileIntrinsic(F))
++      ProfileIntrinsics.push_back(&F);
++  }
++
++  for(auto* F : ProfileIntrinsics) {
++    llvm::SmallVector<llvm::CallBase *, 16> Calls;
++    for(auto* U : F->users()) {
++      auto* Call = llvm::dyn_cast<llvm::CallBase>(U);
++      if(!Call || Call->getCalledOperand()->stripPointerCasts() != F ||
++         !Call->getType()->isVoidTy()) {
++        llvm::report_fatal_error(
++            "unsupported use of host profiling intrinsic in SSCP device IR: " +
++            F->getName());
++      }
++      Calls.push_back(Call);
++    }
++
++    for(auto* Call : Calls)
++      Call->eraseFromParent();
++
++    if(!F->use_empty()) {
++      llvm::report_fatal_error(
++          "host profiling intrinsic still has uses in SSCP device IR: " +
++          F->getName());
++    }
++    F->eraseFromParent();
++  }
++
++  requireNoHostProfileInstrumentation(M);
++}
++
+ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
+                                                const std::vector<std::string>& DynamicFunctions,
+                                                std::vector<KernelInfo> &KernelInfoOutput,
+@@ -287,6 +336,7 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
+ 
+   std::unique_ptr<llvm::Module> DeviceModule = llvm::CloneModule(M);
+   DeviceModule->setModuleIdentifier("device." + DeviceModule->getModuleIdentifier());
++  stripHostProfileInstrumentation(*DeviceModule);
+   
+   llvm::LoopAnalysisManager LAM;
+   llvm::FunctionAnalysisManager FAM;
+@@ -476,6 +526,8 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
+     KernelInfoOutput.push_back(KI);
+   }
+ 
++  requireNoHostProfileInstrumentation(*DeviceModule);
++
+   return DeviceModule;
+ }
+ 

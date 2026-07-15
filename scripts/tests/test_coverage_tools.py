@@ -992,6 +992,9 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
         coverage_tools.write_json(
             coverage_dir / "sql-semantic-assertions.json", manifest
         )
+        patch_path = repo_root / "patches/adaptivecpp/sscp-host-coverage.patch"
+        patch_path.parent.mkdir(parents=True)
+        patch_path.write_text("fixture AdaptiveCpp coverage patch\n", encoding="utf-8")
         for command in (
             ["git", "init", "-q"],
             ["git", "config", "user.email", "coverage@example.invalid"],
@@ -1008,6 +1011,9 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
         ):
             source_path = coverage_dir / name
             (root / name).write_bytes(source_path.read_bytes())
+        (root / "adaptivecpp-sscp-host-coverage.patch").write_bytes(
+            patch_path.read_bytes()
+        )
 
         scope = coverage_tools.read_json(root / "scope.json")
         baseline = coverage_tools.read_json(root / "release-baseline.json")
@@ -1341,6 +1347,25 @@ raise SystemExit(2)
             ),
             0,
         )
+        device_object_root = root / "device-build/CMakeFiles/shared.dir"
+        device_object_root.mkdir(parents=True)
+        device_objects = []
+        for index in range(coverage_tools.BASELINE_CPP_SOURCES):
+            path = device_object_root / f"kernel_{index:02d}.cpp.o"
+            path.write_bytes(f"device-object-{index}\n".encode("ascii"))
+            device_objects.append(str(path))
+        self.assertEqual(
+            quiet_call(
+                coverage_tools.audit_device_profile_intrinsics,
+                argparse.Namespace(
+                    object=device_objects,
+                    object_root=str(device_object_root),
+                    object_dir=str(root / "cpp/device-objects"),
+                    output=str(root / "cpp/device-profile-audit.json"),
+                ),
+            ),
+            0,
+        )
 
         ctest_names = baseline["cpp"]["ctest_names"]
         families = baseline["cpp"]["oom_families"]
@@ -1503,6 +1528,9 @@ raise SystemExit(2)
                 "scope_sha256": coverage_tools.sha256(root / "scope.json"),
                 "baseline_sha256": coverage_tools.sha256(
                     root / "release-baseline.json"
+                ),
+                "adaptivecpp_patch_sha256": coverage_tools.sha256(
+                    root / "adaptivecpp-sscp-host-coverage.patch"
                 ),
                 "errors": [],
                 "passed": True,
@@ -1889,7 +1917,13 @@ raise SystemExit(2)
             self.assertEqual(self.aggregate(root), 1)
 
     def test_dirty_deadbeef_and_scope_drift_provenance_are_rejected(self) -> None:
-        for mutation in ("dirty", "deadbeef", "scope", "checkout_dirty"):
+        for mutation in (
+            "dirty",
+            "deadbeef",
+            "scope",
+            "adaptivecpp_patch",
+            "checkout_dirty",
+        ):
             with (
                 self.subTest(mutation=mutation),
                 tempfile.TemporaryDirectory() as directory,
@@ -1913,6 +1947,10 @@ raise SystemExit(2)
                         evidence = coverage_tools.read_json(evidence_path)
                         evidence["scope_sha256"] = provenance["scope_sha256"]
                         coverage_tools.write_json(evidence_path, evidence)
+                elif mutation == "adaptivecpp_patch":
+                    (root / "adaptivecpp-sscp-host-coverage.patch").write_text(
+                        "tampered\n", encoding="utf-8"
+                    )
                 else:
                     (root / "checkout/untracked.txt").write_text(
                         "dirty\n", encoding="utf-8"
@@ -2326,6 +2364,32 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(status, 1)
+
+    def test_device_profile_audit_rejects_intrinsic_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            object_root = root / "build/CMakeFiles/pgaccel_kernels_shared.dir/src"
+            object_root.mkdir(parents=True)
+            objects = []
+            for index in range(coverage_tools.BASELINE_CPP_SOURCES):
+                path = object_root / f"kernel_{index:02d}.cpp.o"
+                path.write_bytes(f"host-object-{index}\n".encode("ascii"))
+                objects.append(str(path))
+            args = argparse.Namespace(
+                object=objects,
+                object_root=str(object_root.parent),
+                object_dir=str(root / "cpp/device-objects"),
+                output=str(root / "cpp/device-profile-audit.json"),
+            )
+
+            self.assertEqual(quiet_call(coverage_tools.audit_device_profile_intrinsics, args), 0)
+            pathlib.Path(objects[7]).write_bytes(
+                b"device bitcode llvm.instrprof.increment leaked\n"
+            )
+            self.assertEqual(quiet_call(coverage_tools.audit_device_profile_intrinsics, args), 1)
+            evidence = coverage_tools.read_json(pathlib.Path(args.output))
+            self.assertFalse(evidence["passed"])
+            self.assertEqual(evidence["objects"][7]["intrinsic_occurrences"], 1)
 
     def test_gpu_evidence_requires_oom_test_to_report_passed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

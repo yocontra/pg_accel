@@ -206,9 +206,45 @@ apply_sleef_helper_address_space_patch() {
     fi
 }
 
+apply_sscp_host_coverage_patch() {
+    local patch target marker
+    patch="$PG_ACCEL_REPO_ROOT/patches/adaptivecpp/sscp-host-coverage.patch"
+    target="src/compiler/sscp/TargetSeparationPass.cpp"
+    marker="stripHostProfileInstrumentation"
+
+    if [ ! -s "$patch" ] || [ ! -f "$ACPP_SRC/$target" ]; then
+        echo "error: required AdaptiveCpp SSCP host coverage patch or target is missing" >&2
+        exit 1
+    fi
+
+    if grep -q "$marker" "$ACPP_SRC/$target"; then
+        if ! git -C "$ACPP_SRC" apply --reverse --check "$patch"; then
+            echo "error: applied AdaptiveCpp SSCP host coverage patch has drifted" >&2
+            exit 1
+        fi
+        return 0
+    fi
+
+    if ! git -C "$ACPP_SRC" diff --quiet -- "$target"; then
+        echo "error: AdaptiveCpp SSCP target differs from pinned source before patching" >&2
+        exit 1
+    fi
+    if ! git -C "$ACPP_SRC" apply --check "$patch"; then
+        echo "error: AdaptiveCpp SSCP host coverage patch does not apply to pinned source" >&2
+        exit 1
+    fi
+    echo "Applying AdaptiveCpp SSCP host-only coverage patch"
+    git -C "$ACPP_SRC" apply "$patch"
+    if ! git -C "$ACPP_SRC" apply --reverse --check "$patch"; then
+        echo "error: AdaptiveCpp SSCP host coverage patch verification failed" >&2
+        exit 1
+    fi
+}
+
 apply_metal_cpp_compat_patch
 apply_default_targets_json_patch
 apply_sleef_helper_address_space_patch
+apply_sscp_host_coverage_patch
 
 if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
     git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" https://github.com/yocontra/soft-fp.git "$SOFT_FP64_SRC"

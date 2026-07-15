@@ -11,6 +11,7 @@ build_root="${COVERAGE_BUILD_DIR:-target/coverage}"
 scope_file="coverage/scope.json"
 baseline_file="coverage/release-baseline.json"
 manifest_file="coverage/sql-semantic-assertions.json"
+adaptivecpp_coverage_patch="patches/adaptivecpp/sscp-host-coverage.patch"
 minimum_default="${COVERAGE_MIN_PERCENT:-90}"
 rust_minimum="${COVERAGE_MIN_RUST_LINES:-$minimum_default}"
 cpp_minimum="${COVERAGE_MIN_CPP_LINES:-$minimum_default}"
@@ -181,6 +182,8 @@ esac
 cp "$scope_file" "$artifact_dir/scope.json" 2>/dev/null || true
 cp "$baseline_file" "$artifact_dir/release-baseline.json" 2>/dev/null || true
 cp "$manifest_file" "$artifact_dir/sql-semantic-assertions.json" 2>/dev/null || true
+cp "$adaptivecpp_coverage_patch" \
+    "$artifact_dir/adaptivecpp-sscp-host-coverage.patch" 2>/dev/null || true
 
 git_commit="unknown"
 git_tree="unknown"
@@ -199,6 +202,7 @@ else
 fi
 if ! python3 scripts/coverage_tools.py capture-provenance \
     --repo-root "$repo_root" --scope "$scope_file" --baseline "$baseline_file" \
+    --adaptivecpp-patch "$adaptivecpp_coverage_patch" \
     --output "$artifact_dir/provenance.json" \
     > "$artifact_dir/provenance.log" 2>&1; then
     mark_all_layers provenance "exact clean-tree provenance capture failed" 1
@@ -553,6 +557,25 @@ cpp_coverage() (
         return 1
     fi
     record_stage cpp build 0
+
+    local device_object_root="$build_dir/CMakeFiles/pgaccel_kernels_shared.dir"
+    local device_objects=()
+    local device_object_args=()
+    while IFS= read -r -d '' object; do
+        device_objects+=("$object")
+        device_object_args+=(--object "$object")
+    done < <(find "$device_object_root" -type f -name '*.o' -print0 2>/dev/null)
+    cmake -E remove_directory "$output_dir/device-objects" >/dev/null 2>&1 || true
+    if python3 scripts/coverage_tools.py audit-device-profile-intrinsics \
+        "${device_object_args[@]}" --object-root "$device_object_root" \
+        --object-dir "$output_dir/device-objects" \
+        --output "$output_dir/device-profile-audit.json"; then
+        record_stage cpp device_ir_audit 0
+    else
+        execution_status=1
+        record_stage cpp device_ir_audit 1 \
+            "host profiling intrinsics leaked into SSCP device IR"
+    fi
 
     # Do not override per-test timeouts: test_oom_invariant retains its 900s
     # timeout and unchanged 2GB-per-family sweep (14.08GB measured peak RSS).

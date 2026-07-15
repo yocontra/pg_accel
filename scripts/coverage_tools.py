@@ -27,6 +27,7 @@ BASELINE_SQL_FILES = 52
 BASELINE_SQL_ASSERTIONS = 287
 BASELINE_CPP_SOURCES = 21
 BASELINE_CPP_TESTS = 29
+DEVICE_PROFILE_INTRINSIC_MARKER = b"llvm.instrprof."
 UINT32_MAX = (1 << 32) - 1
 UINT64_MAX = (1 << 64) - 1
 ACCELERATOR_BACKENDS = {"metal", "cuda", "hip", "level_zero"}
@@ -58,6 +59,7 @@ REQUIRED_STAGES = {
         "clean",
         "configure",
         "build",
+        "device_ir_audit",
         "ctest",
         "gpu_evidence",
         "coverage_report",
@@ -688,8 +690,13 @@ def capture_provenance(args: argparse.Namespace) -> int:
         errors.append(f"Git provenance failed: {exc}")
     scope_path = pathlib.Path(args.scope)
     baseline_path = pathlib.Path(args.baseline)
-    if not scope_path.is_file() or not baseline_path.is_file():
-        errors.append("scope or release baseline is missing")
+    adaptivecpp_patch_path = pathlib.Path(args.adaptivecpp_patch)
+    if (
+        not scope_path.is_file()
+        or not baseline_path.is_file()
+        or not adaptivecpp_patch_path.is_file()
+    ):
+        errors.append("scope, release baseline, or AdaptiveCpp coverage patch is missing")
     document = {
         "schema_version": SCHEMA_VERSION,
         "kind": "coverage-provenance",
@@ -698,6 +705,9 @@ def capture_provenance(args: argparse.Namespace) -> int:
         "tree": "clean" if not errors else "dirty",
         "scope_sha256": sha256(scope_path) if scope_path.is_file() else None,
         "baseline_sha256": sha256(baseline_path) if baseline_path.is_file() else None,
+        "adaptivecpp_patch_sha256": sha256(adaptivecpp_patch_path)
+        if adaptivecpp_patch_path.is_file()
+        else None,
         "errors": errors,
         "passed": not errors,
     }
@@ -752,6 +762,7 @@ def seal_layer_evidence(args: argparse.Namespace) -> int:
             "cpp/toolchain.json",
             "cpp/ctest.log",
             "cpp/gpu-correctness-evidence.json",
+            "cpp/device-profile-audit.json",
         },
         "sql": {
             "sql/assertion-inventory.json",
@@ -2581,19 +2592,28 @@ def validate_aggregate_provenance(
             errors.append("aggregate requires the exact clean provenance checkout")
     except OSError as exc:
         errors.append(f"cannot verify aggregate Git commit: {exc}")
-    for name, field in (
-        ("scope.json", "scope_sha256"),
-        ("release-baseline.json", "baseline_sha256"),
+    for copied_name, current_name, field in (
+        ("scope.json", "coverage/scope.json", "scope_sha256"),
+        (
+            "release-baseline.json",
+            "coverage/release-baseline.json",
+            "baseline_sha256",
+        ),
+        (
+            "adaptivecpp-sscp-host-coverage.patch",
+            "patches/adaptivecpp/sscp-host-coverage.patch",
+            "adaptivecpp_patch_sha256",
+        ),
     ):
-        copied = artifact_dir / name
-        current = repo_root / "coverage" / name
+        copied = artifact_dir / copied_name
+        current = repo_root / current_name
         if (
             not copied.is_file()
             or not current.is_file()
             or document.get(field) != sha256(copied)
             or sha256(copied) != sha256(current)
         ):
-            errors.append(f"coverage provenance {name} hash drifted")
+            errors.append(f"coverage provenance {copied_name} hash drifted")
     return document, errors
 
 
@@ -3516,6 +3536,7 @@ def validate_raw_evidence_manifest(
             "cpp/toolchain.json",
             "cpp/ctest.log",
             "cpp/gpu-correctness-evidence.json",
+            "cpp/device-profile-audit.json",
         },
         "sql": {"sql/assertion-inventory.json", "sql/test-run/results.tsv"},
     }[layer]
@@ -3539,6 +3560,78 @@ def validate_raw_evidence_manifest(
         for name in seen
     ):
         errors.append(f"{layer}: raw profraw evidence is absent")
+    return errors
+
+
+def validate_device_profile_audit(
+    artifact_dir: pathlib.Path, baseline: dict[str, Any]
+) -> list[str]:
+    errors: list[str] = []
+    try:
+        document = read_json(artifact_dir / "cpp/device-profile-audit.json")
+    except CoverageError as exc:
+        return [str(exc)]
+    expected_count = len(baseline.get("cpp", {}).get("sources", []))
+    entries = document.get("objects") if isinstance(document, dict) else None
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != SCHEMA_VERSION
+        or document.get("kind") != "device-profile-intrinsic-audit"
+        or document.get("marker") != DEVICE_PROFILE_INTRINSIC_MARKER.decode("ascii")
+        or expected_count != BASELINE_CPP_SOURCES
+        or document.get("expected_object_count") != expected_count
+        or document.get("errors") != []
+        or document.get("passed") is not True
+        or not isinstance(entries, list)
+        or len(entries) != expected_count
+    ):
+        errors.append("cpp: device profile intrinsic audit is invalid")
+    if not isinstance(entries, list):
+        return errors
+
+    retained_root = (artifact_dir / "cpp/device-objects").resolve()
+    seen_paths: set[str] = set()
+    seen_retained: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            errors.append("cpp: malformed device profile audit entry")
+            continue
+        relative = entry.get("path")
+        retained_relative = entry.get("retained_path")
+        if (
+            not isinstance(relative, str)
+            or not relative.endswith(".o")
+            or not isinstance(retained_relative, str)
+            or relative in seen_paths
+            or retained_relative in seen_retained
+        ):
+            errors.append("cpp: malformed or duplicate device profile object path")
+            continue
+        seen_paths.add(relative)
+        seen_retained.add(retained_relative)
+        retained = (artifact_dir / "cpp" / retained_relative).resolve()
+        try:
+            retained.relative_to(retained_root)
+        except ValueError:
+            errors.append(f"cpp: retained device object escapes artifact root: {relative}")
+            continue
+        if (
+            not retained.is_file()
+            or not _is_int(entry.get("size"))
+            or entry["size"] <= 0
+            or retained.stat().st_size != entry["size"]
+            or entry.get("sha256") != sha256(retained)
+        ):
+            errors.append(f"cpp: retained device object hash/size mismatch: {relative}")
+            continue
+        intrinsic_occurrences = retained.read_bytes().count(
+            DEVICE_PROFILE_INTRINSIC_MARKER
+        )
+        if (
+            entry.get("intrinsic_occurrences") != 0
+            or intrinsic_occurrences != 0
+        ):
+            errors.append(f"cpp: host profiling intrinsic leaked into device IR: {relative}")
     return errors
 
 
@@ -4058,6 +4151,8 @@ def aggregate(args: argparse.Namespace) -> int:
             continue
         errors.extend(validate_layer_summary(layers[layer], layer))
         errors.extend(validate_raw_evidence_manifest(artifact_dir, layer, provenance))
+        if layer == "cpp":
+            errors.extend(validate_device_profile_audit(artifact_dir, copied_baseline))
         if layer in LINE_LAYERS:
             errors.extend(validate_retained_toolchain_and_profiles(artifact_dir, layer))
         stage_path = artifact_dir / layer / "stage-status.json"
@@ -4299,6 +4394,81 @@ def validate_toolchain(args: argparse.Namespace) -> int:
         "passed": not errors,
     }
     write_json(pathlib.Path(args.output), document)
+    return 0 if not errors else 1
+
+
+def audit_device_profile_intrinsics(args: argparse.Namespace) -> int:
+    object_root = pathlib.Path(args.object_root).resolve()
+    retained_root = pathlib.Path(args.object_dir).resolve()
+    output = pathlib.Path(args.output).resolve()
+    errors: list[str] = []
+    entries: list[dict[str, Any]] = []
+    objects = sorted({pathlib.Path(value).resolve() for value in args.object})
+
+    if len(objects) != BASELINE_CPP_SOURCES:
+        errors.append(
+            "device profile audit requires exactly "
+            f"{BASELINE_CPP_SOURCES} shared-target objects; found {len(objects)}"
+        )
+    try:
+        retained_root.relative_to(output.parent)
+    except ValueError:
+        errors.append("retained device objects must be inside the C++ artifact directory")
+    retained_root.mkdir(parents=True, exist_ok=True)
+
+    seen_relative: set[str] = set()
+    for path in objects:
+        try:
+            relative = path.relative_to(object_root)
+        except ValueError:
+            errors.append(f"device profile object escapes the build target: {path}")
+            continue
+        relative_text = relative.as_posix()
+        if relative_text in seen_relative:
+            errors.append(f"duplicate device profile object: {relative_text}")
+            continue
+        seen_relative.add(relative_text)
+        if not path.is_file() or path.suffix != ".o":
+            errors.append(f"device profile object is absent or not an object: {relative_text}")
+            continue
+        data = path.read_bytes()
+        if not data:
+            errors.append(f"device profile object is empty: {relative_text}")
+            continue
+        marker_count = data.count(DEVICE_PROFILE_INTRINSIC_MARKER)
+        if marker_count:
+            errors.append(
+                f"host profiling intrinsic leaked into device IR object "
+                f"{relative_text} ({marker_count} occurrence(s))"
+            )
+        retained = retained_root / relative
+        retained.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, retained)
+        entries.append(
+            {
+                "path": relative_text,
+                "retained_path": retained.relative_to(output.parent).as_posix(),
+                "sha256": sha256(retained),
+                "size": retained.stat().st_size,
+                "intrinsic_occurrences": marker_count,
+            }
+        )
+
+    if len(entries) != BASELINE_CPP_SOURCES:
+        errors.append(
+            "device profile audit did not retain the complete shared-target object set"
+        )
+    document = {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "device-profile-intrinsic-audit",
+        "generated_at_utc": utc_now(),
+        "marker": DEVICE_PROFILE_INTRINSIC_MARKER.decode("ascii"),
+        "expected_object_count": BASELINE_CPP_SOURCES,
+        "objects": entries,
+        "errors": errors,
+        "passed": not errors,
+    }
+    write_json(output, document)
     return 0 if not errors else 1
 
 
@@ -4904,6 +5074,7 @@ def parser() -> argparse.ArgumentParser:
     provenance.add_argument("--repo-root", default=".")
     provenance.add_argument("--scope", required=True)
     provenance.add_argument("--baseline", required=True)
+    provenance.add_argument("--adaptivecpp-patch", required=True)
     provenance.add_argument("--output", required=True)
     provenance.set_defaults(func=capture_provenance)
 
@@ -4993,6 +5164,13 @@ def parser() -> argparse.ArgumentParser:
     toolchain.add_argument("--llvm-profdata", required=True)
     toolchain.add_argument("--output", required=True)
     toolchain.set_defaults(func=validate_toolchain)
+
+    device_audit = commands.add_parser("audit-device-profile-intrinsics")
+    device_audit.add_argument("--object", action="append", default=[])
+    device_audit.add_argument("--object-root", required=True)
+    device_audit.add_argument("--object-dir", required=True)
+    device_audit.add_argument("--output", required=True)
+    device_audit.set_defaults(func=audit_device_profile_intrinsics)
 
     rust_toolchain = commands.add_parser("validate-rust-toolchain")
     rust_toolchain.add_argument("--rustc", required=True)
