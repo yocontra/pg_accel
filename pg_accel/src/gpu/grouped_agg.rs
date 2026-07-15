@@ -1157,6 +1157,8 @@ fn execute_call(
     // the synchronous FFI call and were built from pinned ABI types.
     let mut detail = abi::PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
     let status = unsafe {
+        // SAFETY: `desc`, `raw_output`, workspace-applied buffers, and `detail`
+        // remain live and exclusively accessible for this synchronous bridge call.
         bridge::pgaccel_grouped_agg_execute_ex(
             std::ptr::from_ref(&desc),
             output_ptr,

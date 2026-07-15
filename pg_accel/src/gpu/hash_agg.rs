@@ -104,6 +104,9 @@ pub fn hash_count_i64_device_bounded(
     }
     crate::ensure_backend_exit_callback();
     let state = unsafe {
+        // SAFETY: the nonempty ExprDeviceBuffer remains live and exposes exactly
+        // `keys.len()` device-accessible i64 values for the synchronous build;
+        // the bridge transfers ownership of any returned aggregate state.
         bridge::pgaccel_hash_count_i64_device_hash_execute_bounded(
             keys.as_mut_ptr(),
             keys.len(),

@@ -133,6 +133,8 @@ pub unsafe fn h3_cell_to_parent_resident(
     // SAFETY: caller upholds the resident pointer/count contract above.
     let mut detail = H3_PARENT_DETAIL_NONE;
     let status = unsafe {
+        // SAFETY: the caller-provided device lanes cover `count` elements, do
+        // not overlap, and `detail` remains writable for the synchronous call.
         bridge::pgaccel_h3_cell_to_parent_resident_ex(
             cells,
             nulls,
@@ -239,6 +241,9 @@ pub fn h3_lat_lng_count_resident(
     let mut state: *mut PgaccelAggState = std::ptr::null_mut();
     crate::ensure_backend_exit_callback();
     let status = unsafe {
+        // SAFETY: all four ExprDeviceBuffers remain live through the synchronous
+        // call and each contains at least `count` device-accessible elements;
+        // `state` is a valid out-pointer for the bridge-owned aggregate state.
         bridge::pgaccel_h3_lat_lng_count_resident_bulk(
             lats_exact.as_ptr(),
             lngs_exact.as_ptr(),
