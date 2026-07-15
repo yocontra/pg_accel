@@ -218,7 +218,7 @@ apply_sscp_host_coverage_patch() {
     fi
 
     if grep -q "$marker" "$ACPP_SRC/$target"; then
-        if ! git -C "$ACPP_SRC" apply --reverse --check "$patch"; then
+        if ! git -C "$ACPP_SRC" apply --unidiff-zero --reverse --check "$patch"; then
             echo "error: applied AdaptiveCpp SSCP host coverage patch has drifted" >&2
             exit 1
         fi
@@ -229,13 +229,13 @@ apply_sscp_host_coverage_patch() {
         echo "error: AdaptiveCpp SSCP target differs from pinned source before patching" >&2
         exit 1
     fi
-    if ! git -C "$ACPP_SRC" apply --check "$patch"; then
+    if ! git -C "$ACPP_SRC" apply --unidiff-zero --check "$patch"; then
         echo "error: AdaptiveCpp SSCP host coverage patch does not apply to pinned source" >&2
         exit 1
     fi
     echo "Applying AdaptiveCpp SSCP host-only coverage patch"
-    git -C "$ACPP_SRC" apply "$patch"
-    if ! git -C "$ACPP_SRC" apply --reverse --check "$patch"; then
+    git -C "$ACPP_SRC" apply --unidiff-zero "$patch"
+    if ! git -C "$ACPP_SRC" apply --unidiff-zero --reverse --check "$patch"; then
         echo "error: AdaptiveCpp SSCP host coverage patch verification failed" >&2
         exit 1
     fi

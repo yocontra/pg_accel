@@ -2391,6 +2391,24 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             self.assertFalse(evidence["passed"])
             self.assertEqual(evidence["objects"][7]["intrinsic_occurrences"], 1)
 
+    def test_adaptivecpp_patch_cannot_drop_nonempty_orphan_mappings(self) -> None:
+        patch = (
+            REPO_ROOT / "patches/adaptivecpp/sscp-host-coverage.patch"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(coverage_tools.adaptivecpp_coverage_patch_errors(patch), [])
+
+        missing_restore = patch.replace(
+            "restoreHostCoverageMappingNames(M, HasCoverageMappingNames)",
+            "dropHostCoverageMappingNames(M)",
+        )
+        self.assertTrue(
+            coverage_tools.adaptivecpp_coverage_patch_errors(missing_restore)
+        )
+        dropped_record = patch + "\n+  __covrec_nonempty->eraseFromParent();\n"
+        self.assertTrue(
+            coverage_tools.adaptivecpp_coverage_patch_errors(dropped_record)
+        )
+
     def test_gpu_evidence_requires_oom_test_to_report_passed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

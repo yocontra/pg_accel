@@ -1,19 +1,10 @@
 diff --git a/src/compiler/sscp/TargetSeparationPass.cpp b/src/compiler/sscp/TargetSeparationPass.cpp
-index f3202ceb..a529d3c4 100644
+index f3202ceb..64353d67 100644
 --- a/src/compiler/sscp/TargetSeparationPass.cpp
 +++ b/src/compiler/sscp/TargetSeparationPass.cpp
-@@ -38,6 +38,7 @@
- #include <llvm/Bitcode/BitcodeWriter.h>
- #include <llvm/Passes/OptimizationLevel.h>
- #include <llvm/Passes/PassBuilder.h>
+@@ -40,0 +41 @@
 +#include <llvm/Support/ErrorHandling.h>
- #include <llvm/Support/raw_ostream.h>
- #include <llvm/Transforms/Utils/Cloning.h>
- #include <llvm/Support/CommandLine.h>
-@@ -278,6 +279,54 @@ void removeLinkerOptionsByPrefixes(
-   }
- }
- 
+@@ -280,0 +282,67 @@ void removeLinkerOptionsByPrefixes(
 +static bool isHostProfileIntrinsic(const llvm::Function &F) {
 +  return llvmutils::starts_with(F.getName(), "llvm.instrprof.");
 +}
@@ -62,31 +53,33 @@ index f3202ceb..a529d3c4 100644
 +  requireNoHostProfileInstrumentation(M);
 +}
 +
- std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
-                                                const std::vector<std::string>& DynamicFunctions,
-                                                std::vector<KernelInfo> &KernelInfoOutput,
-@@ -287,6 +336,7 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
- 
-   std::unique_ptr<llvm::Module> DeviceModule = llvm::CloneModule(M);
-   DeviceModule->setModuleIdentifier("device." + DeviceModule->getModuleIdentifier());
++static bool preserveHostCoverageMappingNames(llvm::Module &M) {
++  if(auto* CoverageNames = M.getGlobalVariable("__llvm_coverage_names", true)) {
++    CoverageNames->setLinkage(llvm::GlobalValue::ExternalLinkage);
++    return true;
++  }
++  return false;
++}
++
++static void restoreHostCoverageMappingNames(llvm::Module &M, bool Required) {
++  if(!Required)
++    return;
++  auto* CoverageNames = M.getGlobalVariable("__llvm_coverage_names", true);
++  if(!CoverageNames) {
++    llvm::report_fatal_error(
++        "host coverage mapping names were dropped during SSCP separation");
++  }
++  CoverageNames->setLinkage(llvm::GlobalValue::InternalLinkage);
++}
++
+@@ -289,0 +358 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
 +  stripHostProfileInstrumentation(*DeviceModule);
-   
-   llvm::LoopAnalysisManager LAM;
-   llvm::FunctionAnalysisManager FAM;
-@@ -325,6 +375,7 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
-   // Fix attributes for generic IR representation
-   llvm::SmallVector<llvm::Attribute::AttrKind, 16> AttrsToRemove;
-   llvm::SmallVector<std::string, 16> StringAttrsToRemove;
+@@ -327,0 +397 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
 +  AttrsToRemove.push_back(llvm::Attribute::AttrKind::OptimizeNone);
-   AttrsToRemove.push_back(llvm::Attribute::AttrKind::UWTable);
-   AttrsToRemove.push_back(llvm::Attribute::AttrKind::StackProtectStrong);
-   AttrsToRemove.push_back(llvm::Attribute::AttrKind::StackProtect);
-@@ -476,6 +527,8 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
-     KernelInfoOutput.push_back(KI);
-   }
- 
+@@ -478,0 +549,2 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
 +  requireNoHostProfileInstrumentation(*DeviceModule);
 +
-   return DeviceModule;
- }
- 
+@@ -644,0 +717 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
++      bool HasCoverageMappingNames = preserveHostCoverageMappingNames(M);
+@@ -645,0 +719 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
++      restoreHostCoverageMappingNames(M, HasCoverageMappingNames);

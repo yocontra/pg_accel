@@ -4843,6 +4843,36 @@ def gpu_evidence(args: argparse.Namespace) -> int:
     return 0 if document["passed"] else 1
 
 
+def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
+    errors: list[str] = []
+    for required in (
+        "stripHostProfileInstrumentation(*DeviceModule);",
+        "preserveHostCoverageMappingNames(M)",
+        "restoreHostCoverageMappingNames(M, HasCoverageMappingNames)",
+        'getGlobalVariable("__llvm_coverage_names", true)',
+        "host coverage mapping names were dropped during SSCP separation",
+        "llvm::GlobalValue::ExternalLinkage",
+        "llvm::GlobalValue::InternalLinkage",
+        "llvm::Attribute::AttrKind::OptimizeNone",
+    ):
+        if required not in text:
+            errors.append(f"AdaptiveCpp coverage patch invariant is absent: {required}")
+    if (
+        text.count("requireNoHostProfileInstrumentation(M);") != 1
+        or text.count("requireNoHostProfileInstrumentation(*DeviceModule);") != 1
+    ):
+        errors.append(
+            "AdaptiveCpp coverage patch must check device IR after stripping and before HCF"
+        )
+    if "__covrec_" in text:
+        errors.append("AdaptiveCpp coverage patch must not delete coverage mapping records")
+    if "appendToCompilerUsed" in text:
+        errors.append(
+            "AdaptiveCpp coverage mapping names must use temporary linkage, not a used-list anchor"
+        )
+    return errors
+
+
 def audit_scope(args: argparse.Namespace) -> int:
     repo_root = pathlib.Path(args.repo_root).resolve()
     document = read_json(pathlib.Path(args.scope))
@@ -4884,6 +4914,14 @@ def audit_scope(args: argparse.Namespace) -> int:
         raise CoverageError(
             "C++ scope must pin both implementation and executable-header roots"
         )
+    adaptivecpp_patch = repo_root / "patches/adaptivecpp/sscp-host-coverage.patch"
+    if not adaptivecpp_patch.is_file():
+        raise CoverageError("AdaptiveCpp SSCP host coverage patch is missing")
+    patch_errors = adaptivecpp_coverage_patch_errors(
+        adaptivecpp_patch.read_text(encoding="utf-8")
+    )
+    if patch_errors:
+        raise CoverageError("; ".join(patch_errors))
     coverage_gate = (repo_root / "scripts/coverage_gate.sh").read_text(encoding="utf-8")
     if coverage_gate.count("--include-build-script") != 2:
         raise CoverageError(
