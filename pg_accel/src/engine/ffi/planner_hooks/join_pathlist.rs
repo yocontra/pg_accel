@@ -59,6 +59,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // where Custom Scan slot handling is incompatible.
     // SAFETY: root.parse is a valid Query pointer provided by the planner.
     let parse = unsafe { (*root).parse };
+    // SAFETY: the null check short-circuits; otherwise `parse` is the
+    // planner-owned Query and its command type is valid for this invocation.
     if parse.is_null() || unsafe { (*parse).commandType } != pg_sys::CmdType::CMD_SELECT {
         stats::record_command_type_skip();
         return;
@@ -72,6 +74,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // Preserve operator-specific evidence before the generic resident-pipeline
     // decline. The benchmark runner confirms this reason from the per-reason
     // counter, so later planner observations cannot erase the MergePath signal.
+    // SAFETY: `joinrel` is the planner-owned RelOptInfo supplied to this hook.
     unsafe { observe_mergejoin_opportunity(joinrel) };
 
     // Observability (NestedLoop scalar inequality): runs BEFORE the early
@@ -89,6 +92,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // SAFETY: joinrel/extra are valid planner pointers; restrictlist may
     // be null but the helper handles that.
     if jointype == pg_sys::JoinType::JOIN_INNER && !selected_gpu_nlj_kernel_available() {
+        // SAFETY: all relation pointers belong to this planner invocation;
+        // when `extra` is non-null its restrictlist is planner-owned as well.
         let observed_between = unsafe {
             observe_gated_nlj_between_opportunity(
                 joinrel,
@@ -102,6 +107,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
             )
         };
         if !observed_between {
+            // SAFETY: the same planner-owned relation/restrictlist pointers
+            // remain live for the observation-only helper call.
             unsafe {
                 observe_nestloop_scalar_opportunity(
                     joinrel,
@@ -153,9 +160,12 @@ unsafe fn observe_mergejoin_opportunity(joinrel: *mut RelOptInfo) {
     for i in 0..len {
         // SAFETY: i is in [0, len), and each entry is a planner Path pointer.
         let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
-        if !path.is_null()
-            && unsafe { (*path.cast::<pg_sys::Node>()).type_ } == NodeTag::T_MergePath
-        {
+        if path.is_null() {
+            continue;
+        }
+        // SAFETY: each non-null pathlist entry begins with PostgreSQL's Node
+        // header, so its tag is readable for the planner-list lifetime.
+        if unsafe { (*path.cast::<pg_sys::Node>()).type_ } == NodeTag::T_MergePath {
             merge_count += 1;
         }
     }
@@ -269,6 +279,8 @@ pub(super) const fn classify_nestloop_shape(nest_count: i32, ineq_count: i32) ->
 /// returns `false`). Calls `get_op_index_interpretation` which must run on
 /// the main backend thread.
 unsafe fn is_btree_inequality_opno(opno: pg_sys::Oid) -> bool {
+    // SAFETY: this wrapper is called in planner context and forwards the
+    // caller's valid-or-InvalidOid operator contract unchanged.
     unsafe { btree_inequality_strategy(opno).is_some() }
 }
 
@@ -358,28 +370,39 @@ unsafe fn find_nlj_between_key(
         return None;
     }
 
-    let outer_relids = unsafe { (*outerrel).relids };
-    let inner_relids = unsafe { (*innerrel).relids };
+    // SAFETY: the null checks prove both planner-owned RelOptInfo pointers are
+    // live; copy their immutable relation-id Bitmapset pointers together.
+    let (outer_relids, inner_relids) = unsafe { ((*outerrel).relids, (*innerrel).relids) };
     let mut lowers: Vec<NljBound> = Vec::new();
     let mut uppers: Vec<NljBound> = Vec::new();
 
+    // SAFETY: `restrictlist` is the non-null planner-owned RestrictInfo List.
     let len = unsafe { pg_sys::list_length(restrictlist) };
     for i in 0..len {
+        // SAFETY: the loop bounds keep `i` within the RestrictInfo List.
         let ri = unsafe { pg_sys::list_nth(restrictlist, i).cast::<RestrictInfo>() };
         if ri.is_null() {
             continue;
         }
+        // SAFETY: a non-null list entry is a planner-owned RestrictInfo.
         let clause = unsafe { (*ri).clause };
-        if clause.is_null()
-            || unsafe { (*clause.cast::<pg_sys::Node>()).type_ } != NodeTag::T_OpExpr
-        {
+        if clause.is_null() {
+            continue;
+        }
+        // SAFETY: the non-null planner clause begins with a PostgreSQL Node
+        // header whose tag is readable for the expression-tree lifetime.
+        if unsafe { (*clause.cast::<pg_sys::Node>()).type_ } != NodeTag::T_OpExpr {
             continue;
         }
 
         let opexpr = clause.cast::<pg_sys::OpExpr>();
+        // SAFETY: the clause tag proves OpExpr layout while the planner tree
+        // remains live.
         if u32::from(unsafe { (*opexpr).opresulttype }) != 16 {
             continue;
         }
+        // SAFETY: the confirmed OpExpr carries a valid operator OID and this
+        // helper runs in the owning planner backend.
         let Some(strategy) = (unsafe { btree_inequality_strategy((*opexpr).opno) }) else {
             continue;
         };
@@ -390,24 +413,40 @@ unsafe fn find_nlj_between_key(
             continue;
         }
 
+        // SAFETY: the confirmed OpExpr owns this planner-lifetime argument List.
         let args = unsafe { (*opexpr).args };
+        // SAFETY: the null check short-circuits; otherwise `args` is a valid List.
         if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
             continue;
         }
-        let left = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
-        let right = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
-        let left_var = unsafe { super::unwrap_var(left) };
-        let right_var = unsafe { super::unwrap_var(right) };
+        // SAFETY: the verified two-element List makes both indexes valid and
+        // its expression nodes remain planner-owned during classification.
+        let (left, right) = unsafe {
+            (
+                pg_sys::list_nth(args, 0).cast::<pg_sys::Node>(),
+                pg_sys::list_nth(args, 1).cast::<pg_sys::Node>(),
+            )
+        };
+        // SAFETY: both expression nodes come from the live OpExpr argument
+        // List; unwrap_var only follows planner-owned RelabelType links.
+        let (left_var, right_var) = unsafe { (super::unwrap_var(left), super::unwrap_var(right)) };
         if left_var.is_null() || right_var.is_null() {
             continue;
         }
 
-        let left_varno = unsafe { (*left_var).varno } as i32;
-        let right_varno = unsafe { (*right_var).varno } as i32;
-        let left_outer = unsafe { pg_sys::bms_is_member(left_varno, outer_relids) };
-        let left_inner = unsafe { pg_sys::bms_is_member(left_varno, inner_relids) };
-        let right_outer = unsafe { pg_sys::bms_is_member(right_varno, outer_relids) };
-        let right_inner = unsafe { pg_sys::bms_is_member(right_varno, inner_relids) };
+        // SAFETY: unwrap_var returned non-null planner-owned Var nodes.
+        let (left_varno, right_varno) =
+            unsafe { ((*left_var).varno as i32, (*right_var).varno as i32) };
+        // SAFETY: all four Bitmapset membership checks use relation-id sets
+        // copied from live RelOptInfo nodes and nonnegative planner varnos.
+        let (left_outer, left_inner, right_outer, right_inner) = unsafe {
+            (
+                pg_sys::bms_is_member(left_varno, outer_relids),
+                pg_sys::bms_is_member(left_varno, inner_relids),
+                pg_sys::bms_is_member(right_varno, outer_relids),
+                pg_sys::bms_is_member(right_varno, inner_relids),
+            )
+        };
 
         let (outer_var, inner_var, outer_on_left) = if left_outer && right_inner {
             (left_var, right_var, true)
@@ -417,13 +456,17 @@ unsafe fn find_nlj_between_key(
             continue;
         };
 
-        let outer_attno = i32::from(unsafe { (*outer_var).varattno });
-        let inner_attno = i32::from(unsafe { (*inner_var).varattno });
+        // SAFETY: orientation selected two non-null planner-owned Var nodes.
+        let (outer_attno_raw, inner_attno_raw) =
+            unsafe { ((*outer_var).varattno, (*inner_var).varattno) };
+        let outer_attno = i32::from(outer_attno_raw);
+        let inner_attno = i32::from(inner_attno_raw);
         if outer_attno <= 0 || inner_attno <= 0 {
             continue;
         }
-        let outer_type = unsafe { (*outer_var).vartype };
-        let inner_type = unsafe { (*inner_var).vartype };
+        // SAFETY: the same oriented Var nodes remain live while their type
+        // OIDs are copied.
+        let (outer_type, inner_type) = unsafe { ((*outer_var).vartype, (*inner_var).vartype) };
         if outer_type != inner_type {
             continue;
         }
@@ -435,7 +478,9 @@ unsafe fn find_nlj_between_key(
             outer_attno,
             inner_attno,
             key_type,
+            // SAFETY: both oriented pointers are verified planner-owned Vars.
             outer_varno: unsafe { (*outer_var).varno },
+            // SAFETY: `inner_var` is the paired verified planner-owned Var.
             inner_varno: unsafe { (*inner_var).varno },
         };
 
@@ -485,9 +530,9 @@ unsafe fn count_correlated_scalar_inequalities(
     if restrictlist.is_null() || outerrel.is_null() || innerrel.is_null() {
         return 0;
     }
-    // SAFETY: valid RelOptInfo pointers.
-    let outer_relids = unsafe { (*outerrel).relids };
-    let inner_relids = unsafe { (*innerrel).relids };
+    // SAFETY: the null checks prove both planner-owned RelOptInfo pointers are
+    // live; copy their relation-id Bitmapset pointers together.
+    let (outer_relids, inner_relids) = unsafe { ((*outerrel).relids, (*innerrel).relids) };
 
     let mut ineq_count: i32 = 0;
     // SAFETY: restrictlist is a valid List of RestrictInfo*.
@@ -525,17 +570,22 @@ unsafe fn count_correlated_scalar_inequalities(
         }
         // SAFETY: opexpr->args is a List.
         let args = unsafe { (*opexpr).args };
+        // SAFETY: the null check short-circuits; otherwise the planner-owned
+        // OpExpr argument pointer is a valid PostgreSQL List.
         if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
             continue;
         }
         // SAFETY: args has 2 elements.
         let left = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+        // SAFETY: the verified two-element List makes index one valid.
         let right = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
         if left.is_null() || right.is_null() {
             continue;
         }
         // SAFETY: both Node pointers are valid.
         let left_var = unsafe { super::unwrap_var(left) };
+        // SAFETY: `right` is the paired live OpExpr argument; unwrap_var only
+        // follows planner-owned RelabelType links.
         let right_var = unsafe { super::unwrap_var(right) };
         if left_var.is_null() || right_var.is_null() {
             // One side is a Const / Param / function call — that's a
@@ -544,11 +594,15 @@ unsafe fn count_correlated_scalar_inequalities(
         }
         // SAFETY: Var nodes are valid.
         let left_varno = unsafe { (*left_var).varno } as i32;
+        // SAFETY: `right_var` is likewise a non-null planner-owned Var.
         let right_varno = unsafe { (*right_var).varno } as i32;
         // SAFETY: bms_is_member on a valid Bitmapset (relids).
         let left_outer = unsafe { pg_sys::bms_is_member(left_varno, outer_relids) };
+        // SAFETY: `inner_relids` is the live inner RelOptInfo Bitmapset.
         let left_inner = unsafe { pg_sys::bms_is_member(left_varno, inner_relids) };
+        // SAFETY: `outer_relids` is the live outer RelOptInfo Bitmapset.
         let right_outer = unsafe { pg_sys::bms_is_member(right_varno, outer_relids) };
+        // SAFETY: `inner_relids` is the live inner RelOptInfo Bitmapset.
         let right_inner = unsafe { pg_sys::bms_is_member(right_varno, inner_relids) };
         // Correlated = one side is outer, other side is inner. Reject
         // same-side quals — those are scan filters that PG pushes down.
@@ -582,10 +636,14 @@ unsafe fn observe_gated_nlj_between_opportunity(
     if joinrel.is_null() {
         return false;
     }
+    // SAFETY: all three pointers are planner-owned for this hook invocation;
+    // the helper treats a null restrictlist as a non-match.
     let Some(_nlj_between) = (unsafe { find_nlj_between_key(restrictlist, outerrel, innerrel) })
     else {
         return false;
     };
+    // SAFETY: the null check proves `joinrel` is the live planner-owned
+    // RelOptInfo whose row estimate is being observed.
     let joinrel_ref = unsafe { &*joinrel };
     #[allow(clippy::cast_sign_loss)]
     let n_rows_est = joinrel_ref.rows.max(0.0) as u64;
