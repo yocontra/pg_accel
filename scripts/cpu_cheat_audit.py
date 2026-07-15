@@ -769,6 +769,7 @@ class Function:
     body_open: int
     body_close: int
     parameter_count: int | None
+    required_parameter_count: int | None
     is_template: bool
     is_entrypoint: bool
     is_export: bool
@@ -1134,6 +1135,86 @@ def _parameter_count(tokens: Sequence[Token], lparen: int, rparen: int) -> int |
     return commas + 1
 
 
+def _required_parameter_count(
+    tokens: Sequence[Token], lparen: int, rparen: int
+) -> int | None:
+    """Return the call arity before trailing C++ default arguments.
+
+    A malformed or non-trailing default sequence is intentionally unresolved.
+    Call-graph resolution can then fail closed instead of guessing which local
+    overload a call selected.
+    """
+
+    total = _parameter_count(tokens, lparen, rparen)
+    if total in {None, 0}:
+        return total
+
+    segments: list[list[Token]] = []
+    start = lparen + 1
+    paren = bracket = brace = angle = 0
+    for index in range(start, rparen + 1):
+        value = tokens[index].value if index < rparen else ","
+        if value == "(":
+            paren += 1
+        elif value == ")":
+            paren -= 1
+        elif value == "[":
+            bracket += 1
+        elif value == "]":
+            bracket -= 1
+        elif value == "{":
+            brace += 1
+        elif value == "}":
+            brace -= 1
+        elif value == "<":
+            angle += 1
+        elif value == ">" and angle:
+            angle -= 1
+        elif value == ">>" and angle:
+            angle = max(0, angle - 2)
+        elif value == "," and not (paren or bracket or brace or angle):
+            segments.append(list(tokens[start:index]))
+            start = index + 1
+    if paren or bracket or brace or angle or len(segments) != total:
+        return None
+
+    defaults: list[bool] = []
+    for segment in segments:
+        paren = bracket = brace = angle = 0
+        has_default = False
+        for token in segment:
+            value = token.value
+            if value == "(":
+                paren += 1
+            elif value == ")":
+                paren -= 1
+            elif value == "[":
+                bracket += 1
+            elif value == "]":
+                bracket -= 1
+            elif value == "{":
+                brace += 1
+            elif value == "}":
+                brace -= 1
+            elif value == "<":
+                angle += 1
+            elif value == ">" and angle:
+                angle -= 1
+            elif value == ">>" and angle:
+                angle = max(0, angle - 2)
+            elif value == "=" and not (paren or bracket or brace or angle):
+                has_default = True
+                break
+        defaults.append(has_default)
+
+    first_default = next(
+        (index for index, value in enumerate(defaults) if value), total
+    )
+    if any(not value for value in defaults[first_default:]):
+        return None
+    return first_default
+
+
 def _name_before_lparen(tokens: Sequence[Token], lparen: int) -> int | None:
     index = lparen - 1
     if index < 0:
@@ -1275,6 +1356,9 @@ def parse_functions(tokens: Sequence[Token]) -> list[Function]:
                 body_open=body_open,
                 body_close=effective_body_close,
                 parameter_count=_parameter_count(tokens, lparen, rparen),
+                required_parameter_count=_required_parameter_count(
+                    tokens, lparen, rparen
+                ),
                 is_template=any(token.value == "template" for token in prefix),
                 is_entrypoint=is_entrypoint,
                 is_export=is_export,
@@ -3996,7 +4080,11 @@ class _PathAuditor:
                 candidate
                 for candidate in candidates
                 if candidate.parameter_count is None
-                or candidate.parameter_count == call.argument_count
+                or (
+                    candidate.required_parameter_count is not None
+                    and candidate.required_parameter_count <= call.argument_count
+                    and call.argument_count <= candidate.parameter_count
+                )
             ]
         if not candidates:
             return None, "unresolved_helper"

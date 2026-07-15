@@ -232,6 +232,55 @@ class CallGraphTests(unittest.TestCase):
         self.assertIn("typed_reduce", result.entrypoint_audits[0].detail)
         self.assertIn("launch_reduce", result.entrypoint_audits[0].detail)
 
+    def test_template_helper_with_trailing_default_reaches_dispatch(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <typename T, typename Op>
+            pgaccel_status device_reduce(
+                const T* data, size_t count, T* out, T identity, Op op,
+                bool identity_from_first = false) {
+              sycl::queue& q = get_queue();
+              q.single_task<ReduceKernel<T>>([=]() {
+                *out = identity_from_first ? data[0] : op(identity, data[0]);
+              });
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_defaulted_reduce(
+                const int* data, size_t count, int* out) {
+              return device_reduce<int>(data, count, out, 0,
+                                        [](int a, int b) { return a + b; });
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "large_input_gpu_chain", result.entrypoint_audits[0].classifications
+        )
+
+    def test_default_argument_does_not_bless_host_output_helper(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <typename T>
+            pgaccel_status host_reduce(
+                const T* data, size_t count, T* out, bool ignored = false) {
+              sycl::queue& q = get_queue();
+              int unrelated = 0;
+              q.single_task<Decoy>([=]() mutable { unrelated = 1; });
+              for (size_t i = 0; i < count; ++i) *out += data[i];
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_defaulted_host_reduce(
+                const int* data, size_t count, int* out) {
+              return host_reduce<int>(data, count, out);
+            }
+            """
+        )
+        finding = finding_for(result, "pgaccel_defaulted_host_reduce")
+        self.assertIn("host_computation", finding.classifications)
+        self.assertNotIn(
+            "large_input_gpu_chain", result.entrypoint_audits[0].classifications
+        )
+
 
 class ControlFlowEvasionTests(unittest.TestCase):
     def assert_rejected(self, source: str, name: str) -> audit.Finding:
@@ -2105,14 +2154,16 @@ class ProductionWitnessTests(unittest.TestCase):
 
     def test_point_in_polygon_all_outside_success_is_flagged(self) -> None:
         finding = self.findings["pgaccel_point_in_polygon_bulk"]
-        self.assertEqual(finding.line, 2662)
-        self.assertIn("host_computation", finding.classifications)
+        self.assertEqual(finding.path.name, "spatial_dispatch.cpp")
+        self.assertEqual(finding.entrypoint, "pgaccel_point_in_polygon_bulk")
+        self.assertIn("missing_device_terminal", finding.classifications)
         self.assertIn("undominated_success", finding.classifications)
 
     def test_sort_i64_does_not_borrow_f32_constexpr_branch(self) -> None:
         finding = self.findings["pgaccel_sort_i64"]
-        self.assertEqual(finding.line, 1606)
+        self.assertEqual(finding.path.name, "sort.cpp")
         self.assertIn("template_specialization_review", finding.classifications)
+        self.assertIn("if constexpr paths require", finding.message)
 
     def test_reduction_host_finalize_is_flagged(self) -> None:
         finding = self.findings["pgaccel_reduce_sum_f32"]
@@ -2123,7 +2174,8 @@ class ProductionWitnessTests(unittest.TestCase):
         entry = self.by_name["pgaccel_hash_join_build"]
         self.assertFalse(entry.is_status)
         self.assertFalse(entry.ok)
-        self.assertEqual(entry.line, 882)
+        self.assertEqual(entry.path.name, "hash_join.cpp")
+        self.assertEqual(entry.return_type, "pgaccel_hash_table *")
 
     def test_original_eleven_wrappers_keep_large_input_gpu_evidence(self) -> None:
         wrappers = [
