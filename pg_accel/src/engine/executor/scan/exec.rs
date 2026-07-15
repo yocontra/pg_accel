@@ -553,7 +553,11 @@ impl ScanExecState {
         // SAFETY: scan_slot has a valid tuple descriptor. batch contains
         // valid MinimalTuple pointers from ExecCopySlotMinimalTuple.
         let tupdesc = unsafe { (*scan_slot).tts_tupleDescriptor };
+        // SAFETY: `attno` identifies the planned column in the live scan-slot
+        // descriptor and the descriptor outlives this extraction call.
         let info = unsafe { AttExtractInfo::new(tupdesc, attno) };
+        // SAFETY: every buffered pointer is a live MinimalTuple copied from
+        // this slot's schema, and `scan_slot` is valid for fallback deformation.
         unsafe { tuple_extract::extract_f64(batch, &info, scan_slot) }
     }
 

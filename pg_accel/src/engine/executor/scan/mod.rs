@@ -342,6 +342,8 @@ impl ScanExecState {
         // SAFETY: child_ps points to an IndexScanState. The iss_RelationDesc
         // field holds the index relation descriptor.
         let iss = child_ps.cast::<pg_sys::IndexScanState>();
+        // SAFETY: the checked NodeTag proves `child_ps` has IndexScanState
+        // layout, so its relation-descriptor field is valid to read.
         let index_rel = unsafe { (*iss).iss_RelationDesc };
         if index_rel.is_null() {
             return;
@@ -480,6 +482,8 @@ impl Drop for ScanExecState {
             }
             for &(datum, is_null) in &self.datum_buffer {
                 if !is_null && datum.value() != 0 {
+                    // SAFETY: non-null buffered Datums are palloc'd detoasted
+                    // copies owned by this scan state and have not been freed.
                     unsafe { pg_sys::pfree(datum.cast_mut_ptr()) };
                 }
             }
@@ -494,8 +498,14 @@ impl Drop for ScanExecState {
 
 impl crate::engine::executor::state::ExecutorState for ScanExecState {
     unsafe fn exec(&mut self, css: *mut pg_sys::CustomScanState) -> *mut pg_sys::TupleTableSlot {
+        // SAFETY: the executor passes this live CustomScanState on the backend
+        // thread; child 0 is optional and bounds-checked by the helper.
         let child_ps = unsafe { crate::engine::executor::state::child_plan_state(css, 0) };
+        // SAFETY: `css` is live for this callback and owns its initialized scan
+        // tuple slot for the duration of the executor invocation.
         let scan_slot = unsafe { (*css).ss.ss_ScanTupleSlot };
+        // SAFETY: `child_ps` is either null for direct mode or the live child;
+        // `scan_slot` is the live executor output slot read above.
         unsafe { self.next(child_ps, scan_slot) }
     }
     fn rows_dispatched(&self) -> u64 {
