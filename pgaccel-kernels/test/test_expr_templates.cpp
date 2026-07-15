@@ -1650,9 +1650,9 @@ static void test_fused_multi_reduce_quarantine() {
 
   s = pgaccel_fused_filter_multi_reduce_f32(nullptr, 0, PGACCEL_CMP_ALWAYS_TRUE, 0.0f, cols, 2,
                                             results, &pass_count);
-  ASSERT_STATUS_OK("fused multi-reduce empty status", s);
-  ASSERT_TRUE("fused multi-reduce empty identity",
-              results[0] == 0.0f && results[1] == 0.0f && pass_count == 0);
+  ASSERT_TRUE("fused multi-reduce empty is unsupported", s == PGACCEL_UNSUPPORTED);
+  ASSERT_TRUE("fused multi-reduce empty preserves outputs",
+              results[0] == -11.0f && results[1] == -22.0f && pass_count == 99);
   ASSERT_TRUE("fused multi-reduce empty launches no GPU work", pgaccel_gpu_exec_count() == 0);
 }
 
