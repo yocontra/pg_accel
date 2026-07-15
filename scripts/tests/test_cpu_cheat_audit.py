@@ -205,6 +205,160 @@ class DeviceTerminalTests(unittest.TestCase):
 
 
 class CallGraphTests(unittest.TestCase):
+    def test_cross_file_calls_require_unique_clean_device_proof_and_output_binding(
+        self,
+    ) -> None:
+        def run(sources: dict[str, str]) -> dict[str, audit.EntrypointAudit]:
+            with tempfile.TemporaryDirectory() as directory:
+                paths = []
+                for name, source in sources.items():
+                    path = pathlib.Path(directory) / name
+                    path.write_text(textwrap.dedent(source), encoding="utf-8")
+                    paths.append(path)
+                results = audit.audit_paths(paths)
+            return {
+                entry.entrypoint: entry
+                for result in results
+                for entry in result.entrypoint_audits
+            }
+
+        clean = run(
+            {
+                "target.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_gpu(int* out) {
+                      sycl::queue q;
+                      q.single_task<ExternalGpu>([=]() { *out = 7; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_wrapper(int* out) {
+                      return pgaccel_external_gpu(out);
+                    }
+                """,
+            }
+        )
+        self.assertTrue(clean["pgaccel_external_gpu"].ok)
+        self.assertTrue(clean["pgaccel_external_wrapper"].ok)
+        self.assertIn(
+            "audited_external_call",
+            clean["pgaccel_external_wrapper"].classifications,
+        )
+
+        host_only = run(
+            {
+                "target.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_host(int* out) {
+                      *out = 7;
+                      return PGACCEL_OK;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_host_target_wrapper(int* out) {
+                      return pgaccel_external_host(out);
+                    }
+                """,
+            }
+        )
+        self.assertFalse(host_only["pgaccel_external_host"].ok)
+        self.assertFalse(host_only["pgaccel_host_target_wrapper"].ok)
+        self.assertIn(
+            "unresolved_helper",
+            host_only["pgaccel_host_target_wrapper"].classifications,
+        )
+
+        unresolved = run(
+            {
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_missing_target_wrapper(int* out) {
+                      return pgaccel_missing_external(out);
+                    }
+                """
+            }
+        )
+        self.assertFalse(unresolved["pgaccel_missing_target_wrapper"].ok)
+        self.assertIn(
+            "unresolved_helper",
+            unresolved["pgaccel_missing_target_wrapper"].classifications,
+        )
+
+        failure_only = run(
+            {
+                "target.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_decline(int* out) {
+                      (void)out;
+                      return PGACCEL_UNSUPPORTED;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_decline_target_wrapper(int* out) {
+                      return pgaccel_external_decline(out);
+                    }
+                """,
+            }
+        )
+        self.assertTrue(failure_only["pgaccel_external_decline"].ok)
+        self.assertFalse(failure_only["pgaccel_decline_target_wrapper"].ok)
+        self.assertIn(
+            "unresolved_helper",
+            failure_only["pgaccel_decline_target_wrapper"].classifications,
+        )
+
+        duplicate = run(
+            {
+                "target_a.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_duplicate(int* out) {
+                      sycl::queue q;
+                      q.single_task<ExternalDuplicateA>([=]() { *out = 1; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "target_b.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_duplicate(int* out) {
+                      sycl::queue q;
+                      q.single_task<ExternalDuplicateB>([=]() { *out = 2; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_duplicate_target_wrapper(int* out) {
+                      return pgaccel_external_duplicate(out);
+                    }
+                """,
+            }
+        )
+        self.assertFalse(duplicate["pgaccel_duplicate_target_wrapper"].ok)
+        self.assertIn(
+            "unresolved_helper",
+            duplicate["pgaccel_duplicate_target_wrapper"].classifications,
+        )
+
+        wrong_binding = run(
+            {
+                "target.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_bound(
+                        const int* input, int* result) {
+                      sycl::queue q;
+                      q.single_task<ExternalBound>([=]() { *result = input[0]; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "caller.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_wrong_binding(int* out) {
+                      sycl::queue q;
+                      int* staging = sycl::malloc_shared<int>(1, q);
+                      return pgaccel_external_bound(out, staging);
+                    }
+                """,
+            }
+        )
+        self.assertTrue(wrong_binding["pgaccel_external_bound"].ok)
+        self.assertFalse(wrong_binding["pgaccel_wrong_binding"].ok)
+        self.assertNotIn(
+            "audited_external_call",
+            wrong_binding["pgaccel_wrong_binding"].classifications,
+        )
+
     def test_multihop_template_wrapper_reaches_dispatch(self) -> None:
         result = audit_fixture(
             r"""

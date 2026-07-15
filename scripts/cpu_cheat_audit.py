@@ -870,6 +870,17 @@ class _Proof:
     classifications: tuple[str, ...]
 
 
+@dataclasses.dataclass(frozen=True)
+class _ExternalProof:
+    path: pathlib.Path
+    name: str
+    return_spelling: str
+    parameter_count: int | None
+    required_parameter_count: int | None
+    mutable_parameter_positions: frozenset[int]
+    proof: _Proof
+
+
 def _advance_position(fragment: str, line: int, column: int) -> tuple[int, int]:
     newlines = fragment.count("\n")
     if newlines == 0:
@@ -3514,7 +3525,7 @@ def _indexed_calls(
 def _call_mutable_output_roots(
     tokens: Sequence[Token],
     indexed: _IndexedCall,
-    candidate: Function | None,
+    candidate: Function | _ExternalProof | None,
     output_roots: set[str],
     forward: dict[int, int],
 ) -> frozenset[str]:
@@ -3532,6 +3543,14 @@ def _call_mutable_output_roots(
     ]
     if candidate is None:
         return frozenset().union(*referenced)
+    if isinstance(candidate, _ExternalProof):
+        return frozenset().union(
+            *(
+                roots
+                for position, roots in enumerate(referenced)
+                if position in candidate.mutable_parameter_positions
+            )
+        )
 
     parameters, mutable = _parameter_names(tokens, candidate)
     parameter_segments = _parameter_ranges(tokens, candidate)
@@ -4988,7 +5007,11 @@ class _PathAuditor:
     """Conservative all-success-path verifier for ABI exports and helpers."""
 
     def __init__(
-        self, path: pathlib.Path, tokens: Sequence[Token], functions: Sequence[Function]
+        self,
+        path: pathlib.Path,
+        tokens: Sequence[Token],
+        functions: Sequence[Function],
+        external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
     ):
         self.path = path
         self.tokens = tokens
@@ -4997,9 +5020,12 @@ class _PathAuditor:
         self.by_name: dict[str, list[Function]] = defaultdict(list)
         for function in functions:
             self.by_name[function.name].append(function)
+        self.external_proofs = external_proofs or {}
         self.cache: dict[Function, _Proof] = {}
 
-    def resolve(self, call: Call) -> tuple[Function | None, str | None]:
+    def resolve(
+        self, call: Call
+    ) -> tuple[Function | _ExternalProof | None, str | None]:
         if call.qualified:
             return None, "qualified_helper"
         candidates = list(self.by_name.get(call.name, ()))
@@ -5019,7 +5045,23 @@ class _PathAuditor:
                 )
             ]
         if not candidates:
-            return None, "unresolved_helper"
+            external = list(self.external_proofs.get(call.name, ()))
+            if call.argument_count is not None:
+                external = [
+                    candidate
+                    for candidate in external
+                    if candidate.parameter_count is None
+                    or (
+                        candidate.required_parameter_count is not None
+                        and candidate.required_parameter_count <= call.argument_count
+                        and call.argument_count <= candidate.parameter_count
+                    )
+                ]
+            if not external:
+                return None, "unresolved_helper"
+            if len(external) != 1:
+                return None, "ambiguous_helper"
+            return external[0], None
         if len(candidates) != 1:
             return None, "ambiguous_helper"
         return candidates[0], None
@@ -5199,11 +5241,12 @@ class _PathAuditor:
                 output_roots,
                 self.forward,
             )
-            proof = (
-                self.prove(candidate, stack + (function,))
-                if candidate is not None
-                else None
-            )
+            if isinstance(candidate, Function):
+                proof = self.prove(candidate, stack + (function,))
+            elif isinstance(candidate, _ExternalProof):
+                proof = candidate.proof
+            else:
+                proof = None
             call_proofs[indexed.index] = (indexed, proof, error)
         safe_ternaries = _proven_device_selection_ternaries(
             self.tokens,
@@ -5725,7 +5768,11 @@ class _PathAuditor:
 
 
 def _audit_source_literal(
-    path: pathlib.Path, source: str, *, require_entrypoint: bool = True
+    path: pathlib.Path,
+    source: str,
+    *,
+    require_entrypoint: bool = True,
+    external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
 ) -> FileAudit:
     try:
         normalized_source, directives = normalize_preprocessor(source)
@@ -5776,7 +5823,7 @@ def _audit_source_literal(
             )
         )
 
-    auditor = _PathAuditor(path, tokens, functions)
+    auditor = _PathAuditor(path, tokens, functions, external_proofs)
     entrypoint_audits: list[EntrypointAudit] = []
     for entrypoint in sorted(entrypoints, key=lambda function: function.line):
         if entrypoint.name in duplicate_entries:
@@ -5857,11 +5904,20 @@ def _audit_source_literal(
 
 
 def audit_source(
-    path: pathlib.Path, source: str, *, require_entrypoint: bool = True
+    path: pathlib.Path,
+    source: str,
+    *,
+    require_entrypoint: bool = True,
+    external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
 ) -> FileAudit:
     """Audit both literal and compiler-expanded main-file source views."""
 
-    literal = _audit_source_literal(path, source, require_entrypoint=require_entrypoint)
+    literal = _audit_source_literal(
+        path,
+        source,
+        require_entrypoint=require_entrypoint,
+        external_proofs=external_proofs,
+    )
     try:
         _, directives = normalize_preprocessor(source)
     except ParseError:
@@ -5874,7 +5930,10 @@ def audit_source(
     try:
         expanded_source = _compiler_preprocess_source(path, source)
         expanded = _audit_source_literal(
-            path, expanded_source, require_entrypoint=require_entrypoint
+            path,
+            expanded_source,
+            require_entrypoint=require_entrypoint,
+            external_proofs=external_proofs,
         )
     except ParseError as error:
         detail = str(error)
@@ -6008,7 +6067,91 @@ def _group_by_name(functions: Iterable[Function]) -> dict[str, list[Function]]:
     return result
 
 
-def audit_paths(paths: Sequence[pathlib.Path]) -> list[FileAudit]:
+def _mutable_parameter_positions(
+    tokens: Sequence[Token], function: Function
+) -> frozenset[int]:
+    parameters, mutable = _parameter_names(tokens, function)
+    positions: set[int] = set()
+    for position, (left, right) in enumerate(_parameter_ranges(tokens, function)):
+        names = [
+            token.value
+            for token in tokens[left:right]
+            if token.kind == "identifier" and token.value in parameters
+        ]
+        if names and names[-1] in mutable:
+            positions.add(position)
+    return frozenset(positions)
+
+
+def _external_device_proofs(
+    paths: Sequence[pathlib.Path], audits: Sequence[FileAudit]
+) -> dict[str, tuple[_ExternalProof, ...]]:
+    """Build a report-derived index of unique, independently clean GPU exports."""
+
+    audit_entries = {
+        (audit_item.path, entry.entrypoint): entry
+        for audit_item in audits
+        for entry in audit_item.entrypoint_audits
+    }
+    definitions: list[tuple[pathlib.Path, list[Token], Function]] = []
+    for path in paths:
+        try:
+            source = path.read_text(encoding="utf-8")
+            normalized, _ = normalize_preprocessor(source)
+            tokens = lex_cpp(normalized)
+            functions = parse_functions(tokens)
+        except (OSError, UnicodeError, ParseError):
+            continue
+        definitions.extend(
+            (path, tokens, function)
+            for function in functions
+            if function.is_export
+        )
+
+    counts = Counter(function.name for _, _, function in definitions)
+    result: dict[str, list[_ExternalProof]] = defaultdict(list)
+    device_evidence = {"device_dispatch", "large_input_gpu_chain"}
+    for path, tokens, function in definitions:
+        if counts[function.name] != 1:
+            continue
+        entry = audit_entries.get((path, function.name))
+        if (
+            entry is None
+            or not entry.ok
+            or not (set(entry.classifications) & device_evidence)
+            or _canonical_signature_tokens(entry.return_type)
+            != _canonical_signature_tokens(function.return_spelling)
+        ):
+            continue
+        result[function.name].append(
+            _ExternalProof(
+                path=path,
+                name=function.name,
+                return_spelling=function.return_spelling,
+                parameter_count=function.parameter_count,
+                required_parameter_count=function.required_parameter_count,
+                mutable_parameter_positions=_mutable_parameter_positions(
+                    tokens, function
+                ),
+                proof=_Proof(
+                    True,
+                    f"independently audited device export {function.name} in {path}: "
+                    + entry.detail,
+                    tuple(
+                        sorted(
+                            set(entry.classifications) | {"audited_external_call"}
+                        )
+                    ),
+                ),
+            )
+        )
+    return {name: tuple(proofs) for name, proofs in result.items()}
+
+
+def _audit_paths_once(
+    paths: Sequence[pathlib.Path],
+    external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
+) -> list[FileAudit]:
     audits: list[FileAudit] = []
     for path in paths:
         try:
@@ -6017,7 +6160,25 @@ def audit_paths(paths: Sequence[pathlib.Path]) -> list[FileAudit]:
             finding = Finding(path, 1, "<read>", str(error), ("read_error",))
             audits.append(FileAudit(path, 0, 0, 0, (), (finding,)))
             continue
-        audits.append(audit_source(path, source, require_entrypoint=False))
+        audits.append(
+            audit_source(
+                path,
+                source,
+                require_entrypoint=False,
+                external_proofs=external_proofs,
+            )
+        )
+    return audits
+
+
+def audit_paths(paths: Sequence[pathlib.Path]) -> list[FileAudit]:
+    initial = _audit_paths_once(paths)
+    external_proofs = _external_device_proofs(paths, initial)
+    audits = (
+        _audit_paths_once(paths, external_proofs)
+        if external_proofs
+        else initial
+    )
     if audits and not any(audit.entrypoints for audit in audits):
         first = audits[0]
         finding = Finding(
