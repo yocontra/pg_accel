@@ -43,12 +43,16 @@ impl JoinExecState {
         let inner_result_slot = if inner_ps.is_null() {
             result_slot
         } else {
+            // SAFETY: the caller supplies a live inner PlanState initialized by
+            // ExecInitNode; its result-slot field is readable for this call.
             let slot = unsafe { (*inner_ps).ps_ResultTupleSlot };
             if slot.is_null() {
                 // Fallback: use the scan tuple slot from inner's ScanState.
                 // SAFETY: inner_ps points to a valid PlanState. If it's a
                 // ScanState, ss_ScanTupleSlot has the right descriptor.
                 let ss = inner_ps.cast::<pg_sys::ScanState>();
+                // SAFETY: an inner child without a result slot is scan-derived;
+                // its common ScanState prefix owns the matching live scan slot.
                 let scan_slot = unsafe { (*ss).ss_ScanTupleSlot };
                 if scan_slot.is_null() {
                     result_slot
@@ -68,7 +72,13 @@ impl JoinExecState {
             loop {
                 // SAFETY: ExecProcNode pulls from inner plan.
                 let inner_slot = unsafe { pg_sys::ExecProcNode(inner_ps) };
-                if inner_slot.is_null() || unsafe { Self::slot_is_empty(inner_slot) } {
+                if inner_slot.is_null()
+                    || unsafe {
+                        // SAFETY: short-circuiting proves the returned executor
+                        // slot is non-null and live until the next child pull.
+                        Self::slot_is_empty(inner_slot)
+                    }
+                {
                     break;
                 }
                 // SAFETY: Copy to owned MinimalTuple.
@@ -125,10 +135,14 @@ impl JoinExecState {
             };
 
             // Validate attno vs slot descriptor before key extraction.
+            // SAFETY: `inner_result_slot` is the live slot selected from the
+            // inner child and owns its tuple descriptor.
             let inner_tupdesc = unsafe { (*inner_result_slot).tts_tupleDescriptor };
             if inner_tupdesc.is_null() {
                 pgrx::error!("pg_accel: hash join inner slot has no tuple descriptor");
             }
+            // SAFETY: the preceding error branch proves the live inner tuple
+            // descriptor is non-null before reading its attribute count.
             let inner_natts = unsafe { (*inner_tupdesc).natts };
             if self.hash_inner_attno <= 0 || self.hash_inner_attno > inner_natts {
                 pgrx::error!(
@@ -155,6 +169,8 @@ impl JoinExecState {
             match self.hash_key_type {
                 PgaccelKeyType::Int32 => {
                     let (k, n) = unsafe {
+                        // SAFETY: every stored inner tuple matches `inner_info`;
+                        // the live inner slot is valid for fallback deformation.
                         tuple_extract::extract_i32(
                             &self.hash_inner_tuples,
                             &inner_info,
@@ -166,6 +182,8 @@ impl JoinExecState {
                 }
                 PgaccelKeyType::Int64 => {
                     let (k, n) = unsafe {
+                        // SAFETY: every stored inner tuple matches `inner_info`;
+                        // the live inner slot is valid for fallback deformation.
                         tuple_extract::extract_i64(
                             &self.hash_inner_tuples,
                             &inner_info,
@@ -329,7 +347,13 @@ impl JoinExecState {
             for _ in 0..self.batch_size {
                 // SAFETY: ExecProcNode pulls from outer plan.
                 let outer_slot = unsafe { pg_sys::ExecProcNode(outer_ps) };
-                if outer_slot.is_null() || unsafe { Self::slot_is_empty(outer_slot) } {
+                if outer_slot.is_null()
+                    || unsafe {
+                        // SAFETY: short-circuiting proves the returned executor
+                        // slot is non-null and live until the next outer pull.
+                        Self::slot_is_empty(outer_slot)
+                    }
+                {
                     self.outer_exhausted = true;
                     break;
                 }
@@ -391,6 +415,8 @@ impl JoinExecState {
             if outer_tupdesc.is_null() {
                 pgrx::error!("pg_accel: hash join outer slot has no tuple descriptor");
             }
+            // SAFETY: the preceding error branch proves the live outer tuple
+            // descriptor is non-null before reading its attribute count.
             let outer_natts = unsafe { (*outer_tupdesc).natts };
             if self.hash_outer_attno <= 0 || self.hash_outer_attno > outer_natts {
                 pgrx::error!(
@@ -399,6 +425,8 @@ impl JoinExecState {
                     outer_natts,
                 );
             }
+            // SAFETY: the attno was range-checked against the live outer
+            // descriptor shared by every tuple and fallback slot in this batch.
             let outer_info = unsafe { AttExtractInfo::new(outer_tupdesc, self.hash_outer_attno) };
 
             let mut o_int32_keys: Vec<i32> = Vec::new();
@@ -409,6 +437,8 @@ impl JoinExecState {
             match self.hash_key_type {
                 PgaccelKeyType::Int32 => {
                     let (k, n) = unsafe {
+                        // SAFETY: all outer tuples match `outer_info` and the
+                        // selected live outer slot supports fallback deformation.
                         tuple_extract::extract_i32(&outer_tuples, &outer_info, outer_extract_slot)
                     };
                     o_int32_keys = k;
@@ -416,6 +446,8 @@ impl JoinExecState {
                 }
                 PgaccelKeyType::Int64 => {
                     let (k, n) = unsafe {
+                        // SAFETY: all outer tuples match `outer_info` and the
+                        // selected live outer slot supports fallback deformation.
                         tuple_extract::extract_i64(&outer_tuples, &outer_info, outer_extract_slot)
                     };
                     o_long_keys = k;
@@ -526,6 +558,8 @@ impl JoinExecState {
                                 crate::engine::pg_compat::heap_copy_minimal_tuple(inner_mt)
                             };
                             let outer_copy = unsafe {
+                                // SAFETY: the GPU pair index was bounds-checked
+                                // and `outer_mt` is a live MinimalTuple copy.
                                 crate::engine::pg_compat::heap_copy_minimal_tuple(outer_mt)
                             };
                             self.pending_matches.push(PendingMatch {
@@ -601,14 +635,20 @@ impl JoinExecState {
             return std::ptr::null_mut();
         }
 
+        // SAFETY: PostgreSQL maintains this backend-global worker identifier;
+        // the executor callback reads it on the main backend thread.
         self.record_hash_join_worker_metadata(unsafe { pg_sys::ParallelWorkerNumber });
 
         let inner_result_slot = if inner_ps.is_null() {
             result_slot
         } else {
+            // SAFETY: the caller supplies a live inner PlanState initialized by
+            // ExecInitNode; its result-slot field is readable for this call.
             let slot = unsafe { (*inner_ps).ps_ResultTupleSlot };
             if slot.is_null() {
                 let ss = inner_ps.cast::<pg_sys::ScanState>();
+                // SAFETY: an inner child without a result slot is scan-derived;
+                // its common ScanState prefix owns the matching live scan slot.
                 let scan_slot = unsafe { (*ss).ss_ScanTupleSlot };
                 if scan_slot.is_null() {
                     result_slot
@@ -624,10 +664,20 @@ impl JoinExecState {
             self.hash_built = true;
 
             loop {
+                // SAFETY: `inner_ps` is the live inner child PlanState on this
+                // backend thread for the duration of the build phase.
                 let inner_slot = unsafe { pg_sys::ExecProcNode(inner_ps) };
-                if inner_slot.is_null() || unsafe { Self::slot_is_empty(inner_slot) } {
+                if inner_slot.is_null()
+                    || unsafe {
+                        // SAFETY: short-circuiting proves the returned executor
+                        // slot is non-null and live until the next child pull.
+                        Self::slot_is_empty(inner_slot)
+                    }
+                {
                     break;
                 }
+                // SAFETY: the non-empty child slot is live; PostgreSQL returns
+                // a new palloc-owned MinimalTuple copy.
                 let mt = unsafe { pg_sys::ExecCopySlotMinimalTuple(inner_slot) };
                 self.hash_inner_tuples.push(mt);
 
@@ -646,6 +696,8 @@ impl JoinExecState {
             if inner_count == 0 {
                 self.record_hash_join_build_metadata(0, 0, 0);
                 self.hash_count_returned = true;
+                // SAFETY: `result_slot` is the live output slot supplied to
+                // this executor callback and count 0 fits PostgreSQL int8.
                 unsafe { Self::emit_hash_join_count(result_slot, 0) };
                 return result_slot;
             }
@@ -665,10 +717,14 @@ impl JoinExecState {
                 }
             };
 
+            // SAFETY: `inner_result_slot` is the live slot selected from the
+            // inner child and owns its tuple descriptor.
             let inner_tupdesc = unsafe { (*inner_result_slot).tts_tupleDescriptor };
             if inner_tupdesc.is_null() {
                 pgrx::error!("pg_accel: hash join inner slot has no tuple descriptor");
             }
+            // SAFETY: the preceding error branch proves the live inner tuple
+            // descriptor is non-null before reading its attribute count.
             let inner_natts = unsafe { (*inner_tupdesc).natts };
             if self.hash_inner_attno <= 0 || self.hash_inner_attno > inner_natts {
                 pgrx::error!(
@@ -678,6 +734,8 @@ impl JoinExecState {
                 );
             }
 
+            // SAFETY: the attno was range-checked against the live descriptor
+            // shared by every inner tuple and the fallback extraction slot.
             let inner_info = unsafe { AttExtractInfo::new(inner_tupdesc, self.hash_inner_attno) };
             let indices: Vec<u32> = (0..inner_count_u32).collect();
             let mut int32_keys: Vec<i32> = Vec::new();
@@ -687,6 +745,8 @@ impl JoinExecState {
             match self.hash_key_type {
                 PgaccelKeyType::Int32 => {
                     let (k, n) = unsafe {
+                        // SAFETY: every stored inner tuple matches `inner_info`;
+                        // the live inner slot is valid for fallback deformation.
                         tuple_extract::extract_i32(
                             &self.hash_inner_tuples,
                             &inner_info,
@@ -698,6 +758,8 @@ impl JoinExecState {
                 }
                 PgaccelKeyType::Int64 => {
                     let (k, n) = unsafe {
+                        // SAFETY: every stored inner tuple matches `inner_info`;
+                        // the live inner slot is valid for fallback deformation.
                         tuple_extract::extract_i64(
                             &self.hash_inner_tuples,
                             &inner_info,
@@ -754,11 +816,21 @@ impl JoinExecState {
         loop {
             let mut outer_tuples: Vec<pg_sys::MinimalTuple> = Vec::with_capacity(self.batch_size);
             for _ in 0..self.batch_size {
+                // SAFETY: `outer_ps` is the live outer child PlanState on this
+                // backend thread for the duration of the probe phase.
                 let outer_slot = unsafe { pg_sys::ExecProcNode(outer_ps) };
-                if outer_slot.is_null() || unsafe { Self::slot_is_empty(outer_slot) } {
+                if outer_slot.is_null()
+                    || unsafe {
+                        // SAFETY: short-circuiting proves the returned executor
+                        // slot is non-null and live until the next outer pull.
+                        Self::slot_is_empty(outer_slot)
+                    }
+                {
                     self.outer_exhausted = true;
                     break;
                 }
+                // SAFETY: the non-empty child slot is live; PostgreSQL returns
+                // a new palloc-owned MinimalTuple copy.
                 let mt = unsafe { pg_sys::ExecCopySlotMinimalTuple(outer_slot) };
                 outer_tuples.push(mt);
             }
@@ -774,6 +846,8 @@ impl JoinExecState {
             if !hash_join_row_indices_representable(outer_count) {
                 for mt in outer_tuples {
                     if !mt.is_null() {
+                        // SAFETY: each tuple is a palloc-owned copy made above
+                        // and is consumed exactly once on this error path.
                         unsafe { pg_sys::pfree(mt.cast()) };
                     }
                 }
@@ -788,10 +862,14 @@ impl JoinExecState {
             } else {
                 self.hash_outer_slot
             };
+            // SAFETY: the selected outer slot is live for this executor call
+            // and owns the descriptor shared by all copied outer tuples.
             let outer_tupdesc = unsafe { (*outer_extract_slot).tts_tupleDescriptor };
             if outer_tupdesc.is_null() {
                 pgrx::error!("pg_accel: hash join outer slot has no tuple descriptor");
             }
+            // SAFETY: the preceding error branch proves the live outer tuple
+            // descriptor is non-null before reading its attribute count.
             let outer_natts = unsafe { (*outer_tupdesc).natts };
             if self.hash_outer_attno <= 0 || self.hash_outer_attno > outer_natts {
                 pgrx::error!(
@@ -800,6 +878,8 @@ impl JoinExecState {
                     outer_natts,
                 );
             }
+            // SAFETY: the attno was range-checked against the live descriptor
+            // shared by every outer tuple and fallback extraction slot.
             let outer_info = unsafe { AttExtractInfo::new(outer_tupdesc, self.hash_outer_attno) };
 
             let mut o_int32_keys: Vec<i32> = Vec::new();
@@ -808,6 +888,8 @@ impl JoinExecState {
             match self.hash_key_type {
                 PgaccelKeyType::Int32 => {
                     let (k, n) = unsafe {
+                        // SAFETY: all outer tuples match `outer_info` and the
+                        // selected live outer slot supports fallback deformation.
                         tuple_extract::extract_i32(&outer_tuples, &outer_info, outer_extract_slot)
                     };
                     o_int32_keys = k;
@@ -815,6 +897,8 @@ impl JoinExecState {
                 }
                 PgaccelKeyType::Int64 => {
                     let (k, n) = unsafe {
+                        // SAFETY: all outer tuples match `outer_info` and the
+                        // selected live outer slot supports fallback deformation.
                         tuple_extract::extract_i64(&outer_tuples, &outer_info, outer_extract_slot)
                     };
                     o_long_keys = k;
@@ -848,6 +932,8 @@ impl JoinExecState {
             let Some(batch_matches) = ht.count_matches(o_keys_ptr, &o_null_mask) else {
                 for mt in outer_tuples {
                     if !mt.is_null() {
+                        // SAFETY: each tuple is a palloc-owned copy made in
+                        // this batch and is consumed once on the failure path.
                         unsafe { pg_sys::pfree(mt.cast()) };
                     }
                 }
@@ -862,6 +948,8 @@ impl JoinExecState {
             } else {
                 for mt in outer_tuples {
                     if !mt.is_null() {
+                        // SAFETY: each tuple is a palloc-owned copy made in
+                        // this batch and is consumed once on the overflow path.
                         unsafe { pg_sys::pfree(mt.cast()) };
                     }
                 }
@@ -870,6 +958,8 @@ impl JoinExecState {
 
             for mt in outer_tuples {
                 if !mt.is_null() {
+                    // SAFETY: each tuple is a palloc-owned copy made in this
+                    // completed batch and has not been freed on the success path.
                     unsafe { pg_sys::pfree(mt.cast()) };
                 }
             }
@@ -890,6 +980,8 @@ impl JoinExecState {
         if total_matches > i64::MAX as usize {
             pgrx::error!("pg_accel: hash-join COUNT(*) result exceeds int8");
         }
+        // SAFETY: `result_slot` is the live output slot supplied to this
+        // executor callback and the range check proves the count fits int8.
         unsafe { Self::emit_hash_join_count(result_slot, total_matches as i64) };
         result_slot
     }
@@ -899,6 +991,9 @@ impl JoinExecState {
             pgrx::error!("pg_accel: hash-join count output slot is null");
         }
         unsafe {
+            // SAFETY: the null check proves a live output slot; its descriptor
+            // and value/null arrays contain at least natts entries, and the
+            // descriptor check below proves the count column exists.
             pg_sys::ExecClearTuple(result_slot);
             let tupdesc = (*result_slot).tts_tupleDescriptor;
             if tupdesc.is_null() || (*tupdesc).natts < 1 {
