@@ -1643,6 +1643,61 @@ mod tests {
     }
 
     #[pg_test]
+    fn malformed_forced_import_restores_memory_context_without_native_fallback() {
+        setup_extension_and_fixture();
+        let sql = "SELECT ST_Reclass(rast, '0:1', '8BUI') \
+                   FROM pgaccel_raster_observer";
+        let native = raster_wkb_rows(sql);
+        Spi::run(
+            "SELECT pg_accel_pin( \
+               'pgaccel_raster_observer'::regclass, ARRAY['rast'])",
+        )
+        .expect("pin malformed importer fixture");
+        crate::gpu::reset_gpu_exec_count();
+        // SAFETY: pg_test runs synchronously on the backend main thread.
+        let context_before = unsafe { pg_sys::CurrentMemoryContext };
+        assert!(!context_before.is_null());
+        let (sqlstate, message) =
+            crate::engine::executor::raster::with_test_raster_import_wkb_corruption(|| {
+                super::with_forced_raster_path(|| capture_sql_error(sql))
+            })
+            .expect("malformed forced import must raise a hard execution error");
+        // SAFETY: the caught SQL error returned control to the same pg_test
+        // backend callback, where CurrentMemoryContext must be restored.
+        let context_after = unsafe { pg_sys::CurrentMemoryContext };
+        assert_eq!(context_after, context_before);
+        assert_eq!(sqlstate, "XX000");
+        assert_eq!(
+            message,
+            "pg_accel: raster execution failed: PostGIS st_rastfromwkb raised ERROR: \
+             rt_raster_from_wkb: wkb size (1) < min size (61)"
+        );
+        crate::gpu::assert_gpu_executed(1);
+        assert!(
+            raster_derived_bytes() > 0,
+            "the real GPU artifact must precede the importer-only corruption"
+        );
+        assert_eq!(
+            raster_output_memory_stats(),
+            RasterOutputMemoryStats {
+                contexts: 0,
+                total_bytes: 0,
+                used_bytes: 0,
+            },
+            "failed query recovery must release the named raster output context"
+        );
+        assert_eq!(
+            Spi::get_one::<i32>("SELECT 42").expect("backend remains usable"),
+            Some(42)
+        );
+        assert_eq!(
+            raster_wkb_rows(sql),
+            native,
+            "malformed forced import must never fall through to native execution"
+        );
+    }
+
+    #[pg_test]
     fn zero_grid_present_band_declines_before_dispatch() {
         use crate::adapters::extractors::raster::parse_resident_raster;
 

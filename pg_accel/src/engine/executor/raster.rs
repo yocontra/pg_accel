@@ -85,7 +85,11 @@ assert_abi_field_offset!(ResidentRasterBand, PgaccelResidentRasterBand, nodata);
 #[cfg(feature = "pg_test")]
 thread_local! {
     static TEST_RASTER_KERNEL_FAILURE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static TEST_RASTER_IMPORT_WKB_CORRUPTION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
+
+#[cfg(feature = "pg_test")]
+const TEST_MALFORMED_RASTER_WKB: &[u8] = &[0];
 
 /// Inject a failing raw result after the real resident kernel has returned.
 #[cfg(feature = "pg_test")]
@@ -106,6 +110,29 @@ pub(crate) fn with_test_raster_kernel_failure<R>(f: impl FnOnce() -> R) -> R {
 #[cfg(feature = "pg_test")]
 fn test_raster_kernel_failure_enabled() -> bool {
     TEST_RASTER_KERNEL_FAILURE_DEPTH.with(|depth| depth.get() > 0)
+}
+
+/// Replace the exact artifact WKB with one malformed byte only at the public
+/// PostGIS importer boundary.
+#[cfg(feature = "pg_test")]
+pub(crate) fn with_test_raster_import_wkb_corruption<R>(f: impl FnOnce() -> R) -> R {
+    struct CorruptionGuard;
+
+    impl Drop for CorruptionGuard {
+        fn drop(&mut self) {
+            TEST_RASTER_IMPORT_WKB_CORRUPTION_DEPTH
+                .with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    TEST_RASTER_IMPORT_WKB_CORRUPTION_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+    let _guard = CorruptionGuard;
+    f()
+}
+
+#[cfg(feature = "pg_test")]
+fn test_raster_import_wkb_corruption_enabled() -> bool {
+    TEST_RASTER_IMPORT_WKB_CORRUPTION_DEPTH.with(|depth| depth.get() > 0)
 }
 
 /// Fully decoded childless raster execution contract. The canonical RQS2
@@ -305,6 +332,8 @@ impl RasterOutputMemoryContext {
         catalog: &PostgisRasterCatalogIdentity,
         wkb: &[u8],
     ) -> Result<pg_sys::Datum, String> {
+        // SAFETY: self retains the live es_query_cxt captured at Begin and
+        // this method runs only on the backend main thread.
         let context = unsafe { self.ensure_context()? };
         // SAFETY: context is our live child of the executor query context.
         let previous = unsafe { pg_sys::MemoryContextSwitchTo(context) };
@@ -314,8 +343,9 @@ impl RasterOutputMemoryContext {
         let result = unsafe { postgis_raster_datum_from_wkb(catalog, wkb) };
         drop(guard);
         if result.is_err() {
-            // No slot references a value from the failed import. Free any
-            // temporary bytea/importer allocations before escalating.
+            // SAFETY: CurrentMemoryContext was restored above and no slot
+            // references a value from the failed import, so the child can be
+            // reset before escalating.
             unsafe { pg_sys::MemoryContextReset(context) };
         }
         result
@@ -465,9 +495,11 @@ impl RasterExecState {
                 "raster CustomScan output slot changed after BeginCustomScan".to_owned(),
             ));
         }
-        // PostgreSQL has finished consuming the prior virtual tuple. Clear its
-        // slot reference before resetting the context that owns its Datum.
+        // SAFETY: PostgreSQL has finished consuming the prior virtual tuple;
+        // the validated slot and its query-owned child context remain live.
         unsafe { self.output_memory.clear_and_reset() };
+        // SAFETY: executor tuple emission runs on the backend main thread and
+        // the plan's catalog/residency state is live for this callback.
         unsafe { self.ensure_ready_for_execution() }?;
         let owner = self.plan.selected_relation.relid;
         let catalog = &self
@@ -482,6 +514,12 @@ impl RasterExecState {
             |resolved| match self.cursor.next(resolved.artifact) {
                 Some(RasterOutputValue::Null) => Ok(Some((pg_sys::Datum::from(0), true))),
                 Some(RasterOutputValue::Wkb(wkb)) => {
+                    #[cfg(feature = "pg_test")]
+                    let wkb = if test_raster_import_wkb_corruption_enabled() {
+                        TEST_MALFORMED_RASTER_WKB
+                    } else {
+                        wkb
+                    };
                     // SAFETY: executor callbacks run on the backend main thread;
                     // the WKB slice remains valid for this complete store borrow
                     // and first execution after Begin/ReScan proved this exact
