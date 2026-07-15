@@ -51,6 +51,10 @@ run_logged() {
     git status --short
 } > "${artifact_dir}/metadata.txt"
 
+run_logged "gpu-build" just gpu-build
+run_logged "cpu-cheat-audit" \
+    env CPU_CHEAT_AUDIT_REPORT="${artifact_dir}/cpu-cheat-audit.json" \
+    just audit-cpu-cheats
 run_logged "install-pg-accel" just install-pg-accel "$pg"
 run_logged "provenance" \
     env PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" \

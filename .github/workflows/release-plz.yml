@@ -17,6 +17,16 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      - name: Run CPU-cheat analyzer fixture gate
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
+      - name: Run real CPU-cheat release gate
+        run: |
+          python3 scripts/cpu_cheat_audit.py \
+            --json-report target/cpu-cheat-audit.json \
+            --headers pgaccel-kernels/include/*.h -- \
+            pgaccel-kernels/src/*.cpp
       - uses: MarcoIeni/release-plz-action@v0.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

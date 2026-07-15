@@ -61,6 +61,12 @@ jobs:
             LLVM_PREFIX="$(brew --prefix llvm@20)" \
             ACPP_LLD_PATH="$(brew --prefix lld@20)/bin/ld64.lld" \
             just setup-gpu-acpp
+      - name: Build kernels before CPU-cheat release gate
+        if: steps.pg-support.outputs.skip != 'true'
+        run: just gpu-build
+      - name: Run CPU-cheat release gate
+        if: steps.pg-support.outputs.skip != 'true'
+        run: CPU_CHEAT_AUDIT_REPORT=target/cpu-cheat-audit.json just audit-cpu-cheats
       - if: steps.pg-support.outputs.skip != 'true'
         run: |
           source scripts/pg_versions.sh

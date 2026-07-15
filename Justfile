@@ -675,22 +675,22 @@ release-verify pg="":
 release-checklist-audit:
     bash scripts/release_checklist_audit.sh
 
-# Prove the structural C++ audit against synthetic positive and adversarial fixtures.
-# This target is independent of current production findings and must stay green.
+# Prove the analyzer against synthetic evasions and the real ABI/witness baseline.
+# Assertions expect the current production audit to be nonzero, so this stays green.
 audit-cpu-cheats-test:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
 
-# Structurally audit every extern-C pgaccel_status entrypoint in the kernel layer.
-# Compute entrypoints must recursively reach a typed SYCL launch. The analyzer
-# rejects unresolved/ambiguous/cyclic helper chains, comments or strings posing as
-# dispatch, and host-success paths. Only exact, source-validated lifecycle and
-# fail-only ABI contracts are exempt. A complete JSON inventory is always written.
+# Audit every extern-C pgaccel_* definition and its public header declaration.
+# Every successful compute path must be dominated by output-producing SYCL work;
+# ambiguous control flow, output provenance, templates, or host finalization fail
+# closed. Exact source-validated lifecycle/fail-only contracts remain auditable.
 audit-cpu-cheats: audit-cpu-cheats-test
     #!/usr/bin/env bash
     set -euo pipefail
     report="${CPU_CHEAT_AUDIT_REPORT:-target/cpu-cheat-audit.json}"
     python3 scripts/cpu_cheat_audit.py \
         --json-report "$report" \
+        --headers pgaccel-kernels/include/*.h -- \
         pgaccel-kernels/src/*.cpp
 
 # === CI ===
