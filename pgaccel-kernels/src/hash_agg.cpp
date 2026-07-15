@@ -4,6 +4,8 @@
  * Group assignment is performed only by GPU-resident paths:
  *   - `agg_hash_row_parallel`: device hash-table group assignment.
  *   - `agg_sort_based`: GPU sort by group key, followed by grouped reduce.
+ *   - `agg_hash_streaming_numeric`: bounded staging into a persistent device
+ *     hash table for the standalone checked ABI.
  *
  * All accumulators use f64 internally to prevent integer overflow
  * (int32 SUM can overflow int32 after ~2B rows; f64 gives ~15 digits
@@ -22,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -3084,29 +3087,630 @@ static pgaccel_agg_state* agg_sort_based_partial(const void* group_keys,
 
 namespace {
 
-enum class HashAggGpuPath { unsupported, row_parallel, sort };
+// The standalone checked ABI receives host columns, so it cannot retain the
+// resident engine's zero-copy property. Keep staging bounded and retain the
+// hash table plus aggregate state across chunks in one shared USM allocation.
+// Group lookup, collision resolution, aggregate updates, and cross-chunk
+// merging all happen in the kernels below.
+static constexpr size_t HASH_AGG_STREAM_MAX_TABLE_SLOTS = size_t{1} << 20;
+static constexpr size_t HASH_AGG_STREAM_MAX_SLAB_BYTES = size_t{256} << 20;
+static constexpr size_t HASH_AGG_STREAM_BLOCK_ROWS = 256;
+static constexpr size_t HASH_AGG_STREAM_BLOCK_TABLE_SLOTS = HASH_AGG_STREAM_BLOCK_ROWS * 2;
+static constexpr uint32_t HASH_AGG_STREAM_NO_GROUP = std::numeric_limits<uint32_t>::max();
+static constexpr uint32_t HASH_AGG_STREAM_OVERFLOW_GROUPS = 1;
+static constexpr uint32_t HASH_AGG_STREAM_OVERFLOW_TABLE = 2;
+static constexpr uint32_t HASH_AGG_STREAM_OVERFLOW_COUNT = 3;
+static constexpr const char* HASH_AGG_STREAM_TEST_CHUNK_ENV = "PGACCEL_TEST_HASHAGG_CHUNK_ROWS";
 
-bool hashagg_sort_shape_supported(const void* group_keys, const uint8_t* group_null_mask,
-                                  size_t row_count, int key_type) {
-  return (key_type == 0 || key_type == 1 || key_type == 2) &&
-         row_count <= static_cast<size_t>(std::numeric_limits<uint32_t>::max()) &&
-         !null_sort_sentinel_collides(group_keys, group_null_mask, row_count, key_type);
-}
+struct HashAggStreamingSlabHeader {
+  size_t table_capacity;
+  size_t max_groups;
+  size_t num_aggs;
+  size_t chunk_capacity;
+  size_t chunk_rows;
+  size_t chunk_blocks;
+  size_t slot_used_off;
+  size_t slot_bits_off;
+  size_t slot_groups_off;
+  size_t group_keys_off;
+  size_t group_counts_off;
+  size_t results_off;
+  size_t value_offsets_off;
+  size_t null_offsets_off;
+  size_t null_present_off;
+  size_t value_types_off;
+  size_t agg_funcs_off;
+  size_t agg_col_idx_off;
+  size_t chunk_keys_off;
+  size_t chunk_key_nulls_off;
+  size_t chunk_value_data_off;
+  size_t chunk_null_data_off;
+  size_t block_slot_used_off;
+  size_t block_slot_bits_off;
+  size_t block_slot_groups_off;
+  size_t block_group_counts_off;
+  size_t partial_keys_off;
+  size_t partial_key_nulls_off;
+  size_t partial_counts_off;
+  size_t partial_results_off;
+  uint32_t group_count;
+  uint32_t null_group;
+  uint32_t overflow;
+};
 
-HashAggGpuPath select_hashagg_finalize_path(const void* group_keys, const uint8_t* group_null_mask,
-                                            size_t row_count, int key_type, const int* value_types,
-                                            const pgaccel_agg_col* agg_cols, size_t num_aggs) {
-  if (!hashagg_sort_based_available())
-    return HashAggGpuPath::unsupported;
+struct HashAggStreamingLayoutCursor {
+  size_t cursor = sizeof(HashAggStreamingSlabHeader);
+  bool valid = true;
 
-  if (row_parallel_hashagg_supported(key_type, row_count) &&
-      row_parallel_hashagg_agg_shape_supported(value_types, agg_cols, num_aggs)) {
-    return HashAggGpuPath::row_parallel;
+  size_t append(size_t count, size_t elem_size, size_t alignment) {
+    size_t aligned = 0;
+    size_t span = 0;
+    size_t next = 0;
+    if (!valid || !checked_align_up(cursor, alignment, &aligned) ||
+        !checked_mul_size(count, elem_size, &span) || !checked_add_size(aligned, span, &next)) {
+      valid = false;
+      return 0;
+    }
+    cursor = next;
+    return aligned;
+  }
+};
+
+bool build_hashagg_streaming_layout(size_t table_capacity, size_t num_aggs, size_t chunk_rows,
+                                    size_t key_size, const uint8_t* const* value_nulls,
+                                    const int* value_types, const pgaccel_agg_col* agg_cols,
+                                    HashAggStreamingSlabHeader* out, size_t* out_bytes) {
+  if (table_capacity < 2 || (table_capacity & (table_capacity - 1)) != 0 || out == nullptr ||
+      out_bytes == nullptr)
+    return false;
+
+  HashAggStreamingSlabHeader h{};
+  h.table_capacity = table_capacity;
+  h.max_groups = table_capacity / 2;
+  h.num_aggs = num_aggs;
+  h.chunk_capacity = chunk_rows;
+  h.chunk_rows = 0;
+  h.chunk_blocks = 0;
+  h.null_group = HASH_AGG_STREAM_NO_GROUP;
+
+  HashAggStreamingLayoutCursor layout;
+  size_t result_count = 0;
+  if (!checked_mul_size(num_aggs, h.max_groups, &result_count))
+    return false;
+  h.slot_used_off = layout.append(table_capacity, sizeof(uint8_t), alignof(uint8_t));
+  h.slot_bits_off = layout.append(table_capacity, sizeof(uint64_t), alignof(uint64_t));
+  h.slot_groups_off = layout.append(table_capacity, sizeof(uint32_t), alignof(uint32_t));
+  h.group_keys_off = layout.append(h.max_groups, key_size, key_size);
+  h.group_counts_off = layout.append(h.max_groups, sizeof(int64_t), alignof(int64_t));
+  h.results_off = layout.append(result_count, sizeof(double), alignof(double));
+  h.value_offsets_off = layout.append(num_aggs, sizeof(size_t), alignof(size_t));
+  h.null_offsets_off = layout.append(num_aggs, sizeof(size_t), alignof(size_t));
+  h.null_present_off = layout.append(num_aggs, sizeof(uint8_t), alignof(uint8_t));
+  h.value_types_off = layout.append(num_aggs, sizeof(int), alignof(int));
+  h.agg_funcs_off = layout.append(num_aggs, sizeof(pgaccel_agg_func), alignof(pgaccel_agg_func));
+  h.agg_col_idx_off = layout.append(num_aggs, sizeof(size_t), alignof(size_t));
+  h.chunk_keys_off = layout.append(chunk_rows, key_size, key_size);
+  h.chunk_key_nulls_off = layout.append(chunk_rows, sizeof(uint8_t), alignof(uint8_t));
+
+  h.chunk_value_data_off = layout.cursor;
+  for (size_t a = 0; a < num_aggs; ++a) {
+    if (agg_reads_value(agg_cols[a].func, agg_cols[a].col_idx)) {
+      layout.append(chunk_rows, value_elem_size(value_types[a]), value_elem_size(value_types[a]));
+    }
+  }
+  h.chunk_null_data_off = layout.cursor;
+  for (size_t a = 0; a < num_aggs; ++a) {
+    if (agg_reads_value(agg_cols[a].func, agg_cols[a].col_idx) && value_nulls != nullptr &&
+        value_nulls[a] != nullptr) {
+      layout.append(chunk_rows, sizeof(uint8_t), alignof(uint8_t));
+    }
   }
 
-  return hashagg_sort_shape_supported(group_keys, group_null_mask, row_count, key_type)
-             ? HashAggGpuPath::sort
-             : HashAggGpuPath::unsupported;
+  size_t chunk_blocks = 0;
+  size_t block_slot_count = 0;
+  size_t partial_result_count = 0;
+  if (chunk_rows != 0) {
+    chunk_blocks = 1 + (chunk_rows - 1) / HASH_AGG_STREAM_BLOCK_ROWS;
+  }
+  if (!checked_mul_size(chunk_blocks, HASH_AGG_STREAM_BLOCK_TABLE_SLOTS, &block_slot_count) ||
+      !checked_mul_size(num_aggs, chunk_rows, &partial_result_count)) {
+    return false;
+  }
+  h.block_slot_used_off = layout.append(block_slot_count, sizeof(uint8_t), alignof(uint8_t));
+  h.block_slot_bits_off = layout.append(block_slot_count, sizeof(uint64_t), alignof(uint64_t));
+  h.block_slot_groups_off = layout.append(block_slot_count, sizeof(uint32_t), alignof(uint32_t));
+  h.block_group_counts_off = layout.append(chunk_blocks, sizeof(uint32_t), alignof(uint32_t));
+  h.partial_keys_off = layout.append(chunk_rows, key_size, key_size);
+  h.partial_key_nulls_off = layout.append(chunk_rows, sizeof(uint8_t), alignof(uint8_t));
+  h.partial_counts_off = layout.append(chunk_rows, sizeof(int64_t), alignof(int64_t));
+  h.partial_results_off = layout.append(partial_result_count, sizeof(double), alignof(double));
+
+  if (!layout.valid)
+    return false;
+  *out = h;
+  *out_bytes = layout.cursor;
+  return true;
+}
+
+size_t hashagg_forced_test_chunk_rows() {
+  const char* raw = std::getenv(HASH_AGG_STREAM_TEST_CHUNK_ENV);
+  if (raw == nullptr || *raw == '\0')
+    return 0;
+  char* end = nullptr;
+  const unsigned long long parsed = std::strtoull(raw, &end, 10);
+  if (end == raw || *end != '\0' || parsed == 0)
+    return 0;
+  if (parsed > static_cast<unsigned long long>(std::numeric_limits<size_t>::max()))
+    return std::numeric_limits<size_t>::max();
+  return static_cast<size_t>(parsed);
+}
+
+void fill_hashagg_streaming_metadata(uint8_t* slab, const int* value_types,
+                                     const uint8_t* const* value_nulls,
+                                     const pgaccel_agg_col* agg_cols) {
+  auto* h = reinterpret_cast<HashAggStreamingSlabHeader*>(slab);
+  auto* value_offsets = reinterpret_cast<size_t*>(slab + h->value_offsets_off);
+  auto* null_offsets = reinterpret_cast<size_t*>(slab + h->null_offsets_off);
+  auto* null_present = reinterpret_cast<uint8_t*>(slab + h->null_present_off);
+  auto* staged_types = reinterpret_cast<int*>(slab + h->value_types_off);
+  auto* funcs = reinterpret_cast<pgaccel_agg_func*>(slab + h->agg_funcs_off);
+  auto* col_idx = reinterpret_cast<size_t*>(slab + h->agg_col_idx_off);
+
+  size_t value_cursor = h->chunk_value_data_off;
+  size_t null_cursor = h->chunk_null_data_off;
+  for (size_t a = 0; a < h->num_aggs; ++a) {
+    const bool reads_value = agg_reads_value(agg_cols[a].func, agg_cols[a].col_idx);
+    const size_t elem_size = value_elem_size(value_types[a]);
+    size_t aligned = value_cursor;
+    if (reads_value) {
+      checked_align_up(value_cursor, elem_size, &aligned);
+      value_cursor = aligned + h->chunk_capacity * elem_size;
+    }
+    value_offsets[a] = reads_value ? aligned - h->chunk_value_data_off : 0;
+    const bool has_nulls = reads_value && value_nulls != nullptr && value_nulls[a] != nullptr;
+    null_offsets[a] = has_nulls ? null_cursor - h->chunk_null_data_off : 0;
+    if (has_nulls)
+      null_cursor += h->chunk_capacity;
+    null_present[a] = has_nulls ? 1 : 0;
+    staged_types[a] = value_types[a];
+    funcs[a] = agg_cols[a].func;
+    col_idx[a] = agg_cols[a].col_idx;
+  }
+}
+
+template <typename KeyT>
+pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t* group_null_mask,
+                                          size_t row_count, int key_type,
+                                          const void* const* value_cols,
+                                          const uint8_t* const* value_nulls, const int* value_types,
+                                          const pgaccel_agg_col* agg_cols, size_t num_aggs,
+                                          pgaccel_agg_state** out_state) {
+  sycl::queue& q = pgaccel_require_queue();
+  const pgaccel_platform_caps caps = pgaccel_get_caps();
+  if (caps.max_alloc_bytes < sizeof(HashAggStreamingSlabHeader) * 2)
+    return PGACCEL_OOM;
+
+  const size_t slab_budget = std::min(HASH_AGG_STREAM_MAX_SLAB_BYTES, caps.max_alloc_bytes / 2);
+  size_t distinct_ceiling = std::min(row_count, HASH_AGG_STREAM_MAX_TABLE_SLOTS / 2);
+  size_t table_need = 0;
+  size_t table_capacity = 0;
+  if (!checked_mul_size(distinct_ceiling, 2, &table_need) ||
+      !next_power_of_two_size(std::max<size_t>(table_need, 2), &table_capacity)) {
+    return PGACCEL_OOM;
+  }
+
+  size_t per_row_bytes = sizeof(KeyT) + sizeof(uint8_t);
+  for (size_t a = 0; a < num_aggs; ++a) {
+    if (!agg_reads_value(agg_cols[a].func, agg_cols[a].col_idx))
+      continue;
+    if (!checked_add_size(per_row_bytes, value_elem_size(value_types[a]), &per_row_bytes) ||
+        (value_nulls != nullptr && value_nulls[a] != nullptr &&
+         !checked_add_size(per_row_bytes, sizeof(uint8_t), &per_row_bytes))) {
+      return PGACCEL_OOM;
+    }
+  }
+
+  HashAggStreamingSlabHeader layout{};
+  size_t base_bytes = 0;
+  while (!build_hashagg_streaming_layout(table_capacity, num_aggs, 0, sizeof(KeyT), value_nulls,
+                                         value_types, agg_cols, &layout, &base_bytes) ||
+         base_bytes >= slab_budget) {
+    if (table_capacity <= 2)
+      return PGACCEL_OOM;
+    table_capacity /= 2;
+  }
+
+  const size_t upper = std::min(row_count, (slab_budget - base_bytes) / per_row_bytes);
+  if (upper == 0)
+    return PGACCEL_OOM;
+
+  size_t low = 1;
+  size_t high = upper;
+  size_t chunk_capacity = 0;
+  size_t slab_bytes = 0;
+  while (low <= high) {
+    const size_t mid = low + (high - low) / 2;
+    HashAggStreamingSlabHeader candidate{};
+    size_t candidate_bytes = 0;
+    if (build_hashagg_streaming_layout(table_capacity, num_aggs, mid, sizeof(KeyT), value_nulls,
+                                       value_types, agg_cols, &candidate, &candidate_bytes) &&
+        candidate_bytes <= slab_budget) {
+      chunk_capacity = mid;
+      slab_bytes = candidate_bytes;
+      layout = candidate;
+      low = mid + 1;
+    } else {
+      high = mid - 1;
+    }
+  }
+  if (chunk_capacity == 0)
+    return PGACCEL_OOM;
+
+  const size_t forced_rows = hashagg_forced_test_chunk_rows();
+  if (forced_rows != 0 && forced_rows < chunk_capacity) {
+    chunk_capacity = forced_rows;
+    if (!build_hashagg_streaming_layout(table_capacity, num_aggs, chunk_capacity, sizeof(KeyT),
+                                        value_nulls, value_types, agg_cols, &layout, &slab_bytes)) {
+      return PGACCEL_OOM;
+    }
+  }
+
+  uint8_t* slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
+  if (slab == nullptr)
+    return PGACCEL_OOM;
+  *reinterpret_cast<HashAggStreamingSlabHeader*>(slab) = layout;
+  fill_hashagg_streaming_metadata(slab, value_types, value_nulls, agg_cols);
+
+  try {
+    q.parallel_for(sycl::range<1>(layout.table_capacity), [=](sycl::id<1> id) {
+       auto* h = reinterpret_cast<HashAggStreamingSlabHeader*>(slab);
+       auto* slot_used = reinterpret_cast<uint8_t*>(slab + h->slot_used_off);
+       slot_used[id[0]] = 0;
+       if (id[0] == 0) {
+         h->group_count = 0;
+         h->null_group = HASH_AGG_STREAM_NO_GROUP;
+         h->overflow = 0;
+       }
+     }).wait_and_throw();
+    pgaccel_record_gpu_exec();
+
+    const auto* source_keys = static_cast<const uint8_t*>(group_keys);
+    const auto* value_offsets = reinterpret_cast<const size_t*>(slab + layout.value_offsets_off);
+    const auto* null_offsets = reinterpret_cast<const size_t*>(slab + layout.null_offsets_off);
+    const auto* null_present = reinterpret_cast<const uint8_t*>(slab + layout.null_present_off);
+
+    for (size_t row_begin = 0; row_begin < row_count; row_begin += chunk_capacity) {
+      const size_t rows = std::min(chunk_capacity, row_count - row_begin);
+      q.memcpy(slab + layout.chunk_keys_off, source_keys + row_begin * sizeof(KeyT),
+               rows * sizeof(KeyT));
+      if (group_null_mask != nullptr) {
+        q.memcpy(slab + layout.chunk_key_nulls_off, group_null_mask + row_begin, rows);
+      } else {
+        q.memset(slab + layout.chunk_key_nulls_off, 0, rows);
+      }
+
+      for (size_t a = 0; a < num_aggs; ++a) {
+        if (!agg_reads_value(agg_cols[a].func, agg_cols[a].col_idx))
+          continue;
+        const size_t elem_size = value_elem_size(value_types[a]);
+        const auto* source = static_cast<const uint8_t*>(value_cols[a]);
+        q.memcpy(slab + layout.chunk_value_data_off + value_offsets[a],
+                 source + row_begin * elem_size, rows * elem_size);
+        if (null_present[a] != 0) {
+          q.memcpy(slab + layout.chunk_null_data_off + null_offsets[a], value_nulls[a] + row_begin,
+                   rows);
+        }
+      }
+      const size_t chunk_blocks = 1 + (rows - 1) / HASH_AGG_STREAM_BLOCK_ROWS;
+      q.memcpy(&reinterpret_cast<HashAggStreamingSlabHeader*>(slab)->chunk_rows, &rows,
+               sizeof(rows));
+      q.memcpy(&reinterpret_cast<HashAggStreamingSlabHeader*>(slab)->chunk_blocks, &chunk_blocks,
+               sizeof(chunk_blocks))
+          .wait_and_throw();
+
+      // Each work-item owns one fixed-size row block and its disjoint scratch
+      // table. No atomics are needed, including for f64 aggregate state.
+      q.parallel_for(sycl::range<1>(chunk_blocks), [=](sycl::id<1> id) {
+         auto* h = reinterpret_cast<HashAggStreamingSlabHeader*>(slab);
+         if (h->overflow != 0)
+           return;
+         const size_t block = id[0];
+         const size_t row_start = block * HASH_AGG_STREAM_BLOCK_ROWS;
+         const size_t row_end = sycl::min(row_start + HASH_AGG_STREAM_BLOCK_ROWS, h->chunk_rows);
+         const size_t table_base = block * HASH_AGG_STREAM_BLOCK_TABLE_SLOTS;
+         const size_t partial_base = row_start;
+
+         auto* local_slot_used =
+             reinterpret_cast<uint8_t*>(slab + h->block_slot_used_off) + table_base;
+         auto* local_slot_bits =
+             reinterpret_cast<uint64_t*>(slab + h->block_slot_bits_off) + table_base;
+         auto* local_slot_groups =
+             reinterpret_cast<uint32_t*>(slab + h->block_slot_groups_off) + table_base;
+         auto* block_group_counts = reinterpret_cast<uint32_t*>(slab + h->block_group_counts_off);
+         auto* partial_keys = reinterpret_cast<KeyT*>(slab + h->partial_keys_off);
+         auto* partial_key_nulls = reinterpret_cast<uint8_t*>(slab + h->partial_key_nulls_off);
+         auto* partial_counts = reinterpret_cast<int64_t*>(slab + h->partial_counts_off);
+         auto* partial_results = reinterpret_cast<double*>(slab + h->partial_results_off);
+         const auto* staged_value_offsets =
+             reinterpret_cast<const size_t*>(slab + h->value_offsets_off);
+         const auto* staged_null_offsets =
+             reinterpret_cast<const size_t*>(slab + h->null_offsets_off);
+         const auto* staged_null_present =
+             reinterpret_cast<const uint8_t*>(slab + h->null_present_off);
+         const auto* staged_value_types = reinterpret_cast<const int*>(slab + h->value_types_off);
+         const auto* staged_funcs =
+             reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+         const auto* staged_col_idx = reinterpret_cast<const size_t*>(slab + h->agg_col_idx_off);
+         const auto* chunk_keys = reinterpret_cast<const KeyT*>(slab + h->chunk_keys_off);
+         const auto* chunk_key_nulls =
+             reinterpret_cast<const uint8_t*>(slab + h->chunk_key_nulls_off);
+         const auto* chunk_values = slab + h->chunk_value_data_off;
+         const auto* chunk_nulls = slab + h->chunk_null_data_off;
+         for (size_t slot = 0; slot < HASH_AGG_STREAM_BLOCK_TABLE_SLOTS; ++slot)
+           local_slot_used[slot] = 0;
+
+         uint32_t local_group_count = 0;
+         uint32_t local_null_group = HASH_AGG_STREAM_NO_GROUP;
+         for (size_t row = row_start; row < row_end; ++row) {
+           uint32_t local_group = HASH_AGG_STREAM_NO_GROUP;
+           bool new_group = false;
+           if (chunk_key_nulls[row] != 0) {
+             local_group = local_null_group;
+             if (local_group == HASH_AGG_STREAM_NO_GROUP) {
+               local_group = local_group_count++;
+               local_null_group = local_group;
+               new_group = true;
+             }
+           } else {
+             const KeyT key = chunk_keys[row];
+             const uint64_t bits = group_key_bits(key);
+             size_t slot =
+                 static_cast<size_t>(hash64(bits)) & (HASH_AGG_STREAM_BLOCK_TABLE_SLOTS - 1);
+             for (size_t probe = 0; probe < HASH_AGG_STREAM_BLOCK_TABLE_SLOTS; ++probe) {
+               if (local_slot_used[slot] == 0) {
+                 local_group = local_group_count++;
+                 local_slot_used[slot] = 1;
+                 local_slot_bits[slot] = bits;
+                 local_slot_groups[slot] = local_group;
+                 new_group = true;
+                 break;
+               }
+               if (local_slot_bits[slot] == bits) {
+                 local_group = local_slot_groups[slot];
+                 break;
+               }
+               slot = (slot + 1) & (HASH_AGG_STREAM_BLOCK_TABLE_SLOTS - 1);
+             }
+           }
+
+           const size_t partial = partial_base + local_group;
+           if (new_group) {
+             partial_keys[partial] = chunk_key_nulls[row] != 0 ? KeyT{} : chunk_keys[row];
+             partial_key_nulls[partial] = chunk_key_nulls[row] != 0 ? 1 : 0;
+             partial_counts[partial] = 0;
+             for (size_t a = 0; a < h->num_aggs; ++a) {
+               double neutral = 0.0;
+               if (staged_funcs[a] == PGACCEL_AGG_MIN)
+                 neutral = std::numeric_limits<double>::infinity();
+               else if (staged_funcs[a] == PGACCEL_AGG_MAX)
+                 neutral = -std::numeric_limits<double>::infinity();
+               partial_results[a * h->chunk_capacity + partial] = neutral;
+             }
+           }
+           ++partial_counts[partial];
+
+           for (size_t a = 0; a < h->num_aggs; ++a) {
+             const pgaccel_agg_func func = staged_funcs[a];
+             double* result = partial_results + a * h->chunk_capacity + partial;
+             if (func == PGACCEL_AGG_COUNT && staged_col_idx[a] == SIZE_MAX) {
+               *result += 1.0;
+               continue;
+             }
+             const val_read value = device_read_value_flat(
+                 chunk_values, chunk_nulls, staged_value_offsets[a], staged_null_offsets[a],
+                 staged_null_present[a] != 0, row, staged_value_types[a]);
+             if (value.is_null)
+               continue;
+             switch (func) {
+               case PGACCEL_AGG_SUM:
+                 *result += value.value;
+                 break;
+               case PGACCEL_AGG_MIN:
+                 if (value.value < *result)
+                   *result = value.value;
+                 break;
+               case PGACCEL_AGG_MAX:
+                 if (value.value > *result)
+                   *result = value.value;
+                 break;
+               case PGACCEL_AGG_COUNT:
+                 *result += 1.0;
+                 break;
+               case PGACCEL_AGG_AVG:
+               case PGACCEL_AGG_STDDEV:
+               case PGACCEL_AGG_VAR:
+                 break;
+             }
+           }
+         }
+         block_group_counts[block] = local_group_count;
+       }).wait_and_throw();
+      pgaccel_record_gpu_exec();
+
+      // Merge only block-level groups, in block/first-seen order, into the
+      // persistent table. This is the sole cross-block and cross-chunk merge.
+      q.single_task([=]() {
+         auto* h = reinterpret_cast<HashAggStreamingSlabHeader*>(slab);
+         if (h->overflow != 0)
+           return;
+         auto* slot_used = reinterpret_cast<uint8_t*>(slab + h->slot_used_off);
+         auto* slot_bits = reinterpret_cast<uint64_t*>(slab + h->slot_bits_off);
+         auto* slot_groups = reinterpret_cast<uint32_t*>(slab + h->slot_groups_off);
+         auto* persistent_keys = reinterpret_cast<KeyT*>(slab + h->group_keys_off);
+         auto* group_counts = reinterpret_cast<int64_t*>(slab + h->group_counts_off);
+         auto* results = reinterpret_cast<double*>(slab + h->results_off);
+         const auto* funcs = reinterpret_cast<const pgaccel_agg_func*>(slab + h->agg_funcs_off);
+         const auto* block_group_counts =
+             reinterpret_cast<const uint32_t*>(slab + h->block_group_counts_off);
+         const auto* partial_keys = reinterpret_cast<const KeyT*>(slab + h->partial_keys_off);
+         const auto* partial_key_nulls =
+             reinterpret_cast<const uint8_t*>(slab + h->partial_key_nulls_off);
+         const auto* partial_counts =
+             reinterpret_cast<const int64_t*>(slab + h->partial_counts_off);
+         const auto* partial_results =
+             reinterpret_cast<const double*>(slab + h->partial_results_off);
+         const size_t mask = h->table_capacity - 1;
+         uint32_t next_group = h->group_count;
+         uint32_t null_group = h->null_group;
+
+         for (size_t block = 0; block < h->chunk_blocks; ++block) {
+           const size_t partial_base = block * HASH_AGG_STREAM_BLOCK_ROWS;
+           for (uint32_t local_group = 0; local_group < block_group_counts[block]; ++local_group) {
+             const size_t partial = partial_base + local_group;
+             uint32_t group = HASH_AGG_STREAM_NO_GROUP;
+             bool new_group = false;
+             if (partial_key_nulls[partial] != 0) {
+               group = null_group;
+               if (group == HASH_AGG_STREAM_NO_GROUP) {
+                 if (next_group >= h->max_groups) {
+                   h->group_count = next_group;
+                   h->null_group = null_group;
+                   h->overflow = HASH_AGG_STREAM_OVERFLOW_GROUPS;
+                   return;
+                 }
+                 group = next_group++;
+                 null_group = group;
+                 persistent_keys[group] = KeyT{};
+                 new_group = true;
+               }
+             } else {
+               const KeyT key = partial_keys[partial];
+               const uint64_t bits = group_key_bits(key);
+               size_t slot = static_cast<size_t>(hash64(bits)) & mask;
+               for (size_t probe = 0; probe < h->table_capacity; ++probe) {
+                 if (slot_used[slot] == 0) {
+                   if (next_group >= h->max_groups) {
+                     h->group_count = next_group;
+                     h->null_group = null_group;
+                     h->overflow = HASH_AGG_STREAM_OVERFLOW_GROUPS;
+                     return;
+                   }
+                   group = next_group++;
+                   slot_used[slot] = 1;
+                   slot_bits[slot] = bits;
+                   slot_groups[slot] = group;
+                   persistent_keys[group] = key;
+                   new_group = true;
+                   break;
+                 }
+                 if (slot_bits[slot] == bits) {
+                   group = slot_groups[slot];
+                   break;
+                 }
+                 slot = (slot + 1) & mask;
+               }
+               if (group == HASH_AGG_STREAM_NO_GROUP) {
+                 h->group_count = next_group;
+                 h->null_group = null_group;
+                 h->overflow = HASH_AGG_STREAM_OVERFLOW_TABLE;
+                 return;
+               }
+             }
+
+             if (new_group) {
+               group_counts[group] = 0;
+               for (size_t a = 0; a < h->num_aggs; ++a) {
+                 double neutral = 0.0;
+                 if (funcs[a] == PGACCEL_AGG_MIN)
+                   neutral = std::numeric_limits<double>::infinity();
+                 else if (funcs[a] == PGACCEL_AGG_MAX)
+                   neutral = -std::numeric_limits<double>::infinity();
+                 results[a * h->max_groups + group] = neutral;
+               }
+             }
+             if (partial_counts[partial] >
+                 std::numeric_limits<int64_t>::max() - group_counts[group]) {
+               h->group_count = next_group;
+               h->null_group = null_group;
+               h->overflow = HASH_AGG_STREAM_OVERFLOW_COUNT;
+               return;
+             }
+             group_counts[group] += partial_counts[partial];
+             for (size_t a = 0; a < h->num_aggs; ++a) {
+               const double partial_value = partial_results[a * h->chunk_capacity + partial];
+               double* result = results + a * h->max_groups + group;
+               if (funcs[a] == PGACCEL_AGG_MIN) {
+                 if (partial_value < *result)
+                   *result = partial_value;
+               } else if (funcs[a] == PGACCEL_AGG_MAX) {
+                 if (partial_value > *result)
+                   *result = partial_value;
+               } else {
+                 *result += partial_value;
+               }
+             }
+           }
+         }
+         h->group_count = next_group;
+         h->null_group = null_group;
+       }).wait_and_throw();
+      pgaccel_record_gpu_exec();
+      if (reinterpret_cast<HashAggStreamingSlabHeader*>(slab)->overflow != 0)
+        break;
+    }
+  } catch (...) {
+    sycl::free(slab, q);
+    throw;
+  }
+
+  auto* h = reinterpret_cast<HashAggStreamingSlabHeader*>(slab);
+  if (h->overflow != 0) {
+    std::fprintf(stderr,
+                 "pgaccel: bounded hash_agg capacity exhausted "
+                 "(code=%u groups=%u max_groups=%zu table_slots=%zu)\n",
+                 h->overflow, h->group_count, h->max_groups, h->table_capacity);
+    sycl::free(slab, q);
+    return PGACCEL_OOM;
+  }
+  if (h->group_count == 0) {
+    sycl::free(slab, q);
+    return PGACCEL_ERROR;
+  }
+
+  auto* state = new (std::nothrow) pgaccel_agg_state();
+  if (state == nullptr) {
+    sycl::free(slab, q);
+    return PGACCEL_OOM;
+  }
+  try {
+    const size_t group_count = h->group_count;
+    state->key_size = sizeof(KeyT);
+    state->key_type = key_type;
+    state->group_count = group_count;
+    state->num_aggs = num_aggs;
+    const auto* persistent_keys = reinterpret_cast<const uint8_t*>(slab + h->group_keys_off);
+    state->group_key_buf.assign(persistent_keys, persistent_keys + group_count * sizeof(KeyT));
+    const auto* counts = reinterpret_cast<const int64_t*>(slab + h->group_counts_off);
+    state->counts.assign(counts, counts + group_count);
+    const auto* results = reinterpret_cast<const double*>(slab + h->results_off);
+    state->results.resize(num_aggs);
+    for (size_t a = 0; a < num_aggs; ++a) {
+      state->results[a].assign(results + a * h->max_groups,
+                               results + a * h->max_groups + group_count);
+    }
+  } catch (const std::bad_alloc&) {
+    delete state;
+    sycl::free(slab, q);
+    return PGACCEL_OOM;
+  } catch (...) {
+    delete state;
+    sycl::free(slab, q);
+    throw;
+  }
+
+  sycl::free(slab, q);
+  *out_state = state;
+  return PGACCEL_OK;
 }
 
 }  // namespace
@@ -3128,12 +3732,27 @@ pgaccel_status pgaccel_hash_agg_execute_checked(
   if (!validate_hashagg_inputs(group_keys, row_count, key_type, value_cols, value_types, agg_cols,
                                num_aggs, false))
     return PGACCEL_ERROR;
-  (void)group_null_mask;
-  (void)value_nulls;
-  // Compatibility-only host-staged ABI. Resident callers use the device-key
-  // count entry points below; a valid nonempty host batch must decline before
-  // queue creation or output allocation.
-  return PGACCEL_UNSUPPORTED;
+  if (!row_parallel_hashagg_key_supported(key_type, row_count) ||
+      !row_parallel_hashagg_agg_shape_supported(value_types, agg_cols, num_aggs)) {
+    return PGACCEL_UNSUPPORTED;
+  }
+
+  switch (key_type) {
+    case 0:
+      return agg_hash_streaming_numeric<int32_t>(group_keys, group_null_mask, row_count, key_type,
+                                                 value_cols, value_nulls, value_types, agg_cols,
+                                                 num_aggs, out_state);
+    case 1:
+      return agg_hash_streaming_numeric<int64_t>(group_keys, group_null_mask, row_count, key_type,
+                                                 value_cols, value_nulls, value_types, agg_cols,
+                                                 num_aggs, out_state);
+    case 2:
+      return agg_hash_streaming_numeric<double>(group_keys, group_null_mask, row_count, key_type,
+                                                value_cols, value_nulls, value_types, agg_cols,
+                                                num_aggs, out_state);
+    default:
+      return PGACCEL_UNSUPPORTED;
+  }
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -3148,16 +3767,12 @@ pgaccel_agg_state* pgaccel_hash_agg_execute(const void* group_keys, const uint8_
                                             const uint8_t* const* value_nulls,
                                             const int* value_types, const pgaccel_agg_col* agg_cols,
                                             size_t num_aggs) {
-  (void)group_keys;
-  (void)group_null_mask;
-  (void)row_count;
-  (void)key_type;
-  (void)value_cols;
-  (void)value_nulls;
-  (void)value_types;
-  (void)agg_cols;
-  (void)num_aggs;
-  return nullptr;
+  pgaccel_agg_state* state = nullptr;
+  return pgaccel_hash_agg_execute_checked(group_keys, group_null_mask, row_count, key_type,
+                                          value_cols, value_nulls, value_types, agg_cols, num_aggs,
+                                          &state) == PGACCEL_OK
+             ? state
+             : nullptr;
 }
 
 pgaccel_agg_state* pgaccel_hash_count_i64_execute(const int64_t* group_keys,

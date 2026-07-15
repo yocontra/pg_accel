@@ -88,9 +88,11 @@ typedef struct pgaccel_agg_state pgaccel_agg_state;
 /// `group_null_mask[i] == 1` means row i has a NULL group key.
 /// `agg_cols` describes each aggregate to compute.
 ///
-/// This checked entry point never assigns groups with a host hash table.
-/// Unsupported backend/key/aggregate shapes return PGACCEL_UNSUPPORTED before
-/// any GPU dispatch and leave `out_state` NULL.
+/// This checked entry point never assigns or merges groups with a host hash
+/// table. Numeric finalize-mode shapes use bounded host-to-device chunks and a
+/// persistent device hash table; unsupported shapes return PGACCEL_UNSUPPORTED
+/// before any GPU dispatch. Capacity/allocation exhaustion returns PGACCEL_OOM.
+/// Every non-OK status leaves `out_state` NULL.
 pgaccel_status pgaccel_hash_agg_execute_checked(
     const void* group_keys, const uint8_t* group_null_mask, size_t row_count, int key_type,
     const void* const* value_cols, const uint8_t* const* value_nulls, const int* value_types,

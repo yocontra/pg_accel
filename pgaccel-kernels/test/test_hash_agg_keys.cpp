@@ -302,15 +302,6 @@ static void test_hash_agg_int64_baseline() {
   const pgaccel_status status =
       pgaccel_hash_agg_execute_checked(keys.data(), key_nulls.data(), N, PGACCEL_KEY_INT64,
                                        val_arrays, val_null_arrays, val_types, agg_cols, 1, &state);
-  const pgaccel_platform_caps caps = pgaccel_get_caps();
-  if (std::strcmp(caps.backend_name, "metal") == 0) {
-    ASSERT_EQ_INT("Metal generic INT64 hash_agg is unsupported", status, PGACCEL_UNSUPPORTED);
-    ASSERT_TRUE("Metal generic INT64 hash_agg leaves state null", state == nullptr);
-    ASSERT_EQ_SZ("Metal generic INT64 hash_agg launches no GPU kernels", pgaccel_gpu_exec_count(),
-                 (uint64_t)0);
-    return;
-  }
-
   ASSERT_EQ_INT("INT64 hash_agg baseline status OK", status, PGACCEL_OK);
   ASSERT_TRUE("INT64 hash_agg baseline state non-null", state != nullptr);
   ASSERT_TRUE("INT64 hash_agg baseline launched GPU kernels", pgaccel_gpu_exec_count() > 0);
@@ -532,15 +523,6 @@ static void test_hash_agg_f64_zero_nan_normalization() {
   const pgaccel_status status = pgaccel_hash_agg_execute_checked(
       keys.data(), key_nulls.data(), keys.size(), PGACCEL_KEY_FLOAT64, val_arrays, val_null_arrays,
       val_types, agg_cols, 1, &state);
-  const pgaccel_platform_caps caps = pgaccel_get_caps();
-  if (std::strcmp(caps.backend_name, "metal") == 0) {
-    ASSERT_EQ_INT("Metal generic FLOAT64 hash_agg is unsupported", status, PGACCEL_UNSUPPORTED);
-    ASSERT_TRUE("Metal generic FLOAT64 hash_agg leaves state null", state == nullptr);
-    ASSERT_EQ_SZ("Metal generic FLOAT64 hash_agg launches no GPU kernels", pgaccel_gpu_exec_count(),
-                 (uint64_t)0);
-    return;
-  }
-
   ASSERT_EQ_INT("FLOAT64 normalization status OK", status, PGACCEL_OK);
   ASSERT_TRUE("FLOAT64 normalization state non-null", state != nullptr);
   ASSERT_TRUE("FLOAT64 normalization launched GPU kernels", pgaccel_gpu_exec_count() > 0);
@@ -607,15 +589,6 @@ static void test_hash_agg_int64_null_sentinel_collision() {
   const pgaccel_status status =
       pgaccel_hash_agg_execute_checked(keys.data(), key_nulls.data(), N, PGACCEL_KEY_INT64,
                                        val_arrays, val_null_arrays, val_types, agg_cols, 1, &state);
-  const pgaccel_platform_caps caps = pgaccel_get_caps();
-  if (std::strcmp(caps.backend_name, "metal") == 0) {
-    ASSERT_EQ_INT("Metal null/sentinel hash_agg is unsupported", status, PGACCEL_UNSUPPORTED);
-    ASSERT_TRUE("Metal null/sentinel hash_agg leaves state null", state == nullptr);
-    ASSERT_EQ_SZ("Metal null/sentinel hash_agg launches no GPU kernels", pgaccel_gpu_exec_count(),
-                 (uint64_t)0);
-    return;
-  }
-
   ASSERT_EQ_INT("INT64 null/sentinel collision status OK", status, PGACCEL_OK);
   ASSERT_TRUE("INT64 null/sentinel collision state non-null", state != nullptr);
   ASSERT_TRUE("INT64 null/sentinel collision launched GPU kernels", pgaccel_gpu_exec_count() > 0);
@@ -702,8 +675,8 @@ static void test_hash_agg_invalid_inputs_return_null() {
   ASSERT_EQ_SZ("finalize-mode AVG launches no GPU kernels", pgaccel_gpu_exec_count(), (uint64_t)0);
 }
 
-static void test_host_staged_compatibility_exports_decline_without_dispatch() {
-  printf("--- test_host_staged_compatibility_exports_decline_without_dispatch ---\n");
+static void test_host_staged_finalize_streams_but_partial_stays_quarantined() {
+  printf("--- test_host_staged_finalize_streams_but_partial_stays_quarantined ---\n");
 
   std::vector<int64_t> keys = {2, 1, 2, 1};
   std::vector<double> values = {1.0, 2.0, 3.0, 4.0};
@@ -715,26 +688,31 @@ static void test_host_staged_compatibility_exports_decline_without_dispatch() {
 
   pgaccel_agg_state* state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
   pgaccel_reset_gpu_exec_count();
-  pgaccel_status status = pgaccel_hash_agg_execute_checked(
-      keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64, value_cols, value_nulls, value_types,
-      sum_cols, 1, &state);
-  ASSERT_EQ_INT("host-staged checked finalize returns UNSUPPORTED", status, PGACCEL_UNSUPPORTED);
-  ASSERT_TRUE("host-staged checked finalize clears state", state == nullptr);
-  ASSERT_EQ_SZ("host-staged checked finalize launches no GPU kernels", pgaccel_gpu_exec_count(),
-               (uint64_t)0);
+  pgaccel_status status =
+      pgaccel_hash_agg_execute_checked(keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64,
+                                       value_cols, value_nulls, value_types, sum_cols, 1, &state);
+  ASSERT_EQ_INT("host-staged checked finalize returns OK", status, PGACCEL_OK);
+  ASSERT_TRUE("host-staged checked finalize returns state", state != nullptr);
+  ASSERT_TRUE("host-staged checked finalize launches GPU kernels", pgaccel_gpu_exec_count() > 0);
+  if (state != nullptr) {
+    ASSERT_EQ_SZ("host-staged checked finalize group count", pgaccel_agg_group_count(state),
+                 (size_t)2);
+    pgaccel_agg_free(state);
+  }
 
   pgaccel_reset_gpu_exec_count();
   state = pgaccel_hash_agg_execute(keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64, value_cols,
                                    value_nulls, value_types, sum_cols, 1);
-  ASSERT_TRUE("host-staged finalize wrapper returns NULL", state == nullptr);
-  ASSERT_EQ_SZ("host-staged finalize wrapper launches no GPU kernels", pgaccel_gpu_exec_count(),
-               (uint64_t)0);
+  ASSERT_TRUE("host-staged finalize wrapper returns state", state != nullptr);
+  ASSERT_TRUE("host-staged finalize wrapper launches GPU kernels", pgaccel_gpu_exec_count() > 0);
+  if (state != nullptr)
+    pgaccel_agg_free(state);
 
   state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
   pgaccel_reset_gpu_exec_count();
-  status = pgaccel_hash_agg_execute_sort_based(
-      keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64, value_cols, value_nulls, value_types,
-      sum_cols, 1, &state);
+  status = pgaccel_hash_agg_execute_sort_based(keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64,
+                                               value_cols, value_nulls, value_types, sum_cols, 1,
+                                               &state);
   ASSERT_EQ_INT("forced host-staged sort returns UNSUPPORTED", status, PGACCEL_UNSUPPORTED);
   ASSERT_TRUE("forced host-staged sort clears state", state == nullptr);
   ASSERT_EQ_SZ("forced host-staged sort launches no GPU kernels", pgaccel_gpu_exec_count(),
@@ -742,9 +720,9 @@ static void test_host_staged_compatibility_exports_decline_without_dispatch() {
 
   state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
   pgaccel_reset_gpu_exec_count();
-  status = pgaccel_hash_agg_execute_partial_checked(
-      keys.data(), nullptr, keys.size(), PGACCEL_KEY_INT64, value_cols, value_nulls, value_types,
-      avg_cols, 1, &state);
+  status = pgaccel_hash_agg_execute_partial_checked(keys.data(), nullptr, keys.size(),
+                                                    PGACCEL_KEY_INT64, value_cols, value_nulls,
+                                                    value_types, avg_cols, 1, &state);
   ASSERT_EQ_INT("host-staged checked partial returns UNSUPPORTED", status, PGACCEL_UNSUPPORTED);
   ASSERT_TRUE("host-staged checked partial clears state", state == nullptr);
   ASSERT_EQ_SZ("host-staged checked partial launches no GPU kernels", pgaccel_gpu_exec_count(),
@@ -768,13 +746,105 @@ static void test_host_staged_compatibility_exports_decline_without_dispatch() {
 
   state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
   pgaccel_reset_gpu_exec_count();
-  status = pgaccel_hash_agg_execute_partial_checked(
-      keys.data(), nullptr, 0, PGACCEL_KEY_INT64, value_cols, value_nulls, value_types, avg_cols, 1,
-      &state);
+  status = pgaccel_hash_agg_execute_partial_checked(keys.data(), nullptr, 0, PGACCEL_KEY_INT64,
+                                                    value_cols, value_nulls, value_types, avg_cols,
+                                                    1, &state);
   ASSERT_EQ_INT("zero-row checked partial preserves ERROR", status, PGACCEL_ERROR);
   ASSERT_TRUE("zero-row checked partial clears state", state == nullptr);
   ASSERT_EQ_SZ("zero-row checked partial launches no GPU kernels", pgaccel_gpu_exec_count(),
                (uint64_t)0);
+}
+
+static void test_hash_agg_forced_chunks_are_boundary_invariant() {
+  printf("--- test_hash_agg_forced_chunks_are_boundary_invariant ---\n");
+
+  const int64_t max_key = std::numeric_limits<int64_t>::max();
+  std::vector<int64_t> keys = {5, 9, max_key, 5, 7, max_key, 9, 7, 5, max_key, 7};
+  std::vector<uint8_t> key_nulls = {0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0};
+  std::vector<int64_t> values = {10, 999, 30, -4, 50, 60, 888, -8, 5, -10, 3};
+  std::vector<uint8_t> value_nulls = {0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0};
+  const void* value_cols[5] = {values.data(), values.data(), values.data(), values.data(), nullptr};
+  const uint8_t* null_cols[5] = {value_nulls.data(), value_nulls.data(), value_nulls.data(),
+                                 value_nulls.data(), nullptr};
+  int value_types[5] = {PGACCEL_VAL_INT64, PGACCEL_VAL_INT64, PGACCEL_VAL_INT64, PGACCEL_VAL_INT64,
+                        PGACCEL_VAL_INT64};
+  pgaccel_agg_col agg_cols[5] = {{PGACCEL_AGG_SUM, 0},
+                                 {PGACCEL_AGG_MIN, 0},
+                                 {PGACCEL_AGG_MAX, 0},
+                                 {PGACCEL_AGG_COUNT, 0},
+                                 {PGACCEL_AGG_COUNT, SIZE_MAX}};
+
+  ASSERT_EQ_INT("set forced two-row hashagg chunks",
+                setenv("PGACCEL_TEST_HASHAGG_CHUNK_ROWS", "2", 1), 0);
+  pgaccel_agg_state* two_row_chunks = nullptr;
+  pgaccel_reset_gpu_exec_count();
+  pgaccel_status status = pgaccel_hash_agg_execute_checked(
+      keys.data(), key_nulls.data(), keys.size(), PGACCEL_KEY_INT64, value_cols, null_cols,
+      value_types, agg_cols, 5, &two_row_chunks);
+  const uint64_t two_row_dispatches = pgaccel_gpu_exec_count();
+
+  ASSERT_EQ_INT("set forced five-row hashagg chunks",
+                setenv("PGACCEL_TEST_HASHAGG_CHUNK_ROWS", "5", 1), 0);
+  pgaccel_agg_state* five_row_chunks = nullptr;
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status repeated_status = pgaccel_hash_agg_execute_checked(
+      keys.data(), key_nulls.data(), keys.size(), PGACCEL_KEY_INT64, value_cols, null_cols,
+      value_types, agg_cols, 5, &five_row_chunks);
+  const uint64_t five_row_dispatches = pgaccel_gpu_exec_count();
+  unsetenv("PGACCEL_TEST_HASHAGG_CHUNK_ROWS");
+
+  ASSERT_EQ_INT("forced two-row chunks return OK", status, PGACCEL_OK);
+  ASSERT_EQ_INT("forced five-row chunks return OK", repeated_status, PGACCEL_OK);
+  ASSERT_TRUE("two-row forcing executes init plus every chunk", two_row_dispatches >= 7);
+  ASSERT_TRUE("five-row forcing executes init plus every chunk", five_row_dispatches >= 4);
+  ASSERT_TRUE("forced chunk states are non-null",
+              two_row_chunks != nullptr && five_row_chunks != nullptr);
+  if (two_row_chunks == nullptr || five_row_chunks == nullptr) {
+    if (two_row_chunks != nullptr)
+      pgaccel_agg_free(two_row_chunks);
+    if (five_row_chunks != nullptr)
+      pgaccel_agg_free(five_row_chunks);
+    return;
+  }
+
+  constexpr size_t expected_groups = 4;
+  ASSERT_EQ_SZ("forced chunks group count", pgaccel_agg_group_count(two_row_chunks),
+               expected_groups);
+  ASSERT_EQ_SZ("forced chunks repeated group count", pgaccel_agg_group_count(five_row_chunks),
+               expected_groups);
+  const auto* keys_out = static_cast<const int64_t*>(pgaccel_agg_get_group_keys(two_row_chunks));
+  const auto* repeated_keys =
+      static_cast<const int64_t*>(pgaccel_agg_get_group_keys(five_row_chunks));
+  const int64_t expected_keys[expected_groups] = {5, 0, max_key, 7};
+  const int64_t expected_row_counts[expected_groups] = {3, 2, 3, 3};
+  const double expected[5][expected_groups] = {
+      {15, 1887, 90, 45}, {5, 888, 30, -8}, {10, 999, 60, 50}, {2, 2, 2, 3}, {3, 2, 3, 3}};
+
+  const bool sizes_match = pgaccel_agg_group_count(two_row_chunks) == expected_groups &&
+                           pgaccel_agg_group_count(five_row_chunks) == expected_groups;
+  bool exact_expected = sizes_match;
+  bool boundary_invariant = sizes_match;
+  if (sizes_match) {
+    exact_expected = std::memcmp(keys_out, expected_keys, sizeof(expected_keys)) == 0 &&
+                     std::memcmp(pgaccel_agg_get_counts(two_row_chunks), expected_row_counts,
+                                 sizeof(expected_row_counts)) == 0;
+    boundary_invariant =
+        std::memcmp(keys_out, repeated_keys, sizeof(expected_keys)) == 0 &&
+        std::memcmp(pgaccel_agg_get_counts(two_row_chunks), pgaccel_agg_get_counts(five_row_chunks),
+                    sizeof(expected_row_counts)) == 0;
+    for (size_t a = 0; a < 5; ++a) {
+      exact_expected &= std::memcmp(pgaccel_agg_get_results(two_row_chunks, a), expected[a],
+                                    expected_groups * sizeof(double)) == 0;
+      boundary_invariant &= std::memcmp(pgaccel_agg_get_results(two_row_chunks, a),
+                                        pgaccel_agg_get_results(five_row_chunks, a),
+                                        expected_groups * sizeof(double)) == 0;
+    }
+  }
+  ASSERT_TRUE("forced chunks preserve deterministic first-seen output", exact_expected);
+  ASSERT_TRUE("aggregate state is exact across chunk boundaries", boundary_invariant);
+
+  pgaccel_agg_free(two_row_chunks);
+  pgaccel_agg_free(five_row_chunks);
 }
 
 static void test_hash_agg_count_star_without_value_cols() {
@@ -790,15 +860,6 @@ static void test_hash_agg_count_star_without_value_cols() {
   const pgaccel_status status = pgaccel_hash_agg_execute_checked(
       keys.data(), key_nulls.data(), keys.size(), PGACCEL_KEY_INT64, nullptr, nullptr, val_types,
       agg_cols, 1, &state);
-  const pgaccel_platform_caps caps = pgaccel_get_caps();
-  if (std::strcmp(caps.backend_name, "metal") == 0) {
-    ASSERT_EQ_INT("Metal generic COUNT(*) is unsupported", status, PGACCEL_UNSUPPORTED);
-    ASSERT_TRUE("Metal generic COUNT(*) leaves state null", state == nullptr);
-    ASSERT_EQ_SZ("Metal generic COUNT(*) launches no GPU kernels", pgaccel_gpu_exec_count(),
-                 (uint64_t)0);
-    return;
-  }
-
   ASSERT_EQ_INT("COUNT(*) status OK", status, PGACCEL_OK);
   ASSERT_TRUE("COUNT(*) accepts NULL value_cols", state != nullptr);
   ASSERT_TRUE("COUNT(*) launched GPU kernels", pgaccel_gpu_exec_count() > 0);
@@ -1015,7 +1076,8 @@ int main() {
   }
 
   test_hash_agg_invalid_inputs_return_null();
-  test_host_staged_compatibility_exports_decline_without_dispatch();
+  test_host_staged_finalize_streams_but_partial_stays_quarantined();
+  test_hash_agg_forced_chunks_are_boundary_invariant();
   test_hash_agg_count_star_without_value_cols();
   test_hash_count_i64_host_keys_decline_without_dispatch();
   test_hash_count_i64_high_cardinality_resident_gpu_path();
