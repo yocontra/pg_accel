@@ -20,6 +20,8 @@ mod integration_connection;
 mod parallel_stress_test;
 mod plan_shape_test;
 mod report;
+#[cfg(test)]
+mod resident_concurrency_test;
 mod resume;
 mod runner;
 mod stats;

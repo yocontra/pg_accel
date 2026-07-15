@@ -357,6 +357,34 @@ impl ArtifactWriter {
         Ok(written)
     }
 
+    /// Read every byte appended to configured logs since this writer was
+    /// created. Artifact files remain bounded by [`LOG_DELTA_BYTES`], while
+    /// release gates can use this complete view to avoid scanning only a tail.
+    #[cfg(test)]
+    pub fn complete_log_deltas(&self) -> io::Result<Vec<(PathBuf, String)>> {
+        let mut deltas = Vec::new();
+        for (index, candidate) in self.log_candidates.iter().enumerate() {
+            if !candidate.is_file() {
+                continue;
+            }
+            let current_len = candidate.metadata()?.len();
+            let start_offset = self
+                .log_start_offsets
+                .get(index)
+                .map_or(0, |offset| offset.len_bytes);
+            let delta_start = if current_len >= start_offset {
+                start_offset
+            } else {
+                0
+            };
+            deltas.push((
+                candidate.clone(),
+                read_delta(candidate, delta_start, u64::MAX)?,
+            ));
+        }
+        Ok(deltas)
+    }
+
     pub fn write_crashes(
         &self,
         crashes: &[CrashedScale],
@@ -1616,6 +1644,11 @@ mod tests {
         assert!(delta.contains("run_start_offset_bytes: 12"));
         assert!(!delta.contains("stale panic"));
         assert!(delta.contains("fresh panic"));
+
+        let complete = writer
+            .complete_log_deltas()
+            .expect("complete log delta should be readable");
+        assert_eq!(complete, vec![(log, "fresh panic\n".to_owned())]);
 
         let index_text = fs::read_to_string(artifacts.path().join(ARTIFACT_INDEX_JSON))
             .expect("artifact index should be readable");
