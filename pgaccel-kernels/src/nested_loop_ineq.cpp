@@ -38,11 +38,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 #include "pgaccel_ffi.h"
-#include "pgaccel_queue.h"
 #include "pgaccel_nested_loop_ineq.h"
+#include "pgaccel_queue.h"
 
 // SAFETY: g_queue is owned by device_manager.cpp.
 
@@ -98,26 +99,35 @@ pgaccel_status nlj_ineq_impl(sycl::queue& q, const T* outer_keys, size_t n_outer
   if (n_outer > UINT32_MAX || n_inner > UINT32_MAX) {
     return PGACCEL_ERROR;
   }
+  if (max_pairs > (std::numeric_limits<size_t>::max() - 2) / 2 ||
+      max_pairs > static_cast<size_t>(std::numeric_limits<C>::max())) {
+    return PGACCEL_ERROR;
+  }
 
   const size_t total_pairs = n_outer * n_inner;
+  if (total_pairs > static_cast<size_t>(std::numeric_limits<C>::max()))
+    return PGACCEL_ERROR;
 
   T* d_outer = sycl::malloc_device<T>(n_outer, q);
   T* d_inner = sycl::malloc_device<T>(n_inner, q);
   // pairs buffer: 2 u32 per slot.
   uint32_t* d_pairs = sycl::malloc_device<uint32_t>(max_pairs * 2 + 2, q);
   C* d_count = sycl::malloc_device<C>(1, q);
+  size_t* d_final_count = sycl::malloc_device<size_t>(1, q);
 
-  if (!d_outer || !d_inner || !d_pairs || !d_count) {
+  if (!d_outer || !d_inner || !d_pairs || !d_count || !d_final_count) {
     sycl::free(d_outer, q);
     sycl::free(d_inner, q);
     sycl::free(d_pairs, q);
     sycl::free(d_count, q);
+    sycl::free(d_final_count, q);
     return PGACCEL_OOM;
   }
 
   try {
     q.memcpy(d_outer, outer_keys, n_outer * sizeof(T));
     q.memcpy(d_inner, inner_keys, n_inner * sizeof(T));
+    q.memset(d_pairs, 0, max_pairs * 2 * sizeof(uint32_t));
     q.memset(d_count, 0, sizeof(C));
     q.wait_and_throw();
 
@@ -148,22 +158,16 @@ pgaccel_status nlj_ineq_impl(sycl::queue& q, const T* outer_keys, size_t n_outer
        });
      }).wait_and_throw();
 
-    C gpu_count = 0;
-    q.memcpy(&gpu_count, d_count, sizeof(C));
-    q.wait_and_throw();
-
-    const size_t emitted =
-        (static_cast<size_t>(gpu_count) <= max_pairs) ? static_cast<size_t>(gpu_count) : max_pairs;
-    if (emitted > 0) {
-      q.memcpy(pairs_out, d_pairs, emitted * 2 * sizeof(uint32_t));
-      q.wait_and_throw();
-    }
-    *pair_count_out = static_cast<size_t>(gpu_count);
+    q.single_task([=]() { *d_final_count = static_cast<size_t>(*d_count); }).wait_and_throw();
+    if (max_pairs > 0)
+      q.memcpy(pairs_out, d_pairs, max_pairs * 2 * sizeof(uint32_t)).wait_and_throw();
+    q.memcpy(pair_count_out, d_final_count, sizeof(size_t)).wait_and_throw();
   } catch (...) {
     sycl::free(d_outer, q);
     sycl::free(d_inner, q);
     sycl::free(d_pairs, q);
     sycl::free(d_count, q);
+    sycl::free(d_final_count, q);
     throw;
   }
 
@@ -171,6 +175,7 @@ pgaccel_status nlj_ineq_impl(sycl::queue& q, const T* outer_keys, size_t n_outer
   sycl::free(d_inner, q);
   sycl::free(d_pairs, q);
   sycl::free(d_count, q);
+  sycl::free(d_final_count, q);
 
   return PGACCEL_OK;
 }
@@ -210,21 +215,29 @@ pgaccel_status nlj_between_impl(sycl::queue& q, const T* outer_keys, size_t n_ou
   if (n_outer > UINT32_MAX || n_inner > UINT32_MAX) {
     return PGACCEL_ERROR;
   }
+  if (max_pairs > (std::numeric_limits<size_t>::max() - 2) / 2 ||
+      max_pairs > static_cast<size_t>(std::numeric_limits<C>::max())) {
+    return PGACCEL_ERROR;
+  }
 
   const size_t total_pairs = n_outer * n_inner;
+  if (total_pairs > static_cast<size_t>(std::numeric_limits<C>::max()))
+    return PGACCEL_ERROR;
 
   T* d_outer = sycl::malloc_device<T>(n_outer, q);
   T* d_lo = sycl::malloc_device<T>(n_inner, q);
   T* d_hi = sycl::malloc_device<T>(n_inner, q);
   uint32_t* d_pairs = sycl::malloc_device<uint32_t>(max_pairs * 2 + 2, q);
   C* d_count = sycl::malloc_device<C>(1, q);
+  size_t* d_final_count = sycl::malloc_device<size_t>(1, q);
 
-  if (!d_outer || !d_lo || !d_hi || !d_pairs || !d_count) {
+  if (!d_outer || !d_lo || !d_hi || !d_pairs || !d_count || !d_final_count) {
     sycl::free(d_outer, q);
     sycl::free(d_lo, q);
     sycl::free(d_hi, q);
     sycl::free(d_pairs, q);
     sycl::free(d_count, q);
+    sycl::free(d_final_count, q);
     return PGACCEL_OOM;
   }
 
@@ -232,6 +245,7 @@ pgaccel_status nlj_between_impl(sycl::queue& q, const T* outer_keys, size_t n_ou
     q.memcpy(d_outer, outer_keys, n_outer * sizeof(T));
     q.memcpy(d_lo, inner_lo, n_inner * sizeof(T));
     q.memcpy(d_hi, inner_hi, n_inner * sizeof(T));
+    q.memset(d_pairs, 0, max_pairs * 2 * sizeof(uint32_t));
     q.memset(d_count, 0, sizeof(C));
     q.wait_and_throw();
 
@@ -262,23 +276,17 @@ pgaccel_status nlj_between_impl(sycl::queue& q, const T* outer_keys, size_t n_ou
        });
      }).wait_and_throw();
 
-    C gpu_count = 0;
-    q.memcpy(&gpu_count, d_count, sizeof(C));
-    q.wait_and_throw();
-
-    const size_t emitted =
-        (static_cast<size_t>(gpu_count) <= max_pairs) ? static_cast<size_t>(gpu_count) : max_pairs;
-    if (emitted > 0) {
-      q.memcpy(pairs_out, d_pairs, emitted * 2 * sizeof(uint32_t));
-      q.wait_and_throw();
-    }
-    *pair_count_out = static_cast<size_t>(gpu_count);
+    q.single_task([=]() { *d_final_count = static_cast<size_t>(*d_count); }).wait_and_throw();
+    if (max_pairs > 0)
+      q.memcpy(pairs_out, d_pairs, max_pairs * 2 * sizeof(uint32_t)).wait_and_throw();
+    q.memcpy(pair_count_out, d_final_count, sizeof(size_t)).wait_and_throw();
   } catch (...) {
     sycl::free(d_outer, q);
     sycl::free(d_lo, q);
     sycl::free(d_hi, q);
     sycl::free(d_pairs, q);
     sycl::free(d_count, q);
+    sycl::free(d_final_count, q);
     throw;
   }
 
@@ -287,6 +295,7 @@ pgaccel_status nlj_between_impl(sycl::queue& q, const T* outer_keys, size_t n_ou
   sycl::free(d_hi, q);
   sycl::free(d_pairs, q);
   sycl::free(d_count, q);
+  sycl::free(d_final_count, q);
 
   return PGACCEL_OK;
 }
@@ -314,22 +323,12 @@ extern "C" pgaccel_status pgaccel_nlj_ineq_i64(const int64_t* outer_keys, size_t
                                                const int64_t* inner_keys, size_t n_inner,
                                                pgaccel_nlj_ineq_op op, uint32_t* pairs_out,
                                                size_t max_pairs, size_t* pair_count_out) try {
-  try {
-    sycl::queue& q = get_queue();
-    pgaccel_status st = nlj_ineq_dispatch<int64_t>(q, outer_keys, n_outer, inner_keys, n_inner, op,
-                                                   pairs_out, max_pairs, pair_count_out);
-    if (st == PGACCEL_OK)
-      pgaccel_record_gpu_exec();
-    return st;
-    return st;
-  } catch (const pgaccel_no_device_error&) {
-    return PGACCEL_ERROR_NO_DEVICE;
-  } catch (const std::exception& e) {
-    return pgaccel_kernel_failure(__func__, &e);
-  } catch (...) {
-    return pgaccel_kernel_failure(__func__, nullptr);
-  }
-  return PGACCEL_ERROR_NO_DEVICE;
+  sycl::queue& q = get_queue();
+  pgaccel_status st = nlj_ineq_dispatch<int64_t>(q, outer_keys, n_outer, inner_keys, n_inner, op,
+                                                 pairs_out, max_pairs, pair_count_out);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -342,22 +341,12 @@ extern "C" pgaccel_status pgaccel_nlj_ineq_f64(const double* outer_keys, size_t 
                                                const double* inner_keys, size_t n_inner,
                                                pgaccel_nlj_ineq_op op, uint32_t* pairs_out,
                                                size_t max_pairs, size_t* pair_count_out) try {
-  try {
-    sycl::queue& q = get_queue();
-    pgaccel_status st = nlj_ineq_dispatch<double>(q, outer_keys, n_outer, inner_keys, n_inner, op,
-                                                  pairs_out, max_pairs, pair_count_out);
-    if (st == PGACCEL_OK)
-      pgaccel_record_gpu_exec();
-    return st;
-    return st;
-  } catch (const pgaccel_no_device_error&) {
-    return PGACCEL_ERROR_NO_DEVICE;
-  } catch (const std::exception& e) {
-    return pgaccel_kernel_failure(__func__, &e);
-  } catch (...) {
-    return pgaccel_kernel_failure(__func__, nullptr);
-  }
-  return PGACCEL_ERROR_NO_DEVICE;
+  sycl::queue& q = get_queue();
+  pgaccel_status st = nlj_ineq_dispatch<double>(q, outer_keys, n_outer, inner_keys, n_inner, op,
+                                                pairs_out, max_pairs, pair_count_out);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -370,22 +359,12 @@ extern "C" pgaccel_status pgaccel_nlj_between_i64(const int64_t* outer_keys, siz
                                                   const int64_t* inner_lo, const int64_t* inner_hi,
                                                   size_t n_inner, uint32_t* pairs_out,
                                                   size_t max_pairs, size_t* pair_count_out) try {
-  try {
-    sycl::queue& q = get_queue();
-    pgaccel_status st = nlj_between_dispatch<int64_t>(
-        q, outer_keys, n_outer, inner_lo, inner_hi, n_inner, pairs_out, max_pairs, pair_count_out);
-    if (st == PGACCEL_OK)
-      pgaccel_record_gpu_exec();
-    return st;
-    return st;
-  } catch (const pgaccel_no_device_error&) {
-    return PGACCEL_ERROR_NO_DEVICE;
-  } catch (const std::exception& e) {
-    return pgaccel_kernel_failure(__func__, &e);
-  } catch (...) {
-    return pgaccel_kernel_failure(__func__, nullptr);
-  }
-  return PGACCEL_ERROR_NO_DEVICE;
+  sycl::queue& q = get_queue();
+  pgaccel_status st = nlj_between_dispatch<int64_t>(q, outer_keys, n_outer, inner_lo, inner_hi,
+                                                    n_inner, pairs_out, max_pairs, pair_count_out);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
@@ -398,22 +377,12 @@ extern "C" pgaccel_status pgaccel_nlj_between_f64(const double* outer_keys, size
                                                   const double* inner_lo, const double* inner_hi,
                                                   size_t n_inner, uint32_t* pairs_out,
                                                   size_t max_pairs, size_t* pair_count_out) try {
-  try {
-    sycl::queue& q = get_queue();
-    pgaccel_status st = nlj_between_dispatch<double>(q, outer_keys, n_outer, inner_lo, inner_hi,
-                                                     n_inner, pairs_out, max_pairs, pair_count_out);
-    if (st == PGACCEL_OK)
-      pgaccel_record_gpu_exec();
-    return st;
-    return st;
-  } catch (const pgaccel_no_device_error&) {
-    return PGACCEL_ERROR_NO_DEVICE;
-  } catch (const std::exception& e) {
-    return pgaccel_kernel_failure(__func__, &e);
-  } catch (...) {
-    return pgaccel_kernel_failure(__func__, nullptr);
-  }
-  return PGACCEL_ERROR_NO_DEVICE;
+  sycl::queue& q = get_queue();
+  pgaccel_status st = nlj_between_dispatch<double>(q, outer_keys, n_outer, inner_lo, inner_hi,
+                                                   n_inner, pairs_out, max_pairs, pair_count_out);
+  if (st == PGACCEL_OK)
+    pgaccel_record_gpu_exec();
+  return st;
 } catch (const pgaccel_no_device_error&) {
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& e) {
