@@ -34,6 +34,8 @@ fn list_len(list: *mut pg_sys::List) -> usize {
     if list.is_null() {
         0
     } else {
+        // SAFETY: every caller passes a PostgreSQL-owned List from the live
+        // planner tree; the null branch above excludes NIL/null storage.
         usize::try_from(unsafe { pg_sys::list_length(list) }).unwrap_or(usize::MAX)
     }
 }
@@ -43,6 +45,8 @@ unsafe fn list_item<T>(list: *mut pg_sys::List, index: usize) -> Option<*mut T> 
         return None;
     }
     let index = i32::try_from(index).ok()?;
+    // SAFETY: list_len proved `index` is within this planner-owned List and
+    // PostgreSQL retains its cells for the current planner context.
     let item = unsafe { pg_sys::list_nth(list, index) }.cast::<T>();
     (!item.is_null()).then_some(item)
 }
@@ -51,10 +55,14 @@ unsafe fn function_name(function_oid: pg_sys::Oid) -> Option<String> {
     if function_oid == pg_sys::InvalidOid {
         return None;
     }
+    // SAFETY: called on the backend thread with a valid pg_proc OID; PostgreSQL
+    // returns a palloc'd function name or null when no catalog row exists.
     let name = unsafe { pg_sys::get_func_name(function_oid) };
     if name.is_null() {
         return None;
     }
+    // SAFETY: the null check proves get_func_name returned a NUL-terminated
+    // string valid in the current PostgreSQL memory context.
     unsafe { std::ffi::CStr::from_ptr(name) }
         .to_str()
         .ok()
@@ -74,31 +82,53 @@ unsafe fn raster_name_prefilter(node: *mut Node) -> Option<(*mut pg_sys::FuncExp
     if node.is_null() {
         return None;
     }
+    // SAFETY: callers pass a live planner expression node whose leading Node
+    // header remains valid throughout this recursive prefilter.
     let (function, wrapped) = match unsafe { (*node).type_ } {
         NodeTag::T_FuncExpr => (node.cast::<pg_sys::FuncExpr>(), false),
-        NodeTag::T_RelabelType => unsafe {
-            let inner = (*node.cast::<pg_sys::RelabelType>()).arg.cast::<Node>();
-            let (function, _) = raster_name_prefilter(inner)?;
-            (function, true)
-        },
-        NodeTag::T_CoerceViaIO => unsafe {
-            let inner = (*node.cast::<pg_sys::CoerceViaIO>()).arg.cast::<Node>();
-            let (function, _) = raster_name_prefilter(inner)?;
-            (function, true)
-        },
-        NodeTag::T_CoerceToDomain => unsafe {
-            let inner = (*node.cast::<pg_sys::CoerceToDomain>()).arg.cast::<Node>();
-            let (function, _) = raster_name_prefilter(inner)?;
-            (function, true)
-        },
-        NodeTag::T_CollateExpr => unsafe {
-            let inner = (*node.cast::<pg_sys::CollateExpr>()).arg.cast::<Node>();
-            let (function, _) = raster_name_prefilter(inner)?;
-            (function, true)
-        },
+        NodeTag::T_RelabelType => {
+            // SAFETY: the tag proves RelabelType layout; its inner expression
+            // is planner-owned and live for the recursive inspection.
+            unsafe {
+                let inner = (*node.cast::<pg_sys::RelabelType>()).arg.cast::<Node>();
+                let (function, _) = raster_name_prefilter(inner)?;
+                (function, true)
+            }
+        }
+        NodeTag::T_CoerceViaIO => {
+            // SAFETY: the tag proves CoerceViaIO layout; its inner expression
+            // is planner-owned and live for the recursive inspection.
+            unsafe {
+                let inner = (*node.cast::<pg_sys::CoerceViaIO>()).arg.cast::<Node>();
+                let (function, _) = raster_name_prefilter(inner)?;
+                (function, true)
+            }
+        }
+        NodeTag::T_CoerceToDomain => {
+            // SAFETY: the tag proves CoerceToDomain layout; its inner
+            // expression is planner-owned for this recursive inspection.
+            unsafe {
+                let inner = (*node.cast::<pg_sys::CoerceToDomain>()).arg.cast::<Node>();
+                let (function, _) = raster_name_prefilter(inner)?;
+                (function, true)
+            }
+        }
+        NodeTag::T_CollateExpr => {
+            // SAFETY: the tag proves CollateExpr layout; its inner expression
+            // is planner-owned and live for the recursive inspection.
+            unsafe {
+                let inner = (*node.cast::<pg_sys::CollateExpr>()).arg.cast::<Node>();
+                let (function, _) = raster_name_prefilter(inner)?;
+                (function, true)
+            }
+        }
         _ => return None,
     };
-    let name = unsafe { function_name((*function).funcid) };
+    // SAFETY: each successful match returns a live planner-owned FuncExpr.
+    let funcid = unsafe { (*function).funcid };
+    // SAFETY: the extracted OID belongs to that FuncExpr and this lookup runs
+    // on the owning backend thread.
+    let name = unsafe { function_name(funcid) };
     name.as_deref()
         .is_some_and(|name| matches!(name, RECLASS_NAME | SUMMARY_STATS_NAME))
         .then_some((function, wrapped))
@@ -108,12 +138,18 @@ unsafe fn raster_target_function(query: &pg_sys::Query) -> Option<RasterNamePref
     let mut nonjunk = 0_usize;
     let mut candidate: Option<(*mut pg_sys::FuncExpr, bool)> = None;
     for index in 0..list_len(query.targetList) {
+        // SAFETY: the loop bound came from this live Query target List.
         let target = unsafe { list_item::<pg_sys::TargetEntry>(query.targetList, index) }?;
+        // SAFETY: a non-null target-list cell is a planner-owned TargetEntry.
         if unsafe { (*target).resjunk } {
             continue;
         }
         nonjunk = nonjunk.checked_add(1)?;
+        // SAFETY: the verified TargetEntry owns its expression pointer for the
+        // planner tree lifetime.
         let expression = unsafe { (*target).expr.cast::<Node>() };
+        // SAFETY: `expression` is the live TargetEntry expression inspected by
+        // the recursive wrapper-aware prefilter.
         if let Some(found) = unsafe { raster_name_prefilter(expression) } {
             if candidate.is_some() {
                 candidate = Some(found);
@@ -130,13 +166,21 @@ unsafe fn raster_target_function(query: &pg_sys::Query) -> Option<RasterNamePref
 }
 
 unsafe fn direct_const(node: *mut Node) -> Option<pg_sys::Const> {
-    if node.is_null() || unsafe { (*node).type_ } != NodeTag::T_Const {
+    if node.is_null() {
         return None;
     }
+    // SAFETY: the non-null planner expression begins with a readable Node tag.
+    if unsafe { (*node).type_ } != NodeTag::T_Const {
+        return None;
+    }
+    // SAFETY: the tag proves Const layout; copy the by-value C struct while
+    // its planner-owned source node remains live.
     Some(unsafe { *node.cast::<pg_sys::Const>() })
 }
 
 unsafe fn text_const(node: *mut Node) -> Option<String> {
+    // SAFETY: the caller supplies a live planner expression; direct_const
+    // validates the Node tag before copying its Const fields.
     let constant = unsafe { direct_const(node) }?;
     if constant.consttype != pg_sys::TEXTOID
         || constant.consttypmod != -1
@@ -146,10 +190,14 @@ unsafe fn text_const(node: *mut Node) -> Option<String> {
     {
         return None;
     }
+    // SAFETY: the strict type/length/byval/null checks establish a non-null
+    // PostgreSQL text Datum; FromDatum copies it into an owned String.
     unsafe { String::from_datum(constant.constvalue, false) }
 }
 
 unsafe fn int4_const(node: *mut Node) -> Option<i32> {
+    // SAFETY: the caller supplies a live planner expression; direct_const
+    // validates the Node tag before copying its Const fields.
     let constant = unsafe { direct_const(node) }?;
     if constant.consttype != pg_sys::INT4OID
         || constant.consttypmod != -1
@@ -160,10 +208,14 @@ unsafe fn int4_const(node: *mut Node) -> Option<i32> {
     {
         return None;
     }
+    // SAFETY: the preceding metadata checks prove a non-null by-value int4
+    // Datum, which DatumGetInt32 decodes without dereferencing external data.
     Some(unsafe { pg_sys::DatumGetInt32(constant.constvalue) })
 }
 
 unsafe fn bool_const(node: *mut Node) -> Option<bool> {
+    // SAFETY: the caller supplies a live planner expression; direct_const
+    // validates the Node tag before copying its Const fields.
     let constant = unsafe { direct_const(node) }?;
     if constant.consttype != pg_sys::BOOLOID
         || constant.consttypmod != -1
@@ -174,6 +226,8 @@ unsafe fn bool_const(node: *mut Node) -> Option<bool> {
     {
         return None;
     }
+    // SAFETY: the preceding metadata checks prove a non-null by-value bool
+    // Datum, which DatumGetBool decodes without external pointer access.
     Some(unsafe { pg_sys::DatumGetBool(constant.constvalue) })
 }
 
@@ -190,9 +244,15 @@ unsafe fn direct_raster_var(
     rte: &pg_sys::RangeTblEntry,
     raster_type_oid: pg_sys::Oid,
 ) -> Option<RasterVar> {
-    if node.is_null() || unsafe { (*node).type_ } != NodeTag::T_Var {
+    if node.is_null() {
         return None;
     }
+    // SAFETY: the non-null planner expression begins with a readable Node tag.
+    if unsafe { (*node).type_ } != NodeTag::T_Var {
+        return None;
+    }
+    // SAFETY: the tag proves Var layout and the planner owns the expression
+    // for this validation call.
     let var = unsafe { &*node.cast::<pg_sys::Var>() };
     let rti_i32 = i32::try_from(rti).ok()?;
     if var.varno != rti_i32
@@ -203,8 +263,12 @@ unsafe fn direct_raster_var(
         || var.varcollid != pg_sys::InvalidOid
         || rte.rtekind != pg_sys::RTEKind::RTE_RELATION
         || rte.relid == pg_sys::InvalidOid
-        || unsafe { pg_sys::get_atttype(rte.relid, var.varattno) } != raster_type_oid
     {
+        return None;
+    }
+    // SAFETY: the checks above establish a live relation RTE with a valid OID
+    // and a positive user attribute number before consulting pg_attribute.
+    if unsafe { pg_sys::get_atttype(rte.relid, var.varattno) } != raster_type_oid {
         return None;
     }
     Some(RasterVar {
@@ -227,9 +291,15 @@ unsafe fn extract_call(
         if list_len(function.args) != 3 || function.funcresulttype != identity.raster_type_oid {
             return Err(());
         }
+        // SAFETY: the exact three-element FuncExpr argument List is
+        // planner-owned; indexes zero through two are therefore valid.
         let raster_node = unsafe { list_item::<Node>(function.args, 0) }.ok_or(())?;
+        // SAFETY: the same verified List makes its expression argument valid.
         let expression_node = unsafe { list_item::<Node>(function.args, 1) }.ok_or(())?;
+        // SAFETY: the same verified List makes its pixel-type argument valid.
         let pixel_type_node = unsafe { list_item::<Node>(function.args, 2) }.ok_or(())?;
+        // SAFETY: `raster_node` is a live planner expression; the helper proves
+        // its Var/relation/catalog identity before returning a RasterVar.
         let raster = unsafe { direct_raster_var(raster_node, rti, rte, identity.raster_type_oid) }
             .ok_or(())?;
         return Ok(RasterCallShape::ReclassTextText {
@@ -238,7 +308,11 @@ unsafe fn extract_call(
             raster_type_oid: raster.type_oid,
             function_oid: u32::from(function.funcid),
             result_type_oid: u32::from(function.funcresulttype),
+            // SAFETY: `expression_node` is the live second argument and the
+            // helper requires an exact non-null text Const before decoding.
             expression: unsafe { text_const(expression_node) }.ok_or(())?,
+            // SAFETY: `pixel_type_node` is the live third argument and the
+            // helper requires an exact non-null text Const before decoding.
             pixel_type: unsafe { text_const(pixel_type_node) }.ok_or(())?,
         });
     }
@@ -248,11 +322,19 @@ unsafe fn extract_call(
         {
             return Err(());
         }
+        // SAFETY: the exact three-element FuncExpr argument List makes index
+        // zero a live planner expression.
         let raster_node = unsafe { list_item::<Node>(function.args, 0) }.ok_or(())?;
+        // SAFETY: the verified List makes index one a live band expression.
         let band_node = unsafe { list_item::<Node>(function.args, 1) }.ok_or(())?;
+        // SAFETY: the verified List makes index two a live exclude expression.
         let exclude_node = unsafe { list_item::<Node>(function.args, 2) }.ok_or(())?;
+        // SAFETY: `raster_node` is validated against this relation and the
+        // catalog-proven raster type by direct_raster_var.
         let raster = unsafe { direct_raster_var(raster_node, rti, rte, identity.raster_type_oid) }
             .ok_or(())?;
+        // SAFETY: `band_node` is the live second argument; int4_const validates
+        // an exact non-null by-value int4 Const before decoding.
         let band = u32::try_from(unsafe { int4_const(band_node) }.ok_or(())?).map_err(|_| ())?;
         return Ok(RasterCallShape::SummaryStatsBand {
             relation_oid: raster.relation_oid,
@@ -261,6 +343,8 @@ unsafe fn extract_call(
             function_oid: u32::from(function.funcid),
             result_type_oid: u32::from(function.funcresulttype),
             band,
+            // SAFETY: `exclude_node` is the live third argument; bool_const
+            // validates an exact non-null by-value bool Const before decoding.
             exclude_nodata: unsafe { bool_const(exclude_node) }.ok_or(())?,
         });
     }
@@ -270,8 +354,13 @@ unsafe fn extract_call(
         {
             return Err(());
         }
+        // SAFETY: the exact two-element FuncExpr argument List makes index
+        // zero a live planner expression.
         let raster_node = unsafe { list_item::<Node>(function.args, 0) }.ok_or(())?;
+        // SAFETY: the verified List makes index one a live exclude expression.
         let exclude_node = unsafe { list_item::<Node>(function.args, 1) }.ok_or(())?;
+        // SAFETY: `raster_node` is validated against this relation and the
+        // catalog-proven raster type by direct_raster_var.
         let raster = unsafe { direct_raster_var(raster_node, rti, rte, identity.raster_type_oid) }
             .ok_or(())?;
         return Ok(RasterCallShape::SummaryStatsDefaultBand {
@@ -280,6 +369,8 @@ unsafe fn extract_call(
             raster_type_oid: raster.type_oid,
             function_oid: u32::from(function.funcid),
             result_type_oid: u32::from(function.funcresulttype),
+            // SAFETY: `exclude_node` is the live second argument; bool_const
+            // validates an exact non-null by-value bool Const before decoding.
             exclude_nodata: unsafe { bool_const(exclude_node) }.ok_or(())?,
         });
     }
@@ -305,6 +396,8 @@ unsafe fn query_features(
     rel: &pg_sys::RelOptInfo,
     rte: &pg_sys::RangeTblEntry,
 ) -> RasterQueryFeatures {
+    // SAFETY: a non-null jointree is the live planner-owned FromExpr for this
+    // Query, so its optional quals pointer may be inspected.
     let jointree_qual = !query.jointree.is_null() && unsafe { !(*query.jointree).quals.is_null() };
     let mut features = RasterQueryFeatures::NONE;
     features = add_feature(
@@ -382,16 +475,26 @@ unsafe fn relation_shape(
         || !matches!(rel.reloptkind, pg_sys::RelOptKind::RELOPT_BASEREL)
         || !rte.tablesample.is_null()
         || query.jointree.is_null()
-        || list_len(unsafe { (*query.jointree).fromlist }) != 1
     {
         return RasterRelationShape::Unsupported;
     }
-    let Some(range_ref) = (unsafe { list_item::<Node>((*query.jointree).fromlist, 0) }) else {
+    // SAFETY: the null check above proves the Query owns a live FromExpr.
+    let fromlist = unsafe { (*query.jointree).fromlist };
+    if list_len(fromlist) != 1 {
+        return RasterRelationShape::Unsupported;
+    }
+    // SAFETY: the verified singleton fromlist is planner-owned and index zero
+    // remains live for this shape check.
+    let Some(range_ref) = (unsafe { list_item::<Node>(fromlist, 0) }) else {
         return RasterRelationShape::Unsupported;
     };
-    if unsafe { (*range_ref).type_ } != NodeTag::T_RangeTblRef
-        || unsafe { (*range_ref.cast::<pg_sys::RangeTblRef>()).rtindex } != rti_i32
-    {
+    // SAFETY: `range_ref` is a non-null planner expression with a Node header.
+    if unsafe { (*range_ref).type_ } != NodeTag::T_RangeTblRef {
+        return RasterRelationShape::Unsupported;
+    }
+    // SAFETY: the tag check proves RangeTblRef layout; its rtindex is readable
+    // while the planner jointree remains live.
+    if unsafe { (*range_ref.cast::<pg_sys::RangeTblRef>()).rtindex } != rti_i32 {
         return RasterRelationShape::Unsupported;
     }
     RasterRelationShape::UnqualifiedSingleBase {
@@ -503,8 +606,12 @@ unsafe fn validated_candidate(
     rte: &pg_sys::RangeTblEntry,
     prefilter: RasterNamePrefilterTarget,
 ) -> Result<RasterPlannerCandidate, RejectionReason> {
+    // SAFETY: catalog resolution runs on the planner backend and balances all
+    // syscache lookups before returning an owned identity snapshot.
     let identity = unsafe { resolve_postgis_raster_catalog() }
         .map_err(|_| RejectionReason::RasterCatalogProofFailed)?;
+    // SAFETY: the prefilter pointer came from this Query's live target list and
+    // remains planner-owned throughout candidate validation.
     let function = unsafe { &*prefilter.function };
     if prefilter.wrapped {
         let exact_oid = function.funcid == identity.reclass_fn_oid
@@ -516,6 +623,8 @@ unsafe fn validated_candidate(
             RejectionReason::RasterCatalogProofFailed
         });
     }
+    // SAFETY: `function` is the live target FuncExpr and `identity` contains
+    // catalog-proven OIDs; extract_call bounds-checks every argument List read.
     let call = unsafe { extract_call(function, &identity, rti, rte) }
         .map_err(|()| RejectionReason::RasterUnsupportedShape)?;
     let catalog = RasterCatalogContract {
@@ -534,7 +643,11 @@ unsafe fn validated_candidate(
         } else {
             RasterCommandShape::Unsupported
         },
+        // SAFETY: query/rel/rte are live objects from the same planner hook;
+        // relation_shape validates jointree and List structure before access.
         relation: unsafe { relation_shape(query, rel, rti, rte) },
+        // SAFETY: the same live planner objects expose only pointer-presence
+        // feature flags; query_features dereferences jointree after a null check.
         features: unsafe { query_features(query, rel, rte) },
         nonjunk_target_count: prefilter.nonjunk_count,
         call,
@@ -605,13 +718,17 @@ pub(super) unsafe fn observe(
     if root.is_null() || rel.is_null() || rte.is_null() {
         return false;
     }
+    // SAFETY: the null checks prove `root` is the live PlannerInfo supplied to
+    // the hook; PostgreSQL retains its parsed Query for planning.
     let query_ptr = unsafe { (*root).parse };
     if query_ptr.is_null() {
         return false;
     }
-    let query = unsafe { &*query_ptr };
-    let rel_ref = unsafe { &*rel };
-    let rte_ref = unsafe { &*rte };
+    // SAFETY: all pointers were checked non-null and belong to this planner
+    // invocation, so immutable references are valid for the observer call.
+    let (query, rel_ref, rte_ref) = unsafe { (&*query_ptr, &*rel, &*rte) };
+    // SAFETY: `query` is the live parsed Query; the helper bounds-checks its
+    // target List and validates expression tags before dereferencing.
     let Some(prefilter) = (unsafe { raster_target_function(query) }) else {
         return false;
     };
@@ -624,6 +741,8 @@ pub(super) unsafe fn observe(
         return true;
     }
     let rows = rows_estimate(rel_ref.rows);
+    // SAFETY: all references and the prefiltered FuncExpr originate from this
+    // same live planner tree; validation performs exact catalog/shape checks.
     let candidate = match unsafe { validated_candidate(query, rel_ref, rti, rte_ref, prefilter) } {
         Ok(candidate) => candidate,
         Err(reason) => {
@@ -635,10 +754,14 @@ pub(super) unsafe fn observe(
     if forced_raster_path_enabled() {
         return true;
     }
+    // SAFETY: `pathlist` is the planner-owned List for this live RelOptInfo;
+    // find_cheapest_path only traverses its Path entries.
     let cheapest = unsafe { find_cheapest_path(rel_ref.pathlist) };
     let native_total_cost = if cheapest.is_null() {
         PgCost::new(0.0)
     } else {
+        // SAFETY: a non-null result from find_cheapest_path is a live
+        // planner-owned Path whose total_cost field is initialized.
         PgCost::new(unsafe { (*cheapest).total_cost })
     };
     let cost = estimate_raster_cost(
