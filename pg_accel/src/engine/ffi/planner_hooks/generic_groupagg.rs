@@ -511,9 +511,14 @@ unsafe fn inject_childless_shape_path(
         ));
     }
 
+    // SAFETY: allocation occurs in the active planner memory context and requests
+    // exactly enough zeroed storage for one CustomPath.
     let cpath = unsafe {
         pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomPath>()).cast::<pg_sys::CustomPath>()
     };
+    // SAFETY: palloc0 either raises a PostgreSQL error or returns aligned storage
+    // for CustomPath; output_rel is valid for this callback and all constructed
+    // List nodes share its planner memory context.
     unsafe {
         (*cpath).path.type_ = NodeTag::T_CustomPath;
         (*cpath).path.pathtype = NodeTag::T_CustomScan;
@@ -539,6 +544,8 @@ unsafe fn inject_childless_shape_path(
         (*cpath).custom_private = private;
     }
 
+    // SAFETY: output_rel and the newly initialized cpath are planner-owned, and
+    // cpath carries a complete resident proof in its private payload.
     Ok(unsafe {
         add_gpu_path_with_resident_proof(
             GENERIC_SHAPE_PATH_CONTEXT,
@@ -553,8 +560,13 @@ unsafe fn cheapest_native_cost(output_rel: *mut RelOptInfo) -> Option<f64> {
     if output_rel.is_null() {
         return None;
     }
+    // SAFETY: output_rel is non-null and planner-owned; its pathlist is valid for
+    // the duration of this upper-path callback.
     let path = unsafe { find_cheapest_path((*output_rel).pathlist) };
-    (!path.is_null()).then(|| unsafe { (*path).total_cost })
+    (!path.is_null()).then(|| {
+        // SAFETY: find_cheapest_path returned a non-null planner-owned Path.
+        unsafe { (*path).total_cost }
+    })
 }
 
 fn record_decline(decline: &AdmissionDecline, output_rel: *mut RelOptInfo) {
@@ -577,6 +589,7 @@ pub(super) unsafe fn try_inject(
     if !gucs::gpu_enabled() {
         return false;
     }
+    // SAFETY: root is the live PlannerInfo supplied to this upper-path callback.
     if let Err(decline) = unsafe { super::shape::preflight_base_relations(root) } {
         record_decline(&AdmissionDecline::Shape(decline), output_rel);
         return false;
@@ -586,6 +599,8 @@ pub(super) unsafe fn try_inject(
     }
     let model = TypedCostModel::from_limits(cost::device_limits());
     let result = (|| {
+        // SAFETY: root and output_rel are the live planner-owned pointers supplied
+        // together to this upper-path callback.
         let mut shape = unsafe { super::shape::extract_shape(root, output_rel, &model) }
             .map_err(AdmissionDecline::Shape)?;
 
@@ -619,6 +634,8 @@ pub(super) unsafe fn try_inject(
                 &model,
             )?;
             shape.cost_gate = ShapeCostGate::Eligible;
+            // SAFETY: output_rel remains live and shape has passed capability,
+            // residency, and forced-test cost validation.
             let added = unsafe {
                 inject_childless_shape_path(
                     output_rel,
@@ -651,6 +668,7 @@ pub(super) unsafe fn try_inject(
             },
             &model,
         )?;
+        // SAFETY: output_rel remains the live planner-owned upper relation.
         let native_cost = unsafe { cheapest_native_cost(output_rel) };
         let effective_cost = effective_path_cost(&shape, gucs::cost_multiplier());
         gate_cost(
@@ -659,6 +677,8 @@ pub(super) unsafe fn try_inject(
             maximum_cost_ratio(&shape, &model),
             effective_cost,
         )?;
+        // SAFETY: output_rel remains live and shape passed capability, residency,
+        // and cost admission before path construction.
         let added = unsafe { inject_childless_shape_path(output_rel, &shape, effective_cost) }
             .map_err(AdmissionDecline::Shape)?;
         if !added {

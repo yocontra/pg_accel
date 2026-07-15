@@ -191,6 +191,7 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
     match stage {
         pg_sys::UpperRelationKind::UPPERREL_SETOP => {
             let rows_est = rel_rows_estimate(output_rel).or_else(|| rel_rows_estimate(input_rel));
+            // SAFETY: output_rel is the planner-owned upper relation supplied to this hook.
             let reason = unsafe { setop_decline_reason(output_rel) };
             stats::increment_planner_rejected(reason, rows_est.unwrap_or(0));
             stats::record_planner_fast_decline("upper_paths_setop_no_gpu_kernel");
@@ -204,6 +205,7 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         // Generic resident aggregate admission performs its structural
         // preflight before device discovery, then applies GPU/residency gates.
         pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG if gucs::gpu_enabled() => {
+            // SAFETY: root and output_rel are the live pointers supplied for this hook call.
             let _ = unsafe { generic_groupagg::try_inject(root, output_rel) };
         }
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
@@ -213,6 +215,7 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // consumer can carry an explicit resident proof. If PostgreSQL has
             // worker partial input paths, also keep the missing partial-window
             // hook visible until worker-local resident work can be injected.
+            // SAFETY: input_rel is the planner-owned input relation for this hook call.
             unsafe { record_window_partial_path_no_parallel_hook(input_rel) };
             if gucs::gpu_enabled() {
                 record_no_gpu_resident_pipeline_decline("upper_paths_window", input_rel);
@@ -227,6 +230,7 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // Most final upper-rel hooks have no SRF work at all. Check the
             // parse flag before GPU/SPI gates so native ORDER BY/LIMIT queries
             // do not initialize the GPU runtime just to decline.
+            // SAFETY: root is the live PlannerInfo pointer supplied to this hook call.
             if !unsafe { query_has_target_srfs(root) } {
                 stats::record_planner_fast_decline("upper_paths_no_target_srf");
                 return;
@@ -284,6 +288,8 @@ pub(super) unsafe fn add_gpu_path_with_resident_proof(
         record_no_gpu_resident_pipeline_decline(context, rel);
         return false;
     }
+    // SAFETY: cpath was checked non-null and both pointers are planner-owned for
+    // this invocation; the appended List and path remain in that planner context.
     unsafe {
         (*cpath).custom_private =
             custom_scan::append_resident_proof_snapshot((*cpath).custom_private, proof);
@@ -300,6 +306,7 @@ unsafe fn record_window_partial_path_no_parallel_hook(input_rel: *mut RelOptInfo
     // SAFETY: input_rel is a planner-owned RelOptInfo pointer.
     let input_ref = unsafe { &*input_rel };
     if input_ref.partial_pathlist.is_null()
+        // SAFETY: a non-null partial_pathlist is a planner-owned PostgreSQL List.
         || unsafe { pg_sys::list_length(input_ref.partial_pathlist) } == 0
     {
         return;
@@ -349,6 +356,7 @@ const fn setop_reason_for_recursive_union(has_recursive_union: bool) -> &'static
 }
 
 unsafe fn setop_decline_reason(output_rel: *mut RelOptInfo) -> &'static str {
+    // SAFETY: the caller supplies the current planner-owned upper relation.
     let has_recursive_union =
         unsafe { rel_pathlist_contains_node_tag(output_rel, NodeTag::T_RecursiveUnionPath) };
     setop_reason_for_recursive_union(has_recursive_union)
@@ -492,6 +500,8 @@ pub(super) unsafe fn unwrap_var(mut node: *mut pg_sys::Node) -> *mut pg_sys::Var
             // SAFETY: tag confirmed RelabelType.
             #[allow(clippy::cast_ptr_alignment)]
             let relabel = node.cast::<pg_sys::RelabelType>();
+            // SAFETY: the checked NodeTag proves relabel's layout and its arg is
+            // another planner-owned node in the same expression tree.
             node = unsafe { (*relabel).arg.cast::<pg_sys::Node>() };
             if node.is_null() {
                 return std::ptr::null_mut();
@@ -530,6 +540,7 @@ fn node_has_accel_func(node: *mut pg_sys::Node, reg: &registry::AdapterRegistry)
         NodeTag::T_FuncExpr => {
             // SAFETY: tag confirmed this is a FuncExpr.
             let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            // SAFETY: the checked NodeTag proves funcexpr's layout and readability.
             let oid = unsafe { (*funcexpr).funcid };
             if reg.lookup(oid).is_some() {
                 return true;
@@ -554,9 +565,13 @@ fn node_has_accel_func(node: *mut pg_sys::Node, reg: &registry::AdapterRegistry)
             // SAFETY: tag confirmed this is an OpExpr. Only resolve
             // opfuncid via syscache if not already set.
             let opexpr = node.cast::<pg_sys::OpExpr>();
+            // SAFETY: the checked NodeTag proves opexpr's layout and readability.
             let mut oid = unsafe { (*opexpr).opfuncid };
             if oid == pg_sys::InvalidOid {
+                // SAFETY: opexpr is a writable planner-owned OpExpr and this hook
+                // runs on the backend thread where PostgreSQL syscaches are valid.
                 unsafe { pg_sys::set_opfuncid(opexpr) };
+                // SAFETY: set_opfuncid initialized this field on the same OpExpr.
                 oid = unsafe { (*opexpr).opfuncid };
             }
             if reg.lookup(oid).is_some() {

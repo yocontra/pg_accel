@@ -213,6 +213,8 @@ unsafe fn h3_parent_group_key(node: *mut Node, query: &pg_sys::Query) -> Option<
     // SAFETY: node is planner-owned and coercion stripping preserves that
     // lifetime. Explicit CollateExpr is intentionally not stripped here.
     let node = unsafe { pg_sys::strip_implicit_coercions(node) };
+    // SAFETY: the short-circuit proves node is non-null before reading its tag;
+    // coercion stripping returned a node in the same planner-owned expression.
     if node.is_null() || unsafe { (*node).type_ } != NodeTag::T_FuncExpr {
         return None;
     }
@@ -901,6 +903,8 @@ unsafe fn spatial_constant_operand(
     // SAFETY: this is a non-NULL pass-by-reference Const of the exact
     // catalog-proved PostGIS geometry type in the active planner context.
     let original = constant.constvalue.cast_mut_ptr::<pg_sys::varlena>();
+    // SAFETY: original points to the non-null varlena Datum proved above and is
+    // valid in the active planner memory context.
     let detoasted = unsafe { pg_sys::pg_detoast_datum(original) };
     if detoasted.is_null() {
         return Err(ShapeDecline::UnsupportedPredicate);
@@ -908,6 +912,8 @@ unsafe fn spatial_constant_operand(
     // SAFETY: pg_detoast_datum returned a flat varlena readable for VARSIZE
     // bytes until the planner context is released.
     let byte_count = unsafe { pgrx::varsize(detoasted.cast()) };
+    // SAFETY: detoasted is non-null and VARSIZE supplies the complete readable
+    // allocation length; to_vec copies it before any conditional pfree.
     let bytes = unsafe { std::slice::from_raw_parts(detoasted.cast::<u8>(), byte_count) }.to_vec();
     if detoasted != original {
         // SAFETY: a distinct pg_detoast_datum result is palloc-owned; bytes
@@ -1237,11 +1243,15 @@ unsafe fn parse_function_predicate(
     // SAFETY: the exact argument-count check bounds both geometry reads.
     let left_node =
         unsafe { list_item::<Node>(function.args, 0) }.ok_or(ShapeDecline::UnsupportedPredicate)?;
+    // SAFETY: the exact argument-count check above proves index 1 is present in
+    // this planner-owned function argument List.
     let right_node =
         unsafe { list_item::<Node>(function.args, 1) }.ok_or(ShapeDecline::UnsupportedPredicate)?;
     // SAFETY: both arguments belong to this analyzed Query and catalog is the
     // freshly proved PostGIS identity.
     let (left, left_varno) = unsafe { spatial_operand(left_node, query, &catalog) }?;
+    // SAFETY: right_node belongs to the same analyzed Query and catalog is the
+    // freshly proved PostGIS identity.
     let (right, right_varno) = unsafe { spatial_operand(right_node, query, &catalog) }?;
     let relation_oid = match (left.column(), right.column()) {
         (Some(left), Some(right)) if left.relation_oid == right.relation_oid => left.relation_oid,
@@ -1663,6 +1673,8 @@ pub(super) fn preflight_range_table_entry(
 pub(super) unsafe fn preflight_base_relations(
     root: *mut pg_sys::PlannerInfo,
 ) -> Result<(), ShapeDecline> {
+    // SAFETY: short-circuiting checks root for null before reading the parse
+    // pointer from the caller-provided live PlannerInfo.
     if root.is_null() || unsafe { (*root).parse }.is_null() {
         return Err(ShapeDecline::NoAggregate);
     }

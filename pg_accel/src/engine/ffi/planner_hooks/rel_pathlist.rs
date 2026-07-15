@@ -35,24 +35,33 @@ impl H3LatLngQualDecline {
 }
 
 unsafe fn h3_point_var_node(node: *mut pg_sys::Node) -> bool {
+    // SAFETY: callers pass a node from the current planner expression tree;
+    // unwrap_var only follows tag-checked RelabelType links in that tree.
     let var = unsafe { unwrap_var(node) };
     if var.is_null() {
         return false;
     }
+    // SAFETY: unwrap_var returned non-null only after proving the Var NodeTag.
     let vartype = u32::from(unsafe { (*var).vartype });
+    // SAFETY: the same tag-checked Var remains live in planner memory.
     let attno = unsafe { (*var).varattno };
     vartype == pg_sys::POINTOID.to_u32() && attno > 0
 }
 
 unsafe fn h3_resolution_const_node(node: *mut pg_sys::Node) -> bool {
+    // SAFETY: short-circuiting proves the planner-owned node is non-null before
+    // reading its common NodeTag field.
     if node.is_null() || unsafe { (*node).type_ } != NodeTag::T_Const {
         return false;
     }
     let cst = node.cast::<pg_sys::Const>();
+    // SAFETY: the checked NodeTag proves cst has Const layout.
     if unsafe { (*cst).constisnull } {
         return false;
     }
+    // SAFETY: cst is a non-null, tag-checked planner Const.
     let datum = unsafe { (*cst).constvalue };
+    // SAFETY: the same tag-checked Const remains readable in planner memory.
     let resolution = match u32::from(unsafe { (*cst).consttype }) {
         21 => i32::from(datum.value() as i16),
         23 => datum.value() as i32,
@@ -63,12 +72,20 @@ unsafe fn h3_resolution_const_node(node: *mut pg_sys::Node) -> bool {
 }
 
 unsafe fn h3_latlng_args_supported(args: *mut List) -> bool {
+    // SAFETY: short-circuiting checks the planner-owned List pointer before
+    // asking PostgreSQL for its length.
     if args.is_null() || unsafe { pg_sys::list_length(args) } != 2 {
         return false;
     }
+    // SAFETY: the exact length check proves index 0 exists in this planner List.
     let arg0 = unsafe { pg_sys::list_nth(args, 0).cast::<pg_sys::Node>() };
+    // SAFETY: the exact length check proves index 1 exists in this planner List.
     let arg1 = unsafe { pg_sys::list_nth(args, 1).cast::<pg_sys::Node>() };
-    (unsafe { h3_point_var_node(arg0) }) && (unsafe { h3_resolution_const_node(arg1) })
+    // SAFETY: arg0 is the node pointer stored at a valid List index.
+    let point_supported = unsafe { h3_point_var_node(arg0) };
+    // SAFETY: arg1 is the node pointer stored at a valid List index.
+    let resolution_supported = unsafe { h3_resolution_const_node(arg1) };
+    point_supported && resolution_supported
 }
 
 fn merge_h3_latlng_decline(
@@ -94,10 +111,13 @@ unsafe fn h3_latlng_qual_decline_list(args: *mut List) -> Option<H3LatLngQualDec
     if args.is_null() {
         return None;
     }
+    // SAFETY: args was checked non-null and is a planner-owned expression List.
     let len = unsafe { pg_sys::list_length(args) };
     let mut out = None;
     for i in 0..len {
+        // SAFETY: i is bounded by list_length(args).
         let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+        // SAFETY: child is the planner-owned node stored at that valid List index.
         out = merge_h3_latlng_decline(out, unsafe { h3_latlng_qual_decline_node(child) });
         if out == Some(H3LatLngQualDecline::UnsupportedShape) {
             return out;
@@ -110,68 +130,98 @@ unsafe fn h3_latlng_qual_decline_node(node: *mut pg_sys::Node) -> Option<H3LatLn
     if node.is_null() {
         return None;
     }
+    // SAFETY: node was checked non-null and belongs to the current planner tree.
     match unsafe { (*node).type_ } {
         NodeTag::T_FuncExpr => {
             let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            // SAFETY: the matched NodeTag proves the FuncExpr layout; catalog
+            // lookup runs on the backend thread during planning.
             let fn_name = unsafe { function_name_for_oid((*funcexpr).funcid) };
             if fn_name.as_deref() == Some("h3_latlng_to_cell") {
+                // SAFETY: the matched FuncExpr owns this planner argument List.
                 return if unsafe { h3_latlng_args_supported((*funcexpr).args) } {
                     Some(H3LatLngQualDecline::ScalarPredicateNoGpuPipeline)
                 } else {
                     Some(H3LatLngQualDecline::UnsupportedShape)
                 };
             }
+            // SAFETY: the matched FuncExpr owns this planner argument List.
             unsafe { h3_latlng_qual_decline_list((*funcexpr).args) }
         }
         NodeTag::T_OpExpr => {
             let opexpr = node.cast::<pg_sys::OpExpr>();
+            // SAFETY: the matched NodeTag proves OpExpr layout and its args List
+            // remains owned by the current planner expression.
             unsafe { h3_latlng_qual_decline_list((*opexpr).args) }
         }
         NodeTag::T_BoolExpr => {
             let bool_expr = node.cast::<pg_sys::BoolExpr>();
+            // SAFETY: the matched NodeTag proves BoolExpr layout and its args
+            // are nodes in the same planner expression.
             unsafe { h3_latlng_qual_decline_list((*bool_expr).args) }
         }
         NodeTag::T_BooleanTest => {
             let bool_test = node.cast::<pg_sys::BooleanTest>();
+            // SAFETY: the matched NodeTag proves BooleanTest layout; arg is its
+            // planner-owned child node.
             unsafe { h3_latlng_qual_decline_node((*bool_test).arg.cast::<pg_sys::Node>()) }
         }
         NodeTag::T_NullTest => {
             let null_test = node.cast::<pg_sys::NullTest>();
+            // SAFETY: the matched NodeTag proves NullTest layout; arg is its
+            // planner-owned child node.
             unsafe { h3_latlng_qual_decline_node((*null_test).arg.cast::<pg_sys::Node>()) }
         }
         NodeTag::T_RelabelType => {
             let relabel = node.cast::<pg_sys::RelabelType>();
+            // SAFETY: the matched NodeTag proves RelabelType layout; arg is its
+            // planner-owned child node.
             unsafe { h3_latlng_qual_decline_node((*relabel).arg.cast::<pg_sys::Node>()) }
         }
         NodeTag::T_CoerceViaIO => {
             let coercion = node.cast::<pg_sys::CoerceViaIO>();
+            // SAFETY: the matched NodeTag proves CoerceViaIO layout; arg is its
+            // planner-owned child node.
             unsafe { h3_latlng_qual_decline_node((*coercion).arg.cast::<pg_sys::Node>()) }
         }
         NodeTag::T_ScalarArrayOpExpr => {
             let scalar_array = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            // SAFETY: the matched NodeTag proves ScalarArrayOpExpr layout and
+            // its args List remains planner-owned.
             unsafe { h3_latlng_qual_decline_list((*scalar_array).args) }
         }
         NodeTag::T_CaseExpr => {
             let case_expr = node.cast::<pg_sys::CaseExpr>();
+            // SAFETY: the matched NodeTag proves CaseExpr layout; arg is its
+            // planner-owned optional child node.
             let mut out =
                 unsafe { h3_latlng_qual_decline_node((*case_expr).arg.cast::<pg_sys::Node>()) };
+            // SAFETY: the same CaseExpr owns its planner argument List.
             out = merge_h3_latlng_decline(out, unsafe {
                 h3_latlng_qual_decline_list((*case_expr).args)
             });
+            // SAFETY: defresult is the planner-owned default child of this
+            // tag-checked CaseExpr.
             merge_h3_latlng_decline(out, unsafe {
                 h3_latlng_qual_decline_node((*case_expr).defresult.cast::<pg_sys::Node>())
             })
         }
         NodeTag::T_CaseWhen => {
             let case_when = node.cast::<pg_sys::CaseWhen>();
+            // SAFETY: the matched NodeTag proves CaseWhen layout; expr is its
+            // planner-owned condition child.
             let out =
                 unsafe { h3_latlng_qual_decline_node((*case_when).expr.cast::<pg_sys::Node>()) };
+            // SAFETY: result is the planner-owned result child of the same
+            // tag-checked CaseWhen.
             merge_h3_latlng_decline(out, unsafe {
                 h3_latlng_qual_decline_node((*case_when).result.cast::<pg_sys::Node>())
             })
         }
         NodeTag::T_CoalesceExpr => {
             let coalesce = node.cast::<pg_sys::CoalesceExpr>();
+            // SAFETY: the matched NodeTag proves CoalesceExpr layout and its
+            // args List remains planner-owned.
             unsafe { h3_latlng_qual_decline_list((*coalesce).args) }
         }
         _ => None,
@@ -182,14 +232,18 @@ unsafe fn h3_latlng_qual_decline(restrictinfo_list: *mut List) -> Option<H3LatLn
     if restrictinfo_list.is_null() {
         return None;
     }
+    // SAFETY: restrictinfo_list was checked non-null and is planner-owned.
     let len = unsafe { pg_sys::list_length(restrictinfo_list) };
     let mut out = None;
     for i in 0..len {
+        // SAFETY: i is bounded by list_length(restrictinfo_list).
         let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<pg_sys::RestrictInfo>() };
         if ri.is_null() {
             continue;
         }
+        // SAFETY: ri is the non-null RestrictInfo at a valid planner List index.
         let clause = unsafe { (*ri).clause };
+        // SAFETY: clause is the planner-owned expression referenced by ri.
         out = merge_h3_latlng_decline(out, unsafe { h3_latlng_qual_decline_node(clause.cast()) });
         if out == Some(H3LatLngQualDecline::UnsupportedShape) {
             return out;
@@ -221,9 +275,13 @@ unsafe fn function_name_for_oid(fn_oid: pg_sys::Oid) -> Option<String> {
 }
 
 unsafe fn postgis_function_name_for_oid(fn_oid: pg_sys::Oid) -> Option<String> {
+    // SAFETY: this planner callback runs on PostgreSQL's backend thread, and
+    // fn_oid is checked against the live extension catalogs.
     if !unsafe { super::super::syscache::function_is_extension_member(fn_oid, "postgis") } {
         return None;
     }
+    // SAFETY: the same backend-thread catalog context keeps the function and
+    // namespace syscache lookups valid for this call.
     let (_, name) = unsafe { super::super::syscache::function_schema_and_name(fn_oid) }?;
     Some(name)
 }
@@ -233,29 +291,39 @@ unsafe fn oid_is_postgis_spatial_scalar_type(type_oid: pg_sys::Oid) -> bool {
         return false;
     }
 
+    // SAFETY: getBaseType is called on the backend thread with a non-invalid OID.
     let base_type = unsafe { pg_sys::getBaseType(type_oid) };
     if base_type == pg_sys::InvalidOid {
         return false;
     }
+    // SAFETY: base_type is a live catalog OID resolved by PostgreSQL above.
     if !unsafe { super::super::syscache::type_is_extension_member(base_type, "postgis") } {
         return false;
     }
+    // SAFETY: base_type was resolved and proved to belong to the PostGIS
+    // extension in this backend's current catalogs.
     unsafe { super::super::syscache::type_name(base_type) }
         .as_deref()
         .is_some_and(|name| matches!(name, "geometry" | "geography"))
 }
 
 unsafe fn expr_list_has_spatial_prefix(args: *mut List, required: usize) -> bool {
+    // SAFETY: short-circuiting checks the planner-owned List pointer before
+    // PostgreSQL reads its length.
     if args.is_null() || unsafe { pg_sys::list_length(args) } < required as i32 {
         return false;
     }
 
     for i in 0..required {
+        // SAFETY: i is below required, which the length check proved is present.
         let child = unsafe { pg_sys::list_nth(args, i as i32).cast::<pg_sys::Node>() };
         if child.is_null() {
             return false;
         }
+        // SAFETY: child is a non-null planner Node obtained from a valid List index.
         let arg_type = unsafe { pg_sys::exprType(child) };
+        // SAFETY: arg_type came from PostgreSQL's expression metadata and catalog
+        // inspection runs on the current backend thread.
         if !unsafe { oid_is_postgis_spatial_scalar_type(arg_type) } {
             return false;
         }
@@ -268,25 +336,40 @@ unsafe fn function_matches_postgis_spatial_prefix(
     args: *mut List,
     name_predicate: impl FnOnce(&str) -> bool,
 ) -> bool {
+    // SAFETY: fn_oid is planner expression metadata and catalog access occurs on
+    // the backend thread during this callback.
     let Some(name) = (unsafe { postgis_function_name_for_oid(fn_oid) }) else {
         return false;
     };
+    // SAFETY: args is the argument List of the tag-checked expression supplied
+    // by the caller; the helper validates its length before indexing.
     name_predicate(&name) && unsafe { expr_list_has_spatial_prefix(args, 2) }
 }
 
 unsafe fn funcexpr_is_postgis_intersects(funcexpr: *mut pg_sys::FuncExpr) -> bool {
+    // SAFETY: callers invoke this only after matching the FuncExpr NodeTag.
     let funcid = unsafe { (*funcexpr).funcid };
+    // SAFETY: the same tag-checked planner FuncExpr remains readable.
     let args = unsafe { (*funcexpr).args };
+    // SAFETY: funcid and args were read from that live FuncExpr and catalog
+    // resolution runs on the backend thread.
     unsafe { function_matches_postgis_spatial_prefix(funcid, args, |name| name == "st_intersects") }
 }
 
 unsafe fn opexpr_is_postgis_intersects(opexpr: *mut pg_sys::OpExpr) -> bool {
+    // SAFETY: callers invoke this only after matching the OpExpr NodeTag.
     let mut opfuncid = unsafe { (*opexpr).opfuncid };
     if opfuncid == pg_sys::InvalidOid {
+        // SAFETY: opexpr is a writable planner-owned OpExpr and syscache lookup
+        // runs on the current backend thread.
         unsafe { pg_sys::set_opfuncid(opexpr) };
+        // SAFETY: set_opfuncid initialized this field on the same live OpExpr.
         opfuncid = unsafe { (*opexpr).opfuncid };
     }
+    // SAFETY: the tag-checked planner OpExpr remains readable.
     let args = unsafe { (*opexpr).args };
+    // SAFETY: opfuncid and args belong to that live OpExpr and the helper bounds
+    // all List access before catalog classification.
     unsafe {
         function_matches_postgis_spatial_prefix(opfuncid, args, |name| name == "st_intersects")
     }
@@ -297,13 +380,17 @@ unsafe fn restrictinfo_contains_wrapped_postgis_intersects(restrictinfo_list: *m
         return false;
     }
 
+    // SAFETY: restrictinfo_list was checked non-null and is planner-owned.
     let len = unsafe { pg_sys::list_length(restrictinfo_list) };
     for i in 0..len {
+        // SAFETY: i is bounded by list_length(restrictinfo_list).
         let ri = unsafe { pg_sys::list_nth(restrictinfo_list, i).cast::<pg_sys::RestrictInfo>() };
         if ri.is_null() {
             continue;
         }
+        // SAFETY: ri is the non-null RestrictInfo stored at a valid List index.
         let clause = unsafe { (*ri).clause };
+        // SAFETY: clause is the planner-owned expression referenced by ri.
         if unsafe { node_contains_wrapped_postgis_intersects(clause.cast()) } {
             return true;
         }
@@ -316,57 +403,82 @@ unsafe fn node_contains_wrapped_postgis_intersects(node: *mut pg_sys::Node) -> b
         return false;
     }
 
+    // SAFETY: node was checked non-null and belongs to the current planner tree.
     let tag = unsafe { (*node).type_ };
     #[allow(clippy::cast_ptr_alignment)]
     match tag {
         NodeTag::T_FuncExpr => {
             let funcexpr = node.cast::<pg_sys::FuncExpr>();
+            // SAFETY: the matched NodeTag proves FuncExpr layout and the helper
+            // reads only this live planner node and backend catalogs.
             if unsafe { funcexpr_is_postgis_intersects(funcexpr) } {
                 return true;
             }
+            // SAFETY: the matched FuncExpr owns this planner argument List.
             unsafe { args_contain_wrapped_postgis_intersects((*funcexpr).args) }
         }
         NodeTag::T_OpExpr => {
             let opexpr = node.cast::<pg_sys::OpExpr>();
+            // SAFETY: the matched NodeTag proves OpExpr layout and the helper may
+            // initialize only its PostgreSQL-managed opfuncid cache field.
             if unsafe { opexpr_is_postgis_intersects(opexpr) } {
                 return true;
             }
+            // SAFETY: the matched OpExpr owns this planner argument List.
             unsafe { args_contain_wrapped_postgis_intersects((*opexpr).args) }
         }
         NodeTag::T_BoolExpr => {
             let bool_expr = node.cast::<pg_sys::BoolExpr>();
+            // SAFETY: the matched NodeTag proves BoolExpr layout and its args
+            // remain planner-owned.
             unsafe { args_contain_wrapped_postgis_intersects((*bool_expr).args) }
         }
         NodeTag::T_NullTest => {
             let null_test = node.cast::<pg_sys::NullTest>();
+            // SAFETY: the matched NodeTag proves NullTest layout; arg is its
+            // planner-owned child expression.
             unsafe { node_contains_wrapped_postgis_intersects((*null_test).arg.cast()) }
         }
         NodeTag::T_BooleanTest => {
             let bool_test = node.cast::<pg_sys::BooleanTest>();
+            // SAFETY: the matched NodeTag proves BooleanTest layout; arg is its
+            // planner-owned child expression.
             unsafe { node_contains_wrapped_postgis_intersects((*bool_test).arg.cast()) }
         }
         NodeTag::T_RelabelType => {
             let relabel = node.cast::<pg_sys::RelabelType>();
+            // SAFETY: the matched NodeTag proves RelabelType layout; arg is its
+            // planner-owned child expression.
             unsafe { node_contains_wrapped_postgis_intersects((*relabel).arg.cast()) }
         }
         NodeTag::T_CoerceViaIO => {
             let coercion = node.cast::<pg_sys::CoerceViaIO>();
+            // SAFETY: the matched NodeTag proves CoerceViaIO layout; arg is its
+            // planner-owned child expression.
             unsafe { node_contains_wrapped_postgis_intersects((*coercion).arg.cast()) }
         }
         NodeTag::T_CoerceToDomain => {
             let coercion = node.cast::<pg_sys::CoerceToDomain>();
+            // SAFETY: the matched NodeTag proves CoerceToDomain layout; arg is
+            // its planner-owned child expression.
             unsafe { node_contains_wrapped_postgis_intersects((*coercion).arg.cast()) }
         }
         NodeTag::T_CoalesceExpr => {
             let coalesce = node.cast::<pg_sys::CoalesceExpr>();
+            // SAFETY: the matched NodeTag proves CoalesceExpr layout and its
+            // args List remains planner-owned.
             unsafe { args_contain_wrapped_postgis_intersects((*coalesce).args) }
         }
         NodeTag::T_ScalarArrayOpExpr => {
             let scalar_array = node.cast::<pg_sys::ScalarArrayOpExpr>();
+            // SAFETY: the matched NodeTag proves ScalarArrayOpExpr layout and
+            // its args List remains planner-owned.
             unsafe { args_contain_wrapped_postgis_intersects((*scalar_array).args) }
         }
         NodeTag::T_CaseExpr => {
             let case_expr = node.cast::<pg_sys::CaseExpr>();
+            // SAFETY: the matched NodeTag proves CaseExpr layout; all three
+            // traversals remain within its planner-owned child nodes and List.
             unsafe {
                 node_contains_wrapped_postgis_intersects((*case_expr).arg.cast())
                     || args_contain_wrapped_postgis_intersects((*case_expr).args)
@@ -375,6 +487,8 @@ unsafe fn node_contains_wrapped_postgis_intersects(node: *mut pg_sys::Node) -> b
         }
         NodeTag::T_CaseWhen => {
             let case_when = node.cast::<pg_sys::CaseWhen>();
+            // SAFETY: the matched NodeTag proves CaseWhen layout; both pointers
+            // are its planner-owned child expressions.
             unsafe {
                 node_contains_wrapped_postgis_intersects((*case_when).expr.cast())
                     || node_contains_wrapped_postgis_intersects((*case_when).result.cast())
@@ -382,10 +496,14 @@ unsafe fn node_contains_wrapped_postgis_intersects(node: *mut pg_sys::Node) -> b
         }
         NodeTag::T_ArrayExpr => {
             let array = node.cast::<pg_sys::ArrayExpr>();
+            // SAFETY: the matched NodeTag proves ArrayExpr layout and elements
+            // remains a planner-owned List.
             unsafe { args_contain_wrapped_postgis_intersects((*array).elements) }
         }
         NodeTag::T_MinMaxExpr => {
             let minmax = node.cast::<pg_sys::MinMaxExpr>();
+            // SAFETY: the matched NodeTag proves MinMaxExpr layout and its args
+            // remain planner-owned.
             unsafe { args_contain_wrapped_postgis_intersects((*minmax).args) }
         }
         _ => false,
@@ -397,9 +515,12 @@ unsafe fn args_contain_wrapped_postgis_intersects(args: *mut List) -> bool {
         return false;
     }
 
+    // SAFETY: args was checked non-null and is a planner-owned expression List.
     let len = unsafe { pg_sys::list_length(args) };
     for i in 0..len {
+        // SAFETY: i is bounded by list_length(args).
         let child = unsafe { pg_sys::list_nth(args, i).cast::<pg_sys::Node>() };
+        // SAFETY: child is the planner-owned node stored at that valid List index.
         if unsafe { node_contains_wrapped_postgis_intersects(child) } {
             return true;
         }
@@ -460,6 +581,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // where Custom Scan slot handling is incompatible.
     // SAFETY: root.parse is a valid Query pointer provided by the planner.
     let parse = unsafe { (*root).parse };
+    // SAFETY: short-circuiting proves parse is non-null before reading the
+    // command type from the planner-owned Query.
     if parse.is_null() || unsafe { (*parse).commandType } != pg_sys::CmdType::CMD_SELECT {
         stats::record_command_type_skip();
         return;
@@ -467,6 +590,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
 
     // SAFETY: rel and rte are valid pointers provided by the planner.
     let rel_ref = unsafe { &*rel };
+    // SAFETY: rte is the planner-owned range-table entry supplied to this hook.
     let rte_ref = unsafe { &*rte };
 
     let _span =
@@ -477,6 +601,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // SAFETY: root is a valid PlannerInfo pointer.
     let has_sort = unsafe { !(*root).sort_pathkeys.is_null() };
     let has_restrictions = !rel_ref.baserestrictinfo.is_null()
+        // SAFETY: the non-null baserestrictinfo pointer is a planner-owned List.
         && unsafe { pg_sys::list_length(rel_ref.baserestrictinfo) } > 0;
 
     // GPU-resident-only admission: pg_accel no longer injects a host-staged
@@ -513,9 +638,12 @@ unsafe fn observe_resident_only_rel_declines(
     }
     // SAFETY: caller passed planner-owned pointers from set_rel_pathlist.
     let rel_ref = unsafe { &*rel };
+    // SAFETY: rte was checked non-null and remains planner-owned for this callback.
     let rte_ref = unsafe { &*rte };
 
     if has_sort {
+        // SAFETY: root and rel are non-null planner pointers supplied by the
+        // enclosing set_rel_pathlist callback.
         unsafe { observe_resident_only_sort_declines(root, rel) };
     }
 
@@ -531,6 +659,8 @@ unsafe fn observe_resident_only_rel_declines(
 
     #[allow(clippy::cast_sign_loss)]
     let rows = rel_ref.tuples.max(rel_ref.rows).max(0.0) as u64;
+    // SAFETY: baserestrictinfo is the live planner List whose non-emptiness was
+    // established by the caller's has_restrictions flag.
     if let Some(h3_decline) = unsafe { h3_latlng_qual_decline(rel_ref.baserestrictinfo) } {
         stats::increment_planner_rejected(h3_decline.stats_key(), rows);
         pgrx::debug1!(
@@ -539,6 +669,7 @@ unsafe fn observe_resident_only_rel_declines(
             h3_decline
         );
     }
+    // SAFETY: baserestrictinfo is the same live planner-owned restriction List.
     if unsafe { restrictinfo_contains_wrapped_postgis_intersects(rel_ref.baserestrictinfo) } {
         stats::increment_planner_rejected(
             super::RejectionReason::PostgisIntersectsUnsupportedShape.stats_key(),
@@ -557,6 +688,7 @@ unsafe fn observe_resident_only_sort_declines(root: *mut PlannerInfo, rel: *mut 
     }
     // SAFETY: caller passed planner-owned pointers from set_rel_pathlist.
     let root_ref = unsafe { &*root };
+    // SAFETY: rel was checked non-null and remains planner-owned for this callback.
     let rel_ref = unsafe { &*rel };
     let sort_pathkeys = root_ref.sort_pathkeys;
     if sort_pathkeys.is_null() {
@@ -570,6 +702,8 @@ unsafe fn observe_resident_only_sort_declines(root: *mut PlannerInfo, rel: *mut 
 
     #[allow(clippy::cast_sign_loss)]
     let rejected_rows = rel_ref.rows.max(0.0) as u64;
+    // SAFETY: pathlist and sort_pathkeys are live planner Lists, and
+    // num_pathkeys is the measured length of the latter.
     let presorted =
         unsafe { longest_presorted_prefix(rel_ref.pathlist, sort_pathkeys, num_pathkeys) };
     match classify_sort_shape(presorted, num_pathkeys) {
