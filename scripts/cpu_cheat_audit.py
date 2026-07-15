@@ -26,7 +26,8 @@ import shutil
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from types import MappingProxyType
 
 
 DISPATCH_METHODS = frozenset({"parallel_for", "single_task", "submit"})
@@ -110,7 +111,20 @@ class LifecycleContract:
 
     purpose: str
     required_sequences: tuple[tuple[str, ...], ...]
+    signature: str
     allow_host_loops: bool = False
+    required_any_sequences: tuple[tuple[str, ...], ...] = ()
+    noop_guard_markers: tuple[tuple[str, ...], ...] = ()
+    noop_guard_polarity: str = "any"
+    noop_guard_conditions: tuple[tuple[str, ...], ...] = ()
+    conditional_evidence_markers: tuple[tuple[str, ...], ...] = ()
+    allow_zero_success: bool = False
+    output_policy: str = "none"
+    allow_empty_body: bool = False
+    allow_ternary: bool = False
+    allowed_output_calls: tuple[str, ...] = ()
+    exact_body_alternatives: tuple[tuple[str, ...], ...] = ()
+    transfer_contract: str = "none"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -124,88 +138,344 @@ class FailOnlyContract:
 # These are ABI support operations, not compute kernels.  Exact names keep the
 # exception boundary reviewable; required token sequences stop a vacuous name
 # match from bypassing the audit.  Compute wrappers must never be added here.
-LIFECYCLE_CONTRACTS: dict[str, LifecycleContract] = {
-    "pgaccel_init": LifecycleContract(
-        "SYCL runtime/device initialization",
-        (("sycl", "::", "device", "::", "get_devices", "("),),
-        allow_host_loops=True,
-    ),
-    "pgaccel_shutdown": LifecycleContract(
-        "SYCL queue teardown",
-        (("wait_and_throw", "("), ("delete", "g_queue")),
-    ),
-    "pgaccel_archive_stats_snapshot": LifecycleContract(
-        "AdaptiveCpp JIT-cache diagnostics",
-        (("std", "::", "filesystem", "::", "directory_iterator", "("),),
-        allow_host_loops=True,
-    ),
-    "pgaccel_archive_jit_cache_dir": LifecycleContract(
-        "AdaptiveCpp JIT-cache diagnostics",
-        (("resolve_jit_cache_dir", "("),),
-    ),
-    "pgaccel_expr_shared_alloc": LifecycleContract(
-        "shared-USM allocation",
-        (("sycl", "::", "malloc_shared", "("),),
-    ),
-    "pgaccel_expr_device_alloc": LifecycleContract(
-        "device-USM allocation",
-        (("sycl", "::", "malloc_device", "("),),
-    ),
-    "pgaccel_expr_device_alloc_copy": LifecycleContract(
-        "resident allocation and transfer",
-        (
-            ("sycl", "::", "malloc_shared", "("),
-            ("memcpy", "("),
+LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
+    {
+        "pgaccel_init": LifecycleContract(
+            "SYCL runtime/device initialization",
+            (("sycl", "::", "device", "::", "get_devices", "("),),
+            "pgaccel_status ()",
+            allow_host_loops=True,
+            noop_guard_markers=(("initialized",), ("g_initialized",)),
+            noop_guard_polarity="truthy",
         ),
-    ),
-    "pgaccel_expr_device_copy_from_host": LifecycleContract(
-        "host-to-device transfer",
-        (("memcpy", "("),),
-    ),
-    "pgaccel_expr_device_copy_to_host": LifecycleContract(
-        "device-to-host transfer",
-        (("memcpy", "("),),
-    ),
-    "pgaccel_grouped_agg_workspace_requirements": LifecycleContract(
-        "workspace metadata calculation",
-        (("validate_desc", "("),),
-    ),
-    "pgaccel_grouped_agg_workspace_alloc": LifecycleContract(
-        "workspace USM allocation",
-        (
-            ("sycl", "::", "aligned_alloc_shared", "("),
-            ("sycl", "::", "aligned_alloc_device", "("),
+        "pgaccel_shutdown": LifecycleContract(
+            "SYCL queue teardown",
+            (("wait_and_throw", "("), ("delete", "g_queue")),
+            "pgaccel_status ()",
+            noop_guard_markers=(("initialized",), ("g_initialized",)),
+            noop_guard_polarity="falsy",
+            conditional_evidence_markers=(("g_queue",), ("g_ooo_queue",)),
         ),
-    ),
-    "pgaccel_spatial_workspace_finish": LifecycleContract(
-        "post-dispatch failure-flag readback",
-        (
-            ("pgaccel_d2h", "("),
-            ("workspace", "->", "failure_flags"),
+        "pgaccel_archive_stats_snapshot": LifecycleContract(
+            "AdaptiveCpp JIT-cache diagnostics",
+            (("std", "::", "filesystem", "::", "directory_iterator", "("),),
+            "pgaccel_status (pgaccel_archive_snapshot *)",
+            allow_host_loops=True,
+            noop_guard_conditions=(
+                (
+                    "!",
+                    "std",
+                    "::",
+                    "filesystem",
+                    "::",
+                    "is_directory",
+                    "(",
+                    "cache_dir",
+                    ",",
+                    "ec",
+                    ")",
+                    "||",
+                    "ec",
+                ),
+            ),
+            output_policy="metadata",
         ),
-    ),
-}
+        "pgaccel_archive_jit_cache_dir": LifecycleContract(
+            "AdaptiveCpp JIT-cache diagnostics",
+            (("resolve_jit_cache_dir", "("),),
+            "pgaccel_status (char *, size_t)",
+            output_policy="metadata",
+        ),
+        "pgaccel_expr_shared_alloc": LifecycleContract(
+            "shared-USM allocation",
+            (("sycl", "::", "malloc_shared", "("),),
+            "pgaccel_status (size_t, void **)",
+            noop_guard_conditions=(("init_status", "!=", "PGACCEL_OK"),),
+            allow_zero_success=True,
+            output_policy="allocation",
+        ),
+        "pgaccel_expr_device_alloc": LifecycleContract(
+            "device-USM allocation",
+            (("sycl", "::", "malloc_device", "("),),
+            "pgaccel_status (size_t, void **)",
+            noop_guard_conditions=(("init_status", "!=", "PGACCEL_OK"),),
+            allow_zero_success=True,
+            output_policy="allocation",
+        ),
+        "pgaccel_expr_device_alloc_copy": LifecycleContract(
+            "resident allocation and transfer",
+            (("memcpy", "("),),
+            "pgaccel_status (const void *, size_t, void **)",
+            required_any_sequences=(
+                ("sycl", "::", "malloc_shared", "("),
+                ("pgaccel_expr_device_alloc", "("),
+            ),
+            noop_guard_conditions=(
+                ("init_status", "!=", "PGACCEL_OK"),
+                ("status", "!=", "PGACCEL_OK"),
+            ),
+            allow_zero_success=True,
+            output_policy="allocation",
+            allowed_output_calls=("free", "pgaccel_expr_device_alloc"),
+            transfer_contract="allocation_copy",
+        ),
+        "pgaccel_expr_device_copy_from_host": LifecycleContract(
+            "host-to-device transfer",
+            (("memcpy", "("),),
+            "pgaccel_status (void *, const void *, size_t)",
+            noop_guard_conditions=(("init_status", "!=", "PGACCEL_OK"),),
+            allow_zero_success=True,
+            transfer_contract="parameters",
+        ),
+        "pgaccel_expr_device_copy_to_host": LifecycleContract(
+            "device-to-host transfer",
+            (("memcpy", "("),),
+            "pgaccel_status (void *, const void *, size_t)",
+            noop_guard_conditions=(("init_status", "!=", "PGACCEL_OK"),),
+            allow_zero_success=True,
+            transfer_contract="parameters",
+        ),
+        "pgaccel_grouped_agg_workspace_requirements": LifecycleContract(
+            "workspace metadata calculation",
+            (("validate_desc", "("),),
+            "pgaccel_status (const pgaccel_grouped_agg_desc *, pgaccel_grouped_agg_workspace_req *)",
+            output_policy="metadata",
+        ),
+        "pgaccel_grouped_agg_workspace_alloc": LifecycleContract(
+            "workspace USM allocation",
+            (),
+            "pgaccel_status (size_t, size_t, int32_t, void **)",
+            required_any_sequences=(
+                ("sycl", "::", "aligned_alloc_shared", "("),
+                ("sycl", "::", "aligned_alloc_device", "("),
+            ),
+            noop_guard_conditions=(("init_status", "!=", "PGACCEL_OK"),),
+            allow_zero_success=True,
+            output_policy="allocation",
+            allow_ternary=True,
+            allowed_output_calls=("free",),
+        ),
+        "pgaccel_spatial_workspace_finish": LifecycleContract(
+            "post-dispatch failure-flag readback",
+            (
+                ("pgaccel_d2h", "("),
+                ("workspace", "->", "failure_flags"),
+            ),
+            "pgaccel_status (const pgaccel_spatial_workspace *, int32_t *)",
+            output_policy="metadata",
+        ),
+        "pgaccel_gpu_exec_count": LifecycleContract(
+            "GPU execution counter accessor",
+            (),
+            "uint64_t ()",
+            required_any_sequences=(
+                ("return", "counter", ";"),
+                ("return", "tl_gpu_exec_count", ";"),
+            ),
+            exact_body_alternatives=(
+                ("return", "counter", ";"),
+                ("return", "tl_gpu_exec_count", ";"),
+            ),
+        ),
+        "pgaccel_reset_gpu_exec_count": LifecycleContract(
+            "GPU execution counter reset",
+            (),
+            "void ()",
+            required_any_sequences=(
+                ("counter", "=", "0"),
+                ("tl_gpu_exec_count", "=", "0"),
+            ),
+            exact_body_alternatives=(
+                ("counter", "=", "0", ";"),
+                ("tl_gpu_exec_count", "=", "0", ";"),
+            ),
+        ),
+        "pgaccel_get_device_info": LifecycleContract(
+            "device metadata accessor",
+            (("return", "g_device_info", ";"),),
+            "pgaccel_device_info ()",
+            exact_body_alternatives=(("return", "g_device_info", ";"),),
+        ),
+        "pgaccel_get_caps": LifecycleContract(
+            "platform capability accessor",
+            (("return", "g_caps", ";"),),
+            "pgaccel_platform_caps ()",
+            exact_body_alternatives=(("return", "g_caps", ";"),),
+        ),
+        "pgaccel_prefork_warmup": LifecycleContract(
+            "fork-safety environment setup",
+            (),
+            "void ()",
+            required_any_sequences=(("setenv", "("),),
+            allow_empty_body=True,
+        ),
+        "pgaccel_expr_shared_free": LifecycleContract(
+            "shared-USM release",
+            (("sycl", "::", "free", "("),),
+            "void (void *)",
+            noop_guard_conditions=(
+                ("ptr", "==", "nullptr"),
+                ("pgaccel_init", "(", ")", "!=", "PGACCEL_OK"),
+                ("q", "==", "nullptr"),
+            ),
+        ),
+        "pgaccel_expr_device_free": LifecycleContract(
+            "device-USM release",
+            (("sycl", "::", "free", "("),),
+            "void (void *)",
+            noop_guard_conditions=(
+                ("ptr", "==", "nullptr"),
+                ("pgaccel_init", "(", ")", "!=", "PGACCEL_OK"),
+                ("q", "==", "nullptr"),
+            ),
+        ),
+        "pgaccel_grouped_agg_workspace_free": LifecycleContract(
+            "workspace USM release",
+            (("sycl", "::", "free", "("),),
+            "void (void *)",
+            noop_guard_conditions=(
+                ("ptr", "==", "nullptr"),
+                ("init_status", "!=", "PGACCEL_OK"),
+                ("q", "==", "nullptr"),
+            ),
+        ),
+        "pgaccel_pool_reset": LifecycleContract(
+            "retired pool no-op reset",
+            (),
+            "void ()",
+            allow_empty_body=True,
+            exact_body_alternatives=((),),
+        ),
+        "pgaccel_hash_join_free": LifecycleContract(
+            "hash-join allocation release",
+            (("free_table_storage", "("), ("delete", "ht")),
+            "void (pgaccel_hash_table *)",
+            noop_guard_conditions=(("ht", "==", "nullptr"),),
+        ),
+        "pgaccel_agg_free": LifecycleContract(
+            "hash-aggregate allocation release",
+            (("delete", "state"),),
+            "void (pgaccel_agg_state *)",
+        ),
+        "pgaccel_agg_group_count": LifecycleContract(
+            "hash-aggregate group-count accessor",
+            (("state", "->", "group_count"),),
+            "size_t (const pgaccel_agg_state *)",
+            noop_guard_conditions=(("state", "==", "nullptr"),),
+        ),
+        "pgaccel_agg_get_group_keys": LifecycleContract(
+            "hash-aggregate group-key accessor",
+            (("state", "->", "group_key_buf", ".", "data", "("),),
+            "const void * (const pgaccel_agg_state *)",
+            noop_guard_conditions=(("state", "==", "nullptr"),),
+        ),
+        "pgaccel_agg_get_results": LifecycleContract(
+            "hash-aggregate result accessor",
+            (("state", "->", "results", "["),),
+            "const double * (const pgaccel_agg_state *, size_t)",
+            noop_guard_conditions=(
+                (
+                    "state",
+                    "==",
+                    "nullptr",
+                    "||",
+                    "agg_idx",
+                    ">=",
+                    "state",
+                    "->",
+                    "num_aggs",
+                ),
+                (
+                    "state",
+                    "->",
+                    "results",
+                    ".",
+                    "size",
+                    "(",
+                    ")",
+                    "<=",
+                    "agg_idx",
+                ),
+            ),
+        ),
+        "pgaccel_agg_get_partial_results": LifecycleContract(
+            "hash-aggregate partial-result accessor",
+            (("state", "->", "partial_results", "["),),
+            "const double * (const pgaccel_agg_state *, size_t)",
+            noop_guard_conditions=(
+                (
+                    "state",
+                    "==",
+                    "nullptr",
+                    "||",
+                    "agg_idx",
+                    ">=",
+                    "state",
+                    "->",
+                    "num_aggs",
+                ),
+                (
+                    "state",
+                    "->",
+                    "partial_results",
+                    ".",
+                    "size",
+                    "(",
+                    ")",
+                    "<=",
+                    "agg_idx",
+                ),
+            ),
+        ),
+        "pgaccel_agg_get_partial_width": LifecycleContract(
+            "hash-aggregate partial-width accessor",
+            (("state", "->", "partial_widths", "["),),
+            "size_t (const pgaccel_agg_state *, size_t)",
+            noop_guard_conditions=(
+                (
+                    "state",
+                    "==",
+                    "nullptr",
+                    "||",
+                    "agg_idx",
+                    ">=",
+                    "state",
+                    "->",
+                    "num_aggs",
+                ),
+            ),
+        ),
+        "pgaccel_agg_get_counts": LifecycleContract(
+            "hash-aggregate count accessor",
+            (("state", "->", "counts", ".", "data", "("),),
+            "const int64_t * (const pgaccel_agg_state *)",
+            noop_guard_conditions=(("state", "==", "nullptr"),),
+        ),
+    }
+)
 
 
-FAIL_ONLY_CONTRACTS: dict[str, FailOnlyContract] = {
-    "pgaccel_spatial_eval_resident_ex": FailOnlyContract(
-        "zero-row contract validator; nonempty work is unsupported",
-        (
-            ("request", "->", "count", "!=", "0"),
-            ("return", "PGACCEL_UNSUPPORTED", ";"),
-            ("resident_validate_request_contract", "("),
+FAIL_ONLY_CONTRACTS: Mapping[str, FailOnlyContract] = MappingProxyType(
+    {
+        "pgaccel_spatial_eval_resident_ex": FailOnlyContract(
+            "zero-row contract validator; nonempty work is unsupported",
+            (
+                ("request", "->", "count", "!=", "0"),
+                ("return", "PGACCEL_UNSUPPORTED", ";"),
+                ("resident_validate_request_contract", "("),
+            ),
         ),
-    ),
-    "pgaccel_spatial_intersects": FailOnlyContract(
-        "zero-row compatibility shim; nonempty work is unsupported",
-        (
-            ("count_a", "==", "0"),
-            ("count_b", "==", "0"),
-            ("return", "PGACCEL_OK", ";"),
-            ("return", "PGACCEL_UNSUPPORTED", ";"),
+        "pgaccel_spatial_intersects": FailOnlyContract(
+            "zero-row compatibility shim; nonempty work is unsupported",
+            (
+                ("count_a", "==", "0"),
+                ("count_b", "==", "0"),
+                ("return", "PGACCEL_OK", ";"),
+                ("return", "PGACCEL_UNSUPPORTED", ";"),
+            ),
         ),
-    ),
-}
+    }
+)
 
 
 class ParseError(ValueError):
@@ -1189,7 +1459,7 @@ def _contract_success_terminals(
     lambda_ranges: Sequence[tuple[int, int]],
 ) -> list[int]:
     terminals = [
-        index
+        index + len(expression) + 1
         for index, expression in _returns(tokens, function, lambda_ranges)
         if not _return_is_explicit_failure(function, expression)
         and _index_is_reachable(tokens, function, index, regions, lambda_ranges)
@@ -1199,6 +1469,301 @@ def _contract_success_terminals(
     ):
         terminals.append(function.body_close)
     return terminals
+
+
+def _strip_condition_parentheses(condition: Sequence[str]) -> tuple[str, ...]:
+    values = tuple(condition)
+    while len(values) >= 2 and values[0] == "(" and values[-1] == ")":
+        depth = 0
+        closes_at_end = True
+        for index, value in enumerate(values):
+            if value == "(":
+                depth += 1
+            elif value == ")":
+                depth -= 1
+                if depth == 0 and index != len(values) - 1:
+                    closes_at_end = False
+                    break
+        if not closes_at_end or depth != 0:
+            break
+        values = values[1:-1]
+    return values
+
+
+def _condition_matches_guard(
+    condition: Sequence[str], marker: Sequence[str], polarity: str
+) -> bool:
+    """Match an entire simple boolean/accessor predicate, never a substring."""
+
+    values = _strip_condition_parentheses(condition)
+    negated = bool(values and values[0] == "!")
+    if negated:
+        values = _strip_condition_parentheses(values[1:])
+    if polarity == "truthy" and negated:
+        return False
+    if polarity == "falsy" and not negated:
+        return False
+
+    marker_values = tuple(marker)
+    if values == marker_values:
+        return True
+    suffix = values[len(marker_values) :]
+    if values[: len(marker_values)] != marker_values or len(suffix) < 4:
+        return False
+    if suffix[:3] != (".", "load", "(") or suffix[-1] != ")":
+        return False
+    depth = 0
+    for index, value in enumerate(suffix[2:]):
+        if value == "(":
+            depth += 1
+        elif value == ")":
+            depth -= 1
+            if depth == 0 and index != len(suffix[2:]) - 1:
+                return False
+    return depth == 0
+
+
+def _condition_matches_exact_guard(
+    condition: Sequence[str], expected: Sequence[str]
+) -> bool:
+    return _strip_condition_parentheses(condition) == _strip_condition_parentheses(
+        expected
+    )
+
+
+def _exact_argument_identifier(
+    tokens: Sequence[Token], bounds: tuple[int, int]
+) -> str | None:
+    values = _strip_condition_parentheses(
+        [token.value for token in tokens[bounds[0] : bounds[1]]]
+    )
+    if len(values) != 1:
+        return None
+    for token in tokens[bounds[0] : bounds[1]]:
+        if token.value == values[0] and token.kind == "identifier":
+            return values[0]
+    return None
+
+
+def _ordered_parameter_names(
+    tokens: Sequence[Token], function: Function
+) -> tuple[str, ...]:
+    parameters, _ = _parameter_names(tokens, function)
+    result: list[str] = []
+    for left, right in _parameter_ranges(tokens, function):
+        candidates = [
+            token.value
+            for token in tokens[left:right]
+            if token.kind == "identifier" and token.value in parameters
+        ]
+        if not candidates:
+            return ()
+        result.append(candidates[-1])
+    return tuple(result)
+
+
+def _parameter_transfer_indices(
+    tokens: Sequence[Token],
+    function: Function,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> list[int]:
+    """Return exact, awaited queue copies over all three transfer parameters."""
+
+    parameter_names = _ordered_parameter_names(tokens, function)
+    if len(parameter_names) != 3:
+        return []
+    forward, _ = _delimiter_pairs(tokens)
+    result: list[int] = []
+    for method_index in range(function.body_open + 1, function.body_close):
+        if (
+            tokens[method_index].value != "memcpy"
+            or method_index < 2
+            or tokens[method_index - 1].value not in {".", "->"}
+            or _is_inside(method_index, lambda_ranges)
+            or not _index_is_reachable(
+                tokens, function, method_index, regions, lambda_ranges
+            )
+        ):
+            continue
+        receiver = tokens[method_index - 2].value
+        if _receiver_kind(tokens, function, receiver, method_index, forward) != "queue":
+            continue
+        call = _method_lparen(tokens, method_index, function.body_close, forward)
+        if call is None or not _call_is_awaited(
+            tokens, call[1], function.body_close, forward
+        ):
+            continue
+        arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
+        if len(arguments) != 3:
+            continue
+        if (
+            tuple(
+                _exact_argument_identifier(tokens, argument) for argument in arguments
+            )
+            == parameter_names
+        ):
+            result.append(method_index)
+    return result
+
+
+def _lifecycle_usm_allocation_events(
+    tokens: Sequence[Token],
+    function: Function,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> list[tuple[str, str, int]]:
+    """Collect exact local USM allocations for support-operation contracts."""
+
+    forward, _ = _delimiter_pairs(tokens)
+    result: list[tuple[str, str, int]] = []
+    allocation_kinds = {
+        "malloc_shared": "shared",
+        "aligned_alloc_shared": "shared",
+        "malloc_device": "device",
+        "aligned_alloc_device": "device",
+    }
+
+    def statement_left(index: int) -> int:
+        cursor = index - 1
+        while cursor > function.body_open and tokens[cursor].value not in {
+            ";",
+            "{",
+            "}",
+        }:
+            cursor -= 1
+        return cursor + 1
+
+    for index in range(function.body_open + 1, function.body_close):
+        kind = allocation_kinds.get(tokens[index].value)
+        if (
+            kind is None
+            or index < 2
+            or tokens[index - 2].value != "sycl"
+            or tokens[index - 1].value != "::"
+            or _is_inside(index, lambda_ranges)
+            or not _index_is_reachable(tokens, function, index, regions, lambda_ranges)
+            or _method_lparen(tokens, index, function.body_close, forward) is None
+        ):
+            continue
+        left = statement_left(index)
+        equals = next(
+            (cursor for cursor in range(left, index) if tokens[cursor].value == "="),
+            None,
+        )
+        if equals is None:
+            continue
+        candidates = [
+            token.value
+            for token in tokens[left:equals]
+            if token.kind == "identifier" and token.value not in CALL_KEYWORDS
+        ]
+        if candidates:
+            result.append((candidates[-1], kind, index))
+
+    helper_kinds = {
+        "pgaccel_expr_shared_alloc": "shared",
+        "pgaccel_expr_device_alloc": "device",
+    }
+    for index in range(function.body_open + 1, function.body_close):
+        kind = helper_kinds.get(tokens[index].value)
+        if (
+            kind is None
+            or not _unqualified_output_identifier(tokens, index)
+            or _is_inside(index, lambda_ranges)
+            or not _index_is_reachable(tokens, function, index, regions, lambda_ranges)
+        ):
+            continue
+        call = _method_lparen(tokens, index, function.body_close, forward)
+        if call is None:
+            continue
+        arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
+        if not arguments:
+            continue
+        left, right = arguments[-1]
+        values = _strip_condition_parentheses(
+            [token.value for token in tokens[left:right]]
+        )
+        if len(values) == 2 and values[0] == "&":
+            root = values[1]
+            if any(
+                token.kind == "identifier" and token.value == root
+                for token in tokens[left:right]
+            ):
+                result.append((root, kind, index))
+    return result
+
+
+def _allocation_copy_transfer_roots(
+    tokens: Sequence[Token],
+    function: Function,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+    allocations: Sequence[tuple[str, str, int]],
+) -> list[tuple[int, str]]:
+    parameter_names = _ordered_parameter_names(tokens, function)
+    if len(parameter_names) != 3:
+        return []
+    source_name, size_name, _ = parameter_names
+    roots = {root for root, _, _ in allocations}
+    forward, _ = _delimiter_pairs(tokens)
+    result: list[tuple[int, str]] = []
+    for method_index in range(function.body_open + 1, function.body_close):
+        if (
+            tokens[method_index].value != "memcpy"
+            or _is_inside(method_index, lambda_ranges)
+            or not _index_is_reachable(
+                tokens, function, method_index, regions, lambda_ranges
+            )
+        ):
+            continue
+        is_member = method_index >= 2 and tokens[method_index - 1].value in {
+            ".",
+            "->",
+        }
+        is_std = (
+            method_index >= 2
+            and tokens[method_index - 2].value == "std"
+            and tokens[method_index - 1].value == "::"
+        )
+        if not (is_member or is_std):
+            continue
+        call = _method_lparen(tokens, method_index, function.body_close, forward)
+        if call is None:
+            continue
+        arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
+        if len(arguments) != 3:
+            continue
+        destination = _exact_pointer_root(tokens, *arguments[0], roots, forward)
+        if destination is None or (
+            _exact_argument_identifier(tokens, arguments[1]) != source_name
+            or _exact_argument_identifier(tokens, arguments[2]) != size_name
+        ):
+            continue
+        root = destination[0]
+        candidates = [
+            (kind, index)
+            for event_root, kind, index in allocations
+            if event_root == root
+            and index < method_index
+            and not _pointer_root_reassigned(
+                tokens, root, index + 1, method_index, lambda_ranges
+            )
+        ]
+        if not candidates:
+            continue
+        if is_member:
+            receiver = tokens[method_index - 2].value
+            if _receiver_kind(
+                tokens, function, receiver, method_index, forward
+            ) != "queue" or not _call_is_awaited(
+                tokens, call[1], function.body_close, forward
+            ):
+                continue
+        elif not any(kind == "shared" for kind, _ in candidates):
+            continue
+        result.append((method_index, root))
+    return result
 
 
 def _lifecycle_proof(
@@ -1214,9 +1779,14 @@ def _lifecycle_proof(
     contract = LIFECYCLE_CONTRACTS.get(function.name)
     if contract is None:
         return None
+    actual_signature = _full_signature(
+        function.return_spelling,
+        _parameter_type_spellings(tokens, function.lparen, function.rparen),
+    )
     values = [
         token.value for token in tokens[function.body_open + 1 : function.body_close]
     ]
+    body_is_empty = not values
     missing = [
         sequence
         for sequence in contract.required_sequences
@@ -1224,41 +1794,244 @@ def _lifecycle_proof(
             tokens, function, sequence, regions, lambda_ranges
         )
     ]
+    active_any = [
+        sequence
+        for sequence in contract.required_any_sequences
+        if _active_contract_sequence(tokens, function, sequence, regions, lambda_ranges)
+    ]
+    if (
+        contract.required_any_sequences
+        and not active_any
+        and not (contract.allow_empty_body and body_is_empty)
+    ):
+        missing.append(contract.required_any_sequences[0])
     success_terminals = _contract_success_terminals(
         tokens, function, regions, lambda_ranges
     )
     uncovered: list[tuple[tuple[str, ...], int]] = []
-    for sequence in contract.required_sequences:
-        evidence = _active_contract_sequence_indices(
-            tokens, function, sequence, regions, lambda_ranges
+    evidence_groups: list[tuple[tuple[tuple[str, ...], ...], list[int]]] = [
+        (
+            (sequence,),
+            _active_contract_sequence_indices(
+                tokens, function, sequence, regions, lambda_ranges
+            ),
         )
-        for terminal in success_terminals:
-            if not any(
-                index < terminal
+        for sequence in contract.required_sequences
+    ]
+    if active_any:
+        evidence_groups.append(
+            (
+                tuple(active_any),
+                sorted(
+                    {
+                        index
+                        for sequence in active_any
+                        for index in _active_contract_sequence_indices(
+                            tokens, function, sequence, regions, lambda_ranges
+                        )
+                    }
+                ),
+            )
+        )
+    if contract.transfer_contract == "parameters":
+        transfer_indices = _parameter_transfer_indices(
+            tokens, function, regions, lambda_ranges
+        )
+        if not transfer_indices:
+            missing.append(("awaited_queue_memcpy", "(dst, src, bytes)"))
+        evidence_groups.append(
+            (
+                (("awaited_queue_memcpy", "(dst, src, bytes)"),),
+                transfer_indices,
+            )
+        )
+    unsafe_contract_writes = list(host_writes)
+    if contract.output_policy == "metadata":
+        unsafe_contract_writes = []
+    elif contract.output_policy == "allocation":
+        forward, _ = _delimiter_pairs(tokens)
+        allocations = _lifecycle_usm_allocation_events(
+            tokens, function, regions, lambda_ranges
+        )
+        allocation_roots = {root for root, _, _ in allocations}
+        copy_transfers = (
+            _allocation_copy_transfer_roots(
+                tokens, function, regions, lambda_ranges, allocations
+            )
+            if contract.transfer_contract == "allocation_copy"
+            else []
+        )
+        publication_indices: list[int] = []
+        unsafe_contract_writes = []
+        for record in host_writes:
+            if record[2]:
+                continue
+            operator = _output_write_operator(
+                tokens, record[0], function.body_close, forward
+            )
+            if operator is None or tokens[operator].value != "=":
+                unsafe_contract_writes.append(record)
+                continue
+            end = operator + 1
+            depth = 0
+            while end < function.body_close:
+                value = tokens[end].value
+                if value in {"(", "[", "{"}:
+                    depth += 1
+                elif value in {")", "]", "}"}:
+                    depth = max(0, depth - 1)
+                elif value == ";" and depth == 0:
+                    break
+                end += 1
+            publication = _exact_pointer_root(
+                tokens, operator + 1, end, allocation_roots, forward
+            )
+            if publication is None:
+                unsafe_contract_writes.append(record)
+                continue
+            root = publication[0]
+            allocation_candidates = [
+                index
+                for event_root, _, index in allocations
+                if event_root == root
+                and index < operator
+                and not _pointer_root_reassigned(
+                    tokens, root, index + 1, operator, lambda_ranges
+                )
+            ]
+            transfer_candidates = [
+                index
+                for index, transfer_root in copy_transfers
+                if transfer_root == root
+                and index < operator
                 and _context_dominates(
+                    _context(index, regions), _context(record[0], regions)
+                )
+            ]
+            if not allocation_candidates or (
+                contract.transfer_contract == "allocation_copy"
+                and not transfer_candidates
+            ):
+                unsafe_contract_writes.append(record)
+                continue
+            publication_indices.append(record[0])
+        if not publication_indices:
+            missing.append(("publish", "USM", "allocation", "to", "ABI", "output"))
+        evidence_groups.append(
+            (
+                (("publish", "USM", "allocation", "to", "ABI", "output"),),
+                publication_indices,
+            )
+        )
+        if contract.transfer_contract == "allocation_copy":
+            transfer_indices = [index for index, _ in copy_transfers]
+            if not transfer_indices:
+                missing.append(("copy", "source", "into", "published", "USM"))
+            evidence_groups.append(
+                (
+                    (("copy", "source", "into", "published", "USM"),),
+                    transfer_indices,
+                )
+            )
+    for sequences, evidence in evidence_groups:
+        for terminal in success_terminals:
+            terminal_regions = [
+                region for region in regions if region.start <= terminal <= region.end
+            ]
+            zero_noop = contract.allow_zero_success and any(
+                region.zero_work for region in terminal_regions
+            )
+            guarded_noop = any(
+                _condition_matches_guard(
+                    region.condition, marker, contract.noop_guard_polarity
+                )
+                for region in terminal_regions
+                for marker in contract.noop_guard_markers
+            ) or any(
+                _condition_matches_exact_guard(region.condition, condition)
+                for region in terminal_regions
+                for condition in contract.noop_guard_conditions
+            )
+            if zero_noop or guarded_noop:
+                continue
+            prior_evidence = [index for index in evidence if index <= terminal]
+            directly_covered = any(
+                _context_dominates(
                     _context(index, regions), _context(terminal, regions)
                 )
-                for index in evidence
-            ):
-                uncovered.append((sequence, tokens[terminal].line))
+                for index in prior_evidence
+            )
+            terminal_context = _context(terminal, regions)
+            branch_covered = any(
+                {"true", "false"}.issubset(
+                    {
+                        dict(_context(index, regions)).get(region.key)
+                        for index in prior_evidence
+                    }
+                )
+                for region in regions
+                if all(
+                    _context_dominates(
+                        tuple(
+                            pair
+                            for pair in _context(index, regions)
+                            if pair[0] != region.key
+                        ),
+                        terminal_context,
+                    )
+                    for index in prior_evidence
+                    if region.key in dict(_context(index, regions))
+                )
+            )
+            conditional_noop = any(
+                index <= terminal
+                and region.start <= index <= region.end < terminal
+                and any(
+                    _contains_sequence(region.condition, marker)
+                    for marker in contract.conditional_evidence_markers
+                )
+                for index in prior_evidence
+                for region in regions
+            )
+            if not (directly_covered or branch_covered or conditional_noop):
+                uncovered.append((sequences[0], tokens[terminal].line))
     forbidden: list[str] = []
+    if _canonical_signature_tokens(actual_signature) != _canonical_signature_tokens(
+        contract.signature
+    ):
+        forbidden.append(
+            f"ABI signature {actual_signature!r} does not match {contract.signature!r}"
+        )
+    if (
+        contract.exact_body_alternatives
+        and tuple(values) not in contract.exact_body_alternatives
+    ):
+        forbidden.append("body does not match the immutable support-operation shape")
     if not contract.allow_host_loops and set(values) & {"for", "while", "do"}:
         forbidden.append("host loop")
     if _contains_sequence(values, ("pgaccel_record_gpu_exec", "(")):
         forbidden.append("GPU execution counter")
     if _contract_contains_dispatch(tokens, function) is not None:
         forbidden.append("device dispatch")
-    if host_writes:
+    if unsafe_contract_writes:
         forbidden.append(
             "host ABI-output write at line(s) "
-            + ", ".join(str(record[1]) for record in host_writes)
+            + ", ".join(str(record[1]) for record in unsafe_contract_writes)
         )
-    if control_lines:
+    lifecycle_control_lines = [
+        item
+        for item in control_lines
+        if not (contract.allow_ternary and item[0] == "?")
+    ]
+    if lifecycle_control_lines:
         forbidden.append(
             "ambiguous control flow "
-            + ", ".join(f"{kind} at line {line}" for kind, line in control_lines)
+            + ", ".join(
+                f"{kind} at line {line}" for kind, line in lifecycle_control_lines
+            )
         )
-    forbidden.extend(output_call_hazards)
+    if contract.output_policy != "metadata":
+        forbidden.extend(output_call_hazards)
     if shadow_lines:
         forbidden.append(
             "ABI output identity is shadowed at line(s) "
@@ -1522,6 +2295,16 @@ class _DispatchEvidence:
 
 
 @dataclasses.dataclass(frozen=True)
+class _KernelWriteEvidence:
+    index: int
+    line: int
+    method: str
+    context: tuple[tuple[str, str], ...]
+    roots: frozenset[str]
+    awaited: bool
+
+
+@dataclasses.dataclass(frozen=True)
 class _IndexedCall:
     call: Call
     index: int
@@ -1578,14 +2361,31 @@ def _statement_range(
     return start - 1, limit, limit
 
 
-def _condition_is_zero(values: Sequence[str], parameters: set[str]) -> bool:
+def _condition_is_zero(
+    values: Sequence[str],
+    parameters: set[str],
+    aggregate_parameters: set[str],
+) -> bool:
     compact = tuple(value for value in values if value not in {"(", ")"})
-    if len(compact) != 3:
-        return False
-    left, operator, right = compact
-    return operator == "==" and (
-        (left in parameters and right in {"0", "0u", "0U"})
-        or (right in parameters and left in {"0", "0u", "0U"})
+    if "||" in compact and _zero_disjunction_names(compact, parameters):
+        return True
+    if len(compact) == 3:
+        left, operator, right = compact
+        return operator == "==" and (
+            (left in parameters and right in {"0", "0u", "0U"})
+            or (right in parameters and left in {"0", "0u", "0U"})
+        )
+    count_member = re.compile(
+        r"(?:n|count|size|length|rows|cols|bytes|num_.+|n_.+|"
+        r"count_.+|.+_(?:count|size|length|rows|cols|bytes))"
+    )
+    return bool(
+        len(compact) == 5
+        and compact[0] in aggregate_parameters
+        and compact[1] in {".", "->"}
+        and count_member.fullmatch(compact[2])
+        and compact[3] == "=="
+        and compact[4] in {"0", "0u", "0U"}
     )
 
 
@@ -1594,6 +2394,7 @@ def _regions(
     function: Function,
     forward: dict[int, int],
     zero_parameters: set[str],
+    aggregate_parameters: set[str],
 ) -> list[_Region]:
     regions: list[_Region] = []
     serial = 0
@@ -1623,7 +2424,9 @@ def _regions(
                     branch="true",
                     start=start,
                     end=end,
-                    zero_work=_condition_is_zero(condition, zero_parameters),
+                    zero_work=_condition_is_zero(
+                        condition, zero_parameters, aggregate_parameters
+                    ),
                     definitely_inactive=false_condition,
                     condition=tuple(condition),
                 )
@@ -1856,6 +2659,12 @@ def _declaration_kind(
             break
         left -= 1
     prefix = [token.value for token in tokens[left + 1 : name_index]]
+    if set(prefix) & CALL_KEYWORDS:
+        return None
+    # Do not mistake an assignment following a single-statement control body
+    # for a declaration, as in ``if (out) *out = 0``.
+    if ")" in prefix or "]" in prefix:
+        return None
     if not any(token.kind == "identifier" for token in tokens[left + 1 : name_index]):
         return None
     if _contains_sequence(prefix, ("sycl", "::", "queue")):
@@ -1959,11 +2768,56 @@ def _handler_lambda(
     return candidates[0] if candidates else None
 
 
-def _lambda_contributes(
-    tokens: Sequence[Token], bounds: tuple[int, int], mutable: set[str]
-) -> bool:
+def _definitely_inactive_ranges(
+    tokens: Sequence[Token],
+    bounds: tuple[int, int],
+    forward: dict[int, int],
+) -> list[tuple[int, int]]:
+    """Return literal-dead branches nested inside a lambda body."""
+
+    left, right = bounds
+    inactive: list[tuple[int, int]] = []
+    cursor = left + 1
+    while cursor < right:
+        if tokens[cursor].value != "if" or cursor + 1 >= right:
+            cursor += 1
+            continue
+        condition_open = cursor + 1
+        if tokens[condition_open].value == "constexpr":
+            condition_open += 1
+        if (
+            condition_open >= right
+            or tokens[condition_open].value != "("
+            or condition_open not in forward
+        ):
+            cursor += 1
+            continue
+        condition_close = forward[condition_open]
+        condition = [
+            token.value for token in tokens[condition_open + 1 : condition_close]
+        ]
+        start, end, after = _statement_range(
+            tokens, condition_close + 1, right, forward
+        )
+        if condition in (["false"], ["0"]):
+            inactive.append((start, end))
+        if (
+            condition in (["true"], ["1"])
+            and after < right
+            and tokens[after].value == "else"
+        ):
+            false_start, false_end, _ = _statement_range(
+                tokens, after + 1, right, forward
+            )
+            inactive.append((false_start, false_end))
+        cursor += 1
+    return inactive
+
+
+def _lambda_written_roots(tokens: Sequence[Token], bounds: tuple[int, int]) -> set[str]:
     left, right = bounds
     forward, reverse = _delimiter_pairs(tokens)
+    inactive = _definitely_inactive_ranges(tokens, bounds, forward)
     nested = []
     for brace in range(left + 1, right):
         if tokens[brace].value != "{" or brace not in forward:
@@ -1973,12 +2827,33 @@ def _lambda_contributes(
             cursor = reverse[cursor] - 1
         if cursor > left and tokens[cursor].value == "]":
             nested.append((brace, forward[brace]))
-    return any(
-        tokens[index].value in mutable
+    return {
+        tokens[index].value
+        for index in range(left + 1, right)
+        if tokens[index].kind == "identifier"
         and _unqualified_output_identifier(tokens, index)
         and not _is_inside(index, nested)
+        and not any(start <= index <= end for start, end in inactive)
         and _output_write_operator(tokens, index, right, forward) is not None
-        for index in range(left + 1, right)
+    }
+
+
+def _lambda_contributes(
+    tokens: Sequence[Token], bounds: tuple[int, int], mutable: set[str]
+) -> bool:
+    return bool(_lambda_written_roots(tokens, bounds) & mutable)
+
+
+def _call_is_awaited(
+    tokens: Sequence[Token], rparen: int, limit: int, forward: dict[int, int]
+) -> bool:
+    cursor = rparen + 1
+    return bool(
+        cursor + 2 < limit
+        and tokens[cursor].value in {".", "->"}
+        and tokens[cursor + 1].value in {"wait", "wait_and_throw"}
+        and tokens[cursor + 2].value == "("
+        and cursor + 2 in forward
     )
 
 
@@ -1997,6 +2872,7 @@ def _direct_dispatches(
     list[_DispatchEvidence],
     list[str],
     set[tuple[int, int]],
+    list[_KernelWriteEvidence],
 ]:
     forward, reverse = _delimiter_pairs(tokens)
     lambdas = _lambda_ranges(tokens, function, forward, reverse)
@@ -2004,6 +2880,7 @@ def _direct_dispatches(
     raw_launches: list[_DispatchEvidence] = []
     rejected: list[str] = []
     device_lambdas: set[tuple[int, int]] = set()
+    kernel_writes: list[_KernelWriteEvidence] = []
     index = function.body_open + 1
     while index + 2 < function.body_close:
         if (
@@ -2046,6 +2923,7 @@ def _direct_dispatches(
                 continue
             inner_found = False
             raw_inner_found = False
+            written_roots: set[str] = set()
             for inner in range(handler_lambda[0] + 1, handler_lambda[1] - 2):
                 if (
                     tokens[inner].kind == "identifier"
@@ -2067,9 +2945,10 @@ def _direct_dispatches(
                     if kernel is not None and _lambda_nonempty(tokens, kernel):
                         device_lambdas.add(kernel)
                         raw_inner_found = True
-                        if _lambda_contributes(tokens, kernel, mutable):
+                        roots = _lambda_written_roots(tokens, kernel)
+                        written_roots.update(roots)
+                        if roots & mutable:
                             inner_found = True
-                            break
             if raw_inner_found:
                 raw_launches.append(
                     _DispatchEvidence(
@@ -2078,6 +2957,16 @@ def _direct_dispatches(
                         method,
                         f"typed nonempty SYCL submit chain at line {tokens[index + 2].line}",
                         _context(index, regions),
+                    )
+                )
+                kernel_writes.append(
+                    _KernelWriteEvidence(
+                        index,
+                        tokens[index + 2].line,
+                        method,
+                        _context(index, regions),
+                        frozenset(written_roots),
+                        _call_is_awaited(tokens, rparen, function.body_close, forward),
                     )
                 )
             if not inner_found:
@@ -2096,6 +2985,7 @@ def _direct_dispatches(
             kernel = _kernel_lambda(tokens, lparen, rparen, forward, reverse)
             if kernel is not None and _lambda_nonempty(tokens, kernel):
                 device_lambdas.add(kernel)
+                roots = _lambda_written_roots(tokens, kernel)
                 raw_launches.append(
                     _DispatchEvidence(
                         index,
@@ -2103,6 +2993,16 @@ def _direct_dispatches(
                         method,
                         f"typed nonempty SYCL {method} chain at line {tokens[index + 2].line}",
                         _context(index, regions),
+                    )
+                )
+                kernel_writes.append(
+                    _KernelWriteEvidence(
+                        index,
+                        tokens[index + 2].line,
+                        method,
+                        _context(index, regions),
+                        frozenset(roots),
+                        _call_is_awaited(tokens, rparen, function.body_close, forward),
                     )
                 )
             if kernel is None or not _lambda_contributes(tokens, kernel, mutable):
@@ -2121,7 +3021,7 @@ def _direct_dispatches(
             )
         )
         index = rparen + 1
-    return evidence, raw_launches, rejected, device_lambdas
+    return evidence, raw_launches, rejected, device_lambdas, kernel_writes
 
 
 def _indexed_calls(
@@ -2242,6 +3142,22 @@ def _output_write_operator(
         return index - 1
     cursor = index + 1
     projected = index > 0 and tokens[index - 1].value == "*"
+    # In ``*(out + 0) = value`` the assignment follows the matching close,
+    # rather than the output identifier itself.
+    enclosing_dereference = next(
+        (
+            close
+            for lparen, close in forward.items()
+            if tokens[lparen].value == "("
+            and lparen < index < close
+            and lparen > 0
+            and tokens[lparen - 1].value == "*"
+        ),
+        None,
+    )
+    if enclosing_dereference is not None:
+        projected = True
+        cursor = enclosing_dereference + 1
     while cursor < limit:
         value = tokens[cursor].value
         if value == "[" and cursor in forward:
@@ -2313,8 +3229,78 @@ def _output_aliases(
     mutable: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
 ) -> tuple[set[str], set[int]]:
+    forward, _ = _delimiter_pairs(tokens)
     roots = set(mutable)
     declarations: set[int] = set()
+    pointer_locals: set[str] = set()
+
+    def statement_left(index: int) -> int:
+        initializer = [
+            open_index
+            for open_index, close_index in forward.items()
+            if tokens[open_index].value == "{"
+            and open_index < index < close_index
+            and open_index > function.body_open
+            and tokens[open_index - 1].kind == "identifier"
+            and tokens[open_index - 1].value not in {"try", "catch", "else", "do"}
+        ]
+        cursor = (max(initializer) - 1) if initializer else index - 1
+        while cursor > function.body_open and tokens[cursor].value not in {
+            ";",
+            "{",
+            "}",
+        }:
+            cursor -= 1
+        return cursor + 1
+
+    def declaration_candidate(left: int, delimiter: int) -> tuple[int, bool] | None:
+        candidates = [
+            index
+            for index in range(left, delimiter)
+            if tokens[index].kind == "identifier"
+            and tokens[index].value not in CALL_KEYWORDS
+        ]
+        if not candidates:
+            return None
+        candidate = candidates[-1]
+        if tokens[candidate].value in {"try", "catch", "else", "do"}:
+            return None
+        prefix = [token.value for token in tokens[left:candidate]]
+        if set(prefix) & CALL_KEYWORDS or any(
+            value in {"(", ")", "[", "]"} for value in prefix
+        ):
+            return None
+        return candidate, "*" in prefix or "auto" in prefix
+
+    def member_base(left: int, equals: int) -> int | None:
+        """Return ``holder`` for an assignment shaped like ``holder.ptr =``."""
+
+        cursor = equals - 1
+        if (
+            cursor < left
+            or tokens[cursor].kind != "identifier"
+            or cursor - 1 < left
+            or tokens[cursor - 1].value not in {".", "->"}
+        ):
+            return None
+        cursor -= 2
+        while (
+            cursor - 2 >= left
+            and tokens[cursor - 1].value in {".", "->"}
+            and tokens[cursor - 2].kind == "identifier"
+        ):
+            cursor -= 2
+        return cursor if tokens[cursor].kind == "identifier" else None
+
+    # Remember pointer-shaped declarations for a later ``alias = out``.
+    for delimiter in range(function.body_open + 1, function.body_close):
+        if tokens[delimiter].value not in {"=", ";", "{"}:
+            continue
+        left = statement_left(delimiter)
+        candidate = declaration_candidate(left, delimiter)
+        if candidate is not None and candidate[1]:
+            pointer_locals.add(tokens[candidate[0]].value)
+
     changed = True
     while changed:
         changed = False
@@ -2325,35 +3311,59 @@ def _output_aliases(
                 or _is_inside(occurrence, lambda_ranges)
             ):
                 continue
-            statement_start = occurrence - 1
-            while statement_start > function.body_open and tokens[
-                statement_start
-            ].value not in {";", "{", "}"}:
-                statement_start -= 1
+            left = statement_left(occurrence)
+            candidate: int | None = None
             equals = next(
                 (
                     index
-                    for index in range(statement_start + 1, occurrence)
+                    for index in range(left, occurrence)
                     if tokens[index].value == "="
                 ),
                 None,
             )
-            if equals is None:
+            if equals is not None:
+                declaration = declaration_candidate(left, equals)
+                if declaration is not None and declaration[1]:
+                    candidate = declaration[0]
+                elif (base := member_base(left, equals)) is not None:
+                    candidate = base
+                elif equals > left and tokens[equals - 1].kind == "identifier":
+                    name = tokens[equals - 1].value
+                    if name in pointer_locals or name in roots:
+                        candidate = equals - 1
+
+            # Direct-list initialization propagates an ABI pointer through
+            # both ``auto alias{out}`` and an aggregate such as
+            # ``Holder holder{out}``. Member projections from that aggregate
+            # are conservatively treated as output aliases.
+            if candidate is None:
+                for brace in range(left, occurrence):
+                    if (
+                        tokens[brace].value == "{"
+                        and brace in forward
+                        and brace > left
+                        and forward[brace] >= occurrence
+                        and tokens[brace - 1].kind == "identifier"
+                    ):
+                        declaration = declaration_candidate(left, brace)
+                        if (
+                            declaration is not None
+                            and declaration[0] == brace - 1
+                            and any(
+                                token.kind == "identifier"
+                                for token in tokens[left : declaration[0]]
+                            )
+                        ):
+                            candidate = declaration[0]
+                            break
+            if candidate is None:
                 continue
-            candidates = [
-                index
-                for index in range(statement_start + 1, equals)
-                if tokens[index].kind == "identifier"
-                and tokens[index].value not in CALL_KEYWORDS
-            ]
-            if not candidates:
-                continue
-            candidate = candidates[-1]
             alias = tokens[candidate].value
             if alias in roots:
                 continue
             roots.add(alias)
             declarations.add(candidate)
+            pointer_locals.add(alias)
             changed = True
     return roots - mutable, declarations
 
@@ -2363,14 +3373,14 @@ def _host_output_accesses(
     function: Function,
     mutable: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
-) -> tuple[list[tuple[int, int, bool]], list[int], set[str]]:
+) -> tuple[list[tuple[int, int, bool]], list[tuple[int, int]], set[str]]:
     forward, _ = _delimiter_pairs(tokens)
     aliases, alias_declarations = _output_aliases(
         tokens, function, mutable, lambda_ranges
     )
     roots = mutable | aliases
     writes: dict[int, tuple[int, int, bool]] = {}
-    transfers: set[int] = set()
+    transfers: dict[int, tuple[int, int]] = {}
     for index in range(function.body_open + 1, function.body_close):
         if (
             tokens[index].value not in roots
@@ -2392,10 +3402,437 @@ def _host_output_accesses(
             and tokens[index - 2].value in {"memcpy", "copy"}
         ):
             if index > 2 and tokens[index - 3].value in {".", "->"}:
-                transfers.add(tokens[index].line)
+                method_index = index - 2
+                transfers[method_index] = (method_index, tokens[index].line)
             else:
                 writes[index] = (index, tokens[index].line, False)
-    return sorted(writes.values()), sorted(transfers), aliases
+    return sorted(writes.values()), sorted(transfers.values()), aliases
+
+
+def _local_usm_provenance(
+    tokens: Sequence[Token],
+    function: Function,
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> dict[str, tuple[str, int]]:
+    """Track local pointers/aggregates rooted in shared or device USM."""
+
+    forward, _ = _delimiter_pairs(tokens)
+    provenance: dict[str, tuple[str, int]] = {}
+
+    def statement_left(index: int) -> int:
+        cursor = index - 1
+        while cursor > function.body_open and tokens[cursor].value not in {
+            ";",
+            "{",
+            "}",
+        }:
+            cursor -= 1
+        return cursor + 1
+
+    def target_before(delimiter: int, left: int) -> str | None:
+        names = [
+            token.value
+            for token in tokens[left:delimiter]
+            if token.kind == "identifier" and token.value not in CALL_KEYWORDS
+        ]
+        return names[-1] if names else None
+
+    allocation_kinds = {
+        "malloc_shared": "shared",
+        "aligned_alloc_shared": "shared",
+        "malloc_device": "device",
+        "aligned_alloc_device": "device",
+    }
+    for index in range(function.body_open + 1, function.body_close):
+        if _is_inside(index, lambda_ranges):
+            continue
+        kind = allocation_kinds.get(tokens[index].value)
+        if (
+            kind is None
+            or index < 2
+            or tokens[index - 1].value != "::"
+            or tokens[index - 2].value != "sycl"
+            or _method_lparen(tokens, index, function.body_close, forward) is None
+        ):
+            continue
+        left = statement_left(index)
+        equals = next(
+            (cursor for cursor in range(left, index) if tokens[cursor].value == "="),
+            None,
+        )
+        target = target_before(equals, left) if equals is not None else None
+        if target is None:
+            initializer = [
+                open_index
+                for open_index, close_index in forward.items()
+                if tokens[open_index].value == "{"
+                and open_index < index < close_index
+                and open_index > function.body_open
+                and tokens[open_index - 1].kind == "identifier"
+                and tokens[open_index - 1].value not in {"try", "catch", "else", "do"}
+            ]
+            if initializer:
+                target = tokens[max(initializer) - 1].value
+        if target is not None:
+            provenance[target] = (kind, index)
+
+    # Exact allocation helpers expose their result through the final pointer
+    # argument rather than a C++ assignment expression.
+    helper_kinds = {
+        "pgaccel_expr_shared_alloc": "shared",
+        "pgaccel_expr_device_alloc": "device",
+    }
+    for index in range(function.body_open + 1, function.body_close):
+        kind = helper_kinds.get(tokens[index].value)
+        if (
+            kind is None
+            or not _unqualified_output_identifier(tokens, index)
+            or _is_inside(index, lambda_ranges)
+        ):
+            continue
+        call = _method_lparen(tokens, index, function.body_close, forward)
+        if call is None:
+            continue
+        arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
+        if not arguments:
+            continue
+        candidates = [
+            tokens[cursor].value
+            for cursor in range(*arguments[-1])
+            if tokens[cursor].kind == "identifier"
+        ]
+        if candidates:
+            provenance[candidates[-1]] = (kind, index)
+
+    # Propagate through typed/cast pointer declarations and aggregate members.
+    changed = True
+    while changed:
+        changed = False
+        for equals in range(function.body_open + 1, function.body_close):
+            if tokens[equals].value != "=" or _is_inside(equals, lambda_ranges):
+                continue
+            left = statement_left(equals)
+            target = target_before(equals, left)
+            if target is None or target in provenance:
+                continue
+            end = equals + 1
+            depth = 0
+            while end < function.body_close:
+                value = tokens[end].value
+                if value in {"(", "[", "{"}:
+                    depth += 1
+                elif value in {")", "]", "}"}:
+                    depth = max(0, depth - 1)
+                if value == ";" and depth == 0:
+                    break
+                end += 1
+            source = _exact_pointer_root(
+                tokens, equals + 1, end, set(provenance), forward
+            )
+            if source is not None:
+                provenance[target] = (provenance[source[0]][0], equals)
+                changed = True
+    return provenance
+
+
+def _call_argument_ranges(
+    tokens: Sequence[Token], lparen: int, rparen: int, forward: dict[int, int]
+) -> list[tuple[int, int]]:
+    result: list[tuple[int, int]] = []
+    left = lparen + 1
+    cursor = left
+    while cursor < rparen:
+        if tokens[cursor].value in {"(", "[", "{"} and cursor in forward:
+            cursor = forward[cursor] + 1
+            continue
+        if tokens[cursor].value == ",":
+            result.append((left, cursor))
+            left = cursor + 1
+        cursor += 1
+    result.append((left, rparen))
+    return result
+
+
+def _exact_pointer_root(
+    tokens: Sequence[Token],
+    left: int,
+    right: int,
+    allowed_roots: set[str],
+    forward: dict[int, int],
+) -> tuple[str, int] | None:
+    """Recognize one reviewable pointer expression rooted in an allowed value."""
+
+    while left < right and tokens[left].value == "(" and forward.get(left) == right - 1:
+        left += 1
+        right -= 1
+
+    casts = {"const_cast", "dynamic_cast", "reinterpret_cast", "static_cast"}
+    while left + 3 < right and tokens[left].value in casts:
+        if tokens[left + 1].value != "<":
+            return None
+        cursor = left + 2
+        depth = 1
+        while cursor < right and depth:
+            if tokens[cursor].value == "<":
+                depth += 1
+            elif tokens[cursor].value == ">":
+                depth -= 1
+            elif tokens[cursor].value == ">>":
+                depth = max(0, depth - 2)
+            cursor += 1
+        if (
+            depth
+            or cursor >= right
+            or tokens[cursor].value != "("
+            or forward.get(cursor) != right - 1
+        ):
+            return None
+        left = cursor + 1
+        right -= 1
+        while (
+            left < right
+            and tokens[left].value == "("
+            and forward.get(left) == right - 1
+        ):
+            left += 1
+            right -= 1
+
+    if left >= right:
+        return None
+    values = [token.value for token in tokens[left:right]]
+    if set(values) & {
+        ",",
+        "?",
+        ":",
+        "&&",
+        "||",
+        "=",
+        "+=",
+        "-=",
+        "*=",
+        "/=",
+        "%=",
+        "&=",
+        "|=",
+        "^=",
+        "++",
+        "--",
+    }:
+        return None
+
+    # Calls can select or replace a pointer even when an allowed root appears
+    # in their argument list. Only scalar compile-time operators are harmless.
+    for index in range(left, right):
+        if tokens[index].value != "(" or index == left:
+            continue
+        previous = tokens[index - 1].value
+        if previous in {"sizeof", "alignof", "decltype"}:
+            continue
+        if tokens[index - 1].kind == "identifier" or previous in {")", "]", ">", ">>"}:
+            return None
+
+    roots = [
+        (tokens[index].value, index)
+        for index in range(left, right)
+        if tokens[index].value in allowed_roots
+        and _unqualified_output_identifier(tokens, index)
+    ]
+    return roots[0] if len(roots) == 1 else None
+
+
+def _transfer_size_is_positive(
+    tokens: Sequence[Token], left: int, right: int, forward: dict[int, int]
+) -> bool:
+    while left < right and tokens[left].value == "(" and forward.get(left) == right - 1:
+        left += 1
+        right -= 1
+    values = [token.value for token in tokens[left:right]]
+    if not values or set(values) & {",", "?", ":", "false", "nullptr", "NULL"}:
+        return False
+
+    def integer_literal(value: str) -> int | None:
+        rendered = re.sub(r"[uUlL]+$", "", value)
+        try:
+            return int(rendered, 0)
+        except ValueError:
+            return None
+
+    if len(values) == 1:
+        literal = integer_literal(values[0])
+        return literal is None or literal > 0
+    for index, value in enumerate(values):
+        if integer_literal(value) != 0:
+            continue
+        if (index > 0 and values[index - 1] == "*") or (
+            index + 1 < len(values) and values[index + 1] == "*"
+        ):
+            return False
+    return True
+
+
+def _pointer_root_reassigned(
+    tokens: Sequence[Token],
+    root: str,
+    left: int,
+    right: int,
+    lambda_ranges: Sequence[tuple[int, int]],
+) -> bool:
+    for index in range(max(0, left), min(right, len(tokens))):
+        if (
+            tokens[index].value != root
+            or not _unqualified_output_identifier(tokens, index)
+            or _is_inside(index, lambda_ranges)
+        ):
+            continue
+        previous = tokens[index - 1].value if index > 0 else ""
+        following = tokens[index + 1].value if index + 1 < right else ""
+        if previous in {"++", "--"} or following in {"++", "--"}:
+            return True
+        if following in OUTPUT_ASSIGNMENTS and previous != "*":
+            return True
+    return False
+
+
+def _proven_output_transfers(
+    tokens: Sequence[Token],
+    function: Function,
+    output_roots: set[str],
+    lambda_ranges: Sequence[tuple[int, int]],
+    regions: Sequence[_Region],
+    kernel_writes: Sequence[_KernelWriteEvidence],
+) -> tuple[
+    list[_DispatchEvidence],
+    set[int],
+    set[int],
+    dict[int, frozenset[str]],
+]:
+    """Prove kernel-written USM reaches an ABI output without host compute."""
+
+    forward, _ = _delimiter_pairs(tokens)
+    provenance = _local_usm_provenance(tokens, function, lambda_ranges)
+    evidence: list[_DispatchEvidence] = []
+    proven_destination_indices: set[int] = set()
+    proven_call_indices: set[int] = set()
+    destinations: dict[int, frozenset[str]] = {}
+
+    for method_index in range(function.body_open + 1, function.body_close):
+        if tokens[method_index].value != "memcpy" or _is_inside(
+            method_index, lambda_ranges
+        ):
+            continue
+        is_member = method_index >= 2 and tokens[method_index - 1].value in {
+            ".",
+            "->",
+        }
+        is_std = (
+            method_index >= 2
+            and tokens[method_index - 1].value == "::"
+            and tokens[method_index - 2].value == "std"
+        )
+        if not (is_member or is_std):
+            continue
+        call = _method_lparen(tokens, method_index, function.body_close, forward)
+        if call is None:
+            continue
+        lparen, rparen = call
+        arguments = _call_argument_ranges(tokens, lparen, rparen, forward)
+        if len(arguments) != 3 or not _transfer_size_is_positive(
+            tokens, *arguments[2], forward
+        ):
+            continue
+        destination = _exact_pointer_root(tokens, *arguments[0], output_roots, forward)
+        source = _exact_pointer_root(tokens, *arguments[1], set(provenance), forward)
+        if destination is None or source is None:
+            continue
+        destination_roots = {destination[0]}
+        source_roots = {source[0]}
+        if is_member:
+            receiver = tokens[method_index - 2].value
+            if _receiver_kind(
+                tokens, function, receiver, method_index, forward
+            ) != "queue" or not _call_is_awaited(
+                tokens, rparen, function.body_close, forward
+            ):
+                continue
+        elif any(provenance[root][0] != "shared" for root in source_roots):
+            continue
+
+        transfer_context = _context(method_index, regions)
+
+        def staging_source_is_host_mutated(launch: _KernelWriteEvidence) -> bool:
+            if any(
+                _pointer_root_reassigned(
+                    tokens,
+                    root,
+                    launch.index + 1,
+                    method_index,
+                    lambda_ranges,
+                )
+                for root in source_roots
+            ):
+                return True
+            for index in range(launch.index + 1, method_index):
+                if _is_inside(index, lambda_ranges):
+                    continue
+                if (
+                    tokens[index].value in source_roots
+                    and _unqualified_output_identifier(tokens, index)
+                    and _output_write_operator(tokens, index, method_index, forward)
+                    is not None
+                ):
+                    return True
+                if tokens[index].kind != "identifier" or tokens[index].value in {
+                    *CALL_KEYWORDS,
+                    *DISPATCH_METHODS,
+                    "wait",
+                    "wait_and_throw",
+                }:
+                    continue
+                nested_call = _method_lparen(tokens, index, method_index, forward)
+                if nested_call is not None and _range_references_output(
+                    tokens, nested_call[0] + 1, nested_call[1], source_roots
+                ):
+                    return True
+            return False
+
+        producers = [
+            launch
+            for launch in kernel_writes
+            if launch.index < method_index
+            and launch.awaited
+            and source_roots.issubset(launch.roots)
+            and all(provenance[root][1] < launch.index for root in source_roots)
+            and not any(
+                _pointer_root_reassigned(
+                    tokens,
+                    root,
+                    provenance[root][1] + 1,
+                    launch.index,
+                    lambda_ranges,
+                )
+                for root in source_roots
+            )
+            and _context_dominates(launch.context, transfer_context)
+            and not staging_source_is_host_mutated(launch)
+        ]
+        if not producers:
+            continue
+        kind = "awaited queue memcpy" if is_member else "shared-USM std::memcpy"
+        roots = ", ".join(sorted(source_roots))
+        evidence.append(
+            _DispatchEvidence(
+                method_index,
+                tokens[method_index].line,
+                "copyback",
+                f"kernel-written {roots} reaches ABI output via {kind} at line "
+                f"{tokens[method_index].line}",
+                transfer_context,
+            )
+        )
+        proven_destination_indices.add(destination[1])
+        proven_call_indices.add(method_index)
+        destinations[method_index] = frozenset(destination_roots)
+    return evidence, proven_destination_indices, proven_call_indices, destinations
 
 
 def _deferred_output_writes(
@@ -2582,13 +4019,75 @@ class _PathAuditor:
         )
         parameters, mutable = _parameter_names(self.tokens, function)
         zero_parameters = _zero_work_parameter_names(self.tokens, function, parameters)
-        regions = _regions(self.tokens, function, self.forward, zero_parameters)
+        regions = _regions(
+            self.tokens,
+            function,
+            self.forward,
+            zero_parameters,
+            parameters,
+        )
         host_writes, transfer_lines, aliases = _host_output_accesses(
             self.tokens, function, mutable, lambda_ranges
         )
         output_roots = mutable | aliases
+        direct, raw_launches, rejected, device_lambdas, kernel_writes = (
+            _direct_dispatches(self.tokens, function, output_roots, regions)
+        )
+        (
+            copyback_evidence,
+            proven_destination_indices,
+            proven_transfer_calls,
+            copyback_destinations,
+        ) = _proven_output_transfers(
+            self.tokens,
+            function,
+            output_roots,
+            lambda_ranges,
+            regions,
+            kernel_writes,
+        )
+        host_writes = [
+            record
+            for record in host_writes
+            if record[0] not in proven_destination_indices
+        ]
+        transfer_records = [
+            record
+            for record in transfer_lines
+            if record[0] not in proven_transfer_calls
+        ]
+        transfer_lines = sorted({line for _, line in transfer_records})
         shadow_lines = _output_shadow_lines(self.tokens, function, mutable)
         calls = _indexed_calls(self.tokens, function, lambda_ranges)
+        safe_initializer_calls: set[int] = set()
+        for indexed in calls:
+            if indexed.call.name.rsplit("::", 1)[-1] != "memset":
+                continue
+            arguments = _call_argument_ranges(
+                self.tokens, indexed.lparen, indexed.rparen, self.forward
+            )
+            if not arguments:
+                continue
+            initialized = {
+                self.tokens[index].value
+                for index in range(*arguments[0])
+                if self.tokens[index].value in output_roots
+                and _unqualified_output_identifier(self.tokens, index)
+            }
+            if any(
+                transfer_index > indexed.index
+                and initialized.intersection(destinations)
+                and _context_dominates(
+                    next(
+                        item.context
+                        for item in copyback_evidence
+                        if item.index == transfer_index
+                    ),
+                    _context(indexed.index, regions),
+                )
+                for transfer_index, destinations in copyback_destinations.items()
+            ):
+                safe_initializer_calls.add(indexed.index)
         member_output_calls = _unresolved_member_output_calls(
             self.tokens, function, output_roots, lambda_ranges
         )
@@ -2601,9 +4100,13 @@ class _PathAuditor:
         allowed_contract_calls = (
             {
                 sequence[-2]
-                for sequence in contract.required_sequences
+                for sequence in (
+                    contract.required_sequences
+                    + getattr(contract, "required_any_sequences", ())
+                )
                 if len(sequence) >= 2 and sequence[-1] == "("
             }
+            | set(getattr(contract, "allowed_output_calls", ()))
             if contract is not None
             else set()
         )
@@ -2618,6 +4121,7 @@ class _PathAuditor:
         contract_output_call_hazards.extend(
             f"unapproved output call {indexed.call.name} at line {indexed.call.line}"
             for indexed in calls
+            if indexed.index not in proven_transfer_calls | safe_initializer_calls
             if indexed.call.name.rsplit("::", 1)[-1] not in allowed_contract_calls
             and _range_references_output(
                 self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
@@ -2661,9 +4165,6 @@ class _PathAuditor:
             self.cache[function] = fail_contract
             return fail_contract
 
-        direct, raw_launches, rejected, device_lambdas = _direct_dispatches(
-            self.tokens, function, output_roots, regions
-        )
         deferred_write_lines = _deferred_output_writes(
             self.tokens,
             function,
@@ -2678,6 +4179,11 @@ class _PathAuditor:
             details.extend(item.detail for item in direct)
         else:
             classifications.add("missing_device_terminal")
+        if copyback_evidence:
+            classifications.update(
+                {"device_copyback", "device_dispatch", "large_input_gpu_chain"}
+            )
+            details.extend(item.detail for item in copyback_evidence)
         if raw_launches:
             classifications.add("large_input_gpu_chain")
             details.extend(
@@ -2689,11 +4195,21 @@ class _PathAuditor:
 
         body = self.tokens[function.body_open + 1 : function.body_close]
         body_values = [token.value for token in body]
-        counter_lines = _sequence_lines(body, ("pgaccel_record_gpu_exec", "("))
+        counter_indices = [
+            index
+            for index in range(function.body_open + 1, function.body_close - 1)
+            if self.tokens[index].value == "pgaccel_record_gpu_exec"
+            and self.tokens[index + 1].value == "("
+        ]
+        counter_lines = sorted({self.tokens[index].line for index in counter_indices})
         if counter_lines:
-            classifications.add("fake_gpu_counter")
+            classifications.add(
+                "gpu_exec_observability"
+                if direct or copyback_evidence
+                else "fake_gpu_counter"
+            )
             details.append(
-                "GPU execution counter is observability only at line(s) "
+                "GPU execution counter is observability at line(s) "
                 + ", ".join(map(str, counter_lines))
             )
 
@@ -2786,6 +4302,8 @@ class _PathAuditor:
             classifications.add("unresolved_indirect_output_call")
         call_proofs: dict[int, tuple[_IndexedCall, _Proof | None, str | None]] = {}
         for indexed in calls:
+            if indexed.index in proven_transfer_calls | safe_initializer_calls:
+                continue
             candidate, error = self.resolve(indexed.call)
             proof = (
                 self.prove(candidate, stack + (function,))
@@ -2849,7 +4367,10 @@ class _PathAuditor:
                     f"{indexed.call.line} may finalize or overwrite the ABI result"
                 )
 
-        all_evidence = sorted(direct + call_evidence, key=lambda item: item.index)
+        all_evidence = sorted(
+            direct + copyback_evidence + call_evidence,
+            key=lambda item: item.index,
+        )
         success_paths = 0
         unsafe_success: list[str] = []
         returns = _returns(self.tokens, function, lambda_ranges)
@@ -2875,8 +4396,13 @@ class _PathAuditor:
             if (
                 zero
                 and not host_loop_lines
-                and not counter_lines
                 and not control_lines
+                and not any(
+                    region.start <= index <= region.end
+                    for region in zero_ranges
+                    if region.start <= return_index <= region.end
+                    for index in counter_indices
+                )
                 and not any(
                     region.start <= record[0] <= region.end and not record[2]
                     for region in zero_ranges
@@ -3912,6 +5438,169 @@ def _object_abi_evidence(
     return tuple(evidence), findings
 
 
+def _release_object_validation(
+    object_paths: Sequence[pathlib.Path],
+    freshness_paths: Sequence[pathlib.Path],
+    build_marker: pathlib.Path | None = None,
+) -> tuple[tuple[dict[str, object], ...], list[Finding]]:
+    """Validate the exact, freshly built shared kernel artifact fail-closed."""
+
+    unique = list(dict.fromkeys(object_paths))
+    findings: list[Finding] = []
+    if len(unique) != 1:
+        path = unique[0] if unique else pathlib.Path("pgaccel-kernels/build")
+        findings.append(
+            Finding(
+                path,
+                1,
+                "<object-inventory>",
+                f"release audit requires exactly one explicit shared kernel object; got {len(unique)}",
+                ("missing_object_inventory", "abi_inventory_mismatch"),
+            )
+        )
+        return (
+            (
+                {
+                    "kind": "release_object_validation",
+                    "status": "missing" if not unique else "invalid",
+                    "paths": [path.as_posix() for path in unique],
+                },
+            ),
+            findings,
+        )
+
+    path = unique[0]
+    expected_name = path.name in {
+        "libpgaccel_kernels_shared.dylib",
+        "libpgaccel_kernels_shared.so",
+    }
+    try:
+        object_stat = path.stat()
+    except OSError as error:
+        findings.append(
+            Finding(
+                path,
+                1,
+                "<object-inventory>",
+                f"explicit shared kernel object is unavailable: {error}",
+                ("object_inventory_error", "abi_inventory_mismatch"),
+            )
+        )
+        return (
+            (
+                {
+                    "kind": "release_object_validation",
+                    "status": "missing",
+                    "path": path.as_posix(),
+                    "error": str(error),
+                },
+            ),
+            findings,
+        )
+
+    if not expected_name or not path.is_file():
+        findings.append(
+            Finding(
+                path,
+                1,
+                "<object-inventory>",
+                "release object is not the exact pgaccel_kernels_shared library",
+                ("wrong_release_object", "abi_inventory_mismatch"),
+            )
+        )
+
+    marker_stat: os.stat_result | None = None
+    if build_marker is None:
+        findings.append(
+            Finding(
+                path,
+                1,
+                "<object-inventory>",
+                "release audit requires the marker from the current clean rebuild",
+                ("missing_build_marker", "abi_inventory_mismatch"),
+            )
+        )
+    else:
+        try:
+            marker_stat = build_marker.stat()
+        except OSError as error:
+            findings.append(
+                Finding(
+                    build_marker,
+                    1,
+                    "<object-inventory>",
+                    f"clean-rebuild marker is unavailable: {error}",
+                    ("missing_build_marker", "abi_inventory_mismatch"),
+                )
+            )
+        else:
+            if (
+                not build_marker.is_file()
+                or object_stat.st_mtime_ns <= marker_stat.st_mtime_ns
+            ):
+                findings.append(
+                    Finding(
+                        path,
+                        1,
+                        "<object-inventory>",
+                        "shared kernel object was not produced after the clean-rebuild marker",
+                        ("stale_release_object", "abi_inventory_mismatch"),
+                    )
+                )
+
+    input_mtimes: list[tuple[pathlib.Path, int]] = []
+    for input_path in dict.fromkeys(freshness_paths):
+        try:
+            if input_path.is_file():
+                input_mtimes.append((input_path, input_path.stat().st_mtime_ns))
+        except OSError:
+            continue
+    newest_input = max(input_mtimes, key=lambda item: item[1]) if input_mtimes else None
+    if newest_input is not None and object_stat.st_mtime_ns <= newest_input[1]:
+        findings.append(
+            Finding(
+                path,
+                1,
+                "<object-inventory>",
+                f"shared kernel object is stale relative to {newest_input[0]}",
+                ("stale_release_object", "abi_inventory_mismatch"),
+            )
+        )
+
+    return (
+        (
+            {
+                "kind": "release_object_validation",
+                "status": "verified" if not findings else "invalid",
+                "path": path.as_posix(),
+                "mtime_ns": object_stat.st_mtime_ns,
+                "newest_input": (
+                    newest_input[0].as_posix() if newest_input is not None else None
+                ),
+                "newest_input_mtime_ns": (
+                    newest_input[1] if newest_input is not None else None
+                ),
+                "build_marker": build_marker.as_posix() if build_marker else None,
+                "build_marker_mtime_ns": (
+                    marker_stat.st_mtime_ns if marker_stat is not None else None
+                ),
+                "input_count": len(input_mtimes),
+                "input_inventory_sha256": hashlib.sha256(
+                    b"".join(
+                        input_path.as_posix().encode("utf-8")
+                        + b"\0"
+                        + hashlib.sha256(input_path.read_bytes()).digest()
+                        for input_path, _ in sorted(
+                            input_mtimes, key=lambda item: item[0].as_posix()
+                        )
+                    )
+                ).hexdigest(),
+            },
+        ),
+        findings,
+    )
+
+
 def audit_abi(
     source_paths: Sequence[pathlib.Path],
     header_paths: Sequence[pathlib.Path],
@@ -3919,6 +5608,8 @@ def audit_abi(
     manifest_path: pathlib.Path | None = None,
     compiler: str | None = None,
     object_paths: Sequence[pathlib.Path] = (),
+    require_release_object: bool = False,
+    build_marker: pathlib.Path | None = None,
 ) -> AbiInventory:
     definitions: list[AbiSymbol] = []
     source_definitions: list[AbiSymbol] = []
@@ -3928,6 +5619,25 @@ def audit_abi(
     manifest_evidence: dict[str, object] | None = None
     compiler_evidence: dict[str, object] | None = None
     object_evidence: tuple[dict[str, object], ...] = ()
+    if require_release_object:
+        freshness_paths = [*source_paths, *header_paths]
+        kernel_root = pathlib.Path("pgaccel-kernels")
+        for pattern in (
+            "CMakeLists.txt",
+            "include/**/*.h",
+            "include/**/*.hpp",
+            "src/**/*.h",
+            "src/**/*.hpp",
+        ):
+            freshness_paths.extend(kernel_root.glob(pattern))
+        for path in (pathlib.Path(".acpp-version"),):
+            if path.is_file():
+                freshness_paths.append(path)
+        validation_evidence, validation_findings = _release_object_validation(
+            object_paths, freshness_paths, build_marker
+        )
+        object_evidence += validation_evidence
+        findings.extend(validation_findings)
     for path in sorted(dict.fromkeys(source_paths), key=lambda item: item.as_posix()):
         try:
             source = path.read_text(encoding="utf-8")
@@ -4131,9 +5841,10 @@ def audit_abi(
                     "stderr": compiler_inventory.stderr,
                 }
             if object_paths:
-                object_evidence, object_findings = _object_abi_evidence(
+                nm_evidence, object_findings = _object_abi_evidence(
                     object_paths, manifest
                 )
+                object_evidence += nm_evidence
                 findings.extend(object_findings)
     return AbiInventory(
         tuple(
@@ -4201,6 +5912,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=(),
         type=pathlib.Path,
         help="built library/object files whose exported symbols are checked with nm",
+    )
+    parser.add_argument(
+        "--build-marker",
+        type=pathlib.Path,
+        help="marker created before the clean rebuild that produced --objects",
     )
     parser.add_argument(
         "--regenerate-abi-manifest",
@@ -4366,18 +6082,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     audits = audit_paths(unique_paths)
     findings = [finding for audit in audits for finding in audit.findings]
     object_paths = list(args.objects)
-    if not object_paths:
-        shared = sorted(
-            path
-            for path in pathlib.Path("pgaccel-kernels/build").glob(
-                "**/libpgaccel_kernels_shared.*"
-            )
-            if path.suffix in {".dylib", ".so"}
-        )
-        static = sorted(
-            pathlib.Path("pgaccel-kernels/build").glob("**/libpgaccel_kernels.a")
-        )
-        object_paths = shared[:1] or static[:1]
     abi = (
         audit_abi(
             unique_paths,
@@ -4385,6 +6089,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest_path=args.abi_manifest,
             compiler=args.abi_compiler,
             object_paths=object_paths,
+            require_release_object=True,
+            build_marker=args.build_marker,
         )
         if args.headers
         else None

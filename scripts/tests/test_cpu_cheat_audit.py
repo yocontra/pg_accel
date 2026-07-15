@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -1230,6 +1231,505 @@ class HostComputationAndContractTests(unittest.TestCase):
         self.assertIn("invalid_failure_only_contract", finding.classifications)
 
 
+class ResidentV5RegressionTests(unittest.TestCase):
+    COPYBACK_PRELUDE = r"""
+        using size_t = decltype(sizeof(0));
+        using uint64_t = unsigned long long;
+        using pgaccel_status = int;
+        constexpr pgaccel_status PGACCEL_OK = 0;
+        constexpr pgaccel_status PGACCEL_ERROR = 1;
+        namespace sycl {
+        template <int> struct range { explicit range(size_t) {} };
+        template <int> struct id { operator size_t() const { return 0; } };
+        struct event { void wait_and_throw() {} };
+        struct queue {
+          template <class Function> event parallel_for(range<1>, Function) { return {}; }
+          event memcpy(void*, const void*, size_t) { return {}; }
+          void wait_and_throw() {}
+        };
+        struct device { static void get_devices() {} };
+        inline void* malloc_shared(size_t, queue&) { static int value; return &value; }
+        inline void* malloc_device(size_t, queue&) { static int value; return &value; }
+        inline void free(void*, queue&) {}
+        }
+        namespace std { inline void* memcpy(void* dst, const void*, size_t) { return dst; } }
+        static bool initialized = false;
+        static uint64_t counter = 0;
+        static sycl::queue queue_value;
+        static sycl::queue* g_queue = &queue_value;
+    """
+
+    def test_kernel_written_usm_copyback_forms_are_proven(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_queue_copyback(int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device_result = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device_result[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device_result, count).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_shared_copyback(int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* shared_result = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                shared_result[i] = 1;
+              }).wait_and_throw();
+              std::memcpy(out, shared_result, count);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        for entry in result.entrypoint_audits:
+            self.assertIn("device_copyback", entry.classifications)
+
+    def test_unawaited_wrong_space_and_unwritten_copybacks_fail(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_unawaited(int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; });
+              q.memcpy(out, buffer, count).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_host_reads_device(int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              std::memcpy(out, buffer, count);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_unwritten_source(int* out, size_t count) {
+              sycl::queue q;
+              int* source = static_cast<int*>(sycl::malloc_shared(count, q));
+              int* other = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { other[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy(out, source, count).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_host_staging_overwrite(
+                int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              buffer[0] = 7;
+              std::memcpy(out, buffer, count);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(len(result.entrypoint_audits), 4)
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_copyback_requires_exact_pointer_expressions_and_positive_size(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_exact_copyback(int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy(out + 0, buffer + 0, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_comma_destination(int* out, size_t count) {
+              static int scratch;
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy((out, &scratch), buffer, sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_comma_source(int* out, size_t count) {
+              static int host_value;
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy(out, (buffer, &host_value), sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_zero_copyback(int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              q.memcpy(out, buffer, 0).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_exact_copyback"].ok)
+        self.assertIn(
+            "device_copyback", entries["pgaccel_exact_copyback"].classifications
+        )
+        for name in {
+            "pgaccel_comma_destination",
+            "pgaccel_comma_source",
+            "pgaccel_zero_copyback",
+        }:
+            with self.subTest(name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertNotIn("device_copyback", entries[name].classifications)
+
+    def test_same_line_copyback_does_not_mask_later_host_overwrite(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_same_line_overwrite(
+                int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              std::memcpy(out, buffer, count); out[0] = 7;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("host_output_write", entry.classifications)
+
+    def test_copyback_requires_live_sycl_usm_provenance(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            namespace fake {
+            inline void* malloc_shared(size_t, sycl::queue&) {
+              static int host_value;
+              return &host_value;
+            }
+            }
+            extern "C" pgaccel_status pgaccel_fake_usm(int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(fake::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              std::memcpy(out, buffer, sizeof(int));
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_reassigned_usm(int* out, size_t count) {
+              static int host_value;
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              buffer = &host_value;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { buffer[i] = 1; })
+                  .wait_and_throw();
+              std::memcpy(out, buffer, sizeof(int));
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_post_declaration_member_aliases_propagate_through_casts(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct AliasHolder { int* ptr; };
+            extern "C" pgaccel_status pgaccel_member_cast(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              AliasHolder holder{};
+              holder.ptr = static_cast<int*>(out);
+              holder.ptr[0] = 7;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_member_paren(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              AliasHolder holder{};
+              holder.ptr = (out);
+              holder.ptr[0] = 7;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("host_output_write", entry.classifications)
+
+    def test_dead_lambda_writes_do_not_prove_copyback(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_dead_lambda_write(
+                int* out, size_t count) {
+              sycl::queue q;
+              int* buffer = static_cast<int*>(sycl::malloc_shared(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                if (false) buffer[i] = 1;
+              }).wait_and_throw();
+              std::memcpy(out, buffer, sizeof(int));
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_post_kernel_alias_member_and_pointer_arithmetic_overwrites_fail(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct Holder { int* ptr; };
+            extern "C" pgaccel_status pgaccel_brace(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              auto alias{out}; alias[0] = 7; return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_aggregate(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              Holder holder{out}; holder.ptr[0] = 7; return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_arithmetic(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              *(out + 0) = 7; return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("host_output_write", entry.classifications)
+
+    def test_local_status_is_not_an_output_alias_and_nested_zero_is_neutral(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status launch(int* out, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) { out[i] = 1; })
+                  .wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_status_local(int* out, size_t count) {
+              pgaccel_status st = launch(out, count);
+              return st;
+            }
+            extern "C" pgaccel_status pgaccel_nested_zero(int* out, size_t count) {
+              if (count == 0) { if (out) *out = 0; return PGACCEL_OK; }
+              return launch(out, count);
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertNotIn(
+            "output_alias_tracking", entries["pgaccel_status_local"].classifications
+        )
+        self.assertIn("zero_work", entries["pgaccel_nested_zero"].classifications)
+
+    def test_exact_support_contracts_are_immutable_and_evidence_bound(self) -> None:
+        with self.assertRaises(TypeError):
+            audit.LIFECYCLE_CONTRACTS["pgaccel_fake"] = object()  # type: ignore[index]
+        valid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" uint64_t pgaccel_gpu_exec_count() { return counter; }
+            extern "C" void pgaccel_reset_gpu_exec_count() { counter = 0; }
+            extern "C" pgaccel_status pgaccel_init() {
+              if (initialized) return PGACCEL_OK;
+              sycl::device::get_devices(); initialized = true; return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              if (!initialized) return PGACCEL_OK;
+              g_queue->wait_and_throw(); delete g_queue; return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              if (!dst || !src) return PGACCEL_ERROR;
+              sycl::queue q; q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+
+        invalid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static bool runtime_skip() { return true; }
+            extern "C" pgaccel_status pgaccel_init() {
+              if (runtime_skip()) return PGACCEL_OK;
+              sycl::device::get_devices(); return PGACCEL_OK;
+            }
+            extern "C" uint64_t pgaccel_gpu_exec_count() { return 42; }
+            """
+        )
+        for entry in invalid.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+        wrong_polarity = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_init() {
+              if (!initialized) return PGACCEL_OK;
+              sycl::device::get_devices(); return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_shutdown() {
+              if (initialized) return PGACCEL_OK;
+              g_queue->wait_and_throw(); delete g_queue; return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in wrong_polarity.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+        compound_guard = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static bool runtime_skip() { return true; }
+            extern "C" pgaccel_status pgaccel_init() {
+              if (initialized || runtime_skip()) return PGACCEL_OK;
+              sycl::device::get_devices(); return PGACCEL_OK;
+            }
+            """
+        )
+        entry = compound_guard.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_transfer_contract_requires_exact_awaited_queue_copy(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              std::memcpy(dst, src, bytes);
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.memcpy(dst, src, 0).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(len(result.entrypoint_audits), 2)
+        for entry in result.entrypoint_audits:
+            with self.subTest(entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_allocation_and_free_contracts_bind_output_to_usm_evidence(self) -> None:
+        valid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
+              if (out == nullptr) return PGACCEL_ERROR;
+              *out = nullptr;
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              void* ptr = sycl::malloc_shared(bytes, q);
+              if (ptr == nullptr) return PGACCEL_ERROR;
+              *out = ptr;
+              return PGACCEL_OK;
+            }
+            extern "C" void pgaccel_expr_shared_free(void* ptr) {
+              if (ptr == nullptr) return;
+              sycl::queue q;
+              sycl::free(ptr, q);
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+
+        invalid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
+              sycl::queue q;
+              void* ptr = sycl::malloc_shared(bytes, q);
+              (void)ptr;
+              *out = reinterpret_cast<void*>(42);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = invalid.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+        discarded = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out) {
+              *out = nullptr;
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              void* ptr = sycl::malloc_shared(bytes, q);
+              (void)ptr;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = discarded.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+        uncopied = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(
+                const void* src, size_t bytes, void** out) {
+              if (bytes == 0) { *out = nullptr; return PGACCEL_OK; }
+              sycl::queue q;
+              void* copied = sycl::malloc_shared(bytes, q);
+              void* published = sycl::malloc_shared(bytes, q);
+              std::memcpy(copied, src, bytes);
+              *out = published;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = uncopied.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+
 class AbiInventoryTests(unittest.TestCase):
     def test_alias_and_trailing_return_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1412,6 +1912,56 @@ class AbiInventoryTests(unittest.TestCase):
         self.assertEqual(evidence[2]["status"], "verified")
         self.assertEqual(evidence[2]["count"], 2)
 
+    def test_release_object_validation_is_mandatory_exact_and_fresh(self) -> None:
+        missing_evidence, missing = audit._release_object_validation([], [])
+        self.assertTrue(missing)
+        self.assertEqual(missing_evidence[0]["status"], "missing")
+        self.assertIn("missing_object_inventory", missing[0].classifications)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            input_path = root / "kernel.cpp"
+            input_path.write_text("// input\n", encoding="utf-8")
+            build_marker = root / "build.marker"
+            build_marker.touch()
+            wrong = root / "unrelated.so"
+            wrong.write_bytes(b"not the kernel library")
+            _, wrong_findings = audit._release_object_validation(
+                [wrong], [input_path], build_marker
+            )
+            self.assertIn("wrong_release_object", wrong_findings[0].classifications)
+
+            shared = root / "libpgaccel_kernels_shared.so"
+            shared.write_bytes(b"kernel library")
+            base = max(
+                input_path.stat().st_mtime,
+                shared.stat().st_mtime,
+                build_marker.stat().st_mtime,
+            )
+            os.utime(build_marker, (base - 1, base - 1))
+            os.utime(shared, (base, base))
+            os.utime(input_path, (base + 2, base + 2))
+            stale_evidence, stale = audit._release_object_validation(
+                [shared], [input_path], build_marker
+            )
+            self.assertEqual(stale_evidence[0]["status"], "invalid")
+            self.assertIn("stale_release_object", stale[0].classifications)
+
+            os.utime(shared, (base + 4, base + 4))
+            fresh_evidence, fresh = audit._release_object_validation(
+                [shared], [input_path], build_marker
+            )
+            self.assertFalse(fresh)
+            self.assertEqual(fresh_evidence[0]["status"], "verified")
+            self.assertEqual(fresh_evidence[0]["input_count"], 1)
+            self.assertIn("input_inventory_sha256", fresh_evidence[0])
+
+            missing_marker_evidence, missing_marker = audit._release_object_validation(
+                [shared], [input_path]
+            )
+            self.assertEqual(missing_marker_evidence[0]["status"], "invalid")
+            self.assertIn("missing_build_marker", missing_marker[0].classifications)
+
 
 class ReleaseWiringTests(unittest.TestCase):
     def test_precommit_keeps_fixture_gate_and_real_recipe_has_headers(self) -> None:
@@ -1421,6 +1971,11 @@ class ReleaseWiringTests(unittest.TestCase):
         )
         self.assertIn("audit-cpu-cheats-test", precommit)
         recipe = justfile[justfile.index("audit-cpu-cheats: audit-cpu-cheats-test") :]
+        self.assertLess(recipe.index("just gpu-build"), recipe.index("--objects"))
+        self.assertLess(recipe.index("-delete"), recipe.index("just gpu-build"))
+        self.assertIn("libpgaccel_kernels_shared", recipe)
+        self.assertIn('--objects "$objects"', recipe)
+        self.assertIn('--build-marker "$build_marker"', recipe)
         self.assertIn("--headers pgaccel-kernels/include/*.h --", recipe)
         self.assertIn("--abi-manifest scripts/cpu_cheat_abi_manifest.txt", recipe)
         self.assertIn("update-cpu-cheat-abi-manifest:", justfile)
@@ -1437,6 +1992,15 @@ class ReleaseWiringTests(unittest.TestCase):
             matrix.index('run_logged "cpu-cheat-audit"'),
             matrix.index('run_logged "install-pg-accel"'),
         )
+
+    def test_cli_never_implicitly_discovers_release_objects(self) -> None:
+        analyzer = (REPO_ROOT / "scripts/cpu_cheat_audit.py").read_text(
+            encoding="utf-8"
+        )
+        main = analyzer[analyzer.index("def main(") :]
+        self.assertIn("require_release_object=True", main)
+        self.assertIn("build_marker=args.build_marker", main)
+        self.assertNotIn("libpgaccel_kernels_shared.*", main)
 
     def test_local_packages_run_real_audit_before_creating_artifacts(self) -> None:
         justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
@@ -1476,6 +2040,12 @@ class ReleaseWiringTests(unittest.TestCase):
             release_plz.index("Run real CPU-cheat release gate"),
             release_plz.index("MarcoIeni/release-plz-action"),
         )
+        real_gate = release_plz[
+            release_plz.index("Run real CPU-cheat release gate") : release_plz.index(
+                "MarcoIeni/release-plz-action"
+            )
+        ]
+        self.assertIn("just audit-cpu-cheats", real_gate)
 
 
 class ProductionWitnessTests(unittest.TestCase):

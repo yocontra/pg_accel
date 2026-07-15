@@ -687,10 +687,28 @@ audit-cpu-cheats-test:
 audit-cpu-cheats: audit-cpu-cheats-test
     #!/usr/bin/env bash
     set -euo pipefail
+    build_marker="$(mktemp "${TMPDIR:-/tmp}/pgaccel-cpu-audit.XXXXXX")"
+    trap 'rm -f "$build_marker"' EXIT
+    # Delete the shared artifact first. Its reappearance after build_marker is
+    # evidence that this invocation relinked the exact library being audited.
+    find pgaccel-kernels/build -type f \
+        \( -name 'libpgaccel_kernels_shared.dylib' -o \
+           -name 'libpgaccel_kernels_shared.so' \) -delete 2>/dev/null || true
+    just gpu-build
+    objects="$(find pgaccel-kernels/build -type f \
+        \( -name 'libpgaccel_kernels_shared.dylib' -o \
+           -name 'libpgaccel_kernels_shared.so' \) -print)"
+    object_count="$(printf '%s\n' "$objects" | sed '/^$/d' | wc -l | tr -d ' ')"
+    if [ "$object_count" -ne 1 ]; then
+        echo "error: expected exactly one built pgaccel_kernels_shared object; found $object_count" >&2
+        exit 1
+    fi
     report="${CPU_CHEAT_AUDIT_REPORT:-target/cpu-cheat-audit.json}"
     python3 scripts/cpu_cheat_audit.py \
         --json-report "$report" \
         --abi-manifest scripts/cpu_cheat_abi_manifest.txt \
+        --objects "$objects" \
+        --build-marker "$build_marker" \
         --headers pgaccel-kernels/include/*.h -- \
         pgaccel-kernels/src/*.cpp
 

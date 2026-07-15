@@ -17,17 +17,32 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      - name: Load pinned AdaptiveCpp SHA
+        run: echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
+      - name: Cache AdaptiveCpp generic install
+        id: cache-acpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pgaccel/acpp
+            .pgaccel/src/AdaptiveCpp
+            .pgaccel/src/soft-fp64
+          key: release-plz-acpp-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}
+      - name: Install kernel audit dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang cmake git lld llvm-dev ninja-build
+          cargo install just --locked --version "$(awk '/^just / { print $2 }' .tool-versions)"
+      - name: Build pinned AdaptiveCpp generic toolchain
+        if: steps.cache-acpp.outputs.cache-hit != 'true'
+        run: ACPP_BACKEND=generic ./scripts/setup_acpp.sh
       - name: Run CPU-cheat analyzer fixture gate
         run: |
           PYTHONDONTWRITEBYTECODE=1 \
             python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
       - name: Run real CPU-cheat release gate
-        run: |
-          python3 scripts/cpu_cheat_audit.py \
-            --json-report target/cpu-cheat-audit.json \
-            --abi-manifest scripts/cpu_cheat_abi_manifest.txt \
-            --headers pgaccel-kernels/include/*.h -- \
-            pgaccel-kernels/src/*.cpp
+        run: CPU_CHEAT_AUDIT_REPORT=target/cpu-cheat-audit.json just audit-cpu-cheats
       - uses: MarcoIeni/release-plz-action@v0.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
