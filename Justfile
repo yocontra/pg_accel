@@ -869,8 +869,9 @@ package pg="":
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
-    cargo pgrx package --package pg_accel --pg-config "$pg_config" --no-default-features --features "pg$pg"
-    cp LICENSE NOTICE .acpp-version "target/release/pg_accel-pg$pg/"
+    acpp_prefix="$(pg_accel_acpp_prefix)"
+    python3 scripts/package_extension.py \
+        --pg "$pg" --pg-config "$pg_config" --acpp-prefix "$acpp_prefix"
 
 # Build installable pgrx packages for every supported PG major.
 package-matrix:
@@ -883,8 +884,9 @@ package-matrix:
         pg_accel_require_pgrx_support "$pg"
         pg_accel_require_pgrx_pg_config "$pg"
         pg_config="$(pg_accel_pg_config_for_pg "$pg")"
-        cargo pgrx package --package pg_accel --pg-config "$pg_config" --no-default-features --features "pg$pg"
-        cp LICENSE NOTICE .acpp-version "target/release/pg_accel-pg$pg/"
+        acpp_prefix="$(pg_accel_acpp_prefix)"
+        python3 scripts/package_extension.py \
+            --pg "$pg" --pg-config "$pg_config" --acpp-prefix "$acpp_prefix"
     done
 
 # Install the current pg_accel release build into the pgrx-managed cluster and

@@ -17,6 +17,7 @@ fn main() {
     println!("cargo::rerun-if-env-changed=ACPP_TARGETS");
     println!("cargo::rerun-if-env-changed=LLVM_PREFIX");
     println!("cargo::rerun-if-env-changed=LIBOMP_PREFIX");
+    println!("cargo::rerun-if-env-changed=PGACCEL_PACKAGE_RELOCATABLE");
 
     gpu_build::build_kernels();
 
@@ -396,8 +397,26 @@ mod gpu_build {
         println!("cargo::rustc-link-search=native={}", acpp_lib.display());
         println!("cargo::rustc-link-lib=dylib=acpp-rt");
         println!("cargo::rustc-link-lib=dylib=acpp-common");
-        // Embed rpath so test binaries + the cdylib find the dylibs.
-        println!("cargo::rustc-link-arg=-Wl,-rpath,{}", acpp_lib.display());
+        // Development and pgrx-test installs resolve the repository toolchain.
+        // Release packages opt into a bundled, loader-relative runtime.
+        match std::env::var("PGACCEL_PACKAGE_RELOCATABLE") {
+            Ok(value) if value == "1" => {
+                if cfg!(target_os = "macos") {
+                    println!("cargo::rustc-link-arg=-Wl,-rpath,@loader_path/pg_accel-runtime/lib");
+                    println!(
+                        "cargo::rustc-cdylib-link-arg=-Wl,-install_name,@rpath/pg_accel.dylib"
+                    );
+                } else if cfg!(target_os = "linux") {
+                    println!("cargo::rustc-link-arg=-Wl,-rpath,$ORIGIN/pg_accel-runtime/lib");
+                } else {
+                    panic!("relocatable packages are unsupported on this platform");
+                }
+            }
+            Ok(value) if !value.is_empty() => {
+                panic!("PGACCEL_PACKAGE_RELOCATABLE must be unset or exactly 1, got {value:?}");
+            }
+            _ => println!("cargo::rustc-link-arg=-Wl,-rpath,{}", acpp_lib.display()),
+        }
 
         // Link C++ standard library for static C++ code.
         if cfg!(target_os = "macos") {

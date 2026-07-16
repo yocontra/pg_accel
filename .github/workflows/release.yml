@@ -77,8 +77,10 @@ jobs:
           cargo pgrx init --pg${{ matrix.pg }} "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})"
       - if: steps.pg-support.outputs.skip != 'true'
         run: |
-          cargo pgrx package --package pg_accel --pg-config "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})" --no-default-features --features pg${{ matrix.pg }}
-          cp NOTICE target/release/pg_accel-pg${{ matrix.pg }}/NOTICE
+          python3 scripts/package_extension.py \
+            --pg "${{ matrix.pg }}" \
+            --pg-config "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})" \
+            --acpp-prefix "$PWD/.pgaccel/acpp/current"
       - name: Upload artifacts
         if: steps.pg-support.outputs.skip != 'true'
         uses: actions/upload-artifact@v4

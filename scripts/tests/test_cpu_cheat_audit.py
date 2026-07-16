@@ -6432,13 +6432,18 @@ class ReleaseWiringTests(unittest.TestCase):
         ]
         self.assertLess(
             package.index("just audit-cpu-cheats"),
-            package.index("cargo pgrx package"),
+            package.index("python3 scripts/package_extension.py"),
         )
         self.assertLess(
             package_matrix.index("just audit-cpu-cheats"),
             package_matrix.index("for pg in"),
         )
         self.assertIn("intentionally remains blocked", package)
+        helper = (REPO_ROOT / "scripts/package_extension.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('environment["PGACCEL_PACKAGE_RELOCATABLE"] = "1"', helper)
+        self.assertIn('"pgrx",\n        "package",', helper)
 
     def test_green_ci_uses_integrity_suite_and_release_keeps_real_gate(self) -> None:
         ci = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

@@ -43,6 +43,14 @@ claim is implied by the entries below.
 
 ### Fixed
 
+- macOS postmasters set the fork-safe Objective-C and unified-logging
+  environment defaults before creating backends, avoiding the reproduced
+  CoreAnalytics crash during lazy Metal initialization while preserving
+  explicit operator overrides.
+- Release packages now link the extension to a loader-relative, bundled
+  AdaptiveCpp runtime prefix, validate every Mach-O/ELF load command, and ship
+  a deterministic `SHA256SUMS` manifest. Development and pgrx-test linkage
+  continues to use the repository toolchain prefix.
 - Resident invalidation now distinguishes benign catalog activity such as
   `ANALYZE` and relation renames from structural changes, DML generations, and
   rewrites that require eviction or refresh.
