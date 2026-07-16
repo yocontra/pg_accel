@@ -2,13 +2,26 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-acpp="${ACPP:-$repo_root/.pgaccel/acpp/metal/bin/acpp}"
+default_acpp="$repo_root/.pgaccel/acpp/metal/bin/acpp"
+if [[ ! -x "$default_acpp" ]]; then
+    git_common_dir="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$git_common_dir" ]]; then
+        shared_root="$(cd "$git_common_dir/.." && pwd)"
+        default_acpp="$shared_root/.pgaccel/acpp/metal/bin/acpp"
+    fi
+fi
+acpp="${ACPP:-$default_acpp}"
 fixture="$repo_root/scripts/tests/fixtures/acpp_device_profile_overflow_only.cpp"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/acpp-overflow-only.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 
 if [[ -n "${ACPP_TEST_DYLD_LIBRARY_PATH:-}" ]]; then
     export DYLD_LIBRARY_PATH="$ACPP_TEST_DYLD_LIBRARY_PATH"
+fi
+
+if [[ ! -x "$acpp" ]]; then
+    echo "AdaptiveCpp driver not found at $acpp" >&2
+    exit 1
 fi
 
 "$acpp" -O0 -g -fprofile-instr-generate -fcoverage-mapping \

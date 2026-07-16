@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -2480,6 +2481,66 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn('asm("llvm.instrprof.increment.step")', fixture)
         self.assertIn("UINT64_C(0x100000000)", fixture)
         self.assertIn("metal_overflow_only_probe", fixture)
+
+        runner = (
+            REPO_ROOT / "scripts/tests/run_acpp_device_profile_overflow_only.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("mktemp -d", runner)
+        self.assertIn('ACPP_METAL_DEVICE_PROFILE_DIR="$work_dir/profiles"', runner)
+        self.assertIn('"$overflow_count" != 1', runner)
+        self.assertIn('"$proftext_count" != 0', runner)
+
+        gate = (REPO_ROOT / "scripts/coverage_gate.sh").read_text(encoding="utf-8")
+        self.assertIn("run_acpp_device_profile_overflow_only.sh", gate)
+        self.assertIn("record_stage cpp device_profile_overflow_only 0", gate)
+        self.assertIn("record_stage cpp device_profile_overflow_only 1", gate)
+        self.assertIn("execution_status=1", gate)
+
+    def test_device_profile_overflow_only_runner_requires_exact_artifacts(self) -> None:
+        runner = REPO_ROOT / "scripts/tests/run_acpp_device_profile_overflow_only.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fake_acpp = root / "acpp"
+
+            def install_fake_probe(probe: str) -> None:
+                fake_acpp.write_text(
+                    "#!/usr/bin/env python3\n"
+                    "import pathlib, sys\n"
+                    "output = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])\n"
+                    f"output.write_text({probe!r}, encoding='utf-8')\n"
+                    "output.chmod(0o755)\n",
+                    encoding="utf-8",
+                )
+                fake_acpp.chmod(0o755)
+
+            environment = os.environ.copy()
+            environment["ACPP"] = str(fake_acpp)
+            environment.pop("ACPP_TEST_DYLD_LIBRARY_PATH", None)
+            install_fake_probe(
+                "#!/usr/bin/env bash\n"
+                "printf 'overflow\\n' > "
+                '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.overflow"\n'
+            )
+            passed = subprocess.run(
+                [str(runner)], check=False, capture_output=True, text=True,
+                env=environment,
+            )
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertIn("overflow=1 proftext=0", passed.stdout)
+
+            install_fake_probe(
+                "#!/usr/bin/env bash\n"
+                "printf 'overflow\\n' > "
+                '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.overflow"\n'
+                "printf 'profile\\n' > "
+                '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.proftext"\n'
+            )
+            rejected = subprocess.run(
+                [str(runner)], check=False, capture_output=True, text=True,
+                env=environment,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("overflow=1 proftext=1", rejected.stderr)
 
     def test_gpu_evidence_requires_oom_test_to_report_passed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

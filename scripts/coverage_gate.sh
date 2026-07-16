@@ -537,6 +537,15 @@ cpp_coverage() (
     fi
     record_stage cpp toolchain 0
 
+    if run_logged "$output_dir/device-profile-overflow-only.log" env \
+        ACPP="$acpp" scripts/tests/run_acpp_device_profile_overflow_only.sh; then
+        record_stage cpp device_profile_overflow_only 0
+    else
+        execution_status=1
+        record_stage cpp device_profile_overflow_only 1 \
+            "Metal overflow-only device profile was not retained fail-closed"
+    fi
+
     if ! cmake -E remove_directory "$build_dir" \
         > "$output_dir/clean.log" 2>&1; then
         mark_layer_error cpp "$cpp_minimum" clean \
