@@ -2464,6 +2464,20 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 "if (!any_nonzero && !overflow) return;",
                 "if (!any_nonzero) return;",
             ),
+            ("std::_Exit(EXIT_FAILURE);", "return;"),
+            (
+                "if (common::filesystem::atomic_write(path, data)) return;",
+                "common::filesystem::atomic_write(path, data); return;",
+            ),
+            (
+                'fail_device_profile_flush("invalid device profile counter buffer")',
+                "return",
+            ),
+            (
+                "if (!std::filesystem::is_directory(output_dir, ec) || ec)",
+                "if (false)",
+            ),
+            ('"device profile overflow marker"', '"device profile warning"'),
         ):
             with self.subTest(missing_invariant=original):
                 mutated = patch.replace(original, replacement)
@@ -2481,14 +2495,28 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn('asm("llvm.instrprof.increment.step")', fixture)
         self.assertIn("UINT64_C(0x100000000)", fixture)
         self.assertIn("metal_overflow_only_probe", fixture)
+        self.assertIn("metal_profile_flush_probe", fixture)
+        self.assertIn('mode == "ordinary"', fixture)
+
+        dormancy_fixture = (
+            REPO_ROOT / "scripts/tests/fixtures/acpp_device_profile_dormancy.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn("DeviceProfileDormancyKernel", dormancy_fixture)
+        self.assertNotIn("fprofile-instr-generate", dormancy_fixture)
 
         runner = (
             REPO_ROOT / "scripts/tests/run_acpp_device_profile_overflow_only.sh"
         ).read_text(encoding="utf-8")
         self.assertIn("mktemp -d", runner)
-        self.assertIn('ACPP_METAL_DEVICE_PROFILE_DIR="$work_dir/profiles"', runner)
+        self.assertIn('ACPP_METAL_DEVICE_PROFILE_DIR="$output_path"', runner)
         self.assertIn('"$overflow_count" != 1', runner)
         self.assertIn('"$proftext_count" != 0', runner)
+        self.assertIn("expect_flush_failure regular-file", runner)
+        self.assertIn("expect_flush_failure unwritable-overflow", runner)
+        self.assertIn("expect_flush_failure unwritable-proftext", runner)
+        self.assertIn('"$status" == 0 || "$retained_proftext" != 0', runner)
+        self.assertIn('"$acpp" -O2 "$dormancy_fixture"', runner)
+        self.assertIn("normal-build device profile dormancy: PASS (files=0)", runner)
 
         gate = (REPO_ROOT / "scripts/coverage_gate.sh").read_text(encoding="utf-8")
         self.assertIn("run_acpp_device_profile_overflow_only.sh", gate)
@@ -2507,7 +2535,12 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                     "#!/usr/bin/env python3\n"
                     "import pathlib, sys\n"
                     "output = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])\n"
-                    f"output.write_text({probe!r}, encoding='utf-8')\n"
+                    f"profile_probe = {probe!r}\n"
+                    "dormancy_probe = '#!/usr/bin/env bash\\nexit 0\\n'\n"
+                    "payload = dormancy_probe if any("
+                    "'acpp_device_profile_dormancy.cpp' in arg for arg in sys.argv"
+                    ") else profile_probe\n"
+                    "output.write_text(payload, encoding='utf-8')\n"
                     "output.chmod(0o755)\n",
                     encoding="utf-8",
                 )
@@ -2518,8 +2551,12 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             environment.pop("ACPP_TEST_DYLD_LIBRARY_PATH", None)
             install_fake_probe(
                 "#!/usr/bin/env bash\n"
-                "printf 'overflow\\n' > "
+                "if [[ \"$ACPP_METAL_DEVICE_PROFILE_DIR\" == */success/profiles ]]; then\n"
+                "  printf 'overflow\\n' > "
                 '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.overflow"\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 9\n"
             )
             passed = subprocess.run(
                 [str(runner)], check=False, capture_output=True, text=True,
@@ -2530,10 +2567,14 @@ class ArtifactAndToolchainTests(unittest.TestCase):
 
             install_fake_probe(
                 "#!/usr/bin/env bash\n"
-                "printf 'overflow\\n' > "
+                "if [[ \"$ACPP_METAL_DEVICE_PROFILE_DIR\" == */success/profiles ]]; then\n"
+                "  printf 'overflow\\n' > "
                 '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.overflow"\n'
-                "printf 'profile\\n' > "
+                "  printf 'profile\\n' > "
                 '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.proftext"\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 9\n"
             )
             rejected = subprocess.run(
                 [str(runner)], check=False, capture_output=True, text=True,

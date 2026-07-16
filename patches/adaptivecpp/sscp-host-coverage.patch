@@ -749,16 +749,18 @@ index f3202ceb..b79a58c7 100644
 @@ -645,0 +974 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
 +      restoreHostCoverageMappingNames(M, HasCoverageMappingNames);
 diff --git a/src/runtime/metal/metal_code_object.cpp b/src/runtime/metal/metal_code_object.cpp
-index 49e7d715..7974ddfb 100644
+index 49e7d715..34fd5e2a 100644
 --- a/src/runtime/metal/metal_code_object.cpp
 +++ b/src/runtime/metal/metal_code_object.cpp
-@@ -23,0 +24 @@
+@@ -21,0 +22 @@
++#include <exception>
+@@ -23,0 +25 @@
 +#include <limits>
-@@ -24,0 +26 @@
+@@ -24,0 +27 @@
 +#include <set>
-@@ -25,0 +28 @@
+@@ -25,0 +29 @@
 +#include <sstream>
-@@ -40,0 +44,21 @@ namespace {
+@@ -40,0 +45,21 @@ namespace {
 +bool decode_profile_name(const std::string& hex, std::string& out) {
 +  auto digit = [](char c) -> int {
 +    if (c >= '0' && c <= '9') return c - '0';
@@ -780,7 +782,28 @@ index 49e7d715..7974ddfb 100644
 +  return !out.empty();
 +}
 +
-@@ -453,2 +477,6 @@ metal_sscp_executable_object::metal_sscp_executable_object(
+@@ -444,0 +470,20 @@ MTL::BinaryArchive* load_binary_archive_from_url(MTL::Device* device,
++[[noreturn]] void fail_device_profile_flush(const std::string& message) {
++  HIPSYCL_DEBUG_ERROR
++      << "metal_code_object: device profile flush failed: " << message
++      << std::endl;
++  std::_Exit(EXIT_FAILURE);
++}
++
++void write_device_profile_or_exit(const std::string& path,
++                                  const std::string& data,
++                                  const char* description) {
++  try {
++    if (common::filesystem::atomic_write(path, data)) return;
++  } catch (const std::exception& error) {
++    fail_device_profile_flush(std::string{"could not atomically write "} +
++                              description + " " + path + ": " + error.what());
++  }
++  fail_device_profile_flush(std::string{"could not atomically write "} +
++                            description + " " + path);
++}
++
+@@ -453,2 +498,6 @@ metal_sscp_executable_object::metal_sscp_executable_object(
 -      _archive{nullptr}, _msl_source{metal_source} {
 -  _build_result = build(metal_source);
 +      _archive{nullptr}, _device_profile_buffer{nullptr},
@@ -789,12 +812,12 @@ index 49e7d715..7974ddfb 100644
 +  if (_build_result.is_success()) {
 +    _build_result = build(metal_source);
 +  }
-@@ -457,0 +486,4 @@ metal_sscp_executable_object::~metal_sscp_executable_object() {
+@@ -457,0 +507,4 @@ metal_sscp_executable_object::~metal_sscp_executable_object() {
 +  flush_device_profile();
 +  if (_device_profile_buffer) {
 +    _device_profile_buffer->release();
 +  }
-@@ -507,0 +540,8 @@ MTL::BinaryArchive* metal_sscp_executable_object::get_binary_archive() const {
+@@ -507,0 +561,8 @@ MTL::BinaryArchive* metal_sscp_executable_object::get_binary_archive() const {
 +MTL::Buffer* metal_sscp_executable_object::get_device_profile_buffer() const {
 +  return _device_profile_buffer;
 +}
@@ -803,7 +826,7 @@ index 49e7d715..7974ddfb 100644
 +  return _device_profile_counter_count;
 +}
 +
-@@ -511,0 +552,169 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
+@@ -511,0 +573,178 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
 +result metal_sscp_executable_object::initialize_device_profile(
 +    const std::string& source) {
 +  static constexpr const char* Header = "// __ACPP_DEVICE_PROFILE_V1 ";
@@ -903,19 +926,25 @@ index 49e7d715..7974ddfb 100644
 +}
 +
 +void metal_sscp_executable_object::flush_device_profile() const {
-+  if (!_device_profile_buffer || _device_profile_records.empty()) return;
 +  const char* output_dir = std::getenv("ACPP_METAL_DEVICE_PROFILE_DIR");
 +  if (!output_dir || output_dir[0] == '\0') return;
++  if (_device_profile_records.empty()) {
++    if (_device_profile_buffer) {
++      fail_device_profile_flush(
++          "profile buffer exists without device profile metadata");
++    }
++    return;
++  }
++  if (!_device_profile_buffer) {
++    fail_device_profile_flush("device profile metadata has no counter buffer");
++  }
 +
 +  const std::size_t slots =
 +      static_cast<std::size_t>(_device_profile_counter_count) + 1;
 +  const std::size_t bytes = slots * sizeof(uint32_t);
 +  if (!_device_profile_buffer->contents() ||
 +      _device_profile_buffer->length() < bytes) {
-+    HIPSYCL_DEBUG_WARNING
-+        << "metal_code_object: refusing to flush an invalid device profile buffer"
-+        << std::endl;
-+    return;
++    fail_device_profile_flush("invalid device profile counter buffer");
 +  }
 +
 +  const auto* counters =
@@ -930,10 +959,15 @@ index 49e7d715..7974ddfb 100644
 +  std::error_code ec;
 +  std::filesystem::create_directories(output_dir, ec);
 +  if (ec) {
-+    HIPSYCL_DEBUG_WARNING
-+        << "metal_code_object: could not create device profile directory: "
-+        << ec.message() << std::endl;
-+    return;
++    fail_device_profile_flush(
++        std::string{"could not create device profile directory: "} +
++        ec.message());
++  }
++  if (!std::filesystem::is_directory(output_dir, ec) || ec) {
++    fail_device_profile_flush(
++        ec ? std::string{"could not inspect device profile directory: "} +
++                 ec.message()
++           : "device profile output path is not a directory");
 +  }
 +  const std::string stem =
 +      std::string{"acpp-metal-device-"} + private_tmp_suffix() + "-" +
@@ -942,8 +976,10 @@ index 49e7d715..7974ddfb 100644
 +  if (overflow) {
 +    const std::string error_path =
 +        common::filesystem::join_path(output_dir, stem + ".overflow");
-+    common::filesystem::atomic_write(
-+        error_path, "Metal device coverage counter overflow; profile rejected\n");
++    write_device_profile_or_exit(
++        error_path,
++        "Metal device coverage counter overflow; profile rejected\n",
++        "device profile overflow marker");
 +    HIPSYCL_DEBUG_WARNING
 +        << "metal_code_object: device profile counter overflow; wrote "
 +        << error_path << std::endl;
@@ -962,15 +998,11 @@ index 49e7d715..7974ddfb 100644
 +  }
 +  const std::string profile_path =
 +      common::filesystem::join_path(output_dir, stem + ".proftext");
-+  if (!common::filesystem::atomic_write(profile_path, profile.str())) {
-+    HIPSYCL_DEBUG_WARNING
-+        << "metal_code_object: could not atomically write device profile "
-+        << profile_path << std::endl;
-+  } else {
-+    HIPSYCL_DEBUG_INFO
-+        << "metal_code_object: wrote Metal device profile " << profile_path
-+        << std::endl;
-+  }
++  write_device_profile_or_exit(profile_path, profile.str(),
++                               "device profile");
++  HIPSYCL_DEBUG_INFO
++      << "metal_code_object: wrote Metal device profile " << profile_path
++      << std::endl;
 +}
 +
 diff --git a/src/runtime/metal/metal_queue.cpp b/src/runtime/metal/metal_queue.cpp

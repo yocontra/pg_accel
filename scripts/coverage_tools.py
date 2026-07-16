@@ -4912,6 +4912,12 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         "const bool overflow = counters[_device_profile_counter_count] != 0",
         "if (!any_nonzero && !overflow) return;",
         "if (overflow) {",
+        "[[noreturn]] void fail_device_profile_flush",
+        "std::_Exit(EXIT_FAILURE);",
+        "if (common::filesystem::atomic_write(path, data)) return;",
+        'fail_device_profile_flush("invalid device profile counter buffer")',
+        "if (!std::filesystem::is_directory(output_dir, ec) || ec)",
+        '"device profile overflow marker"',
         "preserveHostCoverageMappingNames(M)",
         "restoreHostCoverageMappingNames(M, HasCoverageMappingNames)",
         'getGlobalVariable("__llvm_coverage_names", true)',
@@ -4933,6 +4939,10 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
     if "if (!any_nonzero) return;" in text:
         errors.append(
             "AdaptiveCpp coverage patch drops overflow-only device profiles"
+        )
+    if text.count("write_device_profile_or_exit(") != 3:
+        errors.append(
+            "AdaptiveCpp coverage patch must fail closed on both device profile writes"
         )
     for forbidden in (
         '"acpp.metal.device.profile.step"',
