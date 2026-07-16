@@ -2026,23 +2026,25 @@ static void resident_check_operand_budget(const SpatialResidentKernelArgs* args,
     resident_record_failure(failure_flags, SPATIAL_RESIDENT_FAILURE_BUDGET);
 }
 
-static bool resident_validate_workspace(sycl::queue& queue,
-                                        const pgaccel_spatial_workspace* workspace,
+static bool resident_validate_workspace(sycl::queue& queue, uint32_t abi_version,
+                                        uint32_t flags, const void* control_pointer,
+                                        size_t control_bytes, const void* failure_flags,
+                                        size_t failure_flags_bytes,
                                         const SpatialResidentSpans& protected_spans,
                                         const SpatialResidentSpan* extra_spans,
                                         size_t extra_span_count) {
-  if (workspace == nullptr || workspace->abi_version != PGACCEL_SPATIAL_WORKSPACE_ABI_VERSION ||
-      workspace->flags != 0 || workspace->control_bytes != PGACCEL_SPATIAL_CONTROL_BYTES ||
-      workspace->failure_flags_bytes != sizeof(uint32_t)) {
+  if (abi_version != PGACCEL_SPATIAL_WORKSPACE_ABI_VERSION || flags != 0 ||
+      control_bytes != PGACCEL_SPATIAL_CONTROL_BYTES ||
+      failure_flags_bytes != sizeof(uint32_t)) {
     return false;
   }
   SpatialResidentSpan control{};
   SpatialResidentSpan failure{};
-  if (!resident_validate_declared_span(queue, workspace->control, workspace->control_bytes,
+  if (!resident_validate_declared_span(queue, control_pointer, control_bytes,
                                        PGACCEL_SPATIAL_CONTROL_BYTES, sizeof(uint8_t),
                                        alignof(SpatialResidentKernelArgs), &control) ||
-      !resident_validate_declared_span(queue, workspace->failure_flags,
-                                       workspace->failure_flags_bytes, 1, sizeof(uint32_t),
+      !resident_validate_declared_span(queue, failure_flags, failure_flags_bytes, 1,
+                                       sizeof(uint32_t),
                                        alignof(uint32_t), &failure) ||
       resident_spans_overlap(control, failure) ||
       !resident_output_does_not_overlap(control, protected_spans) ||
@@ -2082,9 +2084,19 @@ class SpatialResidentMetricKernel;
 class SpatialResidentCompactKernel;
 class SpatialResidentPatchKernel;
 
+struct SpatialResidentOutputContract {
+  const void* predicate_results;
+  size_t predicate_results_bytes;
+  const void* distances;
+  size_t distances_bytes;
+  const void* distance_uncertain;
+  size_t distance_uncertain_bytes;
+};
+
 static pgaccel_status
-resident_validate_request_contract(const pgaccel_spatial_resident_request* request,
-                                   int32_t* detail) {
+resident_validate_request_contract_values(const pgaccel_spatial_resident_request* request,
+                                          const SpatialResidentOutputContract& output,
+                                          int32_t* detail) {
   if (detail == nullptr)
     return PGACCEL_INVALID_ARGUMENT;
   *detail = PGACCEL_SPATIAL_DETAIL_NONE;
@@ -2103,16 +2115,17 @@ resident_validate_request_contract(const pgaccel_spatial_resident_request* reque
       (request->predicate != PGACCEL_SPATIAL_PREDICATE_DWITHIN &&
        request->distance_threshold != 0.0) ||
       (!distance_operation &&
-       (!resident_declared_span_shape(request->predicate_results, request->predicate_results_bytes,
+       (!resident_declared_span_shape(output.predicate_results, output.predicate_results_bytes,
                                       request->output_capacity, sizeof(int8_t)) ||
-        request->distances != nullptr || request->distances_bytes != 0 ||
-        request->distance_uncertain != nullptr || request->distance_uncertain_bytes != 0)) ||
+        output.distances != nullptr || output.distances_bytes != 0 ||
+        output.distance_uncertain != nullptr || output.distance_uncertain_bytes != 0)) ||
       (distance_operation &&
-       (request->predicate_results != nullptr || request->predicate_results_bytes != 0 ||
-        !resident_declared_span_shape(request->distances, request->distances_bytes,
+       (output.predicate_results != nullptr || output.predicate_results_bytes != 0 ||
+        !resident_declared_span_shape(output.distances, output.distances_bytes,
                                       request->output_capacity, sizeof(double)) ||
-        !resident_declared_span_shape(request->distance_uncertain,
-                                      request->distance_uncertain_bytes, request->output_capacity,
+        !resident_declared_span_shape(output.distance_uncertain,
+                                      output.distance_uncertain_bytes,
+                                      request->output_capacity,
                                       sizeof(uint8_t))))) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
@@ -2126,6 +2139,18 @@ resident_validate_request_contract(const pgaccel_spatial_resident_request* reque
   }
 
   return PGACCEL_OK;
+}
+
+static pgaccel_status
+resident_validate_request_contract(const pgaccel_spatial_resident_request* request,
+                                   int32_t* detail) {
+  if (request == nullptr)
+    return PGACCEL_INVALID_ARGUMENT;
+  const SpatialResidentOutputContract output{
+      request->predicate_results, request->predicate_results_bytes,
+      request->distances,         request->distances_bytes,
+      request->distance_uncertain, request->distance_uncertain_bytes};
+  return resident_validate_request_contract_values(request, output, detail);
 }
 
 static pgaccel_status resident_launch_contains(sycl::queue& queue, SpatialResidentKernelArgs* args,
@@ -2251,6 +2276,22 @@ static pgaccel_status resident_launch_metric(sycl::queue& queue, SpatialResident
   return PGACCEL_OK;
 }
 
+static pgaccel_status
+resident_launch_metric_predicate(sycl::queue& queue, SpatialResidentKernelArgs* args,
+                                 uint32_t* failure_flags, size_t count) {
+  resident_launch_intersects(queue, args, failure_flags, count);
+  return resident_launch_metric(queue, args, failure_flags, count);
+}
+
+static pgaccel_status
+resident_launch_non_intersects(sycl::queue& queue, SpatialResidentKernelArgs* args,
+                               uint32_t* failure_flags, int32_t predicate, size_t count) {
+  return predicate == PGACCEL_SPATIAL_PREDICATE_CONTAINS ||
+                 predicate == PGACCEL_SPATIAL_PREDICATE_WITHIN
+             ? resident_launch_contains(queue, args, failure_flags, count)
+             : resident_launch_metric_predicate(queue, args, failure_flags, count);
+}
+
 extern "C" pgaccel_status
 pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* request,
                                      const pgaccel_spatial_workspace* workspace,
@@ -2258,6 +2299,10 @@ pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* req
   if (detail == nullptr)
     return PGACCEL_INVALID_ARGUMENT;
   *detail = PGACCEL_SPATIAL_DETAIL_NONE;
+  if (request == nullptr) {
+    *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
   int32_t contract_detail = PGACCEL_SPATIAL_DETAIL_NONE;
   const pgaccel_status contract = resident_validate_request_contract(request, &contract_detail);
   if (contract != PGACCEL_OK) {
@@ -2310,8 +2355,11 @@ pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* req
     output_spans[output_span_count++] = uncertain_span;
   }
 
-  if (!resident_validate_workspace(queue, workspace, input_spans, output_spans,
-                                   output_span_count)) {
+  if (workspace == nullptr ||
+      !resident_validate_workspace(
+          queue, workspace->abi_version, workspace->flags, workspace->control,
+          workspace->control_bytes, workspace->failure_flags, workspace->failure_flags_bytes,
+          input_spans, output_spans, output_span_count)) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
   }
@@ -2374,7 +2422,8 @@ pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* req
         if (right_bytes != 0)
           resident_check_operand_budget(args, failure_flags, right_bytes, false,
                                         args->request.right.row_stride);
-      });
+      })
+      .wait_and_throw();
 
   /* g_queue is in-order: every validation chunk completes before any
    * evaluation chunk. Each evaluation item checks the shared failure word,
@@ -2385,15 +2434,12 @@ pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* req
     normalized.predicate = PGACCEL_SPATIAL_PREDICATE_CONTAINS;
     resident_stage_control(queue, *workspace, normalized, false);
   }
-  if (predicate == PGACCEL_SPATIAL_PREDICATE_INTERSECTS) {
-    resident_launch_intersects(queue, args, failure_flags, request->count);
-  } else if (predicate == PGACCEL_SPATIAL_PREDICATE_CONTAINS ||
-             predicate == PGACCEL_SPATIAL_PREDICATE_WITHIN) {
-    resident_launch_contains(queue, args, failure_flags, request->count);
-  } else {
-    resident_launch_intersects(queue, args, failure_flags, request->count);
-    resident_launch_metric(queue, args, failure_flags, request->count);
-  }
+  const pgaccel_status launch_status =
+      predicate == PGACCEL_SPATIAL_PREDICATE_INTERSECTS
+          ? resident_launch_intersects(queue, args, failure_flags, request->count)
+          : resident_launch_non_intersects(queue, args, failure_flags, predicate, request->count);
+  if (launch_status != PGACCEL_OK)
+    return launch_status;
   queue.wait_and_throw();
   pgaccel_record_gpu_exec();
   return PGACCEL_OK;
@@ -2416,7 +2462,11 @@ pgaccel_spatial_workspace_finish(const pgaccel_spatial_workspace* workspace, int
   if (queue_pointer == nullptr)
     return PGACCEL_ERROR_NO_DEVICE;
   SpatialResidentSpans no_spans{};
-  if (!resident_validate_workspace(*queue_pointer, workspace, no_spans, nullptr, 0)) {
+  if (workspace == nullptr ||
+      !resident_validate_workspace(
+          *queue_pointer, workspace->abi_version, workspace->flags, workspace->control,
+          workspace->control_bytes, workspace->failure_flags, workspace->failure_flags_bytes,
+          no_spans, nullptr, 0)) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
   }
@@ -2488,35 +2538,40 @@ pgaccel_spatial_recheck_compact_launch(const pgaccel_spatial_recheck_compact_req
                                &spans) ||
       !resident_add_exact_span(queue, request->uncertain_count, request->uncertain_count_bytes, 1,
                                sizeof(uint64_t), alignof(uint64_t), &spans) ||
-      !resident_spans_are_pairwise_disjoint(spans) ||
-      !resident_validate_workspace(queue, workspace, spans, nullptr, 0)) {
+      !resident_spans_are_pairwise_disjoint(spans) || workspace == nullptr ||
+      !resident_validate_workspace(
+          queue, workspace->abi_version, workspace->flags, workspace->control,
+          workspace->control_bytes, workspace->failure_flags, workspace->failure_flags_bytes,
+          spans, nullptr, 0)) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
   }
   /* Compaction is the second half of the evaluation chain. Preserve a sticky
    * evaluation failure so malformed input cannot be hidden by the helper. */
-  resident_stage_control(queue, *workspace, *request, false);
-  uint8_t* control = workspace->control;
   uint32_t* failure_flags = workspace->failure_flags;
-  const auto* args = reinterpret_cast<const pgaccel_spatial_recheck_compact_request*>(control);
+  const int8_t* tri_state = request->tri_state;
+  int8_t* final_mask = request->final_mask;
+  uint64_t* uncertain_indices = request->uncertain_indices;
+  uint64_t* uncertain_count_out = request->uncertain_count;
+  const size_t row_count = request->row_count;
   queue.single_task<SpatialResidentCompactKernel>([=]() {
     if (resident_has_failure(failure_flags))
       return;
-    for (size_t row = 0; row < args->row_count; ++row) {
-      const int8_t value = args->tri_state[row];
+    for (size_t row = 0; row < row_count; ++row) {
+      const int8_t value = tri_state[row];
       if (value != -1 && value != 0 && value != 1) {
         resident_record_failure(failure_flags, SPATIAL_RESIDENT_FAILURE_TRISTATE);
         return;
       }
     }
     uint64_t uncertain_count = 0;
-    for (size_t row = 0; row < args->row_count; ++row) {
-      const int8_t value = args->tri_state[row];
-      args->final_mask[row] = value == 1 ? 1 : -1;
+    for (size_t row = 0; row < row_count; ++row) {
+      const int8_t value = tri_state[row];
+      final_mask[row] = value == 1 ? 1 : -1;
       if (value == 0)
-        args->uncertain_indices[uncertain_count++] = static_cast<uint64_t>(row);
+        uncertain_indices[uncertain_count++] = static_cast<uint64_t>(row);
     }
-    *args->uncertain_count = uncertain_count;
+    *uncertain_count_out = uncertain_count;
   });
   queue.wait_and_throw();
   pgaccel_record_gpu_exec();
@@ -2567,34 +2622,40 @@ pgaccel_spatial_recheck_patch_launch(const pgaccel_spatial_recheck_patch_request
                                request->patch_count, sizeof(int8_t), alignof(int8_t), &spans) ||
       !resident_add_exact_span(queue, request->final_mask, request->final_mask_bytes,
                                request->row_count, sizeof(int8_t), alignof(int8_t), &spans) ||
-      !resident_spans_are_pairwise_disjoint(spans) ||
-      !resident_validate_workspace(queue, workspace, spans, nullptr, 0)) {
+      !resident_spans_are_pairwise_disjoint(spans) || workspace == nullptr ||
+      !resident_validate_workspace(
+          queue, workspace->abi_version, workspace->flags, workspace->control,
+          workspace->control_bytes, workspace->failure_flags, workspace->failure_flags_bytes,
+          spans, nullptr, 0)) {
     *detail = PGACCEL_SPATIAL_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
   }
-  resident_stage_control(queue, *workspace, *request, true);
-  uint8_t* control = workspace->control;
   uint32_t* failure_flags = workspace->failure_flags;
-  const auto* args = reinterpret_cast<const pgaccel_spatial_recheck_patch_request*>(control);
+  const uint64_t* indices = request->indices;
+  const int8_t* results = request->results;
+  int8_t* final_mask = request->final_mask;
+  const size_t row_count = request->row_count;
+  const size_t patch_count = request->patch_count;
+  resident_stage_control(queue, *workspace, *request, true);
   queue.single_task<SpatialResidentPatchKernel>([=]() {
     if (resident_has_failure(failure_flags))
       return;
     uint64_t previous = 0;
-    for (size_t patch = 0; patch < args->patch_count; ++patch) {
-      const uint64_t index = args->indices[patch];
-      if (index >= args->row_count || (patch != 0 && index <= previous)) {
+    for (size_t patch = 0; patch < patch_count; ++patch) {
+      const uint64_t index = indices[patch];
+      if (index >= row_count || (patch != 0 && index <= previous)) {
         resident_record_failure(failure_flags, SPATIAL_RESIDENT_FAILURE_RECHECK_INDEX);
         return;
       }
-      const int8_t value = args->results[patch];
+      const int8_t value = results[patch];
       if (value != -1 && value != 1) {
         resident_record_failure(failure_flags, SPATIAL_RESIDENT_FAILURE_RECHECK_PATCH);
         return;
       }
       previous = index;
     }
-    for (size_t patch = 0; patch < args->patch_count; ++patch)
-      args->final_mask[args->indices[patch]] = args->results[patch];
+    for (size_t patch = 0; patch < patch_count; ++patch)
+      final_mask[indices[patch]] = results[patch];
   });
   queue.wait_and_throw();
   pgaccel_record_gpu_exec();
