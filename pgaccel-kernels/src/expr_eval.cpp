@@ -948,7 +948,7 @@ static StagedExprDispatch* stage_dispatch(sycl::queue& q, const pgaccel_expr_pro
     delete s;
     return nullptr;
   }
-  std::memcpy(s->d_inst, program->instructions,
+  std::memcpy(s->d_inst, static_cast<const void*>(program->instructions),
               program->inst_count * sizeof(pgaccel_expr_instruction));
 
   // Stage constant pool.
@@ -958,7 +958,8 @@ static StagedExprDispatch* stage_dispatch(sycl::queue& q, const pgaccel_expr_pro
       delete s;
       return nullptr;
     }
-    std::memcpy(s->d_const_pool, program->const_pool, program->const_count * sizeof(pgaccel_val));
+    std::memcpy(s->d_const_pool, static_cast<const void*>(program->const_pool),
+                program->const_count * sizeof(pgaccel_val));
   }
 
   // Stage program struct itself (with shared-mem pointers).
@@ -999,7 +1000,8 @@ static StagedExprDispatch* stage_dispatch(sycl::queue& q, const pgaccel_expr_pro
           delete s;
           return nullptr;
         } else {
-          std::memcpy(buf, batch->col_data[c], batch->num_rows * esz);
+          std::memcpy(buf, static_cast<const void*>(batch->col_data[c]),
+                      batch->num_rows * esz);
           s->d_col_data[c] = buf;
           s->d_data_buffers[c] = buf;
         }
@@ -1015,7 +1017,7 @@ static StagedExprDispatch* stage_dispatch(sycl::queue& q, const pgaccel_expr_pro
           delete s;
           return nullptr;
         } else {
-          std::memcpy(nbuf, batch->col_nulls[c], batch->num_rows);
+          std::memcpy(nbuf, static_cast<const void*>(batch->col_nulls[c]), batch->num_rows);
           s->d_col_nulls[c] = nbuf;
           s->d_null_buffers[c] = nbuf;
         }
@@ -1071,24 +1073,26 @@ pgaccel_status pgaccel_expr_eval_predicate(const pgaccel_expr_program* program,
   if (batch->num_rows == 0)
     return PGACCEL_OK;
 
-  // Documented contract (pgaccel_expr.h): results is fully populated even
-  // on error, defaulting to UNCERTAIN (== 0).
-  static_assert(PGACCEL_EXPR_UNCERTAIN == 0);
-  std::memset(results, 0, batch->num_rows * sizeof(int8_t));
-
   sycl::queue* q = pgaccel_get_queue();
-  if (q == nullptr)
+  if (q == nullptr) {
+    static_assert(PGACCEL_EXPR_UNCERTAIN == 0);
+    std::memset(static_cast<void*>(results), 0, batch->num_rows * sizeof(int8_t));
     return PGACCEL_ERROR_NO_DEVICE;
+  }
 
   try {
     std::unique_ptr<StagedExprDispatch> s(stage_dispatch(*q, program, batch));
-    if (s == nullptr)
+    if (s == nullptr) {
+      std::memset(static_cast<void*>(results), 0, batch->num_rows * sizeof(int8_t));
       return PGACCEL_OOM;
+    }
 
     int8_t* d_results = sycl::malloc_device<int8_t>(batch->num_rows, *q);
     UsmGuard results_guard{*q, d_results};
-    if (d_results == nullptr)
+    if (d_results == nullptr) {
+      std::memset(static_cast<void*>(results), 0, batch->num_rows * sizeof(int8_t));
       return PGACCEL_OOM;
+    }
 
     pgaccel_expr_program* d_prog = s->d_prog;
     pgaccel_batch* d_batch = s->d_batch;
@@ -1111,8 +1115,10 @@ pgaccel_status pgaccel_expr_eval_predicate(const pgaccel_expr_program* program,
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const std::exception& e) {
+    std::memset(static_cast<void*>(results), 0, batch->num_rows * sizeof(int8_t));
     return pgaccel_kernel_failure("pgaccel_expr_eval_predicate", &e);
   } catch (...) {
+    std::memset(static_cast<void*>(results), 0, batch->num_rows * sizeof(int8_t));
     return pgaccel_kernel_failure("pgaccel_expr_eval_predicate", nullptr);
   }
 }

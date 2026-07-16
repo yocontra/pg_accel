@@ -217,7 +217,7 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
             ),
             allow_zero_success=True,
             output_policy="allocation",
-            allowed_output_calls=("free", "pgaccel_expr_device_alloc"),
+            allowed_output_calls=("pgaccel_expr_device_alloc",),
             transfer_contract="allocation_copy",
         ),
         "pgaccel_expr_device_copy_from_host": LifecycleContract(
@@ -258,7 +258,7 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
             allow_zero_success=True,
             output_policy="allocation",
             allow_ternary=True,
-            allowed_output_calls=("free",),
+            allowed_output_calls=(),
         ),
         "pgaccel_spatial_workspace_finish": LifecycleContract(
             "post-dispatch failure-flag readback",
@@ -1752,7 +1752,7 @@ def _parameter_transfer_indices(
         and guarded_host_pointer_position < len(parameter_names)
         else None
     )
-    pointer_types: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+    pointer_types: dict[str, list[tuple[str, str, int, bool]]] = defaultdict(list)
     for method_index in range(function.body_open + 1, function.body_close):
         if (
             tokens[method_index].value != "get_pointer_type"
@@ -1771,7 +1771,26 @@ def _parameter_transfer_indices(
         arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
         if len(arguments) != 2:
             continue
-        pointer = _exact_argument_identifier(tokens, arguments[0])
+        pointer_values = [token.value for token in tokens[slice(*arguments[0])]]
+        if guarded_host_pointer_position == 0:
+            pointer = (
+                guarded_pointer
+                if pointer_values
+                == [
+                    "static_cast",
+                    "<",
+                    "const",
+                    "void",
+                    "*",
+                    ">",
+                    "(",
+                    guarded_pointer,
+                    ")",
+                ]
+                else None
+            )
+        else:
+            pointer = _exact_argument_identifier(tokens, arguments[0])
         if pointer != guarded_pointer:
             continue
         context_values = [token.value for token in tokens[slice(*arguments[1])]]
@@ -1800,7 +1819,14 @@ def _parameter_transfer_indices(
             and tokens[index].value not in CALL_KEYWORDS
         ]
         if names:
-            pointer_types[names[-1]].append((pointer, receiver, method_index))
+            pointer_types[names[-1]].append(
+                (
+                    pointer,
+                    receiver,
+                    method_index,
+                    any(tokens[index].value == "const" for index in range(left, equals)),
+                )
+            )
 
     def guarded_shared_or_host(method_index: int) -> str | None:
         for region in regions:
@@ -1844,11 +1870,19 @@ def _parameter_transfer_indices(
                     continue
                 matching_receivers = {
                     receiver
-                    for pointer, receiver, declaration in pointer_types.get(
+                    for pointer, receiver, declaration, immutable in pointer_types.get(
                         allocation, ()
                     )
                     if pointer == guarded_pointer
+                    and immutable
                     and declaration < method_index
+                    and sum(
+                        1
+                        for index in range(declaration + 1, method_index)
+                        if tokens[index].value == allocation
+                        and _unqualified_output_identifier(tokens, index)
+                    )
+                    == 2
                     and _context_dominates(
                         _context(declaration, regions), _context(method_index, regions)
                     )
@@ -1869,7 +1903,11 @@ def _parameter_transfer_indices(
         receiver = guarded_shared_or_host(method_index)
         if receiver is not None:
             guarded_host_calls[method_index] = receiver
-    guarded_receivers = set(guarded_host_calls.values())
+    guarded_receiver = (
+        next(iter(guarded_host_calls.values()))
+        if len(guarded_host_calls) == 1
+        else None
+    )
 
     for method_index in range(function.body_open + 1, function.body_close):
         if tokens[method_index].value != "memcpy" or _is_inside(
@@ -1906,7 +1944,7 @@ def _parameter_transfer_indices(
                     tokens, function, receiver, method_index, forward
                 ) != "queue" or not _call_is_awaited(
                     tokens, call[1], function.body_close, forward
-                ) or (guarded_receivers and receiver not in guarded_receivers):
+                ) or (guarded_host_calls and receiver != guarded_receiver):
                     continue
                 result.append(method_index)
             elif method_index in guarded_host_calls:
@@ -4272,6 +4310,15 @@ def _device_queue_orchestration_loops(
     indexed_calls = _indexed_calls(tokens, function, lambda_ranges)
     proven: set[int] = set()
     queue_methods = DISPATCH_METHODS | {"memcpy", "memset"}
+    parameter_names, _ = _parameter_names(tokens, function)
+    zero_parameters = _zero_work_parameter_names(tokens, function, parameter_names)
+    nonzero_guarded_counts = {
+        value
+        for region in regions
+        if region.zero_work
+        for value in region.condition
+        if value in zero_parameters
+    }
     for loop_index in range(function.body_open + 1, function.body_close):
         if tokens[loop_index].value not in {"for", "while", "do"} or _is_inside(
             loop_index, lambda_ranges
@@ -4370,12 +4417,24 @@ def _device_queue_orchestration_loops(
                 continue
             unsafe = True
             break
-        if tokens[loop_index].value in {"for", "while"} and not any(
-            body_start <= launch.index <= body_end
-            and bool(launch.roots & device_output_roots)
-            for launch in kernel_writes
-        ):
-            continue
+        if tokens[loop_index].value in {"for", "while"}:
+            condition_open = loop_index + 1
+            condition_values = {
+                tokens[index].value
+                for index in range(condition_open + 1, forward[condition_open])
+            }
+            direct_full_counts = {
+                count
+                for launch in kernel_writes
+                if body_start <= launch.index <= body_end
+                and bool(launch.roots & device_output_roots)
+                for count in launch.full_count_names
+            }
+            if direct_full_counts and not (
+                direct_full_counts.intersection(condition_values)
+                or nonzero_guarded_counts.intersection(condition_values)
+            ):
+                continue
         if not unsafe:
             proven.add(loop_index)
     return proven
@@ -4830,6 +4889,7 @@ def _mutable_pointer_member_write_positions(
     tokens: Sequence[Token],
     function: Function,
     record_members: Mapping[str, frozenset[str]],
+    trusted_observer_calls: frozenset[str],
 ) -> frozenset[int]:
     """Find parameters whose const record still exposes writable pointee storage."""
 
@@ -4875,7 +4935,7 @@ def _mutable_pointer_member_write_positions(
             )
             observer_positions = (
                 frozenset({1, 2})
-                if indexed.call.name in {"std::memcpy", "std::memmove"}
+                if indexed.call.name in trusted_observer_calls
                 else frozenset()
             )
             for argument_position, (argument_left, argument_right) in enumerate(
@@ -5564,6 +5624,93 @@ def _failure_terminal_neutral_write_indices(
             ):
                 continue
             safe.add(index)
+            break
+    return safe
+
+
+def _failure_terminal_neutral_memset_calls(
+    tokens: Sequence[Token],
+    function: Function,
+    mutable: set[str],
+    lambda_ranges: Sequence[tuple[int, int]],
+    regions: Sequence[_Region],
+    trusted_std_memset: bool,
+) -> set[int]:
+    """Accept an exact zero fill only on paths that must return failure."""
+
+    if not trusted_std_memset:
+        return set()
+    forward, _ = _delimiter_pairs(tokens)
+    returns = [
+        (index, _return_is_explicit_failure(function, expression))
+        for index, expression in _returns(tokens, function, lambda_ranges)
+        if _index_is_reachable(tokens, function, index, regions, lambda_ranges)
+    ]
+
+    def contexts_compatible(
+        left: tuple[tuple[str, str], ...], right: tuple[tuple[str, str], ...]
+    ) -> bool:
+        right_map = dict(right)
+        return all(
+            key not in right_map or right_map[key] == branch for key, branch in left
+        )
+
+    safe: set[int] = set()
+    for method_index in range(function.body_open + 1, function.body_close):
+        if (
+            tokens[method_index].value != "memset"
+            or method_index < 2
+            or tokens[method_index - 2].value != "std"
+            or tokens[method_index - 1].value != "::"
+            or _is_inside(method_index, lambda_ranges)
+        ):
+            continue
+        call = _method_lparen(tokens, method_index, function.body_close, forward)
+        if call is None:
+            continue
+        arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
+        if len(arguments) != 3 or not _transfer_size_is_positive(
+            tokens, *arguments[2], forward
+        ):
+            continue
+        destination_values = [
+            token.value for token in tokens[arguments[0][0] : arguments[0][1]]
+        ]
+        destinations = {
+            root
+            for root in mutable
+            if destination_values == [root]
+            or destination_values
+            == ["static_cast", "<", "void", "*", ">", "(", root, ")"]
+        }
+        value_tokens = [
+            token.value for token in tokens[arguments[1][0] : arguments[1][1]]
+        ]
+        if len(destinations) != 1 or value_tokens != ["0"]:
+            continue
+        call_context = _context(method_index, regions)
+        candidates = [
+            return_index
+            for return_index, failure in returns
+            if failure
+            and method_index < return_index
+            and _context_dominates(_context(return_index, regions), call_context)
+        ]
+        for return_index in candidates:
+            if any(
+                method_index < other_index < return_index
+                and not failure
+                and contexts_compatible(_context(other_index, regions), call_context)
+                for other_index, failure in returns
+            ):
+                continue
+            if any(
+                tokens[cursor].value in {"break", "continue", "goto", "throw"}
+                and not _is_inside(cursor, lambda_ranges)
+                for cursor in range(method_index + 1, return_index)
+            ):
+                continue
+            safe.add(method_index)
             break
     return safe
 
@@ -7575,7 +7722,14 @@ class _PathAuditor:
                 )
             return covered
 
-        safe_initializer_calls: set[int] = set()
+        safe_initializer_calls = _failure_terminal_neutral_memset_calls(
+            self.tokens,
+            function,
+            mutable,
+            lambda_ranges,
+            regions,
+            not self.by_name.get("memset"),
+        )
         for method_index in range(function.body_open + 1, function.body_close):
             if self.tokens[method_index].value != "memset" or _is_inside(
                 method_index, lambda_ranges
@@ -7590,6 +7744,7 @@ class _PathAuditor:
                 method_index >= 2
                 and self.tokens[method_index - 2].value == "std"
                 and self.tokens[method_index - 1].value == "::"
+                and not self.by_name.get("memset")
             )
             is_queue_memset = bool(
                 method_index >= 2
@@ -7668,12 +7823,11 @@ class _PathAuditor:
                     for value in size_values
                 )
             }
-            exact_copyback_size_indices = {
+            exact_destination_copybacks = {
                 transfer_index
                 for transfer_index in copyback_destinations
                 if (
-                    transfer_index > method_index
-                    and (
+                    (
                         transfer_call := _method_lparen(
                             self.tokens,
                             transfer_index,
@@ -7682,7 +7836,7 @@ class _PathAuditor:
                         )
                     )
                     is not None
-                    and len(
+                    and (
                         transfer_arguments := _call_argument_ranges(
                             self.tokens,
                             transfer_call[0],
@@ -7690,28 +7844,23 @@ class _PathAuditor:
                             self.forward,
                         )
                     )
-                    == 3
-                    and tuple(size_values)
-                    == tuple(
+                    and [
                         token.value
                         for token in self.tokens[
-                            transfer_arguments[2][0] : transfer_arguments[2][1]
+                            transfer_arguments[0][0] : transfer_arguments[0][1]
                         ]
-                    )
+                    ]
+                    == [initialized_root]
                 )
             }
-            if (
-                not scalar_size
-                and not full_size_counts
-                and not exact_copyback_size_indices
-            ):
+            if not scalar_size and not full_size_counts:
                 continue
             if any(
                 transfer_index > method_index
+                and transfer_index in exact_destination_copybacks
                 and initialized.intersection(destinations)
                 and (
                     scalar_size
-                    or transfer_index in exact_copyback_size_indices
                     or any(
                         launch.index < transfer_index
                         and launch.awaited
@@ -7797,6 +7946,15 @@ class _PathAuditor:
                 self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
             )
         )
+        if (
+            contract is not None
+            and getattr(contract, "transfer_contract", "none") == "parameters"
+        ):
+            contract_output_call_hazards.extend(
+                f"local definition shadows trusted transfer helper {name}"
+                for name in ("memcpy", "get_pointer_type")
+                if self.by_name.get(name)
+            )
         control_records = [
             (index, token.value, token.line)
             for index, token in enumerate(self.tokens)
@@ -7873,7 +8031,14 @@ class _PathAuditor:
                 if candidate not in self.member_write_position_cache:
                     candidate_member_write_positions = (
                         _mutable_pointer_member_write_positions(
-                            self.tokens, candidate, self.record_members
+                            self.tokens,
+                            candidate,
+                            self.record_members,
+                            frozenset(
+                                name
+                                for name in {"std::memcpy", "std::memmove"}
+                                if not self.by_name.get(name.rsplit("::", 1)[-1])
+                            ),
                         )
                     )
                     self.member_write_position_cache[candidate] = (

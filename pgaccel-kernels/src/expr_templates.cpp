@@ -1845,7 +1845,8 @@ extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(void* dst, const vo
     // blit for host-visible memory is unnecessary and can enter CoreAnalytics
     // from a PostgreSQL post-fork backend. The allocation is host-authored and
     // callers synchronize each device dispatch before replacing its contents.
-    const sycl::usm::alloc allocation = sycl::get_pointer_type(dst, q->get_context());
+    const sycl::usm::alloc allocation =
+        sycl::get_pointer_type(static_cast<const void*>(dst), q->get_context());
     if (allocation == sycl::usm::alloc::shared || allocation == sycl::usm::alloc::host) {
       std::memcpy(dst, src, bytes);
       return PGACCEL_OK;
