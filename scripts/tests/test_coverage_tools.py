@@ -2556,7 +2556,10 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             ),
             ("input.close()", "return"),
             ("if (input.fail())", "if (false)"),
-            ("actual != data", "false"),
+            (
+                "if (input.bad() || actual != data)",
+                "if (actual != data)",
+            ),
             (
                 'fail_device_profile_flush("invalid device profile counter buffer")',
                 "return",

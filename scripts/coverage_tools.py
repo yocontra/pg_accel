@@ -4927,7 +4927,7 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         "if (::rename(temp_path.c_str(), path.c_str()) != 0)",
         "std::filesystem::file_size(temp_path, ec)",
         "std::ifstream input{temp_path, std::ios::binary}",
-        "actual != data",
+        "if (input.bad() || actual != data)",
         "input.close()",
         "if (input.fail())",
         'fail_device_profile_flush("invalid device profile counter buffer")',
