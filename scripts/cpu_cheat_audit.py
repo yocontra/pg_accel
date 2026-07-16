@@ -7561,15 +7561,63 @@ def _bounded_detail(parts: Iterable[str], limit: int = 6000) -> str:
     )
 
 
+def _is_exact_gpu_exec_observer_definition(
+    tokens: Sequence[Token], function: Function
+) -> bool:
+    """Bind counter observability to its immutable side-effect-only definition."""
+
+    if (
+        function.name != "pgaccel_record_gpu_exec"
+        or function.is_template
+        or function.parameter_count != 0
+        or _canonical_signature_tokens(function.return_spelling)[-1:] != ("void",)
+        or [
+            token.value
+            for token in tokens[function.body_open + 1 : function.body_close]
+        ]
+        != ["tl_gpu_exec_count", "++", ";"]
+    ):
+        return False
+    declaration = (
+        "static",
+        "thread_local",
+        "uint64_t",
+        "tl_gpu_exec_count",
+        "=",
+        "0",
+        ";",
+    )
+    values = [token.value for token in tokens]
+    return sum(
+        tuple(values[index : index + len(declaration)]) == declaration
+        for index in range(len(values) - len(declaration) + 1)
+    ) == 1
+
+
+def _has_unique_gpu_exec_observer_definition(
+    parsed_sources: Sequence[tuple[Sequence[Token], Sequence[Function]]],
+) -> bool:
+    candidates = [
+        (tokens, function)
+        for tokens, functions in parsed_sources
+        for function in functions
+        if function.name == "pgaccel_record_gpu_exec"
+    ]
+    return bool(
+        len(candidates) == 1
+        and _is_exact_gpu_exec_observer_definition(*candidates[0])
+    )
+
+
 def _proven_device_selection_ternaries(
     tokens: Sequence[Token],
     function: Function,
     output_roots: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
     call_proofs: Mapping[int, tuple[_IndexedCall, _Proof | None, str | None]],
-    call_output_roots: Mapping[int, frozenset[str]],
+    call_output_root_variants: Mapping[int, tuple[frozenset[str], ...]],
     forward: dict[int, int],
-) -> set[int]:
+) -> dict[int, tuple[frozenset[str], ...]]:
     """Recognize exact ternaries whose every successful arm is device-proven."""
 
     template_boolean_parameters = {
@@ -7608,7 +7656,7 @@ def _proven_device_selection_ternaries(
 
     def exact_device_call(
         left: int, right: int
-    ) -> tuple[_IndexedCall, frozenset[str]] | None:
+    ) -> tuple[_IndexedCall, tuple[frozenset[str], ...]] | None:
         left, right = strip_parentheses(left, right)
         for indexed, proof, _ in call_proofs.values():
             if (
@@ -7618,9 +7666,9 @@ def _proven_device_selection_ternaries(
                 or indexed.rparen + 1 != right
             ):
                 continue
-            roots = call_output_roots.get(indexed.index, frozenset())
-            if roots:
-                return indexed, roots
+            variants = call_output_root_variants.get(indexed.index, ())
+            if variants and all(variant for variant in variants):
+                return indexed, variants
         return None
 
     def exact_failure(left: int, right: int) -> bool:
@@ -7655,7 +7703,7 @@ def _proven_device_selection_ternaries(
             for token in tokens[left:right]
         )
 
-    safe: set[int] = set()
+    safe: dict[int, tuple[frozenset[str], ...]] = {}
     for question in range(function.body_open + 1, function.body_close):
         if tokens[question].value != "?" or _is_inside(question, lambda_ranges):
             continue
@@ -7721,20 +7769,25 @@ def _proven_device_selection_ternaries(
             and exact_template_constant(question + 1, colon)
             and exact_template_constant(colon + 1, end)
         ):
-            safe.add(question)
+            safe[question] = ()
             continue
 
         true_call = exact_device_call(question + 1, colon)
         false_call = exact_device_call(colon + 1, end)
         if true_call is not None and false_call is not None:
-            if true_call[1] == false_call[1]:
-                safe.add(question)
+            if set(true_call[1]) == set(false_call[1]):
+                safe[question] = tuple(
+                    sorted(
+                        set(true_call[1]) | set(false_call[1]),
+                        key=lambda item: (len(item), sorted(item)),
+                    )
+                )
             continue
         if true_call is not None and exact_failure(colon + 1, end):
-            safe.add(question)
+            safe[question] = true_call[1]
             continue
         if false_call is not None and exact_failure(question + 1, colon):
-            safe.add(question)
+            safe[question] = false_call[1]
     return safe
 
 
@@ -7748,6 +7801,7 @@ class _PathAuditor:
         functions: Sequence[Function],
         record_members: Mapping[str, frozenset[str]],
         external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
+        trusted_gpu_exec_observer: bool = False,
     ):
         self.path = path
         self.tokens = tokens
@@ -7758,6 +7812,7 @@ class _PathAuditor:
         for function in functions:
             self.by_name[function.name].append(function)
         self.external_proofs = external_proofs or {}
+        self.trusted_gpu_exec_observer = trusted_gpu_exec_observer
         self.cache: dict[Function, _Proof] = {}
         self.member_write_position_cache: dict[Function, frozenset[int]] = {}
 
@@ -7845,6 +7900,9 @@ class _PathAuditor:
         returns = _returns(self.tokens, function, lambda_ranges)
         indexed_calls = _indexed_calls(self.tokens, function, lambda_ranges)
         propagated_failure_returns: set[int] = set()
+        helper_evidence_contexts: dict[
+            int, tuple[tuple[str, str], ...]
+        ] = {}
 
         def call_start(indexed: _IndexedCall) -> int:
             start = indexed.index
@@ -7915,6 +7973,50 @@ class _PathAuditor:
             if not declarations:
                 return False
             return max(declarations, key=lambda item: (item[0], item[1]))[2]
+
+        def exact_bool_local(name: str, before: int) -> bool:
+            """Require the active declaration to be an exact builtin bool."""
+
+            brace_ranges = [
+                (left, right)
+                for left, right in self.forward.items()
+                if self.tokens[left].value == "{"
+            ]
+            declarations: list[tuple[int, int, bool]] = []
+            qualifiers = {"const", "volatile"}
+            for index in range(function.signature_start, before):
+                if (
+                    self.tokens[index].value != name
+                    or _declaration_kind(self.tokens, index, function) is None
+                ):
+                    continue
+                cursor = index - 1
+                while (
+                    cursor >= function.signature_start
+                    and self.tokens[cursor].value in qualifiers
+                ):
+                    cursor -= 1
+                scope = _scope_for(index, brace_ranges)
+                if scope[0] < before < scope[1]:
+                    declarations.append(
+                        (
+                            scope[0],
+                            index,
+                            cursor >= 0 and self.tokens[cursor].value == "bool",
+                        )
+                    )
+            if not declarations:
+                return False
+            return max(declarations, key=lambda item: (item[0], item[1]))[2]
+
+        def gpu_exec_observer_call_is_trusted(call_index: int) -> bool:
+            if not self.trusted_gpu_exec_observer:
+                return False
+            return not any(
+                self.tokens[index].value == "pgaccel_record_gpu_exec"
+                and _declaration_kind(self.tokens, index, function) is not None
+                for index in range(function.signature_start, call_index)
+            )
 
         def exact_call_assignment(
             indexed: _IndexedCall,
@@ -8005,20 +8107,108 @@ class _PathAuditor:
                         inner_right += 1
                         break
                     inner_right += 1
+            if inner_right - inner_left < 3:
+                return False
+            return_indices = [
+                index
+                for index in range(inner_left, inner_right)
+                if self.tokens[index].value == "return"
+                and not _is_inside(index, lambda_ranges)
+            ]
+            if len(return_indices) != 1:
+                return False
+            return_index = return_indices[0]
             if (
-                inner_right - inner_left < 3
-                or self.tokens[inner_left].value != "return"
-                or self.tokens[inner_right - 1].value != ";"
+                self.tokens[inner_right - 1].value != ";"
+                or any(
+                    self.tokens[index].value
+                    in {"if", "switch", "for", "while", "do", "goto", "try", "catch", "?"}
+                    for index in range(inner_left, return_index)
+                )
+                or (
+                    propagated_status is not None
+                    and any(
+                        self.tokens[index].value == propagated_status
+                        for index in range(inner_left, return_index)
+                    )
+                )
             ):
                 return False
-            expression = self.tokens[inner_left + 1 : inner_right - 1]
+            expression = self.tokens[return_index + 1 : inner_right - 1]
             propagates_failure = bool(
                 propagated_status is not None
                 and [token.value for token in expression] == [propagated_status]
             )
             if propagates_failure:
-                propagated_failure_returns.add(inner_left)
+                propagated_failure_returns.add(return_index)
             return _return_is_explicit_failure(function, expression) or propagates_failure
+
+        def directly_guarded_false_call(indexed: _IndexedCall) -> bool:
+            candidates = [
+                lparen
+                for lparen, rparen in self.forward.items()
+                if self.tokens[lparen].value == "("
+                and lparen < indexed.index < indexed.rparen < rparen
+                and lparen > function.body_open
+                and self.tokens[lparen - 1].value == "if"
+            ]
+            if not candidates:
+                return False
+            condition = max(candidates)
+            close = self.forward[condition]
+            left, right = strip_parentheses(condition + 1, close)
+            return bool(
+                right > left
+                and self.tokens[left].value == "!"
+                and left + 1 == call_start(indexed)
+                and right == indexed.rparen + 1
+                and failure_guard_body(condition - 1)
+            )
+
+        def assigned_bool_failure_guard(indexed: _IndexedCall) -> bool:
+            assignment = exact_call_assignment(indexed, pointer_target=False)
+            if assignment is None:
+                return False
+            target, statement_end = assignment
+            if not exact_bool_local(target, indexed.index):
+                return False
+            call_context = _context(indexed.index, regions)
+            for guard in range(statement_end + 1, function.body_close):
+                if self.tokens[guard].value != "if":
+                    continue
+                condition = guard + 1
+                close = self.forward.get(condition)
+                if close is None:
+                    continue
+                values = _strip_condition_parentheses(
+                    [token.value for token in self.tokens[condition + 1 : close]]
+                )
+                if values != ("!", target) or not failure_guard_body(guard):
+                    continue
+                guard_context = _context(guard, regions)
+                if not _context_dominates(guard_context, call_context):
+                    continue
+                incompatible = False
+                for occurrence in range(statement_end + 1, guard):
+                    occurrence_context = dict(_context(occurrence, regions))
+                    compatible = all(
+                        occurrence_context.get(key, branch) == branch
+                        for key, branch in call_context
+                    )
+                    if self.tokens[occurrence].value == "return" and compatible:
+                        incompatible = True
+                        break
+                    if (
+                        self.tokens[occurrence].value != target
+                        or not _unqualified_output_identifier(self.tokens, occurrence)
+                    ):
+                        continue
+                    if compatible:
+                        incompatible = True
+                        break
+                if not incompatible:
+                    return True
+            return False
 
         def guarded_status_call(indexed: _IndexedCall) -> bool:
             # Exact assignment followed immediately by `if (status != OK) return ...`.
@@ -8062,11 +8252,84 @@ class _PathAuditor:
                 return False
             target, statement_end = assignment
             return_index = statement_end + 1
-            return bool(
+            if (
                 return_index + 2 < function.body_close
                 and self.tokens[return_index].value == "return"
                 and self.tokens[return_index + 1].value == target
                 and self.tokens[return_index + 2].value == ";"
+            ):
+                return True
+            if return_index >= function.body_close or self.tokens[return_index].value != "if":
+                return False
+            condition = return_index + 1
+            close = self.forward.get(condition)
+            if close is None:
+                return False
+            values = _strip_condition_parentheses(
+                [token.value for token in self.tokens[condition + 1 : close]]
+            )
+            if values not in (
+                (target, "==", "PGACCEL_OK"),
+                ("PGACCEL_OK", "==", target),
+            ):
+                return False
+            if any(
+                self.tokens[index].value == "operator"
+                and self.tokens[index + 1].value == "=="
+                for index in range(len(self.tokens) - 1)
+            ):
+                return False
+            observer_left = close + 1
+            if self.tokens[observer_left].value == "{" and observer_left in self.forward:
+                observer_right = self.forward[observer_left]
+                observer_left += 1
+                body = [
+                    token.value
+                    for token in self.tokens[observer_left:observer_right]
+                ]
+                proven = bool(
+                    body
+                    == [
+                        "pgaccel_record_gpu_exec",
+                        "(",
+                        ")",
+                        ";",
+                        "return",
+                        target,
+                        ";",
+                    ]
+                    and _context_dominates(
+                        _context(indexed.index, regions),
+                        _context(observer_left, regions),
+                    )
+                    and gpu_exec_observer_call_is_trusted(observer_left)
+                )
+                if proven:
+                    helper_evidence_contexts[indexed.index] = _context(
+                        observer_left, regions
+                    )
+                return proven
+            else:
+                observer_right = observer_left
+                while (
+                    observer_right < function.body_close
+                    and self.tokens[observer_right].value != ";"
+                ):
+                    observer_right += 1
+                observer_right += 1
+            if [
+                token.value for token in self.tokens[observer_left:observer_right]
+            ] != ["pgaccel_record_gpu_exec", "(", ")", ";"]:
+                return False
+            if not gpu_exec_observer_call_is_trusted(observer_left):
+                return False
+            return bool(
+                observer_right + 2 < function.body_close
+                and self.tokens[observer_right].value == "return"
+                and self.tokens[observer_right + 1].value == target
+                and self.tokens[observer_right + 2].value == ";"
+                and _context(observer_right, regions)
+                == _context(indexed.index, regions)
             )
 
         def helper_execution_is_proven(
@@ -8103,8 +8366,11 @@ class _PathAuditor:
                 if isinstance(candidate, Function)
                 else "pgaccel_status" in canonical_return
             )
-            return is_status and (
-                guarded_status_call(indexed) or propagated_status_call(indexed)
+            if is_status:
+                return guarded_status_call(indexed) or propagated_status_call(indexed)
+            return canonical_return[-1:] == ("bool",) and (
+                directly_guarded_false_call(indexed)
+                or assigned_bool_failure_guard(indexed)
             )
         caller_provenance = _local_usm_provenance(
             self.tokens, function, lambda_ranges
@@ -8120,6 +8386,49 @@ class _PathAuditor:
         )
         output_roots = hazard_output_roots | aliases
         proof_output_roots = output_roots
+        destructor_types = {
+            candidate.name
+            for candidate in self.functions
+            if candidate.name_index > 0
+            and self.tokens[candidate.name_index - 1].value == "~"
+        }
+        raii_output_capture_lines: list[int] = []
+        for type_index in range(function.body_open + 1, function.body_close - 2):
+            if (
+                self.tokens[type_index].value not in destructor_types
+                or _is_inside(type_index, lambda_ranges)
+                or self.tokens[type_index + 1].kind != "identifier"
+                or _declaration_kind(self.tokens, type_index + 1, function) is None
+                or self.tokens[type_index + 2].value not in {"{", "(", "="}
+            ):
+                continue
+            initializer = type_index + 2
+            if self.tokens[initializer].value in {"{", "("}:
+                initializer_end = self.forward.get(initializer)
+                if initializer_end is None:
+                    continue
+                initializer_left = initializer + 1
+            else:
+                initializer_left = initializer + 1
+                initializer_end = initializer_left
+                while (
+                    initializer_end < function.body_close
+                    and self.tokens[initializer_end].value != ";"
+                ):
+                    if (
+                        self.tokens[initializer_end].value in {"(", "[", "{"}
+                        and initializer_end in self.forward
+                    ):
+                        initializer_end = self.forward[initializer_end] + 1
+                    else:
+                        initializer_end += 1
+            if _range_references_output(
+                self.tokens,
+                initializer_left,
+                initializer_end,
+                output_roots,
+            ):
+                raii_output_capture_lines.append(self.tokens[type_index].line)
         root_parameter_positions = {
             root: frozenset(
                 parameter_positions[origin]
@@ -8212,7 +8521,9 @@ class _PathAuditor:
                     indexed.index,
                     indexed.call.line,
                     "helper",
-                    _context(indexed.index, regions),
+                    helper_evidence_contexts.get(
+                        indexed.index, _context(indexed.index, regions)
+                    ),
                     frozenset(roots),
                     True,
                 )
@@ -8771,7 +9082,9 @@ class _PathAuditor:
                         f"{indexed.call.name} publishes kernel-derived opaque "
                         f"resource through local {target} at line "
                         f"{indexed.call.line}",
-                        _context(indexed.index, regions),
+                        helper_evidence_contexts.get(
+                            indexed.index, _context(indexed.index, regions)
+                        ),
                     )
                 )
                 helper_resource_may_be_null[indexed.index] = False
@@ -8924,7 +9237,7 @@ class _PathAuditor:
             output_roots,
             lambda_ranges,
             call_proofs,
-            call_output_roots,
+            call_output_root_variants,
             self.forward,
         )
         control_lines = sorted(
@@ -9003,6 +9316,13 @@ class _PathAuditor:
             and self.tokens[index + 1].value == "("
         ]
         counter_lines = sorted({self.tokens[index].line for index in counter_indices})
+        untrusted_counter_lines = sorted(
+            {
+                self.tokens[index].line
+                for index in counter_indices
+                if not gpu_exec_observer_call_is_trusted(index)
+            }
+        )
         if counter_lines:
             classifications.add(
                 "gpu_exec_observability"
@@ -9015,6 +9335,12 @@ class _PathAuditor:
             details.append(
                 "GPU execution counter is observability at line(s) "
                 + ", ".join(map(str, counter_lines))
+            )
+        if untrusted_counter_lines:
+            classifications.update({"untrusted_gpu_observer", "review_required"})
+            details.append(
+                "GPU execution observer lacks one unique exact definition at line(s) "
+                + ", ".join(map(str, untrusted_counter_lines))
             )
 
         orchestration_loops = _device_orchestration_do_loops(
@@ -9148,6 +9474,13 @@ class _PathAuditor:
             classifications.add("output_alias_tracking")
             details.append("ABI output alias(es): " + ", ".join(sorted(aliases)))
 
+        if raii_output_capture_lines:
+            classifications.update({"implicit_raii_output_write", "review_required"})
+            details.append(
+                "local object with a user destructor captures ABI output at line(s) "
+                + ", ".join(map(str, sorted(set(raii_output_capture_lines))))
+            )
+
         if shadow_lines:
             classifications.update({"output_identity_shadowing", "review_required"})
             details.append(
@@ -9239,7 +9572,9 @@ class _PathAuditor:
                         indexed.call.line,
                         "helper",
                         f"{function.name} -> {indexed.call.name} at line {indexed.call.line}: {proof.detail}",
-                        _context(indexed.index, regions),
+                        helper_evidence_contexts.get(
+                            indexed.index, _context(indexed.index, regions)
+                        ),
                         call_output_root_variants[indexed.index],
                     )
                 )
@@ -9355,6 +9690,27 @@ class _PathAuditor:
                 details.append(selected_resource.detail)
                 all_evidence.append(selected_resource)
                 success_output_root_variants.append(frozenset())
+                continue
+
+            selected_ternaries = [
+                (question, variants)
+                for question, variants in safe_ternaries.items()
+                if return_index < question < return_index + len(expression) + 1
+                and variants
+            ]
+            if len(selected_ternaries) == 1:
+                question, variants = selected_ternaries[0]
+                success_output_root_variants.extend(variants)
+                all_evidence.append(
+                    _DispatchEvidence(
+                        question,
+                        self.tokens[question].line,
+                        "device_selection",
+                        "every successful device-selection arm binds the same ABI output",
+                        _context(question, regions),
+                        variants,
+                    )
+                )
                 continue
 
             dominating = [
@@ -9595,6 +9951,8 @@ class _PathAuditor:
 
         hard_failure = bool(
             unsafe_success
+            or untrusted_counter_lines
+            or raii_output_capture_lines
             or host_loop_lines
             or unsafe_write_lines
             or transfer_lines
@@ -9650,11 +10008,17 @@ def _audit_source_literal(
     require_entrypoint: bool = True,
     external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
     inherited_record_members: Mapping[str, frozenset[str]] | None = None,
+    trusted_gpu_exec_observer: bool | None = None,
 ) -> FileAudit:
     try:
         normalized_source, directives = normalize_preprocessor(source)
         tokens = lex_cpp(normalized_source)
         functions = parse_functions(tokens)
+        observer_trusted = (
+            trusted_gpu_exec_observer
+            if trusted_gpu_exec_observer is not None
+            else _has_unique_gpu_exec_observer_definition(((tokens, functions),))
+        )
         type_token_sources = [tokens]
         type_token_sources.extend(
             lex_cpp(include_source)
@@ -9714,7 +10078,14 @@ def _audit_source_literal(
             )
         )
 
-    auditor = _PathAuditor(path, tokens, functions, record_members, external_proofs)
+    auditor = _PathAuditor(
+        path,
+        tokens,
+        functions,
+        record_members,
+        external_proofs,
+        observer_trusted,
+    )
     entrypoint_audits: list[EntrypointAudit] = []
     for entrypoint in sorted(entrypoints, key=lambda function: function.line):
         if entrypoint.name in duplicate_entries:
@@ -9805,6 +10176,7 @@ def audit_source(
     *,
     require_entrypoint: bool = True,
     external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
+    trusted_gpu_exec_observer: bool | None = None,
 ) -> FileAudit:
     """Audit both literal and compiler-expanded main-file source views."""
 
@@ -9813,6 +10185,7 @@ def audit_source(
         source,
         require_entrypoint=require_entrypoint,
         external_proofs=external_proofs,
+        trusted_gpu_exec_observer=trusted_gpu_exec_observer,
     )
     try:
         _, directives = normalize_preprocessor(source)
@@ -9837,6 +10210,7 @@ def audit_source(
             require_entrypoint=require_entrypoint,
             external_proofs=external_proofs,
             inherited_record_members=inherited_record_members,
+            trusted_gpu_exec_observer=trusted_gpu_exec_observer,
         )
     except ParseError as error:
         detail = str(error)
@@ -10073,6 +10447,7 @@ def _external_device_proofs(
 def _audit_paths_once(
     paths: Sequence[pathlib.Path],
     external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
+    trusted_gpu_exec_observer: bool = False,
 ) -> list[FileAudit]:
     audits: list[FileAudit] = []
     for path in paths:
@@ -10088,6 +10463,7 @@ def _audit_paths_once(
                 source,
                 require_entrypoint=False,
                 external_proofs=external_proofs,
+                trusted_gpu_exec_observer=trusted_gpu_exec_observer,
             )
         )
     return audits
@@ -10116,7 +10492,23 @@ def _external_proof_signature(
 
 
 def audit_paths(paths: Sequence[pathlib.Path]) -> list[FileAudit]:
-    audits = _audit_paths_once(paths)
+    parsed_sources: list[tuple[Sequence[Token], Sequence[Function]]] = []
+    observer_parse_failed = False
+    for path in paths:
+        try:
+            normalized, _ = normalize_preprocessor(path.read_text(encoding="utf-8"))
+            tokens = lex_cpp(normalized)
+            parsed_sources.append((tokens, parse_functions(tokens)))
+        except (OSError, UnicodeError, ParseError):
+            observer_parse_failed = True
+            break
+    trusted_gpu_exec_observer = bool(
+        not observer_parse_failed
+        and _has_unique_gpu_exec_observer_definition(parsed_sources)
+    )
+    audits = _audit_paths_once(
+        paths, trusted_gpu_exec_observer=trusted_gpu_exec_observer
+    )
     previous_signature: tuple[tuple[object, ...], ...] = ()
     # Each pass can expose another independently clean wrapper in a cross-file
     # call chain. Proofs are derived only from the preceding complete audit, so
@@ -10128,7 +10520,9 @@ def audit_paths(paths: Sequence[pathlib.Path]) -> list[FileAudit]:
         if not external_proofs or signature == previous_signature:
             break
         previous_signature = signature
-        audits = _audit_paths_once(paths, external_proofs)
+        audits = _audit_paths_once(
+            paths, external_proofs, trusted_gpu_exec_observer
+        )
     if audits and not any(audit.entrypoints for audit in audits):
         first = audits[0]
         finding = Finding(

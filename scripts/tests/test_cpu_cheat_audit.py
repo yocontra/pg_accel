@@ -5070,6 +5070,11 @@ class ResidentV5RegressionTests(unittest.TestCase):
             self.COPYBACK_PRELUDE
             + r"""
             struct Holder { pgaccel_status status; };
+            struct Cleanup {
+              int* out;
+              ~Cleanup() { out[0] = 99; }
+            };
+            static void pgaccel_record_gpu_exec();
             static pgaccel_status write_or_fail(bool fail, int* out) {
               if (fail) return PGACCEL_ERROR;
               sycl::queue q;
@@ -5081,6 +5086,15 @@ class ResidentV5RegressionTests(unittest.TestCase):
             static pgaccel_status always_write(int* out) {
               return write_or_fail(false, out);
             }
+            static bool write_bool_or_fail(bool ready, int* out) {
+              if (!ready) return false;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 8;
+              }).wait_and_throw();
+              return true;
+            }
+            static void force_true(bool& value) { value = true; }
             extern "C" pgaccel_status pgaccel_helper_ignored(int* out) {
               write_or_fail(false, out);
               return PGACCEL_OK;
@@ -5117,12 +5131,59 @@ class ResidentV5RegressionTests(unittest.TestCase):
               }
               return PGACCEL_OK;
             }
+            extern "C" pgaccel_status pgaccel_helper_nested_success_guard(
+                int* out) {
+              pgaccel_status status = write_or_fail(false, out);
+              if (status != PGACCEL_OK) {
+                { return PGACCEL_OK; }
+                return status;
+              }
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_raii_cleanup(
+                bool fail, int* out) {
+              Cleanup cleanup{out};
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
             extern "C" pgaccel_status pgaccel_helper_mutated_guard(int* out) {
               pgaccel_status status = write_or_fail(false, out);
               if (status != PGACCEL_OK) {
                 status = PGACCEL_OK;
                 return status;
               }
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_success_branch_bypass(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status == PGACCEL_OK) {
+                pgaccel_record_gpu_exec();
+                return status;
+              }
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_bool_guard_bypass(
+                bool ready, bool bypass, int* out) {
+              bool written = write_bool_or_fail(ready, out);
+              if (bypass) return PGACCEL_OK;
+              if (!written) return PGACCEL_ERROR;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_bool_call_rebind(
+                bool ready, int* out) {
+              bool written = write_bool_or_fail(ready, out);
+              force_true(written);
+              if (!written) return PGACCEL_ERROR;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_helper_bool_swap_rebind(
+                bool ready, int* out) {
+              bool written = write_bool_or_fail(ready, out);
+              bool forced = true;
+              std::swap(written, forced);
+              if (!written) return PGACCEL_ERROR;
               return PGACCEL_OK;
             }
             extern "C" pgaccel_status pgaccel_helper_member_lhs(int* out) {
@@ -5375,6 +5436,61 @@ class ResidentV5RegressionTests(unittest.TestCase):
         ):
             self.assertFalse(entries[name].ok, entries[name].detail)
             self.assertIn("undominated_success", entries[name].classifications)
+
+    def test_gpu_exec_observer_requires_one_exact_definition(self) -> None:
+        exact = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static thread_local uint64_t tl_gpu_exec_count = 0;
+            void pgaccel_record_gpu_exec() { tl_gpu_exec_count++; }
+            static pgaccel_status observed_write(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 9;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_exact_observer(
+                bool fail, int* out) {
+              pgaccel_status status = observed_write(fail, out);
+              if (status == PGACCEL_OK) {
+                pgaccel_record_gpu_exec();
+                return status;
+              }
+              return PGACCEL_ERROR;
+            }
+            """
+        )
+        self.assertTrue(exact.entrypoint_audits[0].ok, exact.entrypoint_audits[0].detail)
+
+        shadowed = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static int global_output = 0;
+            static void pgaccel_record_gpu_exec() { global_output = 99; }
+            static pgaccel_status observed_write(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 9;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_shadowed_observer(
+                bool fail, int* out) {
+              pgaccel_status status = observed_write(fail, out);
+              if (status == PGACCEL_OK) {
+                pgaccel_record_gpu_exec();
+                return status;
+              }
+              return PGACCEL_ERROR;
+            }
+            """
+        )
+        entry = shadowed.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("untrusted_gpu_observer", entry.classifications)
 
     def test_borrowed_workspace_is_in_host_hazard_and_shadow_analysis(self) -> None:
         result = audit_compiling_fixture(
