@@ -431,6 +431,47 @@ class CallGraphTests(unittest.TestCase):
             self.assertFalse(entry.ok, entry.detail)
             self.assertNotIn("opaque_device_resource", entry.classifications)
 
+    def test_direct_pointer_return_requires_a_proven_opaque_helper(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            OpaqueState* build_device_state(size_t count) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<DirectOpaque>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = static_cast<int>(id[0]);
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              return state;
+            }
+            OpaqueState* build_host_state(size_t count) {
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              state->payload[0] = 42;
+              return state;
+            }
+            extern "C" OpaqueState* pgaccel_direct_device_state(size_t count) {
+              return build_device_state(count);
+            }
+            extern "C" OpaqueState* pgaccel_direct_host_state(size_t count) {
+              return build_host_state(count);
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_direct_device_state"].ok)
+        self.assertIn(
+            "opaque_device_resource",
+            entries["pgaccel_direct_device_state"].classifications,
+        )
+        self.assertFalse(entries["pgaccel_direct_host_state"].ok)
+        self.assertNotIn(
+            "opaque_device_resource",
+            entries["pgaccel_direct_host_state"].classifications,
+        )
+
     def test_cross_file_calls_require_unique_clean_device_proof_and_output_binding(
         self,
     ) -> None:
@@ -705,6 +746,33 @@ class CallGraphTests(unittest.TestCase):
         self.assertFalse(result.findings)
         self.assertIn("typed_reduce", result.entrypoint_audits[0].detail)
         self.assertIn("launch_reduce", result.entrypoint_audits[0].detail)
+
+    def test_template_void_helper_and_false_terminal_preserve_device_proof(self) -> None:
+        result = audit_fixture(
+            r"""
+            template <typename T>
+            void write_device(T* out) {
+              sycl::queue q;
+              q.single_task<WriteDevice<T>>([=]() { *out = T{7}; }).wait();
+            }
+            template <typename T>
+            bool write_if_ready(T* out, bool ready) {
+              if (!ready) return false;
+              write_device<T>(out);
+              return true;
+            }
+            extern "C" pgaccel_status pgaccel_template_bool_write(
+                int* out, bool ready) {
+              if (!write_if_ready<int>(out, ready)) return PGACCEL_ERROR;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn(
+            "large_input_gpu_chain",
+            result.entrypoint_audits[0].classifications,
+        )
 
     def test_template_helper_with_trailing_default_reaches_dispatch(self) -> None:
         result = audit_fixture(
@@ -2669,6 +2737,98 @@ class ResidentV5RegressionTests(unittest.TestCase):
         )
         self.assertFalse(result.findings)
         self.assertIn("device_copyback", result.entrypoint_audits[0].classifications)
+
+    def test_resident_raw_usm_resource_binding_is_terminal_safe(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct ResidentState {
+              int* device_index;
+              std::vector<int> host_payload;
+            };
+            void build_index(int* device_index, size_t count) {
+              sycl::queue q;
+              q.parallel_for<BuildIndex>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_index[id[0]] = static_cast<int>(id[0]);
+              }).wait();
+            }
+            extern "C" ResidentState* pgaccel_resident_raw_usm(size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_overwritten(size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              q.fill(device_index, 0, count).wait();
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_freed(size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              sycl::free(device_index, q);
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_copied_over(
+                const int* host_values, size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              q.copy(host_values, device_index, count).wait();
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_alias_host_write(
+                size_t count, int host_value) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              int* alias = device_index;
+              build_index(device_index, count);
+              alias[0] = host_value;
+              auto* state = new ResidentState();
+              state->device_index = alias;
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_mixed_host_payload(
+                size_t count, int host_value) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              state->host_payload.resize(count);
+              state->host_payload[0] = host_value;
+              return state;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_resident_raw_usm"].ok)
+        self.assertIn(
+            "opaque_device_resource",
+            entries["pgaccel_resident_raw_usm"].classifications,
+        )
+        for name in (
+            "pgaccel_resident_overwritten",
+            "pgaccel_resident_freed",
+            "pgaccel_resident_copied_over",
+            "pgaccel_resident_alias_host_write",
+            "pgaccel_resident_mixed_host_payload",
+        ):
+            with self.subTest(name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertNotIn(
+                    "opaque_device_resource", entries[name].classifications
+                )
 
     def test_read_only_typed_slab_projection_does_not_prove_copyback(self) -> None:
         result = audit_compiling_fixture(

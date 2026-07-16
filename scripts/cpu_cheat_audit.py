@@ -5620,9 +5620,15 @@ def _proven_opaque_resource_handoffs(
     transfers: dict[str, list[tuple[str, _DispatchEvidence]]] = defaultdict(list)
     transfer_calls: set[int] = set()
     usm_host_overwrites: list[tuple[int, str]] = []
+    resident_binding_sources: dict[tuple[str, str, int], tuple[str, int]] = {}
 
     for method_index in range(function.body_open + 1, function.body_close):
-        if tokens[method_index].value not in {"memcpy", "memset"} or _is_inside(
+        if tokens[method_index].value not in {
+            "memcpy",
+            "memset",
+            "fill",
+            "copy",
+        } or _is_inside(
             method_index, lambda_ranges
         ):
             continue
@@ -5643,11 +5649,12 @@ def _proven_opaque_resource_handoffs(
         if call is None:
             continue
         arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
-        if not arguments:
+        destination_position = 1 if tokens[method_index].value == "copy" else 0
+        if len(arguments) <= destination_position:
             continue
         destination = _pointer_provenance_root(
             tokens,
-            *arguments[0],
+            *arguments[destination_position],
             {name: item[2] for name, item in provenance.items()},
             forward,
         )
@@ -5743,6 +5750,103 @@ def _proven_opaque_resource_handoffs(
         )
         transfer_calls.add(method_index)
 
+    # A returned resident object may own raw USM members instead of copying
+    # device results into host containers. Bind only exact ``state->member =
+    # usm_root`` assignments whose source was written by awaited kernel work;
+    # later queue overwrites invalidate the binding.
+    for resource, allocation_index in resources.items():
+        for index in range(allocation_index + 1, function.body_close - 3):
+            if (
+                tokens[index].value != resource
+                or not _unqualified_output_identifier(tokens, index)
+                or tokens[index + 1].value not in {".", "->"}
+                or tokens[index + 2].kind != "identifier"
+                or tokens[index + 3].value != "="
+                or _is_inside(index, lambda_ranges)
+            ):
+                continue
+            end = index + 4
+            while end < function.body_close and tokens[end].value != ";":
+                end += 1
+            source = _pointer_provenance_root(
+                tokens,
+                index + 4,
+                end,
+                {name: item[2] for name, item in provenance.items()},
+                forward,
+            )
+            if source is None:
+                continue
+            source_base = provenance[source[0]][2]
+            binding_context = _context(index, regions)
+            producers = [
+                launch
+                for launch in kernel_writes
+                if launch.index < index
+                and launch.awaited
+                and source_base
+                in {
+                    provenance[root][2]
+                    for root in launch.roots
+                    if root in provenance
+                }
+                and launch.index
+                > max(
+                    (
+                        overwrite_index
+                        for overwrite_index, overwrite_root in usm_host_overwrites
+                        if overwrite_root == source_base and overwrite_index < index
+                    ),
+                    default=-1,
+                )
+            ]
+            directly_covered = any(
+                _context_dominates(launch.context, binding_context)
+                for launch in producers
+            )
+            branch_covered = any(
+                {"true", "false"}.issubset(
+                    {
+                        dict(launch.context).get(region.key)
+                        for launch in producers
+                        if region.key in dict(launch.context)
+                    }
+                )
+                and all(
+                    _context_dominates(
+                        tuple(
+                            pair for pair in launch.context if pair[0] != region.key
+                        ),
+                        binding_context,
+                    )
+                    for launch in producers
+                    if region.key in dict(launch.context)
+                )
+                for region in regions
+            )
+            if not producers or not (directly_covered or branch_covered):
+                continue
+            member = tokens[index + 2].value
+            producer = max(producers, key=lambda launch: launch.index)
+            resident_binding_sources[(resource, member, index)] = (
+                source_base,
+                min(launch.index for launch in producers),
+            )
+            transfers[resource].append(
+                (
+                    member,
+                    _DispatchEvidence(
+                        index,
+                        tokens[index].line,
+                        "opaque_resource_resident_member",
+                        f"kernel-written {source_base} remains resident in opaque "
+                        f"resource {resource}->{member} at line {tokens[index].line} "
+                        f"after awaited device work at line {producer.line}",
+                        binding_context,
+                    ),
+                )
+            )
+
     def resource_content_is_device_derived(
         resource: str,
         terminal: int,
@@ -5750,9 +5854,57 @@ def _proven_opaque_resource_handoffs(
     ) -> bool:
         terminal_context = _context(terminal, regions)
         transferred = {member for member, _ in candidates}
+        resident_bindings = {
+            (member, transfer.index)
+            for member, transfer in candidates
+            if transfer.method == "opaque_resource_resident_member"
+        }
         shaped: set[str] = set()
         invalid: set[str] = set()
         direct_assignments: set[str] = set()
+        for member, transfer in candidates:
+            if transfer.method != "opaque_resource_resident_member":
+                continue
+            binding = resident_binding_sources.get(
+                (resource, member, transfer.index)
+            )
+            if binding is None:
+                invalid.add(member)
+                continue
+            source_base, producer_index = binding
+            aliases = {
+                name for name, item in provenance.items() if item[2] == source_base
+            }
+            if any(
+                producer_index < overwrite_index < terminal
+                and overwrite_root == source_base
+                for overwrite_index, overwrite_root in usm_host_overwrites
+            ):
+                invalid.add(member)
+                continue
+            for index in range(producer_index + 1, terminal):
+                if _is_inside(index, lambda_ranges):
+                    continue
+                if (
+                    tokens[index].value in aliases
+                    and _unqualified_output_identifier(tokens, index)
+                    and _output_write_operator(tokens, index, terminal, forward)
+                    is not None
+                ):
+                    invalid.add(member)
+                    break
+                if tokens[index].value != "free":
+                    continue
+                call = _method_lparen(tokens, index, terminal, forward)
+                if call is None:
+                    continue
+                arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
+                if arguments and any(
+                    tokens[cursor].value in aliases
+                    for cursor in range(*arguments[0])
+                ):
+                    invalid.add(member)
+                    break
         for index in range(resources[resource] + 1, terminal):
             if (
                 tokens[index].value != resource
@@ -5783,7 +5935,8 @@ def _proven_opaque_resource_handoffs(
             member = tokens[member_index].value
             operator = _output_write_operator(tokens, index, statement_end, forward)
             if operator is not None:
-                direct_assignments.add(member)
+                if (member, index) not in resident_bindings:
+                    direct_assignments.add(member)
                 if any(
                     tokens[cursor].value == "["
                     for cursor in range(index + 1, operator)
@@ -7191,7 +7344,12 @@ class _PathAuditor:
                 continue
             if values and values[0] == "pgaccel_kernel_failure":
                 continue
-            if not function.is_status and values in (["nullptr"], ["NULL"], ["0"]):
+            if not function.is_status and values in (
+                ["nullptr"],
+                ["NULL"],
+                ["0"],
+                ["false"],
+            ):
                 continue
             success_paths += 1
             return_context = _context(return_index, regions)
@@ -7247,7 +7405,17 @@ class _PathAuditor:
                     for index, record in call_proofs.items()
                     if return_index < index
                     and index < return_index + len(expression) + 2
-                    and call_output_roots.get(index)
+                    and (
+                        call_output_roots.get(index)
+                        or (
+                            not function.is_status
+                            and "*" in function.return_spelling
+                            and record[1] is not None
+                            and record[1].ok
+                            and "opaque_device_resource"
+                            in record[1].classifications
+                        )
+                    )
                 ),
                 None,
             )
@@ -7258,6 +7426,21 @@ class _PathAuditor:
                     details.append(
                         f"returned helper chain {function.name} -> {indexed.call.name}: {proof.detail}"
                     )
+                    if (
+                        "opaque_device_resource" in proof.classifications
+                        and not call_output_roots.get(indexed.index)
+                    ):
+                        all_evidence.append(
+                            _DispatchEvidence(
+                                indexed.index,
+                                indexed.call.line,
+                                "opaque_returned_helper",
+                                f"{function.name} directly returns independently proven "
+                                f"opaque helper {indexed.call.name} at line "
+                                f"{indexed.call.line}",
+                                _context(indexed.index, regions),
+                            )
+                        )
                     continue
                 if proof is not None:
                     classifications.update(proof.classifications)
@@ -7291,7 +7474,7 @@ class _PathAuditor:
 
         internal_void_terminal = bool(
             not returns
-            and function.return_spelling == "void"
+            and _canonical_signature_tokens(function.return_spelling)[-1:] == ("void",)
             and not function.is_entrypoint
         )
         if internal_void_terminal:

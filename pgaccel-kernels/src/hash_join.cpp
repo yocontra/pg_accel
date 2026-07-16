@@ -149,67 +149,9 @@ static void free_table_storage(pgaccel_hash_table* ht) {
 }
 
 template <typename K>
-static bool allocate_and_copy_build_inputs(pgaccel_hash_table* ht, const K* keys,
-                                           const uint8_t* null_mask, const uint32_t* indices) {
-  sycl::queue& q = *ht->queue;
-  const size_t count = ht->count;
-  const size_t alloc_count = count > 0 ? count : 1;
-
-  ht->d_keys = sycl::malloc_device<K>(alloc_count, q);
-  ht->d_indices = sycl::malloc_device<uint32_t>(alloc_count, q);
-  ht->d_next = sycl::malloc_device<int32_t>(alloc_count, q);
-  ht->d_heads = sycl::malloc_device<int32_t>(ht->capacity, q);
-  if (null_mask != nullptr) {
-    ht->d_null_mask = sycl::malloc_device<uint8_t>(alloc_count, q);
-  }
-  ht->owns_input_buffers = true;
-
-  if (ht->d_keys == nullptr || ht->d_indices == nullptr || ht->d_next == nullptr ||
-      ht->d_heads == nullptr || (null_mask != nullptr && ht->d_null_mask == nullptr)) {
-    return false;
-  }
-
-  q.memcpy(ht->d_keys, keys, count * sizeof(K));
-  q.memcpy(ht->d_indices, indices, count * sizeof(uint32_t));
-  q.fill(ht->d_next, EMPTY_HEAD, alloc_count);
-  q.fill(ht->d_heads, EMPTY_HEAD, ht->capacity);
-  if (null_mask != nullptr) {
-    q.memcpy(ht->d_null_mask, null_mask, count * sizeof(uint8_t));
-  }
-  q.wait_and_throw();
-  return true;
-}
-
-template <typename K>
-static bool allocate_external_count_build_inputs(pgaccel_hash_table* ht, const K* device_keys,
-                                                 const uint8_t* device_null_mask) {
-  if (ht == nullptr || device_keys == nullptr) {
-    return false;
-  }
-  sycl::queue& q = *ht->queue;
-  const size_t count = ht->count;
-  const size_t alloc_count = count > 0 ? count : 1;
-
-  ht->d_keys = const_cast<K*>(device_keys);
-  ht->d_null_mask = const_cast<uint8_t*>(device_null_mask);
-  ht->d_indices = nullptr;
-  ht->d_next = sycl::malloc_device<int32_t>(alloc_count, q);
-  ht->d_heads = sycl::malloc_device<int32_t>(ht->capacity, q);
-  ht->owns_input_buffers = false;
-
-  if (ht->d_next == nullptr || ht->d_heads == nullptr) {
-    return false;
-  }
-
-  q.fill(ht->d_next, EMPTY_HEAD, alloc_count);
-  q.fill(ht->d_heads, EMPTY_HEAD, ht->capacity);
-  q.wait_and_throw();
-  return true;
-}
-
-template <typename K, bool HasNullMask>
-static bool build_hash_table_serial_kernel(sycl::queue& q, const K* d_keys, const uint8_t* d_nulls,
-                                           int32_t* d_heads, int32_t* d_next, size_t count,
+static bool build_hash_table_serial_kernel(sycl::queue& q, const K* d_keys,
+                                           const uint8_t* d_nulls, int32_t* d_heads,
+                                           int32_t* d_next, size_t count,
                                            size_t table_capacity) {
   uint32_t* d_build_failed = sycl::malloc_shared<uint32_t>(1, q);
   if (d_build_failed == nullptr) {
@@ -221,11 +163,8 @@ static bool build_hash_table_serial_kernel(sycl::queue& q, const K* d_keys, cons
   try {
     q.single_task([=]() {
        for (size_t row = 0; row < count; ++row) {
-         if constexpr (HasNullMask) {
-           if (d_nulls[row] != 0) {
-             continue;
-           }
-         }
+         if (d_nulls != nullptr && d_nulls[row] != 0)
+           continue;
 
          const K key = d_keys[row];
          const uint64_t h = hash_key<K>(key);
@@ -266,18 +205,6 @@ static bool build_hash_table_serial_kernel(sycl::queue& q, const K* d_keys, cons
 }
 
 template <typename K>
-static bool build_hash_table_serial_kernel(sycl::queue& q, const K* d_keys, const uint8_t* d_nulls,
-                                           int32_t* d_heads, int32_t* d_next, size_t count,
-                                           size_t table_capacity) {
-  if (d_nulls == nullptr) {
-    return build_hash_table_serial_kernel<K, false>(q, d_keys, d_nulls, d_heads, d_next, count,
-                                                    table_capacity);
-  }
-  return build_hash_table_serial_kernel<K, true>(q, d_keys, d_nulls, d_heads, d_next, count,
-                                                 table_capacity);
-}
-
-template <typename K, bool HasNullMask>
 static void build_hash_table_kernel(sycl::queue& q, const K* d_keys, const uint8_t* d_nulls,
                                     int32_t* d_heads, int32_t* d_next, size_t count,
                                     size_t table_capacity) {
@@ -285,11 +212,8 @@ static void build_hash_table_kernel(sycl::queue& q, const K* d_keys, const uint8
 
   q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
      const size_t row = id[0];
-     if constexpr (HasNullMask) {
-       if (d_nulls[row] != 0) {
-         return;
-       }
-     }
+     if (d_nulls != nullptr && d_nulls[row] != 0)
+       return;
 
      const K key = d_keys[row];
      const uint64_t h = hash_key<K>(key);
@@ -325,17 +249,6 @@ static void build_hash_table_kernel(sycl::queue& q, const K* d_keys, const uint8
 }
 
 template <typename K>
-static void build_hash_table_kernel(sycl::queue& q, const K* d_keys, const uint8_t* d_nulls,
-                                    int32_t* d_heads, int32_t* d_next, size_t count,
-                                    size_t table_capacity) {
-  if (d_nulls == nullptr) {
-    build_hash_table_kernel<K, false>(q, d_keys, d_nulls, d_heads, d_next, count, table_capacity);
-  } else {
-    build_hash_table_kernel<K, true>(q, d_keys, d_nulls, d_heads, d_next, count, table_capacity);
-  }
-}
-
-template <typename K>
 static pgaccel_hash_table* build_typed(const K* keys, const uint8_t* null_mask,
                                        const uint32_t* indices, size_t count,
                                        pgaccel_key_type key_type) {
@@ -354,51 +267,84 @@ static pgaccel_hash_table* build_typed(const K* keys, const uint8_t* null_mask,
     return nullptr;
   }
 
-  auto* ht = new (std::nothrow) pgaccel_hash_table{};
-  if (ht == nullptr) {
-    return nullptr;
-  }
-  ht->key_type = key_type;
-  ht->count = count;
-  ht->capacity = capacity;
-  ht->queue = q;
+  K* d_keys = nullptr;
+  uint8_t* d_nulls = nullptr;
+  uint32_t* d_indices = nullptr;
+  int32_t* d_heads = nullptr;
+  int32_t* d_next = nullptr;
+
+  auto cleanup = [&]() {
+    if (d_keys != nullptr)
+      sycl::free(d_keys, *q);
+    if (d_nulls != nullptr)
+      sycl::free(d_nulls, *q);
+    if (d_indices != nullptr)
+      sycl::free(d_indices, *q);
+    if (d_heads != nullptr)
+      sycl::free(d_heads, *q);
+    if (d_next != nullptr)
+      sycl::free(d_next, *q);
+  };
 
   try {
-    if (!allocate_and_copy_build_inputs(ht, keys, null_mask, indices)) {
-      free_table_storage(ht);
-      delete ht;
+    d_keys = sycl::malloc_device<K>(count, *q);
+    d_indices = sycl::malloc_device<uint32_t>(count, *q);
+    d_next = sycl::malloc_device<int32_t>(count, *q);
+    d_heads = sycl::malloc_device<int32_t>(capacity, *q);
+    if (null_mask != nullptr)
+      d_nulls = sycl::malloc_device<uint8_t>(count, *q);
+    if (d_keys == nullptr || d_indices == nullptr || d_next == nullptr || d_heads == nullptr ||
+        (null_mask != nullptr && d_nulls == nullptr)) {
+      cleanup();
       return nullptr;
     }
 
-    const K* d_keys = static_cast<const K*>(ht->d_keys);
-    const uint8_t* d_nulls = ht->d_null_mask;
-    int32_t* d_heads = ht->d_heads;
-    int32_t* d_next = ht->d_next;
+    q->memcpy(d_keys, keys, count * sizeof(K));
+    q->memcpy(d_indices, indices, count * sizeof(uint32_t));
+    q->fill(d_next, EMPTY_HEAD, count);
+    q->fill(d_heads, EMPTY_HEAD, capacity);
+    if (d_nulls != nullptr)
+      q->memcpy(d_nulls, null_mask, count * sizeof(uint8_t));
+    q->wait_and_throw();
+
     bool built = false;
     if (is_metal_backend()) {
       built = build_hash_table_serial_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count,
-                                                ht->capacity);
+                                                capacity);
     } else {
-      build_hash_table_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count, ht->capacity);
+      build_hash_table_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count, capacity);
       built = true;
     }
     if (!built) {
-      free_table_storage(ht);
-      delete ht;
+      cleanup();
       return nullptr;
     }
+
+    auto* ht = new (std::nothrow) pgaccel_hash_table{};
+    if (ht == nullptr) {
+      cleanup();
+      return nullptr;
+    }
+    ht->key_type = key_type;
+    ht->count = count;
+    ht->capacity = capacity;
+    ht->queue = q;
+    ht->d_keys = d_keys;
+    ht->d_null_mask = d_nulls;
+    ht->d_indices = d_indices;
+    ht->d_heads = d_heads;
+    ht->d_next = d_next;
+    ht->owns_input_buffers = true;
     pgaccel_record_gpu_exec();
 
     return ht;
   } catch (const sycl::exception& e) {
     std::fprintf(stderr, "pgaccel: hash_join build kernel failed: %s\n", e.what());
-    free_table_storage(ht);
-    delete ht;
+    cleanup();
     return nullptr;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "pgaccel: hash_join build failed: %s\n", e.what());
-    free_table_storage(ht);
-    delete ht;
+    cleanup();
     return nullptr;
   }
 }
@@ -422,50 +368,67 @@ static pgaccel_hash_table* build_device_count_typed(const K* device_keys,
     return nullptr;
   }
 
-  auto* ht = new (std::nothrow) pgaccel_hash_table{};
-  if (ht == nullptr) {
-    return nullptr;
-  }
-  ht->key_type = key_type;
-  ht->count = count;
-  ht->capacity = capacity;
-  ht->queue = q;
+  int32_t* d_heads = nullptr;
+  int32_t* d_next = nullptr;
+
+  auto cleanup = [&]() {
+    if (d_heads != nullptr)
+      sycl::free(d_heads, *q);
+    if (d_next != nullptr)
+      sycl::free(d_next, *q);
+  };
 
   try {
-    if (!allocate_external_count_build_inputs(ht, device_keys, device_null_mask)) {
-      free_table_storage(ht);
-      delete ht;
+    d_next = sycl::malloc_device<int32_t>(count, *q);
+    d_heads = sycl::malloc_device<int32_t>(capacity, *q);
+    if (d_next == nullptr || d_heads == nullptr) {
+      cleanup();
       return nullptr;
     }
 
-    const K* d_keys = static_cast<const K*>(ht->d_keys);
-    const uint8_t* d_nulls = ht->d_null_mask;
-    int32_t* d_heads = ht->d_heads;
-    int32_t* d_next = ht->d_next;
+    q->fill(d_next, EMPTY_HEAD, count);
+    q->fill(d_heads, EMPTY_HEAD, capacity);
+    q->wait_and_throw();
+
+    const K* d_keys = device_keys;
+    const uint8_t* d_nulls = device_null_mask;
     bool built = false;
     if (is_metal_backend()) {
       built = build_hash_table_serial_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count,
-                                                ht->capacity);
+                                                capacity);
     } else {
-      build_hash_table_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count, ht->capacity);
+      build_hash_table_kernel<K>(*q, d_keys, d_nulls, d_heads, d_next, count, capacity);
       built = true;
     }
     if (!built) {
-      free_table_storage(ht);
-      delete ht;
+      cleanup();
       return nullptr;
     }
+
+    auto* ht = new (std::nothrow) pgaccel_hash_table{};
+    if (ht == nullptr) {
+      cleanup();
+      return nullptr;
+    }
+    ht->key_type = key_type;
+    ht->count = count;
+    ht->capacity = capacity;
+    ht->queue = q;
+    ht->d_keys = const_cast<K*>(device_keys);
+    ht->d_null_mask = const_cast<uint8_t*>(device_null_mask);
+    ht->d_indices = nullptr;
+    ht->d_heads = d_heads;
+    ht->d_next = d_next;
+    ht->owns_input_buffers = false;
     pgaccel_record_gpu_exec();
     return ht;
   } catch (const sycl::exception& e) {
     std::fprintf(stderr, "pgaccel: resident hash_join build kernel failed: %s\n", e.what());
-    free_table_storage(ht);
-    delete ht;
+    cleanup();
     return nullptr;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "pgaccel: resident hash_join build failed: %s\n", e.what());
-    free_table_storage(ht);
-    delete ht;
+    cleanup();
     return nullptr;
   }
 }
@@ -920,16 +883,13 @@ pgaccel_hash_table* pgaccel_hash_join_build(const void* keys, const uint8_t* nul
     return nullptr;
   }
 
-  switch (key_type) {
-    case PGACCEL_KEY_INT32:
-      return build_typed<int32_t>(static_cast<const int32_t*>(keys), null_mask, indices, count,
-                                  key_type);
-    case PGACCEL_KEY_INT64:
-      return build_typed<int64_t>(static_cast<const int64_t*>(keys), null_mask, indices, count,
-                                  key_type);
-    default:
-      return nullptr;
-  }
+  if (key_type == PGACCEL_KEY_INT32)
+    return build_typed<int32_t>(static_cast<const int32_t*>(keys), null_mask, indices, count,
+                                key_type);
+  if (key_type == PGACCEL_KEY_INT64)
+    return build_typed<int64_t>(static_cast<const int64_t*>(keys), null_mask, indices, count,
+                                key_type);
+  return nullptr;
 }
 
 pgaccel_hash_table* pgaccel_hash_join_build_device_count(const void* device_keys,
@@ -939,16 +899,13 @@ pgaccel_hash_table* pgaccel_hash_join_build_device_count(const void* device_keys
     return nullptr;
   }
 
-  switch (key_type) {
-    case PGACCEL_KEY_INT32:
-      return build_device_count_typed<int32_t>(static_cast<const int32_t*>(device_keys),
-                                               device_null_mask, count, key_type);
-    case PGACCEL_KEY_INT64:
-      return build_device_count_typed<int64_t>(static_cast<const int64_t*>(device_keys),
-                                               device_null_mask, count, key_type);
-    default:
-      return nullptr;
-  }
+  if (key_type == PGACCEL_KEY_INT32)
+    return build_device_count_typed<int32_t>(static_cast<const int32_t*>(device_keys),
+                                             device_null_mask, count, key_type);
+  if (key_type == PGACCEL_KEY_INT64)
+    return build_device_count_typed<int64_t>(static_cast<const int64_t*>(device_keys),
+                                             device_null_mask, count, key_type);
+  return nullptr;
 }
 
 void pgaccel_hash_join_free(pgaccel_hash_table* ht) try {
