@@ -1726,6 +1726,76 @@ void test_error_and_unsupported_statuses() {
   }
 
   {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+    SharedWorkspace workspace(req.bytes, req.alignment);
+    desc.scratch = workspace.data();
+    desc.scratch_bytes = req.bytes;
+    desc.scratch_space = PGACCEL_MEM_SPACE_SHARED_USM;
+    desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+    OutputStorage output(desc);
+    output.out.active_groups = reinterpret_cast<uint8_t*>(&desc.execution_flags);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    pgaccel_reset_gpu_exec_count();
+    CHECK_STATUS(pgaccel_grouped_agg_execute_ex(&desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+    CHECK(pgaccel_gpu_exec_count() == 0);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+    SharedWorkspace workspace(req.bytes, req.alignment);
+    desc.scratch = workspace.data();
+    desc.scratch_bytes = req.bytes;
+    desc.scratch_space = PGACCEL_MEM_SPACE_SHARED_USM;
+    desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+    OutputStorage output(desc);
+    output.out.active_groups = reinterpret_cast<uint8_t*>(&output.out.measures[0].count);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    pgaccel_reset_gpu_exec_count();
+    CHECK_STATUS(pgaccel_grouped_agg_execute_ex(&desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+    CHECK(pgaccel_gpu_exec_count() == 0);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+    SharedWorkspace workspace(req.bytes, req.alignment);
+    desc.scratch = workspace.data();
+    desc.scratch_bytes = req.bytes;
+    desc.scratch_space = PGACCEL_MEM_SPACE_SHARED_USM;
+    desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+    OutputStorage output(desc);
+    int32_t* detail = reinterpret_cast<int32_t*>(&output.out.flags);
+    pgaccel_reset_gpu_exec_count();
+    CHECK_STATUS(pgaccel_grouped_agg_execute_ex(&desc, &output.out, detail), PGACCEL_ERROR);
+    CHECK(*detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+    CHECK(pgaccel_gpu_exec_count() == 0);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+    SharedWorkspace workspace(req.bytes, req.alignment);
+    desc.scratch = workspace.data();
+    desc.scratch_bytes = req.bytes;
+    desc.scratch_space = PGACCEL_MEM_SPACE_SHARED_USM;
+    desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+    OutputStorage output(desc);
+    int32_t* detail = reinterpret_cast<int32_t*>(&desc._pad0);
+    pgaccel_reset_gpu_exec_count();
+    CHECK_STATUS(pgaccel_grouped_agg_execute_ex(&desc, &output.out, detail), PGACCEL_ERROR);
+    CHECK(*detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+    CHECK(pgaccel_gpu_exec_count() == 0);
+  }
+
+  {
     SharedArray<int64_t> values({7});
     pgaccel_grouped_agg_desc desc = base_desc(1);
     set_i64_view(desc.measures[0].value, values.data());
