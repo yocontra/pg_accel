@@ -3139,6 +3139,40 @@ class ResidentV5RegressionTests(unittest.TestCase):
             self.assertFalse(entry.ok, entry.detail)
             self.assertNotIn("output_alias_tracking", entry.classifications)
 
+    def test_helper_binding_rejects_unbounded_and_overloaded_projections(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct SmallOutput { int values[1]; };
+            struct IndexedOutput {
+              int values[1];
+              int& operator[](size_t index) { return values[index]; }
+            };
+            static pgaccel_status write_value(int* value) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                value[0] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_out_of_range_binding(
+                SmallOutput* out) {
+              return write_value(&out->values[999]);
+            }
+            extern "C" pgaccel_status pgaccel_overloaded_index_binding(
+                IndexedOutput* out) {
+              return write_value(&out[0][0]);
+            }
+            extern "C" pgaccel_status pgaccel_pointer_offset_binding(int* out) {
+              return write_value(out + 999);
+            }
+            """
+        )
+        self.assertEqual(len(result.entrypoint_audits), 3)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("undominated_success", entry.classifications)
+
     def test_branch_output_variants_require_each_caller_binding(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE

@@ -4905,13 +4905,54 @@ def _call_proven_output_root_variants(
 ) -> tuple[frozenset[str], ...]:
     """Bind only callee parameter positions carrying proven device output."""
 
+    def exact_direct_root(left: int, right: int, roots: set[str]) -> str | None:
+        while left < right and tokens[left].value == "(" and forward.get(left) == right - 1:
+            left += 1
+            right -= 1
+        casts = {"const_cast", "dynamic_cast", "reinterpret_cast", "static_cast"}
+        while left + 3 < right and tokens[left].value in casts:
+            if tokens[left + 1].value != "<":
+                return None
+            cursor = left + 2
+            depth = 1
+            while cursor < right and depth:
+                if tokens[cursor].value == "<":
+                    depth += 1
+                elif tokens[cursor].value == ">":
+                    depth -= 1
+                elif tokens[cursor].value == ">>":
+                    depth = max(0, depth - 2)
+                cursor += 1
+            if (
+                depth
+                or cursor >= right
+                or tokens[cursor].value != "("
+                or forward.get(cursor) != right - 1
+            ):
+                return None
+            left = cursor + 1
+            right -= 1
+            while (
+                left < right
+                and tokens[left].value == "("
+                and forward.get(left) == right - 1
+            ):
+                left += 1
+                right -= 1
+        if (
+            right - left == 1
+            and tokens[left].value in roots
+            and _unqualified_output_identifier(tokens, left)
+        ):
+            return tokens[left].value
+        return None
+
     arguments = _call_argument_ranges(tokens, indexed.lparen, indexed.rparen, forward)
     permitted_roots = output_roots | set(caller_member_parameters)
     referenced: list[frozenset[str]] = []
     referenced_descriptors: list[frozenset[str]] = []
     for left, right in arguments:
-        exact = _exact_pointer_root(tokens, left, right, permitted_roots, forward)
-        root = exact[0] if exact is not None else None
+        root = exact_direct_root(left, right, permitted_roots)
         referenced.append(
             frozenset({root})
             if root is not None and root in output_roots
