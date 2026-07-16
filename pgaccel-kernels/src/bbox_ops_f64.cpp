@@ -101,21 +101,20 @@ static pgaccel_status bbox_intersects_bulk_sycl_f64(sycl::queue& queue, const do
 
     const size_t inner_count = count_b;
     queue
-        .submit([&](sycl::handler& handler) {
-          handler.parallel_for(sycl::range<1>(total_pairs), [=](sycl::id<1> id) {
-            const size_t pair_index = id[0];
-            const size_t outer_index = pair_index / inner_count;
-            const size_t inner_index = pair_index % inner_count;
-            const uint64_t* outer = device_a + outer_index * kBoxWords;
-            const uint64_t* inner = device_b + inner_index * kBoxWords;
+        .parallel_for(sycl::range<1>(total_pairs),
+                      [=](sycl::id<1> id) {
+                        const size_t pair_index = id[0];
+                        const size_t outer_index = pair_index / inner_count;
+                        const size_t inner_index = pair_index % inner_count;
+                        const uint64_t* outer = device_a + outer_index * kBoxWords;
+                        const uint64_t* inner = device_b + inner_index * kBoxWords;
 
-            const bool separated = f64_bits_ordered_less(outer[2], inner[0]) ||
-                                   f64_bits_ordered_less(inner[2], outer[0]) ||
-                                   f64_bits_ordered_less(outer[3], inner[1]) ||
-                                   f64_bits_ordered_less(inner[3], outer[1]);
-            device_result[pair_index] = separated ? 0 : 1;
-          });
-        })
+                        const bool separated = f64_bits_ordered_less(outer[2], inner[0]) ||
+                                               f64_bits_ordered_less(inner[2], outer[0]) ||
+                                               f64_bits_ordered_less(outer[3], inner[1]) ||
+                                               f64_bits_ordered_less(inner[3], outer[1]);
+                        device_result[pair_index] = separated ? 0 : 1;
+                      })
         .wait_and_throw();
 
     if (device_hits != nullptr) {
@@ -168,10 +167,10 @@ extern "C" pgaccel_status pgaccel_bbox_intersects_bulk_f64(const double* boxes_a
     sycl::queue& queue = pgaccel_require_queue();
     const pgaccel_status status =
         bbox_intersects_bulk_sycl_f64(queue, boxes_a, count_a, boxes_b, count_b, result, hit_count);
-    if (status == PGACCEL_OK) {
-      pgaccel_record_gpu_exec();
-    }
-    return status;
+    if (status != PGACCEL_OK)
+      return status;
+    pgaccel_record_gpu_exec();
+    return PGACCEL_OK;
   } catch (const pgaccel_no_device_error&) {
     return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& error) {

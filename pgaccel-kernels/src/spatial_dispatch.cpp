@@ -2206,12 +2206,19 @@ static pgaccel_status resident_launch_intersects_family(sycl::queue& queue,
 static pgaccel_status resident_launch_intersects(sycl::queue& queue,
                                                  SpatialResidentKernelArgs* args,
                                                  uint32_t* failure_flags, size_t count) {
-  resident_launch_intersects_family<SpatialResidentGeometryPairFamily::PointPairs>(
+  pgaccel_status status =
+      resident_launch_intersects_family<SpatialResidentGeometryPairFamily::PointPairs>(
+          queue, args, failure_flags, count);
+  if (status != PGACCEL_OK)
+    return status;
+  status = resident_launch_intersects_family<SpatialResidentGeometryPairFamily::LinearPairs>(
       queue, args, failure_flags, count);
-  resident_launch_intersects_family<SpatialResidentGeometryPairFamily::LinearPairs>(
+  if (status != PGACCEL_OK)
+    return status;
+  status = resident_launch_intersects_family<SpatialResidentGeometryPairFamily::PolygonPair>(
       queue, args, failure_flags, count);
-  resident_launch_intersects_family<SpatialResidentGeometryPairFamily::PolygonPair>(
-      queue, args, failure_flags, count);
+  if (status != PGACCEL_OK)
+    return status;
   return PGACCEL_OK;
 }
 
@@ -2267,29 +2274,47 @@ static pgaccel_status resident_launch_metric_family(sycl::queue& queue,
 
 static pgaccel_status resident_launch_metric(sycl::queue& queue, SpatialResidentKernelArgs* args,
                                              uint32_t* failure_flags, size_t count) {
-  resident_launch_metric_family<SpatialResidentGeometryPairFamily::PointPairs>(
+  pgaccel_status status =
+      resident_launch_metric_family<SpatialResidentGeometryPairFamily::PointPairs>(
+          queue, args, failure_flags, count);
+  if (status != PGACCEL_OK)
+    return status;
+  status = resident_launch_metric_family<SpatialResidentGeometryPairFamily::LinearPairs>(
       queue, args, failure_flags, count);
-  resident_launch_metric_family<SpatialResidentGeometryPairFamily::LinearPairs>(
+  if (status != PGACCEL_OK)
+    return status;
+  status = resident_launch_metric_family<SpatialResidentGeometryPairFamily::PolygonPair>(
       queue, args, failure_flags, count);
-  resident_launch_metric_family<SpatialResidentGeometryPairFamily::PolygonPair>(
-      queue, args, failure_flags, count);
+  if (status != PGACCEL_OK)
+    return status;
   return PGACCEL_OK;
 }
 
 static pgaccel_status
 resident_launch_metric_predicate(sycl::queue& queue, SpatialResidentKernelArgs* args,
                                  uint32_t* failure_flags, size_t count) {
-  resident_launch_intersects(queue, args, failure_flags, count);
+  const pgaccel_status status = resident_launch_intersects(queue, args, failure_flags, count);
+  if (status != PGACCEL_OK)
+    return status;
   return resident_launch_metric(queue, args, failure_flags, count);
 }
 
 static pgaccel_status
 resident_launch_non_intersects(sycl::queue& queue, SpatialResidentKernelArgs* args,
                                uint32_t* failure_flags, int32_t predicate, size_t count) {
-  return predicate == PGACCEL_SPATIAL_PREDICATE_CONTAINS ||
-                 predicate == PGACCEL_SPATIAL_PREDICATE_WITHIN
-             ? resident_launch_contains(queue, args, failure_flags, count)
-             : resident_launch_metric_predicate(queue, args, failure_flags, count);
+  if (predicate == PGACCEL_SPATIAL_PREDICATE_CONTAINS ||
+      predicate == PGACCEL_SPATIAL_PREDICATE_WITHIN) {
+    return resident_launch_contains(queue, args, failure_flags, count);
+  }
+  return resident_launch_metric_predicate(queue, args, failure_flags, count);
+}
+
+static pgaccel_status resident_launch_predicate(sycl::queue& queue, SpatialResidentKernelArgs* args,
+                                                uint32_t* failure_flags, int32_t predicate,
+                                                size_t count) {
+  if (predicate == PGACCEL_SPATIAL_PREDICATE_INTERSECTS)
+    return resident_launch_intersects(queue, args, failure_flags, count);
+  return resident_launch_non_intersects(queue, args, failure_flags, predicate, count);
 }
 
 extern "C" pgaccel_status
@@ -2435,9 +2460,7 @@ pgaccel_spatial_eval_resident_launch(const pgaccel_spatial_resident_request* req
     resident_stage_control(queue, *workspace, normalized, false);
   }
   const pgaccel_status launch_status =
-      predicate == PGACCEL_SPATIAL_PREDICATE_INTERSECTS
-          ? resident_launch_intersects(queue, args, failure_flags, request->count)
-          : resident_launch_non_intersects(queue, args, failure_flags, predicate, request->count);
+      resident_launch_predicate(queue, args, failure_flags, predicate, request->count);
   if (launch_status != PGACCEL_OK)
     return launch_status;
   queue.wait_and_throw();

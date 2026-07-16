@@ -1634,8 +1634,8 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
   if (!q)
     return PGACCEL_ERROR_NO_DEVICE;
 
-  uint8_t* d_slab = nullptr;
-  int8_t* d_results = nullptr;
+  uint8_t* cleanup_slab = nullptr;
+  int8_t* cleanup_results = nullptr;
   try {
     AlgorithmicPredicateStaging staged{};
     if (!algorithmic_stage_predicate_inputs(geoms_a, geoms_b, count, pred, &staged))
@@ -1643,8 +1643,10 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
 
     // Keep the Metal kernel ABI low-capture: one input slab and one result
     // allocation are captured, with typed views rebuilt inside the kernel.
-    d_slab = sycl::malloc_shared<uint8_t>(staged.bytes.size(), *q);
-    d_results = sycl::malloc_shared<int8_t>(count, *q);
+    uint8_t* const d_slab = sycl::malloc_shared<uint8_t>(staged.bytes.size(), *q);
+    cleanup_slab = d_slab;
+    int8_t* const d_results = sycl::malloc_shared<int8_t>(count, *q);
+    cleanup_results = d_results;
     if (!d_slab || !d_results) {
       if (d_slab)
         sycl::free(d_slab, *q);
@@ -1766,23 +1768,23 @@ pgaccel_status sycl_algorithmic_predicate_dispatch(const pgaccel_geometry* geoms
     q->memcpy(results, d_results, staged.result_bytes).wait_and_throw();
     sycl::free(d_slab, *q);
     sycl::free(d_results, *q);
-    d_slab = nullptr;
-    d_results = nullptr;
+    cleanup_slab = nullptr;
+    cleanup_results = nullptr;
 
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const sycl::exception& e) {
-    if (d_slab)
-      sycl::free(d_slab, *q);
-    if (d_results)
-      sycl::free(d_results, *q);
+    if (cleanup_slab)
+      sycl::free(cleanup_slab, *q);
+    if (cleanup_results)
+      sycl::free(cleanup_results, *q);
     fprintf(stderr, "pgaccel: SYCL sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
     return PGACCEL_ERROR;
   } catch (const std::exception& e) {
-    if (d_slab)
-      sycl::free(d_slab, *q);
-    if (d_results)
-      sycl::free(d_results, *q);
+    if (cleanup_slab)
+      sycl::free(cleanup_slab, *q);
+    if (cleanup_results)
+      sycl::free(cleanup_results, *q);
     fprintf(stderr, "pgaccel: sycl_algorithmic_predicate_dispatch failed: %s\n", e.what());
     return PGACCEL_ERROR;
   }
