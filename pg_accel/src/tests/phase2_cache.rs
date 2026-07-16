@@ -243,6 +243,7 @@ mod tests {
         // This helper proves the selected descriptor executor contract. Keep
         // platform-specific cost calibration from deciding whether the test
         // reaches that executor; default-cost admission is tested separately.
+        // admission-audit-allow: direct cost_multiplier executor contract test
         Spi::run("SET LOCAL pg_accel.cost_multiplier = 0.1")
             .expect("select contract-test generic aggregate cost");
         Spi::run("SET LOCAL pg_accel.enabled = off").expect("disable pg_accel");

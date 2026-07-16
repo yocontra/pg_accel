@@ -20,6 +20,86 @@ use crate::integration_connection::live_pg_test_lock;
 use crate::integration_connection::test_connection;
 use crate::workloads::parallel_stress::bench_f32_10m_setup_sql;
 
+const DIRECT_COST_OVERRIDE_SOURCE: &str = "pg_accel/src/tests/phase2_cache.rs";
+const DIRECT_COST_OVERRIDE_ALLOW_MARKER: &str =
+    "// admission-audit-allow: direct cost_multiplier executor contract test";
+const DIRECT_COST_DEFAULT_PROOF_LINE: &str =
+    "fn assert_default_cost_decline_matches_native(query: &str) {";
+
+fn numeric_cost_source_line(value: &str) -> String {
+    [
+        "Spi::run(\"SET LOCAL pg_accel.",
+        "cost_multiplier = ",
+        value,
+        "\")",
+    ]
+    .concat()
+}
+
+fn starts_with_numeric_cost_literal(value: &str) -> bool {
+    value
+        .trim_start()
+        .starts_with(|ch: char| ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | '\''))
+}
+
+fn direct_cost_override_allowed(name: &str, lines: &[&str], line_index: usize, line: &str) -> bool {
+    name == DIRECT_COST_OVERRIDE_SOURCE
+        && line.trim() == numeric_cost_source_line("0.1")
+        && line_index
+            .checked_sub(1)
+            .and_then(|previous| lines.get(previous))
+            .is_some_and(|previous| previous.trim() == DIRECT_COST_OVERRIDE_ALLOW_MARKER)
+        && lines
+            .iter()
+            .any(|candidate| candidate.trim() == DIRECT_COST_DEFAULT_PROOF_LINE)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NumericCostPinAudit {
+    approved_lines: Vec<usize>,
+    rejected_lines: Vec<usize>,
+}
+
+impl NumericCostPinAudit {
+    fn passes_for_source(&self, name: &str) -> bool {
+        self.rejected_lines.is_empty()
+            && if name == DIRECT_COST_OVERRIDE_SOURCE {
+                self.approved_lines.len() == 1
+            } else {
+                self.approved_lines.is_empty()
+            }
+    }
+}
+
+fn audit_numeric_cost_pins(name: &str, source: &str) -> NumericCostPinAudit {
+    let numeric_cost_prefixes = [
+        ["SET pg_accel.", "cost_multiplier = "].concat(),
+        ["SET LOCAL pg_accel.", "cost_multiplier = "].concat(),
+    ];
+    let lines = source.lines().collect::<Vec<_>>();
+    let mut approved_lines = Vec::new();
+    let mut rejected_lines = Vec::new();
+    for (line_index, line) in lines.iter().enumerate() {
+        for prefix in &numeric_cost_prefixes {
+            let Some((_, value)) = line.split_once(prefix) else {
+                continue;
+            };
+            if !starts_with_numeric_cost_literal(value) {
+                continue;
+            }
+            if direct_cost_override_allowed(name, &lines, line_index, line) {
+                approved_lines.push(line_index);
+            } else {
+                rejected_lines.push(line_index);
+            }
+        }
+    }
+    NumericCostPinAudit {
+        approved_lines,
+        rejected_lines,
+    }
+}
+
 #[test]
 fn released_planner_evidence_uses_default_admission_settings() {
     const EVIDENCE_SOURCES: &[(&str, &str)] = &[
@@ -82,10 +162,6 @@ fn released_planner_evidence_uses_default_admission_settings() {
         ["SET parallel_setup_cost = ", "0"].concat(),
         ["SET parallel_tuple_cost = ", "0"].concat(),
     ];
-    let numeric_cost_prefixes = [
-        ["SET pg_accel.", "cost_multiplier = "].concat(),
-        ["SET LOCAL pg_accel.", "cost_multiplier = "].concat(),
-    ];
     let numeric_min_batch_prefixes = [
         ["SET pg_accel.", "min_batch_size = "].concat(),
         ["SET LOCAL pg_accel.", "min_batch_size = "].concat(),
@@ -98,6 +174,7 @@ fn released_planner_evidence_uses_default_admission_settings() {
         "SET parallel_tuple_cost = ",
     ];
 
+    let mut approved_cost_overrides = 0;
     for (name, source) in EVIDENCE_SOURCES {
         for marker in &banned {
             assert!(
@@ -105,19 +182,25 @@ fn released_planner_evidence_uses_default_admission_settings() {
                 "released planner evidence `{name}` contains underwritten setting `{marker}`"
             );
         }
+        let numeric_cost_audit = audit_numeric_cost_pins(name, source);
+        assert!(
+            numeric_cost_audit.rejected_lines.is_empty(),
+            "released planner evidence `{name}` line {} pins a numeric cost multiplier without the exact direct-contract allow marker",
+            numeric_cost_audit
+                .rejected_lines
+                .first()
+                .copied()
+                .unwrap_or_default()
+                + 1
+        );
+        assert!(
+            numeric_cost_audit.passes_for_source(name),
+            "released planner evidence `{name}` has {} approved numeric cost override(s); expected {}",
+            numeric_cost_audit.approved_lines.len(),
+            usize::from(*name == DIRECT_COST_OVERRIDE_SOURCE)
+        );
+        approved_cost_overrides += numeric_cost_audit.approved_lines.len();
         for (line_index, line) in source.lines().enumerate() {
-            for prefix in &numeric_cost_prefixes {
-                let Some((_, value)) = line.split_once(prefix) else {
-                    continue;
-                };
-                assert!(
-                    !value
-                        .trim_start()
-                        .starts_with(|ch: char| ch.is_ascii_digit() || ch == '-'),
-                    "released planner evidence `{name}` line {} pins a numeric cost multiplier",
-                    line_index + 1
-                );
-            }
             for prefix in &numeric_min_batch_prefixes {
                 let Some((_, value)) = line.split_once(prefix) else {
                     continue;
@@ -155,6 +238,93 @@ fn released_planner_evidence_uses_default_admission_settings() {
             }
         }
     }
+    assert_eq!(
+        approved_cost_overrides, 1,
+        "released planner evidence must contain exactly one narrowly approved numeric cost override"
+    );
+}
+
+#[test]
+fn admission_audit_rejects_unmarked_copied_and_changed_numeric_cost_pins() {
+    let direct_line = numeric_cost_source_line("0.1");
+    assert_eq!(
+        audit_numeric_cost_pins(DIRECT_COST_OVERRIDE_SOURCE, &direct_line).rejected_lines,
+        vec![0],
+    );
+    let session_pin = ["Spi::run(\"SET pg_accel.", "cost_multiplier = ", "0.1\")"].concat();
+    assert_eq!(
+        audit_numeric_cost_pins("plan_shape_test.rs", &session_pin).rejected_lines,
+        vec![0]
+    );
+
+    let copied_elsewhere = format!(
+        "{DIRECT_COST_DEFAULT_PROOF_LINE}\n{DIRECT_COST_OVERRIDE_ALLOW_MARKER}\n{direct_line}"
+    );
+    assert_eq!(
+        audit_numeric_cost_pins("pg_accel/src/tests/not_phase2_cache.rs", &copied_elsewhere)
+            .rejected_lines,
+        vec![2],
+    );
+
+    for value in ["0.2", "-0.2", "+0.2", ".2", "'0.2'"] {
+        let changed_value = format!(
+            "{DIRECT_COST_DEFAULT_PROOF_LINE}\n{DIRECT_COST_OVERRIDE_ALLOW_MARKER}\n{}",
+            numeric_cost_source_line(value)
+        );
+        assert_eq!(
+            audit_numeric_cost_pins(DIRECT_COST_OVERRIDE_SOURCE, &changed_value).rejected_lines,
+            vec![2],
+            "changed numeric literal {value} must not inherit the exception"
+        );
+    }
+}
+
+#[test]
+fn admission_audit_cost_allow_marker_must_be_exact_adjacent_and_paired_with_default_proof() {
+    let direct_line = numeric_cost_source_line("0.1");
+    let exact = format!(
+        "{DIRECT_COST_DEFAULT_PROOF_LINE}\n{DIRECT_COST_OVERRIDE_ALLOW_MARKER}\n{direct_line}"
+    );
+    assert!(
+        audit_numeric_cost_pins(DIRECT_COST_OVERRIDE_SOURCE, &exact)
+            .passes_for_source(DIRECT_COST_OVERRIDE_SOURCE)
+    );
+
+    let suffixed_marker = format!(
+        "{DIRECT_COST_DEFAULT_PROOF_LINE}\n{DIRECT_COST_OVERRIDE_ALLOW_MARKER} (copied)\n{direct_line}"
+    );
+    assert_eq!(
+        audit_numeric_cost_pins(DIRECT_COST_OVERRIDE_SOURCE, &suffixed_marker).rejected_lines,
+        vec![2]
+    );
+
+    let nonadjacent_marker = format!(
+        "{DIRECT_COST_DEFAULT_PROOF_LINE}\n{DIRECT_COST_OVERRIDE_ALLOW_MARKER}\n// unrelated\n{direct_line}"
+    );
+    assert_eq!(
+        audit_numeric_cost_pins(DIRECT_COST_OVERRIDE_SOURCE, &nonadjacent_marker).rejected_lines,
+        vec![3]
+    );
+
+    let missing_default_proof = format!("{DIRECT_COST_OVERRIDE_ALLOW_MARKER}\n{direct_line}");
+    assert_eq!(
+        audit_numeric_cost_pins(DIRECT_COST_OVERRIDE_SOURCE, &missing_default_proof).rejected_lines,
+        vec![1]
+    );
+}
+
+#[test]
+fn admission_audit_rejects_duplicate_exact_cost_overrides_in_the_allowed_source() {
+    let direct_line = numeric_cost_source_line("0.1");
+    let duplicate = format!(
+        "{DIRECT_COST_DEFAULT_PROOF_LINE}\n\
+         {DIRECT_COST_OVERRIDE_ALLOW_MARKER}\n{direct_line}\n\
+         {DIRECT_COST_OVERRIDE_ALLOW_MARKER}\n{direct_line}"
+    );
+    let audit = audit_numeric_cost_pins(DIRECT_COST_OVERRIDE_SOURCE, &duplicate);
+    assert_eq!(audit.approved_lines, vec![2, 4]);
+    assert!(audit.rejected_lines.is_empty());
+    assert!(!audit.passes_for_source(DIRECT_COST_OVERRIDE_SOURCE));
 }
 
 #[test]
