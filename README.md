@@ -146,7 +146,7 @@ joins, windows, and target-list SRFs explicitly remain native.
 
 | Capability | Kernel or bridge | Production planner | Current boundary |
 |---|---|---|---|
-| Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. |
+| Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. Stored generated columns are physical base attributes and remain selectable when their types and aggregate shape pass those same gates. |
 | Resident star join plus aggregate | Present | Selectable | The join is represented inside one childless aggregate descriptor; this is not a row-returning join path. |
 | H3-derived group key inside a resident aggregate | Present | Selectable | Covered `h3_cell_to_parent` and `h3_latlng_to_cell` group expressions can be encoded in the aggregate descriptor. |
 | PostGIS spatial filter inside a resident aggregate | Present | Test-only | The descriptor lane is dark in normal planning and is admitted only by a test GUC. |

@@ -91,7 +91,7 @@ justify checking any release item.
 ## Phase 6 - Feature Completion And Deferrals
 
 - [ ] SQL operator/function support matrix, unsupported JSON/JSONB or deferred type coverage, type coercion, NULL edge cases, and released GUC docs match the implementation. Evidence SHA/artifact: `<sha-or-url>`.
-- [ ] SetOp, RecursiveUnion, merge join, NUMERIC behavior, generated columns, partition/pruning behavior, and any remaining accelerator-surface gaps either have GPU/correctness/performance proof or documented planner-decline deferrals. Evidence SHA/artifact: `<sha-or-url>`.
+- [ ] SetOp, RecursiveUnion, merge join, NUMERIC behavior, generated columns, partition/pruning behavior, and any remaining accelerator-surface gaps either have GPU/correctness/performance proof or documented planner-decline deferrals. The checked-in `test_stored_generated_columns_dispatch_and_match_native` integration test covers stored generated group keys and measures after a base-column update, including selected-plan shape, real GPU dispatch, and native-result parity; a fresh exact-candidate artifact remains required. Evidence SHA/artifact: `<sha-or-url>`.
 - [ ] AdaptiveCpp rebase/upstream status and fork-pinned installation burden match the public documentation: exact fork commit, embedded upstream snapshot and merge, no unproved upstream-acceptance claim, source-build requirement, Metal/LLVM/lld and soft-fp64 prerequisites, tracked post-checkout patches, and generated setup provenance. A fresh clean-machine artifact must prove those instructions against the exact candidate. Evidence SHA/artifact: `<sha-or-url>`.
 
 ## Phase 7 - Cost Models, Performance Ratchets, And Comparative Benchmarks

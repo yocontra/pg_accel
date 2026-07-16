@@ -632,6 +632,107 @@ mod tests {
     }
 
     #[pg_test]
+    fn test_stored_generated_columns_dispatch_and_match_native() {
+        if !gpu_device_available() {
+            pgrx::notice!("skipping stored generated-column dispatch test: no GPU device");
+            return;
+        }
+        serialize_gpu_tests();
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET pg_accel.auto_load = off").expect("SET AUTO LOAD OFF");
+        Spi::run(
+            "CREATE TEMP TABLE _generated_resident_agg (\
+                seed int4 NOT NULL, \
+                bucket int4 GENERATED ALWAYS AS (((seed % 64) + 64) % 64) STORED, \
+                amount int4 GENERATED ALWAYS AS ((seed * 3) - 7) STORED\
+             ); \
+             INSERT INTO _generated_resident_agg(seed) \
+             SELECT i FROM generate_series(1, 500000) i; \
+             UPDATE _generated_resident_agg SET seed = -seed WHERE seed % 97 = 0; \
+             ANALYZE _generated_resident_agg",
+        )
+        .expect("create and update stored generated-column fixture");
+
+        let stored_columns = Spi::get_one::<i64>(
+            "SELECT count(*) \
+             FROM pg_catalog.pg_attribute \
+             WHERE attrelid = '_generated_resident_agg'::regclass \
+               AND attname IN ('bucket', 'amount') \
+               AND attgenerated = 's'",
+        )
+        .expect("generated-column catalog query should succeed")
+        .expect("generated-column count should not be NULL");
+        assert_eq!(
+            stored_columns, 2,
+            "fixture columns must be stored-generated"
+        );
+        let values_recomputed = Spi::get_one::<bool>(
+            "SELECT bool_and(\
+                 bucket = (((seed % 64) + 64) % 64) \
+                 AND amount = ((seed * 3) - 7)\
+             ) \
+             FROM _generated_resident_agg",
+        )
+        .expect("generated-value verification should succeed")
+        .expect("generated-value verification should not be NULL");
+        assert!(
+            values_recomputed,
+            "stored generated values must reflect the base-column update"
+        );
+
+        let pinned = Spi::get_one::<i64>(
+            "SELECT pg_accel_pin(\
+                 '_generated_resident_agg'::regclass, ARRAY['bucket', 'amount']\
+             )",
+        )
+        .expect("pin query succeeds")
+        .expect("pin returns row count");
+        assert_eq!(pinned, 500_000);
+
+        let query = "SELECT bucket, sum(amount), count(*) \
+                     FROM _generated_resident_agg GROUP BY bucket ORDER BY bucket";
+        let read_results = || {
+            Spi::connect(|client| {
+                client
+                    .select(query, None, &[])
+                    .expect("stored generated-column aggregate succeeds")
+                    .into_iter()
+                    .map(|row| {
+                        (
+                            row.get::<i32>(1)
+                                .expect("generated group key read")
+                                .expect("generated group key"),
+                            row.get::<i64>(2)
+                                .expect("generated measure sum read")
+                                .expect("generated measure sum"),
+                            row.get::<i64>(3)
+                                .expect("generated row count read")
+                                .expect("generated row count"),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
+        let native = read_results();
+        Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+        let plan = explain_text(query);
+        assert!(
+            plan.contains("Custom Scan (GpuAccelAgg)"),
+            "stored generated columns must remain eligible physical attributes:\n{plan}"
+        );
+
+        crate::gpu::reset_gpu_exec_count();
+        let accelerated = read_results();
+        assert_eq!(
+            accelerated, native,
+            "stored generated-column aggregate result mismatch"
+        );
+        crate::gpu::assert_gpu_executed(1);
+    }
+
+    #[pg_test]
     fn test_generic_groupagg_declines_expansion_but_only_parent_is_exact() {
         if !gpu_device_available() {
             pgrx::notice!("skipping generic inheritance aggregate test: no GPU device");
