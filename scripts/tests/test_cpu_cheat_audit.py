@@ -3045,6 +3045,31 @@ class ResidentV5RegressionTests(unittest.TestCase):
         static sycl::queue* g_queue = &queue_value;
     """
 
+    def test_returned_helper_cannot_substitute_local_detail_for_abi_output(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status detail_only(
+                int* out, int* detail, size_t count) {
+              (void)out;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                detail[i] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_detail_only_wrapper(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              int detail = 0;
+              return detail_only(out, &detail, 1);
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+
     def test_kernel_written_usm_copyback_forms_are_proven(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE

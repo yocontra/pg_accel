@@ -847,6 +847,8 @@ class EntrypointAudit:
     detail: str
     is_status: bool = True
     return_type: str = "pgaccel_status"
+    guaranteed_output_parameter_positions: tuple[int, ...] = ()
+    output_parameter_position_variants: tuple[tuple[int, ...], ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -910,6 +912,8 @@ class _Proof:
     ok: bool
     detail: str
     classifications: tuple[str, ...]
+    guaranteed_output_parameter_positions: frozenset[int] = frozenset()
+    output_parameter_position_variants: tuple[frozenset[int], ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2652,6 +2656,7 @@ class _DispatchEvidence:
     method: str
     detail: str
     context: tuple[tuple[str, str], ...]
+    output_root_variants: tuple[frozenset[str], ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -4888,6 +4893,47 @@ def _call_mutable_output_roots(
         if position in candidate_member_write_positions:
             contributing.update(descriptor_roots)
     return frozenset(contributing)
+
+
+def _call_proven_output_root_variants(
+    tokens: Sequence[Token],
+    indexed: _IndexedCall,
+    proof: _Proof,
+    output_roots: set[str],
+    caller_member_parameters: Mapping[str, frozenset[str]],
+    forward: dict[int, int],
+) -> tuple[frozenset[str], ...]:
+    """Bind only callee parameter positions carrying proven device output."""
+
+    arguments = _call_argument_ranges(tokens, indexed.lparen, indexed.rparen, forward)
+    referenced = [
+        frozenset(
+            root
+            for root in output_roots
+            if _range_references_output(tokens, left, right, {root})
+        )
+        for left, right in arguments
+    ]
+    referenced_descriptors = [
+        frozenset(
+            root
+            for root in caller_member_parameters
+            if _range_references_output(tokens, left, right, {root})
+        )
+        for left, right in arguments
+    ]
+    variants: list[frozenset[str]] = []
+    for positions in proof.output_parameter_position_variants:
+        roots: set[str] = set()
+        for position in positions:
+            if position >= len(arguments):
+                continue
+            roots.update(referenced[position])
+            roots.update(referenced_descriptors[position])
+        variant = frozenset(roots)
+        if variant not in variants:
+            variants.append(variant)
+    return tuple(variants)
 
 
 def _mutable_pointer_member_write_positions(
@@ -7648,6 +7694,19 @@ class _PathAuditor:
             self.tokens, function, self.forward, self.reverse
         )
         parameters, mutable = _parameter_names(self.tokens, function)
+        parameter_names_by_position: list[str | None] = []
+        for left, right in _parameter_ranges(self.tokens, function):
+            names = [
+                token.value
+                for token in self.tokens[left:right]
+                if token.kind == "identifier" and token.value in parameters
+            ]
+            parameter_names_by_position.append(names[-1] if names else None)
+        parameter_positions = {
+            name: position
+            for position, name in enumerate(parameter_names_by_position)
+            if name is not None
+        }
         member_parameters = _parameter_mutable_pointer_members(
             self.tokens, function, self.record_members
         )
@@ -8124,7 +8183,9 @@ class _PathAuditor:
             return fail_contract
 
         call_proofs: dict[int, tuple[_IndexedCall, _Proof | None, str | None]] = {}
+        call_referenced_output_roots: dict[int, frozenset[str]] = {}
         call_output_roots: dict[int, frozenset[str]] = {}
+        call_output_root_variants: dict[int, tuple[frozenset[str], ...]] = {}
         for indexed in calls:
             if indexed.index in proven_transfer_calls | safe_initializer_calls:
                 continue
@@ -8150,7 +8211,7 @@ class _PathAuditor:
                     self.member_write_position_cache[candidate] = (
                         candidate_member_write_positions
                     )
-            call_output_roots[indexed.index] = _call_mutable_output_roots(
+            call_referenced_output_roots[indexed.index] = _call_mutable_output_roots(
                 self.tokens,
                 indexed,
                 candidate,
@@ -8165,6 +8226,20 @@ class _PathAuditor:
                 proof = candidate.proof
             else:
                 proof = None
+            variants = (
+                _call_proven_output_root_variants(
+                    self.tokens,
+                    indexed,
+                    proof,
+                    output_roots,
+                    member_parameters,
+                    self.forward,
+                )
+                if proof is not None and proof.ok
+                else ()
+            )
+            call_output_root_variants[indexed.index] = variants
+            call_output_roots[indexed.index] = frozenset().union(*variants)
             call_proofs[indexed.index] = (indexed, proof, error)
 
         returns = _returns(self.tokens, function, lambda_ranges)
@@ -8646,7 +8721,7 @@ class _PathAuditor:
             if (
                 proof is not None
                 and not proof.ok
-                and call_output_roots.get(indexed.index)
+                and call_referenced_output_roots.get(indexed.index)
             ):
                 classifications.update(proof.classifications)
                 unsafe_contributing_helpers.append(
@@ -8663,7 +8738,7 @@ class _PathAuditor:
                         _context(indexed.index, regions),
                     )
                 )
-            if proof is None and call_output_roots.get(indexed.index):
+            if proof is None and call_referenced_output_roots.get(indexed.index):
                 classifications.update(
                     {
                         error or "unresolved_helper",
@@ -8941,6 +9016,18 @@ class _PathAuditor:
                 True,
                 _bounded_detail(details),
                 tuple(sorted(classifications or {"device_dispatch"})),
+                frozenset(
+                    parameter_positions[root]
+                    for root in device_output_roots
+                    if root in parameter_positions
+                ),
+                (
+                    frozenset(
+                        parameter_positions[root]
+                        for root in device_output_roots
+                        if root in parameter_positions
+                    ),
+                ),
             )
         else:
             classifications.update({"missing_device_terminal", "review_required"})
