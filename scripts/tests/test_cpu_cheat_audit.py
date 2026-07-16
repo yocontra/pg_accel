@@ -5277,6 +5277,74 @@ class ResidentV5RegressionTests(unittest.TestCase):
         self.assertFalse(entry.ok, entry.detail)
         self.assertIn("undominated_success", entry.classifications)
 
+    def test_status_helper_propagation_requires_exact_status_scalar(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct StatusWrapper {
+              StatusWrapper(pgaccel_status value) : value(value) {}
+              operator pgaccel_status() const { return PGACCEL_OK; }
+              pgaccel_status value;
+            };
+            using status_alias = pgaccel_status;
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_converted_status_guard(
+                bool fail, int* out) {
+              StatusWrapper status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_converted_status_return(
+                bool fail, int* out) {
+              StatusWrapper status = write_or_fail(fail, out);
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_auto_status_guard(
+                bool fail, int* out) {
+              auto status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_aliased_status_return(
+                bool fail, int* out) {
+              status_alias status = write_or_fail(fail, out);
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_exact_status_guard(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_exact_cv_status_return(
+                bool fail, int* out) {
+              const volatile pgaccel_status status = write_or_fail(fail, out);
+              return status;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        for name in (
+            "pgaccel_exact_status_guard",
+            "pgaccel_exact_cv_status_return",
+        ):
+            self.assertTrue(entries[name].ok, entries[name].detail)
+        for name in (
+            "pgaccel_converted_status_guard",
+            "pgaccel_converted_status_return",
+            "pgaccel_auto_status_guard",
+            "pgaccel_aliased_status_return",
+        ):
+            self.assertFalse(entries[name].ok, entries[name].detail)
+            self.assertIn("undominated_success", entries[name].classifications)
+
     def test_borrowed_workspace_is_in_host_hazard_and_shadow_analysis(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE

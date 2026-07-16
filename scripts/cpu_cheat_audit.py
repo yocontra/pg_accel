@@ -7917,7 +7917,10 @@ class _PathAuditor:
             return max(declarations, key=lambda item: (item[0], item[1]))[2]
 
         def exact_call_assignment(
-            indexed: _IndexedCall, *, pointer_target: bool
+            indexed: _IndexedCall,
+            *,
+            pointer_target: bool,
+            status_target: bool = False,
         ) -> tuple[str, int] | None:
             """Bind a helper call only from an exact direct assignment RHS."""
 
@@ -7962,6 +7965,16 @@ class _PathAuditor:
             target = self.tokens[target_index].value
             if pointer_target and not exact_pointer_local(target, indexed.index):
                 return None
+            if status_target:
+                declaration = lhs_values[:-1]
+                if (
+                    declaration.count("pgaccel_status") != 1
+                    or any(
+                        token not in {"pgaccel_status", "const", "volatile"}
+                        for token in declaration
+                    )
+                ):
+                    return None
             return target, statement_end
 
         def failure_guard_body(
@@ -8017,7 +8030,9 @@ class _PathAuditor:
                 for index in range(len(self.tokens) - 1)
             ):
                 return False
-            assignment = exact_call_assignment(indexed, pointer_target=False)
+            assignment = exact_call_assignment(
+                indexed, pointer_target=False, status_target=True
+            )
             if assignment is None:
                 return False
             target, statement_end = assignment
@@ -8040,7 +8055,9 @@ class _PathAuditor:
             return failure_guard_body(guard, target)
 
         def propagated_status_call(indexed: _IndexedCall) -> bool:
-            assignment = exact_call_assignment(indexed, pointer_target=False)
+            assignment = exact_call_assignment(
+                indexed, pointer_target=False, status_target=True
+            )
             if assignment is None:
                 return False
             target, statement_end = assignment
