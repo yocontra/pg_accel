@@ -2,7 +2,8 @@
 
 use super::{
     FromDatum, H3FunctionShape, H3TypeShape, fnv1a64, function_fingerprint, oid_word, pg_sys,
-    read_h3_function_shape, read_h3_type_shape, type_fingerprint, u32_word, u64_words,
+    postgres_error_requires_rethrow, read_h3_function_shape, read_h3_type_shape, type_fingerprint,
+    u32_word, u64_words,
 };
 use pgrx::IntoDatum;
 
@@ -1153,6 +1154,16 @@ pub unsafe fn postgis_raster_datum_to_wkb(
         Ok(wkb)
     }))
     .catch_others(|caught| {
+        use pgrx::pg_sys::panic::CaughtError;
+        let (level, code) = match &caught {
+            CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => {
+                (error.level(), error.sql_error_code())
+            }
+            CaughtError::RustPanic { .. } => caught.rethrow(),
+        };
+        if postgres_error_requires_rethrow(level, code) {
+            caught.rethrow();
+        }
         Err(format!(
             "PostGIS st_aswkb raised ERROR: {}",
             caught_error_message(&caught)

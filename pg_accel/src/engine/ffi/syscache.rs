@@ -2,7 +2,7 @@
 //!
 //! Wraps syscache/catalog helpers used by planner hooks.
 
-use pgrx::{FromDatum, pg_sys};
+use pgrx::{FromDatum, PgLogLevel, pg_sys, prelude::PgSqlErrorCode};
 
 mod postgis;
 mod raster;
@@ -13,6 +13,36 @@ pub use raster::{
     postgis_raster_datum_to_wkb, resolve_postgis_raster_catalog, resolve_postgis_raster_function,
     validate_postgis_raster_type,
 };
+
+pub(crate) fn postgres_error_requires_rethrow(level: PgLogLevel, code: PgSqlErrorCode) -> bool {
+    use PgSqlErrorCode::{
+        ERRCODE_DATA_EXCEPTION, ERRCODE_DATATYPE_MISMATCH, ERRCODE_EXTERNAL_ROUTINE_EXCEPTION,
+        ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
+        ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
+        ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_FUNCTION,
+        ERRCODE_UNDEFINED_TABLE,
+    };
+    if matches!(level, PgLogLevel::FATAL | PgLogLevel::PANIC) {
+        return true;
+    }
+
+    // Only expected catalog-race, authorization, type, and datum-conversion
+    // failures may cross a PgTry boundary as an ordinary Rust error.
+    !matches!(
+        code,
+        ERRCODE_DATA_EXCEPTION
+            | ERRCODE_DATATYPE_MISMATCH
+            | ERRCODE_EXTERNAL_ROUTINE_EXCEPTION
+            | ERRCODE_FEATURE_NOT_SUPPORTED
+            | ERRCODE_INSUFFICIENT_PRIVILEGE
+            | ERRCODE_INVALID_PARAMETER_VALUE
+            | ERRCODE_INVALID_TEXT_REPRESENTATION
+            | ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
+            | ERRCODE_UNDEFINED_COLUMN
+            | ERRCODE_UNDEFINED_FUNCTION
+            | ERRCODE_UNDEFINED_TABLE
+    )
+}
 
 // pg_aggregate column attnos (see src/include/catalog/pg_aggregate_d.h).
 const ANUM_PG_AGGREGATE_AGGSERIALFN: i16 = 7;

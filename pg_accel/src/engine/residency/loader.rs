@@ -28,6 +28,19 @@ use super::store::{RelationFingerprint, ResidentColumn, ResidentRelation};
 
 const LOAD_INTERRUPT_CHECK_ROWS: usize = 8192;
 
+#[cfg(feature = "pg_test")]
+#[derive(Clone, Copy)]
+enum TestDirectScanError {
+    Recoverable,
+    QueryCanceled,
+}
+
+#[cfg(feature = "pg_test")]
+std::thread_local! {
+    static TEST_DIRECT_SCAN_ERROR_AFTER_ROWS: std::cell::Cell<Option<(u64, TestDirectScanError)>> = const { std::cell::Cell::new(None) };
+    static TEST_DIRECT_SCAN_DROP_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Raw H3 Datum access is intentionally private. `ColumnBuilder::for_type`
 /// proves the dynamic type before this wrapper is ever requested from SPI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1501,6 +1514,18 @@ struct DirectTableScan {
     slot: *mut pg_sys::TupleTableSlot,
 }
 
+struct LockedPreflight<'relation> {
+    qualified: String,
+    column_names: Vec<String>,
+    _relation: std::marker::PhantomData<&'relation DirectTableScan>,
+}
+
+impl LockedPreflight<'_> {
+    fn query(&self) -> String {
+        exact_relation_preflight_query(&self.qualified, &self.column_names)
+    }
+}
+
 impl DirectTableScan {
     fn open_relation(relid: pg_sys::Oid, requests: &[ColumnRequest]) -> Result<Self, String> {
         // SAFETY: residency loading runs on the PostgreSQL backend main thread.
@@ -1592,6 +1617,22 @@ impl DirectTableScan {
         Ok(())
     }
 
+    fn locked_preflight_metadata<'relation>(
+        &'relation self,
+        requests: &[ColumnRequest],
+    ) -> Result<LockedPreflight<'relation>, String> {
+        // AccessShareLock is held by self while both catalog lookups run. DDL
+        // cannot rename the relation or requested columns until the preflight
+        // and subsequent table-AM scan release this borrow and guard.
+        // SAFETY: relation is live under the guard's AccessShareLock.
+        let relid = unsafe { (*self.relation).rd_id };
+        Ok(LockedPreflight {
+            qualified: qualified_relation_name(relid)?,
+            column_names: column_names(relid, requests)?,
+            _relation: std::marker::PhantomData,
+        })
+    }
+
     fn begin(&mut self) -> Result<(), String> {
         // SAFETY: stage_relation is invoked inside an active SQL statement.
         let snapshot = unsafe { pg_sys::GetActiveSnapshot() };
@@ -1640,6 +1681,8 @@ impl Drop for DirectTableScan {
             };
             self.relation = std::ptr::null_mut();
         }
+        #[cfg(feature = "pg_test")]
+        TEST_DIRECT_SCAN_DROP_COUNT.with(|count| count.set(count.get().saturating_add(1)));
     }
 }
 
@@ -1660,11 +1703,32 @@ unsafe fn begin_default_resident_scan(
     }
 }
 
-fn preflight_relation_projection(query: &str, qualified: &str) -> Result<(), String> {
+fn caught_loader_error<R>(caught: pg_sys::panic::CaughtError, context: &str) -> Result<R, String> {
+    use pg_sys::panic::CaughtError;
+    let (level, code, message) = match &caught {
+        CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => (
+            error.level(),
+            error.sql_error_code(),
+            error.message().to_owned(),
+        ),
+        CaughtError::RustPanic { .. } => caught.rethrow(),
+    };
+    // Preserve PostgreSQL control-flow and resource failures. In particular,
+    // statement_timeout and cancellation retain SQLSTATE 57014 after the scan
+    // guard has unwound, rather than becoming an ordinary loader decline.
+    if syscache::postgres_error_requires_rethrow(level, code) {
+        caught.rethrow();
+    }
+    Err(format!("{context}: {message}"))
+}
+
+fn preflight_relation_projection(metadata: &LockedPreflight<'_>) -> Result<(), String> {
+    let query = metadata.query();
+    let qualified = metadata.qualified.as_str();
     pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
         crate::engine::ffi::planner_hooks::with_planner_hooks_suspended(|| {
             Spi::connect(|client| {
-                client.select(query, Some(1), &[]).map_err(|error| {
+                client.select(&query, Some(1), &[]).map_err(|error| {
                     format!("resident ACL/type preflight for {qualified} failed: {error:?}")
                 })?;
                 Ok::<(), String>(())
@@ -1672,24 +1736,28 @@ fn preflight_relation_projection(query: &str, qualified: &str) -> Result<(), Str
         })
     }))
     .catch_others(|caught| {
-        use pg_sys::panic::CaughtError;
-        let message = match caught {
-            CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => {
-                error.message().to_owned()
-            }
-            CaughtError::RustPanic { ereport, .. } => ereport.message().to_owned(),
-        };
-        Err(format!(
-            "resident ACL/type preflight for {qualified} failed: {message}"
-        ))
+        caught_loader_error(
+            caught,
+            &format!("resident ACL/type preflight for {qualified} failed"),
+        )
     })
     .execute()
 }
 
 fn scan_relation_direct(
     relid: pg_sys::Oid,
-    preflight_query: &str,
-    qualified: &str,
+    requests: &[ColumnRequest],
+    builders: &mut [ColumnBuilder],
+) -> Result<u64, String> {
+    pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        scan_relation_direct_inner(relid, requests, builders)
+    }))
+    .catch_others(|caught| caught_loader_error(caught, "resident direct table scan failed"))
+    .execute()
+}
+
+fn scan_relation_direct_inner(
+    relid: pg_sys::Oid,
     requests: &[ColumnRequest],
     builders: &mut [ColumnBuilder],
 ) -> Result<u64, String> {
@@ -1697,7 +1765,8 @@ fn scan_relation_direct(
         return Err("resident scan request/builder count mismatch".to_owned());
     }
     let mut table = DirectTableScan::open_relation(relid, requests)?;
-    preflight_relation_projection(preflight_query, qualified)?;
+    let metadata = table.locked_preflight_metadata(requests)?;
+    preflight_relation_projection(&metadata)?;
     table.begin()?;
 
     let mut row_count = 0_u64;
@@ -1733,11 +1802,40 @@ fn scan_relation_direct(
         row_count = row_count
             .checked_add(1)
             .ok_or("resident row count exceeds u64")?;
+        #[cfg(feature = "pg_test")]
+        inject_direct_scan_error(row_count);
         batch_rows += 1;
         if batch_rows == LOAD_INTERRUPT_CHECK_ROWS {
             pgrx::check_for_interrupts!();
             batch_rows = 0;
         }
+    }
+}
+
+#[cfg(feature = "pg_test")]
+fn inject_direct_scan_error(row_count: u64) {
+    let error = TEST_DIRECT_SCAN_ERROR_AFTER_ROWS.with(|trigger| {
+        let Some((target, error)) = trigger.get() else {
+            return None;
+        };
+        if target != row_count {
+            return None;
+        }
+        trigger.set(None);
+        Some(error)
+    });
+    match error {
+        Some(TestDirectScanError::Recoverable) => pgrx::ereport!(
+            pgrx::PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION,
+            "injected resident direct scan error"
+        ),
+        Some(TestDirectScanError::QueryCanceled) => pgrx::ereport!(
+            pgrx::PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+            "injected resident direct scan cancellation"
+        ),
+        None => {}
     }
 }
 
@@ -1774,7 +1872,6 @@ pub(super) fn stage_relation(
         })?;
         let relfilenode_before = fingerprint_before.relfilenode();
         let started = Instant::now();
-        let qualified = qualified_relation_name(relid)?;
         let estimated_bytes = estimate_resident_bytes(relid, requests)?;
         let budget = gucs::resident_memory_budget_bytes();
         if estimated_bytes > budget {
@@ -1783,14 +1880,11 @@ pub(super) fn stage_relation(
                 u32::from(relid)
             ));
         }
-        let names = column_names(relid, requests)?;
-        let preflight_query = exact_relation_preflight_query(&qualified, &names);
         let mut builders = requests
             .iter()
             .map(|request| ColumnBuilder::for_type(request.type_oid))
             .collect::<Result<Vec<_>, _>>()?;
-        let row_count =
-            scan_relation_direct(relid, &preflight_query, &qualified, requests, &mut builders)?;
+        let row_count = scan_relation_direct(relid, requests, &mut builders)?;
         let generation_after = ledger::generation_stamp(relid);
         let fingerprint_after = RelationFingerprint::capture(relid, requests);
         if generation_before != generation_after
@@ -1989,17 +2083,53 @@ mod unit_tests {
     }
 
     #[test]
-    fn acl_preflight_uses_exact_zero_row_projection() {
-        assert_eq!(scan_projection(&[]), "1");
-        assert_eq!(scan_projection(&["a\"b".to_owned()]), "\"a\"\"b\"");
+    fn locked_metadata_proof_renders_exact_zero_row_projection() {
+        let count_only = LockedPreflight {
+            qualified: "\"s\".\"parent\"".to_owned(),
+            column_names: Vec::new(),
+            _relation: std::marker::PhantomData,
+        };
         assert_eq!(
-            exact_relation_preflight_query("\"s\".\"parent\"", &[]),
+            count_only.query(),
             "SELECT 1 FROM ONLY \"s\".\"parent\" LIMIT 0"
         );
+        let projected = LockedPreflight {
+            qualified: "\"s\".\"parent\"".to_owned(),
+            column_names: vec!["a\"b".to_owned()],
+            _relation: std::marker::PhantomData,
+        };
         assert_eq!(
-            exact_relation_preflight_query("\"s\".\"parent\"", &["a\"b".to_owned()]),
+            projected.query(),
             "SELECT \"a\"\"b\" FROM ONLY \"s\".\"parent\" LIMIT 0"
         );
+    }
+
+    #[test]
+    fn cancellation_resource_and_deadlock_sqlstates_are_rethrown() {
+        assert!(syscache::postgres_error_requires_rethrow(
+            pgrx::PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_QUERY_CANCELED
+        ));
+        assert!(syscache::postgres_error_requires_rethrow(
+            pgrx::PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_T_R_DEADLOCK_DETECTED
+        ));
+        assert!(syscache::postgres_error_requires_rethrow(
+            pgrx::PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_OUT_OF_MEMORY
+        ));
+        assert!(syscache::postgres_error_requires_rethrow(
+            pgrx::PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+        ));
+        assert!(!syscache::postgres_error_requires_rethrow(
+            pgrx::PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE
+        ));
+        assert!(!syscache::postgres_error_requires_rethrow(
+            pgrx::PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION
+        ));
     }
 
     #[test]
@@ -2285,6 +2415,16 @@ mod tests {
             .expect("relation exists")
     }
 
+    fn caught_error_code(caught: &pg_sys::panic::CaughtError) -> PgSqlErrorCode {
+        use pg_sys::panic::CaughtError;
+        match caught {
+            CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => {
+                error.sql_error_code()
+            }
+            CaughtError::RustPanic { ereport, .. } => ereport.sql_error_code(),
+        }
+    }
+
     #[pg_test]
     fn direct_loader_acl_rls_mvcc_primitives_and_cold_timing() {
         Spi::run(
@@ -2347,27 +2487,26 @@ mod tests {
             .expect("resolve primitive columns");
         let staged = stage_for_test(values_relid, &requests).expect("direct primitive load");
         assert_eq!(staged.row_count(), 2, "dead tuple must be MVCC-invisible");
-        match staged.columns.get(&1).expect("bool staged") {
-            StagedColumn::Bool { values, nulls, .. } => {
-                assert_eq!(values, &[1, 0]);
-                assert_eq!(nulls.as_deref(), Some(&[0, 1][..]));
-            }
-            _ => panic!("bool staging representation changed"),
+        macro_rules! assert_nullable_column {
+            ($attno:expr, $variant:ident, $expected:expr) => {
+                match staged.columns.get(&$attno).expect("primitive staged") {
+                    StagedColumn::$variant { values, nulls, .. } => {
+                        assert_eq!(values.as_slice(), $expected);
+                        assert_eq!(nulls.as_deref(), Some(&[0, 1][..]));
+                    }
+                    _ => panic!("primitive staging representation changed"),
+                }
+            };
         }
-        match staged.columns.get(&3).expect("int4 staged") {
-            StagedColumn::I32 { values, nulls, .. } => {
-                assert_eq!(values, &[17, 0]);
-                assert_eq!(nulls.as_deref(), Some(&[0, 1][..]));
-            }
-            _ => panic!("int4 staging representation changed"),
-        }
-        match staged.columns.get(&8).expect("timestamp staged") {
-            StagedColumn::I64 { values, nulls, .. } => {
-                assert_eq!(values, &[1_000_000, 0]);
-                assert_eq!(nulls.as_deref(), Some(&[0, 1][..]));
-            }
-            _ => panic!("timestamp staging representation changed"),
-        }
+        assert_nullable_column!(1, Bool, &[1_u8, 0]);
+        assert_nullable_column!(2, I32, &[-2_i32, 0]);
+        assert_nullable_column!(3, I32, &[17_i32, 0]);
+        assert_nullable_column!(4, I64, &[-9_000_000_000_i64, 0]);
+        assert_nullable_column!(5, F32, &[1.25_f32, 0.0]);
+        assert_nullable_column!(6, F64, &[-2.5_f64, 0.0]);
+        assert_nullable_column!(7, I32, &[1_i32, 0]);
+        assert_nullable_column!(8, I64, &[1_000_000_i64, 0]);
+        assert_nullable_column!(9, I64, &[2_000_000_i64, 0]);
         match staged.columns.get(&10).expect("text staged") {
             StagedColumn::TextDictionary {
                 codes,
@@ -2381,6 +2520,49 @@ mod tests {
             }
             _ => panic!("text staging representation changed"),
         }
+
+        let drops_before_error = TEST_DIRECT_SCAN_DROP_COUNT.with(std::cell::Cell::get);
+        TEST_DIRECT_SCAN_ERROR_AFTER_ROWS.with(|trigger| {
+            trigger.set(Some((1, TestDirectScanError::Recoverable)));
+        });
+        let injected = match stage_for_test(values_relid, &requests) {
+            Ok(_) => panic!("injected scan ERROR must not publish a staged relation"),
+            Err(error) => error,
+        };
+        assert!(injected.contains("injected resident direct scan error"));
+        assert_eq!(
+            TEST_DIRECT_SCAN_DROP_COUNT.with(std::cell::Cell::get),
+            drops_before_error + 1,
+            "caught scan ERROR must drop scan, slot, and relation guard exactly once"
+        );
+
+        let drops_before_cancel = TEST_DIRECT_SCAN_DROP_COUNT.with(std::cell::Cell::get);
+        TEST_DIRECT_SCAN_ERROR_AFTER_ROWS.with(|trigger| {
+            trigger.set(Some((1, TestDirectScanError::QueryCanceled)));
+        });
+        let cancellation = pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            stage_for_test(values_relid, &requests)
+                .expect("query cancellation must rethrow instead of returning a loader error");
+            None
+        }))
+        .catch_others(|caught| Some(caught_error_code(&caught)))
+        .execute();
+        assert_eq!(
+            cancellation,
+            Some(PgSqlErrorCode::ERRCODE_QUERY_CANCELED),
+            "cancellation must retain SQLSTATE 57014"
+        );
+        assert_eq!(
+            TEST_DIRECT_SCAN_DROP_COUNT.with(std::cell::Cell::get),
+            drops_before_cancel + 1,
+            "rethrowing cancellation must still drop direct scan resources"
+        );
+        assert_eq!(
+            stage_for_test(values_relid, &requests)
+                .expect("scan must remain reusable after caught errors")
+                .row_count(),
+            2
+        );
 
         Spi::run(
             "CREATE UNLOGGED TABLE pgaccel_loader_bench (g int4 NOT NULL, v int4); \
