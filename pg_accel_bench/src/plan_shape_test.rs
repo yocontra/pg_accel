@@ -57,27 +57,32 @@ fn ascii_keyword_end(source: &[u8], start: usize, keyword: &[u8]) -> Option<usiz
     Some(end)
 }
 
-fn fragmented_keyword_end(source: &[u8], start: usize, keyword: &[u8]) -> Option<usize> {
+fn fragmented_keyword_match(
+    source: &[u8],
+    start: usize,
+    keyword: &[u8],
+) -> Option<(usize, Vec<usize>)> {
     if start > 0 && is_sql_identifier_byte(source[start - 1]) {
         return None;
     }
     let mut cursor = start;
+    let mut positions = Vec::with_capacity(keyword.len());
     for expected in keyword {
-        while source.get(cursor).is_some_and(|byte| {
-            matches!(byte, b'"' | b',' | b'[' | b']' | b'(' | b')' | b'\\' | b'#')
-                || byte.is_ascii_whitespace()
-        }) {
-            cursor += 1;
-        }
+        cursor = skip_source_construction_separators(source, cursor);
         if !source
             .get(cursor)
             .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
         {
             return None;
         }
+        positions.push(cursor);
         cursor += 1;
     }
-    Some(cursor)
+    Some((cursor, positions))
+}
+
+fn fragmented_keyword_end(source: &[u8], start: usize, keyword: &[u8]) -> Option<usize> {
+    fragmented_keyword_match(source, start, keyword).map(|(end, _positions)| end)
 }
 
 fn enclosing_rust_string_start(source: &str, target: usize) -> Option<usize> {
@@ -137,9 +142,58 @@ fn skip_source_construction_separators(source: &[u8], mut cursor: usize) -> usiz
             }
             continue;
         }
+        if source.get(cursor..cursor + 2) == Some(b"//") {
+            cursor += 2;
+            while source.get(cursor).is_some_and(|byte| *byte != b'\n') {
+                cursor += 1;
+            }
+            continue;
+        }
         break;
     }
     cursor
+}
+
+fn set_config_argument_prefix(source: &[u8], mut cursor: usize, target: usize) -> bool {
+    let mut projected = Vec::new();
+    while cursor < target {
+        let next = skip_source_construction_separators(source, cursor);
+        if next != cursor {
+            cursor = next;
+            continue;
+        }
+        let Some(byte) = source.get(cursor).copied() else {
+            return false;
+        };
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'(') {
+            projected.push(byte.to_ascii_lowercase());
+        } else if !matches!(byte, b'&' | b'+') {
+            return false;
+        }
+        cursor += 1;
+    }
+    projected.is_empty() || projected == b"pg_accel."
+}
+
+fn fragmented_set_config_call_before(name: &str, source: &str, target: usize) -> bool {
+    let bytes = source.as_bytes();
+    for start in 0..target {
+        let Some((end, positions)) = fragmented_keyword_match(bytes, start, b"set_config") else {
+            continue;
+        };
+        if end > target || !set_config_argument_prefix(bytes, end, target) {
+            continue;
+        }
+        if name.ends_with(".rs")
+            && positions
+                .iter()
+                .any(|position| enclosing_rust_string_start(source, *position).is_none())
+        {
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 fn starts_numeric_literal(source: &[u8], cursor: usize) -> bool {
@@ -191,10 +245,7 @@ fn nondefault_setting_pin_lines(name: &str, source: &str, setting: &str) -> Vec<
         }
         cursor = skip_source_construction_separators(bytes, cursor);
 
-        let context_start = start.saturating_sub(512);
-        let set_config_assignment = source[context_start..start]
-            .to_ascii_lowercase()
-            .contains("set_config");
+        let set_config_assignment = fragmented_set_config_call_before(name, source, start);
         if !has_assignment_operator && !set_config_assignment {
             continue;
         }
@@ -579,6 +630,36 @@ fn admission_audit_is_sql_scoped_and_rejects_fragmented_or_dynamic_pins() {
         assert!(
             !nondefault_setting_pin_lines("fixture.rs", source, "cost_multiplier").is_empty(),
             "protected SQL construction must fail closed: {source}"
+        );
+    }
+
+    let distant_set_config = format!(
+        "Spi::run(\"SELECT set_config({}'pg_accel.cost_multiplier', '0.1', true)\")",
+        format!("/*{}*/", " separated ".repeat(80))
+    );
+    assert!(distant_set_config.len() > 512);
+    assert_eq!(
+        nondefault_setting_pin_lines("fixture.rs", &distant_set_config, "cost_multiplier"),
+        vec![0],
+        "set_config must remain bound to its argument across arbitrarily long comments"
+    );
+
+    let fragmented_set_config =
+        r#"Spi::run(&["SELECT set_","config('pg_accel.cost_multiplier', '0.1', true)"].concat())"#;
+    assert_eq!(
+        nondefault_setting_pin_lines("fixture.rs", fragmented_set_config, "cost_multiplier"),
+        vec![0],
+        "fragmented set_config constructors must not bypass admission auditing"
+    );
+
+    for ordinary_rust in [
+        "let set_config = callback; let cost_multiplier = settings.cost_multiplier;",
+        r#"let prefix = "set_"; let suffix = "config("; let label = "cost_multiplier";"#,
+        r#"let words = ["set_", "config"]; let metric = "cost_multiplier";"#,
+    ] {
+        assert!(
+            nondefault_setting_pin_lines("fixture.rs", ordinary_rust, "cost_multiplier").is_empty(),
+            "ordinary Rust identifiers and disconnected strings are not SQL assignments: {ordinary_rust}"
         );
     }
 }
