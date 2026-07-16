@@ -180,6 +180,36 @@ class PackageExtensionTests(unittest.TestCase):
         helper = MODULE_PATH.read_text(encoding="utf-8")
         self.assertIn("_remove_generated_path(package_root)", helper)
 
+    def test_linux_release_lane_builds_installs_and_loads_each_package(self) -> None:
+        workflow = (REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+            encoding="utf-8"
+        )
+        linux_job = workflow[
+            workflow.index("  linux-package:") : workflow.index("  metal-coverage:")
+        ]
+        release_job = workflow[workflow.index("  release:") :]
+
+        for required in (
+            "runs-on: ubuntu-latest",
+            "pg: [18, 19]",
+            "ACPP_BACKEND=generic ./scripts/setup_acpp.sh",
+            "just audit-cpu-cheats",
+            "python3 scripts/package_extension.py",
+            "sha256sum -c \"$archive_name.sha256\"",
+            "sha256sum -c SHA256SUMS",
+            '"$package_root/install.py"',
+            '--destdir "$stage"',
+            "dynamic_library_path",
+            "extension_control_path",
+            "shared_preload_libraries = 'pg_accel'",
+            "CREATE EXTENSION pg_accel;",
+            "pg_accel_stats()",
+            "target/release/pg_accel-pg${{ matrix.pg }}-linux-*.tar.gz",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, linux_job)
+        self.assertIn("needs: [build, linux-package, metal-coverage]", release_job)
+
     def test_checksum_manifest_is_sorted_complete_and_fails_when_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

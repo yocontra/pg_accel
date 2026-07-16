@@ -19,8 +19,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Release packaging currently runs on macOS; Linux/CUDA runtime
-        # validation is covered by the optional self-hosted CUDA smoke job.
+        # Qualified Metal release packaging runs on macOS. The independent
+        # generic Linux package matrix below validates the Linux artifacts.
         os: [macos-26]
         pg: [18, 19]
     runs-on: ${{ matrix.os }}
@@ -89,6 +89,212 @@ jobs:
           path: |
             target/release/pg_accel-pg${{ matrix.pg }}-*.tar.gz
             target/release/pg_accel-pg${{ matrix.pg }}-*.tar.gz.sha256
+          if-no-files-found: error
+
+  linux-package:
+    name: Linux generic package (PG ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SOFT_FP64_REQUIRED_TAG: v1.3.0
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [18, 19]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Load pinned AdaptiveCpp SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ACPP_REQUIRED_SHA=$(cat .acpp-version)" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rust_version="$(awk '/^rust / { print $2 }' .tool-versions)"
+          rustup toolchain install "$rust_version" --profile minimal
+          rustup default "$rust_version"
+
+      - name: Validate pgrx support for PostgreSQL ${{ matrix.pg }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          pg_accel_require_pgrx_support "${{ matrix.pg }}"
+
+      - name: Cache Cargo artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+          key: release-cargo-linux-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}
+          restore-keys: |
+            release-cargo-linux-${{ runner.arch }}-pg${{ matrix.pg }}-
+            release-cargo-linux-${{ runner.arch }}-
+
+      - name: Cache AdaptiveCpp generic install
+        id: cache-acpp-linux-release
+        uses: actions/cache@v4
+        with:
+          path: |
+            .pgaccel/acpp
+            .pgaccel/src/AdaptiveCpp
+            .pgaccel/src/soft-fp64
+          key: release-acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+
+      - name: Cache source PostgreSQL
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pgrx
+            .pgaccel/postgres
+          key: release-source-pg-linux-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('scripts/pg_source.sh') }}
+
+      - name: Install system dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            bison \
+            clang \
+            cmake \
+            curl \
+            flex \
+            git \
+            libreadline-dev \
+            libssl-dev \
+            lld \
+            llvm-dev \
+            ninja-build \
+            pkg-config \
+            zlib1g-dev
+
+      - name: Install build tools and initialize PostgreSQL ${{ matrix.pg }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          source scripts/pg_versions.sh
+          cargo install just --locked
+          cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
+          scripts/pg_source.sh build "${{ matrix.pg }}"
+          cargo pgrx init --pg${{ matrix.pg }} "$(scripts/pg_source.sh pg-config "${{ matrix.pg }}")"
+
+      - name: Build pinned AdaptiveCpp generic toolchain
+        if: steps.cache-acpp-linux-release.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACPP_BACKEND=generic ./scripts/setup_acpp.sh
+
+      - name: Build and audit release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          just gpu-build
+          CPU_CHEAT_AUDIT_REPORT=target/cpu-cheat-audit-linux-pg${{ matrix.pg }}.json \
+            just audit-cpu-cheats
+
+      - name: Build validated Linux release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/package_extension.py \
+            --pg "${{ matrix.pg }}" \
+            --pg-config "$(scripts/pg_source.sh pg-config "${{ matrix.pg }}")" \
+            --acpp-prefix "$PWD/.pgaccel/acpp/current"
+
+      - name: Verify extracted installer in an isolated PostgreSQL cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+          pg_config="$(scripts/pg_source.sh pg-config "${{ matrix.pg }}")"
+          pg_bindir="$("$pg_config" --bindir)"
+          test_root="$(mktemp -d)"
+          pg_started=0
+          cleanup() {
+            if [ "$pg_started" = 1 ]; then
+              "$pg_bindir/pg_ctl" -D "$test_root/data" -m fast stop >/dev/null 2>&1 || true
+            fi
+            rm -rf "$test_root"
+          }
+          trap cleanup EXIT
+
+          mapfile -t archives < <(
+            find target/release -maxdepth 1 -type f \
+              -name 'pg_accel-pg${{ matrix.pg }}-linux-*.tar.gz' -print
+          )
+          if [ "${#archives[@]}" -ne 1 ]; then
+            printf 'expected one Linux archive, found %s\n' "${#archives[@]}" >&2
+            exit 1
+          fi
+          archive="${archives[0]}"
+          archive_dir="$(dirname "$archive")"
+          archive_name="$(basename "$archive")"
+          (cd "$archive_dir" && sha256sum -c "$archive_name.sha256")
+
+          tar -xzf "$archive" -C "$test_root"
+          package_root="$test_root/pg_accel-pg${{ matrix.pg }}"
+          (cd "$package_root" && sha256sum -c SHA256SUMS)
+
+          stage="$test_root/stage"
+          "$package_root/install.py" \
+            --package-root "$package_root" \
+            --pg-config "$pg_config" \
+            --destdir "$stage"
+          pkglibdir="$stage$("$pg_config" --pkglibdir)"
+          sharedir="$stage$("$pg_config" --sharedir)"
+          socket_dir="$test_root/socket"
+          mkdir -p "$socket_dir"
+
+          "$pg_bindir/initdb" -D "$test_root/data" --no-locale --encoding=UTF8 >/dev/null
+          {
+            printf "dynamic_library_path = '%s'\n" "$pkglibdir"
+            # PostgreSQL appends /extension to each custom control-path root.
+            printf "extension_control_path = '%s'\n" "$sharedir"
+            printf "shared_preload_libraries = 'pg_accel'\n"
+            printf "listen_addresses = ''\n"
+            printf "unix_socket_directories = '%s'\n" "$socket_dir"
+            printf "port = 55432\n"
+          } >> "$test_root/data/postgresql.conf"
+          "$pg_bindir/pg_ctl" \
+            -D "$test_root/data" \
+            -l "$test_root/postgresql.log" \
+            -w start
+          pg_started=1
+          "$pg_bindir/psql" \
+            -h "$socket_dir" \
+            -p 55432 \
+            -d postgres \
+            -v ON_ERROR_STOP=1 \
+            -c "CREATE EXTENSION pg_accel;" \
+            -c "SELECT pg_accel_version();" \
+            -c "SELECT count(*) FROM pg_accel_stats();"
+          "$pg_bindir/pg_ctl" -D "$test_root/data" -m fast -w stop
+          pg_started=0
+          if grep -Eiq '(FATAL|PANIC):|could not load library|undefined symbol' \
+            "$test_root/postgresql.log"; then
+            cat "$test_root/postgresql.log" >&2
+            exit 1
+          fi
+
+      - name: Upload Linux release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg_accel-pg${{ matrix.pg }}-ubuntu-generic-${{ runner.arch }}
+          path: |
+            target/release/pg_accel-pg${{ matrix.pg }}-linux-*.tar.gz
+            target/release/pg_accel-pg${{ matrix.pg }}-linux-*.tar.gz.sha256
           if-no-files-found: error
 
   metal-coverage:
@@ -205,7 +411,7 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
-    needs: [build, metal-coverage]
+    needs: [build, linux-package, metal-coverage]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
