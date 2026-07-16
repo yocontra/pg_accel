@@ -3406,10 +3406,10 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
     *out_state = nullptr;
     return PGACCEL_OOM;
   }
-  q.memcpy(slab, &layout, sizeof(layout)).wait_and_throw();
-  fill_hashagg_streaming_metadata(slab, value_types, value_nulls, agg_cols);
-
   try {
+    q.memcpy(slab, &layout, sizeof(layout)).wait_and_throw();
+    fill_hashagg_streaming_metadata(slab, value_types, value_nulls, agg_cols);
+
     q.parallel_for(sycl::range<1>(layout.table_capacity), [=](sycl::id<1> id) {
        auto* h = reinterpret_cast<HashAggStreamingSlabHeader*>(slab);
        auto* slot_used = reinterpret_cast<uint8_t*>(slab + h->slot_used_off);
