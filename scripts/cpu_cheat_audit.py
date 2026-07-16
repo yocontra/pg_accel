@@ -4906,22 +4906,22 @@ def _call_proven_output_root_variants(
     """Bind only callee parameter positions carrying proven device output."""
 
     arguments = _call_argument_ranges(tokens, indexed.lparen, indexed.rparen, forward)
-    referenced = [
-        frozenset(
-            root
-            for root in output_roots
-            if _range_references_output(tokens, left, right, {root})
+    permitted_roots = output_roots | set(caller_member_parameters)
+    referenced: list[frozenset[str]] = []
+    referenced_descriptors: list[frozenset[str]] = []
+    for left, right in arguments:
+        exact = _exact_pointer_root(tokens, left, right, permitted_roots, forward)
+        root = exact[0] if exact is not None else None
+        referenced.append(
+            frozenset({root})
+            if root is not None and root in output_roots
+            else frozenset()
         )
-        for left, right in arguments
-    ]
-    referenced_descriptors = [
-        frozenset(
-            root
-            for root in caller_member_parameters
-            if _range_references_output(tokens, left, right, {root})
+        referenced_descriptors.append(
+            frozenset({root})
+            if root is not None and root in caller_member_parameters
+            else frozenset()
         )
-        for left, right in arguments
-    ]
     variants: list[frozenset[str]] = []
     for positions in proof.output_parameter_position_variants:
         roots: set[str] = set()
@@ -4963,7 +4963,7 @@ def _mutable_pointer_member_write_positions(
             continue
         parameter = names[-1]
         selected = {parameter: member_parameters[parameter]}
-        aliases, declarations = _output_aliases(
+        aliases, declarations, _ = _output_aliases(
             tokens, function, set(), lambda_ranges, selected
         )
         writes_member = any(
@@ -5247,9 +5247,10 @@ def _output_aliases(
     mutable: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
     member_parameters: Mapping[str, frozenset[str]],
-) -> tuple[set[str], set[int]]:
+) -> tuple[set[str], set[int], dict[str, frozenset[str]]]:
     forward, _ = _delimiter_pairs(tokens)
     roots = set(mutable)
+    origins: dict[str, set[str]] = {root: {root} for root in mutable}
     declarations: set[int] = set()
     pointer_locals: set[str] = set()
 
@@ -5311,16 +5312,9 @@ def _output_aliases(
             cursor -= 2
         return cursor if tokens[cursor].kind == "identifier" else None
 
-    def exact_member_initializer(equals: int, occurrence: int) -> bool:
-        expression_left = equals + 1
-        expression_right = next(
-            (
-                cursor
-                for cursor in range(expression_left, function.body_close)
-                if tokens[cursor].value == ";"
-            ),
-            function.body_close,
-        )
+    def exact_alias_expression(
+        expression_left: int, expression_right: int, occurrence: int
+    ) -> bool:
         while (
             expression_left < expression_right
             and tokens[expression_left].value == "("
@@ -5329,11 +5323,61 @@ def _output_aliases(
         ):
             expression_left += 1
             expression_right -= 1
-        return bool(
+        if expression_right - expression_left == 1:
+            return bool(
+                occurrence == expression_left
+                and tokens[occurrence].value in roots
+                and _unqualified_output_identifier(tokens, occurrence)
+            )
+        if (
             expression_right - expression_left == 3
             and occurrence == expression_left
             and _is_mutable_member_projection(tokens, occurrence, member_parameters)
+        ):
+            return True
+        if (
+            expression_left + 4 >= expression_right
+            or tokens[expression_left].value
+            not in {
+                "static_cast",
+                "const_cast",
+                "reinterpret_cast",
+                "dynamic_cast",
+            }
+            or tokens[expression_left + 1].value != "<"
+        ):
+            return False
+        depth = 1
+        close_angle = expression_left + 2
+        while close_angle < expression_right and depth:
+            value = tokens[close_angle].value
+            if value == "<":
+                depth += 1
+            elif value == ">":
+                depth -= 1
+            elif value == ">>":
+                depth = max(0, depth - 2)
+            close_angle += 1
+        if (
+            depth
+            or close_angle >= expression_right
+            or tokens[close_angle].value != "("
+            or close_angle not in forward
+            or forward[close_angle] != expression_right - 1
+        ):
+            return False
+        return exact_alias_expression(close_angle + 1, expression_right - 1, occurrence)
+
+    def exact_assignment_initializer(equals: int, occurrence: int) -> bool:
+        expression_right = next(
+            (
+                cursor
+                for cursor in range(equals + 1, function.body_close)
+                if tokens[cursor].value == ";"
+            ),
+            function.body_close,
         )
+        return exact_alias_expression(equals + 1, expression_right, occurrence)
 
     # Remember pointer-shaped declarations for a later ``alias = out``.
     for delimiter in range(function.body_open + 1, function.body_close):
@@ -5369,8 +5413,8 @@ def _output_aliases(
                 ),
                 None,
             )
-            if member_projection and (
-                equals is None or not exact_member_initializer(equals, occurrence)
+            if equals is not None and not exact_assignment_initializer(
+                equals, occurrence
             ):
                 continue
             if equals is not None:
@@ -5398,6 +5442,9 @@ def _output_aliases(
                         and brace in forward
                         and brace > left
                         and forward[brace] >= occurrence
+                        and exact_alias_expression(
+                            brace + 1, forward[brace], occurrence
+                        )
                         and tokens[brace - 1].kind == "identifier"
                     ):
                         declaration = declaration_candidate(left, brace)
@@ -5414,13 +5461,23 @@ def _output_aliases(
             if candidate is None:
                 continue
             alias = tokens[candidate].value
-            if alias in roots:
-                continue
-            roots.add(alias)
-            declarations.add(candidate)
-            pointer_locals.add(alias)
-            changed = True
-    return roots - mutable, declarations
+            source_origins = set(origins.get(tokens[occurrence].value, ()))
+            if member_projection:
+                source_origins.add(tokens[occurrence].value)
+            previous = set(origins.get(alias, ()))
+            origins.setdefault(alias, set()).update(source_origins)
+            if alias not in roots:
+                roots.add(alias)
+                declarations.add(candidate)
+                pointer_locals.add(alias)
+                changed = True
+            elif origins[alias] != previous:
+                changed = True
+    return (
+        roots - mutable,
+        declarations,
+        {root: frozenset(values) for root, values in origins.items()},
+    )
 
 
 def _host_output_accesses(
@@ -5429,7 +5486,12 @@ def _host_output_accesses(
     mutable: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
     member_parameters: Mapping[str, frozenset[str]],
-) -> tuple[list[tuple[int, int, bool]], list[tuple[int, int]], set[str]]:
+) -> tuple[
+    list[tuple[int, int, bool]],
+    list[tuple[int, int]],
+    set[str],
+    dict[str, frozenset[str]],
+]:
     forward, _ = _delimiter_pairs(tokens)
     identity_identifiers = {
         "bool",
@@ -5464,7 +5526,7 @@ def _host_output_accesses(
                 and tokens[index + 1].kind == "identifier"
             ):
                 identity_identifiers.add(tokens[index + 1].value)
-    aliases, alias_declarations = _output_aliases(
+    aliases, alias_declarations, alias_origins = _output_aliases(
         tokens, function, mutable, lambda_ranges, member_parameters
     )
     roots = mutable | aliases
@@ -5505,7 +5567,12 @@ def _host_output_accesses(
                 transfers[method_index] = (method_index, tokens[index].line)
             else:
                 writes[index] = (index, tokens[index].line, False)
-    return sorted(writes.values()), sorted(transfers.values()), aliases
+    return (
+        sorted(writes.values()),
+        sorted(transfers.values()),
+        aliases,
+        alias_origins,
+    )
 
 
 def _validation_metadata_write_indices(
@@ -7718,16 +7785,37 @@ class _PathAuditor:
             zero_parameters,
             parameters,
         )
-        host_writes, transfer_lines, aliases = _host_output_accesses(
+        host_writes, transfer_lines, aliases, alias_origins = _host_output_accesses(
             self.tokens, function, mutable, lambda_ranges, member_parameters
         )
         output_roots = mutable | aliases
+        root_parameter_positions = {
+            root: frozenset(
+                parameter_positions[origin]
+                for origin in alias_origins.get(root, frozenset({root}))
+                if origin in parameter_positions
+            )
+            for root in output_roots | set(member_parameters)
+        }
         direct, raw_launches, rejected, device_lambdas, kernel_writes = (
             _direct_dispatches(self.tokens, function, output_roots, regions)
         )
-        caller_provenance = _local_usm_provenance(
-            self.tokens, function, lambda_ranges
-        )
+        direct = [
+            dataclasses.replace(
+                item,
+                output_root_variants=(
+                    frozenset(
+                        root
+                        for launch in kernel_writes
+                        if launch.index == item.index
+                        for root in launch.roots
+                        if root in output_roots
+                    ),
+                ),
+            )
+            for item in direct
+        ]
+        caller_provenance = _local_usm_provenance(self.tokens, function, lambda_ranges)
         helper_kernel_writes: list[_KernelWriteEvidence] = []
         for indexed in _indexed_calls(self.tokens, function, lambda_ranges):
             candidate, _ = self.resolve(indexed.call)
@@ -7799,6 +7887,15 @@ class _PathAuditor:
             regions,
             kernel_writes,
         )
+        copyback_evidence = [
+            dataclasses.replace(
+                item,
+                output_root_variants=(
+                    copyback_destinations.get(item.index, frozenset()),
+                ),
+            )
+            for item in copyback_evidence
+        ]
         (
             resource_publications,
             proven_resource_writes,
@@ -7815,6 +7912,19 @@ class _PathAuditor:
             kernel_writes,
             host_writes,
         )
+        resource_publications = [
+            dataclasses.replace(
+                item,
+                output_root_variants=(
+                    frozenset(
+                        {self.tokens[item.index].value}
+                        if self.tokens[item.index].value in output_roots
+                        else set()
+                    ),
+                ),
+            )
+            for item in resource_publications
+        ]
         proven_transfer_calls.update(resource_transfer_calls)
         host_writes = [
             record
@@ -8395,6 +8505,7 @@ class _PathAuditor:
                     f"kernel-derived opaque resource {resource[0]} reaches ABI "
                     f"output at line {self.tokens[index].line}",
                     _context(index, regions),
+                    (frozenset({self.tokens[index].value}),),
                 )
             )
         if helper_resource_publications:
@@ -8511,7 +8622,10 @@ class _PathAuditor:
         if counter_lines:
             classifications.add(
                 "gpu_exec_observability"
-                if direct or copyback_evidence or resource_publications or resource_returns
+                if direct
+                or copyback_evidence
+                or resource_publications
+                or resource_returns
                 else "fake_gpu_counter"
             )
             details.append(
@@ -8736,6 +8850,7 @@ class _PathAuditor:
                         "helper",
                         f"{function.name} -> {indexed.call.name} at line {indexed.call.line}: {proof.detail}",
                         _context(indexed.index, regions),
+                        call_output_root_variants[indexed.index],
                     )
                 )
             if proof is None and call_referenced_output_roots.get(indexed.index):
@@ -8755,8 +8870,28 @@ class _PathAuditor:
             direct + copyback_evidence + resource_publications + call_evidence,
             key=lambda item: item.index,
         )
+
+        def combined_output_root_variants(
+            evidence: Sequence[_DispatchEvidence],
+        ) -> tuple[frozenset[str], ...]:
+            variants: set[frozenset[str]] = {frozenset()}
+            observed = False
+            for item in evidence:
+                if not item.output_root_variants:
+                    continue
+                observed = True
+                variants = {
+                    existing | produced
+                    for existing in variants
+                    for produced in item.output_root_variants
+                }
+            if not observed:
+                return ()
+            return tuple(sorted(variants, key=lambda item: (len(item), sorted(item))))
+
         success_paths = 0
         zero_success_paths = 0
+        success_output_root_variants: list[frozenset[str]] = []
         unsafe_success: list[str] = []
         for return_index, expression in returns:
             values = [token.value for token in expression]
@@ -8805,6 +8940,7 @@ class _PathAuditor:
             if return_index in resource_returns:
                 classifications.add("opaque_device_resource")
                 details.append(resource_returns[return_index].detail)
+                success_output_root_variants.append(frozenset())
                 continue
 
             returned_resource_name = values[0] if len(values) == 1 else None
@@ -8817,7 +8953,15 @@ class _PathAuditor:
             if helper_resource:
                 classifications.add("opaque_device_resource")
                 details.append(max(helper_resource, key=lambda item: item.index).detail)
+                success_output_root_variants.append(frozenset())
                 continue
+
+            dominating = [
+                item
+                for item in all_evidence
+                if item.index < return_index
+                and _context_dominates(item.context, return_context)
+            ]
 
             returned_call = next(
                 (
@@ -8826,14 +8970,14 @@ class _PathAuditor:
                     if return_index < index
                     and index < return_index + len(expression) + 2
                     and (
-                        call_output_roots.get(index)
+                        call_output_root_variants.get(index)
+                        or call_referenced_output_roots.get(index)
                         or (
                             not function.is_status
                             and "*" in function.return_spelling
                             and record[1] is not None
                             and record[1].ok
-                            and "opaque_device_resource"
-                            in record[1].classifications
+                            and "opaque_device_resource" in record[1].classifications
                         )
                     )
                 ),
@@ -8842,25 +8986,47 @@ class _PathAuditor:
             if returned_call is not None:
                 indexed, proof, error = returned_call
                 if proof is not None and proof.ok:
-                    classifications.update(proof.classifications)
-                    details.append(
-                        f"returned helper chain {function.name} -> {indexed.call.name}: {proof.detail}"
-                    )
-                    if (
+                    opaque_return = (
                         "opaque_device_resource" in proof.classifications
                         and not call_output_roots.get(indexed.index)
-                    ):
-                        all_evidence.append(
-                            _DispatchEvidence(
-                                indexed.index,
-                                indexed.call.line,
-                                "opaque_returned_helper",
-                                f"{function.name} directly returns independently proven "
-                                f"opaque helper {indexed.call.name} at line "
-                                f"{indexed.call.line}",
-                                _context(indexed.index, regions),
-                            )
+                    )
+                    bound_variants = call_output_root_variants.get(indexed.index, ())
+                    prior_variants = combined_output_root_variants(dominating)
+                    combined = tuple(
+                        sorted(
+                            {
+                                prior | bound
+                                for prior in (prior_variants or (frozenset(),))
+                                for bound in (bound_variants or (frozenset(),))
+                            },
+                            key=lambda item: (len(item), sorted(item)),
                         )
+                    )
+                    if function.is_status and any(not variant for variant in combined):
+                        unsafe_success.append(
+                            f"returned helper {indexed.call.name} at line "
+                            f"{indexed.call.line} has a successful output variant that "
+                            "does not bind any caller ABI output"
+                        )
+                    else:
+                        classifications.update(proof.classifications)
+                        details.append(
+                            f"returned helper chain {function.name} -> "
+                            f"{indexed.call.name}: {proof.detail}"
+                        )
+                        if opaque_return:
+                            all_evidence.append(
+                                _DispatchEvidence(
+                                    indexed.index,
+                                    indexed.call.line,
+                                    "opaque_returned_helper",
+                                    f"{function.name} directly returns independently "
+                                    f"proven opaque helper {indexed.call.name} at line "
+                                    f"{indexed.call.line}",
+                                    _context(indexed.index, regions),
+                                )
+                            )
+                        success_output_root_variants.extend(combined)
                     continue
                 if proof is not None:
                     classifications.update(proof.classifications)
@@ -8881,16 +9047,18 @@ class _PathAuditor:
                 )
                 continue
 
-            dominating = [
-                item
-                for item in all_evidence
-                if item.index < return_index
-                and _context_dominates(item.context, return_context)
-            ]
-            if not dominating:
+            path_variants = combined_output_root_variants(dominating)
+            if not path_variants:
                 unsafe_success.append(
                     f"success at line {self.tokens[return_index].line} is not dominated by output-producing SYCL work"
                 )
+            elif any(not variant for variant in path_variants):
+                unsafe_success.append(
+                    f"success at line {self.tokens[return_index].line} has a device "
+                    "evidence variant that does not bind any ABI output"
+                )
+            else:
+                success_output_root_variants.extend(path_variants)
 
         internal_void_terminal = bool(
             not returns
@@ -8899,14 +9067,21 @@ class _PathAuditor:
         )
         if internal_void_terminal:
             success_paths = 1
-            if not any(
-                item.index < function.body_close
-                and _context_dominates(
-                    item.context, _context(function.body_close, regions)
-                )
+            terminal_evidence = [
+                item
                 for item in all_evidence
-            ):
+                if (
+                    item.index < function.body_close
+                    and _context_dominates(
+                        item.context, _context(function.body_close, regions)
+                    )
+                )
+            ]
+            terminal_variants = combined_output_root_variants(terminal_evidence)
+            if not terminal_variants or any(not item for item in terminal_variants):
                 unsafe_success.append("implicit void return lacks device provenance")
+            else:
+                success_output_root_variants.extend(terminal_variants)
 
         failure_only_hazards = bool(
             host_loop_lines
@@ -8980,6 +9155,26 @@ class _PathAuditor:
             classifications.update({"missing_return_analysis", "review_required"})
             unsafe_success.append("no auditable terminal return")
 
+        output_parameter_position_variants = tuple(
+            sorted(
+                {
+                    frozenset().union(
+                        *(
+                            root_parameter_positions.get(root, frozenset())
+                            for root in roots
+                        )
+                    )
+                    for roots in success_output_root_variants
+                },
+                key=lambda item: (len(item), sorted(item)),
+            )
+        )
+        guaranteed_output_parameter_positions = (
+            frozenset.intersection(*output_parameter_position_variants)
+            if output_parameter_position_variants
+            else frozenset()
+        )
+
         hard_failure = bool(
             unsafe_success
             or host_loop_lines
@@ -9016,18 +9211,8 @@ class _PathAuditor:
                 True,
                 _bounded_detail(details),
                 tuple(sorted(classifications or {"device_dispatch"})),
-                frozenset(
-                    parameter_positions[root]
-                    for root in device_output_roots
-                    if root in parameter_positions
-                ),
-                (
-                    frozenset(
-                        parameter_positions[root]
-                        for root in device_output_roots
-                        if root in parameter_positions
-                    ),
-                ),
+                guaranteed_output_parameter_positions,
+                output_parameter_position_variants,
             )
         else:
             classifications.update({"missing_device_terminal", "review_required"})
@@ -9160,6 +9345,11 @@ def _audit_source_literal(
                 proof.detail,
                 entrypoint.is_status,
                 entrypoint.return_spelling,
+                tuple(sorted(proof.guaranteed_output_parameter_positions)),
+                tuple(
+                    tuple(sorted(variant))
+                    for variant in proof.output_parameter_position_variants
+                ),
             )
         )
         if not proof.ok:
@@ -9302,7 +9492,25 @@ def audit_source(
                 ),
             )
         elif expanded_entry.ok:
-            merged = entry
+            literal_variants = set(entry.output_parameter_position_variants or ((),))
+            expanded_variants = set(
+                expanded_entry.output_parameter_position_variants or ((),)
+            )
+            merged_variants = tuple(
+                sorted(
+                    literal_variants | expanded_variants,
+                    key=lambda item: (len(item), item),
+                )
+            )
+            merged = dataclasses.replace(
+                entry,
+                guaranteed_output_parameter_positions=tuple(
+                    sorted(
+                        set.intersection(*(set(variant) for variant in merged_variants))
+                    )
+                ),
+                output_parameter_position_variants=merged_variants,
+            )
         else:
             merged = dataclasses.replace(
                 entry,
@@ -9433,6 +9641,11 @@ def _external_device_proofs(
                     + entry.detail,
                     tuple(
                         sorted(set(entry.classifications) | {"audited_external_call"})
+                    ),
+                    frozenset(entry.guaranteed_output_parameter_positions),
+                    tuple(
+                        frozenset(variant)
+                        for variant in entry.output_parameter_position_variants
                     ),
                 ),
             )
@@ -10615,7 +10828,7 @@ def _write_json_report(
         for classification in finding.classifications
     )
     payload = {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": "fail" if findings else "pass",
         "summary": {
             "files": len(audits),
@@ -10646,6 +10859,13 @@ def _write_json_report(
                 "status": "pass" if entry.ok else "fail",
                 "classifications": list(entry.classifications),
                 "detail": entry.detail,
+                "guaranteed_output_parameter_positions": list(
+                    entry.guaranteed_output_parameter_positions
+                ),
+                "output_parameter_position_variants": [
+                    list(variant)
+                    for variant in entry.output_parameter_position_variants
+                ],
             }
             for entry in entrypoint_audits
         ],

@@ -3070,6 +3070,195 @@ class ResidentV5RegressionTests(unittest.TestCase):
         self.assertFalse(entry.ok, entry.detail)
         self.assertIn("undominated_success", entry.classifications)
 
+    def test_helper_output_positions_survive_reordered_and_duplicate_arguments(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status write_first(int* first, int* second) {
+              (void)second;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                first[0] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status write_detail(
+                int* first, int* detail, int* third) {
+              (void)first;
+              (void)third;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                detail[0] = 2;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_reordered_output(int* out) {
+              int local = 0;
+              return write_first(&local, out);
+            }
+            extern "C" pgaccel_status pgaccel_duplicate_unwritten_output(int* out) {
+              int local = 0;
+              return write_detail(out, &local, out);
+            }
+            """
+        )
+        self.assertEqual(len(result.entrypoint_audits), 2)
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("undominated_success", entry.classifications)
+
+    def test_conditional_and_call_rhs_do_not_invent_output_aliases(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static int* select_local(int* local, int*) { return local; }
+            extern "C" pgaccel_status pgaccel_conditional_alias_red(
+                int* out, bool choose_out) {
+              int local = 0;
+              int* selected = choose_out ? out : &local;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                selected[0] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_call_alias_red(int* out) {
+              int local = 0;
+              int* selected = select_local(&local, out);
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                selected[0] = 2;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertNotIn("output_alias_tracking", entry.classifications)
+
+    def test_branch_output_variants_require_each_caller_binding(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status select_output(
+                bool first, int* first_out, int* second_out) {
+              sycl::queue q;
+              if (first) {
+                q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                  first_out[0] = 1;
+                }).wait_and_throw();
+                return PGACCEL_OK;
+              }
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                second_out[0] = 2;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_branch_output_red(
+                bool first, int* out) {
+              int local = 0;
+              return select_output(first, out, &local);
+            }
+            extern "C" pgaccel_status pgaccel_branch_output_green(
+                bool first, int* first_out, int* second_out) {
+              return select_output(first, first_out, second_out);
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        red = entries["pgaccel_branch_output_red"]
+        self.assertFalse(red.ok, red.detail)
+        self.assertTrue(
+            entries["pgaccel_branch_output_green"].ok,
+            entries["pgaccel_branch_output_green"].detail,
+        )
+        self.assertEqual(
+            entries["pgaccel_branch_output_green"].output_parameter_position_variants,
+            ((1,), (2,)),
+        )
+
+    def test_output_position_proof_survives_three_levels_and_local_detail(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status detail_leaf(int* out, int* detail) {
+              (void)out;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                detail[0] = 3;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status detail_middle(int* out, int* detail) {
+              return detail_leaf(out, detail);
+            }
+            static pgaccel_status write_both(int* out, int* detail) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 4;
+                detail[0] = 5;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_three_level_detail_red(int* out) {
+              int local = 0;
+              return detail_middle(out, &local);
+            }
+            extern "C" pgaccel_status pgaccel_out_with_local_detail_green(int* out) {
+              int local = 0;
+              return write_both(out, &local);
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertFalse(entries["pgaccel_three_level_detail_red"].ok)
+        green = entries["pgaccel_out_with_local_detail_green"]
+        self.assertTrue(green.ok, green.detail)
+        self.assertEqual(green.guaranteed_output_parameter_positions, (0,))
+        self.assertEqual(green.output_parameter_position_variants, ((0,),))
+
+    def test_descriptor_scratch_and_finalize_outputs_remain_path_variants(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct GroupedDesc { int* scratch; };
+            static pgaccel_status finalize(int* out, int* detail) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 6;
+                detail[0] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status accumulate(int* scratch, int* detail) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                scratch[0] = 8;
+                detail[0] = 9;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status execute_ex(
+                const GroupedDesc* desc, int* out, int* detail, bool final) {
+              int* scratch_output = desc->scratch;
+              if (final) return finalize(out, detail);
+              return accumulate(scratch_output, detail);
+            }
+            extern "C" pgaccel_status pgaccel_grouped_variant_wrapper(
+                const GroupedDesc* desc, int* out, bool final) {
+              int local_detail = 0;
+              return execute_ex(desc, out, &local_detail, final);
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.guaranteed_output_parameter_positions, ())
+        self.assertEqual(entry.output_parameter_position_variants, ((0,), (1,)))
+
     def test_kernel_written_usm_copyback_forms_are_proven(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE
@@ -5270,7 +5459,9 @@ class ReportTests(unittest.TestCase):
             report_path = pathlib.Path(directory) / "report.json"
             audit._write_json_report(report_path, [result])
             report = json.loads(report_path.read_text(encoding="utf-8"))
-        self.assertEqual(report["schema_version"], 3)
+        self.assertEqual(report["schema_version"], 4)
+        self.assertIn("guaranteed_output_parameter_positions", report["entrypoints"][0])
+        self.assertIn("output_parameter_position_variants", report["entrypoints"][0])
         self.assertEqual(report["status"], "fail")
         self.assertEqual(report["summary"]["entrypoints"], 1)
         self.assertEqual(report["summary"]["entrypoints_failed"], 1)
