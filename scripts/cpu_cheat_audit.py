@@ -8026,7 +8026,7 @@ class _PathAuditor:
             # comparison lie about whether the helper failure is propagated.
             if any(
                 self.tokens[index].value == "operator"
-                and self.tokens[index + 1].value == "!="
+                and self.tokens[index + 1].value in {"!=", "not_eq"}
                 for index in range(len(self.tokens) - 1)
             ):
                 return False

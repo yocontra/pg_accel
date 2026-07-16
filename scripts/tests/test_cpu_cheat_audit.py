@@ -5277,6 +5277,37 @@ class ResidentV5RegressionTests(unittest.TestCase):
         self.assertFalse(entry.ok, entry.detail)
         self.assertIn("undominated_success", entry.classifications)
 
+    def test_alternative_status_inequality_cannot_prove_failure_guard(self) -> None:
+        prelude = self.COPYBACK_PRELUDE.replace(
+            """using pgaccel_status = int;
+        constexpr pgaccel_status PGACCEL_OK = 0;
+        constexpr pgaccel_status PGACCEL_ERROR = 1;""",
+            """enum pgaccel_status { PGACCEL_OK = 0, PGACCEL_ERROR = 1 };
+        static bool operator not_eq(pgaccel_status, pgaccel_status) { return false; }""",
+        )
+        result = audit_compiling_fixture(
+            prelude
+            + r"""
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 7;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_alternative_status_guard(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+
     def test_status_helper_propagation_requires_exact_status_scalar(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE
