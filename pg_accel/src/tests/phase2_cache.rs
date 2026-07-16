@@ -240,6 +240,11 @@ mod tests {
     }
 
     fn assert_generic_matches_native(query: &str) {
+        // This helper proves the selected descriptor executor contract. Keep
+        // platform-specific cost calibration from deciding whether the test
+        // reaches that executor; default-cost admission is tested separately.
+        Spi::run("SET LOCAL pg_accel.cost_multiplier = 0.1")
+            .expect("select contract-test generic aggregate cost");
         Spi::run("SET LOCAL pg_accel.enabled = off").expect("disable pg_accel");
         let native = result_rows(query);
 
@@ -261,6 +266,8 @@ mod tests {
     }
 
     fn assert_default_cost_decline_matches_native(query: &str) {
+        Spi::run("SET LOCAL pg_accel.cost_multiplier = DEFAULT")
+            .expect("restore production generic aggregate cost");
         Spi::run("SET LOCAL pg_accel.enabled = off").expect("disable pg_accel");
         let native = result_rows(query);
 
