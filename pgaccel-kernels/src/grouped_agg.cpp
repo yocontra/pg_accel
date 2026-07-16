@@ -196,6 +196,12 @@ struct DeviceCompletion {
   DeviceCopyCommand commands[kPublishCommandCount];
 };
 
+static_assert(std::is_standard_layout_v<DeviceCompletion>);
+static_assert(std::is_same_v<decltype(DeviceCompletion::emitted),
+                             decltype(pgaccel_grouped_agg_out::emitted_group_count)>);
+static_assert(sizeof(decltype(DeviceCompletion::emitted)) ==
+              sizeof(decltype(pgaccel_grouped_agg_out::emitted_group_count)));
+
 struct DeviceOutputPresence {
   uint8_t detail;
   uint8_t group_codes;
@@ -2643,7 +2649,7 @@ class ScratchOwner {
 
 void launch_grouped_agg_device(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
                                uint64_t output_mask, void* const device_workspace,
-                               DeviceCompletion* completion_output, const WorkspaceLayout& layout) {
+                               const WorkspaceLayout& layout) {
   KernelParams host_params;
   bind_params(desc, layout, device_workspace, &host_params);
   DevicePublishParams host_publish_params;
@@ -2652,6 +2658,8 @@ void launch_grouped_agg_device(sycl::queue& queue, const pgaccel_grouped_agg_des
       reinterpret_cast<KernelParams*>(static_cast<uint8_t*>(device_workspace) + layout.params);
   auto* device_publish_params = reinterpret_cast<DevicePublishParams*>(
       static_cast<uint8_t*>(device_workspace) + layout.publish_params);
+  auto* const completion_output = reinterpret_cast<DeviceCompletion*>(
+      static_cast<uint8_t*>(device_workspace) + layout.completion);
   queue.memcpy(device_params, &host_params, sizeof(host_params)).wait_and_throw();
   queue.memcpy(device_publish_params, &host_publish_params, sizeof(host_publish_params))
       .wait_and_throw();
@@ -2839,9 +2847,7 @@ pgaccel_status execute_grouped_agg_finalize(sycl::queue& queue,
           static_cast<uint64_t>(measure3_rhs_count_output != nullptr) |
       publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 8) *
           static_cast<uint64_t>(measure3_rhs_nonnull_output != nullptr);
-  auto* const device_completion = reinterpret_cast<DeviceCompletion*>(
-      static_cast<uint8_t*>(device_workspace) + layout.completion);
-  launch_grouped_agg_device(queue, desc, output_mask, device_workspace, device_completion, layout);
+  launch_grouped_agg_device(queue, desc, output_mask, device_workspace, layout);
 
   const auto* const workspace_bytes = static_cast<const uint8_t*>(device_workspace);
   DeviceCompletion completion{};
@@ -2851,6 +2857,9 @@ pgaccel_status execute_grouped_agg_finalize(sycl::queue& queue,
 
   queue.memcpy(detail, workspace_bytes + completion.commands[kPublishDetail].source_offset,
                sizeof(completion.detail));
+  const size_t emitted_offset = layout.completion + offsetof(DeviceCompletion, emitted);
+  queue.memcpy(&out->emitted_group_count, workspace_bytes + emitted_offset,
+               sizeof(out->emitted_group_count));
   {
     {
       const DeviceCopyCommand& command = completion.commands[kPublishActive];
@@ -3139,12 +3148,6 @@ pgaccel_status execute_grouped_agg_finalize(sycl::queue& queue,
                      command.bytes);
     }
     {
-      const DeviceCopyCommand& command = completion.commands[kPublishEmitted];
-      if (command.bytes != 0)
-        queue.memcpy(&out->emitted_group_count, workspace_bytes + command.source_offset,
-                     command.bytes);
-    }
-    {
       const DeviceCopyCommand& command = completion.commands[kPublishSelected];
       if (command.bytes != 0)
         queue.memcpy(&out->selected_count, workspace_bytes + command.source_offset, command.bytes);
@@ -3163,10 +3166,7 @@ pgaccel_status execute_grouped_agg_accumulate(sycl::queue& queue,
                                               const pgaccel_grouped_agg_desc& desc,
                                               int32_t* detail, void* const device_workspace,
                                               const WorkspaceLayout& layout) {
-  auto* const device_completion = reinterpret_cast<DeviceCompletion*>(
-      static_cast<uint8_t*>(device_workspace) + layout.completion);
-  launch_grouped_agg_device(queue, desc, publish_bit(kPublishDetail), device_workspace,
-                            device_completion, layout);
+  launch_grouped_agg_device(queue, desc, publish_bit(kPublishDetail), device_workspace, layout);
 
   const auto* const workspace_bytes = static_cast<const uint8_t*>(device_workspace);
   DeviceCompletion completion{};

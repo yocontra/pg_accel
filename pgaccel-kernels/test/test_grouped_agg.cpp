@@ -1473,6 +1473,7 @@ void test_device_publication_contract() {
   CHECK(pgaccel_gpu_exec_count() > 0);
   CHECK(output.out.emitted_group_count == 3);
   CHECK(output.out.selected_count == keys.size());
+  CHECK(output.out.uncertain_count == 0);
   CHECK(std::vector<int32_t>(output.key_values[0].begin(), output.key_values[0].begin() + 3) ==
         std::vector<int32_t>({1, 3, 7}));
   CHECK(std::vector<uint8_t>(output.key_nulls[0].begin(), output.key_nulls[0].begin() + 3) ==
@@ -1502,6 +1503,8 @@ void test_device_publication_contract() {
   CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
   CHECK(pgaccel_gpu_exec_count() > 0);
   CHECK(device_failure.out.emitted_group_count == 0);
+  CHECK(device_failure.out.selected_count == 0);
+  CHECK(device_failure.out.uncertain_count == 0);
   CHECK(device_failure.measures[0].count[0] == OutputStorage::kSentinel);
 }
 
