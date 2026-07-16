@@ -5349,6 +5349,13 @@ class ResidentV5RegressionTests(unittest.TestCase):
               (void)ignored;
               return build_or_fail(false, out);
             }
+            struct ConvertedState {
+              State* stored{};
+              ConvertedState() = default;
+              ConvertedState(State* state) : stored(state) {}
+              State** operator&() { return &stored; }
+              operator State*() const { return new State{}; }
+            };
             extern "C" State* pgaccel_resource_direct() {
               return build_device_state();
             }
@@ -5403,6 +5410,18 @@ class ResidentV5RegressionTests(unittest.TestCase):
               if (state == nullptr) return PGACCEL_ERROR;
               *out = state;
               return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_resource_conversion_status(
+                State** out) {
+              ConvertedState state;
+              pgaccel_status status = build_or_fail(false, &state);
+              if (status != PGACCEL_OK) return status;
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" State* pgaccel_resource_conversion_return() {
+              ConvertedState state = build_device_state();
+              return state;
             }
             """
         )

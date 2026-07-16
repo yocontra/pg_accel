@@ -7875,6 +7875,47 @@ class _PathAuditor:
                     return True
             return False
 
+        def exact_pointer_local(name: str, before: int) -> bool:
+            """Require the active declaration to name a direct pointer object."""
+
+            brace_ranges = [
+                (left, right)
+                for left, right in self.forward.items()
+                if self.tokens[left].value == "{"
+            ]
+            declarations: list[tuple[int, int, bool]] = []
+            qualifiers = {
+                "const",
+                "volatile",
+                "restrict",
+                "__restrict",
+                "__restrict__",
+            }
+            for index in range(function.signature_start, before):
+                if (
+                    self.tokens[index].value != name
+                    or _declaration_kind(self.tokens, index, function) is None
+                ):
+                    continue
+                cursor = index - 1
+                while (
+                    cursor >= function.signature_start
+                    and self.tokens[cursor].value in qualifiers
+                ):
+                    cursor -= 1
+                scope = _scope_for(index, brace_ranges)
+                if scope[0] < before < scope[1]:
+                    declarations.append(
+                        (
+                            scope[0],
+                            index,
+                            cursor >= 0 and self.tokens[cursor].value == "*",
+                        )
+                    )
+            if not declarations:
+                return False
+            return max(declarations, key=lambda item: (item[0], item[1]))[2]
+
         def exact_call_assignment(
             indexed: _IndexedCall, *, pointer_target: bool
         ) -> tuple[str, int] | None:
@@ -7918,7 +7959,10 @@ class _PathAuditor:
                 forbidden.update({"*", "&", "&&"})
             if set(lhs_values) & forbidden:
                 return None
-            return self.tokens[target_index].value, statement_end
+            target = self.tokens[target_index].value
+            if pointer_target and not exact_pointer_local(target, indexed.index):
+                return None
+            return target, statement_end
 
         def failure_guard_body(
             if_index: int, propagated_status: str | None = None
@@ -8692,6 +8736,7 @@ class _PathAuditor:
                         len(values) == 2
                         and values[0] == "&"
                         and re.fullmatch(r"[A-Za-z_]\w*", values[1])
+                        and exact_pointer_local(values[1], indexed.index)
                     ):
                         bound.add(values[1])
                 bound_variants.append(frozenset(bound))
