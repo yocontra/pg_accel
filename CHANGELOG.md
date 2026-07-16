@@ -57,6 +57,57 @@ claim is implied by the entries below.
 
 ### Verification
 
+- AdaptiveCpp release provenance is the `fork-safe-metal` commit
+  `456ae6910720810f5fe59f160e6707d46bb8e5f0` named by `.acpp-version`. Its
+  locally available history incorporates upstream `develop` snapshot
+  `9a91272169733bdfa6780362e7a2c94cd7580ffd` through merge
+  `44948428654b8785d464d11544b0a845b52917af` on 2026-07-04. This is the last
+  locally verifiable sync point, not a claim of a later rebase or upstream
+  acceptance. Relative to that embedded snapshot, the 33 non-merge commits
+  unique to the pinned side are listed below in ancestry order. The abbreviated
+  object IDs resolve from the exact pin:
+
+  ```text
+  ff4d8382316e feat(runtime): add fork-aware backend reset and Metal archive path
+  ffa1f56b599d feat(algorithms): add pointer-based sort_into facade
+  560ce326f5a1 feat(metal): add atomic64 and opt-in soft-fp64 scaffolding
+  e5281d78cc41 fix(metal): avoid WindowServer device lookup and clean emitter state
+  049fbbb23f8d feat(metal): external fp64 dep hook + IEEE signed-zero fmin/fmax + shutdown fixes
+  416a3d75a5fe fix(metal): absolute-path + bitcode-link fixes for external fp64 dep
+  561cb7e2ec28 fix(metal): emit fp64 helper types before dependent structs
+  729001a48f5e fix(metal): preserve soft-fp64 bodies for MSL emission
+  da3a44c5b4f9 fix(runtime): poison kernel_cache entries on JIT / code-object failure
+  edefd36cf77a fix(metal-emitter): lower fp64 undef and i128 equality safely
+  a9d29568ea30 fix(metal-emitter): lower i128, fp64 calls, and globals correctly
+  fe01d21e55c9 fix(metal-as): specialise pointer-param soft-fp64 helpers via inlining
+  f3a14eea61b0 fix(metal-emitter): align acpp_f64 to 8 bytes
+  681d4f5df7b5 feat(metal): consume soft-fp64 sources directly
+  c604341094b9 docs(metal-emitter): remove stale fp64 TODO comments
+  13f51f63f1c5 fix(metal-emitter): correct lowering of i128 add/sub/mul
+  7c26ca6daf24 feat(metal-archive): skip oversized archive builds
+  1f8881e7a9dd fix(metal): treat archive skip as non-fatal
+  2bd168ff52b2 fix(metal-emitter): promote non-standard integer widths to next supported size
+  2177fafbbb88 fix(metal-emitter): inline aggregate constants at use sites
+  54a707364792 fix(metal): refuse allocations after fork without exec
+  777b6f7f2b25 fix(metal-emitter): preserve fmin/fmax semantics under fast math
+  44fcc839a50b fix(metal): signal queue event after cross-queue waits
+  9afa93e9744d test(metal): clarify backend limitations and test bounds
+  57f3ac7f166d fix(runtime): avoid inherited mutex locks during fork reset
+  b050eef9ade5 chore: polish review comments and diagnostics
+  43053c9d7862 fix(metal): integrate soft-fp64 v1.3 source set
+  572b7000a94b fix(metal-emitter): lower i128 division and remainder
+  a0c7c3671ad6 test(metal): allow cold soft-fp64 full coverage
+  d2816b44d8f6 fix(metal): use process-private temp filenames in compile_msl_to_metallib
+  7e79a6ca45f5 fix(metal): poll shared events safely after fork
+  876634a63d09 fix(metal): keep soft-fp64 lowering clean after upstream sync
+  456ae6910720 fix(config): escape default targets in generated JSON
+  ```
+
+  Release builds clone and compile this fork rather than consuming an upstream
+  binary package. Metal additionally requires Apple `metal-cpp`, LLVM/lld, and
+  soft-fp64 tag `v1.3.0`; `scripts/setup_acpp.sh` applies the tracked
+  AdaptiveCpp patches and writes `pg_accel-acpp-provenance.txt`. A fresh
+  exact-candidate provenance artifact remains required before release.
 - The local Phase 6 domain gate landed in `37a9571d`, `868e0e89`, and
   `2f85c059`. A pre-integration PG18/Metal run passed, but its machine-local
   artifact was not retained as durable release evidence. This is not an

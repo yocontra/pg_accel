@@ -14,6 +14,14 @@ The repository-root `.acpp-version` file is the source of truth for this exact
 pin. AdaptiveCpp license and bundled-component sources are available from that
 commit under its `external/`, `src/`, and license files.
 
+The locally available commit graph records an upstream `develop` snapshot at
+9a91272169733bdfa6780362e7a2c94cd7580ffd, incorporated by merge commit
+44948428654b8785d464d11544b0a845b52917af on 2026-07-04. This records the last
+verifiable sync in the pinned history; it does not claim that later upstream
+work is included or that pg_accel's fork-only changes were accepted upstream.
+The pg_accel setup path also applies tracked repository patches after checkout
+and records their resulting Git status in `pg_accel-acpp-provenance.txt`.
+
 ----------------------------------------------------------------------
 
 1. soft-fp64

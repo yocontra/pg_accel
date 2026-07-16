@@ -35,6 +35,36 @@ GPU can load the extension, but the planner keeps queries on PostgreSQL-native
 plans. CUDA/NVIDIA validation is owner-deferred in [TODO.md](TODO.md); this
 document makes no support claim for it.
 
+### AdaptiveCpp provenance and installation burden
+
+The Metal toolchain is not an upstream binary dependency. The setup path clones
+`https://github.com/yocontra/AdaptiveCpp.git`, checks out branch
+`fork-safe-metal` at exact commit
+`456ae6910720810f5fe59f160e6707d46bb8e5f0`, and builds it from source into the
+repository-local `.pgaccel/acpp/metal` prefix. The commit recorded in
+`.acpp-version` remains authoritative if this prose ever drifts.
+
+The pinned history contains an upstream `develop` snapshot at
+`9a91272169733bdfa6780362e7a2c94cd7580ffd`, merged by
+`44948428654b8785d464d11544b0a845b52917af` on 2026-07-04. Release notes list
+the non-merge commits unique to the pinned side of that locally available
+history. This is a historical rebase/sync statement only: pg_accel does not
+claim that the fork changes have been accepted upstream or that the snapshot is
+the current upstream tip.
+
+On Apple Silicon, building the toolchain requires Xcode command-line tools,
+Apple `metal-cpp` headers, a supported LLVM installation (LLVM 20 is the CI
+configuration), and `lld`/`ld64.lld`. Setup also clones `yocontra/soft-fp` tag
+`v1.3.0` and applies the tracked patches under `patches/adaptivecpp/` plus a
+conditional `metal-cpp` compatibility edit. The result is therefore the exact
+fork commit plus reviewed repository patches, not a claim that a pristine
+upstream checkout is sufficient. `scripts/setup_acpp.sh` records the resolved
+commit, backend, compiler paths, CMake arguments, soft-fp64 revision, and
+post-patch Git status in
+`${ACPP_PREFIX}/pg_accel-acpp-provenance.txt`. That file from the exact release
+candidate is required evidence; these instructions alone do not close a
+release gate.
+
 Add the extension to `postgresql.conf`:
 
 ```conf
