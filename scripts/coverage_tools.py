@@ -25,7 +25,7 @@ SCHEMA_VERSION = 2
 FIXED_THRESHOLD = 90.0
 BASELINE_SQL_FILES = 52
 BASELINE_SQL_ASSERTIONS = 287
-BASELINE_CPP_SOURCES = 21
+BASELINE_CPP_SOURCES = 20
 BASELINE_CPP_TESTS = 29
 DEVICE_PROFILE_INTRINSIC_MARKER = b"llvm.instrprof."
 UINT32_MAX = (1 << 32) - 1
@@ -3768,7 +3768,7 @@ def recompute_raw_line_layer(
             or scope_required != required
         ):
             errors.append(
-                "cpp: owned sources differ from the 21-source release baseline"
+                "cpp: owned sources differ from the 20-source release baseline"
             )
         final_json = (
             regenerated["json"]

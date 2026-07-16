@@ -30,7 +30,6 @@ pub use super::types::{
 //   - pgaccel_sort_u64                        (pgaccel_ffi.h:174)
 //   - pgaccel_sort_kv_i32_device              (pgaccel_ffi.h:190)
 //   - pgaccel_sort_kv_i32_nonnegative_device  (pgaccel_ffi.h:191)
-//   - pgaccel_sort_window_overlap_probe       (pgaccel_ffi.h:80)
 //   - pgaccel_archive_stats_snapshot          (pgaccel_ffi.h:126)
 //   - pgaccel_archive_jit_cache_dir           (pgaccel_ffi.h:131)
 //   - pgaccel_sort_{f32,f64,i32,i64}          (host tuplesort executor retired)

@@ -98,9 +98,9 @@ OUTPUT_ASSIGNMENTS = frozenset(
 )
 
 DEFAULT_ABI_MANIFEST = pathlib.Path(__file__).with_name("cpu_cheat_abi_manifest.txt")
-EXPECTED_ABI_MANIFEST_COUNT = 167
+EXPECTED_ABI_MANIFEST_COUNT = 166
 EXPECTED_ABI_MANIFEST_SHA256 = (
-    "3c8a3db2cd7a070af3ebf796cb7d3189add46959c4cc2eb481554478da4ab2c6"
+    "830ff6746a1ac51371995e23a4ec5d4f69f4e7f9723692ab9bf3128aee0c4783"
 )
 INTERNAL_NON_ABI_HEADERS = frozenset({"alloc_helper.h", "pgaccel_queue.h"})
 
@@ -113,7 +113,6 @@ class LifecycleContract:
     required_sequences: tuple[tuple[str, ...], ...]
     signature: str
     allow_host_loops: bool = False
-    allow_gpu_counter: bool = False
     required_any_sequences: tuple[tuple[str, ...], ...] = ()
     noop_guard_markers: tuple[tuple[str, ...], ...] = ()
     noop_guard_polarity: str = "any"
@@ -185,27 +184,6 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
             "AdaptiveCpp JIT-cache diagnostics",
             (("resolve_jit_cache_dir", "("),),
             "pgaccel_status (char *, size_t)",
-            output_policy="metadata",
-        ),
-        "pgaccel_sort_window_overlap_probe": LifecycleContract(
-            "out-of-order queue overlap profiling diagnostics",
-            (("pgaccel_get_ooo_queue", "("), ("run_probe_once", "(")),
-            "pgaccel_status (size_t, uint32_t, pgaccel_ooo_overlap_report *)",
-            allow_host_loops=True,
-            allow_gpu_counter=True,
-            noop_guard_conditions=(
-                (
-                    "ooo",
-                    "==",
-                    "nullptr",
-                    "||",
-                    "ooo",
-                    "->",
-                    "is_in_order",
-                    "(",
-                    ")",
-                ),
-            ),
             output_policy="metadata",
         ),
         "pgaccel_expr_shared_alloc": LifecycleContract(
@@ -2178,10 +2156,7 @@ def _lifecycle_proof(
         forbidden.append("body does not match the immutable support-operation shape")
     if not contract.allow_host_loops and set(values) & {"for", "while", "do"}:
         forbidden.append("host loop")
-    if (
-        not contract.allow_gpu_counter
-        and _contains_sequence(values, ("pgaccel_record_gpu_exec", "("))
-    ):
+    if _contains_sequence(values, ("pgaccel_record_gpu_exec", "(")):
         forbidden.append("GPU execution counter")
     if _contract_contains_dispatch(tokens, function) is not None:
         forbidden.append("device dispatch")
@@ -2474,6 +2449,7 @@ class _KernelWriteEvidence:
     context: tuple[tuple[str, str], ...]
     roots: frozenset[str]
     awaited: bool
+    full_count_names: frozenset[str] = frozenset()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3411,6 +3387,68 @@ def _call_is_awaited(
     )
 
 
+def _queue_receiver_mutated(
+    tokens: Sequence[Token],
+    function: Function,
+    receiver: str,
+    left: int,
+    right: int,
+    lambda_ranges: Sequence[tuple[int, int]],
+    forward: dict[int, int],
+) -> bool:
+    """Reject any operation that can replace a queue before its covering wait."""
+
+    if _pointer_root_reassigned(tokens, receiver, left, right, lambda_ranges):
+        return True
+
+    queue_operations = DISPATCH_METHODS | {
+        "copy",
+        "fill",
+        "mem_advise",
+        "memcpy",
+        "memset",
+        "prefetch",
+        "wait",
+        "wait_and_throw",
+    }
+    queue_observers = {
+        "get_backend",
+        "get_context",
+        "get_device",
+        "get_info",
+        "has_property",
+        "is_in_order",
+    }
+    for index in range(max(left, function.body_open + 1), min(right, function.body_close)):
+        if (
+            tokens[index].value != receiver
+            or not _unqualified_output_identifier(tokens, index)
+            or _is_inside(index, lambda_ranges)
+        ):
+            continue
+        if (
+            index + 3 < right
+            and tokens[index + 1].value in {".", "->"}
+            and tokens[index + 2].kind == "identifier"
+            and tokens[index + 3].value == "("
+            and index + 3 in forward
+        ):
+            if tokens[index + 2].value not in queue_operations | queue_observers:
+                return True
+            continue
+        if any(
+            lparen < index < rparen
+            and lparen >= left
+            and rparen < right
+            and (name_index := _name_before_lparen(tokens, lparen)) is not None
+            and tokens[name_index].value not in CALL_KEYWORDS
+            for lparen, rparen in forward.items()
+            if tokens[lparen].value == "("
+        ):
+            return True
+    return False
+
+
 def _queue_call_is_covered_by_wait(
     tokens: Sequence[Token],
     function: Function,
@@ -3452,7 +3490,69 @@ def _queue_call_is_covered_by_wait(
             continue
         if any(rparen < return_index < index for return_index, _ in returns):
             continue
+        if _queue_receiver_mutated(
+            tokens,
+            function,
+            receiver,
+            rparen + 1,
+            index,
+            lambda_ranges,
+            forward,
+        ):
+            continue
         if _context_dominates(_context(index, regions), call_context):
+            return True
+    return False
+
+
+def _queue_call_has_rebound_wait(
+    tokens: Sequence[Token],
+    function: Function,
+    method_index: int,
+    rparen: int,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+    forward: dict[int, int],
+) -> bool:
+    """Detect a purported covering wait reached only after replacing its queue."""
+
+    if (
+        method_index < 2
+        or tokens[method_index - 1].value not in {".", "->"}
+        or _receiver_kind(
+            tokens,
+            function,
+            tokens[method_index - 2].value,
+            method_index,
+            forward,
+        )
+        != "queue"
+    ):
+        return False
+    receiver = tokens[method_index - 2].value
+    call_context = _context(method_index, regions)
+    returns = _returns(tokens, function, lambda_ranges)
+    for index in range(rparen + 1, function.body_close - 3):
+        if (
+            tokens[index].value != receiver
+            or tokens[index + 1].value not in {".", "->"}
+            or tokens[index + 2].value not in {"wait", "wait_and_throw"}
+            or tokens[index + 3].value != "("
+            or index + 3 not in forward
+            or _is_inside(index, lambda_ranges)
+            or any(rparen < return_index < index for return_index, _ in returns)
+            or not _context_dominates(_context(index, regions), call_context)
+        ):
+            continue
+        if _queue_receiver_mutated(
+            tokens,
+            function,
+            receiver,
+            rparen + 1,
+            index,
+            lambda_ranges,
+            forward,
+        ):
             return True
     return False
 
@@ -3900,6 +4000,35 @@ def _lambda_nonempty(tokens: Sequence[Token], bounds: tuple[int, int]) -> bool:
     return any(token.value != ";" for token in tokens[left + 1 : right])
 
 
+def _dispatch_full_count_names(
+    tokens: Sequence[Token],
+    lparen: int,
+    rparen: int,
+    kernel: tuple[int, int] | None,
+    zero_parameters: set[str],
+    forward: dict[int, int],
+) -> frozenset[str]:
+    """Return exact zero-guarded counts used as a kernel's launch range."""
+
+    if kernel is None or not zero_parameters:
+        return frozenset()
+    limit = kernel[0]
+    counts: set[str] = set()
+    for index in range(lparen + 1, min(limit, rparen)):
+        if tokens[index].value != "range":
+            continue
+        call = _method_lparen(tokens, index, min(limit, rparen), forward)
+        if call is None or call[1] > limit:
+            continue
+        for left, right in _call_argument_ranges(tokens, call[0], call[1], forward):
+            values = [token.value for token in tokens[left:right]]
+            while len(values) >= 2 and values[0] == "(" and values[-1] == ")":
+                values = values[1:-1]
+            if len(values) == 1 and values[0] in zero_parameters:
+                counts.add(values[0])
+    return frozenset(counts)
+
+
 def _direct_dispatches(
     tokens: Sequence[Token],
     function: Function,
@@ -3915,7 +4044,8 @@ def _direct_dispatches(
     forward, reverse = _delimiter_pairs(tokens)
     lambdas = _lambda_ranges(tokens, function, forward, reverse)
     usm_provenance = _local_usm_provenance(tokens, function, lambdas)
-    _, mutable_parameters = _parameter_names(tokens, function)
+    parameters, mutable_parameters = _parameter_names(tokens, function)
+    zero_parameters = _zero_work_parameter_names(tokens, function, parameters)
     for parameter in mutable_parameters:
         usm_provenance.setdefault(
             parameter, ("borrowed", function.body_open, parameter)
@@ -3968,6 +4098,7 @@ def _direct_dispatches(
             inner_found = False
             raw_inner_found = False
             written_roots: set[str] = set()
+            full_count_names: set[str] = set()
             for inner in range(handler_lambda[0] + 1, handler_lambda[1] - 2):
                 if (
                     tokens[inner].kind == "identifier"
@@ -3993,6 +4124,16 @@ def _direct_dispatches(
                             tokens, kernel, usm_provenance
                         )
                         written_roots.update(roots)
+                        full_count_names.update(
+                            _dispatch_full_count_names(
+                                tokens,
+                                inner_call[0],
+                                inner_call[1],
+                                kernel,
+                                zero_parameters,
+                                forward,
+                            )
+                        )
                         if roots & mutable:
                             inner_found = True
             if raw_inner_found:
@@ -4021,6 +4162,7 @@ def _direct_dispatches(
                             lambdas,
                             forward,
                         ),
+                        frozenset(full_count_names),
                     )
                 )
             if not inner_found:
@@ -4067,6 +4209,14 @@ def _direct_dispatches(
                             lambdas,
                             forward,
                         ),
+                        _dispatch_full_count_names(
+                            tokens,
+                            lparen,
+                            rparen,
+                            kernel,
+                            zero_parameters,
+                            forward,
+                        ),
                     )
                 )
             if kernel is None or not _lambda_contributes(tokens, kernel, mutable):
@@ -4075,6 +4225,21 @@ def _direct_dispatches(
                 )
                 index = rparen + 1
                 continue
+        if _queue_call_has_rebound_wait(
+            tokens,
+            function,
+            index + 2,
+            rparen,
+            regions,
+            lambdas,
+            forward,
+        ):
+            rejected.append(
+                f"{method} queue receiver is rebound before its wait at line "
+                f"{tokens[index + 2].line}"
+            )
+            index = rparen + 1
+            continue
         evidence.append(
             _DispatchEvidence(
                 index,
@@ -4166,6 +4331,8 @@ def _call_mutable_output_roots(
     indexed: _IndexedCall,
     candidate: Function | _ExternalProof | None,
     output_roots: set[str],
+    caller_member_parameters: Mapping[str, frozenset[str]],
+    candidate_member_write_positions: frozenset[int],
     forward: dict[int, int],
 ) -> frozenset[str]:
     """Bind caller outputs only to mutable callee parameter positions."""
@@ -4176,6 +4343,14 @@ def _call_mutable_output_roots(
         frozenset(
             root
             for root in output_roots
+            if _range_references_output(tokens, left, right, {root})
+        )
+        for left, right in arguments
+    ]
+    referenced_descriptors = [
+        frozenset(
+            root
+            for root in caller_member_parameters
             if _range_references_output(tokens, left, right, {root})
         )
         for left, right in arguments
@@ -4251,7 +4426,8 @@ def _call_mutable_output_roots(
 
     contributing: set[str] = set()
     for position, roots in enumerate(referenced):
-        if not roots:
+        descriptor_roots = referenced_descriptors[position]
+        if not roots and not descriptor_roots:
             continue
         if position >= len(parameter_names) or parameter_names[position] is None:
             contributing.update(roots)
@@ -4259,7 +4435,67 @@ def _call_mutable_output_roots(
         name = parameter_names[position]
         if name in mutable or casts_away_const(name):
             contributing.update(roots)
+        if position in candidate_member_write_positions:
+            contributing.update(descriptor_roots)
     return frozenset(contributing)
+
+
+def _mutable_pointer_member_write_positions(
+    tokens: Sequence[Token],
+    function: Function,
+    record_members: Mapping[str, frozenset[str]],
+) -> frozenset[int]:
+    """Find parameters whose const record still exposes writable pointee storage."""
+
+    member_parameters = _parameter_mutable_pointer_members(
+        tokens, function, record_members
+    )
+    if not member_parameters:
+        return frozenset()
+    forward, reverse = _delimiter_pairs(tokens)
+    lambda_ranges = _lambda_ranges(tokens, function, forward, reverse)
+    parameters, _ = _parameter_names(tokens, function)
+    positions: set[int] = set()
+    for position, (left, right) in enumerate(_parameter_ranges(tokens, function)):
+        names = [
+            tokens[index].value
+            for index in range(left, right)
+            if tokens[index].kind == "identifier" and tokens[index].value in parameters
+        ]
+        if not names or names[-1] not in member_parameters:
+            continue
+        parameter = names[-1]
+        selected = {parameter: member_parameters[parameter]}
+        aliases, declarations = _output_aliases(
+            tokens, function, set(), lambda_ranges, selected
+        )
+        writes_member = any(
+            index not in declarations
+            and (
+                _is_mutable_member_projection(tokens, index, selected)
+                or (
+                    tokens[index].value in aliases
+                    and _unqualified_output_identifier(tokens, index)
+                )
+            )
+            and _output_write_operator(tokens, index, function.body_close, forward)
+            is not None
+            for index in range(function.body_open + 1, function.body_close)
+        )
+        passes_member_to_call = any(
+            any(
+                _is_mutable_member_projection(tokens, index, selected)
+                or (
+                    tokens[index].value in aliases
+                    and _unqualified_output_identifier(tokens, index)
+                )
+                for index in range(indexed.lparen + 1, indexed.rparen)
+            )
+            for indexed in _indexed_calls(tokens, function, lambda_ranges)
+        )
+        if writes_member or passes_member_to_call:
+            positions.add(position)
+    return frozenset(positions)
 
 
 def _returns(
@@ -5407,6 +5643,42 @@ def _pointer_root_reassigned(
     return False
 
 
+def _mutable_alias_call_indices(
+    tokens: Sequence[Token],
+    function: Function,
+    aliases: set[str],
+    left: int,
+    right: int,
+    lambda_ranges: Sequence[tuple[int, int]],
+    forward: dict[int, int],
+) -> set[int]:
+    """Find calls that can mutate storage reachable through a pointer alias."""
+
+    calls: set[int] = set()
+    for index in range(max(left, function.body_open + 1), min(right, function.body_close)):
+        if (
+            tokens[index].kind != "identifier"
+            or tokens[index].value in CALL_KEYWORDS
+            or _is_inside(index, lambda_ranges)
+        ):
+            continue
+        call = _method_lparen(tokens, index, min(right, function.body_close), forward)
+        if call is None or call[1] >= right:
+            continue
+        receiver_alias = bool(
+            index >= 2
+            and tokens[index - 1].value in {".", "->"}
+            and tokens[index - 2].value in aliases
+            and _unqualified_output_identifier(tokens, index - 2)
+        )
+        arguments_alias = _range_references_output(
+            tokens, call[0] + 1, call[1], aliases
+        )
+        if receiver_alias or arguments_alias:
+            calls.add(index)
+    return calls
+
+
 def _proven_output_transfers(
     tokens: Sequence[Token],
     function: Function,
@@ -5887,6 +6159,20 @@ def _proven_opaque_resource_handoffs(
             if source is None:
                 continue
             source_base = provenance[source[0]][2]
+            source_aliases = {
+                name for name, item in provenance.items() if item[2] == source_base
+            }
+            if any(
+                _pointer_root_reassigned(
+                    tokens,
+                    alias,
+                    provenance[alias][1] + 1,
+                    index,
+                    lambda_ranges,
+                )
+                for alias in source_aliases
+            ):
+                continue
             binding_context = _context(index, regions)
             producers = [
                 launch
@@ -5989,6 +6275,42 @@ def _proven_opaque_resource_handoffs(
                 and overwrite_root == source_base
                 for overwrite_index, overwrite_root in usm_host_overwrites
             ):
+                invalid.add(member)
+                continue
+            if any(
+                _pointer_root_reassigned(
+                    tokens,
+                    alias,
+                    max(producer_index + 1, provenance[alias][1] + 1),
+                    terminal,
+                    lambda_ranges,
+                )
+                for alias in aliases
+            ):
+                invalid.add(member)
+                continue
+            device_derived_calls = {
+                call_index
+                for launch in kernel_writes
+                if producer_index <= launch.index < terminal
+                and launch.awaited
+                and source_base
+                in {
+                    provenance[root][2]
+                    for root in launch.roots
+                    if root in provenance
+                }
+                for call_index in (launch.index, launch.index + 2)
+            }
+            if _mutable_alias_call_indices(
+                tokens,
+                function,
+                aliases,
+                producer_index + 1,
+                terminal,
+                lambda_ranges,
+                forward,
+            ) - device_derived_calls:
                 invalid.add(member)
                 continue
             for index in range(producer_index + 1, terminal):
@@ -6583,6 +6905,7 @@ class _PathAuditor:
             self.by_name[function.name].append(function)
         self.external_proofs = external_proofs or {}
         self.cache: dict[Function, _Proof] = {}
+        self.member_write_position_cache: dict[Function, frozenset[int]] = {}
 
     def resolve(
         self, call: Call
@@ -6771,6 +7094,55 @@ class _PathAuditor:
             regions,
         )
         calls = _indexed_calls(self.tokens, function, lambda_ranges)
+        queue_orchestration_loops = _device_queue_orchestration_loops(
+            self.tokens,
+            function,
+            regions,
+            output_roots
+            | resource_roots
+            | set(_local_usm_provenance(self.tokens, function, lambda_ranges)),
+            output_roots | resource_roots,
+            proven_transfer_calls,
+            lambda_ranges,
+            self.forward,
+        )
+
+        def collectively_covered_counts(launch: _KernelWriteEvidence) -> set[str]:
+            covered = set(launch.full_count_names)
+            for loop_index in queue_orchestration_loops:
+                if self.tokens[loop_index].value == "do":
+                    body_start, body_end, _ = _statement_range(
+                        self.tokens,
+                        loop_index + 1,
+                        function.body_close,
+                        self.forward,
+                    )
+                    header_end = body_start
+                else:
+                    condition = loop_index + 1
+                    if (
+                        self.tokens[condition].value != "("
+                        or condition not in self.forward
+                    ):
+                        continue
+                    body_start, body_end, _ = _statement_range(
+                        self.tokens,
+                        self.forward[condition] + 1,
+                        function.body_close,
+                        self.forward,
+                    )
+                    header_end = body_start
+                if not (body_start <= launch.index <= body_end):
+                    continue
+                covered.update(
+                    name
+                    for name in zero_parameters
+                    if _range_references_output(
+                        self.tokens, loop_index, header_end, {name}
+                    )
+                )
+            return covered
+
         safe_initializer_calls: set[int] = set()
         for method_index in range(function.body_open + 1, function.body_close):
             if self.tokens[method_index].value != "memset" or _is_inside(
@@ -6782,8 +7154,27 @@ class _PathAuditor:
             )
             if call is None:
                 continue
+            is_std_memset = bool(
+                method_index >= 2
+                and self.tokens[method_index - 2].value == "std"
+                and self.tokens[method_index - 1].value == "::"
+            )
+            is_queue_memset = bool(
+                method_index >= 2
+                and self.tokens[method_index - 1].value in {".", "->"}
+                and _receiver_kind(
+                    self.tokens,
+                    function,
+                    self.tokens[method_index - 2].value,
+                    method_index,
+                    self.forward,
+                )
+                == "queue"
+            )
+            if not is_std_memset and not is_queue_memset:
+                continue
             arguments = _call_argument_ranges(self.tokens, call[0], call[1], self.forward)
-            if len(arguments) < 2:
+            if len(arguments) != 3:
                 continue
             value_tokens = [
                 token.value for token in self.tokens[arguments[1][0] : arguments[1][1]]
@@ -6798,9 +7189,69 @@ class _PathAuditor:
                 if self.tokens[index].value in output_roots
                 and _unqualified_output_identifier(self.tokens, index)
             }
+            if len(initialized) != 1:
+                continue
+            initialized_root = next(iter(initialized))
+            size_values = [
+                token.value for token in self.tokens[arguments[2][0] : arguments[2][1]]
+            ]
+            scalar_size = size_values == [
+                "sizeof",
+                "(",
+                "*",
+                initialized_root,
+                ")",
+            ]
+            full_size_counts = {
+                name
+                for name in zero_parameters
+                if name in size_values
+                and not ({"-", "/", "%", "?", ":"} & set(size_values))
+                and all(
+                    value in {
+                        name,
+                        "*",
+                        "(",
+                        ")",
+                        "sizeof",
+                        "const",
+                        "volatile",
+                        "char",
+                        "short",
+                        "int",
+                        "long",
+                        "float",
+                        "double",
+                        "size_t",
+                        "uint8_t",
+                        "uint16_t",
+                        "uint32_t",
+                        "uint64_t",
+                        "int8_t",
+                        "int16_t",
+                        "int32_t",
+                        "int64_t",
+                    }
+                    or re.fullmatch(r"\d+[uUlL]*", value)
+                    for value in size_values
+                )
+            }
+            if not scalar_size and not full_size_counts:
+                continue
             if any(
                 transfer_index > method_index
                 and initialized.intersection(destinations)
+                and (
+                    scalar_size
+                    or any(
+                        launch.index < transfer_index
+                        and launch.awaited
+                        and full_size_counts.intersection(
+                            collectively_covered_counts(launch)
+                        )
+                        for launch in kernel_writes
+                    )
+                )
                 and _context_dominates(
                     next(
                         item.context
@@ -6814,6 +7265,12 @@ class _PathAuditor:
                 launch.index > method_index
                 and launch.awaited
                 and initialized.intersection(launch.roots)
+                and (
+                    scalar_size
+                    or full_size_counts.intersection(
+                        collectively_covered_counts(launch)
+                    )
+                )
                 and _context_dominates(
                     launch.context, _context(method_index, regions)
                 )
@@ -6931,11 +7388,27 @@ class _PathAuditor:
             if indexed.index in proven_transfer_calls | safe_initializer_calls:
                 continue
             candidate, error = self.resolve(indexed.call)
+            candidate_member_write_positions = frozenset()
+            if isinstance(candidate, Function):
+                candidate_member_write_positions = self.member_write_position_cache.get(
+                    candidate, frozenset()
+                )
+                if candidate not in self.member_write_position_cache:
+                    candidate_member_write_positions = (
+                        _mutable_pointer_member_write_positions(
+                            self.tokens, candidate, self.record_members
+                        )
+                    )
+                    self.member_write_position_cache[candidate] = (
+                        candidate_member_write_positions
+                    )
             call_output_roots[indexed.index] = _call_mutable_output_roots(
                 self.tokens,
                 indexed,
                 candidate,
                 output_roots,
+                member_parameters,
+                candidate_member_write_positions,
                 self.forward,
             )
             if isinstance(candidate, Function):
@@ -7237,20 +7710,7 @@ class _PathAuditor:
             self.forward,
             self.reverse,
         )
-        orchestration_loops.update(
-            _device_queue_orchestration_loops(
-                self.tokens,
-                function,
-                regions,
-                output_roots | resource_roots | set(_local_usm_provenance(
-                    self.tokens, function, lambda_ranges
-                )),
-                output_roots | resource_roots,
-                proven_transfer_calls,
-                lambda_ranges,
-                self.forward,
-            )
-        )
+        orchestration_loops.update(queue_orchestration_loops)
         orchestration_loops.update(resource_shape_loops)
         if orchestration_loops:
             classifications.add("device_launch_orchestration")

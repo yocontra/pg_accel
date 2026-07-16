@@ -2,7 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "pgaccel_ffi.h"
+#include "ooo_overlap_support.h"
 
 static size_t env_size(const char* name, size_t fallback) {
   const char* raw = std::getenv(name);

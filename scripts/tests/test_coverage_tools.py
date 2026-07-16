@@ -843,7 +843,10 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
         )
         repo_root = root / "checkout"
         rust_sources = ["crate/src/lib.rs", "crate/build.rs"]
-        cpp_sources = [f"kernels/src/source_{index:02d}.cpp" for index in range(21)]
+        cpp_sources = [
+            f"kernels/src/source_{index:02d}.cpp"
+            for index in range(coverage_tools.BASELINE_CPP_SOURCES)
+        ]
         ctest_names = [
             "test_device",
             *(f"test_{index:02d}" for index in range(1, 28)),

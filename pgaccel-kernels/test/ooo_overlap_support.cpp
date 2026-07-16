@@ -9,7 +9,7 @@
 #include <new>
 #include <vector>
 
-#include "pgaccel_ffi.h"
+#include "ooo_overlap_support.h"
 #include "pgaccel_queue.h"
 
 namespace {

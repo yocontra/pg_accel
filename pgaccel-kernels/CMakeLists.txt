@@ -52,7 +52,6 @@ set(KERNEL_SOURCES
     src/window.cpp
     src/fused_ops.cpp
     src/nested_loop_ineq.cpp
-    src/ooo_overlap.cpp
 )
 
 # Static library for embedding into the Rust extension.
@@ -206,8 +205,11 @@ target_link_libraries(test_exec_gpu PRIVATE pgaccel_kernels_shared)
 add_executable(test_sort_bench test/test_sort_bench.cpp)
 target_link_libraries(test_sort_bench PRIVATE pgaccel_kernels_shared)
 
-add_executable(test_ooo_overlap test/test_ooo_overlap.cpp)
+add_executable(test_ooo_overlap
+    test/test_ooo_overlap.cpp
+    test/ooo_overlap_support.cpp)
 target_link_libraries(test_ooo_overlap PRIVATE pgaccel_kernels_shared)
+add_sycl_to_target(TARGET test_ooo_overlap)
 
 add_executable(test_spatial_bench test/test_spatial_bench.cpp)
 target_link_libraries(test_spatial_bench PRIVATE pgaccel_kernels_shared)

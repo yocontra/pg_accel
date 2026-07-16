@@ -2063,62 +2063,6 @@ class CompilerValidAdversarialTests(unittest.TestCase):
 
 
 class HostComputationAndContractTests(unittest.TestCase):
-    def test_ooo_overlap_diagnostic_contract_is_exact(self) -> None:
-        valid = audit_fixture(
-            r"""
-            struct pgaccel_ooo_overlap_report { uint64_t wall_ns; };
-            extern "C" pgaccel_status pgaccel_sort_window_overlap_probe(
-                size_t count, uint32_t spin, pgaccel_ooo_overlap_report* out) {
-              if (out == nullptr) return PGACCEL_ERROR;
-              std::memset(out, 0, sizeof(*out));
-              auto* ooo = pgaccel_get_ooo_queue();
-              if (ooo == nullptr || ooo->is_in_order()) return PGACCEL_UNSUPPORTED;
-              for (size_t i = 0; i < count; ++i) { (void)i; }
-              run_probe_once();
-              pgaccel_record_gpu_exec();
-              return PGACCEL_OK;
-            }
-            """
-        )
-        self.assertFalse(valid.findings)
-        self.assertIn(
-            "lifecycle",
-            valid.entrypoint_audits[0].classifications,
-        )
-
-        for body in (
-            r"""
-              if (out == nullptr) return PGACCEL_ERROR;
-              auto* ooo = pgaccel_get_ooo_queue();
-              if (ooo == nullptr || ooo->is_in_order()) return PGACCEL_UNSUPPORTED;
-              pgaccel_record_gpu_exec();
-              return PGACCEL_OK;
-            """,
-            r"""
-              if (out == nullptr) return PGACCEL_ERROR;
-              auto* ooo = pgaccel_get_ooo_queue();
-              if (ooo == nullptr || ooo->is_in_order()) return PGACCEL_UNSUPPORTED;
-              run_probe_once();
-              sycl::queue q;
-              q.single_task<SubstituteProbe>([=]() { out->wall_ns = 1; }).wait();
-              pgaccel_record_gpu_exec();
-              return PGACCEL_OK;
-            """,
-        ):
-            hostile = audit_fixture(
-                "struct pgaccel_ooo_overlap_report { uint64_t wall_ns; };\n"
-                'extern "C" pgaccel_status pgaccel_sort_window_overlap_probe('
-                "size_t count, uint32_t spin, pgaccel_ooo_overlap_report* out) {\n"
-                + textwrap.dedent(body)
-                + "}\n"
-            )
-            with self.subTest(body=body):
-                self.assertTrue(hostile.findings)
-                self.assertIn(
-                    "invalid_lifecycle_contract",
-                    hostile.entrypoint_audits[0].classifications,
-                )
-
     def test_host_loop_success_is_classified(self) -> None:
         result = audit_fixture(
             r"""
@@ -2497,6 +2441,30 @@ class HostComputationAndContractTests(unittest.TestCase):
 
 
 class ConstDescriptorMemberProvenanceTests(unittest.TestCase):
+    def test_const_descriptor_helper_cannot_hide_mutable_member_write(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct Request { size_t count; int* output; };
+            void overwrite_descriptor_output(const Request* request) {
+              for (size_t index = 0; index < request->count; ++index) {
+                request->output[index] = 41;
+              }
+            }
+            extern "C" pgaccel_status pgaccel_const_descriptor_helper_write(
+                const Request* request) {
+              overwrite_descriptor_output(request);
+              int* output = request->output;
+              sycl::queue q;
+              q.parallel_for<DescriptorWrite>(sycl::range<1>(request->count),
+                  [=](sycl::id<1> id) { output[id[0]] = 42; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("host_output_write", entry.classifications)
+
     def test_only_exact_mutable_pointer_member_alias_proves_output(self) -> None:
         result = audit_compiling_fixture(
             CompilerValidAdversarialTests.CPP_PRELUDE
@@ -2807,6 +2775,11 @@ class ResidentV5RegressionTests(unittest.TestCase):
                 device_index[id[0]] = static_cast<int>(id[0]);
               }).wait();
             }
+            void host_overwrite(int* output) { output[0] = 0; }
+            int* choose_host(int* output) {
+              static int host_value = 0;
+              return output == nullptr ? output : &host_value;
+            }
             extern "C" ResidentState* pgaccel_resident_raw_usm(size_t count) {
               sycl::queue q;
               int* device_index = sycl::malloc_device<int>(count, q);
@@ -2865,6 +2838,47 @@ class ResidentV5RegressionTests(unittest.TestCase):
               state->host_payload[0] = host_value;
               return state;
             }
+            extern "C" ResidentState* pgaccel_resident_std_fill_after_binding(
+                size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              std::fill(device_index, device_index + count, 0);
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_unknown_host_call_after_binding(
+                size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              host_overwrite(device_index);
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_host_rebind_before_binding(
+                size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              int host_value = 0;
+              device_index = &host_value;
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              return state;
+            }
+            extern "C" ResidentState* pgaccel_resident_call_rebind_before_binding(
+                size_t count) {
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              build_index(device_index, count);
+              device_index = choose_host(device_index);
+              auto* state = new ResidentState();
+              state->device_index = device_index;
+              return state;
+            }
             """
         )
         entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
@@ -2879,6 +2893,10 @@ class ResidentV5RegressionTests(unittest.TestCase):
             "pgaccel_resident_copied_over",
             "pgaccel_resident_alias_host_write",
             "pgaccel_resident_mixed_host_payload",
+            "pgaccel_resident_std_fill_after_binding",
+            "pgaccel_resident_unknown_host_call_after_binding",
+            "pgaccel_resident_host_rebind_before_binding",
+            "pgaccel_resident_call_rebind_before_binding",
         ):
             with self.subTest(name):
                 self.assertFalse(entries[name].ok, entries[name].detail)
@@ -2940,6 +2958,30 @@ class ResidentV5RegressionTests(unittest.TestCase):
             unawaited.entrypoint_audits[0].classifications,
         )
 
+        rebound_queue = audit_fixture(
+            r"""
+            struct BatchRequest { size_t count; int* output; };
+            extern "C" pgaccel_status pgaccel_rebound_batch_queue(
+                const BatchRequest* request) {
+              const size_t selected_count = request->count;
+              if (selected_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              auto* output = request->output;
+              q.parallel_for<ReboundBatch>(sycl::range<1>(selected_count),
+                  [=](sycl::id<1> id) { output[id[0]] = 7; });
+              q = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(rebound_queue.findings)
+        self.assertIn(
+            "missing_device_terminal",
+            rebound_queue.entrypoint_audits[0].classifications,
+        )
+
         nonzero_initializer = audit_fixture(
             r"""
             struct BatchRequest { size_t count; int* output; };
@@ -2963,6 +3005,81 @@ class ResidentV5RegressionTests(unittest.TestCase):
             "unresolved_output_helper",
             nonzero_initializer.entrypoint_audits[0].classifications,
         )
+
+    def test_zero_initializer_requires_known_memset_and_full_launch(self) -> None:
+        arbitrary_global = audit_fixture(
+            r"""
+            void memset(int*, int, size_t);
+            extern "C" pgaccel_status pgaccel_arbitrary_global_memset(
+                int* output, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              memset(output, 0, count * sizeof(int));
+              sycl::queue q;
+              q.parallel_for<GlobalMemsetWrite>(sycl::range<1>(count),
+                  [=](sycl::id<1> id) { output[id[0]] = 7; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(arbitrary_global.findings)
+        self.assertIn(
+            "unresolved_output_helper",
+            arbitrary_global.entrypoint_audits[0].classifications,
+        )
+
+        arbitrary_member = audit_fixture(
+            r"""
+            struct Initializer { void memset(int*, int, size_t); };
+            extern "C" pgaccel_status pgaccel_arbitrary_member_memset(
+                int* output, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              Initializer initializer;
+              initializer.memset(output, 0, count * sizeof(int));
+              sycl::queue q;
+              q.parallel_for<MemberMemsetWrite>(sycl::range<1>(count),
+                  [=](sycl::id<1> id) { output[id[0]] = 7; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(arbitrary_member.findings)
+        self.assertIn(
+            "unresolved_output_helper",
+            arbitrary_member.entrypoint_audits[0].classifications,
+        )
+
+        partial_kernel = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_partial_after_std_memset(
+                int* output, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              std::memset(output, 0, count * sizeof(int));
+              sycl::queue q;
+              q.single_task<PartialMemsetWrite>([=]() { output[0] = 7; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(partial_kernel.findings)
+        self.assertIn(
+            "unresolved_output_helper",
+            partial_kernel.entrypoint_audits[0].classifications,
+        )
+
+        full_kernel = audit_fixture(
+            r"""
+            extern "C" pgaccel_status pgaccel_full_after_std_memset(
+                int* output, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              std::memset(output, 0, count * sizeof(int));
+              sycl::queue q;
+              q.parallel_for<FullMemsetWrite>(sycl::range<1>(count),
+                  [=](sycl::id<1> id) { output[id[0]] = 7; }).wait();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(full_kernel.findings)
 
     def test_read_only_typed_slab_projection_does_not_prove_copyback(self) -> None:
         result = audit_compiling_fixture(
@@ -3887,11 +4004,11 @@ class AbiInventoryTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
         manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
-        self.assertEqual(manifest.count, 167)
-        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 167)
+        self.assertEqual(manifest.count, 166)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 166)
         self.assertEqual(
             manifest.sha256,
-            "3c8a3db2cd7a070af3ebf796cb7d3189add46959c4cc2eb481554478da4ab2c6",
+            "830ff6746a1ac51371995e23a4ec5d4f69f4e7f9723692ab9bf3128aee0c4783",
         )
         self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
 
@@ -4093,15 +4210,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
-        self.assertEqual(len(self.abi.definitions), 167)
-        self.assertEqual(len({item.name for item in self.abi.definitions}), 167)
-        self.assertEqual(len({item.name for item in self.abi.declarations}), 167)
+        self.assertEqual(len(self.abi.definitions), 166)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 166)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 166)
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
-        self.assertEqual(self.abi.compiler["inventory_count"], 167)
+        self.assertEqual(self.abi.compiler["inventory_count"], 166)
         status_names = sorted(
             entry.entrypoint for entry in self.by_name.values() if entry.is_status
         )[:82]
