@@ -6078,6 +6078,21 @@ class ProductionWitnessTests(unittest.TestCase):
                 self.assertIn("opaque_device_resource", entry.classifications)
                 self.assertIn("kernel-derived opaque resource", entry.detail)
 
+    def test_streaming_hash_agg_publishes_only_device_derived_state(self) -> None:
+        checked = self.by_name["pgaccel_hash_agg_execute_checked"]
+        self.assertTrue(checked.ok, checked.detail)
+        self.assertEqual(checked.path.name, "hash_agg.cpp")
+        self.assertEqual(checked.guaranteed_output_parameter_positions, (9,))
+        self.assertEqual(checked.output_parameter_position_variants, ((9,),))
+        self.assertIn("kernel-derived opaque resource", checked.detail)
+
+        wrapper = self.by_name["pgaccel_hash_agg_execute"]
+        self.assertTrue(wrapper.ok, wrapper.detail)
+        self.assertFalse(wrapper.is_status)
+        self.assertEqual(wrapper.path.name, "hash_agg.cpp")
+        self.assertIn("opaque_device_resource", wrapper.classifications)
+        self.assertIn("publishes kernel-derived opaque resource", wrapper.detail)
+
     def test_original_eleven_wrappers_keep_large_input_gpu_evidence(self) -> None:
         wrappers = [
             *(

@@ -3401,12 +3401,12 @@ pgaccel_status agg_hash_streaming_numeric(const void* group_keys, const uint8_t*
   const size_t chunk_capacity = plan.chunk_capacity;
   const size_t slab_bytes = plan.slab_bytes;
 
-  uint8_t* slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
+  uint8_t* slab = static_cast<uint8_t*>(sycl::malloc_shared(slab_bytes, q));
   if (slab == nullptr) {
     *out_state = nullptr;
     return PGACCEL_OOM;
   }
-  *reinterpret_cast<HashAggStreamingSlabHeader*>(slab) = layout;
+  q.memcpy(slab, &layout, sizeof(layout)).wait_and_throw();
   fill_hashagg_streaming_metadata(slab, value_types, value_nulls, agg_cols);
 
   try {
