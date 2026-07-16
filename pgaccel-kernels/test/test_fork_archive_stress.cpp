@@ -188,6 +188,15 @@ struct ChildReport {
   uint64_t first_reduce_us;
   uint64_t first_h3_us;
   uint64_t first_pip_us;
+  uint64_t warm_iterations;
+  uint64_t warm_iteration_total_us;
+  uint64_t warm_iteration_max_us;
+  uint64_t warm_reduce_total_us;
+  uint64_t warm_reduce_max_us;
+  uint64_t warm_h3_total_us;
+  uint64_t warm_h3_max_us;
+  uint64_t warm_pip_total_us;
+  uint64_t warm_pip_max_us;
   uint64_t wall_us;
 };
 
@@ -343,20 +352,31 @@ static int run_one_iteration(std::vector<float>& reduce_buf, std::vector<double>
 
   for (int iter = 0; iter < N_ITERATIONS; ++iter) {
     report.iterations_attempted = iter + 1;
-    IterationTiming first_timing{};
+    IterationTiming timing{};
     int rc = run_one_iteration(reduce_buf, h3_lat, h3_lng, h3_cells, h3_valid, pip_points,
-                               pip_results, pip_bbox, pip_ring, iter == 0 ? &first_timing : nullptr);
+                               pip_results, pip_bbox, pip_ring, &timing);
     if (iter == 0) {
-      report.first_iteration_us = first_timing.total_us;
-      report.first_reduce_us = first_timing.reduce_us;
-      report.first_h3_us = first_timing.h3_us;
-      report.first_pip_us = first_timing.pip_us;
+      report.first_iteration_us = timing.total_us;
+      report.first_reduce_us = timing.reduce_us;
+      report.first_h3_us = timing.h3_us;
+      report.first_pip_us = timing.pip_us;
     }
     if (rc != 0) {
       report.first_failure_iter = iter;
       report.first_failure_kernel = (rc >> 16) & 0xff;
       report.first_failure_status = rc & 0xff;
       break;
+    }
+    if (iter > 0) {
+      ++report.warm_iterations;
+      report.warm_iteration_total_us += timing.total_us;
+      report.warm_iteration_max_us = std::max(report.warm_iteration_max_us, timing.total_us);
+      report.warm_reduce_total_us += timing.reduce_us;
+      report.warm_reduce_max_us = std::max(report.warm_reduce_max_us, timing.reduce_us);
+      report.warm_h3_total_us += timing.h3_us;
+      report.warm_h3_max_us = std::max(report.warm_h3_max_us, timing.h3_us);
+      report.warm_pip_total_us += timing.pip_us;
+      report.warm_pip_max_us = std::max(report.warm_pip_max_us, timing.pip_us);
     }
     report.iterations_passed = iter + 1;
   }
@@ -668,6 +688,20 @@ int main() {
                 us_to_ms(r.first_reduce_us), us_to_ms(r.first_h3_us),
                 us_to_ms(r.first_pip_us), us_to_ms(steady_after_first_us),
                 us_to_ms(r.wall_us));
+    std::printf(
+        "latency_record_us worker=%d init_us=%llu cold_iteration_us=%llu cold_reduce_us=%llu "
+        "cold_h3_us=%llu cold_pip_us=%llu warm_iterations=%llu "
+        "warm_iteration_total_us=%llu warm_iteration_max_us=%llu warm_reduce_total_us=%llu "
+        "warm_reduce_max_us=%llu warm_h3_total_us=%llu warm_h3_max_us=%llu "
+        "warm_pip_total_us=%llu warm_pip_max_us=%llu wall_us=%llu\n",
+        i, (unsigned long long)r.init_us, (unsigned long long)r.first_iteration_us,
+        (unsigned long long)r.first_reduce_us, (unsigned long long)r.first_h3_us,
+        (unsigned long long)r.first_pip_us, (unsigned long long)r.warm_iterations,
+        (unsigned long long)r.warm_iteration_total_us, (unsigned long long)r.warm_iteration_max_us,
+        (unsigned long long)r.warm_reduce_total_us, (unsigned long long)r.warm_reduce_max_us,
+        (unsigned long long)r.warm_h3_total_us, (unsigned long long)r.warm_h3_max_us,
+        (unsigned long long)r.warm_pip_total_us, (unsigned long long)r.warm_pip_max_us,
+        (unsigned long long)r.wall_us);
   }
   const char* first_dispatch_status =
       max_first_reduce_us <= static_cast<uint64_t>(FIRST_DISPATCH_BUDGET_US)

@@ -24,7 +24,11 @@ real GPU work; unsupported or unprofitable shapes must remain PostgreSQL-native.
   clean-install matrix with binary provenance and backend-log checks.
 - Produce fresh Metal release artifacts for correctness, fork/archive stress,
   cancellation, invalidation, residency budget, benchmark evidence, and final
-  clean shutdown. Do not substitute older local logs.
+  clean shutdown. The exact-candidate stress artifact must index fail-closed
+  before/after Metal cache file-count and byte-size snapshots, per-class cold
+  first-dispatch latency, and warm-cache sample totals/maxima for regression
+  review. Do not substitute older local logs or infer a timing pass from a
+  measurement that has no approved release threshold.
 
 ## Public Release Gates
 

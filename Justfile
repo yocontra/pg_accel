@@ -319,7 +319,7 @@ pg-version-audit:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_pg_source.py
 
 # Pre-commit checks: fmt, lint, type-check matrix, deny, audits, doc-parity
-pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit audit-cpu-cheats-test
+pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit audit-cpu-cheats-test metal-stress-artifact-test
     @echo "Pre-commit checks passed."
 
 # Run pgrx unit tests against one PG major. Defaults to the repo target PG major.
@@ -560,7 +560,11 @@ clean-logs pg="":
 clear-jit:
     #!/usr/bin/env bash
     set -euo pipefail
-    cache_dir="$HOME/.acpp/apps/global/jit-cache"
+    if [ -n "${ACPP_APPDB_DIR:-}" ]; then
+        cache_dir="${ACPP_APPDB_DIR}/global/jit-cache"
+    else
+        cache_dir="$HOME/.acpp/apps/global/jit-cache"
+    fi
     if [ -d "$cache_dir" ]; then
         mkdir -p .pgaccel/logs
         log=".pgaccel/logs/clear-jit-$(date +%Y%m%d-%H%M%S).log"
@@ -663,15 +667,28 @@ gpu-test-cold-all:
 gpu-stress-archive workers="8" iters="20":
     #!/usr/bin/env bash
     set -euo pipefail
-    just clear-jit
-    mkdir -p .pgaccel/logs
-    log=".pgaccel/logs/gpu-stress-archive-$(date +%Y%m%d-%H%M%S).log"
+    cache_precleared="${PGACCEL_ARCHIVE_STRESS_CACHE_PRECLEARED:-0}"
+    case "$cache_precleared" in
+        0) just clear-jit ;;
+        1) echo "using caller-verified empty JIT cache" ;;
+        *)
+            echo "error: PGACCEL_ARCHIVE_STRESS_CACHE_PRECLEARED must be 0 or 1" >&2
+            exit 1
+            ;;
+    esac
+    log="${PGACCEL_ARCHIVE_STRESS_RAW_LOG:-.pgaccel/logs/gpu-stress-archive-$(date +%Y%m%d-%H%M%S).log}"
+    mkdir -p "$(dirname "$log")"
     echo "=== gpu-stress-archive workers={{workers}} iters={{iters}} ==="
     python3 scripts/filter_gpu_output.py \
         --label "gpu-stress-archive" \
         --log "$log" \
         -- env PGACCEL_FORK_STRESS_WORKERS={{workers}} PGACCEL_FORK_STRESS_ITERS={{iters}} \
             timeout 600 ./pgaccel-kernels/build/test_fork_archive_stress
+
+# Validate the Metal stress parser and shell contract without a GPU device.
+metal-stress-artifact-test:
+    bash -n scripts/metal_stress_gate.sh
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_metal_stress_artifacts.py -v
 
 # Run the M-series Metal release stress gate with durable artifacts.
 metal-stress pg="":

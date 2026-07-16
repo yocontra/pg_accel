@@ -194,7 +194,25 @@ run_logged "sql-tests" \
 run_logged "clean-logs" just clean-logs "$pg"
 
 run_logged "standalone-gpu-tests" just gpu-test
-run_logged "archive-fork-stress" just gpu-stress-archive "$fork_workers" "$fork_iters"
+run_logged "archive-cache-clear" just clear-jit
+run_logged "archive-cache-before" \
+    python3 scripts/metal_stress_artifacts.py snapshot \
+        --point before_cold_archive_stress \
+        --output "${artifact_dir}/metal-cache-before-archive.json"
+run_logged "archive-fork-stress" \
+    env PGACCEL_ARCHIVE_STRESS_CACHE_PRECLEARED=1 \
+        PGACCEL_ARCHIVE_STRESS_RAW_LOG="${artifact_dir}/archive-fork-stress-raw.log" \
+        just gpu-stress-archive "$fork_workers" "$fork_iters"
+run_logged "archive-cache-after" \
+    python3 scripts/metal_stress_artifacts.py snapshot \
+        --point after_cold_archive_stress \
+        --output "${artifact_dir}/metal-cache-after-archive.json"
+run_logged "archive-artifacts" \
+    python3 scripts/metal_stress_artifacts.py finalize \
+        --before "${artifact_dir}/metal-cache-before-archive.json" \
+        --after "${artifact_dir}/metal-cache-after-archive.json" \
+        --archive-log "${artifact_dir}/archive-fork-stress-raw.log" \
+        --output-dir "$artifact_dir"
 
 run_benchmark_cell "gpu_reduce_sum" "100000" "warm"
 run_benchmark_cell "gpu_nlj_between" "50000" "warm"
@@ -206,7 +224,6 @@ run_cancellation_probe
 assert_clean_logs
 
 {
-    echo "metal-stress: PASS"
     echo "artifact_dir=${artifact_dir}"
     echo "iterations=${iterations}"
     echo "warmup=${warmup}"
@@ -214,3 +231,7 @@ assert_clean_logs
     echo "fork_iters=${fork_iters}"
     echo "gpu_test_timeout_s=${GPU_TEST_TIMEOUT_S}"
 } | tee -a "${artifact_dir}/summary.txt"
+
+run_logged "artifact-index" \
+    python3 scripts/metal_stress_artifacts.py index --artifact-dir "$artifact_dir"
+echo "metal-stress: PASS" | tee -a "${artifact_dir}/summary.txt"

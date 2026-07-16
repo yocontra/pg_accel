@@ -318,6 +318,9 @@ add_pgaccel_gpu_test(test_oom_invariant TIMEOUT 900)
 add_pgaccel_gpu_test(test_fp64_mul_probe)
 add_pgaccel_gpu_test(test_nested_loop_ineq)
 add_pgaccel_gpu_test(test_kernel_failure_status)
+# test_fork_archive_stress stays outside the warm-cache CTest suite. The
+# gpu-stress-archive recipe and Metal release gate establish and independently
+# verify its empty-cache boundary before launching the fork matrix.
 # test_ooo_overlap is intentionally NOT registered with CTest: it asserts the
 # acceptance criterion of the never-built out-of-order kernel-overlap feature
 # (dropped by the 2026-07 architecture decision). It cannot pass on the pinned
