@@ -303,6 +303,23 @@ enum Command {
         artifacts_dir: Option<PathBuf>,
     },
 
+    /// Run the fixed qualified-Metal benchmark performance ratchet.
+    ///
+    /// The exact winner cells, row scale, sampling counts, seed, timing mode,
+    /// cache policy, and per-lane speedup floors are immutable repository
+    /// policy. The command requires a release build and writes a complete
+    /// benchmark evidence bundle before returning success.
+    MetalShipGate {
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+
+        /// Directory for the Metal ship-gate evidence bundle. If omitted, a
+        /// fresh `benchmarks/artifacts/metal-ship-gate-<timestamp>` directory is used.
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
+    },
+
     /// Run the pg_accel install/provenance gate without benchmarks.
     ///
     /// Checks that the live backend is loading the expected extension SQL,
@@ -594,6 +611,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             connection,
             artifacts_dir,
         } => cmd_phase9_gate(&connection, artifacts_dir),
+        Command::MetalShipGate {
+            connection,
+            artifacts_dir,
+        } => cmd_metal_ship_gate(&connection, artifacts_dir),
         Command::Provenance { connection } => cmd_provenance(&connection),
         Command::Fp64Calibrate {
             connection,
@@ -933,6 +954,283 @@ fn cmd_phase9_gate(
         "[phase9-gate] PASS: all {} operator lanes produced exact-oracle and planner/dispatch evidence at {} rows",
         workloads::PHASE9_OPERATOR_DECLINES.len(),
         PHASE9_VERIFICATION_ROWS
+    );
+    Ok(())
+}
+
+const METAL_SHIP_GATE_ITERATIONS: usize = 10;
+const METAL_SHIP_GATE_WARMUP: usize = 5;
+const METAL_SHIP_GATE_SEED: u64 = 42;
+const METAL_SHIP_GATE_CONTRACT_FILE: &str = "metal_ship_gate_contract.json";
+
+fn metal_ship_gate_workloads()
+-> Result<Vec<Box<dyn workloads::Workload>>, Box<dyn std::error::Error>> {
+    let mut resolved = Vec::with_capacity(workloads::METAL_SHIP_GATE_CELLS.len());
+    let mut seen = BTreeSet::new();
+    for contract in workloads::METAL_SHIP_GATE_CELLS {
+        if !seen.insert((contract.workload, contract.rows)) {
+            return Err(format!(
+                "Metal ship-gate contract contains duplicate cell `{}` @ {}",
+                contract.workload, contract.rows
+            )
+            .into());
+        }
+        let workload = workloads::find_workload(contract.workload).ok_or_else(|| {
+            format!(
+                "Metal ship-gate contract references missing workload `{}`",
+                contract.workload
+            )
+        })?;
+        if !workload.row_scales().contains(&contract.rows) {
+            return Err(format!(
+                "Metal ship-gate workload `{}` does not register the required {}-row scale",
+                contract.workload, contract.rows
+            )
+            .into());
+        }
+        let entry = workloads::benchmark_threshold_matrix_entry(contract.workload, contract.rows)
+            .ok_or_else(|| {
+            format!(
+                "Metal ship-gate cell `{}` @ {} has no threshold-matrix entry",
+                contract.workload, contract.rows
+            )
+        })?;
+        let workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } = entry.expectation
+        else {
+            return Err(format!(
+                "Metal ship-gate cell `{}` @ {} is not classified as a GPU winner",
+                contract.workload, contract.rows
+            )
+            .into());
+        };
+        if !min_warm_speedup.is_finite()
+            || min_warm_speedup < report::BENCHMARK_SHIP_GATE_MIN_SPEEDUP
+        {
+            return Err(format!(
+                "Metal ship-gate cell `{}` @ {} has invalid warm-speedup floor {min_warm_speedup}",
+                contract.workload, contract.rows
+            )
+            .into());
+        }
+        resolved.push(workload);
+    }
+    Ok(resolved)
+}
+
+fn write_metal_ship_gate_contract(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if root.exists() {
+        if !root.is_dir() {
+            return Err(format!(
+                "Metal ship-gate artifact path `{}` exists and is not a directory",
+                root.display()
+            )
+            .into());
+        }
+        if fs::read_dir(root)?.next().transpose()?.is_some() {
+            return Err(format!(
+                "Metal ship-gate artifact directory `{}` is not empty; evidence bundles are immutable",
+                root.display()
+            )
+            .into());
+        }
+    }
+
+    let mut cells = Vec::with_capacity(workloads::METAL_SHIP_GATE_CELLS.len());
+    for contract in workloads::METAL_SHIP_GATE_CELLS {
+        let entry = workloads::benchmark_threshold_matrix_entry(contract.workload, contract.rows)
+            .ok_or_else(|| {
+            format!(
+                "Metal ship-gate cell `{}` @ {} has no threshold-matrix entry",
+                contract.workload, contract.rows
+            )
+        })?;
+        let workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } = entry.expectation
+        else {
+            return Err(format!(
+                "Metal ship-gate cell `{}` @ {} is not classified as a GPU winner",
+                contract.workload, contract.rows
+            )
+            .into());
+        };
+        cells.push(serde_json::json!({
+            "workload": contract.workload,
+            "rows": contract.rows,
+            "lane": entry.lane,
+            "min_warm_speedup_vs_postgresql_parallel": min_warm_speedup,
+        }));
+    }
+
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "gate": "qualified_metal_benchmark_ship_gate",
+        "comparison": "postgresql_parallel",
+        "iterations": METAL_SHIP_GATE_ITERATIONS,
+        "warmup": METAL_SHIP_GATE_WARMUP,
+        "seed": METAL_SHIP_GATE_SEED,
+        "timing_mode": "raw-wallclock",
+        "cache_mode": "both",
+        "required_harness_profile": "release",
+        "generic_min_speedup": report::BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+        "threshold_source": "benchmark_threshold_matrix_entry",
+        "cells": cells,
+    });
+    fs::create_dir_all(root)?;
+    let mut contents = serde_json::to_vec_pretty(&manifest)?;
+    contents.push(b'\n');
+    fs::write(root.join(METAL_SHIP_GATE_CONTRACT_FILE), contents)?;
+    Ok(())
+}
+
+fn enforce_metal_ship_gate_complete(
+    report: &BenchReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let expected = workloads::METAL_SHIP_GATE_CELLS
+        .iter()
+        .map(|cell| (cell.workload, cell.rows))
+        .collect::<BTreeSet<_>>();
+    let observed = report
+        .workloads
+        .iter()
+        .map(|result| (result.name.as_str(), result.rows))
+        .collect::<Vec<_>>();
+    let mut gaps = Vec::new();
+
+    for (workload, rows) in &expected {
+        let matches = observed
+            .iter()
+            .filter(|cell| cell.0 == *workload && cell.1 == *rows)
+            .count();
+        if matches != 1 {
+            gaps.push(format!(
+                "`{workload}` @ {rows}: expected one result, found {matches}"
+            ));
+        }
+    }
+    for result in &report.workloads {
+        if !expected.contains(&(result.name.as_str(), result.rows)) {
+            gaps.push(format!(
+                "unexpected result `{}` @ {}",
+                result.name, result.rows
+            ));
+            continue;
+        }
+        if result.plan_snippet.is_none() || result.baseline_plan_snippet.is_none() {
+            gaps.push(format!(
+                "`{}` @ {} is missing accelerated or PostgreSQL plan evidence",
+                result.name, result.rows
+            ));
+        }
+        if result.correctness_diff_artifact.is_none() {
+            gaps.push(format!(
+                "`{}` @ {} is missing its correctness-diff artifact",
+                result.name, result.rows
+            ));
+        }
+        if result.pg_accel_stock_exec_delta != 0 {
+            gaps.push(format!(
+                "`{}` @ {} used {} stock-executor fallback(s)",
+                result.name, result.rows, result.pg_accel_stock_exec_delta
+            ));
+        }
+    }
+    for crash in &report.crashes {
+        gaps.push(format!(
+            "{} @ {} crashed: {}",
+            crash.workload, crash.rows, crash.error
+        ));
+    }
+
+    if report.methodology.iterations != METAL_SHIP_GATE_ITERATIONS {
+        gaps.push(format!(
+            "expected {} measured iterations, report recorded {}",
+            METAL_SHIP_GATE_ITERATIONS, report.methodology.iterations
+        ));
+    }
+    if report.methodology.warmup != METAL_SHIP_GATE_WARMUP {
+        gaps.push(format!(
+            "expected {} warmups, report recorded {}",
+            METAL_SHIP_GATE_WARMUP, report.methodology.warmup
+        ));
+    }
+    if report.methodology.row_scales != [1_000_000] {
+        gaps.push(format!(
+            "expected only the 1M row scale, report recorded {:?}",
+            report.methodology.row_scales
+        ));
+    }
+    if report.methodology.timing_mode != "raw-wallclock" {
+        gaps.push(format!(
+            "expected raw-wallclock timing, report recorded `{}`",
+            report.methodology.timing_mode
+        ));
+    }
+    if report.methodology.cache_mode != "both" {
+        gaps.push(format!(
+            "expected cache mode both, report recorded `{}`",
+            report.methodology.cache_mode
+        ));
+    }
+    if report.methodology.harness_profile != "release" {
+        gaps.push(format!(
+            "expected a release benchmark harness, report recorded `{}`",
+            report.methodology.harness_profile
+        ));
+    }
+
+    if gaps.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Metal benchmark ship-gate evidence is incomplete:\n{}",
+            gaps.join("\n")
+        )
+        .into())
+    }
+}
+
+fn cmd_metal_ship_gate(
+    connection: &str,
+    artifacts_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(debug_assertions) {
+        return Err(
+            "Metal benchmark ship gate requires a release harness; run with `cargo run --release`"
+                .into(),
+        );
+    }
+
+    let workloads = metal_ship_gate_workloads()?;
+    let artifact_root =
+        artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir("metal-ship-gate"));
+    write_metal_ship_gate_contract(&artifact_root)?;
+    let cells = workloads::METAL_SHIP_GATE_CELLS
+        .iter()
+        .zip(&workloads)
+        .map(|(contract, workload)| runner::WorkloadRunCell {
+            workload: workload.as_ref(),
+            rows: contract.rows,
+        })
+        .collect::<Vec<_>>();
+    let config = runner::BenchConfig {
+        iterations: METAL_SHIP_GATE_ITERATIONS,
+        warmup: METAL_SHIP_GATE_WARMUP,
+        seed: METAL_SHIP_GATE_SEED,
+        timing_mode: runner::TimingMode::RawWallClock,
+        cache_mode: runner::CacheMode::Both,
+        plans_capture_path: Some(artifact_root.join("plans.txt")),
+        guc_profile: None,
+        skip_guc_verify: false,
+        artifacts_dir: Some(artifact_root),
+    };
+
+    let report = runner::run_cells_with_config(connection, &cells, &config)?;
+    print_report(&report, &ReportFormat::Markdown)?;
+    enforce_metal_ship_gate_complete(&report)?;
+    enforce_benchmark_ship_gate(&report)?;
+    enforce_h3_lane_gate(&report)?;
+    eprintln!(
+        "[metal-ship-gate] PASS: all {} fixed winner cells selected, dispatched, met their warm-speedup floors, and produced complete evidence",
+        cells.len()
     );
     Ok(())
 }
@@ -1534,6 +1832,61 @@ mod tests {
                 contract.workload
             );
         }
+    }
+
+    #[test]
+    fn metal_ship_gate_registry_resolves_the_exact_contract() {
+        let gate_workloads =
+            metal_ship_gate_workloads().expect("Metal ship-gate workloads should resolve");
+        assert_eq!(gate_workloads.len(), workloads::METAL_SHIP_GATE_CELLS.len());
+        for (workload, contract) in gate_workloads.iter().zip(workloads::METAL_SHIP_GATE_CELLS) {
+            assert_eq!(workload.name(), contract.workload);
+            assert!(workload.row_scales().contains(&contract.rows));
+            assert!(matches!(
+                workloads::benchmark_threshold_matrix_entry(contract.workload, contract.rows)
+                    .map(|entry| entry.expectation),
+                Some(workloads::BenchmarkLaneExpectation::GpuWinner { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn metal_ship_gate_manifest_is_deterministic_and_immutable() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "pg-accel-metal-ship-gate-test-{}-{nonce}",
+            std::process::id()
+        ));
+        let left = base.join("left");
+        let right = base.join("right");
+
+        write_metal_ship_gate_contract(&left).expect("first contract manifest");
+        write_metal_ship_gate_contract(&right).expect("second contract manifest");
+        let left_bytes = fs::read(left.join(METAL_SHIP_GATE_CONTRACT_FILE)).expect("left manifest");
+        let right_bytes =
+            fs::read(right.join(METAL_SHIP_GATE_CONTRACT_FILE)).expect("right manifest");
+        assert_eq!(left_bytes, right_bytes);
+
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&left_bytes).expect("valid contract JSON");
+        assert_eq!(manifest["iterations"], METAL_SHIP_GATE_ITERATIONS);
+        assert_eq!(manifest["warmup"], METAL_SHIP_GATE_WARMUP);
+        assert_eq!(manifest["cache_mode"], "both");
+        assert_eq!(
+            manifest["cells"].as_array().map(Vec::len),
+            Some(workloads::METAL_SHIP_GATE_CELLS.len())
+        );
+        assert!(
+            write_metal_ship_gate_contract(&left)
+                .expect_err("non-empty evidence directory must fail")
+                .to_string()
+                .contains("evidence bundles are immutable")
+        );
+
+        fs::remove_dir_all(base).expect("remove manifest test directories");
     }
 
     #[test]

@@ -146,6 +146,44 @@ These values are an explicit reproducible invocation, not published performance
 evidence. `run --help` is authoritative for supported flags. `--dry-run` checks
 the generated run plan without executing measurements.
 
+## Qualified Metal ship gate
+
+The bounded live performance ratchet is:
+
+```bash
+just metal-benchmark-ship-gate 18
+```
+
+The recipe installs the current release build, runs the CPU-cheat audit and
+provenance checks, and invokes `pg_accel_bench metal-ship-gate`. The command
+does not accept sampling or workload overrides. It fixes seed 42, ten measured
+iterations, five warmups, raw wall-clock timing, cache mode `both`, plan
+capture, and the following 1M-row winner cells:
+
+| Workload | Protected lane | Minimum warm median vs PostgreSQL parallel |
+|---|---|---:|
+| `grouped_agg` | resident grouped SUM/AVG/COUNT | 1.00x |
+| `predicate_filter_expression_grouped_agg` | expression measure plus aggregate FILTER | 1.00x |
+| `mixed_join_agg` | resident hash join plus grouped aggregate | 1.00x |
+| `ssbm_q4_3` | resident star-schema grouped profit | 1.00x |
+| `h3_bulk` | H3 lat/lng-to-cell grouped count | 1.50x |
+| `h3_cell_to_parent` | fused H3 parent grouped count | 1.10x |
+
+The threshold matrix is the executable source of truth. Before timing, the
+command rejects missing, duplicate, unregistered, non-winner, or sub-parity
+contract entries. After timing, it fails on an incomplete matrix, a debug
+harness, a crash, missing accelerated/native plans or correctness artifacts,
+stock-executor fallback, missed GPU selection or dispatch, absent dispatch
+counters or consumed output, missing resident-plan evidence, a per-lane
+threshold regression, or missing H3 cold/warm evidence.
+
+The qualified self-hosted Metal jobs in both `ci.yml` and `release.yml` run the
+same recipe and upload the deterministic
+`artifacts/benchmark-ship-gate-pg18-qualified-metal` bundle. Release creation
+depends on the release workflow job. Checked-in workflow wiring is not run
+evidence: the release checklist remains open until the exact candidate has a
+successful CI artifact URL.
+
 ## Timing and ordering
 
 - Keep warm and cold samples separate. Do not pool their medians or ratios.

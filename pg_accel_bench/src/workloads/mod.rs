@@ -887,6 +887,45 @@ pub struct BenchmarkThresholdMatrixEntry {
     pub expectation: BenchmarkLaneExpectation,
 }
 
+/// Exact winner cells exercised by the qualified Metal benchmark ship gate.
+///
+/// This is intentionally a bounded sentinel matrix rather than an alias for
+/// the full benchmark registry. Each cell must remain registered at the given
+/// scale and classified as a [`BenchmarkLaneExpectation::GpuWinner`]. The
+/// threshold matrix remains the single source of truth for its speedup floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MetalShipGateCell {
+    pub workload: &'static str,
+    pub rows: usize,
+}
+
+pub const METAL_SHIP_GATE_CELLS: &[MetalShipGateCell] = &[
+    MetalShipGateCell {
+        workload: "grouped_agg",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "predicate_filter_expression_grouped_agg",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "mixed_join_agg",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "ssbm_q4_3",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "h3_bulk",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "h3_cell_to_parent",
+        rows: 1_000_000,
+    },
+];
+
 #[must_use]
 pub fn benchmark_threshold_matrix_entry(
     name: &str,
@@ -1614,7 +1653,7 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             batch_count: "backend-local resident H3 cell cache consumed by one parent grouped-count kernel",
             row_width: "8-byte h3index input and output",
             output_size: "parent h3index group key plus count rows",
-            threshold_basis: "Phase 6 resident parent/count capability gate; performance re-baseline deferred to Phase 7",
+            threshold_basis: "Phase 7 fused parent/count warm winner ratchet backed by cache-mode-both evidence",
             decline_reason: "h3_parent_grouped_count_unexpected_native_decline",
         },
         "h3_grid_distance" | "h3_dist_near" | "h3_dist_far" => H3MatrixProfile {
@@ -2889,6 +2928,45 @@ mod tests {
     }
 
     #[test]
+    fn test_metal_ship_gate_cells_are_exact_registered_winners() {
+        let expected = [
+            ("grouped_agg", 1.0),
+            ("predicate_filter_expression_grouped_agg", 1.0),
+            ("mixed_join_agg", 1.0),
+            ("ssbm_q4_3", 1.0),
+            ("h3_bulk", 1.5),
+            ("h3_cell_to_parent", 1.1),
+        ];
+        assert_eq!(METAL_SHIP_GATE_CELLS.len(), expected.len());
+
+        let mut seen = std::collections::BTreeSet::new();
+        for (cell, (expected_name, expected_floor)) in METAL_SHIP_GATE_CELLS.iter().zip(expected) {
+            assert_eq!(cell.workload, expected_name);
+            assert_eq!(cell.rows, 1_000_000);
+            assert!(
+                seen.insert((cell.workload, cell.rows)),
+                "duplicate Metal ship-gate cell: {} @ {}",
+                cell.workload,
+                cell.rows
+            );
+
+            let workload = find_workload(cell.workload)
+                .unwrap_or_else(|| panic!("registered Metal ship-gate workload {}", cell.workload));
+            assert!(workload.row_scales().contains(&cell.rows));
+            let entry = benchmark_threshold_matrix_entry(cell.workload, cell.rows)
+                .unwrap_or_else(|| panic!("threshold metadata for {}", cell.workload));
+            assert_eq!(entry.workload, cell.workload);
+            assert_eq!(entry.rows, cell.rows);
+            assert_eq!(
+                entry.expectation,
+                BenchmarkLaneExpectation::GpuWinner {
+                    min_warm_speedup: expected_floor,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn test_all_workload_names_unique() {
         let workloads = all_workloads();
         let mut names: Vec<&str> = workloads.iter().map(|w| w.name()).collect();
@@ -3707,7 +3785,7 @@ mod tests {
         assert_eq!(
             parent.expectation,
             BenchmarkLaneExpectation::GpuWinner {
-                min_warm_speedup: 1.0,
+                min_warm_speedup: 1.1,
             }
         );
         assert!(parent.threshold_basis.contains("Phase 7"));

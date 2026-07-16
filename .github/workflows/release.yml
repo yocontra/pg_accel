@@ -87,7 +87,7 @@ jobs:
           path: target/release/pg_accel-pg${{ matrix.pg }}/
 
   metal-coverage:
-    name: Qualified Metal release coverage (PG 18)
+    name: Qualified Metal release gates (PG 18)
     runs-on: [self-hosted, macOS, ARM64, metal, pg-accel-coverage]
     timeout-minutes: 360
     env:
@@ -159,12 +159,26 @@ jobs:
           set -euo pipefail
           CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18
 
+      - name: Run live Metal benchmark ship gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          just metal-benchmark-ship-gate 18 artifacts/benchmark-ship-gate-pg18-qualified-metal
+
       - name: Upload release coverage artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pg-accel-release-three-layer-coverage-pg18-qualified-metal
           path: artifacts/coverage-pg18-qualified-metal
+          if-no-files-found: error
+
+      - name: Upload release Metal benchmark ship-gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-release-benchmark-ship-gate-pg18-qualified-metal
+          path: artifacts/benchmark-ship-gate-pg18-qualified-metal
           if-no-files-found: error
 
   release:

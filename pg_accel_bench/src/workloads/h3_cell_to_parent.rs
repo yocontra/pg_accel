@@ -7,8 +7,8 @@ use super::Workload;
 /// shape is the Phase 6 resident capability lane:
 /// `h3_cell_to_parent(cell, 0), COUNT(*) GROUP BY 1`.
 /// The baseline keeps `pg_accel.enabled = off` and schema-qualifies the
-/// native h3-pg call. Performance is intentionally left for Phase 7
-/// re-baselining; this workload currently proves dispatch and correctness.
+/// native h3-pg call. The fused lane is protected by the Phase 7 warm-speedup
+/// threshold while standalone scalar parent conversion remains quarantined.
 pub struct H3CellToParent;
 
 impl Workload for H3CellToParent {
@@ -18,9 +18,8 @@ impl Workload for H3CellToParent {
 
     fn description(&self) -> &'static str {
         "h3_cell_to_parent resident grouped COUNT(*) at parent resolution 0 — \
-         standalone scalar H3 stays quarantined. This Phase 6 capability lane \
-         proves selected GPU dispatch and native equality; Phase 7 will \
-         re-baseline performance."
+         standalone scalar H3 stays quarantined. This fused lane must prove \
+         selected GPU dispatch, native equality, and its warm-speedup floor."
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

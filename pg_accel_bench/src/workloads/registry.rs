@@ -1030,7 +1030,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .pins(PINS_H3_PARENT)
         .extensions(H3)
         .h3(H3LaneClass::Winning {
-            min_warm_speedup: 1.0,
+            min_warm_speedup: 1.1,
         })
         .evidence(H3_WINNER),
     workload("h3_grid_distance", C::GpuH3, K::H3LatLng)
