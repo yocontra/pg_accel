@@ -11,7 +11,7 @@
 
 #![allow(dead_code)]
 
-use std::fmt::Write as _;
+use std::{fmt::Write as _, path::Path};
 
 use postgres::{Client, NoTls};
 
@@ -106,14 +106,30 @@ fn enclosing_rust_string_start(source: &str, target: usize) -> Option<usize> {
     string_start
 }
 
+fn utf8_suffix_with_byte_limit(source: &str, max_bytes: usize) -> &str {
+    let minimum = source.len().saturating_sub(max_bytes);
+    let start = (minimum..=source.len())
+        .find(|index| source.is_char_boundary(*index))
+        .unwrap_or(source.len());
+    source.get(start..).unwrap_or_default()
+}
+
 fn diagnostic_rust_string(source: &str, string_start: usize) -> bool {
-    let prefix = &source[..string_start];
-    let prefix = &prefix[prefix.len().saturating_sub(96)..];
+    let Some(prefix) = source.get(..string_start) else {
+        return false;
+    };
+    let prefix = utf8_suffix_with_byte_limit(prefix, 96);
     let compact = prefix.split_whitespace().collect::<String>();
     compact.ends_with("panic!(")
         || compact.ends_with(".expect(")
         || compact.ends_with("assert!(")
         || compact.ends_with("assert_eq!(")
+}
+
+fn is_rust_source(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("rs"))
 }
 
 fn skip_source_construction_separators(source: &[u8], mut cursor: usize) -> usize {
@@ -184,7 +200,7 @@ fn fragmented_set_config_call_before(name: &str, source: &str, target: usize) ->
         if end > target || !set_config_argument_prefix(bytes, end, target) {
             continue;
         }
-        if name.ends_with(".rs")
+        if is_rust_source(name)
             && positions
                 .iter()
                 .any(|position| enclosing_rust_string_start(source, *position).is_none())
@@ -223,9 +239,8 @@ fn nondefault_setting_pin_lines(name: &str, source: &str, setting: &str) -> Vec<
             continue;
         };
         let rust_string = enclosing_rust_string_start(source, start);
-        if name.ends_with(".rs")
-            && (rust_string.is_none()
-                || rust_string.is_some_and(|opening| diagnostic_rust_string(source, opening)))
+        if is_rust_source(name)
+            && rust_string.is_none_or(|opening| diagnostic_rust_string(source, opening))
         {
             continue;
         }
@@ -253,9 +268,10 @@ fn nondefault_setting_pin_lines(name: &str, source: &str, setting: &str) -> Vec<
             continue;
         }
         matches.push(
-            source[..start]
-                .bytes()
-                .filter(|byte| *byte == b'\n')
+            source
+                .get(..start)
+                .unwrap_or_default()
+                .matches('\n')
                 .count(),
         );
     }
@@ -600,6 +616,15 @@ fn admission_audit_is_sql_scoped_and_rejects_fragmented_or_dynamic_pins() {
         )
         .is_empty()
     );
+    assert!(
+        nondefault_setting_pin_lines(
+            "fixture.RS",
+            "let cost_multiplier = settings.cost_multiplier;",
+            "cost_multiplier"
+        )
+        .is_empty(),
+        "Rust source detection must be case-insensitive"
+    );
     for unrelated in [
         "Spi::run(\"SET pg_accel.soft_fp64_cost_multiplier = 0.1\")",
         "Spi::run(\"SET pg_accel.cost_multiplier_extra = 0.1\")",
@@ -618,6 +643,23 @@ fn admission_audit_is_sql_scoped_and_rejects_fragmented_or_dynamic_pins() {
         .is_empty()
     );
 
+    let unicode_diagnostic = format!(
+        "\u{e9}{}panic!(\"query with cost_multiplier={{value}} should not crash\")",
+        "x".repeat(88)
+    );
+    assert!(
+        nondefault_setting_pin_lines("fixture.rs", &unicode_diagnostic, "cost_multiplier")
+            .is_empty(),
+        "a multibyte character at the diagnostic suffix boundary must remain safe"
+    );
+
+    let unicode_prefixed_pin = "\u{3c0}\nSpi::run(\"SET pg_accel.cost_multiplier = 0.1\")";
+    assert_eq!(
+        nondefault_setting_pin_lines("fixture.RS", unicode_prefixed_pin, "cost_multiplier"),
+        vec![1],
+        "multibyte prefixes and uppercase Rust extensions must not hide SQL pins"
+    );
+
     let adversarial = [
         "[\"SET LOCAL pg_accel.cost_\", \"multiplier = 0.1\"].concat()",
         "Spi::run(\"SET pg_accel.cost_multiplier /* split */ TO 0.1\")",
@@ -633,9 +675,9 @@ fn admission_audit_is_sql_scoped_and_rejects_fragmented_or_dynamic_pins() {
         );
     }
 
+    let separated_comment = format!("/*{}*/", " separated ".repeat(80));
     let distant_set_config = format!(
-        "Spi::run(\"SELECT set_config({}'pg_accel.cost_multiplier', '0.1', true)\")",
-        format!("/*{}*/", " separated ".repeat(80))
+        "Spi::run(\"SELECT set_config({separated_comment}'pg_accel.cost_multiplier', '0.1', true)\")"
     );
     assert!(distant_set_config.len() > 512);
     assert_eq!(
