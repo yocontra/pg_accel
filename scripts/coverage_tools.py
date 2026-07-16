@@ -434,7 +434,7 @@ def initial_layer_summary(layer: str, threshold: float) -> dict[str, Any]:
         "metric_kind": metric,
         "description": {
             "rust": "Owned Rust production source coverage from the compiler-derived pg18 map without pg_test.",
-            "cpp": "Owned C++/SYCL host-object source coverage; GPU device correctness is separate evidence.",
+            "cpp": "Owned C++/SYCL source coverage from merged host and real Metal device counters.",
             "sql": "Fixed-manifest SQL semantic assertion coverage.",
         }[layer],
         "threshold_percent": validate_threshold(threshold),
@@ -785,6 +785,19 @@ def seal_layer_evidence(args: argparse.Namespace) -> int:
         for entry in entries
     ):
         errors.append("nonempty LLVM profraw evidence is missing")
+    if args.layer == "cpp" and not any(
+        entry["path"].startswith("cpp/profiles/")
+        and entry["path"].endswith(".proftext")
+        and entry["size"] > 0
+        for entry in entries
+    ):
+        errors.append("nonempty Metal device profile evidence is missing")
+    if args.layer == "cpp" and any(
+        entry["path"].startswith("cpp/profiles/")
+        and entry["path"].endswith(".overflow")
+        for entry in entries
+    ):
+        errors.append("Metal device coverage counter overflow was retained")
     if args.layer in LINE_LAYERS and not any(
         entry["path"].startswith(f"{args.layer}/objects/") and entry["size"] > 0
         for entry in entries
@@ -2964,9 +2977,19 @@ def capture_coverage_bundle(args: argparse.Namespace) -> int:
     object_dir = pathlib.Path(args.object_dir).resolve()
     manifest_path = pathlib.Path(args.manifest).resolve()
     layer_dir = manifest_path.parent
-    profiles = sorted(profile_dir.glob("*.profraw"))
-    if not profiles or any(path.stat().st_size <= 0 for path in profiles):
+    raw_profiles = sorted(profile_dir.glob("*.profraw"))
+    device_profiles = sorted(profile_dir.glob("*.proftext"))
+    overflows = sorted(profile_dir.glob("*.overflow"))
+    if overflows:
+        raise CoverageError("Metal device coverage counter overflow was recorded")
+    if not raw_profiles or any(path.stat().st_size <= 0 for path in raw_profiles):
         raise CoverageError("coverage bundle raw profiles are absent or empty")
+    if args.layer == "cpp" and (
+        not device_profiles
+        or any(path.stat().st_size <= 0 for path in device_profiles)
+    ):
+        raise CoverageError("C++ coverage bundle has no nonempty Metal device profiles")
+    profiles = sorted(raw_profiles + (device_profiles if args.layer == "cpp" else []))
 
     merge = merge_llvm_profiles(
         args.llvm_profdata, profiles, pathlib.Path(args.profdata).resolve()
@@ -3371,7 +3394,8 @@ def regenerate_coverage_bundle(
         path.relative_to(layer_dir).as_posix()
         for path in (
             layer_dir / ("production-profiles" if role == "production" else "profiles")
-        ).rglob("*.profraw")
+        ).rglob("*")
+        if path.is_file() and path.suffix in {".profraw", ".proftext", ".overflow"}
     }
     actual_objects = {
         path.relative_to(layer_dir).as_posix()
@@ -3560,6 +3584,19 @@ def validate_raw_evidence_manifest(
         for name in seen
     ):
         errors.append(f"{layer}: raw profraw evidence is absent")
+    if layer == "cpp" and not any(
+        name.startswith("cpp/profiles/")
+        and name.endswith(".proftext")
+        and _is_int(entry_sizes.get(name))
+        and entry_sizes[name] > 0
+        for name in seen
+    ):
+        errors.append("cpp: Metal device profile evidence is absent")
+    if layer == "cpp" and any(
+        name.startswith("cpp/profiles/") and name.endswith(".overflow")
+        for name in seen
+    ):
+        errors.append("cpp: Metal device coverage counter overflow was retained")
     return errors
 
 
@@ -4075,6 +4112,10 @@ def validate_retained_toolchain_and_profiles(
     llvm_profdata = profdata_entry.get("path")
     profile_paths = [artifact_dir / layer / "coverage.profdata"]
     profile_paths.extend(sorted((artifact_dir / layer / "profiles").glob("*.profraw")))
+    if layer == "cpp":
+        profile_paths.extend(
+            sorted((artifact_dir / layer / "profiles").glob("*.proftext"))
+        )
     if not isinstance(llvm_profdata, str) or len(profile_paths) < 2:
         errors.append(f"{layer}: retained LLVM profiles are incomplete")
     else:
@@ -4846,7 +4887,27 @@ def gpu_evidence(args: argparse.Namespace) -> int:
 def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
     errors: list[str] = []
     for required in (
-        "stripHostProfileInstrumentation(*DeviceModule);",
+        "lowerDeviceProfileInstrumentation(*DeviceModule);",
+        '"__acpp_sscp_metal_profile_increment"',
+        '"acpp.metal.device.profile.records"',
+        '"acpp.metal.device.profile.batch"',
+        "llvm::Intrinsic::donothing",
+        "EntryBuilder.CreateAlloca(",
+        "Builder.CreateZExtOrTrunc(Step, I64)",
+        "Builder.CreateICmpULT(Sum, Old)",
+        "llvm::ConstantInt::get(I64, UINT64_MAX)",
+        "BatchInputs.push_back(llvm::ConstantInt::get(I32, Slot + 1))",
+        "Call->getNumOperandBundles() != 1",
+        "Slot->getZExtValue() > deviceProfileCounterCount",
+        'Name.consume_front("\\1")',
+        "functionNeedsDeviceProfile(*Callee)",
+        "device atomic_uint* __acpp_sscp_metal_profile_counters",
+        "atomic_fetch_add_explicit(__acpp_sscp_metal_profile_counters",
+        'os << " [[buffer(30)]]"',
+        "metal_device_profile_buffer_index = 30",
+        'std::getenv("ACPP_METAL_DEVICE_PROFILE_DIR")',
+        'stem + ".proftext"',
+        'stem + ".overflow"',
         "preserveHostCoverageMappingNames(M)",
         "restoreHostCoverageMappingNames(M, HasCoverageMappingNames)",
         'getGlobalVariable("__llvm_coverage_names", true)',
@@ -4857,13 +4918,23 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
     ):
         if required not in text:
             errors.append(f"AdaptiveCpp coverage patch invariant is absent: {required}")
-    if (
-        text.count("requireNoHostProfileInstrumentation(M);") != 1
-        or text.count("requireNoHostProfileInstrumentation(*DeviceModule);") != 1
-    ):
+    if text.count("requireNoHostProfileInstrumentation(M);") != 2:
         errors.append(
-            "AdaptiveCpp coverage patch must check device IR after stripping and before HCF"
+            "AdaptiveCpp coverage patch must reject host profile intrinsics on every lowering exit"
         )
+    if "stripHostProfileInstrumentation" in text:
+        errors.append("AdaptiveCpp coverage patch must lower, not discard, device counters")
+    if "device atomic_ulong* __acpp_sscp_metal_profile_counters" in text:
+        errors.append("AdaptiveCpp coverage patch uses unsupported Metal 64-bit fetch-add")
+    for forbidden in (
+        '"acpp.metal.device.profile.step"',
+        "DeviceProfileProbeGuid",
+        "llvm::Intrinsic::pseudoprobe",
+    ):
+        if forbidden in text:
+            errors.append(
+                f"AdaptiveCpp coverage patch retains obsolete per-site probe carrier: {forbidden}"
+            )
     if "__covrec_" in text:
         errors.append("AdaptiveCpp coverage patch must not delete coverage mapping records")
     if "appendToCompilerUsed" in text:
@@ -4942,6 +5013,7 @@ def audit_scope(args: argparse.Namespace) -> int:
         'copy_profiles "$build_dir" "$profile_dir"',
         'copy_profiles "$build_dir" "$production_profile_dir"',
         'cmake -E remove_directory "$build_dir"',
+        'ACPP_METAL_DEVICE_PROFILE_DIR="$profile_dir"',
         '--per-test-log-dir "$per_test_log_dir"',
         '--baseline "$baseline_file"',
         'aggregate --artifact-dir "$artifact_dir"',

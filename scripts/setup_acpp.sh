@@ -207,36 +207,52 @@ apply_sleef_helper_address_space_patch() {
 }
 
 apply_sscp_host_coverage_patch() {
-    local patch target marker
+    local patch marker target
+    local targets=(
+        "include/hipSYCL/runtime/metal/metal_code_object.hpp"
+        "src/compiler/llvm-to-backend/metal/Emitter.cpp"
+        "src/compiler/llvm-to-backend/metal/Emitter.hpp"
+        "src/compiler/sscp/TargetSeparationPass.cpp"
+        "src/runtime/metal/metal_code_object.cpp"
+        "src/runtime/metal/metal_queue.cpp"
+    )
     patch="$PG_ACCEL_REPO_ROOT/patches/adaptivecpp/sscp-host-coverage.patch"
-    target="src/compiler/sscp/TargetSeparationPass.cpp"
-    marker="stripHostProfileInstrumentation"
+    marker="lowerDeviceProfileInstrumentation"
 
-    if [ ! -s "$patch" ] || [ ! -f "$ACPP_SRC/$target" ]; then
-        echo "error: required AdaptiveCpp SSCP host coverage patch or target is missing" >&2
+    if [ ! -s "$patch" ]; then
+        echo "error: required AdaptiveCpp SSCP coverage patch is missing" >&2
         exit 1
     fi
+    for target in "${targets[@]}"; do
+        if [ ! -f "$ACPP_SRC/$target" ]; then
+            echo "error: required AdaptiveCpp SSCP coverage target is missing: $target" >&2
+            exit 1
+        fi
+    done
 
-    if grep -q "$marker" "$ACPP_SRC/$target"; then
+    if grep -q "$marker" \
+        "$ACPP_SRC/src/compiler/sscp/TargetSeparationPass.cpp"; then
         if ! git -C "$ACPP_SRC" apply --unidiff-zero --reverse --check "$patch"; then
-            echo "error: applied AdaptiveCpp SSCP host coverage patch has drifted" >&2
+            echo "error: applied AdaptiveCpp SSCP coverage patch has drifted" >&2
             exit 1
         fi
         return 0
     fi
 
-    if ! git -C "$ACPP_SRC" diff --quiet -- "$target"; then
-        echo "error: AdaptiveCpp SSCP target differs from pinned source before patching" >&2
-        exit 1
-    fi
+    for target in "${targets[@]}"; do
+        if ! git -C "$ACPP_SRC" diff --quiet -- "$target"; then
+            echo "error: AdaptiveCpp SSCP coverage target differs from pinned source before patching: $target" >&2
+            exit 1
+        fi
+    done
     if ! git -C "$ACPP_SRC" apply --unidiff-zero --check "$patch"; then
-        echo "error: AdaptiveCpp SSCP host coverage patch does not apply to pinned source" >&2
+        echo "error: AdaptiveCpp SSCP coverage patch does not apply to pinned source" >&2
         exit 1
     fi
-    echo "Applying AdaptiveCpp SSCP host-only coverage patch"
+    echo "Applying AdaptiveCpp SSCP host and Metal device coverage patch"
     git -C "$ACPP_SRC" apply --unidiff-zero "$patch"
     if ! git -C "$ACPP_SRC" apply --unidiff-zero --reverse --check "$patch"; then
-        echo "error: AdaptiveCpp SSCP host coverage patch verification failed" >&2
+        echo "error: AdaptiveCpp SSCP coverage patch verification failed" >&2
         exit 1
     fi
 }

@@ -1,13 +1,437 @@
+diff --git a/include/hipSYCL/runtime/metal/metal_code_object.hpp b/include/hipSYCL/runtime/metal/metal_code_object.hpp
+index 3045348c..2eb2a20e 100644
+--- a/include/hipSYCL/runtime/metal/metal_code_object.hpp
++++ b/include/hipSYCL/runtime/metal/metal_code_object.hpp
+@@ -15,0 +16,2 @@
++#include <cstddef>
++#include <cstdint>
+@@ -27,0 +30 @@ class BinaryArchive;
++class Buffer;
+@@ -48,0 +52,3 @@ public:
++
++  virtual MTL::Buffer* get_device_profile_buffer() const = 0;
++  virtual std::size_t get_device_profile_counter_count() const = 0;
+@@ -86,0 +93,2 @@ public:
++  virtual MTL::Buffer* get_device_profile_buffer() const override;
++  virtual std::size_t get_device_profile_counter_count() const override;
+@@ -90,0 +99,7 @@ private:
++  struct device_profile_record {
++    std::string name;
++    uint64_t hash = 0;
++    uint32_t num_counters = 0;
++    uint32_t base_counter = 0;
++  };
++
+@@ -91,0 +107,2 @@ private:
++  result initialize_device_profile(const std::string& source);
++  void flush_device_profile() const;
+@@ -100,0 +118,3 @@ private:
++  MTL::Buffer* _device_profile_buffer;
++  std::vector<device_profile_record> _device_profile_records;
++  uint32_t _device_profile_counter_count = 0;
+diff --git a/src/compiler/llvm-to-backend/metal/Emitter.cpp b/src/compiler/llvm-to-backend/metal/Emitter.cpp
+index 94a49963..60570b24 100644
+--- a/src/compiler/llvm-to-backend/metal/Emitter.cpp
++++ b/src/compiler/llvm-to-backend/metal/Emitter.cpp
+@@ -23,0 +24 @@
++#include <llvm/IR/IRBuilder.h>
+@@ -24,0 +26 @@
++#include <llvm/IR/Metadata.h>
+@@ -264,0 +267,245 @@ MetalEmitter::~MetalEmitter() = default;
++bool MetalEmitter::analyzeDeviceProfileMetadata() {
++  static constexpr const char* MetadataName =
++      "acpp.metal.device.profile.records";
++  NamedMDNode* Metadata = M.getNamedMetadata(MetadataName);
++  if (!Metadata) {
++    return true;
++  }
++  if (Metadata->getNumOperands() == 0) {
++    errorMsg = "Metal device profile metadata is empty";
++    return false;
++  }
++  if (opt.maxArgsForFlatMode < 1) {
++    errorMsg = "Metal device profiling has no free implicit buffer binding";
++    return false;
++  }
++
++  auto readInteger = [&](llvm::Metadata* MD, uint64_t& Out) -> bool {
++    auto* ConstantMD = dyn_cast<ConstantAsMetadata>(MD);
++    auto* Value = ConstantMD ? dyn_cast<ConstantInt>(ConstantMD->getValue()) : nullptr;
++    if (!Value) {
++      return false;
++    }
++    Out = Value->getZExtValue();
++    return true;
++  };
++
++  uint64_t ExpectedBase = 0;
++  for (unsigned I = 0; I < Metadata->getNumOperands(); ++I) {
++    MDNode* Node = Metadata->getOperand(I);
++    if (!Node || Node->getNumOperands() != 4) {
++      errorMsg = "Malformed Metal device profile record metadata";
++      return false;
++    }
++    auto* Name = dyn_cast<MDString>(Node->getOperand(0).get());
++    uint64_t Hash = 0;
++    uint64_t NumCounters = 0;
++    uint64_t BaseCounter = 0;
++    if (!Name || Name->getString().empty() ||
++        !readInteger(Node->getOperand(1).get(), Hash) ||
++        !readInteger(Node->getOperand(2).get(), NumCounters) ||
++        !readInteger(Node->getOperand(3).get(), BaseCounter) ||
++        NumCounters == 0 || NumCounters > UINT32_MAX ||
++        BaseCounter != ExpectedBase ||
++        ExpectedBase + NumCounters > UINT32_MAX) {
++      errorMsg = "Invalid or non-contiguous Metal device profile record metadata";
++      return false;
++    }
++    deviceProfileRecords.push_back(DeviceProfileRecord{
++        Name->getString().str(), Hash, static_cast<uint32_t>(NumCounters),
++        static_cast<uint32_t>(BaseCounter)});
++    ExpectedBase += NumCounters;
++  }
++  deviceProfileCounterCount = static_cast<uint32_t>(ExpectedBase);
++  return true;
++}
++
++void MetalEmitter::emitDeviceProfileMetadata() {
++  if (deviceProfileRecords.empty()) {
++    return;
++  }
++  static constexpr char Hex[] = "0123456789abcdef";
++  auto hexEncode = [&](const std::string& Input) {
++    std::string Result;
++    Result.reserve(Input.size() * 2);
++    for (unsigned char C : Input) {
++      Result.push_back(Hex[C >> 4]);
++      Result.push_back(Hex[C & 0xf]);
++    }
++    return Result;
++  };
++
++  os << "// __ACPP_DEVICE_PROFILE_V1 " << deviceProfileCounterCount << "\n";
++  for (const auto& Record : deviceProfileRecords) {
++    os << "// __ACPP_DEVICE_PROFILE_RECORD " << Record.baseCounter << " "
++       << Record.numCounters << " " << Record.hash << " "
++       << hexEncode(Record.name) << "\n";
++  }
++}
++
++int MetalEmitter::flatArgumentLimit() const {
++  return opt.maxArgsForFlatMode - (deviceProfileRecords.empty() ? 0 : 1);
++}
++
++bool MetalEmitter::functionNeedsDeviceProfile(const Function& F) const {
++  return deviceProfileFunctions.count(&F) != 0;
++}
++
++bool MetalEmitter::lowerDeviceProfileIntrinsics() {
++  if (deviceProfileRecords.empty()) {
++    return true;
++  }
++
++  for (const GlobalValue& GV : M.global_values()) {
++    StringRef Name = GV.getName();
++    Name.consume_front("\1");
++    if (Name == "__acpp_sscp_metal_profile_increment") {
++      errorMsg = "Reserved Metal device profile hook already exists";
++      return false;
++    }
++  }
++
++  for (Function& F : M) {
++    if (F.getName().starts_with("llvm.instrprof.") && !F.use_empty()) {
++      errorMsg = "Profiling intrinsic survived Metal device hit marking";
++      return false;
++    }
++  }
++
++  struct ProfileHit {
++    CallBase* carrier;
++    uint32_t slot;
++    Value* step;
++  };
++  SmallVector<ProfileHit, 32> Hits;
++  SmallPtrSet<CallBase*, 32> Carriers;
++  static constexpr const char* BatchBundleName =
++      "acpp.metal.device.profile.batch";
++  for (Function& F : M) {
++    for (BasicBlock& BB : F) {
++      for (Instruction& I : BB) {
++        auto* Call = dyn_cast<CallBase>(&I);
++        auto BatchBundle = Call ? Call->getOperandBundle(BatchBundleName)
++                                : std::nullopt;
++        if (!BatchBundle) {
++          continue;
++        }
++        Function* Callee = Call ? Call->getCalledFunction() : nullptr;
++        if (!Callee || Callee->getIntrinsicID() != Intrinsic::donothing ||
++            !Call->arg_empty() || Call->getNumOperandBundles() != 1 ||
++            BatchBundle->Inputs.empty() ||
++            (BatchBundle->Inputs.size() % 2) != 0) {
++          errorMsg = "Invalid or unrecognized Metal device profile carrier";
++          return false;
++        }
++        Carriers.insert(Call);
++        for (unsigned Index = 0; Index < BatchBundle->Inputs.size(); Index += 2) {
++          auto* Slot = dyn_cast<ConstantInt>(
++              BatchBundle->Inputs[Index].get());
++          Value* Step = BatchBundle->Inputs[Index + 1].get();
++          if (!Slot || Slot->isZero() ||
++              Slot->getZExtValue() > deviceProfileCounterCount ||
++              !Step || !Step->getType()->isIntegerTy()) {
++            errorMsg = "Metal device profile carrier has an invalid counter pair";
++            return false;
++          }
++          Hits.push_back(ProfileHit{
++              Call, static_cast<uint32_t>(Slot->getZExtValue() - 1), Step});
++        }
++      }
++    }
++  }
++
++  if (Hits.empty()) {
++    return true;
++  }
++
++  auto& Ctx = M.getContext();
++  Type* I32 = Type::getInt32Ty(Ctx);
++  Type* I64 = Type::getInt64Ty(Ctx);
++  FunctionCallee Hook = M.getOrInsertFunction(
++      "__acpp_sscp_metal_profile_increment",
++      FunctionType::get(Type::getVoidTy(Ctx), {I32, I64}, false));
++
++  for (const ProfileHit& Hit : Hits) {
++    IRBuilder<> Builder{Hit.carrier};
++    Value* Step = Builder.CreateZExtOrTrunc(Hit.step, I64);
++    auto* ProfileCall = Builder.CreateCall(
++        Hook,
++        {ConstantInt::get(I32, Hit.slot), Step});
++    ProfileCall->addFnAttr(Attribute::NoMerge);
++  }
++  for (CallBase* Carrier : Carriers) {
++    Carrier->eraseFromParent();
++  }
++  if (Function* Carrier = M.getFunction("llvm.donothing")) {
++    if (Carrier->use_empty()) {
++      Carrier->eraseFromParent();
++    }
++  }
++  return true;
++}
++
++bool MetalEmitter::analyzeDeviceProfileFunctions() {
++  deviceProfileFunctions.clear();
++  if (deviceProfileRecords.empty()) {
++    return true;
++  }
++
++  Function* Hook = M.getFunction("__acpp_sscp_metal_profile_increment");
++  if (!Hook || Hook->use_empty()) {
++    // Per-kernel JIT specialization can prove every instrumented path dead
++    // after target separation emitted the validated module-level records. In
++    // that case this code object has no device coverage contribution and must
++    // retain the ordinary, unprofiled Metal ABI. Malformed records have
++    // already been rejected by analyzeDeviceProfileMetadata().
++    deviceProfileRecords.clear();
++    deviceProfileCounterCount = 0;
++    return true;
++  }
++  for (User* U : Hook->users()) {
++    auto* Call = dyn_cast<CallBase>(U);
++    if (!Call || Call->getCalledOperand()->stripPointerCasts() != Hook ||
++        !Call->getFunction()) {
++      errorMsg = "Metal device profile increment hook has an unsupported use";
++      return false;
++    }
++    deviceProfileFunctions.insert(Call->getFunction());
++  }
++
++  bool Changed = true;
++  while (Changed) {
++    Changed = false;
++    for (Function& F : M) {
++      if (F.isDeclaration() || functionNeedsDeviceProfile(F)) {
++        continue;
++      }
++      for (BasicBlock& BB : F) {
++        for (Instruction& I : BB) {
++          auto* Call = dyn_cast<CallBase>(&I);
++          if (!Call) {
++            continue;
++          }
++          auto* Callee = dyn_cast<Function>(
++              Call->getCalledOperand()->stripPointerCasts());
++          if (Callee && functionNeedsDeviceProfile(*Callee)) {
++            Changed |= deviceProfileFunctions.insert(&F).second;
++            break;
++          }
++        }
++        if (functionNeedsDeviceProfile(F)) {
++          break;
++        }
++      }
++    }
++  }
++
++  for (const Function* F : deviceProfileFunctions) {
++    if (kernelNames.count(F->getName().str()) != 0) {
++      return true;
++    }
++  }
++  errorMsg = "Metal device profile counter hooks are not reachable from a kernel";
++  return false;
++}
++
+@@ -277,0 +525,10 @@ bool MetalEmitter::emit(std::string& out) {
++  if (!analyzeDeviceProfileMetadata()) {
++    return false;
++  }
++  if (!lowerDeviceProfileIntrinsics()) {
++    return false;
++  }
++  if (!analyzeDeviceProfileFunctions()) {
++    return false;
++  }
++  emitDeviceProfileMetadata();
+@@ -397,0 +655,4 @@ constant long& constant __acpp_sscp_metal_gpu_to_host_addr_diff [[buffer(1)]];
++        if (functionNeedsDeviceProfile(F)) {
++          if (!first) os << ", ";
++          os << "device atomic_uint* __acpp_sscp_metal_profile_counters";
++        }
+@@ -436,0 +698,5 @@ constant long& constant __acpp_sscp_metal_gpu_to_host_addr_diff [[buffer(1)]];
++  if (!deviceProfileRecords.empty() && emittedDeviceProfileHits == 0) {
++    errorMsg = "Metal device profile metadata has no surviving atomic hit sites";
++    return false;
++  }
++
+@@ -939 +1205 @@ bool MetalEmitter::emitArgStruct(Function& F) {
+-  bool useArgStruct = isKernel && F.arg_size() > opt.maxArgsForFlatMode;
++  bool useArgStruct = isKernel && F.arg_size() > flatArgumentLimit();
+@@ -959 +1225 @@ bool MetalEmitter::emitSignature(Function& F,
+-  bool useArgStruct = isKernel && F.arg_size() > opt.maxArgsForFlatMode;
++  bool useArgStruct = isKernel && F.arg_size() > flatArgumentLimit();
+@@ -971 +1237,3 @@ bool MetalEmitter::emitSignature(Function& F,
+-  int bufIdx = 2; // index=0 is reserved for dynamic local memory size, index=1 for host-to-device address difference, so start from 2
++  // Keep user arguments on their established bindings. Device profiling uses
++  // the reserved high binding 30 and reduces flat mode by one argument.
++  int bufIdx = 2;
+@@ -992,0 +1261,7 @@ bool MetalEmitter::emitSignature(Function& F,
++  if (functionNeedsDeviceProfile(F)) {
++    if (!first) os << ", ";
++    os << "device atomic_uint* __acpp_sscp_metal_profile_counters";
++    if (isKernel) {
++      os << " [[buffer(30)]]";
++    }
++  }
+@@ -2120,0 +2396,49 @@ bool MetalEmitter::emitCallInstruction(const CallInst* CI, const std::string& na
++  if (calleeName == "__acpp_sscp_metal_profile_increment") {
++    if (deviceProfileRecords.empty() || CI->arg_size() != 2) {
++      errorMsg = "Metal device profile hit has no matching metadata";
++      return false;
++    }
++    auto* Slot = dyn_cast<ConstantInt>(CI->getArgOperand(0));
++    if (!Slot) {
++      errorMsg = "Metal device profile hit has a non-constant counter slot: " +
++                 instToString(*CI);
++      return false;
++    }
++    if (Slot->getZExtValue() >= deviceProfileCounterCount) {
++      errorMsg = "Metal device profile hit counter slot " +
++                 std::to_string(Slot->getZExtValue()) + " exceeds total " +
++                 std::to_string(deviceProfileCounterCount) + ": " +
++                 instToString(*CI);
++      return false;
++    }
++    if (!CI->getArgOperand(1)->getType()->isIntegerTy()) {
++      errorMsg = "Metal device profile hit has a non-integer step: " +
++                 instToString(*CI);
++      return false;
++    }
++    const uint64_t HitId = emittedDeviceProfileHits++;
++    os << indent(level) << "{\n";
++    os << indent(level + 1) << "const ulong __acpp_profile_wide_step_" << HitId
++       << " = ulong(" << emitExpr(CI->getArgOperand(1)) << ");\n";
++    os << indent(level + 1) << "if (__acpp_profile_wide_step_" << HitId
++       << " > ulong(~uint(0))) {\n";
++    os << indent(level + 2)
++       << "atomic_store_explicit(__acpp_sscp_metal_profile_counters + "
++       << deviceProfileCounterCount << ", uint(1), memory_order_relaxed);\n";
++    os << indent(level + 1) << "} else {\n";
++    os << indent(level + 2) << "const uint __acpp_profile_step_" << HitId
++       << " = uint(__acpp_profile_wide_step_" << HitId << ");\n";
++    os << indent(level + 2) << "const uint __acpp_profile_old_" << HitId
++       << " = atomic_fetch_add_explicit(__acpp_sscp_metal_profile_counters + "
++       << Slot->getZExtValue() << ", __acpp_profile_step_" << HitId
++       << ", memory_order_relaxed);\n";
++    os << indent(level + 2) << "if (__acpp_profile_old_" << HitId
++       << " > (~uint(0) - __acpp_profile_step_" << HitId << "))\n";
++    os << indent(level + 3)
++       << "atomic_store_explicit(__acpp_sscp_metal_profile_counters + "
++       << deviceProfileCounterCount << ", uint(1), memory_order_relaxed);\n";
++    os << indent(level + 1) << "}\n";
++    os << indent(level) << "}\n";
++    return true;
++  }
++
+@@ -2192,0 +2517,6 @@ bool MetalEmitter::emitCallInstruction(const CallInst* CI, const std::string& na
++  if (!callee->isDeclaration() && functionNeedsDeviceProfile(*callee)) {
++    if (argsSize > 0) {
++      callExpr += ", ";
++    }
++    callExpr += "__acpp_sscp_metal_profile_counters";
++  }
+diff --git a/src/compiler/llvm-to-backend/metal/Emitter.hpp b/src/compiler/llvm-to-backend/metal/Emitter.hpp
+index 61b1ae57..88907ab9 100644
+--- a/src/compiler/llvm-to-backend/metal/Emitter.hpp
++++ b/src/compiler/llvm-to-backend/metal/Emitter.hpp
+@@ -14,0 +15 @@
++#include <cstdint>
+@@ -108,0 +110,6 @@ private:
++  bool analyzeDeviceProfileMetadata();
++  bool lowerDeviceProfileIntrinsics();
++  bool analyzeDeviceProfileFunctions();
++  bool functionNeedsDeviceProfile(const llvm::Function& F) const;
++  void emitDeviceProfileMetadata();
++  int flatArgumentLimit() const;
+@@ -145,0 +153,11 @@ private:
++  struct DeviceProfileRecord {
++    std::string name;
++    uint64_t hash = 0;
++    uint32_t numCounters = 0;
++    uint32_t baseCounter = 0;
++  };
++  std::vector<DeviceProfileRecord> deviceProfileRecords;
++  std::unordered_set<const llvm::Function*> deviceProfileFunctions;
++  uint32_t deviceProfileCounterCount = 0;
++  uint64_t emittedDeviceProfileHits = 0;
++
 diff --git a/src/compiler/sscp/TargetSeparationPass.cpp b/src/compiler/sscp/TargetSeparationPass.cpp
-index f3202ceb..64353d67 100644
+index f3202ceb..b79a58c7 100644
 --- a/src/compiler/sscp/TargetSeparationPass.cpp
 +++ b/src/compiler/sscp/TargetSeparationPass.cpp
-@@ -40,0 +41 @@
+@@ -29,0 +30,2 @@
++#include <map>
++#include <tuple>
+@@ -31,0 +34 @@
++#include <llvm/Analysis/ValueTracking.h>
+@@ -34,0 +38,3 @@
++#include <llvm/IR/IRBuilder.h>
++#include <llvm/IR/Intrinsics.h>
++#include <llvm/IR/Metadata.h>
+@@ -40,0 +47 @@
 +#include <llvm/Support/ErrorHandling.h>
-@@ -280,0 +282,67 @@ void removeLinkerOptionsByPrefixes(
+@@ -280,0 +288,314 @@ void removeLinkerOptionsByPrefixes(
 +static bool isHostProfileIntrinsic(const llvm::Function &F) {
 +  return llvmutils::starts_with(F.getName(), "llvm.instrprof.");
 +}
++
++static constexpr const char *DeviceProfileIncrement =
++    "__acpp_sscp_metal_profile_increment";
++static constexpr const char *DeviceProfileRecords =
++    "acpp.metal.device.profile.records";
++static constexpr const char *DeviceProfileBatchBundle =
++    "acpp.metal.device.profile.batch";
 +
 +static void requireNoHostProfileInstrumentation(const llvm::Module &M) {
 +  for(const auto& F : M) {
@@ -19,37 +443,277 @@ index f3202ceb..64353d67 100644
 +  }
 +}
 +
-+static void stripHostProfileInstrumentation(llvm::Module &M) {
-+  llvm::SmallVector<llvm::Function *, 8> ProfileIntrinsics;
-+  for(auto& F : M) {
-+    if(isHostProfileIntrinsic(F))
-+      ProfileIntrinsics.push_back(&F);
++struct DeviceProfileRecord {
++  std::string Name;
++  uint64_t Hash;
++  uint32_t NumCounters;
++  uint32_t BaseCounter;
++};
++
++static std::string getDeviceProfileName(const llvm::CallBase &Call) {
++  llvm::StringRef Name;
++  if(Call.arg_size() < 1 ||
++     !llvm::getConstantStringInfo(Call.getArgOperand(0), Name)) {
++    llvm::report_fatal_error(
++        "device profiling intrinsic has no constant profile name");
++  }
++  return Name.str();
++}
++
++static uint64_t getConstantProfileOperand(const llvm::CallBase &Call,
++                                          unsigned Index,
++                                          llvm::StringRef Description) {
++  if(Call.arg_size() <= Index) {
++    llvm::report_fatal_error("device profiling intrinsic is missing " +
++                             Description);
++  }
++  auto *Value = llvm::dyn_cast<llvm::ConstantInt>(Call.getArgOperand(Index));
++  if(!Value) {
++    llvm::report_fatal_error("device profiling intrinsic has non-constant " +
++                             Description);
++  }
++  return Value->getZExtValue();
++}
++
++static void lowerDeviceProfileInstrumentation(llvm::Module &M) {
++  bool HasReservedProfileSymbol = false;
++  for(const auto &GV : M.global_values()) {
++    llvm::StringRef Name = GV.getName();
++    Name.consume_front("\1");
++    HasReservedProfileSymbol |= Name == DeviceProfileIncrement;
++  }
++  bool HasReservedProfileCarrier = false;
++  for(const auto &F : M) {
++    for(const auto &BB : F) {
++      for(const auto &I : BB) {
++        auto *Call = llvm::dyn_cast<llvm::CallBase>(&I);
++        if(!Call)
++          continue;
++        HasReservedProfileCarrier |=
++            Call->getOperandBundle(DeviceProfileBatchBundle).has_value();
++      }
++    }
++  }
++  if(HasReservedProfileSymbol || HasReservedProfileCarrier ||
++     M.getNamedMetadata(DeviceProfileRecords)) {
++    llvm::report_fatal_error(
++        "reserved SSCP device profile symbol or metadata already exists");
 +  }
 +
-+  for(auto* F : ProfileIntrinsics) {
-+    llvm::SmallVector<llvm::CallBase *, 16> Calls;
-+    for(auto* U : F->users()) {
-+      auto* Call = llvm::dyn_cast<llvm::CallBase>(U);
-+      if(!Call || Call->getCalledOperand()->stripPointerCasts() != F ||
++  llvm::SmallVector<llvm::CallBase *, 32> Calls;
++  for(auto &F : M) {
++    if(!isHostProfileIntrinsic(F))
++      continue;
++    for(auto *U : F.users()) {
++      auto *Call = llvm::dyn_cast<llvm::CallBase>(U);
++      if(!Call || Call->getCalledOperand()->stripPointerCasts() != &F ||
 +         !Call->getType()->isVoidTy()) {
 +        llvm::report_fatal_error(
 +            "unsupported use of host profiling intrinsic in SSCP device IR: " +
-+            F->getName());
++            F.getName());
 +      }
 +      Calls.push_back(Call);
 +    }
-+
-+    for(auto* Call : Calls)
-+      Call->eraseFromParent();
-+
-+    if(!F->use_empty()) {
-+      llvm::report_fatal_error(
-+          "host profiling intrinsic still has uses in SSCP device IR: " +
-+          F->getName());
-+    }
-+    F->eraseFromParent();
 +  }
 +
++  if(Calls.empty()) {
++    llvm::SmallVector<llvm::Function *, 8> EmptyIntrinsics;
++    for(auto &F : M)
++      if(isHostProfileIntrinsic(F) && F.use_empty())
++        EmptyIntrinsics.push_back(&F);
++    for(auto *F : EmptyIntrinsics)
++      F->eraseFromParent();
++    requireNoHostProfileInstrumentation(M);
++    return;
++  }
++
++  using RecordKey = std::tuple<std::string, uint64_t, uint32_t>;
++  std::map<RecordKey, uint32_t> RecordBases;
++  std::map<std::pair<std::string, uint64_t>, uint32_t> RecordCounterCounts;
++  std::vector<DeviceProfileRecord> Records;
++  uint64_t NextCounter = 0;
++  auto &Ctx = M.getContext();
++  auto *I32 = llvm::Type::getInt32Ty(Ctx);
++  auto *I64 = llvm::Type::getInt64Ty(Ctx);
++
++  auto readRecordKey = [](llvm::CallBase &Call) -> RecordKey {
++    std::string ProfileName = getDeviceProfileName(Call);
++    uint64_t Hash = getConstantProfileOperand(Call, 1, "function hash");
++    uint64_t NumCounters64 =
++        getConstantProfileOperand(Call, 2, "counter count");
++    uint64_t CounterIndex =
++        getConstantProfileOperand(Call, 3, "counter index");
++    if(NumCounters64 == 0 || NumCounters64 > UINT32_MAX ||
++       CounterIndex >= NumCounters64) {
++      llvm::report_fatal_error(
++          llvm::Twine{"invalid device profiling counter bounds for "} +
++          ProfileName);
++    }
++    return {std::move(ProfileName), Hash,
++            static_cast<uint32_t>(NumCounters64)};
++  };
++
++  // A sorted key map makes the slot layout byte-for-byte deterministic even
++  // if LLVM changes the iteration order of intrinsic users.
++  for(auto *Call : Calls) {
++    RecordKey Key = readRecordKey(*Call);
++    const auto &[Name, Hash, NumCounters] = Key;
++    auto [CountIt, Inserted] =
++        RecordCounterCounts.emplace(std::make_pair(Name, Hash), NumCounters);
++    if(!Inserted && CountIt->second != NumCounters) {
++      llvm::report_fatal_error(
++          llvm::Twine{"conflicting device profile counter counts for "} + Name);
++    }
++    RecordBases.emplace(std::move(Key), 0);
++  }
++  for(auto &[Key, Base] : RecordBases) {
++    const auto &[Name, Hash, NumCounters] = Key;
++    if(NextCounter + NumCounters > UINT32_MAX) {
++      llvm::report_fatal_error(
++          "SSCP device profile requires more than UINT32_MAX counters");
++    }
++    Base = static_cast<uint32_t>(NextCounter);
++    Records.push_back(DeviceProfileRecord{Name, Hash, NumCounters, Base});
++    NextCounter += NumCounters;
++  }
++
++  struct FunctionAccumulators {
++    std::map<uint32_t, llvm::AllocaInst *> Slots;
++  };
++  std::map<llvm::Function *, FunctionAccumulators> Accumulators;
++
++  // First validate every site and determine the per-function accumulator
++  // layout. The local sums are pure data flow: LLVM can still if-convert and
++  // simplify the instrumented CFG before the Metal side effect is introduced.
++  for(auto *Call : Calls) {
++    auto *Intrinsic = Call->getCalledFunction();
++    llvm::StringRef IntrinsicName = Intrinsic->getName();
++    if(IntrinsicName != "llvm.instrprof.increment" &&
++       IntrinsicName != "llvm.instrprof.increment.step") {
++      llvm::report_fatal_error(
++          "unsupported profiling intrinsic in SSCP device IR: " +
++          IntrinsicName);
++    }
++    const unsigned ExpectedArgs =
++        IntrinsicName == "llvm.instrprof.increment.step" ? 5 : 4;
++    if(Call->arg_size() != ExpectedArgs) {
++      llvm::report_fatal_error(
++          "device profile intrinsic has an unexpected signature");
++    }
++    readRecordKey(*Call);
++    if(IntrinsicName == "llvm.instrprof.increment.step" &&
++       !Call->getArgOperand(4)->getType()->isIntegerTy()) {
++        llvm::report_fatal_error(
++            "device profile increment.step has a non-integer step");
++    }
++
++    RecordKey Key = readRecordKey(*Call);
++    const uint64_t CounterIndex =
++        getConstantProfileOperand(*Call, 3, "counter index");
++    auto BaseIt = RecordBases.find(Key);
++    if(BaseIt == RecordBases.end())
++      llvm::report_fatal_error(
++          "device profile record layout changed while marking hits");
++
++    auto *Parent = Call->getFunction();
++    if(!Parent || Parent->isDeclaration())
++      llvm::report_fatal_error(
++          "device profile increment has no defined parent function");
++    const uint64_t Slot = BaseIt->second + CounterIndex;
++    Accumulators[Parent].Slots.emplace(static_cast<uint32_t>(Slot), nullptr);
++  }
++
++  for(auto &[F, FunctionState] : Accumulators) {
++    llvm::IRBuilder<> EntryBuilder{&*F->getEntryBlock().getFirstInsertionPt()};
++    for(auto &[Slot, Accumulator] : FunctionState.Slots) {
++      Accumulator = EntryBuilder.CreateAlloca(
++          I64, nullptr, "__acpp_device_profile_sum");
++      EntryBuilder.CreateStore(llvm::ConstantInt::get(I64, 0), Accumulator);
++    }
++  }
++
++  for(auto *Call : Calls) {
++    auto *Intrinsic = Call->getCalledFunction();
++    llvm::StringRef IntrinsicName = Intrinsic->getName();
++    RecordKey Key = readRecordKey(*Call);
++    const uint64_t CounterIndex =
++        getConstantProfileOperand(*Call, 3, "counter index");
++    auto BaseIt = RecordBases.find(Key);
++    auto FunctionIt = Accumulators.find(Call->getFunction());
++    if(BaseIt == RecordBases.end() || FunctionIt == Accumulators.end())
++      llvm::report_fatal_error(
++          "device profile accumulator layout changed while marking hits");
++    const uint64_t Slot = BaseIt->second + CounterIndex;
++    auto AccumulatorIt =
++        FunctionIt->second.Slots.find(static_cast<uint32_t>(Slot));
++    if(AccumulatorIt == FunctionIt->second.Slots.end() ||
++       !AccumulatorIt->second)
++      llvm::report_fatal_error("device profile accumulator is missing");
++
++    llvm::Value *Step = llvm::ConstantInt::get(I64, 1);
++    if(IntrinsicName == "llvm.instrprof.increment.step")
++      Step = Call->getArgOperand(4);
++    llvm::IRBuilder<> Builder{Call};
++    Builder.SetCurrentDebugLocation(Call->getDebugLoc());
++    Step = Builder.CreateZExtOrTrunc(Step, I64);
++    llvm::Value *Old = Builder.CreateLoad(I64, AccumulatorIt->second);
++    llvm::Value *Sum = Builder.CreateAdd(Old, Step);
++    llvm::Value *Overflow = Builder.CreateICmpULT(Sum, Old);
++    llvm::Value *Saturated = Builder.CreateSelect(
++        Overflow, llvm::ConstantInt::get(I64, UINT64_MAX), Sum);
++    Builder.CreateStore(Saturated, AccumulatorIt->second);
++  }
++
++  llvm::FunctionCallee ProfileCarrier =
++      llvm::Intrinsic::getOrInsertDeclaration(&M, llvm::Intrinsic::donothing);
++  for(auto &[F, FunctionState] : Accumulators) {
++    bool HasReturn = false;
++    for(auto &BB : *F) {
++      auto *Return = llvm::dyn_cast<llvm::ReturnInst>(BB.getTerminator());
++      if(!Return)
++        continue;
++      HasReturn = true;
++      llvm::IRBuilder<> Builder{Return};
++      llvm::SmallVector<llvm::Value *, 16> BatchInputs;
++      for(const auto &[Slot, Accumulator] : FunctionState.Slots) {
++        BatchInputs.push_back(llvm::ConstantInt::get(I32, Slot + 1));
++        BatchInputs.push_back(Builder.CreateLoad(I64, Accumulator));
++      }
++      llvm::OperandBundleDef BatchBundle{
++          std::string{DeviceProfileBatchBundle}, BatchInputs};
++      Builder.CreateCall(ProfileCarrier, {}, {BatchBundle});
++    }
++    if(!HasReturn)
++      llvm::report_fatal_error(
++          "instrumented SSCP device function has no return");
++  }
++
++  llvm::NamedMDNode *Metadata = M.getOrInsertNamedMetadata(DeviceProfileRecords);
++  if(Metadata->getNumOperands() != 0)
++    llvm::report_fatal_error("duplicate SSCP device profile metadata");
++  for(const auto &Record : Records) {
++    Metadata->addOperand(llvm::MDNode::get(
++        Ctx,
++        {llvm::MDString::get(Ctx, Record.Name),
++         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(I64, Record.Hash)),
++         llvm::ConstantAsMetadata::get(
++             llvm::ConstantInt::get(I32, Record.NumCounters)),
++         llvm::ConstantAsMetadata::get(
++             llvm::ConstantInt::get(I32, Record.BaseCounter))}));
++  }
++
++  for(auto *Call : Calls)
++    Call->eraseFromParent();
++  llvm::SmallVector<llvm::Function *, 8> ProfileIntrinsics;
++  for(auto &F : M)
++    if(isHostProfileIntrinsic(F))
++      ProfileIntrinsics.push_back(&F);
++  for(auto *F : ProfileIntrinsics) {
++    if(!F->use_empty())
++      llvm::report_fatal_error(
++          "profiling intrinsic survived device hit marking: " + F->getName());
++    F->eraseFromParent();
++  }
 +  requireNoHostProfileInstrumentation(M);
 +}
 +
@@ -72,14 +736,288 @@ index f3202ceb..64353d67 100644
 +  CoverageNames->setLinkage(llvm::GlobalValue::InternalLinkage);
 +}
 +
-@@ -289,0 +358 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
-+  stripHostProfileInstrumentation(*DeviceModule);
-@@ -327,0 +397 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
+@@ -331,0 +653 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
 +  AttrsToRemove.push_back(llvm::Attribute::AttrKind::OptimizeNone);
-@@ -478,0 +549,2 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
-+  requireNoHostProfileInstrumentation(*DeviceModule);
+@@ -425,0 +748,5 @@ std::unique_ptr<llvm::Module> generateDeviceIR(llvm::Module &M,
++  // Only device-reachable functions survive outlining. Lower their frontend
++  // coverage increments to the Metal runtime hook now, so host-only records do
++  // not consume slots in the device counter buffer.
++  lowerDeviceProfileInstrumentation(*DeviceModule);
 +
-@@ -644,0 +717 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
+@@ -644,0 +972 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
 +      bool HasCoverageMappingNames = preserveHostCoverageMappingNames(M);
-@@ -645,0 +719 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
+@@ -645,0 +974 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
 +      restoreHostCoverageMappingNames(M, HasCoverageMappingNames);
+diff --git a/src/runtime/metal/metal_code_object.cpp b/src/runtime/metal/metal_code_object.cpp
+index 49e7d715..78a0139c 100644
+--- a/src/runtime/metal/metal_code_object.cpp
++++ b/src/runtime/metal/metal_code_object.cpp
+@@ -23,0 +24 @@
++#include <limits>
+@@ -24,0 +26 @@
++#include <set>
+@@ -25,0 +28 @@
++#include <sstream>
+@@ -40,0 +44,21 @@ namespace {
++bool decode_profile_name(const std::string& hex, std::string& out) {
++  auto digit = [](char c) -> int {
++    if (c >= '0' && c <= '9') return c - '0';
++    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
++    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
++    return -1;
++  };
++  if (hex.empty() || (hex.size() & 1) != 0) return false;
++  out.clear();
++  out.reserve(hex.size() / 2);
++  for (std::size_t i = 0; i < hex.size(); i += 2) {
++    int hi = digit(hex[i]);
++    int lo = digit(hex[i + 1]);
++    if (hi < 0 || lo < 0) return false;
++    char value = static_cast<char>((hi << 4) | lo);
++    if (value == '\0' || value == '\n' || value == '\r') return false;
++    out.push_back(value);
++  }
++  return !out.empty();
++}
++
+@@ -453,2 +477,6 @@ metal_sscp_executable_object::metal_sscp_executable_object(
+-      _archive{nullptr}, _msl_source{metal_source} {
+-  _build_result = build(metal_source);
++      _archive{nullptr}, _device_profile_buffer{nullptr},
++      _msl_source{metal_source} {
++  _build_result = initialize_device_profile(metal_source);
++  if (_build_result.is_success()) {
++    _build_result = build(metal_source);
++  }
+@@ -457,0 +486,4 @@ metal_sscp_executable_object::~metal_sscp_executable_object() {
++  flush_device_profile();
++  if (_device_profile_buffer) {
++    _device_profile_buffer->release();
++  }
+@@ -507,0 +540,8 @@ MTL::BinaryArchive* metal_sscp_executable_object::get_binary_archive() const {
++MTL::Buffer* metal_sscp_executable_object::get_device_profile_buffer() const {
++  return _device_profile_buffer;
++}
++
++std::size_t metal_sscp_executable_object::get_device_profile_counter_count() const {
++  return _device_profile_counter_count;
++}
++
+@@ -511,0 +552,168 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
++result metal_sscp_executable_object::initialize_device_profile(
++    const std::string& source) {
++  static constexpr const char* Header = "// __ACPP_DEVICE_PROFILE_V1 ";
++  static constexpr const char* Record = "// __ACPP_DEVICE_PROFILE_RECORD ";
++  bool header_seen = false;
++  uint64_t declared_counters = 0;
++  std::istringstream lines{source};
++  std::string line;
++  while (std::getline(lines, line)) {
++    if (line.compare(0, std::strlen(Header), Header) == 0) {
++      if (header_seen) {
++        return make_error(__acpp_here(), error_info{
++            "metal_code_object: duplicate device profile header"});
++      }
++      header_seen = true;
++      std::istringstream fields{line.substr(std::strlen(Header))};
++      std::string trailing;
++      if (!(fields >> declared_counters) || (fields >> trailing) ||
++          declared_counters == 0 || declared_counters > UINT32_MAX) {
++        return make_error(__acpp_here(), error_info{
++            "metal_code_object: malformed device profile header"});
++      }
++      continue;
++    }
++    if (line.compare(0, std::strlen(Record), Record) != 0) continue;
++    if (!header_seen) {
++      return make_error(__acpp_here(), error_info{
++          "metal_code_object: device profile record precedes header"});
++    }
++    uint64_t base = 0;
++    uint64_t count = 0;
++    uint64_t hash = 0;
++    std::string hex_name;
++    std::string trailing;
++    std::istringstream fields{line.substr(std::strlen(Record))};
++    if (!(fields >> base >> count >> hash >> hex_name) || (fields >> trailing) ||
++        base > UINT32_MAX || count == 0 || count > UINT32_MAX ||
++        base + count > UINT32_MAX) {
++      return make_error(__acpp_here(), error_info{
++          "metal_code_object: malformed device profile record"});
++    }
++    std::string name;
++    if (!decode_profile_name(hex_name, name)) {
++      return make_error(__acpp_here(), error_info{
++          "metal_code_object: invalid device profile record name"});
++    }
++    _device_profile_records.push_back(device_profile_record{
++        std::move(name), hash, static_cast<uint32_t>(count),
++        static_cast<uint32_t>(base)});
++  }
++
++  if (!header_seen) return make_success();
++  if (_device_profile_records.empty()) {
++    return make_error(__acpp_here(), error_info{
++        "metal_code_object: device profile header has no records"});
++  }
++
++  uint64_t expected_base = 0;
++  std::set<std::pair<std::string, uint64_t>> unique_records;
++  for (const auto& record : _device_profile_records) {
++    if (record.base_counter != expected_base ||
++        !unique_records.emplace(record.name, record.hash).second) {
++      return make_error(__acpp_here(), error_info{
++          "metal_code_object: non-contiguous or duplicate device profile records"});
++    }
++    expected_base += record.num_counters;
++  }
++  if (expected_base != declared_counters) {
++    return make_error(__acpp_here(), error_info{
++        "metal_code_object: device profile counter total mismatch"});
++  }
++  if (!_device) {
++    return make_error(__acpp_here(), error_info{
++        "metal_code_object: cannot allocate device profile buffer without a device"});
++  }
++
++  _device_profile_counter_count = static_cast<uint32_t>(declared_counters);
++  const std::size_t slots = static_cast<std::size_t>(declared_counters) + 1;
++  if (slots > std::numeric_limits<std::size_t>::max() / sizeof(uint32_t)) {
++    return make_error(__acpp_here(), error_info{
++        "metal_code_object: device profile buffer size overflow"});
++  }
++  const std::size_t bytes = slots * sizeof(uint32_t);
++  _device_profile_buffer =
++      _device->newBuffer(bytes, MTL::ResourceStorageModeShared);
++  if (!_device_profile_buffer || !_device_profile_buffer->contents() ||
++      _device_profile_buffer->length() < bytes) {
++    if (_device_profile_buffer) {
++      _device_profile_buffer->release();
++      _device_profile_buffer = nullptr;
++    }
++    return make_error(__acpp_here(), error_info{
++        "metal_code_object: device profile buffer allocation failed"});
++  }
++  std::memset(_device_profile_buffer->contents(), 0, bytes);
++  return make_success();
++}
++
++void metal_sscp_executable_object::flush_device_profile() const {
++  if (!_device_profile_buffer || _device_profile_records.empty()) return;
++  const char* output_dir = std::getenv("ACPP_METAL_DEVICE_PROFILE_DIR");
++  if (!output_dir || output_dir[0] == '\0') return;
++
++  const std::size_t slots =
++      static_cast<std::size_t>(_device_profile_counter_count) + 1;
++  const std::size_t bytes = slots * sizeof(uint32_t);
++  if (!_device_profile_buffer->contents() ||
++      _device_profile_buffer->length() < bytes) {
++    HIPSYCL_DEBUG_WARNING
++        << "metal_code_object: refusing to flush an invalid device profile buffer"
++        << std::endl;
++    return;
++  }
++
++  const auto* counters =
++      static_cast<const uint32_t*>(_device_profile_buffer->contents());
++  bool any_nonzero = false;
++  for (uint32_t i = 0; i < _device_profile_counter_count; ++i) {
++    any_nonzero |= counters[i] != 0;
++  }
++  if (!any_nonzero) return;
++
++  std::error_code ec;
++  std::filesystem::create_directories(output_dir, ec);
++  if (ec) {
++    HIPSYCL_DEBUG_WARNING
++        << "metal_code_object: could not create device profile directory: "
++        << ec.message() << std::endl;
++    return;
++  }
++  const std::string stem =
++      std::string{"acpp-metal-device-"} + private_tmp_suffix() + "-" +
++      kernel_configuration::to_string(_id);
++
++  if (counters[_device_profile_counter_count] != 0) {
++    const std::string error_path =
++        common::filesystem::join_path(output_dir, stem + ".overflow");
++    common::filesystem::atomic_write(
++        error_path, "Metal device coverage counter overflow; profile rejected\n");
++    HIPSYCL_DEBUG_WARNING
++        << "metal_code_object: device profile counter overflow; wrote "
++        << error_path << std::endl;
++    return;
++  }
++
++  std::ostringstream profile;
++  for (const auto& record : _device_profile_records) {
++    profile << record.name << "\n# Func Hash:\n" << record.hash
++            << "\n# Num Counters:\n" << record.num_counters
++            << "\n# Counter Values:\n";
++    for (uint32_t i = 0; i < record.num_counters; ++i) {
++      profile << counters[record.base_counter + i] << "\n";
++    }
++    profile << "\n";
++  }
++  const std::string profile_path =
++      common::filesystem::join_path(output_dir, stem + ".proftext");
++  if (!common::filesystem::atomic_write(profile_path, profile.str())) {
++    HIPSYCL_DEBUG_WARNING
++        << "metal_code_object: could not atomically write device profile "
++        << profile_path << std::endl;
++  } else {
++    HIPSYCL_DEBUG_INFO
++        << "metal_code_object: wrote Metal device profile " << profile_path
++        << std::endl;
++  }
++}
++
+diff --git a/src/runtime/metal/metal_queue.cpp b/src/runtime/metal/metal_queue.cpp
+index c32232fa..d4533230 100644
+--- a/src/runtime/metal/metal_queue.cpp
++++ b/src/runtime/metal/metal_queue.cpp
+@@ -20,0 +21 @@
++#include <limits>
+@@ -38,0 +40 @@ static constexpr int metal_max_args_for_flat_mode =
++static constexpr NS::UInteger metal_device_profile_buffer_index = 30;
+@@ -121,0 +124,2 @@ result launch_kernel_from_library(
++  MTL::Buffer* device_profile_buffer,
++  std::size_t device_profile_counter_count,
+@@ -181 +185,18 @@ result launch_kernel_from_library(
+-  bool arg_buffer_used = static_cast<int>(num_args) > metal_max_args_for_flat_mode;
++  const bool device_profile_enabled = device_profile_buffer != nullptr;
++  if (device_profile_enabled != (device_profile_counter_count != 0)) {
++    return make_error(__acpp_here(), error_info{
++        "metal: inconsistent device profile buffer metadata"});
++  }
++  if (device_profile_enabled) {
++    if (device_profile_counter_count == std::numeric_limits<std::size_t>::max() ||
++        device_profile_counter_count + 1 >
++            std::numeric_limits<std::size_t>::max() / sizeof(uint32_t) ||
++        device_profile_buffer->length() <
++            (device_profile_counter_count + 1) * sizeof(uint32_t)) {
++      return make_error(__acpp_here(), error_info{
++          "metal: invalid device profile buffer length"});
++    }
++  }
++  const int flat_argument_limit =
++      metal_max_args_for_flat_mode - (device_profile_enabled ? 1 : 0);
++  bool arg_buffer_used = static_cast<int>(num_args) > flat_argument_limit;
+@@ -211 +232,2 @@ result launch_kernel_from_library(
+-  // buffer(0) = dynamic local memory size, buffer(1) = gpu-to-host addr delta for pointer translation
++  // Preserve the established user ABI at buffer(2). Device coverage uses the
++  // reserved high binding buffer(30), with flat mode capped at 28 arguments.
+@@ -215,0 +238,10 @@ result launch_kernel_from_library(
++  if (device_profile_enabled) {
++    encoder->setBuffer(device_profile_buffer, 0,
++                       metal_device_profile_buffer_index);
++    encoder->useResource(device_profile_buffer,
++                         MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
++  }
++  if (!arg_buffer_used && buf_offset + num_args > metal_max_buffer_args) {
++    return make_error(__acpp_here(), error_info{
++        "metal: kernel arguments collide with reserved buffer bindings"});
++  }
+@@ -941,0 +974,2 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
++    metal_obj->get_device_profile_buffer(),
++    metal_obj->get_device_profile_counter_count(),

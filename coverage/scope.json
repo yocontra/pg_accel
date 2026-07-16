@@ -29,7 +29,7 @@
       ]
     },
     "cpp": {
-      "description": "Owned C++/SYCL host-object source coverage exercised by standalone CTest binaries; device execution correctness is separate evidence.",
+      "description": "Owned C++/SYCL source coverage from merged host instrumentation and real Metal device counters exercised by standalone CTest binaries.",
       "roots": [
         "pgaccel-kernels/src",
         "pgaccel-kernels/include"

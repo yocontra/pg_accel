@@ -1300,6 +1300,10 @@ raise SystemExit(2)
             (profiles / "fixture.profraw").write_text(
                 f"BUNDLE={bundle_id}\nHITS={hits}\n", encoding="utf-8"
             )
+            if layer == "cpp":
+                (profiles / "fixture.proftext").write_text(
+                    f"BUNDLE={bundle_id}\nHITS={hits}\n", encoding="utf-8"
+                )
             source_object = tools_dir / f"{bundle_id}.object"
             source_object.write_text(
                 f"BUNDLE={bundle_id}\n"
@@ -1887,6 +1891,32 @@ raise SystemExit(2)
             with (root / "cpp/raw-lcov.info").open("a", encoding="utf-8") as handle:
                 handle.write("TN:tampered\n")
             self.assertEqual(self.aggregate(root), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            (root / "cpp/profiles/fixture.proftext").unlink()
+            self.assertEqual(
+                quiet_call(
+                    coverage_tools.seal_layer_evidence,
+                    argparse.Namespace(artifact_dir=str(root), layer="cpp"),
+                ),
+                1,
+            )
+            self.assertEqual(self.aggregate(root), 1)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            (root / "cpp/profiles/device.overflow").write_text(
+                "counter overflow\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                quiet_call(
+                    coverage_tools.seal_layer_evidence,
+                    argparse.Namespace(artifact_dir=str(root), layer="cpp"),
+                ),
+                1,
+            )
+            self.assertEqual(self.aggregate(root), 1)
 
     def test_malformed_lcov_json_and_profdata_fail_after_reseal(self) -> None:
         mutations = (
@@ -2408,6 +2438,34 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertTrue(
             coverage_tools.adaptivecpp_coverage_patch_errors(dropped_record)
         )
+        dropped_device_counters = patch.replace(
+            "lowerDeviceProfileInstrumentation(*DeviceModule);",
+            "stripHostProfileInstrumentation(*DeviceModule);",
+        )
+        self.assertTrue(
+            coverage_tools.adaptivecpp_coverage_patch_errors(dropped_device_counters)
+        )
+        for original, replacement in (
+            (
+                '"acpp.metal.device.profile.batch"',
+                '"acpp.metal.device.profile.step"',
+            ),
+            ("EntryBuilder.CreateAlloca(", "EntryBuilder.CreateCall("),
+            ("Builder.CreateICmpULT(Sum, Old)", "Builder.CreateICmpEQ(Sum, Old)"),
+            (
+                "BatchInputs.push_back(llvm::ConstantInt::get(I32, Slot + 1))",
+                "BatchInputs.push_back(llvm::ConstantInt::get(I32, Slot))",
+            ),
+            ('os << " [[buffer(30)]]"', 'os << " [[buffer(29)]]"'),
+            ("metal_device_profile_buffer_index = 30", "metal_device_profile_buffer_index = 29"),
+            ('Name.consume_front("\\1")', 'Name.consume_front("_")'),
+        ):
+            with self.subTest(missing_invariant=original):
+                mutated = patch.replace(original, replacement)
+                self.assertNotEqual(mutated, patch)
+                self.assertTrue(
+                    coverage_tools.adaptivecpp_coverage_patch_errors(mutated)
+                )
 
     def test_gpu_evidence_requires_oom_test_to_report_passed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

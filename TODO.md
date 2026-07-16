@@ -51,6 +51,8 @@ from the current Metal/no-GPU environments.
 - Verify cross-backend ABI compatibility and run CUDA correctness, fp64,
   cold/warm, fork, cancellation, memory-pressure, crash-band, packaging, and
   `just cuda-stress` gates.
+- Add a CUDA device-counter lowering/runtime path equivalent to the sealed
+  Metal `.proftext` evidence before applying the C++ coverage gate on NVIDIA.
 - Tune CUDA admission only from correctness-clean measurements; keep losing or
   unstable cells PostgreSQL-native with an exact decline reason.
 - Install PG-Strom on the same PostgreSQL/CUDA host and capture like-for-like

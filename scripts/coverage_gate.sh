@@ -93,11 +93,17 @@ merge_profiles() {
     local profile_dir="$2"
     local output="$3"
     local profiles=()
+    if find "$profile_dir" -type f -name '*.overflow' -print -quit 2>/dev/null \
+        | grep -q .; then
+        echo "error: a device coverage counter overflow was recorded under $profile_dir" >&2
+        return 1
+    fi
     while IFS= read -r -d '' profile; do
         profiles+=("$profile")
-    done < <(find "$profile_dir" -type f -name '*.profraw' -print0 2>/dev/null)
+    done < <(find "$profile_dir" -type f \
+        \( -name '*.profraw' -o -name '*.proftext' \) -print0 2>/dev/null)
     if [ "${#profiles[@]}" -eq 0 ]; then
-        echo "error: no LLVM raw profiles were written under $profile_dir" >&2
+        echo "error: no LLVM coverage profiles were written under $profile_dir" >&2
         return 1
     fi
     "$llvm_profdata" merge -sparse "${profiles[@]}" -o "$output"
@@ -581,6 +587,7 @@ cpp_coverage() (
     # timeout and unchanged 2GB-per-family sweep (14.08GB measured peak RSS).
     if ! run_logged "$output_dir/ctest.log" env \
         LLVM_PROFILE_FILE="$profile_dir/pgaccel-cpp-%p-%m.profraw" \
+        ACPP_METAL_DEVICE_PROFILE_DIR="$profile_dir" \
         ctest --test-dir "$build_dir" --output-on-failure; then
         execution_status=1
         record_stage cpp ctest 1 "registered GPU CTest suite failed"
