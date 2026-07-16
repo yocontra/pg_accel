@@ -3874,10 +3874,15 @@ def _queue_call_is_covered_by_wait(
     regions: Sequence[_Region],
     lambda_ranges: Sequence[tuple[int, int]],
     forward: dict[int, int],
+    search_limit: int | None = None,
 ) -> bool:
     """Prove a queue command is covered by a later unconditional queue wait."""
 
-    if _call_is_awaited(tokens, rparen, function.body_close, forward):
+    wait_limit = min(
+        function.body_close,
+        search_limit if search_limit is not None else function.body_close,
+    )
+    if _call_is_awaited(tokens, rparen, wait_limit, forward):
         return True
     if (
         method_index < 2
@@ -3895,7 +3900,7 @@ def _queue_call_is_covered_by_wait(
     receiver = tokens[method_index - 2].value
     call_context = _context(method_index, regions)
     returns = _returns(tokens, function, lambda_ranges)
-    for index in range(rparen + 1, function.body_close - 3):
+    for index in range(rparen + 1, wait_limit - 3):
         if (
             tokens[index].value != receiver
             or tokens[index + 1].value not in {".", "->"}
@@ -6388,8 +6393,14 @@ def _proven_output_transfers(
             receiver = tokens[method_index - 2].value
             if _receiver_kind(
                 tokens, function, receiver, method_index, forward
-            ) != "queue" or not _call_is_awaited(
-                tokens, rparen, function.body_close, forward
+            ) != "queue" or not _queue_call_is_covered_by_wait(
+                tokens,
+                function,
+                method_index,
+                rparen,
+                regions,
+                lambda_ranges,
+                forward,
             ):
                 continue
         elif any(provenance[root][0] != "shared" for root in source_roots):
@@ -6490,6 +6501,35 @@ def _proven_output_transfers(
                     return True
             return False
 
+        def producer_completed_before_transfer(launch: _KernelWriteEvidence) -> bool:
+            if not launch.awaited:
+                return False
+            if launch.method == "helper":
+                # A proven helper returns only after its own device work is awaited.
+                return True
+            launch_method = launch.index + 2
+            if (
+                launch_method >= method_index
+                or tokens[launch_method].value != launch.method
+            ):
+                return False
+            launch_call = _method_lparen(
+                tokens, launch_method, method_index, forward
+            )
+            return bool(
+                launch_call is not None
+                and _queue_call_is_covered_by_wait(
+                    tokens,
+                    function,
+                    launch_method,
+                    launch_call[1],
+                    regions,
+                    lambda_ranges,
+                    forward,
+                    method_index,
+                )
+            )
+
         producers = [
             launch
             for launch in kernel_writes
@@ -6498,7 +6538,7 @@ def _proven_output_transfers(
                 start <= launch.index <= end
                 for start, end in potentially_empty_loop_bodies
             )
-            and launch.awaited
+            and producer_completed_before_transfer(launch)
             and source_roots.issubset(launch.roots)
             and all(provenance[root][1] < launch.index for root in source_roots)
             and not any(

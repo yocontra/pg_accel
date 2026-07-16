@@ -3989,6 +3989,142 @@ class ResidentV5RegressionTests(unittest.TestCase):
         self.assertFalse(result.findings)
         self.assertIn("device_copyback", result.entrypoint_audits[0].classifications)
 
+    def test_batched_queue_copybacks_share_one_dominating_wait(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_batched_copybacks(
+                int* out_first, int* out_second, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* first = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              int* second = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                first[i] = 1;
+                second[i] = 2;
+              }).wait_and_throw();
+              q.memcpy(out_first, first, count * sizeof(int));
+              q.memcpy(out_second, second, count * sizeof(int));
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        entry = result.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertIn("device_copyback", entry.classifications)
+
+    def test_batched_copyback_wait_and_producer_mutants_fail_closed(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_batched_missing_wait(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_other_queue_wait(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              other.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_conditional_wait(
+                int* out, size_t count, bool should_wait) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              if (should_wait) q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_early_return(
+                int* out, size_t count, bool skip_wait) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              if (skip_wait) return PGACCEL_OK;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_receiver_rebind(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue replacement;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              q = replacement;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_batched_alias_rebind(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue replacement;
+              sycl::queue& alias = q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              }).wait_and_throw();
+              q.memcpy(out, device, count);
+              alias = replacement;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_ooo_producer_before_copy(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* device = static_cast<int*>(sycl::malloc_device(count, q));
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device[i] = 1;
+              });
+              q.memcpy(out, device, count);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertEqual(result.entrypoints, 7)
+        for entry in result.entrypoint_audits:
+            with self.subTest(entrypoint=entry.entrypoint):
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("device_copyback", entry.classifications)
+
     def test_runtime_pointer_offset_does_not_prove_copyback(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE
