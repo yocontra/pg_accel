@@ -15,6 +15,13 @@ from typing import Any, TextIO
 
 
 SCHEMA_VERSION = 1
+LOG_EXCERPT_BYTES = 64 * 1024
+LOG_FAILURE_PATTERN = re.compile(
+    rb"PGACCEL PANIC|PANIC|segmentation fault|MTLCompilerService|resource leak|leaked resource|"
+    rb"kernel[^\r\n]{0,96}(?:failed|failure)|server process[^\r\n]{0,160}terminated by signal|"
+    rb"crash recovery|reinitializ(?:e|ing|ation)",
+    re.IGNORECASE,
+)
 CACHE_SCOPES = (
     "all_cache_files",
     "metal_binary_archive",
@@ -54,6 +61,8 @@ CORE_ARTIFACTS = (
     ("extension-smoke.log", "gate_log"),
     ("sql-tests.log", "gate_log"),
     ("clean-logs.log", "gate_log"),
+    ("log-start-offsets.log", "log_binding_log"),
+    ("metal-log-start-offsets.json", "log_start_offsets"),
     ("standalone-gpu-tests.log", "gate_log"),
     ("archive-cache-clear.log", "archive_cache_log"),
     ("archive-cache-before.log", "archive_cache_log"),
@@ -67,7 +76,6 @@ CORE_ARTIFACTS = (
     ("metal-stress-cache.tsv", "cache_metrics"),
     ("metal-stress-latency.tsv", "latency_metrics"),
     ("metal-stress-metrics-summary.txt", "metrics_summary"),
-    ("artifact-index.log", "artifact_validation_log"),
     ("bench-gpu_reduce_sum-100000.log", "benchmark_log"),
     ("bench-gpu_nlj_between-50000.log", "benchmark_log"),
     ("bench-gpu_sort_topk_wide-100000.log", "benchmark_log"),
@@ -75,7 +83,9 @@ CORE_ARTIFACTS = (
     ("bench-spatial_filter-100000.log", "benchmark_log"),
     ("bench-raster_reclass-100.log", "benchmark_log"),
     ("cancellation.log", "gate_log"),
-    ("postgres-log-tail.txt", "postgres_log_audit"),
+    ("postgres-log-audit.log", "artifact_validation_log"),
+    ("postgres-log-audit.json", "postgres_log_audit"),
+    ("postgres-log-tail.txt", "postgres_log_audit_excerpt"),
 )
 BENCHMARK_DIRS = (
     "bench-gpu_reduce_sum-100000",
@@ -89,6 +99,239 @@ BENCHMARK_DIRS = (
 
 class ArtifactContractError(ValueError):
     """The stress evidence is incomplete, malformed, or contradictory."""
+
+
+def load_crash_count(path: Path) -> int:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ArtifactContractError(
+            f"cannot read benchmark crash artifact {path}: {error}"
+        ) from error
+    if isinstance(payload, list):
+        return len(payload)
+    raise ArtifactContractError(
+        f"benchmark crash artifact has an unknown schema: {path}"
+    )
+
+
+def _log_source(role: str, path: Path) -> dict[str, Any]:
+    path = path.expanduser().resolve()
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ArtifactContractError(f"Metal stress {role} path is not a file: {path}")
+    try:
+        stat = path.stat() if path.exists() else None
+    except OSError as error:
+        raise ArtifactContractError(f"cannot stat Metal stress {role} {path}: {error}") from error
+    digest = hashlib.sha256()
+    if stat is not None:
+        try:
+            with path.open("rb") as handle:
+                while chunk := handle.read(64 * 1024):
+                    digest.update(chunk)
+        except OSError as error:
+            raise ArtifactContractError(f"cannot hash Metal stress {role} {path}: {error}") from error
+    return {
+        "device": stat.st_dev if stat is not None else None,
+        "existed": stat is not None,
+        "inode": stat.st_ino if stat is not None else None,
+        "length_bytes": stat.st_size if stat is not None else 0,
+        "path": str(path),
+        "prefix_sha256": digest.hexdigest(),
+        "role": role,
+    }
+
+
+def snapshot_log_offsets(postgres_log: Path, panic_log: Path) -> dict[str, Any]:
+    sources = [
+        _log_source("postgres_log", postgres_log),
+        _log_source("panic_log", panic_log),
+    ]
+    panic = sources[1]
+    if panic["length_bytes"] != 0:
+        raise ArtifactContractError(
+            f"panic log is non-empty at Metal stress audit start: {panic['path']}"
+        )
+    return {
+        "artifact_type": "metal_stress_log_start_offsets",
+        "schema_version": SCHEMA_VERSION,
+        "sources": sources,
+    }
+
+
+def load_log_offsets(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ArtifactContractError(f"cannot read log-offset artifact {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ArtifactContractError(f"log-offset artifact is not a JSON object: {path}")
+    if payload.get("schema_version") != SCHEMA_VERSION or payload.get(
+        "artifact_type"
+    ) != "metal_stress_log_start_offsets":
+        raise ArtifactContractError(f"log-offset artifact has the wrong schema: {path}")
+    sources = payload.get("sources")
+    if not isinstance(sources, list) or len(sources) != 2:
+        raise ArtifactContractError(f"log-offset artifact must contain two sources: {path}")
+    roles: list[str] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            raise ArtifactContractError(f"malformed log source in {path}")
+        role = source.get("role")
+        roles.append(role if isinstance(role, str) else "")
+        if not isinstance(source.get("path"), str) or not source["path"]:
+            raise ArtifactContractError(f"log source path is missing in {path}")
+        if not isinstance(source.get("existed"), bool):
+            raise ArtifactContractError(f"log source existed flag is invalid in {path}")
+        _require_nonnegative_integer(source.get("length_bytes"), "log length_bytes")
+        if source["existed"]:
+            _require_nonnegative_integer(source.get("device"), "log device")
+            _require_nonnegative_integer(source.get("inode"), "log inode")
+        elif source.get("device") is not None or source.get("inode") is not None:
+            raise ArtifactContractError(f"absent log source has file identity in {path}")
+        if not isinstance(source.get("prefix_sha256"), str) or re.fullmatch(
+            r"[0-9a-f]{64}", source["prefix_sha256"]
+        ) is None:
+            raise ArtifactContractError(f"log source prefix hash is invalid in {path}")
+    if roles != ["postgres_log", "panic_log"]:
+        raise ArtifactContractError(f"log-offset roles are missing or reordered: {path}")
+    return payload
+
+
+def audit_log_deltas(snapshot_path: Path, output_path: Path, excerpt_path: Path) -> None:
+    snapshot = load_log_offsets(snapshot_path)
+    failures: list[str] = []
+    audited_sources: list[dict[str, Any]] = []
+    excerpts: list[bytes] = []
+
+    for source in snapshot["sources"]:
+        role = source["role"]
+        path = Path(source["path"])
+        start = source["length_bytes"]
+        digest = hashlib.sha256()
+        delta_bytes = 0
+        line_count = 0
+        match_count = 0
+        match_samples: list[dict[str, Any]] = []
+        tail = b""
+
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            failures.append(f"{role} path is no longer a regular file: {path}")
+            current = 0
+        elif not path.exists():
+            current = 0
+            if source["existed"]:
+                failures.append(f"{role} disappeared after the audit started: {path}")
+        else:
+            try:
+                handle = path.open("rb")
+            except OSError as error:
+                raise ArtifactContractError(f"cannot open audited log {path}: {error}") from error
+            with handle:
+                opened = os.fstat(handle.fileno())
+                current = opened.st_size
+                if source["existed"] and (
+                    opened.st_dev != source["device"] or opened.st_ino != source["inode"]
+                ):
+                    failures.append(f"{role} file identity changed after audit start: {path}")
+                if current < start:
+                    failures.append(
+                        f"{role} shrank after the audit started ({current} < {start} bytes): {path}"
+                    )
+                prefix_bytes = min(start, current)
+                prefix_digest = hashlib.sha256()
+                remaining = prefix_bytes
+                while remaining:
+                    chunk = handle.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    prefix_digest.update(chunk)
+                    remaining -= len(chunk)
+                if remaining or prefix_bytes != start or prefix_digest.hexdigest() != source["prefix_sha256"]:
+                    failures.append(f"{role} prefix changed after audit start: {path}")
+
+                expected_delta = current - start if current >= start else current
+                handle.seek(start if current >= start else 0)
+                remaining = expected_delta
+                pending = b""
+                while remaining:
+                    chunk = handle.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        failures.append(f"{role} ended before its captured end offset: {path}")
+                        break
+                    remaining -= len(chunk)
+                    delta_bytes += len(chunk)
+                    digest.update(chunk)
+                    tail = (tail + chunk)[-LOG_EXCERPT_BYTES:]
+                    pending += chunk
+                    lines = pending.splitlines(keepends=True)
+                    if lines and not lines[-1].endswith((b"\n", b"\r")):
+                        pending = lines.pop()
+                    else:
+                        pending = b""
+                    for raw_line in lines:
+                        line_count += 1
+                        if LOG_FAILURE_PATTERN.search(raw_line):
+                            match_count += 1
+                            if len(match_samples) < 20:
+                                match_samples.append({
+                                    "line": line_count,
+                                    "text": raw_line.decode("utf-8", errors="replace").rstrip("\r\n")[:512],
+                                })
+                if pending:
+                    line_count += 1
+                    if LOG_FAILURE_PATTERN.search(pending):
+                        match_count += 1
+                        if len(match_samples) < 20:
+                            match_samples.append({
+                                "line": line_count,
+                                "text": pending.decode("utf-8", errors="replace")[:512],
+                            })
+                closed = os.fstat(handle.fileno())
+                if closed.st_size != current or closed.st_dev != opened.st_dev or closed.st_ino != opened.st_ino:
+                    failures.append(f"{role} changed while its bounded audit was running: {path}")
+                if delta_bytes != expected_delta:
+                    failures.append(
+                        f"{role} audit read {delta_bytes} bytes, expected exactly {expected_delta}: {path}"
+                    )
+
+        if match_count:
+            failures.append(f"{role} contains {match_count} crash/panic/resource pattern(s)")
+        if role == "panic_log" and delta_bytes:
+            failures.append(f"panic log received {delta_bytes} byte(s) during Metal stress")
+
+        audited_sources.append(
+            {
+                "capture_end_offset_bytes": current,
+                "delta_bytes_scanned": delta_bytes,
+                "delta_lines_scanned": line_count,
+                "delta_sha256": digest.hexdigest(),
+                "match_count": match_count,
+                "match_samples": match_samples,
+                "path": str(path),
+                "role": role,
+                "run_start_offset_bytes": start,
+            }
+        )
+        header = (
+            f"source={path}\nrole={role}\nrun_start_offset_bytes={start}\n"
+            f"capture_end_offset_bytes={current}\ndelta_bytes_scanned={delta_bytes}\n"
+            f"delta_lines_scanned={line_count}\n--- bounded final delta excerpt ---\n"
+        ).encode("utf-8")
+        excerpts.extend([header, tail, b"\n"])
+
+    payload = {
+        "artifact_type": "metal_stress_log_audit",
+        "failures": failures,
+        "schema_version": SCHEMA_VERSION,
+        "sources": audited_sources,
+        "status": "PASS" if not failures else "FAIL",
+    }
+    _write_json(output_path, payload)
+    excerpt_path.parent.mkdir(parents=True, exist_ok=True)
+    excerpt_path.write_bytes(b"".join(excerpts))
+    if failures:
+        raise ArtifactContractError("Metal stress log audit failed: " + "; ".join(failures))
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -709,31 +952,309 @@ def finalize_artifacts(
     write_summary(output_dir / "metal-stress-metrics-summary.txt", metrics)
 
 
-def write_artifact_index(artifact_dir: Path) -> None:
+def _artifact_evidence(
+    artifact_dir: Path,
+    relative: str,
+    role: str,
+    *,
+    require_nonempty: bool,
+) -> dict[str, Any]:
+    path = artifact_dir / relative
+    if path.is_symlink() or not path.is_file():
+        raise ArtifactContractError(
+            f"required Metal stress artifact is missing or empty/non-regular: {path}"
+        )
+    before = path.stat()
+    if require_nonempty and before.st_size == 0:
+        raise ArtifactContractError(f"required Metal stress artifact is empty: {path}")
+    raw = path.read_bytes()
+    after = path.stat()
+    if (
+        before.st_dev != after.st_dev
+        or before.st_ino != after.st_ino
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or len(raw) != after.st_size
+    ):
+        raise ArtifactContractError(f"Metal stress artifact changed while hashing: {path}")
+    return {
+        "path": relative,
+        "required": True,
+        "role": role,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+
+
+def _safe_nested_path(index_path: Path, child: Any, seen: set[str]) -> str:
+    if not isinstance(child, str) or not child or "\\" in child:
+        raise ArtifactContractError(f"unsafe benchmark artifact path in {index_path}")
+    candidate = Path(child)
+    if (
+        candidate.is_absolute()
+        or any(part in ("", ".", "..") for part in candidate.parts)
+        or child in seen
+        or child in ("artifact_index.json", "artifact_checklist.md")
+    ):
+        raise ArtifactContractError(
+            f"unsafe/duplicate benchmark artifact path in {index_path}: {child}"
+        )
+    seen.add(child)
+    return child
+
+
+def _benchmark_artifact_evidence(
+    artifact_dir: Path, benchmark_dir: str
+) -> list[dict[str, Any]]:
+    benchmark_root = artifact_dir / benchmark_dir
+    relative_index = f"{benchmark_dir}/artifact_index.json"
+    index_path = artifact_dir / relative_index
+    if index_path.is_symlink() or not index_path.is_file():
+        raise ArtifactContractError(
+            f"benchmark artifact index is missing or not a regular file: {index_path}"
+        )
+    try:
+        nested = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ArtifactContractError(
+            f"invalid benchmark artifact index {index_path}: {error}"
+        ) from error
+    if not isinstance(nested, dict) or nested.get("schema_version") != 1:
+        raise ArtifactContractError(f"benchmark artifact index has wrong schema: {index_path}")
+    entries = nested.get("entries")
+    if not isinstance(entries, list) or not entries:
+        raise ArtifactContractError(f"benchmark artifact index has no entries: {index_path}")
+    if nested.get("entry_count") != len(entries):
+        raise ArtifactContractError(
+            f"benchmark artifact index entry_count mismatch: {index_path}"
+        )
+
+    seen: set[str] = set()
+    indexed_sizes: dict[str, int] = {}
+    total = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ArtifactContractError(f"malformed benchmark artifact entry: {index_path}")
+        child = _safe_nested_path(index_path, entry.get("path"), seen)
+        size = _require_nonnegative_integer(
+            entry.get("size_bytes"), f"{relative_index}:{child}.size_bytes"
+        )
+        child_path = benchmark_root / child
+        if child_path.is_symlink() or not child_path.is_file() or child_path.stat().st_size != size:
+            raise ArtifactContractError(
+                f"benchmark artifact size/path contradicts nested index: {child_path}"
+            )
+        indexed_sizes[child] = size
+        total += size
+    if nested.get("total_size_bytes") != total:
+        raise ArtifactContractError(
+            f"benchmark artifact index total size mismatch: {index_path}"
+        )
+    required_nested = {
+        "manifest.json",
+        "crashes.json",
+        "report.json",
+        "report.md",
+        "report.csv",
+    }
+    if not required_nested.issubset(seen) or not any(
+        child.startswith("correctness_diffs/") for child in seen
+    ):
+        raise ArtifactContractError(f"benchmark artifact index is incomplete: {index_path}")
+    if load_crash_count(benchmark_root / "crashes.json") != 0:
+        raise ArtifactContractError(f"benchmark artifact records crashes: {index_path}")
+
+    actual: set[str] = set()
+    for path in benchmark_root.rglob("*"):
+        if path.is_symlink():
+            raise ArtifactContractError(f"benchmark artifact tree contains a symlink: {path}")
+        if path.is_file():
+            actual.add(path.relative_to(benchmark_root).as_posix())
+    self_generated = {"artifact_index.json"}
+    if (benchmark_root / "artifact_checklist.md").is_file():
+        self_generated.add("artifact_checklist.md")
+    if actual != seen | self_generated:
+        missing = sorted((seen | self_generated) - actual)
+        unindexed = sorted(actual - (seen | self_generated))
+        raise ArtifactContractError(
+            f"benchmark artifact inventory mismatch in {index_path}: "
+            f"missing={missing} unindexed={unindexed}"
+        )
+
+    artifacts = [
+        _artifact_evidence(
+            artifact_dir,
+            relative_index,
+            "benchmark_artifact_index",
+            require_nonempty=True,
+        )
+    ]
+    for child in sorted(seen):
+        evidence = _artifact_evidence(
+            artifact_dir,
+            f"{benchmark_dir}/{child}",
+            "benchmark_artifact",
+            require_nonempty=False,
+        )
+        if evidence["size_bytes"] != indexed_sizes[child]:
+            raise ArtifactContractError(
+                f"benchmark artifact changed after nested index validation: "
+                f"{benchmark_root / child}"
+            )
+        artifacts.append(evidence)
+    if "artifact_checklist.md" in self_generated:
+        artifacts.append(
+            _artifact_evidence(
+                artifact_dir,
+                f"{benchmark_dir}/artifact_checklist.md",
+                "benchmark_artifact_checklist",
+                require_nonempty=True,
+            )
+        )
+    return artifacts
+
+
+def _collect_root_artifacts(artifact_dir: Path) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for relative, role in CORE_ARTIFACTS:
-        path = artifact_dir / relative
-        if not path.is_file() or path.stat().st_size == 0:
-            raise ArtifactContractError(
-                f"required Metal stress artifact is missing or empty: {path}"
-            )
-        artifacts.append({"path": relative, "required": True, "role": role})
-    for benchmark_dir in BENCHMARK_DIRS:
-        relative = f"{benchmark_dir}/artifact_index.json"
-        path = artifact_dir / relative
-        if not path.is_file() or path.stat().st_size == 0:
-            raise ArtifactContractError(
-                f"benchmark artifact index is missing or empty: {path}"
-            )
         artifacts.append(
-            {"path": relative, "required": True, "role": "benchmark_artifact_index"}
+            _artifact_evidence(
+                artifact_dir, relative, role, require_nonempty=True
+            )
         )
+    for benchmark_dir in BENCHMARK_DIRS:
+        artifacts.extend(_benchmark_artifact_evidence(artifact_dir, benchmark_dir))
+    return artifacts
+
+
+def verify_artifact_index(artifact_dir: Path) -> None:
+    index_path = artifact_dir / "artifact_index.json"
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ArtifactContractError(f"cannot read Metal stress artifact index: {error}") from error
+    if (
+        not isinstance(payload, dict)
+        or payload.get("artifact_type") != "metal_stress_artifact_index"
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(payload.get("artifacts"), list)
+    ):
+        raise ArtifactContractError(f"Metal stress artifact index has the wrong schema: {index_path}")
+    expected = _collect_root_artifacts(artifact_dir)
+    if payload["artifacts"] != expected:
+        raise ArtifactContractError(
+            "Metal stress artifact index contradicts current path, size, or sha256 evidence"
+        )
+
+
+def write_artifact_index(artifact_dir: Path) -> None:
+    artifacts = _collect_root_artifacts(artifact_dir)
     payload = {
         "artifact_type": "metal_stress_artifact_index",
         "artifacts": artifacts,
         "schema_version": SCHEMA_VERSION,
     }
     _write_json(artifact_dir / "artifact_index.json", payload)
+    verify_artifact_index(artifact_dir)
+
+
+def _workflow_job_block(workflow: str, job: str) -> str:
+    match = re.search(
+        rf"^  {re.escape(job)}:\s*$\n(?P<body>(?:^(?:    .*|\s*)$\n?)*)",
+        workflow,
+        re.MULTILINE,
+    )
+    if match is None:
+        raise ArtifactContractError(f"release workflow is missing the `{job}` job")
+    return match.group(0)
+
+
+def _workflow_step(job_block: str, name: str) -> str:
+    lines = job_block.splitlines()
+    marker = f"      - name: {name}"
+    indexes = [index for index, line in enumerate(lines) if line == marker]
+    if len(indexes) != 1:
+        raise ArtifactContractError(f"release workflow requires exactly one `{name}` step")
+    start = indexes[0]
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("      - ")),
+        len(lines),
+    )
+    return "\n".join(lines[start:end])
+
+
+def validate_release_workflow_contract(workflow: str) -> None:
+    metal = _workflow_job_block(workflow, "metal-coverage")
+    release = _workflow_job_block(workflow, "release")
+    artifact_dir = "artifacts/metal-stress-pg18-qualified-metal"
+    gate = _workflow_step(metal, "Run live Metal stress gate")
+    upload = _workflow_step(metal, "Upload release Metal stress artifacts")
+    gate_lines = {line.strip() for line in gate.splitlines() if not line.lstrip().startswith("#")}
+    upload_lines = {line.strip() for line in upload.splitlines() if not line.lstrip().startswith("#")}
+    for required in (
+        "env:",
+        f"METAL_STRESS_ARTIFACT_DIR: {artifact_dir}",
+        "run: |",
+        "set -euo pipefail",
+        "just metal-stress 18",
+    ):
+        if required not in gate_lines:
+            raise ArtifactContractError(f"Metal stress workflow step is missing `{required}`")
+    if any(
+        line.startswith(("if:", "continue-on-error:")) for line in gate_lines
+    ):
+        raise ArtifactContractError(
+            "Metal stress workflow step cannot be conditional or continue on error"
+        )
+    if re.search(r"^    continue-on-error\s*:", metal, re.MULTILINE):
+        raise ArtifactContractError(
+            "qualified Metal workflow job cannot continue on error"
+        )
+    raw_gate_lines = gate.splitlines()
+    run_index = next(
+        index for index, line in enumerate(raw_gate_lines) if line.strip() == "run: |"
+    )
+    commands = [
+        line.strip()
+        for line in raw_gate_lines[run_index + 1 :]
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if commands != ["set -euo pipefail", "just metal-stress 18"]:
+        raise ArtifactContractError(
+            "Metal stress workflow run block must contain only the strict shell prelude and terminal gate command"
+        )
+    for required in (
+        "if: always()",
+        "uses: actions/upload-artifact@v4",
+        "with:",
+        f"path: {artifact_dir}",
+        "if-no-files-found: error",
+    ):
+        if required not in upload_lines:
+            raise ArtifactContractError(f"Metal stress upload step is missing `{required}`")
+    if any(line.startswith("continue-on-error:") for line in upload_lines):
+        raise ArtifactContractError(
+            "Metal stress artifact upload cannot continue on error"
+        )
+    if metal.index("      - name: Run live Metal stress gate") > metal.index(
+        "      - name: Upload release Metal stress artifacts"
+    ):
+        raise ArtifactContractError(
+            "release workflow uploads Metal stress evidence before running the gate"
+        )
+    needs = re.search(r"^    needs:\s*\[([^]]+)\]\s*$", release, re.MULTILINE)
+    if needs is None or "metal-coverage" not in {
+        dependency.strip() for dependency in needs.group(1).split(",")
+    }:
+        raise ArtifactContractError(
+            "release publication does not depend on the qualified Metal gate job"
+        )
+    if re.search(r"^    if\s*:", release, re.MULTILINE):
+        raise ArtifactContractError(
+            "release publication cannot override dependency success with a job condition"
+        )
+    if re.search(r"^    continue-on-error\s*:", release, re.MULTILINE):
+        raise ArtifactContractError("release publication cannot continue on error")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -747,6 +1268,25 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--output", required=True, type=Path)
     snapshot.add_argument("--cache-dir")
 
+    crash_count = subparsers.add_parser(
+        "crash-count", help="validate and count a benchmark crash artifact"
+    )
+    crash_count.add_argument("--path", required=True, type=Path)
+
+    log_snapshot = subparsers.add_parser(
+        "log-snapshot", help="capture run-start offsets for the Metal stress logs"
+    )
+    log_snapshot.add_argument("--postgres-log", required=True, type=Path)
+    log_snapshot.add_argument("--panic-log", required=True, type=Path)
+    log_snapshot.add_argument("--output", required=True, type=Path)
+
+    log_audit = subparsers.add_parser(
+        "log-audit", help="scan the complete run-bound Metal stress log deltas"
+    )
+    log_audit.add_argument("--snapshot", required=True, type=Path)
+    log_audit.add_argument("--output", required=True, type=Path)
+    log_audit.add_argument("--excerpt", required=True, type=Path)
+
     finalize = subparsers.add_parser(
         "finalize", help="validate and render archive metrics"
     )
@@ -759,6 +1299,16 @@ def build_parser() -> argparse.ArgumentParser:
         "index", help="validate and index the complete stress gate"
     )
     index.add_argument("--artifact-dir", required=True, type=Path)
+
+    verify_index = subparsers.add_parser(
+        "verify-index", help="verify a sealed Metal stress artifact index"
+    )
+    verify_index.add_argument("--artifact-dir", required=True, type=Path)
+
+    workflow = subparsers.add_parser(
+        "workflow-audit", help="validate release workflow Metal stress wiring"
+    )
+    workflow.add_argument("--path", required=True, type=Path)
     return parser
 
 
@@ -768,12 +1318,25 @@ def main(argv: list[str] | None = None, stderr: TextIO = sys.stderr) -> int:
         if args.command == "snapshot":
             cache_dir = resolve_cache_dir(args.cache_dir)
             _write_json(args.output, measure_cache(cache_dir, args.point))
+        elif args.command == "crash-count":
+            print(load_crash_count(args.path))
+        elif args.command == "log-snapshot":
+            _write_json(
+                args.output,
+                snapshot_log_offsets(args.postgres_log, args.panic_log),
+            )
+        elif args.command == "log-audit":
+            audit_log_deltas(args.snapshot, args.output, args.excerpt)
         elif args.command == "finalize":
             finalize_artifacts(
                 args.before, args.after, args.archive_log, args.output_dir
             )
-        else:
+        elif args.command == "index":
             write_artifact_index(args.artifact_dir)
+        elif args.command == "verify-index":
+            verify_artifact_index(args.artifact_dir)
+        else:
+            validate_release_workflow_contract(args.path.read_text(encoding="utf-8"))
     except ArtifactContractError as error:
         print(f"error: {error}", file=stderr)
         return 1

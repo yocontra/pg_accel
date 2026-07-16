@@ -52,22 +52,6 @@ run_logged() {
     echo "${name}: PASS log=${log}" | tee -a "${artifact_dir}/summary.txt"
 }
 
-json_crash_count() {
-    python3 - "$1" <<'PY'
-import json
-import sys
-path = sys.argv[1]
-with open(path, encoding="utf-8") as fh:
-    data = json.load(fh)
-if isinstance(data, list):
-    print(len(data))
-elif isinstance(data, dict) and isinstance(data.get("crashes"), list):
-    print(len(data["crashes"]))
-else:
-    print(0)
-PY
-}
-
 assert_no_benchmark_crashes() {
     local cell_dir="$1"
     local crashes="${cell_dir}/crashes.json"
@@ -76,7 +60,10 @@ assert_no_benchmark_crashes() {
         return 1
     fi
     local count
-    count="$(json_crash_count "$crashes")"
+    if ! count="$(python3 scripts/metal_stress_artifacts.py crash-count --path "$crashes")"; then
+        echo "error: invalid benchmark crash artifact: $crashes" >&2
+        return 1
+    fi
     if [ "$count" != "0" ]; then
         echo "error: benchmark crash artifact contains ${count} crash(es): $crashes" >&2
         return 1
@@ -146,23 +133,6 @@ SQL
     psql "$connection" -v ON_ERROR_STOP=1 -c "RESET statement_timeout; SELECT 1;" >> "$log" 2>&1
 }
 
-assert_clean_logs() {
-    local combined="${artifact_dir}/postgres-log-tail.txt"
-    {
-        [ -f "$pg_log" ] && tail -400 "$pg_log" || true
-        [ -f "$panic_log" ] && tail -400 "$panic_log" || true
-    } > "$combined"
-
-    if [ -s "$panic_log" ]; then
-        echo "error: pg_accel panic log is non-empty: $panic_log" >&2
-        return 1
-    fi
-    if grep -Eiq "PGACCEL PANIC|PANIC|segmentation fault|MTLCompilerService|resource leak|leaked resource|kernel failure" "$combined"; then
-        echo "error: crash/panic/resource-leak pattern found in $combined" >&2
-        return 1
-    fi
-}
-
 just gpu-build > "${artifact_dir}/gpu-build.log" 2>&1
 
 {
@@ -192,6 +162,11 @@ run_logged "sql-tests" \
         PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 PG_ACCEL_RELEASE_MODE=1 \
         sql/tests/run_all.sh "$connection"
 run_logged "clean-logs" just clean-logs "$pg"
+run_logged "log-start-offsets" \
+    python3 scripts/metal_stress_artifacts.py log-snapshot \
+        --postgres-log "$pg_log" \
+        --panic-log "$panic_log" \
+        --output "${artifact_dir}/metal-log-start-offsets.json"
 
 run_logged "standalone-gpu-tests" just gpu-test
 run_logged "archive-cache-clear" just clear-jit
@@ -221,7 +196,11 @@ run_benchmark_cell "h3_bulk" "100000" "both"
 run_benchmark_cell "spatial_filter" "100000" "warm"
 run_benchmark_cell "raster_reclass" "100" "warm"
 run_cancellation_probe
-assert_clean_logs
+run_logged "postgres-log-audit" \
+    python3 scripts/metal_stress_artifacts.py log-audit \
+        --snapshot "${artifact_dir}/metal-log-start-offsets.json" \
+        --output "${artifact_dir}/postgres-log-audit.json" \
+        --excerpt "${artifact_dir}/postgres-log-tail.txt"
 
 {
     echo "artifact_dir=${artifact_dir}"
@@ -232,6 +211,6 @@ assert_clean_logs
     echo "gpu_test_timeout_s=${GPU_TEST_TIMEOUT_S}"
 } | tee -a "${artifact_dir}/summary.txt"
 
-run_logged "artifact-index" \
-    python3 scripts/metal_stress_artifacts.py index --artifact-dir "$artifact_dir"
 echo "metal-stress: PASS" | tee -a "${artifact_dir}/summary.txt"
+python3 scripts/metal_stress_artifacts.py index --artifact-dir "$artifact_dir"
+echo "metal-stress: artifact index sealed at ${artifact_dir}/artifact_index.json"

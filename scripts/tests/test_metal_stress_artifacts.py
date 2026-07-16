@@ -25,6 +25,35 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def write_nested_benchmark_index(root: Path) -> None:
+    children = {
+        "manifest.json": b"{}\n",
+        "crashes.json": b"[]\n",
+        "report.json": b"{}\n",
+        "report.md": b"report\n",
+        "report.csv": b"report\n",
+        "correctness_diffs/result.json": b"{}\n",
+    }
+    entries = []
+    for relative, content in children.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+        entries.append(
+            {"path": relative, "size_bytes": len(content), "modified_unix_seconds": 1}
+        )
+    write_json(
+        root / "artifact_index.json",
+        {
+            "schema_version": 1,
+            "entry_count": len(entries),
+            "total_size_bytes": sum(entry["size_bytes"] for entry in entries),
+            "entries": entries,
+        },
+    )
+    (root / "artifact_checklist.md").write_text("# Checklist\n", encoding="utf-8")
+
+
 def latency_record(worker: int, warm_iterations: int = 2) -> str:
     offset = worker * 10
     values = {
@@ -297,9 +326,7 @@ class ArtifactIndexTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("fixture\n", encoding="utf-8")
             for benchmark_dir in artifacts.BENCHMARK_DIRS:
-                path = root / benchmark_dir / "artifact_index.json"
-                path.parent.mkdir(parents=True)
-                path.write_text("{}\n", encoding="utf-8")
+                write_nested_benchmark_index(root / benchmark_dir)
 
             artifacts.write_artifact_index(root)
             first = (root / "artifact_index.json").read_text()
@@ -311,6 +338,34 @@ class ArtifactIndexTests(unittest.TestCase):
             paths = [entry["path"] for entry in payload["artifacts"]]
             self.assertIn("metal-stress-metrics.json", paths)
             self.assertIn("bench-h3_bulk-100000/artifact_index.json", paths)
+            self.assertIn("bench-h3_bulk-100000/artifact_checklist.md", paths)
+            self.assertIn("bench-h3_bulk-100000/report.json", paths)
+            self.assertTrue(
+                all(entry["size_bytes"] >= 0 for entry in payload["artifacts"])
+            )
+            self.assertTrue(
+                all(len(entry["sha256"]) == 64 for entry in payload["artifacts"])
+            )
+            artifacts.verify_artifact_index(root)
+
+    def test_root_index_rejects_same_size_nested_child_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative, _role in artifacts.CORE_ARTIFACTS:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n", encoding="utf-8")
+            for benchmark_dir in artifacts.BENCHMARK_DIRS:
+                write_nested_benchmark_index(root / benchmark_dir)
+
+            artifacts.write_artifact_index(root)
+            report = root / artifacts.BENCHMARK_DIRS[0] / "report.json"
+            original = report.read_bytes()
+            report.write_bytes(b"X" * len(original))
+            with self.assertRaisesRegex(
+                artifacts.ArtifactContractError, "path, size, or sha256"
+            ):
+                artifacts.verify_artifact_index(root)
 
     def test_index_rejects_missing_required_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -318,6 +373,164 @@ class ArtifactIndexTests(unittest.TestCase):
                 artifacts.ArtifactContractError, "missing or empty"
             ):
                 artifacts.write_artifact_index(Path(temporary))
+
+    def test_index_rejects_schema_free_nested_benchmark_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for relative, _role in artifacts.CORE_ARTIFACTS:
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n", encoding="utf-8")
+            for benchmark_dir in artifacts.BENCHMARK_DIRS:
+                path = root / benchmark_dir / "artifact_index.json"
+                path.parent.mkdir(parents=True)
+                path.write_text("{}\n", encoding="utf-8")
+            with self.assertRaisesRegex(artifacts.ArtifactContractError, "wrong schema"):
+                artifacts.write_artifact_index(root)
+
+
+class CrashArtifactTests(unittest.TestCase):
+    def test_crash_artifact_accepts_only_the_producer_list_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "crashes.json"
+            path.write_text("[]\n", encoding="utf-8")
+            self.assertEqual(artifacts.load_crash_count(path), 0)
+            for malformed in ({"crashes": []}, {"error": "writer failed"}, None, 0):
+                path.write_text(json.dumps(malformed), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactContractError, "unknown schema"
+                ):
+                    artifacts.load_crash_count(path)
+
+
+class LogAuditTests(unittest.TestCase):
+    def _snapshot(self, root: Path, postgres: Path, panic: Path) -> Path:
+        path = root / "offsets.json"
+        write_json(path, artifacts.snapshot_log_offsets(postgres, panic))
+        return path
+
+    def test_full_delta_detects_failure_before_more_than_400_benign_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            postgres = root / "postgres.log"
+            panic = root / "panic.log"
+            postgres.write_text("before run\n", encoding="utf-8")
+            panic.write_bytes(b"")
+            snapshot = self._snapshot(root, postgres, panic)
+            with postgres.open("a", encoding="utf-8") as handle:
+                handle.write("PANIC: backend crashed\n")
+                handle.writelines(f"benign {index}\n" for index in range(500))
+            with self.assertRaisesRegex(artifacts.ArtifactContractError, "log audit failed"):
+                artifacts.audit_log_deltas(
+                    snapshot, root / "audit.json", root / "excerpt.txt"
+                )
+            payload = json.loads((root / "audit.json").read_text())
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["sources"][0]["match_count"], 1)
+            self.assertGreater(payload["sources"][0]["delta_lines_scanned"], 400)
+
+    def test_truncate_and_regrow_cannot_hide_changed_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            postgres = root / "postgres.log"
+            panic = root / "panic.log"
+            postgres.write_bytes(b"A" * 100)
+            panic.write_bytes(b"")
+            snapshot = self._snapshot(root, postgres, panic)
+            postgres.write_bytes(b"PANIC hidden in replaced prefix\n" + b"B" * 100)
+            with self.assertRaisesRegex(artifacts.ArtifactContractError, "prefix changed"):
+                artifacts.audit_log_deltas(
+                    snapshot, root / "audit.json", root / "excerpt.txt"
+                )
+
+    def test_replacement_identity_and_runtime_crash_signatures_fail(self) -> None:
+        signatures = (
+            b"kernel dispatch failed\n",
+            b"server process was terminated by signal 6: Abort trap\n",
+            b"all server processes terminated; reinitializing\n",
+        )
+        for signature in signatures:
+            with self.subTest(signature=signature), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                postgres = root / "postgres.log"
+                panic = root / "panic.log"
+                postgres.write_bytes(b"")
+                panic.write_bytes(b"")
+                snapshot = self._snapshot(root, postgres, panic)
+                postgres.write_bytes(signature)
+                with self.assertRaisesRegex(artifacts.ArtifactContractError, "log audit failed"):
+                    artifacts.audit_log_deltas(
+                        snapshot, root / "audit.json", root / "excerpt.txt"
+                    )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            postgres = root / "postgres.log"
+            panic = root / "panic.log"
+            postgres.write_bytes(b"stable prefix\n")
+            panic.write_bytes(b"")
+            snapshot = self._snapshot(root, postgres, panic)
+            postgres.unlink()
+            postgres.write_bytes(b"stable prefix\nbenign\n")
+            with self.assertRaisesRegex(artifacts.ArtifactContractError, "identity changed"):
+                artifacts.audit_log_deltas(
+                    snapshot, root / "audit.json", root / "excerpt.txt"
+                )
+
+
+class ReleaseWorkflowTests(unittest.TestCase):
+    def test_release_workflow_requires_live_gate_upload_and_dependency(self) -> None:
+        workflow_path = SCRIPT.parents[1] / ".github/workflows/release.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        artifacts.validate_release_workflow_contract(workflow)
+
+        mutants = (
+            workflow.replace("          just metal-stress 18", "          # just metal-stress 18"),
+            workflow.replace(
+                "          path: artifacts/metal-stress-pg18-qualified-metal",
+                "          # path: artifacts/metal-stress-pg18-qualified-metal",
+            ),
+            workflow.replace("needs: [build, metal-coverage]", "needs: [build]"),
+            workflow.replace(
+                "        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
+                "        continue-on-error: true\n        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
+                1,
+            ),
+            workflow.replace(
+                "        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
+                "        if: false\n        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
+                1,
+            ),
+            workflow.replace(
+                "          just metal-stress 18",
+                "          exit 0\n          just metal-stress 18",
+                1,
+            ),
+            workflow.replace(
+                "      - name: Upload release Metal stress artifacts\n        if: always()",
+                "      - name: Upload release Metal stress artifacts\n"
+                "        continue-on-error: true\n        if: always()",
+                1,
+            ),
+            workflow.replace(
+                "  metal-coverage:\n    name:",
+                "  metal-coverage:\n    continue-on-error: true\n    name:",
+                1,
+            ),
+            workflow.replace(
+                "  release:\n    name:",
+                "  release:\n    if: always()\n    name:",
+                1,
+            ),
+            workflow.replace(
+                "  release:\n    name:",
+                "  release:\n    continue-on-error: true\n    name:",
+                1,
+            ),
+        )
+        for mutant in mutants:
+            with self.assertRaises(artifacts.ArtifactContractError):
+                artifacts.validate_release_workflow_contract(mutant)
 
 
 if __name__ == "__main__":
