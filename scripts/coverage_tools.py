@@ -25,7 +25,8 @@ SCHEMA_VERSION = 2
 FIXED_THRESHOLD = 90.0
 BASELINE_SQL_FILES = 52
 BASELINE_SQL_ASSERTIONS = 287
-BASELINE_CPP_SOURCES = 20
+BASELINE_CPP_SOURCES = 21
+BASELINE_CPP_DEVICE_OBJECTS = 20
 BASELINE_CPP_TESTS = 29
 DEVICE_PROFILE_INTRINSIC_MARKER = b"llvm.instrprof."
 UINT32_MAX = (1 << 32) - 1
@@ -61,6 +62,7 @@ REQUIRED_STAGES = {
         "build",
         "device_ir_audit",
         "device_profile_overflow_only",
+        "ooo_overlap_diagnostic",
         "ctest",
         "gpu_evidence",
         "coverage_report",
@@ -762,6 +764,7 @@ def seal_layer_evidence(args: argparse.Namespace) -> int:
             "cpp/object-manifest.json",
             "cpp/toolchain.json",
             "cpp/ctest.log",
+            "cpp/ooo-overlap-diagnostic.log",
             "cpp/gpu-correctness-evidence.json",
             "cpp/device-profile-audit.json",
         },
@@ -1968,8 +1971,9 @@ def release_baseline_document(
     rust_files, _ = source_inventory(repo_root, rust_scope)
     cpp_files, cpp_required = source_inventory(repo_root, cpp_scope)
     cpp_sources = sorted(
-        path.relative_to(repo_root).as_posix()
-        for path in (repo_root / "pgaccel-kernels/src").glob("*.cpp")
+        path
+        for path in cpp_files
+        if pathlib.PurePosixPath(path).suffix == ".cpp"
     )
     cmake = (repo_root / "pgaccel-kernels/CMakeLists.txt").read_text(encoding="utf-8")
     ctest_names = cmake_registered_tests(cmake)
@@ -3560,6 +3564,7 @@ def validate_raw_evidence_manifest(
             "cpp/object-manifest.json",
             "cpp/toolchain.json",
             "cpp/ctest.log",
+            "cpp/ooo-overlap-diagnostic.log",
             "cpp/gpu-correctness-evidence.json",
             "cpp/device-profile-audit.json",
         },
@@ -3609,14 +3614,15 @@ def validate_device_profile_audit(
         document = read_json(artifact_dir / "cpp/device-profile-audit.json")
     except CoverageError as exc:
         return [str(exc)]
-    expected_count = len(baseline.get("cpp", {}).get("sources", []))
+    expected_count = BASELINE_CPP_DEVICE_OBJECTS
     entries = document.get("objects") if isinstance(document, dict) else None
     if (
         not isinstance(document, dict)
         or document.get("schema_version") != SCHEMA_VERSION
         or document.get("kind") != "device-profile-intrinsic-audit"
         or document.get("marker") != DEVICE_PROFILE_INTRINSIC_MARKER.decode("ascii")
-        or expected_count != BASELINE_CPP_SOURCES
+        or len(baseline.get("cpp", {}).get("sources", []))
+        != BASELINE_CPP_SOURCES
         or document.get("expected_object_count") != expected_count
         or document.get("errors") != []
         or document.get("passed") is not True
@@ -3768,7 +3774,7 @@ def recompute_raw_line_layer(
             or scope_required != required
         ):
             errors.append(
-                "cpp: owned sources differ from the 20-source release baseline"
+                "cpp: owned sources differ from the 21-source release baseline"
             )
         final_json = (
             regenerated["json"]
@@ -4447,10 +4453,10 @@ def audit_device_profile_intrinsics(args: argparse.Namespace) -> int:
     entries: list[dict[str, Any]] = []
     objects = sorted({pathlib.Path(value).resolve() for value in args.object})
 
-    if len(objects) != BASELINE_CPP_SOURCES:
+    if len(objects) != BASELINE_CPP_DEVICE_OBJECTS:
         errors.append(
             "device profile audit requires exactly "
-            f"{BASELINE_CPP_SOURCES} shared-target objects; found {len(objects)}"
+            f"{BASELINE_CPP_DEVICE_OBJECTS} shared-target objects; found {len(objects)}"
         )
     try:
         retained_root.relative_to(output.parent)
@@ -4496,7 +4502,7 @@ def audit_device_profile_intrinsics(args: argparse.Namespace) -> int:
             }
         )
 
-    if len(entries) != BASELINE_CPP_SOURCES:
+    if len(entries) != BASELINE_CPP_DEVICE_OBJECTS:
         errors.append(
             "device profile audit did not retain the complete shared-target object set"
         )
@@ -4505,7 +4511,7 @@ def audit_device_profile_intrinsics(args: argparse.Namespace) -> int:
         "kind": "device-profile-intrinsic-audit",
         "generated_at_utc": utc_now(),
         "marker": DEVICE_PROFILE_INTRINSIC_MARKER.decode("ascii"),
-        "expected_object_count": BASELINE_CPP_SOURCES,
+        "expected_object_count": BASELINE_CPP_DEVICE_OBJECTS,
         "objects": entries,
         "errors": errors,
         "passed": not errors,
@@ -4919,8 +4925,11 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         "while (::fsync(fd) < 0)",
         "if (::close(fd) != 0)",
         "if (::rename(temp_path.c_str(), path.c_str()) != 0)",
-        "std::filesystem::file_size(path, ec)",
+        "std::filesystem::file_size(temp_path, ec)",
+        "std::ifstream input{temp_path, std::ios::binary}",
         "actual != data",
+        "input.close()",
+        "if (input.fail())",
         'fail_device_profile_flush("invalid device profile counter buffer")',
         "if (!std::filesystem::is_directory(output_dir, ec) || ec)",
         '"device profile overflow marker"',
@@ -4954,6 +4963,40 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         errors.append(
             "AdaptiveCpp device profiles must not use unchecked common atomic_write"
         )
+    if "remove_device_profile_file(path)" in text:
+        errors.append(
+            "AdaptiveCpp device profile failure cleanup must not target an accepted profile"
+        )
+    writer_start = text.find("+void write_device_profile_or_exit(")
+    writer_end = text.find("\n@@", writer_start)
+    if writer_start < 0 or writer_end < 0:
+        errors.append("AdaptiveCpp device profile writer patch body is absent")
+    else:
+        writer = "\n".join(
+            line[1:] if line.startswith("+") else line
+            for line in text[writer_start:writer_end].splitlines()
+        ).strip()
+        size_check = writer.find("std::filesystem::file_size(temp_path, ec)")
+        readback = writer.find("std::ifstream input{temp_path, std::ios::binary}")
+        readback_close = writer.find("input.close()")
+        rename = writer.find(
+            "if (::rename(temp_path.c_str(), path.c_str()) != 0)"
+        )
+        if not (0 <= size_check < readback < readback_close < rename):
+            errors.append(
+                "AdaptiveCpp device profile temp validation must complete before rename"
+            )
+        rename_tail = writer[rename:] if rename >= 0 else ""
+        if not re.fullmatch(
+            r"if \(::rename\(temp_path\.c_str\(\), path\.c_str\(\)\) != 0\) \{"
+            r"\s+fail_device_profile_write\(path, temp_path, fd, description,"
+            r"\s+std::string\{\"rename failed: \"\} \+"
+            r"\s+std::strerror\(errno\)\);\s+\}\s+\}",
+            rename_tail,
+        ):
+            errors.append(
+                "AdaptiveCpp device profile rename must be the final writer operation"
+            )
     for forbidden in (
         '"acpp.metal.device.profile.step"',
         "DeviceProfileProbeGuid",
@@ -5004,14 +5047,19 @@ def audit_scope(args: argparse.Namespace) -> int:
         )
     cpp_scope = document["layers"]["cpp"]
     if (
-        cpp_scope.get("roots") != ["pgaccel-kernels/src", "pgaccel-kernels/include"]
+        cpp_scope.get("roots")
+        != [
+            "pgaccel-kernels/src",
+            "pgaccel-kernels/include",
+            "pgaccel-kernels/test/ooo_overlap_support.cpp",
+        ]
         or cpp_scope.get("extensions") != [".cpp", ".hpp", ".h"]
         or cpp_scope.get("required_extensions") != [".cpp", ".hpp", ".h"]
         or cpp_scope.get("require_executable_mapping_only") is not True
         or cpp_scope.get("exclude") != []
     ):
         raise CoverageError(
-            "C++ scope must pin both implementation and executable-header roots"
+            "C++ scope must pin implementation, executable-header, and OOO diagnostic roots"
         )
     adaptivecpp_patch = repo_root / "patches/adaptivecpp/sscp-host-coverage.patch"
     if not adaptivecpp_patch.is_file():
@@ -5044,6 +5092,12 @@ def audit_scope(args: argparse.Namespace) -> int:
         'ACPP_METAL_DEVICE_PROFILE_DIR="$profile_dir"',
         "run_acpp_device_profile_overflow_only.sh",
         "record_stage cpp device_profile_overflow_only",
+        "record_stage cpp ooo_overlap_diagnostic",
+        '"$build_dir/test_ooo_overlap"',
+        'if [ "$status" -ne 1 ]',
+        "test_ooo_overlap: sort/window GPU spans did not overlap",
+        "pgaccel-ooo-%p-%m.profraw",
+        '--object "$build_dir/test_ooo_overlap"',
         '--per-test-log-dir "$per_test_log_dir"',
         '--baseline "$baseline_file"',
         'aggregate --artifact-dir "$artifact_dir"',
@@ -5088,10 +5142,20 @@ def audit_scope(args: argparse.Namespace) -> int:
             f"KERNEL_SOURCES drift: missing={sorted(actual - declared)}, stale={sorted(declared - actual)}"
         )
     _, cpp_required = source_inventory(repo_root, document["layers"]["cpp"])
-    pinned_cpp_sources = {f"pgaccel-kernels/{relative}" for relative in actual}
-    if not pinned_cpp_sources.issubset(cpp_required):
+    pinned_cpp_sources = {
+        f"pgaccel-kernels/{relative}" for relative in actual
+    } | {"pgaccel-kernels/test/ooo_overlap_support.cpp"}
+    scoped_cpp_sources = {
+        path
+        for path in cpp_required
+        if pathlib.PurePosixPath(path).suffix == ".cpp"
+    }
+    if (
+        len(actual) != BASELINE_CPP_DEVICE_OBJECTS
+        or scoped_cpp_sources != pinned_cpp_sources
+    ):
         raise CoverageError(
-            "C++ scope must require all 21 owned implementation sources; headers alone are insufficient"
+            "C++ scope must equal the 20 shared-target sources plus OOO diagnostic support"
         )
     executable_headers = {
         path
@@ -5106,6 +5170,7 @@ def audit_scope(args: argparse.Namespace) -> int:
         "PGACCEL_ENABLE_COVERAGE",
         "-fprofile-instr-generate",
         "-fcoverage-mapping",
+        "test/ooo_overlap_support.cpp",
         "add_pgaccel_gpu_test(test_oom_invariant TIMEOUT 900)",
     ):
         if required_text not in cmake:
@@ -5171,7 +5236,7 @@ def audit_scope(args: argparse.Namespace) -> int:
     print(
         "coverage scope audit: PASS "
         f"({len(baseline['rust']['owned_files'])} Rust files, "
-        f"{len(actual)} C++ sources, {len(baseline['cpp']['ctest_names'])} CTests, "
+        f"{len(pinned_cpp_sources)} C++ sources, {len(baseline['cpp']['ctest_names'])} CTests, "
         f"{len(sql_files)} SQL files, "
         f"{len(declarations)} SQL semantic assertions, threshold {minimum:g}%)"
     )

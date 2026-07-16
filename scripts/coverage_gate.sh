@@ -493,6 +493,56 @@ resolve_cpp_llvm_tools() {
     printf '%s\n%s\n%s\n' "$configured_clang" "$llvm_cov" "$llvm_profdata"
 }
 
+run_ooo_overlap_diagnostic() {
+    local binary="$1"
+    local profile_dir="$2"
+    local output=""
+    local status=0
+    local host_profiles=()
+    local device_profiles=()
+
+    if [ ! -x "$binary" ]; then
+        echo "error: manual OOO overlap diagnostic is unavailable: $binary" >&2
+        return 1
+    fi
+    if output="$(env \
+        LLVM_PROFILE_FILE="$profile_dir/pgaccel-ooo-%p-%m.profraw" \
+        ACPP_METAL_DEVICE_PROFILE_DIR="$profile_dir" \
+        "$binary" 2>&1)"; then
+        status=0
+    else
+        status=$?
+    fi
+    printf '%s\n' "$output"
+    if [ "$status" -ne 1 ]; then
+        echo "error: manual OOO overlap diagnostic exited $status; expected 1" >&2
+        return 1
+    fi
+    if ! grep -Fxq \
+        "test_ooo_overlap: sort/window GPU spans did not overlap" <<< "$output"; then
+        echo "error: manual OOO overlap diagnostic did not report the pinned structural failure" >&2
+        return 1
+    fi
+    if find "$profile_dir" -maxdepth 1 -type f -name '*.overflow' -print -quit \
+        | grep -q .; then
+        echo "error: manual OOO overlap diagnostic overflowed a device profile" >&2
+        return 1
+    fi
+    while IFS= read -r -d '' profile; do
+        host_profiles+=("$profile")
+    done < <(find "$profile_dir" -maxdepth 1 -type f \
+        -name 'pgaccel-ooo-*.profraw' -size +0c -print0)
+    while IFS= read -r -d '' profile; do
+        device_profiles+=("$profile")
+    done < <(find "$profile_dir" -maxdepth 1 -type f \
+        -name '*.proftext' -size +0c -print0)
+    if [ "${#host_profiles[@]}" -eq 0 ] || [ "${#device_profiles[@]}" -eq 0 ]; then
+        echo "error: manual OOO overlap diagnostic did not emit host and device coverage" >&2
+        return 1
+    fi
+    echo "manual OOO overlap coverage: PASS (expected no-overlap structural failure)"
+}
+
 cpp_coverage() (
     local output_dir="$artifact_dir/cpp"
     local build_dir="$build_root/cpp-build"
@@ -592,6 +642,15 @@ cpp_coverage() (
             "host profiling intrinsics leaked into SSCP device IR"
     fi
 
+    if run_logged "$output_dir/ooo-overlap-diagnostic.log" \
+        run_ooo_overlap_diagnostic "$build_dir/test_ooo_overlap" "$profile_dir"; then
+        record_stage cpp ooo_overlap_diagnostic 0
+    else
+        execution_status=1
+        record_stage cpp ooo_overlap_diagnostic 1 \
+            "manual OOO overlap diagnostic did not fail in the expected structural mode with coverage"
+    fi
+
     # Do not override per-test timeouts: test_oom_invariant retains its 900s
     # timeout and unchanged 2GB-per-family sweep (14.08GB measured peak RSS).
     if ! run_logged "$output_dir/ctest.log" env \
@@ -632,7 +691,8 @@ cpp_coverage() (
         --layer cpp --role final --repo-root "$repo_root" \
         --scope "$scope_file" --llvm-cov "$llvm_cov" \
         --llvm-profdata "$llvm_profdata" --profile-dir "$profile_dir" \
-        --object "${objects[0]}" --object-dir "$output_dir/objects" \
+        --object "${objects[0]}" --object "$build_dir/test_ooo_overlap" \
+        --object-dir "$output_dir/objects" \
         --manifest "$output_dir/object-manifest.json" \
         --profdata "$output_dir/coverage.profdata" \
         --json-output "$output_dir/raw-coverage.json" \

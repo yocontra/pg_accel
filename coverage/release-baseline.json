@@ -114,7 +114,8 @@
       "pgaccel-kernels/src/sort.cpp",
       "pgaccel-kernels/src/spatial_dispatch.cpp",
       "pgaccel-kernels/src/spatial_predicates.cpp",
-      "pgaccel-kernels/src/window.cpp"
+      "pgaccel-kernels/src/window.cpp",
+      "pgaccel-kernels/test/ooo_overlap_support.cpp"
     ],
     "require_executable_mapping_only": true,
     "required_extensions": [
@@ -147,11 +148,13 @@
       "pgaccel-kernels/src/sort.cpp",
       "pgaccel-kernels/src/spatial_dispatch.cpp",
       "pgaccel-kernels/src/spatial_predicates.cpp",
-      "pgaccel-kernels/src/window.cpp"
+      "pgaccel-kernels/src/window.cpp",
+      "pgaccel-kernels/test/ooo_overlap_support.cpp"
     ],
     "roots": [
       "pgaccel-kernels/src",
-      "pgaccel-kernels/include"
+      "pgaccel-kernels/include",
+      "pgaccel-kernels/test/ooo_overlap_support.cpp"
     ],
     "sources": [
       "pgaccel-kernels/src/archive_stats.cpp",
@@ -173,7 +176,8 @@
       "pgaccel-kernels/src/sort.cpp",
       "pgaccel-kernels/src/spatial_dispatch.cpp",
       "pgaccel-kernels/src/spatial_predicates.cpp",
-      "pgaccel-kernels/src/window.cpp"
+      "pgaccel-kernels/src/window.cpp",
+      "pgaccel-kernels/test/ooo_overlap_support.cpp"
     ]
   },
   "kind": "coverage-release-baseline",

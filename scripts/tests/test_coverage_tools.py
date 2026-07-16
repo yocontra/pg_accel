@@ -1358,7 +1358,7 @@ raise SystemExit(2)
         device_object_root = root / "device-build/CMakeFiles/shared.dir"
         device_object_root.mkdir(parents=True)
         device_objects = []
-        for index in range(coverage_tools.BASELINE_CPP_SOURCES):
+        for index in range(coverage_tools.BASELINE_CPP_DEVICE_OBJECTS):
             path = device_object_root / f"kernel_{index:02d}.cpp.o"
             path.write_bytes(f"device-object-{index}\n".encode("ascii"))
             device_objects.append(str(path))
@@ -1409,6 +1409,12 @@ raise SystemExit(2)
                 )
         ctest_log = root / "cpp/ctest.log"
         ctest_log.write_text(ctest_pass_log(ctest_names), encoding="utf-8")
+        (root / "cpp/ooo-overlap-diagnostic.log").write_text(
+            "test_ooo_overlap: sort/window GPU spans did not overlap\n"
+            "manual OOO overlap coverage: PASS "
+            "(expected no-overlap structural failure)\n",
+            encoding="utf-8",
+        )
         self.assertEqual(
             quiet_call(
                 coverage_tools.gpu_evidence,
@@ -1610,6 +1616,20 @@ raise SystemExit(2)
             root = pathlib.Path(directory)
             self.initialize_valid_gate(root)
             self.assertEqual(self.aggregate(root), 0)
+
+    def test_ooo_overlap_diagnostic_log_is_required_raw_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            (root / "cpp/ooo-overlap-diagnostic.log").unlink()
+            self.assertEqual(
+                quiet_call(
+                    coverage_tools.seal_layer_evidence,
+                    argparse.Namespace(artifact_dir=str(root), layer="cpp"),
+                ),
+                1,
+            )
+            self.assertEqual(self.aggregate(root), 1)
 
     def test_script_llvm_tools_are_rejected_as_untrusted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -2127,6 +2147,21 @@ class ImmutableBaselineTests(unittest.TestCase):
             with self.assertRaises(coverage_tools.CoverageError):
                 self.audit(scope_path, baseline)
 
+    def test_cpp_ooo_support_root_removal_is_rejected_with_matching_baseline(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            scope = coverage_tools.read_json(REPO_ROOT / "coverage/scope.json")
+            scope["layers"]["cpp"]["roots"].remove(
+                "pgaccel-kernels/test/ooo_overlap_support.cpp"
+            )
+            scope_path = root / "scope.json"
+            coverage_tools.write_json(scope_path, scope)
+            baseline = self.write_matching_baseline(root, scope_path)
+            with self.assertRaises(coverage_tools.CoverageError):
+                self.audit(scope_path, baseline)
+
     def test_cpp_executable_header_membership_cannot_be_removed(self) -> None:
         for field in ("executable_headers", "required_mapping_files"):
             with (
@@ -2169,6 +2204,38 @@ class ImmutableBaselineTests(unittest.TestCase):
             ):
                 baseline = self.write_matching_baseline(
                     root, REPO_ROOT / "coverage/scope.json"
+                )
+                with self.assertRaises(coverage_tools.CoverageError):
+                    self.audit(REPO_ROOT / "coverage/scope.json", baseline)
+
+    def test_cpp_source_substitution_fails_with_matching_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            original_inventory = coverage_tools.source_inventory
+            removed = "pgaccel-kernels/test/ooo_overlap_support.cpp"
+            replacement = "pgaccel-kernels/include/compensating.cpp"
+
+            def inventory_with_substitution(repo_root, scope):
+                included, required = original_inventory(repo_root, scope)
+                if removed in scope.get("roots", []):
+                    included.discard(removed)
+                    required.discard(removed)
+                    included.add(replacement)
+                    required.add(replacement)
+                return included, required
+
+            with mock.patch.object(
+                coverage_tools,
+                "source_inventory",
+                side_effect=inventory_with_substitution,
+            ):
+                baseline = self.write_matching_baseline(
+                    root, REPO_ROOT / "coverage/scope.json"
+                )
+                document = coverage_tools.read_json(baseline)
+                self.assertEqual(
+                    len(document["cpp"]["sources"]),
+                    coverage_tools.BASELINE_CPP_SOURCES,
                 )
                 with self.assertRaises(coverage_tools.CoverageError):
                     self.audit(REPO_ROOT / "coverage/scope.json", baseline)
@@ -2405,7 +2472,7 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             object_root = root / "build/CMakeFiles/pgaccel_kernels_shared.dir/src"
             object_root.mkdir(parents=True)
             objects = []
-            for index in range(coverage_tools.BASELINE_CPP_SOURCES):
+            for index in range(coverage_tools.BASELINE_CPP_DEVICE_OBJECTS):
                 path = object_root / f"kernel_{index:02d}.cpp.o"
                 path.write_bytes(f"host-object-{index}\n".encode("ascii"))
                 objects.append(str(path))
@@ -2482,7 +2549,13 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 "if (::rename(temp_path.c_str(), path.c_str()) != 0)",
                 "if (false)",
             ),
-            ("std::filesystem::file_size(path, ec)", "data.size()"),
+            ("std::filesystem::file_size(temp_path, ec)", "data.size()"),
+            (
+                "std::ifstream input{temp_path, std::ios::binary}",
+                "std::ifstream input{path, std::ios::binary}",
+            ),
+            ("input.close()", "return"),
+            ("if (input.fail())", "if (false)"),
             ("actual != data", "false"),
             (
                 'fail_device_profile_flush("invalid device profile counter buffer")',
@@ -2500,6 +2573,35 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 self.assertTrue(
                     coverage_tools.adaptivecpp_coverage_patch_errors(mutated)
                 )
+
+        writer_start = patch.index("+void write_device_profile_or_exit(")
+        validation_start = patch.index("+  std::error_code ec;", writer_start)
+        rename_start = patch.index(
+            "+  if (::rename(temp_path.c_str(), path.c_str()) != 0)",
+            validation_start,
+        )
+        rename_end = patch.index("+  }\n+}", rename_start) + len("+  }\n")
+        validation = patch[validation_start:rename_start]
+        rename_block = patch[rename_start:rename_end]
+        renamed_too_early = (
+            patch[:validation_start]
+            + rename_block
+            + validation
+            + patch[rename_end:]
+        )
+        self.assertTrue(
+            coverage_tools.adaptivecpp_coverage_patch_errors(renamed_too_early)
+        )
+        final_cleanup = patch.replace(
+            "+  remove_device_profile_file(temp_path);",
+            "+  remove_device_profile_file(temp_path);\n"
+            "+  remove_device_profile_file(path);",
+            1,
+        )
+        self.assertNotEqual(final_cleanup, patch)
+        self.assertTrue(
+            coverage_tools.adaptivecpp_coverage_patch_errors(final_cleanup)
+        )
 
     def test_device_profile_overflow_only_fixture_is_hostile(self) -> None:
         fixture = (
@@ -2542,6 +2644,13 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn("run_acpp_device_profile_overflow_only.sh", gate)
         self.assertIn("record_stage cpp device_profile_overflow_only 0", gate)
         self.assertIn("record_stage cpp device_profile_overflow_only 1", gate)
+        self.assertIn("record_stage cpp ooo_overlap_diagnostic 0", gate)
+        self.assertIn("record_stage cpp ooo_overlap_diagnostic 1", gate)
+        self.assertIn('if [ "$status" -ne 1 ]', gate)
+        self.assertIn(
+            "test_ooo_overlap: sort/window GPU spans did not overlap", gate
+        )
+        self.assertIn('--object "$build_dir/test_ooo_overlap"', gate)
         self.assertIn("execution_status=1", gate)
 
     def test_device_profile_overflow_only_runner_requires_exact_artifacts(self) -> None:

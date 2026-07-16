@@ -29,10 +29,11 @@
       ]
     },
     "cpp": {
-      "description": "Owned C++/SYCL source coverage from merged host instrumentation and real Metal device counters exercised by standalone CTest binaries.",
+      "description": "Owned C++/SYCL source coverage from merged host instrumentation and real Metal device counters exercised by standalone CTest binaries and the manual out-of-order overlap diagnostic.",
       "roots": [
         "pgaccel-kernels/src",
-        "pgaccel-kernels/include"
+        "pgaccel-kernels/include",
+        "pgaccel-kernels/test/ooo_overlap_support.cpp"
       ],
       "extensions": [".cpp", ".hpp", ".h"],
       "required_extensions": [".cpp", ".hpp", ".h"],
