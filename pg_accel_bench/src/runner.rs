@@ -4214,7 +4214,7 @@ fn run_explain_analyze_outcome(
     })
 }
 
-/// Parse the millisecond value from an `Execution Time: X.XXX ms` line.
+/// Parse the millisecond value from an `Execution Time: <milliseconds> ms` line.
 fn parse_execution_time(line: &str) -> Option<f64> {
     let trimmed = line.trim();
     let suffix = trimmed.strip_prefix("Execution Time:")?;
