@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -19,10 +20,17 @@ import cpu_cheat_audit as audit  # noqa: E402
 
 
 FIXTURE_PATH = pathlib.Path("fixture.cpp")
+STATUS_BINDING_RE = re.compile(
+    r"\b(?:using\s+pgaccel_status\s*=|typedef\b[^;{}]*(?:\{[^}]*\}\s*)?pgaccel_status\s*;|enum(?:\s+class)?\s+pgaccel_status\b)",
+    re.DOTALL,
+)
 
 
 def audit_fixture(source: str) -> audit.FileAudit:
-    return audit.audit_source(FIXTURE_PATH, textwrap.dedent(source))
+    rendered = textwrap.dedent(source)
+    if STATUS_BINDING_RE.search(rendered) is None:
+        rendered = "using pgaccel_status = int;\n" + rendered
+    return audit.audit_source(FIXTURE_PATH, rendered)
 
 
 def audit_compiling_fixture(source: str) -> audit.FileAudit:
@@ -40,6 +48,39 @@ def audit_compiling_fixture(source: str) -> audit.FileAudit:
     if completed.returncode != 0:
         raise AssertionError(f"fixture is not valid C++:\n{completed.stderr}")
     return audit.audit_source(FIXTURE_PATH, rendered)
+
+
+def audit_compiling_fixture_with_headers(
+    source: str, headers: dict[str, str]
+) -> audit.FileAudit:
+    rendered = textwrap.dedent(source)
+    compiler = shutil.which("clang++")
+    if compiler is None:
+        raise unittest.SkipTest("clang++ is required for compile-valid regressions")
+    with tempfile.TemporaryDirectory(prefix="pgaccel-audit-header-") as directory:
+        root = pathlib.Path(directory)
+        source_path = root / "fixture.cpp"
+        source_path.write_text(rendered, encoding="utf-8")
+        for name, contents in headers.items():
+            header_path = root / name
+            header_path.parent.mkdir(parents=True, exist_ok=True)
+            header_path.write_text(textwrap.dedent(contents), encoding="utf-8")
+        completed = subprocess.run(
+            [
+                compiler,
+                "-std=c++17",
+                "-fsyntax-only",
+                "-I",
+                str(root),
+                str(source_path),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(f"fixture is not valid C++:\n{completed.stderr}")
+        return audit.audit_source(source_path, rendered)
 
 
 def finding_for(result: audit.FileAudit, name: str) -> audit.Finding:
@@ -480,7 +521,10 @@ class CallGraphTests(unittest.TestCase):
                 paths = []
                 for name, source in sources.items():
                     path = pathlib.Path(directory) / name
-                    path.write_text(textwrap.dedent(source), encoding="utf-8")
+                    rendered = textwrap.dedent(source)
+                    if STATUS_BINDING_RE.search(rendered) is None:
+                        rendered = "using pgaccel_status = int;\n" + rendered
+                    path.write_text(rendered, encoding="utf-8")
                     paths.append(path)
                 results = audit.audit_paths(paths)
             return {
@@ -3044,6 +3088,9 @@ class ResidentV5RegressionTests(unittest.TestCase):
         static sycl::queue queue_value;
         static sycl::queue* g_queue = &queue_value;
     """
+    STATUS_ALIAS_DECLARATION = """using pgaccel_status = int;
+        constexpr pgaccel_status PGACCEL_OK = 0;
+        constexpr pgaccel_status PGACCEL_ERROR = 1;"""
 
     def test_returned_helper_cannot_substitute_local_detail_for_abi_output(self) -> None:
         result = audit_compiling_fixture(
@@ -5312,7 +5359,7 @@ class ResidentV5RegressionTests(unittest.TestCase):
             """using pgaccel_status = int;
         constexpr pgaccel_status PGACCEL_OK = 0;
         constexpr pgaccel_status PGACCEL_ERROR = 1;""",
-            """enum pgaccel_status { PGACCEL_OK = 0, PGACCEL_ERROR = 1 };
+            """typedef enum { PGACCEL_OK = 0, PGACCEL_ERROR = 1 } pgaccel_status;
         static bool operator!=(pgaccel_status, pgaccel_status) { return false; }""",
         )
         result = audit_compiling_fixture(
@@ -5343,7 +5390,7 @@ class ResidentV5RegressionTests(unittest.TestCase):
             """using pgaccel_status = int;
         constexpr pgaccel_status PGACCEL_OK = 0;
         constexpr pgaccel_status PGACCEL_ERROR = 1;""",
-            """enum pgaccel_status { PGACCEL_OK = 0, PGACCEL_ERROR = 1 };
+            """typedef enum { PGACCEL_OK = 0, PGACCEL_ERROR = 1 } pgaccel_status;
         static bool operator not_eq(pgaccel_status, pgaccel_status) { return false; }""",
         )
         result = audit_compiling_fixture(
@@ -5578,6 +5625,360 @@ class ResidentV5RegressionTests(unittest.TestCase):
                 entry = entries[name]
                 self.assertFalse(entry.ok, entry.detail)
                 self.assertIn("undominated_success", entry.classifications)
+
+    def test_status_selection_rejects_local_status_proxy_aliases(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static thread_local uint64_t tl_gpu_exec_count = 0;
+            void pgaccel_record_gpu_exec() { tl_gpu_exec_count++; }
+            static pgaccel_status write_first(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 10;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status write_second(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 11;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            struct StatusProxy {
+              StatusProxy(::pgaccel_status) {}
+              operator ::pgaccel_status() const { return PGACCEL_OK; }
+            };
+            extern "C" pgaccel_status pgaccel_shadowed_status_ternary(
+                bool first, bool fail, int* out) {
+              using pgaccel_status = StatusProxy;
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_shadowed_status_guard(
+                bool fail, int* out) {
+              using pgaccel_status = StatusProxy;
+              pgaccel_status status = write_first(fail, out);
+              if (status != PGACCEL_OK)
+                return status;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in result.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("ambiguous_status_type", entry.classifications)
+
+        namespace_shadow = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct StatusProxy {
+              StatusProxy(::pgaccel_status) {}
+              operator ::pgaccel_status() const { return PGACCEL_OK; }
+            };
+            namespace hostile { using pgaccel_status = StatusProxy; }
+            extern "C" pgaccel_status pgaccel_namespace_status_shadow(int* out) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 12;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = namespace_shadow.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("ambiguous_status_type", entry.classifications)
+
+        anonymous_typedef = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_local_anonymous_status(int* out) {
+              typedef struct { int value; } pgaccel_status;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 13;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = anonymous_typedef.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("ambiguous_status_type", entry.classifications)
+
+        declaration_cases = (
+            "struct Holder { public: using pgaccel_status = StatusProxy; };",
+            "struct Holder { public: typedef StatusProxy pgaccel_status, *Other; };",
+            "struct Base { using pgaccel_status = StatusProxy; }; "
+            "struct Holder : Base { using Base::pgaccel_status; };",
+        )
+        for declaration in declaration_cases:
+            with self.subTest(declaration=declaration):
+                class_shadow = audit_compiling_fixture(
+                    self.COPYBACK_PRELUDE
+                    + r"""
+                    struct StatusProxy {
+                      StatusProxy(::pgaccel_status) {}
+                      operator ::pgaccel_status() const { return PGACCEL_OK; }
+                    };
+                    """
+                    + declaration
+                    + r"""
+                    extern "C" pgaccel_status pgaccel_class_status_shadow(
+                        int* out) {
+                      sycl::queue q;
+                      q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                        out[0] = 14;
+                      }).wait_and_throw();
+                      return PGACCEL_OK;
+                    }
+                    """
+                )
+                entry = class_shadow.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("ambiguous_status_type", entry.classifications)
+
+        ordinary_alias = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            using status_alias = pgaccel_status;
+            typedef pgaccel_status legacy_status;
+            extern "C" pgaccel_status pgaccel_ordinary_status_alias(int* out) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 15;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = ordinary_alias.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertNotIn("ambiguous_status_type", entry.classifications)
+
+        decorated_bindings = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 17;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            struct StatusProxy {
+              StatusProxy(::pgaccel_status) {}
+              operator ::pgaccel_status() const { return PGACCEL_OK; }
+            };
+            struct StatusProxyBase {
+              StatusProxyBase(::pgaccel_status) {}
+              operator ::pgaccel_status() const { return PGACCEL_OK; }
+            };
+            extern "C" pgaccel_status pgaccel_parenthesized_status_typedef(
+                bool fail, int* out) {
+              typedef StatusProxy (pgaccel_status);
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_attributed_status_class(
+                bool fail, int* out) {
+              struct [[maybe_unused]] pgaccel_status : StatusProxyBase {
+                using StatusProxyBase::StatusProxyBase;
+              };
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_aligned_status_class(
+                bool fail, int* out) {
+              struct alignas(8) pgaccel_status : StatusProxyBase {
+                using StatusProxyBase::StatusProxyBase;
+              };
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        for entry in decorated_bindings.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("ambiguous_status_type", entry.classifications)
+
+    def test_included_header_status_operator_cannot_mutate_failure_to_ok(
+        self,
+    ) -> None:
+        statusless_prelude = self.COPYBACK_PRELUDE.replace(
+            self.STATUS_ALIAS_DECLARATION, ""
+        )
+        result = audit_compiling_fixture_with_headers(
+            '#include "outer_status.hpp"\n'
+            + statusless_prelude
+            + r"""
+            static thread_local uint64_t tl_gpu_exec_count = 0;
+            void pgaccel_record_gpu_exec() { tl_gpu_exec_count++; }
+            static pgaccel_status write_first(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 10;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status write_second(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 11;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_header_operator_status(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            """,
+            {
+                "outer_status.hpp": '#include "status_override.hpp"\n',
+                "status_override.hpp": r"""
+                    typedef enum {
+                      PGACCEL_STATUS_OK = 0,
+                      PGACCEL_ERROR = 1,
+                    } pgaccel_status;
+                    struct PgaccelOkTag {
+                      constexpr operator pgaccel_status() const {
+                        return PGACCEL_STATUS_OK;
+                      }
+                    };
+                    constexpr PgaccelOkTag PGACCEL_OK{};
+                    inline bool operator==(pgaccel_status& status, PgaccelOkTag) {
+                      status = PGACCEL_STATUS_OK;
+                      return true;
+                    }
+                """,
+            },
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+
+    def test_macro_operator_in_transitive_angle_header_cannot_fake_guard(
+        self,
+    ) -> None:
+        statusless_prelude = self.COPYBACK_PRELUDE.replace(
+            self.STATUS_ALIAS_DECLARATION, ""
+        )
+        result = audit_compiling_fixture_with_headers(
+            "#include <angle_outer.hpp>\n"
+            + statusless_prelude
+            + r"""
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 16;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_angle_macro_status_guard(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+            """,
+            {
+                "angle_outer.hpp": "#include <nested/status_override.hpp>\n",
+                "nested/status_override.hpp": r"""
+                    typedef enum {
+                      PGACCEL_OK = 0,
+                      PGACCEL_ERROR = 1,
+                    } pgaccel_status;
+                    #define NOT_EQUAL !=
+                    inline bool operator NOT_EQUAL(
+                        pgaccel_status, pgaccel_status) {
+                      return false;
+                    }
+                """,
+            },
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertIn("undominated_success", entry.classifications)
+
+    def test_nonproject_header_overloads_fail_preprocessing_closed(self) -> None:
+        compiler = shutil.which("clang++")
+        if compiler is None:
+            raise unittest.SkipTest("clang++ is required for compile-valid regressions")
+        prelude = self.COPYBACK_PRELUDE.replace(
+            self.STATUS_ALIAS_DECLARATION,
+            "typedef enum { PGACCEL_OK = 0, PGACCEL_ERROR = 1 } pgaccel_status;",
+        )
+        body = r"""
+            static pgaccel_status write_or_fail(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 18;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_external_header_guard(
+                bool fail, int* out) {
+              pgaccel_status status = write_or_fail(fail, out);
+              if (status != PGACCEL_OK) return status;
+              return PGACCEL_OK;
+            }
+        """
+        with (
+            tempfile.TemporaryDirectory(
+                prefix="pgaccel-audit-source-"
+            ) as source_directory,
+            tempfile.TemporaryDirectory(
+                prefix="pgaccel-audit-external-"
+            ) as external_directory,
+        ):
+            source_root = pathlib.Path(source_directory)
+            external_header = pathlib.Path(external_directory) / "status_op.hpp"
+            external_header.write_text(
+                "inline bool operator!=(pgaccel_status, pgaccel_status) "
+                "{ return false; }\n",
+                encoding="utf-8",
+            )
+            symlink_header = source_root / "status_op.hpp"
+            symlink_header.symlink_to(external_header)
+            include_lines = (
+                f'#include "{external_header}"\n',
+                '#include "status_op.hpp"\n',
+            )
+            for index, include_line in enumerate(include_lines):
+                with self.subTest(include=include_line.strip()):
+                    rendered = textwrap.dedent(prelude + include_line + body)
+                    source_path = source_root / f"fixture_{index}.cpp"
+                    source_path.write_text(rendered, encoding="utf-8")
+                    completed = subprocess.run(
+                        [compiler, "-std=c++17", "-fsyntax-only", str(source_path)],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                    result = audit.audit_source(source_path, rendered)
+                    entry = result.entrypoint_audits[0]
+                    self.assertFalse(entry.ok, entry.detail)
+                    self.assertIn("preprocessor_expansion_error", entry.classifications)
 
     def test_borrowed_workspace_is_in_host_hazard_and_shadow_analysis(self) -> None:
         result = audit_compiling_fixture(
@@ -6162,6 +6563,8 @@ class ProductionWitnessTests(unittest.TestCase):
                 self.assertTrue(entry.ok, entry.detail)
                 self.assertEqual(entry.path.name, "reduce.cpp")
                 self.assertIn("large_input_gpu_chain", entry.classifications)
+                self.assertIn("validated_device_selection", entry.classifications)
+                self.assertNotIn("ambiguous_status_type", entry.classifications)
                 self.assertNotIn("host_output_write", entry.classifications)
 
     def test_non_status_hash_join_builds_have_device_resource_proof(self) -> None:

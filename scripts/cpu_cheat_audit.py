@@ -704,7 +704,7 @@ def _compiler_include_directories() -> tuple[pathlib.Path, ...]:
 def _quoted_include_sources(
     path: pathlib.Path, directives: Sequence[PreprocessorDirective]
 ) -> tuple[str, ...]:
-    """Load direct project headers needed for literal-view type provenance."""
+    """Load direct quoted headers as best-effort record-layout metadata."""
 
     search_roots = (path.resolve().parent, *_compiler_include_directories())
     sources: list[str] = []
@@ -733,7 +733,7 @@ def _quoted_include_sources(
             sources.append(resolved.read_text(encoding="utf-8"))
         except OSError as error:
             raise ParseError(
-                f"cannot read included type declarations {resolved}: {error}"
+                f"cannot read included record declarations {resolved}: {error}"
             ) from error
     return tuple(sources)
 
@@ -741,7 +741,7 @@ def _quoted_include_sources(
 @functools.lru_cache(maxsize=128)
 def _compiler_preprocess_cached(
     source: str, source_directory: str, compiler: str
-) -> str:
+) -> tuple[str, tuple[str, ...], str]:
     command = [
         compiler,
         "-std=c++17",
@@ -770,21 +770,104 @@ def _compiler_preprocess_cached(
         raise ParseError(
             f"compiler preprocessing exited {completed.returncode}: {diagnostic}"
         )
+    source_root = pathlib.Path(source_directory).resolve()
+    project_include = (
+        pathlib.Path(__file__).resolve().parents[1] / "pgaccel-kernels/include"
+    ).resolve()
+    acpp_roots = tuple(
+        include_root
+        for include_root in _compiler_include_directories()
+        if include_root != project_include
+    )
+
+    def within(path: pathlib.Path, root: pathlib.Path) -> bool:
+        return path == root or root in path.parents
+
+    def known_acpp(path: pathlib.Path) -> bool:
+        return any(within(path, root) for root in acpp_roots)
+
+    def retained(path: pathlib.Path) -> bool:
+        return (within(path, source_root) or within(path, project_include)) and not any(
+            within(path, root) for root in acpp_roots
+        )
+
     main_file_lines: list[str] = []
-    in_main_file = False
+    project_file_lines: dict[pathlib.Path, list[str]] = {}
+    translation_unit_lines: list[str] = []
+    physical_file: pathlib.Path | str | None = None
+    physical_is_system = False
+    include_stack: list[tuple[pathlib.Path | str | None, bool]] = []
     for line in completed.stdout.splitlines(keepends=True):
-        marker = re.match(r'^\s*#\s*\d+\s+"([^"]+)"', line)
+        marker = re.match(r'^\s*#\s*\d+\s+"([^"]+)"(.*)$', line)
         if marker is not None:
-            in_main_file = marker.group(1) == "<stdin>"
+            marker_file = marker.group(1)
+            flags = frozenset(re.findall(r"\b[1-4]\b", marker.group(2)))
+            if "1" in flags:
+                include_stack.append((physical_file, physical_is_system))
+                physical_file = marker_file
+                physical_is_system = "3" in flags
+            elif "2" in flags:
+                if include_stack:
+                    physical_file, physical_is_system = include_stack.pop()
+                else:
+                    physical_file = marker_file
+                    physical_is_system = "3" in flags
+            elif physical_file is None:
+                physical_file = marker_file
+                physical_is_system = "3" in flags
+            elif "3" in flags:
+                physical_is_system = True
+
+            if isinstance(physical_file, str) and not physical_file.startswith("<"):
+                candidate = pathlib.Path(physical_file)
+                lexical_path = pathlib.Path(
+                    os.path.abspath(
+                        candidate
+                        if candidate.is_absolute()
+                        else source_root / candidate
+                    )
+                )
+                physical_file = lexical_path.resolve()
+                lexically_project_local = within(lexical_path, source_root) or within(
+                    lexical_path, project_include
+                )
+                if (
+                    lexically_project_local
+                    and not retained(physical_file)
+                    and not known_acpp(physical_file)
+                ):
+                    raise ParseError(
+                        "compiler-expanded project header escapes an allowed root: "
+                        f"{lexical_path} -> {physical_file}"
+                    )
+                if (
+                    not retained(physical_file)
+                    and not known_acpp(physical_file)
+                    and not physical_is_system
+                ):
+                    raise ParseError(
+                        "compiler-expanded include is outside allowed project roots: "
+                        f"{physical_file}"
+                    )
             continue
-        if in_main_file:
+        if physical_file == "<stdin>":
             main_file_lines.append(line)
+            translation_unit_lines.append(line)
+        elif isinstance(physical_file, pathlib.Path) and retained(physical_file):
+            project_file_lines.setdefault(physical_file, []).append(line)
+            translation_unit_lines.append(line)
     if not main_file_lines:
         raise ParseError("compiler preprocessing emitted no main-file source")
-    return "".join(main_file_lines)
+    return (
+        "".join(main_file_lines),
+        tuple("".join(lines) for lines in project_file_lines.values()),
+        "".join(translation_unit_lines),
+    )
 
 
-def _compiler_preprocess_source(path: pathlib.Path, source: str) -> str:
+def _compiler_preprocess_source(
+    path: pathlib.Path, source: str
+) -> tuple[str, tuple[str, ...], str]:
     compiler = os.environ.get("PGACCEL_ABI_CLANG") or shutil.which("clang++")
     if compiler is None:
         raise ParseError("clang++ is required to expand source macros")
@@ -1148,6 +1231,239 @@ def _extern_c_braces(tokens: Sequence[Token]) -> set[int]:
         if tokens[index - 2].value == "extern" and tokens[index - 1].kind == "string_c":
             braces.add(index)
     return braces
+
+
+def _canonical_status_type_binding(
+    token_sources: Sequence[Sequence[Token]],
+) -> bool:
+    """Require one file-scope enum or builtin alias for ``pgaccel_status``."""
+
+    binding_count = 0
+    invalid_binding = False
+    for tokens in token_sources:
+        _, reverse = _delimiter_pairs(tokens)
+        extern_c_braces = _extern_c_braces(tokens)
+        enclosing: list[tuple[int, ...]] = []
+        stack: list[int] = []
+        for index, token in enumerate(tokens):
+            enclosing.append(tuple(stack))
+            if token.value == "{":
+                stack.append(index)
+            elif token.value == "}" and stack:
+                stack.pop()
+
+        bindings: dict[int, bool] = {}
+
+        def file_scope(index: int) -> bool:
+            return all(brace in extern_c_braces for brace in enclosing[index])
+
+        def statement_bounds(index: int) -> tuple[int, int]:
+            left = index - 1
+            while left >= 0 and tokens[left].value not in {";", "{", "}"}:
+                left -= 1
+            right = index + 1
+            while right < len(tokens) and tokens[right].value != ";":
+                right += 1
+            return left + 1, right
+
+        def skip_attributes(values: Sequence[str], cursor: int) -> int:
+            while cursor + 1 < len(values) and values[cursor : cursor + 2] == [
+                "[",
+                "[",
+            ]:
+                depth = 1
+                cursor += 2
+                while cursor < len(values) and depth:
+                    if values[cursor : cursor + 2] == ["[", "["]:
+                        depth += 1
+                        cursor += 2
+                    elif values[cursor : cursor + 2] == ["]", "]"]:
+                        depth -= 1
+                        cursor += 2
+                    else:
+                        cursor += 1
+            return cursor
+
+        def typedef_declarator_start(values: Sequence[str], typedef_at: int) -> int:
+            cursor = skip_attributes(values, typedef_at + 1)
+            while cursor < len(values) and values[cursor] in {
+                "const",
+                "volatile",
+                "restrict",
+                "__restrict",
+                "__restrict__",
+            }:
+                cursor = skip_attributes(values, cursor + 1)
+
+            builtin = False
+            while cursor < len(values) and values[cursor] in {
+                "signed",
+                "unsigned",
+                "short",
+                "long",
+                "int",
+                "char",
+                "wchar_t",
+                "char8_t",
+                "char16_t",
+                "char32_t",
+                "float",
+                "double",
+                "bool",
+                "void",
+            }:
+                builtin = True
+                cursor = skip_attributes(values, cursor + 1)
+            if builtin:
+                return cursor
+
+            if cursor < len(values) and values[cursor] in {
+                "class",
+                "struct",
+                "union",
+                "enum",
+            }:
+                cursor = skip_attributes(values, cursor + 1)
+                if cursor < len(values) and values[cursor] == "class":
+                    cursor = skip_attributes(values, cursor + 1)
+            elif cursor < len(values) and values[cursor] == "typename":
+                cursor = skip_attributes(values, cursor + 1)
+
+            if cursor < len(values) and values[cursor] == "::":
+                cursor += 1
+            if cursor < len(values) and re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]*", values[cursor]
+            ):
+                cursor += 1
+                while (
+                    cursor + 1 < len(values)
+                    and values[cursor] == "::"
+                    and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", values[cursor + 1])
+                ):
+                    cursor += 2
+            return cursor
+
+        for index, token in enumerate(tokens):
+            if token.value != "pgaccel_status":
+                continue
+
+            left, right = statement_bounds(index)
+            values = [item.value for item in tokens[left:right]]
+            relative_index = index - left
+
+            # The production ABI uses exactly
+            # ``typedef enum { ... } pgaccel_status``.
+            closing_brace = next(
+                (
+                    cursor
+                    for cursor in range(index - 1, left - 2, -1)
+                    if tokens[cursor].value == "}" and cursor in reverse
+                ),
+                None,
+            )
+            if closing_brace is not None:
+                enum_open = reverse[closing_brace]
+                prefix_left = enum_open - 1
+                while prefix_left >= 0 and tokens[prefix_left].value not in {
+                    ";",
+                    "{",
+                    "}",
+                }:
+                    prefix_left -= 1
+                prefix = [item.value for item in tokens[prefix_left + 1 : enum_open]]
+                typedef_at = next(
+                    (
+                        offset
+                        for offset, value in enumerate(prefix)
+                        if value == "typedef"
+                    ),
+                    None,
+                )
+                typedef_prefix = prefix[typedef_at:] if typedef_at is not None else []
+                if typedef_prefix == ["typedef", "enum"]:
+                    bindings[index] = bool(
+                        file_scope(index)
+                        and closing_brace == index - 1
+                        and values[relative_index:] == ["pgaccel_status"]
+                    )
+                elif typedef_at is not None:
+                    bindings[index] = False
+                if index in bindings:
+                    continue
+
+            using_at = max(
+                (
+                    offset
+                    for offset, value in enumerate(values[: relative_index + 1])
+                    if value == "using"
+                ),
+                default=-1,
+            )
+            if using_at >= 0 and relative_index == using_at + 1:
+                alias = values[using_at:]
+                bindings[index] = bool(
+                    file_scope(index)
+                    and alias == ["using", "pgaccel_status", "=", "int"]
+                )
+                continue
+            if (
+                using_at >= 0
+                and "=" not in values[using_at:relative_index]
+                and "::" in values[using_at:relative_index]
+                and relative_index == len(values) - 1
+            ):
+                bindings[index] = False
+                continue
+
+            typedef_at = next(
+                (
+                    offset
+                    for offset, value in enumerate(values[: relative_index + 1])
+                    if value == "typedef"
+                ),
+                None,
+            )
+            if typedef_at is not None:
+                if relative_index >= typedef_declarator_start(values, typedef_at):
+                    bindings[index] = False
+                    continue
+
+            for keyword_at in range(relative_index - 1, -1, -1):
+                if values[keyword_at] not in {
+                    "class",
+                    "struct",
+                    "union",
+                    "enum",
+                    "namespace",
+                    "typename",
+                }:
+                    continue
+                if values[keyword_at] == "typename":
+                    declared_at = skip_attributes(values, keyword_at + 1)
+                    if declared_at == relative_index:
+                        bindings[index] = False
+                    break
+                depth = 0
+                base_clause = False
+                for value in values[keyword_at + 1 : relative_index]:
+                    if value in {"(", "[", "{"}:
+                        depth += 1
+                    elif value in {")",
+                        "]",
+                        "}",
+                    }:
+                        depth = max(0, depth - 1)
+                    elif value == ":" and depth == 0:
+                        base_clause = True
+                        break
+                if not base_clause:
+                    bindings[index] = False
+                break
+
+        binding_count += sum(bindings.values())
+        invalid_binding |= any(not valid for valid in bindings.values())
+
+    return binding_count == 1 and not invalid_binding
 
 
 def _signature_start(tokens: Sequence[Token], name_index: int) -> int:
@@ -7802,6 +8118,7 @@ class _PathAuditor:
         record_members: Mapping[str, frozenset[str]],
         external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
         trusted_gpu_exec_observer: bool = False,
+        translation_unit_tokens: Sequence[Sequence[Token]] = (),
     ):
         self.path = path
         self.tokens = tokens
@@ -7813,10 +8130,15 @@ class _PathAuditor:
             self.by_name[function.name].append(function)
         self.external_proofs = external_proofs or {}
         self.trusted_gpu_exec_observer = trusted_gpu_exec_observer
+        type_sources = tuple(translation_unit_tokens) or (tokens,)
+        self.status_type_binding_is_canonical = _canonical_status_type_binding(
+            type_sources
+        )
         self.overloaded_operators = frozenset(
-            tokens[index + 1].value
-            for index in range(len(tokens) - 1)
-            if tokens[index].value == "operator"
+            source[index + 1].value
+            for source in type_sources
+            for index in range(len(source) - 1)
+            if source[index].value == "operator"
         )
         self.cache: dict[Function, _Proof] = {}
         self.member_write_position_cache: dict[Function, frozenset[int]] = {}
@@ -7873,6 +8195,15 @@ class _PathAuditor:
                 f"recursive helper cycle through {function.name} at line {function.line}",
                 ("recursive_helper", "review_required"),
             )
+        if function.is_status and not self.status_type_binding_is_canonical:
+            proof = _Proof(
+                False,
+                "pgaccel_status is missing one canonical file-scope enum or "
+                "builtin-integral binding, or is shadowed by another binding",
+                ("ambiguous_status_type", "review_required"),
+            )
+            self.cache[function] = proof
+            return proof
 
         lambda_ranges = _lambda_ranges(
             self.tokens, function, self.forward, self.reverse
@@ -8014,6 +8345,23 @@ class _PathAuditor:
                 return False
             return max(declarations, key=lambda item: (item[0], item[1]))[2]
 
+        def exact_status_local(target_index: int, declaration_left: int) -> bool:
+            """Require the canonical translation-unit status type without shadows."""
+
+            declaration = [
+                token.value
+                for token in self.tokens[declaration_left:target_index]
+            ]
+            return bool(
+                self.status_type_binding_is_canonical
+                and declaration.count("pgaccel_status") == 1
+                and all(
+                    token in {"pgaccel_status", "const", "volatile"}
+                    for token in declaration
+                )
+                and _declaration_kind(self.tokens, target_index, function) is not None
+            )
+
         def gpu_exec_observer_call_is_trusted(call_index: int) -> bool:
             if not self.trusted_gpu_exec_observer:
                 return False
@@ -8072,16 +8420,8 @@ class _PathAuditor:
             target = self.tokens[target_index].value
             if pointer_target and not exact_pointer_local(target, indexed.index):
                 return None
-            if status_target:
-                declaration = lhs_values[:-1]
-                if (
-                    declaration.count("pgaccel_status") != 1
-                    or any(
-                        token not in {"pgaccel_status", "const", "volatile"}
-                        for token in declaration
-                    )
-                ):
-                    return None
+            if status_target and not exact_status_local(target_index, statement_start):
+                return None
             return target, statement_end
 
         def failure_guard_body(
@@ -9278,18 +9618,7 @@ class _PathAuditor:
             ):
                 continue
             target = self.tokens[target_index].value
-            declaration = [
-                token.value
-                for token in self.tokens[statement_start + 1 : target_index]
-            ]
-            if (
-                declaration.count("pgaccel_status") != 1
-                or any(
-                    token not in {"pgaccel_status", "const", "volatile"}
-                    for token in declaration
-                )
-                or _declaration_kind(self.tokens, target_index, function) is None
-            ):
+            if not exact_status_local(target_index, statement_start + 1):
                 continue
 
             guard = statement_end + 1
@@ -10122,6 +10451,7 @@ def _audit_source_literal(
     require_entrypoint: bool = True,
     external_proofs: Mapping[str, tuple[_ExternalProof, ...]] | None = None,
     inherited_record_members: Mapping[str, frozenset[str]] | None = None,
+    inherited_type_token_sources: Sequence[Sequence[Token]] = (),
     trusted_gpu_exec_observer: bool | None = None,
 ) -> FileAudit:
     try:
@@ -10133,11 +10463,19 @@ def _audit_source_literal(
             if trusted_gpu_exec_observer is not None
             else _has_unique_gpu_exec_observer_definition(((tokens, functions),))
         )
-        type_token_sources = [tokens]
-        type_token_sources.extend(
-            lex_cpp(include_source)
-            for include_source in _quoted_include_sources(path, directives)
+        included_type_tokens = (
+            []
+            if inherited_type_token_sources
+            else [
+                lex_cpp(include_source)
+                for include_source in _quoted_include_sources(path, directives)
+            ]
         )
+        type_token_sources = [
+            tokens,
+            *inherited_type_token_sources,
+            *included_type_tokens,
+        ]
         record_members = _record_mutable_pointer_members(type_token_sources)
         if inherited_record_members:
             record_members = {
@@ -10199,6 +10537,7 @@ def _audit_source_literal(
         record_members,
         external_proofs,
         observer_trusted,
+        inherited_type_token_sources,
     )
     entrypoint_audits: list[EntrypointAudit] = []
     for entrypoint in sorted(entrypoints, key=lambda function: function.line):
@@ -10294,29 +10633,49 @@ def audit_source(
 ) -> FileAudit:
     """Audit both literal and compiler-expanded main-file source views."""
 
-    literal = _audit_source_literal(
-        path,
-        source,
-        require_entrypoint=require_entrypoint,
-        external_proofs=external_proofs,
-        trusted_gpu_exec_observer=trusted_gpu_exec_observer,
-    )
     try:
         _, directives = normalize_preprocessor(source)
     except ParseError:
-        return literal
+        return _audit_source_literal(
+            path,
+            source,
+            require_entrypoint=require_entrypoint,
+            external_proofs=external_proofs,
+            trusted_gpu_exec_observer=trusted_gpu_exec_observer,
+        )
     if not any(
         _directive_parts(directive)[0] in {"define", "include"}
         for directive in directives
     ):
-        return literal
+        return _audit_source_literal(
+            path,
+            source,
+            require_entrypoint=require_entrypoint,
+            external_proofs=external_proofs,
+            trusted_gpu_exec_observer=trusted_gpu_exec_observer,
+        )
     try:
-        expanded_source = _compiler_preprocess_source(path, source)
+        (
+            expanded_source,
+            expanded_project_header_sources,
+            expanded_translation_unit_source,
+        ) = _compiler_preprocess_source(path, source)
+        expanded_project_header_tokens = tuple(
+            lex_cpp(include_source)
+            for include_source in expanded_project_header_sources
+        )
+        inherited_type_token_sources = (lex_cpp(expanded_translation_unit_source),)
         inherited_record_members = _record_mutable_pointer_members(
-            [
-                lex_cpp(include_source)
-                for include_source in _quoted_include_sources(path, directives)
-            ]
+            expanded_project_header_tokens
+        )
+        literal = _audit_source_literal(
+            path,
+            source,
+            require_entrypoint=require_entrypoint,
+            external_proofs=external_proofs,
+            inherited_record_members=inherited_record_members,
+            inherited_type_token_sources=inherited_type_token_sources,
+            trusted_gpu_exec_observer=trusted_gpu_exec_observer,
         )
         expanded = _audit_source_literal(
             path,
@@ -10324,9 +10683,17 @@ def audit_source(
             require_entrypoint=require_entrypoint,
             external_proofs=external_proofs,
             inherited_record_members=inherited_record_members,
+            inherited_type_token_sources=inherited_type_token_sources,
             trusted_gpu_exec_observer=trusted_gpu_exec_observer,
         )
     except ParseError as error:
+        literal = _audit_source_literal(
+            path,
+            source,
+            require_entrypoint=require_entrypoint,
+            external_proofs=external_proofs,
+            trusted_gpu_exec_observer=trusted_gpu_exec_observer,
+        )
         detail = str(error)
         entrypoint_audits = tuple(
             dataclasses.replace(
