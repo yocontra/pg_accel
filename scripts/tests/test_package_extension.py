@@ -3,10 +3,13 @@ from __future__ import annotations
 import importlib.util
 import os
 import pathlib
+import platform
+import shutil
 import stat
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -15,6 +18,13 @@ SPEC = importlib.util.spec_from_file_location("package_extension", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 package_extension = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(package_extension)
+INSTALLER_PATH = REPO_ROOT / "scripts" / "install_package.py"
+INSTALLER_SPEC = importlib.util.spec_from_file_location(
+    "install_package", INSTALLER_PATH
+)
+assert INSTALLER_SPEC is not None and INSTALLER_SPEC.loader is not None
+install_package = importlib.util.module_from_spec(INSTALLER_SPEC)
+INSTALLER_SPEC.loader.exec_module(install_package)
 
 
 class PackageExtensionTests(unittest.TestCase):
@@ -39,6 +49,28 @@ class PackageExtensionTests(unittest.TestCase):
                 package_extension.PackageError, "expected exactly one"
             ):
                 package_extension.discover_extension(root, "Linux")
+
+    def test_normalizes_private_pgrx_prefix_to_stable_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory) / "pg_accel-pg18"
+            prefix = root / "Users" / "builder" / "work" / "postgres"
+            library = prefix / "lib" / "pg_accel.dylib"
+            share = prefix / "share" / "extension"
+            library.parent.mkdir(parents=True)
+            share.mkdir(parents=True)
+            library.write_bytes(b"extension")
+            (share / "pg_accel.control").write_text("control", encoding="utf-8")
+            (share / "pg_accel--0.1.0.sql").write_text("sql", encoding="utf-8")
+
+            normalized = package_extension.normalize_package_tree(root, "Darwin")
+            self.assertEqual(normalized, root / "lib" / "pg_accel.dylib")
+            self.assertTrue((root / "share" / "extension" / "pg_accel.control").is_file())
+            relative_parts = {
+                part.casefold()
+                for path in root.rglob("*")
+                for part in path.relative_to(root).parts
+            }
+            self.assertFalse({"users", "home", "runner", "worktrees"} & relative_parts)
 
     def test_private_and_unexpected_absolute_load_paths_fail_closed(self) -> None:
         for value in (
@@ -146,7 +178,7 @@ class PackageExtensionTests(unittest.TestCase):
         self.assertNotIn("release-artifacts/pg_accel-pg*/**", workflow)
         self.assertIn("release-artifacts/pg_accel-pg*/*.tar.gz", workflow)
         helper = MODULE_PATH.read_text(encoding="utf-8")
-        self.assertIn("shutil.rmtree(package_root, ignore_errors=True)", helper)
+        self.assertIn("_remove_generated_path(package_root)", helper)
 
     def test_checksum_manifest_is_sorted_complete_and_fails_when_stale(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -201,7 +233,7 @@ class PackageExtensionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             package = root / "pg_accel-pg18"
-            runtime_bin = package / "prefix" / "lib" / "pg_accel-runtime" / "bin"
+            runtime_bin = package / "lib" / "pg_accel-runtime" / "bin"
             runtime_lib = runtime_bin.parent / "lib"
             runtime_bin.mkdir(parents=True)
             runtime_lib.mkdir()
@@ -234,17 +266,198 @@ class PackageExtensionTests(unittest.TestCase):
             unpacked = extracted / package.name
             self.assertTrue((unpacked / ".acpp-version").is_file())
             unpacked_helper = (
-                unpacked / "prefix" / "lib" / "pg_accel-runtime" / "bin"
+                unpacked / "lib" / "pg_accel-runtime" / "bin"
                 / "acpp-metal-archive-build"
             )
             self.assertTrue(stat.S_IMODE(unpacked_helper.stat().st_mode) & stat.S_IXUSR)
             unpacked_link = (
-                unpacked / "prefix" / "lib" / "pg_accel-runtime" / "lib"
+                unpacked / "lib" / "pg_accel-runtime" / "lib"
                 / "libacpp-rt.so"
             )
             self.assertTrue(unpacked_link.is_symlink())
             self.assertEqual(os.readlink(unpacked_link), "libacpp-rt.so.1")
             package_extension.validate_checksums(unpacked)
+
+            with tarfile.open(archive, "r:gz") as tar:
+                private = {"users", "home", "runner", "worktrees", ".codex"}
+                self.assertFalse(
+                    any(
+                        part.casefold() in private
+                        for member in tar.getmembers()
+                        for part in pathlib.PurePosixPath(member.name).parts
+                    )
+                )
+
+    def test_installer_verifies_and_maps_normalized_payload_through_pg_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            package = root / "pg_accel-pg18"
+            runtime_bin = package / "lib" / "pg_accel-runtime" / "bin"
+            runtime_lib = runtime_bin.parent / "lib"
+            extension_share = package / "share" / "extension"
+            for path in (runtime_bin, runtime_lib, extension_share):
+                path.mkdir(parents=True, exist_ok=True)
+            suffix = ".dylib" if platform.system() == "Darwin" else ".so"
+            extension_name = f"pg_accel{suffix}"
+            (package / "lib" / extension_name).write_bytes(b"extension")
+            helper = runtime_bin / "acpp-metal-archive-build"
+            helper.write_bytes(b"helper")
+            helper.chmod(0o755)
+            (runtime_lib / "libacpp-rt.dylib").write_bytes(b"runtime")
+            (runtime_lib / "libacpp-common.dylib").symlink_to("libacpp-rt.dylib")
+            (extension_share / "pg_accel.control").write_text(
+                "module_pathname = 'pg_accel'\n", encoding="utf-8"
+            )
+            (extension_share / "pg_accel--0.1.0.sql").write_text(
+                "SELECT 1;\n", encoding="utf-8"
+            )
+            for name, content in (
+                (".acpp-version", "pin\n"),
+                ("ARCH", f"{platform.machine().lower()}\n"),
+                ("LICENSE", "license\n"),
+                ("NOTICE", "notice\n"),
+                ("PG_MAJOR", "18\n"),
+                (
+                    "PLATFORM",
+                    f"{'macos' if platform.system() == 'Darwin' else 'linux'}\n",
+                ),
+                ("pg_accel-acpp-provenance.txt", "backend=metal\n"),
+            ):
+                (package / name).write_text(content, encoding="utf-8")
+            shutil.copy2(INSTALLER_PATH, package / "install.py")
+            (package / "install.py").chmod(0o755)
+            package_extension.write_checksums(package)
+
+            pg_config = root / "pg_config"
+            pg_config.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  --version) echo 'PostgreSQL 18.4' ;;\n"
+                "  --pkglibdir) echo '/opt/pg18/lib' ;;\n"
+                "  --sharedir) echo '/opt/pg18/share' ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            pg_config.chmod(0o755)
+            destdir = root / "stage"
+            old_runtime = destdir / "opt" / "pg18" / "lib" / "pg_accel-runtime"
+            old_runtime.mkdir(parents=True)
+            (old_runtime / "librt-backend-omp.stale").write_bytes(b"stale")
+            pkglibdir, share_dir = install_package.install(
+                package, pg_config, destdir
+            )
+            self.assertEqual(
+                pkglibdir, destdir.resolve() / "opt" / "pg18" / "lib"
+            )
+            self.assertEqual(
+                share_dir,
+                destdir.resolve() / "opt" / "pg18" / "share" / "extension",
+            )
+            self.assertEqual((pkglibdir / extension_name).read_bytes(), b"extension")
+            self.assertFalse(
+                (pkglibdir / "pg_accel-runtime" / "librt-backend-omp.stale").exists()
+            )
+            if platform.system() == "Darwin":
+                self.assertTrue(
+                    os.access(
+                        pkglibdir
+                        / "pg_accel-runtime"
+                        / "bin"
+                        / "acpp-metal-archive-build",
+                        os.X_OK,
+                    )
+                )
+            self.assertTrue(
+                (pkglibdir / "pg_accel-runtime" / "lib" / "libacpp-common.dylib").is_symlink()
+            )
+            self.assertTrue((share_dir / "pg_accel--0.1.0.sql").is_file())
+
+            (package / "PG_MAJOR").write_text("19\n", encoding="ascii")
+            package_extension.write_checksums(package)
+            with self.assertRaisesRegex(install_package.InstallError, "requires PostgreSQL"):
+                install_package.install(package, pg_config, destdir)
+
+            (package / "PG_MAJOR").write_text("18\n", encoding="ascii")
+            (extension_share / "pg_accel-evil.sql").write_text(
+                "SELECT 2;\n", encoding="utf-8"
+            )
+            package_extension.write_checksums(package)
+            with self.assertRaisesRegex(install_package.InstallError, "unexpected payload"):
+                install_package.install(package, pg_config, destdir)
+
+    def test_installer_rejects_escaping_and_multiline_pg_config_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            package = root / "package"
+            package.mkdir()
+            (package / "PG_MAJOR").write_text("18\n", encoding="ascii")
+            pg_config = root / "pg_config"
+            pg_config.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  --version) echo 'PostgreSQL 18.4' ;;\n"
+                "  --pkglibdir) echo '/opt/pg18/../../escape' ;;\n"
+                "  --sharedir) echo '/opt/pg18/share' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            pg_config.chmod(0o755)
+            destdir = root / "stage"
+            with self.assertRaisesRegex(install_package.InstallError, "absolute"):
+                install_package.resolve_install_dirs(package, pg_config, destdir)
+            self.assertFalse((root / "escape").exists())
+
+            pg_config.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  --version) echo 'PostgreSQL 18.4' ;;\n"
+                "  --pkglibdir) printf '/opt/pg18/lib\\n/escape\\n' ;;\n"
+                "  --sharedir) echo '/opt/pg18/share' ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(install_package.InstallError, "multiline"):
+                install_package.resolve_install_dirs(package, pg_config, destdir)
+
+    def test_installer_transaction_rolls_back_all_committed_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source_tree = root / "source-runtime"
+            source_tree.mkdir()
+            (source_tree / "new").write_bytes(b"new-runtime")
+            source_file = root / "source-extension"
+            source_file.write_bytes(b"new-extension")
+            destination_tree = root / "dest-runtime"
+            destination_tree.mkdir()
+            (destination_tree / "old").write_bytes(b"old-runtime")
+            destination_file = root / "dest-extension"
+            destination_file.write_bytes(b"old-extension")
+
+            real_replace = os.replace
+            calls = 0
+
+            def fail_fourth_replace(source: object, destination: object) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 4:
+                    raise OSError("synthetic commit failure")
+                real_replace(source, destination)
+
+            with mock.patch.object(
+                install_package.os, "replace", side_effect=fail_fourth_replace
+            ):
+                with self.assertRaisesRegex(OSError, "synthetic commit failure"):
+                    install_package._install_transaction(
+                        [
+                            (source_tree, destination_tree, True),
+                            (source_file, destination_file, False),
+                        ]
+                    )
+            self.assertEqual(
+                (destination_tree / "old").read_bytes(), b"old-runtime"
+            )
+            self.assertEqual(destination_file.read_bytes(), b"old-extension")
 
 
 if __name__ == "__main__":

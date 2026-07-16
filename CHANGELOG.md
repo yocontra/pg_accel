@@ -47,10 +47,11 @@ claim is implied by the entries below.
   environment defaults before creating backends, avoiding the reproduced
   CoreAnalytics crash during lazy Metal initialization while preserving
   explicit operator overrides.
-- Release packages now link the extension to a loader-relative, bundled
-  AdaptiveCpp runtime prefix, validate every Mach-O/ELF load command, and ship
-  a deterministic `SHA256SUMS` manifest. Development and pgrx-test linkage
-  continues to use the repository toolchain prefix.
+- Release packages now use a normalized, installer-mapped PostgreSQL layout,
+  link the extension to a loader-relative bundled AdaptiveCpp runtime, validate
+  every Mach-O/ELF load command, and ship deterministic inner and archive
+  checksums. Development and pgrx-test linkage continues to use the repository
+  toolchain prefix.
 - Resident invalidation now distinguishes benign catalog activity such as
   `ANALYZE` and relation renames from structural changes, DML generations, and
   rewrites that require eviction or refresh.

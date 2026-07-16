@@ -22,6 +22,13 @@ class PackageError(RuntimeError):
     pass
 
 
+def _remove_generated_path(path: pathlib.Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
 def run(command: list[str], *, env: dict[str, str] | None = None) -> str:
     try:
         result = subprocess.run(
@@ -48,6 +55,48 @@ def discover_extension(package_root: pathlib.Path, system: str) -> pathlib.Path:
             f"expected exactly one packaged pg_accel{suffix}, found: {found}"
         )
     return candidates[0]
+
+
+def normalize_package_tree(package_root: pathlib.Path, system: str) -> pathlib.Path:
+    extension = discover_extension(package_root, system)
+    controls = [
+        path
+        for path in package_root.rglob("pg_accel.control")
+        if path.is_file() and not path.is_symlink()
+    ]
+    all_sql_files = [
+        path
+        for path in package_root.rglob("pg_accel*.sql")
+        if path.is_file() and not path.is_symlink()
+    ]
+    sql_name = re.compile(
+        r"pg_accel--\d+\.\d+\.\d+(?:--\d+\.\d+\.\d+)?\.sql"
+    )
+    sql_files = [path for path in all_sql_files if sql_name.fullmatch(path.name)]
+    if len(sql_files) != len(all_sql_files):
+        raise PackageError("pgrx package contains an unexpected pg_accel SQL filename")
+    if len(controls) != 1 or not sql_files:
+        raise PackageError("pgrx package has ambiguous or incomplete extension metadata")
+    if any(path.parent != controls[0].parent for path in sql_files):
+        raise PackageError("pgrx package SQL files do not share the control-file directory")
+
+    temporary = package_root.parent / f".{package_root.name}.normalized-tmp"
+    _remove_generated_path(temporary)
+    library_dir = temporary / "lib"
+    share_dir = temporary / "share" / "extension"
+    library_dir.mkdir(parents=True)
+    share_dir.mkdir(parents=True)
+    shutil.copy2(extension, library_dir / extension.name)
+    shutil.copy2(controls[0], share_dir / controls[0].name)
+    for source in sorted(sql_files):
+        destination = share_dir / source.name
+        if destination.exists():
+            raise PackageError(f"duplicate normalized extension SQL filename: {source.name}")
+        shutil.copy2(source, destination)
+
+    shutil.rmtree(package_root)
+    temporary.rename(package_root)
+    return package_root / "lib" / extension.name
 
 
 def _copy_entry(source: pathlib.Path, destination: pathlib.Path) -> None:
@@ -85,8 +134,8 @@ def bundle_runtime(
 
     runtime = extension.parent / "pg_accel-runtime"
     temporary = extension.parent / ".pg_accel-runtime.tmp"
-    shutil.rmtree(temporary, ignore_errors=True)
-    shutil.rmtree(runtime, ignore_errors=True)
+    _remove_generated_path(temporary)
+    _remove_generated_path(runtime)
     (temporary / "lib").mkdir(parents=True)
 
     for source in _runtime_libraries(acpp_lib, system):
@@ -116,6 +165,8 @@ def bundle_runtime(
 
 
 def _assert_runtime_layout(runtime: pathlib.Path, system: str) -> None:
+    if runtime.is_symlink() or not runtime.is_dir():
+        raise PackageError("packaged runtime must be a real directory")
     suffix = ".dylib" if system == "Darwin" else ".so"
     for stem in ("libacpp-rt", "libacpp-common"):
         if not list((runtime / "lib").glob(f"{stem}{suffix}*")):
@@ -379,10 +430,63 @@ def validate_package(
         "LICENSE",
         "NOTICE",
         ".acpp-version",
+        "ARCH",
+        "PG_MAJOR",
+        "PLATFORM",
+        "install.py",
         "pg_accel-acpp-provenance.txt",
     ):
         if not (package_root / metadata).is_file():
             raise PackageError(f"package metadata is missing: {metadata}")
+    expected_top_level = {
+        ".acpp-version",
+        "ARCH",
+        "LICENSE",
+        "NOTICE",
+        "PG_MAJOR",
+        "PLATFORM",
+        "install.py",
+        "lib",
+        "pg_accel-acpp-provenance.txt",
+        "share",
+    }
+    actual_top_level = {path.name for path in package_root.iterdir()}
+    actual_top_level.discard("SHA256SUMS")
+    if actual_top_level != expected_top_level:
+        raise PackageError("package root is not in normalized release topology")
+    package_major = (package_root / "PG_MAJOR").read_text(encoding="ascii").strip()
+    if package_major not in {"18", "19"} or package_root.name != f"pg_accel-pg{package_major}":
+        raise PackageError("package PG_MAJOR does not match its normalized root")
+    expected_platform = {"Darwin": "macos", "Linux": "linux"}.get(system)
+    package_platform = (package_root / "PLATFORM").read_text(encoding="ascii").strip()
+    package_arch = (package_root / "ARCH").read_text(encoding="ascii").strip()
+    if (
+        expected_platform is None
+        or package_platform != expected_platform
+        or package_arch != platform.machine().lower()
+    ):
+        raise PackageError("package platform/architecture metadata does not match the host")
+    installer = package_root / "install.py"
+    if installer.is_symlink() or not os.access(installer, os.X_OK):
+        raise PackageError("package installer must be a real executable file")
+    if extension.parent != package_root / "lib":
+        raise PackageError("packaged extension is outside normalized lib directory")
+    share_root = package_root / "share"
+    if (package_root / "lib").is_symlink() or share_root.is_symlink():
+        raise PackageError("normalized lib/share directories must not be symlinks")
+    if {path.name for path in share_root.iterdir()} != {"extension"}:
+        raise PackageError("package share directory contains an unexpected payload")
+    extension_share = share_root / "extension"
+    sql_name = re.compile(
+        r"pg_accel--\d+\.\d+\.\d+(?:--\d+\.\d+\.\d+)?\.sql"
+    )
+    share_names = {path.name for path in extension_share.iterdir()}
+    sql_names = {name for name in share_names if sql_name.fullmatch(name)}
+    if "pg_accel.control" not in share_names or not sql_names or share_names != {
+        "pg_accel.control",
+        *sql_names,
+    }:
+        raise PackageError("normalized extension metadata is incomplete")
     _assert_runtime_layout(runtime, system)
     if system == "Darwin":
         validate_macos(extension, runtime)
@@ -439,11 +543,26 @@ def copy_sanitized_provenance(
 
 def _manifest_files(package_root: pathlib.Path) -> list[pathlib.Path]:
     manifest = package_root / "SHA256SUMS"
-    files = sorted(
-        path
-        for path in package_root.rglob("*")
-        if path != manifest and (path.is_file() or path.is_symlink())
-    )
+    files: list[pathlib.Path] = []
+    for path in package_root.rglob("*"):
+        mode = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            continue
+        if stat.S_ISLNK(mode):
+            resolved = path.resolve()
+            if not resolved.is_relative_to(package_root.resolve()) or not resolved.is_file():
+                raise PackageError(
+                    f"unsafe package symlink: {path.relative_to(package_root)}"
+                )
+            files.append(path)
+            continue
+        if not stat.S_ISREG(mode):
+            raise PackageError(
+                f"package contains a special file: {path.relative_to(package_root)}"
+            )
+        if path != manifest:
+            files.append(path)
+    files.sort()
     for path in files:
         relative = path.relative_to(package_root).as_posix()
         if "\n" in relative or "\r" in relative:
@@ -485,7 +604,24 @@ def validate_checksums(package_root: pathlib.Path) -> None:
 
 
 def _archive_paths(package_root: pathlib.Path) -> list[pathlib.Path]:
-    return [package_root, *sorted(package_root.rglob("*"))]
+    if not re.fullmatch(r"pg_accel-pg(18|19)", package_root.name):
+        raise PackageError(f"unsafe normalized package root name: {package_root.name}")
+    paths = [package_root, *sorted(package_root.rglob("*"))]
+    private_components = {
+        ".codex",
+        "home",
+        "runner",
+        "runners",
+        "tmp",
+        "users",
+        "workspace",
+        "worktrees",
+    }
+    for path in paths[1:]:
+        relative = path.relative_to(package_root)
+        if any(part.casefold() in private_components for part in relative.parts):
+            raise PackageError(f"private build path component remains in archive: {relative}")
+    return paths
 
 
 def validate_release_archive(
@@ -609,7 +745,7 @@ def build_package(
         f"pg{args.pg}",
     ]
     package_root = _target_dir(repo_root) / "release" / f"pg_accel-pg{args.pg}"
-    shutil.rmtree(package_root, ignore_errors=True)
+    _remove_generated_path(package_root)
     for stale in package_root.parent.glob(f"pg_accel-pg{args.pg}-*.tar.gz*"):
         if stale.is_file() or stale.is_symlink():
             stale.unlink()
@@ -617,12 +753,24 @@ def build_package(
 
     if not package_root.is_dir():
         raise PackageError(f"cargo pgrx did not create expected package: {package_root}")
+    system = platform.system()
+    normalize_package_tree(package_root, system)
     for metadata in ("LICENSE", "NOTICE", ".acpp-version"):
         shutil.copy2(repo_root / metadata, package_root / metadata)
+    (package_root / "PG_MAJOR").write_text(f"{args.pg}\n", encoding="ascii")
+    platform_name = {"Darwin": "macos", "Linux": "linux"}.get(system)
+    if platform_name is None:
+        raise PackageError(f"unsupported package platform: {system}")
+    (package_root / "PLATFORM").write_text(f"{platform_name}\n", encoding="ascii")
+    (package_root / "ARCH").write_text(
+        f"{platform.machine().lower()}\n", encoding="ascii"
+    )
+    installer = package_root / "install.py"
+    shutil.copy2(repo_root / "scripts" / "install_package.py", installer)
+    installer.chmod(0o755)
     required_sha = (repo_root / ".acpp-version").read_text(encoding="utf-8").strip()
     copy_sanitized_provenance(acpp_prefix, package_root, required_sha)
 
-    system = platform.system()
     extension = discover_extension(package_root, system)
     runtime = bundle_runtime(extension, acpp_prefix, system)
     validate_package(package_root, extension, runtime, system)
