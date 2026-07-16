@@ -2396,15 +2396,36 @@ fn operation_cache_gate_required(name: &str) -> bool {
     )
 }
 
-/// Verifies the h3_/raster_ cache-mode-both requirement. Requires both that
-/// the methodology reports `cache_mode == "both"` AND that this row actually
-/// carries a populated `warm_summary` — i.e. real warm-only medians were
-/// computed for this row, not merely that the run was globally configured
-/// for cache-mode both. A methodology string alone does not prove any given
-/// row was measured under both cache states.
+/// Verifies the h3_/raster_ cache-mode-both requirement. The methodology label
+/// is not evidence by itself: the row must carry non-empty warm and cold
+/// summaries, and every cold iteration must prove that both measurements in
+/// the pair completed their requested OS page-cache purge.
 fn operation_cache_gate_verified(w: &WorkloadResult, cache_mode: &str) -> bool {
-    !operation_cache_gate_required(&w.name)
-        || (cache_mode.trim().eq_ignore_ascii_case("both") && w.warm_summary.is_some())
+    if !operation_cache_gate_required(&w.name) {
+        return true;
+    }
+
+    let Some(warm) = &w.warm_summary else {
+        return false;
+    };
+    let Some(cold) = &w.cold_summary else {
+        return false;
+    };
+    let cold_iterations = w
+        .iterations
+        .iter()
+        .filter(|iteration| iteration.cache_state == CacheState::Cold)
+        .collect::<Vec<_>>();
+
+    cache_mode.trim().eq_ignore_ascii_case("both")
+        && warm.cache_state == CacheState::Warm
+        && warm.n > 0
+        && cold.cache_state == CacheState::Cold
+        && cold.n > 0
+        && cold_iterations.len() == cold.n
+        && cold_iterations
+            .iter()
+            .all(|iteration| iteration.cache_purge == CachePurgeState::Completed)
 }
 
 fn no_dispatch_audit_action(w: &WorkloadResult) -> &'static str {
@@ -5428,6 +5449,24 @@ mod tests {
         }
     }
 
+    fn with_cold_cache_evidence(
+        mut workload: WorkloadResult,
+        purge: CachePurgeState,
+    ) -> WorkloadResult {
+        let cold_iterations = (0..5)
+            .map(|_| IterationResult {
+                accel_ms: 20.0,
+                parallel_ms: 40.0,
+                cache_purge: purge,
+                cache_state: CacheState::Cold,
+            })
+            .collect::<Vec<_>>();
+        workload.cold_summary =
+            CacheModeSummary::from_iterations(CacheState::Cold, &cold_iterations);
+        workload.iterations.extend(cold_iterations);
+        workload
+    }
+
     /// `warm_speedup_for_gate` (and therefore `gpu_winner_evidence_verified`)
     /// must read `WorkloadResult::warm_summary` directly rather than the flat
     /// `speedup_median_vs_parallel`. Plant a flat speedup that would FAIL a
@@ -5482,20 +5521,37 @@ mod tests {
         ));
     }
 
-    /// The h3_/raster_ cache-mode-both gate must require a populated
-    /// `warm_summary` on the row itself, not merely a `cache_mode == "both"`
-    /// methodology string. A degenerate row (e.g. every iteration was
-    /// classified Cold, or the row was hand-built without a warm subsample)
-    /// must not launder a global "both" config into a false per-row pass.
+    /// The h3_/raster_ cache-mode-both gate must require populated warm/cold
+    /// summaries and successful per-iteration purge proof, not merely a global
+    /// `cache_mode == "both"` methodology string.
     #[test]
-    fn test_operation_cache_gate_verified_requires_row_level_warm_summary() {
+    fn test_operation_cache_gate_verified_requires_complete_successful_cache_evidence() {
         let mut w = mock_workload_result("h3_bulk", 1_000_000, 10.0, 50.0);
         w.category = "gpu_h3".to_owned();
         assert!(
             w.warm_summary.is_some(),
             "sanity: mock_workload_result's all-Warm iterations must populate warm_summary"
         );
-        assert!(operation_cache_gate_verified(&w, "both"));
+        assert!(w.cold_summary.is_none());
+        assert!(
+            !operation_cache_gate_verified(&w, "both"),
+            "a warm summary and methodology label must not impersonate cold evidence"
+        );
+
+        let verified = with_cold_cache_evidence(w.clone(), CachePurgeState::Completed);
+        assert!(operation_cache_gate_verified(&verified, "both"));
+
+        for purge in [
+            CachePurgeState::NotRequested,
+            CachePurgeState::Unavailable,
+            CachePurgeState::Failed,
+        ] {
+            let unproven = with_cold_cache_evidence(w.clone(), purge);
+            assert!(
+                !operation_cache_gate_verified(&unproven, "both"),
+                "cold evidence with purge state {purge:?} must fail closed"
+            );
+        }
 
         w.warm_summary = None;
         assert!(
@@ -5505,8 +5561,7 @@ mod tests {
 
         // And the existing requirement still holds: cache_mode must actually
         // be "both", regardless of warm_summary.
-        w.warm_summary = Some(mock_cache_mode_summary(CacheState::Warm, 2.0));
-        assert!(!operation_cache_gate_verified(&w, "warm"));
+        assert!(!operation_cache_gate_verified(&verified, "warm"));
     }
 
     /// `native_decline_reason_verified` must read only
@@ -6572,8 +6627,17 @@ mod tests {
         );
         assert!(failures[0].detail.contains("cache-mode both"));
 
-        let cache_both_report = with_cache_mode(mock_report(vec![workload]), "both");
+        let verified_workload =
+            with_cold_cache_evidence(workload.clone(), CachePurgeState::Completed);
+        let cache_both_report = with_cache_mode(mock_report(vec![verified_workload]), "both");
         assert!(cache_both_report.evaluate_benchmark_ship_gate().is_empty());
+
+        let unproven = with_cold_cache_evidence(workload, CachePurgeState::Failed);
+        let unproven_report = with_cache_mode(mock_report(vec![unproven]), "both");
+        let failures = unproven_report.evaluate_benchmark_ship_gate();
+        assert!(failures.iter().any(|failure| {
+            failure.kind == BenchmarkShipGateFailureKind::ExpectedWinnerMissingCacheEvidence
+        }));
     }
 
     #[test]

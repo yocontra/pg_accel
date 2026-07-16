@@ -42,6 +42,86 @@ fn starts_with_numeric_cost_literal(value: &str) -> bool {
         .starts_with(|ch: char| ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | '\''))
 }
 
+fn is_sql_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn ascii_keyword_end(source: &[u8], start: usize, keyword: &[u8]) -> Option<usize> {
+    let end = start.checked_add(keyword.len())?;
+    let candidate = source.get(start..end)?;
+    if (start > 0 && is_sql_identifier_byte(source[start - 1]))
+        || source
+            .get(end)
+            .is_some_and(|byte| is_sql_identifier_byte(*byte))
+        || !candidate.eq_ignore_ascii_case(keyword)
+    {
+        return None;
+    }
+    Some(end)
+}
+
+fn skip_ascii_whitespace(source: &[u8], mut cursor: usize) -> usize {
+    while source.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    cursor
+}
+
+/// Return the source-line index of every numeric SQL `SET` pin for the cost
+/// multiplier. PostgreSQL accepts both `=` and `TO`, case-insensitively, with
+/// arbitrary whitespace (including newlines), so the audit must recognize the
+/// same syntax rather than one preferred rendering.
+fn numeric_cost_pin_lines(source: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
+    let mut matches = Vec::new();
+
+    for start in 0..bytes.len() {
+        let Some(mut cursor) = ascii_keyword_end(bytes, start, b"set") else {
+            continue;
+        };
+        cursor = skip_ascii_whitespace(bytes, cursor);
+
+        if let Some(end) = ascii_keyword_end(bytes, cursor, b"local")
+            .or_else(|| ascii_keyword_end(bytes, cursor, b"session"))
+        {
+            cursor = skip_ascii_whitespace(bytes, end);
+        }
+
+        let Some(end) = ascii_keyword_end(bytes, cursor, b"pg_accel") else {
+            continue;
+        };
+        cursor = skip_ascii_whitespace(bytes, end);
+        if bytes.get(cursor) != Some(&b'.') {
+            continue;
+        }
+        cursor = skip_ascii_whitespace(bytes, cursor + 1);
+
+        let Some(end) = ascii_keyword_end(bytes, cursor, b"cost_multiplier") else {
+            continue;
+        };
+        cursor = skip_ascii_whitespace(bytes, end);
+        if bytes.get(cursor) == Some(&b'=') {
+            cursor += 1;
+        } else if let Some(end) = ascii_keyword_end(bytes, cursor, b"to") {
+            cursor = end;
+        } else {
+            continue;
+        }
+        cursor = skip_ascii_whitespace(bytes, cursor);
+
+        if starts_with_numeric_cost_literal(&source[cursor..]) {
+            matches.push(
+                source[..start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count(),
+            );
+        }
+    }
+
+    matches
+}
+
 fn direct_cost_override_allowed(name: &str, lines: &[&str], line_index: usize, line: &str) -> bool {
     name == DIRECT_COST_OVERRIDE_SOURCE
         && line.trim() == numeric_cost_source_line("0.1")
@@ -72,26 +152,15 @@ impl NumericCostPinAudit {
 }
 
 fn audit_numeric_cost_pins(name: &str, source: &str) -> NumericCostPinAudit {
-    let numeric_cost_prefixes = [
-        ["SET pg_accel.", "cost_multiplier = "].concat(),
-        ["SET LOCAL pg_accel.", "cost_multiplier = "].concat(),
-    ];
     let lines = source.lines().collect::<Vec<_>>();
     let mut approved_lines = Vec::new();
     let mut rejected_lines = Vec::new();
-    for (line_index, line) in lines.iter().enumerate() {
-        for prefix in &numeric_cost_prefixes {
-            let Some((_, value)) = line.split_once(prefix) else {
-                continue;
-            };
-            if !starts_with_numeric_cost_literal(value) {
-                continue;
-            }
-            if direct_cost_override_allowed(name, &lines, line_index, line) {
-                approved_lines.push(line_index);
-            } else {
-                rejected_lines.push(line_index);
-            }
+    for line_index in numeric_cost_pin_lines(source) {
+        let line = lines.get(line_index).copied().unwrap_or_default();
+        if direct_cost_override_allowed(name, &lines, line_index, line) {
+            approved_lines.push(line_index);
+        } else {
+            rejected_lines.push(line_index);
         }
     }
     NumericCostPinAudit {
@@ -275,6 +344,40 @@ fn admission_audit_rejects_unmarked_copied_and_changed_numeric_cost_pins() {
             audit_numeric_cost_pins(DIRECT_COST_OVERRIDE_SOURCE, &changed_value).rejected_lines,
             vec![2],
             "changed numeric literal {value} must not inherit the exception"
+        );
+    }
+
+    let alternate_spellings = [
+        [
+            "Spi::run(\"",
+            "set",
+            " local pg_accel.cost_multiplier to 0.1\")",
+        ]
+        .concat(),
+        [
+            "Spi::run(\"",
+            "SeT",
+            " SESSION pg_accel.cost_multiplier = 0.1\")",
+        ]
+        .concat(),
+        [
+            "Spi::run(\"",
+            "SET",
+            "\tLOCAL\tpg_accel . cost_multiplier\tTO\t0.1\")",
+        ]
+        .concat(),
+        [
+            "Spi::run(\"",
+            "SET",
+            " LOCAL pg_accel.cost_multiplier\nTO 0.1\")",
+        ]
+        .concat(),
+    ];
+    for spelling in alternate_spellings {
+        assert_eq!(
+            audit_numeric_cost_pins("plan_shape_test.rs", &spelling).rejected_lines,
+            vec![0],
+            "valid PostgreSQL SET spelling must not bypass the numeric cost audit: {spelling:?}"
         );
     }
 }
