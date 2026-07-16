@@ -51,6 +51,8 @@ constexpr size_t kPublishEmitted =
 constexpr size_t kPublishSelected = kPublishEmitted + 1;
 constexpr size_t kPublishUncertain = kPublishSelected + 1;
 constexpr size_t kPublishCommandCount = kPublishUncertain + 1;
+static_assert(kPublishCommandCount <= 64);
+constexpr uint64_t publish_bit(size_t slot) { return UINT64_C(1) << slot; }
 constexpr uint16_t kOpEq = PGACCEL_EXPR_OP_EQ;
 constexpr uint16_t kOpNe = PGACCEL_EXPR_OP_NE;
 constexpr uint16_t kOpLt = PGACCEL_EXPR_OP_LT;
@@ -2237,8 +2239,8 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
 }
 
 void bind_publish_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& layout,
-                         void* const scratch, const pgaccel_grouped_agg_out* out,
-                         const int32_t* detail, DevicePublishParams* params) {
+                         void* const scratch, uint64_t output_mask,
+                         DevicePublishParams* params) {
   *params = {};
   params->group_capacity = desc.group_capacity;
   params->execution_flags = desc.execution_flags;
@@ -2250,6 +2252,25 @@ void bind_publish_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLa
   params->source_offsets.completion = layout.completion;
   params->source_offsets.active = layout.active;
   params->source_offsets.group_codes = layout.staged_group_codes;
+  params->output.detail = (output_mask & publish_bit(kPublishDetail)) != 0;
+  params->output.active_groups = (output_mask & publish_bit(kPublishActive)) != 0;
+  params->output.group_codes = (output_mask & publish_bit(kPublishGroupCodes)) != 0;
+  params->output.emitted = (output_mask & publish_bit(kPublishEmitted)) != 0;
+  params->output.selected = (output_mask & publish_bit(kPublishSelected)) != 0;
+  params->output.uncertain = (output_mask & publish_bit(kPublishUncertain)) != 0;
+  for (size_t key = 0; key < PGACCEL_GROUPED_AGG_MAX_KEYS; ++key) {
+    params->output.key_values[key] =
+        (output_mask & publish_bit(kPublishKeys + key * kPublishKeyLaneCount)) != 0;
+    params->output.key_nulls[key] =
+        (output_mask & publish_bit(kPublishKeys + key * kPublishKeyLaneCount + 1)) != 0;
+  }
+  for (size_t measure = 0; measure < PGACCEL_GROUPED_AGG_MAX_MEASURES; ++measure) {
+    for (size_t lane = 0; lane < kPublishMeasureLaneCount; ++lane) {
+      params->output.measure_lanes[measure][lane] =
+          (output_mask &
+           publish_bit(kPublishMeasures + measure * kPublishMeasureLaneCount + lane)) != 0;
+    }
+  }
   for (size_t key = 0; key < desc.key_count; ++key) {
     params->key_types[key] = materialized_key_type(desc, desc.keys[key]);
     params->source_offsets.key_values[key] = layout.staged_key_values[key];
@@ -2268,31 +2289,6 @@ void bind_publish_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLa
     offsets[6] = ml.rhs_sum;
     offsets[7] = ml.rhs_count;
     offsets[8] = ml.rhs_nonnull;
-  }
-  params->output.detail = detail != nullptr;
-  if ((desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) == 0)
-    return;
-  params->output.group_codes = out->group_codes != nullptr;
-  params->output.active_groups = out->active_groups != nullptr;
-  params->output.emitted = true;
-  params->output.selected = true;
-  params->output.uncertain = true;
-  for (size_t key = 0; key < PGACCEL_GROUPED_AGG_MAX_KEYS; ++key) {
-    params->output.key_values[key] = out->keys[key].values != nullptr;
-    params->output.key_nulls[key] = out->keys[key].nulls != nullptr;
-  }
-  for (size_t measure = 0; measure < PGACCEL_GROUPED_AGG_MAX_MEASURES; ++measure) {
-    uint8_t* lanes = params->output.measure_lanes[measure];
-    const pgaccel_grouped_agg_measure_out& measure_output = out->measures[measure];
-    lanes[0] = measure_output.sum != nullptr;
-    lanes[1] = measure_output.min != nullptr;
-    lanes[2] = measure_output.max != nullptr;
-    lanes[3] = measure_output.sumsq != nullptr;
-    lanes[4] = measure_output.count != nullptr;
-    lanes[5] = measure_output.nonnull_count != nullptr;
-    lanes[6] = measure_output.rhs_sum != nullptr;
-    lanes[7] = measure_output.rhs_count != nullptr;
-    lanes[8] = measure_output.rhs_nonnull_count != nullptr;
   }
 }
 
@@ -2645,61 +2641,13 @@ class ScratchOwner {
   void* pointer_ = nullptr;
 };
 
-pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
-                                          pgaccel_grouped_agg_out* out, int32_t* detail,
-                                          void* const device_workspace,
-                                          const WorkspaceLayout& layout) {
-  size_t* const group_codes_output = out->group_codes;
-  uint8_t* const active_groups_output = out->active_groups;
-  void* const key0_values_output = out->keys[0].values;
-  uint8_t* const key0_nulls_output = out->keys[0].nulls;
-  void* const key1_values_output = out->keys[1].values;
-  uint8_t* const key1_nulls_output = out->keys[1].nulls;
-  void* const key2_values_output = out->keys[2].values;
-  uint8_t* const key2_nulls_output = out->keys[2].nulls;
-  void* const measure0_sum_output = out->measures[0].sum;
-  void* const measure0_min_output = out->measures[0].min;
-  void* const measure0_max_output = out->measures[0].max;
-  void* const measure0_sumsq_output = out->measures[0].sumsq;
-  uint64_t* const measure0_count_output = out->measures[0].count;
-  uint64_t* const measure0_nonnull_output = out->measures[0].nonnull_count;
-  void* const measure0_rhs_sum_output = out->measures[0].rhs_sum;
-  uint64_t* const measure0_rhs_count_output = out->measures[0].rhs_count;
-  uint64_t* const measure0_rhs_nonnull_output = out->measures[0].rhs_nonnull_count;
-  void* const measure1_sum_output = out->measures[1].sum;
-  void* const measure1_min_output = out->measures[1].min;
-  void* const measure1_max_output = out->measures[1].max;
-  void* const measure1_sumsq_output = out->measures[1].sumsq;
-  uint64_t* const measure1_count_output = out->measures[1].count;
-  uint64_t* const measure1_nonnull_output = out->measures[1].nonnull_count;
-  void* const measure1_rhs_sum_output = out->measures[1].rhs_sum;
-  uint64_t* const measure1_rhs_count_output = out->measures[1].rhs_count;
-  uint64_t* const measure1_rhs_nonnull_output = out->measures[1].rhs_nonnull_count;
-  void* const measure2_sum_output = out->measures[2].sum;
-  void* const measure2_min_output = out->measures[2].min;
-  void* const measure2_max_output = out->measures[2].max;
-  void* const measure2_sumsq_output = out->measures[2].sumsq;
-  uint64_t* const measure2_count_output = out->measures[2].count;
-  uint64_t* const measure2_nonnull_output = out->measures[2].nonnull_count;
-  void* const measure2_rhs_sum_output = out->measures[2].rhs_sum;
-  uint64_t* const measure2_rhs_count_output = out->measures[2].rhs_count;
-  uint64_t* const measure2_rhs_nonnull_output = out->measures[2].rhs_nonnull_count;
-  void* const measure3_sum_output = out->measures[3].sum;
-  void* const measure3_min_output = out->measures[3].min;
-  void* const measure3_max_output = out->measures[3].max;
-  void* const measure3_sumsq_output = out->measures[3].sumsq;
-  uint64_t* const measure3_count_output = out->measures[3].count;
-  uint64_t* const measure3_nonnull_output = out->measures[3].nonnull_count;
-  void* const measure3_rhs_sum_output = out->measures[3].rhs_sum;
-  uint64_t* const measure3_rhs_count_output = out->measures[3].rhs_count;
-  uint64_t* const measure3_rhs_nonnull_output = out->measures[3].rhs_nonnull_count;
-  const bool publish_outputs =
-      (desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
-
+void launch_grouped_agg_device(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
+                               uint64_t output_mask, void* const device_workspace,
+                               DeviceCompletion* completion_output, const WorkspaceLayout& layout) {
   KernelParams host_params;
   bind_params(desc, layout, device_workspace, &host_params);
   DevicePublishParams host_publish_params;
-  bind_publish_params(desc, layout, device_workspace, out, detail, &host_publish_params);
+  bind_publish_params(desc, layout, device_workspace, output_mask, &host_publish_params);
   auto* device_params =
       reinterpret_cast<KernelParams*>(static_cast<uint8_t*>(device_workspace) + layout.params);
   auto* device_publish_params = reinterpret_cast<DevicePublishParams*>(
@@ -2755,8 +2703,145 @@ pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grou
   }
   queue.wait_and_throw();
   queue.single_task<GroupedAggCompletionKernel>(
-      [=]() { *device_publish_params->completion = build_completion(device_publish_params); });
+      [=]() { *completion_output = build_completion(device_publish_params); });
   queue.wait_and_throw();
+}
+
+pgaccel_status execute_grouped_agg_finalize(sycl::queue& queue,
+                                            const pgaccel_grouped_agg_desc& desc,
+                                            pgaccel_grouped_agg_out* out, int32_t* detail,
+                                            void* const device_workspace,
+                                            const WorkspaceLayout& layout) {
+  size_t* const group_codes_output = out->group_codes;
+  uint8_t* const active_groups_output = out->active_groups;
+  void* const key0_values_output = out->keys[0].values;
+  uint8_t* const key0_nulls_output = out->keys[0].nulls;
+  void* const key1_values_output = out->keys[1].values;
+  uint8_t* const key1_nulls_output = out->keys[1].nulls;
+  void* const key2_values_output = out->keys[2].values;
+  uint8_t* const key2_nulls_output = out->keys[2].nulls;
+  void* const measure0_sum_output = out->measures[0].sum;
+  void* const measure0_min_output = out->measures[0].min;
+  void* const measure0_max_output = out->measures[0].max;
+  void* const measure0_sumsq_output = out->measures[0].sumsq;
+  uint64_t* const measure0_count_output = out->measures[0].count;
+  uint64_t* const measure0_nonnull_output = out->measures[0].nonnull_count;
+  void* const measure0_rhs_sum_output = out->measures[0].rhs_sum;
+  uint64_t* const measure0_rhs_count_output = out->measures[0].rhs_count;
+  uint64_t* const measure0_rhs_nonnull_output = out->measures[0].rhs_nonnull_count;
+  void* const measure1_sum_output = out->measures[1].sum;
+  void* const measure1_min_output = out->measures[1].min;
+  void* const measure1_max_output = out->measures[1].max;
+  void* const measure1_sumsq_output = out->measures[1].sumsq;
+  uint64_t* const measure1_count_output = out->measures[1].count;
+  uint64_t* const measure1_nonnull_output = out->measures[1].nonnull_count;
+  void* const measure1_rhs_sum_output = out->measures[1].rhs_sum;
+  uint64_t* const measure1_rhs_count_output = out->measures[1].rhs_count;
+  uint64_t* const measure1_rhs_nonnull_output = out->measures[1].rhs_nonnull_count;
+  void* const measure2_sum_output = out->measures[2].sum;
+  void* const measure2_min_output = out->measures[2].min;
+  void* const measure2_max_output = out->measures[2].max;
+  void* const measure2_sumsq_output = out->measures[2].sumsq;
+  uint64_t* const measure2_count_output = out->measures[2].count;
+  uint64_t* const measure2_nonnull_output = out->measures[2].nonnull_count;
+  void* const measure2_rhs_sum_output = out->measures[2].rhs_sum;
+  uint64_t* const measure2_rhs_count_output = out->measures[2].rhs_count;
+  uint64_t* const measure2_rhs_nonnull_output = out->measures[2].rhs_nonnull_count;
+  void* const measure3_sum_output = out->measures[3].sum;
+  void* const measure3_min_output = out->measures[3].min;
+  void* const measure3_max_output = out->measures[3].max;
+  void* const measure3_sumsq_output = out->measures[3].sumsq;
+  uint64_t* const measure3_count_output = out->measures[3].count;
+  uint64_t* const measure3_nonnull_output = out->measures[3].nonnull_count;
+  void* const measure3_rhs_sum_output = out->measures[3].rhs_sum;
+  uint64_t* const measure3_rhs_count_output = out->measures[3].rhs_count;
+  uint64_t* const measure3_rhs_nonnull_output = out->measures[3].rhs_nonnull_count;
+
+  const uint64_t output_mask =
+      publish_bit(kPublishDetail) | publish_bit(kPublishEmitted) | publish_bit(kPublishSelected) |
+      publish_bit(kPublishUncertain) |
+      publish_bit(kPublishActive) * static_cast<uint64_t>(active_groups_output != nullptr) |
+      publish_bit(kPublishGroupCodes) * static_cast<uint64_t>(group_codes_output != nullptr) |
+      publish_bit(kPublishKeys) * static_cast<uint64_t>(key0_values_output != nullptr) |
+      publish_bit(kPublishKeys + 1) * static_cast<uint64_t>(key0_nulls_output != nullptr) |
+      publish_bit(kPublishKeys + kPublishKeyLaneCount) *
+          static_cast<uint64_t>(key1_values_output != nullptr) |
+      publish_bit(kPublishKeys + kPublishKeyLaneCount + 1) *
+          static_cast<uint64_t>(key1_nulls_output != nullptr) |
+      publish_bit(kPublishKeys + 2 * kPublishKeyLaneCount) *
+          static_cast<uint64_t>(key2_values_output != nullptr) |
+      publish_bit(kPublishKeys + 2 * kPublishKeyLaneCount + 1) *
+          static_cast<uint64_t>(key2_nulls_output != nullptr) |
+      publish_bit(kPublishMeasures) * static_cast<uint64_t>(measure0_sum_output != nullptr) |
+      publish_bit(kPublishMeasures + 1) * static_cast<uint64_t>(measure0_min_output != nullptr) |
+      publish_bit(kPublishMeasures + 2) * static_cast<uint64_t>(measure0_max_output != nullptr) |
+      publish_bit(kPublishMeasures + 3) * static_cast<uint64_t>(measure0_sumsq_output != nullptr) |
+      publish_bit(kPublishMeasures + 4) * static_cast<uint64_t>(measure0_count_output != nullptr) |
+      publish_bit(kPublishMeasures + 5) *
+          static_cast<uint64_t>(measure0_nonnull_output != nullptr) |
+      publish_bit(kPublishMeasures + 6) *
+          static_cast<uint64_t>(measure0_rhs_sum_output != nullptr) |
+      publish_bit(kPublishMeasures + 7) *
+          static_cast<uint64_t>(measure0_rhs_count_output != nullptr) |
+      publish_bit(kPublishMeasures + 8) *
+          static_cast<uint64_t>(measure0_rhs_nonnull_output != nullptr) |
+      publish_bit(kPublishMeasures + 1 * kPublishMeasureLaneCount) *
+          static_cast<uint64_t>(measure1_sum_output != nullptr) |
+      publish_bit(kPublishMeasures + 1 * kPublishMeasureLaneCount + 1) *
+          static_cast<uint64_t>(measure1_min_output != nullptr) |
+      publish_bit(kPublishMeasures + 1 * kPublishMeasureLaneCount + 2) *
+          static_cast<uint64_t>(measure1_max_output != nullptr) |
+      publish_bit(kPublishMeasures + 1 * kPublishMeasureLaneCount + 3) *
+          static_cast<uint64_t>(measure1_sumsq_output != nullptr) |
+      publish_bit(kPublishMeasures + 1 * kPublishMeasureLaneCount + 4) *
+          static_cast<uint64_t>(measure1_count_output != nullptr) |
+      publish_bit(kPublishMeasures + 1 * kPublishMeasureLaneCount + 5) *
+          static_cast<uint64_t>(measure1_nonnull_output != nullptr) |
+      publish_bit(kPublishMeasures + 1 * kPublishMeasureLaneCount + 6) *
+          static_cast<uint64_t>(measure1_rhs_sum_output != nullptr) |
+      publish_bit(kPublishMeasures + 1 * kPublishMeasureLaneCount + 7) *
+          static_cast<uint64_t>(measure1_rhs_count_output != nullptr) |
+      publish_bit(kPublishMeasures + 1 * kPublishMeasureLaneCount + 8) *
+          static_cast<uint64_t>(measure1_rhs_nonnull_output != nullptr) |
+      publish_bit(kPublishMeasures + 2 * kPublishMeasureLaneCount) *
+          static_cast<uint64_t>(measure2_sum_output != nullptr) |
+      publish_bit(kPublishMeasures + 2 * kPublishMeasureLaneCount + 1) *
+          static_cast<uint64_t>(measure2_min_output != nullptr) |
+      publish_bit(kPublishMeasures + 2 * kPublishMeasureLaneCount + 2) *
+          static_cast<uint64_t>(measure2_max_output != nullptr) |
+      publish_bit(kPublishMeasures + 2 * kPublishMeasureLaneCount + 3) *
+          static_cast<uint64_t>(measure2_sumsq_output != nullptr) |
+      publish_bit(kPublishMeasures + 2 * kPublishMeasureLaneCount + 4) *
+          static_cast<uint64_t>(measure2_count_output != nullptr) |
+      publish_bit(kPublishMeasures + 2 * kPublishMeasureLaneCount + 5) *
+          static_cast<uint64_t>(measure2_nonnull_output != nullptr) |
+      publish_bit(kPublishMeasures + 2 * kPublishMeasureLaneCount + 6) *
+          static_cast<uint64_t>(measure2_rhs_sum_output != nullptr) |
+      publish_bit(kPublishMeasures + 2 * kPublishMeasureLaneCount + 7) *
+          static_cast<uint64_t>(measure2_rhs_count_output != nullptr) |
+      publish_bit(kPublishMeasures + 2 * kPublishMeasureLaneCount + 8) *
+          static_cast<uint64_t>(measure2_rhs_nonnull_output != nullptr) |
+      publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount) *
+          static_cast<uint64_t>(measure3_sum_output != nullptr) |
+      publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 1) *
+          static_cast<uint64_t>(measure3_min_output != nullptr) |
+      publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 2) *
+          static_cast<uint64_t>(measure3_max_output != nullptr) |
+      publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 3) *
+          static_cast<uint64_t>(measure3_sumsq_output != nullptr) |
+      publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 4) *
+          static_cast<uint64_t>(measure3_count_output != nullptr) |
+      publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 5) *
+          static_cast<uint64_t>(measure3_nonnull_output != nullptr) |
+      publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 6) *
+          static_cast<uint64_t>(measure3_rhs_sum_output != nullptr) |
+      publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 7) *
+          static_cast<uint64_t>(measure3_rhs_count_output != nullptr) |
+      publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 8) *
+          static_cast<uint64_t>(measure3_rhs_nonnull_output != nullptr);
+  auto* const device_completion = reinterpret_cast<DeviceCompletion*>(
+      static_cast<uint8_t*>(device_workspace) + layout.completion);
+  launch_grouped_agg_device(queue, desc, output_mask, device_workspace, device_completion, layout);
 
   const auto* const workspace_bytes = static_cast<const uint8_t*>(device_workspace);
   DeviceCompletion completion{};
@@ -2766,7 +2851,7 @@ pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grou
 
   queue.memcpy(detail, workspace_bytes + completion.commands[kPublishDetail].source_offset,
                sizeof(completion.detail));
-  if (publish_outputs) {
+  {
     {
       const DeviceCopyCommand& command = completion.commands[kPublishActive];
       if (command.bytes != 0 && active_groups_output != nullptr)
@@ -3074,6 +3159,27 @@ pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grou
   return static_cast<pgaccel_status>(completion.status);
 }
 
+pgaccel_status execute_grouped_agg_accumulate(sycl::queue& queue,
+                                              const pgaccel_grouped_agg_desc& desc,
+                                              int32_t* detail, void* const device_workspace,
+                                              const WorkspaceLayout& layout) {
+  auto* const device_completion = reinterpret_cast<DeviceCompletion*>(
+      static_cast<uint8_t*>(device_workspace) + layout.completion);
+  launch_grouped_agg_device(queue, desc, publish_bit(kPublishDetail), device_workspace,
+                            device_completion, layout);
+
+  const auto* const workspace_bytes = static_cast<const uint8_t*>(device_workspace);
+  DeviceCompletion completion{};
+  queue.memcpy(&completion, workspace_bytes + layout.completion, sizeof(completion))
+      .wait_and_throw();
+  pgaccel_record_gpu_exec();
+
+  queue.memcpy(detail, workspace_bytes + completion.commands[kPublishDetail].source_offset,
+               sizeof(completion.detail));
+  queue.wait_and_throw();
+  return static_cast<pgaccel_status>(completion.status);
+}
+
 }  // namespace
 
 extern "C" pgaccel_status
@@ -3112,12 +3218,18 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
     return PGACCEL_UNSUPPORTED;
   }
   const pgaccel_grouped_agg_desc descriptor_contract = *desc;
-  if (!validate_scratch_shape(descriptor_contract, layout)) {
+  void* const scratch_output = desc->scratch;
+  if (scratch_output != descriptor_contract.scratch ||
+      !validate_scratch_shape(descriptor_contract, layout)) {
     *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
     return PGACCEL_ERROR;
   }
   const bool finalize =
       (descriptor_contract.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
+  if (!finalize && scratch_output == nullptr) {
+    *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
+    return PGACCEL_ERROR;
+  }
   pgaccel_grouped_agg_out output_contract{};
   if (finalize) {
     if (!validate_out(descriptor_contract, out)) {
@@ -3129,9 +3241,12 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
       *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
       return PGACCEL_ERROR;
     }
-  } else if (out != nullptr) {
-    *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
-    return PGACCEL_ERROR;
+  } else {
+    if (out != nullptr ||
+        !validate_aliases(descriptor_contract, output_contract, desc, &output_contract, detail)) {
+      *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
+      return PGACCEL_ERROR;
+    }
   }
   try {
     sycl::queue& queue = pgaccel_require_queue();
@@ -3142,13 +3257,13 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
       return PGACCEL_ERROR;
     }
 
-    if (descriptor_contract.scratch != nullptr) {
-      if (finalize)
-        return execute_grouped_agg_device(queue, descriptor_contract, out, detail,
+    if (!finalize)
+      return execute_grouped_agg_accumulate(queue, descriptor_contract, detail,
+                                            scratch_output, layout);
+
+    if (descriptor_contract.scratch != nullptr)
+      return execute_grouped_agg_finalize(queue, descriptor_contract, out, detail,
                                           descriptor_contract.scratch, layout);
-      return execute_grouped_agg_device(queue, descriptor_contract, &output_contract, detail,
-                                        descriptor_contract.scratch, layout);
-    }
 
     void* owned_workspace = sycl::aligned_alloc_device(kWorkspaceAlignment, layout.bytes, queue);
     if (owned_workspace == nullptr) {
@@ -3156,11 +3271,8 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
       return PGACCEL_OOM;
     }
     ScratchOwner owner(&queue, owned_workspace);
-    if (finalize)
-      return execute_grouped_agg_device(queue, descriptor_contract, out, detail, owned_workspace,
+    return execute_grouped_agg_finalize(queue, descriptor_contract, out, detail, owned_workspace,
                                         layout);
-    return execute_grouped_agg_device(queue, descriptor_contract, &output_contract, detail,
-                                      owned_workspace, layout);
   } catch (const pgaccel_no_device_error&) {
     *detail = 0;
     return PGACCEL_ERROR_NO_DEVICE;
