@@ -141,16 +141,10 @@ def bundle_runtime(
     for source in _runtime_libraries(acpp_lib, system):
         _copy_entry(source, temporary / "lib" / source.name)
 
-    def ignore_unsupported_backend(directory: str, names: list[str]) -> set[str]:
-        if system == "Darwin" and pathlib.Path(directory) == hipsycl:
-            return {name for name in names if name.startswith("librt-backend-omp.")}
-        return set()
-
     shutil.copytree(
         hipsycl,
         temporary / "lib" / "hipSYCL",
         symlinks=True,
-        ignore=ignore_unsupported_backend,
     )
 
     if system == "Darwin":
@@ -181,6 +175,7 @@ def _assert_runtime_layout(runtime: pathlib.Path, system: str) -> None:
         required = (
             runtime / "bin" / "acpp-metal-archive-build",
             hipsycl / "librt-backend-metal.dylib",
+            hipsycl / "librt-backend-omp.dylib",
             hipsycl / "bitcode" / "libkernel-sscp-metal-full.bc",
             hipsycl / "llvm-to-backend" / "libllvm-to-backend.dylib",
             hipsycl / "llvm-to-backend" / "libllvm-to-metal.dylib",
@@ -188,8 +183,6 @@ def _assert_runtime_layout(runtime: pathlib.Path, system: str) -> None:
         missing = [str(path) for path in required if not path.is_file()]
         if missing:
             raise PackageError(f"packaged Metal runtime is incomplete: {', '.join(missing)}")
-        if list(hipsycl.glob("librt-backend-omp.*")):
-            raise PackageError("packaged Metal runtime must not contain the OMP backend")
         if not os.access(runtime / "bin" / "acpp-metal-archive-build", os.X_OK):
             raise PackageError("packaged Metal archive helper is not executable")
     elif system == "Linux":
@@ -259,8 +252,13 @@ def validate_load_value(value: str, kind: str, system: str) -> None:
             "/System/Library/",
             "/Library/Apple/System/Library/",
             "/opt/homebrew/opt/llvm@20/lib/",
+            "/opt/homebrew/opt/libomp/lib/",
         )
-        if value != "/opt/homebrew/opt/llvm@20/lib" and not value.startswith(allowed):
+        allowed_exact = {
+            "/opt/homebrew/opt/llvm@20/lib",
+            "/opt/homebrew/opt/libomp/lib",
+        }
+        if value not in allowed_exact and not value.startswith(allowed):
             raise PackageError(f"unexpected absolute {kind} remains in package: {value}")
     else:
         raise PackageError(f"absolute ELF {kind} remains in package: {value}")

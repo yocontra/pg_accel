@@ -260,8 +260,9 @@ jobs:
           "$pg_bindir/initdb" -D "$test_root/data" --no-locale --encoding=UTF8 >/dev/null
           {
             printf "dynamic_library_path = '%s'\n" "$pkglibdir"
-            # PostgreSQL appends /extension to each custom control-path root.
-            printf "extension_control_path = '%s'\n" "$sharedir"
+            # Retain built-in controls and add the staged share root; PostgreSQL
+            # appends /extension to each custom control-path root.
+            printf "extension_control_path = '\$system:%s'\n" "$sharedir"
             printf "shared_preload_libraries = 'pg_accel'\n"
             printf "listen_addresses = ''\n"
             printf "unix_socket_directories = '%s'\n" "$socket_dir"

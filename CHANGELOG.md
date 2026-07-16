@@ -50,8 +50,10 @@ claim is implied by the entries below.
 - Release packages now use a normalized, installer-mapped PostgreSQL layout,
   link the extension to a loader-relative bundled AdaptiveCpp runtime, validate
   every Mach-O/ELF load command, and ship deterministic inner and archive
-  checksums. Development and pgrx-test linkage continues to use the repository
-  toolchain prefix.
+  checksums. The Metal package includes AdaptiveCpp's required OMP backend and
+  validates its explicit Homebrew LLVM 20 and `libomp` runtime prerequisites.
+  Development and pgrx-test linkage continues to use the repository toolchain
+  prefix.
 - Resident invalidation now distinguishes benign catalog activity such as
   `ANALYZE` and relation renames from structural changes, DML generations, and
   rewrites that require eviction or refresh.
@@ -113,8 +115,9 @@ claim is implied by the entries below.
   ```
 
   Release builds clone and compile this fork rather than consuming an upstream
-  binary package. Metal additionally requires Apple `metal-cpp`, LLVM/lld, and
-  soft-fp64 tag `v1.3.0`; `scripts/setup_acpp.sh` applies the tracked
+  binary package. Metal additionally requires Apple `metal-cpp`, LLVM/lld,
+  Boost, the OpenMP runtime, and soft-fp64 tag `v1.3.0`;
+  `scripts/setup_acpp.sh` applies the tracked
   AdaptiveCpp patches and writes `pg_accel-acpp-provenance.txt`. A fresh
   exact-candidate provenance artifact remains required before release.
 - The local Phase 6 domain gate landed in `37a9571d`, `868e0e89`, and

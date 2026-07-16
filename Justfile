@@ -58,8 +58,8 @@ setup-system-deps:
             ;;
         Darwin)
             printf '%s\n' \
-                "Install Xcode command line tools and Homebrew packages: brew install postgis." \
-                "For Metal runs, install a supported LLVM/lld toolchain: brew install llvm@20 lld." \
+                "Install Xcode command line tools and Homebrew packages:" \
+                "  brew install postgis boost libomp llvm@20 lld@20" \
                 "Then run:" \
                 "  just setup-gpu-metal"
             ;;

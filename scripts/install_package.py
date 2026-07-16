@@ -206,6 +206,16 @@ def install(
             f"package architecture {package_arch!r} does not match host "
             f"{platform.machine().lower()!r}"
         )
+    if system == "Darwin":
+        prerequisites = (
+            pathlib.Path("/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib"),
+            pathlib.Path("/opt/homebrew/opt/libomp/lib/libomp.dylib"),
+        )
+        missing = [str(path) for path in prerequisites if not path.is_file()]
+        if missing:
+            raise InstallError(
+                "missing Homebrew runtime prerequisite(s): " + ", ".join(missing)
+            )
     pkglibdir, extension_dir = resolve_install_dirs(package_root, pg_config, destdir)
 
     library_dir = package_root / "lib"

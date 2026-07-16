@@ -221,6 +221,13 @@ License text (Apache-2.0):
 
 Other dependencies
 ----------------------------------------------------------------------
+Metal release packages dynamically link the target host's LLVM 20 and OpenMP
+runtimes from Homebrew; those libraries are prerequisites and are not copied
+into the archive. LLVM and its OpenMP runtime are distributed under
+Apache-2.0 with the LLVM exception. Their source and license texts are
+available from https://github.com/llvm/llvm-project and the installed Homebrew
+formulae.
+
 The full transitive crate graph is pinned by `Cargo.lock` and license-audited by
 `cargo deny check` against `deny.toml`; `cargo audit` scans the same graph for
 RustSec advisories. The repository exposes these required release checks as

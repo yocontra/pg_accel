@@ -54,7 +54,10 @@ the current upstream tip.
 
 On Apple Silicon, building the toolchain requires Xcode command-line tools,
 Apple `metal-cpp` headers, a supported LLVM installation (LLVM 20 is the CI
-configuration), and `lld`/`ld64.lld`. Setup also clones `yocontra/soft-fp` tag
+configuration), `lld`/`ld64.lld`, Boost, and the Homebrew OpenMP runtime. The
+release package retains LLVM 20 and `libomp` as explicit host prerequisites;
+its installer fails before writing files when either runtime is absent. Setup
+also clones `yocontra/soft-fp` tag
 `v1.3.0` and applies the tracked patches under `patches/adaptivecpp/` plus a
 conditional `metal-cpp` compatibility edit. The result is therefore the exact
 fork commit plus reviewed repository patches, not a claim that a pristine

@@ -87,6 +87,12 @@ class PackageExtensionTests(unittest.TestCase):
             "/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib", "dependency", "Darwin"
         )
         package_extension.validate_load_value(
+            "/opt/homebrew/opt/libomp/lib/libomp.dylib", "dependency", "Darwin"
+        )
+        package_extension.validate_load_value(
+            "/opt/homebrew/opt/libomp/lib", "LC_RPATH", "Darwin"
+        )
+        package_extension.validate_load_value(
             "@loader_path/../lib/libacpp-rt.dylib", "dependency", "Darwin"
         )
         package_extension.validate_load_value(
@@ -101,7 +107,7 @@ class PackageExtensionTests(unittest.TestCase):
                 "Darwin",
             )
 
-    def test_metal_bundle_preserves_prefix_and_excludes_omp_backend(self) -> None:
+    def test_metal_bundle_preserves_prefix_and_requires_omp_backend(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             prefix = root / "acpp"
@@ -131,7 +137,7 @@ class PackageExtensionTests(unittest.TestCase):
             self.assertTrue(
                 (runtime / "bin" / "acpp-metal-archive-build").is_file()
             )
-            self.assertFalse(
+            self.assertTrue(
                 (runtime / "lib" / "hipSYCL" / "librt-backend-omp.dylib").exists()
             )
 
@@ -201,6 +207,7 @@ class PackageExtensionTests(unittest.TestCase):
             '--destdir "$stage"',
             "dynamic_library_path",
             "extension_control_path",
+            r"\$system:%s",
             "shared_preload_libraries = 'pg_accel'",
             "CREATE EXTENSION pg_accel;",
             "pg_accel_stats()",
