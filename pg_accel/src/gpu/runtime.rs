@@ -36,9 +36,8 @@ pub fn ensure_init() {
     INIT_PID.store(pid, Ordering::Release);
 }
 
-/// Pre-fork warmup: initialize Metal/SkyLight in the postmaster before
-/// fork so forked backends can create Metal devices. Safe to call from
-/// `_PG_init()` — does not spawn threads.
+/// Establish Darwin fork-safety environment in the postmaster before fork.
+/// Safe to call from `_PG_init()`; does not initialize Metal or spawn threads.
 pub fn prefork_warmup() {
     // SAFETY: pgaccel_prefork_warmup does not spawn threads and is
     // safe to call from the postmaster during _PG_init().

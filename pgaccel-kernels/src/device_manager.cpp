@@ -358,16 +358,17 @@ extern "C" pgaccel_platform_caps pgaccel_get_caps(void) {
 
 extern "C" void pgaccel_prefork_warmup(void) {
 #if defined(__APPLE__)
-  // macOS Sequoia+ aborts forked processes that initialize Objective-C
-  // frameworks (like Metal/SkyLight) after fork. This is the documented
-  // opt-out. We deliberately do NOT initialize SYCL or touch Metal in the
-  // parent: the AGX device stack caches process-local state that
-  // cannot be reset on the child side, so any parent-side Metal activity
-  // propagates stale IOKit handles into every forked child. Kernel
-  // compilation is deferred to the first child: AdaptiveCpp's Metal
-  // backend now routes MSL through `xcrun metal` in a subprocess and
-  // caches the resulting .metallib on disk, so post-fork cold-starts
-  // avoid MTLCompilerService entirely.
+  // Establish inherited fork-safety policy before PostgreSQL creates any
+  // backend. Some macOS releases can crash a forked child in unified
+  // logging/CoreAnalytics while Metal initializes. OS_ACTIVITY_MODE disables
+  // that Apple activity telemetry; PostgreSQL's elog/stderr logging is
+  // unaffected. Preserve explicit operator choices by never overwriting them.
   setenv("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES", 0);
+  setenv("OS_ACTIVITY_MODE", "disable", 0);
+
+  // Deliberately do NOT initialize SYCL or touch Metal in the parent: the AGX
+  // device stack caches process-local state that cannot be reset on the child
+  // side. Kernel compilation is deferred to the first child and cached on
+  // disk, avoiding stale IOKit handles in PostgreSQL backends.
 #endif
 }

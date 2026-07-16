@@ -1145,8 +1145,8 @@ unsafe extern "C" {
     #[link_name = "pgaccel_get_caps"]
     fn pgaccel_get_caps_raw() -> PgaccelPlatformCaps;
 
-    /// Pre-fork warmup: initialize Metal/SkyLight in the postmaster before
-    /// fork. Safe to call from `_PG_init()` — does not spawn threads.
+    /// Establish Darwin fork-safety environment in the postmaster before fork.
+    /// Safe to call from `_PG_init()`; does not initialize Metal or spawn threads.
     pub fn pgaccel_prefork_warmup();
 
     // -- GPU execution observability --

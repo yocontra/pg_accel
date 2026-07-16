@@ -304,11 +304,8 @@ pub unsafe extern "C-unwind" fn _PG_init() {
     // before any queries. Saves previous hooks and installs ours.
     unsafe { engine::ffi::planner_hooks::install() };
 
-    // 5. Pre-fork Metal warmup: call MTLCreateSystemDefaultDevice() only in
-    //    the postmaster so SkyLight/IOKit state is initialized before fork.
-    //    When the extension is loaded inside a regular backend or parallel
-    //    worker, this is no longer "pre-fork" work and it shows up as native
-    //    query planning/execution overhead for planner-declined queries.
+    // 5. Establish Darwin fork-safety environment only in the postmaster,
+    //    before it creates backends. This does not initialize Metal or SYCL.
     // SAFETY: PostgreSQL initializes this process-global flag before extension
     // loading; `_PG_init` reads it once on the main backend/postmaster thread.
     if !unsafe { pgrx::pg_sys::IsUnderPostmaster } {

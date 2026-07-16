@@ -71,6 +71,13 @@ Add the extension to `postgresql.conf`:
 shared_preload_libraries = 'pg_accel'
 ```
 
+On macOS, pg_accel sets `OS_ACTIVITY_MODE=disable` in the postmaster before it
+forks backends. This works around an Apple unified logging/CoreAnalytics crash
+during lazy Metal initialization on affected Tahoe builds. An explicit
+`OS_ACTIVITY_MODE` value in the postmaster environment is preserved, but an
+override other than `disable` may re-expose that fork-time instability. This
+is a targeted runtime workaround, not a broader macOS support claim.
+
 Restart PostgreSQL and create the extension in the target database:
 
 ```sql

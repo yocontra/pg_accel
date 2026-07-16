@@ -654,6 +654,20 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "pg_test", target_os = "macos"))]
+    #[pg_test]
+    fn test_darwin_prefork_activity_mode_default_when_requested() {
+        if std::env::var_os("PGACCEL_TEST_ASSERT_DEFAULT_OS_ACTIVITY_MODE").is_some() {
+            let activity_mode = std::env::var("OS_ACTIVITY_MODE").expect(
+                "postmaster must establish OS_ACTIVITY_MODE before the test backend is forked",
+            );
+            assert_eq!(
+                activity_mode, "disable",
+                "canonical macOS pg_test starts the postmaster without an owner override"
+            );
+        }
+    }
+
     #[cfg(feature = "pg_test")]
     #[pg_test]
     fn test_bounded_dense_statement_timeout_is_exact_and_recoverable() {
