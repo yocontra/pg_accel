@@ -3075,6 +3075,87 @@ class ResidentV5RegressionTests(unittest.TestCase):
         for entry in result.entrypoint_audits:
             self.assertIn("device_copyback", entry.classifications)
 
+    def test_pointer_const_borrowed_workspace_requires_device_provenance(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_borrowed_workspace(
+                int* out, int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              }).wait_and_throw();
+              q.memcpy(out, workspace, sizeof(*out)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_pointee_const_workspace(
+                int* out, const int* workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                const_cast<int*>(workspace)[0] = 7;
+              }).wait_and_throw();
+              q.memcpy(out, workspace, sizeof(*out)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_unawaited_borrowed_workspace(
+                int* out, int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              });
+              q.memcpy(out, workspace, sizeof(*out)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_host_only_borrowed_workspace(
+                int* out, int* const workspace) {
+              sycl::queue q;
+              q.memcpy(out, workspace, sizeof(*out)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            struct BorrowedOutput { int* values; int scalar; };
+            extern "C" pgaccel_status pgaccel_borrowed_member_copyback(
+                BorrowedOutput* out, int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              }).wait_and_throw();
+              q.memcpy(out->values, workspace, sizeof(*out->values)).wait_and_throw();
+              q.memcpy(&out->scalar, workspace, sizeof(out->scalar)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_computed_member_copyback(
+                BorrowedOutput* out, int* const workspace, size_t offset) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              }).wait_and_throw();
+              q.memcpy(out->values + offset, workspace, sizeof(*out->values))
+                  .wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_borrowed_workspace"].ok)
+        self.assertIn(
+            "device_copyback",
+            entries["pgaccel_borrowed_workspace"].classifications,
+        )
+        self.assertTrue(entries["pgaccel_borrowed_member_copyback"].ok)
+        self.assertIn(
+            "device_copyback",
+            entries["pgaccel_borrowed_member_copyback"].classifications,
+        )
+        for name in (
+            "pgaccel_pointee_const_workspace",
+            "pgaccel_unawaited_borrowed_workspace",
+            "pgaccel_host_only_borrowed_workspace",
+            "pgaccel_computed_member_copyback",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertNotIn("device_copyback", entries[name].classifications)
+
     def test_typed_slab_projection_with_intermediate_readback_is_proven(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE

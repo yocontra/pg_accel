@@ -5837,6 +5837,41 @@ def _local_usm_provenance(
         "malloc_device": "device",
         "aligned_alloc_device": "device",
     }
+
+    # A top-level ``T* const`` parameter is immutable as a pointer but still
+    # names writable borrowed storage.  Device orchestration helpers use this
+    # form so the workspace is not confused with an ABI output while kernel
+    # writes and their awaited copybacks retain the same storage provenance.
+    # Reject pointee-const, references, and multi-level pointers.
+    parameters, _ = _parameter_names(tokens, function)
+    for left, right in _parameter_ranges(tokens, function):
+        names = [
+            (index, tokens[index].value)
+            for index in range(left, right)
+            if tokens[index].kind == "identifier"
+            and tokens[index].value in parameters
+        ]
+        if not names:
+            continue
+        name_index, name = names[-1]
+        stars = [
+            index for index in range(left, name_index) if tokens[index].value == "*"
+        ]
+        if len(stars) != 1 or any(
+            tokens[index].value in {"&", "&&"}
+            for index in range(left, name_index)
+        ):
+            continue
+        star = stars[0]
+        const_before = any(
+            tokens[index].value == "const" for index in range(left, star)
+        )
+        const_after = any(
+            tokens[index].value == "const" for index in range(star + 1, name_index)
+        )
+        if const_after and not const_before:
+            provenance[name] = ("borrowed", function.body_open, name)
+
     for index in range(function.body_open + 1, function.body_close):
         if _is_inside(index, lambda_ranges):
             continue
@@ -6052,6 +6087,37 @@ def _exact_pointer_root(
     root = roots[0]
     if right - left == 1:
         return root
+
+    # Exact ABI member projections retain the identity of their root.  This
+    # covers pointer-valued fields and the address of scalar fields without
+    # accepting calls, selection, computed indices, or pointer rebinding.
+    cursor = left
+    addressed = cursor < right and tokens[cursor].value == "&"
+    if addressed:
+        cursor += 1
+    if cursor == root[1]:
+        cursor += 1
+        projected = False
+        while cursor < right:
+            if (
+                cursor + 1 < right
+                and tokens[cursor].value in {".", "->"}
+                and tokens[cursor + 1].kind == "identifier"
+            ):
+                cursor += 2
+                projected = True
+                continue
+            if (
+                cursor + 2 < right
+                and tokens[cursor].value == "["
+                and re.fullmatch(r"\d+[uUlL]*", tokens[cursor + 1].value)
+                and tokens[cursor + 2].value == "]"
+            ):
+                cursor += 3
+                continue
+            break
+        if cursor == right and projected:
+            return root
 
     def nonnegative_integer_literal(value: str) -> bool:
         rendered = re.sub(r"[uUlL]+$", "", value)
