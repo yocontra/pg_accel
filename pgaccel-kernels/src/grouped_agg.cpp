@@ -182,7 +182,6 @@ struct DenseIntegerPartial {
 
 struct DeviceCopyCommand {
   size_t source_offset;
-  uint64_t destination;
   size_t bytes;
 };
 
@@ -195,16 +194,16 @@ struct DeviceCompletion {
   DeviceCopyCommand commands[kPublishCommandCount];
 };
 
-struct DeviceOutputBindings {
-  uint64_t detail;
-  uint64_t group_codes;
-  uint64_t active_groups;
-  uint64_t key_values[PGACCEL_GROUPED_AGG_MAX_KEYS];
-  uint64_t key_nulls[PGACCEL_GROUPED_AGG_MAX_KEYS];
-  uint64_t measure_lanes[PGACCEL_GROUPED_AGG_MAX_MEASURES][kPublishMeasureLaneCount];
-  uint64_t emitted;
-  uint64_t selected;
-  uint64_t uncertain;
+struct DeviceOutputPresence {
+  uint8_t detail;
+  uint8_t group_codes;
+  uint8_t active_groups;
+  uint8_t key_values[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  uint8_t key_nulls[PGACCEL_GROUPED_AGG_MAX_KEYS];
+  uint8_t measure_lanes[PGACCEL_GROUPED_AGG_MAX_MEASURES][kPublishMeasureLaneCount];
+  uint8_t emitted;
+  uint8_t selected;
+  uint8_t uncertain;
 };
 
 struct DeviceSourceOffsets {
@@ -226,12 +225,14 @@ struct DevicePublishParams {
   size_t measure_state_bytes[PGACCEL_GROUPED_AGG_MAX_MEASURES];
   DeviceMeta* meta;
   DeviceCompletion* completion;
-  DeviceOutputBindings output;
+  DeviceOutputPresence output;
   DeviceSourceOffsets source_offsets;
 };
 
 static_assert(kFailureInvalid == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
 static_assert(kFailureNumericOverflow == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
+static_assert(PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE == 0);
+constexpr int32_t PGACCEL_GROUPED_AGG_DETAIL_INVALID = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
 
 struct KernelParams {
   size_t row_count;
@@ -2097,25 +2098,22 @@ inline void run_dense_kernel(KernelParams* params_ptr) {
   meta.lifecycle_state = kLifecycleFinalized;
 }
 
-inline void set_completion_copy(DevicePublishParams& params, size_t slot, size_t source_offset,
-                                uint64_t destination, size_t count, size_t width) {
-  if (source_offset == kNoOffset || destination == 0 || count == 0)
+inline void set_completion_copy(DeviceCompletion& completion, size_t slot, size_t source_offset,
+                                bool destination_present, size_t count, size_t width) {
+  if (source_offset == kNoOffset || !destination_present || count == 0)
     return;
-  DeviceCopyCommand& command = params.completion->commands[slot];
+  DeviceCopyCommand& command = completion.commands[slot];
   command.source_offset = source_offset;
-  command.destination = destination;
   command.bytes = count * width;
 }
 
-inline void run_completion_kernel(DevicePublishParams* params_ptr) {
+inline DeviceCompletion build_completion(DevicePublishParams* params_ptr) {
   DevicePublishParams& params = *params_ptr;
   DeviceMeta& meta = *params.meta;
-  DeviceCompletion& completion = *params.completion;
-  completion = {};
+  DeviceCompletion completion{};
 
   const uint32_t known_failures = kFailureInvalid | kFailureNumericOverflow | kFailureCapacity;
-  if ((meta.failure_flags & ~known_failures) != 0 ||
-      (meta.failure_flags & kFailureInvalid) != 0) {
+  if ((meta.failure_flags & ~known_failures) != 0 || (meta.failure_flags & kFailureInvalid) != 0) {
     completion.status = PGACCEL_ERROR;
     completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   } else if ((meta.failure_flags & kFailureNumericOverflow) != 0) {
@@ -2129,12 +2127,12 @@ inline void run_completion_kernel(DevicePublishParams* params_ptr) {
     completion.detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   }
 
-  set_completion_copy(params, kPublishDetail,
+  set_completion_copy(completion, kPublishDetail,
                       params.source_offsets.completion + offsetof(DeviceCompletion, detail),
                       params.output.detail, 1, sizeof(completion.detail));
   if (completion.status != PGACCEL_OK ||
       (params.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) == 0)
-    return;
+    return completion;
 
   completion.emitted = meta.emitted;
   completion.selected = meta.selected;
@@ -2143,50 +2141,47 @@ inline void run_completion_kernel(DevicePublishParams* params_ptr) {
                            ? completion.emitted
                            : params.group_capacity;
   if (params.output_mode == PGACCEL_GROUPED_AGG_OUTPUT_DENSE) {
-    set_completion_copy(params, kPublishActive, params.source_offsets.active,
+    set_completion_copy(completion, kPublishActive, params.source_offsets.active,
                         params.output.active_groups, params.group_capacity, sizeof(uint8_t));
   }
-  set_completion_copy(params, kPublishGroupCodes, params.source_offsets.group_codes,
+  set_completion_copy(completion, kPublishGroupCodes, params.source_offsets.group_codes,
                       params.output.group_codes, count, sizeof(size_t));
 
   for (size_t key = 0; key < params.key_count; ++key) {
     const size_t slot = kPublishKeys + key * kPublishKeyLaneCount;
     const size_t width = val_tag_width(params.key_types[key]);
-    set_completion_copy(params, slot, params.source_offsets.key_values[key],
+    set_completion_copy(completion, slot, params.source_offsets.key_values[key],
                         params.output.key_values[key], count, width);
-    set_completion_copy(params, slot + 1, params.source_offsets.key_nulls[key],
+    set_completion_copy(completion, slot + 1, params.source_offsets.key_nulls[key],
                         params.output.key_nulls[key], count, sizeof(uint8_t));
   }
 
   for (size_t measure = 0; measure < params.measure_count; ++measure) {
     const size_t slot = kPublishMeasures + measure * kPublishMeasureLaneCount;
-    const uint64_t* destinations = params.output.measure_lanes[measure];
+    const uint8_t* destinations = params.output.measure_lanes[measure];
     const size_t state_bytes = params.measure_state_bytes[measure];
     const size_t* offsets = params.source_offsets.measure_lanes[measure];
-    set_completion_copy(params, slot, offsets[0], destinations[0], count, state_bytes);
-    set_completion_copy(params, slot + 1, offsets[1], destinations[1], count, state_bytes);
-    set_completion_copy(params, slot + 2, offsets[2], destinations[2], count, state_bytes);
-    set_completion_copy(params, slot + 3, offsets[3], destinations[3], count, state_bytes);
-    set_completion_copy(params, slot + 4, offsets[4], destinations[4], count,
-                        sizeof(uint64_t));
-    set_completion_copy(params, slot + 5, offsets[5], destinations[5], count,
-                        sizeof(uint64_t));
-    set_completion_copy(params, slot + 6, offsets[6], destinations[6], count, state_bytes);
-    set_completion_copy(params, slot + 7, offsets[7], destinations[7], count,
-                        sizeof(uint64_t));
-    set_completion_copy(params, slot + 8, offsets[8], destinations[8], count,
-                        sizeof(uint64_t));
+    set_completion_copy(completion, slot, offsets[0], destinations[0], count, state_bytes);
+    set_completion_copy(completion, slot + 1, offsets[1], destinations[1], count, state_bytes);
+    set_completion_copy(completion, slot + 2, offsets[2], destinations[2], count, state_bytes);
+    set_completion_copy(completion, slot + 3, offsets[3], destinations[3], count, state_bytes);
+    set_completion_copy(completion, slot + 4, offsets[4], destinations[4], count, sizeof(uint64_t));
+    set_completion_copy(completion, slot + 5, offsets[5], destinations[5], count, sizeof(uint64_t));
+    set_completion_copy(completion, slot + 6, offsets[6], destinations[6], count, state_bytes);
+    set_completion_copy(completion, slot + 7, offsets[7], destinations[7], count, sizeof(uint64_t));
+    set_completion_copy(completion, slot + 8, offsets[8], destinations[8], count, sizeof(uint64_t));
   }
 
-  set_completion_copy(params, kPublishEmitted,
+  set_completion_copy(completion, kPublishEmitted,
                       params.source_offsets.completion + offsetof(DeviceCompletion, emitted),
                       params.output.emitted, 1, sizeof(completion.emitted));
-  set_completion_copy(params, kPublishSelected,
+  set_completion_copy(completion, kPublishSelected,
                       params.source_offsets.completion + offsetof(DeviceCompletion, selected),
                       params.output.selected, 1, sizeof(completion.selected));
-  set_completion_copy(params, kPublishUncertain,
+  set_completion_copy(completion, kPublishUncertain,
                       params.source_offsets.completion + offsetof(DeviceCompletion, uncertain),
                       params.output.uncertain, 1, sizeof(completion.uncertain));
+  return completion;
 }
 
 template <typename T>
@@ -2194,8 +2189,8 @@ T* arena_ptr(void* base, size_t offset) {
   return offset == kNoOffset ? nullptr : reinterpret_cast<T*>(static_cast<uint8_t*>(base) + offset);
 }
 
-void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& layout, void* scratch,
-                 KernelParams* params) {
+void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& layout,
+                 void* const scratch, KernelParams* params) {
   *params = {};
   params->row_count = desc.row_count;
   params->group_capacity = desc.group_capacity;
@@ -2241,13 +2236,9 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   }
 }
 
-uint64_t pointer_bits(const void* pointer) {
-  return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pointer));
-}
-
 void bind_publish_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& layout,
-                         void* scratch, pgaccel_grouped_agg_out* out, int32_t* detail,
-                         DevicePublishParams* params) {
+                         void* const scratch, const pgaccel_grouped_agg_out* out,
+                         const int32_t* detail, DevicePublishParams* params) {
   *params = {};
   params->group_capacity = desc.group_capacity;
   params->execution_flags = desc.execution_flags;
@@ -2278,30 +2269,30 @@ void bind_publish_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLa
     offsets[7] = ml.rhs_count;
     offsets[8] = ml.rhs_nonnull;
   }
-  params->output.detail = pointer_bits(detail);
+  params->output.detail = detail != nullptr;
   if (out == nullptr)
     return;
-  params->output.group_codes = pointer_bits(out->group_codes);
-  params->output.active_groups = pointer_bits(out->active_groups);
-  params->output.emitted = pointer_bits(&out->emitted_group_count);
-  params->output.selected = pointer_bits(&out->selected_count);
-  params->output.uncertain = pointer_bits(&out->uncertain_count);
+  params->output.group_codes = out->group_codes != nullptr;
+  params->output.active_groups = out->active_groups != nullptr;
+  params->output.emitted = true;
+  params->output.selected = true;
+  params->output.uncertain = true;
   for (size_t key = 0; key < PGACCEL_GROUPED_AGG_MAX_KEYS; ++key) {
-    params->output.key_values[key] = pointer_bits(out->keys[key].values);
-    params->output.key_nulls[key] = pointer_bits(out->keys[key].nulls);
+    params->output.key_values[key] = out->keys[key].values != nullptr;
+    params->output.key_nulls[key] = out->keys[key].nulls != nullptr;
   }
   for (size_t measure = 0; measure < PGACCEL_GROUPED_AGG_MAX_MEASURES; ++measure) {
     const pgaccel_grouped_agg_measure_out& output = out->measures[measure];
-    uint64_t* lanes = params->output.measure_lanes[measure];
-    lanes[0] = pointer_bits(output.sum);
-    lanes[1] = pointer_bits(output.min);
-    lanes[2] = pointer_bits(output.max);
-    lanes[3] = pointer_bits(output.sumsq);
-    lanes[4] = pointer_bits(output.count);
-    lanes[5] = pointer_bits(output.nonnull_count);
-    lanes[6] = pointer_bits(output.rhs_sum);
-    lanes[7] = pointer_bits(output.rhs_count);
-    lanes[8] = pointer_bits(output.rhs_nonnull_count);
+    uint8_t* lanes = params->output.measure_lanes[measure];
+    lanes[0] = output.sum != nullptr;
+    lanes[1] = output.min != nullptr;
+    lanes[2] = output.max != nullptr;
+    lanes[3] = output.sumsq != nullptr;
+    lanes[4] = output.count != nullptr;
+    lanes[5] = output.nonnull_count != nullptr;
+    lanes[6] = output.rhs_sum != nullptr;
+    lanes[7] = output.rhs_count != nullptr;
+    lanes[8] = output.rhs_nonnull_count != nullptr;
   }
 }
 
@@ -2477,6 +2468,10 @@ bool validate_aliases(const pgaccel_grouped_agg_desc& desc, const pgaccel_groupe
   return true;
 }
 
+pgaccel_grouped_agg_out snapshot_output_contract(const pgaccel_grouped_agg_out& out) {
+  return out;
+}
+
 bool same_queue_device(sycl::queue& queue, const void* ptr) {
   try {
     return sycl::get_pointer_device(ptr, queue.get_context()) == queue.get_device();
@@ -2591,54 +2586,6 @@ bool validate_scratch_usm(sycl::queue& queue, const pgaccel_grouped_agg_desc& de
   return expected_space && same_queue_device(queue, desc.scratch);
 }
 
-void enqueue_copyback(sycl::queue& queue, const void* scratch,
-                      const DeviceCopyCommand& command) {
-  if (command.bytes == 0)
-    return;
-  const void* source = static_cast<const uint8_t*>(scratch) + command.source_offset;
-  queue.memcpy(reinterpret_cast<void*>(command.destination), source, command.bytes);
-}
-
-void enqueue_key_copybacks(sycl::queue& queue, const void* scratch,
-                           const DeviceCompletion& completion, size_t slot) {
-  enqueue_copyback(queue, scratch, completion.commands[slot]);
-  enqueue_copyback(queue, scratch, completion.commands[slot + 1]);
-}
-
-void enqueue_measure_copybacks(sycl::queue& queue, const void* scratch,
-                               const DeviceCompletion& completion, size_t slot) {
-  enqueue_copyback(queue, scratch, completion.commands[slot]);
-  enqueue_copyback(queue, scratch, completion.commands[slot + 1]);
-  enqueue_copyback(queue, scratch, completion.commands[slot + 2]);
-  enqueue_copyback(queue, scratch, completion.commands[slot + 3]);
-  enqueue_copyback(queue, scratch, completion.commands[slot + 4]);
-  enqueue_copyback(queue, scratch, completion.commands[slot + 5]);
-  enqueue_copyback(queue, scratch, completion.commands[slot + 6]);
-  enqueue_copyback(queue, scratch, completion.commands[slot + 7]);
-  enqueue_copyback(queue, scratch, completion.commands[slot + 8]);
-}
-
-void publish_completion(sycl::queue& queue, const void* scratch,
-                        const DeviceCompletion& completion) {
-  enqueue_copyback(queue, scratch, completion.commands[kPublishDetail]);
-  enqueue_copyback(queue, scratch, completion.commands[kPublishActive]);
-  enqueue_copyback(queue, scratch, completion.commands[kPublishGroupCodes]);
-  enqueue_key_copybacks(queue, scratch, completion, kPublishKeys);
-  enqueue_key_copybacks(queue, scratch, completion, kPublishKeys + kPublishKeyLaneCount);
-  enqueue_key_copybacks(queue, scratch, completion, kPublishKeys + 2 * kPublishKeyLaneCount);
-  enqueue_measure_copybacks(queue, scratch, completion, kPublishMeasures);
-  enqueue_measure_copybacks(queue, scratch, completion,
-                            kPublishMeasures + kPublishMeasureLaneCount);
-  enqueue_measure_copybacks(queue, scratch, completion,
-                            kPublishMeasures + 2 * kPublishMeasureLaneCount);
-  enqueue_measure_copybacks(queue, scratch, completion,
-                            kPublishMeasures + 3 * kPublishMeasureLaneCount);
-  enqueue_copyback(queue, scratch, completion.commands[kPublishEmitted]);
-  enqueue_copyback(queue, scratch, completion.commands[kPublishSelected]);
-  enqueue_copyback(queue, scratch, completion.commands[kPublishUncertain]);
-  queue.wait_and_throw();
-}
-
 class GroupedAggDenseKernel;
 class GroupedAggDenseCountPrepareKernel;
 class GroupedAggDenseCountRowsKernel;
@@ -2668,6 +2615,433 @@ class ScratchOwner {
   void* pointer_ = nullptr;
 };
 
+pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
+                                          pgaccel_grouped_agg_out* out, int32_t* detail,
+                                          void* const device_workspace,
+                                          const WorkspaceLayout& layout) {
+  KernelParams host_params;
+  bind_params(desc, layout, device_workspace, &host_params);
+  DevicePublishParams host_publish_params;
+  bind_publish_params(desc, layout, device_workspace, out, detail, &host_publish_params);
+  auto* device_params =
+      reinterpret_cast<KernelParams*>(static_cast<uint8_t*>(device_workspace) + layout.params);
+  auto* device_publish_params = reinterpret_cast<DevicePublishParams*>(
+      static_cast<uint8_t*>(device_workspace) + layout.publish_params);
+  queue.memcpy(device_params, &host_params, sizeof(host_params)).wait_and_throw();
+  queue.memcpy(device_publish_params, &host_publish_params, sizeof(host_publish_params))
+      .wait_and_throw();
+
+  const bool parallel_dense_count =
+      parallel_dense_count_star_shape(desc) && desc.row_count <= UINT32_MAX;
+  const bool parallel_dense_integer = layout.dense_integer_parallel;
+  if (desc.grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
+    queue.single_task<GroupedAggHashInitKernel>([=]() { run_hash_init_kernel(device_params); });
+    queue.fill(host_params.hash_owners, kHashEmptyOwner, layout.hash_slot_count);
+    queue.fill(host_params.hash_counts, uint32_t{0}, layout.hash_slot_count);
+    queue.fill(host_params.hash_group_count, uint32_t{0}, size_t{1});
+    if (desc.row_count != 0) {
+      queue.parallel_for<GroupedAggHashKernel>(sycl::range<1>(desc.row_count), [=](sycl::id<1> id) {
+        run_hash_row(device_params, id[0]);
+      });
+    }
+    queue.single_task<GroupedAggHashCompactKernel>(
+        [=]() { run_hash_compact_kernel(device_params); });
+  } else if (parallel_dense_count) {
+    queue.single_task<GroupedAggDenseCountPrepareKernel>(
+        [=]() { run_dense_count_prepare_kernel(device_params); });
+    if ((desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0) {
+      queue.fill(host_params.dense_chunk_counts, uint32_t{0}, desc.group_capacity);
+      if (desc.row_count != 0) {
+        queue.parallel_for<GroupedAggDenseCountRowsKernel>(
+            sycl::range<1>(desc.row_count),
+            [=](sycl::id<1> id) { run_dense_count_row(device_params, id[0]); });
+      }
+    }
+    queue.single_task<GroupedAggDenseCountCommitKernel>(
+        [=]() { run_dense_count_commit_kernel(device_params); });
+  } else if (parallel_dense_integer) {
+    queue.single_task<GroupedAggDenseIntegerPrepareKernel>(
+        [=]() { run_dense_integer_prepare_kernel(device_params); });
+    if ((desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0 &&
+        layout.dense_integer_partial_count != 0) {
+      queue.parallel_for<GroupedAggDenseIntegerPartialsKernel>(
+          sycl::range<1>(layout.dense_integer_partial_count),
+          [=](sycl::id<1> id) { run_dense_integer_partial(device_params, id[0]); });
+      queue.parallel_for<GroupedAggDenseIntegerReduceKernel>(
+          sycl::range<1>(desc.group_capacity),
+          [=](sycl::id<1> id) { run_dense_integer_reduce(device_params, id[0]); });
+    }
+    queue.single_task<GroupedAggDenseIntegerCommitKernel>(
+        [=]() { run_dense_integer_commit_kernel(device_params); });
+  } else {
+    queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
+  }
+  queue.wait_and_throw();
+  queue.single_task<GroupedAggCompletionKernel>(
+      [=]() { *device_publish_params->completion = build_completion(device_publish_params); });
+  queue.wait_and_throw();
+
+  const auto* const workspace_bytes = static_cast<const uint8_t*>(device_workspace);
+  DeviceCompletion completion{};
+  queue.memcpy(&completion, workspace_bytes + layout.completion, sizeof(completion))
+      .wait_and_throw();
+  pgaccel_record_gpu_exec();
+
+  queue
+      .memcpy(detail, workspace_bytes + completion.commands[kPublishDetail].source_offset,
+              sizeof(completion.detail))
+      .wait_and_throw();
+  if (out != nullptr) {
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishActive];
+      if (command.bytes != 0 && out->active_groups != nullptr)
+        queue.memcpy(out->active_groups, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishGroupCodes];
+      if (command.bytes != 0 && out->group_codes != nullptr)
+        queue.memcpy(out->group_codes, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishKeys];
+      if (command.bytes != 0 && out->keys[0].values != nullptr)
+        queue.memcpy(out->keys[0].values, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishKeys + 1];
+      if (command.bytes != 0 && out->keys[0].nulls != nullptr)
+        queue.memcpy(out->keys[0].nulls, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishKeys + kPublishKeyLaneCount];
+      if (command.bytes != 0 && out->keys[1].values != nullptr)
+        queue.memcpy(out->keys[1].values, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishKeys + kPublishKeyLaneCount + 1];
+      if (command.bytes != 0 && out->keys[1].nulls != nullptr)
+        queue.memcpy(out->keys[1].nulls, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishKeys + 2 * kPublishKeyLaneCount];
+      if (command.bytes != 0 && out->keys[2].values != nullptr)
+        queue.memcpy(out->keys[2].values, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishKeys + 2 * kPublishKeyLaneCount + 1];
+      if (command.bytes != 0 && out->keys[2].nulls != nullptr)
+        queue.memcpy(out->keys[2].nulls, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishMeasures];
+      if (command.bytes != 0 && out->measures[0].sum != nullptr)
+        queue.memcpy(out->measures[0].sum, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 1];
+      if (command.bytes != 0 && out->measures[0].min != nullptr)
+        queue.memcpy(out->measures[0].min, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 2];
+      if (command.bytes != 0 && out->measures[0].max != nullptr)
+        queue.memcpy(out->measures[0].max, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 3];
+      if (command.bytes != 0 && out->measures[0].sumsq != nullptr)
+        queue.memcpy(out->measures[0].sumsq, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 4];
+      if (command.bytes != 0 && out->measures[0].count != nullptr)
+        queue.memcpy(out->measures[0].count, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 5];
+      if (command.bytes != 0 && out->measures[0].nonnull_count != nullptr)
+        queue
+            .memcpy(out->measures[0].nonnull_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 6];
+      if (command.bytes != 0 && out->measures[0].rhs_sum != nullptr)
+        queue
+            .memcpy(out->measures[0].rhs_sum, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 7];
+      if (command.bytes != 0 && out->measures[0].rhs_count != nullptr)
+        queue
+            .memcpy(out->measures[0].rhs_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 8];
+      if (command.bytes != 0 && out->measures[0].rhs_nonnull_count != nullptr)
+        queue
+            .memcpy(out->measures[0].rhs_nonnull_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + kPublishMeasureLaneCount];
+      if (command.bytes != 0 && out->measures[1].sum != nullptr)
+        queue.memcpy(out->measures[1].sum, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 1];
+      if (command.bytes != 0 && out->measures[1].min != nullptr)
+        queue.memcpy(out->measures[1].min, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 2];
+      if (command.bytes != 0 && out->measures[1].max != nullptr)
+        queue.memcpy(out->measures[1].max, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 3];
+      if (command.bytes != 0 && out->measures[1].sumsq != nullptr)
+        queue.memcpy(out->measures[1].sumsq, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 4];
+      if (command.bytes != 0 && out->measures[1].count != nullptr)
+        queue.memcpy(out->measures[1].count, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 5];
+      if (command.bytes != 0 && out->measures[1].nonnull_count != nullptr)
+        queue
+            .memcpy(out->measures[1].nonnull_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 6];
+      if (command.bytes != 0 && out->measures[1].rhs_sum != nullptr)
+        queue
+            .memcpy(out->measures[1].rhs_sum, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 7];
+      if (command.bytes != 0 && out->measures[1].rhs_count != nullptr)
+        queue
+            .memcpy(out->measures[1].rhs_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 8];
+      if (command.bytes != 0 && out->measures[1].rhs_nonnull_count != nullptr)
+        queue
+            .memcpy(out->measures[1].rhs_nonnull_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount];
+      if (command.bytes != 0 && out->measures[2].sum != nullptr)
+        queue.memcpy(out->measures[2].sum, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 1];
+      if (command.bytes != 0 && out->measures[2].min != nullptr)
+        queue.memcpy(out->measures[2].min, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 2];
+      if (command.bytes != 0 && out->measures[2].max != nullptr)
+        queue.memcpy(out->measures[2].max, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 3];
+      if (command.bytes != 0 && out->measures[2].sumsq != nullptr)
+        queue.memcpy(out->measures[2].sumsq, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 4];
+      if (command.bytes != 0 && out->measures[2].count != nullptr)
+        queue.memcpy(out->measures[2].count, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 5];
+      if (command.bytes != 0 && out->measures[2].nonnull_count != nullptr)
+        queue
+            .memcpy(out->measures[2].nonnull_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 6];
+      if (command.bytes != 0 && out->measures[2].rhs_sum != nullptr)
+        queue
+            .memcpy(out->measures[2].rhs_sum, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 7];
+      if (command.bytes != 0 && out->measures[2].rhs_count != nullptr)
+        queue
+            .memcpy(out->measures[2].rhs_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 8];
+      if (command.bytes != 0 && out->measures[2].rhs_nonnull_count != nullptr)
+        queue
+            .memcpy(out->measures[2].rhs_nonnull_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount];
+      if (command.bytes != 0 && out->measures[3].sum != nullptr)
+        queue.memcpy(out->measures[3].sum, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 1];
+      if (command.bytes != 0 && out->measures[3].min != nullptr)
+        queue.memcpy(out->measures[3].min, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 2];
+      if (command.bytes != 0 && out->measures[3].max != nullptr)
+        queue.memcpy(out->measures[3].max, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 3];
+      if (command.bytes != 0 && out->measures[3].sumsq != nullptr)
+        queue.memcpy(out->measures[3].sumsq, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 4];
+      if (command.bytes != 0 && out->measures[3].count != nullptr)
+        queue.memcpy(out->measures[3].count, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 5];
+      if (command.bytes != 0 && out->measures[3].nonnull_count != nullptr)
+        queue
+            .memcpy(out->measures[3].nonnull_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 6];
+      if (command.bytes != 0 && out->measures[3].rhs_sum != nullptr)
+        queue
+            .memcpy(out->measures[3].rhs_sum, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 7];
+      if (command.bytes != 0 && out->measures[3].rhs_count != nullptr)
+        queue
+            .memcpy(out->measures[3].rhs_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command =
+          completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 8];
+      if (command.bytes != 0 && out->measures[3].rhs_nonnull_count != nullptr)
+        queue
+            .memcpy(out->measures[3].rhs_nonnull_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishEmitted];
+      if (command.bytes != 0)
+        queue
+            .memcpy(&out->emitted_group_count, workspace_bytes + command.source_offset,
+                    command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishSelected];
+      if (command.bytes != 0)
+        queue.memcpy(&out->selected_count, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+    {
+      const DeviceCopyCommand& command = completion.commands[kPublishUncertain];
+      if (command.bytes != 0)
+        queue.memcpy(&out->uncertain_count, workspace_bytes + command.source_offset, command.bytes)
+            .wait_and_throw();
+    }
+  }
+  return static_cast<pgaccel_status>(completion.status);
+}
+
 }  // namespace
 
 extern "C" pgaccel_status
@@ -2694,121 +3068,68 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
                                                          int32_t* detail) {
   if (detail == nullptr)
     return PGACCEL_ERROR;
-  *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   Validation validation;
   WorkspaceLayout layout;
   const pgaccel_status descriptor_status = validate_desc(desc, &validation, &layout);
   if (descriptor_status == PGACCEL_ERROR) {
-    *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
-    return descriptor_status;
-  }
-  if (descriptor_status == PGACCEL_UNSUPPORTED)
-    return descriptor_status;
-  if (!validate_scratch_shape(*desc, layout)) {
-    *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+    *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
     return PGACCEL_ERROR;
   }
-  const bool finalize = (desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
+  if (descriptor_status == PGACCEL_UNSUPPORTED) {
+    *detail = 0;
+    return PGACCEL_UNSUPPORTED;
+  }
+  const pgaccel_grouped_agg_desc descriptor_contract = *desc;
+  if (!validate_scratch_shape(descriptor_contract, layout)) {
+    *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
+    return PGACCEL_ERROR;
+  }
+  const bool finalize =
+      (descriptor_contract.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
   if (finalize) {
-    if (!validate_out(*desc, out) || !validate_aliases(*desc, *out)) {
-      *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+    if (!validate_out(descriptor_contract, out)) {
+      *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
+      return PGACCEL_ERROR;
+    }
+    const pgaccel_grouped_agg_out output_contract = snapshot_output_contract(*out);
+    if (!validate_aliases(descriptor_contract, output_contract)) {
+      *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
       return PGACCEL_ERROR;
     }
   } else if (out != nullptr) {
-    *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+    *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
     return PGACCEL_ERROR;
   }
   try {
     sycl::queue& queue = pgaccel_require_queue();
-    if (!validate_input_usm(queue, *desc) || !validate_scratch_usm(queue, *desc) ||
-        (finalize && !validate_output_usm(queue, *desc, *out))) {
-      *detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+    if (!validate_input_usm(queue, descriptor_contract) ||
+        !validate_scratch_usm(queue, descriptor_contract) ||
+        (finalize && !validate_output_usm(queue, descriptor_contract, *out))) {
+      *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
       return PGACCEL_ERROR;
     }
 
-    void* scratch = desc->scratch;
-    if (scratch == nullptr) {
-      scratch = sycl::aligned_alloc_device(kWorkspaceAlignment, layout.bytes, queue);
-      if (scratch == nullptr)
-        return PGACCEL_OOM;
+    if (desc->scratch != nullptr)
+      return execute_grouped_agg_device(queue, *desc, out, detail, desc->scratch, layout);
+
+    void* owned_workspace = sycl::aligned_alloc_device(kWorkspaceAlignment, layout.bytes, queue);
+    if (owned_workspace == nullptr) {
+      *detail = 0;
+      return PGACCEL_OOM;
     }
-    ScratchOwner owner(desc->scratch == nullptr ? &queue : nullptr,
-                       desc->scratch == nullptr ? scratch : nullptr);
-
-    KernelParams host_params;
-    bind_params(*desc, layout, scratch, &host_params);
-    DevicePublishParams host_publish_params;
-    bind_publish_params(*desc, layout, scratch, finalize ? out : nullptr, detail,
-                        &host_publish_params);
-    KernelParams* device_params = arena_ptr<KernelParams>(scratch, layout.params);
-    DevicePublishParams* device_publish_params =
-        arena_ptr<DevicePublishParams>(scratch, layout.publish_params);
-    queue.memcpy(device_params, &host_params, sizeof(host_params)).wait_and_throw();
-    queue.memcpy(device_publish_params, &host_publish_params, sizeof(host_publish_params))
-        .wait_and_throw();
-
-    const bool parallel_dense_count =
-        parallel_dense_count_star_shape(*desc) && desc->row_count <= UINT32_MAX;
-    const bool parallel_dense_integer = layout.dense_integer_parallel;
-    if (desc->grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
-      queue.single_task<GroupedAggHashInitKernel>([=]() { run_hash_init_kernel(device_params); });
-      queue.fill(host_params.hash_owners, kHashEmptyOwner, layout.hash_slot_count);
-      queue.fill(host_params.hash_counts, uint32_t{0}, layout.hash_slot_count);
-      queue.fill(host_params.hash_group_count, uint32_t{0}, size_t{1});
-      if (desc->row_count != 0) {
-        queue.parallel_for<GroupedAggHashKernel>(
-            sycl::range<1>(desc->row_count),
-            [=](sycl::id<1> id) { run_hash_row(device_params, id[0]); });
-      }
-      queue.single_task<GroupedAggHashCompactKernel>(
-          [=]() { run_hash_compact_kernel(device_params); });
-    } else if (parallel_dense_count) {
-      queue.single_task<GroupedAggDenseCountPrepareKernel>(
-          [=]() { run_dense_count_prepare_kernel(device_params); });
-      if ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0) {
-        queue.fill(host_params.dense_chunk_counts, uint32_t{0}, desc->group_capacity);
-        if (desc->row_count != 0) {
-          queue.parallel_for<GroupedAggDenseCountRowsKernel>(
-              sycl::range<1>(desc->row_count),
-              [=](sycl::id<1> id) { run_dense_count_row(device_params, id[0]); });
-        }
-      }
-      queue.single_task<GroupedAggDenseCountCommitKernel>(
-          [=]() { run_dense_count_commit_kernel(device_params); });
-    } else if (parallel_dense_integer) {
-      queue.single_task<GroupedAggDenseIntegerPrepareKernel>(
-          [=]() { run_dense_integer_prepare_kernel(device_params); });
-      if ((desc->execution_flags & PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE) != 0 &&
-          layout.dense_integer_partial_count != 0) {
-        queue.parallel_for<GroupedAggDenseIntegerPartialsKernel>(
-            sycl::range<1>(layout.dense_integer_partial_count),
-            [=](sycl::id<1> id) { run_dense_integer_partial(device_params, id[0]); });
-        queue.parallel_for<GroupedAggDenseIntegerReduceKernel>(
-            sycl::range<1>(desc->group_capacity),
-            [=](sycl::id<1> id) { run_dense_integer_reduce(device_params, id[0]); });
-      }
-      queue.single_task<GroupedAggDenseIntegerCommitKernel>(
-          [=]() { run_dense_integer_commit_kernel(device_params); });
-    } else {
-      queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
-    }
-    queue.wait_and_throw();
-    queue.single_task<GroupedAggCompletionKernel>(
-        [=]() { run_completion_kernel(device_publish_params); });
-    queue.wait_and_throw();
-
-    DeviceCompletion completion{};
-    queue.memcpy(&completion, host_publish_params.completion, sizeof(completion)).wait_and_throw();
-    pgaccel_record_gpu_exec();
-    publish_completion(queue, scratch, completion);
-    return static_cast<pgaccel_status>(completion.status);
+    ScratchOwner owner(&queue, owned_workspace);
+    return execute_grouped_agg_device(queue, *desc, out, detail, owned_workspace, layout);
   } catch (const pgaccel_no_device_error&) {
+    *detail = 0;
     return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::bad_alloc&) {
+    *detail = 0;
     return PGACCEL_OOM;
   } catch (const std::exception& error) {
+    *detail = 0;
     return pgaccel_kernel_failure("pgaccel_grouped_agg_execute_ex", &error);
   } catch (...) {
+    *detail = 0;
     return pgaccel_kernel_failure("pgaccel_grouped_agg_execute_ex", nullptr);
   }
 }
