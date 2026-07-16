@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-checklist="docs/release-checklist-1.0.md"
+checklist="${RELEASE_CHECKLIST_EVIDENCE_PATH:-docs/release-checklist-1.0.md}"
+
+if [ -z "$checklist" ] || [ ! -f "$checklist" ] || [ ! -r "$checklist" ]; then
+    echo "release checklist audit: evidence path must name a readable regular file: $checklist" >&2
+    exit 1
+fi
 
 required_patterns=(
     "CUDA, NVIDIA, and PG-Strom are owner-deferred"
@@ -21,7 +26,7 @@ for pattern in "${required_patterns[@]}"; do
     fi
 done
 
-placeholder_matches="$(rg -n '<(sha-or-url|url|sha)>|<release-url>' "$checklist" || true)"
+placeholder_matches="$(rg -n '<(sha-or-url|url|sha|name)>|<release-url>' "$checklist" || true)"
 unchecked_matches="$(rg -n '^- \[ \]' "$checklist" || true)"
 if [ -n "$placeholder_matches" ]; then
     printf '%s\n' "$placeholder_matches" >&2
@@ -40,4 +45,4 @@ if [ "$placeholder_count" -ne 0 ] || [ "$unchecked_count" -ne 0 ]; then
     exit 1
 fi
 
-echo "release checklist audit: PASS"
+echo "release checklist audit: PASS ($checklist)"

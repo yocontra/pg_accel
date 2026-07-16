@@ -734,7 +734,8 @@ release-verify pg="":
     fi
     bash scripts/release_verification_matrix.sh "$pg"
 
-# Fail while the v1.0 release checklist still has placeholder evidence.
+# Fail while the v1.0 release checklist still has placeholder evidence. Set
+# RELEASE_CHECKLIST_EVIDENCE_PATH to audit a completed external/tag-PR ledger.
 release-checklist-audit:
     bash scripts/release_checklist_audit.sh
 
