@@ -15,6 +15,10 @@ unchecked.
 - Hardware evidence: name the Apple Silicon runner or host class used for Metal.
 - Deferrals: link to the release-note section and issue that explicitly scopes the item out of 1.0.
 
+Rows marked **External/publication** cannot be closed by a local repository
+check. They require hosted CI, an independent clean-machine run, public-repository
+or release artifacts, publication evidence, or named human sign-off as stated.
+
 CUDA, NVIDIA, and PG-Strom are owner-deferred until a CUDA device is available.
 They remain tracked in [TODO.md](../TODO.md), are excluded from this Metal
 release gate, and must not be presented as validated or supported by this
@@ -28,21 +32,18 @@ exact-candidate, CI, publication, or external-hardware rules above. They do not
 justify checking any release item.
 
 - Phase 6 domain-gate implementation commits: `37a9571d`, `868e0e89`, and
-  `2f85c059`. Passing pre-integration PG18/Metal artifact:
-  `.codex/worktrees/phase6-domain-gate/benchmarks/artifacts/phase6-gate-d94b583-pg18-metal/`
-  (`provenance.json` status `pass`, no errors or warnings). The exact-candidate
+  `2f85c059`. A pre-integration PG18/Metal run passed, but its machine-local
+  artifact was not retained as durable release evidence. The exact-candidate
   rerun remains open.
 - Phase 9 operator-gate implementation commits: `b3261c86`, `64948b96`, and
-  `d58db14f`. Passing pre-integration PG18/Metal artifact:
-  `.codex/worktrees/phase9-operator-gate/benchmarks/artifacts/phase9-gate-db2c6d2-pg18-metal/`
-  (`provenance.json` status `pass`, no errors or warnings). The exact-candidate
+  `d58db14f`. A pre-integration PG18/Metal run passed, but its machine-local
+  artifact was not retained as durable release evidence. The exact-candidate
   rerun remains open.
-- PostgreSQL 19 source/build commits: `3fd3d743` and `4ae5e337`. Local build:
-  `.codex/worktrees/phase12-pg19/target/phase12-pg19/release/libpg_accel.dylib`
-  (`sha256:685cc1cf01c82b659965a1a3078a9ca993c47a5ee5ddb23e0f411da5deb78f5f`),
-  with `pg19` recorded in
-  `.codex/worktrees/phase12-pg19/target/phase12-pg19/release/.fingerprint/pg_accel-ebeb4c9184e13ef2/lib-pg_accel.json`.
-  This is build-only evidence; package, install, and test gates remain open.
+- PostgreSQL 19 source/build commits: `3fd3d743` and `4ae5e337`. A local build
+  recorded the `pg19` feature and binary digest
+  `sha256:685cc1cf01c82b659965a1a3078a9ca993c47a5ee5ddb23e0f411da5deb78f5f`,
+  but the build output was machine-local. Candidate package, install, and test
+  gates remain open.
 - Safety-documentation and strict-Clippy closure: `a0b98dd`. The local
   strict-Clippy command passed:
   `cargo clippy -p pg_accel --features pg18 --all-targets -- -D clippy::undocumented_unsafe_blocks`.
@@ -101,25 +102,25 @@ justify checking any release item.
 
 ## Phase 8 - Test Coverage, CI, And Stress Gates
 
-- [ ] Coverage reaches at least 90% for pg_accel-owned Rust, C++/SYCL, and SQL-extension behavior; CI publishes coverage artifacts and fails below the required thresholds. Current local evidence: the automated coverage artifact is Rust-only `cargo llvm-cov` with `pg_test` enabled and the Rust test harness pinned to one thread. It covers Rust reached by pgrx tests, writes `coverage-scope.txt`, and explicitly does not instrument `pgaccel-kernels` C++/SYCL sources, standalone SQL harness files, benchmark artifacts, shell scripts, or GPU runtime/toolchain code. The Rust gate completes after the direct-USM fused-filter null-mask fix but fails with 40.23% Rust line coverage and 38.36% Rust region coverage in `artifacts/coverage/coverage-summary.txt`. C++/SYCL and SQL coverage remain unevidenced for the 90% release claim. Evidence CI/artifact: `<sha-or-url>`.
-- [ ] Coverage includes planner hooks, executor state, private-data encoding/decoding, GPU dispatch adapters, SQL extension surfaces, C++ kernels, H3/PostGIS/raster semantics, and benchmark classification. Current gap evidence: the 2026-07-04 Rust coverage report still shows major uncovered planner/executor/runtime surfaces, including custom scan execution, resident/group aggregate planners, OLAP cache, GPU dispatch adapters, H3/PostGIS/raster dispatch, and benchmark CLI/integration paths; separate C++/SYCL and SQL-extension coverage artifacts are not yet produced. Evidence CI/artifact: `<sha-or-url>`.
+- [ ] Coverage reaches at least 90% for pg_accel-owned Rust, C++/SYCL, and SQL-extension behavior; CI publishes coverage artifacts and fails below the required thresholds. The current gate seals independent Rust source-line, C++/SYCL source-line (host instrumentation plus real Metal device counters), and fixed-manifest SQL semantic-assertion layers at 90% each. The sealed SQL scope contains 52 files and 287 assertions. A fresh exact-candidate bundle and CI artifact are still required. Evidence CI/artifact: `<sha-or-url>`.
+- [ ] Coverage includes planner hooks, executor state, private-data encoding/decoding, GPU dispatch adapters, SQL extension surfaces, C++ kernels, H3/PostGIS/raster semantics, and benchmark classification. The coverage scope and gate require compiler-derived Rust production mapping, CTest plus manual out-of-order C++/SYCL evidence, and the external SQL integration suite. A fresh exact-candidate artifact must prove the required surfaces and percentages. Evidence CI/artifact: `<sha-or-url>`.
 - [ ] Metal stress gate passes on M-series hardware with mixed scan, aggregate, join, sort, H3, PostGIS, raster, fork, and cancellation workloads: zero backend crashes, kernel failures, panic-log entries, and resource-leak messages. Current local evidence: `just metal-stress 18` passed on 2026-07-04 with artifact directory `benchmarks/artifacts/metal-stress-20260704-161735`, including install, extension smoke, 52/52 SQL files, clean logs, standalone GPU tests, `gpu-stress-archive` 8x20 with zero XPC/pipeline/archive failures, benchmark crash-artifact checks, cancellation probe, and final clean-log assertion. Release evidence artifact: `<sha-or-url>`.
-- [ ] Required CI ship-bar jobs pass on the release candidate commit: macOS arm64 Metal GPU and Linux x86_64 no-GPU. Branch protection is recommended repository policy but is not a tag blocker. Evidence CI/settings: `<sha-or-url>`.
-- [ ] Release verification matrix passes with artifacts for EXPLAIN audit, correctness diff, benchmark sweep, fork stress, deferred-site audit, and `pg_accel_stats()` sanity. Interim live-PG evidence: H3 protection passes under the default Rust test scheduler without `--test-threads=1`, the plan-shape filter passes 8/8 after the direct-GpuExpr and NLJ crash gates, and `parallel_stress_test` passes 4/4 with no backend disconnects. Current local PG18 evidence on 2026-07-04: `just sql-test 18` passes 52/52 SQL files; `just metal-stress 18` passes with artifacts at `benchmarks/artifacts/metal-stress-20260704-161735`; native Metal tests pass (`test_bbox` 27/27, `test_spatial` 162/162, `test_reduce_stats` PASS, `test_correctness` 340/340, `test_hash_join` 23/23); Rust format, diff whitespace, shell syntax, lint, unit tests, audit, package, and doc parity complete. Rust coverage execution also completes, writes scope metadata, and still fails the 90% threshold; C++/SYCL and SQL coverage artifacts are still missing. Release evidence artifact: `<sha-or-url>`.
-- [ ] Release checklist synchronization is complete: this checklist matches the remaining release gates, every item has evidence, and the tag PR includes the checked checklist. Evidence PR: `<url>`.
+- [ ] **External/publication:** Required CI ship-bar jobs pass on the release candidate commit: macOS arm64 Metal GPU and Linux x86_64 no-GPU. Branch protection is recommended repository policy but is not a tag blocker. Evidence CI/settings: `<sha-or-url>`.
+- [ ] Release verification matrix passes with artifacts for EXPLAIN audit, correctness diff, benchmark sweep, fork stress, deferred-site audit, and `pg_accel_stats()` sanity. Interim live-PG evidence: H3 protection passes under the default Rust test scheduler without `--test-threads=1`, the plan-shape filter passes 8/8 after the direct-GpuExpr and NLJ crash gates, and `parallel_stress_test` passes 4/4 with no backend disconnects. Current local PG18 evidence on 2026-07-04: `just sql-test 18` passes 52/52 SQL files; `just metal-stress 18` passes with artifacts at `benchmarks/artifacts/metal-stress-20260704-161735`; native Metal tests pass (`test_bbox` 27/27, `test_spatial` 162/162, `test_reduce_stats` PASS, `test_correctness` 340/340, `test_hash_join` 23/23); Rust format, diff whitespace, shell syntax, lint, unit tests, audit, package, and doc parity complete. Those historical checks are not exact-candidate evidence and do not close this row. Release evidence artifact: `<sha-or-url>`.
+- [ ] **External/publication:** Release checklist synchronization is complete: this checklist matches the remaining release gates, every item has evidence, and the tag PR includes the checked checklist. Evidence PR: `<url>`.
 
 ## Phase 9 - Public Release And Installability
 
-- [ ] Fresh-machine smoke passes from a clean clone using public README instructions: install prerequisites, `just setup-gpu-acpp`, package, install, `CREATE EXTENSION`, and run a representative benchmark without manual fixes. Evidence artifact: `<sha-or-url>`.
-- [ ] Installable-by-anyone gate passes: PostgreSQL extension package, AdaptiveCpp fork setup, kernel build, SQL/control files, source PostgreSQL/pgrx path, native macOS notes, Linux no-GPU behavior, and verification command all work from clean machines. Evidence artifact: `<sha-or-url>`.
+- [ ] **External/publication:** Fresh-machine smoke passes from a clean clone using public README instructions: install prerequisites, `just setup-gpu-acpp`, package, install, `CREATE EXTENSION`, and run a representative benchmark without manual fixes. Evidence artifact: `<sha-or-url>`.
+- [ ] **External/publication:** Installable-by-anyone gate passes: PostgreSQL extension package, AdaptiveCpp fork setup, kernel build, SQL/control files, source PostgreSQL/pgrx path, native macOS notes, Linux no-GPU behavior, and verification command all work from clean machines. Evidence artifact: `<sha-or-url>`.
 - [ ] Install provenance confirms the live PostgreSQL backend loads the just-built extension binary and failures produce actionable diagnostics. Evidence artifact: `<sha-or-url>`.
-- [ ] Public repository readiness is complete: README, architecture docs, benchmark docs, release notes, license files, contribution guide, security policy, issue templates, reproducible benchmark artifacts, supported hardware, limitations, and failure-reporting docs are published. Evidence SHA/artifact: `<sha-or-url>`.
-- [ ] Release candidate and final tag artifacts are published: `v1.0.0-rc1`, one-week monitoring notes, `v1.0.0`, release notes, source archive, SQL artifacts, checksums, benchmark artifacts, and install docs. Evidence release: `<release-url>`.
-- [ ] Hacker News launch is blocked until the repo is public, installable, benchmark-backed, crash-free on the release matrix, and the post links to install docs, benchmark evidence, supported hardware, limitations, and issue tracker. Evidence URL: `<url>`.
+- [ ] **External/publication:** Public repository readiness is complete: README, architecture docs, benchmark docs, release notes, license files, contribution guide, security policy, issue templates, reproducible benchmark artifacts, supported hardware, limitations, and failure-reporting docs are published. Evidence SHA/artifact: `<sha-or-url>`.
+- [ ] **External/publication:** Release candidate and final tag artifacts are published: `v1.0.0-rc1`, one-week monitoring notes, `v1.0.0`, release notes, source archive, SQL artifacts, checksums, benchmark artifacts, and install docs. Evidence release: `<release-url>`.
+- [ ] **External/publication:** Hacker News launch is blocked until the repo is public, installable, benchmark-backed, crash-free on the release matrix, and the post links to install docs, benchmark evidence, supported hardware, limitations, and issue tracker. Evidence URL: `<url>`.
 
 ## Maintainer Sign-Off
 
-- [ ] Release owner: `<name>`, Evidence SHA: `<sha>`.
-- [ ] Reviewer: `<name>`, Evidence SHA: `<sha>`.
-- [ ] Tag PR includes this completed checklist. Evidence PR: `<url>`.
-- [ ] Final tag command recorded in PR body. Evidence PR: `<url>`.
+- [ ] **External/publication:** Release owner: `<name>`, Evidence SHA: `<sha>`.
+- [ ] **External/publication:** Reviewer: `<name>`, Evidence SHA: `<sha>`.
+- [ ] **External/publication:** Tag PR includes this completed checklist. Evidence PR: `<url>`.
+- [ ] **External/publication:** Final tag command recorded in PR body. Evidence PR: `<url>`.

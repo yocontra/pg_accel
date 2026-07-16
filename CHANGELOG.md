@@ -58,23 +58,18 @@ claim is implied by the entries below.
 ### Verification
 
 - The local Phase 6 domain gate landed in `37a9571d`, `868e0e89`, and
-  `2f85c059`. Its passing pre-integration PG18/Metal artifact is
-  `.codex/worktrees/phase6-domain-gate/benchmarks/artifacts/phase6-gate-d94b583-pg18-metal/`;
-  provenance reports `pass` with no errors or warnings. This is pre-RC local
-  evidence, not an exact-candidate release artifact.
+  `2f85c059`. A pre-integration PG18/Metal run passed, but its machine-local
+  artifact was not retained as durable release evidence. This is not an
+  exact-candidate release result.
 - The local Phase 9 operator gate landed in `b3261c86`, `64948b96`, and
-  `d58db14f`. Its passing pre-integration PG18/Metal artifact is
-  `.codex/worktrees/phase9-operator-gate/benchmarks/artifacts/phase9-gate-db2c6d2-pg18-metal/`;
-  provenance reports `pass` with no errors or warnings. This is pre-RC local
-  evidence, not an exact-candidate release artifact.
-- PostgreSQL 19 source/build support landed in `3fd3d743` and `4ae5e337`. The
-  local build produced
-  `.codex/worktrees/phase12-pg19/target/phase12-pg19/release/libpg_accel.dylib`
-  (`sha256:685cc1cf01c82b659965a1a3078a9ca993c47a5ee5ddb23e0f411da5deb78f5f`),
-  with the `pg19` feature recorded in
-  `.codex/worktrees/phase12-pg19/target/phase12-pg19/release/.fingerprint/pg_accel-ebeb4c9184e13ef2/lib-pg_accel.json`.
-  This proves a local build only; candidate package, install, and test gates
-  remain open.
+  `d58db14f`. A pre-integration PG18/Metal run passed, but its machine-local
+  artifact was not retained as durable release evidence. This is not an
+  exact-candidate release result.
+- PostgreSQL 19 source/build support landed in `3fd3d743` and `4ae5e337`. A
+  local build recorded the `pg19` feature and binary digest
+  `sha256:685cc1cf01c82b659965a1a3078a9ca993c47a5ee5ddb23e0f411da5deb78f5f`.
+  The build output was machine-local, so candidate package, install, and test
+  gates remain open.
 - Safety-documentation and strict-Clippy closure is commit `a0b98dd`. The local
   strict-Clippy command passed:
   `cargo clippy -p pg_accel --features pg18 --all-targets -- -D clippy::undocumented_unsafe_blocks`.
