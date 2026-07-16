@@ -2432,6 +2432,9 @@ unsafe fn begin_default_table_scan(
     }
     #[cfg(feature = "pg19")]
     {
+        // SAFETY: the executor supplies a live open Relation and active
+        // Snapshot; nkeys=0 makes the null scan-key pointer valid, and PG19
+        // flags=0 requests the default table-scan behavior.
         unsafe { pg_sys::table_beginscan(relation, snapshot, 0, std::ptr::null_mut(), 0) }
     }
 }
