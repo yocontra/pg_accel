@@ -7813,6 +7813,11 @@ class _PathAuditor:
             self.by_name[function.name].append(function)
         self.external_proofs = external_proofs or {}
         self.trusted_gpu_exec_observer = trusted_gpu_exec_observer
+        self.overloaded_operators = frozenset(
+            tokens[index + 1].value
+            for index in range(len(tokens) - 1)
+            if tokens[index].value == "operator"
+        )
         self.cache: dict[Function, _Proof] = {}
         self.member_write_position_cache: dict[Function, frozenset[int]] = {}
 
@@ -8214,11 +8219,7 @@ class _PathAuditor:
             # Exact assignment followed immediately by `if (status != OK) return ...`.
             # A translation-unit overload can make the syntactically exact
             # comparison lie about whether the helper failure is propagated.
-            if any(
-                self.tokens[index].value == "operator"
-                and self.tokens[index + 1].value in {"!=", "not_eq"}
-                for index in range(len(self.tokens) - 1)
-            ):
+            if self.overloaded_operators & {"!=", "not_eq"}:
                 return False
             assignment = exact_call_assignment(
                 indexed, pointer_target=False, status_target=True
@@ -8273,11 +8274,7 @@ class _PathAuditor:
                 ("PGACCEL_OK", "==", target),
             ):
                 return False
-            if any(
-                self.tokens[index].value == "operator"
-                and self.tokens[index + 1].value == "=="
-                for index in range(len(self.tokens) - 1)
-            ):
+            if "==" in self.overloaded_operators:
                 return False
             observer_left = close + 1
             if self.tokens[observer_left].value == "{" and observer_left in self.forward:
@@ -9240,6 +9237,119 @@ class _PathAuditor:
             call_output_root_variants,
             self.forward,
         )
+
+        observed_status_selection_evidence: list[_DispatchEvidence] = []
+        for question, variants in safe_ternaries.items():
+            if not variants:
+                continue
+
+            statement_start = question - 1
+            while statement_start > function.body_open and self.tokens[
+                statement_start
+            ].value not in {";", "{", "}"}:
+                statement_start -= 1
+
+            statement_end = question + 1
+            while statement_end < function.body_close:
+                if (
+                    self.tokens[statement_end].value in {"(", "[", "{"}
+                    and statement_end in self.forward
+                ):
+                    statement_end = self.forward[statement_end] + 1
+                    continue
+                if self.tokens[statement_end].value == ";":
+                    break
+                statement_end += 1
+            if statement_end >= function.body_close:
+                continue
+
+            equals = [
+                index
+                for index in range(statement_start + 1, question)
+                if self.tokens[index].value == "="
+            ]
+            if len(equals) != 1:
+                continue
+            equals_index = equals[0]
+            target_index = equals_index - 1
+            if (
+                target_index <= statement_start
+                or self.tokens[target_index].kind != "identifier"
+            ):
+                continue
+            target = self.tokens[target_index].value
+            declaration = [
+                token.value
+                for token in self.tokens[statement_start + 1 : target_index]
+            ]
+            if (
+                declaration.count("pgaccel_status") != 1
+                or any(
+                    token not in {"pgaccel_status", "const", "volatile"}
+                    for token in declaration
+                )
+                or _declaration_kind(self.tokens, target_index, function) is None
+            ):
+                continue
+
+            guard = statement_end + 1
+            condition = guard + 1
+            if (
+                guard >= function.body_close
+                or self.tokens[guard].value != "if"
+                or condition >= function.body_close
+                or self.tokens[condition].value != "("
+            ):
+                continue
+            close = self.forward.get(condition)
+            if close is None:
+                continue
+            condition_values = _strip_condition_parentheses(
+                [token.value for token in self.tokens[condition + 1 : close]]
+            )
+            if condition_values not in (
+                (target, "==", "PGACCEL_OK"),
+                ("PGACCEL_OK", "==", target),
+            ):
+                continue
+            if "==" in self.overloaded_operators:
+                continue
+
+            observer = close + 1
+            if (
+                observer + 3 >= function.body_close
+                or [
+                    token.value for token in self.tokens[observer : observer + 4]
+                ]
+                != ["pgaccel_record_gpu_exec", "(", ")", ";"]
+                or not gpu_exec_observer_call_is_trusted(observer)
+            ):
+                continue
+            return_index = observer + 4
+            if (
+                return_index + 2 >= function.body_close
+                or [
+                    token.value
+                    for token in self.tokens[return_index : return_index + 3]
+                ]
+                != ["return", target, ";"]
+                or _context(question, regions) != _context(guard, regions)
+                or _context(question, regions) != _context(return_index, regions)
+            ):
+                continue
+
+            observed_status_selection_evidence.append(
+                _DispatchEvidence(
+                    question,
+                    self.tokens[question].line,
+                    "observed_status_device_selection",
+                    "exact status ternary has device-proven output arms and is "
+                    "observed only on success before direct propagation",
+                    _context(question, regions),
+                    variants,
+                )
+            )
+
         control_lines = sorted(
             (
                 (kind, line)
@@ -9592,7 +9702,11 @@ class _PathAuditor:
                 )
 
         all_evidence = sorted(
-            direct + copyback_evidence + resource_publications + call_evidence,
+            direct
+            + copyback_evidence
+            + resource_publications
+            + call_evidence
+            + observed_status_selection_evidence,
             key=lambda item: item.index,
         )
 

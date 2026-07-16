@@ -5492,6 +5492,93 @@ class ResidentV5RegressionTests(unittest.TestCase):
         self.assertFalse(entry.ok, entry.detail)
         self.assertIn("untrusted_gpu_observer", entry.classifications)
 
+    def test_observed_status_ternary_requires_exact_device_arms_and_propagation(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static thread_local uint64_t tl_gpu_exec_count = 0;
+            void pgaccel_record_gpu_exec() { tl_gpu_exec_count++; }
+            static pgaccel_status write_first(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 10;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static pgaccel_status write_second(bool fail, int* out) {
+              if (fail) return PGACCEL_ERROR;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                out[0] = 11;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            static void force_ok(pgaccel_status& status) {
+              status = PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_observed_status_selection(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_mismatched_status_selection(
+                bool first, bool fail, int* first_out, int* second_out) {
+              pgaccel_status status = first ? write_first(fail, first_out)
+                                             : write_second(fail, second_out);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_mutated_status_selection(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              status = PGACCEL_OK;
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_rebound_status_selection(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              force_ok(status);
+              if (status == PGACCEL_OK)
+                pgaccel_record_gpu_exec();
+              return status;
+            }
+            extern "C" pgaccel_status pgaccel_unguarded_status_selection(
+                bool first, bool fail, int* out) {
+              pgaccel_status status = first ? write_first(fail, out)
+                                             : write_second(fail, out);
+              pgaccel_record_gpu_exec();
+              return status;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        green = entries["pgaccel_observed_status_selection"]
+        self.assertTrue(green.ok, green.detail)
+        self.assertIn("validated_device_selection", green.classifications)
+        self.assertEqual(green.guaranteed_output_parameter_positions, (2,))
+        self.assertEqual(green.output_parameter_position_variants, ((2,),))
+        for name in (
+            "pgaccel_mismatched_status_selection",
+            "pgaccel_mutated_status_selection",
+            "pgaccel_rebound_status_selection",
+            "pgaccel_unguarded_status_selection",
+        ):
+            with self.subTest(name=name):
+                entry = entries[name]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("undominated_success", entry.classifications)
+
     def test_borrowed_workspace_is_in_host_hazard_and_shadow_analysis(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE
@@ -6063,6 +6150,19 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertIn("large_input_gpu_chain", entry.classifications)
         self.assertIn("zero_work", entry.classifications)
         self.assertNotIn("host_output_write", entry.classifications)
+
+    def test_f64_reduction_status_selection_is_source_proven(self) -> None:
+        for name in (
+            "pgaccel_reduce_min_f64",
+            "pgaccel_reduce_max_f64",
+            "pgaccel_reduce_multi_f64",
+        ):
+            with self.subTest(name=name):
+                entry = self.by_name[name]
+                self.assertTrue(entry.ok, entry.detail)
+                self.assertEqual(entry.path.name, "reduce.cpp")
+                self.assertIn("large_input_gpu_chain", entry.classifications)
+                self.assertNotIn("host_output_write", entry.classifications)
 
     def test_non_status_hash_join_builds_have_device_resource_proof(self) -> None:
         entries = (
