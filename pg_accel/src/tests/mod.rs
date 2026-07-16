@@ -1591,6 +1591,7 @@ mod tests {
 
         // Try with various batch sizes
         for bs in &[1, 10, 100, 1000] {
+            // admission-audit-allow: direct min_batch_size GUC contract test
             Spi::run(&format!("SET pg_accel.min_batch_size = {bs}"))
                 .unwrap_or_else(|_| panic!("SET min_batch_size = {bs} should succeed"));
             Spi::run("SELECT abs(x) FROM t_bsz")

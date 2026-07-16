@@ -25,6 +25,9 @@ const DIRECT_COST_OVERRIDE_ALLOW_MARKER: &str =
     "// admission-audit-allow: direct cost_multiplier executor contract test";
 const DIRECT_COST_DEFAULT_PROOF_LINE: &str =
     "fn assert_default_cost_decline_matches_native(query: &str) {";
+const DIRECT_MIN_BATCH_SOURCE: &str = "pg_accel/src/tests/mod.rs";
+const DIRECT_MIN_BATCH_ALLOW_MARKER: &str =
+    "// admission-audit-allow: direct min_batch_size GUC contract test";
 
 fn numeric_cost_source_line(value: &str) -> String {
     [
@@ -34,12 +37,6 @@ fn numeric_cost_source_line(value: &str) -> String {
         "\")",
     ]
     .concat()
-}
-
-fn starts_with_numeric_cost_literal(value: &str) -> bool {
-    value
-        .trim_start()
-        .starts_with(|ch: char| ch.is_ascii_digit() || matches!(ch, '-' | '+' | '.' | '\''))
 }
 
 fn is_sql_identifier_byte(byte: u8) -> bool {
@@ -60,66 +57,192 @@ fn ascii_keyword_end(source: &[u8], start: usize, keyword: &[u8]) -> Option<usiz
     Some(end)
 }
 
-fn skip_ascii_whitespace(source: &[u8], mut cursor: usize) -> usize {
-    while source.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+fn fragmented_keyword_end(source: &[u8], start: usize, keyword: &[u8]) -> Option<usize> {
+    if start > 0 && is_sql_identifier_byte(source[start - 1]) {
+        return None;
+    }
+    let mut cursor = start;
+    for expected in keyword {
+        while source.get(cursor).is_some_and(|byte| {
+            matches!(byte, b'"' | b',' | b'[' | b']' | b'(' | b')' | b'\\' | b'#')
+                || byte.is_ascii_whitespace()
+        }) {
+            cursor += 1;
+        }
+        if !source
+            .get(cursor)
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
+        {
+            return None;
+        }
         cursor += 1;
+    }
+    Some(cursor)
+}
+
+fn enclosing_rust_string_start(source: &str, target: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut string_start = None;
+    while cursor < target {
+        if bytes[cursor] == b'\\' && string_start.is_some() {
+            cursor = (cursor + 2).min(target);
+            continue;
+        }
+        if bytes[cursor] == b'"' {
+            string_start = if string_start.is_some() {
+                None
+            } else {
+                Some(cursor)
+            };
+        }
+        cursor += 1;
+    }
+    string_start
+}
+
+fn diagnostic_rust_string(source: &str, string_start: usize) -> bool {
+    let prefix = &source[..string_start];
+    let prefix = &prefix[prefix.len().saturating_sub(96)..];
+    let compact = prefix.split_whitespace().collect::<String>();
+    compact.ends_with("panic!(")
+        || compact.ends_with(".expect(")
+        || compact.ends_with("assert!(")
+        || compact.ends_with("assert_eq!(")
+}
+
+fn skip_source_construction_separators(source: &[u8], mut cursor: usize) -> usize {
+    loop {
+        while source.get(cursor).is_some_and(|byte| {
+            byte.is_ascii_whitespace()
+                || matches!(
+                    byte,
+                    b'"' | b'\'' | b',' | b'(' | b')' | b'[' | b']' | b'\\' | b'#'
+                )
+        }) {
+            cursor += 1;
+        }
+        if source.get(cursor..cursor + 2) == Some(b"/*") {
+            cursor += 2;
+            while cursor + 1 < source.len() && source.get(cursor..cursor + 2) != Some(b"*/") {
+                cursor += 1;
+            }
+            cursor = (cursor + 2).min(source.len());
+            continue;
+        }
+        if source.get(cursor..cursor + 2) == Some(b"--") {
+            cursor += 2;
+            while source.get(cursor).is_some_and(|byte| *byte != b'\n') {
+                cursor += 1;
+            }
+            continue;
+        }
+        break;
     }
     cursor
 }
 
-/// Return the source-line index of every numeric SQL `SET` pin for the cost
-/// multiplier. PostgreSQL accepts both `=` and `TO`, case-insensitively, with
-/// arbitrary whitespace (including newlines), so the audit must recognize the
-/// same syntax rather than one preferred rendering.
-fn numeric_cost_pin_lines(source: &str) -> Vec<usize> {
+fn starts_numeric_literal(source: &[u8], cursor: usize) -> bool {
+    match source.get(cursor) {
+        Some(byte) if byte.is_ascii_digit() => true,
+        Some(b'.') => source.get(cursor + 1).is_some_and(u8::is_ascii_digit),
+        Some(b'-' | b'+') => source.get(cursor + 1).is_some_and(|byte| {
+            byte.is_ascii_digit()
+                || (*byte == b'.' && source.get(cursor + 2).is_some_and(u8::is_ascii_digit))
+        }),
+        _ => false,
+    }
+}
+
+/// Return the source-line index of every non-default assignment to a protected
+/// planner setting. This intentionally audits source construction, not only
+/// rendered SQL: it sees `=`, `TO`, `set_config(..., value, ...)`, adjacent
+/// Rust string fragments, and dynamic `format!` placeholders. Any assignment
+/// value other than the literal `DEFAULT` is a pin and must be explicitly
+/// approved by the narrow contract-test allowlist.
+fn nondefault_setting_pin_lines(name: &str, source: &str, setting: &str) -> Vec<usize> {
     let bytes = source.as_bytes();
     let mut matches = Vec::new();
 
     for start in 0..bytes.len() {
-        let Some(mut cursor) = ascii_keyword_end(bytes, start, b"set") else {
+        let Some(mut cursor) = fragmented_keyword_end(bytes, start, setting.as_bytes()) else {
             continue;
         };
-        cursor = skip_ascii_whitespace(bytes, cursor);
-
-        if let Some(end) = ascii_keyword_end(bytes, cursor, b"local")
-            .or_else(|| ascii_keyword_end(bytes, cursor, b"session"))
+        let rust_string = enclosing_rust_string_start(source, start);
+        if name.ends_with(".rs")
+            && (rust_string.is_none()
+                || rust_string.is_some_and(|opening| diagnostic_rust_string(source, opening)))
         {
-            cursor = skip_ascii_whitespace(bytes, end);
-        }
-
-        let Some(end) = ascii_keyword_end(bytes, cursor, b"pg_accel") else {
-            continue;
-        };
-        cursor = skip_ascii_whitespace(bytes, end);
-        if bytes.get(cursor) != Some(&b'.') {
             continue;
         }
-        cursor = skip_ascii_whitespace(bytes, cursor + 1);
-
-        let Some(end) = ascii_keyword_end(bytes, cursor, b"cost_multiplier") else {
-            continue;
-        };
-        cursor = skip_ascii_whitespace(bytes, end);
+        cursor = skip_source_construction_separators(bytes, cursor);
+        let has_assignment_operator;
         if bytes.get(cursor) == Some(&b'=') {
             cursor += 1;
+            has_assignment_operator = true;
         } else if let Some(end) = ascii_keyword_end(bytes, cursor, b"to") {
             cursor = end;
+            has_assignment_operator = true;
+        } else if let Some(end) = ascii_keyword_end(bytes, cursor, b"from") {
+            cursor = end;
+            has_assignment_operator = true;
         } else {
+            has_assignment_operator = false;
+        }
+        cursor = skip_source_construction_separators(bytes, cursor);
+
+        let context_start = start.saturating_sub(512);
+        let set_config_assignment = source[context_start..start]
+            .to_ascii_lowercase()
+            .contains("set_config");
+        if !has_assignment_operator && !set_config_assignment {
             continue;
         }
-        cursor = skip_ascii_whitespace(bytes, cursor);
-
-        if starts_with_numeric_cost_literal(&source[cursor..]) {
-            matches.push(
-                source[..start]
-                    .bytes()
-                    .filter(|byte| *byte == b'\n')
-                    .count(),
-            );
+        if ascii_keyword_end(bytes, cursor, b"default").is_some() {
+            continue;
         }
+        matches.push(
+            source[..start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count(),
+        );
     }
 
+    matches.sort_unstable();
+    matches.dedup();
     matches
+}
+
+fn numeric_cost_pin_lines(source: &str) -> Vec<usize> {
+    nondefault_setting_pin_lines("fixture.sql", source, "cost_multiplier")
+}
+
+fn direct_min_batch_override_allowed(
+    name: &str,
+    lines: &[&str],
+    line_index: usize,
+    line: &str,
+) -> bool {
+    let allowed_lines = [
+        [
+            "Spi::run(\"SET pg_accel.",
+            "min_batch_size = 512\").expect(\"SET min_batch_size should succeed\");",
+        ]
+        .concat(),
+        ["Spi::run(\"SET pg_accel.", "min_batch_size = 256\")"].concat(),
+        [
+            "Spi::run(&format!(\"SET pg_accel.",
+            "min_batch_size = {bs}\"))",
+        ]
+        .concat(),
+    ];
+    name == DIRECT_MIN_BATCH_SOURCE
+        && allowed_lines.iter().any(|allowed| line.trim() == allowed)
+        && line_index
+            .checked_sub(1)
+            .and_then(|previous| lines.get(previous))
+            .is_some_and(|previous| previous.trim() == DIRECT_MIN_BATCH_ALLOW_MARKER)
 }
 
 fn direct_cost_override_allowed(name: &str, lines: &[&str], line_index: usize, line: &str) -> bool {
@@ -155,7 +278,7 @@ fn audit_numeric_cost_pins(name: &str, source: &str) -> NumericCostPinAudit {
     let lines = source.lines().collect::<Vec<_>>();
     let mut approved_lines = Vec::new();
     let mut rejected_lines = Vec::new();
-    for line_index in numeric_cost_pin_lines(source) {
+    for line_index in nondefault_setting_pin_lines(name, source, "cost_multiplier") {
         let line = lines.get(line_index).copied().unwrap_or_default();
         if direct_cost_override_allowed(name, &lines, line_index, line) {
             approved_lines.push(line_index);
@@ -223,35 +346,29 @@ fn released_planner_evidence_uses_default_admission_settings() {
             include_str!("../../sql/tests/88_concurrent_features.sql"),
         ),
     ];
-    let banned = [
-        ["SET max_parallel_workers_per_gather = ", "0"].concat(),
-        ["SET max_parallel_workers_per_gather = ", "4"].concat(),
-        ["SET max_parallel_workers_per_gather = ", "8"].concat(),
-        ["SET min_parallel_table_scan_size = ", "0"].concat(),
-        ["SET parallel_setup_cost = ", "0"].concat(),
-        ["SET parallel_tuple_cost = ", "0"].concat(),
-    ];
-    let numeric_min_batch_prefixes = [
-        ["SET pg_accel.", "min_batch_size = "].concat(),
-        ["SET LOCAL pg_accel.", "min_batch_size = "].concat(),
-    ];
-    let numeric_parallel_prefixes = [
-        "SET max_parallel_workers_per_gather = ",
-        "SET min_parallel_table_scan_size = ",
-        "SET min_parallel_index_scan_size = ",
-        "SET parallel_setup_cost = ",
-        "SET parallel_tuple_cost = ",
+    let parallel_settings = [
+        "max_parallel_workers_per_gather",
+        "min_parallel_table_scan_size",
+        "min_parallel_index_scan_size",
+        "parallel_setup_cost",
+        "parallel_tuple_cost",
     ];
 
     let mut approved_cost_overrides = 0;
+    let mut approved_min_batch_overrides = 0;
     for (name, source) in EVIDENCE_SOURCES {
-        for marker in &banned {
-            assert!(
-                !source.contains(marker),
-                "released planner evidence `{name}` contains underwritten setting `{marker}`"
-            );
-        }
-        let numeric_cost_audit = audit_numeric_cost_pins(name, source);
+        // The first section of this file defines and adversarially tests this
+        // audit. Its released plan evidence begins at `connect`; all other
+        // evidence sources are audited in full.
+        let auditable_source = if *name == "plan_shape_test.rs" {
+            let evidence_start = ["fn con", "nect() -> Client {"].concat();
+            source
+                .split_once(&evidence_start)
+                .map_or(*source, |(_, body)| body)
+        } else {
+            source
+        };
+        let numeric_cost_audit = audit_numeric_cost_pins(name, auditable_source);
         assert!(
             numeric_cost_audit.rejected_lines.is_empty(),
             "released planner evidence `{name}` line {} pins a numeric cost multiplier without the exact direct-contract allow marker",
@@ -269,39 +386,21 @@ fn released_planner_evidence_uses_default_admission_settings() {
             usize::from(*name == DIRECT_COST_OVERRIDE_SOURCE)
         );
         approved_cost_overrides += numeric_cost_audit.approved_lines.len();
-        for (line_index, line) in source.lines().enumerate() {
-            for prefix in &numeric_min_batch_prefixes {
-                let Some((_, value)) = line.split_once(prefix) else {
-                    continue;
-                };
-                if !value
-                    .trim_start()
-                    .starts_with(|ch: char| ch.is_ascii_digit() || ch == '-')
-                {
-                    continue;
-                }
-                let previous_line = line_index
-                    .checked_sub(1)
-                    .and_then(|previous| source.lines().nth(previous))
-                    .unwrap_or_default();
-                assert!(
-                    line.contains("admission-audit-allow: direct min_batch_size GUC contract test")
-                        || previous_line.contains(
-                            "admission-audit-allow: direct min_batch_size GUC contract test",
-                        ),
-                    "released planner evidence `{name}` line {} pins a numeric minimum batch without a direct-contract allow marker",
-                    line_index + 1
-                );
-            }
-            for prefix in &numeric_parallel_prefixes {
-                let Some((_, value)) = line.split_once(prefix) else {
-                    continue;
-                };
-                assert!(
-                    !value
-                        .trim_start()
-                        .starts_with(|ch: char| ch.is_ascii_digit() || ch == '-'),
-                    "released planner evidence `{name}` line {} pins a numeric parallel planner setting",
+        let lines = auditable_source.lines().collect::<Vec<_>>();
+        for line_index in nondefault_setting_pin_lines(name, auditable_source, "min_batch_size") {
+            let line = lines.get(line_index).copied().unwrap_or_default();
+            assert!(
+                direct_min_batch_override_allowed(name, &lines, line_index, line),
+                "released planner evidence `{name}` line {} pins minimum batch size outside the exact direct GUC contract",
+                line_index + 1
+            );
+            approved_min_batch_overrides += 1;
+        }
+        for setting in parallel_settings {
+            let pins = nondefault_setting_pin_lines(name, auditable_source, setting);
+            if let Some(line_index) = pins.first() {
+                panic!(
+                    "released planner evidence `{name}` line {} pins protected planner setting `{setting}`",
                     line_index + 1
                 );
             }
@@ -310,6 +409,10 @@ fn released_planner_evidence_uses_default_admission_settings() {
     assert_eq!(
         approved_cost_overrides, 1,
         "released planner evidence must contain exactly one narrowly approved numeric cost override"
+    );
+    assert_eq!(
+        approved_min_batch_overrides, 3,
+        "released planner evidence must contain only the three exact direct min_batch_size GUC checks"
     );
 }
 
@@ -372,12 +475,110 @@ fn admission_audit_rejects_unmarked_copied_and_changed_numeric_cost_pins() {
             " LOCAL pg_accel.cost_multiplier\nTO 0.1\")",
         ]
         .concat(),
+        [
+            "Spi::run(\"SELECT ",
+            "SeT_ConFig",
+            "( 'pg_accel.cost_multiplier' , '0.1' , true)\")",
+        ]
+        .concat(),
+        [
+            "[\"SET LOCAL pg_accel.\", \"",
+            "cost_multiplier TO 0.1\"].concat()",
+        ]
+        .concat(),
+        [
+            "format!(\"SET LOCAL pg_accel.",
+            "cost_multiplier = {}\", 0.1)",
+        ]
+        .concat(),
     ];
     for spelling in alternate_spellings {
         assert_eq!(
             audit_numeric_cost_pins("plan_shape_test.rs", &spelling).rejected_lines,
             vec![0],
             "valid PostgreSQL SET spelling must not bypass the numeric cost audit: {spelling:?}"
+        );
+    }
+}
+
+#[test]
+fn admission_audit_rejects_alternate_min_batch_and_parallel_setting_pins() {
+    let protected_settings = [
+        "min_batch_size",
+        "max_parallel_workers_per_gather",
+        "min_parallel_table_scan_size",
+        "min_parallel_index_scan_size",
+        "parallel_setup_cost",
+        "parallel_tuple_cost",
+    ];
+    for setting in protected_settings {
+        let sql_setting = if setting == "min_batch_size" {
+            format!("pg_accel.{setting}")
+        } else {
+            setting.to_owned()
+        };
+        let set_to = format!("Spi::run(\"sEt {sql_setting}\nTo 0\")");
+        assert_eq!(
+            nondefault_setting_pin_lines("fixture.sql", &set_to, setting),
+            vec![0],
+            "lowercase/multiline SET TO must be rejected for {setting}"
+        );
+
+        let set_config = format!("SELECT set_config( '{sql_setting}' , '0.1' , true)");
+        assert_eq!(
+            nondefault_setting_pin_lines("fixture.sql", &set_config, setting),
+            vec![0],
+            "set_config must be rejected for {setting}"
+        );
+
+        let default = format!("SET {sql_setting} TO DEFAULT");
+        assert!(
+            nondefault_setting_pin_lines("fixture.sql", &default, setting).is_empty(),
+            "literal DEFAULT must remain admissible for {setting}"
+        );
+    }
+}
+
+#[test]
+fn admission_audit_is_sql_scoped_and_rejects_fragmented_or_dynamic_pins() {
+    assert!(
+        nondefault_setting_pin_lines(
+            "fixture.rs",
+            "let cost_multiplier = settings.cost_multiplier;",
+            "cost_multiplier"
+        )
+        .is_empty()
+    );
+    for unrelated in [
+        "Spi::run(\"SET pg_accel.soft_fp64_cost_multiplier = 0.1\")",
+        "Spi::run(\"SET pg_accel.cost_multiplier_extra = 0.1\")",
+    ] {
+        assert!(
+            nondefault_setting_pin_lines("fixture.rs", unrelated, "cost_multiplier").is_empty(),
+            "identifier prefixes/suffixes are not the protected GUC: {unrelated}"
+        );
+    }
+    assert!(
+        nondefault_setting_pin_lines(
+            "fixture.rs",
+            "panic!(\"query with cost_multiplier={value} should not crash\")",
+            "cost_multiplier"
+        )
+        .is_empty()
+    );
+
+    let adversarial = [
+        "[\"SET LOCAL pg_accel.cost_\", \"multiplier = 0.1\"].concat()",
+        "Spi::run(\"SET pg_accel.cost_multiplier /* split */ TO 0.1\")",
+        "Spi::run(&format!(\"SET pg_accel.cost_multiplier = {value}\"))",
+        "Spi::run(\"SET pg_accel.cost_multiplier FROM CURRENT\")",
+        "Spi::run(&format!(\"SELECT set_config('pg_accel.cost_multiplier', '{value}', true)\"))",
+        "Spi::run(&format!(\"SELECT set_config(\n'pg_accel.cost_multiplier',\n'{value}', true)\"))",
+    ];
+    for source in adversarial {
+        assert!(
+            !nondefault_setting_pin_lines("fixture.rs", source, "cost_multiplier").is_empty(),
+            "protected SQL construction must fail closed: {source}"
         );
     }
 }

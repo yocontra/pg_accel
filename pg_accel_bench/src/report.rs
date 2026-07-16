@@ -2268,10 +2268,17 @@ fn threshold_matrix_status(
     lane: &str,
     expectation: crate::workloads::BenchmarkLaneExpectation,
     cache_mode: &str,
+    expected_iterations: usize,
 ) -> &'static str {
     match expectation {
         crate::workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
-            if gpu_winner_evidence_verified(w, lane, min_warm_speedup, cache_mode) {
+            if gpu_winner_evidence_verified(
+                w,
+                lane,
+                min_warm_speedup,
+                cache_mode,
+                expected_iterations,
+            ) {
                 "pass"
             } else {
                 "FAIL"
@@ -2330,6 +2337,7 @@ fn gpu_winner_evidence_verified(
     lane: &str,
     min_warm_speedup: f64,
     cache_mode: &str,
+    expected_iterations: usize,
 ) -> bool {
     let classification = w.dispatch_classification();
     let threshold = min_warm_speedup.max(BENCHMARK_SHIP_GATE_MIN_SPEEDUP);
@@ -2340,7 +2348,7 @@ fn gpu_winner_evidence_verified(
         && classification.rows_returned_to_cpu > 0
         && warm_speedup.is_finite()
         && warm_speedup >= threshold
-        && operation_cache_gate_verified(w, cache_mode)
+        && operation_cache_gate_verified(w, cache_mode, expected_iterations)
         && (!threshold_lane_requires_resident_groupagg_logical_spec(lane)
             || w.plan_snippet
                 .as_deref()
@@ -2400,7 +2408,11 @@ fn operation_cache_gate_required(name: &str) -> bool {
 /// is not evidence by itself: the row must carry non-empty warm and cold
 /// summaries, and every cold iteration must prove that both measurements in
 /// the pair completed their requested OS page-cache purge.
-fn operation_cache_gate_verified(w: &WorkloadResult, cache_mode: &str) -> bool {
+fn operation_cache_gate_verified(
+    w: &WorkloadResult,
+    cache_mode: &str,
+    expected_iterations: usize,
+) -> bool {
     if !operation_cache_gate_required(&w.name) {
         return true;
     }
@@ -2411,6 +2423,11 @@ fn operation_cache_gate_verified(w: &WorkloadResult, cache_mode: &str) -> bool {
     let Some(cold) = &w.cold_summary else {
         return false;
     };
+    let warm_count = w
+        .iterations
+        .iter()
+        .filter(|iteration| iteration.cache_state == CacheState::Warm)
+        .count();
     let cold_iterations = w
         .iterations
         .iter()
@@ -2419,13 +2436,16 @@ fn operation_cache_gate_verified(w: &WorkloadResult, cache_mode: &str) -> bool {
 
     cache_mode.trim().eq_ignore_ascii_case("both")
         && warm.cache_state == CacheState::Warm
-        && warm.n > 0
+        && expected_iterations > 0
+        && warm.n == expected_iterations
+        && warm_count == expected_iterations
         && cold.cache_state == CacheState::Cold
-        && cold.n > 0
-        && cold_iterations.len() == cold.n
+        && cold.n == expected_iterations
+        && cold_iterations.len() == expected_iterations
         && cold_iterations
             .iter()
             .all(|iteration| iteration.cache_purge == CachePurgeState::Completed)
+        && w.cold_shared_buffers_resident == Some(false)
 }
 
 fn no_dispatch_audit_action(w: &WorkloadResult) -> &'static str {
@@ -3791,6 +3811,7 @@ impl BenchReport {
                 entry.lane,
                 entry.expectation,
                 &self.methodology.cache_mode,
+                self.methodology.iterations,
             );
             let expected = threshold_matrix_expectation_label(entry.expectation);
             let observed = dispatch_evidence_label(workload);
@@ -4488,7 +4509,11 @@ impl BenchReport {
                             });
                             continue;
                         }
-                        if !operation_cache_gate_verified(w, &report.methodology.cache_mode) {
+                        if !operation_cache_gate_verified(
+                            w,
+                            &report.methodology.cache_mode,
+                            report.methodology.iterations,
+                        ) {
                             failures.push(BenchmarkShipGateFailure {
                                 workload: w.name.clone(),
                                 rows: w.rows,
@@ -5453,7 +5478,7 @@ mod tests {
         mut workload: WorkloadResult,
         purge: CachePurgeState,
     ) -> WorkloadResult {
-        let cold_iterations = (0..5)
+        let cold_iterations = (0..10)
             .map(|_| IterationResult {
                 accel_ms: 20.0,
                 parallel_ms: 40.0,
@@ -5464,6 +5489,7 @@ mod tests {
         workload.cold_summary =
             CacheModeSummary::from_iterations(CacheState::Cold, &cold_iterations);
         workload.iterations.extend(cold_iterations);
+        workload.cold_shared_buffers_resident = Some(false);
         workload
     }
 
@@ -5507,7 +5533,8 @@ mod tests {
             &w,
             "unrelated_lane",
             1.5,
-            "warm"
+            "warm",
+            10,
         ));
 
         // With no warm_summary at all, the flat field (0.5x) governs and the
@@ -5517,7 +5544,8 @@ mod tests {
             &w,
             "unrelated_lane",
             1.5,
-            "warm"
+            "warm",
+            10,
         ));
     }
 
@@ -5534,12 +5562,49 @@ mod tests {
         );
         assert!(w.cold_summary.is_none());
         assert!(
-            !operation_cache_gate_verified(&w, "both"),
+            !operation_cache_gate_verified(&w, "both", 10),
             "a warm summary and methodology label must not impersonate cold evidence"
         );
 
         let verified = with_cold_cache_evidence(w.clone(), CachePurgeState::Completed);
-        assert!(operation_cache_gate_verified(&verified, "both"));
+        assert!(operation_cache_gate_verified(&verified, "both", 10));
+
+        let mut one_cold = verified.clone();
+        let mut retained_cold = false;
+        one_cold.iterations.retain(|iteration| {
+            iteration.cache_state == CacheState::Warm
+                || (!retained_cold && {
+                    retained_cold = true;
+                    true
+                })
+        });
+        one_cold.cold_summary = CacheModeSummary::from_iterations(
+            CacheState::Cold,
+            &one_cold
+                .iterations
+                .iter()
+                .filter(|iteration| iteration.cache_state == CacheState::Cold)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        assert!(!operation_cache_gate_verified(&one_cold, "both", 10));
+        one_cold.cold_summary.as_mut().expect("one cold summary").n = 10;
+        assert!(
+            !operation_cache_gate_verified(&one_cold, "both", 10),
+            "a forged summary count must not replace raw cold samples"
+        );
+
+        for residency in [None, Some(true)] {
+            let mut unproven = verified.clone();
+            unproven.cold_shared_buffers_resident = residency;
+            assert!(
+                !operation_cache_gate_verified(&unproven, "both", 10),
+                "cold shared-buffer residency {residency:?} must fail closed"
+            );
+        }
+        let mut forged_warm = verified.clone();
+        forged_warm.warm_summary.as_mut().expect("warm summary").n = 9;
+        assert!(!operation_cache_gate_verified(&forged_warm, "both", 10));
 
         for purge in [
             CachePurgeState::NotRequested,
@@ -5548,20 +5613,20 @@ mod tests {
         ] {
             let unproven = with_cold_cache_evidence(w.clone(), purge);
             assert!(
-                !operation_cache_gate_verified(&unproven, "both"),
+                !operation_cache_gate_verified(&unproven, "both", 10),
                 "cold evidence with purge state {purge:?} must fail closed"
             );
         }
 
         w.warm_summary = None;
         assert!(
-            !operation_cache_gate_verified(&w, "both"),
+            !operation_cache_gate_verified(&w, "both", 10),
             "cache_mode=both alone must not satisfy the gate without a row-level warm_summary"
         );
 
         // And the existing requirement still holds: cache_mode must actually
         // be "both", regardless of warm_summary.
-        assert!(!operation_cache_gate_verified(&verified, "warm"));
+        assert!(!operation_cache_gate_verified(&verified, "warm", 10));
     }
 
     /// `native_decline_reason_verified` must read only
@@ -6629,11 +6694,13 @@ mod tests {
 
         let verified_workload =
             with_cold_cache_evidence(workload.clone(), CachePurgeState::Completed);
-        let cache_both_report = with_cache_mode(mock_report(vec![verified_workload]), "both");
+        let mut cache_both_report = with_cache_mode(mock_report(vec![verified_workload]), "both");
+        cache_both_report.methodology.iterations = 10;
         assert!(cache_both_report.evaluate_benchmark_ship_gate().is_empty());
 
         let unproven = with_cold_cache_evidence(workload, CachePurgeState::Failed);
-        let unproven_report = with_cache_mode(mock_report(vec![unproven]), "both");
+        let mut unproven_report = with_cache_mode(mock_report(vec![unproven]), "both");
+        unproven_report.methodology.iterations = 10;
         let failures = unproven_report.evaluate_benchmark_ship_gate();
         assert!(failures.iter().any(|failure| {
             failure.kind == BenchmarkShipGateFailureKind::ExpectedWinnerMissingCacheEvidence
