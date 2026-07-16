@@ -172,7 +172,9 @@ static void h3_run_fast_f32_to_common_slab(sycl::queue& q, uint8_t* d_slab, size
 static void h3_run_exact_split_to_common_slab(sycl::queue& q, uint8_t* d_slab, size_t count,
                                               int res, bool fix_all) {
   const size_t row_count = count;
-  const uint8_t fix_every = fix_all ? uint8_t(1) : uint8_t(0);
+  uint8_t fix_every = 0;
+  if (fix_all)
+    fix_every = 1;
 
   q.submit([&](sycl::handler& h) {
      h.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
@@ -1650,13 +1652,13 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
     // on device" invariant without rebuilding the monolithic soft-fp64 kernel.
     const H3LatLngCellSlabLayout layout = h3_lat_lng_cell_slab_layout(count);
 
-    uint8_t* d_slab = sycl::malloc_shared<uint8_t>(layout.slab_bytes, q);
-    if (!d_slab) {
+    uint8_t* d_fast_slab = sycl::malloc_shared<uint8_t>(layout.slab_bytes, q);
+    if (!d_fast_slab) {
       return PGACCEL_ERROR_OOM;
     }
 
-    auto* slab_lats32 = reinterpret_cast<float*>(d_slab + layout.lat32_off);
-    auto* slab_lngs32 = reinterpret_cast<float*>(d_slab + layout.lng32_off);
+    auto* slab_lats32 = reinterpret_cast<float*>(d_fast_slab + layout.lat32_off);
+    auto* slab_lngs32 = reinterpret_cast<float*>(d_fast_slab + layout.lng32_off);
     const size_t f32_bytes = count * sizeof(float);
     std::memcpy(slab_lats32, lats_f32, f32_bytes);
     std::memcpy(slab_lngs32, lngs_f32, f32_bytes);
@@ -1665,22 +1667,22 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
     q.parallel_for(sycl::range<1>(row_count), [=](sycl::id<1> id) {
        const size_t i = id[0];
        const H3LatLngCellSlabLayout k_layout = h3_lat_lng_cell_slab_layout(row_count);
-       auto* d_lats64 = reinterpret_cast<double*>(d_slab + k_layout.lat64_off);
-       auto* d_lngs64 = reinterpret_cast<double*>(d_slab + k_layout.lng64_off);
-       const auto* d_lats32 = reinterpret_cast<const float*>(d_slab + k_layout.lat32_off);
-       const auto* d_lngs32 = reinterpret_cast<const float*>(d_slab + k_layout.lng32_off);
+       auto* d_lats64 = reinterpret_cast<double*>(d_fast_slab + k_layout.lat64_off);
+       auto* d_lngs64 = reinterpret_cast<double*>(d_fast_slab + k_layout.lng64_off);
+       const auto* d_lats32 = reinterpret_cast<const float*>(d_fast_slab + k_layout.lat32_off);
+       const auto* d_lngs32 = reinterpret_cast<const float*>(d_fast_slab + k_layout.lng32_off);
        d_lats64[i] = static_cast<double>(d_lats32[i]);
        d_lngs64[i] = static_cast<double>(d_lngs32[i]);
      }).wait_and_throw();
-    h3_zero_lat_lng_cell_slab(d_slab, count);
+    h3_zero_lat_lng_cell_slab(d_fast_slab, count);
 
-    h3_run_fast_f32_to_common_slab(q, d_slab, count, resolution);
-    h3_run_exact_split_to_common_slab(q, d_slab, count, resolution, /*fix_all=*/false);
+    h3_run_fast_f32_to_common_slab(q, d_fast_slab, count, resolution);
+    h3_run_exact_split_to_common_slab(q, d_fast_slab, count, resolution, /*fix_all=*/false);
 
-    q.memcpy(cell_ids, d_slab + layout.out_off, count * sizeof(uint64_t)).wait_and_throw();
-    q.memcpy(valid, d_slab + layout.valid_off, count * sizeof(uint8_t)).wait_and_throw();
+    q.memcpy(cell_ids, d_fast_slab + layout.out_off, count * sizeof(uint64_t)).wait_and_throw();
+    q.memcpy(valid, d_fast_slab + layout.valid_off, count * sizeof(uint8_t)).wait_and_throw();
 
-    sycl::free(d_slab, q);
+    sycl::free(d_fast_slab, q);
     pgaccel_record_gpu_exec();
     return PGACCEL_OK;
   } catch (const pgaccel_no_device_error&) {
@@ -2155,9 +2157,13 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_output_size(const uint64_t
 
     H3ChildrenSizeCompletion completion{};
     q.memcpy(&completion, d_slab + completion_off, sizeof(completion)).wait_and_throw();
+    if (completion.status == static_cast<int32_t>(PGACCEL_ERROR_UNSUPPORTED)) {
+      sycl::free(d_slab, q);
+      return PGACCEL_ERROR_UNSUPPORTED;
+    }
     if (completion.status != static_cast<int32_t>(PGACCEL_OK)) {
       sycl::free(d_slab, q);
-      return static_cast<pgaccel_status>(completion.status);
+      return PGACCEL_ERROR;
     }
 
     q.memcpy(out_offsets, d_slab + offsets_off, offsets_bytes).wait_and_throw();
@@ -2192,8 +2198,8 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells
   if (child_res < 0 || child_res > H3_MAX_RESOLUTION)
     return PGACCEL_ERROR_UNSUPPORTED;
 
-  const size_t total = offsets[count];
-  if (total == 0)
+  const size_t output_count = offsets[count];
+  if (output_count == 0)
     return PGACCEL_OK;
 
   try {
@@ -2205,7 +2211,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_children_emit(const uint64_t* cells
     const size_t offsets_off = cells_bytes;
     const size_t offsets_bytes = (count + 1) * sizeof(uint32_t);
     const size_t out_off = (offsets_off + offsets_bytes + 7) & ~size_t{7};
-    const size_t out_bytes = total * sizeof(uint64_t);
+    const size_t out_bytes = output_count * sizeof(uint64_t);
     const size_t slab_bytes = out_off + out_bytes;
 
     uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);

@@ -2918,6 +2918,7 @@ def _zero_work_parameter_names(
         )
 
     result: set[str] = set()
+    const_pointer_parameters: set[str] = set()
     for left, right in _parameter_ranges(tokens, function):
         values = [token.value for token in tokens[left:right]]
         names = [
@@ -2934,6 +2935,43 @@ def _zero_work_parameter_names(
             count_name(name)
             and not ({"*", "&", "&&", "bool"} & set(declared_type))
             and numeric_types.intersection(declared_type)
+        ):
+            result.add(name)
+        if "const" in declared_type and "*" in declared_type:
+            const_pointer_parameters.add(name)
+
+    # A two-pass emitter can have an exact zero-output path whose size is the
+    # terminal offset produced by its first pass. Accept only an immutable
+    # numeric local initialized as ``const_offsets[count]``; calls, arithmetic,
+    # mutable pointers, and arbitrary indices remain outside the proof.
+    for equals in range(function.body_open + 1, function.body_close):
+        if tokens[equals].value != "=":
+            continue
+        left = equals - 1
+        while left > function.body_open and tokens[left].value not in {";", "{", "}"}:
+            left -= 1
+        declaration = tokens[left + 1 : equals]
+        names = [token.value for token in declaration if token.kind == "identifier"]
+        if not names:
+            continue
+        name = names[-1]
+        declared = {token.value for token in declaration[:-1]}
+        if (
+            "const" not in declared
+            or not numeric_types.intersection(declared)
+            or not count_name(name)
+        ):
+            continue
+        end = equals + 1
+        while end < function.body_close and tokens[end].value != ";":
+            end += 1
+        expression = [token.value for token in tokens[equals + 1 : end]]
+        if (
+            len(expression) == 4
+            and expression[0] in const_pointer_parameters
+            and expression[1] == "["
+            and expression[2] in result
+            and expression[3] == "]"
         ):
             result.add(name)
     return result
@@ -3213,6 +3251,113 @@ def _lambda_written_roots(tokens: Sequence[Token], bounds: tuple[int, int]) -> s
         ):
             written.add(tokens[index].value)
     return written
+
+
+def _canonical_kernel_written_roots(
+    tokens: Sequence[Token],
+    bounds: tuple[int, int],
+    outer_provenance: Mapping[str, tuple[str, int, str]],
+) -> set[str]:
+    """Map exact typed projections written in a kernel back to their USM root."""
+
+    written = _lambda_written_roots(tokens, bounds)
+    if not written or not outer_provenance:
+        return written
+
+    left, right = bounds
+    forward, _ = _delimiter_pairs(tokens)
+    aliases = {name: item[2] for name, item in outer_provenance.items()}
+    local_alias_declarations: dict[str, int] = {}
+
+    def statement_left(index: int) -> int:
+        cursor = index - 1
+        while cursor > left and tokens[cursor].value not in {";", "{", "}"}:
+            cursor -= 1
+        return cursor + 1
+
+    def declaration_target(equals: int) -> str | None:
+        start = statement_left(equals)
+        names = [
+            index
+            for index in range(start, equals)
+            if tokens[index].kind == "identifier"
+            and tokens[index].value not in CALL_KEYWORDS
+        ]
+        if not names:
+            return None
+        target = names[-1]
+        prefix = {token.value for token in tokens[start:target]}
+        if "*" not in prefix and "auto" not in prefix:
+            return None
+        return tokens[target].value
+
+    changed = True
+    while changed:
+        changed = False
+        for equals in range(left + 1, right):
+            if tokens[equals].value != "=":
+                continue
+            target = declaration_target(equals)
+            if target is None or target in aliases:
+                continue
+            end = equals + 1
+            depth = 0
+            while end < right:
+                value = tokens[end].value
+                if value in {"(", "[", "{"}:
+                    depth += 1
+                elif value in {")", "]", "}"}:
+                    depth = max(0, depth - 1)
+                if value == ";" and depth == 0:
+                    break
+                end += 1
+            source = _pointer_provenance_root(
+                tokens, equals + 1, end, aliases, forward
+            )
+            if source is None:
+                continue
+            aliases[target] = aliases[source[0]]
+            local_alias_declarations[target] = equals
+            changed = True
+
+    canonical = set(written)
+    for root in written:
+        if root in outer_provenance:
+            canonical.add(aliases[root])
+            continue
+        declaration = local_alias_declarations.get(root)
+        if declaration is None:
+            continue
+        direct_write = any(
+            tokens[index].value == root
+            and _unqualified_output_identifier(tokens, index)
+            and _output_write_operator(tokens, index, right, forward) is not None
+            for index in range(declaration + 1, right)
+        )
+        atomic_write = any(
+            tokens[index].value == root
+            and any(
+                tokens[cursor].value == "atomic_ref"
+                for cursor in range(
+                    next(
+                        (
+                            cursor + 1
+                            for cursor in range(index - 1, declaration, -1)
+                            if tokens[cursor].value in {";", "{", "}"}
+                        ),
+                        declaration + 1,
+                    ),
+                    index,
+                )
+            )
+            for index in range(declaration + 1, right)
+        )
+        # _lambda_written_roots adds an atomic target only after finding a
+        # matching mutating atomic_ref operation, so the initializer witness
+        # above cannot turn a read-only alias into write provenance.
+        if direct_write or atomic_write:
+            canonical.add(aliases[root])
+    return canonical
 
 
 def _lambda_contributes(
@@ -3676,6 +3821,12 @@ def _direct_dispatches(
 ]:
     forward, reverse = _delimiter_pairs(tokens)
     lambdas = _lambda_ranges(tokens, function, forward, reverse)
+    usm_provenance = _local_usm_provenance(tokens, function, lambdas)
+    _, mutable_parameters = _parameter_names(tokens, function)
+    for parameter in mutable_parameters:
+        usm_provenance.setdefault(
+            parameter, ("borrowed", function.body_open, parameter)
+        )
     evidence: list[_DispatchEvidence] = []
     raw_launches: list[_DispatchEvidence] = []
     rejected: list[str] = []
@@ -3745,7 +3896,9 @@ def _direct_dispatches(
                     if kernel is not None and _lambda_nonempty(tokens, kernel):
                         device_lambdas.add(kernel)
                         raw_inner_found = True
-                        roots = _lambda_written_roots(tokens, kernel)
+                        roots = _canonical_kernel_written_roots(
+                            tokens, kernel, usm_provenance
+                        )
                         written_roots.update(roots)
                         if roots & mutable:
                             inner_found = True
@@ -3785,7 +3938,9 @@ def _direct_dispatches(
             kernel = _kernel_lambda(tokens, lparen, rparen, forward, reverse)
             if kernel is not None and _lambda_nonempty(tokens, kernel):
                 device_lambdas.add(kernel)
-                roots = _lambda_written_roots(tokens, kernel)
+                roots = _canonical_kernel_written_roots(
+                    tokens, kernel, usm_provenance
+                )
                 raw_launches.append(
                     _DispatchEvidence(
                         index,
@@ -5191,11 +5346,23 @@ def _proven_output_transfers(
         ):
             continue
         destination = _exact_pointer_root(tokens, *arguments[0], output_roots, forward)
-        source = _exact_pointer_root(tokens, *arguments[1], set(provenance), forward)
+        source = _pointer_provenance_root(
+            tokens,
+            *arguments[1],
+            {name: item[2] for name, item in provenance.items()},
+            forward,
+        )
         if destination is None or source is None:
             continue
+        parameter_names = set(_ordered_parameter_names(tokens, function))
+        if any(
+            tokens[index].kind == "identifier"
+            and tokens[index].value in parameter_names - {source[0]}
+            for index in range(*arguments[1])
+        ):
+            continue
         destination_roots = {destination[0]}
-        source_roots = {source[0]}
+        source_roots = {provenance[source[0]][2]}
         if is_member:
             receiver = tokens[method_index - 2].value
             if _receiver_kind(
@@ -5210,6 +5377,18 @@ def _proven_output_transfers(
         transfer_context = _context(method_index, regions)
 
         def staging_source_is_host_mutated(launch: _KernelWriteEvidence) -> bool:
+            returns = _returns(tokens, function, lambda_ranges)
+
+            def terminates_before_transfer(index: int) -> bool:
+                context = _context(index, regions)
+                if _context_dominates(context, transfer_context):
+                    return False
+                return any(
+                    index < return_index < method_index
+                    and _context(return_index, regions) == context
+                    for return_index, _ in returns
+                )
+
             if any(
                 _pointer_root_reassigned(
                     tokens,
@@ -5223,6 +5402,8 @@ def _proven_output_transfers(
                 return True
             for index in range(launch.index + 1, method_index):
                 if _is_inside(index, lambda_ranges):
+                    continue
+                if terminates_before_transfer(index):
                     continue
                 # An earlier proven copyback reads its staging source and is
                 # awaited; it cannot invalidate later reads from that source.
@@ -5243,6 +5424,45 @@ def _proven_output_transfers(
                 }:
                     continue
                 nested_call = _method_lparen(tokens, index, method_index, forward)
+                if nested_call is not None and tokens[index].value == "memcpy":
+                    arguments = _call_argument_ranges(
+                        tokens, nested_call[0], nested_call[1], forward
+                    )
+                    if (
+                        len(arguments) == 3
+                        and not _range_references_output(
+                            tokens, *arguments[0], source_roots
+                        )
+                        and _range_references_output(
+                            tokens, *arguments[1], source_roots
+                        )
+                        and (
+                            (
+                                index >= 2
+                                and tokens[index - 1].value in {".", "->"}
+                                and _receiver_kind(
+                                    tokens,
+                                    function,
+                                    tokens[index - 2].value,
+                                    index,
+                                    forward,
+                                )
+                                == "queue"
+                                and _call_is_awaited(
+                                    tokens,
+                                    nested_call[1],
+                                    method_index,
+                                    forward,
+                                )
+                            )
+                            or (
+                                index >= 2
+                                and tokens[index - 2].value == "std"
+                                and tokens[index - 1].value == "::"
+                            )
+                        )
+                    ):
+                        continue
                 if nested_call is not None and _range_references_output(
                     tokens, nested_call[0] + 1, nested_call[1], source_roots
                 ):
@@ -6174,6 +6394,67 @@ class _PathAuditor:
         direct, raw_launches, rejected, device_lambdas, kernel_writes = (
             _direct_dispatches(self.tokens, function, output_roots, regions)
         )
+        caller_provenance = _local_usm_provenance(
+            self.tokens, function, lambda_ranges
+        )
+        helper_kernel_writes: list[_KernelWriteEvidence] = []
+        for indexed in _indexed_calls(self.tokens, function, lambda_ranges):
+            candidate, _ = self.resolve(indexed.call)
+            if not isinstance(candidate, Function):
+                continue
+            arguments = _call_argument_ranges(
+                self.tokens, indexed.lparen, indexed.rparen, self.forward
+            )
+            roots: set[str] = set()
+            for position in _mutable_parameter_positions(self.tokens, candidate):
+                if position >= len(arguments):
+                    continue
+                source = _pointer_provenance_root(
+                    self.tokens,
+                    *arguments[position],
+                    {name: item[2] for name, item in caller_provenance.items()},
+                    self.forward,
+                )
+                if source is not None:
+                    roots.add(caller_provenance[source[0]][2])
+            if not roots:
+                continue
+            proof = self.prove(candidate, stack + (function,))
+            if not proof.ok or not (
+                {"device_dispatch", "device_copyback"}
+                & set(proof.classifications)
+            ):
+                continue
+            candidate_parameters, candidate_mutable = _parameter_names(
+                self.tokens, candidate
+            )
+            candidate_regions = _regions(
+                self.tokens,
+                candidate,
+                self.forward,
+                _zero_work_parameter_names(
+                    self.tokens, candidate, candidate_parameters
+                ),
+                candidate_parameters,
+            )
+            candidate_writes = _direct_dispatches(
+                self.tokens, candidate, candidate_mutable, candidate_regions
+            )[4]
+            if not candidate_writes or not all(
+                launch.awaited for launch in candidate_writes
+            ):
+                continue
+            helper_kernel_writes.append(
+                _KernelWriteEvidence(
+                    indexed.index,
+                    indexed.call.line,
+                    "helper",
+                    _context(indexed.index, regions),
+                    frozenset(roots),
+                    True,
+                )
+            )
+        kernel_writes.extend(helper_kernel_writes)
         (
             copyback_evidence,
             proven_destination_indices,
@@ -6375,6 +6656,34 @@ class _PathAuditor:
             else:
                 proof = None
             call_proofs[indexed.index] = (indexed, proof, error)
+
+        returns = _returns(self.tokens, function, lambda_ranges)
+        returned_helper_outputs: dict[str, list[int]] = defaultdict(list)
+        for index, (indexed, proof, _) in call_proofs.items():
+            if proof is None or not proof.ok:
+                continue
+            if not any(
+                return_index < index < return_index + len(expression) + 2
+                for return_index, expression in returns
+            ):
+                continue
+            for root in call_output_roots.get(index, ()):
+                returned_helper_outputs[root].append(index)
+        host_writes = [
+            record
+            for record in host_writes
+            if not (
+                record[2]
+                and self.tokens[record[0]].value in returned_helper_outputs
+                and any(
+                    record[0] < call_index
+                    for call_index in returned_helper_outputs[
+                        self.tokens[record[0]].value
+                    ]
+                )
+            )
+        ]
+
         helper_resource_roots: dict[str, list[_DispatchEvidence]] = defaultdict(list)
         for indexed, proof, _ in call_proofs.values():
             if (
@@ -6418,6 +6727,117 @@ class _PathAuditor:
                             _context(indexed.index, regions),
                         )
                     )
+            statement_left = indexed.index - 1
+            while (
+                statement_left > function.body_open
+                and self.tokens[statement_left].value not in {";", "{", "}"}
+            ):
+                statement_left -= 1
+            equals = next(
+                (
+                    index
+                    for index in range(statement_left + 1, indexed.index)
+                    if self.tokens[index].value == "="
+                ),
+                None,
+            )
+            if (
+                equals is not None
+                and indexed.rparen + 1 < function.body_close
+                and self.tokens[indexed.rparen + 1].value == ";"
+            ):
+                names = [
+                    self.tokens[index].value
+                    for index in range(statement_left + 1, equals)
+                    if self.tokens[index].kind == "identifier"
+                    and self.tokens[index].value not in CALL_KEYWORDS
+                ]
+                declaration = {
+                    self.tokens[index].value
+                    for index in range(statement_left + 1, equals)
+                }
+                if names and ({"*", "auto"} & declaration):
+                    target = names[-1]
+                    helper_resource_roots[target].append(
+                        _DispatchEvidence(
+                            indexed.index,
+                            indexed.call.line,
+                            "opaque_resource_helper_return",
+                            f"{indexed.call.name} returns a kernel-derived opaque "
+                            f"resource into local {target} at line {indexed.call.line}",
+                            _context(indexed.index, regions),
+                        )
+                    )
+
+        helper_resource_publications: list[_DispatchEvidence] = []
+        helper_resource_write_indices: set[int] = set()
+        for index, _, _ in host_writes:
+            if self.tokens[index].value not in output_roots:
+                continue
+            operator = _output_write_operator(
+                self.tokens, index, function.body_close, self.forward
+            )
+            if operator is None or self.tokens[operator].value != "=":
+                continue
+            end = operator + 1
+            while end < function.body_close and self.tokens[end].value != ";":
+                end += 1
+            resource = _exact_pointer_root(
+                self.tokens,
+                operator + 1,
+                end,
+                set(helper_resource_roots),
+                self.forward,
+            )
+            if resource is None:
+                continue
+            candidates = [
+                item
+                for item in helper_resource_roots[resource[0]]
+                if item.index < index
+                and _context_dominates(
+                    item.context, _context(index, regions)
+                )
+            ]
+            if not candidates:
+                continue
+            helper_resource_write_indices.add(index)
+            helper_resource_publications.append(
+                _DispatchEvidence(
+                    index,
+                    self.tokens[index].line,
+                    "opaque_resource_helper_publication",
+                    f"kernel-derived opaque resource {resource[0]} reaches ABI "
+                    f"output at line {self.tokens[index].line}",
+                    _context(index, regions),
+                )
+            )
+        if helper_resource_publications:
+            resource_publications.extend(helper_resource_publications)
+            host_writes = [
+                record
+                for record in host_writes
+                if record[0] not in helper_resource_write_indices
+            ]
+        resource_publication_indices: dict[str, list[int]] = defaultdict(list)
+        for publication in resource_publications:
+            root = self.tokens[publication.index].value
+            if root in output_roots:
+                resource_publication_indices[root].append(publication.index)
+        host_writes = [
+            record
+            for record in host_writes
+            if not (
+                record[2]
+                and self.tokens[record[0]].value in resource_publication_indices
+                and any(
+                    record[0] < publication
+                    for publication in resource_publication_indices[
+                        self.tokens[record[0]].value
+                    ]
+                )
+            )
+        ]
         safe_ternaries = _proven_device_selection_ternaries(
             self.tokens,
             function,
@@ -6765,7 +7185,6 @@ class _PathAuditor:
         success_paths = 0
         zero_success_paths = 0
         unsafe_success: list[str] = []
-        returns = _returns(self.tokens, function, lambda_ranges)
         for return_index, expression in returns:
             values = [token.value for token in expression]
             if values and values[0] in FAILURE_STATUSES:
@@ -6870,6 +7289,22 @@ class _PathAuditor:
                     f"success at line {self.tokens[return_index].line} is not dominated by output-producing SYCL work"
                 )
 
+        internal_void_terminal = bool(
+            not returns
+            and function.return_spelling == "void"
+            and not function.is_entrypoint
+        )
+        if internal_void_terminal:
+            success_paths = 1
+            if not any(
+                item.index < function.body_close
+                and _context_dominates(
+                    item.context, _context(function.body_close, regions)
+                )
+                for item in all_evidence
+            ):
+                unsafe_success.append("implicit void return lacks device provenance")
+
         failure_only_hazards = bool(
             host_loop_lines
             or unsafe_write_records
@@ -6934,10 +7369,11 @@ class _PathAuditor:
             not function.is_status
             and function.return_spelling == "void"
             and not returns
+            and function.is_entrypoint
         ):
             classifications.update({"unclassified_nonstatus_export", "review_required"})
             unsafe_success.append("void export lacks an explicit lifecycle contract")
-        elif not returns:
+        elif not returns and not internal_void_terminal:
             classifications.update({"missing_return_analysis", "review_required"})
             unsafe_success.append("no auditable terminal return")
 
@@ -7412,10 +7848,42 @@ def _audit_paths_once(
     return audits
 
 
+def _external_proof_signature(
+    proofs: Mapping[str, tuple[_ExternalProof, ...]],
+) -> tuple[tuple[object, ...], ...]:
+    """Return the semantic proof state used by cross-file call resolution."""
+
+    return tuple(
+        sorted(
+            (
+                name,
+                str(proof.path),
+                _canonical_signature_tokens(proof.return_spelling),
+                proof.parameter_count,
+                proof.required_parameter_count,
+                tuple(sorted(proof.mutable_parameter_positions)),
+                proof.proof.classifications,
+            )
+            for name, candidates in proofs.items()
+            for proof in candidates
+        )
+    )
+
+
 def audit_paths(paths: Sequence[pathlib.Path]) -> list[FileAudit]:
-    initial = _audit_paths_once(paths)
-    external_proofs = _external_device_proofs(paths, initial)
-    audits = _audit_paths_once(paths, external_proofs) if external_proofs else initial
+    audits = _audit_paths_once(paths)
+    previous_signature: tuple[tuple[object, ...], ...] = ()
+    # Each pass can expose another independently clean wrapper in a cross-file
+    # call chain. Proofs are derived only from the preceding complete audit, so
+    # mutually dependent wrappers cannot bootstrap a device proof from a cycle.
+    max_passes = sum(audit.entrypoints for audit in audits) + 1
+    for _ in range(max_passes):
+        external_proofs = _external_device_proofs(paths, audits)
+        signature = _external_proof_signature(external_proofs)
+        if not external_proofs or signature == previous_signature:
+            break
+        previous_signature = signature
+        audits = _audit_paths_once(paths, external_proofs)
     if audits and not any(audit.entrypoints for audit in audits):
         first = audits[0]
         finding = Finding(

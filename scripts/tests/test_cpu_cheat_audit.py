@@ -223,6 +223,13 @@ class CallGraphTests(unittest.TestCase):
             extern "C" OpaqueState* pgaccel_opaque_direct(int* input, size_t count) {
               return build_device_state(input, count);
             }
+            extern "C" pgaccel_status pgaccel_opaque_return_then_publish(
+                int* input, size_t count, OpaqueState** out) {
+              OpaqueState* state = build_device_state(input, count);
+              if (state == nullptr) return PGACCEL_ERROR;
+              *out = state;
+              return PGACCEL_OK;
+            }
             extern "C" pgaccel_status pgaccel_opaque_checked(
                 int* input, size_t count, OpaqueState** out) {
               sycl::queue q;
@@ -262,7 +269,7 @@ class CallGraphTests(unittest.TestCase):
             }
             """
         )
-        self.assertEqual(result.entrypoints, 4)
+        self.assertEqual(result.entrypoints, 5)
         self.assertFalse(result.findings)
         for entry in result.entrypoint_audits:
             self.assertIn("opaque_device_resource", entry.classifications)
@@ -464,6 +471,56 @@ class CallGraphTests(unittest.TestCase):
             clean["pgaccel_external_wrapper"].classifications,
         )
 
+        transitive = run(
+            {
+                "leaf.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_leaf(int* out) {
+                      sycl::queue q;
+                      q.single_task<ExternalLeaf>([=]() { *out = 7; }).wait();
+                      return PGACCEL_OK;
+                    }
+                """,
+                "middle.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_middle(int* out) {
+                      return pgaccel_external_leaf(out);
+                    }
+                """,
+                "top.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_top(int* out) {
+                      return pgaccel_external_middle(out);
+                    }
+                """,
+            }
+        )
+        self.assertTrue(transitive["pgaccel_external_leaf"].ok)
+        self.assertTrue(transitive["pgaccel_external_middle"].ok)
+        self.assertTrue(transitive["pgaccel_external_top"].ok)
+        self.assertIn(
+            "audited_external_call",
+            transitive["pgaccel_external_top"].classifications,
+        )
+
+        cyclic = run(
+            {
+                "cycle_a.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_cycle_a(int* out) {
+                      return pgaccel_external_cycle_b(out);
+                    }
+                """,
+                "cycle_b.cpp": r"""
+                    extern "C" pgaccel_status pgaccel_external_cycle_b(int* out) {
+                      return pgaccel_external_cycle_a(out);
+                    }
+                """,
+            }
+        )
+        self.assertFalse(cyclic["pgaccel_external_cycle_a"].ok)
+        self.assertFalse(cyclic["pgaccel_external_cycle_b"].ok)
+        self.assertNotIn(
+            "audited_external_call",
+            cyclic["pgaccel_external_cycle_a"].classifications,
+        )
+
         host_only = run(
             {
                 "target.cpp": r"""
@@ -576,6 +633,50 @@ class CallGraphTests(unittest.TestCase):
         self.assertNotIn(
             "audited_external_call",
             wrong_binding["pgaccel_wrong_binding"].classifications,
+        )
+
+    def test_neutral_output_init_requires_a_clean_returned_helper_on_every_success(
+        self,
+    ) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            pgaccel_status build_checked(
+                int* input, size_t count, OpaqueState** out) {
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<CheckedBuild>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_checked_wrapper(
+                int* input, size_t count, OpaqueState** out) {
+              *out = nullptr;
+              return build_checked(input, count, out);
+            }
+            extern "C" pgaccel_status pgaccel_checked_partial_wrapper(
+                int* input, size_t count, bool run_device, OpaqueState** out) {
+              *out = nullptr;
+              if (run_device) return build_checked(input, count, out);
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_checked_wrapper"].ok)
+        self.assertIn(
+            "opaque_device_resource",
+            entries["pgaccel_checked_wrapper"].classifications,
+        )
+        self.assertFalse(entries["pgaccel_checked_partial_wrapper"].ok)
+        self.assertIn(
+            "undominated_success",
+            entries["pgaccel_checked_partial_wrapper"].classifications,
         )
 
     def test_multihop_template_wrapper_reaches_dispatch(self) -> None:
@@ -2538,6 +2639,93 @@ class ResidentV5RegressionTests(unittest.TestCase):
         self.assertFalse(result.findings)
         for entry in result.entrypoint_audits:
             self.assertIn("device_copyback", entry.classifications)
+
+    def test_typed_slab_projection_with_intermediate_readback_is_proven(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_projected_slab(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* slab = static_cast<int*>(
+                  sycl::malloc_shared(2 * count * sizeof(int), q));
+              const size_t output_offset = count;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                const int* input = reinterpret_cast<const int*>(slab);
+                int* projected = reinterpret_cast<int*>(slab + output_offset);
+                projected[i] = input[i] + 1;
+              }).wait_and_throw();
+              int completion = 0;
+              q.memcpy(&completion, slab + output_offset, sizeof(int)).wait_and_throw();
+              if (completion < 0) {
+                sycl::free(slab, q);
+                return PGACCEL_ERROR;
+              }
+              q.memcpy(out, slab + output_offset, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(result.findings)
+        self.assertIn("device_copyback", result.entrypoint_audits[0].classifications)
+
+    def test_read_only_typed_slab_projection_does_not_prove_copyback(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_read_only_projection(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* slab = static_cast<int*>(
+                  sycl::malloc_shared(2 * count * sizeof(int), q));
+              const size_t output_offset = count;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                const int* projected = reinterpret_cast<const int*>(slab + output_offset);
+                int ignored = projected[i];
+                (void)ignored;
+              }).wait_and_throw();
+              q.memcpy(out, slab + output_offset, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertFalse(entry.ok, entry.detail)
+        self.assertNotIn("device_copyback", entry.classifications)
+
+    def test_terminal_offset_zero_output_path_is_exact(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_terminal_offset_zero(
+                const int* offsets, size_t count, int* out) {
+              if (count == 0) return PGACCEL_OK;
+              const size_t output_count = offsets[count];
+              if (output_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(output_count), [=](sycl::id<1> i) {
+                out[i] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_computed_offset_zero(
+                const int* offsets, size_t count, int* out) {
+              if (count == 0) return PGACCEL_OK;
+              const size_t output_count = offsets[count] + 1;
+              if (output_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(output_count), [=](sycl::id<1> i) {
+                out[i] = 1;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(entries["pgaccel_terminal_offset_zero"].ok)
+        self.assertFalse(entries["pgaccel_computed_offset_zero"].ok)
 
     def test_guaranteed_once_device_launch_orchestration_is_proven(self) -> None:
         result = audit_compiling_fixture(

@@ -1778,6 +1778,13 @@ static void test_cell_to_children() {
     pgaccel_status s = pgaccel_h3_cell_to_children_output_size(&parent_r3, 1, 2, off);
     ASSERT_STATUS_OK("c2c invalid size status", s);
     ASSERT_EQ("c2c invalid count", off[1], 0);
+
+    uint64_t untouched = 0xDEADBEEFCAFEBABEULL;
+    pgaccel_reset_gpu_exec_count();
+    s = pgaccel_h3_cell_to_children_emit(&parent_r3, 1, 2, off, &untouched);
+    ASSERT_STATUS_OK("c2c zero-output emit status", s);
+    ASSERT_TRUE("c2c zero-output emit preserves output", untouched == 0xDEADBEEFCAFEBABEULL);
+    ASSERT_EQ("c2c zero-output emit launches no GPU work", pgaccel_gpu_exec_count(), 0u);
   }
 }
 
