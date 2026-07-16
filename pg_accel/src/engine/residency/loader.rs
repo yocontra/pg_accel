@@ -1,8 +1,8 @@
-//! Synchronous SPI full-scan loader for residency v2.
+//! Synchronous MVCC table loader for residency v2.
 //!
-//! SPI is deliberate: it preserves PostgreSQL MVCC, permissions, row-security,
-//! partition routing, and type conversion semantics. Every loader query runs
-//! with pg_accel planner hooks suspended to prevent recursive path injection.
+//! SPI performs an exact zero-row projection preflight so PostgreSQL enforces
+//! relation and column privileges. The data path then scans the table through
+//! its table AM under the active snapshot, avoiding per-row SPI conversion.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
@@ -921,11 +921,19 @@ impl ColumnBuilder {
         }
     }
 
-    fn push(
+    unsafe fn push_datum(
         &mut self,
-        row: &pgrx::spi::SpiHeapTupleData<'_>,
-        ordinal: usize,
+        datum: pg_sys::Datum,
+        is_null: bool,
+        attno: i16,
     ) -> Result<(), String> {
+        macro_rules! decode_datum {
+            ($type:ty, $type_oid:expr) => {{
+                // SAFETY: push_datum's caller proves that the slot Datum is
+                // live and has the builder's freshly validated dynamic type.
+                unsafe { <$type>::from_polymorphic_datum(datum, is_null, $type_oid) }
+            }};
+        }
         match self {
             Self::Bool {
                 values,
@@ -933,9 +941,9 @@ impl ColumnBuilder {
                 saw_null,
                 ..
             } => {
-                let value = row
-                    .get::<bool>(ordinal)
-                    .map_err(|error| format!("column {ordinal} bool read failed: {error:?}"))?;
+                // SAFETY: the builder's catalog-proved type is bool and the
+                // Datum remains live in the current table slot.
+                let value = decode_datum!(bool, pg_sys::BOOLOID);
                 values.push(u8::from(value.unwrap_or(false)));
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
@@ -947,13 +955,10 @@ impl ColumnBuilder {
                 saw_null,
             } => {
                 let value = match *type_oid {
-                    pg_sys::INT2OID => row.get::<i16>(ordinal).map(|value| value.map(i32::from)),
-                    pg_sys::DATEOID => row
-                        .get::<Date>(ordinal)
-                        .map(|value| value.map(pg_sys::DateADT::from)),
-                    _ => row.get::<i32>(ordinal),
-                }
-                .map_err(|error| format!("column {ordinal} integer read failed: {error:?}"))?;
+                    pg_sys::INT2OID => decode_datum!(i16, *type_oid).map(i32::from),
+                    pg_sys::DATEOID => decode_datum!(Date, *type_oid).map(pg_sys::DateADT::from),
+                    _ => decode_datum!(i32, *type_oid),
+                };
                 values.push(value.unwrap_or(0));
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
@@ -965,42 +970,34 @@ impl ColumnBuilder {
                 saw_null,
             } => {
                 let value = match *type_oid {
-                    pg_sys::TIMESTAMPOID => row
-                        .get::<Timestamp>(ordinal)
-                        .map(|value| value.map(pg_sys::Timestamp::from)),
-                    pg_sys::TIMESTAMPTZOID => row
-                        .get::<TimestampWithTimeZone>(ordinal)
-                        .map(|value| value.map(pg_sys::TimestampTz::from)),
-                    _ => row.get::<i64>(ordinal),
-                }
-                .map_err(|error| format!("column {ordinal} int8 read failed: {error:?}"))?;
+                    pg_sys::TIMESTAMPOID => {
+                        decode_datum!(Timestamp, *type_oid).map(pg_sys::Timestamp::from)
+                    }
+                    pg_sys::TIMESTAMPTZOID => decode_datum!(TimestampWithTimeZone, *type_oid)
+                        .map(pg_sys::TimestampTz::from),
+                    _ => decode_datum!(i64, *type_oid),
+                };
                 values.push(value.unwrap_or(0));
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
             }
             Self::H3 {
+                type_oid,
                 values,
                 nulls,
                 saw_null,
-                ..
             } => {
-                let value = row
-                    .get::<RawH3Datum>(ordinal)
-                    .map_err(|error| format!("column {ordinal} h3index read failed: {error:?}"))?;
+                let value = decode_datum!(RawH3Datum, *type_oid);
                 values.push(value.map_or(0, |value| value.0));
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
             }
-            Self::Geometry { builder, .. } => {
-                let value = row
-                    .get::<RawGeometryDatum>(ordinal)
-                    .map_err(|error| format!("column {ordinal} geometry read failed: {error:?}"))?;
+            Self::Geometry { type_oid, builder } => {
+                let value = decode_datum!(RawGeometryDatum, *type_oid);
                 builder.push(value.map(|value| value.0))?;
             }
             Self::Raster(builder) => {
-                let datum = row
-                    .get::<RawRasterDatum>(ordinal)
-                    .map_err(|error| format!("column {ordinal} raster read failed: {error:?}"))?;
+                let datum = decode_datum!(RawRasterDatum, builder.type_oid);
                 let wkb = datum
                     .map(|datum| unsafe {
                         // SAFETY: RawRasterDatum only wraps the live non-null
@@ -1010,7 +1007,7 @@ impl ColumnBuilder {
                     })
                     .transpose()
                     .map_err(|error| {
-                        format!("column {ordinal} raster WKB conversion failed: {error}")
+                        format!("column {attno} raster WKB conversion failed: {error}")
                     })?;
                 builder.push_value(wkb.as_deref())?;
             }
@@ -1020,9 +1017,7 @@ impl ColumnBuilder {
                 saw_null,
                 ..
             } => {
-                let value = row
-                    .get::<f32>(ordinal)
-                    .map_err(|error| format!("column {ordinal} float4 read failed: {error:?}"))?;
+                let value = decode_datum!(f32, pg_sys::FLOAT4OID);
                 values.push(value.unwrap_or(0.0));
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
@@ -1033,18 +1028,14 @@ impl ColumnBuilder {
                 saw_null,
                 ..
             } => {
-                let value = row
-                    .get::<f64>(ordinal)
-                    .map_err(|error| format!("column {ordinal} float8 read failed: {error:?}"))?;
+                let value = decode_datum!(f64, pg_sys::FLOAT8OID);
                 values.push(value.unwrap_or(0.0));
                 nulls.push(u8::from(value.is_none()));
                 *saw_null |= value.is_none();
             }
-            Self::Text { values, .. } => {
-                values
-                    .push(row.get::<String>(ordinal).map_err(|error| {
-                        format!("column {ordinal} text read failed: {error:?}")
-                    })?);
+            Self::Text { type_oid, values } => {
+                let value = decode_datum!(String, *type_oid);
+                values.push(value);
             }
         }
         Ok(())
@@ -1504,59 +1495,250 @@ pub(super) fn current_relfilenode(relid: pg_sys::Oid) -> Option<pg_sys::Oid> {
     Some(relfilenode)
 }
 
-fn scan_with_detached_cursor(
-    query: &str,
-    qualified: &str,
-    builders: &mut [ColumnBuilder],
-) -> Result<u64, String> {
-    crate::engine::ffi::planner_hooks::with_planner_hooks_suspended(|| {
-        let mut cursor_name = Spi::connect_mut(|client| {
-            let cursor = client.try_open_cursor(query, &[]).map_err(|error| {
-                format!("resident SPI cursor open for {qualified} failed: {error:?}")
-            })?;
-            Ok::<String, String>(cursor.detach_into_name())
-        })?;
-        let mut row_count = 0_u64;
-        loop {
-            let (done, detached_name, fetched) = Spi::connect_mut(|client| {
-                let mut cursor = client.find_cursor(&cursor_name).map_err(|error| {
-                    format!("resident SPI cursor lookup for {qualified} failed: {error:?}")
-                })?;
-                let rows = cursor
-                    .fetch(LOAD_INTERRUPT_CHECK_ROWS as libc::c_long)
-                    .map_err(|error| {
-                        format!("resident SPI cursor fetch for {qualified} failed: {error:?}")
-                    })?;
-                let fetched = rows.len();
-                for builder in &mut *builders {
-                    builder.try_reserve(fetched)?;
-                }
-                for row in rows {
-                    for (index, builder) in builders.iter_mut().enumerate() {
-                        builder.push(&row, index + 1)?;
-                    }
-                }
-                if fetched == 0 {
-                    drop(cursor);
-                    Ok::<_, String>((true, None, 0_usize))
-                } else {
-                    Ok((false, Some(cursor.detach_into_name()), fetched))
-                }
-            })?;
-            row_count = add_fetched_rows(row_count, fetched)?;
-            if done {
-                return Ok(row_count);
-            }
-            cursor_name = detached_name.ok_or("resident SPI cursor detached without a name")?;
-            pgrx::check_for_interrupts!();
-        }
-    })
+struct DirectTableScan {
+    relation: pg_sys::Relation,
+    scan: pg_sys::TableScanDesc,
+    slot: *mut pg_sys::TupleTableSlot,
 }
 
-fn add_fetched_rows(row_count: u64, fetched: usize) -> Result<u64, &'static str> {
-    row_count
-        .checked_add(u64::try_from(fetched).map_err(|_| "cursor batch length exceeds u64")?)
-        .ok_or("resident row count exceeds u64")
+impl DirectTableScan {
+    fn open_relation(relid: pg_sys::Oid, requests: &[ColumnRequest]) -> Result<Self, String> {
+        // SAFETY: residency loading runs on the PostgreSQL backend main thread.
+        // The lock protects the relation identity through preflight and scan.
+        let relation =
+            unsafe { pg_sys::try_table_open(relid, pg_sys::AccessShareLock as pg_sys::LOCKMODE) };
+        if relation.is_null() {
+            return Err(format!(
+                "relation OID {} disappeared before resident table scan",
+                u32::from(relid)
+            ));
+        }
+        let table = Self {
+            relation,
+            scan: std::ptr::null_mut(),
+            slot: std::ptr::null_mut(),
+        };
+        table.validate_locked_relation(requests)?;
+        Ok(table)
+    }
+
+    fn validate_locked_relation(&self, requests: &[ColumnRequest]) -> Result<(), String> {
+        // SAFETY: relation is open under AccessShareLock for the guard's life.
+        let relation = unsafe { &*self.relation };
+        if relation.rd_rel.is_null() {
+            return Err("resident table scan relation has no pg_class descriptor".to_owned());
+        }
+        // SAFETY: rd_rel is relation-owned and protected by AccessShareLock.
+        let class = unsafe { &*relation.rd_rel };
+        if class.relrowsecurity || class.relforcerowsecurity {
+            return Err(format!(
+                "relation OID {} has row-level security enabled; residency cannot bypass role- or policy-dependent row subsets",
+                u32::from(relation.rd_id)
+            ));
+        }
+        if class.relkind as u8 != pg_sys::RELKIND_RELATION {
+            return Err(format!(
+                "relation OID {} is no longer an ordinary table",
+                u32::from(relation.rd_id)
+            ));
+        }
+        if relation.rd_tableam.is_null() {
+            return Err(format!(
+                "relation OID {} has no table access method",
+                u32::from(relation.rd_id)
+            ));
+        }
+        let tuple_desc = relation.rd_att;
+        if tuple_desc.is_null() {
+            return Err(format!(
+                "relation OID {} has no tuple descriptor",
+                u32::from(relation.rd_id)
+            ));
+        }
+        // SAFETY: tuple_desc is live and relation-owned under the lock.
+        let attribute_count = usize::try_from(unsafe { (*tuple_desc).natts })
+            .map_err(|_| "resident tuple descriptor has a negative attribute count")?;
+        for request in requests {
+            let index = usize::try_from(request.attno.checked_sub(1).ok_or_else(|| {
+                format!("resident request has invalid attribute {}", request.attno)
+            })?)
+            .map_err(|_| format!("resident request has invalid attribute {}", request.attno))?;
+            if index >= attribute_count {
+                return Err(format!(
+                    "relation OID {} no longer has attribute {}",
+                    u32::from(relation.rd_id),
+                    request.attno
+                ));
+            }
+            // SAFETY: index is in bounds for this live tuple descriptor.
+            let attribute = unsafe { crate::engine::pg_compat::tuple_desc_attr(tuple_desc, index) };
+            if attribute.is_null() {
+                return Err(format!(
+                    "relation OID {} attribute {} has no descriptor",
+                    u32::from(relation.rd_id),
+                    request.attno
+                ));
+            }
+            // SAFETY: attribute belongs to the locked tuple descriptor.
+            let attribute = unsafe { &*attribute };
+            if attribute.attisdropped || attribute.atttypid != request.type_oid {
+                return Err(format!(
+                    "relation OID {} attribute {} changed before resident table scan",
+                    u32::from(relation.rd_id),
+                    request.attno
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn begin(&mut self) -> Result<(), String> {
+        // SAFETY: stage_relation is invoked inside an active SQL statement.
+        let snapshot = unsafe { pg_sys::GetActiveSnapshot() };
+        if snapshot.is_null() {
+            return Err("resident table scan has no active PostgreSQL snapshot".to_owned());
+        }
+        // SAFETY: the relation is open under AccessShareLock and the active
+        // snapshot remains valid for the surrounding statement.
+        self.scan = unsafe { begin_default_resident_scan(self.relation, snapshot) };
+        if self.scan.is_null() {
+            return Err("PostgreSQL table AM returned a NULL scan descriptor".to_owned());
+        }
+        // SAFETY: rd_att and the table AM's slot callbacks remain valid while
+        // the relation is open. This supports non-heap ordinary table AMs.
+        self.slot = unsafe {
+            pg_sys::MakeSingleTupleTableSlot(
+                (*self.relation).rd_att,
+                pg_sys::table_slot_callbacks(self.relation),
+            )
+        };
+        if self.slot.is_null() {
+            return Err("PostgreSQL could not allocate a resident table scan slot".to_owned());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DirectTableScan {
+    fn drop(&mut self) {
+        if !self.scan.is_null() {
+            // SAFETY: scan was returned by table_beginscan and is ended once.
+            unsafe { pg_sys::table_endscan(self.scan) };
+            self.scan = std::ptr::null_mut();
+        }
+        if !self.slot.is_null() {
+            // SAFETY: slot was returned by MakeSingleTupleTableSlot and is
+            // dropped once, before its relation descriptor is closed.
+            unsafe { pg_sys::ExecDropSingleTupleTableSlot(self.slot) };
+            self.slot = std::ptr::null_mut();
+        }
+        if !self.relation.is_null() {
+            // SAFETY: relation was opened with this lock mode and is closed
+            // once after all scan-owned objects have been released.
+            unsafe {
+                pg_sys::table_close(self.relation, pg_sys::AccessShareLock as pg_sys::LOCKMODE);
+            };
+            self.relation = std::ptr::null_mut();
+        }
+    }
+}
+
+unsafe fn begin_default_resident_scan(
+    relation: pg_sys::Relation,
+    snapshot: pg_sys::Snapshot,
+) -> pg_sys::TableScanDesc {
+    #[cfg(feature = "pg18")]
+    {
+        // SAFETY: relation and snapshot are live; zero keys requests an
+        // unqualified MVCC scan through the relation's table AM.
+        unsafe { pg_sys::table_beginscan(relation, snapshot, 0, std::ptr::null_mut()) }
+    }
+    #[cfg(feature = "pg19")]
+    {
+        // SAFETY: PG19 adds a flags argument; zero selects default behavior.
+        unsafe { pg_sys::table_beginscan(relation, snapshot, 0, std::ptr::null_mut(), 0) }
+    }
+}
+
+fn preflight_relation_projection(query: &str, qualified: &str) -> Result<(), String> {
+    pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        crate::engine::ffi::planner_hooks::with_planner_hooks_suspended(|| {
+            Spi::connect(|client| {
+                client.select(query, Some(1), &[]).map_err(|error| {
+                    format!("resident ACL/type preflight for {qualified} failed: {error:?}")
+                })?;
+                Ok::<(), String>(())
+            })
+        })
+    }))
+    .catch_others(|caught| {
+        use pg_sys::panic::CaughtError;
+        let message = match caught {
+            CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => {
+                error.message().to_owned()
+            }
+            CaughtError::RustPanic { ereport, .. } => ereport.message().to_owned(),
+        };
+        Err(format!(
+            "resident ACL/type preflight for {qualified} failed: {message}"
+        ))
+    })
+    .execute()
+}
+
+fn scan_relation_direct(
+    relid: pg_sys::Oid,
+    preflight_query: &str,
+    qualified: &str,
+    requests: &[ColumnRequest],
+    builders: &mut [ColumnBuilder],
+) -> Result<u64, String> {
+    if requests.len() != builders.len() {
+        return Err("resident scan request/builder count mismatch".to_owned());
+    }
+    let mut table = DirectTableScan::open_relation(relid, requests)?;
+    preflight_relation_projection(preflight_query, qualified)?;
+    table.begin()?;
+
+    let mut row_count = 0_u64;
+    let mut batch_rows = 0_usize;
+    loop {
+        // SAFETY: table.scan and table.slot are live and owned by the guard.
+        let found = unsafe {
+            pg_sys::table_scan_getnextslot(
+                table.scan,
+                pg_sys::ScanDirection::ForwardScanDirection,
+                table.slot,
+            )
+        };
+        if !found {
+            return Ok(row_count);
+        }
+        if batch_rows == 0 {
+            for builder in &mut *builders {
+                builder.try_reserve(LOAD_INTERRUPT_CHECK_ROWS)?;
+            }
+        }
+        for (request, builder) in requests.iter().zip(builders.iter_mut()) {
+            let mut is_null = false;
+            // SAFETY: the slot contains the current row and each positive
+            // attno was validated against the relation fingerprint/catalog.
+            let datum = unsafe {
+                pg_sys::slot_getattr(table.slot, i32::from(request.attno), &raw mut is_null)
+            };
+            // SAFETY: the request and builder carry the freshly validated
+            // dynamic type for this attribute; slot storage remains live.
+            unsafe { builder.push_datum(datum, is_null, request.attno) }?;
+        }
+        row_count = row_count
+            .checked_add(1)
+            .ok_or("resident row count exceeds u64")?;
+        batch_rows += 1;
+        if batch_rows == LOAD_INTERRUPT_CHECK_ROWS {
+            pgrx::check_for_interrupts!();
+            batch_rows = 0;
+        }
+    }
 }
 
 fn scan_projection(names: &[String]) -> String {
@@ -1571,8 +1753,11 @@ fn scan_projection(names: &[String]) -> String {
     }
 }
 
-fn exact_relation_scan_query(qualified: &str, names: &[String]) -> String {
-    format!("SELECT {} FROM ONLY {qualified}", scan_projection(names))
+fn exact_relation_preflight_query(qualified: &str, names: &[String]) -> String {
+    format!(
+        "SELECT {} FROM ONLY {qualified} LIMIT 0",
+        scan_projection(names)
+    )
 }
 
 pub(super) fn stage_relation(
@@ -1599,12 +1784,13 @@ pub(super) fn stage_relation(
             ));
         }
         let names = column_names(relid, requests)?;
-        let query = exact_relation_scan_query(&qualified, &names);
+        let preflight_query = exact_relation_preflight_query(&qualified, &names);
         let mut builders = requests
             .iter()
             .map(|request| ColumnBuilder::for_type(request.type_oid))
             .collect::<Result<Vec<_>, _>>()?;
-        let row_count = scan_with_detached_cursor(&query, &qualified, &mut builders)?;
+        let row_count =
+            scan_relation_direct(relid, &preflight_query, &qualified, requests, &mut builders)?;
         let generation_after = ledger::generation_stamp(relid);
         let fingerprint_after = RelationFingerprint::capture(relid, requests);
         if generation_before != generation_after
@@ -1782,7 +1968,7 @@ fn now_us() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+mod unit_tests {
     use super::*;
 
     fn raster_catalog_identity() -> syscache::PostgisRasterCatalogIdentity {
@@ -1803,31 +1989,45 @@ mod tests {
     }
 
     #[test]
-    fn count_only_projection_scans_one_constant_per_visible_row() {
+    fn acl_preflight_uses_exact_zero_row_projection() {
         assert_eq!(scan_projection(&[]), "1");
         assert_eq!(scan_projection(&["a\"b".to_owned()]), "\"a\"\"b\"");
         assert_eq!(
-            exact_relation_scan_query("\"s\".\"parent\"", &[]),
-            "SELECT 1 FROM ONLY \"s\".\"parent\""
+            exact_relation_preflight_query("\"s\".\"parent\"", &[]),
+            "SELECT 1 FROM ONLY \"s\".\"parent\" LIMIT 0"
         );
         assert_eq!(
-            exact_relation_scan_query("\"s\".\"parent\"", &["a\"b".to_owned()]),
-            "SELECT \"a\"\"b\" FROM ONLY \"s\".\"parent\""
+            exact_relation_preflight_query("\"s\".\"parent\"", &["a\"b".to_owned()]),
+            "SELECT \"a\"\"b\" FROM ONLY \"s\".\"parent\" LIMIT 0"
         );
     }
 
     #[test]
-    fn cursor_batches_accumulate_an_exact_count() {
-        let after_first = add_fetched_rows(0, LOAD_INTERRUPT_CHECK_ROWS).expect("first batch");
-        let after_second = add_fetched_rows(after_first, 17).expect("second batch");
-        assert_eq!(
-            after_second,
-            u64::try_from(LOAD_INTERRUPT_CHECK_ROWS + 17).expect("test count fits u64")
-        );
-        assert_eq!(
-            add_fetched_rows(u64::MAX, 1),
-            Err("resident row count exceeds u64")
-        );
+    fn raw_datum_ingestion_preserves_values_and_nulls() {
+        let mut builder = ColumnBuilder::I32 {
+            type_oid: pg_sys::INT4OID,
+            values: Vec::new(),
+            nulls: Vec::new(),
+            saw_null: false,
+        };
+        unsafe {
+            // SAFETY: these are by-value int4 Datums paired with the matching
+            // catalog-proved builder type; NULL prevents the second payload
+            // from being interpreted.
+            builder
+                .push_datum(pg_sys::Datum::from((-17_i32) as usize), false, 3)
+                .expect("non-null int4 stages");
+            builder
+                .push_datum(pg_sys::Datum::from(0_usize), true, 3)
+                .expect("NULL int4 stages");
+        }
+        let StagedColumn::I32 { values, nulls, .. } =
+            builder.finish().expect("raw Datum builder finishes")
+        else {
+            panic!("int4 builder changed staging representation");
+        };
+        assert_eq!(values, vec![-17, 0]);
+        assert_eq!(nulls, Some(vec![0, 1]));
     }
 
     #[test]
@@ -2048,5 +2248,157 @@ mod tests {
             .expect_err("oversized exact value must decline during staging");
         assert!(error.contains("exceeding the per-value limit"));
         assert!(capped.rows.is_empty());
+    }
+}
+
+#[cfg(feature = "pg_test")]
+#[pgrx::pg_schema]
+mod tests {
+    use super::*;
+
+    struct TestSnapshotGuard;
+
+    impl Drop for TestSnapshotGuard {
+        fn drop(&mut self) {
+            // SAFETY: stage_for_test pushes exactly one copied snapshot.
+            unsafe { pg_sys::PopActiveSnapshot() };
+        }
+    }
+
+    fn stage_for_test(
+        relid: pg_sys::Oid,
+        requests: &[ColumnRequest],
+    ) -> Result<StagedRelation, String> {
+        // SAFETY: pg_test runs on the backend main thread with an active outer
+        // snapshot. A private copy may be updated to the current SPI command ID.
+        unsafe {
+            pg_sys::PushCopiedSnapshot(pg_sys::GetActiveSnapshot());
+            pg_sys::UpdateActiveSnapshotCommandId();
+        }
+        let _snapshot = TestSnapshotGuard;
+        stage_relation(relid, requests)
+    }
+
+    fn relation_oid(name: &str) -> pg_sys::Oid {
+        Spi::get_one::<pg_sys::Oid>(&format!("SELECT '{name}'::regclass::oid"))
+            .expect("relation OID lookup succeeds")
+            .expect("relation exists")
+    }
+
+    #[pg_test]
+    fn direct_loader_acl_rls_mvcc_primitives_and_cold_timing() {
+        Spi::run(
+            "CREATE ROLE pgaccel_loader_reader; \
+             CREATE TABLE pgaccel_loader_acl (allowed int4, denied int4); \
+             INSERT INTO pgaccel_loader_acl VALUES (1, 2); \
+             REVOKE ALL ON pgaccel_loader_acl FROM PUBLIC; \
+             GRANT SELECT (allowed) ON pgaccel_loader_acl TO pgaccel_loader_reader",
+        )
+        .expect("create ACL fixture");
+        let acl_relid = relation_oid("pgaccel_loader_acl");
+        let allowed = resolve_attnos(acl_relid, &[1]).expect("resolve allowed column");
+        let denied = resolve_attnos(acl_relid, &[2]).expect("resolve denied column");
+        Spi::run("SET ROLE pgaccel_loader_reader").expect("assume restricted role");
+        let allowed_result = stage_for_test(acl_relid, &allowed);
+        let denied_result = stage_for_test(acl_relid, &denied);
+        Spi::run("RESET ROLE").expect("restore test role");
+        assert_eq!(
+            allowed_result
+                .expect("column grant permits exact preflight")
+                .row_count(),
+            1
+        );
+        let denied_error = match denied_result {
+            Ok(_) => panic!("missing column grant must reject load"),
+            Err(error) => error,
+        };
+        assert!(
+            denied_error.contains("ACL/type preflight"),
+            "unexpected ACL rejection: {denied_error}"
+        );
+
+        Spi::run("ALTER TABLE pgaccel_loader_acl ENABLE ROW LEVEL SECURITY").expect("enable RLS");
+        let rls_error = match stage_for_test(acl_relid, &allowed) {
+            Ok(_) => panic!("RLS must reject residency"),
+            Err(error) => error,
+        };
+        assert!(
+            rls_error.contains("row-level security enabled"),
+            "unexpected RLS rejection: {rls_error}"
+        );
+
+        Spi::run(
+            "SET TIME ZONE 'UTC'; \
+             CREATE TABLE pgaccel_loader_values ( \
+               b bool, i2 int2, i4 int4, i8 int8, f4 float4, f8 float8, \
+               d date, ts timestamp, tstz timestamptz, t text); \
+             INSERT INTO pgaccel_loader_values VALUES \
+               (true, -2, 17, -9000000000, 1.25, -2.5, \
+                DATE '2000-01-02', TIMESTAMP '2000-01-01 00:00:01', \
+                TIMESTAMPTZ '2000-01-01 00:00:02+00', 'alpha'), \
+               (NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL), \
+               (false, 9, 999, 9, 9, 9, DATE '2020-01-01', \
+                TIMESTAMP '2020-01-01', TIMESTAMPTZ '2020-01-01+00', 'deleted'); \
+             DELETE FROM pgaccel_loader_values WHERE i4 = 999",
+        )
+        .expect("create MVCC/primitive fixture");
+        let values_relid = relation_oid("pgaccel_loader_values");
+        let requests = resolve_attnos(values_relid, &(1_i16..=10).collect::<Vec<_>>())
+            .expect("resolve primitive columns");
+        let staged = stage_for_test(values_relid, &requests).expect("direct primitive load");
+        assert_eq!(staged.row_count(), 2, "dead tuple must be MVCC-invisible");
+        match staged.columns.get(&1).expect("bool staged") {
+            StagedColumn::Bool { values, nulls, .. } => {
+                assert_eq!(values, &[1, 0]);
+                assert_eq!(nulls.as_deref(), Some(&[0, 1][..]));
+            }
+            _ => panic!("bool staging representation changed"),
+        }
+        match staged.columns.get(&3).expect("int4 staged") {
+            StagedColumn::I32 { values, nulls, .. } => {
+                assert_eq!(values, &[17, 0]);
+                assert_eq!(nulls.as_deref(), Some(&[0, 1][..]));
+            }
+            _ => panic!("int4 staging representation changed"),
+        }
+        match staged.columns.get(&8).expect("timestamp staged") {
+            StagedColumn::I64 { values, nulls, .. } => {
+                assert_eq!(values, &[1_000_000, 0]);
+                assert_eq!(nulls.as_deref(), Some(&[0, 1][..]));
+            }
+            _ => panic!("timestamp staging representation changed"),
+        }
+        match staged.columns.get(&10).expect("text staged") {
+            StagedColumn::TextDictionary {
+                codes,
+                nulls,
+                labels,
+                ..
+            } => {
+                assert_eq!(codes, &[0, 0]);
+                assert_eq!(nulls.as_deref(), Some(&[0, 1][..]));
+                assert_eq!(labels, &["alpha"]);
+            }
+            _ => panic!("text staging representation changed"),
+        }
+
+        Spi::run(
+            "CREATE UNLOGGED TABLE pgaccel_loader_bench (g int4 NOT NULL, v int4); \
+             INSERT INTO pgaccel_loader_bench \
+             SELECT (i % 17)::int4, CASE WHEN i % 127 = 0 THEN NULL ELSE (i % 997)::int4 END \
+             FROM generate_series(1, 262144) AS i; \
+             ANALYZE pgaccel_loader_bench",
+        )
+        .expect("create cold-load fixture");
+        let bench_relid = relation_oid("pgaccel_loader_bench");
+        let bench_requests = resolve_attnos(bench_relid, &[1, 2]).expect("resolve bench columns");
+        let wall_started = Instant::now();
+        let bench = stage_for_test(bench_relid, &bench_requests).expect("cold direct table load");
+        let wall_ms = wall_started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(bench.row_count(), 262_144);
+        pgrx::notice!(
+            "direct resident cold load: 262144 rows x 2 int4 columns: stage={:.3}ms wall={wall_ms:.3}ms",
+            bench.load_ms
+        );
     }
 }
