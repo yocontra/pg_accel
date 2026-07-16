@@ -7965,6 +7965,14 @@ class _PathAuditor:
 
         def guarded_status_call(indexed: _IndexedCall) -> bool:
             # Exact assignment followed immediately by `if (status != OK) return ...`.
+            # A translation-unit overload can make the syntactically exact
+            # comparison lie about whether the helper failure is propagated.
+            if any(
+                self.tokens[index].value == "operator"
+                and self.tokens[index + 1].value == "!="
+                for index in range(len(self.tokens) - 1)
+            ):
+                return False
             assignment = exact_call_assignment(indexed, pointer_target=False)
             if assignment is None:
                 return False
