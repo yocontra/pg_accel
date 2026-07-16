@@ -3422,41 +3422,87 @@ def _queue_receiver_mutated(
     scan_right = min(right, function.body_close)
     reference_aliases: dict[str, int] = {}
     pointer_aliases: dict[str, int] = {}
-    # Close declarator-shaped queue aliases before inspecting post-launch use.
-    alias_declarations: list[tuple[str, list[str], list[str], int]] = []
-    for equals in range(collect_left, scan_right):
-        if tokens[equals].value != "=" or equals <= collect_left:
+    def normalized_initializer(values: Sequence[str]) -> tuple[str, str] | None:
+        values = tuple(values)
+        while len(values) >= 2 and values[0] == "(" and values[-1] == ")":
+            depth = 0
+            closes_at_end = False
+            for offset, value in enumerate(values):
+                if value == "(":
+                    depth += 1
+                elif value == ")":
+                    depth -= 1
+                    if depth == 0:
+                        closes_at_end = offset == len(values) - 1
+                        break
+            if not closes_at_end:
+                break
+            values = values[1:-1]
+        if len(values) == 1:
+            return "value", values[0]
+        if values and values[0] in {"&", "*"}:
+            operand = normalized_initializer(values[1:])
+            if operand is not None and operand[0] == "value":
+                return ("address" if values[0] == "&" else "dereference"), operand[1]
+        return None
+
+    # Collect bounded simple declarators, including copy-, direct-, and list-init.
+    alias_declarations: list[
+        tuple[str, list[str], tuple[str, str] | None, int, tuple[int, int]]
+    ] = []
+    for target in range(collect_left, scan_right - 1):
+        if tokens[target].kind != "identifier" or _is_inside(target, lambda_ranges):
             continue
-        statement_left = equals - 1
+        delimiter = target + 1
+        if tokens[delimiter].value not in {"=", "(", "{"}:
+            continue
+        statement_left = target
         while statement_left > collect_left and tokens[statement_left - 1].value not in {
             ";",
             "{",
             "}",
         }:
             statement_left -= 1
-        target = equals - 1
-        if tokens[target].kind != "identifier":
-            continue
-        prefix = [token.value for token in tokens[statement_left:target]]
-        if not any(token.kind == "identifier" for token in tokens[statement_left:target]):
-            continue
-        statement_right = next(
-            (
-                index
-                for index in range(equals + 1, scan_right)
-                if tokens[index].value == ";"
-            ),
-            scan_right,
-        )
-        initializer = [token.value for token in tokens[equals + 1 : statement_right]]
-        while (
-            len(initializer) >= 3
-            and initializer[0] == "("
-            and initializer[-1] == ")"
+        prefix_tokens = tokens[statement_left:target]
+        prefix = [token.value for token in prefix_tokens]
+        if not any(token.kind == "identifier" for token in prefix_tokens) or not (
+            {"&", "*"} & set(prefix)
         ):
-            initializer = initializer[1:-1]
+            continue
+        if set(prefix) & OUTPUT_ASSIGNMENTS:
+            continue
+
+        if tokens[delimiter].value == "=":
+            initializer_left = delimiter + 1
+            statement_right = initializer_left
+            while statement_right < scan_right:
+                if statement_right in forward:
+                    statement_right = forward[statement_right] + 1
+                    continue
+                if tokens[statement_right].value == ";":
+                    break
+                statement_right += 1
+            initializer_right = statement_right
+        else:
+            if delimiter not in forward:
+                continue
+            initializer_left = delimiter + 1
+            initializer_right = forward[delimiter]
+            statement_right = initializer_right + 1
+            if statement_right >= scan_right or tokens[statement_right].value != ";":
+                continue
+
+        initializer = normalized_initializer(
+            [token.value for token in tokens[initializer_left:initializer_right]]
+        )
         alias_declarations.append(
-            (tokens[target].value, prefix, initializer, statement_right + 1)
+            (
+                tokens[target].value,
+                prefix,
+                initializer,
+                statement_right + 1,
+                (delimiter, initializer_right),
+            )
         )
 
     changed = True
@@ -3464,26 +3510,43 @@ def _queue_receiver_mutated(
         changed = False
         object_roots = {receiver} | set(reference_aliases)
         pointer_roots = set(pointer_aliases)
-        for alias, prefix, initializer, declaration_end in alias_declarations:
+        for alias, prefix, initializer, declaration_end, _ in alias_declarations:
             if alias in object_roots | pointer_roots:
                 continue
             if (
                 "&" in prefix
-                and len(initializer) == 1
-                and initializer[0] in object_roots
+                and initializer is not None
+                and (
+                    (initializer[0] == "value" and initializer[1] in object_roots)
+                    or (
+                        initializer[0] == "dereference"
+                        and initializer[1] in pointer_roots
+                    )
+                )
             ):
                 reference_aliases[alias] = declaration_end
                 changed = True
             elif "*" in prefix and (
                 (
-                    len(initializer) == 2
-                    and initializer[0] == "&"
+                    initializer is not None
+                    and initializer[0] == "address"
                     and initializer[1] in object_roots
                 )
-                or (len(initializer) == 1 and initializer[0] in pointer_roots)
+                or (
+                    initializer is not None
+                    and initializer[0] == "value"
+                    and initializer[1] in pointer_roots
+                )
             ):
                 pointer_aliases[alias] = declaration_end
                 changed = True
+
+    resolved_aliases = set(reference_aliases) | set(pointer_aliases)
+    alias_initializer_ranges = [
+        initializer_range
+        for alias, _, _, _, initializer_range in alias_declarations
+        if alias in resolved_aliases
+    ]
 
     object_roots = {receiver: scan_left, **reference_aliases}
     for root, bound in object_roots.items():
@@ -3529,6 +3592,16 @@ def _queue_receiver_mutated(
                 and tokens[index + 4].value == "("
             ):
                 return True
+            if (
+                previous == "*"
+                and index + 5 < scan_right
+                and following == ")"
+                and tokens[index + 2].value == "."
+                and tokens[index + 3].value == "operator"
+                and tokens[index + 4].value == "="
+                and tokens[index + 5].value == "("
+            ):
+                return True
 
     aliases = set(reference_aliases) | set(pointer_aliases)
     for call_index in _mutable_alias_call_indices(
@@ -3554,6 +3627,7 @@ def _queue_receiver_mutated(
             tokens[index].value != receiver
             or not _unqualified_output_identifier(tokens, index)
             or _is_inside(index, lambda_ranges)
+            or _is_inside(index, alias_initializer_ranges)
         ):
             continue
         if (
