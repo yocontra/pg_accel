@@ -1182,10 +1182,6 @@ impl ColumnBuilder {
     }
 }
 
-fn quote_identifier(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
-
 fn qualified_relation_name(relid: pg_sys::Oid) -> Result<String, String> {
     let rls_query = format!(
         "SELECT relrowsecurity OR relforcerowsecurity FROM pg_catalog.pg_class WHERE oid = {}::oid",
@@ -1252,35 +1248,6 @@ fn relation_columns(relid: pg_sys::Oid) -> Result<Vec<(i16, String, pg_sys::Oid)
         }
         Ok::<_, String>(columns)
     })
-}
-
-fn column_names(relid: pg_sys::Oid, requests: &[ColumnRequest]) -> Result<Vec<String>, String> {
-    let mut by_attno = BTreeMap::new();
-    for (attno, name, type_oid) in relation_columns(relid)? {
-        by_attno.insert(attno, (name, type_oid));
-    }
-    requests
-        .iter()
-        .map(|request| {
-            let (name, actual_type) = by_attno.get(&request.attno).ok_or_else(|| {
-                format!(
-                    "relation OID {} has no live attribute {}",
-                    u32::from(relid),
-                    request.attno
-                )
-            })?;
-            if *actual_type != request.type_oid {
-                return Err(format!(
-                    "relation OID {} attribute {} changed type from OID {} to OID {}",
-                    u32::from(relid),
-                    request.attno,
-                    u32::from(request.type_oid),
-                    u32::from(*actual_type)
-                ));
-            }
-            Ok(name.clone())
-        })
-        .collect()
 }
 
 pub(super) fn resolve_attnos(
@@ -1514,16 +1481,22 @@ struct DirectTableScan {
     slot: *mut pg_sys::TupleTableSlot,
 }
 
-struct LockedPreflight<'relation> {
-    qualified: String,
-    column_names: Vec<String>,
-    _relation: std::marker::PhantomData<&'relation DirectTableScan>,
-}
-
-impl LockedPreflight<'_> {
-    fn query(&self) -> String {
-        exact_relation_preflight_query(&self.qualified, &self.column_names)
+fn select_privilege_granted(
+    relation_select: bool,
+    requests: &[ColumnRequest],
+    mut column_select: impl FnMut(Option<i16>) -> bool,
+) -> bool {
+    if relation_select {
+        return true;
     }
+    if requests.is_empty() {
+        // PostgreSQL permits a projection without Vars, such as COUNT(*),
+        // when the role has SELECT on any live user column.
+        return column_select(None);
+    }
+    requests
+        .iter()
+        .all(|request| column_select(Some(request.attno)))
 }
 
 impl DirectTableScan {
@@ -1544,6 +1517,7 @@ impl DirectTableScan {
             slot: std::ptr::null_mut(),
         };
         table.validate_locked_relation(requests)?;
+        table.validate_select_privileges(requests)?;
         Ok(table)
     }
 
@@ -1617,20 +1591,45 @@ impl DirectTableScan {
         Ok(())
     }
 
-    fn locked_preflight_metadata<'relation>(
-        &'relation self,
-        requests: &[ColumnRequest],
-    ) -> Result<LockedPreflight<'relation>, String> {
-        // AccessShareLock is held by self while both catalog lookups run. DDL
-        // cannot rename the relation or requested columns until the preflight
-        // and subsequent table-AM scan release this borrow and guard.
-        // SAFETY: relation is live under the guard's AccessShareLock.
+    fn validate_select_privileges(&self, requests: &[ColumnRequest]) -> Result<(), String> {
+        // These OID-based ACL checks use PostgreSQL's current syscache state.
+        // AccessShareLock prevents the relation or its columns from being
+        // renamed or replaced between this proof and the table-AM scan.
+        // SAFETY: relation is live under AccessShareLock on the backend thread.
         let relid = unsafe { (*self.relation).rd_id };
-        Ok(LockedPreflight {
-            qualified: qualified_relation_name(relid)?,
-            column_names: column_names(relid, requests)?,
-            _relation: std::marker::PhantomData,
-        })
+        // SAFETY: GetUserId reads backend-local effective-role state.
+        let user_id = unsafe { pg_sys::GetUserId() };
+        let select_mode = pg_sys::AclMode::from(pg_sys::ACL_SELECT);
+        // SAFETY: relid is locked and user_id/select_mode are valid ACL inputs.
+        let relation_select = unsafe {
+            pg_sys::pg_class_aclcheck(relid, user_id, select_mode) == pg_sys::AclResult::ACLCHECK_OK
+        };
+        let granted = select_privilege_granted(relation_select, requests, |attno| {
+            // SAFETY: requested attnos were checked against the locked tuple
+            // descriptor above. None requests PostgreSQL's COUNT(*) rule: any
+            // live user column with SELECT is sufficient.
+            let result = unsafe {
+                match attno {
+                    Some(attno) => {
+                        pg_sys::pg_attribute_aclcheck(relid, attno, user_id, select_mode)
+                    }
+                    None => pg_sys::pg_attribute_aclcheck_all(
+                        relid,
+                        user_id,
+                        select_mode,
+                        pg_sys::AclMaskHow::ACLMASK_ANY,
+                    ),
+                }
+            };
+            result == pg_sys::AclResult::ACLCHECK_OK
+        });
+        if !granted {
+            return Err(format!(
+                "resident ACL/type preflight for relation OID {} failed: current role lacks the SELECT privileges required by the resident projection",
+                u32::from(relid)
+            ));
+        }
+        Ok(())
     }
 
     fn begin(&mut self) -> Result<(), String> {
@@ -1722,28 +1721,6 @@ fn caught_loader_error<R>(caught: pg_sys::panic::CaughtError, context: &str) -> 
     Err(format!("{context}: {message}"))
 }
 
-fn preflight_relation_projection(metadata: &LockedPreflight<'_>) -> Result<(), String> {
-    let query = metadata.query();
-    let qualified = metadata.qualified.as_str();
-    pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-        crate::engine::ffi::planner_hooks::with_planner_hooks_suspended(|| {
-            Spi::connect(|client| {
-                client.select(&query, Some(1), &[]).map_err(|error| {
-                    format!("resident ACL/type preflight for {qualified} failed: {error:?}")
-                })?;
-                Ok::<(), String>(())
-            })
-        })
-    }))
-    .catch_others(|caught| {
-        caught_loader_error(
-            caught,
-            &format!("resident ACL/type preflight for {qualified} failed"),
-        )
-    })
-    .execute()
-}
-
 fn scan_relation_direct(
     relid: pg_sys::Oid,
     requests: &[ColumnRequest],
@@ -1765,8 +1742,6 @@ fn scan_relation_direct_inner(
         return Err("resident scan request/builder count mismatch".to_owned());
     }
     let mut table = DirectTableScan::open_relation(relid, requests)?;
-    let metadata = table.locked_preflight_metadata(requests)?;
-    preflight_relation_projection(&metadata)?;
     table.begin()?;
 
     let mut row_count = 0_u64;
@@ -1837,25 +1812,6 @@ fn inject_direct_scan_error(row_count: u64) {
         ),
         None => {}
     }
-}
-
-fn scan_projection(names: &[String]) -> String {
-    if names.is_empty() {
-        "1".to_owned()
-    } else {
-        names
-            .iter()
-            .map(|name| quote_identifier(name))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-fn exact_relation_preflight_query(qualified: &str, names: &[String]) -> String {
-    format!(
-        "SELECT {} FROM ONLY {qualified} LIMIT 0",
-        scan_projection(names)
-    )
 }
 
 pub(super) fn stage_relation(
@@ -2083,25 +2039,34 @@ mod unit_tests {
     }
 
     #[test]
-    fn locked_metadata_proof_renders_exact_zero_row_projection() {
-        let count_only = LockedPreflight {
-            qualified: "\"s\".\"parent\"".to_owned(),
-            column_names: Vec::new(),
-            _relation: std::marker::PhantomData,
-        };
-        assert_eq!(
-            count_only.query(),
-            "SELECT 1 FROM ONLY \"s\".\"parent\" LIMIT 0"
-        );
-        let projected = LockedPreflight {
-            qualified: "\"s\".\"parent\"".to_owned(),
-            column_names: vec!["a\"b".to_owned()],
-            _relation: std::marker::PhantomData,
-        };
-        assert_eq!(
-            projected.query(),
-            "SELECT \"a\"\"b\" FROM ONLY \"s\".\"parent\" LIMIT 0"
-        );
+    fn select_acl_matches_postgresql_projection_rules() {
+        let requests = [
+            ColumnRequest {
+                attno: 1,
+                type_oid: pg_sys::INT4OID,
+            },
+            ColumnRequest {
+                attno: 2,
+                type_oid: pg_sys::INT4OID,
+            },
+        ];
+        assert!(select_privilege_granted(true, &requests, |_| {
+            panic!("table SELECT must bypass column ACL checks")
+        }));
+        assert!(select_privilege_granted(false, &requests, |attno| {
+            matches!(attno, Some(1 | 2))
+        }));
+        assert!(!select_privilege_granted(false, &requests, |attno| {
+            attno == Some(1)
+        }));
+
+        let mut count_only_checks = 0;
+        assert!(select_privilege_granted(false, &[], |attno| {
+            count_only_checks += 1;
+            assert_eq!(attno, None);
+            true
+        }));
+        assert_eq!(count_only_checks, 1);
     }
 
     #[test]
@@ -2441,10 +2406,11 @@ mod tests {
         Spi::run("SET ROLE pgaccel_loader_reader").expect("assume restricted role");
         let allowed_result = stage_for_test(acl_relid, &allowed);
         let denied_result = stage_for_test(acl_relid, &denied);
+        let count_only_result = stage_for_test(acl_relid, &[]);
         Spi::run("RESET ROLE").expect("restore test role");
         assert_eq!(
             allowed_result
-                .expect("column grant permits exact preflight")
+                .expect("per-column SELECT permits the requested projection")
                 .row_count(),
             1
         );
@@ -2455,6 +2421,24 @@ mod tests {
         assert!(
             denied_error.contains("ACL/type preflight"),
             "unexpected ACL rejection: {denied_error}"
+        );
+        assert_eq!(
+            count_only_result
+                .expect("SELECT on any column permits a count-only projection")
+                .row_count(),
+            1
+        );
+
+        Spi::run("GRANT SELECT ON pgaccel_loader_acl TO pgaccel_loader_reader")
+            .expect("grant table SELECT");
+        Spi::run("SET ROLE pgaccel_loader_reader").expect("assume table reader role");
+        let table_grant_result = stage_for_test(acl_relid, &denied);
+        Spi::run("RESET ROLE").expect("restore test role after table grant");
+        assert_eq!(
+            table_grant_result
+                .expect("table SELECT permits every requested projection")
+                .row_count(),
+            1
         );
 
         Spi::run("ALTER TABLE pgaccel_loader_acl ENABLE ROW LEVEL SECURITY").expect("enable RLS");
