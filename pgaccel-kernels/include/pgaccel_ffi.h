@@ -76,11 +76,11 @@ void pgaccel_prefork_warmup(void);
 pgaccel_device_info pgaccel_get_device_info(void);
 pgaccel_platform_caps pgaccel_get_caps(void);
 
-/* Out-of-order queue probe for the sort/window overlap gate. Runs one explicit
- * bitonic sort DAG and one independent window row-number kernel, first
- * serialized through event dependencies and then overlapped on AdaptiveCpp
- * execution lanes. The final marker kernel depends on both DAGs so Metal
- * routes cross-lane waits through MTLSharedEvent/submit_queue_wait_for. */
+/* Manual diagnostic for the dropped sort/window overlap feature. Runs one
+ * explicit bitonic sort DAG and one independent window row-number kernel,
+ * first serialized through event dependencies and then submitted without a
+ * cross-lane dependency. The final marker kernel depends on both DAGs. Pinned
+ * Metal hazard tracking currently serializes the otherwise independent work. */
 pgaccel_status pgaccel_sort_window_overlap_probe(size_t count, uint32_t spin_iters_per_sort_step,
                                                  pgaccel_ooo_overlap_report* out);
 
