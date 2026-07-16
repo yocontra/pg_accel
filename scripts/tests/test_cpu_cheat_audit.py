@@ -1825,11 +1825,171 @@ class CompilerValidAdversarialTests(unittest.TestCase):
         template <int> struct id { operator std::size_t() const { return 0; } };
         struct queue {
           template <class Function> void parallel_for(range<1>, Function) {}
+          void wait_and_throw() {}
+          bool is_in_order() const { return false; }
         };
         struct device { static void get_devices() {} };
         }
         void observe() {}
     """
+
+    def test_queue_identity_mutation_through_aliases_invalidates_later_wait(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.CPP_PRELUDE
+            + r"""
+            void mutate_queue(sycl::queue&);
+            void mutate_queue_pointer(sycl::queue*);
+
+            extern "C" pgaccel_status pgaccel_queue_reference_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue& alias = q;
+              alias = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_pointer_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              sycl::queue* alias = &q;
+              *alias = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_explicit_assignment(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              q.operator=(other);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_alias_escape(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              auto& alias = q;
+              mutate_queue(alias);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_pointer_escape(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              auto* alias = &q;
+              mutate_queue_pointer(alias);
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_predispatch_alias_rebind(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              sycl::queue& alias = q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              alias = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_reference_alias_chain(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              sycl::queue& alias = q;
+              auto& alias2 = alias;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              alias2 = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_pointer_alias_chain(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              sycl::queue other;
+              sycl::queue* alias = &q;
+              auto* alias2 = alias;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              *alias2 = other;
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_observer_before_wait(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              (void)q.is_in_order();
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_queue_dispatch_before_wait(
+                int* out, std::size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 1; });
+              q.parallel_for(sycl::range<1>(count),
+                             [=](sycl::id<1> i) { out[i] = 2; });
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        for name in (
+            "pgaccel_queue_reference_rebind",
+            "pgaccel_queue_pointer_rebind",
+            "pgaccel_queue_explicit_assignment",
+            "pgaccel_queue_alias_escape",
+            "pgaccel_queue_pointer_escape",
+            "pgaccel_queue_predispatch_alias_rebind",
+            "pgaccel_queue_reference_alias_chain",
+            "pgaccel_queue_pointer_alias_chain",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(entries[name].ok, entries[name].detail)
+                self.assertIn("missing_device_terminal", entries[name].classifications)
+                self.assertIn("queue receiver is rebound", entries[name].detail)
+        for name in (
+            "pgaccel_queue_observer_before_wait",
+            "pgaccel_queue_dispatch_before_wait",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(entries[name].ok, entries[name].detail)
 
     def test_seven_compiler_valid_output_bypasses_fail_closed(self) -> None:
         result = audit_compiling_fixture(

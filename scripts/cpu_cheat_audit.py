@@ -3398,9 +3398,6 @@ def _queue_receiver_mutated(
 ) -> bool:
     """Reject any operation that can replace a queue before its covering wait."""
 
-    if _pointer_root_reassigned(tokens, receiver, left, right, lambda_ranges):
-        return True
-
     queue_operations = DISPATCH_METHODS | {
         "copy",
         "fill",
@@ -3419,6 +3416,139 @@ def _queue_receiver_mutated(
         "has_property",
         "is_in_order",
     }
+
+    collect_left = function.body_open + 1
+    scan_left = max(left, collect_left)
+    scan_right = min(right, function.body_close)
+    reference_aliases: dict[str, int] = {}
+    pointer_aliases: dict[str, int] = {}
+    # Close declarator-shaped queue aliases before inspecting post-launch use.
+    alias_declarations: list[tuple[str, list[str], list[str], int]] = []
+    for equals in range(collect_left, scan_right):
+        if tokens[equals].value != "=" or equals <= collect_left:
+            continue
+        statement_left = equals - 1
+        while statement_left > collect_left and tokens[statement_left - 1].value not in {
+            ";",
+            "{",
+            "}",
+        }:
+            statement_left -= 1
+        target = equals - 1
+        if tokens[target].kind != "identifier":
+            continue
+        prefix = [token.value for token in tokens[statement_left:target]]
+        if not any(token.kind == "identifier" for token in tokens[statement_left:target]):
+            continue
+        statement_right = next(
+            (
+                index
+                for index in range(equals + 1, scan_right)
+                if tokens[index].value == ";"
+            ),
+            scan_right,
+        )
+        initializer = [token.value for token in tokens[equals + 1 : statement_right]]
+        while (
+            len(initializer) >= 3
+            and initializer[0] == "("
+            and initializer[-1] == ")"
+        ):
+            initializer = initializer[1:-1]
+        alias_declarations.append(
+            (tokens[target].value, prefix, initializer, statement_right + 1)
+        )
+
+    changed = True
+    while changed:
+        changed = False
+        object_roots = {receiver} | set(reference_aliases)
+        pointer_roots = set(pointer_aliases)
+        for alias, prefix, initializer, declaration_end in alias_declarations:
+            if alias in object_roots | pointer_roots:
+                continue
+            if (
+                "&" in prefix
+                and len(initializer) == 1
+                and initializer[0] in object_roots
+            ):
+                reference_aliases[alias] = declaration_end
+                changed = True
+            elif "*" in prefix and (
+                (
+                    len(initializer) == 2
+                    and initializer[0] == "&"
+                    and initializer[1] in object_roots
+                )
+                or (len(initializer) == 1 and initializer[0] in pointer_roots)
+            ):
+                pointer_aliases[alias] = declaration_end
+                changed = True
+
+    object_roots = {receiver: scan_left, **reference_aliases}
+    for root, bound in object_roots.items():
+        bound = max(bound, scan_left)
+        if _pointer_root_reassigned(tokens, root, bound, scan_right, lambda_ranges):
+            return True
+        for index in range(bound, scan_right - 4):
+            if (
+                tokens[index].value == root
+                and _unqualified_output_identifier(tokens, index)
+                and tokens[index + 1].value in {".", "->"}
+                and tokens[index + 2].value == "operator"
+                and tokens[index + 3].value == "="
+                and tokens[index + 4].value == "("
+            ):
+                return True
+
+    for alias, bound in pointer_aliases.items():
+        bound = max(bound, scan_left)
+        for index in range(bound, scan_right):
+            if (
+                tokens[index].value != alias
+                or not _unqualified_output_identifier(tokens, index)
+                or _is_inside(index, lambda_ranges)
+            ):
+                continue
+            previous = tokens[index - 1].value if index > bound else ""
+            following = tokens[index + 1].value if index + 1 < scan_right else ""
+            if previous == "*" and following in OUTPUT_ASSIGNMENTS:
+                return True
+            if (
+                previous == "*"
+                and index + 2 < scan_right
+                and following == ")"
+                and tokens[index + 2].value in OUTPUT_ASSIGNMENTS
+            ):
+                return True
+            if (
+                index + 4 < scan_right
+                and following == "->"
+                and tokens[index + 2].value == "operator"
+                and tokens[index + 3].value == "="
+                and tokens[index + 4].value == "("
+            ):
+                return True
+
+    aliases = set(reference_aliases) | set(pointer_aliases)
+    for call_index in _mutable_alias_call_indices(
+        tokens,
+        function,
+        aliases,
+        scan_left,
+        scan_right,
+        lambda_ranges,
+        forward,
+    ):
+        receiver_call = bool(
+            call_index >= 2
+            and tokens[call_index - 1].value in {".", "->"}
+            and tokens[call_index - 2].value in aliases
+        )
+        if receiver_call and tokens[call_index].value in queue_operations | queue_observers:
+            continue
+        return True
+
     for index in range(max(left, function.body_open + 1), min(right, function.body_close)):
         if (
             tokens[index].value != receiver
