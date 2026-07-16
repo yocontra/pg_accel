@@ -2116,6 +2116,59 @@ class CompilerValidAdversarialTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertTrue(entries[name].ok, entries[name].detail)
 
+    def test_non_status_opaque_resource_rejects_host_mutation_after_device_work(
+        self,
+    ) -> None:
+        result = audit_compiling_fixture(
+            self.CPP_PRELUDE
+            + r"""
+            namespace sycl {
+            template <class T>
+            T* malloc_device(std::size_t, queue&);
+            }
+            struct OpaqueState { int* device_index; };
+
+            extern "C" OpaqueState* pgaccel_nonstatus_device_resource(
+                std::size_t count) {
+              if (count == 0) return nullptr;
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device_index[i] = 1;
+              });
+              q.wait_and_throw();
+              auto* state = new OpaqueState();
+              state->device_index = device_index;
+              return state;
+            }
+
+            extern "C" OpaqueState* pgaccel_nonstatus_host_mutated_resource(
+                std::size_t count) {
+              if (count == 0) return nullptr;
+              sycl::queue q;
+              int* device_index = sycl::malloc_device<int>(count, q);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device_index[i] = 1;
+              });
+              q.wait_and_throw();
+              device_index[0] = 42;
+              auto* state = new OpaqueState();
+              state->device_index = device_index;
+              return state;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        clean = entries["pgaccel_nonstatus_device_resource"]
+        hostile = entries["pgaccel_nonstatus_host_mutated_resource"]
+        self.assertFalse(clean.is_status)
+        self.assertTrue(clean.ok, clean.detail)
+        self.assertIn("opaque_device_resource", clean.classifications)
+        self.assertFalse(hostile.is_status)
+        self.assertFalse(hostile.ok, hostile.detail)
+        self.assertIn("missing_device_terminal", hostile.classifications)
+        self.assertNotIn("opaque_device_resource", hostile.classifications)
+
     def test_seven_compiler_valid_output_bypasses_fail_closed(self) -> None:
         result = audit_compiling_fixture(
             self.CPP_PRELUDE
@@ -4558,12 +4611,19 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertIn("zero_work", entry.classifications)
         self.assertNotIn("host_output_write", entry.classifications)
 
-    def test_non_status_hash_join_build_is_audited(self) -> None:
-        entry = self.by_name["pgaccel_hash_join_build"]
-        self.assertFalse(entry.is_status)
-        self.assertFalse(entry.ok)
-        self.assertEqual(entry.path.name, "hash_join.cpp")
-        self.assertEqual(entry.return_type, "pgaccel_hash_table *")
+    def test_non_status_hash_join_builds_have_device_resource_proof(self) -> None:
+        entries = (
+            self.by_name["pgaccel_hash_join_build"],
+            self.by_name["pgaccel_hash_join_build_device_count"],
+        )
+        for entry in entries:
+            with self.subTest(entrypoint=entry.entrypoint):
+                self.assertFalse(entry.is_status)
+                self.assertTrue(entry.ok, entry.detail)
+                self.assertEqual(entry.path.name, "hash_join.cpp")
+                self.assertEqual(entry.return_type, "pgaccel_hash_table *")
+                self.assertIn("opaque_device_resource", entry.classifications)
+                self.assertIn("kernel-derived opaque resource", entry.detail)
 
     def test_original_eleven_wrappers_keep_large_input_gpu_evidence(self) -> None:
         wrappers = [
