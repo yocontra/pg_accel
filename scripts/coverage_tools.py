@@ -4908,6 +4908,9 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         'std::getenv("ACPP_METAL_DEVICE_PROFILE_DIR")',
         'stem + ".proftext"',
         'stem + ".overflow"',
+        "const bool overflow = counters[_device_profile_counter_count] != 0",
+        "if (!any_nonzero && !overflow) return;",
+        "if (overflow) {",
         "preserveHostCoverageMappingNames(M)",
         "restoreHostCoverageMappingNames(M, HasCoverageMappingNames)",
         'getGlobalVariable("__llvm_coverage_names", true)',
@@ -4926,6 +4929,10 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         errors.append("AdaptiveCpp coverage patch must lower, not discard, device counters")
     if "device atomic_ulong* __acpp_sscp_metal_profile_counters" in text:
         errors.append("AdaptiveCpp coverage patch uses unsupported Metal 64-bit fetch-add")
+    if "if (!any_nonzero) return;" in text:
+        errors.append(
+            "AdaptiveCpp coverage patch drops overflow-only device profiles"
+        )
     for forbidden in (
         '"acpp.metal.device.profile.step"',
         "DeviceProfileProbeGuid",

@@ -749,7 +749,7 @@ index f3202ceb..b79a58c7 100644
 @@ -645,0 +974 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
 +      restoreHostCoverageMappingNames(M, HasCoverageMappingNames);
 diff --git a/src/runtime/metal/metal_code_object.cpp b/src/runtime/metal/metal_code_object.cpp
-index 49e7d715..78a0139c 100644
+index 49e7d715..7974ddfb 100644
 --- a/src/runtime/metal/metal_code_object.cpp
 +++ b/src/runtime/metal/metal_code_object.cpp
 @@ -23,0 +24 @@
@@ -803,7 +803,7 @@ index 49e7d715..78a0139c 100644
 +  return _device_profile_counter_count;
 +}
 +
-@@ -511,0 +552,168 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
+@@ -511,0 +552,169 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
 +result metal_sscp_executable_object::initialize_device_profile(
 +    const std::string& source) {
 +  static constexpr const char* Header = "// __ACPP_DEVICE_PROFILE_V1 ";
@@ -920,11 +920,12 @@ index 49e7d715..78a0139c 100644
 +
 +  const auto* counters =
 +      static_cast<const uint32_t*>(_device_profile_buffer->contents());
++  const bool overflow = counters[_device_profile_counter_count] != 0;
 +  bool any_nonzero = false;
 +  for (uint32_t i = 0; i < _device_profile_counter_count; ++i) {
 +    any_nonzero |= counters[i] != 0;
 +  }
-+  if (!any_nonzero) return;
++  if (!any_nonzero && !overflow) return;
 +
 +  std::error_code ec;
 +  std::filesystem::create_directories(output_dir, ec);
@@ -938,7 +939,7 @@ index 49e7d715..78a0139c 100644
 +      std::string{"acpp-metal-device-"} + private_tmp_suffix() + "-" +
 +      kernel_configuration::to_string(_id);
 +
-+  if (counters[_device_profile_counter_count] != 0) {
++  if (overflow) {
 +    const std::string error_path =
 +        common::filesystem::join_path(output_dir, stem + ".overflow");
 +    common::filesystem::atomic_write(

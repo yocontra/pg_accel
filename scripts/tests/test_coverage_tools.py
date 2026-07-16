@@ -2459,6 +2459,10 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             ('os << " [[buffer(30)]]"', 'os << " [[buffer(29)]]"'),
             ("metal_device_profile_buffer_index = 30", "metal_device_profile_buffer_index = 29"),
             ('Name.consume_front("\\1")', 'Name.consume_front("_")'),
+            (
+                "if (!any_nonzero && !overflow) return;",
+                "if (!any_nonzero) return;",
+            ),
         ):
             with self.subTest(missing_invariant=original):
                 mutated = patch.replace(original, replacement)
@@ -2466,6 +2470,16 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 self.assertTrue(
                     coverage_tools.adaptivecpp_coverage_patch_errors(mutated)
                 )
+
+    def test_device_profile_overflow_only_fixture_is_hostile(self) -> None:
+        fixture = (
+            REPO_ROOT
+            / "scripts/tests/fixtures/acpp_device_profile_overflow_only.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn("no_profile_instrument_function", fixture)
+        self.assertIn('asm("llvm.instrprof.increment.step")', fixture)
+        self.assertIn("UINT64_C(0x100000000)", fixture)
+        self.assertIn("metal_overflow_only_probe", fixture)
 
     def test_gpu_evidence_requires_oom_test_to_report_passed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
