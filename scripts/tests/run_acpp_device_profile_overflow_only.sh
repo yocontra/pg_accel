@@ -70,13 +70,13 @@ expect_flush_failure() {
     local mode="$4"
     local status=0
     run_probe "$case_dir" "$output_path" "$mode" || status=$?
-    local retained_proftext
-    retained_proftext="$(find "$case_dir" -name '*.proftext' | wc -l | tr -d ' ')"
-    if [[ "$status" == 0 || "$retained_proftext" != 0 ]]; then
-        echo "device profile flush failure mismatch: case=$label exit=$status proftext=$retained_proftext" >&2
+    local retained_profiles
+    retained_profiles="$(find "$case_dir" -type f \( -name '*.proftext' -o -name '*.overflow' \) | wc -l | tr -d ' ')"
+    if [[ "$status" == 0 || "$retained_profiles" != 0 ]]; then
+        echo "device profile flush failure mismatch: case=$label exit=$status accepted=$retained_profiles" >&2
         exit 1
     fi
-    echo "device profile flush failure: PASS (case=$label exit=$status proftext=0)"
+    echo "device profile flush failure: PASS (case=$label exit=$status accepted=0)"
 }
 
 mkdir -p "$work_dir/regular-file"
@@ -93,6 +93,10 @@ mkdir -p "$work_dir/unwritable-proftext/output"
 chmod a-w "$work_dir/unwritable-proftext/output"
 expect_flush_failure unwritable-proftext "$work_dir/unwritable-proftext" \
     "$work_dir/unwritable-proftext/output" ordinary
+
+mkdir -p "$work_dir/short-write/output"
+expect_flush_failure short-write "$work_dir/short-write" \
+    "$work_dir/short-write/output" short-write
 
 mkdir -p "$work_dir/dormancy/home" "$work_dir/dormancy/profiles"
 HOME="$work_dir/dormancy/home" \

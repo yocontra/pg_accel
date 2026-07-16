@@ -749,18 +749,19 @@ index f3202ceb..b79a58c7 100644
 @@ -645,0 +974 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
 +      restoreHostCoverageMappingNames(M, HasCoverageMappingNames);
 diff --git a/src/runtime/metal/metal_code_object.cpp b/src/runtime/metal/metal_code_object.cpp
-index 49e7d715..34fd5e2a 100644
+index 49e7d715..41676672 100644
 --- a/src/runtime/metal/metal_code_object.cpp
 +++ b/src/runtime/metal/metal_code_object.cpp
 @@ -21,0 +22 @@
-+#include <exception>
-@@ -23,0 +25 @@
++#include <fcntl.h>
+@@ -23,0 +25,2 @@
++#include <iterator>
 +#include <limits>
-@@ -24,0 +27 @@
+@@ -24,0 +28 @@
 +#include <set>
-@@ -25,0 +29 @@
+@@ -25,0 +30 @@
 +#include <sstream>
-@@ -40,0 +45,21 @@ namespace {
+@@ -40,0 +46,21 @@ namespace {
 +bool decode_profile_name(const std::string& hex, std::string& out) {
 +  auto digit = [](char c) -> int {
 +    if (c >= '0' && c <= '9') return c - '0';
@@ -782,7 +783,7 @@ index 49e7d715..34fd5e2a 100644
 +  return !out.empty();
 +}
 +
-@@ -444,0 +470,20 @@ MTL::BinaryArchive* load_binary_archive_from_url(MTL::Device* device,
+@@ -444,0 +471,85 @@ MTL::BinaryArchive* load_binary_archive_from_url(MTL::Device* device,
 +[[noreturn]] void fail_device_profile_flush(const std::string& message) {
 +  HIPSYCL_DEBUG_ERROR
 +      << "metal_code_object: device profile flush failed: " << message
@@ -790,20 +791,85 @@ index 49e7d715..34fd5e2a 100644
 +  std::_Exit(EXIT_FAILURE);
 +}
 +
++void remove_device_profile_file(const std::string& path) {
++  std::error_code ec;
++  std::filesystem::remove(path, ec);
++}
++
++[[noreturn]] void fail_device_profile_write(const std::string& path,
++                                            const std::string& temp_path,
++                                            int fd, const char* description,
++                                            const std::string& reason,
++                                            bool final_created = false) {
++  if (fd >= 0) ::close(fd);
++  remove_device_profile_file(temp_path);
++  if (final_created) remove_device_profile_file(path);
++  fail_device_profile_flush(std::string{"could not atomically write "} +
++                            description + " " + path + ": " + reason);
++}
++
 +void write_device_profile_or_exit(const std::string& path,
 +                                  const std::string& data,
 +                                  const char* description) {
-+  try {
-+    if (common::filesystem::atomic_write(path, data)) return;
-+  } catch (const std::exception& error) {
-+    fail_device_profile_flush(std::string{"could not atomically write "} +
-+                              description + " " + path + ": " + error.what());
++  const std::string temp_path = path + "." + private_tmp_suffix() + ".tmp";
++  int fd = ::open(temp_path.c_str(),
++                  O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
++  if (fd < 0) {
++    fail_device_profile_write(path, temp_path, -1, description,
++                              std::strerror(errno));
 +  }
-+  fail_device_profile_flush(std::string{"could not atomically write "} +
-+                            description + " " + path);
++
++  std::size_t written = 0;
++  while (written < data.size()) {
++    const ssize_t count =
++        ::write(fd, data.data() + written, data.size() - written);
++    if (count < 0 && errno == EINTR) continue;
++    if (count <= 0) {
++      const std::string reason =
++          count < 0 ? std::strerror(errno) : "write returned zero bytes";
++      fail_device_profile_write(path, temp_path, fd, description, reason);
++    }
++    written += static_cast<std::size_t>(count);
++  }
++
++  while (::fsync(fd) < 0) {
++    if (errno == EINTR) continue;
++    fail_device_profile_write(path, temp_path, fd, description,
++                              std::strerror(errno));
++  }
++  if (::close(fd) != 0) {
++    fd = -1;
++    fail_device_profile_write(path, temp_path, fd, description,
++                              std::string{"close failed: "} +
++                                  std::strerror(errno));
++  }
++  fd = -1;
++
++  if (::rename(temp_path.c_str(), path.c_str()) != 0) {
++    fail_device_profile_write(path, temp_path, fd, description,
++                              std::string{"rename failed: "} +
++                                  std::strerror(errno));
++  }
++
++  std::error_code ec;
++  const auto final_size = std::filesystem::file_size(path, ec);
++  if (ec || final_size != data.size()) {
++    const std::string reason =
++        ec ? std::string{"final size check failed: "} + ec.message()
++           : "final size differs from requested payload";
++    fail_device_profile_write(path, temp_path, fd, description, reason, true);
++  }
++
++  std::ifstream input{path, std::ios::binary};
++  const std::string actual{std::istreambuf_iterator<char>{input},
++                           std::istreambuf_iterator<char>{}};
++  if (!input.is_open() || input.bad() || actual != data) {
++    fail_device_profile_write(path, temp_path, fd, description,
++                              "final content verification failed", true);
++  }
 +}
 +
-@@ -453,2 +498,6 @@ metal_sscp_executable_object::metal_sscp_executable_object(
+@@ -453,2 +564,6 @@ metal_sscp_executable_object::metal_sscp_executable_object(
 -      _archive{nullptr}, _msl_source{metal_source} {
 -  _build_result = build(metal_source);
 +      _archive{nullptr}, _device_profile_buffer{nullptr},
@@ -812,12 +878,12 @@ index 49e7d715..34fd5e2a 100644
 +  if (_build_result.is_success()) {
 +    _build_result = build(metal_source);
 +  }
-@@ -457,0 +507,4 @@ metal_sscp_executable_object::~metal_sscp_executable_object() {
+@@ -457,0 +573,4 @@ metal_sscp_executable_object::~metal_sscp_executable_object() {
 +  flush_device_profile();
 +  if (_device_profile_buffer) {
 +    _device_profile_buffer->release();
 +  }
-@@ -507,0 +561,8 @@ MTL::BinaryArchive* metal_sscp_executable_object::get_binary_archive() const {
+@@ -507,0 +627,8 @@ MTL::BinaryArchive* metal_sscp_executable_object::get_binary_archive() const {
 +MTL::Buffer* metal_sscp_executable_object::get_device_profile_buffer() const {
 +  return _device_profile_buffer;
 +}
@@ -826,7 +892,7 @@ index 49e7d715..34fd5e2a 100644
 +  return _device_profile_counter_count;
 +}
 +
-@@ -511,0 +573,178 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
+@@ -511,0 +639,178 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
 +result metal_sscp_executable_object::initialize_device_profile(
 +    const std::string& source) {
 +  static constexpr const char* Header = "// __ACPP_DEVICE_PROFILE_V1 ";

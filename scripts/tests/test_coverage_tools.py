@@ -2469,9 +2469,21 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             ),
             ("std::_Exit(EXIT_FAILURE);", "return;"),
             (
-                "if (common::filesystem::atomic_write(path, data)) return;",
-                "common::filesystem::atomic_write(path, data); return;",
+                "O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC",
+                "O_WRONLY | O_CREAT",
             ),
+            (
+                "::write(fd, data.data() + written, data.size() - written)",
+                "data.size()",
+            ),
+            ("while (::fsync(fd) < 0)", "if (false)"),
+            ("if (::close(fd) != 0)", "if (false)"),
+            (
+                "if (::rename(temp_path.c_str(), path.c_str()) != 0)",
+                "if (false)",
+            ),
+            ("std::filesystem::file_size(path, ec)", "data.size()"),
+            ("actual != data", "false"),
             (
                 'fail_device_profile_flush("invalid device profile counter buffer")',
                 "return",
@@ -2499,7 +2511,11 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn("UINT64_C(0x100000000)", fixture)
         self.assertIn("metal_overflow_only_probe", fixture)
         self.assertIn("metal_profile_flush_probe", fixture)
+        self.assertIn("metal_short_write_probe", fixture)
         self.assertIn('mode == "ordinary"', fixture)
+        self.assertIn('mode == "short-write"', fixture)
+        self.assertIn("SIGXFSZ", fixture)
+        self.assertIn("setrlimit(RLIMIT_FSIZE", fixture)
 
         dormancy_fixture = (
             REPO_ROOT / "scripts/tests/fixtures/acpp_device_profile_dormancy.cpp"
@@ -2517,7 +2533,8 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn("expect_flush_failure regular-file", runner)
         self.assertIn("expect_flush_failure unwritable-overflow", runner)
         self.assertIn("expect_flush_failure unwritable-proftext", runner)
-        self.assertIn('"$status" == 0 || "$retained_proftext" != 0', runner)
+        self.assertIn("expect_flush_failure short-write", runner)
+        self.assertIn('"$status" == 0 || "$retained_profiles" != 0', runner)
         self.assertIn('"$acpp" -O2 "$dormancy_fixture"', runner)
         self.assertIn("normal-build device profile dormancy: PASS (files=0)", runner)
 

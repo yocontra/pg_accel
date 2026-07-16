@@ -4914,7 +4914,13 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         "if (overflow) {",
         "[[noreturn]] void fail_device_profile_flush",
         "std::_Exit(EXIT_FAILURE);",
-        "if (common::filesystem::atomic_write(path, data)) return;",
+        "O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC",
+        "::write(fd, data.data() + written, data.size() - written)",
+        "while (::fsync(fd) < 0)",
+        "if (::close(fd) != 0)",
+        "if (::rename(temp_path.c_str(), path.c_str()) != 0)",
+        "std::filesystem::file_size(path, ec)",
+        "actual != data",
         'fail_device_profile_flush("invalid device profile counter buffer")',
         "if (!std::filesystem::is_directory(output_dir, ec) || ec)",
         '"device profile overflow marker"',
@@ -4943,6 +4949,10 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
     if text.count("write_device_profile_or_exit(") != 3:
         errors.append(
             "AdaptiveCpp coverage patch must fail closed on both device profile writes"
+        )
+    if "common::filesystem::atomic_write(path, data)" in text:
+        errors.append(
+            "AdaptiveCpp device profiles must not use unchecked common atomic_write"
         )
     for forbidden in (
         '"acpp.metal.device.profile.step"',
