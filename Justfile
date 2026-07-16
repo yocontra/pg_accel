@@ -318,8 +318,12 @@ pg-version-audit:
     ./scripts/pg_version_audit.sh
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_pg_source.py
 
+# Validate relocatable package layout, loader metadata, and archive preservation.
+package-extension-test:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_package_extension.py -v
+
 # Pre-commit checks: fmt, lint, type-check matrix, deny, audits, doc-parity
-pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit audit-cpu-cheats-test metal-stress-artifact-test
+pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit package-extension-test audit-cpu-cheats-test metal-stress-artifact-test
     @echo "Pre-commit checks passed."
 
 # Run pgrx unit tests against one PG major. Defaults to the repo target PG major.

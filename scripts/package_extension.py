@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import os
 import pathlib
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tarfile
 from collections.abc import Iterable
 
 
@@ -127,6 +130,8 @@ def _assert_runtime_layout(runtime: pathlib.Path, system: str) -> None:
         required = (
             runtime / "bin" / "acpp-metal-archive-build",
             hipsycl / "librt-backend-metal.dylib",
+            hipsycl / "bitcode" / "libkernel-sscp-metal-full.bc",
+            hipsycl / "llvm-to-backend" / "libllvm-to-backend.dylib",
             hipsycl / "llvm-to-backend" / "libllvm-to-metal.dylib",
         )
         missing = [str(path) for path in required if not path.is_file()]
@@ -134,6 +139,31 @@ def _assert_runtime_layout(runtime: pathlib.Path, system: str) -> None:
             raise PackageError(f"packaged Metal runtime is incomplete: {', '.join(missing)}")
         if list(hipsycl.glob("librt-backend-omp.*")):
             raise PackageError("packaged Metal runtime must not contain the OMP backend")
+        if not os.access(runtime / "bin" / "acpp-metal-archive-build", os.X_OK):
+            raise PackageError("packaged Metal archive helper is not executable")
+    elif system == "Linux":
+        base_compiler = hipsycl / "llvm-to-backend" / "libllvm-to-backend.so"
+        backend_specs = {
+            "omp": ("host", "host"),
+            "cuda": ("ptx", "ptx"),
+            "hip": ("amdgpu", "amdgpu-amdhsa"),
+            "ocl": ("spirv", "spirv"),
+            "ze": ("spirv", "spirv"),
+            "vk": ("clspv", "spirv"),
+        }
+        complete_backend = False
+        for backend, (compiler, bitcode_target) in backend_specs.items():
+            plugin = hipsycl / f"librt-backend-{backend}.so"
+            target_compiler = hipsycl / "llvm-to-backend" / f"libllvm-to-{compiler}.so"
+            full_bitcode = hipsycl / "bitcode" / f"libkernel-sscp-{bitcode_target}-full.bc"
+            if plugin.is_file() and target_compiler.is_file() and full_bitcode.is_file():
+                complete_backend = True
+                break
+        if not base_compiler.is_file() or not complete_backend:
+            raise PackageError(
+                "packaged Linux runtime requires a backend plugin with its matching "
+                "base/target compiler plugins and full SSCP bitcode image"
+            )
 
     for path in runtime.rglob("*"):
         if not path.is_symlink():
@@ -153,14 +183,20 @@ def _private_absolute(value: str) -> bool:
 
 def validate_load_value(value: str, kind: str, system: str) -> None:
     if not value.startswith("/"):
-        if kind in {"LC_RPATH", "RPATH", "RUNPATH"}:
-            allowed_prefixes = (
-                ("@loader_path", "@executable_path")
-                if system == "Darwin"
-                else ("$ORIGIN", "${ORIGIN}")
-            )
-            if not value.startswith(allowed_prefixes):
+        if system == "Darwin":
+            if kind == "LC_RPATH" and not value.startswith("@loader_path"):
                 raise PackageError(f"non-relocatable relative {kind} remains: {value}")
+            if kind in {"dependency", "LC_ID_DYLIB"} and not value.startswith(
+                ("@rpath/", "@loader_path/")
+            ):
+                raise PackageError(f"non-relocatable relative {kind} remains: {value}")
+        elif kind in {"RPATH", "RUNPATH"}:
+            if not value.startswith(("$ORIGIN", "${ORIGIN}")):
+                raise PackageError(f"non-relocatable relative {kind} remains: {value}")
+        elif kind in {"NEEDED", "SONAME"} and (
+            "/" in value or value in {".", "..", ""}
+        ):
+            raise PackageError(f"non-relocatable relative {kind} remains: {value}")
         return
     if kind == "LC_ID_DYLIB":
         raise PackageError(f"absolute LC_ID_DYLIB remains in package: {value}")
@@ -211,6 +247,49 @@ def _mac_rpaths(path: pathlib.Path) -> list[str]:
     return re.findall(r"\n\s*cmd LC_RPATH\n\s*cmdsize \d+\n\s*path (.+?) \(offset", output)
 
 
+def _expand_relative_loader_path(
+    value: str, binary: pathlib.Path, allowed_root: pathlib.Path
+) -> pathlib.Path:
+    if not value.startswith("@loader_path"):
+        raise PackageError(f"unsupported loader-relative path: {value}")
+    suffix = value.removeprefix("@loader_path").lstrip("/")
+    resolved = (binary.parent / suffix).resolve()
+    if not resolved.is_relative_to(allowed_root.resolve()):
+        raise PackageError(f"loader path escapes packaged runtime: {binary}: {value}")
+    return resolved
+
+
+def _validate_macos_closure(
+    binary: pathlib.Path, package_lib: pathlib.Path, identifier: str | None
+) -> None:
+    rpaths = _mac_rpaths(binary)
+    expanded_rpaths: list[pathlib.Path] = []
+    for rpath in rpaths:
+        validate_load_value(rpath, "LC_RPATH", "Darwin")
+        if rpath.startswith("@loader_path"):
+            expanded = _expand_relative_loader_path(rpath, binary, package_lib)
+            if not expanded.is_dir():
+                raise PackageError(f"LC_RPATH does not resolve to a packaged directory: {rpath}")
+            expanded_rpaths.append(expanded)
+
+    for dependency in _mac_dependencies(binary):
+        if dependency == identifier:
+            continue
+        validate_load_value(dependency, "dependency", "Darwin")
+        if dependency.startswith("@rpath/"):
+            name = dependency.removeprefix("@rpath/")
+            if "/" in name or name in {"", ".", ".."}:
+                raise PackageError(f"invalid @rpath dependency: {dependency}")
+            if not any((directory / name).is_file() for directory in expanded_rpaths):
+                raise PackageError(f"unresolved packaged @rpath dependency: {binary}: {dependency}")
+        elif dependency.startswith("@loader_path/"):
+            resolved = _expand_relative_loader_path(dependency, binary, package_lib)
+            if not resolved.is_file():
+                raise PackageError(
+                    f"unresolved packaged @loader_path dependency: {binary}: {dependency}"
+                )
+
+
 def validate_macos(extension: pathlib.Path, runtime: pathlib.Path) -> None:
     expected_rpath = "@loader_path/pg_accel-runtime/lib"
     if _mac_id(extension) != "@rpath/pg_accel.dylib":
@@ -229,11 +308,8 @@ def validate_macos(extension: pathlib.Path, runtime: pathlib.Path) -> None:
         identifier = _mac_id(binary)
         if identifier is not None:
             validate_load_value(identifier, "LC_ID_DYLIB", "Darwin")
-        for dependency in _mac_dependencies(binary):
-            validate_load_value(dependency, "dependency", "Darwin")
-        for rpath in _mac_rpaths(binary):
-            validate_load_value(rpath, "LC_RPATH", "Darwin")
-    run(["codesign", "--verify", "--strict", str(extension)])
+        _validate_macos_closure(binary, extension.parent, identifier)
+        run(["codesign", "--verify", "--strict", str(binary)])
 
 
 def _is_elf(path: pathlib.Path) -> bool:
@@ -265,12 +341,32 @@ def validate_linux(extension: pathlib.Path, runtime: pathlib.Path) -> None:
             raise PackageError(f"packaged extension is missing dependency {required}")
 
     binaries = [extension, *sorted(path for path in runtime.rglob("*") if _is_elf(path))]
+    packaged_names = {path.name for path in runtime.rglob("*") if path.is_file()}
     for binary in binaries:
         for kind, values in _elf_dynamic(binary).items():
             for value in values:
                 components = value.split(":") if kind in {"RPATH", "RUNPATH"} else [value]
                 for component in components:
                     validate_load_value(component, kind, "Linux")
+                    if kind in {"RPATH", "RUNPATH"}:
+                        token = "${ORIGIN}" if component.startswith("${ORIGIN}") else "$ORIGIN"
+                        suffix = component.removeprefix(token).lstrip("/")
+                        resolved = (binary.parent / suffix).resolve()
+                        if not resolved.is_relative_to(extension.parent.resolve()):
+                            raise PackageError(
+                                f"ELF loader path escapes packaged runtime: {binary}: {component}"
+                            )
+                        if not resolved.is_dir():
+                            raise PackageError(
+                                f"ELF loader path does not resolve: {binary}: {component}"
+                            )
+                    elif kind == "NEEDED" and component.startswith(
+                        ("libacpp-", "librt-backend-", "libllvm-to-")
+                    ):
+                        if component not in packaged_names:
+                            raise PackageError(
+                                f"unresolved packaged ELF dependency: {binary}: {component}"
+                            )
 
 
 def validate_package(
@@ -279,7 +375,12 @@ def validate_package(
     runtime: pathlib.Path,
     system: str,
 ) -> None:
-    for metadata in ("LICENSE", "NOTICE", ".acpp-version"):
+    for metadata in (
+        "LICENSE",
+        "NOTICE",
+        ".acpp-version",
+        "pg_accel-acpp-provenance.txt",
+    ):
         if not (package_root / metadata).is_file():
             raise PackageError(f"package metadata is missing: {metadata}")
     _assert_runtime_layout(runtime, system)
@@ -289,6 +390,51 @@ def validate_package(
         validate_linux(extension, runtime)
     else:
         raise PackageError(f"unsupported package platform: {system}")
+
+
+def copy_sanitized_provenance(
+    acpp_prefix: pathlib.Path, package_root: pathlib.Path, required_sha: str
+) -> pathlib.Path:
+    source = acpp_prefix / "pg_accel-acpp-provenance.txt"
+    if not source.is_file():
+        raise PackageError(f"AdaptiveCpp setup provenance is missing: {source}")
+    text = source.read_text(encoding="utf-8")
+    required_fields = (
+        "backend=",
+        "targets=",
+        f"acpp_required_sha={required_sha}",
+        f"acpp_head={required_sha}",
+        "soft_fp64_required_tag=",
+        "soft_fp64_head=",
+        "cmake_args=",
+        "acpp_git_status_start",
+        "acpp_git_status_end",
+    )
+    missing = [field for field in required_fields if field not in text]
+    if missing:
+        raise PackageError(f"AdaptiveCpp setup provenance is incomplete: {', '.join(missing)}")
+
+    sanitized = text.replace(str(acpp_prefix), "${ACPP_PREFIX}")
+    home = str(pathlib.Path.home())
+    if home != "/":
+        sanitized = sanitized.replace(home, "${HOME}")
+    for line in sanitized.splitlines():
+        if "=" not in line:
+            continue
+        value = line.split("=", 1)[1]
+        private_markers = (
+            "/Users/",
+            "/home/",
+            "/private/tmp/",
+            "/tmp/",
+            "/var/folders/",
+        )
+        if any(marker in value for marker in private_markers) or "/.codex/worktrees/" in value:
+            raise PackageError(f"private path remains in AdaptiveCpp provenance: {line}")
+
+    destination = package_root / "pg_accel-acpp-provenance.txt"
+    destination.write_text(sanitized, encoding="utf-8")
+    return destination
 
 
 def _manifest_files(package_root: pathlib.Path) -> list[pathlib.Path]:
@@ -338,12 +484,110 @@ def validate_checksums(package_root: pathlib.Path) -> None:
         raise PackageError("package SHA256SUMS is incomplete, stale, or non-deterministic")
 
 
+def _archive_paths(package_root: pathlib.Path) -> list[pathlib.Path]:
+    return [package_root, *sorted(package_root.rglob("*"))]
+
+
+def validate_release_archive(
+    package_root: pathlib.Path, archive: pathlib.Path, outer_checksum: pathlib.Path
+) -> None:
+    expected_outer = f"{_sha256(archive)}  {archive.name}\n"
+    if outer_checksum.read_text(encoding="utf-8") != expected_outer:
+        raise PackageError("release archive checksum is missing or stale")
+
+    expected: dict[str, tuple[int, int, str]] = {}
+    for path in _archive_paths(package_root):
+        relative = path.relative_to(package_root)
+        name = package_root.name if relative == pathlib.Path(".") else (
+            pathlib.PurePosixPath(package_root.name) / relative.as_posix()
+        ).as_posix()
+        metadata = path.lstat()
+        expected[name] = (
+            stat.S_IFMT(metadata.st_mode),
+            stat.S_IMODE(metadata.st_mode),
+            os.readlink(path) if path.is_symlink() else "",
+        )
+
+    with tarfile.open(archive, "r:gz") as tar:
+        members = {member.name: member for member in tar.getmembers()}
+    if set(members) != set(expected):
+        raise PackageError("release archive contents differ from the validated package tree")
+    for name, (file_type, mode, linkname) in expected.items():
+        member = members[name]
+        member_type = (
+            stat.S_IFLNK
+            if member.issym()
+            else stat.S_IFDIR
+            if member.isdir()
+            else stat.S_IFREG
+            if member.isfile()
+            else 0
+        )
+        if member_type != file_type or member.mode != mode:
+            raise PackageError(f"release archive changed file type or mode: {name}")
+        if member.issym() and member.linkname != linkname:
+            raise PackageError(f"release archive changed symlink target: {name}")
+
+
+def create_release_archive(
+    package_root: pathlib.Path,
+    pg: str,
+    *,
+    system: str | None = None,
+    machine: str | None = None,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    system_name = system or platform.system()
+    platform_name = {"Darwin": "macos", "Linux": "linux"}.get(system_name)
+    if platform_name is None:
+        raise PackageError(f"unsupported archive platform: {system_name}")
+    architecture = (machine or platform.machine()).lower()
+    if not re.fullmatch(r"[a-z0-9_+-]+", architecture):
+        raise PackageError(f"unsafe archive architecture name: {architecture!r}")
+
+    for stale in package_root.parent.glob(f"pg_accel-pg{pg}-*.tar.gz*"):
+        if stale.is_file() or stale.is_symlink():
+            stale.unlink()
+    archive = package_root.parent / f"pg_accel-pg{pg}-{platform_name}-{architecture}.tar.gz"
+    outer_checksum = archive.with_name(f"{archive.name}.sha256")
+    archive.unlink(missing_ok=True)
+    outer_checksum.unlink(missing_ok=True)
+
+    with archive.open("wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
+            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as tar:
+                for path in _archive_paths(package_root):
+                    relative = path.relative_to(package_root)
+                    arcname = package_root.name if relative == pathlib.Path(".") else (
+                        pathlib.PurePosixPath(package_root.name) / relative.as_posix()
+                    ).as_posix()
+                    info = tar.gettarinfo(str(path), arcname=arcname)
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    info.mtime = 0
+                    info.pax_headers = {}
+                    if info.isfile():
+                        with path.open("rb") as source:
+                            tar.addfile(info, source)
+                    else:
+                        tar.addfile(info)
+
+    outer_checksum.write_text(
+        f"{_sha256(archive)}  {archive.name}\n", encoding="utf-8"
+    )
+    validate_release_archive(package_root, archive, outer_checksum)
+    return archive, outer_checksum
+
+
 def _target_dir(repo_root: pathlib.Path) -> pathlib.Path:
     configured = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", "target"))
     return configured if configured.is_absolute() else repo_root / configured
 
 
-def build_package(args: argparse.Namespace) -> pathlib.Path:
+def build_package(
+    args: argparse.Namespace,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     acpp_prefix = args.acpp_prefix.resolve()
     if not acpp_prefix.is_dir():
@@ -364,13 +608,19 @@ def build_package(args: argparse.Namespace) -> pathlib.Path:
         "--features",
         f"pg{args.pg}",
     ]
+    package_root = _target_dir(repo_root) / "release" / f"pg_accel-pg{args.pg}"
+    shutil.rmtree(package_root, ignore_errors=True)
+    for stale in package_root.parent.glob(f"pg_accel-pg{args.pg}-*.tar.gz*"):
+        if stale.is_file() or stale.is_symlink():
+            stale.unlink()
     subprocess.run(command, cwd=repo_root, env=environment, check=True)
 
-    package_root = _target_dir(repo_root) / "release" / f"pg_accel-pg{args.pg}"
     if not package_root.is_dir():
         raise PackageError(f"cargo pgrx did not create expected package: {package_root}")
     for metadata in ("LICENSE", "NOTICE", ".acpp-version"):
         shutil.copy2(repo_root / metadata, package_root / metadata)
+    required_sha = (repo_root / ".acpp-version").read_text(encoding="utf-8").strip()
+    copy_sanitized_provenance(acpp_prefix, package_root, required_sha)
 
     system = platform.system()
     extension = discover_extension(package_root, system)
@@ -378,7 +628,8 @@ def build_package(args: argparse.Namespace) -> pathlib.Path:
     validate_package(package_root, extension, runtime, system)
     write_checksums(package_root)
     validate_checksums(package_root)
-    return package_root
+    archive, outer_checksum = create_release_archive(package_root, args.pg, system=system)
+    return package_root, archive, outer_checksum
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -391,11 +642,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Iterable[str] | None = None) -> int:
     try:
-        package = build_package(parse_args(argv))
+        package, archive, outer_checksum = build_package(parse_args(argv))
     except (PackageError, OSError, subprocess.CalledProcessError) as error:
         print(f"error: relocatable package failed validation: {error}", file=sys.stderr)
         return 1
     print(f"relocatable package validated: {package}")
+    print(f"release archive validated: {archive}")
+    print(f"release archive checksum: {outer_checksum}")
     return 0
 
 

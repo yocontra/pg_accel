@@ -86,7 +86,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pg_accel-pg${{ matrix.pg }}-${{ matrix.os }}
-          path: target/release/pg_accel-pg${{ matrix.pg }}/
+          path: |
+            target/release/pg_accel-pg${{ matrix.pg }}-*.tar.gz
+            target/release/pg_accel-pg${{ matrix.pg }}-*.tar.gz.sha256
+          if-no-files-found: error
 
   metal-coverage:
     name: Qualified Metal release gates (PG 18)
@@ -213,4 +216,5 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            release-artifacts/pg_accel-pg*/**
+            release-artifacts/pg_accel-pg*/*.tar.gz
+            release-artifacts/pg_accel-pg*/*.tar.gz.sha256
