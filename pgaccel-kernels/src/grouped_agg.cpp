@@ -2649,7 +2649,6 @@ pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grou
                                           pgaccel_grouped_agg_out* out, int32_t* detail,
                                           void* const device_workspace,
                                           const WorkspaceLayout& layout) {
-  int32_t* const detail_output = detail;
   size_t* const group_codes_output = out->group_codes;
   uint8_t* const active_groups_output = out->active_groups;
   void* const key0_values_output = out->keys[0].values;
@@ -2694,16 +2693,13 @@ pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grou
   void* const measure3_rhs_sum_output = out->measures[3].rhs_sum;
   uint64_t* const measure3_rhs_count_output = out->measures[3].rhs_count;
   uint64_t* const measure3_rhs_nonnull_output = out->measures[3].rhs_nonnull_count;
-  size_t* const emitted_output = &out->emitted_group_count;
-  uint64_t* const selected_output = &out->selected_count;
-  uint64_t* const uncertain_output = &out->uncertain_count;
   const bool publish_outputs =
       (desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
 
   KernelParams host_params;
   bind_params(desc, layout, device_workspace, &host_params);
   DevicePublishParams host_publish_params;
-  bind_publish_params(desc, layout, device_workspace, out, detail_output, &host_publish_params);
+  bind_publish_params(desc, layout, device_workspace, out, detail, &host_publish_params);
   auto* device_params =
       reinterpret_cast<KernelParams*>(static_cast<uint8_t*>(device_workspace) + layout.params);
   auto* device_publish_params = reinterpret_cast<DevicePublishParams*>(
@@ -2768,7 +2764,7 @@ pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grou
       .wait_and_throw();
   pgaccel_record_gpu_exec();
 
-  queue.memcpy(detail_output, workspace_bytes + completion.commands[kPublishDetail].source_offset,
+  queue.memcpy(detail, workspace_bytes + completion.commands[kPublishDetail].source_offset,
                sizeof(completion.detail));
   if (publish_outputs) {
     {
@@ -3060,17 +3056,18 @@ pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grou
     {
       const DeviceCopyCommand& command = completion.commands[kPublishEmitted];
       if (command.bytes != 0)
-        queue.memcpy(emitted_output, workspace_bytes + command.source_offset, command.bytes);
+        queue.memcpy(&out->emitted_group_count, workspace_bytes + command.source_offset,
+                     command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishSelected];
       if (command.bytes != 0)
-        queue.memcpy(selected_output, workspace_bytes + command.source_offset, command.bytes);
+        queue.memcpy(&out->selected_count, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishUncertain];
       if (command.bytes != 0)
-        queue.memcpy(uncertain_output, workspace_bytes + command.source_offset, command.bytes);
+        queue.memcpy(&out->uncertain_count, workspace_bytes + command.source_offset, command.bytes);
     }
   }
   queue.wait_and_throw();
