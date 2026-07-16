@@ -988,10 +988,11 @@ static StagedExprDispatch* stage_dispatch(sycl::queue& q, const pgaccel_expr_pro
     }
 
     for (size_t c = 0; c < batch->num_cols; ++c) {
-      s->d_col_types[c] = batch->col_types[c];
+      const pgaccel_val_tag column_type = batch->col_types[c];
+      s->d_col_types[c] = column_type;
 
       // Stage column data, sized by the type tag.
-      size_t esz = elem_size_for_tag(batch->col_types[c]);
+      size_t esz = elem_size_for_tag(column_type);
       if (batch->col_data[c] != nullptr && esz > 0 && batch->num_rows > 0) {
         void* buf = sycl::malloc_shared(batch->num_rows * esz, q);
         if (buf == nullptr) {
@@ -1072,7 +1073,8 @@ pgaccel_status pgaccel_expr_eval_predicate(const pgaccel_expr_program* program,
 
   // Documented contract (pgaccel_expr.h): results is fully populated even
   // on error, defaulting to UNCERTAIN (== 0).
-  std::memset(results, PGACCEL_EXPR_UNCERTAIN, batch->num_rows * sizeof(int8_t));
+  static_assert(PGACCEL_EXPR_UNCERTAIN == 0);
+  std::memset(results, 0, batch->num_rows * sizeof(int8_t));
 
   sycl::queue* q = pgaccel_get_queue();
   if (q == nullptr)

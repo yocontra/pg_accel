@@ -2999,6 +2999,8 @@ class ResidentV5RegressionTests(unittest.TestCase):
         constexpr pgaccel_status PGACCEL_OK = 0;
         constexpr pgaccel_status PGACCEL_ERROR = 1;
         namespace sycl {
+        namespace usm { enum class alloc { unknown, host, shared, device }; }
+        struct context {};
         template <int> struct range { explicit range(size_t) {} };
         template <int> struct id { operator size_t() const { return 0; } };
         struct event { void wait_and_throw() {} };
@@ -3020,11 +3022,15 @@ class ResidentV5RegressionTests(unittest.TestCase):
           event memcpy(void*, const void*, size_t) { return {}; }
           event memset(void*, int, size_t) { return {}; }
           void wait_and_throw() {}
+          context get_context() const { return {}; }
         };
         struct device { static void get_devices() {} };
         inline void* malloc_shared(size_t, queue&) { static int value; return &value; }
         inline void* malloc_device(size_t, queue&) { static int value; return &value; }
         inline void free(void*, queue&) {}
+        inline usm::alloc get_pointer_type(const void*, const context&) {
+          return usm::alloc::shared;
+        }
         }
         namespace std {
         inline void* memcpy(void* dst, const void*, size_t) { return dst; }
@@ -4130,6 +4136,193 @@ class ResidentV5RegressionTests(unittest.TestCase):
             with self.subTest(entry.entrypoint):
                 self.assertFalse(entry.ok, entry.detail)
                 self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_transfer_contract_accepts_only_exact_guarded_host_usm_copy(self) -> None:
+        valid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              const sycl::usm::alloc allocation =
+                  sycl::get_pointer_type(dst, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes);
+                return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_copy_to_host(
+                void* dst, const void* src, size_t bytes) {
+              if (bytes == 0) return PGACCEL_OK;
+              sycl::queue q;
+              const sycl::usm::alloc allocation =
+                  sycl::get_pointer_type(src, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes);
+                return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertEqual(
+            {entry.classifications for entry in valid.entrypoint_audits},
+            {("lifecycle",)},
+        )
+
+        mutants = (
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(src, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            namespace hostile {
+            inline sycl::usm::alloc get_pointer_type(void* output) {
+              static_cast<unsigned char*>(output)[0] = 7;
+              return sycl::usm::alloc::shared;
+            }
+            }
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(dst, q.get_context());
+              hostile::get_pointer_type(dst);
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(dst, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(dst, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes - 1); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              if (dst != nullptr) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(dst, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes); return PGACCEL_OK;
+              }
+              sycl::queue other;
+              other.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+            r"""
+            extern "C" pgaccel_status pgaccel_expr_device_copy_from_host(
+                void* dst, const void* src, size_t bytes) {
+              sycl::queue q;
+              const auto allocation = sycl::get_pointer_type(dst, q.get_context());
+              if (allocation == sycl::usm::alloc::shared ||
+                  allocation == sycl::usm::alloc::host) {
+                std::memcpy(dst, src, bytes);
+                auto* alias = static_cast<unsigned char*>(dst);
+                alias[0] = 7;
+                return PGACCEL_OK;
+              }
+              q.memcpy(dst, src, bytes).wait_and_throw(); return PGACCEL_OK;
+            }
+            """,
+        )
+        for source in mutants:
+            with self.subTest(source=source):
+                result = audit_compiling_fixture(self.COPYBACK_PRELUDE + source)
+                entry = result.entrypoint_audits[0]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_const_descriptor_member_memcpy_source_is_an_observer(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct Descriptor { int* values; size_t count; };
+            static void stage_source(const Descriptor* descriptor, int* scratch) {
+              std::memcpy(scratch, descriptor->values, sizeof(int));
+            }
+            static void overwrite_destination(
+                const Descriptor* descriptor, const int* scratch) {
+              std::memcpy(descriptor->values, scratch, sizeof(int));
+            }
+            extern "C" pgaccel_status pgaccel_descriptor_source_observer(
+                const Descriptor* descriptor, int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              int staged = 0;
+              stage_source(descriptor, &staged);
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                out[i] = staged;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_descriptor_destination_mutation(
+                const Descriptor* descriptor, int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              int staged = 7;
+              overwrite_destination(descriptor, &staged);
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                out[i] = staged;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        self.assertTrue(
+            entries["pgaccel_descriptor_source_observer"].ok,
+            entries["pgaccel_descriptor_source_observer"].detail,
+        )
+        hostile = entries["pgaccel_descriptor_destination_mutation"]
+        self.assertFalse(hostile.ok, hostile.detail)
+        self.assertIn("host_computation", hostile.classifications)
 
     def test_allocation_and_free_contracts_bind_output_to_usm_evidence(self) -> None:
         valid = audit_compiling_fixture(

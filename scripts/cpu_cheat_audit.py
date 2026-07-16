@@ -125,6 +125,7 @@ class LifecycleContract:
     allowed_output_calls: tuple[str, ...] = ()
     exact_body_alternatives: tuple[tuple[str, ...], ...] = ()
     transfer_contract: str = "none"
+    guarded_host_pointer_position: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,7 +226,9 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
             "pgaccel_status (void *, const void *, size_t)",
             noop_guard_conditions=(("init_status", "!=", "PGACCEL_OK"),),
             allow_zero_success=True,
+            allowed_output_calls=("sycl::get_pointer_type",),
             transfer_contract="parameters",
+            guarded_host_pointer_position=0,
         ),
         "pgaccel_expr_device_copy_to_host": LifecycleContract(
             "device-to-host transfer",
@@ -233,7 +236,9 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
             "pgaccel_status (void *, const void *, size_t)",
             noop_guard_conditions=(("init_status", "!=", "PGACCEL_OK"),),
             allow_zero_success=True,
+            allowed_output_calls=("sycl::get_pointer_type",),
             transfer_contract="parameters",
+            guarded_host_pointer_position=1,
         ),
         "pgaccel_grouped_agg_workspace_requirements": LifecycleContract(
             "workspace metadata calculation",
@@ -1714,32 +1719,177 @@ def _parameter_transfer_indices(
     function: Function,
     regions: Sequence[_Region],
     lambda_ranges: Sequence[tuple[int, int]],
-) -> list[int]:
-    """Return exact, awaited queue copies over all three transfer parameters."""
+    guarded_host_pointer_position: int | None,
+) -> tuple[list[int], set[int]]:
+    """Return exact parameter transfers and guarded host-write token indices.
+
+    A queue copy must be awaited. A direct host copy is accepted only when it
+    is the true branch of an exact shared/host-USM pointer-type guard. This
+    models unified allocations without admitting arbitrary host transfers.
+    """
 
     parameter_names = _ordered_parameter_names(tokens, function)
     if len(parameter_names) != 3:
-        return []
+        return [], set()
+    destination_name, source_name, size_name = parameter_names
     forward, _ = _delimiter_pairs(tokens)
     result: list[int] = []
+    guarded_host_writes: set[int] = set()
+
+    def statement_left(index: int) -> int:
+        cursor = index - 1
+        while cursor > function.body_open and tokens[cursor].value not in {
+            ";",
+            "{",
+            "}",
+        }:
+            cursor -= 1
+        return cursor + 1
+
+    guarded_pointer = (
+        parameter_names[guarded_host_pointer_position]
+        if guarded_host_pointer_position is not None
+        and guarded_host_pointer_position < len(parameter_names)
+        else None
+    )
+    pointer_types: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
     for method_index in range(function.body_open + 1, function.body_close):
         if (
-            tokens[method_index].value != "memcpy"
+            tokens[method_index].value != "get_pointer_type"
             or method_index < 2
-            or tokens[method_index - 1].value not in {".", "->"}
+            or tokens[method_index - 2].value != "sycl"
+            or tokens[method_index - 1].value != "::"
             or _is_inside(method_index, lambda_ranges)
             or not _index_is_reachable(
                 tokens, function, method_index, regions, lambda_ranges
             )
         ):
             continue
-        receiver = tokens[method_index - 2].value
+        call = _method_lparen(tokens, method_index, function.body_close, forward)
+        if call is None:
+            continue
+        arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
+        if len(arguments) != 2:
+            continue
+        pointer = _exact_argument_identifier(tokens, arguments[0])
+        if pointer != guarded_pointer:
+            continue
+        context_values = [token.value for token in tokens[slice(*arguments[1])]]
+        if (
+            len(context_values) != 5
+            or context_values[1:] != ["->", "get_context", "(", ")"]
+        ) and (
+            len(context_values) != 5
+            or context_values[1:] != [".", "get_context", "(", ")"]
+        ):
+            continue
+        receiver = context_values[0]
         if _receiver_kind(tokens, function, receiver, method_index, forward) != "queue":
             continue
-        call = _method_lparen(tokens, method_index, function.body_close, forward)
-        if call is None or not _call_is_awaited(
-            tokens, call[1], function.body_close, forward
+        left = statement_left(method_index)
+        equals = next(
+            (index for index in range(left, method_index) if tokens[index].value == "="),
+            None,
+        )
+        if equals is None:
+            continue
+        names = [
+            tokens[index].value
+            for index in range(left, equals)
+            if tokens[index].kind == "identifier"
+            and tokens[index].value not in CALL_KEYWORDS
+        ]
+        if names:
+            pointer_types[names[-1]].append((pointer, receiver, method_index))
+
+    def guarded_shared_or_host(method_index: int) -> str | None:
+        for region in regions:
+            if (
+                region.branch != "true"
+                or not region.start <= method_index <= region.end
+            ):
+                continue
+            values = tuple(
+                value
+                for value in _strip_condition_parentheses(region.condition)
+                if value not in {"(", ")"}
+            )
+            clauses: list[tuple[str, ...]] = []
+            current: list[str] = []
+            for value in values:
+                if value == "||":
+                    clauses.append(tuple(current))
+                    current = []
+                else:
+                    current.append(value)
+            clauses.append(tuple(current))
+            if len(clauses) != 2:
+                continue
+            allocation: str | None = None
+            kinds: set[str] = set()
+            for clause in clauses:
+                if len(clause) != 9 or clause[1] != "==":
+                    break
+                if clause[2:8] != ("sycl", "::", "usm", "::", "alloc", "::"):
+                    break
+                if clause[8] not in {"shared", "host"}:
+                    break
+                if allocation is None:
+                    allocation = clause[0]
+                elif allocation != clause[0]:
+                    break
+                kinds.add(clause[8])
+            else:
+                if allocation is None or kinds != {"shared", "host"}:
+                    continue
+                matching_receivers = {
+                    receiver
+                    for pointer, receiver, declaration in pointer_types.get(
+                        allocation, ()
+                    )
+                    if pointer == guarded_pointer
+                    and declaration < method_index
+                    and _context_dominates(
+                        _context(declaration, regions), _context(method_index, regions)
+                    )
+                }
+                if len(matching_receivers) == 1:
+                    return next(iter(matching_receivers))
+        return None
+
+    guarded_host_calls: dict[int, str] = {}
+    for method_index in range(function.body_open + 1, function.body_close):
+        if (
+            tokens[method_index].value != "memcpy"
+            or method_index < 2
+            or tokens[method_index - 2].value != "std"
+            or tokens[method_index - 1].value != "::"
         ):
+            continue
+        receiver = guarded_shared_or_host(method_index)
+        if receiver is not None:
+            guarded_host_calls[method_index] = receiver
+    guarded_receivers = set(guarded_host_calls.values())
+
+    for method_index in range(function.body_open + 1, function.body_close):
+        if tokens[method_index].value != "memcpy" or _is_inside(
+            method_index, lambda_ranges
+        ) or not _index_is_reachable(
+            tokens, function, method_index, regions, lambda_ranges
+        ):
+            continue
+        is_member = bool(
+            method_index >= 2 and tokens[method_index - 1].value in {".", "->"}
+        )
+        is_std = bool(
+            method_index >= 2
+            and tokens[method_index - 2].value == "std"
+            and tokens[method_index - 1].value == "::"
+        )
+        if not is_member and not is_std:
+            continue
+        call = _method_lparen(tokens, method_index, function.body_close, forward)
+        if call is None:
             continue
         arguments = _call_argument_ranges(tokens, call[0], call[1], forward)
         if len(arguments) != 3:
@@ -1750,8 +1900,24 @@ def _parameter_transfer_indices(
             )
             == parameter_names
         ):
-            result.append(method_index)
-    return result
+            if is_member:
+                receiver = tokens[method_index - 2].value
+                if _receiver_kind(
+                    tokens, function, receiver, method_index, forward
+                ) != "queue" or not _call_is_awaited(
+                    tokens, call[1], function.body_close, forward
+                ) or (guarded_receivers and receiver not in guarded_receivers):
+                    continue
+                result.append(method_index)
+            elif method_index in guarded_host_calls:
+                result.append(method_index)
+                guarded_host_writes.update(
+                    index
+                    for index in range(*arguments[0])
+                    if tokens[index].value == destination_name
+                    and _unqualified_output_identifier(tokens, index)
+                )
+    return result, guarded_host_writes
 
 
 def _lifecycle_usm_allocation_events(
@@ -1980,9 +2146,14 @@ def _lifecycle_proof(
                 ),
             )
         )
+    guarded_parameter_writes: set[int] = set()
     if contract.transfer_contract == "parameters":
-        transfer_indices = _parameter_transfer_indices(
-            tokens, function, regions, lambda_ranges
+        transfer_indices, guarded_parameter_writes = _parameter_transfer_indices(
+            tokens,
+            function,
+            regions,
+            lambda_ranges,
+            contract.guarded_host_pointer_position,
         )
         if not transfer_indices:
             missing.append(("awaited_queue_memcpy", "(dst, src, bytes)"))
@@ -1992,7 +2163,11 @@ def _lifecycle_proof(
                 transfer_indices,
             )
         )
-    unsafe_contract_writes = list(host_writes)
+    unsafe_contract_writes = [
+        record
+        for record in host_writes
+        if record[0] not in guarded_parameter_writes
+    ]
     if contract.output_policy == "metadata":
         unsafe_contract_writes = []
     elif contract.output_policy == "allocation":
@@ -4067,6 +4242,7 @@ def _device_queue_orchestration_loops(
     protected_roots: set[str],
     device_output_roots: set[str],
     proven_transfer_calls: set[int],
+    kernel_writes: Sequence[_KernelWriteEvidence],
     lambda_ranges: Sequence[tuple[int, int]],
     forward: dict[int, int],
 ) -> set[int]:
@@ -4194,6 +4370,12 @@ def _device_queue_orchestration_loops(
                 continue
             unsafe = True
             break
+        if tokens[loop_index].value in {"for", "while"} and not any(
+            body_start <= launch.index <= body_end
+            and bool(launch.roots & device_output_roots)
+            for launch in kernel_writes
+        ):
+            continue
         if not unsafe:
             proven.add(loop_index)
     return proven
@@ -4686,17 +4868,33 @@ def _mutable_pointer_member_write_positions(
             is not None
             for index in range(function.body_open + 1, function.body_close)
         )
-        passes_member_to_call = any(
-            any(
-                _is_mutable_member_projection(tokens, index, selected)
-                or (
-                    tokens[index].value in aliases
-                    and _unqualified_output_identifier(tokens, index)
-                )
-                for index in range(indexed.lparen + 1, indexed.rparen)
+        passes_member_to_call = False
+        for indexed in _indexed_calls(tokens, function, lambda_ranges):
+            arguments = _call_argument_ranges(
+                tokens, indexed.lparen, indexed.rparen, forward
             )
-            for indexed in _indexed_calls(tokens, function, lambda_ranges)
-        )
+            observer_positions = (
+                frozenset({1, 2})
+                if indexed.call.name in {"std::memcpy", "std::memmove"}
+                else frozenset()
+            )
+            for argument_position, (argument_left, argument_right) in enumerate(
+                arguments
+            ):
+                if argument_position in observer_positions:
+                    continue
+                if any(
+                    _is_mutable_member_projection(tokens, index, selected)
+                    or (
+                        tokens[index].value in aliases
+                        and _unqualified_output_identifier(tokens, index)
+                    )
+                    for index in range(argument_left, argument_right)
+                ):
+                    passes_member_to_call = True
+                    break
+            if passes_member_to_call:
+                break
         if writes_member or passes_member_to_call:
             positions.add(position)
     return frozenset(positions)
@@ -5905,6 +6103,31 @@ def _proven_output_transfers(
     proven_call_indices: set[int] = set()
     destinations: dict[int, frozenset[str]] = {}
 
+    do_while_indices: set[int] = set()
+    for index in range(function.body_open + 1, function.body_close):
+        if tokens[index].value != "do" or _is_inside(index, lambda_ranges):
+            continue
+        _, _, after = _statement_range(
+            tokens, index + 1, function.body_close, forward
+        )
+        if after < function.body_close and tokens[after].value == "while":
+            do_while_indices.add(after)
+    potentially_empty_loop_bodies: list[tuple[int, int]] = []
+    for index in range(function.body_open + 1, function.body_close):
+        if (
+            tokens[index].value not in {"for", "while"}
+            or index in do_while_indices
+            or _is_inside(index, lambda_ranges)
+            or index + 1 >= function.body_close
+            or tokens[index + 1].value != "("
+            or index + 1 not in forward
+        ):
+            continue
+        body_start, body_end, _ = _statement_range(
+            tokens, forward[index + 1] + 1, function.body_close, forward
+        )
+        potentially_empty_loop_bodies.append((body_start, body_end))
+
     for method_index in range(function.body_open + 1, function.body_close):
         if tokens[method_index].value != "memcpy" or _is_inside(
             method_index, lambda_ranges
@@ -6058,6 +6281,10 @@ def _proven_output_transfers(
             launch
             for launch in kernel_writes
             if launch.index < method_index
+            and not any(
+                start <= launch.index <= end
+                for start, end in potentially_empty_loop_bodies
+            )
             and launch.awaited
             and source_roots.issubset(launch.roots)
             and all(provenance[root][1] < launch.index for root in source_roots)
@@ -7307,6 +7534,7 @@ class _PathAuditor:
             | set(_local_usm_provenance(self.tokens, function, lambda_ranges)),
             output_roots | resource_roots,
             proven_transfer_calls,
+            kernel_writes,
             lambda_ranges,
             self.forward,
         )
@@ -7440,13 +7668,50 @@ class _PathAuditor:
                     for value in size_values
                 )
             }
-            if not scalar_size and not full_size_counts:
+            exact_copyback_size_indices = {
+                transfer_index
+                for transfer_index in copyback_destinations
+                if (
+                    transfer_index > method_index
+                    and (
+                        transfer_call := _method_lparen(
+                            self.tokens,
+                            transfer_index,
+                            function.body_close,
+                            self.forward,
+                        )
+                    )
+                    is not None
+                    and len(
+                        transfer_arguments := _call_argument_ranges(
+                            self.tokens,
+                            transfer_call[0],
+                            transfer_call[1],
+                            self.forward,
+                        )
+                    )
+                    == 3
+                    and tuple(size_values)
+                    == tuple(
+                        token.value
+                        for token in self.tokens[
+                            transfer_arguments[2][0] : transfer_arguments[2][1]
+                        ]
+                    )
+                )
+            }
+            if (
+                not scalar_size
+                and not full_size_counts
+                and not exact_copyback_size_indices
+            ):
                 continue
             if any(
                 transfer_index > method_index
                 and initialized.intersection(destinations)
                 and (
                     scalar_size
+                    or transfer_index in exact_copyback_size_indices
                     or any(
                         launch.index < transfer_index
                         and launch.awaited
@@ -7507,6 +7772,14 @@ class _PathAuditor:
             if contract is not None
             else set()
         )
+
+        def contract_call_is_allowed(name: str) -> bool:
+            short_name = name.rsplit("::", 1)[-1]
+            return any(
+                name == allowed if "::" in allowed else short_name == allowed
+                for allowed in allowed_contract_calls
+            )
+
         contract_output_call_hazards = [
             f"unresolved output method {name} at line {line}"
             for name, line in member_output_calls
@@ -7519,7 +7792,7 @@ class _PathAuditor:
             f"unapproved output call {indexed.call.name} at line {indexed.call.line}"
             for indexed in calls
             if indexed.index not in proven_transfer_calls | safe_initializer_calls
-            if indexed.call.name.rsplit("::", 1)[-1] not in allowed_contract_calls
+            if not contract_call_is_allowed(indexed.call.name)
             and _range_references_output(
                 self.tokens, indexed.lparen + 1, indexed.rparen, output_roots
             )
