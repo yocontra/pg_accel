@@ -65,6 +65,26 @@ bool raster_resident_current_device_pointer(sycl::queue& queue, const void* poin
   }
 }
 
+bool raster_resident_spans_are_disjoint(const RasterResidentSpan* spans, size_t span_count) {
+  for (size_t left = 0; left < span_count; ++left) {
+    for (size_t right = left + 1; right < span_count; ++right) {
+      if (raster_resident_spans_overlap(spans[left], spans[right]))
+        return false;
+    }
+  }
+  return true;
+}
+
+bool raster_resident_spans_on_current_device(sycl::queue& queue, const RasterResidentSpan* spans,
+                                             size_t span_count) {
+  for (size_t span = 0; span < span_count; ++span) {
+    if (!raster_resident_current_device_pointer(
+            queue, reinterpret_cast<const void*>(spans[span].begin)))
+      return false;
+  }
+  return true;
+}
+
 size_t raster_resident_pixel_width(uint32_t pixel_type) {
   switch (pixel_type) {
     case PGACCEL_RESIDENT_RASTER_BOOL:
@@ -219,6 +239,7 @@ static_assert(RASTER_RESIDENT_FAILURE_OFFSETS == PGACCEL_RASTER_VALIDATION_OFFSE
 static_assert(RASTER_RESIDENT_FAILURE_CAPACITY == PGACCEL_RASTER_VALIDATION_CAPACITY);
 static_assert(RASTER_RESIDENT_FAILURE_BYTE_BUDGET == PGACCEL_RASTER_VALIDATION_BYTE_BUDGET);
 static_assert(RASTER_RESIDENT_FAILURE_NUMERIC == PGACCEL_RASTER_VALIDATION_NUMERIC_OVERFLOW);
+static_assert(PGACCEL_RASTER_DETAIL_NONE == 0);
 static_assert(sizeof(size_t) == sizeof(uint64_t), "resident raster ABI requires LP64 size_t");
 constexpr size_t RASTER_RESIDENT_MAX_ROW_VALIDATION_LAUNCH =
     PGACCEL_RESIDENT_RASTER_ROWS_PER_VALIDATION_LAUNCH;
@@ -249,7 +270,8 @@ pgaccel_raster_reclass_resident_ex(const pgaccel_raster_reclass_resident_request
     *detail = PGACCEL_RASTER_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
   }
-  if (request->count == 0)
+  const size_t selected_count = request->count;
+  if (selected_count == 0)
     return PGACCEL_OK;
 
   int64_t output_minimum = 0;
@@ -351,22 +373,15 @@ pgaccel_raster_reclass_resident_ex(const pgaccel_raster_reclass_resident_request
     *detail = PGACCEL_RASTER_DETAIL_CONTRACT;
     return PGACCEL_INVALID_ARGUMENT;
   }
-  for (size_t left = 0; left < span_count; ++left) {
-    for (size_t right = left + 1; right < span_count; ++right) {
-      if (raster_resident_spans_overlap(spans[left], spans[right])) {
-        *detail = PGACCEL_RASTER_DETAIL_CONTRACT;
-        return PGACCEL_INVALID_ARGUMENT;
-      }
-    }
+  if (!raster_resident_spans_are_disjoint(spans, span_count)) {
+    *detail = PGACCEL_RASTER_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
   }
 
   sycl::queue& queue = get_queue();
-  for (size_t span = 0; span < span_count; ++span) {
-    if (!raster_resident_current_device_pointer(queue,
-                                                reinterpret_cast<const void*>(spans[span].begin))) {
-      *detail = PGACCEL_RASTER_DETAIL_CONTRACT;
-      return PGACCEL_INVALID_ARGUMENT;
-    }
+  if (!raster_resident_spans_on_current_device(queue, spans, span_count)) {
+    *detail = PGACCEL_RASTER_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
   }
 
   auto* validation = request->validation_scratch;
@@ -397,7 +412,6 @@ pgaccel_raster_reclass_resident_ex(const pgaccel_raster_reclass_resident_request
       });
 
   const size_t selected_first_row = request->first_row;
-  const size_t selected_count = request->count;
   const size_t output_capacity = request->output_pixels_bytes;
   const uint32_t output_type = request->output_pixel_type;
   const size_t output_element_bytes = output_width;

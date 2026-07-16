@@ -2063,6 +2063,62 @@ class CompilerValidAdversarialTests(unittest.TestCase):
 
 
 class HostComputationAndContractTests(unittest.TestCase):
+    def test_ooo_overlap_diagnostic_contract_is_exact(self) -> None:
+        valid = audit_fixture(
+            r"""
+            struct pgaccel_ooo_overlap_report { uint64_t wall_ns; };
+            extern "C" pgaccel_status pgaccel_sort_window_overlap_probe(
+                size_t count, uint32_t spin, pgaccel_ooo_overlap_report* out) {
+              if (out == nullptr) return PGACCEL_ERROR;
+              std::memset(out, 0, sizeof(*out));
+              auto* ooo = pgaccel_get_ooo_queue();
+              if (ooo == nullptr || ooo->is_in_order()) return PGACCEL_UNSUPPORTED;
+              for (size_t i = 0; i < count; ++i) { (void)i; }
+              run_probe_once();
+              pgaccel_record_gpu_exec();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertIn(
+            "lifecycle",
+            valid.entrypoint_audits[0].classifications,
+        )
+
+        for body in (
+            r"""
+              if (out == nullptr) return PGACCEL_ERROR;
+              auto* ooo = pgaccel_get_ooo_queue();
+              if (ooo == nullptr || ooo->is_in_order()) return PGACCEL_UNSUPPORTED;
+              pgaccel_record_gpu_exec();
+              return PGACCEL_OK;
+            """,
+            r"""
+              if (out == nullptr) return PGACCEL_ERROR;
+              auto* ooo = pgaccel_get_ooo_queue();
+              if (ooo == nullptr || ooo->is_in_order()) return PGACCEL_UNSUPPORTED;
+              run_probe_once();
+              sycl::queue q;
+              q.single_task<SubstituteProbe>([=]() { out->wall_ns = 1; }).wait();
+              pgaccel_record_gpu_exec();
+              return PGACCEL_OK;
+            """,
+        ):
+            hostile = audit_fixture(
+                "struct pgaccel_ooo_overlap_report { uint64_t wall_ns; };\n"
+                'extern "C" pgaccel_status pgaccel_sort_window_overlap_probe('
+                "size_t count, uint32_t spin, pgaccel_ooo_overlap_report* out) {\n"
+                + textwrap.dedent(body)
+                + "}\n"
+            )
+            with self.subTest(body=body):
+                self.assertTrue(hostile.findings)
+                self.assertIn(
+                    "invalid_lifecycle_contract",
+                    hostile.entrypoint_audits[0].classifications,
+                )
+
     def test_host_loop_success_is_classified(self) -> None:
         result = audit_fixture(
             r"""
@@ -2829,6 +2885,84 @@ class ResidentV5RegressionTests(unittest.TestCase):
                 self.assertNotIn(
                     "opaque_device_resource", entries[name].classifications
                 )
+
+    def test_member_count_batched_queue_work_is_collectively_awaited(self) -> None:
+        positive = audit_fixture(
+            r"""
+            struct BatchRequest { size_t count; int* output; };
+            extern "C" pgaccel_status pgaccel_member_count_batches(
+                const BatchRequest* request) {
+              const size_t selected_count = request->count;
+              if (selected_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              auto* output = request->output;
+              q.memset(output, 0, selected_count * sizeof(int));
+              for (size_t start = 0; start < selected_count;) {
+                const size_t batch = std::min(size_t{64}, selected_count - start);
+                q.parallel_for<BatchWrite>(sycl::range<1>(batch), [=](sycl::id<1> id) {
+                  output[start + id[0]] = 7;
+                });
+                start += batch;
+              }
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertFalse(positive.findings)
+        entry = positive.entrypoint_audits[0]
+        self.assertIn("zero_work", entry.classifications)
+        self.assertIn("device_launch_orchestration", entry.classifications)
+
+        unawaited = audit_fixture(
+            r"""
+            struct BatchRequest { size_t count; int* output; };
+            extern "C" pgaccel_status pgaccel_unawaited_batches(
+                const BatchRequest* request) {
+              const size_t selected_count = request->count;
+              if (selected_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              auto* output = request->output;
+              for (size_t start = 0; start < selected_count;) {
+                const size_t batch = std::min(size_t{64}, selected_count - start);
+                q.parallel_for<UnawaitedBatch>(sycl::range<1>(batch), [=](sycl::id<1> id) {
+                  output[start + id[0]] = 7;
+                });
+                start += batch;
+              }
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(unawaited.findings)
+        self.assertIn(
+            "host_computation",
+            unawaited.entrypoint_audits[0].classifications,
+        )
+
+        nonzero_initializer = audit_fixture(
+            r"""
+            struct BatchRequest { size_t count; int* output; };
+            extern "C" pgaccel_status pgaccel_nonzero_batch_init(
+                const BatchRequest* request) {
+              const size_t selected_count = request->count;
+              if (selected_count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              auto* output = request->output;
+              q.memset(output, 42, selected_count * sizeof(int));
+              q.parallel_for<NonzeroBatch>(sycl::range<1>(selected_count), [=](sycl::id<1> id) {
+                output[id[0]] = 7;
+              });
+              q.wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        self.assertTrue(nonzero_initializer.findings)
+        self.assertIn(
+            "unresolved_output_helper",
+            nonzero_initializer.entrypoint_audits[0].classifications,
+        )
 
     def test_read_only_typed_slab_projection_does_not_prove_copyback(self) -> None:
         result = audit_compiling_fixture(

@@ -113,6 +113,7 @@ class LifecycleContract:
     required_sequences: tuple[tuple[str, ...], ...]
     signature: str
     allow_host_loops: bool = False
+    allow_gpu_counter: bool = False
     required_any_sequences: tuple[tuple[str, ...], ...] = ()
     noop_guard_markers: tuple[tuple[str, ...], ...] = ()
     noop_guard_polarity: str = "any"
@@ -184,6 +185,27 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
             "AdaptiveCpp JIT-cache diagnostics",
             (("resolve_jit_cache_dir", "("),),
             "pgaccel_status (char *, size_t)",
+            output_policy="metadata",
+        ),
+        "pgaccel_sort_window_overlap_probe": LifecycleContract(
+            "out-of-order queue overlap profiling diagnostics",
+            (("pgaccel_get_ooo_queue", "("), ("run_probe_once", "(")),
+            "pgaccel_status (size_t, uint32_t, pgaccel_ooo_overlap_report *)",
+            allow_host_loops=True,
+            allow_gpu_counter=True,
+            noop_guard_conditions=(
+                (
+                    "ooo",
+                    "==",
+                    "nullptr",
+                    "||",
+                    "ooo",
+                    "->",
+                    "is_in_order",
+                    "(",
+                    ")",
+                ),
+            ),
             output_policy="metadata",
         ),
         "pgaccel_expr_shared_alloc": LifecycleContract(
@@ -2156,7 +2178,10 @@ def _lifecycle_proof(
         forbidden.append("body does not match the immutable support-operation shape")
     if not contract.allow_host_loops and set(values) & {"for", "while", "do"}:
         forbidden.append("host loop")
-    if _contains_sequence(values, ("pgaccel_record_gpu_exec", "(")):
+    if (
+        not contract.allow_gpu_counter
+        and _contains_sequence(values, ("pgaccel_record_gpu_exec", "("))
+    ):
         forbidden.append("GPU execution counter")
     if _contract_contains_dispatch(tokens, function) is not None:
         forbidden.append("device dispatch")
@@ -2974,6 +2999,13 @@ def _zero_work_parameter_names(
             and expression[3] == "]"
         ):
             result.add(name)
+        if (
+            len(expression) == 3
+            and expression[0] in const_pointer_parameters
+            and expression[1] in {".", "->"}
+            and count_name(expression[2])
+        ):
+            result.add(name)
     return result
 
 
@@ -3379,6 +3411,52 @@ def _call_is_awaited(
     )
 
 
+def _queue_call_is_covered_by_wait(
+    tokens: Sequence[Token],
+    function: Function,
+    method_index: int,
+    rparen: int,
+    regions: Sequence[_Region],
+    lambda_ranges: Sequence[tuple[int, int]],
+    forward: dict[int, int],
+) -> bool:
+    """Prove a queue command is covered by a later unconditional queue wait."""
+
+    if _call_is_awaited(tokens, rparen, function.body_close, forward):
+        return True
+    if (
+        method_index < 2
+        or tokens[method_index - 1].value not in {".", "->"}
+        or _receiver_kind(
+            tokens,
+            function,
+            tokens[method_index - 2].value,
+            method_index,
+            forward,
+        )
+        != "queue"
+    ):
+        return False
+    receiver = tokens[method_index - 2].value
+    call_context = _context(method_index, regions)
+    returns = _returns(tokens, function, lambda_ranges)
+    for index in range(rparen + 1, function.body_close - 3):
+        if (
+            tokens[index].value != receiver
+            or tokens[index + 1].value not in {".", "->"}
+            or tokens[index + 2].value not in {"wait", "wait_and_throw"}
+            or tokens[index + 3].value != "("
+            or index + 3 not in forward
+            or _is_inside(index, lambda_ranges)
+        ):
+            continue
+        if any(rparen < return_index < index for return_index, _ in returns):
+            continue
+        if _context_dominates(_context(index, regions), call_context):
+            return True
+    return False
+
+
 def _device_orchestration_do_loops(
     tokens: Sequence[Token],
     function: Function,
@@ -3681,6 +3759,7 @@ def _device_orchestration_do_loops(
 def _device_queue_orchestration_loops(
     tokens: Sequence[Token],
     function: Function,
+    regions: Sequence[_Region],
     protected_roots: set[str],
     device_output_roots: set[str],
     proven_transfer_calls: set[int],
@@ -3714,7 +3793,9 @@ def _device_queue_orchestration_loops(
     proven: set[int] = set()
     queue_methods = DISPATCH_METHODS | {"memcpy", "memset"}
     for loop_index in range(function.body_open + 1, function.body_close):
-        if tokens[loop_index].value != "do" or _is_inside(loop_index, lambda_ranges):
+        if tokens[loop_index].value not in {"for", "while", "do"} or _is_inside(
+            loop_index, lambda_ranges
+        ):
             continue
         body = loop_body(loop_index)
         if body is None:
@@ -3741,7 +3822,15 @@ def _device_queue_orchestration_loops(
                     forward,
                 )
                 != "queue"
-                or not _call_is_awaited(tokens, call[1], body_end + 1, forward)
+                or not _queue_call_is_covered_by_wait(
+                    tokens,
+                    function,
+                    method_index,
+                    call[1],
+                    regions,
+                    lambda_ranges,
+                    forward,
+                )
             ):
                 unsafe = True
                 break
@@ -3794,6 +3883,10 @@ def _device_queue_orchestration_loops(
                 continue
             short_name = indexed.call.name.rsplit("::", 1)[-1]
             if short_name in {"wait", "wait_and_throw", "range", "nd_range"}:
+                continue
+            if short_name in {"min", "max"} and not _range_references_output(
+                tokens, indexed.lparen + 1, indexed.rparen, protected_roots
+            ):
                 continue
             unsafe = True
             break
@@ -3919,7 +4012,15 @@ def _direct_dispatches(
                         method,
                         _context(index, regions),
                         frozenset(written_roots),
-                        _call_is_awaited(tokens, rparen, function.body_close, forward),
+                        _queue_call_is_covered_by_wait(
+                            tokens,
+                            function,
+                            index + 2,
+                            rparen,
+                            regions,
+                            lambdas,
+                            forward,
+                        ),
                     )
                 )
             if not inner_found:
@@ -3957,7 +4058,15 @@ def _direct_dispatches(
                         method,
                         _context(index, regions),
                         frozenset(roots),
-                        _call_is_awaited(tokens, rparen, function.body_close, forward),
+                        _queue_call_is_covered_by_wait(
+                            tokens,
+                            function,
+                            index + 2,
+                            rparen,
+                            regions,
+                            lambdas,
+                            forward,
+                        ),
                     )
                 )
             if kernel is None or not _lambda_contributes(tokens, kernel, mutable):
@@ -6175,12 +6284,15 @@ def _unresolved_member_output_calls(
     function: Function,
     roots: set[str],
     lambda_ranges: Sequence[tuple[int, int]],
+    proven_calls: set[int] | None = None,
 ) -> list[tuple[str, int]]:
     forward, _ = _delimiter_pairs(tokens)
+    proven_calls = proven_calls or set()
     calls: set[tuple[str, int]] = set()
     for method_index in range(function.body_open + 2, function.body_close):
         if (
             tokens[method_index].kind != "identifier"
+            or method_index in proven_calls
             or tokens[method_index - 1].value not in {".", "->"}
             or tokens[method_index].value in DISPATCH_METHODS | {"memcpy", "copy"}
             or _is_inside(method_index, lambda_ranges)
@@ -6660,13 +6772,25 @@ class _PathAuditor:
         )
         calls = _indexed_calls(self.tokens, function, lambda_ranges)
         safe_initializer_calls: set[int] = set()
-        for indexed in calls:
-            if indexed.call.name.rsplit("::", 1)[-1] != "memset":
+        for method_index in range(function.body_open + 1, function.body_close):
+            if self.tokens[method_index].value != "memset" or _is_inside(
+                method_index, lambda_ranges
+            ):
                 continue
-            arguments = _call_argument_ranges(
-                self.tokens, indexed.lparen, indexed.rparen, self.forward
+            call = _method_lparen(
+                self.tokens, method_index, function.body_close, self.forward
             )
-            if not arguments:
+            if call is None:
+                continue
+            arguments = _call_argument_ranges(self.tokens, call[0], call[1], self.forward)
+            if len(arguments) < 2:
+                continue
+            value_tokens = [
+                token.value for token in self.tokens[arguments[1][0] : arguments[1][1]]
+            ]
+            if len(value_tokens) != 1 or not re.fullmatch(
+                r"0+[uUlL]*", value_tokens[0]
+            ):
                 continue
             initialized = {
                 self.tokens[index].value
@@ -6675,7 +6799,7 @@ class _PathAuditor:
                 and _unqualified_output_identifier(self.tokens, index)
             }
             if any(
-                transfer_index > indexed.index
+                transfer_index > method_index
                 and initialized.intersection(destinations)
                 and _context_dominates(
                     next(
@@ -6683,13 +6807,25 @@ class _PathAuditor:
                         for item in copyback_evidence
                         if item.index == transfer_index
                     ),
-                    _context(indexed.index, regions),
+                    _context(method_index, regions),
                 )
                 for transfer_index, destinations in copyback_destinations.items()
+            ) or any(
+                launch.index > method_index
+                and launch.awaited
+                and initialized.intersection(launch.roots)
+                and _context_dominates(
+                    launch.context, _context(method_index, regions)
+                )
+                for launch in kernel_writes
             ):
-                safe_initializer_calls.add(indexed.index)
+                safe_initializer_calls.add(method_index)
         member_output_calls = _unresolved_member_output_calls(
-            self.tokens, function, output_roots, lambda_ranges
+            self.tokens,
+            function,
+            output_roots,
+            lambda_ranges,
+            safe_initializer_calls,
         )
         indirect_output_calls = _unresolved_indirect_output_calls(
             self.tokens, function, output_roots, lambda_ranges
@@ -7105,6 +7241,7 @@ class _PathAuditor:
             _device_queue_orchestration_loops(
                 self.tokens,
                 function,
+                regions,
                 output_roots | resource_roots | set(_local_usm_provenance(
                     self.tokens, function, lambda_ranges
                 )),
