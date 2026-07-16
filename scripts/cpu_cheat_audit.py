@@ -4633,6 +4633,7 @@ def _direct_dispatches(
                 )
                 index = rparen + 1
                 continue
+            roots: set[str] = set()
             kernel = _kernel_lambda(tokens, lparen, rparen, forward, reverse)
             if kernel is not None and _lambda_nonempty(tokens, kernel):
                 device_lambdas.add(kernel)
@@ -4674,7 +4675,7 @@ def _direct_dispatches(
                         ),
                     )
                 )
-            if kernel is None or not _lambda_contributes(tokens, kernel, mutable):
+            if kernel is None or not (roots & mutable):
                 rejected.append(
                     f"{method} does not produce an ABI output at line {tokens[index + 2].line}"
                 )
@@ -7830,16 +7831,26 @@ class _PathAuditor:
             self.tokens, function, mutable, lambda_ranges, member_parameters
         )
         output_roots = mutable | aliases
+        caller_provenance = _local_usm_provenance(
+            self.tokens, function, lambda_ranges
+        )
+        borrowed_output_roots = {
+            name
+            for name in parameters
+            if name in caller_provenance
+            and caller_provenance[name][0] == "borrowed"
+        }
+        proof_output_roots = output_roots | borrowed_output_roots
         root_parameter_positions = {
             root: frozenset(
                 parameter_positions[origin]
                 for origin in alias_origins.get(root, frozenset({root}))
                 if origin in parameter_positions
             )
-            for root in output_roots | set(member_parameters)
+            for root in proof_output_roots | set(member_parameters)
         }
         direct, raw_launches, rejected, device_lambdas, kernel_writes = (
-            _direct_dispatches(self.tokens, function, output_roots, regions)
+            _direct_dispatches(self.tokens, function, proof_output_roots, regions)
         )
         direct = [
             dataclasses.replace(
@@ -7850,13 +7861,12 @@ class _PathAuditor:
                         for launch in kernel_writes
                         if launch.index == item.index
                         for root in launch.roots
-                        if root in output_roots
+                        if root in proof_output_roots
                     ),
                 ),
             )
             for item in direct
         ]
-        caller_provenance = _local_usm_provenance(self.tokens, function, lambda_ranges)
         helper_kernel_writes: list[_KernelWriteEvidence] = []
         for indexed in _indexed_calls(self.tokens, function, lambda_ranges):
             candidate, _ = self.resolve(indexed.call)
@@ -7865,8 +7875,14 @@ class _PathAuditor:
             arguments = _call_argument_ranges(
                 self.tokens, indexed.lparen, indexed.rparen, self.forward
             )
+            proof = self.prove(candidate, stack + (function,))
+            if not proof.ok or not (
+                {"device_dispatch", "device_copyback"}
+                & set(proof.classifications)
+            ):
+                continue
             roots: set[str] = set()
-            for position in _mutable_parameter_positions(self.tokens, candidate):
+            for position in proof.guaranteed_output_parameter_positions:
                 if position >= len(arguments):
                     continue
                 source = _pointer_provenance_root(
@@ -7879,15 +7895,21 @@ class _PathAuditor:
                     roots.add(caller_provenance[source[0]][2])
             if not roots:
                 continue
-            proof = self.prove(candidate, stack + (function,))
-            if not proof.ok or not (
-                {"device_dispatch", "device_copyback"}
-                & set(proof.classifications)
-            ):
-                continue
             candidate_parameters, candidate_mutable = _parameter_names(
                 self.tokens, candidate
             )
+            candidate_lambdas = _lambda_ranges(
+                self.tokens, candidate, self.forward, self.reverse
+            )
+            candidate_provenance = _local_usm_provenance(
+                self.tokens, candidate, candidate_lambdas
+            )
+            candidate_proof_roots = candidate_mutable | {
+                name
+                for name in candidate_parameters
+                if name in candidate_provenance
+                and candidate_provenance[name][0] == "borrowed"
+            }
             candidate_regions = _regions(
                 self.tokens,
                 candidate,
@@ -7898,7 +7920,7 @@ class _PathAuditor:
                 candidate_parameters,
             )
             candidate_writes = _direct_dispatches(
-                self.tokens, candidate, candidate_mutable, candidate_regions
+                self.tokens, candidate, candidate_proof_roots, candidate_regions
             )[4]
             if not candidate_writes or not all(
                 launch.awaited for launch in candidate_writes
@@ -8382,7 +8404,7 @@ class _PathAuditor:
                     self.tokens,
                     indexed,
                     proof,
-                    output_roots,
+                    proof_output_roots,
                     member_parameters,
                     self.forward,
                 )
@@ -8596,7 +8618,7 @@ class _PathAuditor:
             root
             for launch in kernel_writes
             for root in launch.roots
-            if root in output_roots
+            if root in proof_output_roots
         }
         device_output_roots.update(
             root
@@ -9215,6 +9237,12 @@ class _PathAuditor:
             if output_parameter_position_variants
             else frozenset()
         )
+        if function.is_status and any(
+            not variant for variant in output_parameter_position_variants
+        ):
+            unsafe_success.append(
+                "successful device-output root variant has no formal output parameter lineage"
+            )
 
         hard_failure = bool(
             unsafe_success

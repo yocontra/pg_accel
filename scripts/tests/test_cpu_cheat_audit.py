@@ -3254,6 +3254,27 @@ class ResidentV5RegressionTests(unittest.TestCase):
         self.assertEqual(green.guaranteed_output_parameter_positions, (0,))
         self.assertEqual(green.output_parameter_position_variants, ((0,),))
 
+    def test_top_level_const_pointer_preserves_borrowed_workspace_output(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static pgaccel_status write_borrowed_workspace(int* const workspace) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 10;
+              }).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_borrowed_workspace_wrapper(int* out) {
+              return write_borrowed_workspace(out);
+            }
+            """
+        )
+        entry = result.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.guaranteed_output_parameter_positions, (0,))
+        self.assertEqual(entry.output_parameter_position_variants, ((0,),))
+
     def test_descriptor_scratch_and_finalize_outputs_remain_path_variants(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE
