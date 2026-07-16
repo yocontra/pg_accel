@@ -5963,6 +5963,44 @@ def _failure_terminal_diagnostic_write_indices(
     return safe
 
 
+def _borrowed_usm_parameter_names(
+    tokens: Sequence[Token], function: Function
+) -> set[str]:
+    """Return top-level const-pointer parameters that name writable storage."""
+
+    parameters, _ = _parameter_names(tokens, function)
+    borrowed: set[str] = set()
+    for left, right in _parameter_ranges(tokens, function):
+        names = [
+            (index, tokens[index].value)
+            for index in range(left, right)
+            if tokens[index].kind == "identifier"
+            and tokens[index].value in parameters
+        ]
+        if not names:
+            continue
+        name_index, name = names[-1]
+        stars = [
+            index for index in range(left, name_index) if tokens[index].value == "*"
+        ]
+        if len(stars) != 1 or any(
+            tokens[index].value in {"&", "&&"}
+            for index in range(left, name_index)
+        ):
+            continue
+        star = stars[0]
+        const_before = any(
+            tokens[index].value == "const" for index in range(left, star)
+        )
+        const_after = any(
+            tokens[index].value == "const"
+            for index in range(star + 1, name_index)
+        )
+        if const_after and not const_before:
+            borrowed.add(name)
+    return borrowed
+
+
 def _local_usm_provenance(
     tokens: Sequence[Token],
     function: Function,
@@ -6003,34 +6041,8 @@ def _local_usm_provenance(
     # form so the workspace is not confused with an ABI output while kernel
     # writes and their awaited copybacks retain the same storage provenance.
     # Reject pointee-const, references, and multi-level pointers.
-    parameters, _ = _parameter_names(tokens, function)
-    for left, right in _parameter_ranges(tokens, function):
-        names = [
-            (index, tokens[index].value)
-            for index in range(left, right)
-            if tokens[index].kind == "identifier"
-            and tokens[index].value in parameters
-        ]
-        if not names:
-            continue
-        name_index, name = names[-1]
-        stars = [
-            index for index in range(left, name_index) if tokens[index].value == "*"
-        ]
-        if len(stars) != 1 or any(
-            tokens[index].value in {"&", "&&"}
-            for index in range(left, name_index)
-        ):
-            continue
-        star = stars[0]
-        const_before = any(
-            tokens[index].value == "const" for index in range(left, star)
-        )
-        const_after = any(
-            tokens[index].value == "const" for index in range(star + 1, name_index)
-        )
-        if const_after and not const_before:
-            provenance[name] = ("borrowed", function.body_open, name)
+    for name in _borrowed_usm_parameter_names(tokens, function):
+        provenance[name] = ("borrowed", function.body_open, name)
 
     for index in range(function.body_open + 1, function.body_close):
         if _is_inside(index, lambda_ranges):
@@ -6094,49 +6106,52 @@ def _local_usm_provenance(
             target = candidates[-1]
             provenance[target] = (kind, index, target)
 
-    # Propagate through typed/cast pointer declarations and aggregate members.
-    changed = True
-    while changed:
-        changed = False
-        for equals in range(function.body_open + 1, function.body_close):
-            if tokens[equals].value != "=" or _is_inside(equals, lambda_ranges):
-                continue
-            left = statement_left(equals)
-            target = target_before(equals, left)
-            if target is None or target in provenance:
-                continue
-            lhs_values = {token.value for token in tokens[left:equals]}
-            if "*" not in lhs_values and not ({".", "->"} & lhs_values):
-                continue
-            end = equals + 1
-            depth = 0
-            while end < function.body_close:
-                value = tokens[end].value
-                if value in {"(", "[", "{"}:
-                    depth += 1
-                elif value in {")", "]", "}"}:
-                    depth = max(0, depth - 1)
-                if value == ";" and depth == 0:
-                    break
-                end += 1
-            source = _exact_pointer_root(
-                tokens, equals + 1, end, set(provenance), forward
+    # Propagate aliases in statement order. Reassignment replaces or kills the
+    # prior base so a later kernel cannot retroactively write an old allocation.
+    for equals in range(function.body_open + 1, function.body_close):
+        if tokens[equals].value != "=" or _is_inside(equals, lambda_ranges):
+            continue
+        left = statement_left(equals)
+        target = target_before(equals, left)
+        if target is None:
+            continue
+        lhs_values = {token.value for token in tokens[left:equals]}
+        pointer_shaped = "*" in lhs_values or bool({".", "->"} & lhs_values)
+        if not pointer_shaped and target not in provenance:
+            continue
+        end = equals + 1
+        depth = 0
+        while end < function.body_close:
+            value = tokens[end].value
+            if value in {"(", "[", "{"}:
+                depth += 1
+            elif value in {")", "]", "}"}:
+                depth = max(0, depth - 1)
+            if value == ";" and depth == 0:
+                break
+            end += 1
+        available = {
+            name: item
+            for name, item in provenance.items()
+            if item[1] < equals or item[1] == function.body_open
+        }
+        source = _exact_pointer_root(tokens, equals + 1, end, set(available), forward)
+        if source is None:
+            source = _pointer_provenance_root(
+                tokens,
+                equals + 1,
+                end,
+                {name: item[2] for name, item in available.items()},
+                forward,
             )
-            if source is None:
-                source = _pointer_provenance_root(
-                    tokens,
-                    equals + 1,
-                    end,
-                    {name: item[2] for name, item in provenance.items()},
-                    forward,
-                )
-            if source is not None:
-                provenance[target] = (
-                    provenance[source[0]][0],
-                    equals,
-                    provenance[source[0]][2],
-                )
-                changed = True
+        if source is not None:
+            provenance[target] = (
+                available[source[0]][0],
+                equals,
+                available[source[0]][2],
+            )
+        elif target in provenance and provenance[target][1] < equals:
+            provenance.pop(target)
     return provenance
 
 
@@ -7827,20 +7842,215 @@ class _PathAuditor:
             zero_parameters,
             parameters,
         )
-        host_writes, transfer_lines, aliases, alias_origins = _host_output_accesses(
-            self.tokens, function, mutable, lambda_ranges, member_parameters
-        )
-        output_roots = mutable | aliases
+        returns = _returns(self.tokens, function, lambda_ranges)
+        indexed_calls = _indexed_calls(self.tokens, function, lambda_ranges)
+        propagated_failure_returns: set[int] = set()
+
+        def call_start(indexed: _IndexedCall) -> int:
+            start = indexed.index
+            while (
+                start >= function.body_open + 2
+                and self.tokens[start - 1].value == "::"
+                and self.tokens[start - 2].kind == "identifier"
+            ):
+                start -= 2
+            return start
+
+        def strip_parentheses(left: int, right: int) -> tuple[int, int]:
+            while (
+                left < right
+                and self.tokens[left].value == "("
+                and self.forward.get(left) == right - 1
+            ):
+                left += 1
+                right -= 1
+            return left, right
+
+        def exact_returned_call(indexed: _IndexedCall) -> bool:
+            for return_index, expression in returns:
+                left, right = strip_parentheses(
+                    return_index + 1, return_index + 1 + len(expression)
+                )
+                if left == call_start(indexed) and right == indexed.rparen + 1:
+                    return True
+            return False
+
+        def exact_call_assignment(
+            indexed: _IndexedCall, *, pointer_target: bool
+        ) -> tuple[str, int] | None:
+            """Bind a helper call only from an exact direct assignment RHS."""
+
+            left = call_start(indexed) - 1
+            while left > function.body_open and self.tokens[left].value not in {
+                ";",
+                "{",
+                "}",
+            }:
+                left -= 1
+            statement_start = left + 1
+            statement_end = indexed.rparen + 1
+            if (
+                statement_end >= function.body_close
+                or self.tokens[statement_end].value != ";"
+            ):
+                return None
+            equals = [
+                index
+                for index in range(statement_start, call_start(indexed))
+                if self.tokens[index].value == "="
+            ]
+            if len(equals) != 1:
+                return None
+            rhs_left, rhs_right = strip_parentheses(equals[0] + 1, statement_end)
+            if rhs_left != call_start(indexed) or rhs_right != indexed.rparen + 1:
+                return None
+            target_index = equals[0] - 1
+            if (
+                target_index < statement_start
+                or self.tokens[target_index].kind != "identifier"
+            ):
+                return None
+            lhs_values = [
+                token.value for token in self.tokens[statement_start : equals[0]]
+            ]
+            forbidden = {".", "->", "[", "]", "(", ")", ",", "?", ":", "::"}
+            if not pointer_target:
+                forbidden.update({"*", "&", "&&"})
+            if set(lhs_values) & forbidden:
+                return None
+            return self.tokens[target_index].value, statement_end
+
+        def failure_guard_body(
+            if_index: int, propagated_status: str | None = None
+        ) -> bool:
+            condition = if_index + 1
+            if condition >= function.body_close or self.tokens[condition].value != "(":
+                return False
+            close = self.forward.get(condition)
+            if close is None:
+                return False
+            inner_left = close + 1
+            if inner_left >= function.body_close:
+                return False
+            if self.tokens[inner_left].value == "{" and inner_left in self.forward:
+                inner_right = self.forward[inner_left]
+                inner_left += 1
+            else:
+                inner_right = inner_left
+                depth = 0
+                while inner_right < function.body_close:
+                    value = self.tokens[inner_right].value
+                    if value in {"(", "[", "{"}:
+                        depth += 1
+                    elif value in {")", "]", "}"}:
+                        depth = max(0, depth - 1)
+                    if value == ";" and depth == 0:
+                        inner_right += 1
+                        break
+                    inner_right += 1
+            if (
+                inner_right - inner_left < 3
+                or self.tokens[inner_left].value != "return"
+                or self.tokens[inner_right - 1].value != ";"
+            ):
+                return False
+            expression = self.tokens[inner_left + 1 : inner_right - 1]
+            propagates_failure = bool(
+                propagated_status is not None
+                and [token.value for token in expression] == [propagated_status]
+            )
+            if propagates_failure:
+                propagated_failure_returns.add(inner_left)
+            return _return_is_explicit_failure(function, expression) or propagates_failure
+
+        def guarded_status_call(indexed: _IndexedCall) -> bool:
+            # Exact assignment followed immediately by `if (status != OK) return ...`.
+            assignment = exact_call_assignment(indexed, pointer_target=False)
+            if assignment is None:
+                return False
+            target, statement_end = assignment
+            guard = statement_end + 1
+            if guard >= function.body_close or self.tokens[guard].value != "if":
+                return False
+            condition = guard + 1
+            close = self.forward.get(condition)
+            if close is None:
+                return False
+            values = _strip_condition_parentheses(
+                [token.value for token in self.tokens[condition + 1 : close]]
+            )
+            if (
+                values
+                not in ((target, "!=", "PGACCEL_OK"), ("PGACCEL_OK", "!=", target))
+                or _context(guard, regions) != _context(indexed.index, regions)
+            ):
+                return False
+            return failure_guard_body(guard, target)
+
+        def propagated_status_call(indexed: _IndexedCall) -> bool:
+            assignment = exact_call_assignment(indexed, pointer_target=False)
+            if assignment is None:
+                return False
+            target, statement_end = assignment
+            return_index = statement_end + 1
+            return bool(
+                return_index + 2 < function.body_close
+                and self.tokens[return_index].value == "return"
+                and self.tokens[return_index + 1].value == target
+                and self.tokens[return_index + 2].value == ";"
+            )
+
+        def helper_execution_is_proven(
+            indexed: _IndexedCall, candidate: Function | _ExternalProof | None
+        ) -> bool:
+            if candidate is None:
+                return False
+            if exact_returned_call(indexed):
+                return True
+            return_spelling = (
+                candidate.return_spelling
+                if isinstance(candidate, (Function, _ExternalProof))
+                else ""
+            )
+            canonical_return = _canonical_signature_tokens(return_spelling)
+            is_void = canonical_return[-1:] == ("void",)
+            if is_void:
+                left = call_start(indexed) - 1
+                while left > function.body_open and self.tokens[left].value not in {
+                    ";",
+                    "{",
+                    "}",
+                }:
+                    left -= 1
+                return bool(
+                    left + 1 == call_start(indexed)
+                    and indexed.rparen + 1 < function.body_close
+                    and self.tokens[indexed.rparen + 1].value == ";"
+                )
+            if "*" in canonical_return:
+                return exact_call_assignment(indexed, pointer_target=True) is not None
+            is_status = (
+                candidate.is_status
+                if isinstance(candidate, Function)
+                else "pgaccel_status" in canonical_return
+            )
+            return is_status and (
+                guarded_status_call(indexed) or propagated_status_call(indexed)
+            )
         caller_provenance = _local_usm_provenance(
             self.tokens, function, lambda_ranges
         )
-        borrowed_output_roots = {
-            name
-            for name in parameters
-            if name in caller_provenance
-            and caller_provenance[name][0] == "borrowed"
-        }
-        proof_output_roots = output_roots | borrowed_output_roots
+        borrowed_output_roots = _borrowed_usm_parameter_names(self.tokens, function)
+        hazard_output_roots = mutable | borrowed_output_roots
+        host_writes, transfer_lines, aliases, alias_origins = _host_output_accesses(
+            self.tokens,
+            function,
+            hazard_output_roots,
+            lambda_ranges,
+            member_parameters,
+        )
+        output_roots = hazard_output_roots | aliases
+        proof_output_roots = output_roots
         root_parameter_positions = {
             root: frozenset(
                 parameter_positions[origin]
@@ -7868,9 +8078,11 @@ class _PathAuditor:
             for item in direct
         ]
         helper_kernel_writes: list[_KernelWriteEvidence] = []
-        for indexed in _indexed_calls(self.tokens, function, lambda_ranges):
+        for indexed in indexed_calls:
             candidate, _ = self.resolve(indexed.call)
-            if not isinstance(candidate, Function):
+            if not isinstance(candidate, Function) or not helper_execution_is_proven(
+                indexed, candidate
+            ):
                 continue
             arguments = _call_argument_ranges(
                 self.tokens, indexed.lparen, indexed.rparen, self.forward
@@ -8000,7 +8212,9 @@ class _PathAuditor:
             if record[0] not in proven_transfer_calls
         ]
         transfer_lines = sorted({line for _, line in transfer_records})
-        shadow_lines = _output_shadow_lines(self.tokens, function, mutable)
+        shadow_lines = _output_shadow_lines(
+            self.tokens, function, hazard_output_roots
+        )
         failure_diagnostic_write_indices = _failure_terminal_diagnostic_write_indices(
             self.tokens,
             function,
@@ -8009,7 +8223,7 @@ class _PathAuditor:
             lambda_ranges,
             regions,
         )
-        calls = _indexed_calls(self.tokens, function, lambda_ranges)
+        calls = indexed_calls
         queue_orchestration_loops = _device_queue_orchestration_loops(
             self.tokens,
             function,
@@ -8359,10 +8573,14 @@ class _PathAuditor:
         call_referenced_output_roots: dict[int, frozenset[str]] = {}
         call_output_roots: dict[int, frozenset[str]] = {}
         call_output_root_variants: dict[int, tuple[frozenset[str], ...]] = {}
+        call_execution_proven: dict[int, bool] = {}
         for indexed in calls:
             if indexed.index in proven_transfer_calls | safe_initializer_calls:
                 continue
             candidate, error = self.resolve(indexed.call)
+            call_execution_proven[indexed.index] = helper_execution_is_proven(
+                indexed, candidate
+            )
             candidate_member_write_positions = frozenset()
             if isinstance(candidate, Function):
                 candidate_member_write_positions = self.member_write_position_cache.get(
@@ -8415,15 +8633,11 @@ class _PathAuditor:
             call_output_roots[indexed.index] = frozenset().union(*variants)
             call_proofs[indexed.index] = (indexed, proof, error)
 
-        returns = _returns(self.tokens, function, lambda_ranges)
         returned_helper_outputs: dict[str, list[int]] = defaultdict(list)
         for index, (indexed, proof, _) in call_proofs.items():
             if proof is None or not proof.ok:
                 continue
-            if not any(
-                return_index < index < return_index + len(expression) + 2
-                for return_index, expression in returns
-            ):
+            if not call_execution_proven.get(index) or not exact_returned_call(indexed):
                 continue
             for root in call_output_roots.get(index, ()):
                 returned_helper_outputs[root].append(index)
@@ -8443,89 +8657,118 @@ class _PathAuditor:
         ]
 
         helper_resource_roots: dict[str, list[_DispatchEvidence]] = defaultdict(list)
+        helper_resource_may_be_null: dict[int, bool] = {}
         for indexed, proof, _ in call_proofs.values():
             if (
                 proof is None
                 or not proof.ok
                 or "opaque_device_resource" not in proof.classifications
+                or not call_execution_proven.get(indexed.index)
             ):
                 continue
             candidate, _ = self.resolve(indexed.call)
-            if isinstance(candidate, Function):
-                mutable_positions = _mutable_parameter_positions(
-                    self.tokens, candidate
-                )
-            elif isinstance(candidate, _ExternalProof):
-                mutable_positions = candidate.mutable_parameter_positions
-            else:
+            if not isinstance(candidate, (Function, _ExternalProof)):
                 continue
             arguments = _call_argument_ranges(
                 self.tokens, indexed.lparen, indexed.rparen, self.forward
             )
-            for position in mutable_positions:
-                if position >= len(arguments):
-                    continue
-                left, right = arguments[position]
-                values = [token.value for token in self.tokens[left:right]]
-                while len(values) >= 2 and values[0] == "(" and values[-1] == ")":
-                    values = values[1:-1]
-                if (
-                    len(values) == 2
-                    and values[0] == "&"
-                    and re.fullmatch(r"[A-Za-z_]\w*", values[1])
-                ):
-                    helper_resource_roots[values[1]].append(
-                        _DispatchEvidence(
-                            indexed.index,
-                            indexed.call.line,
-                            "opaque_resource_helper",
-                            f"{indexed.call.name} publishes kernel-derived opaque "
-                            f"resource through local {values[1]} at line "
-                            f"{indexed.call.line}",
-                            _context(indexed.index, regions),
-                        )
-                    )
-            statement_left = indexed.index - 1
-            while (
-                statement_left > function.body_open
-                and self.tokens[statement_left].value not in {";", "{", "}"}
-            ):
-                statement_left -= 1
-            equals = next(
-                (
-                    index
-                    for index in range(statement_left + 1, indexed.index)
-                    if self.tokens[index].value == "="
-                ),
-                None,
+            bound_variants: list[frozenset[str]] = []
+            for positions in proof.output_parameter_position_variants:
+                bound: set[str] = set()
+                for position in positions:
+                    if position >= len(arguments):
+                        continue
+                    left, right = strip_parentheses(*arguments[position])
+                    values = [token.value for token in self.tokens[left:right]]
+                    if (
+                        len(values) == 2
+                        and values[0] == "&"
+                        and re.fullmatch(r"[A-Za-z_]\w*", values[1])
+                    ):
+                        bound.add(values[1])
+                bound_variants.append(frozenset(bound))
+            guaranteed_bound = (
+                frozenset.intersection(*bound_variants)
+                if bound_variants
+                else frozenset()
             )
-            if (
-                equals is not None
-                and indexed.rparen + 1 < function.body_close
-                and self.tokens[indexed.rparen + 1].value == ";"
-            ):
-                names = [
-                    self.tokens[index].value
-                    for index in range(statement_left + 1, equals)
-                    if self.tokens[index].kind == "identifier"
-                    and self.tokens[index].value not in CALL_KEYWORDS
-                ]
-                declaration = {
-                    self.tokens[index].value
-                    for index in range(statement_left + 1, equals)
-                }
-                if names and ({"*", "auto"} & declaration):
-                    target = names[-1]
-                    helper_resource_roots[target].append(
-                        _DispatchEvidence(
-                            indexed.index,
-                            indexed.call.line,
-                            "opaque_resource_helper_return",
-                            f"{indexed.call.name} returns a kernel-derived opaque "
-                            f"resource into local {target} at line {indexed.call.line}",
-                            _context(indexed.index, regions),
-                        )
+            for target in guaranteed_bound:
+                helper_resource_roots[target].append(
+                    _DispatchEvidence(
+                        indexed.index,
+                        indexed.call.line,
+                        "opaque_resource_helper",
+                        f"{indexed.call.name} publishes kernel-derived opaque "
+                        f"resource through local {target} at line "
+                        f"{indexed.call.line}",
+                        _context(indexed.index, regions),
                     )
+                )
+                helper_resource_may_be_null[indexed.index] = False
+
+            assignment = exact_call_assignment(indexed, pointer_target=True)
+            canonical_return = _canonical_signature_tokens(candidate.return_spelling)
+            if assignment is None or "*" not in canonical_return:
+                continue
+            target, _ = assignment
+            helper_resource_roots[target].append(
+                _DispatchEvidence(
+                    indexed.index,
+                    indexed.call.line,
+                    "opaque_resource_helper_return",
+                    f"{indexed.call.name} returns a kernel-derived opaque "
+                    f"resource into local {target} at line {indexed.call.line}",
+                    _context(indexed.index, regions),
+                )
+            )
+            if isinstance(candidate, Function):
+                candidate_lambdas = _lambda_ranges(
+                    self.tokens, candidate, self.forward, self.reverse
+                )
+                helper_resource_may_be_null[indexed.index] = any(
+                    [token.value for token in expression]
+                    in (["nullptr"], ["NULL"], ["0"])
+                    for _, expression in _returns(
+                        self.tokens, candidate, candidate_lambdas
+                    )
+                )
+            else:
+                helper_resource_may_be_null[indexed.index] = True
+
+        def nullable_resource_is_guarded(item: _DispatchEvidence, target: str) -> bool:
+            if not helper_resource_may_be_null.get(item.index, False):
+                return True
+            record = call_proofs.get(item.index)
+            if record is None:
+                return False
+            assignment = exact_call_assignment(record[0], pointer_target=True)
+            if assignment is None:
+                return False
+            _, statement_end = assignment
+            guard = statement_end + 1
+            if guard >= function.body_close or self.tokens[guard].value != "if":
+                return False
+            condition = guard + 1
+            close = self.forward.get(condition)
+            if close is None:
+                return False
+            values = _strip_condition_parentheses(
+                [token.value for token in self.tokens[condition + 1 : close]]
+            )
+            nulls = {"nullptr", "NULL", "0"}
+            exact_null_check = bool(
+                len(values) == 3
+                and values[1] == "=="
+                and (
+                    (values[0] == target and values[2] in nulls)
+                    or (values[2] == target and values[0] in nulls)
+                )
+            )
+            return bool(
+                exact_null_check
+                and _context(guard, regions) == _context(item.index, regions)
+                and failure_guard_body(guard)
+            )
 
         helper_resource_publications: list[_DispatchEvidence] = []
         helper_resource_write_indices: set[int] = set()
@@ -8556,6 +8799,14 @@ class _PathAuditor:
                 and _context_dominates(
                     item.context, _context(index, regions)
                 )
+                and not _pointer_root_reassigned(
+                    self.tokens,
+                    resource[0],
+                    item.index + 1,
+                    index,
+                    lambda_ranges,
+                )
+                and nullable_resource_is_guarded(item, resource[0])
             ]
             if not candidates:
                 continue
@@ -8905,7 +9156,13 @@ class _PathAuditor:
                     f"output helper {indexed.call.name} at line {indexed.call.line} is not "
                     "independently device-proven"
                 )
-            if proof is not None and proof.ok and call_output_roots.get(indexed.index):
+            if (
+                proof is not None
+                and proof.ok
+                and call_execution_proven.get(indexed.index)
+                and not exact_returned_call(indexed)
+                and call_output_roots.get(indexed.index)
+            ):
                 call_evidence.append(
                     _DispatchEvidence(
                         indexed.index,
@@ -8958,6 +9215,8 @@ class _PathAuditor:
         unsafe_success: list[str] = []
         for return_index, expression in returns:
             values = [token.value for token in expression]
+            if return_index in propagated_failure_returns:
+                continue
             if values and values[0] in FAILURE_STATUSES:
                 continue
             if values and values[0] == "pgaccel_kernel_failure":
@@ -9012,10 +9271,19 @@ class _PathAuditor:
                 for item in helper_resource_roots.get(returned_resource_name or "", ())
                 if item.index < return_index
                 and _context_dominates(item.context, return_context)
+                and not _pointer_root_reassigned(
+                    self.tokens,
+                    returned_resource_name or "",
+                    item.index + 1,
+                    return_index,
+                    lambda_ranges,
+                )
             ]
             if helper_resource:
+                selected_resource = max(helper_resource, key=lambda item: item.index)
                 classifications.add("opaque_device_resource")
-                details.append(max(helper_resource, key=lambda item: item.index).detail)
+                details.append(selected_resource.detail)
+                all_evidence.append(selected_resource)
                 success_output_root_variants.append(frozenset())
                 continue
 
@@ -9032,6 +9300,8 @@ class _PathAuditor:
                     for index, record in call_proofs.items()
                     if return_index < index
                     and index < return_index + len(expression) + 2
+                    and call_execution_proven.get(index)
+                    and exact_returned_call(record[0])
                     and (
                         call_output_root_variants.get(index)
                         or call_referenced_output_roots.get(index)
@@ -9077,17 +9347,26 @@ class _PathAuditor:
                             f"returned helper chain {function.name} -> "
                             f"{indexed.call.name}: {proof.detail}"
                         )
+                        returned_evidence = _DispatchEvidence(
+                            indexed.index,
+                            indexed.call.line,
+                            "returned_helper",
+                            f"{function.name} directly propagates independently "
+                            f"proven helper {indexed.call.name} at line "
+                            f"{indexed.call.line}",
+                            _context(indexed.index, regions),
+                            bound_variants,
+                        )
+                        all_evidence.append(returned_evidence)
                         if opaque_return:
-                            all_evidence.append(
-                                _DispatchEvidence(
-                                    indexed.index,
-                                    indexed.call.line,
-                                    "opaque_returned_helper",
+                            all_evidence[-1] = dataclasses.replace(
+                                returned_evidence,
+                                method="opaque_returned_helper",
+                                detail=(
                                     f"{function.name} directly returns independently "
                                     f"proven opaque helper {indexed.call.name} at line "
-                                    f"{indexed.call.line}",
-                                    _context(indexed.index, regions),
-                                )
+                                    f"{indexed.call.line}"
+                                ),
                             )
                         success_output_root_variants.extend(combined)
                     continue
@@ -9268,13 +9547,12 @@ class _PathAuditor:
             all_evidence
             or resource_returns
             or resource_publications
-            or helper_resource_roots
         ):
             details.extend(
                 item.detail for item in all_evidence if item.detail not in details
             )
             classifications.discard("missing_device_terminal")
-            if resource_publications or resource_returns or helper_resource_roots:
+            if resource_publications or resource_returns:
                 classifications.add("opaque_device_resource")
             proof = _Proof(
                 True,
