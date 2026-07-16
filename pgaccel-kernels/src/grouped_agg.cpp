@@ -206,17 +206,6 @@ struct DeviceOutputPresence {
   uint8_t uncertain;
 };
 
-struct HostOutputBindings {
-  int32_t* detail;
-  void* group_codes;
-  void* active_groups;
-  pgaccel_grouped_agg_key_out keys[PGACCEL_GROUPED_AGG_MAX_KEYS];
-  pgaccel_grouped_agg_measure_out measures[PGACCEL_GROUPED_AGG_MAX_MEASURES];
-  void* emitted;
-  void* selected;
-  void* uncertain;
-};
-
 struct DeviceSourceOffsets {
   size_t completion;
   size_t active;
@@ -2248,8 +2237,8 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
 }
 
 void bind_publish_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& layout,
-                         void* const scratch, const HostOutputBindings& output,
-                         DevicePublishParams* params) {
+                         void* const scratch, const pgaccel_grouped_agg_out* out,
+                         const int32_t* detail, DevicePublishParams* params) {
   *params = {};
   params->group_capacity = desc.group_capacity;
   params->execution_flags = desc.execution_flags;
@@ -2280,19 +2269,21 @@ void bind_publish_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLa
     offsets[7] = ml.rhs_count;
     offsets[8] = ml.rhs_nonnull;
   }
-  params->output.detail = output.detail != nullptr;
-  params->output.group_codes = output.group_codes != nullptr;
-  params->output.active_groups = output.active_groups != nullptr;
-  params->output.emitted = output.emitted != nullptr;
-  params->output.selected = output.selected != nullptr;
-  params->output.uncertain = output.uncertain != nullptr;
+  params->output.detail = detail != nullptr;
+  if ((desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) == 0)
+    return;
+  params->output.group_codes = out->group_codes != nullptr;
+  params->output.active_groups = out->active_groups != nullptr;
+  params->output.emitted = true;
+  params->output.selected = true;
+  params->output.uncertain = true;
   for (size_t key = 0; key < PGACCEL_GROUPED_AGG_MAX_KEYS; ++key) {
-    params->output.key_values[key] = output.keys[key].values != nullptr;
-    params->output.key_nulls[key] = output.keys[key].nulls != nullptr;
+    params->output.key_values[key] = out->keys[key].values != nullptr;
+    params->output.key_nulls[key] = out->keys[key].nulls != nullptr;
   }
   for (size_t measure = 0; measure < PGACCEL_GROUPED_AGG_MAX_MEASURES; ++measure) {
     uint8_t* lanes = params->output.measure_lanes[measure];
-    const pgaccel_grouped_agg_measure_out& measure_output = output.measures[measure];
+    const pgaccel_grouped_agg_measure_out& measure_output = out->measures[measure];
     lanes[0] = measure_output.sum != nullptr;
     lanes[1] = measure_output.min != nullptr;
     lanes[2] = measure_output.max != nullptr;
@@ -2511,24 +2502,6 @@ pgaccel_grouped_agg_out snapshot_output_contract(const pgaccel_grouped_agg_out& 
   return out;
 }
 
-HostOutputBindings capture_output_bindings(pgaccel_grouped_agg_out* const control,
-                                           int32_t* const detail) {
-  HostOutputBindings bindings{};
-  bindings.detail = detail;
-  if (control == nullptr)
-    return bindings;
-  bindings.group_codes = control->group_codes;
-  bindings.active_groups = control->active_groups;
-  for (size_t key = 0; key < PGACCEL_GROUPED_AGG_MAX_KEYS; ++key)
-    bindings.keys[key] = control->keys[key];
-  for (size_t measure = 0; measure < PGACCEL_GROUPED_AGG_MAX_MEASURES; ++measure)
-    bindings.measures[measure] = control->measures[measure];
-  bindings.emitted = &control->emitted_group_count;
-  bindings.selected = &control->selected_count;
-  bindings.uncertain = &control->uncertain_count;
-  return bindings;
-}
-
 bool same_queue_device(sycl::queue& queue, const void* ptr) {
   try {
     return sycl::get_pointer_device(ptr, queue.get_context()) == queue.get_device();
@@ -2673,13 +2646,64 @@ class ScratchOwner {
 };
 
 pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
-                                          const HostOutputBindings& output,
+                                          pgaccel_grouped_agg_out* out, int32_t* detail,
                                           void* const device_workspace,
                                           const WorkspaceLayout& layout) {
+  int32_t* const detail_output = detail;
+  size_t* const group_codes_output = out->group_codes;
+  uint8_t* const active_groups_output = out->active_groups;
+  void* const key0_values_output = out->keys[0].values;
+  uint8_t* const key0_nulls_output = out->keys[0].nulls;
+  void* const key1_values_output = out->keys[1].values;
+  uint8_t* const key1_nulls_output = out->keys[1].nulls;
+  void* const key2_values_output = out->keys[2].values;
+  uint8_t* const key2_nulls_output = out->keys[2].nulls;
+  void* const measure0_sum_output = out->measures[0].sum;
+  void* const measure0_min_output = out->measures[0].min;
+  void* const measure0_max_output = out->measures[0].max;
+  void* const measure0_sumsq_output = out->measures[0].sumsq;
+  uint64_t* const measure0_count_output = out->measures[0].count;
+  uint64_t* const measure0_nonnull_output = out->measures[0].nonnull_count;
+  void* const measure0_rhs_sum_output = out->measures[0].rhs_sum;
+  uint64_t* const measure0_rhs_count_output = out->measures[0].rhs_count;
+  uint64_t* const measure0_rhs_nonnull_output = out->measures[0].rhs_nonnull_count;
+  void* const measure1_sum_output = out->measures[1].sum;
+  void* const measure1_min_output = out->measures[1].min;
+  void* const measure1_max_output = out->measures[1].max;
+  void* const measure1_sumsq_output = out->measures[1].sumsq;
+  uint64_t* const measure1_count_output = out->measures[1].count;
+  uint64_t* const measure1_nonnull_output = out->measures[1].nonnull_count;
+  void* const measure1_rhs_sum_output = out->measures[1].rhs_sum;
+  uint64_t* const measure1_rhs_count_output = out->measures[1].rhs_count;
+  uint64_t* const measure1_rhs_nonnull_output = out->measures[1].rhs_nonnull_count;
+  void* const measure2_sum_output = out->measures[2].sum;
+  void* const measure2_min_output = out->measures[2].min;
+  void* const measure2_max_output = out->measures[2].max;
+  void* const measure2_sumsq_output = out->measures[2].sumsq;
+  uint64_t* const measure2_count_output = out->measures[2].count;
+  uint64_t* const measure2_nonnull_output = out->measures[2].nonnull_count;
+  void* const measure2_rhs_sum_output = out->measures[2].rhs_sum;
+  uint64_t* const measure2_rhs_count_output = out->measures[2].rhs_count;
+  uint64_t* const measure2_rhs_nonnull_output = out->measures[2].rhs_nonnull_count;
+  void* const measure3_sum_output = out->measures[3].sum;
+  void* const measure3_min_output = out->measures[3].min;
+  void* const measure3_max_output = out->measures[3].max;
+  void* const measure3_sumsq_output = out->measures[3].sumsq;
+  uint64_t* const measure3_count_output = out->measures[3].count;
+  uint64_t* const measure3_nonnull_output = out->measures[3].nonnull_count;
+  void* const measure3_rhs_sum_output = out->measures[3].rhs_sum;
+  uint64_t* const measure3_rhs_count_output = out->measures[3].rhs_count;
+  uint64_t* const measure3_rhs_nonnull_output = out->measures[3].rhs_nonnull_count;
+  size_t* const emitted_output = &out->emitted_group_count;
+  uint64_t* const selected_output = &out->selected_count;
+  uint64_t* const uncertain_output = &out->uncertain_count;
+  const bool publish_outputs =
+      (desc.execution_flags & PGACCEL_GROUPED_AGG_EXEC_FINALIZE) != 0;
+
   KernelParams host_params;
   bind_params(desc, layout, device_workspace, &host_params);
   DevicePublishParams host_publish_params;
-  bind_publish_params(desc, layout, device_workspace, output, &host_publish_params);
+  bind_publish_params(desc, layout, device_workspace, out, detail_output, &host_publish_params);
   auto* device_params =
       reinterpret_cast<KernelParams*>(static_cast<uint8_t*>(device_workspace) + layout.params);
   auto* device_publish_params = reinterpret_cast<DevicePublishParams*>(
@@ -2744,309 +2768,309 @@ pgaccel_status execute_grouped_agg_device(sycl::queue& queue, const pgaccel_grou
       .wait_and_throw();
   pgaccel_record_gpu_exec();
 
-  queue.memcpy(output.detail, workspace_bytes + completion.commands[kPublishDetail].source_offset,
+  queue.memcpy(detail_output, workspace_bytes + completion.commands[kPublishDetail].source_offset,
                sizeof(completion.detail));
-  if (output.emitted != nullptr) {
+  if (publish_outputs) {
     {
       const DeviceCopyCommand& command = completion.commands[kPublishActive];
-      if (command.bytes != 0 && output.active_groups != nullptr)
-        queue.memcpy(output.active_groups, workspace_bytes + command.source_offset, command.bytes);
+      if (command.bytes != 0 && active_groups_output != nullptr)
+        queue.memcpy(active_groups_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishGroupCodes];
-      if (command.bytes != 0 && output.group_codes != nullptr)
-        queue.memcpy(output.group_codes, workspace_bytes + command.source_offset, command.bytes);
+      if (command.bytes != 0 && group_codes_output != nullptr)
+        queue.memcpy(group_codes_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishKeys];
-      if (command.bytes != 0 && output.keys[0].values != nullptr)
-        queue.memcpy(output.keys[0].values, workspace_bytes + command.source_offset, command.bytes);
+      if (command.bytes != 0 && key0_values_output != nullptr)
+        queue.memcpy(key0_values_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishKeys + 1];
-      if (command.bytes != 0 && output.keys[0].nulls != nullptr)
-        queue.memcpy(output.keys[0].nulls, workspace_bytes + command.source_offset, command.bytes);
+      if (command.bytes != 0 && key0_nulls_output != nullptr)
+        queue.memcpy(key0_nulls_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishKeys + kPublishKeyLaneCount];
-      if (command.bytes != 0 && output.keys[1].values != nullptr)
-        queue.memcpy(output.keys[1].values, workspace_bytes + command.source_offset, command.bytes);
+      if (command.bytes != 0 && key1_values_output != nullptr)
+        queue.memcpy(key1_values_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishKeys + kPublishKeyLaneCount + 1];
-      if (command.bytes != 0 && output.keys[1].nulls != nullptr)
-        queue.memcpy(output.keys[1].nulls, workspace_bytes + command.source_offset, command.bytes);
+      if (command.bytes != 0 && key1_nulls_output != nullptr)
+        queue.memcpy(key1_nulls_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishKeys + 2 * kPublishKeyLaneCount];
-      if (command.bytes != 0 && output.keys[2].values != nullptr)
-        queue.memcpy(output.keys[2].values, workspace_bytes + command.source_offset, command.bytes);
+      if (command.bytes != 0 && key2_values_output != nullptr)
+        queue.memcpy(key2_values_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishKeys + 2 * kPublishKeyLaneCount + 1];
-      if (command.bytes != 0 && output.keys[2].nulls != nullptr)
-        queue.memcpy(output.keys[2].nulls, workspace_bytes + command.source_offset, command.bytes);
+      if (command.bytes != 0 && key2_nulls_output != nullptr)
+        queue.memcpy(key2_nulls_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishMeasures];
-      if (command.bytes != 0 && output.measures[0].sum != nullptr)
-        queue.memcpy(output.measures[0].sum, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure0_sum_output != nullptr)
+        queue.memcpy(measure0_sum_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 1];
-      if (command.bytes != 0 && output.measures[0].min != nullptr)
-        queue.memcpy(output.measures[0].min, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure0_min_output != nullptr)
+        queue.memcpy(measure0_min_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 2];
-      if (command.bytes != 0 && output.measures[0].max != nullptr)
-        queue.memcpy(output.measures[0].max, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure0_max_output != nullptr)
+        queue.memcpy(measure0_max_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 3];
-      if (command.bytes != 0 && output.measures[0].sumsq != nullptr)
-        queue.memcpy(output.measures[0].sumsq, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure0_sumsq_output != nullptr)
+        queue.memcpy(measure0_sumsq_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 4];
-      if (command.bytes != 0 && output.measures[0].count != nullptr)
-        queue.memcpy(output.measures[0].count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure0_count_output != nullptr)
+        queue.memcpy(measure0_count_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 5];
-      if (command.bytes != 0 && output.measures[0].nonnull_count != nullptr)
-        queue.memcpy(output.measures[0].nonnull_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure0_nonnull_output != nullptr)
+        queue.memcpy(measure0_nonnull_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 6];
-      if (command.bytes != 0 && output.measures[0].rhs_sum != nullptr)
-        queue.memcpy(output.measures[0].rhs_sum, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure0_rhs_sum_output != nullptr)
+        queue.memcpy(measure0_rhs_sum_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 7];
-      if (command.bytes != 0 && output.measures[0].rhs_count != nullptr)
-        queue.memcpy(output.measures[0].rhs_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure0_rhs_count_output != nullptr)
+        queue.memcpy(measure0_rhs_count_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishMeasures + 8];
-      if (command.bytes != 0 && output.measures[0].rhs_nonnull_count != nullptr)
-        queue.memcpy(output.measures[0].rhs_nonnull_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure0_rhs_nonnull_output != nullptr)
+        queue.memcpy(measure0_rhs_nonnull_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + kPublishMeasureLaneCount];
-      if (command.bytes != 0 && output.measures[1].sum != nullptr)
-        queue.memcpy(output.measures[1].sum, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure1_sum_output != nullptr)
+        queue.memcpy(measure1_sum_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 1];
-      if (command.bytes != 0 && output.measures[1].min != nullptr)
-        queue.memcpy(output.measures[1].min, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure1_min_output != nullptr)
+        queue.memcpy(measure1_min_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 2];
-      if (command.bytes != 0 && output.measures[1].max != nullptr)
-        queue.memcpy(output.measures[1].max, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure1_max_output != nullptr)
+        queue.memcpy(measure1_max_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 3];
-      if (command.bytes != 0 && output.measures[1].sumsq != nullptr)
-        queue.memcpy(output.measures[1].sumsq, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure1_sumsq_output != nullptr)
+        queue.memcpy(measure1_sumsq_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 4];
-      if (command.bytes != 0 && output.measures[1].count != nullptr)
-        queue.memcpy(output.measures[1].count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure1_count_output != nullptr)
+        queue.memcpy(measure1_count_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 5];
-      if (command.bytes != 0 && output.measures[1].nonnull_count != nullptr)
-        queue.memcpy(output.measures[1].nonnull_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure1_nonnull_output != nullptr)
+        queue.memcpy(measure1_nonnull_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 6];
-      if (command.bytes != 0 && output.measures[1].rhs_sum != nullptr)
-        queue.memcpy(output.measures[1].rhs_sum, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure1_rhs_sum_output != nullptr)
+        queue.memcpy(measure1_rhs_sum_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 7];
-      if (command.bytes != 0 && output.measures[1].rhs_count != nullptr)
-        queue.memcpy(output.measures[1].rhs_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure1_rhs_count_output != nullptr)
+        queue.memcpy(measure1_rhs_count_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + kPublishMeasureLaneCount + 8];
-      if (command.bytes != 0 && output.measures[1].rhs_nonnull_count != nullptr)
-        queue.memcpy(output.measures[1].rhs_nonnull_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure1_rhs_nonnull_output != nullptr)
+        queue.memcpy(measure1_rhs_nonnull_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount];
-      if (command.bytes != 0 && output.measures[2].sum != nullptr)
-        queue.memcpy(output.measures[2].sum, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure2_sum_output != nullptr)
+        queue.memcpy(measure2_sum_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 1];
-      if (command.bytes != 0 && output.measures[2].min != nullptr)
-        queue.memcpy(output.measures[2].min, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure2_min_output != nullptr)
+        queue.memcpy(measure2_min_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 2];
-      if (command.bytes != 0 && output.measures[2].max != nullptr)
-        queue.memcpy(output.measures[2].max, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure2_max_output != nullptr)
+        queue.memcpy(measure2_max_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 3];
-      if (command.bytes != 0 && output.measures[2].sumsq != nullptr)
-        queue.memcpy(output.measures[2].sumsq, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure2_sumsq_output != nullptr)
+        queue.memcpy(measure2_sumsq_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 4];
-      if (command.bytes != 0 && output.measures[2].count != nullptr)
-        queue.memcpy(output.measures[2].count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure2_count_output != nullptr)
+        queue.memcpy(measure2_count_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 5];
-      if (command.bytes != 0 && output.measures[2].nonnull_count != nullptr)
-        queue.memcpy(output.measures[2].nonnull_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure2_nonnull_output != nullptr)
+        queue.memcpy(measure2_nonnull_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 6];
-      if (command.bytes != 0 && output.measures[2].rhs_sum != nullptr)
-        queue.memcpy(output.measures[2].rhs_sum, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure2_rhs_sum_output != nullptr)
+        queue.memcpy(measure2_rhs_sum_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 7];
-      if (command.bytes != 0 && output.measures[2].rhs_count != nullptr)
-        queue.memcpy(output.measures[2].rhs_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure2_rhs_count_output != nullptr)
+        queue.memcpy(measure2_rhs_count_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 2 * kPublishMeasureLaneCount + 8];
-      if (command.bytes != 0 && output.measures[2].rhs_nonnull_count != nullptr)
-        queue.memcpy(output.measures[2].rhs_nonnull_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure2_rhs_nonnull_output != nullptr)
+        queue.memcpy(measure2_rhs_nonnull_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount];
-      if (command.bytes != 0 && output.measures[3].sum != nullptr)
-        queue.memcpy(output.measures[3].sum, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure3_sum_output != nullptr)
+        queue.memcpy(measure3_sum_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 1];
-      if (command.bytes != 0 && output.measures[3].min != nullptr)
-        queue.memcpy(output.measures[3].min, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure3_min_output != nullptr)
+        queue.memcpy(measure3_min_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 2];
-      if (command.bytes != 0 && output.measures[3].max != nullptr)
-        queue.memcpy(output.measures[3].max, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure3_max_output != nullptr)
+        queue.memcpy(measure3_max_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 3];
-      if (command.bytes != 0 && output.measures[3].sumsq != nullptr)
-        queue.memcpy(output.measures[3].sumsq, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure3_sumsq_output != nullptr)
+        queue.memcpy(measure3_sumsq_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 4];
-      if (command.bytes != 0 && output.measures[3].count != nullptr)
-        queue.memcpy(output.measures[3].count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure3_count_output != nullptr)
+        queue.memcpy(measure3_count_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 5];
-      if (command.bytes != 0 && output.measures[3].nonnull_count != nullptr)
-        queue.memcpy(output.measures[3].nonnull_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure3_nonnull_output != nullptr)
+        queue.memcpy(measure3_nonnull_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 6];
-      if (command.bytes != 0 && output.measures[3].rhs_sum != nullptr)
-        queue.memcpy(output.measures[3].rhs_sum, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure3_rhs_sum_output != nullptr)
+        queue.memcpy(measure3_rhs_sum_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 7];
-      if (command.bytes != 0 && output.measures[3].rhs_count != nullptr)
-        queue.memcpy(output.measures[3].rhs_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure3_rhs_count_output != nullptr)
+        queue.memcpy(measure3_rhs_count_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command =
           completion.commands[kPublishMeasures + 3 * kPublishMeasureLaneCount + 8];
-      if (command.bytes != 0 && output.measures[3].rhs_nonnull_count != nullptr)
-        queue.memcpy(output.measures[3].rhs_nonnull_count, workspace_bytes + command.source_offset,
+      if (command.bytes != 0 && measure3_rhs_nonnull_output != nullptr)
+        queue.memcpy(measure3_rhs_nonnull_output, workspace_bytes + command.source_offset,
                      command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishEmitted];
       if (command.bytes != 0)
-        queue.memcpy(output.emitted, workspace_bytes + command.source_offset, command.bytes);
+        queue.memcpy(emitted_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishSelected];
       if (command.bytes != 0)
-        queue.memcpy(output.selected, workspace_bytes + command.source_offset, command.bytes);
+        queue.memcpy(selected_output, workspace_bytes + command.source_offset, command.bytes);
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishUncertain];
       if (command.bytes != 0)
-        queue.memcpy(output.uncertain, workspace_bytes + command.source_offset, command.bytes);
+        queue.memcpy(uncertain_output, workspace_bytes + command.source_offset, command.bytes);
     }
   }
   queue.wait_and_throw();
@@ -3112,7 +3136,6 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
     *detail = PGACCEL_GROUPED_AGG_DETAIL_INVALID;
     return PGACCEL_ERROR;
   }
-  const HostOutputBindings output_bindings = capture_output_bindings(out, detail);
   try {
     sycl::queue& queue = pgaccel_require_queue();
     if (!validate_input_usm(queue, descriptor_contract) ||
@@ -3122,9 +3145,13 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
       return PGACCEL_ERROR;
     }
 
-    if (descriptor_contract.scratch != nullptr)
-      return execute_grouped_agg_device(queue, descriptor_contract, output_bindings,
+    if (descriptor_contract.scratch != nullptr) {
+      if (finalize)
+        return execute_grouped_agg_device(queue, descriptor_contract, out, detail,
+                                          descriptor_contract.scratch, layout);
+      return execute_grouped_agg_device(queue, descriptor_contract, &output_contract, detail,
                                         descriptor_contract.scratch, layout);
+    }
 
     void* owned_workspace = sycl::aligned_alloc_device(kWorkspaceAlignment, layout.bytes, queue);
     if (owned_workspace == nullptr) {
@@ -3132,8 +3159,11 @@ extern "C" pgaccel_status pgaccel_grouped_agg_execute_ex(const pgaccel_grouped_a
       return PGACCEL_OOM;
     }
     ScratchOwner owner(&queue, owned_workspace);
-    return execute_grouped_agg_device(queue, descriptor_contract, output_bindings, owned_workspace,
-                                      layout);
+    if (finalize)
+      return execute_grouped_agg_device(queue, descriptor_contract, out, detail, owned_workspace,
+                                        layout);
+    return execute_grouped_agg_device(queue, descriptor_contract, &output_contract, detail,
+                                      owned_workspace, layout);
   } catch (const pgaccel_no_device_error&) {
     *detail = 0;
     return PGACCEL_ERROR_NO_DEVICE;
