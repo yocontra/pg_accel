@@ -4055,6 +4055,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_h3_res9_res15_keep_raw_grouped_cell_count_evidence() {
+        for (name, resolution, table) in [
+            ("h3_resolution_sweep", 9, "bench_h3_sweep"),
+            ("h3_latlng_res15", 15, "bench_h3_var"),
+        ] {
+            let workload = find_workload(name).expect("registered raw H3 workload");
+            let query = workload.query_sql();
+            let baseline = workload
+                .baseline_query_sql()
+                .expect("raw H3 workload baseline query");
+            let normalized_query = query
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase();
+            let normalized_baseline = baseline
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase();
+
+            assert_eq!(
+                normalized_query,
+                format!(
+                    "select h3_latlng_to_cell(geom, {resolution}) as cell, count(*) as n from {table} group by 1"
+                ),
+                "accelerated `{name}` evidence must remain raw grouped cell|count output"
+            );
+            assert_eq!(
+                normalized_baseline,
+                format!(
+                    "select public.h3_lat_lng_to_cell(geom, {resolution}) as cell, count(*) as n from {table} group by 1"
+                ),
+                "stock `{name}` evidence must remain raw grouped cell|count output"
+            );
+
+            for (side, sql) in [
+                ("accelerated", &normalized_query),
+                ("stock", &normalized_baseline),
+            ] {
+                for forbidden in [
+                    "group_count",
+                    "input_rows",
+                    "cell_count_checksum",
+                    "hashtextextended",
+                    "from (",
+                    " limit ",
+                ] {
+                    assert!(
+                        !sql.contains(forbidden),
+                        "{side} `{name}` evidence contains forbidden summary/limit token `{forbidden}`: {sql}"
+                    );
+                }
+            }
+        }
+    }
+
     /// All H3 lane workloads must report category `gpu_h3` so per-category
     /// rollups in the report keep counting them under the H3 bucket. A drift
     /// (e.g. an h3 workload accidentally tagged `gpu`) would hide a

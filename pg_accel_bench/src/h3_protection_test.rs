@@ -281,7 +281,7 @@ fn assert_grouped_h3_declines_and_matches_native(name: &str, rows: usize) {
     let mut native = execute_to_rows(&mut c, &baseline_sql, rows);
     native.sort_unstable();
     assert_eq!(
-        grouped_count_total(&native),
+        grouped_result_input_rows(name, &native),
         rows,
         "{name}: stock h3-pg grouped output must consume every input row"
     );
@@ -310,7 +310,7 @@ fn assert_grouped_h3_declines_and_matches_native(name: &str, rows: usize) {
         "{name}: grouped H3 structural decline must not dispatch a GPU kernel"
     );
     assert_eq!(
-        grouped_count_total(&enabled),
+        grouped_result_input_rows(name, &enabled),
         rows,
         "{name}: enabled native grouped output must consume every input row"
     );
@@ -630,6 +630,27 @@ fn h3_explain_row_cap_is_reserved_for_explain_output() {
         "H3 EXPLAIN cap may only bound EXPLAIN output: {}",
         uses[1]
     );
+}
+
+#[test]
+fn h3_grouped_result_parsers_keep_raw_and_summary_contracts_distinct() {
+    let raw = vec![
+        "8928308280fffff|2".to_owned(),
+        "8928308280bffff|3".to_owned(),
+    ];
+    assert_eq!(grouped_count_total(&raw), 5);
+    assert_eq!(grouped_result_input_rows("h3_resolution_sweep", &raw), 5);
+
+    let summary = vec!["2|5|8928308280bffff|8928308280fffff|-123456789".to_owned()];
+    assert_eq!(h3_bulk_summary_input_rows(&summary), 5);
+    assert_eq!(grouped_result_input_rows("h3_bulk", &summary), 5);
+}
+
+#[test]
+#[should_panic(expected = "exactly cell|count")]
+fn h3_raw_grouped_parser_rejects_summary_or_extra_fields() {
+    let summarized = vec!["cell|5|checksum".to_owned()];
+    let _ = grouped_count_total(&summarized);
 }
 
 // ---------------------------------------------------------------------------
@@ -1044,13 +1065,20 @@ fn h3_grouped_count_sql(table: &str, function: &str, resolution: i32) -> String 
     )
 }
 
-#[cfg(feature = "integration_tests")]
 fn grouped_count_total(rows: &[String]) -> usize {
     rows.iter().fold(0_usize, |total, row| {
-        let count = row
-            .rsplit_once('|')
-            .unwrap_or_else(|| panic!("grouped-count row missing count separator: {row}"))
-            .1
+        let fields = row.split('|').collect::<Vec<_>>();
+        assert_eq!(
+            fields.len(),
+            2,
+            "grouped-count row must contain exactly cell|count: {row}"
+        );
+        let cell = fields[0];
+        assert!(
+            !cell.is_empty() && cell != "NULL",
+            "grouped-count row has an empty or NULL cell: {row}"
+        );
+        let count = fields[1]
             .parse::<usize>()
             .unwrap_or_else(|e| panic!("grouped-count row has non-numeric count `{row}`: {e}"));
         assert!(count > 0, "grouped-count row has a zero count: {row}");
@@ -1058,6 +1086,58 @@ fn grouped_count_total(rows: &[String]) -> usize {
             .checked_add(count)
             .unwrap_or_else(|| panic!("grouped-count total overflowed at row: {row}"))
     })
+}
+
+fn h3_bulk_summary_input_rows(rows: &[String]) -> usize {
+    assert_eq!(
+        rows.len(),
+        1,
+        "h3_bulk must return exactly one summary row, got {}",
+        rows.len()
+    );
+    let fields = rows[0].split('|').collect::<Vec<_>>();
+    assert_eq!(
+        fields.len(),
+        5,
+        "h3_bulk summary must contain exactly five fields: {}",
+        rows[0]
+    );
+
+    let group_count = fields[0]
+        .parse::<usize>()
+        .unwrap_or_else(|e| panic!("h3_bulk summary has invalid group_count `{}`: {e}", rows[0]));
+    let input_rows = fields[1]
+        .parse::<usize>()
+        .unwrap_or_else(|e| panic!("h3_bulk summary has invalid input_rows `{}`: {e}", rows[0]));
+    assert!(
+        group_count > 0,
+        "h3_bulk summary has no groups: {}",
+        rows[0]
+    );
+    assert!(
+        input_rows >= group_count,
+        "h3_bulk summary has more groups than input rows: {}",
+        rows[0]
+    );
+    for (label, value) in [("min_cell", fields[2]), ("max_cell", fields[3])] {
+        assert!(
+            !value.is_empty() && value != "NULL",
+            "h3_bulk summary has an empty or NULL {label}: {}",
+            rows[0]
+        );
+    }
+    fields[4]
+        .parse::<i128>()
+        .unwrap_or_else(|e| panic!("h3_bulk summary has invalid checksum `{}`: {e}", rows[0]));
+    input_rows
+}
+
+fn grouped_result_input_rows(name: &str, rows: &[String]) -> usize {
+    match name {
+        "h3_bulk" => h3_bulk_summary_input_rows(rows),
+        "h3_resolution_sweep" | "h3_latlng_res15" => grouped_count_total(rows),
+        _ => panic!("unsupported grouped H3 result contract for `{name}`"),
+    }
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1163,7 +1243,7 @@ fn h3_warm_grouped_fallback_latency_bounded() {
     let mut native = execute_to_rows(&mut c, &baseline_sql, H3_GROUPED_DISPATCH_ROWS);
     native.sort_unstable();
     assert_eq!(
-        grouped_count_total(&native),
+        h3_bulk_summary_input_rows(&native),
         H3_GROUPED_DISPATCH_ROWS,
         "h3_bulk warm stock baseline must consume every input row"
     );
@@ -1185,7 +1265,7 @@ fn h3_warm_grouped_fallback_latency_bounded() {
     let mut warm = execute_to_rows(&mut c, &query, H3_GROUPED_DISPATCH_ROWS);
     warm.sort_unstable();
     assert_eq!(
-        grouped_count_total(&warm),
+        h3_bulk_summary_input_rows(&warm),
         H3_GROUPED_DISPATCH_ROWS,
         "h3_bulk warmup must consume every input row"
     );
@@ -1200,7 +1280,7 @@ fn h3_warm_grouped_fallback_latency_bounded() {
     apply_cleanup(&mut c, &wl);
 
     assert_eq!(
-        grouped_count_total(&measured),
+        h3_bulk_summary_input_rows(&measured),
         H3_GROUPED_DISPATCH_ROWS,
         "h3_bulk measured fallback must consume every input row"
     );
