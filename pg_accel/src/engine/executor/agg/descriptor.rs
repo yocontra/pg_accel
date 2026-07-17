@@ -1990,7 +1990,7 @@ fn execute_bounded_dense_artifact(
             // submits or dereferences those pointer values after return.
             let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
                 .map_err(|error| gpu_execution_error("grouped descriptor rejected", error))?;
-            let session = GroupedAggSession::start(&plan)
+            let session = GroupedAggSession::start(&plan, max_chunk_rows)
                 .map_err(|error| gpu_execution_error("grouped session setup failed", error))?;
             let metadata = DescriptorExecutionMetadata {
                 fact_rows: inputs.artifact.fact_rows,

@@ -468,29 +468,29 @@ pgaccel_grouped_agg_desc row_slice(const pgaccel_grouped_agg_desc& original, siz
     pgaccel_grouped_agg_key& key = desc.keys[i];
     if (key.source == PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT) {
       key.values.values = advance_bytes(key.values.values, first_row, sizeof(int32_t));
-      key.values.nulls = static_cast<const uint8_t*>(
-          advance_bytes(key.values.nulls, first_row, sizeof(uint8_t)));
+      key.values.nulls =
+          static_cast<const uint8_t*>(advance_bytes(key.values.nulls, first_row, sizeof(uint8_t)));
     }
   }
   for (size_t i = 0; i < desc.measure_count; ++i) {
     pgaccel_grouped_agg_measure& measure = desc.measures[i];
     measure.value.values =
         advance_bytes(measure.value.values, first_row, measure.value.element_bytes);
-    measure.value.nulls = static_cast<const uint8_t*>(
-        advance_bytes(measure.value.nulls, first_row, sizeof(uint8_t)));
+    measure.value.nulls =
+        static_cast<const uint8_t*>(advance_bytes(measure.value.nulls, first_row, sizeof(uint8_t)));
     measure.rhs.values = advance_bytes(measure.rhs.values, first_row, measure.rhs.element_bytes);
-    measure.rhs.nulls = static_cast<const uint8_t*>(
-        advance_bytes(measure.rhs.nulls, first_row, sizeof(uint8_t)));
+    measure.rhs.nulls =
+        static_cast<const uint8_t*>(advance_bytes(measure.rhs.nulls, first_row, sizeof(uint8_t)));
     desc.measure_filters[i].mask = static_cast<const int8_t*>(
         advance_bytes(desc.measure_filters[i].mask, first_row, sizeof(int8_t)));
   }
-  desc.where_filter.mask = static_cast<const int8_t*>(
-      advance_bytes(desc.where_filter.mask, first_row, sizeof(int8_t)));
+  desc.where_filter.mask =
+      static_cast<const int8_t*>(advance_bytes(desc.where_filter.mask, first_row, sizeof(int8_t)));
   for (size_t i = 0; i < desc.dim_count; ++i) {
     pgaccel_grouped_agg_dim& dim = desc.dims[i];
     dim.fact_key.values = advance_bytes(dim.fact_key.values, first_row, sizeof(int32_t));
-    dim.fact_key.nulls = static_cast<const uint8_t*>(
-        advance_bytes(dim.fact_key.nulls, first_row, sizeof(uint8_t)));
+    dim.fact_key.nulls =
+        static_cast<const uint8_t*>(advance_bytes(dim.fact_key.nulls, first_row, sizeof(uint8_t)));
   }
   return desc;
 }
@@ -601,11 +601,11 @@ void test_dense_chunk_lifecycle_equivalence() {
   SharedArray<int64_t> values({10, -4, 99, 8, 6, 3, -2});
   SharedArray<uint8_t> value_nulls({0, 0, 1, 0, 0, 1, 0});
   SharedArray<int8_t> where_mask({PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE,
-                                  PGACCEL_EXPR_FALSE, PGACCEL_EXPR_TRUE,
-                                  PGACCEL_EXPR_UNCERTAIN, PGACCEL_EXPR_TRUE});
+                                  PGACCEL_EXPR_FALSE, PGACCEL_EXPR_TRUE, PGACCEL_EXPR_UNCERTAIN,
+                                  PGACCEL_EXPR_TRUE});
   SharedArray<int8_t> measure_mask({PGACCEL_EXPR_TRUE, PGACCEL_EXPR_FALSE, PGACCEL_EXPR_TRUE,
-                                    PGACCEL_EXPR_TRUE, PGACCEL_EXPR_UNCERTAIN,
-                                    PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE});
+                                    PGACCEL_EXPR_TRUE, PGACCEL_EXPR_UNCERTAIN, PGACCEL_EXPR_TRUE,
+                                    PGACCEL_EXPR_TRUE});
   SharedArray<int32_t> dim_keys({10, 11, 10, 11, 10, 11, 10});
   SharedArray<uint8_t> dim_nulls({0, 0, 0, 0, 0, 0, 1});
   SharedArray<uint8_t> dim_match({1, 1});
@@ -636,10 +636,9 @@ void test_dense_chunk_lifecycle_equivalence() {
     SharedWorkspace workspace(req.bytes, req.alignment);
     for (size_t row = 0; row < rows; ++row) {
       pgaccel_grouped_agg_desc chunk = row_slice(desc, row, 1);
-      chunk.execution_flags = row == 0
-                                  ? PGACCEL_GROUPED_AGG_EXEC_RESET |
-                                        PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE
-                                  : PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+      chunk.execution_flags =
+          row == 0 ? PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE
+                   : PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
       int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
       CHECK_STATUS(execute_in_workspace(chunk, req, workspace, nullptr, &detail), PGACCEL_OK);
       CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
@@ -654,8 +653,7 @@ void test_dense_chunk_lifecycle_equivalence() {
     finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
     OutputStorage output(desc, true, true);
     int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
-    CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &output.out, &detail),
-                 PGACCEL_OK);
+    CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &output.out, &detail), PGACCEL_OK);
     CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
     check_outputs_equal(output, reference, desc.measure_count);
   }
@@ -702,8 +700,7 @@ void test_dense_chunk_lifecycle_equivalence() {
     pgaccel_grouped_agg_desc finalize = empty_desc;
     finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
     OutputStorage output(empty_desc, true, true);
-    CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &output.out, &detail),
-                 PGACCEL_OK);
+    CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &output.out, &detail), PGACCEL_OK);
     check_outputs_equal(output, empty_reference, desc.measure_count);
   }
 
@@ -774,8 +771,7 @@ void test_dense_chunk_lifecycle_fail_closed() {
   {
     SharedWorkspace workspace(req.bytes, req.alignment);
     pgaccel_grouped_agg_desc first = row_slice(desc, 0, 1);
-    first.execution_flags =
-        PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    first.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
     int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     CHECK_STATUS(execute_in_workspace(first, req, workspace, nullptr, &detail), PGACCEL_OK);
 
@@ -792,8 +788,7 @@ void test_dense_chunk_lifecycle_fail_closed() {
   {
     SharedWorkspace workspace(req.bytes, req.alignment);
     pgaccel_grouped_agg_desc first = row_slice(desc, 0, 1);
-    first.execution_flags =
-        PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    first.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
     int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     CHECK_STATUS(execute_in_workspace(first, req, workspace, nullptr, &detail), PGACCEL_OK);
 
@@ -810,8 +805,7 @@ void test_dense_chunk_lifecycle_fail_closed() {
   {
     SharedWorkspace workspace(req.bytes, req.alignment);
     pgaccel_grouped_agg_desc first = row_slice(desc, 0, 1);
-    first.execution_flags =
-        PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    first.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
     int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     CHECK_STATUS(execute_in_workspace(first, req, workspace, nullptr, &detail), PGACCEL_OK);
 
@@ -827,8 +821,7 @@ void test_dense_chunk_lifecycle_fail_closed() {
   {
     SharedWorkspace workspace(req.bytes, req.alignment);
     pgaccel_grouped_agg_desc first = row_slice(desc, 0, 1);
-    first.execution_flags =
-        PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    first.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
     int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     CHECK_STATUS(execute_in_workspace(first, req, workspace, nullptr, &detail), PGACCEL_OK);
 
@@ -851,8 +844,7 @@ void test_dense_chunk_lifecycle_fail_closed() {
     pgaccel_grouped_agg_desc reset = row_slice(desc, 0, 3);
     reset.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN;
     OutputStorage recovered(desc);
-    CHECK_STATUS(execute_in_workspace(reset, req, workspace, &recovered.out, &detail),
-                 PGACCEL_OK);
+    CHECK_STATUS(execute_in_workspace(reset, req, workspace, &recovered.out, &detail), PGACCEL_OK);
     OutputStorage reference(desc);
     CHECK_STATUS(execute_external(desc, &reference.out), PGACCEL_OK);
     check_outputs_equal(recovered, reference, desc.measure_count);
@@ -867,8 +859,7 @@ void test_dense_chunk_lifecycle_fail_closed() {
   {
     SharedWorkspace workspace(req.bytes, req.alignment);
     pgaccel_grouped_agg_desc first = row_slice(desc, 0, 1);
-    first.execution_flags =
-        PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    first.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
     int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
     CHECK_STATUS(execute_in_workspace(first, req, workspace, nullptr, &detail), PGACCEL_OK);
 
@@ -885,8 +876,7 @@ void test_dense_chunk_lifecycle_fail_closed() {
     CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
 
     pgaccel_grouped_agg_desc reset = row_slice(desc, 2, 1);
-    reset.execution_flags =
-        PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    reset.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
     CHECK_STATUS(execute_in_workspace(reset, req, workspace, nullptr, &detail), PGACCEL_OK);
   }
 }
@@ -949,16 +939,14 @@ void test_parallel_dense_count_star_lifecycle() {
   const auto timed_end = std::chrono::steady_clock::now();
   const double timed_ms =
       std::chrono::duration<double, std::milli>(timed_end - timed_start).count();
-  std::printf("parallel dense COUNT(*) %zu rows/%zu groups: %.3f ms\n", rows, groups,
-              timed_ms);
+  std::printf("parallel dense COUNT(*) %zu rows/%zu groups: %.3f ms\n", rows, groups, timed_ms);
   check_outputs_equal(timed, one_shot, desc.measure_count);
 
   const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
   SharedWorkspace workspace(req.bytes, req.alignment);
   constexpr size_t first_rows = 100003;
   pgaccel_grouped_agg_desc first = row_slice(desc, 0, first_rows);
-  first.execution_flags =
-      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  first.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
   int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
   CHECK_STATUS(execute_in_workspace(first, req, workspace, nullptr, &detail), PGACCEL_OK);
   CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
@@ -968,14 +956,12 @@ void test_parallel_dense_count_star_lifecycle() {
   pgaccel_grouped_agg_desc finalize = row_slice(desc, 0, 0);
   finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
   OutputStorage chunked(desc, true, true);
-  CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &chunked.out, &detail),
-               PGACCEL_OK);
+  CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &chunked.out, &detail), PGACCEL_OK);
   check_outputs_equal(chunked, one_shot, desc.measure_count);
 
   nulls[7] = 2;
   pgaccel_grouped_agg_desc invalid = row_slice(desc, 7, 1);
-  invalid.execution_flags =
-      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  invalid.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
   detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
   CHECK_STATUS(execute_in_workspace(invalid, req, workspace, nullptr, &detail), PGACCEL_ERROR);
   CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
@@ -1108,15 +1094,168 @@ void test_parallel_dense_integer_phase2_shape() {
   OutputStorage recovered(desc, true, true);
   CHECK_STATUS(execute_in_workspace(desc, req, workspace, &recovered.out, &detail), PGACCEL_OK);
   check_outputs_equal(recovered, one_shot, desc.measure_count);
+}
 
-  pgaccel_grouped_agg_desc capped = desc;
-  capped.row_count = 10'000'000;
-  const pgaccel_grouped_agg_workspace_req capped_req = workspace_req(capped);
-  pgaccel_grouped_agg_desc empty = desc;
-  empty.row_count = 0;
-  const pgaccel_grouped_agg_workspace_req empty_req = workspace_req(empty);
-  CHECK(capped_req.bytes == empty_req.bytes);
-  CHECK(req.bytes > empty_req.bytes);
+void test_parallel_dense_integer_product_sum_shape() {
+  std::printf("--- parallel dense int4 product SUM+COUNT(*) ---\n");
+  constexpr size_t rows = 263157;
+  constexpr size_t groups = 128;
+  std::vector<int32_t> host_keys(rows);
+  std::vector<int32_t> host_lhs(rows);
+  std::vector<int32_t> host_rhs(rows);
+  std::vector<uint8_t> host_lhs_nulls(rows);
+  std::vector<uint8_t> host_rhs_nulls(rows);
+  std::array<int64_t, groups> expected_sum{};
+  std::array<uint64_t, groups> expected_nonnull{};
+  std::array<uint64_t, groups> expected_count{};
+  for (size_t row = 0; row < rows; ++row) {
+    const size_t group = row % groups;
+    host_keys[row] = static_cast<int32_t>(group);
+    host_lhs[row] = 1 + static_cast<int32_t>(row % 997);
+    host_rhs[row] = 1 + static_cast<int32_t>(row % 49);
+    // Keep one group entirely NULL while also covering lhs-only, rhs-only,
+    // and jointly NULL rows in the remaining groups.
+    host_lhs_nulls[row] = group + 1 == groups || row % 127 == 0 ? 1 : 0;
+    host_rhs_nulls[row] = row % 131 == 0 ? 1 : 0;
+    ++expected_count[group];
+    if (host_lhs_nulls[row] != 0 || host_rhs_nulls[row] != 0)
+      continue;
+    expected_sum[group] += static_cast<int64_t>(host_lhs[row]) * host_rhs[row];
+    ++expected_nonnull[group];
+  }
+
+  SharedArray<int32_t> keys(host_keys);
+  SharedArray<int32_t> lhs(host_lhs);
+  SharedArray<int32_t> rhs(host_rhs);
+  SharedArray<uint8_t> lhs_nulls(host_lhs_nulls);
+  SharedArray<uint8_t> rhs_nulls(host_rhs_nulls);
+  pgaccel_grouped_agg_desc desc = base_desc(rows);
+  set_fact_key(desc, 0, keys.data(), nullptr, 0, groups);
+  set_i32_view(desc.measures[0].value, lhs.data(), lhs_nulls.data());
+  set_i32_view(desc.measures[0].rhs, rhs.data(), rhs_nulls.data());
+  finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_MUL, PGACCEL_GROUPED_AGG_LANE_SUM);
+  set_count_star(desc, 1);
+
+  OutputStorage one_shot(desc, true, true);
+  CHECK_STATUS(execute_external(desc, &one_shot.out), PGACCEL_OK);
+  CHECK(one_shot.out.selected_count == rows);
+  CHECK(one_shot.out.uncertain_count == 0);
+  CHECK(one_shot.out.emitted_group_count == groups);
+  CHECK(one_shot.active == std::vector<uint8_t>(groups, 1));
+  for (size_t group = 0; group < groups; ++group) {
+    CHECK(one_shot.i64(one_shot.measures[0].sum, group) == expected_sum[group]);
+    CHECK(one_shot.measures[0].nonnull[group] == expected_nonnull[group]);
+    CHECK(one_shot.measures[1].count[group] == expected_count[group]);
+  }
+  CHECK(expected_count[groups - 1] > 0);
+  CHECK(one_shot.measures[0].nonnull[groups - 1] == 0);
+
+  OutputStorage timed(desc, true, true);
+  const auto timed_start = std::chrono::steady_clock::now();
+  CHECK_STATUS(execute_external(desc, &timed.out), PGACCEL_OK);
+  const auto timed_end = std::chrono::steady_clock::now();
+  const double timed_ms =
+      std::chrono::duration<double, std::milli>(timed_end - timed_start).count();
+  std::printf("parallel dense int4 MUL/SUM+COUNT(*) %zu rows/%zu groups: %.3f ms\n", rows, groups,
+              timed_ms);
+  check_outputs_equal(timed, one_shot, desc.measure_count);
+
+  const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+  SharedWorkspace workspace(req.bytes, req.alignment);
+  constexpr std::array<size_t, 3> chunk_rows = {65537, 100003, rows - 165540};
+  size_t first_row = 0;
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  for (size_t index = 0; index < chunk_rows.size(); ++index) {
+    pgaccel_grouped_agg_desc chunk = row_slice(desc, first_row, chunk_rows[index]);
+    chunk.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    if (index == 0)
+      chunk.execution_flags |= PGACCEL_GROUPED_AGG_EXEC_RESET;
+    CHECK_STATUS(execute_in_workspace(chunk, req, workspace, nullptr, &detail), PGACCEL_OK);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+    first_row += chunk_rows[index];
+  }
+  pgaccel_grouped_agg_desc finalize = row_slice(desc, 0, 0);
+  finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+  OutputStorage chunked(desc, true, true);
+  CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &chunked.out, &detail), PGACCEL_OK);
+  check_outputs_equal(chunked, one_shot, desc.measure_count);
+
+  lhs[31] = 46340;
+  rhs[31] = 46340;
+  lhs_nulls[31] = 0;
+  rhs_nulls[31] = 0;
+  pgaccel_grouped_agg_desc exact_product = row_slice(desc, 31, 1);
+  exact_product.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  CHECK_STATUS(execute_in_workspace(exact_product, req, workspace, nullptr, &detail), PGACCEL_OK);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+
+  lhs[31] = 46341;
+  rhs[31] = 46341;
+  pgaccel_grouped_agg_desc overflow = row_slice(desc, 31, 1);
+  overflow.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_in_workspace(overflow, req, workspace, nullptr, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
+  pgaccel_grouped_agg_desc poisoned = row_slice(desc, 32, 1);
+  poisoned.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  CHECK_STATUS(execute_in_workspace(poisoned, req, workspace, nullptr, &detail), PGACCEL_ERROR);
+
+  lhs[31] = host_lhs[31];
+  rhs[31] = host_rhs[31];
+  lhs_nulls[31] = host_lhs_nulls[31];
+  rhs_nulls[31] = host_rhs_nulls[31];
+  OutputStorage recovered(desc, true, true);
+  CHECK_STATUS(execute_in_workspace(desc, req, workspace, &recovered.out, &detail), PGACCEL_OK);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+  check_outputs_equal(recovered, one_shot, desc.measure_count);
+
+  // The session's logical plan may exceed the partial budget even though its
+  // bounded executor slices qualify. A workspace sized from the large shape
+  // must still admit the 256K lifecycle call.
+  pgaccel_grouped_agg_desc large_plan = desc;
+  large_plan.row_count = 1'300'000;
+  const pgaccel_grouped_agg_workspace_req large_req = workspace_req(large_plan);
+  pgaccel_grouped_agg_desc bounded = row_slice(desc, 0, 256'000);
+  bounded.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  SharedWorkspace large_workspace(large_req.bytes, large_req.alignment);
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  CHECK_STATUS(execute_in_workspace(bounded, large_req, large_workspace, nullptr, &detail),
+               PGACCEL_OK);
+  pgaccel_grouped_agg_desc bounded_finalize = row_slice(large_plan, 0, 0);
+  bounded_finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+  OutputStorage bounded_output(desc, true, true);
+  CHECK_STATUS(execute_in_workspace(bounded_finalize, large_req, large_workspace,
+                                    &bounded_output.out, &detail),
+               PGACCEL_OK);
+  OutputStorage bounded_expected(desc, true, true);
+  pgaccel_grouped_agg_desc bounded_one_shot = row_slice(desc, 0, 256'000);
+  CHECK_STATUS(execute_external(bounded_one_shot, &bounded_expected.out), PGACCEL_OK);
+  check_outputs_equal(bounded_output, bounded_expected, desc.measure_count);
+
+  // Eligibility is non-monotone at the partial budget: 1,000 groups makes a
+  // 256K allocation shape serial, while a 100K tail is parallel. Reservation
+  // must cover the shorter tail rather than the selected mode of the maximum.
+  pgaccel_grouped_agg_desc wide_allocation = bounded_one_shot;
+  wide_allocation.group_capacity = 1'000;
+  wide_allocation.keys[0].cardinality = 1'000;
+  const pgaccel_grouped_agg_workspace_req wide_req = workspace_req(wide_allocation);
+  SharedWorkspace wide_workspace(wide_req.bytes, wide_req.alignment);
+  pgaccel_grouped_agg_desc wide_tail = row_slice(wide_allocation, 0, 100'000);
+  wide_tail.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  CHECK_STATUS(execute_in_workspace(wide_tail, wide_req, wide_workspace, nullptr, &detail),
+               PGACCEL_OK);
+  pgaccel_grouped_agg_desc wide_finalize = row_slice(wide_allocation, 0, 0);
+  wide_finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+  OutputStorage wide_output(wide_allocation, true, true);
+  CHECK_STATUS(
+      execute_in_workspace(wide_finalize, wide_req, wide_workspace, &wide_output.out, &detail),
+      PGACCEL_OK);
+  OutputStorage wide_expected(wide_allocation, true, true);
+  pgaccel_grouped_agg_desc wide_one_shot = row_slice(wide_allocation, 0, 100'000);
+  CHECK_STATUS(execute_external(wide_one_shot, &wide_expected.out), PGACCEL_OK);
+  check_outputs_equal(wide_output, wide_expected, wide_allocation.measure_count);
 }
 
 void test_i64_four_measure_lanes() {
@@ -1839,8 +1978,7 @@ void test_error_and_unsupported_statuses() {
     // Hash/H3 owners are current-call row indexes, so their reusable chunk
     // lifecycle is intentionally rejected until owner identity is detached
     // from the input slice.
-    desc.execution_flags =
-        PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+    desc.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
     workspace_req(desc, &status);
     CHECK(status == PGACCEL_UNSUPPORTED);
   }
@@ -2149,6 +2287,7 @@ int main() {
     test_empty_ungrouped_active();
     test_parallel_dense_count_star_lifecycle();
     test_parallel_dense_integer_phase2_shape();
+    test_parallel_dense_integer_product_sum_shape();
     test_i64_four_measure_lanes();
     test_f64_stats_pair_and_nan_ordering();
     test_global_and_measure_filters();

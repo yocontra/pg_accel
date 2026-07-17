@@ -667,6 +667,15 @@ unsafe fn cheapest_serial_agg_path_from_iter(
         {
             continue;
         }
+        let valid_cost = unsafe {
+            (*path).startup_cost.is_finite()
+                && (*path).startup_cost >= 0.0
+                && (*path).total_cost.is_finite()
+                && (*path).total_cost >= (*path).startup_cost
+        };
+        if !valid_cost {
+            continue;
+        }
         if best.is_null() || unsafe { (*path).total_cost < (*best).total_cost } {
             best = path;
         }
@@ -729,12 +738,88 @@ unsafe fn consistent_agg_num_groups_from_iter(
     estimate
 }
 
-fn minimum_valid_cost(first: Option<f64>, second: Option<f64>) -> Option<f64> {
-    [first, second]
+fn minimum_valid_cost(costs: impl IntoIterator<Item = Option<f64>>) -> Option<f64> {
+    costs
         .into_iter()
         .flatten()
         .filter(|cost| cost.is_finite() && *cost >= 0.0)
         .min_by(f64::total_cmp)
+}
+
+fn grouping_capability_enabled(flags: u32, capability: u32) -> bool {
+    flags & capability != 0
+}
+
+/// Return a conservative numerical lower bound for a serial sorted aggregate.
+///
+/// The selected input is not required to provide the grouping order, so this
+/// is not an executable path and must never be added to a relation. Omitting
+/// the cost of establishing that order makes the result no greater than any
+/// valid sorted aggregate over the proven serial inputs. It prevents hash
+/// spill I/O from inflating the native admission comparator.
+unsafe fn serial_sorted_agg_cost_lower_bound(
+    root: *mut pg_sys::PlannerInfo,
+    serial_input: *mut pg_sys::Path,
+    output_rel: *mut RelOptInfo,
+    extra: *mut pg_sys::GroupPathExtraData,
+    costs: *const pg_sys::AggClauseCosts,
+    num_groups: f64,
+) -> Option<f64> {
+    if root.is_null()
+        || serial_input.is_null()
+        || output_rel.is_null()
+        || extra.is_null()
+        || costs.is_null()
+    {
+        return None;
+    }
+    let group_clause = unsafe { (*root).processed_groupClause };
+    let input_target = unsafe { (*serial_input).pathtarget };
+    let output_target = unsafe { (*output_rel).reltarget };
+    if group_clause.is_null() || input_target.is_null() || output_target.is_null() {
+        return None;
+    }
+    let group_columns = unsafe { pg_sys::list_length(group_clause) };
+    let target_cost = unsafe { (*output_target).cost };
+    let input_width = unsafe { (*input_target).width };
+    if group_columns <= 0
+        || input_width < 0
+        || !target_cost.startup.is_finite()
+        || target_cost.startup < 0.0
+        || !target_cost.per_tuple.is_finite()
+        || target_cost.per_tuple < 0.0
+    {
+        return None;
+    }
+
+    let mut lower_bound = pg_sys::Path::default();
+    unsafe {
+        pg_sys::cost_agg(
+            &raw mut lower_bound,
+            root,
+            pg_sys::AggStrategy::AGG_SORTED,
+            costs,
+            group_columns,
+            num_groups,
+            (*extra).havingQual.cast::<List>(),
+            (*serial_input).disabled_nodes,
+            (*serial_input).startup_cost,
+            (*serial_input).total_cost,
+            (*serial_input).rows,
+            f64::from(input_width),
+        );
+    }
+    lower_bound.startup_cost += target_cost.startup;
+    lower_bound.total_cost += target_cost.startup + target_cost.per_tuple * lower_bound.rows;
+
+    (lower_bound.disabled_nodes == unsafe { (*serial_input).disabled_nodes }
+        && lower_bound.rows.is_finite()
+        && lower_bound.rows >= 0.0
+        && lower_bound.startup_cost.is_finite()
+        && lower_bound.startup_cost >= 0.0
+        && lower_bound.total_cost.is_finite()
+        && lower_bound.total_cost >= lower_bound.startup_cost)
+        .then_some(lower_bound.total_cost)
 }
 
 unsafe fn reconstructed_serial_agg_cost(
@@ -780,50 +865,76 @@ unsafe fn reconstructed_serial_agg_cost(
 
     let grouped = unsafe { !(*parse).groupClause.is_null() };
     let strategy = if grouped {
-        let hash_enabled = unsafe { (*extra).flags } as u32 & pg_sys::GROUPING_CAN_USE_HASH != 0;
-        if !hash_enabled || unsafe { (*root).processed_groupClause.is_null() } {
+        if unsafe { (*root).processed_groupClause.is_null() } {
             return None;
         }
-        pg_sys::AggStrategy::AGG_HASHED
+        let hash_enabled = grouping_capability_enabled(
+            unsafe { (*extra).flags } as u32,
+            pg_sys::GROUPING_CAN_USE_HASH,
+        );
+        hash_enabled.then_some(pg_sys::AggStrategy::AGG_HASHED)
     } else {
         if unsafe { !(*root).processed_groupClause.is_null() } {
             return None;
         }
-        pg_sys::AggStrategy::AGG_PLAIN
+        Some(pg_sys::AggStrategy::AGG_PLAIN)
     };
 
     let mut costs = pg_sys::AggClauseCosts::default();
     unsafe { get_agg_clause_costs(root, pg_sys::AggSplit::AGGSPLIT_SIMPLE, &raw mut costs) };
-    let candidate = unsafe {
-        pg_sys::create_agg_path(
-            root,
-            output_rel,
-            serial_input,
-            (*output_rel).reltarget,
-            strategy,
-            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
-            (*root).processed_groupClause,
-            (*extra).havingQual.cast::<List>(),
-            &raw const costs,
-            num_groups,
-        )
-    };
-    if candidate.is_null() {
-        return None;
+    let reconstructed = strategy.and_then(|strategy| {
+        let candidate = unsafe {
+            pg_sys::create_agg_path(
+                root,
+                output_rel,
+                serial_input,
+                (*output_rel).reltarget,
+                strategy,
+                pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+                (*root).processed_groupClause,
+                (*extra).havingQual.cast::<List>(),
+                &raw const costs,
+                num_groups,
+            )
+        };
+        if candidate.is_null() {
+            return None;
+        }
+        let path = candidate.cast::<pg_sys::Path>();
+        let valid = unsafe {
+            (*candidate).aggsplit == pg_sys::AggSplit::AGGSPLIT_SIMPLE
+                && (*candidate).subpath == serial_input
+                && (*path).parent == output_rel
+                && (*path).disabled_nodes <= (*serial_input).disabled_nodes
+                && (*path).startup_cost.is_finite()
+                && (*path).startup_cost >= 0.0
+                && (*path).total_cost.is_finite()
+                && (*path).total_cost >= (*path).startup_cost
+                && path_tree_is_serial(path, 0)
+        };
+        valid.then(|| unsafe { (*path).total_cost })
+    });
+    if !grouped {
+        return reconstructed;
     }
-    let path = candidate.cast::<pg_sys::Path>();
-    let valid = unsafe {
-        (*candidate).aggsplit == pg_sys::AggSplit::AGGSPLIT_SIMPLE
-            && (*candidate).subpath == serial_input
-            && (*path).parent == output_rel
-            && (*path).disabled_nodes <= (*serial_input).disabled_nodes
-            && (*path).startup_cost.is_finite()
-            && (*path).startup_cost >= 0.0
-            && (*path).total_cost.is_finite()
-            && (*path).total_cost >= (*path).startup_cost
-            && path_tree_is_serial(path, 0)
+    let sorted_lower_bound = if grouping_capability_enabled(
+        unsafe { (*extra).flags } as u32,
+        pg_sys::GROUPING_CAN_USE_SORT,
+    ) {
+        unsafe {
+            serial_sorted_agg_cost_lower_bound(
+                root,
+                serial_input,
+                output_rel,
+                extra,
+                &raw const costs,
+                num_groups,
+            )
+        }
+    } else {
+        None
     };
-    valid.then(|| unsafe { (*path).total_cost })
+    minimum_valid_cost([reconstructed, sorted_lower_bound])
 }
 
 unsafe fn cheapest_native_cost(
@@ -845,7 +956,7 @@ unsafe fn cheapest_native_cost(
     let existing_cost = (!existing.is_null()).then(|| unsafe { (*existing).total_cost });
     let reconstructed =
         unsafe { reconstructed_serial_agg_cost(root, input_rel, output_rel, extra) };
-    minimum_valid_cost(existing_cost, reconstructed)
+    minimum_valid_cost([existing_cost, reconstructed])
 }
 
 fn record_decline(decline: &AdmissionDecline, output_rel: *mut RelOptInfo) {
@@ -1094,6 +1205,41 @@ mod tests {
     }
 
     #[test]
+    fn serial_agg_baseline_ignores_invalid_costs() {
+        let mut invalid_leaf = test_leaf();
+        let mut invalid = test_agg(
+            std::ptr::from_mut(&mut invalid_leaf),
+            f64::NAN,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+        let mut valid_leaf = test_leaf();
+        let mut valid = test_agg(
+            std::ptr::from_mut(&mut valid_leaf),
+            25.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+
+        let selected = unsafe {
+            cheapest_serial_agg_path_from_iter([
+                std::ptr::from_mut(&mut invalid.path),
+                std::ptr::from_mut(&mut valid.path),
+            ])
+        };
+        assert_eq!(selected, std::ptr::from_mut(&mut valid.path));
+
+        valid.path.startup_cost = 30.0;
+        assert!(
+            unsafe {
+                cheapest_serial_agg_path_from_iter([
+                    std::ptr::from_mut(&mut invalid.path),
+                    std::ptr::from_mut(&mut valid.path),
+                ])
+            }
+            .is_null()
+        );
+    }
+
+    #[test]
     fn serial_agg_baseline_fails_closed_without_proved_serial_agg() {
         let mut leaf = test_leaf();
         let mut gather = pg_sys::GatherPath::default();
@@ -1244,10 +1390,34 @@ mod tests {
 
     #[test]
     fn native_baseline_uses_cheapest_valid_serial_cost() {
-        assert_eq!(minimum_valid_cost(Some(90.0), Some(40.0)), Some(40.0));
-        assert_eq!(minimum_valid_cost(Some(25.0), None), Some(25.0));
-        assert_eq!(minimum_valid_cost(Some(f64::NAN), Some(30.0)), Some(30.0));
-        assert_eq!(minimum_valid_cost(Some(-1.0), None), None);
+        assert_eq!(minimum_valid_cost([Some(90.0), Some(40.0)]), Some(40.0));
+        assert_eq!(minimum_valid_cost([Some(25.0), None]), Some(25.0));
+        assert_eq!(minimum_valid_cost([Some(f64::NAN), Some(30.0)]), Some(30.0));
+        assert_eq!(minimum_valid_cost([Some(-1.0), None]), None);
+    }
+
+    #[test]
+    fn spilling_hash_reconstruction_cannot_inflate_serial_baseline() {
+        let spilling_hash_cost = Some(9_000.0);
+        let sorted_no_ordering_lower_bound = Some(1_200.0);
+
+        assert_eq!(
+            minimum_valid_cost([spilling_hash_cost, sorted_no_ordering_lower_bound]),
+            sorted_no_ordering_lower_bound
+        );
+    }
+
+    #[test]
+    fn sorted_lower_bound_requires_sort_grouping_capability() {
+        let hash_only = pg_sys::GROUPING_CAN_USE_HASH;
+        assert!(!grouping_capability_enabled(
+            hash_only,
+            pg_sys::GROUPING_CAN_USE_SORT
+        ));
+        assert!(grouping_capability_enabled(
+            hash_only | pg_sys::GROUPING_CAN_USE_SORT,
+            pg_sys::GROUPING_CAN_USE_SORT
+        ));
     }
 
     fn count_contract() -> (AggQuerySpec, AggOutputProjection) {

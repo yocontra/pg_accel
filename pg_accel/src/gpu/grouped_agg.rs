@@ -448,16 +448,20 @@ pub struct GroupedAggWorkspace {
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
-fn workspace_query_descriptor(plan: &ResolvedGroupedAggPlan<'_>) -> abi::PgaccelGroupedAggDesc {
-    let mut desc = plan.desc;
+fn workspace_query_descriptor(desc: &abi::PgaccelGroupedAggDesc) -> abi::PgaccelGroupedAggDesc {
+    let mut desc = *desc;
     desc.execution_flags = abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN;
     desc
 }
 
 impl GroupedAggWorkspace {
     pub fn allocate(plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<Self> {
+        Self::allocate_for_descriptor(&plan.desc)
+    }
+
+    fn allocate_for_descriptor(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<Self> {
         crate::ensure_backend_exit_callback();
-        let query_desc = workspace_query_descriptor(plan);
+        let query_desc = workspace_query_descriptor(desc);
         let mut requirement = abi::PgaccelGroupedAggWorkspaceReq {
             abi_version: abi::PGACCEL_OLAP_ABI_VERSION,
             size_bytes: WORKSPACE_REQ_SIZE,
@@ -1228,21 +1232,24 @@ pub fn execute_grouped_agg_one_shot(
 /// which lets residency release its store borrow between synchronous calls.
 pub struct GroupedAggSession {
     plan_shape: abi::PgaccelGroupedAggDesc,
+    workspace_row_capacity: usize,
     workspace: GroupedAggWorkspace,
     state: LifecycleState,
     _not_send_sync: PhantomData<Rc<()>>,
 }
 
 impl GroupedAggSession {
-    pub fn start(plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<Self> {
+    pub fn start(plan: &ResolvedGroupedAggPlan<'_>, max_chunk_rows: usize) -> GpuResult<Self> {
         if plan.desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX {
             return Err(descriptor_error(
                 "hash grouped aggregation is one-shot because workspace owners are chunk-relative",
             ));
         }
+        let workspace_desc = bounded_workspace_descriptor(plan, max_chunk_rows)?;
         Ok(Self {
             plan_shape: plan.desc,
-            workspace: GroupedAggWorkspace::allocate(plan)?,
+            workspace_row_capacity: workspace_desc.row_count,
+            workspace: GroupedAggWorkspace::allocate_for_descriptor(&workspace_desc)?,
             state: LifecycleState::Ready,
             _not_send_sync: PhantomData,
         })
@@ -1253,6 +1260,11 @@ impl GroupedAggSession {
     }
 
     pub fn accumulate(&mut self, chunk: &GroupedAggChunk<'_, '_>) -> GpuResult<()> {
+        if chunk.desc.row_count > self.workspace_row_capacity {
+            return Err(descriptor_error(
+                "grouped chunk exceeds the session workspace row capacity",
+            ));
+        }
         if !stable_shape_matches(&self.plan_shape, &chunk.desc) {
             return Err(descriptor_error("chunk does not match session plan"));
         }
@@ -1316,6 +1328,23 @@ impl GroupedAggSession {
     pub const fn workspace(&self) -> &GroupedAggWorkspace {
         &self.workspace
     }
+}
+
+fn bounded_workspace_descriptor(
+    plan: &ResolvedGroupedAggPlan<'_>,
+    max_chunk_rows: usize,
+) -> GpuResult<abi::PgaccelGroupedAggDesc> {
+    if max_chunk_rows == 0 {
+        return Err(descriptor_error(
+            "grouped session chunk limit must be greater than zero",
+        ));
+    }
+    let row_count = plan.row_count().min(max_chunk_rows);
+    // This is the zero-offset row chunk: every pointer and frozen shape field
+    // remains identical to the already validated full plan.
+    let mut desc = plan.desc;
+    desc.row_count = row_count;
+    Ok(desc)
 }
 
 fn validate_session_plan(
@@ -1523,7 +1552,7 @@ mod tests {
     fn workspace_query_uses_execute_flags_without_mutating_plan() {
         let plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
         assert_eq!(plan.desc.execution_flags, 0);
-        let query = workspace_query_descriptor(&plan);
+        let query = workspace_query_descriptor(plan.descriptor());
         assert_eq!(
             query.execution_flags,
             abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN
@@ -1615,7 +1644,22 @@ mod tests {
         // SAFETY: pointer-free zero-row fixture is rejected before dispatch.
         let plan = unsafe { ResolvedGroupedAggPlan::from_abi(descriptor) }
             .expect("hash fixture is structurally valid");
-        assert!(GroupedAggSession::start(&plan).is_err());
+        assert!(GroupedAggSession::start(&plan, 1).is_err());
+    }
+
+    #[test]
+    fn bounded_session_workspace_uses_executor_chunk_rows() {
+        let mut plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        // The helper only copies this resolved fixture's frozen shape and is
+        // never dispatched, so no row pointer is dereferenced by the test.
+        plan.desc.row_count = 1_300_000;
+
+        let bounded = bounded_workspace_descriptor(&plan, 256_000)
+            .expect("bounded workspace descriptor resolves");
+        assert_eq!(bounded.row_count, 256_000);
+        assert!(stable_shape_matches(plan.descriptor(), &bounded));
+        assert_eq!(plan.row_count(), 1_300_000);
+        assert!(bounded_workspace_descriptor(&plan, 0).is_err());
     }
 
     #[test]
