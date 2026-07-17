@@ -3499,6 +3499,14 @@ mod tests {
     }
 
     #[test]
+    fn test_grouped_h3_decline_lanes_preserve_canonical_scales() {
+        for name in ["h3_bulk", "h3_resolution_sweep", "h3_latlng_res15"] {
+            let workload = find_workload(name).unwrap_or_else(|| panic!("registered {name}"));
+            assert_eq!(workload.row_scales(), ROW_SCALES, "{name}");
+        }
+    }
+
+    #[test]
     fn test_pathological_spatial_lanes_cap_default_scales() {
         let complex =
             find_workload("spatial_complex_poly").expect("registered spatial_complex_poly");

@@ -53,6 +53,8 @@
 // If h3-pg is not installed, `runner.rs::ensure_extensions` fails the
 // run before any h3 workload starts.
 
+use crate::config::ROW_SCALES as DEFAULT_ROW_SCALES;
+
 use super::Workload;
 
 const H3_NATIVE_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
@@ -151,7 +153,7 @@ pub const H3_LATLNG_RES15: H3Variant = H3Variant {
             FROM bench_h3_var GROUP BY 1",
     baseline_query: "SELECT public.h3_lat_lng_to_cell(geom, 15) AS cell, count(*) AS n \
                      FROM bench_h3_var GROUP BY 1",
-    row_scales: H3_NATIVE_DECLINE_ROW_SCALES,
+    row_scales: DEFAULT_ROW_SCALES,
     cleanup_extra: "",
 };
 

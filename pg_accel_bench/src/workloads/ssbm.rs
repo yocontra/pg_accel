@@ -279,6 +279,9 @@ impl Workload for SsbmResidentInt4Star {
         Some(ResultOracle::one_row(
             format!(
                 "SELECT COALESCE(SUM(q.count), 0)::int8 AS input_rows, \
+                        COALESCE(SUM(q.sum), 0::numeric) = \
+                          (SELECT COALESCE(SUM(lo_revenue), 0)::numeric \
+                           FROM ssbm_lineorder) AS exact_sum, \
                         COALESCE(bool_and(q.d_year BETWEEN 1992 AND 1998), true) AS valid_years, \
                         COALESCE(bool_and(q.p_size BETWEEN 1 AND 50), true) AS valid_part_sizes, \
                         COUNT(*) <= LEAST({rows}, 350)::int8 AS valid_group_count \
@@ -287,6 +290,7 @@ impl Workload for SsbmResidentInt4Star {
             ),
             vec![
                 Value::I64(usize_to_i64(rows)),
+                Value::Bool(true),
                 Value::Bool(true),
                 Value::Bool(true),
                 Value::Bool(true),
@@ -589,9 +593,12 @@ mod tests {
         assert!(!query.contains("round("));
 
         let oracle = workload.result_oracle(1_000_000).expect("sentinel oracle");
-        assert!(oracle.query_sql.contains("bool_and(q.d_year"));
-        assert!(oracle.query_sql.contains("bool_and(q.p_size"));
-        assert_eq!(oracle.expected_row.len(), 4);
+        let oracle_query = oracle.query_sql.to_ascii_lowercase();
+        assert!(oracle_query.contains("bool_and(q.d_year"));
+        assert!(oracle_query.contains("bool_and(q.p_size"));
+        assert!(oracle_query.contains("sum(q.sum)"));
+        assert!(oracle_query.contains("sum(lo_revenue)"));
+        assert_eq!(oracle.expected_row.len(), 5);
     }
 }
 

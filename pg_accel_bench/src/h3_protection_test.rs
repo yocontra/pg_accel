@@ -256,7 +256,16 @@ fn apply_setup(c: &mut Client, wl: &dyn Workload, rows: usize) {
 }
 
 const H3_GROUP_EXPRESSION_DECLINE: &str = "shape_group_expression";
+const H3_UNSUPPORTED_RTE_DECLINE: &str = "shape_unsupported_rte";
 const H3_PARENT_CAPACITY_DECLINE: &str = "generic_groups_exceed_device_maximum";
+
+fn grouped_h3_decline_reason(name: &str) -> &'static str {
+    match name {
+        "h3_bulk" => H3_UNSUPPORTED_RTE_DECLINE,
+        "h3_resolution_sweep" | "h3_latlng_res15" => H3_GROUP_EXPRESSION_DECLINE,
+        _ => panic!("no grouped H3 decline reason registered for `{name}`"),
+    }
+}
 
 /// Apply the workload's cleanup statements. Tolerates errors so a previous
 /// failed run leaves the fixture in a recoverable state.
@@ -297,7 +306,7 @@ fn assert_grouped_h3_declines_and_matches_native(name: &str, rows: usize) {
     );
     assert_planner_rejection_observed(
         &mut c,
-        H3_GROUP_EXPRESSION_DECLINE,
+        grouped_h3_decline_reason(name),
         &format!("{name}: grouped H3 structural decline"),
     );
 
@@ -1256,7 +1265,7 @@ fn h3_warm_grouped_fallback_latency_bounded() {
     );
     assert_planner_rejection_observed(
         &mut c,
-        H3_GROUP_EXPRESSION_DECLINE,
+        grouped_h3_decline_reason(wl.name()),
         "h3_bulk warm grouped fallback",
     );
 

@@ -1824,37 +1824,46 @@ fn plan_contains_exact_ssbm_two_dimension_descriptor(plan: &str) -> bool {
     let Some(sum_column) = parse_descriptor_column_measure(&measures[0]) else {
         return false;
     };
+    let fact_oid = date_dim.fact_key.relation_oid;
+    let date_oid = date_dim.relation_oid;
+    let part_oid = part_dim.relation_oid;
 
     operator_class.is_some_and(|value| value.eq_ignore_ascii_case("resident_groupagg"))
         && strategy.is_some_and(|value| value.eq_ignore_ascii_case("descriptor_grouped_aggregate"))
         && date_group.dim_index == date_dim.dim_index
-        && date_group.column.relation_oid == date_dim.relation_oid
+        && date_group.column.relation_oid == date_oid
         && date_group.column.attno == 5
         && date_group.column.type_oid == 23
+        && date_group.type_oid == 23
+        && date_group.collation_oid == 0
+        && descriptor_i32_group_key_encoding_is_concrete(&date_group.encoding)
         && part_group.dim_index == part_dim.dim_index
-        && part_group.column.relation_oid == part_dim.relation_oid
+        && part_group.column.relation_oid == part_oid
         && part_group.column.attno == 8
         && part_group.column.type_oid == 23
-        && date_dim.fact_key.relation_oid == part_dim.fact_key.relation_oid
-        && date_dim.relation_oid == date_dim.dim_key.relation_oid
-        && part_dim.relation_oid == part_dim.dim_key.relation_oid
-        && date_dim.relation_oid != part_dim.relation_oid
-        && sum_column.relation_oid == date_dim.fact_key.relation_oid
+        && part_group.type_oid == 23
+        && part_group.collation_oid == 0
+        && descriptor_i32_group_key_encoding_is_concrete(&part_group.encoding)
+        && fact_oid == part_dim.fact_key.relation_oid
+        && date_oid == date_dim.dim_key.relation_oid
+        && part_oid == part_dim.dim_key.relation_oid
+        && fact_oid != date_oid
+        && fact_oid != part_oid
+        && date_oid != part_oid
+        && sum_column.relation_oid == fact_oid
         && sum_column.attno == 13
         && sum_column.type_oid == 23
-        && measures[0].contains("-> value.sum")
-        && measures[1].contains("m1:count_star -> value.count")
+        && measures[0] == format!("m0:column({fact_oid}.13:type=23) -> value.sum")
+        && measures[1] == "m1:count_star -> value.count"
         && filter == "fact=none; measures=[m0=none; m1=none]; dimensions=[d0=none; d1=none]"
-        && dims.iter().all(|entry| {
-            entry.contains(" join=")
-                && entry.contains("<->")
-                && entry.contains(" multiplicity=unique ")
-                && entry.ends_with("filter=none")
-        })
-        && slots[0].contains("slot0:group[k0]")
-        && slots[1].contains("slot1:group[k1]")
-        && slots[2].contains("slot2:aggregate[m0].value.sum")
-        && slots[3].contains("slot3:aggregate[m1].value.count")
+        && slots[0]
+            == "slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false"
+        && slots[1]
+            == "slot1:group[k1] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false"
+        && slots[2]
+            == "slot2:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true"
+        && slots[3]
+            == "slot3:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false"
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1864,10 +1873,13 @@ struct DescriptorColumnRef {
     type_oid: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DescriptorDimensionGroupKey {
     dim_index: usize,
     column: DescriptorColumnRef,
+    type_oid: u32,
+    collation_oid: u32,
+    encoding: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1892,24 +1904,39 @@ fn parse_descriptor_dimension_group_key(entry: &str) -> Option<DescriptorDimensi
     let (_, source) = entry.split_once(':')?;
     let source = source.strip_prefix("dimension[")?;
     let (dim_index, column) = source.split_once("](")?;
-    let (column, _) = column.split_once(')')?;
+    let (column, fields) = column.split_once(") ")?;
+    let fields = fields.strip_prefix("type=")?;
+    let (type_oid, fields) = fields.split_once(" collation=")?;
+    let (collation_oid, encoding) = fields.split_once(" encoding=")?;
+    if encoding.is_empty() {
+        return None;
+    }
     Some(DescriptorDimensionGroupKey {
         dim_index: dim_index.parse().ok()?,
         column: parse_descriptor_column(column)?,
+        type_oid: type_oid.parse().ok()?,
+        collation_oid: collation_oid.parse().ok()?,
+        encoding: encoding.to_owned(),
     })
 }
 
 fn parse_descriptor_star_dimension(entry: &str) -> Option<DescriptorStarDimension> {
     let (indexed, fields) = entry.split_once(':')?;
     let dim_index = indexed.strip_prefix('d')?.parse().ok()?;
-    let relation_oid = fields
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix("rel="))?
-        .parse()
+    let mut fields = fields.split_whitespace();
+    let relation_oid = fields.next()?.strip_prefix("rel=")?.parse().ok()?;
+    let join = fields.next()?.strip_prefix("join=")?;
+    let collation_oid = fields
+        .next()?
+        .strip_prefix("collation=")?
+        .parse::<u32>()
         .ok()?;
-    let join = fields
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix("join="))?;
+    let multiplicity = fields.next()?.strip_prefix("multiplicity=")?;
+    let filter = fields.next()?.strip_prefix("filter=")?;
+    if fields.next().is_some() || collation_oid != 0 || multiplicity != "unique" || filter != "none"
+    {
+        return None;
+    }
     let (fact_key, dim_key) = join.split_once("<->")?;
     Some(DescriptorStarDimension {
         dim_index,
@@ -1917,6 +1944,43 @@ fn parse_descriptor_star_dimension(entry: &str) -> Option<DescriptorStarDimensio
         fact_key: parse_descriptor_column(fact_key)?,
         dim_key: parse_descriptor_column(dim_key)?,
     })
+}
+
+fn descriptor_i32_group_key_encoding_is_concrete(encoding: &str) -> bool {
+    if encoding == "hash" {
+        return true;
+    }
+    let Some((kind, fields)) = encoding.split_once('(') else {
+        return false;
+    };
+    let Some(fields) = fields.strip_suffix(')') else {
+        return false;
+    };
+    let fields = fields.split(", ").collect::<Vec<_>>();
+    let valid_cardinality = |field: &str| {
+        field
+            .strip_prefix("cardinality=")
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|value| value > 0)
+    };
+    let valid_null = |field: &str| {
+        field
+            .strip_prefix("null=")
+            .is_some_and(|value| value == "none" || value.parse::<i32>().is_ok())
+    };
+    match (kind, fields.as_slice()) {
+        ("dense_i32", [minimum, cardinality, null]) => {
+            minimum
+                .strip_prefix("min=")
+                .is_some_and(|value| value.parse::<i32>().is_ok())
+                && valid_cardinality(cardinality)
+                && valid_null(null)
+        }
+        ("dictionary_i32", [cardinality, null]) => {
+            valid_cardinality(cardinality) && valid_null(null)
+        }
+        _ => false,
+    }
 }
 
 fn parse_descriptor_column_measure(entry: &str) -> Option<DescriptorColumnRef> {
@@ -6814,7 +6878,7 @@ mod tests {
          GPU Descriptor Aggregates: m0:column(100.13:type=23) -> value.sum; m1:count_star -> value.count\n  \
          GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[d0=none; d1=none]\n  \
          GPU Descriptor Star Dimensions: d0:rel=200 join=100.6:type=23<->200.1:type=23 collation=0 multiplicity=unique filter=none; d1:rel=300 join=100.4:type=23<->300.1:type=23 collation=0 multiplicity=unique filter=none\n  \
-         GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false; slot1:group[k1] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false; slot2:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot3:aggregate[m1].value.count source_type=20 result_type=20 typmod=-1 collation=0 nullable=false"
+         GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false; slot1:group[k1] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false; slot2:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot3:aggregate[m1].value.count source_type=0 result_type=20 typmod=-1 collation=0 nullable=false"
             .to_owned()
     }
 
@@ -6864,12 +6928,36 @@ mod tests {
     }
 
     #[test]
-    fn test_ssbm_ship_gate_rejects_wrong_dimension_key_or_measure_dependency() {
+    fn test_ssbm_ship_gate_rejects_wrong_dependency_alias_or_output_metadata() {
         let valid = exact_ssbm_two_dimension_descriptor_plan();
         for invalid in [
             valid.replace("join=100.6:type=23", "join=100.7:type=23"),
             valid.replace("dimension[0](200.5:type=23)", "dimension[0](200.6:type=23)"),
             valid.replace("m0:column(100.13:type=23)", "m0:column(100.12:type=23)"),
+            valid
+                .replace("200.5:type=23", "100.5:type=23")
+                .replace("d0:rel=200", "d0:rel=100")
+                .replace("<->200.1:type=23", "<->100.1:type=23"),
+            valid
+                .replace("300.8:type=23", "200.8:type=23")
+                .replace("d1:rel=300", "d1:rel=200")
+                .replace("<->300.1:type=23", "<->200.1:type=23"),
+            valid.replace(
+                "dimension[0](200.5:type=23) type=23 collation=0",
+                "dimension[0](200.5:type=23) type=20 collation=0",
+            ),
+            valid.replace(
+                "dimension[1](300.8:type=23) type=23 collation=0",
+                "dimension[1](300.8:type=23) type=23 collation=42",
+            ),
+            valid.replace(
+                "slot3:aggregate[m1].value.count source_type=0",
+                "slot3:aggregate[m1].value.count source_type=20",
+            ),
+            valid.replace(
+                "slot2:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true",
+                "slot2:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=false",
+            ),
         ] {
             assert_ssbm_sentinel_ship_gate_rejects(invalid);
         }
