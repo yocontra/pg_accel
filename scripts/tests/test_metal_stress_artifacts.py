@@ -490,7 +490,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "          path: artifacts/metal-stress-pg18-qualified-metal",
                 "          # path: artifacts/metal-stress-pg18-qualified-metal",
             ),
-            workflow.replace("needs: [build, metal-coverage]", "needs: [build]"),
+            workflow.replace(
+                "needs: [build, linux-package, metal-coverage]",
+                "needs: [build, linux-package]",
+            ),
             workflow.replace(
                 "        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
                 "        continue-on-error: true\n        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
@@ -528,9 +531,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 1,
             ),
         )
-        for mutant in mutants:
-            with self.assertRaises(artifacts.ArtifactContractError):
-                artifacts.validate_release_workflow_contract(mutant)
+        for index, mutant in enumerate(mutants):
+            with self.subTest(mutant=index):
+                self.assertNotEqual(
+                    mutant,
+                    workflow,
+                    "workflow adversarial mutation must change the baseline",
+                )
+                with self.assertRaises(artifacts.ArtifactContractError):
+                    artifacts.validate_release_workflow_contract(mutant)
 
 
 if __name__ == "__main__":
