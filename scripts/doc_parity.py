@@ -70,6 +70,10 @@ CAPABILITY_TABLE_HEADER = (
 )
 ADAPTER_TABLE_HEADER = ("Adapter", "Registered functions")
 
+MACOS_HOMEBREW_PREREQUISITES = ("llvm@20", "lld@20", "libomp", "boost", "postgis")
+MACOS_PREREQUISITE_DOCS = ("README.md", "CONTRIBUTING.md", "Justfile", "CHANGELOG.md")
+BREW_INSTALL_RE = re.compile(r"\bbrew install(?P<formulas>(?: [A-Za-z0-9@+_.-]+)+)")
+
 EXPECTED_CAPABILITIES = {
     "Resident reducing or grouped aggregate": ("Present", "Selectable"),
     "Resident star join plus aggregate": ("Present", "Selectable"),
@@ -752,12 +756,38 @@ def audit_quick_start(root: Path) -> list[str]:
     return [f"README.md quick start is missing exact evidence: {value}" for value in required if value not in readme]
 
 
+def audit_macos_prerequisites(root: Path) -> list[str]:
+    errors: list[str] = []
+    required = set(MACOS_HOMEBREW_PREREQUISITES)
+    for document in MACOS_PREREQUISITE_DOCS:
+        text = (root / document).read_text()
+        commands = [
+            tuple(match.group("formulas").split())
+            for match in BREW_INSTALL_RE.finditer(text)
+            if required.intersection(match.group("formulas").split())
+        ]
+        if commands != [MACOS_HOMEBREW_PREREQUISITES]:
+            errors.append(
+                f"{document}: macOS Homebrew prerequisites must contain exactly "
+                f"`brew install {' '.join(MACOS_HOMEBREW_PREREQUISITES)}`; "
+                f"found {commands!r}"
+            )
+    return errors
+
+
 def run(root: Path, verbose: bool = False) -> int:
     citation_result = audit_citations(root, AUTHORITATIVE_DOCS, verbose)
     guc_errors, gucs = audit_guc_docs(root)
     capability_errors, capability_count, adapter_entry_count = audit_capabilities(root)
     quick_start_errors = audit_quick_start(root)
-    errors = citation_result.errors + guc_errors + capability_errors + quick_start_errors
+    macos_prerequisite_errors = audit_macos_prerequisites(root)
+    errors = (
+        citation_result.errors
+        + guc_errors
+        + capability_errors
+        + quick_start_errors
+        + macos_prerequisite_errors
+    )
 
     print("=== doc_parity summary ===")
     for document in AUTHORITATIVE_DOCS:
@@ -766,6 +796,7 @@ def run(root: Path, verbose: bool = False) -> int:
     print(f"  released GUCs:         {len(gucs)}")
     print(f"  capability rows:       {capability_count}")
     print(f"  registered functions:  {adapter_entry_count}")
+    print(f"  macOS brew formulas:   {len(MACOS_HOMEBREW_PREREQUISITES)}")
     if errors:
         print("\n=== parity failures ===", file=sys.stderr)
         for error in errors:
@@ -780,7 +811,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Validate exact source citations, released GUC semantics, adapter inventory, "
-            "and production planner capability documentation."
+            "macOS prerequisites, and production planner capability documentation."
         )
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="print each valid citation")

@@ -38,6 +38,9 @@ claim is implied by the entries below.
 - Benchmark documentation no longer treats historical local timing logs as
   current evidence. Release conclusions require fresh artifacts from the exact
   candidate binary and environment.
+- macOS source setup uses one canonical Homebrew prerequisite set:
+  `brew install llvm@20 lld@20 libomp boost postgis`. AdaptiveCpp discovery
+  prefers the versioned `lld@20` formula before an unversioned `lld` fallback.
 - CUDA/NVIDIA and PG-Strom validation is explicitly owner-deferred until an
   NVIDIA device is available. No CUDA support or performance claim is made.
 

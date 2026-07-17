@@ -247,18 +247,22 @@ def validate_load_value(value: str, kind: str, system: str) -> None:
     if _private_absolute(value):
         raise PackageError(f"private absolute {kind} remains in package: {value}")
     if system == "Darwin":
-        allowed = (
+        allowed_prefixes = (
             "/usr/lib/",
             "/System/Library/",
             "/Library/Apple/System/Library/",
             "/opt/homebrew/opt/llvm@20/lib/",
-            "/opt/homebrew/opt/libomp/lib/",
         )
-        allowed_exact = {
-            "/opt/homebrew/opt/llvm@20/lib",
-            "/opt/homebrew/opt/libomp/lib",
+        allowed_any_kind_exact = {"/opt/homebrew/opt/llvm@20/lib"}
+        allowed_external_values = {
+            ("dependency", "/opt/homebrew/opt/libomp/lib/libomp.dylib"),
+            ("LC_RPATH", "/opt/homebrew/opt/libomp/lib"),
         }
-        if value not in allowed_exact and not value.startswith(allowed):
+        if (
+            value not in allowed_any_kind_exact
+            and (kind, value) not in allowed_external_values
+            and not value.startswith(allowed_prefixes)
+        ):
             raise PackageError(f"unexpected absolute {kind} remains in package: {value}")
     else:
         raise PackageError(f"absolute ELF {kind} remains in package: {value}")

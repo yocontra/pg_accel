@@ -134,5 +134,44 @@ class CapabilityParityTests(unittest.TestCase):
         self.assertEqual(adapter_count, 3)
 
 
+class MacosPrerequisiteParityTests(unittest.TestCase):
+    def test_current_prerequisite_contract_passes(self) -> None:
+        self.assertEqual(doc_parity.audit_macos_prerequisites(doc_parity.REPO_ROOT), [])
+
+    def test_formula_drift_fails(self) -> None:
+        canonical = "brew install " + " ".join(
+            doc_parity.MACOS_HOMEBREW_PREREQUISITES
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for document in doc_parity.MACOS_PREREQUISITE_DOCS:
+                (root / document).write_text(canonical + "\n")
+            (root / "README.md").write_text(
+                canonical.replace("lld@20", "lld") + "\n"
+            )
+
+            errors = doc_parity.audit_macos_prerequisites(root)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("README.md", errors[0])
+        self.assertIn("lld@20", errors[0])
+
+    def test_extra_formula_fails(self) -> None:
+        canonical = "brew install " + " ".join(
+            doc_parity.MACOS_HOMEBREW_PREREQUISITES
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for document in doc_parity.MACOS_PREREQUISITE_DOCS:
+                (root / document).write_text(canonical + "\n")
+            (root / "CHANGELOG.md").write_text(canonical + " ninja\n")
+
+            errors = doc_parity.audit_macos_prerequisites(root)
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("CHANGELOG.md", errors[0])
+        self.assertIn("ninja", errors[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -87,12 +87,6 @@ class PackageExtensionTests(unittest.TestCase):
             "/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib", "dependency", "Darwin"
         )
         package_extension.validate_load_value(
-            "/opt/homebrew/opt/libomp/lib/libomp.dylib", "dependency", "Darwin"
-        )
-        package_extension.validate_load_value(
-            "/opt/homebrew/opt/libomp/lib", "LC_RPATH", "Darwin"
-        )
-        package_extension.validate_load_value(
             "@loader_path/../lib/libacpp-rt.dylib", "dependency", "Darwin"
         )
         package_extension.validate_load_value(
@@ -106,6 +100,25 @@ class PackageExtensionTests(unittest.TestCase):
                 "LC_ID_DYLIB",
                 "Darwin",
             )
+
+    def test_libomp_absolute_load_allowlist_is_kind_specific(self) -> None:
+        package_extension.validate_load_value(
+            "/opt/homebrew/opt/libomp/lib/libomp.dylib", "dependency", "Darwin"
+        )
+        package_extension.validate_load_value(
+            "/opt/homebrew/opt/libomp/lib", "LC_RPATH", "Darwin"
+        )
+        for kind, value in (
+            ("dependency", "/opt/homebrew/opt/libomp/lib/libomp.5.dylib"),
+            ("dependency", "/opt/homebrew/opt/libomp/lib/libunexpected.dylib"),
+            ("dependency", "/opt/homebrew/opt/libomp/lib"),
+            ("LC_RPATH", "/opt/homebrew/opt/libomp/lib/libomp.dylib"),
+            ("LC_RPATH", "/opt/homebrew/opt/libomp/lib/"),
+        ):
+            with self.subTest(kind=kind, value=value), self.assertRaisesRegex(
+                package_extension.PackageError, "unexpected absolute"
+            ):
+                package_extension.validate_load_value(value, kind, "Darwin")
 
     def test_metal_bundle_preserves_prefix_and_requires_omp_backend(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -20,6 +20,7 @@ directly; a branch name alone is not sufficient provenance.
 The currently validated GPU development target is Metal on Apple Silicon:
 
 ```bash
+brew install llvm@20 lld@20 libomp boost postgis
 just setup-system-deps
 just setup-tools
 just setup-pg-source 18
@@ -52,12 +53,12 @@ history. This is a historical rebase/sync statement only: pg_accel does not
 claim that the fork changes have been accepted upstream or that the snapshot is
 the current upstream tip.
 
-On Apple Silicon, building the toolchain requires Xcode command-line tools,
-Apple `metal-cpp` headers, a supported LLVM installation (LLVM 20 is the CI
-configuration), `lld`/`ld64.lld`, Boost, and the Homebrew OpenMP runtime. The
-release package retains LLVM 20 and `libomp` as explicit host prerequisites;
-its installer fails before writing files when either runtime is absent. Setup
-also clones `yocontra/soft-fp` tag
+On Apple Silicon, source setup requires Xcode command-line tools, Apple
+`metal-cpp` headers, and the canonical Homebrew formula set `llvm@20`,
+`lld@20`, `libomp`, `boost`, and `postgis`. The release package retains only
+LLVM 20 and `libomp` as explicit host runtime prerequisites; its installer
+fails before writing files when either runtime is absent. Setup also clones
+`yocontra/soft-fp` tag
 `v1.3.0` and applies the tracked patches under `patches/adaptivecpp/` plus a
 conditional `metal-cpp` compatibility edit. The result is therefore the exact
 fork commit plus reviewed repository patches, not a claim that a pristine

@@ -86,6 +86,8 @@ select_macos_lld() {
     for candidate in \
         "$LLVM_PREFIX/bin/ld64.lld" \
         "$LLVM_PREFIX/bin/lld" \
+        "$brew_root/opt/lld@20/bin/ld64.lld" \
+        "$brew_root/opt/lld@20/bin/lld" \
         "$brew_root/opt/lld/bin/ld64.lld" \
         "$brew_root/opt/lld/bin/lld"; do
         [ -x "$candidate" ] || continue
@@ -103,7 +105,7 @@ select_macos_lld() {
     done
 
     echo "error: no lld or ld64.lld found for AdaptiveCpp Metal setup" >&2
-    echo "       install Homebrew lld or set ACPP_LLD_PATH=/path/to/ld64.lld" >&2
+    echo "       install Homebrew lld@20 or set ACPP_LLD_PATH=/path/to/ld64.lld" >&2
     exit 1
 }
 

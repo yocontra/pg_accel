@@ -59,7 +59,7 @@ setup-system-deps:
         Darwin)
             printf '%s\n' \
                 "Install Xcode command line tools and Homebrew packages:" \
-                "  brew install postgis boost libomp llvm@20 lld@20" \
+                "  brew install llvm@20 lld@20 libomp boost postgis" \
                 "Then run:" \
                 "  just setup-gpu-metal"
             ;;
@@ -307,8 +307,9 @@ audit:
     cargo audit "${ignore_args[@]}"
 
 # Validate exact citations, released GUC semantics, registered adapter names,
-# and the production planner-capability matrix across authoritative docs. Run
-# focused adversarial parser tests in the same CI gate.
+# the macOS prerequisite set, and the production planner-capability matrix
+# across authoritative docs. Run focused adversarial parser tests in the same
+# CI gate.
 doc-parity:
     ./scripts/doc_parity.sh
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_doc_parity.py

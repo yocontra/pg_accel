@@ -17,6 +17,7 @@ CUDA/NVIDIA validation is owner-deferred in [TODO.md](TODO.md); do not claim it
 from an unverified build.
 
 ```bash
+brew install llvm@20 lld@20 libomp boost postgis
 just setup-system-deps
 just setup-tools
 just setup-pg-source 18
@@ -24,6 +25,11 @@ ACPP_BACKEND=metal just setup-gpu-metal-headers
 ACPP_BACKEND=metal LLVM_PREFIX=/path/to/llvm ACPP_LLD_PATH=/path/to/ld64.lld just setup-gpu
 just setup-pgrx
 ```
+
+That Homebrew command is the canonical Apple Silicon source-build prerequisite
+set. Xcode command-line tools and the repository-installed `metal-cpp` headers
+are also required. The packaged extension's runtime prerequisite set is
+narrower: LLVM 20 and `libomp` only.
 
 PostgreSQL 18 is the default extension target. The configured PostgreSQL 19
 beta target is a build/test target, not a release-package promise.
