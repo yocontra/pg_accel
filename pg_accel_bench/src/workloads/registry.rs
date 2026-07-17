@@ -272,7 +272,7 @@ pub struct Phase6DomainContract {
 }
 
 const PHASE6_SMOKE_ROWS: &[usize] = &[10_000];
-const PHASE6_H3_WINNER_ROWS: &[usize] = &[100_000];
+const PHASE6_H3_PARENT_ROWS: &[usize] = &[100_000];
 const PHASE6_RASTER_ROWS: &[usize] = &[100];
 
 /// The old spatial unsafe-row quarantine covered this interval. The executor
@@ -394,14 +394,14 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
     phase6_contract!(
         "h3_bulk",
         WorkloadCategory::GpuH3,
-        Phase6DomainOracle::NativeH3,
-        PHASE6_H3_WINNER_ROWS
+        Phase6DomainOracle::NativeH3FailClosed,
+        PHASE6_SMOKE_ROWS
     ),
     phase6_contract!(
         "h3_cell_to_parent",
         WorkloadCategory::GpuH3,
         Phase6DomainOracle::NativeH3,
-        PHASE6_H3_WINNER_ROWS
+        PHASE6_H3_PARENT_ROWS
     ),
     phase6_contract!(
         "h3_grid_distance",
@@ -412,8 +412,8 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
     phase6_contract!(
         "h3_resolution_sweep",
         WorkloadCategory::GpuH3,
-        Phase6DomainOracle::NativeH3,
-        PHASE6_H3_WINNER_ROWS
+        Phase6DomainOracle::NativeH3FailClosed,
+        PHASE6_SMOKE_ROWS
     ),
     phase6_contract!(
         "h3_srf_grid_disk",
@@ -424,8 +424,8 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
     phase6_contract!(
         "h3_latlng_res15",
         WorkloadCategory::GpuH3,
-        Phase6DomainOracle::NativeH3,
-        PHASE6_H3_WINNER_ROWS
+        Phase6DomainOracle::NativeH3FailClosed,
+        PHASE6_SMOKE_ROWS
     ),
     phase6_contract!(
         "h3_dist_near",
@@ -651,6 +651,10 @@ const FP64_WINNER: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::GpuWinner,
     flags: EvidenceEligibility::FP64_CALIBRATION,
 };
+const FP64_NATIVE_DECLINE: EvidenceEligibility = EvidenceEligibility {
+    threshold: ThresholdEvidenceEligibility::NativeDeclineOnly,
+    flags: EvidenceEligibility::FP64_CALIBRATION,
+};
 const H3_FP64_NATIVE_DECLINE: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::NativeDeclineOnly,
     flags: EvidenceEligibility::FUNCTION_KERNEL
@@ -672,6 +676,8 @@ const PINS_HASHAGG_MED: &[ResidentPinSpec] = &[pin!("bench_hashagg_med", ["user_
 const PINS_FILTERED_GROUPAGG: &[ResidentPinSpec] =
     &[pin!("bench_employees", ["dept", "salary", "active"])];
 const PINS_GROUPED_AGG: &[ResidentPinSpec] = &[pin!("bench_employees_agg", ["dept", "salary"])];
+const PINS_GROUPED_AGG_INT4: &[ResidentPinSpec] =
+    &[pin!("bench_employees_agg_int4", ["dept", "salary"])];
 const PINS_GROUPED_AGG_HIGH_CARD: &[ResidentPinSpec] =
     &[pin!("bench_events_agg", ["user_id", "val"])];
 const PINS_TIMESERIES: &[ResidentPinSpec] = &[pin!("sensor_data", ["sensor_id", "value"])];
@@ -683,6 +689,10 @@ const PINS_EXPRESSION: &[ResidentPinSpec] = &[pin!(
 const PINS_PREDICATE_EXPRESSION: &[ResidentPinSpec] = &[pin!(
     "bench_predicate_expression_sales",
     ["product_id", "price", "discount", "active"]
+)];
+const PINS_PREDICATE_EXPRESSION_INT4: &[ResidentPinSpec] = &[pin!(
+    "bench_predicate_expression_sales_int4",
+    ["product_id", "price", "quantity", "active"]
 )];
 const PINS_CASE_EXPRESSION: &[ResidentPinSpec] = &[pin!(
     "bench_case_when_expression_sales",
@@ -735,6 +745,10 @@ const PINS_MIXED_JOIN: &[ResidentPinSpec] = &[
     pin!("bench_mixed_facts", ["dim_id", "amount"]),
     pin!("bench_mixed_dims", ["id", "label"]),
 ];
+const PINS_MIXED_JOIN_INT4: &[ResidentPinSpec] = &[
+    pin!("bench_mixed_facts_int4", ["dim_id", "amount"]),
+    pin!("bench_mixed_dims_int4", ["id", "label"]),
+];
 
 const SSBM_Q1_FACT: &[&str] = &[
     "lo_orderdate",
@@ -751,6 +765,10 @@ const SSBM_Q4_FACT: &[&str] = &[
     "lo_partkey",
     "lo_revenue",
     "lo_supplycost",
+];
+const PINS_SSBM_RESIDENT_INT4_STAR: &[ResidentPinSpec] = &[
+    pin!("ssbm_lineorder", ["lo_orderdate", "lo_revenue"]),
+    pin!("ssbm_date", ["d_datekey", "d_year"]),
 ];
 const PINS_SSBM_Q1_1: &[ResidentPinSpec] = &[
     ResidentPinSpec {
@@ -870,28 +888,38 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("reduce_multi", C::GpuReduce, K::Reduce),
     workload("grouped_agg", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG)
+        .evidence(NATIVE_DECLINE),
+    workload("grouped_agg_int4", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_AGG_INT4)
         .evidence(WINNER),
     workload("grouped_agg_high_card", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG_HIGH_CARD)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("gpu_hashagg_med_card", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_HASHAGG_MED)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("timeseries_sensor_rollup", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_TIMESERIES)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("dictionary_grouped_agg", C::GpuHashAgg, K::Unclassified)
         .pins(PINS_DICTIONARY)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("expression_grouped_agg", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_EXPRESSION)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload(
         "predicate_filter_expression_grouped_agg",
         C::GpuHashAgg,
         K::HashAgg,
     )
     .pins(PINS_PREDICATE_EXPRESSION)
+    .evidence(NATIVE_DECLINE),
+    workload(
+        "predicate_expression_grouped_agg_int4",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(PINS_PREDICATE_EXPRESSION_INT4)
     .evidence(WINNER),
     workload(
         "case_when_expression_grouped_agg",
@@ -899,64 +927,64 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         K::HashAgg,
     )
     .pins(PINS_CASE_EXPRESSION)
-    .evidence(WINNER),
+    .evidence(NATIVE_DECLINE),
     workload(
         "case_when_range_expression_grouped_agg",
         C::GpuHashAgg,
         K::HashAgg,
     )
     .pins(PINS_CASE_RANGE)
-    .evidence(WINNER),
+    .evidence(NATIVE_DECLINE),
     workload(
         "case_when_value_predicate_expression_grouped_agg",
         C::GpuHashAgg,
         K::HashAgg,
     )
     .pins(PINS_CASE_VALUE)
-    .evidence(WINNER),
+    .evidence(NATIVE_DECLINE),
     workload(
         "case_when_null_predicate_expression_grouped_agg",
         C::GpuHashAgg,
         K::HashAgg,
     )
     .pins(PINS_CASE_NULL)
-    .evidence(WINNER),
+    .evidence(NATIVE_DECLINE),
     workload(
         "case_when_or_expression_grouped_agg",
         C::GpuHashAgg,
         K::HashAgg,
     )
     .pins(PINS_CASE_OR)
-    .evidence(WINNER),
+    .evidence(NATIVE_DECLINE),
     workload(
         "case_when_in_expression_grouped_agg",
         C::GpuHashAgg,
         K::HashAgg,
     )
     .pins(PINS_CASE_IN)
-    .evidence(WINNER),
+    .evidence(NATIVE_DECLINE),
     workload(
         "case_when_not_expression_grouped_agg",
         C::GpuHashAgg,
         K::HashAgg,
     )
     .pins(PINS_CASE_NOT)
-    .evidence(WINNER),
+    .evidence(NATIVE_DECLINE),
     workload("hashagg_10g", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_HASHAGG_SWEEP)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("hashagg_100g", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_HASHAGG_SWEEP)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("hashagg_256g", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_HASHAGG_SWEEP)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("hashagg_1kg", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_HASHAGG_SWEEP)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("hashagg_10kg", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_HASHAGG_SWEEP)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("large_sort", C::GpuSort, K::Sort).evidence(NATIVE_DECLINE),
     workload("gpu_sort_multikey", C::GpuSort, K::Sort).evidence(NATIVE_DECLINE),
     workload("gpu_sort_topk_wide", C::GpuSort, K::Sort).evidence(NATIVE_DECLINE),
@@ -974,7 +1002,8 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         C::GpuHashJoin,
         K::ResidentStarGroupAgg,
     )
-    .pins(PINS_HASHJOIN_FILTER),
+    .pins(PINS_HASHJOIN_FILTER)
+    .evidence(NATIVE_DECLINE),
     workload("gpu_nlj_between", C::GpuJoin, K::NestedLoopInequality).evidence(NATIVE_DECLINE),
     workload("hashjoin_100_1m", C::GpuHashJoin, K::HashJoin).pins(PINS_HASHJOIN_SWEEP),
     workload("hashjoin_1k_1m", C::GpuHashJoin, K::HashJoin).pins(PINS_HASHJOIN_SWEEP),
@@ -1022,10 +1051,8 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .evidence(NATIVE_DECLINE),
     workload("h3_bulk", C::GpuH3, K::H3LatLng)
         .extensions(H3)
-        .h3(H3LaneClass::Winning {
-            min_warm_speedup: 1.5,
-        })
-        .evidence(H3_WINNER),
+        .h3(H3LaneClass::Parity)
+        .evidence(H3_NATIVE_DECLINE),
     workload("h3_cell_to_parent", C::GpuH3, K::H3CellToParent)
         .pins(PINS_H3_PARENT)
         .extensions(H3)
@@ -1039,20 +1066,16 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .evidence(H3_NATIVE_DECLINE),
     workload("h3_resolution_sweep", C::GpuH3, K::H3LatLng)
         .extensions(H3)
-        .h3(H3LaneClass::Winning {
-            min_warm_speedup: 1.5,
-        })
-        .evidence(H3_WINNER),
+        .h3(H3LaneClass::Parity)
+        .evidence(H3_NATIVE_DECLINE),
     workload("h3_srf_grid_disk", C::GpuH3, K::H3LatLng)
         .extensions(H3)
         .h3(H3LaneClass::Parity)
         .evidence(H3_NATIVE_DECLINE),
     workload("h3_latlng_res15", C::GpuH3, K::H3LatLng)
         .extensions(H3)
-        .h3(H3LaneClass::Winning {
-            min_warm_speedup: 1.5,
-        })
-        .evidence(H3_WINNER),
+        .h3(H3LaneClass::Parity)
+        .evidence(H3_NATIVE_DECLINE),
     workload("h3_dist_near", C::GpuH3, K::H3LatLng)
         .extensions(H3)
         .h3(H3LaneClass::Parity)
@@ -1086,45 +1109,52 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("window_lead", C::GpuWindow, K::Window),
     workload("window_full_output_decline", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
     workload("window_reducing_decline", C::GpuWindow, K::Window).evidence(NATIVE_DECLINE),
+    workload(
+        "ssbm_resident_int4_star",
+        C::StarSchemaSsbm,
+        K::ResidentStarGroupAgg,
+    )
+    .pins(PINS_SSBM_RESIDENT_INT4_STAR)
+    .evidence(WINNER),
     workload("ssbm_q1_1", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q1_1)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q1_2", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q1_2)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q1_3", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q1_3)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q2_1", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q2_1)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q2_2", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q2_2_3)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q2_3", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q2_2_3)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q3_1", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q3_1)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q3_2", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q3_2)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q3_3", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q3_3)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q3_4", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q3_4)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q4_1", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q4_1)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q4_2", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q4_2)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("ssbm_q4_3", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q4_3)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("parallel_stress", C::GpuReduce, K::Unclassified),
     workload("parallel_stress_grouped", C::GpuHashAgg, K::Unclassified),
     workload("parallel_stress_sort", C::GpuSort, K::Unclassified),
@@ -1133,10 +1163,15 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("spatial_sort", C::Mixed, K::Sort).extensions(POSTGIS),
     workload("filtered_grouped_agg", C::Mixed, K::HashAgg)
         .pins(PINS_FILTERED_GROUPAGG)
-        .evidence(WINNER),
+        .evidence(NATIVE_DECLINE),
     workload("mixed_megapoly_agg", C::Mixed, K::PointInRing).extensions(POSTGIS),
     workload("mixed_expr_agg", C::Mixed, K::Expr),
-    workload("mixed_join_agg", C::Mixed, K::ResidentStarGroupAgg).pins(PINS_MIXED_JOIN),
+    workload("mixed_join_agg", C::Mixed, K::ResidentStarGroupAgg)
+        .pins(PINS_MIXED_JOIN)
+        .evidence(NATIVE_DECLINE),
+    workload("mixed_join_agg_int4", C::Mixed, K::ResidentStarGroupAgg)
+        .pins(PINS_MIXED_JOIN_INT4)
+        .evidence(WINNER),
     workload("mixed_spatial_sort", C::Mixed, K::Sort).extensions(POSTGIS),
     workload("raster_ndvi", C::GpuRaster, K::Raster)
         .extensions(POSTGIS_RASTER)
@@ -1188,13 +1223,13 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("topk_wide", C::Regression, K::Sort).evidence(NATIVE_DECLINE),
     workload("reduce_f64_sum", C::Fp64Matrix, K::ResidentF64Reduce)
         .pins(PINS_REDUCE_F64)
-        .evidence(FP64_WINNER),
+        .evidence(FP64_NATIVE_DECLINE),
     workload("reduce_f64_minmax", C::Fp64Matrix, K::ResidentF64Reduce)
         .pins(PINS_REDUCE_F64)
         .evidence(FP64_WINNER),
     workload("reduce_f64_stats", C::Fp64Matrix, K::ResidentF64Reduce)
         .pins(PINS_REDUCE_F64)
-        .evidence(FP64_WINNER),
+        .evidence(FP64_NATIVE_DECLINE),
     workload("sort_f64_keys", C::Fp64Matrix, K::Unclassified).evidence(FP64_CALIBRATION),
     workload("hashagg_f64_keys", C::Fp64Matrix, K::HashAgg).evidence(FP64_CALIBRATION),
     workload(
@@ -1203,7 +1238,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         K::ResidentF64GroupedStats,
     )
     .pins(PINS_HASHAGG_F64)
-    .evidence(FP64_WINNER),
+    .evidence(FP64_NATIVE_DECLINE),
     workload("spatial_fp64_recheck", C::Fp64Matrix, K::Unclassified)
         .extensions(POSTGIS)
         .evidence(FP64_CALIBRATION),

@@ -128,6 +128,41 @@ pub const MIXED_JOIN_AGG: MixedVariant = MixedVariant {
     ],
 };
 
+/// Deterministic exact-integer join + aggregation release lane.
+pub const MIXED_JOIN_AGG_INT4: MixedVariant = MixedVariant {
+    name: "mixed_join_agg_int4",
+    description: "INNER JOIN -> GROUP BY -> SUM(int4)/COUNT(*) exact pipeline",
+    setup_stmts: &[
+        "DROP TABLE IF EXISTS bench_mixed_facts_int4",
+        "DROP TABLE IF EXISTS bench_mixed_dims_int4",
+        "CREATE TABLE bench_mixed_dims_int4 (\
+           id int4 PRIMARY KEY, \
+           label int4 NOT NULL\
+         )",
+        "CREATE TABLE bench_mixed_facts_int4 (\
+           id int4 PRIMARY KEY, \
+           dim_id int4 NOT NULL, \
+           amount int4 NOT NULL\
+         )",
+        "INSERT INTO bench_mixed_dims_int4 (id, label) \
+         SELECT g::int4, ((g - 1) % 11)::int4 \
+         FROM generate_series(1, 1000) AS g",
+        "INSERT INTO bench_mixed_facts_int4 (id, dim_id, amount) \
+         SELECT g::int4, ((g - 1) % 1000 + 1)::int4, (1 + (g % 1000))::int4 \
+         FROM generate_series(1, {rows}) AS g",
+        "ANALYZE bench_mixed_dims_int4",
+        "ANALYZE bench_mixed_facts_int4",
+    ],
+    query: "SELECT d.label, SUM(f.amount) AS sum, COUNT(*) AS count \
+            FROM bench_mixed_facts_int4 f \
+            INNER JOIN bench_mixed_dims_int4 d ON f.dim_id = d.id \
+            GROUP BY d.label",
+    cleanup_stmts: &[
+        "DROP TABLE IF EXISTS bench_mixed_facts_int4",
+        "DROP TABLE IF EXISTS bench_mixed_dims_int4",
+    ],
+};
+
 /// Spatial megapoly + sort pipeline
 pub const MIXED_SPATIAL_SORT: MixedVariant = MixedVariant {
     name: "mixed_spatial_sort",

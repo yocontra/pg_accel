@@ -66,10 +66,10 @@ existing pin. `pg_accel.resident_memory_budget_mb` charges device buffers,
 retained exact values, derived artifacts, and transient transform storage
 cluster-wide; pins never bypass it.
 
-Example setup for the canonical resident aggregate:
+Example setup for the exact-integer resident aggregate:
 
 ```sql
-SELECT pg_accel_pin('bench_grouped_agg', ARRAY['group_id', 'value']);
+SELECT pg_accel_pin('bench_employees_agg_int4', ARRAY['dept', 'salary']);
 SET pg_accel.auto_load = off;
 
 SELECT * FROM pg_accel_resident_status();
@@ -119,20 +119,20 @@ The complete inventory, defaults, contexts, and ranges are in
 First validate workload definitions without connecting:
 
 ```bash
-cargo run -p pg_accel_bench -- validate --workload grouped_agg
+cargo run -p pg_accel_bench -- validate --workload grouped_agg_int4
 ```
 
 Create deterministic data, then run the same workload:
 
 ```bash
 cargo run -p pg_accel_bench -- setup \
-  --workload grouped_agg \
+  --workload grouped_agg_int4 \
   --rows 1000000 \
   --seed 42 \
   --connection "host=localhost dbname=postgres"
 
 cargo run -p pg_accel_bench -- run \
-  --workload grouped_agg \
+  --workload grouped_agg_int4 \
   --iterations 10 \
   --warmup 5 \
   --seed 42 \
@@ -158,16 +158,28 @@ The recipe installs the current release build, runs the CPU-cheat audit and
 provenance checks, and invokes `pg_accel_bench metal-ship-gate`. The command
 does not accept sampling or workload overrides. It fixes seed 42, ten measured
 iterations, five warmups, raw wall-clock timing, cache mode `both`, plan
-capture, and the following 1M-row winner cells:
+capture, and the following exact 1M-row winner cells:
 
 | Workload | Protected lane | Minimum warm median vs PostgreSQL parallel |
 |---|---|---:|
-| `grouped_agg` | resident grouped SUM/AVG/COUNT | 1.00x |
-| `predicate_filter_expression_grouped_agg` | expression measure plus aggregate FILTER | 1.00x |
-| `mixed_join_agg` | resident hash join plus grouped aggregate | 1.00x |
-| `ssbm_q4_3` | resident star-schema grouped profit | 1.00x |
-| `h3_bulk` | H3 lat/lng-to-cell grouped count | 1.50x |
+| `grouped_agg_int4` | exact resident grouped SUM(int4)/COUNT | 1.00x |
+| `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.00x |
+| `mixed_join_agg_int4` | exact resident hash join plus grouped SUM(int4)/COUNT | 1.00x |
+| `ssbm_resident_int4_star` | exact resident fact/date join grouped by year | 1.00x |
+| `hashjoin_10k_1m` | resident equality hash join COUNT | 1.00x |
 | `h3_cell_to_parent` | fused H3 parent grouped count | 1.10x |
+
+The similarly named legacy workloads remain in the harness as fail-closed
+coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
+`shape_floating_accumulator_semantics`, while
+`predicate_filter_expression_grouped_agg` declines with
+`shape_aggregate_modifier`. The 13 canonical `ssbm_q*` workloads also remain
+native: Q1.1-Q1.3 report `shape_multi_filter_relation`, Q3.3-Q3.4 report
+`shape_unsupported_predicate`, and the remaining canonical SSBM queries report
+`shape_unsupported_filter_type`. `h3_bulk` reports `shape_unsupported_rte`, and
+`h3_resolution_sweep` plus `h3_latlng_res15` report
+`shape_group_expression`. Historical timing artifacts for those workloads do
+not make them eligible for the current ship gate.
 
 The threshold matrix is the executable source of truth. Before timing, the
 command rejects missing, duplicate, unregistered, non-winner, or sub-parity

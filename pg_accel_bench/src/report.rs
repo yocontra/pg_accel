@@ -1621,6 +1621,8 @@ fn threshold_lane_requires_resident_groupagg_logical_spec(lane: &str) -> bool {
         || lane.starts_with("h3_latlng_to_cell_grouped_")
         || lane.starts_with("h3_cell_to_parent_grouped_count_")
         || lane == "hashjoin_filter_groupagg"
+        || lane == "hashjoin_groupagg_exact_sum_count"
+        || lane == "ssbm_resident_int4_year_revenue"
 }
 
 fn plan_contains_resident_groupagg_logical_evidence(plan: &str) -> bool {
@@ -5055,7 +5057,7 @@ fn ledger_track(
         || kernel_class == "hash_join"
         || workload.contains("hashjoin")
         || workload.contains("hash_join")
-        || workload == "mixed_join_agg"
+        || workload.starts_with("mixed_join_agg")
     {
         return "resident_hashjoin_and_join_aggregate";
     }
@@ -6379,7 +6381,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_ship_gate_flags_expected_winner_missing_evidence() {
-        let mut workload = mock_workload_result("grouped_agg", 1_000_000, 10.0, 20.0);
+        let mut workload = mock_workload_result("grouped_agg_int4", 1_000_000, 10.0, 20.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
         workload.accel_output_rows_consumed = 0;
@@ -6405,7 +6407,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_ship_gate_allows_groupagg_winner_with_logical_spec() {
-        let mut workload = mock_workload_result("grouped_agg", 1_000_000, 10.0, 20.0);
+        let mut workload = mock_workload_result("grouped_agg_int4", 1_000_000, 10.0, 20.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
         workload.accel_output_rows_consumed = 10;
@@ -6453,7 +6455,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_ship_gate_requires_groupagg_logical_spec_for_winners() {
-        let mut workload = mock_workload_result("grouped_agg", 1_000_000, 10.0, 20.0);
+        let mut workload = mock_workload_result("grouped_agg_int4", 1_000_000, 10.0, 20.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
         workload.accel_output_rows_consumed = 10;
@@ -6480,7 +6482,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_ship_gate_requires_groupagg_predicate_ir_for_winners() {
-        let mut workload = mock_workload_result("grouped_agg", 1_000_000, 10.0, 20.0);
+        let mut workload = mock_workload_result("grouped_agg_int4", 1_000_000, 10.0, 20.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
         workload.accel_output_rows_consumed = 10;
@@ -6513,7 +6515,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_ship_gate_requires_hashjoin_filter_groupagg_logical_spec() {
-        let mut workload = mock_workload_result("gpu_hashjoin_filter", 1_000_000, 10.0, 20.0);
+        let mut workload = mock_workload_result("mixed_join_agg_int4", 1_000_000, 10.0, 20.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
         workload.accel_output_rows_consumed = 10;
@@ -6535,12 +6537,16 @@ mod tests {
             failures[0].kind,
             BenchmarkShipGateFailureKind::ExpectedWinnerMissingGroupAggLogicalSpec
         );
-        assert!(failures[0].detail.contains("hashjoin_filter_groupagg"));
+        assert!(
+            failures[0]
+                .detail
+                .contains("hashjoin_groupagg_exact_sum_count")
+        );
     }
 
     #[test]
     fn test_benchmark_ship_gate_requires_ssbm_groupagg_logical_spec_for_winners() {
-        let mut workload = mock_workload_result("ssbm_q4_3", 1_000_000, 10.0, 20.0);
+        let mut workload = mock_workload_result("ssbm_resident_int4_star", 1_000_000, 10.0, 20.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
         workload.accel_output_rows_consumed = 10;
@@ -6562,12 +6568,16 @@ mod tests {
             failures[0].kind,
             BenchmarkShipGateFailureKind::ExpectedWinnerMissingGroupAggLogicalSpec
         );
-        assert!(failures[0].detail.contains("ssbm_q4_grouped_profit"));
+        assert!(
+            failures[0]
+                .detail
+                .contains("ssbm_resident_int4_year_revenue")
+        );
     }
 
     #[test]
     fn test_benchmark_ship_gate_allows_ssbm_q1_winner_with_groupagg_logical_spec() {
-        let mut workload = mock_workload_result("ssbm_q1_1", 1_000_000, 10.0, 20.0);
+        let mut workload = mock_workload_result("ssbm_resident_int4_star", 1_000_000, 10.0, 20.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
         workload.accel_output_rows_consumed = 1;
@@ -6595,7 +6605,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_ship_gate_allows_ssbm_q4_winner_with_groupagg_logical_spec() {
-        let mut workload = mock_workload_result("ssbm_q4_3", 1_000_000, 10.0, 20.0);
+        let mut workload = mock_workload_result("ssbm_resident_int4_star", 1_000_000, 10.0, 20.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
         workload.accel_output_rows_consumed = 10;
@@ -6623,7 +6633,7 @@ mod tests {
 
     #[test]
     fn test_benchmark_ship_gate_flags_expected_winner_below_threshold() {
-        let mut workload = mock_workload_result("h3_bulk", 1_000_000, 10.0, 12.0);
+        let mut workload = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 10.0);
         workload.category = "gpu_h3".to_owned();
         workload.kernel_class = "h3_latlng".to_owned();
         workload.plan_selected = false;
@@ -6654,12 +6664,12 @@ mod tests {
             failures[0].kind,
             BenchmarkShipGateFailureKind::ExpectedWinnerBelowThreshold
         );
-        assert!((failures[0].gate_floor - 1.5).abs() < f64::EPSILON);
+        assert!((failures[0].gate_floor - 1.1).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_benchmark_ship_gate_requires_h3_raster_cache_mode_both_for_winners() {
-        let mut workload = mock_workload_result("h3_bulk", 1_000_000, 10.0, 50.0);
+        let mut workload = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 50.0);
         workload.category = "gpu_h3".to_owned();
         workload.kernel_class = "h3_latlng".to_owned();
         workload.plan_selected = true;
@@ -6711,7 +6721,7 @@ mod tests {
     #[test]
     fn test_benchmark_ship_gate_flags_expected_winner_missed_selection() {
         let workload = mark_no_dispatch(
-            mock_workload_result("grouped_agg", 1_000_000, 10.0, 20.0),
+            mock_workload_result("grouped_agg_int4", 1_000_000, 10.0, 20.0),
             "HashAggregate\n  -> Seq Scan on bench_grouped_agg",
             "HashAggregate\n  -> Seq Scan on bench_grouped_agg",
         );
@@ -6970,7 +6980,7 @@ mod tests {
             "HashAggregate\n  -> Seq Scan on bench_h3_points",
         );
         with_reason.native_decline_evidence = Some(NativeDeclineEvidence {
-            reason: "h3_rows_below_grouped_agg_min".to_owned(),
+            reason: "shape_unsupported_rte".to_owned(),
             source: DeclineReasonSource::PlannerReported,
         });
         let report = mock_report(vec![with_reason]);
@@ -7011,7 +7021,7 @@ mod tests {
 
     #[test]
     fn test_threshold_matrix_renders_evidence_columns() {
-        let workload = mock_h3_winning_workload("h3_bulk", 1_000_000);
+        let workload = mock_h3_winning_workload("h3_cell_to_parent", 1_000_000);
         let report = mock_report(vec![workload]);
         let md = report.to_markdown();
 
@@ -7217,25 +7227,25 @@ mod tests {
     // the report can no longer leave CI green.
     // -----------------------------------------------------------------------
 
-    /// `h3_bulk` is a canonical H3 Winner. Dispatched, but with a
+    /// `h3_cell_to_parent` is the canonical H3 Winner. Dispatched, but with a
     /// `speedup_median_vs_parallel` of 0.5x (well below the 1.0x gate floor)
     /// MUST produce exactly one `WinnerBelowFloor` failure.
     #[test]
     fn test_h3_winner_below_threshold_triggers_gate_fail() {
         // 20ms accel vs 10ms parallel → median speedup ~0.5x
-        let mut workload = mock_workload_result("h3_bulk", 1_000_000, 20.0, 10.0);
+        let mut workload = mock_workload_result("h3_cell_to_parent", 1_000_000, 20.0, 10.0);
         workload.category = "gpu_h3".to_owned();
-        workload.kernel_class = "h3_latlng".to_owned();
+        workload.kernel_class = "h3_cell_to_parent".to_owned();
         // The gate reads `gpu_kernel_dispatched` AFTER `with_normalized_dispatch`
         // re-runs the classifier, so seed the inputs the classifier consumes.
-        workload.plan_selected = false;
+        workload.plan_selected = true;
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
         workload.accel_output_rows_consumed = 10;
         workload.pg_accel_stock_exec_delta = 0;
         workload.plan_snippet = Some(
-            "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n  \
-             Group Key: h3_latlng_to_cell(bench_h3_points.geom, 7)\n"
+            "Custom Scan (GpuAgg)\n  Output: (h3_cell_to_parent(cell, 0)), count(*)\n  \
+             Group Key: h3_cell_to_parent(bench_h3_parent.cell, 0)\n"
                 .to_owned(),
         );
 
@@ -7244,9 +7254,9 @@ mod tests {
         assert_eq!(
             failures.len(),
             1,
-            "regressed h3_bulk Winner must produce exactly one gate failure; got: {failures:?}"
+            "regressed h3_cell_to_parent Winner must produce exactly one gate failure; got: {failures:?}"
         );
-        assert_eq!(failures[0].workload, "h3_bulk");
+        assert_eq!(failures[0].workload, "h3_cell_to_parent");
         assert_eq!(failures[0].kind, H3LaneGateFailureKind::WinnerBelowFloor);
         assert!(
             failures[0].speedup_median < H3_LANE_GATE_MIN_WARM_SPEEDUP,
@@ -7265,7 +7275,7 @@ mod tests {
             "failure section must label the failure kind; full md:\n{md}"
         );
         assert!(
-            md.contains("h3_bulk"),
+            md.contains("h3_cell_to_parent"),
             "failure section must name the failing workload; full md:\n{md}"
         );
     }
@@ -7313,7 +7323,7 @@ mod tests {
 
     #[test]
     fn test_h3_below_grouped_floor_passes_as_native_decline() {
-        let mut workload = mock_workload_result("h3_bulk", 10_000, 10.0, 30.0);
+        let mut workload = mock_workload_result("h3_cell_to_parent", 10_000, 10.0, 30.0);
         workload.category = "gpu_h3".to_owned();
         workload.kernel_class = "h3_latlng".to_owned();
         workload.plan_selected = false;
@@ -7335,13 +7345,13 @@ mod tests {
         let report = mock_report(vec![workload]);
         assert!(
             report.evaluate_benchmark_ship_gate().is_empty(),
-            "below-floor h3_bulk row must satisfy the generic native-decline ship gate \
+            "below-floor h3_cell_to_parent row must satisfy the generic native-decline ship gate \
              when the planner reported the expected decline reason"
         );
         let failures = report.evaluate_h3_lane_gate();
         assert!(
             failures.is_empty(),
-            "below-floor h3_bulk row must follow the threshold matrix native-decline expectation; got: {failures:?}"
+            "below-floor h3_cell_to_parent row must follow the threshold matrix native-decline expectation; got: {failures:?}"
         );
 
         let md = report.to_markdown();
@@ -7359,7 +7369,7 @@ mod tests {
     #[test]
     fn test_h3_below_grouped_floor_native_decline_requires_confirmed_evidence() {
         let base = || {
-            let mut workload = mock_workload_result("h3_bulk", 10_000, 10.0, 30.0);
+            let mut workload = mock_workload_result("h3_cell_to_parent", 10_000, 10.0, 30.0);
             workload.category = "gpu_h3".to_owned();
             workload.kernel_class = "h3_latlng".to_owned();
             workload.plan_selected = false;

@@ -1,4 +1,4 @@
-use super::Workload;
+use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i64};
 
 const SSBM_Q23_EXACT_BRAND_MIN_PARTS: usize = 1_000;
 
@@ -200,6 +200,9 @@ pub fn ssbm_setup_sql(rows: usize) -> Vec<String> {
              FROM generate_series(1, {cust_count}) AS i"
         ),
         ssbm_dimension_sanity_sql(),
+        // PostgreSQL's session-local PRNG drives the canonical fact fixture.
+        // Pin it so repeated native/GPU release runs start from identical data.
+        "SELECT setseed(0.424242)".to_owned(),
         // -- Populate fact table --
         format!(
             "INSERT INTO ssbm_lineorder \
@@ -249,6 +252,46 @@ pub fn ssbm_cleanup_sql() -> Vec<String> {
 // ---------------------------------------------------------------------------
 // Q1 — Revenue from discounted lineorders with date/quantity filters
 // ---------------------------------------------------------------------------
+
+/// Exact current-planner sentinel over the canonical SSBM fact/date schema.
+pub struct SsbmResidentInt4Star;
+
+impl Workload for SsbmResidentInt4Star {
+    fn name(&self) -> &'static str {
+        "ssbm_resident_int4_star"
+    }
+
+    fn description(&self) -> &'static str {
+        "SSBM lineorder/date join grouped by int4 year with exact SUM(int4) and COUNT(*)"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        ssbm_setup_sql(rows)
+    }
+
+    fn query_sql(&self) -> String {
+        "SELECT d_year, SUM(lo_revenue) AS sum, COUNT(*) AS count \
+         FROM ssbm_lineorder \
+         JOIN ssbm_date ON lo_orderdate = d_datekey \
+         GROUP BY d_year"
+            .to_owned()
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT COALESCE(SUM(q.count), 0)::int8 AS input_rows \
+                 FROM ({}) AS q",
+                self.query_sql()
+            ),
+            vec![Value::I64(usize_to_i64(rows))],
+        ))
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        ssbm_cleanup_sql()
+    }
+}
 
 pub struct SsbmQ1_1;
 

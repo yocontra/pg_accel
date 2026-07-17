@@ -4777,6 +4777,20 @@ mod tests {
             )]
         );
         assert_eq!(
+            resident_pin_specs("grouped_agg_int4"),
+            vec![resident_pin(
+                "bench_employees_agg_int4",
+                &["dept", "salary"],
+            )]
+        );
+        assert_eq!(
+            resident_pin_specs("predicate_expression_grouped_agg_int4"),
+            vec![resident_pin(
+                "bench_predicate_expression_sales_int4",
+                &["product_id", "price", "quantity", "active"],
+            )]
+        );
+        assert_eq!(
             resident_pin_specs("hashagg_f64_aggs"),
             vec![resident_pin("bench_fp64_num", &["gk", "v_f64", "w_f64"],)]
         );
@@ -4784,6 +4798,13 @@ mod tests {
 
     #[test]
     fn test_resident_pin_specs_cover_ssbm_inputs_exactly() {
+        assert_eq!(
+            resident_pin_specs("ssbm_resident_int4_star"),
+            vec![
+                resident_pin("ssbm_lineorder", &["lo_orderdate", "lo_revenue"]),
+                resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+            ]
+        );
         assert_eq!(
             resident_pin_specs("ssbm_q1_3"),
             vec![
@@ -4835,6 +4856,13 @@ mod tests {
             vec![
                 resident_pin("bench_mixed_facts", &["dim_id", "amount"]),
                 resident_pin("bench_mixed_dims", &["id", "label"]),
+            ]
+        );
+        assert_eq!(
+            resident_pin_specs("mixed_join_agg_int4"),
+            vec![
+                resident_pin("bench_mixed_facts_int4", &["dim_id", "amount"]),
+                resident_pin("bench_mixed_dims_int4", &["id", "label"]),
             ]
         );
     }
@@ -5123,6 +5151,26 @@ mod tests {
         );
         assert!(case_when_not_expression.contains("round(q.sum::numeric, 3)"));
         assert!(case_when_not_expression.contains("'product_id', q.product_id"));
+    }
+
+    #[test]
+    fn test_correctness_projection_keeps_exact_release_aggregates_unrounded() {
+        for name in [
+            "grouped_agg_int4",
+            "predicate_expression_grouped_agg_int4",
+            "mixed_join_agg_int4",
+            "ssbm_resident_int4_star",
+        ] {
+            let workload = crate::workloads::find_workload(name)
+                .unwrap_or_else(|| panic!("registered exact workload {name}"));
+            let projection = correctness_projection_sql(&workload.query_sql(), name, false);
+            assert!(projection.contains("to_jsonb(q)::text"), "{name}");
+            assert!(
+                !projection.to_ascii_lowercase().contains("round("),
+                "{name}"
+            );
+            assert!(projection.contains(&workload.query_sql()), "{name}");
+        }
     }
 
     #[test]
