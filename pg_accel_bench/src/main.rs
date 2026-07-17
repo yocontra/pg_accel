@@ -1839,7 +1839,7 @@ mod tests {
                 contract.verification_rows.len()
             })
             .sum::<usize>();
-        assert_eq!(cell_count, 33);
+        assert_eq!(cell_count, 36);
     }
 
     #[test]

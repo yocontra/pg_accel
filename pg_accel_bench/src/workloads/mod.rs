@@ -993,6 +993,7 @@ const GENERIC_GPU_DISPATCH_EVIDENCE: &str =
     "dispatch counter delta > 0 and accel output rows consumed";
 const GENERIC_NATIVE_DISPATCH_EVIDENCE: &str =
     "dispatch counter delta = 0 and no pg_accel plan selected";
+const NATIVE_DECLINE_BATCH_COUNT: &str = "n/a; native PostgreSQL execution; zero GPU batches";
 const GENERIC_CACHE_GATE: &str =
     "warm median threshold; use cache-mode both artifacts for cold-start audit";
 
@@ -1302,8 +1303,13 @@ fn groupagg_threshold_matrix_entry(
         result_count,
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
-        batch_count: "backend-local resident groupagg cache consumed by one dense grouped kernel"
-            .to_owned(),
+        batch_count: match expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => {
+                "backend-local resident groupagg cache consumed by one dense grouped kernel"
+            }
+            BenchmarkLaneExpectation::NativeDecline { .. } => NATIVE_DECLINE_BATCH_COUNT,
+        }
+        .to_owned(),
         row_width,
         output_size,
         dispatch_evidence: match expectation {
@@ -1359,7 +1365,11 @@ fn olap_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
         result_count: profile.result_count.to_owned(),
         index_pruning_shape: profile.index_pruning_shape,
         prepared_geometry: "n/a",
-        batch_count: profile.batch_count.to_owned(),
+        batch_count: match expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => profile.batch_count,
+            BenchmarkLaneExpectation::NativeDecline { .. } => NATIVE_DECLINE_BATCH_COUNT,
+        }
+        .to_owned(),
         row_width: profile.row_width,
         output_size: profile.output_size,
         dispatch_evidence: match expectation {
@@ -1402,17 +1412,17 @@ struct SsbmMatrixProfile {
 fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
     Some(match name {
         "ssbm_resident_int4_star" => SsbmMatrixProfile {
-            lane: "ssbm_resident_int4_year_revenue",
-            data_type: "int4 fact/dimension join keys, group key, and measure",
-            cardinality: "seven canonical SSBM year groups",
-            selectivity: "100% deterministically seeded lineorder rows joined and grouped",
-            result_count: "exactly seven grouped rows at release scale",
-            index_pruning_shape: "unique int4 date dimension join",
-            batch_count: "resident lineorder/date batches consumed by one exact grouped kernel",
-            row_width: "int4 orderdate/revenue fact plus int4 date key/year dimension",
-            output_size: "d_year, exact SUM(int4), COUNT(*)",
-            dispatch_evidence: "SSBM resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
-            threshold_basis: "deterministically seeded canonical five-table SSBM exact-int4 release sentinel",
+            lane: "ssbm_resident_int4_year_size_revenue",
+            data_type: "int4 fact/date/part join keys, two dimension group keys, and measure",
+            cardinality: "at most 350 canonical SSBM year-by-part-size groups",
+            selectivity: "100% runner-seeded lineorder rows joined through two unique dimensions",
+            result_count: "one row per populated year-by-part-size group (maximum 350)",
+            index_pruning_shape: "unique int4 date and part dimension joins",
+            batch_count: "resident lineorder/date/part batches consumed by one exact grouped kernel",
+            row_width: "int4 orderdate/partkey/revenue fact plus int4 date key/year and part key/size dimensions",
+            output_size: "d_year, p_size, exact SUM(int4), COUNT(*)",
+            dispatch_evidence: "SSBM two-dimension resident GroupAgg Custom Scan; descriptor proves date+part joins, d_year+p_size keys, SUM+COUNT; kernel counter delta > 0; stock fallback counter = 0",
+            threshold_basis: "runner-seeded canonical SSBM exact-int4 two-dimension star release sentinel",
         },
         "ssbm_q1_1" => SsbmMatrixProfile {
             lane: "ssbm_q1_filtered_revenue_year",
@@ -1421,7 +1431,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "date year = 1993, discount 1..3, quantity < 25",
             result_count: "one revenue aggregate row",
             index_pruning_shape: "canonical date dimension join folded to fact-side date filter",
-            batch_count: "resident lineorder column batches consumed by one filtered-revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "4 x int4 fact columns (orderdate, discount, quantity, extendedprice)",
             output_size: "one int8 revenue scalar plus selected-row count proof",
             dispatch_evidence: "SSBM Q1 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1434,7 +1444,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "date yearmonthnum = 199401, discount 4..6, quantity 26..35",
             result_count: "one revenue aggregate row",
             index_pruning_shape: "canonical date dimension join folded to fact-side date filter",
-            batch_count: "resident lineorder column batches consumed by one filtered-revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "4 x int4 fact columns (orderdate, discount, quantity, extendedprice)",
             output_size: "one int8 revenue scalar plus selected-row count proof",
             dispatch_evidence: "SSBM Q1 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1447,7 +1457,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "date weeknuminyear = 6 and year = 1994, discount 5..7, quantity 26..35",
             result_count: "one revenue aggregate row",
             index_pruning_shape: "canonical date dimension join folded to fact-side date filter",
-            batch_count: "resident lineorder column batches consumed by one filtered-revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "4 x int4 fact columns (orderdate, discount, quantity, extendedprice)",
             output_size: "one int8 revenue scalar plus selected-row count proof",
             dispatch_evidence: "SSBM Q1 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1460,7 +1470,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "part category MFGR#12 and supplier region AMERICA",
             result_count: "bounded d_year/p_brand1 grouped revenue rows",
             index_pruning_shape: "date, part, and supplier joins folded to resident dimension membership maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, partkey, suppkey, revenue plus resident dimension maps",
             output_size: "SUM(lo_revenue), d_year, p_brand1",
             dispatch_evidence: "SSBM Q2 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1473,7 +1483,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "part brand MFGR#2221..MFGR#2228 and supplier region ASIA",
             result_count: "bounded d_year/p_brand1 grouped revenue rows",
             index_pruning_shape: "date, part, and supplier joins folded to resident dimension membership maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, partkey, suppkey, revenue plus resident dimension maps",
             output_size: "SUM(lo_revenue), d_year, p_brand1",
             dispatch_evidence: "SSBM Q2 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1486,7 +1496,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "part brand MFGR#2239 and supplier region EUROPE",
             result_count: "bounded d_year/p_brand1 grouped revenue rows",
             index_pruning_shape: "date, part, and supplier joins folded to resident dimension membership maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, partkey, suppkey, revenue plus resident dimension maps",
             output_size: "SUM(lo_revenue), d_year, p_brand1",
             dispatch_evidence: "SSBM Q2 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1499,7 +1509,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "customer/supplier region ASIA and date years 1992..1997",
             result_count: "bounded c_geo/s_geo/d_year grouped revenue rows",
             index_pruning_shape: "date, customer, and supplier joins folded to resident membership and group-code maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, custkey, suppkey, revenue plus resident dimension maps",
             output_size: "customer geo, supplier geo, d_year, SUM(lo_revenue)",
             dispatch_evidence: "SSBM Q3 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1512,7 +1522,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "customer/supplier nation UNITED STATES and date years 1992..1997",
             result_count: "bounded c_city/s_city/d_year grouped revenue rows",
             index_pruning_shape: "date, customer, and supplier joins folded to resident membership and group-code maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, custkey, suppkey, revenue plus resident dimension maps",
             output_size: "customer city, supplier city, d_year, SUM(lo_revenue)",
             dispatch_evidence: "SSBM Q3 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1525,7 +1535,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "customer/supplier city IN (UNITED ST0, UNITED ST1) and date years 1992..1997",
             result_count: "bounded c_city/s_city/d_year grouped revenue rows",
             index_pruning_shape: "date, customer, and supplier joins folded to resident membership and group-code maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, custkey, suppkey, revenue plus resident dimension maps",
             output_size: "customer city, supplier city, d_year, SUM(lo_revenue)",
             dispatch_evidence: "SSBM Q3 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1538,7 +1548,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "customer/supplier city set and date yearmonth Dec1997",
             result_count: "bounded c_city/s_city/d_year grouped revenue rows",
             index_pruning_shape: "date, customer, and supplier joins folded to resident membership and group-code maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped revenue kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, custkey, suppkey, revenue plus resident dimension maps",
             output_size: "customer city, supplier city, d_year, SUM(lo_revenue)",
             dispatch_evidence: "SSBM Q3 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1551,7 +1561,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "customer/supplier region AMERICA and part mfgr MFGR#1 or MFGR#2",
             result_count: "bounded d_year/geography grouped profit rows",
             index_pruning_shape: "date, customer, supplier, and part joins folded to resident membership and group-code maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped profit kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, custkey, suppkey, partkey, revenue, supplycost plus resident dimension maps",
             output_size: "d_year, geography, SUM(lo_revenue - lo_supplycost)",
             dispatch_evidence: "SSBM Q4 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1564,7 +1574,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "customer/supplier region AMERICA, years 1997/1998, part mfgr MFGR#1 or MFGR#2",
             result_count: "bounded d_year/geography/part grouped profit rows",
             index_pruning_shape: "date, customer, supplier, and part joins folded to resident membership and group-code maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped profit kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, custkey, suppkey, partkey, revenue, supplycost plus resident dimension maps",
             output_size: "d_year, geography, part category, SUM(lo_revenue - lo_supplycost)",
             dispatch_evidence: "SSBM Q4 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1577,7 +1587,7 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             selectivity: "customer region AMERICA, supplier nation UNITED STATES, years 1997/1998, part category MFGR#14",
             result_count: "bounded d_year/geography/part grouped profit rows",
             index_pruning_shape: "date, customer, supplier, and part joins folded to resident membership and group-code maps",
-            batch_count: "resident lineorder/star dimension batches consumed by one grouped profit kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "orderdate, custkey, suppkey, partkey, revenue, supplycost plus resident dimension maps",
             output_size: "d_year, supplier city, part brand, SUM(lo_revenue - lo_supplycost)",
             dispatch_evidence: "SSBM Q4 resident GroupAgg Custom Scan, GPU Resident GroupAgg logical proof, kernel counter delta > 0, stock fallback counter = 0",
@@ -1620,7 +1630,11 @@ fn h3_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresho
         result_count: (profile.result_count)(rows),
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
-        batch_count: profile.batch_count.to_owned(),
+        batch_count: match expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => profile.batch_count,
+            BenchmarkLaneExpectation::NativeDecline { .. } => NATIVE_DECLINE_BATCH_COUNT,
+        }
+        .to_owned(),
         row_width: profile.row_width,
         output_size: profile.output_size,
         dispatch_evidence: match expectation {
@@ -1698,11 +1712,11 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             cardinality: "resolution 7 grouped cell ids",
             selectivity: "100% input points converted and grouped",
             result_count: grouped_result,
-            batch_count: "backend-local resident H3 point cache consumed by one grouped-count kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "16-byte point input + 8-byte h3index output",
             output_size: "h3index group key plus count rows",
-            threshold_basis: "H3 bulk lat/lng-to-cell warm winner matrix",
-            decline_reason: "h3_unexpected_native_decline",
+            threshold_basis: "H3 bulk lat/lng-to-cell native-decline guard",
+            decline_reason: "shape_unsupported_rte",
         },
         "h3_resolution_sweep" => H3MatrixProfile {
             lane: "h3_latlng_to_cell_grouped_res9",
@@ -1710,11 +1724,11 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             cardinality: "resolution 9 grouped cell ids",
             selectivity: "100% input points converted and grouped",
             result_count: grouped_result,
-            batch_count: "backend-local resident H3 point cache consumed by one grouped-count kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "16-byte point input + 8-byte h3index output",
             output_size: "h3index group key plus count rows",
-            threshold_basis: "H3 resolution-specific lat/lng-to-cell warm winner matrix",
-            decline_reason: "h3_unexpected_native_decline",
+            threshold_basis: "H3 resolution-9 lat/lng-to-cell native-decline guard",
+            decline_reason: "shape_group_expression",
         },
         "h3_latlng_res15" => H3MatrixProfile {
             lane: "h3_latlng_to_cell_grouped_res15",
@@ -1722,11 +1736,11 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             cardinality: "resolution 15 grouped cell ids",
             selectivity: "100% input points converted and grouped",
             result_count: grouped_result,
-            batch_count: "backend-local resident H3 point cache consumed by one grouped-count kernel",
+            batch_count: NATIVE_DECLINE_BATCH_COUNT,
             row_width: "16-byte point input + 8-byte h3index output",
             output_size: "h3index group key plus count rows",
-            threshold_basis: "H3 high-resolution lat/lng-to-cell warm winner matrix",
-            decline_reason: "h3_unexpected_native_decline",
+            threshold_basis: "H3 resolution-15 lat/lng-to-cell native-decline guard",
+            decline_reason: "shape_group_expression",
         },
         "h3_fp64_ops" => H3MatrixProfile {
             lane: "h3_latlng_to_cell_fp64_count_res15",
@@ -3154,9 +3168,18 @@ mod tests {
         ] {
             assert!(ssbm_setup.contains(&format!("create table {table}")));
         }
-        assert!(ssbm_setup.contains("select setseed(0.424242)"));
         assert!(ssbm_setup.contains("random()"));
-        assert!(!ssbm.query_sql().to_ascii_lowercase().contains("round("));
+        assert!(
+            !ssbm_setup.contains("setseed"),
+            "SSBM setup must use the runner's recorded --seed without overriding it"
+        );
+        let ssbm_query = ssbm.query_sql().to_ascii_lowercase();
+        assert!(ssbm_query.contains("join ssbm_date"));
+        assert!(ssbm_query.contains("join ssbm_part"));
+        assert!(ssbm_query.contains("group by d_year, p_size"));
+        assert!(ssbm_query.contains("sum(lo_revenue)"));
+        assert!(ssbm_query.contains("count(*)"));
+        assert!(!ssbm_query.contains("round("));
         assert!(ssbm.result_oracle(1_000_000).is_some());
     }
 
@@ -3820,11 +3843,10 @@ mod tests {
                 min_warm_speedup: 1.0,
             }
         );
-        assert!(
-            sentinel
-                .threshold_basis
-                .contains("canonical five-table SSBM")
-        );
+        assert_eq!(sentinel.lane, "ssbm_resident_int4_year_size_revenue");
+        assert!(sentinel.threshold_basis.contains("two-dimension star"));
+        assert!(sentinel.index_pruning_shape.contains("date and part"));
+        assert!(sentinel.output_size.contains("d_year, p_size"));
 
         for (name, reason) in [
             ("ssbm_q1_1", "shape_multi_filter_relation"),
@@ -4120,6 +4142,40 @@ mod tests {
             assert!(
                 find_workload(name).is_some(),
                 "threshold matrix references unregistered workload `{name}`"
+            );
+        }
+    }
+
+    #[test]
+    fn test_native_grouped_ssbm_and_h3_profiles_never_claim_gpu_batch_consumption() {
+        for metadata in registry::WORKLOAD_REGISTRY.iter().filter(|metadata| {
+            matches!(
+                metadata.category,
+                WorkloadCategory::GpuHashAgg
+                    | WorkloadCategory::StarSchemaSsbm
+                    | WorkloadCategory::GpuH3
+            )
+        }) {
+            let Some(entry) = benchmark_threshold_matrix_entry(metadata.name, 1_000_000) else {
+                continue;
+            };
+            if !matches!(
+                entry.expectation,
+                BenchmarkLaneExpectation::NativeDecline { .. }
+            ) {
+                continue;
+            }
+            assert_eq!(
+                entry.batch_count, NATIVE_DECLINE_BATCH_COUNT,
+                "{} native-decline batch metadata",
+                metadata.name
+            );
+            assert!(
+                entry.dispatch_evidence.contains("delta = 0")
+                    || entry.dispatch_evidence.contains("must remain zero"),
+                "{} native-decline dispatch metadata: {}",
+                metadata.name,
+                entry.dispatch_evidence
             );
         }
     }

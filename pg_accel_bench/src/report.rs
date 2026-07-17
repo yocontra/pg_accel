@@ -1622,7 +1622,7 @@ fn threshold_lane_requires_resident_groupagg_logical_spec(lane: &str) -> bool {
         || lane.starts_with("h3_cell_to_parent_grouped_count_")
         || lane == "hashjoin_filter_groupagg"
         || lane == "hashjoin_groupagg_exact_sum_count"
-        || lane == "ssbm_resident_int4_year_revenue"
+        || lane == "ssbm_resident_int4_year_size_revenue"
 }
 
 fn plan_contains_resident_groupagg_logical_evidence(plan: &str) -> bool {
@@ -1710,6 +1710,233 @@ fn plan_contains_resident_groupagg_logical_evidence(plan: &str) -> bool {
         && descriptor_property_is_concrete(descriptor_output, false);
 
     resident_groupagg && (legacy_logical_spec || descriptor_logical_spec)
+}
+
+fn plan_contains_required_groupagg_logical_evidence(plan: &str, lane: &str) -> bool {
+    if lane == "ssbm_resident_int4_year_size_revenue" {
+        plan_contains_exact_ssbm_two_dimension_descriptor(plan)
+    } else {
+        plan_contains_resident_groupagg_logical_evidence(plan)
+    }
+}
+
+fn plan_contains_exact_ssbm_two_dimension_descriptor(plan: &str) -> bool {
+    let operator_class = plan_text_property(
+        plan,
+        &["gpu resident operator class", "gpu_resident_operator_class"],
+    );
+    let strategy = plan_text_property(
+        plan,
+        &["gpu descriptor strategy", "gpu_descriptor_strategy"],
+    );
+    let Some(group_keys) = plan_text_property(
+        plan,
+        &["gpu descriptor group keys", "gpu_descriptor_group_keys"],
+    ) else {
+        return false;
+    };
+    let Some(aggregates) = plan_text_property(
+        plan,
+        &["gpu descriptor aggregates", "gpu_descriptor_aggregates"],
+    ) else {
+        return false;
+    };
+    let Some(filter) =
+        plan_text_property(plan, &["gpu descriptor filter", "gpu_descriptor_filter"])
+    else {
+        return false;
+    };
+    let Some(dimensions) = plan_text_property(
+        plan,
+        &[
+            "gpu descriptor star dimensions",
+            "gpu_descriptor_star_dimensions",
+        ],
+    ) else {
+        return false;
+    };
+    let Some(output) =
+        plan_text_property(plan, &["gpu descriptor output", "gpu_descriptor_output"])
+    else {
+        return false;
+    };
+
+    let Some(keys) = exact_indexed_descriptor_entries(&group_keys, "k", 2) else {
+        return false;
+    };
+    let Some(measures) = exact_indexed_descriptor_entries(&aggregates, "m", 2) else {
+        return false;
+    };
+    let Some(dims) = exact_indexed_descriptor_entries(&dimensions, "d", 2) else {
+        return false;
+    };
+    let Some(slots) = exact_indexed_descriptor_entries(&output, "slot", 4) else {
+        return false;
+    };
+
+    let keys = keys
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let measures = measures
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let dims = dims
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let slots = slots
+        .into_iter()
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let filter = filter.to_ascii_lowercase();
+
+    let Some(date_group) = parse_descriptor_dimension_group_key(&keys[0]) else {
+        return false;
+    };
+    let Some(part_group) = parse_descriptor_dimension_group_key(&keys[1]) else {
+        return false;
+    };
+    let parsed_dims = dims
+        .iter()
+        .map(|entry| parse_descriptor_star_dimension(entry))
+        .collect::<Option<Vec<_>>>();
+    let Some(parsed_dims) = parsed_dims else {
+        return false;
+    };
+    let Some(date_dim) = parsed_dims.iter().find(|dimension| {
+        dimension.fact_key.attno == 6
+            && dimension.dim_key.attno == 1
+            && dimension.fact_key.type_oid == 23
+            && dimension.dim_key.type_oid == 23
+    }) else {
+        return false;
+    };
+    let Some(part_dim) = parsed_dims.iter().find(|dimension| {
+        dimension.fact_key.attno == 4
+            && dimension.dim_key.attno == 1
+            && dimension.fact_key.type_oid == 23
+            && dimension.dim_key.type_oid == 23
+    }) else {
+        return false;
+    };
+    let Some(sum_column) = parse_descriptor_column_measure(&measures[0]) else {
+        return false;
+    };
+
+    operator_class.is_some_and(|value| value.eq_ignore_ascii_case("resident_groupagg"))
+        && strategy.is_some_and(|value| value.eq_ignore_ascii_case("descriptor_grouped_aggregate"))
+        && date_group.dim_index == date_dim.dim_index
+        && date_group.column.relation_oid == date_dim.relation_oid
+        && date_group.column.attno == 5
+        && date_group.column.type_oid == 23
+        && part_group.dim_index == part_dim.dim_index
+        && part_group.column.relation_oid == part_dim.relation_oid
+        && part_group.column.attno == 8
+        && part_group.column.type_oid == 23
+        && date_dim.fact_key.relation_oid == part_dim.fact_key.relation_oid
+        && date_dim.relation_oid == date_dim.dim_key.relation_oid
+        && part_dim.relation_oid == part_dim.dim_key.relation_oid
+        && date_dim.relation_oid != part_dim.relation_oid
+        && sum_column.relation_oid == date_dim.fact_key.relation_oid
+        && sum_column.attno == 13
+        && sum_column.type_oid == 23
+        && measures[0].contains("-> value.sum")
+        && measures[1].contains("m1:count_star -> value.count")
+        && filter == "fact=none; measures=[m0=none; m1=none]; dimensions=[d0=none; d1=none]"
+        && dims.iter().all(|entry| {
+            entry.contains(" join=")
+                && entry.contains("<->")
+                && entry.contains(" multiplicity=unique ")
+                && entry.ends_with("filter=none")
+        })
+        && slots[0].contains("slot0:group[k0]")
+        && slots[1].contains("slot1:group[k1]")
+        && slots[2].contains("slot2:aggregate[m0].value.sum")
+        && slots[3].contains("slot3:aggregate[m1].value.count")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DescriptorColumnRef {
+    relation_oid: u32,
+    attno: i32,
+    type_oid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DescriptorDimensionGroupKey {
+    dim_index: usize,
+    column: DescriptorColumnRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DescriptorStarDimension {
+    dim_index: usize,
+    relation_oid: u32,
+    fact_key: DescriptorColumnRef,
+    dim_key: DescriptorColumnRef,
+}
+
+fn parse_descriptor_column(value: &str) -> Option<DescriptorColumnRef> {
+    let (relation_and_attno, type_oid) = value.split_once(":type=")?;
+    let (relation_oid, attno) = relation_and_attno.rsplit_once('.')?;
+    Some(DescriptorColumnRef {
+        relation_oid: relation_oid.parse().ok()?,
+        attno: attno.parse().ok()?,
+        type_oid: type_oid.parse().ok()?,
+    })
+}
+
+fn parse_descriptor_dimension_group_key(entry: &str) -> Option<DescriptorDimensionGroupKey> {
+    let (_, source) = entry.split_once(':')?;
+    let source = source.strip_prefix("dimension[")?;
+    let (dim_index, column) = source.split_once("](")?;
+    let (column, _) = column.split_once(')')?;
+    Some(DescriptorDimensionGroupKey {
+        dim_index: dim_index.parse().ok()?,
+        column: parse_descriptor_column(column)?,
+    })
+}
+
+fn parse_descriptor_star_dimension(entry: &str) -> Option<DescriptorStarDimension> {
+    let (indexed, fields) = entry.split_once(':')?;
+    let dim_index = indexed.strip_prefix('d')?.parse().ok()?;
+    let relation_oid = fields
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("rel="))?
+        .parse()
+        .ok()?;
+    let join = fields
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("join="))?;
+    let (fact_key, dim_key) = join.split_once("<->")?;
+    Some(DescriptorStarDimension {
+        dim_index,
+        relation_oid,
+        fact_key: parse_descriptor_column(fact_key)?,
+        dim_key: parse_descriptor_column(dim_key)?,
+    })
+}
+
+fn parse_descriptor_column_measure(entry: &str) -> Option<DescriptorColumnRef> {
+    let measure = entry.strip_prefix("m0:column(")?;
+    let (column, _) = measure.split_once(')')?;
+    parse_descriptor_column(column)
+}
+
+fn exact_indexed_descriptor_entries<'a>(
+    value: &'a str,
+    prefix: &str,
+    expected: usize,
+) -> Option<Vec<&'a str>> {
+    let entries = value.split(';').map(str::trim).collect::<Vec<_>>();
+    (entries.len() == expected
+        && entries
+            .iter()
+            .enumerate()
+            .all(|(index, entry)| entry.starts_with(&format!("{prefix}{index}:"))))
+    .then_some(entries)
 }
 
 fn descriptor_property_is_concrete(value: Option<String>, allow_none: bool) -> bool {
@@ -2354,7 +2581,7 @@ fn gpu_winner_evidence_verified(
         && (!threshold_lane_requires_resident_groupagg_logical_spec(lane)
             || w.plan_snippet
                 .as_deref()
-                .is_some_and(plan_contains_resident_groupagg_logical_evidence))
+                .is_some_and(|plan| plan_contains_required_groupagg_logical_evidence(plan, lane)))
 }
 
 /// Whether native-decline evidence for this row is *verified* — i.e. safe to
@@ -4290,8 +4517,8 @@ impl BenchReport {
     ///    not winning.
     /// 2. **Winner missed dispatch**: every H3 Winner row that did NOT dispatch
     ///    a GPU kernel fails the gate. A Winner that silently routes to the
-    ///    PG-native plan is the failure mode `test_h3_bulk_with_zero_kernel_delta_is_not_dispatched`
-    ///    exists to catch — and the report-level gate makes it a CI failure.
+    ///    PG-native plan is a release failure for a selected winner; the
+    ///    report-level gate makes that loss of dispatch a CI failure.
     /// 3. **Parity dispatched unexpectedly**: every H3 [`Parity`](crate::workloads::H3LaneClass::Parity)
     ///    row that DID dispatch a GPU kernel fails the gate. Parity ops are
     ///    deliberately not registered for normal planner exposure; an
@@ -4474,10 +4701,9 @@ impl BenchReport {
                             continue;
                         }
                         if threshold_lane_requires_resident_groupagg_logical_spec(entry.lane)
-                            && !w
-                                .plan_snippet
-                                .as_deref()
-                                .is_some_and(plan_contains_resident_groupagg_logical_evidence)
+                            && !w.plan_snippet.as_deref().is_some_and(|plan| {
+                                plan_contains_required_groupagg_logical_evidence(plan, entry.lane)
+                            })
                         {
                             failures.push(BenchmarkShipGateFailure {
                                 workload: w.name.clone(),
@@ -5557,7 +5783,7 @@ mod tests {
     /// `cache_mode == "both"` methodology string.
     #[test]
     fn test_operation_cache_gate_verified_requires_complete_successful_cache_evidence() {
-        let mut w = mock_workload_result("h3_bulk", 1_000_000, 10.0, 50.0);
+        let mut w = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 50.0);
         w.category = "gpu_h3".to_owned();
         assert!(
             w.warm_summary.is_some(),
@@ -6166,9 +6392,9 @@ mod tests {
 
     #[test]
     fn test_h3_resident_groupagg_counts_as_custom_scan_gpu_dispatched() {
-        let mut workload = mock_workload_result("h3_bulk", 100_000, 10.0, 50.0);
+        let mut workload = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 50.0);
         workload.category = "gpu_h3".to_owned();
-        workload.kernel_class = "h3_latlng".to_owned();
+        workload.kernel_class = "h3_cell_to_parent".to_owned();
         workload.plan_selected = false;
         workload.gpu_kernel_dispatched = false;
         workload.function_srf_kernel_dispatched = false;
@@ -6201,14 +6427,15 @@ mod tests {
 
         let csv = report.to_csv();
         assert!(csv.contains(
-            "h3_bulk,gpu_h3,h3_latlng,true,true,false,false,false,0,10,\
-             reported,true,1,0,0,0,0,10,100000"
+            "h3_cell_to_parent,gpu_h3,h3_cell_to_parent,true,true,false,false,false,0,10,\
+             reported,true,1,0,0,0,0,10,1000000"
         ));
     }
 
     #[test]
     fn test_h3_function_kernel_requires_output_consumption() {
-        let mut workload = mock_workload_result("h3_bulk", 100_000, 10.0, 50.0);
+        let mut workload =
+            mock_workload_result("h3_function_dispatch_fixture", 100_000, 10.0, 50.0);
         workload.category = "gpu_h3".to_owned();
         workload.kernel_class = "h3_latlng".to_owned();
         workload.plan_selected = false;
@@ -6571,64 +6798,97 @@ mod tests {
         assert!(
             failures[0]
                 .detail
-                .contains("ssbm_resident_int4_year_revenue")
+                .contains("ssbm_resident_int4_year_size_revenue")
+        );
+    }
+
+    fn exact_ssbm_two_dimension_descriptor_plan() -> String {
+        "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Dispatched: true\n  \
+         GPU Resident Pipeline: true\n  \
+         GPU Resident Proof Version: 2\n  \
+         GPU Resident Operator Class: resident_groupagg\n  \
+         GPU Resident Stage Mask: 29\n  \
+         GPU Resident Device Columns: 7\n  \
+         GPU Descriptor Strategy: descriptor_grouped_aggregate\n  \
+         GPU Descriptor Group Keys: k0:dimension[0](200.5:type=23) type=23 collation=0 encoding=dense_i32(min=1992, cardinality=7, null=none); k1:dimension[1](300.8:type=23) type=23 collation=0 encoding=dense_i32(min=1, cardinality=50, null=none)\n  \
+         GPU Descriptor Aggregates: m0:column(100.13:type=23) -> value.sum; m1:count_star -> value.count\n  \
+         GPU Descriptor Filter: fact=none; measures=[m0=none; m1=none]; dimensions=[d0=none; d1=none]\n  \
+         GPU Descriptor Star Dimensions: d0:rel=200 join=100.6:type=23<->200.1:type=23 collation=0 multiplicity=unique filter=none; d1:rel=300 join=100.4:type=23<->300.1:type=23 collation=0 multiplicity=unique filter=none\n  \
+         GPU Descriptor Output: slot0:group[k0] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false; slot1:group[k1] source_type=23 result_type=23 typmod=-1 collation=0 nullable=false; slot2:aggregate[m0].value.sum source_type=23 result_type=20 typmod=-1 collation=0 nullable=true; slot3:aggregate[m1].value.count source_type=20 result_type=20 typmod=-1 collation=0 nullable=false"
+            .to_owned()
+    }
+
+    fn assert_ssbm_sentinel_ship_gate_rejects(plan: String) {
+        assert!(plan_contains_resident_groupagg_logical_evidence(&plan));
+        assert!(!plan_contains_exact_ssbm_two_dimension_descriptor(&plan));
+
+        let mut workload = mock_workload_result("ssbm_resident_int4_star", 1_000_000, 10.0, 20.0);
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 350;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.plan_snippet = Some(plan);
+
+        let failures = mock_report(vec![workload]).evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::ExpectedWinnerMissingGroupAggLogicalSpec
         );
     }
 
     #[test]
-    fn test_benchmark_ship_gate_allows_ssbm_q1_winner_with_groupagg_logical_spec() {
+    fn test_benchmark_ship_gate_allows_exact_ssbm_two_dimension_descriptor() {
         let mut workload = mock_workload_result("ssbm_resident_int4_star", 1_000_000, 10.0, 20.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
-        workload.accel_output_rows_consumed = 1;
+        workload.accel_output_rows_consumed = 350;
         workload.pg_accel_stock_exec_delta = 0;
-        workload.plan_snippet = Some(
-            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Dispatched: true\n  \
-             GPU Resident Pipeline: true\n  \
-             GPU Resident Proof Version: 2\n  \
-             GPU Resident Operator Class: resident_groupagg\n  \
-             GPU Resident GroupAgg Key: single_group\n  \
-             GPU Resident GroupAgg Measure: ssbm_discounted_revenue\n  \
-             GPU Resident GroupAgg Filter: ssbm_date_fact_predicate\n  \
-             GPU Resident GroupAgg Predicate Guard: ssbm_date_fact_predicate\n  \
-             GPU Resident GroupAgg Value Predicate: none\n  \
-             GPU Resident GroupAgg Predicate IR: guard=ssbm_date_fact_predicate;value=none\n  \
-             GPU Resident GroupAgg Aggregate Mask: 1\n  \
-             GPU Resident Stage Mask: 13\n  \
-             GPU Resident Device Columns: 5"
-                .to_owned(),
-        );
+        workload.plan_snippet = Some(exact_ssbm_two_dimension_descriptor_plan());
         let report = mock_report(vec![workload]);
 
         assert!(report.evaluate_benchmark_ship_gate().is_empty());
     }
 
     #[test]
-    fn test_benchmark_ship_gate_allows_ssbm_q4_winner_with_groupagg_logical_spec() {
-        let mut workload = mock_workload_result("ssbm_resident_int4_star", 1_000_000, 10.0, 20.0);
-        workload.dispatch_counter_captured = true;
-        workload.gpu_kernel_execution_delta = 1;
-        workload.accel_output_rows_consumed = 10;
-        workload.pg_accel_stock_exec_delta = 0;
-        workload.plan_snippet = Some(
-            "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Dispatched: true\n  \
-             GPU Resident Pipeline: true\n  \
-             GPU Resident Proof Version: 2\n  \
-             GPU Resident Operator Class: resident_groupagg\n  \
-             GPU Resident GroupAgg Key: ssbm_year_geo_part\n  \
-             GPU Resident GroupAgg Measure: ssbm_profit_revenue_minus_supplycost\n  \
-             GPU Resident GroupAgg Filter: ssbm_star_join_membership\n  \
-             GPU Resident GroupAgg Predicate Guard: ssbm_star_join_membership\n  \
-             GPU Resident GroupAgg Value Predicate: none\n  \
-             GPU Resident GroupAgg Predicate IR: guard=ssbm_star_join_membership;value=none\n  \
-             GPU Resident GroupAgg Aggregate Mask: 1\n  \
-             GPU Resident Stage Mask: 29\n  \
-             GPU Resident Device Columns: 10"
-                .to_owned(),
-        );
-        let report = mock_report(vec![workload]);
+    fn test_ssbm_sentinel_allows_date_and_part_dimension_index_permutation() {
+        let plan = exact_ssbm_two_dimension_descriptor_plan()
+            .replace("k0:dimension[0]", "k0:dimension[date]")
+            .replace("k1:dimension[1]", "k1:dimension[0]")
+            .replace("k0:dimension[date]", "k0:dimension[1]")
+            .replace(
+                "d0:rel=200 join=100.6:type=23<->200.1:type=23 collation=0 multiplicity=unique filter=none; d1:rel=300 join=100.4:type=23<->300.1:type=23 collation=0 multiplicity=unique filter=none",
+                "d0:rel=300 join=100.4:type=23<->300.1:type=23 collation=0 multiplicity=unique filter=none; d1:rel=200 join=100.6:type=23<->200.1:type=23 collation=0 multiplicity=unique filter=none",
+            );
+        assert!(plan_contains_exact_ssbm_two_dimension_descriptor(&plan));
+    }
 
-        assert!(report.evaluate_benchmark_ship_gate().is_empty());
+    #[test]
+    fn test_ssbm_ship_gate_rejects_wrong_dimension_key_or_measure_dependency() {
+        let valid = exact_ssbm_two_dimension_descriptor_plan();
+        for invalid in [
+            valid.replace("join=100.6:type=23", "join=100.7:type=23"),
+            valid.replace("dimension[0](200.5:type=23)", "dimension[0](200.6:type=23)"),
+            valid.replace("m0:column(100.13:type=23)", "m0:column(100.12:type=23)"),
+        ] {
+            assert_ssbm_sentinel_ship_gate_rejects(invalid);
+        }
+    }
+
+    #[test]
+    fn test_ssbm_sentinel_rejects_incompatible_legacy_q1_and_q4_specs() {
+        let resident_proof = "Custom Scan (GpuAccelAgg)\nGPU Dispatched: true\nGPU Resident Pipeline: true\nGPU Resident Proof Version: 2\nGPU Resident Operator Class: resident_groupagg\nGPU Resident Stage Mask: 29\nGPU Resident Device Columns: 7\n";
+        for legacy_spec in [
+            "GPU Resident GroupAgg Key: single_group\nGPU Resident GroupAgg Measure: ssbm_discounted_revenue\nGPU Resident GroupAgg Filter: ssbm_date_fact_predicate\nGPU Resident GroupAgg Predicate Guard: ssbm_date_fact_predicate\nGPU Resident GroupAgg Value Predicate: none\nGPU Resident GroupAgg Predicate IR: guard=ssbm_date_fact_predicate;value=none\nGPU Resident GroupAgg Aggregate Mask: 1",
+            "GPU Resident GroupAgg Key: ssbm_year_geo_part\nGPU Resident GroupAgg Measure: ssbm_profit_revenue_minus_supplycost\nGPU Resident GroupAgg Filter: ssbm_star_join_membership\nGPU Resident GroupAgg Predicate Guard: ssbm_star_join_membership\nGPU Resident GroupAgg Value Predicate: none\nGPU Resident GroupAgg Predicate IR: guard=ssbm_star_join_membership;value=none\nGPU Resident GroupAgg Aggregate Mask: 1",
+        ] {
+            assert_ssbm_sentinel_ship_gate_rejects(format!("{resident_proof}{legacy_spec}"));
+        }
+
+        let one_dimension = exact_ssbm_two_dimension_descriptor_plan()
+            .replace("; k1:dimension[1](300.8:type=23) type=23 collation=0 encoding=dense_i32(min=1, cardinality=50, null=none)", "")
+            .replace("; d1:rel=300 join=100.4:type=23<->300.1:type=23 collation=0 multiplicity=unique filter=none", "");
+        assert_ssbm_sentinel_ship_gate_rejects(one_dimension);
     }
 
     #[test]
@@ -6988,40 +7248,30 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // H3 winning-lane protection dispatch-classification gates
-    //
-    // These tests pin the report classifier behavior for the H3 winning lanes.
-    // They are unit tests against
-    // `dispatch_classification`, not live-PG runs — so they fail loudly if
-    // anyone weakens the criterion for crediting an H3 winner OR weakens
-    // the rejection of a parity-only row that lacks dispatch evidence.
+    // H3 winner and native-decline dispatch-classification gates.
     // -----------------------------------------------------------------------
 
-    /// Build the "happy path" H3 winning-lane mock the protection tests share.
-    /// Caller can mutate the returned result to flip individual fields and
-    /// verify the classifier responds correctly.
-    fn mock_h3_winning_workload(name: &str, rows: usize) -> WorkloadResult {
-        let mut wl = mock_workload_result(name, rows, 10.0, 100.0);
-        wl.category = "gpu_h3".to_owned();
-        wl.kernel_class = "h3_latlng".to_owned();
-        wl.plan_selected = false;
-        wl.gpu_kernel_dispatched = false;
-        wl.function_srf_kernel_dispatched = false;
-        wl.dispatch_counter_captured = true;
-        wl.gpu_kernel_execution_delta = 1;
-        wl.accel_output_rows_consumed = 10;
-        wl.pg_accel_stock_exec_delta = 0;
-        wl.plan_snippet = Some(
-            "HashAggregate\n  Output: (h3_latlng_to_cell(geom, 7)), count(*)\n  \
-             Group Key: h3_latlng_to_cell(bench_h3_points.geom, 7)\n"
-                .to_owned(),
+    fn mock_h3_native_decline(name: &str, rows: usize, reason: &str) -> WorkloadResult {
+        let mut workload = mark_no_dispatch(
+            mock_workload_result(name, rows, 10.0, 10.0),
+            "HashAggregate\n  -> Seq Scan on native_h3_fixture",
+            "HashAggregate\n  -> Seq Scan on native_h3_fixture",
         );
-        wl
+        workload.category = "gpu_h3".to_owned();
+        workload.kernel_class = "h3_latlng".to_owned();
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 0;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.native_decline_evidence = Some(NativeDeclineEvidence {
+            reason: reason.to_owned(),
+            source: DeclineReasonSource::PlannerReported,
+        });
+        workload
     }
 
     #[test]
     fn test_threshold_matrix_renders_evidence_columns() {
-        let workload = mock_h3_winning_workload("h3_cell_to_parent", 1_000_000);
+        let workload = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 20.0);
         let report = mock_report(vec![workload]);
         let md = report.to_markdown();
 
@@ -7032,105 +7282,47 @@ mod tests {
         assert!(md.contains("resident H3 GpuAgg"));
     }
 
-    /// `h3_bulk` is the canonical H3 winning lane (~6s accel vs 90s PG
-    /// parallel @ 10M on 2026-05-14). A representative happy-path measurement
-    /// MUST be credited as `function_srf_kernel_dispatched` and counted in the
-    /// GPU-dispatched geomean. Regression here would silently drop the bulk
-    /// win from the headline.
     #[test]
-    fn test_h3_bulk_winning_lane_credited_as_function_srf_dispatch() {
-        let workload = mock_h3_winning_workload("h3_bulk", 1_000_000);
-        let classification = workload.dispatch_classification();
-        assert!(
-            classification.function_srf_kernel_dispatched,
-            "h3_bulk happy-path must be credited as function/SRF dispatch; \
-             got classification={classification:?}"
-        );
-        assert!(
-            classification.gpu_kernel_dispatched,
-            "h3_bulk happy-path must be credited as GPU-dispatched (function/SRF \
-             path), got classification={classification:?}"
-        );
-        assert!(
-            !classification.planner_declined,
-            "h3_bulk happy-path must NOT be marked planner_declined; \
-             got classification={classification:?}"
-        );
-        assert_eq!(
-            classification.function_kernel_count, 1,
-            "h3_bulk happy-path kernel delta=1 must carry into function_kernel_count"
-        );
+    fn test_grouped_h3_point_to_cell_lanes_require_verified_native_declines() {
+        for (name, reason) in [
+            ("h3_bulk", "shape_unsupported_rte"),
+            ("h3_resolution_sweep", "shape_group_expression"),
+            ("h3_latlng_res15", "shape_group_expression"),
+        ] {
+            let workload = mock_h3_native_decline(name, 1_000_000, reason);
+            let classification = workload.dispatch_classification();
+            assert!(
+                classification.planner_declined,
+                "{name}: {classification:?}"
+            );
+            assert!(!classification.gpu_kernel_dispatched, "{name}");
+            assert!(!classification.function_srf_kernel_dispatched, "{name}");
+            assert_eq!(classification.function_kernel_count, 0, "{name}");
+
+            let report = mock_report(vec![workload]);
+            assert!(report.evaluate_benchmark_ship_gate().is_empty(), "{name}");
+            assert!(report.evaluate_h3_lane_gate().is_empty(), "{name}");
+        }
     }
 
-    /// `h3_resolution_sweep` is the second canonical H3 winning lane
-    /// (~0.32s accel vs 8.4s PG parallel @ 1M on 2026-05-14). Same gate.
     #[test]
-    fn test_h3_resolution_sweep_winning_lane_credited_as_function_srf_dispatch() {
-        let workload = mock_h3_winning_workload("h3_resolution_sweep", 1_000_000);
-        let classification = workload.dispatch_classification();
-        assert!(
-            classification.function_srf_kernel_dispatched,
-            "h3_resolution_sweep happy-path must be credited as function/SRF dispatch"
-        );
-        assert!(
-            classification.gpu_kernel_dispatched,
-            "h3_resolution_sweep happy-path must be credited as GPU-dispatched"
-        );
-    }
-
-    /// If the kernel counter delta is zero for an H3 winning-lane workload,
-    /// the row must NOT be credited as GPU-dispatched. This is the regression
-    /// gate: if the function/SRF dispatch hook breaks and stops incrementing
-    /// the counter, `h3_bulk` falls out of the headline geomean.
-    #[test]
-    fn test_h3_bulk_with_zero_kernel_delta_is_not_dispatched() {
-        let mut workload = mock_h3_winning_workload("h3_bulk", 1_000_000);
-        workload.gpu_kernel_execution_delta = 0;
-        let classification = workload.dispatch_classification();
-        assert!(
-            !classification.function_srf_kernel_dispatched,
-            "h3_bulk with zero kernel delta must NOT be credited as function/SRF dispatch; \
-             this gate detects the case where the function dispatch hook silently \
-             stopped firing. Got: {classification:?}"
-        );
-        assert!(
-            !classification.gpu_kernel_dispatched,
-            "h3_bulk with zero kernel delta must NOT be credited as GPU-dispatched"
-        );
-        assert!(
-            classification.planner_declined,
-            "h3_bulk with no dispatch evidence must be classified as planner_declined; \
-             a regression would silently route h3_bulk to native PG without alerting"
-        );
-    }
-
-    /// Same gate for `h3_resolution_sweep`.
-    #[test]
-    fn test_h3_resolution_sweep_with_zero_kernel_delta_is_not_dispatched() {
-        let mut workload = mock_h3_winning_workload("h3_resolution_sweep", 1_000_000);
-        workload.gpu_kernel_execution_delta = 0;
-        let classification = workload.dispatch_classification();
-        assert!(
-            !classification.function_srf_kernel_dispatched,
-            "h3_resolution_sweep with zero kernel delta must NOT be credited as dispatch"
-        );
-        assert!(classification.planner_declined);
-    }
-
-    /// If a stock-executor fallback fires (`pg_accel_stock_exec_delta > 0`),
-    /// the row must NOT be credited as GPU-dispatched even when the kernel
-    /// counter is positive. This catches the silent "GPU ran AND CPU
-    /// fell back" path, which is a crash-accounting anti-cheat rail.
-    #[test]
-    fn test_h3_bulk_with_stock_exec_fallback_is_not_dispatched() {
-        let mut workload = mock_h3_winning_workload("h3_bulk", 1_000_000);
-        workload.pg_accel_stock_exec_delta = 1;
-        let classification = workload.dispatch_classification();
-        assert!(
-            !classification.function_srf_kernel_dispatched,
-            "h3_bulk that also fell back to the stock executor must NOT be credited"
-        );
-        assert!(!classification.gpu_kernel_dispatched);
+    fn test_grouped_h3_point_to_cell_native_declines_reject_any_kernel_delta() {
+        for (name, reason) in [
+            ("h3_bulk", "shape_unsupported_rte"),
+            ("h3_resolution_sweep", "shape_group_expression"),
+            ("h3_latlng_res15", "shape_group_expression"),
+        ] {
+            let mut workload = mock_h3_native_decline(name, 1_000_000, reason);
+            workload.gpu_kernel_execution_delta = 1;
+            workload.accel_output_rows_consumed = 1;
+            let report = mock_report(vec![workload]);
+            assert!(report.evaluate_benchmark_ship_gate().iter().any(|failure| {
+                failure.kind == BenchmarkShipGateFailureKind::NativeDeclineUnexpectedDispatch
+            }));
+            assert!(report.evaluate_h3_lane_gate().iter().any(|failure| {
+                failure.kind == H3LaneGateFailureKind::ParityUnexpectedlyDispatched
+            }));
+        }
     }
 
     /// The `h3_cell_to_parent` benchmark is the fused grouped COUNT(*) shape,
@@ -7362,7 +7554,7 @@ mod tests {
     }
 
     /// Counterpart to the test above: without a planner-reported decline
-    /// reason, the same below-floor `h3_bulk` row must NOT pass the generic
+    /// reason, the same below-floor `h3_cell_to_parent` row must NOT pass the generic
     /// ship gate — neither when no evidence at all was captured, nor when
     /// the evidence is present but tagged `ExpectedUnconfirmed` (the static
     /// matrix assumed the decline; the planner never confirmed it).
@@ -7544,9 +7736,11 @@ mod tests {
         custom_scan_workload.plan_snippet =
             Some("Custom Scan (GpuAccelReduce)\n  Strategy: GpuReduce\n".to_owned());
 
-        // Function/SRF win: H3 bulk row with no Custom Scan plan but kernel
-        // delta and consumed output.
-        let mut function_srf_workload = mock_workload_result("h3_bulk", 1_000_000, 7.0, 70.0);
+        // Synthetic function/SRF row with no Custom Scan plan but a kernel
+        // delta and consumed output. It deliberately is not a registered
+        // release workload.
+        let mut function_srf_workload =
+            mock_workload_result("h3_function_dispatch_fixture", 1_000_000, 7.0, 70.0);
         function_srf_workload.category = "gpu_h3".to_owned();
         function_srf_workload.kernel_class = "h3_latlng".to_owned();
         function_srf_workload.plan_selected = false;
@@ -7744,7 +7938,8 @@ mod tests {
 
     #[test]
     fn test_dispatch_classification_counts_function_kernel_rows() {
-        let mut workload = mock_workload_result("h3_bulk", 100_000, 10.0, 50.0);
+        let mut workload =
+            mock_workload_result("h3_function_dispatch_fixture", 100_000, 10.0, 50.0);
         workload.category = "gpu_h3".to_owned();
         workload.kernel_class = "h3_latlng".to_owned();
         workload.plan_selected = false;
@@ -7980,7 +8175,8 @@ mod tests {
 
     #[test]
     fn test_resident_boundary_audit_ignores_function_srf_dispatch_rows() {
-        let mut workload = mock_workload_result("h3_bulk", 100_000, 10.0, 50.0);
+        let mut workload =
+            mock_workload_result("h3_function_dispatch_fixture", 100_000, 10.0, 50.0);
         workload.category = "gpu_h3".to_owned();
         workload.kernel_class = "h3_latlng".to_owned();
         workload.plan_selected = false;

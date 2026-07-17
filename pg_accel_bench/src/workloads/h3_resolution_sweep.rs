@@ -1,10 +1,10 @@
 use super::Workload;
 
-/// Winning H3 lane: h3_latlng_to_cell at resolution 9 through the GPU H3 kernel.
+/// Native-decline guard for grouped `h3_latlng_to_cell` at resolution 9.
 ///
 /// Baseline uses h3-pg's `h3_lat_lng_to_cell` alias so the PG-parallel
-/// comparand runs stock h3-pg C code. See `h3_variants.rs` for the
-/// rationale and `benchmarks/action_items.md` §0.
+/// comparand runs stock h3-pg C code. Normal planning must report
+/// `shape_group_expression` and keep the kernel counter at zero.
 pub struct H3ResolutionSweep;
 
 impl Workload for H3ResolutionSweep {
@@ -13,8 +13,9 @@ impl Workload for H3ResolutionSweep {
     }
 
     fn description(&self) -> &'static str {
-        "h3_latlng_to_cell at resolution 9 — protects the GPU H3 cell win. \
-         Baseline uses h3-pg `h3_lat_lng_to_cell`."
+        "grouped h3_latlng_to_cell at resolution 9 native-decline guard \
+         (`shape_group_expression`, zero GPU kernels). Baseline uses stock h3-pg \
+         `h3_lat_lng_to_cell`."
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

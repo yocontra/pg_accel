@@ -165,7 +165,7 @@ capture, and the following exact 1M-row winner cells:
 | `grouped_agg_int4` | exact resident grouped SUM(int4)/COUNT | 1.00x |
 | `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.00x |
 | `mixed_join_agg_int4` | exact resident hash join plus grouped SUM(int4)/COUNT | 1.00x |
-| `ssbm_resident_int4_star` | exact resident fact/date join grouped by year | 1.00x |
+| `ssbm_resident_int4_star` | exact two-dimension date+part star grouped by year and part size, SUM(int4)/COUNT | 1.00x |
 | `hashjoin_10k_1m` | resident equality hash join COUNT | 1.00x |
 | `h3_cell_to_parent` | fused H3 parent grouped count | 1.10x |
 
@@ -180,6 +180,12 @@ native: Q1.1-Q1.3 report `shape_multi_filter_relation`, Q3.3-Q3.4 report
 `h3_resolution_sweep` plus `h3_latlng_res15` report
 `shape_group_expression`. Historical timing artifacts for those workloads do
 not make them eligible for the current ship gate.
+
+Any change to a workload SQL contract, fixture, threshold, or candidate tree
+invalidates the predecessor population freeze and random selection for the new
+candidate. Freeze the replacement SHA/tree and six-cell population, then make a
+fresh independent write-once random selection before executing release gates;
+retained predecessor evidence is transition history only.
 
 The threshold matrix is the executable source of truth. Before timing, the
 command rejects missing, duplicate, unregistered, non-winner, or sub-parity

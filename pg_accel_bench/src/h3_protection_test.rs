@@ -13,10 +13,10 @@
 //!    planner exposure
 //!    (see `pg_accel/src/adapters/h3.rs`
 //!    `cheap_scalar_h3_ops_are_quarantined_from_normal_registry`).
-//! 3. **Result diff vs h3-pg** — the same query executed with
+//! 3. **Result diff vs h3-pg** - the same query executed with
 //!    `pg_accel.enabled=on` and `pg_accel.enabled=off` over a fixed
 //!    `setseed(0.42)` source MUST return identical row sets (modulo
-//!    ordering). This catches GPU kernels that silently corrupt output.
+//!    ordering). This protects H3 semantics without presuming GPU dispatch.
 //! 4. **Warm fallback latency budget** - the bounded grouped fixture remains
 //!    protected while it executes through native PostgreSQL.
 //! 5. **Grouped-count resolution matrix** - deterministic res7 coordinates
@@ -47,7 +47,7 @@ use crate::workloads::{
 // to detect *regressions in the protection signals* (kernel counter,
 // classification, result diff), not to reproduce the headline speedup.
 const SETUP_ROWS: usize = 10_000;
-const H3_GROUPED_DISPATCH_ROWS: usize = 100_000;
+const H3_GROUPED_DECLINE_ROWS: usize = 100_000;
 const H3_PARENT_RESIDENT_DISPATCH_ROWS: usize = 1_000_000;
 const H3_DIFF_ROWS: usize = 5_000;
 const H3_DIFF_EDGE_ROWS: usize = 15;
@@ -588,30 +588,29 @@ fn h3_protection_parity_lane_names_resolve() {
     }
 }
 
-/// `h3_bulk` and `h3_resolution_sweep` are canonical winning lanes. The
-/// integration suite below names them explicitly; if
-/// either is renamed, this test fails and the integration tests need to
-/// be updated rather than silently skipping the workload.
+/// The fused parent grouped-count query is the only current H3 winning lane.
 #[test]
 fn h3_protection_canonical_winning_names_registered() {
-    for name in ["h3_bulk", "h3_resolution_sweep", "h3_cell_to_parent"] {
-        assert!(
-            find_workload(name).is_some(),
-            "canonical winning lane `{name}` is not registered in the workload list"
-        );
-    }
+    assert_eq!(h3_winning_lane_names(), vec!["h3_cell_to_parent"]);
+    assert!(find_workload("h3_cell_to_parent").is_some());
 }
 
-/// `h3_grid_distance` and the deep parent variant remain canonical parity
-/// lanes. The canonical `h3_cell_to_parent` workload is the fused
-/// grouped-count winner.
+/// Grouped point-to-cell shapes and standalone scalar variants remain
+/// canonical native-decline/parity lanes.
 #[test]
 fn h3_protection_canonical_parity_names_registered() {
-    for name in ["h3_grid_distance", "h3_parent_deep"] {
+    for name in [
+        "h3_bulk",
+        "h3_resolution_sweep",
+        "h3_latlng_res15",
+        "h3_grid_distance",
+        "h3_parent_deep",
+    ] {
         assert!(
             find_workload(name).is_some(),
             "canonical parity lane `{name}` is not registered in the workload list"
         );
+        assert_eq!(h3_lane_class(name), Some(H3LaneClass::Parity));
     }
 }
 
@@ -663,7 +662,7 @@ fn h3_raw_grouped_parser_rejects_summary_or_extra_fields() {
 #[test]
 fn h3_bulk_grouped_shape_declines_and_matches_native() {
     let _live_pg_guard = live_pg_test_lock();
-    assert_grouped_h3_declines_and_matches_native("h3_bulk", H3_GROUPED_DISPATCH_ROWS);
+    assert_grouped_h3_declines_and_matches_native("h3_bulk", H3_GROUPED_DECLINE_ROWS);
 }
 
 /// Same generic-expression decline contract for the resolution-9 lane.
@@ -671,7 +670,7 @@ fn h3_bulk_grouped_shape_declines_and_matches_native() {
 #[test]
 fn h3_resolution_sweep_grouped_shape_declines_and_matches_native() {
     let _live_pg_guard = live_pg_test_lock();
-    assert_grouped_h3_declines_and_matches_native("h3_resolution_sweep", H3_GROUPED_DISPATCH_ROWS);
+    assert_grouped_h3_declines_and_matches_native("h3_resolution_sweep", H3_GROUPED_DECLINE_ROWS);
 }
 
 /// Keep resolution-15 exactness visible without selecting the deleted legacy
@@ -680,7 +679,7 @@ fn h3_resolution_sweep_grouped_shape_declines_and_matches_native() {
 #[test]
 fn h3_high_resolution_grouped_shape_declines_and_matches_native() {
     let _live_pg_guard = live_pg_test_lock();
-    assert_grouped_h3_declines_and_matches_native("h3_latlng_res15", H3_GROUPED_DISPATCH_ROWS);
+    assert_grouped_h3_declines_and_matches_native("h3_latlng_res15", H3_GROUPED_DECLINE_ROWS);
 }
 
 /// The exact resolution-zero parent/count shape dispatches through the resident
@@ -982,10 +981,9 @@ fn h3_latlng_scan_predicates_stay_native_with_visible_declines() {
 // Result-diff test (live PG)
 // ---------------------------------------------------------------------------
 
-/// `h3_latlng_to_cell` must return the same cell indices regardless of
-/// whether pg_accel intercepts the call. This is the most direct check that
-/// the GPU H3 kernel's output is byte-identical to stock h3-pg's C
-/// implementation, which is the assumption underlying every winning lane.
+/// `h3_latlng_to_cell` must return the same cell indices with pg_accel enabled
+/// or disabled. This checks adapter-visible semantics against stock h3-pg
+/// without treating the generic expression as a release winner.
 ///
 /// Uses a fixed `setseed` so the random point fixture is reproducible.
 #[cfg(feature = "integration_tests")]
@@ -1233,18 +1231,18 @@ fn h3_warm_grouped_fallback_latency_bounded() {
     let _live_pg_guard = live_pg_test_lock();
     let wl = H3Bulk;
     let mut c = connect();
-    apply_setup(&mut c, &wl, H3_GROUPED_DISPATCH_ROWS);
+    apply_setup(&mut c, &wl, H3_GROUPED_DECLINE_ROWS);
 
     c.simple_query("SET pg_accel.enabled = off")
         .expect("disable pg_accel for H3 fallback baseline");
     let baseline_sql = wl
         .baseline_query_sql()
         .expect("h3_bulk has a stock h3-pg baseline");
-    let mut native = execute_to_rows(&mut c, &baseline_sql, H3_GROUPED_DISPATCH_ROWS);
+    let mut native = execute_to_rows(&mut c, &baseline_sql, H3_GROUPED_DECLINE_ROWS);
     native.sort_unstable();
     assert_eq!(
         h3_bulk_summary_input_rows(&native),
-        H3_GROUPED_DISPATCH_ROWS,
+        H3_GROUPED_DECLINE_ROWS,
         "h3_bulk warm stock baseline must consume every input row"
     );
 
@@ -1262,17 +1260,17 @@ fn h3_warm_grouped_fallback_latency_bounded() {
         "h3_bulk warm grouped fallback",
     );
 
-    let mut warm = execute_to_rows(&mut c, &query, H3_GROUPED_DISPATCH_ROWS);
+    let mut warm = execute_to_rows(&mut c, &query, H3_GROUPED_DECLINE_ROWS);
     warm.sort_unstable();
     assert_eq!(
         h3_bulk_summary_input_rows(&warm),
-        H3_GROUPED_DISPATCH_ROWS,
+        H3_GROUPED_DECLINE_ROWS,
         "h3_bulk warmup must consume every input row"
     );
     assert_eq!(warm, native);
     let before = kernel_executions(&mut c);
     let t0 = Instant::now();
-    let mut measured = execute_to_rows(&mut c, &query, H3_GROUPED_DISPATCH_ROWS);
+    let mut measured = execute_to_rows(&mut c, &query, H3_GROUPED_DECLINE_ROWS);
     let elapsed = t0.elapsed();
     let after = kernel_executions(&mut c);
     measured.sort_unstable();
@@ -1281,7 +1279,7 @@ fn h3_warm_grouped_fallback_latency_bounded() {
 
     assert_eq!(
         h3_bulk_summary_input_rows(&measured),
-        H3_GROUPED_DISPATCH_ROWS,
+        H3_GROUPED_DECLINE_ROWS,
         "h3_bulk measured fallback must consume every input row"
     );
     assert_eq!(measured, native);

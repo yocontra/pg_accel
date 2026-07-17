@@ -4801,8 +4801,12 @@ mod tests {
         assert_eq!(
             resident_pin_specs("ssbm_resident_int4_star"),
             vec![
-                resident_pin("ssbm_lineorder", &["lo_orderdate", "lo_revenue"]),
+                resident_pin(
+                    "ssbm_lineorder",
+                    &["lo_orderdate", "lo_partkey", "lo_revenue"],
+                ),
                 resident_pin("ssbm_date", &["d_datekey", "d_year"]),
+                resident_pin("ssbm_part", &["p_partkey", "p_size"]),
             ]
         );
         assert_eq!(

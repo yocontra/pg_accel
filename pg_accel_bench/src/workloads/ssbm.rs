@@ -200,9 +200,6 @@ pub fn ssbm_setup_sql(rows: usize) -> Vec<String> {
              FROM generate_series(1, {cust_count}) AS i"
         ),
         ssbm_dimension_sanity_sql(),
-        // PostgreSQL's session-local PRNG drives the canonical fact fixture.
-        // Pin it so repeated native/GPU release runs start from identical data.
-        "SELECT setseed(0.424242)".to_owned(),
         // -- Populate fact table --
         format!(
             "INSERT INTO ssbm_lineorder \
@@ -253,7 +250,7 @@ pub fn ssbm_cleanup_sql() -> Vec<String> {
 // Q1 — Revenue from discounted lineorders with date/quantity filters
 // ---------------------------------------------------------------------------
 
-/// Exact current-planner sentinel over the canonical SSBM fact/date schema.
+/// Exact two-dimension star sentinel over the canonical SSBM schema.
 pub struct SsbmResidentInt4Star;
 
 impl Workload for SsbmResidentInt4Star {
@@ -262,7 +259,7 @@ impl Workload for SsbmResidentInt4Star {
     }
 
     fn description(&self) -> &'static str {
-        "SSBM lineorder/date join grouped by int4 year with exact SUM(int4) and COUNT(*)"
+        "SSBM lineorder/date/part star grouped by int4 year and part size with exact SUM(int4) and COUNT(*)"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {
@@ -270,21 +267,30 @@ impl Workload for SsbmResidentInt4Star {
     }
 
     fn query_sql(&self) -> String {
-        "SELECT d_year, SUM(lo_revenue) AS sum, COUNT(*) AS count \
+        "SELECT d_year, p_size, SUM(lo_revenue) AS sum, COUNT(*) AS count \
          FROM ssbm_lineorder \
          JOIN ssbm_date ON lo_orderdate = d_datekey \
-         GROUP BY d_year"
+         JOIN ssbm_part ON lo_partkey = p_partkey \
+         GROUP BY d_year, p_size"
             .to_owned()
     }
 
     fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
         Some(ResultOracle::one_row(
             format!(
-                "SELECT COALESCE(SUM(q.count), 0)::int8 AS input_rows \
+                "SELECT COALESCE(SUM(q.count), 0)::int8 AS input_rows, \
+                        COALESCE(bool_and(q.d_year BETWEEN 1992 AND 1998), true) AS valid_years, \
+                        COALESCE(bool_and(q.p_size BETWEEN 1 AND 50), true) AS valid_part_sizes, \
+                        COUNT(*) <= LEAST({rows}, 350)::int8 AS valid_group_count \
                  FROM ({}) AS q",
                 self.query_sql()
             ),
-            vec![Value::I64(usize_to_i64(rows))],
+            vec![
+                Value::I64(usize_to_i64(rows)),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
         ))
     }
 
@@ -557,6 +563,35 @@ mod tests {
         assert!(setup[sanity_pos].contains("MFGR#12"));
         assert!(setup[sanity_pos].contains("MFGR#14"));
         assert!(setup[sanity_pos].contains("Dec1997"));
+    }
+
+    #[test]
+    fn setup_leaves_prng_seed_control_to_the_runner() {
+        let setup = ssbm_setup_sql(1_000);
+        assert!(setup.iter().any(|sql| sql.contains("random()")));
+        assert!(
+            setup
+                .iter()
+                .all(|sql| !sql.to_ascii_lowercase().contains("setseed")),
+            "workloads must not override the runner's recorded --seed"
+        );
+    }
+
+    #[test]
+    fn exact_star_sentinel_exercises_two_dimensions_and_two_aggregates() {
+        let workload = SsbmResidentInt4Star;
+        let query = workload.query_sql().to_ascii_lowercase();
+        assert!(query.contains("join ssbm_date"));
+        assert!(query.contains("join ssbm_part"));
+        assert!(query.contains("group by d_year, p_size"));
+        assert!(query.contains("sum(lo_revenue)"));
+        assert!(query.contains("count(*)"));
+        assert!(!query.contains("round("));
+
+        let oracle = workload.result_oracle(1_000_000).expect("sentinel oracle");
+        assert!(oracle.query_sql.contains("bool_and(q.d_year"));
+        assert!(oracle.query_sql.contains("bool_and(q.p_size"));
+        assert_eq!(oracle.expected_row.len(), 4);
     }
 }
 

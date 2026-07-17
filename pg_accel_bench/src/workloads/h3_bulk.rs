@@ -1,11 +1,11 @@
 use super::Workload;
 
-/// Winning H3 lane: `h3_latlng_to_cell` on bulk points with GROUP BY.
+/// Native-decline guard for bulk `h3_latlng_to_cell` with `GROUP BY`.
 ///
 /// Baseline uses h3-pg's `h3_lat_lng_to_cell` alias so the PG-parallel
 /// comparand runs stock h3-pg C code rather than pg_accel's expression
-/// wrapper. See `h3_variants.rs` for the rationale and
-/// `benchmarks/action_items.md` §0.
+/// wrapper. Normal planning must report `shape_unsupported_rte` and keep the
+/// kernel counter at zero for this query shape.
 pub struct H3Bulk;
 
 impl Workload for H3Bulk {
@@ -14,9 +14,9 @@ impl Workload for H3Bulk {
     }
 
     fn description(&self) -> &'static str {
-        "SELECT h3_latlng_to_cell(geom, 7), count(*) FROM bench_h3_points \
-         GROUP BY 1 — protects the GpuH3 bulk cell win. \
-         Baseline uses h3-pg `h3_lat_lng_to_cell`."
+        "h3_latlng_to_cell(geom, 7) grouped-count native-decline guard \
+         (`shape_unsupported_rte`, zero GPU kernels). Baseline uses stock h3-pg \
+         `h3_lat_lng_to_cell`."
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

@@ -273,6 +273,7 @@ pub struct Phase6DomainContract {
 
 const PHASE6_SMOKE_ROWS: &[usize] = &[10_000];
 const PHASE6_H3_PARENT_ROWS: &[usize] = &[100_000];
+const PHASE6_H3_DECLINE_ROWS: &[usize] = &[100_000, 1_000_000];
 const PHASE6_RASTER_ROWS: &[usize] = &[100];
 
 /// The old spatial unsafe-row quarantine covered this interval. The executor
@@ -395,7 +396,7 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
         "h3_bulk",
         WorkloadCategory::GpuH3,
         Phase6DomainOracle::NativeH3FailClosed,
-        PHASE6_SMOKE_ROWS
+        PHASE6_H3_DECLINE_ROWS
     ),
     phase6_contract!(
         "h3_cell_to_parent",
@@ -413,7 +414,7 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
         "h3_resolution_sweep",
         WorkloadCategory::GpuH3,
         Phase6DomainOracle::NativeH3FailClosed,
-        PHASE6_SMOKE_ROWS
+        PHASE6_H3_DECLINE_ROWS
     ),
     phase6_contract!(
         "h3_srf_grid_disk",
@@ -425,7 +426,7 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
         "h3_latlng_res15",
         WorkloadCategory::GpuH3,
         Phase6DomainOracle::NativeH3FailClosed,
-        PHASE6_SMOKE_ROWS
+        PHASE6_H3_DECLINE_ROWS
     ),
     phase6_contract!(
         "h3_dist_near",
@@ -767,8 +768,12 @@ const SSBM_Q4_FACT: &[&str] = &[
     "lo_supplycost",
 ];
 const PINS_SSBM_RESIDENT_INT4_STAR: &[ResidentPinSpec] = &[
-    pin!("ssbm_lineorder", ["lo_orderdate", "lo_revenue"]),
+    pin!(
+        "ssbm_lineorder",
+        ["lo_orderdate", "lo_partkey", "lo_revenue"]
+    ),
     pin!("ssbm_date", ["d_datekey", "d_year"]),
+    pin!("ssbm_part", ["p_partkey", "p_size"]),
 ];
 const PINS_SSBM_Q1_1: &[ResidentPinSpec] = &[
     ResidentPinSpec {
@@ -1448,6 +1453,15 @@ mod tests {
             assert_eq!(crash_band.verification_rows, PHASE6_SPATIAL_CRASH_BAND_ROWS);
         }
         assert_eq!(PHASE6_SPATIAL_CRASH_BAND_ROWS, &[80_000, 100_000, 150_000]);
+
+        for workload in ["h3_bulk", "h3_resolution_sweep", "h3_latlng_res15"] {
+            let contract = PHASE6_DOMAIN_CONTRACTS
+                .iter()
+                .find(|contract| contract.workload == workload)
+                .expect("H3 native-decline contract");
+            assert_eq!(contract.oracle, Phase6DomainOracle::NativeH3FailClosed);
+            assert_eq!(contract.verification_rows, &[100_000, 1_000_000]);
+        }
     }
 
     #[test]

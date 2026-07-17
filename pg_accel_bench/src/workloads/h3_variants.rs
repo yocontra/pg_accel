@@ -14,11 +14,12 @@
 // pg_accel's own per-row fcinfo wrapper over the h3-pg C function.
 // Neither side measured GPU acceleration.
 //
-// The fix for winning workloads: the baseline query is routed through
-// a path pg_accel's adapter matcher *cannot intercept* even when the
-// GPU planner hook is active. Quarantined scalar workloads deliberately
-// keep the unqualified spelling on the pg_accel-enabled side so accidental
-// re-registration shows up in plan/speedup evidence.
+// The independent baseline query is routed through a path pg_accel's adapter
+// matcher cannot intercept even when the GPU planner hook is active. Current
+// grouped point-to-cell workloads are native-decline guards: historical
+// kernel timings do not override their current planner classification.
+// Quarantined workloads keep the unqualified spelling on the pg_accel-enabled
+// side so accidental re-registration shows up in plan/counter evidence.
 //
 //   1. `h3_latlng_to_cell` → `public.h3_lat_lng_to_cell`. h3-pg ships
 //      both names as aliases of the same C function; pg_accel's
@@ -52,8 +53,6 @@
 // If h3-pg is not installed, `runner.rs::ensure_extensions` fails the
 // run before any h3 workload starts.
 
-use crate::config::ROW_SCALES as DEFAULT_ROW_SCALES;
-
 use super::Workload;
 
 const H3_NATIVE_DECLINE_ROW_SCALES: &[usize] = &[10_000, 100_000];
@@ -63,9 +62,9 @@ pub struct H3Variant {
     pub name: &'static str,
     pub description: &'static str,
     pub setup_extra: &'static str,
-    /// SQL executed on the pg_accel-enabled side. Winning workloads should
-    /// use the registered accelerated spelling. Quarantined workloads keep
-    /// the unqualified h3-pg spelling and should remain native.
+    /// SQL executed on the pg_accel-enabled side. Quarantined workloads keep
+    /// the registered spelling so an accidental dispatch is observable, but
+    /// the normal planner must leave them native.
     pub query: &'static str,
     /// SQL executed on the **PG parallel baseline** side. It must call a
     /// function name or schema-qualified path that measures stock h3-pg.
@@ -132,10 +131,11 @@ impl Workload for H3Variant {
     }
 }
 
-// H3 point → cell at resolution 15 (finest grid, most compute).
+// H3 point -> cell at resolution 15 (finest grid, most compute). This grouped
+// expression is a native-decline guard under the current descriptor planner.
 //
-// Accel side:    `h3_latlng_to_cell`   — pg_accel intercepts and
-//                                        routes to GpuH3 kernel.
+// Accel side:    `h3_latlng_to_cell`   - keeps the adapter-visible spelling,
+//                                        but the grouped expression declines.
 // Baseline side: `h3_lat_lng_to_cell`  — h3-pg alias of the same C
 //                                        function, not in pg_accel's
 //                                        adapter list, so pg_accel's
@@ -143,14 +143,15 @@ impl Workload for H3Variant {
 //                                        PG runs stock h3-pg.
 pub const H3_LATLNG_RES15: H3Variant = H3Variant {
     name: "h3_latlng_res15",
-    description: "h3_latlng_to_cell at resolution 15 — finest grid, maximum compute. \
-                  Baseline uses h3-pg `h3_lat_lng_to_cell` alias (stock C impl).",
+    description: "grouped h3_latlng_to_cell at resolution 15 native-decline guard \
+                  (`shape_group_expression`, zero GPU kernels). Baseline uses \
+                  h3-pg `h3_lat_lng_to_cell` alias (stock C impl).",
     setup_extra: "",
     query: "SELECT h3_latlng_to_cell(geom, 15) AS cell, count(*) AS n \
             FROM bench_h3_var GROUP BY 1",
     baseline_query: "SELECT public.h3_lat_lng_to_cell(geom, 15) AS cell, count(*) AS n \
                      FROM bench_h3_var GROUP BY 1",
-    row_scales: DEFAULT_ROW_SCALES,
+    row_scales: H3_NATIVE_DECLINE_ROW_SCALES,
     cleanup_extra: "",
 };
 
