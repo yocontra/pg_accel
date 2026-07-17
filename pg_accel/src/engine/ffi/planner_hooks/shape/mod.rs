@@ -291,6 +291,9 @@ pub struct ShapePlan {
     pub spec: AggQuerySpec,
     pub projections: Vec<ProjectionSlot>,
     pub required_relations: Vec<RequiredRelation>,
+    /// Conservative PostgreSQL aggregate cardinality after any exact H3
+    /// universe bound. This is the cardinality advertised by the CustomPath.
+    pub estimated_output_rows: u64,
     /// Stable words consumed by Phase 5A's `shape_digest`.
     pub digest_words: Vec<i32>,
     pub descriptor_resolution: DescriptorResolution,
@@ -671,6 +674,7 @@ impl ShapePlan {
 pub unsafe fn extract_shape(
     root: *mut pg_sys::PlannerInfo,
     output_rel: *mut pg_sys::RelOptInfo,
+    estimated_output_rows: u64,
     model: &TypedCostModel,
 ) -> Result<ShapePlan, ShapeDecline> {
     // SAFETY: forwarded unchanged under this function's planner-pointer and
@@ -679,6 +683,7 @@ pub unsafe fn extract_shape(
         postgres::extract_input(
             root,
             output_rel,
+            estimated_output_rows,
             model.planner.auto_load_amortization_queries,
         )
     }?;

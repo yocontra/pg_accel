@@ -1093,7 +1093,7 @@ fn backend_resource_paths_arm_cleanup_after_postmaster_fork() {
         .find("TypedCostModel::from_limits(cost::device_limits())")
         .expect("generic admission builds its typed device model");
     let extraction = generic_admission
-        .find("extract_shape(root, output_rel, &model)")
+        .find("extract_shape(root, output_rel, group_estimate.output_rows, &model)")
         .expect("generic admission performs full shape extraction");
     let residency = generic_admission
         .find("exact_residency_estimates(&shape)")

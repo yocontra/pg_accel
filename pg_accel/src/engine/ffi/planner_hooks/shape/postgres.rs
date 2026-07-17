@@ -1716,6 +1716,7 @@ pub(super) unsafe fn preflight_base_relations(
 pub(super) unsafe fn extract_input(
     root: *mut pg_sys::PlannerInfo,
     output_rel: *mut pg_sys::RelOptInfo,
+    estimated_output_rows: u64,
     expected_reuses: NonZeroU32,
 ) -> Result<ShapeInput, ShapeDecline> {
     // SAFETY: root is read only after the explicit null guard; caller owns
@@ -1760,12 +1761,9 @@ pub(super) unsafe fn extract_input(
     let (joins, relation_filters) = unsafe { joins_and_filters(query, &inventory) }?;
     // SAFETY: root/query/inventory all belong to this planner invocation.
     let relations = unsafe { relation_shapes(root_ref, query, &inventory) }?;
-    let estimated_output_rows = if output_rel.is_null() {
-        0
-    } else {
-        // SAFETY: output_rel was checked non-null and is valid by contract.
-        estimate_rows(unsafe { (*output_rel).rows })
-    };
+    if output_rel.is_null() || estimated_output_rows == 0 {
+        return Err(ShapeDecline::NoAggregate);
+    }
     Ok(ShapeInput {
         relations,
         joins,

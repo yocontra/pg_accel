@@ -156,6 +156,7 @@ fn single_table_reduce_emits_neutral_spec_and_typed_projection() {
         }]
     );
     assert_eq!(plan.residency.total_required_bytes, Some(8_000_000));
+    assert_eq!(plan.estimated_output_rows, 1);
     assert_eq!(plan.cost_gate, ShapeCostGate::Eligible);
     assert!(plan.descriptor_spec().is_ok());
 }
@@ -353,6 +354,38 @@ fn grouped_plan_requires_exact_dictionary_resolution_before_descriptor_use() {
             null_code: None,
         }]),
         Err(ShapeDecline::InvalidGroupKeyResolution)
+    );
+}
+
+#[test]
+fn generic_group_estimate_above_device_limit_declines_before_resolution() {
+    let mut input = single_table_input();
+    let group = column(1, 100, 1, u32::from(pg_sys::INT4OID));
+    input.group_keys = vec![PlannerGroupKey::Column(group)];
+    input.projections.insert(
+        0,
+        InputProjection::Group {
+            key: PlannerGroupKey::Column(group),
+            output: output(u32::from(pg_sys::INT4OID), false),
+        },
+    );
+    let mut limits = DeviceLimits::cpu_only();
+    limits.gpu_hash_agg_min_rows = 1;
+    input.estimated_output_rows =
+        u64::try_from(limits.gpu_hash_agg_max_groups).expect("group limit fits u64") + 1;
+
+    let plan = build_shape(input, &TypedCostModel::from_limits(&limits))
+        .expect("shape should retain an honest group-cap decline");
+    assert_eq!(
+        plan.cost_gate,
+        ShapeCostGate::GroupsExceedDeviceMaximum {
+            estimated: crate::engine::cost::Rows::new(limits.gpu_hash_agg_max_groups + 1),
+            maximum: crate::engine::cost::Rows::new(limits.gpu_hash_agg_max_groups),
+        }
+    );
+    assert_eq!(
+        plan.estimated_output_rows,
+        u64::try_from(limits.gpu_hash_agg_max_groups).expect("group limit fits u64") + 1
     );
 }
 
@@ -1550,6 +1583,7 @@ fn h3_parent_output_cost_caps_postgres_group_estimate_to_exact_universe() {
 
     let plan = build_shape(input, &TypedCostModel::from_limits(&limits))
         .expect("resolution-zero H3 shape should build");
+    assert_eq!(plan.estimated_output_rows, 123);
     let bounded_output_cost = 123.0 * limits.preagg_yield_cost;
     assert!(
         (plan.cost.output_materialization.get() - bounded_output_cost).abs() < 1.0e-12,

@@ -1040,7 +1040,8 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
             .map_err(|error| ShapeDecline::Codec(error.to_string()))?,
     );
 
-    let (cost, cost_gate) = estimate_shape_cost(&input, &spec, &residency, model);
+    let (cost, cost_gate, estimated_output_rows) =
+        estimate_shape_cost(&input, &spec, &residency, model);
     let dictionary_joins = spec
         .star_dims
         .iter()
@@ -1113,6 +1114,7 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
         spec,
         projections: projection.slots,
         required_relations,
+        estimated_output_rows,
         digest_words,
         descriptor_resolution,
         descriptor_measures,

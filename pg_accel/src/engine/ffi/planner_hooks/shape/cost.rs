@@ -207,7 +207,7 @@ pub fn estimate_shape_cost(
     spec: &AggQuerySpec,
     residency: &ResidencyEstimate,
     model: &TypedCostModel,
-) -> (ShapeCost, ShapeCostGate) {
+) -> (ShapeCost, ShapeCostGate, u64) {
     let fact_rows = input
         .relations
         .iter()
@@ -409,5 +409,5 @@ pub fn estimate_shape_cost(
         }
     };
 
-    (cost, gate)
+    (cost, gate, estimated_output_rows)
 }

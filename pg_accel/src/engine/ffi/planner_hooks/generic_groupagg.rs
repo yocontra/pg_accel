@@ -73,6 +73,7 @@ enum AdmissionDecline {
     ResidencyBytesOverflow,
     ResidencyBudgetSnapshotUnavailable,
     DerivedArtifactEstimateUnavailable,
+    GroupEstimateUnavailable,
     ResidencyBudgetExceeded {
         cluster_live_bytes: u64,
         current_backend_live_bytes: u64,
@@ -111,6 +112,7 @@ impl AdmissionDecline {
             Self::DerivedArtifactEstimateUnavailable => {
                 "generic_derived_artifact_estimate_unavailable"
             }
+            Self::GroupEstimateUnavailable => "generic_group_estimate_unavailable",
             Self::ResidencyBudgetExceeded { .. } => "generic_residency_budget_exceeded",
             Self::DeviceCostGate(ShapeCostGate::Eligible) => "generic_invalid_eligible_cost_gate",
             Self::DeviceCostGate(ShapeCostGate::FactRowsBelowDeviceMinimum { .. }) => {
@@ -492,6 +494,10 @@ fn shape_resident_proof(shape: &ShapePlan) -> crate::engine::residency::Resident
     .snapshot()
 }
 
+fn advertised_output_rows(shape: &ShapePlan) -> f64 {
+    shape.estimated_output_rows as f64
+}
+
 unsafe fn inject_childless_shape_path(
     output_rel: *mut RelOptInfo,
     shape: &ShapePlan,
@@ -538,7 +544,7 @@ unsafe fn inject_childless_shape_path(
         (*cpath).path.parallel_aware = false;
         (*cpath).path.parallel_safe = false;
         (*cpath).path.parallel_workers = 0;
-        (*cpath).path.rows = (*output_rel).rows.max(1.0);
+        (*cpath).path.rows = advertised_output_rows(shape);
         (*cpath).path.startup_cost = effective_cost.startup;
         (*cpath).path.total_cost = effective_cost.total;
         (*cpath).path.pathkeys = std::ptr::null_mut();
@@ -738,6 +744,41 @@ unsafe fn consistent_agg_num_groups_from_iter(
     estimate
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AggGroupEstimate {
+    num_groups: f64,
+    output_rows: u64,
+}
+
+fn conservative_output_rows(num_groups: f64) -> Option<u64> {
+    const U64_EXCLUSIVE_UPPER_BOUND: f64 = 18_446_744_073_709_551_616.0;
+
+    if !num_groups.is_finite() || num_groups <= 0.0 || num_groups >= U64_EXCLUSIVE_UPPER_BOUND {
+        return None;
+    }
+    Some(num_groups.ceil() as u64)
+}
+
+unsafe fn consistent_agg_group_estimate(output_rel: *mut RelOptInfo) -> Option<AggGroupEstimate> {
+    if output_rel.is_null() {
+        return None;
+    }
+    // SAFETY: output_rel is the live upper relation supplied to this planner
+    // callback, and pathlist contains planner-owned Path pointers.
+    let pathlist = unsafe { (*output_rel).pathlist };
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    let num_groups = unsafe {
+        consistent_agg_num_groups_from_iter(
+            (0..len).map(|index| pg_sys::list_nth(pathlist, index).cast()),
+            output_rel,
+        )?
+    };
+    Some(AggGroupEstimate {
+        num_groups,
+        output_rows: conservative_output_rows(num_groups)?,
+    })
+}
+
 fn minimum_valid_cost(costs: impl IntoIterator<Item = Option<f64>>) -> Option<f64> {
     costs
         .into_iter()
@@ -827,6 +868,7 @@ unsafe fn reconstructed_serial_agg_cost(
     input_rel: *mut RelOptInfo,
     output_rel: *mut RelOptInfo,
     extra: *mut c_void,
+    num_groups: f64,
 ) -> Option<f64> {
     if root.is_null() || input_rel.is_null() || output_rel.is_null() || extra.is_null() {
         return None;
@@ -853,15 +895,6 @@ unsafe fn reconstructed_serial_agg_cost(
     if serial_input.is_null() {
         return None;
     }
-
-    let output_paths = unsafe { (*output_rel).pathlist };
-    let output_len = unsafe { pg_sys::list_length(output_paths) };
-    let num_groups = unsafe {
-        consistent_agg_num_groups_from_iter(
-            (0..output_len).map(|index| pg_sys::list_nth(output_paths, index).cast()),
-            output_rel,
-        )?
-    };
 
     let grouped = unsafe { !(*parse).groupClause.is_null() };
     let strategy = if grouped {
@@ -942,6 +975,7 @@ unsafe fn cheapest_native_cost(
     input_rel: *mut RelOptInfo,
     output_rel: *mut RelOptInfo,
     extra: *mut c_void,
+    num_groups: f64,
 ) -> Option<f64> {
     if output_rel.is_null() {
         return None;
@@ -955,7 +989,7 @@ unsafe fn cheapest_native_cost(
     };
     let existing_cost = (!existing.is_null()).then(|| unsafe { (*existing).total_cost });
     let reconstructed =
-        unsafe { reconstructed_serial_agg_cost(root, input_rel, output_rel, extra) };
+        unsafe { reconstructed_serial_agg_cost(root, input_rel, output_rel, extra, num_groups) };
     minimum_valid_cost([existing_cost, reconstructed])
 }
 
@@ -991,10 +1025,18 @@ pub(super) unsafe fn try_inject(
     }
     let model = TypedCostModel::from_limits(cost::device_limits());
     let result = (|| {
+        // Use the aggregate paths PostgreSQL just built as the single source of
+        // truth for both admission and the injected path's output cardinality.
+        // Missing, invalid, or disagreeing estimates fail closed before catalog
+        // shape extraction and resident-byte estimation.
+        let group_estimate = unsafe { consistent_agg_group_estimate(output_rel) }
+            .ok_or(AdmissionDecline::GroupEstimateUnavailable)?;
         // SAFETY: root and output_rel are the live planner-owned pointers supplied
         // together to this upper-path callback.
-        let mut shape = unsafe { super::shape::extract_shape(root, output_rel, &model) }
-            .map_err(AdmissionDecline::Shape)?;
+        let mut shape = unsafe {
+            super::shape::extract_shape(root, output_rel, group_estimate.output_rows, &model)
+        }
+        .map_err(AdmissionDecline::Shape)?;
 
         #[cfg(any(test, feature = "pg_test"))]
         if test_force_spatial_groupagg(&shape) {
@@ -1061,7 +1103,15 @@ pub(super) unsafe fn try_inject(
             &model,
         )?;
         // SAFETY: output_rel remains the live planner-owned upper relation.
-        let native_cost = unsafe { cheapest_native_cost(root, input_rel, output_rel, extra) };
+        let native_cost = unsafe {
+            cheapest_native_cost(
+                root,
+                input_rel,
+                output_rel,
+                extra,
+                group_estimate.num_groups,
+            )
+        };
         let effective_cost = effective_path_cost(&shape, gucs::cost_multiplier());
         gate_cost(
             &shape,
@@ -1386,6 +1436,33 @@ mod tests {
             )
         };
         assert_eq!(inconsistent, None);
+
+        let absent = unsafe {
+            consistent_agg_num_groups_from_iter(
+                [std::ptr::from_mut(&mut leaf)],
+                std::ptr::from_mut(&mut rel),
+            )
+        };
+        assert_eq!(absent, None);
+
+        second.numGroups = 0.0;
+        let nonpositive = unsafe {
+            consistent_agg_num_groups_from_iter(
+                [std::ptr::from_mut(&mut second.path)],
+                std::ptr::from_mut(&mut rel),
+            )
+        };
+        assert_eq!(nonpositive, None);
+    }
+
+    #[test]
+    fn aggregate_group_estimate_rounds_up_and_rejects_invalid_values() {
+        assert_eq!(conservative_output_rows(64.0), Some(64));
+        assert_eq!(conservative_output_rows(127.01), Some(128));
+        assert_eq!(conservative_output_rows(f64::MIN_POSITIVE), Some(1));
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(conservative_output_rows(invalid), None);
+        }
     }
 
     #[test]
@@ -1475,6 +1552,7 @@ mod tests {
                 relation_oid: 42,
                 attnos: Vec::new(),
             }],
+            estimated_output_rows: 1,
             digest_words,
             descriptor_resolution: DescriptorResolution::Ready,
             descriptor_measures: DescriptorMeasurePlan {
@@ -1501,6 +1579,15 @@ mod tests {
             cost: zero_cost,
             cost_gate: ShapeCostGate::Eligible,
         }
+    }
+
+    #[test]
+    fn childless_path_rows_follow_the_shape_group_estimate() {
+        let mut shape = grouped_count_shape();
+        shape.estimated_output_rows = 64;
+        assert_eq!(advertised_output_rows(&shape), 64.0);
+        shape.estimated_output_rows = 128;
+        assert_eq!(advertised_output_rows(&shape), 128.0);
     }
 
     fn estimate(loaded: bool, bytes: u64) -> ResidentLoadEstimate {
