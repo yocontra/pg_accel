@@ -613,13 +613,11 @@ impl DeviceLimits {
             // values >= 1.0 allow injection as long as our path is within
             // this multiple of serial PG.
             //
-            // Note: `find_cheapest_nonparallel_path` only strips top-level
-            // Gather/GatherMerge nodes, so Finalize aggregate paths that
-            // embed a parallel partial aggregate still count as
-            // "non-parallel best". This biases the serial cost downward,
-            // so the injection ratio is set above 1.0 to compensate — the
-            // GPU kernel's real-world batched throughput makes up the
-            // paper-cost gap.
+            // Generic aggregate admission proves that its comparison path is
+            // an AGGSPLIT_SIMPLE aggregate with no parallel execution anywhere
+            // in its subtree. If no such serial baseline exists, admission
+            // fails closed instead of comparing against a parallel finalize
+            // aggregate whose root itself reports zero workers.
             // 2026-04-12: lowered from 2.00 to 0.80 after a filtered integer
             // aggregate scored 0.30x@10M. At 0.80 the planner
             // rejects GPU agg unless estimated cheaper than 80% of PG serial.

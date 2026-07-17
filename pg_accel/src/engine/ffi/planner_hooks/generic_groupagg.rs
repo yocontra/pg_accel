@@ -10,7 +10,7 @@ use super::shape::{
     RelationResidency, RelationResidencyRequirement, ResidencyEstimate, ShapeCostGate,
     ShapeDecline, ShapePlan,
 };
-use super::{add_gpu_path_with_resident_proof, find_cheapest_path, rel_rows_estimate};
+use super::{add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, TypedCostModel};
 use crate::engine::executor::agg::{
     estimate_descriptor_artifact_bytes_upper_bound, validate_descriptor_capability,
@@ -556,15 +556,134 @@ unsafe fn inject_childless_shape_path(
     })
 }
 
+const MAX_SERIAL_PATH_DEPTH: usize = 128;
+
+unsafe fn path_list_is_serial(pathlist: *mut List, depth: usize) -> bool {
+    if pathlist.is_null() {
+        return true;
+    }
+    // SAFETY: callers pass a planner-owned List of Path pointers.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    for index in 0..len {
+        // SAFETY: index is within the live planner List.
+        let path = unsafe { pg_sys::list_nth(pathlist, index).cast::<pg_sys::Path>() };
+        if !unsafe { path_tree_is_serial(path, depth) } {
+            return false;
+        }
+    }
+    true
+}
+
+unsafe fn path_tree_is_serial(path: *mut pg_sys::Path, depth: usize) -> bool {
+    if path.is_null() || depth > MAX_SERIAL_PATH_DEPTH {
+        return false;
+    }
+    // `parallel_safe` only describes eligibility. These two fields describe
+    // an execution path that actually participates in parallel execution.
+    if unsafe { (*path).parallel_aware || (*path).parallel_workers > 0 } {
+        return false;
+    }
+
+    // SAFETY: every planner Path begins with its NodeTag and the casts below
+    // are selected by that tag. Unknown path kinds fail closed because their
+    // possible children cannot be proved serial.
+    let next_depth = depth + 1;
+    match unsafe { (*path).type_ } {
+        NodeTag::T_GatherPath | NodeTag::T_GatherMergePath => false,
+        NodeTag::T_AggPath => {
+            let path = path.cast::<pg_sys::AggPath>();
+            unsafe {
+                (*path).aggsplit == pg_sys::AggSplit::AGGSPLIT_SIMPLE
+                    && path_tree_is_serial((*path).subpath, next_depth)
+            }
+        }
+        NodeTag::T_SortPath | NodeTag::T_IncrementalSortPath => {
+            let path = path.cast::<pg_sys::SortPath>();
+            unsafe { path_tree_is_serial((*path).subpath, next_depth) }
+        }
+        NodeTag::T_ProjectionPath => {
+            let path = path.cast::<pg_sys::ProjectionPath>();
+            unsafe { path_tree_is_serial((*path).subpath, next_depth) }
+        }
+        NodeTag::T_MaterialPath => {
+            let path = path.cast::<pg_sys::MaterialPath>();
+            unsafe { path_tree_is_serial((*path).subpath, next_depth) }
+        }
+        NodeTag::T_MemoizePath => {
+            let path = path.cast::<pg_sys::MemoizePath>();
+            unsafe { path_tree_is_serial((*path).subpath, next_depth) }
+        }
+        NodeTag::T_NestPath | NodeTag::T_MergePath | NodeTag::T_HashPath => {
+            let path = path.cast::<pg_sys::JoinPath>();
+            unsafe {
+                path_tree_is_serial((*path).outerjoinpath, next_depth)
+                    && path_tree_is_serial((*path).innerjoinpath, next_depth)
+            }
+        }
+        NodeTag::T_AppendPath => {
+            let path = path.cast::<pg_sys::AppendPath>();
+            unsafe { path_list_is_serial((*path).subpaths, next_depth) }
+        }
+        NodeTag::T_MergeAppendPath => {
+            let path = path.cast::<pg_sys::MergeAppendPath>();
+            unsafe { path_list_is_serial((*path).subpaths, next_depth) }
+        }
+        // Extension and FDW implementations are opaque to this proof even
+        // when they expose no child paths or PostgreSQL parallel fields.
+        NodeTag::T_CustomPath | NodeTag::T_ForeignPath => false,
+        // These are terminal scan/result paths for aggregate inputs. They have
+        // no executable Path children; the parallel fields above are decisive.
+        NodeTag::T_Path
+        | NodeTag::T_IndexPath
+        | NodeTag::T_BitmapHeapPath
+        | NodeTag::T_TidPath
+        | NodeTag::T_TidRangePath
+        | NodeTag::T_GroupResultPath => true,
+        _ => false,
+    }
+}
+
+unsafe fn cheapest_serial_agg_path_from_iter(
+    paths: impl IntoIterator<Item = *mut pg_sys::Path>,
+) -> *mut pg_sys::Path {
+    let mut best: *mut pg_sys::Path = std::ptr::null_mut();
+    for path in paths {
+        if path.is_null() || unsafe { (*path).type_ != NodeTag::T_AggPath } {
+            continue;
+        }
+        let agg = path.cast::<pg_sys::AggPath>();
+        if unsafe { (*agg).aggsplit != pg_sys::AggSplit::AGGSPLIT_SIMPLE }
+            || !unsafe { path_tree_is_serial(path, 0) }
+        {
+            continue;
+        }
+        if best.is_null() || unsafe { (*path).total_cost < (*best).total_cost } {
+            best = path;
+        }
+    }
+    best
+}
+
 unsafe fn cheapest_native_cost(output_rel: *mut RelOptInfo) -> Option<f64> {
     if output_rel.is_null() {
         return None;
     }
-    // SAFETY: output_rel is non-null and planner-owned; its pathlist is valid for
-    // the duration of this upper-path callback.
-    let path = unsafe { find_cheapest_path((*output_rel).pathlist) };
+    // SAFETY: output_rel is non-null and planner-owned; its pathlist is valid
+    // for this upper-path callback and contains Path pointers.
+    let pathlist = unsafe { (*output_rel).pathlist };
+    if pathlist.is_null() {
+        return None;
+    }
+    // SAFETY: pathlist is a live planner List.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    let paths = (0..len).map(|index| {
+        // SAFETY: index is within the planner-owned List.
+        unsafe { pg_sys::list_nth(pathlist, index).cast::<pg_sys::Path>() }
+    });
+    // SAFETY: every iterator item is a live Path pointer from output_rel.
+    let path = unsafe { cheapest_serial_agg_path_from_iter(paths) };
     (!path.is_null()).then(|| {
-        // SAFETY: find_cheapest_path returned a non-null planner-owned Path.
+        // SAFETY: the selector returned a non-null planner-owned Path.
         unsafe { (*path).total_cost }
     })
 }
@@ -707,6 +826,177 @@ mod tests {
         AggregateSource, ColumnRef, DimSpec, GroupKeyEncoding, GroupKeyRef, GroupKeySource,
         JoinMultiplicity, MeasureSpec,
     };
+
+    fn test_leaf() -> pg_sys::Path {
+        let mut path = pg_sys::Path::default();
+        path.type_ = NodeTag::T_Path;
+        path
+    }
+
+    fn test_agg(
+        subpath: *mut pg_sys::Path,
+        cost: f64,
+        split: pg_sys::AggSplit::Type,
+    ) -> pg_sys::AggPath {
+        let mut path = pg_sys::AggPath::default();
+        path.path.type_ = NodeTag::T_AggPath;
+        path.path.total_cost = cost;
+        path.subpath = subpath;
+        path.aggsplit = split;
+        path
+    }
+
+    #[test]
+    fn serial_agg_baseline_ignores_cheaper_parallel_finalize_agg() {
+        let mut serial_leaf = test_leaf();
+        let mut serial_agg = test_agg(
+            std::ptr::from_mut(&mut serial_leaf),
+            100.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+
+        let mut partial_leaf = test_leaf();
+        partial_leaf.parallel_aware = true;
+        let mut gather = pg_sys::GatherMergePath::default();
+        gather.path.type_ = NodeTag::T_GatherMergePath;
+        gather.subpath = std::ptr::from_mut(&mut partial_leaf);
+        gather.num_workers = 7;
+        let mut finalize_agg = test_agg(
+            std::ptr::from_mut(&mut gather.path),
+            10.0,
+            pg_sys::AggSplit::AGGSPLIT_FINAL_DESERIAL,
+        );
+
+        let selected = unsafe {
+            cheapest_serial_agg_path_from_iter([
+                std::ptr::from_mut(&mut finalize_agg.path),
+                std::ptr::from_mut(&mut serial_agg.path),
+            ])
+        };
+        assert_eq!(selected, std::ptr::from_mut(&mut serial_agg.path));
+    }
+
+    #[test]
+    fn serial_agg_baseline_rejects_nested_sort_over_gather() {
+        let mut parallel_leaf = test_leaf();
+        let mut gather = pg_sys::GatherPath::default();
+        gather.path.type_ = NodeTag::T_GatherPath;
+        gather.subpath = std::ptr::from_mut(&mut parallel_leaf);
+        gather.num_workers = 4;
+        let mut sort = pg_sys::SortPath::default();
+        sort.path.type_ = NodeTag::T_SortPath;
+        sort.subpath = std::ptr::from_mut(&mut gather.path);
+        let mut nested_parallel_agg = test_agg(
+            std::ptr::from_mut(&mut sort.path),
+            5.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+
+        let mut serial_leaf = test_leaf();
+        let mut serial_agg = test_agg(
+            std::ptr::from_mut(&mut serial_leaf),
+            20.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+        let selected = unsafe {
+            cheapest_serial_agg_path_from_iter([
+                std::ptr::from_mut(&mut nested_parallel_agg.path),
+                std::ptr::from_mut(&mut serial_agg.path),
+            ])
+        };
+        assert_eq!(selected, std::ptr::from_mut(&mut serial_agg.path));
+    }
+
+    #[test]
+    fn serial_agg_baseline_selects_cheapest_ordinary_serial_agg() {
+        let mut first_leaf = test_leaf();
+        let mut first = test_agg(
+            std::ptr::from_mut(&mut first_leaf),
+            50.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+        let mut second_leaf = test_leaf();
+        let mut second = test_agg(
+            std::ptr::from_mut(&mut second_leaf),
+            25.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+
+        let selected = unsafe {
+            cheapest_serial_agg_path_from_iter([
+                std::ptr::from_mut(&mut first.path),
+                std::ptr::from_mut(&mut second.path),
+            ])
+        };
+        assert_eq!(selected, std::ptr::from_mut(&mut second.path));
+    }
+
+    #[test]
+    fn serial_agg_baseline_fails_closed_without_proved_serial_agg() {
+        let mut leaf = test_leaf();
+        let mut gather = pg_sys::GatherPath::default();
+        gather.path.type_ = NodeTag::T_GatherPath;
+        gather.subpath = std::ptr::from_mut(&mut leaf);
+        gather.num_workers = 2;
+        let mut agg = test_agg(
+            std::ptr::from_mut(&mut gather.path),
+            5.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+
+        let selected =
+            unsafe { cheapest_serial_agg_path_from_iter([std::ptr::from_mut(&mut agg.path)]) };
+        assert!(selected.is_null());
+    }
+
+    #[test]
+    fn serial_agg_baseline_rejects_opaque_custom_and_foreign_inputs() {
+        let mut custom = pg_sys::CustomPath::default();
+        custom.path.type_ = NodeTag::T_CustomPath;
+        let mut custom_agg = test_agg(
+            std::ptr::from_mut(&mut custom.path),
+            10.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+        let mut foreign = pg_sys::ForeignPath::default();
+        foreign.path.type_ = NodeTag::T_ForeignPath;
+        let mut foreign_agg = test_agg(
+            std::ptr::from_mut(&mut foreign.path),
+            20.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+
+        let selected = unsafe {
+            cheapest_serial_agg_path_from_iter([
+                std::ptr::from_mut(&mut custom_agg.path),
+                std::ptr::from_mut(&mut foreign_agg.path),
+            ])
+        };
+        assert!(selected.is_null());
+    }
+
+    #[test]
+    fn serial_agg_baseline_rejects_gather_nested_in_join_branch() {
+        let mut outer = test_leaf();
+        let mut inner = test_leaf();
+        let mut gather = pg_sys::GatherPath::default();
+        gather.path.type_ = NodeTag::T_GatherPath;
+        gather.subpath = std::ptr::from_mut(&mut inner);
+        gather.num_workers = 3;
+        let mut join = pg_sys::HashPath::default();
+        join.jpath.path.type_ = NodeTag::T_HashPath;
+        join.jpath.outerjoinpath = std::ptr::from_mut(&mut outer);
+        join.jpath.innerjoinpath = std::ptr::from_mut(&mut gather.path);
+        let mut agg = test_agg(
+            std::ptr::from_mut(&mut join.jpath.path),
+            15.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+
+        let selected =
+            unsafe { cheapest_serial_agg_path_from_iter([std::ptr::from_mut(&mut agg.path)]) };
+        assert!(selected.is_null());
+    }
 
     fn count_contract() -> (AggQuerySpec, AggOutputProjection) {
         let spec = AggQuerySpec {
