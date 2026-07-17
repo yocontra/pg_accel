@@ -745,6 +745,44 @@ unsafe fn cheapest_serial_agg_path_from_iter(
     best
 }
 
+unsafe fn cheapest_live_agg_cost_from_iter(
+    paths: impl IntoIterator<Item = *mut pg_sys::Path>,
+    output_rel: *mut RelOptInfo,
+) -> Option<f64> {
+    let mut best: Option<f64> = None;
+    for path in paths {
+        // SAFETY: the caller guarantees non-null entries are live, aligned
+        // concrete Path-derived values whose NodeTag matches their allocation.
+        if path.is_null() || unsafe { (*path).type_ != NodeTag::T_AggPath } {
+            continue;
+        }
+        // SAFETY: short-circuiting proves both pointers non-null before reading
+        // the Path parent field; output_rel and every path are planner-owned for
+        // the duration of this selection.
+        if output_rel.is_null() || unsafe { (*path).parent != output_rel } {
+            continue;
+        }
+        // This fallback may be a parallel FINAL_DESERIAL aggregate. It is used
+        // only when no proved serial comparator survives PostgreSQL path
+        // pruning, so comparing against it is stricter than the preferred
+        // serial baseline.
+        // SAFETY: path is non-null and remains live under the caller contract.
+        let cost = unsafe { (*path).total_cost };
+        // SAFETY: the same live common Path header contains startup_cost.
+        if !cost.is_finite()
+            || cost < 0.0
+            || !unsafe { (*path).startup_cost.is_finite() }
+            || unsafe { (*path).startup_cost < 0.0 || cost < (*path).startup_cost }
+        {
+            continue;
+        }
+        if best.is_none_or(|current| cost < current) {
+            best = Some(cost);
+        }
+    }
+    best
+}
+
 unsafe fn cheapest_serial_input_path_from_iter(
     paths: impl IntoIterator<Item = *mut pg_sys::Path>,
     input_rel: *mut RelOptInfo,
@@ -1121,7 +1159,24 @@ unsafe fn cheapest_native_cost(
     // pointers; the callee checks every nullable argument before dereferencing.
     let reconstructed =
         unsafe { reconstructed_serial_agg_cost(root, input_rel, output_rel, extra, num_groups) };
-    minimum_valid_cost([existing_cost, reconstructed])
+    let serial_cost = minimum_valid_cost([existing_cost, reconstructed]);
+    if serial_cost.is_some() {
+        return serial_cost;
+    }
+
+    // A strongly parallel profile can prune every serial join input before
+    // UPPERREL_GROUP_AGG. The already-built parallel aggregate remains a
+    // truthful, more competitive comparator; failing admission solely because
+    // its serial counterpart was pruned makes count-only resident joins
+    // unreachable. This fallback never replaces an available serial baseline.
+    // SAFETY: every index is bounded by the pathlist length measured above and
+    // every entry remains planner-owned for this callback.
+    unsafe {
+        cheapest_live_agg_cost_from_iter(
+            (0..len).map(|index| pg_sys::list_nth(pathlist, index).cast()),
+            output_rel,
+        )
+    }
 }
 
 fn record_decline(decline: &AdmissionDecline, output_rel: *mut RelOptInfo) {
@@ -1451,6 +1506,69 @@ mod tests {
         let selected =
             unsafe { cheapest_serial_agg_path_from_iter([std::ptr::from_mut(&mut agg.path)]) };
         assert!(selected.is_null());
+    }
+
+    #[test]
+    fn live_agg_fallback_accepts_parallel_finalize_cost() {
+        let mut output_rel = pg_sys::RelOptInfo::default();
+        let mut leaf = test_leaf();
+        leaf.parallel_aware = true;
+        let mut gather = pg_sys::GatherPath::default();
+        gather.path.type_ = NodeTag::T_GatherPath;
+        gather.path.parallel_workers = 8;
+        gather.subpath = std::ptr::from_mut(&mut leaf);
+        let mut finalize = test_agg(
+            std::ptr::from_mut(&mut gather.path),
+            80.0,
+            pg_sys::AggSplit::AGGSPLIT_FINAL_DESERIAL,
+        );
+        finalize.path.parent = std::ptr::from_mut(&mut output_rel);
+        finalize.path.startup_cost = 75.0;
+
+        // SAFETY: every pointer targets a test-owned path that remains live for
+        // this call; NodeTags, parent, costs, and child links are initialized.
+        let cost = unsafe {
+            cheapest_live_agg_cost_from_iter(
+                [std::ptr::from_mut(&mut finalize.path)],
+                std::ptr::from_mut(&mut output_rel),
+            )
+        };
+        assert_eq!(cost, Some(80.0));
+    }
+
+    #[test]
+    fn live_agg_fallback_rejects_nonaggregate_foreign_and_invalid_paths() {
+        let mut output_rel = pg_sys::RelOptInfo::default();
+        let mut other_rel = pg_sys::RelOptInfo::default();
+        let mut leaf = test_leaf();
+        leaf.parent = std::ptr::from_mut(&mut output_rel);
+
+        let mut foreign = test_agg(
+            std::ptr::from_mut(&mut leaf),
+            10.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+        foreign.path.parent = std::ptr::from_mut(&mut other_rel);
+        let mut invalid = test_agg(
+            std::ptr::from_mut(&mut leaf),
+            f64::NAN,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+        invalid.path.parent = std::ptr::from_mut(&mut output_rel);
+
+        // SAFETY: every pointer targets a test-owned path that remains live for
+        // this call and each NodeTag matches its concrete allocation.
+        let cost = unsafe {
+            cheapest_live_agg_cost_from_iter(
+                [
+                    std::ptr::from_mut(&mut leaf),
+                    std::ptr::from_mut(&mut foreign.path),
+                    std::ptr::from_mut(&mut invalid.path),
+                ],
+                std::ptr::from_mut(&mut output_rel),
+            )
+        };
+        assert_eq!(cost, None);
     }
 
     #[test]
