@@ -4,6 +4,7 @@ import importlib.util
 import os
 import pathlib
 import platform
+import re
 import shutil
 import stat
 import tarfile
@@ -101,14 +102,21 @@ class PackageExtensionTests(unittest.TestCase):
                 "Darwin",
             )
 
-    def test_libomp_absolute_load_allowlist_is_kind_specific(self) -> None:
-        package_extension.validate_load_value(
-            "/opt/homebrew/opt/libomp/lib/libomp.dylib", "dependency", "Darwin"
-        )
-        package_extension.validate_load_value(
-            "/opt/homebrew/opt/libomp/lib", "LC_RPATH", "Darwin"
-        )
+    def test_homebrew_absolute_load_allowlist_is_kind_specific(self) -> None:
         for kind, value in (
+            ("dependency", "/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib"),
+            ("LC_RPATH", "/opt/homebrew/opt/llvm@20/lib"),
+            ("dependency", "/opt/homebrew/opt/libomp/lib/libomp.dylib"),
+            ("LC_RPATH", "/opt/homebrew/opt/libomp/lib"),
+        ):
+            package_extension.validate_load_value(value, kind, "Darwin")
+
+        for kind, value in (
+            ("dependency", "/opt/homebrew/opt/llvm@20/lib"),
+            ("dependency", "/opt/homebrew/opt/llvm@20/lib/libLLVM.20.dylib"),
+            ("dependency", "/opt/homebrew/opt/llvm@20/lib/libclang.dylib"),
+            ("LC_RPATH", "/opt/homebrew/opt/llvm@20/lib/"),
+            ("LC_RPATH", "/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib"),
             ("dependency", "/opt/homebrew/opt/libomp/lib/libomp.5.dylib"),
             ("dependency", "/opt/homebrew/opt/libomp/lib/libunexpected.dylib"),
             ("dependency", "/opt/homebrew/opt/libomp/lib"),
@@ -119,6 +127,30 @@ class PackageExtensionTests(unittest.TestCase):
                 package_extension.PackageError, "unexpected absolute"
             ):
                 package_extension.validate_load_value(value, kind, "Darwin")
+
+    def test_system_absolute_load_allowlist_is_dependency_only(self) -> None:
+        for value in (
+            "/usr/lib/libSystem.B.dylib",
+            "/System/Library/Frameworks/Metal.framework/Versions/A/Metal",
+            "/Library/Apple/System/Library/Frameworks/Foundation.framework/Foundation",
+        ):
+            package_extension.validate_load_value(value, "dependency", "Darwin")
+            with self.subTest(value=value), self.assertRaisesRegex(
+                package_extension.PackageError, "unexpected absolute"
+            ):
+                package_extension.validate_load_value(value, "LC_RPATH", "Darwin")
+
+    def test_absolute_load_paths_reject_dot_and_traversal_components(self) -> None:
+        for value in (
+            "/opt/homebrew/opt/llvm@20/lib/../evil.dylib",
+            "/opt/homebrew/opt/llvm@20/lib/./libLLVM.dylib",
+            "/usr/lib/../evil.dylib",
+            "/System/Library/Frameworks/../evil.dylib",
+        ):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                package_extension.PackageError, "dot path component"
+            ):
+                package_extension.validate_load_value(value, "dependency", "Darwin")
 
     def test_metal_bundle_preserves_prefix_and_requires_omp_backend(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -435,6 +467,35 @@ class PackageExtensionTests(unittest.TestCase):
             package_extension.write_checksums(package)
             with self.assertRaisesRegex(install_package.InstallError, "unexpected payload"):
                 install_package.install(package, pg_config, destdir)
+
+    def test_installer_rejects_missing_darwin_prerequisite_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            package = root / "package"
+            package.mkdir()
+            (package / "PLATFORM").write_text("macos\n", encoding="ascii")
+            (package / "ARCH").write_text("arm64\n", encoding="ascii")
+            package_extension.write_checksums(package)
+
+            present = root / "libLLVM.dylib"
+            present.write_bytes(b"llvm")
+            missing = root / "libomp.dylib"
+            destdir = root / "stage"
+            with (
+                mock.patch.object(install_package.platform, "system", return_value="Darwin"),
+                mock.patch.object(install_package.platform, "machine", return_value="arm64"),
+                mock.patch.object(
+                    install_package,
+                    "DARWIN_RUNTIME_PREREQUISITES",
+                    (present, missing),
+                ),
+                self.assertRaisesRegex(
+                    install_package.InstallError, re.escape(str(missing))
+                ),
+            ):
+                install_package.install(package, root / "missing-pg-config", destdir)
+
+            self.assertFalse(destdir.exists())
 
     def test_installer_rejects_escaping_and_multiline_pg_config_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

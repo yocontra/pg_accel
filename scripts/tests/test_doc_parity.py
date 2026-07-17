@@ -172,6 +172,16 @@ class MacosPrerequisiteParityTests(unittest.TestCase):
         self.assertIn("CHANGELOG.md", errors[0])
         self.assertIn("ninja", errors[0])
 
+    def test_setup_prefers_lld20_and_recommends_it(self) -> None:
+        setup = (doc_parity.REPO_ROOT / "scripts/setup_acpp.sh").read_text()
+        for executable in ("ld64.lld", "lld"):
+            versioned = f'"$brew_root/opt/lld@20/bin/{executable}"'
+            unversioned = f'"$brew_root/opt/lld/bin/{executable}"'
+            self.assertIn(versioned, setup)
+            self.assertIn(unversioned, setup)
+            self.assertLess(setup.index(versioned), setup.index(unversioned))
+        self.assertIn("install Homebrew lld@20 or set ACPP_LLD_PATH", setup)
+
 
 if __name__ == "__main__":
     unittest.main()

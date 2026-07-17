@@ -20,6 +20,22 @@ class InstallError(RuntimeError):
     pass
 
 
+DARWIN_RUNTIME_PREREQUISITES = (
+    pathlib.Path("/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib"),
+    pathlib.Path("/opt/homebrew/opt/libomp/lib/libomp.dylib"),
+)
+
+
+def validate_runtime_prerequisites(system: str) -> None:
+    if system != "Darwin":
+        return
+    missing = [str(path) for path in DARWIN_RUNTIME_PREREQUISITES if not path.is_file()]
+    if missing:
+        raise InstallError(
+            "missing Homebrew runtime prerequisite(s): " + ", ".join(missing)
+        )
+
+
 def _sha256(path: pathlib.Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -206,16 +222,7 @@ def install(
             f"package architecture {package_arch!r} does not match host "
             f"{platform.machine().lower()!r}"
         )
-    if system == "Darwin":
-        prerequisites = (
-            pathlib.Path("/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib"),
-            pathlib.Path("/opt/homebrew/opt/libomp/lib/libomp.dylib"),
-        )
-        missing = [str(path) for path in prerequisites if not path.is_file()]
-        if missing:
-            raise InstallError(
-                "missing Homebrew runtime prerequisite(s): " + ", ".join(missing)
-            )
+    validate_runtime_prerequisites(system)
     pkglibdir, extension_dir = resolve_install_dirs(package_root, pg_config, destdir)
 
     library_dir = package_root / "lib"

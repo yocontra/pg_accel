@@ -242,26 +242,30 @@ def validate_load_value(value: str, kind: str, system: str) -> None:
         ):
             raise PackageError(f"non-relocatable relative {kind} remains: {value}")
         return
+    if any(component in {".", ".."} for component in value.split("/")):
+        raise PackageError(f"absolute {kind} contains a dot path component: {value}")
     if kind == "LC_ID_DYLIB":
         raise PackageError(f"absolute LC_ID_DYLIB remains in package: {value}")
     if _private_absolute(value):
         raise PackageError(f"private absolute {kind} remains in package: {value}")
     if system == "Darwin":
-        allowed_prefixes = (
+        allowed_system_dependency_prefixes = (
             "/usr/lib/",
             "/System/Library/",
             "/Library/Apple/System/Library/",
-            "/opt/homebrew/opt/llvm@20/lib/",
         )
-        allowed_any_kind_exact = {"/opt/homebrew/opt/llvm@20/lib"}
         allowed_external_values = {
+            ("dependency", "/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib"),
+            ("LC_RPATH", "/opt/homebrew/opt/llvm@20/lib"),
             ("dependency", "/opt/homebrew/opt/libomp/lib/libomp.dylib"),
             ("LC_RPATH", "/opt/homebrew/opt/libomp/lib"),
         }
         if (
-            value not in allowed_any_kind_exact
-            and (kind, value) not in allowed_external_values
-            and not value.startswith(allowed_prefixes)
+            (kind, value) not in allowed_external_values
+            and not (
+                kind == "dependency"
+                and value.startswith(allowed_system_dependency_prefixes)
+            )
         ):
             raise PackageError(f"unexpected absolute {kind} remains in package: {value}")
     else:
