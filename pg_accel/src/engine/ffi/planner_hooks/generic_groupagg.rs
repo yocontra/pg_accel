@@ -600,13 +600,14 @@ unsafe fn path_list_is_serial(pathlist: *mut List, depth: usize) -> bool {
     if pathlist.is_null() {
         return true;
     }
-    // SAFETY: callers pass a planner-owned List of Path pointers.
+    // SAFETY: the caller supplies a live, aligned PostgreSQL List with a valid
+    // header.
     let len = unsafe { pg_sys::list_length(pathlist) };
     for index in 0..len {
-        // SAFETY: index is within the live planner List.
+        // SAFETY: index is within the live caller-supplied List.
         let path = unsafe { pg_sys::list_nth(pathlist, index).cast::<pg_sys::Path>() };
-        // SAFETY: list_nth returned a planner-owned Path pointer; a null list
-        // element is accepted by path_tree_is_serial and fails closed.
+        // SAFETY: the caller guarantees each non-null element is a live, aligned
+        // concrete Path allocation matching its NodeTag. Null fails closed.
         if !unsafe { path_tree_is_serial(path, depth) } {
             return false;
         }
@@ -620,22 +621,24 @@ unsafe fn path_tree_is_serial(path: *mut pg_sys::Path, depth: usize) -> bool {
     }
     // `parallel_safe` only describes eligibility. These two fields describe
     // an execution path that actually participates in parallel execution.
-    // SAFETY: path was checked non-null above and is planner-owned for this walk.
+    // SAFETY: path is non-null; the caller guarantees it is live, aligned, and
+    // allocated as a concrete Path-derived value matching its NodeTag.
     if unsafe { (*path).parallel_aware || (*path).parallel_workers > 0 } {
         return false;
     }
 
-    // SAFETY: every planner Path begins with its NodeTag and the casts below
-    // are selected by that tag. Unknown path kinds fail closed because their
-    // possible children cannot be proved serial.
+    // SAFETY: every valid Path begins with its NodeTag. The caller guarantees
+    // that tag matches the concrete allocation and that all child pointers and
+    // Lists satisfy the same live/aligned contract. Unknown path kinds fail
+    // closed because their possible children cannot be proved serial.
     let next_depth = depth + 1;
-    // SAFETY: path was checked non-null above, and every Path starts with NodeTag.
+    // SAFETY: path satisfies the caller contract above and was checked non-null.
     match unsafe { (*path).type_ } {
         NodeTag::T_GatherPath | NodeTag::T_GatherMergePath => false,
         NodeTag::T_AggPath => {
             let path = path.cast::<pg_sys::AggPath>();
-            // SAFETY: the T_AggPath tag proves the cast, and PostgreSQL owns the
-            // AggPath and its subpath for the duration of planner traversal.
+            // SAFETY: the caller contract and T_AggPath tag establish the
+            // concrete layout; its subpath remains live for this walk.
             unsafe {
                 (*path).aggsplit == pg_sys::AggSplit::AGGSPLIT_SIMPLE
                     && path_tree_is_serial((*path).subpath, next_depth)
@@ -643,32 +646,32 @@ unsafe fn path_tree_is_serial(path: *mut pg_sys::Path, depth: usize) -> bool {
         }
         NodeTag::T_SortPath | NodeTag::T_IncrementalSortPath => {
             let path = path.cast::<pg_sys::SortPath>();
-            // SAFETY: both matched tags share SortPath's subpath layout, and the
-            // planner owns that child pointer for this traversal.
+            // SAFETY: the caller contract and matched tag establish the layout;
+            // both concrete types share SortPath's live subpath field.
             unsafe { path_tree_is_serial((*path).subpath, next_depth) }
         }
         NodeTag::T_ProjectionPath => {
             let path = path.cast::<pg_sys::ProjectionPath>();
-            // SAFETY: the matched tag proves the ProjectionPath cast and its
-            // planner-owned subpath remains live during this walk.
+            // SAFETY: the caller contract and matched tag establish the
+            // ProjectionPath layout, and its subpath remains live for this walk.
             unsafe { path_tree_is_serial((*path).subpath, next_depth) }
         }
         NodeTag::T_MaterialPath => {
             let path = path.cast::<pg_sys::MaterialPath>();
-            // SAFETY: the matched tag proves the MaterialPath cast and its
-            // planner-owned subpath remains live during this walk.
+            // SAFETY: the caller contract and matched tag establish the
+            // MaterialPath layout, and its subpath remains live for this walk.
             unsafe { path_tree_is_serial((*path).subpath, next_depth) }
         }
         NodeTag::T_MemoizePath => {
             let path = path.cast::<pg_sys::MemoizePath>();
-            // SAFETY: the matched tag proves the MemoizePath cast and its
-            // planner-owned subpath remains live during this walk.
+            // SAFETY: the caller contract and matched tag establish the
+            // MemoizePath layout, and its subpath remains live for this walk.
             unsafe { path_tree_is_serial((*path).subpath, next_depth) }
         }
         NodeTag::T_NestPath | NodeTag::T_MergePath | NodeTag::T_HashPath => {
             let path = path.cast::<pg_sys::JoinPath>();
-            // SAFETY: all matched join path structs embed JoinPath at this
-            // location; PostgreSQL owns both child paths during planning.
+            // SAFETY: the caller contract and matched tag establish the layout;
+            // each concrete type embeds JoinPath here and both children stay live.
             unsafe {
                 path_tree_is_serial((*path).outerjoinpath, next_depth)
                     && path_tree_is_serial((*path).innerjoinpath, next_depth)
@@ -676,14 +679,15 @@ unsafe fn path_tree_is_serial(path: *mut pg_sys::Path, depth: usize) -> bool {
         }
         NodeTag::T_AppendPath => {
             let path = path.cast::<pg_sys::AppendPath>();
-            // SAFETY: the matched tag proves the AppendPath cast, and subpaths
-            // is a planner-owned List of Path pointers.
+            // SAFETY: the caller contract and matched tag establish the
+            // AppendPath layout and the live subpaths List satisfies that contract.
             unsafe { path_list_is_serial((*path).subpaths, next_depth) }
         }
         NodeTag::T_MergeAppendPath => {
             let path = path.cast::<pg_sys::MergeAppendPath>();
-            // SAFETY: the matched tag proves the MergeAppendPath cast, and
-            // subpaths is a planner-owned List of Path pointers.
+            // SAFETY: the caller contract and matched tag establish the
+            // MergeAppendPath layout, and its live subpaths List satisfies that
+            // contract.
             unsafe { path_list_is_serial((*path).subpaths, next_depth) }
         }
         // Extension and FDW implementations are opaque to this proof even
@@ -706,22 +710,23 @@ unsafe fn cheapest_serial_agg_path_from_iter(
 ) -> *mut pg_sys::Path {
     let mut best: *mut pg_sys::Path = std::ptr::null_mut();
     for path in paths {
-        // SAFETY: non-null iterator entries are caller-owned live Path values;
-        // every Path exposes NodeTag at the common header.
+        // SAFETY: the caller guarantees non-null entries are live, aligned
+        // concrete Path-derived values whose NodeTag matches their allocation.
         if path.is_null() || unsafe { (*path).type_ != NodeTag::T_AggPath } {
             continue;
         }
         let agg = path.cast::<pg_sys::AggPath>();
-        // SAFETY: the checked T_AggPath tag proves the cast to AggPath.
+        // SAFETY: the caller contract and checked T_AggPath tag establish the
+        // cast.
         if unsafe { (*agg).aggsplit != pg_sys::AggSplit::AGGSPLIT_SIMPLE }
-            // SAFETY: path is a live caller-owned Path and recursive traversal
-            // validates each NodeTag before reading a concrete path layout.
+            // SAFETY: path satisfies the caller contract; recursive traversal
+            // matches each concrete layout to its NodeTag before reading children.
             || !unsafe { path_tree_is_serial(path, 0) }
         {
             continue;
         }
-        // SAFETY: path is non-null and remains owned by the planner or test
-        // caller throughout selection.
+        // SAFETY: path is non-null and remains live under the caller contract
+        // throughout selection.
         let valid_cost = unsafe {
             (*path).startup_cost.is_finite()
                 && (*path).startup_cost >= 0.0
@@ -749,9 +754,9 @@ unsafe fn cheapest_serial_input_path_from_iter(
         if path.is_null() || input_rel.is_null() {
             continue;
         }
-        // SAFETY: path and input_rel are live non-null caller pointers. The
-        // common Path header contains parent/param_info, and recursive traversal
-        // validates each concrete child layout from its NodeTag.
+        // SAFETY: the caller guarantees path and input_rel are live, aligned,
+        // correctly typed pointers. The common Path header contains parent and
+        // param_info; recursive traversal matches concrete layouts to NodeTags.
         let incompatible = unsafe {
             (*path).parent != input_rel
                 || !(*path).param_info.is_null()
@@ -760,8 +765,8 @@ unsafe fn cheapest_serial_input_path_from_iter(
         if incompatible {
             continue;
         }
-        // SAFETY: path passed the non-null and ownership checks above and stays
-        // live for the duration of selection.
+        // SAFETY: path is non-null and the caller keeps it live for the duration
+        // of selection.
         let valid_cost = unsafe {
             (*path).startup_cost.is_finite()
                 && (*path).startup_cost >= 0.0
@@ -786,18 +791,19 @@ unsafe fn consistent_agg_num_groups_from_iter(
 ) -> Option<f64> {
     let mut estimate: Option<f64> = None;
     for path in paths {
-        // SAFETY: non-null iterator entries are live Path values supplied by
-        // the planner or test, and NodeTag is in the common header.
+        // SAFETY: the caller guarantees non-null entries are live, aligned
+        // concrete Path-derived values whose NodeTag matches their allocation.
         if path.is_null() || unsafe { (*path).type_ != NodeTag::T_AggPath } {
             continue;
         }
         // SAFETY: short-circuiting proves both pointers non-null before reading
-        // the Path parent field.
+        // the Path parent field; the caller guarantees output_rel is a live,
+        // aligned RelOptInfo.
         if output_rel.is_null() || unsafe { (*path).parent != output_rel } {
             return None;
         }
-        // SAFETY: the T_AggPath tag checked above proves this cast, and the path
-        // remains live for the iterator call.
+        // SAFETY: the caller contract and checked T_AggPath tag establish the
+        // concrete layout, and the path remains live for the iterator call.
         let groups = unsafe { (*path.cast::<pg_sys::AggPath>()).numGroups };
         if !groups.is_finite() || groups <= 0.0 {
             return None;
