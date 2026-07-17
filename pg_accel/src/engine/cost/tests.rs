@@ -203,6 +203,8 @@ fn cpu_only_limits_match_previous_defaults() {
     assert_eq!(l.gpu_expr_min_rows, 250_000);
     assert_eq!(l.gpu_hash_join_build_max_rows, 99_999);
     assert_eq!(l.gpu_pipeline_fusion_min_rows, 10_000);
+    assert!((l.resident_load_scan_per_row_cost - 0.01).abs() < f64::EPSILON);
+    assert!((l.resident_load_per_byte_cost - 0.001).abs() < f64::EPSILON);
     assert!((l.preagg_dim_materialize_cost - 0.10).abs() < f64::EPSILON);
     assert_eq!(l.optimal_batch_min, 256);
     assert_eq!(l.optimal_batch_max, 8192);
@@ -225,6 +227,8 @@ fn baseline_gpu_matches_defaults() {
     assert_eq!(l.gpu_window_min_rows, 100_000);
     assert_eq!(l.gpu_reduce_min_rows, 25_000);
     assert!((l.gpu_spatial_max_output_fraction - 0.80).abs() < f64::EPSILON);
+    assert!((l.resident_load_scan_per_row_cost - 0.01).abs() < f64::EPSILON);
+    assert!((l.resident_load_per_byte_cost - 0.001).abs() < f64::EPSILON);
     assert!((l.preagg_dim_materialize_cost - 0.10).abs() < f64::EPSILON);
 }
 
@@ -550,6 +554,14 @@ fn spatial_per_row_exceeds_h3() {
 }
 
 // -- PreAgg cost constants ---------------------------------------------------
+
+#[test]
+fn resident_load_costs_are_positive_and_distinct_from_preagg_materialization() {
+    let l = DeviceLimits::cpu_only();
+    assert!(l.resident_load_scan_per_row_cost > 0.0);
+    assert!(l.resident_load_per_byte_cost > 0.0);
+    assert!(l.resident_load_scan_per_row_cost < l.preagg_dim_materialize_cost);
+}
 
 #[test]
 fn preagg_fixed_overhead_less_than_gpu_launch() {

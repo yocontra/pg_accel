@@ -814,6 +814,32 @@ fn classify_extension_column_type(type_oid: pg_sys::Oid) -> Result<ExtensionColu
     }
 }
 
+/// Whether every requested column has fixed-width resident load work.
+///
+/// An empty request is the zero-column `COUNT(*)` case: it still scans rows,
+/// but it does not decode or materialize any variable-width values.
+pub(super) fn columns_have_fixed_width_load(requests: &[ColumnRequest]) -> Result<bool, String> {
+    requests.iter().try_fold(true, |all_fixed, request| {
+        let fixed = match request.type_oid {
+            pg_sys::BOOLOID
+            | pg_sys::INT2OID
+            | pg_sys::INT4OID
+            | pg_sys::INT8OID
+            | pg_sys::DATEOID
+            | pg_sys::TIMESTAMPOID
+            | pg_sys::TIMESTAMPTZOID
+            | pg_sys::FLOAT4OID
+            | pg_sys::FLOAT8OID => true,
+            pg_sys::TEXTOID | pg_sys::VARCHAROID | pg_sys::BPCHAROID => false,
+            _ => matches!(
+                classify_extension_column_type(request.type_oid)?,
+                ExtensionColumnKind::H3
+            ),
+        };
+        Ok(all_fixed && fixed)
+    })
+}
+
 impl ColumnBuilder {
     fn type_oid(&self) -> pg_sys::Oid {
         match self {
@@ -2036,6 +2062,31 @@ mod unit_tests {
             summary_stats_impl_fn_oid: pg_sys::Oid::from(60_010),
             fingerprint_words: vec![1, 2, 3],
         }
+    }
+
+    #[test]
+    fn fixed_width_load_classifies_zero_builtin_and_text_requests() {
+        assert_eq!(columns_have_fixed_width_load(&[]), Ok(true));
+        assert_eq!(
+            columns_have_fixed_width_load(&[
+                ColumnRequest {
+                    attno: 1,
+                    type_oid: pg_sys::INT4OID,
+                },
+                ColumnRequest {
+                    attno: 2,
+                    type_oid: pg_sys::TIMESTAMPOID,
+                },
+            ]),
+            Ok(true)
+        );
+        assert_eq!(
+            columns_have_fixed_width_load(&[ColumnRequest {
+                attno: 1,
+                type_oid: pg_sys::TEXTOID,
+            }]),
+            Ok(false)
+        );
     }
 
     #[test]

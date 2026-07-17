@@ -22,6 +22,27 @@ pub struct ShapeCost {
     pub total: PgCost,
 }
 
+impl ShapeCost {
+    /// Replace the first-use load component and recompute the complete total.
+    ///
+    /// Exact residency resolution uses this after shape extraction. Keeping
+    /// the component sum here prevents spatial operation and exact-recheck
+    /// reserves from disappearing when only residency evidence changes.
+    pub(crate) fn replace_amortized_auto_load(&mut self, load: PgCost) {
+        self.amortized_auto_load = load;
+        self.total = PgCost::new(
+            self.fact_scan.get()
+                + self.dimension_setup.get()
+                + self.join_probe.get()
+                + self.spatial_filter.get()
+                + self.spatial_recheck_reserve.get()
+                + self.aggregate.get()
+                + self.output_materialization.get()
+                + self.amortized_auto_load.get(),
+        );
+    }
+}
+
 /// Device-derived capability gate, separate from cost comparison with a
 /// native PostgreSQL path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,16 +318,7 @@ pub fn estimate_shape_cost(
     let output_materialization =
         mul_cost(estimated_output_rows, model.coefficients.preagg_yield_cost);
     let amortized_auto_load = residency.amortized_load_cost.get();
-    let total = fact_scan
-        + dimension_setup
-        + join_probe
-        + spatial_filter
-        + spatial_recheck_reserve
-        + aggregate
-        + output_materialization
-        + amortized_auto_load;
-
-    let cost = ShapeCost {
+    let mut cost = ShapeCost {
         fact_scan: PgCost::new(fact_scan),
         dimension_setup: PgCost::new(dimension_setup),
         join_probe: PgCost::new(join_probe),
@@ -315,8 +327,9 @@ pub fn estimate_shape_cost(
         aggregate: PgCost::new(aggregate),
         output_materialization: PgCost::new(output_materialization),
         amortized_auto_load: PgCost::new(amortized_auto_load),
-        total: PgCost::new(total),
+        total: PgCost::ZERO,
     };
+    cost.replace_amortized_auto_load(PgCost::new(amortized_auto_load));
 
     let required_fact_rows = if has_spatial {
         model.planner.gpu_reduce_min_rows

@@ -141,6 +141,27 @@ Unified memory halves most thresholds (no DMA copy). Memory-derived limits use
 `gpu_op_cost_reduce`, `gpu_op_cost_hash_agg`, `gpu_op_cost_sort`, `gpu_op_cost_window`,
 `gpu_op_cost_filter`. All halved on unified memory.
 
+### Resident first-use load cost
+
+Generic resident aggregates cost a synchronous missing-relation load as a row
+scan plus an estimated resident-byte term, amortized by
+`auto_load_amortization_queries`:
+
+- `resident_load_scan_per_row_cost` applies only when the complete selected,
+  pinned, and already-resident column union is empty or catalog-proved
+  fixed-width (built-in primitive or H3).
+- `resident_load_per_byte_cost` applies to every estimated missing resident
+  byte.
+- Text, geometry, and raster loads retain the conservative
+  `preagg_dim_materialize_cost` row term because their decoding and dictionary
+  or domain construction work is not bounded by the compressed resident-byte
+  footprint.
+
+The early neutral shape lacks the exact type union and therefore uses the
+conservative variable-width row term. Exact residency evidence replaces that
+preliminary cost before production path admission. Resident-load coefficients
+must not be substituted for PreAgg dimension hash-table construction costs.
+
 ### Cost-ratio gates vs PG's serial best
 
 - `gpu_agg_cost_ratio` (default 0.80).

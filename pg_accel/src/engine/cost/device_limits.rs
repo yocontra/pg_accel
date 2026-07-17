@@ -27,6 +27,11 @@ pub struct DeviceLimits {
     /// Number of expected reuses over which planner costing amortizes a
     /// synchronous first-use resident load.
     pub auto_load_amortization_queries: u32,
+    /// Per-row scan cost for a resident load whose selected columns are all
+    /// fixed-width (or for a zero-column `COUNT(*)` scan).
+    pub resident_load_scan_per_row_cost: f64,
+    /// Per estimated resident byte copied or materialized by a first-use load.
+    pub resident_load_per_byte_cost: f64,
     /// Minimum rows before generic GPU dispatch is considered.
     pub gpu_min_rows: usize,
     /// Minimum rows for GPU sort at executor level.
@@ -500,6 +505,13 @@ impl DeviceLimits {
             resident_memory_budget_bytes,
             resident_domain_max_exact_value_bytes: 1024 * 1024,
             auto_load_amortization_queries: 8,
+            // M2 unified-memory measurements loaded 2,105,256 and 3,157,884
+            // byte fixed-width integer snapshots in 16.236ms and 20.627ms.
+            // These coefficients deliberately retain substantial headroom
+            // before the configured reuse amortization while keeping resident
+            // loading distinct from PreAgg dimension hash-table construction.
+            resident_load_scan_per_row_cost: 0.01,
+            resident_load_per_byte_cost: 0.001,
             gpu_min_rows,
             gpu_sort_min_rows,
             gpu_sort_planner_min_rows,
@@ -705,6 +717,8 @@ impl DeviceLimits {
             resident_memory_budget_bytes: 256 * 1024 * 1024,
             resident_domain_max_exact_value_bytes: 1024 * 1024,
             auto_load_amortization_queries: 8,
+            resident_load_scan_per_row_cost: 0.01,
+            resident_load_per_byte_cost: 0.001,
             gpu_min_rows: 10_000,
             gpu_sort_min_rows: 100_000,
             // Planner threshold tracks the executor threshold — see comment
@@ -914,6 +928,14 @@ impl DeviceLimits {
         }
 
         for (field, value) in [
+            (
+                "resident_load_scan_per_row_cost",
+                self.resident_load_scan_per_row_cost,
+            ),
+            (
+                "resident_load_per_byte_cost",
+                self.resident_load_per_byte_cost,
+            ),
             (
                 "preagg_dim_materialize_cost",
                 self.preagg_dim_materialize_cost,
@@ -1172,6 +1194,26 @@ mod tests {
 
     #[test]
     fn validation_rejects_nonpositive_or_nonfinite_costs() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.resident_load_scan_per_row_cost = 0.0;
+        assert_eq!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvalidPositiveFloat {
+                field: "resident_load_scan_per_row_cost",
+                value: 0.0,
+            })
+        );
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.resident_load_per_byte_cost = f64::NAN;
+        assert!(matches!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvalidPositiveFloat {
+                field: "resident_load_per_byte_cost",
+                value,
+            }) if value.is_nan()
+        ));
+
         let mut limits = DeviceLimits::cpu_only();
         limits.gpu_nlj_per_pair_cost = f64::INFINITY;
         assert_eq!(

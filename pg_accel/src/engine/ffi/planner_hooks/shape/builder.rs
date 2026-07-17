@@ -715,7 +715,14 @@ fn build_residency(
             estimated_bytes,
         });
     }
-    let load_cost = missing_rows as f64 * model.coefficients.preagg_dim_materialize_cost.get()
+    // ShapeInput does not yet carry the exact selected/pinned/existing type
+    // union. Preserve the prior variable-width row charge here; exact
+    // residency resolution replaces it before production cost admission.
+    let byte_cost = missing_bytes.map_or(0.0, |bytes| {
+        bytes as f64 * model.coefficients.resident_load_per_byte_cost.get()
+    });
+    let load_cost = (missing_rows as f64 * model.coefficients.preagg_dim_materialize_cost.get()
+        + byte_cost)
         / f64::from(input.expected_reuses.get());
     Ok(ResidencyEstimate {
         relations,

@@ -580,6 +580,14 @@ fn pg_accel_device_limits() -> TableIterator<
             "auto_load_amortization_queries".into(),
             limits.auto_load_amortization_queries.to_string(),
         ),
+        (
+            "resident_load_scan_per_row_cost".into(),
+            limits.resident_load_scan_per_row_cost.to_string(),
+        ),
+        (
+            "resident_load_per_byte_cost".into(),
+            limits.resident_load_per_byte_cost.to_string(),
+        ),
         ("gpu_min_rows".into(), limits.gpu_min_rows.to_string()),
         (
             "gpu_sort_min_rows".into(),
@@ -1174,7 +1182,7 @@ mod tests {
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM pg_accel_device_limits()")
             .expect("pg_accel_device_limits() should succeed")
             .expect("pg_accel_device_limits() should return a row count");
-        assert_eq!(count, 72, "expected one SRF row per DeviceLimits field");
+        assert_eq!(count, 74, "expected one SRF row per DeviceLimits field");
 
         let phase6_count = Spi::get_one::<i64>(
             "SELECT COUNT(*) FROM pg_accel_device_limits() WHERE name IN (\

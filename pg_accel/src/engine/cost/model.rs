@@ -92,6 +92,10 @@ impl From<&DeviceLimits> for MemoryModel {
 /// Per-row and per-operation cost coefficients.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct CostCoefficients {
+    /// Per-row scan cost for fixed-width or zero-column resident loads.
+    pub resident_load_scan_per_row_cost: PgCost,
+    /// Per estimated resident byte loaded on first use.
+    pub resident_load_per_byte_cost: PgCost,
     /// Per-row dimension materialization cost for PreAgg.
     pub preagg_dim_materialize_cost: PgCost,
     /// Per-row fact-table scan cost for PreAgg.
@@ -131,6 +135,8 @@ pub struct CostCoefficients {
 impl From<&DeviceLimits> for CostCoefficients {
     fn from(limits: &DeviceLimits) -> Self {
         Self {
+            resident_load_scan_per_row_cost: PgCost::new(limits.resident_load_scan_per_row_cost),
+            resident_load_per_byte_cost: PgCost::new(limits.resident_load_per_byte_cost),
             preagg_dim_materialize_cost: PgCost::new(limits.preagg_dim_materialize_cost),
             preagg_fact_scan_cost: PgCost::new(limits.preagg_fact_scan_cost),
             preagg_probe_cost: PgCost::new(limits.preagg_probe_cost),
@@ -339,6 +345,14 @@ mod tests {
             limits.gpu_spatial_max_vertices_per_row,
         );
 
+        assert_eq!(
+            model.coefficients.resident_load_scan_per_row_cost.get(),
+            limits.resident_load_scan_per_row_cost,
+        );
+        assert_eq!(
+            model.coefficients.resident_load_per_byte_cost.get(),
+            limits.resident_load_per_byte_cost,
+        );
         assert_eq!(
             model.coefficients.preagg_dim_materialize_cost.get(),
             limits.preagg_dim_materialize_cost,

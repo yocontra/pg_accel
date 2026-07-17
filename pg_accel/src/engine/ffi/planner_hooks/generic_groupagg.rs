@@ -208,6 +208,24 @@ fn add_bytes(total: u64, bytes: u64) -> Result<u64, AdmissionDecline> {
         .ok_or(AdmissionDecline::ResidencyBytesOverflow)
 }
 
+fn unamortized_resident_load_cost(
+    rows: u64,
+    bytes: u64,
+    fixed_width: bool,
+    model: &TypedCostModel,
+) -> f64 {
+    let row_cost = if fixed_width {
+        model.coefficients.resident_load_scan_per_row_cost
+    } else {
+        // Variable-width decoding and dictionary/domain construction do not
+        // scale with the compressed resident byte footprint. Retain the
+        // established conservative materialization row charge for that class.
+        model.coefficients.preagg_dim_materialize_cost
+    };
+    rows as f64 * row_cost.get()
+        + bytes as f64 * model.coefficients.resident_load_per_byte_cost.get()
+}
+
 fn apply_exact_residency(
     shape: &mut ShapePlan,
     estimates: &[ResidentLoadEstimate],
@@ -229,6 +247,7 @@ fn apply_exact_residency(
     let mut total_required_bytes = 0_u64;
     let mut missing_bytes = 0_u64;
     let mut missing_rows = 0_u64;
+    let mut unamortized_load_cost = 0.0;
     for required in &shape.required_relations {
         let estimate = estimates
             .iter()
@@ -255,7 +274,16 @@ fn apply_exact_residency(
                 });
             }
             missing_bytes = add_bytes(missing_bytes, estimate.estimated_bytes)?;
+            // Shape extraction records max(RelOptInfo.tuples, rows), so this
+            // is the base relation's full-scan cardinality rather than a
+            // post-restriction query-row estimate.
             missing_rows = missing_rows.saturating_add(prior.estimated_rows);
+            unamortized_load_cost += unamortized_resident_load_cost(
+                prior.estimated_rows,
+                estimate.estimated_bytes,
+                estimate.fixed_width,
+                model,
+            );
             RelationResidency::AutoLoad
         };
         relations.push(RelationResidencyRequirement {
@@ -302,8 +330,7 @@ fn apply_exact_residency(
         .min()
         .and_then(NonZeroU32::new)
         .unwrap_or(shape.residency.expected_reuses);
-    let load_cost = missing_rows as f64 * model.coefficients.preagg_dim_materialize_cost.get()
-        / f64::from(expected_reuses.get());
+    let load_cost = unamortized_load_cost / f64::from(expected_reuses.get());
     let amortized_auto_load = PgCost::new(load_cost);
     shape.residency = ResidencyEstimate {
         relations,
@@ -313,15 +340,7 @@ fn apply_exact_residency(
         expected_reuses,
         amortized_load_cost: amortized_auto_load,
     };
-    shape.cost.amortized_auto_load = amortized_auto_load;
-    shape.cost.total = PgCost::new(
-        shape.cost.fact_scan.get()
-            + shape.cost.dimension_setup.get()
-            + shape.cost.join_probe.get()
-            + shape.cost.aggregate.get()
-            + shape.cost.output_materialization.get()
-            + amortized_auto_load.get(),
-    );
+    shape.cost.replace_amortized_auto_load(amortized_auto_load);
     Ok(())
 }
 
@@ -1591,11 +1610,21 @@ mod tests {
     }
 
     fn estimate(loaded: bool, bytes: u64) -> ResidentLoadEstimate {
+        estimate_for(42, loaded, bytes, true)
+    }
+
+    fn estimate_for(
+        relation_oid: u32,
+        loaded: bool,
+        bytes: u64,
+        fixed_width: bool,
+    ) -> ResidentLoadEstimate {
         ResidentLoadEstimate {
-            relid: pg_sys::Oid::from(42u32),
+            relid: pg_sys::Oid::from(relation_oid),
             loaded,
             pinned: false,
             estimated_bytes: bytes,
+            fixed_width,
             last_load_ms: None,
             amortization_queries: 4,
         }
@@ -1603,8 +1632,14 @@ mod tests {
 
     fn model() -> TypedCostModel {
         let mut limits = DeviceLimits::cpu_only();
-        limits.preagg_dim_materialize_cost = 0.004;
+        limits.resident_load_scan_per_row_cost = 0.004;
+        limits.resident_load_per_byte_cost = 0.001;
         TypedCostModel::from_limits(&limits)
+    }
+
+    fn expected_exact_load(rows: u64, bytes: u64, fixed_width: bool) -> PgCost {
+        let model = model();
+        PgCost::new(unamortized_resident_load_cost(rows, bytes, fixed_width, &model) / 4.0)
     }
 
     fn budget_snapshot(
@@ -1748,6 +1783,7 @@ mod tests {
                 loaded: false,
                 pinned: false,
                 estimated_bytes: 4096,
+                fixed_width: true,
                 last_load_ms: None,
                 amortization_queries: 4,
             })
@@ -1828,8 +1864,9 @@ mod tests {
         );
         assert_eq!(shape.residency.missing_bytes, Some(4096));
         assert_eq!(shape.residency.missing_rows, 100_000);
-        assert_eq!(shape.cost.amortized_auto_load, PgCost::new(100.0));
-        assert_eq!(shape.cost.total, PgCost::new(116.0));
+        let expected_load = expected_exact_load(100_000, 4096, true);
+        assert_eq!(shape.cost.amortized_auto_load, expected_load);
+        assert_eq!(shape.cost.total, PgCost::new(16.0 + expected_load.get()));
     }
 
     #[test]
@@ -1964,8 +2001,103 @@ mod tests {
         );
         assert_eq!(shape.residency.missing_bytes, Some(4096));
         assert_eq!(shape.residency.missing_rows, 100_000);
-        assert_eq!(shape.cost.amortized_auto_load, PgCost::new(100.0));
-        assert_eq!(shape.cost.total, PgCost::new(116.0));
+        let expected_load = expected_exact_load(100_000, 4096, true);
+        assert_eq!(shape.cost.amortized_auto_load, expected_load);
+        assert_eq!(shape.cost.total, PgCost::new(16.0 + expected_load.get()));
+    }
+
+    #[test]
+    fn zero_column_load_still_charges_full_relation_scan_rows() {
+        let mut shape = count_shape();
+        apply_exact_residency(
+            &mut shape,
+            &[estimate(false, 0)],
+            AdmissionPolicy {
+                auto_load: true,
+                budget_bytes: 0,
+                budget_snapshot: budget_snapshot(0, 0, 0),
+            },
+            &model(),
+        )
+        .expect("zero-column COUNT(*) scan has no resident byte allocation");
+
+        let expected_load = expected_exact_load(100_000, 0, true);
+        assert!(expected_load.get() > 0.0);
+        assert_eq!(shape.residency.missing_bytes, Some(0));
+        assert_eq!(shape.residency.missing_rows, 100_000);
+        assert_eq!(shape.cost.amortized_auto_load, expected_load);
+    }
+
+    #[test]
+    fn mixed_fixed_and_variable_loads_sum_per_relation_before_amortization() {
+        let mut shape = count_shape();
+        shape.required_relations.push(RequiredRelation {
+            relation_oid: 99,
+            attnos: vec![1],
+        });
+        shape
+            .residency
+            .relations
+            .push(RelationResidencyRequirement {
+                relation_oid: 99,
+                attnos: vec![1],
+                state: RelationResidency::Unknown,
+                estimated_rows: 50_000,
+                estimated_bytes: None,
+            });
+        let fixed = estimate_for(42, false, 4_096, true);
+        let mut variable = estimate_for(99, false, 8_192, false);
+        variable.amortization_queries = 8;
+        apply_exact_residency(
+            &mut shape,
+            &[fixed, variable],
+            AdmissionPolicy {
+                auto_load: true,
+                budget_bytes: 20_000,
+                budget_snapshot: budget_snapshot(0, 0, 0),
+            },
+            &model(),
+        )
+        .expect("mixed missing relations fit the test budget");
+
+        let expected_load = PgCost::new(
+            expected_exact_load(100_000, 4_096, true).get()
+                + expected_exact_load(50_000, 8_192, false).get(),
+        );
+        assert_eq!(shape.residency.missing_rows, 150_000);
+        assert_eq!(shape.residency.missing_bytes, Some(12_288));
+        assert_eq!(shape.cost.amortized_auto_load, expected_load);
+        assert!(
+            expected_exact_load(50_000, 8_192, false).get()
+                > expected_exact_load(50_000, 8_192, true).get()
+        );
+    }
+
+    #[test]
+    fn exact_residency_preserves_spatial_cost_components() {
+        let mut shape = count_shape();
+        shape.cost.spatial_filter = PgCost::new(2.0);
+        shape.cost.spatial_recheck_reserve = PgCost::new(3.0);
+        shape.cost.replace_amortized_auto_load(PgCost::ZERO);
+        apply_exact_residency(
+            &mut shape,
+            &[estimate(false, 4_096)],
+            AdmissionPolicy {
+                auto_load: true,
+                budget_bytes: 8_192,
+                budget_snapshot: budget_snapshot(0, 0, 0),
+            },
+            &model(),
+        )
+        .expect("spatial shape load fits the test budget");
+
+        let expected_load = expected_exact_load(100_000, 4_096, true);
+        assert_eq!(shape.cost.spatial_filter, PgCost::new(2.0));
+        assert_eq!(shape.cost.spatial_recheck_reserve, PgCost::new(3.0));
+        assert_eq!(
+            shape.cost.total,
+            PgCost::new(16.0 + 2.0 + 3.0 + expected_load.get())
+        );
     }
 
     #[test]

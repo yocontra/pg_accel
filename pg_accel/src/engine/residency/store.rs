@@ -1219,6 +1219,9 @@ pub struct ResidentLoadEstimate {
     pub loaded: bool,
     pub pinned: bool,
     pub estimated_bytes: u64,
+    /// True when the complete selected/pinned/existing column union is
+    /// zero-column or catalog-proved fixed-width resident input.
+    pub fixed_width: bool,
     pub last_load_ms: Option<f64>,
     pub amortization_queries: u32,
 }
@@ -1943,6 +1946,8 @@ pub fn estimate_selected_relation(
 ) -> Result<ResidentLoadEstimate, ResidentLoadError> {
     process_invalidations();
     let columns = required_columns_for(request)?;
+    let fixed_width =
+        loader::columns_have_fixed_width_load(&columns).map_err(ResidentLoadError::Loader)?;
     let estimated_bytes = loader::estimate_resident_bytes(request.relid, &columns)
         .map_err(ResidentLoadError::Loader)?;
     let (loaded, pinned, last_load_ms) = STORE.with(|store| {
@@ -1962,6 +1967,7 @@ pub fn estimate_selected_relation(
         loaded,
         pinned,
         estimated_bytes,
+        fixed_width,
         last_load_ms,
         amortization_queries: crate::engine::cost::device_limits().auto_load_amortization_queries,
     })
