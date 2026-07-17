@@ -107,11 +107,12 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
 
-        /// Apply the realistic GUC profile (8 GB `shared_buffers`, 256 MB
-        /// `work_mem`, 48 GB `effective_cache_size`, 8 parallel workers)
-        /// before running. Non-reloadable settings (`shared_buffers`,
-        /// `max_worker_processes`) log a warning — they require a full PG
-        /// restart to take effect.
+        /// Apply the publication GUC profile: 16 GB `shared_buffers`, 512 MB
+        /// `work_mem`, 48 GB `effective_cache_size`,
+        /// `max_worker_processes=16`, `max_parallel_workers=12`,
+        /// `max_parallel_workers_per_gather=8`, and 2 GB
+        /// `maintenance_work_mem`. The two postmaster settings require a full
+        /// PG restart before publishable evidence can pass verification.
         #[arg(long)]
         realistic_gucs: bool,
 
@@ -1789,6 +1790,38 @@ fn print_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn run_help_matches_publication_guc_profile() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("run")
+            .expect("run subcommand")
+            .render_long_help()
+            .to_string();
+
+        for expected in [
+            "16 GB `shared_buffers`",
+            "512 MB `work_mem`",
+            "48 GB `effective_cache_size`",
+            "`max_worker_processes=16`",
+            "`max_parallel_workers=12`",
+            "`max_parallel_workers_per_gather=8`",
+            "2 GB `maintenance_work_mem`",
+        ] {
+            assert!(
+                help.contains(expected),
+                "run --help is missing publication profile token {expected:?}:\n{help}"
+            );
+        }
+        for retired in ["8 GB `shared_buffers`", "256 MB `work_mem`"] {
+            assert!(
+                !help.contains(retired),
+                "run --help still contains retired profile token {retired:?}:\n{help}"
+            );
+        }
+    }
 
     #[test]
     fn phase6_gate_registry_resolves_every_typed_cell() {

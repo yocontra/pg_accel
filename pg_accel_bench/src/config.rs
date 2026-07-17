@@ -76,16 +76,16 @@ pub enum CacheMode {
 /// - `toy()` -- the pgrx development defaults (small `shared_buffers`, tiny
 ///   `work_mem`, 2 parallel workers). Useful for comparing against the
 ///   historical benchmarks, but not representative of production.
-/// - `realistic()` -- a production-sized profile tuned for a 64 GB / 12-core
-///   workstation (8 GB `shared_buffers`, 256 MB `work_mem`, 48 GB
-///   `effective_cache_size`, 8 parallel workers). These are the numbers a
-///   production DBA would actually use; benchmarking with `toy()` is
-///   methodologically weak.
+/// - `realistic()` -- the publication profile for a 64 GB / 12-core
+///   workstation: 16 GB `shared_buffers`, 512 MB `work_mem`, 48 GB
+///   `effective_cache_size`, `max_worker_processes=16`,
+///   `max_parallel_workers=12`, `max_parallel_workers_per_gather=8`, and 2 GB
+///   `maintenance_work_mem`. Benchmarking with `toy()` is methodologically
+///   weak.
 ///
-/// `shared_buffers` and `max_worker_processes` are not reloadable -- they
-/// require a full PG restart. If the caller is running against an existing
-/// `pgrx` postmaster, those two settings are skipped with a warning instead
-/// of attempting `ALTER SYSTEM`.
+/// `shared_buffers` and `max_worker_processes` are not reloadable. The profile
+/// writes them with `ALTER SYSTEM`, but a full PG restart is required before
+/// the harness can verify them and accept publishable evidence.
 #[derive(Clone, Debug)]
 pub struct GucProfile {
     pub shared_buffers: String,
@@ -134,8 +134,9 @@ impl GucProfile {
     /// Production-sized profile for a 64 GB / 12-core workstation.
     ///
     /// Publication profile for the documented 64 GB / 12-core workstation:
-    /// 16 GB `shared_buffers`, 512 MB
-    /// `work_mem`, 48 GB `effective_cache_size`, 12 parallel workers,
+    /// 16 GB `shared_buffers`, 512 MB `work_mem`, 48 GB
+    /// `effective_cache_size`, `max_worker_processes=16`,
+    /// `max_parallel_workers=12`, `max_parallel_workers_per_gather=8`, and
     /// 2 GB `maintenance_work_mem`.
     #[must_use]
     pub fn realistic() -> Self {
@@ -464,5 +465,29 @@ mod tests {
             "16",
             "8"
         ));
+    }
+
+    #[test]
+    fn realistic_profile_matches_publication_contract() {
+        let profile = GucProfile::realistic();
+
+        assert_eq!(
+            profile.requested_settings(),
+            vec![
+                ("shared_buffers", "16GB".to_owned()),
+                ("work_mem", "512MB".to_owned()),
+                ("effective_cache_size", "48GB".to_owned()),
+                ("max_parallel_workers_per_gather", "8".to_owned()),
+                ("max_worker_processes", "16".to_owned()),
+                ("max_parallel_workers", "12".to_owned()),
+                ("maintenance_work_mem", "2GB".to_owned()),
+                ("jit", "off".to_owned()),
+                ("jit_above_cost", "100000".to_owned()),
+                ("random_page_cost", "1.1".to_owned()),
+                ("effective_io_concurrency", "256".to_owned()),
+                ("track_io_timing", "on".to_owned()),
+                ("parallel_leader_participation", "on".to_owned()),
+            ]
+        );
     }
 }
