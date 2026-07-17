@@ -107,7 +107,6 @@ class PackageExtensionTests(unittest.TestCase):
             ("dependency", "/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib"),
             ("LC_RPATH", "/opt/homebrew/opt/llvm@20/lib"),
             ("dependency", "/opt/homebrew/opt/libomp/lib/libomp.dylib"),
-            ("LC_RPATH", "/opt/homebrew/opt/libomp/lib"),
         ):
             package_extension.validate_load_value(value, kind, "Darwin")
 
@@ -120,6 +119,7 @@ class PackageExtensionTests(unittest.TestCase):
             ("dependency", "/opt/homebrew/opt/libomp/lib/libomp.5.dylib"),
             ("dependency", "/opt/homebrew/opt/libomp/lib/libunexpected.dylib"),
             ("dependency", "/opt/homebrew/opt/libomp/lib"),
+            ("LC_RPATH", "/opt/homebrew/opt/libomp/lib"),
             ("LC_RPATH", "/opt/homebrew/opt/libomp/lib/libomp.dylib"),
             ("LC_RPATH", "/opt/homebrew/opt/libomp/lib/"),
         ):

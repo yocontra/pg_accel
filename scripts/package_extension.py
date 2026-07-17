@@ -258,7 +258,6 @@ def validate_load_value(value: str, kind: str, system: str) -> None:
             ("dependency", "/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib"),
             ("LC_RPATH", "/opt/homebrew/opt/llvm@20/lib"),
             ("dependency", "/opt/homebrew/opt/libomp/lib/libomp.dylib"),
-            ("LC_RPATH", "/opt/homebrew/opt/libomp/lib"),
         }
         if (
             (kind, value) not in allowed_external_values
