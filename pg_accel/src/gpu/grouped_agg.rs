@@ -450,7 +450,9 @@ pub struct GroupedAggWorkspace {
 
 fn workspace_query_descriptor(desc: &abi::PgaccelGroupedAggDesc) -> abi::PgaccelGroupedAggDesc {
     let mut desc = *desc;
-    desc.execution_flags = abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN;
+    if desc.execution_flags == 0 {
+        desc.execution_flags = abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN;
+    }
     desc
 }
 
@@ -1344,6 +1346,8 @@ fn bounded_workspace_descriptor(
     // remains identical to the already validated full plan.
     let mut desc = plan.desc;
     desc.row_count = row_count;
+    desc.execution_flags =
+        abi::PGACCEL_GROUPED_AGG_EXEC_RESET | abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
     Ok(desc)
 }
 
@@ -1558,6 +1562,14 @@ mod tests {
             abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN
         );
         assert_eq!(plan.desc.execution_flags, 0);
+
+        let mut lifecycle = *plan.descriptor();
+        lifecycle.execution_flags =
+            abi::PGACCEL_GROUPED_AGG_EXEC_RESET | abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+        assert_eq!(
+            workspace_query_descriptor(&lifecycle).execution_flags,
+            lifecycle.execution_flags
+        );
     }
 
     #[test]
@@ -1657,6 +1669,10 @@ mod tests {
         let bounded = bounded_workspace_descriptor(&plan, 256_000)
             .expect("bounded workspace descriptor resolves");
         assert_eq!(bounded.row_count, 256_000);
+        assert_eq!(
+            bounded.execution_flags,
+            abi::PGACCEL_GROUPED_AGG_EXEC_RESET | abi::PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE
+        );
         assert!(stable_shape_matches(plan.descriptor(), &bounded));
         assert_eq!(plan.row_count(), 1_300_000);
         assert!(bounded_workspace_descriptor(&plan, 0).is_err());

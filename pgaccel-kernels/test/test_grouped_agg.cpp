@@ -1160,7 +1160,25 @@ void test_parallel_dense_integer_product_sum_shape() {
               timed_ms);
   check_outputs_equal(timed, one_shot, desc.measure_count);
 
-  const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+  lhs[31] = 46341;
+  rhs[31] = 46341;
+  lhs_nulls[31] = 0;
+  rhs_nulls[31] = 0;
+  OutputStorage atomic_overflow(desc, true, true);
+  int32_t atomic_detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_external_ex(desc, &atomic_overflow.out, &atomic_detail), PGACCEL_ERROR);
+  CHECK(atomic_detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
+  lhs[31] = host_lhs[31];
+  rhs[31] = host_rhs[31];
+  lhs_nulls[31] = host_lhs_nulls[31];
+  rhs_nulls[31] = host_rhs_nulls[31];
+
+  const pgaccel_grouped_agg_workspace_req one_shot_req = workspace_req(desc);
+  pgaccel_grouped_agg_desc session_shape = desc;
+  session_shape.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  const pgaccel_grouped_agg_workspace_req req = workspace_req(session_shape);
+  CHECK(one_shot_req.bytes < req.bytes);
   SharedWorkspace workspace(req.bytes, req.alignment);
   constexpr std::array<size_t, 3> chunk_rows = {65537, 100003, rows - 165540};
   size_t first_row = 0;
@@ -1216,7 +1234,10 @@ void test_parallel_dense_integer_product_sum_shape() {
   // must still admit the 256K lifecycle call.
   pgaccel_grouped_agg_desc large_plan = desc;
   large_plan.row_count = 1'300'000;
-  const pgaccel_grouped_agg_workspace_req large_req = workspace_req(large_plan);
+  pgaccel_grouped_agg_desc large_workspace_shape = large_plan;
+  large_workspace_shape.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  const pgaccel_grouped_agg_workspace_req large_req = workspace_req(large_workspace_shape);
   pgaccel_grouped_agg_desc bounded = row_slice(desc, 0, 256'000);
   bounded.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
   SharedWorkspace large_workspace(large_req.bytes, large_req.alignment);
@@ -1240,7 +1261,10 @@ void test_parallel_dense_integer_product_sum_shape() {
   pgaccel_grouped_agg_desc wide_allocation = bounded_one_shot;
   wide_allocation.group_capacity = 1'000;
   wide_allocation.keys[0].cardinality = 1'000;
-  const pgaccel_grouped_agg_workspace_req wide_req = workspace_req(wide_allocation);
+  pgaccel_grouped_agg_desc wide_workspace_shape = wide_allocation;
+  wide_workspace_shape.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  const pgaccel_grouped_agg_workspace_req wide_req = workspace_req(wide_workspace_shape);
   SharedWorkspace wide_workspace(wide_req.bytes, wide_req.alignment);
   pgaccel_grouped_agg_desc wide_tail = row_slice(wide_allocation, 0, 100'000);
   wide_tail.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
@@ -1256,6 +1280,255 @@ void test_parallel_dense_integer_product_sum_shape() {
   pgaccel_grouped_agg_desc wide_one_shot = row_slice(wide_allocation, 0, 100'000);
   CHECK_STATUS(execute_external(wide_one_shot, &wide_expected.out), PGACCEL_OK);
   check_outputs_equal(wide_output, wide_expected, wide_allocation.measure_count);
+}
+
+void test_parallel_dense_sum_mask_unique_dimension_shape() {
+  std::printf("--- parallel dense SUM+COUNT(*) mask/two unique dimensions ---\n");
+  constexpr size_t rows = 262144;
+  constexpr size_t dim0_rows = 1000;
+  constexpr size_t dim1_rows = 257;
+  constexpr size_t key0_groups = 5;
+  constexpr size_t key1_groups = 7;
+  constexpr size_t groups = key0_groups * key1_groups;
+  std::vector<int32_t> host_fact_key0(rows);
+  std::vector<int32_t> host_fact_key1(rows);
+  std::vector<int32_t> host_values(rows);
+  std::vector<int8_t> host_mask(rows);
+  std::vector<int32_t> host_group_lookup0(dim0_rows);
+  std::vector<int32_t> host_group_lookup1(dim1_rows);
+  std::vector<uint8_t> host_matches0(dim0_rows, 1);
+  std::vector<uint8_t> host_matches1(dim1_rows, 1);
+  std::vector<uint64_t> host_multiplicity0(dim0_rows, 1);
+  std::array<int64_t, groups> expected_sum{};
+  std::array<uint64_t, groups> expected_count{};
+  for (size_t dim = 0; dim < dim0_rows; ++dim) {
+    host_group_lookup0[dim] = static_cast<int32_t>((dim * 3 + 1) % key0_groups);
+    if (dim % 97 == 0)
+      host_matches0[dim] = 0;
+  }
+  for (size_t dim = 0; dim < dim1_rows; ++dim) {
+    host_group_lookup1[dim] = static_cast<int32_t>((dim * 5 + 2) % key1_groups);
+    if (dim % 43 == 0)
+      host_matches1[dim] = 0;
+  }
+  size_t expected_selected = 0;
+  size_t rejected_by_dim0_only = 0;
+  size_t rejected_by_dim1_only = 0;
+  for (size_t row = 0; row < rows; ++row) {
+    const size_t dim0 = row % dim0_rows;
+    const size_t dim1 = (row * 37 + 11) % dim1_rows;
+    host_fact_key0[row] = static_cast<int32_t>(dim0);
+    host_fact_key1[row] = static_cast<int32_t>(dim1);
+    host_values[row] = 1 + static_cast<int32_t>(row % 1000);
+    host_mask[row] = row % 10 == 0 ? PGACCEL_EXPR_TRUE : PGACCEL_EXPR_FALSE;
+    if (host_mask[row] != PGACCEL_EXPR_TRUE)
+      continue;
+    const bool dim0_matches = host_matches0[dim0] != 0;
+    const bool dim1_matches = host_matches1[dim1] != 0;
+    if (!dim0_matches || !dim1_matches) {
+      rejected_by_dim0_only += !dim0_matches && dim1_matches ? 1 : 0;
+      rejected_by_dim1_only += dim0_matches && !dim1_matches ? 1 : 0;
+      continue;
+    }
+    const size_t group = static_cast<size_t>(host_group_lookup0[dim0]) * key1_groups +
+                         static_cast<size_t>(host_group_lookup1[dim1]);
+    expected_sum[group] += host_values[row];
+    ++expected_count[group];
+    ++expected_selected;
+  }
+  CHECK(rejected_by_dim0_only != 0);
+  CHECK(rejected_by_dim1_only != 0);
+
+  SharedArray<int32_t> fact_key0(host_fact_key0);
+  SharedArray<int32_t> fact_key1(host_fact_key1);
+  SharedArray<int32_t> values(host_values);
+  SharedArray<int8_t> mask(host_mask);
+  SharedArray<int32_t> group_lookup0(host_group_lookup0);
+  SharedArray<int32_t> group_lookup1(host_group_lookup1);
+  SharedArray<uint8_t> matches0(host_matches0);
+  SharedArray<uint8_t> matches1(host_matches1);
+  SharedArray<uint64_t> multiplicity0(host_multiplicity0);
+  pgaccel_grouped_agg_desc desc = base_desc(rows);
+  set_dim(desc, 0, fact_key0.data(), nullptr, 0, dim0_rows, matches0.data());
+  set_dim(desc, 1, fact_key1.data(), nullptr, 0, dim1_rows, matches1.data());
+  set_dim_key(desc, 0, 0, group_lookup0.data(), 0, key0_groups);
+  set_dim_key(desc, 1, 1, group_lookup1.data(), 0, key1_groups);
+  set_i32_view(desc.measures[0].value, values.data());
+  finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                     PGACCEL_GROUPED_AGG_LANE_SUM);
+  set_count_star(desc, 1);
+  desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+  desc.where_filter.mask = mask.data();
+
+  const pgaccel_grouped_agg_workspace_req one_shot_req = workspace_req(desc);
+  pgaccel_grouped_agg_desc session_shape = desc;
+  session_shape.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  const pgaccel_grouped_agg_workspace_req parallel_req = workspace_req(session_shape);
+  pgaccel_grouped_agg_desc serial_session_shape = session_shape;
+  serial_session_shape.dims[0].multiplicity_by_key = multiplicity0.data();
+  const pgaccel_grouped_agg_workspace_req serial_req = workspace_req(serial_session_shape);
+  CHECK(one_shot_req.bytes < parallel_req.bytes);
+  CHECK(parallel_req.bytes > serial_req.bytes);
+
+  // The release SSBM date x part sentinel resolves to at most 350 groups.
+  // Its one-million-row shape must remain eligible for both compact atomic
+  // one-shot execution and the ordered partial lifecycle path.
+  pgaccel_grouped_agg_desc release_shape = desc;
+  release_shape.row_count = 1'000'000;
+  release_shape.group_capacity = 350;
+  release_shape.keys[0].cardinality = 50;
+  const pgaccel_grouped_agg_workspace_req release_one_shot_req = workspace_req(release_shape);
+  pgaccel_grouped_agg_desc release_session_shape = release_shape;
+  release_session_shape.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  const pgaccel_grouped_agg_workspace_req release_parallel_req =
+      workspace_req(release_session_shape);
+  pgaccel_grouped_agg_desc release_serial_session_shape = release_session_shape;
+  release_serial_session_shape.dims[0].multiplicity_by_key = multiplicity0.data();
+  const pgaccel_grouped_agg_workspace_req release_serial_req =
+      workspace_req(release_serial_session_shape);
+  constexpr size_t release_chunks = (1'000'000 + 1023) / 1024;
+  constexpr size_t expected_partial_bytes = 350 * release_chunks * 56;
+  CHECK(release_one_shot_req.bytes < release_parallel_req.bytes);
+  CHECK(release_parallel_req.bytes >= release_serial_req.bytes + expected_partial_bytes);
+
+  // Atomic one-shot execution owns no partial array, so it remains eligible
+  // above the ordered lifecycle budget. The same shape queried for a session
+  // still reserves only the bounded partial layout.
+  pgaccel_grouped_agg_desc high_capacity_shape = release_shape;
+  high_capacity_shape.group_capacity = 700;
+  high_capacity_shape.keys[0].cardinality = 100;
+  constexpr size_t high_capacity_partial_bytes = 700 * release_chunks * 56;
+  CHECK(high_capacity_partial_bytes > 32 * 1024 * 1024);
+  pgaccel_status high_capacity_status = PGACCEL_ERROR;
+  const pgaccel_grouped_agg_workspace_req high_capacity_one_shot_req =
+      workspace_req(high_capacity_shape, &high_capacity_status);
+  CHECK(high_capacity_status == PGACCEL_OK);
+  pgaccel_grouped_agg_desc high_capacity_session_shape = high_capacity_shape;
+  high_capacity_session_shape.execution_flags =
+      PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  const pgaccel_grouped_agg_workspace_req high_capacity_session_req =
+      workspace_req(high_capacity_session_shape, &high_capacity_status);
+  CHECK(high_capacity_status == PGACCEL_OK);
+  CHECK(high_capacity_one_shot_req.bytes < high_capacity_session_req.bytes);
+
+  OutputStorage one_shot(desc, true, true);
+  CHECK_STATUS(execute_external(desc, &one_shot.out), PGACCEL_OK);
+  CHECK(one_shot.out.selected_count == expected_selected);
+  CHECK(one_shot.out.uncertain_count == 0);
+  for (size_t group = 0; group < groups; ++group) {
+    CHECK(one_shot.group_codes[group] == group);
+    CHECK(one_shot.key_values[0][group] == static_cast<int32_t>(group / key1_groups));
+    CHECK(one_shot.key_values[1][group] == static_cast<int32_t>(group % key1_groups));
+    CHECK(one_shot.i64(one_shot.measures[0].sum, group) == expected_sum[group]);
+    CHECK(one_shot.measures[0].nonnull[group] == expected_count[group]);
+    CHECK(one_shot.measures[1].count[group] == expected_count[group]);
+    CHECK(one_shot.active[group] == (expected_count[group] != 0 ? 1 : 0));
+  }
+
+  OutputStorage timed(desc, true, true);
+  const auto timed_start = std::chrono::steady_clock::now();
+  CHECK_STATUS(execute_external(desc, &timed.out), PGACCEL_OK);
+  const double timed_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - timed_start)
+          .count();
+  std::printf("row-parallel dense SUM+COUNT(*) %zu rows/%zu groups: %.3f ms\n", rows, groups,
+              timed_ms);
+  check_outputs_equal(timed, one_shot, desc.measure_count);
+
+  SharedWorkspace workspace(parallel_req.bytes, parallel_req.alignment);
+  constexpr size_t first_rows = 100003;
+  pgaccel_grouped_agg_desc first = row_slice(desc, 0, first_rows);
+  first.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  CHECK_STATUS(execute_in_workspace(first, parallel_req, workspace, nullptr, &detail), PGACCEL_OK);
+  pgaccel_grouped_agg_desc second = row_slice(desc, first_rows, rows - first_rows);
+  second.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  CHECK_STATUS(execute_in_workspace(second, parallel_req, workspace, nullptr, &detail),
+               PGACCEL_OK);
+  pgaccel_grouped_agg_desc finalize = row_slice(desc, 0, 0);
+  finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+  OutputStorage chunked(desc, true, true);
+  CHECK_STATUS(execute_in_workspace(finalize, parallel_req, workspace, &chunked.out, &detail),
+               PGACCEL_OK);
+  check_outputs_equal(chunked, one_shot, desc.measure_count);
+}
+
+void test_parallel_dense_count_unique_dimension_shape() {
+  std::printf("--- parallel dense COUNT(*) unique dimension ---\n");
+  constexpr size_t rows = 262144;
+  constexpr size_t dim_rows = 10000;
+  std::vector<int32_t> host_fact_keys(rows);
+  std::vector<uint8_t> host_matches(dim_rows, 1);
+  std::vector<uint64_t> host_multiplicity(dim_rows, 1);
+  for (size_t dim = 0; dim < dim_rows; ++dim) {
+    if (dim % 101 == 0)
+      host_matches[dim] = 0;
+  }
+  size_t expected = 0;
+  for (size_t row = 0; row < rows; ++row) {
+    const size_t dim = row % dim_rows;
+    host_fact_keys[row] = static_cast<int32_t>(dim);
+    expected += host_matches[dim] != 0 ? 1 : 0;
+  }
+
+  SharedArray<int32_t> fact_keys(host_fact_keys);
+  SharedArray<uint8_t> matches(host_matches);
+  SharedArray<uint64_t> multiplicity(host_multiplicity);
+  pgaccel_grouped_agg_desc desc = base_desc(rows);
+  set_dim(desc, 0, fact_keys.data(), nullptr, 0, dim_rows, matches.data());
+  set_count_star(desc, 0);
+
+  const pgaccel_grouped_agg_workspace_req parallel_req = workspace_req(desc);
+  pgaccel_grouped_agg_desc serial_desc = desc;
+  serial_desc.dims[0].multiplicity_by_key = multiplicity.data();
+  const pgaccel_grouped_agg_workspace_req serial_req = workspace_req(serial_desc);
+  CHECK(parallel_req.bytes > serial_req.bytes);
+
+  OutputStorage output(desc, true, true);
+  CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+  CHECK(output.out.selected_count == expected);
+  CHECK(output.out.emitted_group_count == 1);
+  CHECK(output.measures[0].count[0] == expected);
+  CHECK(output.active[0] == 1);
+}
+
+void test_parallel_dense_sum_atomic_low_word_carry() {
+  std::printf("--- row-parallel dense SUM low-word carry ---\n");
+  constexpr size_t rows = 65536;
+  constexpr size_t groups = 17;
+  std::vector<int32_t> host_keys(rows);
+  std::vector<int32_t> host_values(rows, INT32_MAX);
+  std::array<int64_t, groups> expected_sum{};
+  std::array<uint64_t, groups> expected_count{};
+  for (size_t row = 0; row < rows; ++row) {
+    const size_t group = row % groups;
+    host_keys[row] = static_cast<int32_t>(group);
+    expected_sum[group] += host_values[row];
+    ++expected_count[group];
+  }
+  for (const int64_t sum : expected_sum)
+    CHECK(sum > static_cast<int64_t>(UINT32_MAX));
+
+  SharedArray<int32_t> keys(host_keys);
+  SharedArray<int32_t> values(host_values);
+  pgaccel_grouped_agg_desc desc = base_desc(rows);
+  set_fact_key(desc, 0, keys.data(), nullptr, 0, groups);
+  set_i32_view(desc.measures[0].value, values.data());
+  finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                     PGACCEL_GROUPED_AGG_LANE_SUM);
+  set_count_star(desc, 1);
+
+  OutputStorage output(desc, true, true);
+  CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+  CHECK(output.out.selected_count == rows);
+  for (size_t group = 0; group < groups; ++group) {
+    CHECK(output.i64(output.measures[0].sum, group) == expected_sum[group]);
+    CHECK(output.measures[0].nonnull[group] == expected_count[group]);
+    CHECK(output.measures[1].count[group] == expected_count[group]);
+    CHECK(output.active[group] == 1);
+  }
 }
 
 void test_i64_four_measure_lanes() {
@@ -2288,6 +2561,9 @@ int main() {
     test_parallel_dense_count_star_lifecycle();
     test_parallel_dense_integer_phase2_shape();
     test_parallel_dense_integer_product_sum_shape();
+    test_parallel_dense_sum_mask_unique_dimension_shape();
+    test_parallel_dense_count_unique_dimension_shape();
+    test_parallel_dense_sum_atomic_low_word_carry();
     test_i64_four_measure_lanes();
     test_f64_stats_pair_and_nan_ordering();
     test_global_and_measure_filters();

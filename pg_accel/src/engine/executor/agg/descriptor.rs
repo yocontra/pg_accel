@@ -54,6 +54,13 @@ const DATEOID: u32 = 1082;
 const TIMESTAMPOID: u32 = 1114;
 const TIMESTAMPTZOID: u32 = 1184;
 
+// Atomic SUM one-shot execution only needs the row cap. Ordered integer
+// statistics still use the bounded native partial layout mirrored here.
+const DENSE_ONE_SHOT_MAX_ROWS: usize = 1_000_000;
+const DENSE_INTEGER_CHUNK_ROWS: usize = 1_024;
+const DENSE_INTEGER_PARTIAL_BYTES: usize = 56;
+const DENSE_INTEGER_MAX_PARTIAL_BYTES: usize = 32 * 1_024 * 1_024;
+
 fn is_text_family(type_oid: u32) -> bool {
     matches!(type_oid, TEXTOID | VARCHAROID | BPCHAROID)
 }
@@ -1865,6 +1872,17 @@ enum DenseBoundedFailure {
     Interrupt(Box<pg_sys::panic::CaughtError>),
 }
 
+enum DenseExecutionSetup {
+    OneShot {
+        dispatch: DescriptorAggDispatch,
+        elapsed: Duration,
+    },
+    Bounded {
+        session: GroupedAggSession,
+        metadata: DescriptorExecutionMetadata,
+    },
+}
+
 #[cfg(feature = "pg_test")]
 static TEST_DENSE_CHUNK_ROWS: AtomicUsize = AtomicUsize::new(0);
 
@@ -1904,6 +1922,128 @@ fn effective_dense_chunk_rows(device_limit: usize) -> usize {
         }
     }
     device_limit
+}
+
+fn dense_one_shot_row_cap() -> usize {
+    #[cfg(feature = "pg_test")]
+    {
+        let test_limit = TEST_DENSE_CHUNK_ROWS.load(Ordering::SeqCst);
+        if test_limit != 0 {
+            return test_limit.min(DENSE_ONE_SHOT_MAX_ROWS);
+        }
+    }
+    DENSE_ONE_SHOT_MAX_ROWS
+}
+
+fn canonical_null_value(value: &PgaccelVal) -> bool {
+    value.tag == PgaccelValTag::Null && value.data == 0
+}
+
+fn canonical_parallel_filter_fields(filter: &abi::PgaccelGroupedAggFilter) -> bool {
+    filter.predicate_source == 0
+        && filter.predicate_measure_slot == 0
+        && filter.predicate_range_count == 0
+        && filter.value_cmp_opcode == crate::engine::expr_compiler::opcode::ALWAYS_TRUE
+        && filter.pad0 == 0
+        && filter.flags == 0
+        && canonical_null_value(&filter.value_cmp_const)
+        && filter.predicate_lo.iter().all(canonical_null_value)
+        && filter.predicate_hi.iter().all(canonical_null_value)
+}
+
+fn canonical_disabled_filter(filter: &abi::PgaccelGroupedAggFilter) -> bool {
+    filter.kind == abi::PGACCEL_GROUPED_AGG_FILTER_NONE
+        && filter.mask.is_null()
+        && canonical_parallel_filter_fields(filter)
+}
+
+fn parallel_dense_filter_kind(filter: &abi::PgaccelGroupedAggFilter) -> bool {
+    canonical_disabled_filter(filter)
+        || (filter.kind == abi::PGACCEL_GROUPED_AGG_FILTER_SQL
+            && !filter.mask.is_null()
+            && canonical_parallel_filter_fields(filter))
+}
+
+fn parallel_dense_unique_dimensions(desc: &abi::PgaccelGroupedAggDesc) -> bool {
+    let Ok(dim_count) = usize::try_from(desc.dim_count) else {
+        return false;
+    };
+    dim_count <= abi::PGACCEL_GROUPED_AGG_MAX_DIMS
+        && desc.dims[..dim_count]
+            .iter()
+            .all(|dim| dim.multiplicity_by_key.is_null())
+}
+
+fn parallel_dense_count_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
+    if desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX
+        || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
+        || desc.measure_count != 1
+        || !parallel_dense_filter_kind(&desc.where_filter)
+        || !parallel_dense_unique_dimensions(desc)
+        || !canonical_disabled_filter(&desc.measure_filters[0])
+    {
+        return false;
+    }
+    let count = &desc.measures[0];
+    count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR
+        && count.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+        && count.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
+        && count.state_bytes == 8
+}
+
+fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
+    if desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX
+        || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
+        || desc.group_capacity == 0
+        || desc.measure_count != 2
+        || !parallel_dense_filter_kind(&desc.where_filter)
+        || !parallel_dense_unique_dimensions(desc)
+        || desc.measure_filters[..2]
+            .iter()
+            .any(|filter| !canonical_disabled_filter(filter))
+    {
+        return false;
+    }
+    let value = &desc.measures[0];
+    let count = &desc.measures[1];
+    let direct_sum = value.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
+        && (value.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_SUM
+            || value.agg_mask
+                == (abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                    | abi::PGACCEL_GROUPED_AGG_LANE_MIN
+                    | abi::PGACCEL_GROUPED_AGG_LANE_MAX));
+    let product_sum = value.op == abi::PGACCEL_GROUPED_AGG_MEASURE_MUL
+        && value.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_SUM
+        && value.rhs.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+        && value.rhs.element_bytes == 4;
+    (direct_sum || product_sum)
+        && value.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+        && value.value.element_bytes == 4
+        && value.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
+        && value.state_bytes == 8
+        && count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR
+        && count.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+        && count.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
+        && count.state_bytes == 8
+}
+
+fn dense_one_shot_eligible(desc: &abi::PgaccelGroupedAggDesc, row_cap: usize) -> bool {
+    if row_cap == 0 || desc.row_count > row_cap {
+        return false;
+    }
+    if parallel_dense_count_shape(desc) {
+        return true;
+    }
+    if !parallel_dense_integer_shape(desc) {
+        return false;
+    }
+    if desc.measures[0].agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_SUM {
+        return true;
+    }
+    desc.group_capacity
+        .checked_mul(desc.row_count.div_ceil(DENSE_INTEGER_CHUNK_ROWS))
+        .and_then(|partials| partials.checked_mul(DENSE_INTEGER_PARTIAL_BYTES))
+        .is_some_and(|bytes| bytes <= DENSE_INTEGER_MAX_PARTIAL_BYTES)
 }
 
 #[cfg(feature = "pg_test")]
@@ -1969,13 +2109,16 @@ fn execute_bounded_dense_artifact(
     projection: &AggOutputProjection,
     max_chunk_rows: usize,
 ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
-    let max_chunk_rows = effective_dense_chunk_rows(max_chunk_rows);
-    if max_chunk_rows == 0 {
+    let bounded_chunk_rows = effective_dense_chunk_rows(max_chunk_rows);
+    if bounded_chunk_rows == 0 {
         return Err(DescriptorDispatchFailure::Execution(
             DescriptorAggExecutionError::Failure(
                 "grouped aggregate chunk limit is zero".to_owned(),
             ),
         ));
+    }
+    if let Some(caught) = capture_postgres_interrupt() {
+        caught.rethrow();
     }
 
     let initialized = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
@@ -1990,24 +2133,63 @@ fn execute_bounded_dense_artifact(
             // submits or dereferences those pointer values after return.
             let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
                 .map_err(|error| gpu_execution_error("grouped descriptor rejected", error))?;
-            let session = GroupedAggSession::start(&plan, max_chunk_rows)
+            if dense_one_shot_eligible(plan.descriptor(), dense_one_shot_row_cap()) {
+                let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
+                    gpu_execution_error("grouped one-shot output allocation failed", error)
+                })?;
+                let dispatch_started = Instant::now();
+                let outcome =
+                    execute_grouped_agg_one_shot(&plan, &mut storage).map_err(|error| {
+                        gpu_execution_error("grouped one-shot kernel failed", error)
+                    })?;
+                let elapsed = dispatch_started.elapsed();
+                let output = DescriptorAggOutput::new(
+                    storage,
+                    outcome,
+                    inputs.artifact.domains.clone(),
+                    inputs.artifact.resolved_spec.clone(),
+                    projection.clone(),
+                )
+                .map_err(DescriptorAggExecutionError::Failure)?;
+                return Ok(DenseExecutionSetup::OneShot {
+                    dispatch: DescriptorAggDispatch {
+                        output,
+                        fact_rows: inputs.artifact.fact_rows,
+                        batches_executed: 1,
+                        dispatch_time_us: u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+                        residency: None,
+                    },
+                    elapsed,
+                });
+            }
+            let session = GroupedAggSession::start(&plan, bounded_chunk_rows)
                 .map_err(|error| gpu_execution_error("grouped session setup failed", error))?;
             let metadata = DescriptorExecutionMetadata {
                 fact_rows: inputs.artifact.fact_rows,
                 domains: inputs.artifact.domains.clone(),
                 resolved_spec: inputs.artifact.resolved_spec.clone(),
             };
-            Ok::<_, DescriptorAggExecutionError>((session, metadata))
+            Ok::<_, DescriptorAggExecutionError>(DenseExecutionSetup::Bounded { session, metadata })
         },
     )
     .map_err(DescriptorDispatchFailure::Residency)?
     .map_err(DescriptorDispatchFailure::Execution)?;
-    let (mut session, metadata) = initialized;
+    let (mut session, metadata) = match initialized {
+        DenseExecutionSetup::OneShot { dispatch, elapsed } => {
+            note_dense_test_call_and_maybe_arm_timeout();
+            warn_if_grouped_dispatch_slow("one-shot", elapsed);
+            return match capture_postgres_interrupt() {
+                Some(caught) => cleanup_before_rethrow(dispatch, caught, |caught| caught.rethrow()),
+                None => Ok(dispatch),
+            };
+        }
+        DenseExecutionSetup::Bounded { session, metadata } => (session, metadata),
+    };
 
     let dispatch_started = Instant::now();
     let dispatch = run_bounded_dispatch(
         metadata.fact_rows,
-        max_chunk_rows,
+        bounded_chunk_rows,
         |range| {
             let elapsed = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
                 owner_relid,
@@ -2098,7 +2280,7 @@ fn execute_bounded_dense_artifact(
 
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    let completed_calls = bounded_dispatch_call_count(metadata.fact_rows, max_chunk_rows)
+    let completed_calls = bounded_dispatch_call_count(metadata.fact_rows, bounded_chunk_rows)
         .ok_or_else(|| {
             DescriptorDispatchFailure::Execution(DescriptorAggExecutionError::Failure(
                 "grouped aggregate bounded dispatch call count overflowed".to_owned(),
@@ -2221,12 +2403,103 @@ mod tests {
     const TEST_GEOMETRY_OID: u32 = 60_001;
     const TEST_SRID: i32 = 4_326;
 
+    fn parallel_dense_integer_desc(
+        row_count: usize,
+        group_capacity: usize,
+    ) -> abi::PgaccelGroupedAggDesc {
+        // SAFETY: zero is the canonical inactive representation for every ABI
+        // field; the active shape fields are populated below.
+        let mut desc: abi::PgaccelGroupedAggDesc = unsafe { std::mem::zeroed() };
+        desc.row_count = row_count;
+        desc.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX;
+        desc.output_mode = abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE;
+        desc.group_capacity = group_capacity;
+        desc.measure_count = 2;
+        desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN;
+        desc.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_SUM;
+        desc.measures[0].accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_I64;
+        desc.measures[0].state_bytes = 8;
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
+        desc.measures[0].value.element_bytes = 4;
+        desc.measures[1].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR;
+        desc.measures[1].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_COUNT;
+        desc.measures[1].accumulator_kind = abi::PGACCEL_GROUPED_AGG_ACCUM_I64;
+        desc.measures[1].state_bytes = 8;
+        desc.where_filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        for filter in &mut desc.measure_filters {
+            filter.value_cmp_opcode = crate::engine::expr_compiler::opcode::ALWAYS_TRUE;
+        }
+        desc
+    }
+
     fn column(type_oid: u32) -> ColumnRef {
         ColumnRef {
             relation_oid: 42,
             attno: 1,
             type_oid,
         }
+    }
+
+    #[test]
+    fn dense_one_shot_branch_obeys_row_and_ordered_partial_budgets() {
+        let release_shape = parallel_dense_integer_desc(1_000_000, 350);
+        assert!(dense_one_shot_eligible(
+            &release_shape,
+            DENSE_ONE_SHOT_MAX_ROWS
+        ));
+
+        let chunks = release_shape.row_count.div_ceil(DENSE_INTEGER_CHUNK_ROWS);
+        let max_groups = DENSE_INTEGER_MAX_PARTIAL_BYTES / (chunks * DENSE_INTEGER_PARTIAL_BYTES);
+        let over_budget = parallel_dense_integer_desc(1_000_000, max_groups + 1);
+        assert!(dense_one_shot_eligible(
+            &over_budget,
+            DENSE_ONE_SHOT_MAX_ROWS
+        ));
+        let mut ordered_over_budget = over_budget;
+        ordered_over_budget.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_SUM
+            | abi::PGACCEL_GROUPED_AGG_LANE_MIN
+            | abi::PGACCEL_GROUPED_AGG_LANE_MAX;
+        assert!(!dense_one_shot_eligible(
+            &ordered_over_budget,
+            DENSE_ONE_SHOT_MAX_ROWS
+        ));
+
+        assert!(!dense_one_shot_eligible(&release_shape, 999_999));
+        let oversized = parallel_dense_integer_desc(1_000_001, 350);
+        assert!(!dense_one_shot_eligible(
+            &oversized,
+            DENSE_ONE_SHOT_MAX_ROWS
+        ));
+
+        let mut unsupported = release_shape;
+        unsupported.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_SUB;
+        assert!(!dense_one_shot_eligible(
+            &unsupported,
+            DENSE_ONE_SHOT_MAX_ROWS
+        ));
+
+        let mask = [1_i8];
+        let mut noncanonical = release_shape;
+        noncanonical.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        noncanonical.where_filter.mask = mask.as_ptr();
+        assert!(dense_one_shot_eligible(
+            &noncanonical,
+            DENSE_ONE_SHOT_MAX_ROWS
+        ));
+        noncanonical.where_filter.predicate_range_count = 1;
+        assert!(!dense_one_shot_eligible(
+            &noncanonical,
+            DENSE_ONE_SHOT_MAX_ROWS
+        ));
+    }
+
+    #[test]
+    fn dense_count_one_shot_still_honors_forced_small_chunks() {
+        let mut desc = parallel_dense_integer_desc(10, 1);
+        desc.measure_count = 1;
+        desc.measures[0] = desc.measures[1];
+        assert!(dense_one_shot_eligible(&desc, 10));
+        assert!(!dense_one_shot_eligible(&desc, 4));
     }
 
     fn projection(
