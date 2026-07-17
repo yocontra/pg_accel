@@ -16,6 +16,7 @@ use super::artifact::{
 };
 use super::output::{DescriptorAggOutput, validate_h3_compact_key_buffers};
 use super::spatial::{SpatialAggArtifact, SpatialTransformPlan, SpatialWorkspace};
+use super::{DENSE_ATOMIC_ONE_SHOT_MAX_ROWS, dense_atomic_one_shot_rows_eligible};
 use crate::engine::executor::bounded::{
     BoundedDispatchError, bounded_dispatch_call_count, cleanup_before_rethrow,
     dispatch_warning_threshold_exceeded, run_bounded_dispatch,
@@ -54,9 +55,8 @@ const DATEOID: u32 = 1082;
 const TIMESTAMPOID: u32 = 1114;
 const TIMESTAMPTZOID: u32 = 1184;
 
-// Atomic SUM one-shot execution only needs the row cap. Ordered integer
-// statistics still use the bounded native partial layout mirrored here.
-const DENSE_ONE_SHOT_MAX_ROWS: usize = 1_000_000;
+// Ordered integer statistics still use the bounded native partial layout
+// mirrored here. Atomic SUM one-shot execution only needs the shared row cap.
 const DENSE_INTEGER_CHUNK_ROWS: usize = 1_024;
 const DENSE_INTEGER_PARTIAL_BYTES: usize = 56;
 const DENSE_INTEGER_MAX_PARTIAL_BYTES: usize = 32 * 1_024 * 1_024;
@@ -1929,10 +1929,10 @@ fn dense_one_shot_row_cap() -> usize {
     {
         let test_limit = TEST_DENSE_CHUNK_ROWS.load(Ordering::SeqCst);
         if test_limit != 0 {
-            return test_limit.min(DENSE_ONE_SHOT_MAX_ROWS);
+            return test_limit.min(DENSE_ATOMIC_ONE_SHOT_MAX_ROWS);
         }
     }
-    DENSE_ONE_SHOT_MAX_ROWS
+    DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
 }
 
 fn canonical_null_value(value: &PgaccelVal) -> bool {
@@ -2028,7 +2028,10 @@ fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
 }
 
 fn dense_one_shot_eligible(desc: &abi::PgaccelGroupedAggDesc, row_cap: usize) -> bool {
-    if row_cap == 0 || desc.row_count > row_cap {
+    if row_cap == 0
+        || desc.row_count > row_cap
+        || !dense_atomic_one_shot_rows_eligible(desc.row_count)
+    {
         return false;
     }
     if parallel_dense_count_shape(desc) {
@@ -2445,7 +2448,7 @@ mod tests {
         let release_shape = parallel_dense_integer_desc(1_000_000, 350);
         assert!(dense_one_shot_eligible(
             &release_shape,
-            DENSE_ONE_SHOT_MAX_ROWS
+            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
         ));
 
         let chunks = release_shape.row_count.div_ceil(DENSE_INTEGER_CHUNK_ROWS);
@@ -2453,7 +2456,7 @@ mod tests {
         let over_budget = parallel_dense_integer_desc(1_000_000, max_groups + 1);
         assert!(dense_one_shot_eligible(
             &over_budget,
-            DENSE_ONE_SHOT_MAX_ROWS
+            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
         ));
         let mut ordered_over_budget = over_budget;
         ordered_over_budget.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_SUM
@@ -2461,21 +2464,21 @@ mod tests {
             | abi::PGACCEL_GROUPED_AGG_LANE_MAX;
         assert!(!dense_one_shot_eligible(
             &ordered_over_budget,
-            DENSE_ONE_SHOT_MAX_ROWS
+            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
         ));
 
         assert!(!dense_one_shot_eligible(&release_shape, 999_999));
         let oversized = parallel_dense_integer_desc(1_000_001, 350);
         assert!(!dense_one_shot_eligible(
             &oversized,
-            DENSE_ONE_SHOT_MAX_ROWS
+            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
         ));
 
         let mut unsupported = release_shape;
         unsupported.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_SUB;
         assert!(!dense_one_shot_eligible(
             &unsupported,
-            DENSE_ONE_SHOT_MAX_ROWS
+            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
         ));
 
         let mask = [1_i8];
@@ -2484,12 +2487,12 @@ mod tests {
         noncanonical.where_filter.mask = mask.as_ptr();
         assert!(dense_one_shot_eligible(
             &noncanonical,
-            DENSE_ONE_SHOT_MAX_ROWS
+            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
         ));
         noncanonical.where_filter.predicate_range_count = 1;
         assert!(!dense_one_shot_eligible(
             &noncanonical,
-            DENSE_ONE_SHOT_MAX_ROWS
+            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
         ));
     }
 

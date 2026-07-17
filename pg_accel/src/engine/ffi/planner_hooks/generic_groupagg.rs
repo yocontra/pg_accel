@@ -8,7 +8,7 @@ use pgrx::pg_sys::{self, List, NodeTag, RelOptInfo};
 
 use super::shape::{
     RelationResidency, RelationResidencyRequirement, ResidencyEstimate, ShapeCostGate,
-    ShapeDecline, ShapePlan,
+    ShapeDecline, ShapePlan, dense_atomic_sum_count_cost,
 };
 use super::{add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, TypedCostModel};
@@ -344,6 +344,31 @@ fn apply_exact_residency(
         amortized_load_cost: amortized_auto_load,
     };
     shape.cost.replace_amortized_auto_load(amortized_auto_load);
+    let fact_estimate = estimates
+        .iter()
+        .find(|estimate| u32::from(estimate.relid) == shape.spec.fact_rel);
+    let resident_fact_rows = fact_estimate
+        .filter(|estimate| estimate.loaded)
+        .and_then(|estimate| estimate.resident_rows);
+    let fact_columns_have_no_null_sidecars = fact_estimate
+        .filter(|estimate| estimate.loaded)
+        .and_then(|estimate| estimate.selected_columns_have_no_null_sidecars);
+    let estimated_fact_rows = shape
+        .residency
+        .relations
+        .iter()
+        .find(|relation| relation.relation_oid == shape.spec.fact_rel)
+        .map_or(0, |relation| relation.estimated_rows);
+    if let Some(aggregate) = dense_atomic_sum_count_cost(
+        &shape.spec,
+        &shape.descriptor_resolution,
+        estimated_fact_rows,
+        resident_fact_rows,
+        fact_columns_have_no_null_sidecars,
+        model,
+    ) {
+        shape.cost.replace_aggregate(aggregate);
+    }
     Ok(())
 }
 
@@ -1330,12 +1355,13 @@ mod tests {
     use super::*;
     use crate::engine::cost::{DeviceLimits, Rows, WorkProduct};
     use crate::engine::ffi::planner_hooks::shape::{
-        DescriptorMeasurePlan, DescriptorResolution, RequiredRelation, ShapeCost,
+        DescriptorGroupingMode, DescriptorMeasurePlan, DescriptorResolution,
+        DictionaryKeyRequirement, RequiredRelation, ShapeCost,
     };
     use crate::engine::spec::{
         AggOutputSlot, AggOutputSource, AggQuerySpec, AggregateKind, AggregateOutput,
-        AggregateSource, ColumnRef, DimSpec, GroupKeyEncoding, GroupKeyRef, GroupKeySource,
-        JoinMultiplicity, MeasureSpec,
+        AggregateSource, BinaryMeasureOp, ColumnRef, DimSpec, GroupKeyEncoding, GroupKeyRef,
+        GroupKeySource, JoinMultiplicity, MaskKind, MeasureSpec,
     };
 
     fn test_leaf() -> pg_sys::Path {
@@ -1881,6 +1907,8 @@ mod tests {
         ResidentLoadEstimate {
             relid: pg_sys::Oid::from(relation_oid),
             loaded,
+            resident_rows: loaded.then_some(100_000),
+            selected_columns_have_no_null_sidecars: loaded.then_some(true),
             pinned: false,
             estimated_bytes: bytes,
             fixed_width,
@@ -1935,6 +1963,235 @@ mod tests {
         shape.required_relations[0].attnos.push(1);
         shape.residency.relations[0].attnos.push(1);
         shape
+    }
+
+    fn dense_sum_count_shape(estimated_fact_rows: u64) -> ShapePlan {
+        let mut shape = grouped_count_shape();
+        let sum_column = ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: u32::from(pg_sys::INT4OID),
+        };
+        shape.spec.measures = vec![
+            MeasureSpec {
+                expression: MeasureExpr::Column(sum_column),
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Sum,
+                }],
+                filter: FilterSpec::None,
+            },
+            MeasureSpec {
+                expression: MeasureExpr::CountStar,
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+                filter: FilterSpec::None,
+            },
+        ];
+        shape.required_relations[0].attnos = vec![1, 2, 3];
+        shape.residency.relations[0].attnos = vec![1, 2, 3];
+        shape.residency.relations[0].estimated_rows = estimated_fact_rows;
+        shape.descriptor_resolution = DescriptorResolution::BeginTimeArtifacts {
+            dictionary_keys: vec![DictionaryKeyRequirement {
+                key_index: 0,
+                source: shape.spec.group_keys[0].source.clone(),
+                collation_oid: 0,
+            }],
+            derived_keys: Vec::new(),
+            joins: Vec::new(),
+            grouping_mode: DescriptorGroupingMode::DenseDictionary,
+            max_group_count: 10_000,
+        };
+        shape.descriptor_measures.projected_measure_count = 2;
+        shape.descriptor_measures.descriptor_measure_count = 2;
+        let hash_cost =
+            estimated_fact_rows as f64 * model().coefficients.gpu_op_cost_hash_agg.get() * 2.0;
+        shape.cost.replace_aggregate(PgCost::new(hash_cost));
+        shape
+    }
+
+    fn apply_resident_evidence(shape: &mut ShapePlan, resident_rows: u64, no_null_sidecars: bool) {
+        let mut evidence = estimate(true, 4_096);
+        evidence.resident_rows = Some(resident_rows);
+        evidence.selected_columns_have_no_null_sidecars = Some(no_null_sidecars);
+        apply_exact_residency(
+            shape,
+            &[evidence],
+            AdmissionPolicy {
+                auto_load: false,
+                budget_bytes: u64::MAX,
+                budget_snapshot: budget_snapshot(0, 0, 0),
+            },
+            &model(),
+        )
+        .expect("resident fixture fits the unbounded test budget");
+    }
+
+    #[test]
+    fn dense_atomic_cost_matches_exact_sum_count_operation_count() {
+        let model = model();
+        let mut shape = dense_sum_count_shape(1_000_000);
+        let direct = dense_atomic_sum_count_cost(
+            &shape.spec,
+            &shape.descriptor_resolution,
+            1_000_000,
+            Some(1_000_000),
+            Some(true),
+            &model,
+        )
+        .expect("exact resident dense SUM/COUNT is atomic one-shot");
+        assert_eq!(
+            direct,
+            PgCost::new(1_000_000.0 * model.coefficients.gpu_op_cost_reduce.get() * 2.0)
+        );
+
+        let high_estimate = dense_atomic_sum_count_cost(
+            &shape.spec,
+            &shape.descriptor_resolution,
+            2_000_000,
+            Some(1_000_000),
+            Some(true),
+            &model,
+        )
+        .expect("exact resident rows, not a high estimate, size atomic work");
+        assert_eq!(high_estimate, direct);
+
+        let lhs = ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: u32::from(pg_sys::INT4OID),
+        };
+        let rhs = ColumnRef {
+            relation_oid: 42,
+            attno: 3,
+            type_oid: u32::from(pg_sys::INT4OID),
+        };
+        shape.spec.measures[0].expression = MeasureExpr::Binary {
+            op: BinaryMeasureOp::Mul,
+            lhs,
+            rhs,
+        };
+        let product = dense_atomic_sum_count_cost(
+            &shape.spec,
+            &shape.descriptor_resolution,
+            1_000_000,
+            Some(1_000_000),
+            Some(true),
+            &model,
+        )
+        .expect("nonnull int4 product SUM/COUNT is atomic one-shot");
+        let expected_product = 1_000_000.0
+            * model
+                .coefficients
+                .gpu_op_cost_reduce
+                .get()
+                .mul_add(2.0, model.coefficients.gpu_op_cost_filter.get());
+        assert_eq!(product, PgCost::new(expected_product));
+    }
+
+    #[test]
+    fn dense_atomic_cost_requires_runtime_proof_boundaries() {
+        let model = model();
+        let mut shape = dense_sum_count_shape(1_000_000);
+        let cost = |shape: &ShapePlan, rows, no_nulls| {
+            dense_atomic_sum_count_cost(
+                &shape.spec,
+                &shape.descriptor_resolution,
+                1_000_000,
+                rows,
+                no_nulls,
+                &model,
+            )
+        };
+        assert!(cost(&shape, None, Some(true)).is_none());
+        assert!(cost(&shape, Some(1_000_000), None).is_none());
+        assert!(cost(&shape, Some(1_000_001), Some(true)).is_none());
+
+        let nullable = cost(&shape, Some(1_000_000), Some(false))
+            .expect("nullable direct SUM retains its nonnull atomic update");
+        assert_eq!(
+            nullable,
+            PgCost::new(1_000_000.0 * model.coefficients.gpu_op_cost_reduce.get() * 3.0)
+        );
+
+        shape.spec.measures[0].expression = MeasureExpr::Binary {
+            op: BinaryMeasureOp::Mul,
+            lhs: ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: u32::from(pg_sys::INT4OID),
+            },
+            rhs: ColumnRef {
+                relation_oid: 42,
+                attno: 3,
+                type_oid: u32::from(pg_sys::INT4OID),
+            },
+        };
+        assert!(
+            cost(&shape, Some(1_000_000), Some(false)).is_none(),
+            "nullable product operands retain ordinary hash cost"
+        );
+
+        shape.spec.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: u32::from(pg_sys::INT4OID),
+        });
+        shape.spec.measures[0].outputs.push(AggregateOutput {
+            source: AggregateSource::Value,
+            kind: AggregateKind::Min,
+        });
+        assert!(cost(&shape, Some(1_000_000), Some(true)).is_none());
+        shape.spec.measures[0].outputs.pop();
+
+        shape.spec.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 4,
+                type_oid: u32::from(pg_sys::BOOLOID),
+            },
+            kind: MaskKind::Sql,
+        };
+        assert!(cost(&shape, Some(1_000_000), Some(true)).is_some());
+        shape.spec.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 4,
+                type_oid: u32::from(pg_sys::BOOLOID),
+            },
+            kind: MaskKind::Recheck,
+        };
+        assert!(cost(&shape, Some(1_000_000), Some(true)).is_none());
+
+        shape.spec.fact_filter = FilterSpec::None;
+        add_star_dimension(&mut shape, JoinMultiplicity::Counted);
+        assert!(cost(&shape, Some(1_000_000), Some(true)).is_none());
+    }
+
+    #[test]
+    fn exact_residency_never_uses_an_optimistic_row_estimate_for_atomic_cost() {
+        let model = model();
+        let mut exact = dense_sum_count_shape(1_000_000);
+        apply_resident_evidence(&mut exact, 1_000_000, true);
+        assert_eq!(
+            exact.cost.aggregate,
+            PgCost::new(1_000_000.0 * model.coefficients.gpu_op_cost_reduce.get() * 2.0)
+        );
+
+        let mut underestimated = dense_sum_count_shape(100_000);
+        let ordinary = underestimated.cost.aggregate;
+        apply_resident_evidence(&mut underestimated, 1_000_000, true);
+        assert_eq!(
+            underestimated.cost.aggregate, ordinary,
+            "a low catalog estimate cannot unlock or size the one-shot discount"
+        );
+
+        let mut over_cap = dense_sum_count_shape(1_000_001);
+        let ordinary = over_cap.cost.aggregate;
+        apply_resident_evidence(&mut over_cap, 1_000_001, true);
+        assert_eq!(over_cap.cost.aggregate, ordinary);
     }
 
     fn h3_parent_shape() -> ShapePlan {
@@ -2040,6 +2297,8 @@ mod tests {
             Ok::<_, std::convert::Infallible>(ResidentLoadEstimate {
                 relid: request.relid,
                 loaded: false,
+                resident_rows: None,
+                selected_columns_have_no_null_sidecars: None,
                 pinned: false,
                 estimated_bytes: 4096,
                 fixed_width: true,

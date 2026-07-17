@@ -143,6 +143,22 @@ impl ResidentColumn {
     }
 
     #[must_use]
+    fn has_null_sidecar(&self) -> bool {
+        match self {
+            Self::Empty { .. } => false,
+            Self::Bool { nulls, .. }
+            | Self::I32 { nulls, .. }
+            | Self::I64 { nulls, .. }
+            | Self::H3 { nulls, .. }
+            | Self::Raster { nulls, .. }
+            | Self::F32 { nulls, .. }
+            | Self::F64 { nulls, .. }
+            | Self::TextDictionary { nulls, .. } => nulls.is_some(),
+            Self::Geometry { data, .. } => data.view().nulls.is_some(),
+        }
+    }
+
+    #[must_use]
     pub fn device_bytes(&self) -> Option<u64> {
         let checked = |len: usize, width: usize, nulls: usize| {
             len.checked_mul(width)
@@ -1217,6 +1233,12 @@ pub struct ResidentRelationStatus {
 pub struct ResidentLoadEstimate {
     pub relid: pg_sys::Oid,
     pub loaded: bool,
+    /// Exact row count of the current resident entry when it covers every
+    /// selected column. Missing/partial entries have no exact row proof.
+    pub resident_rows: Option<u64>,
+    /// Exact proof over the selected column union of a loaded resident entry.
+    /// `None` means no complete loaded entry was available to inspect.
+    pub selected_columns_have_no_null_sidecars: Option<bool>,
     pub pinned: bool,
     pub estimated_bytes: u64,
     /// True when the complete selected/pinned/existing column union is
@@ -1950,21 +1972,34 @@ pub fn estimate_selected_relation(
         loader::columns_have_fixed_width_load(&columns).map_err(ResidentLoadError::Loader)?;
     let estimated_bytes = loader::estimate_resident_bytes(request.relid, &columns)
         .map_err(ResidentLoadError::Loader)?;
-    let (loaded, pinned, last_load_ms) = STORE.with(|store| {
-        let store = store.borrow();
-        let entry = store
-            .entries
-            .iter()
-            .find(|entry| entry.relid == request.relid);
-        (
-            entry.is_some_and(|entry| has_requested_columns(entry, &request.columns)),
-            store.pins.contains_key(&u32::from(request.relid)),
-            entry.map(|entry| entry.load_ms),
-        )
-    });
+    let (loaded, resident_rows, selected_columns_have_no_null_sidecars, pinned, last_load_ms) =
+        STORE.with(|store| {
+            let store = store.borrow();
+            let entry = store
+                .entries
+                .iter()
+                .find(|entry| entry.relid == request.relid);
+            let loaded_entry = entry.filter(|entry| has_requested_columns(entry, &request.columns));
+            (
+                loaded_entry.is_some(),
+                loaded_entry.map(|entry| entry.row_count),
+                loaded_entry.map(|entry| {
+                    request.columns.iter().all(|attno| {
+                        entry
+                            .columns
+                            .get(attno)
+                            .is_some_and(|column| !column.has_null_sidecar())
+                    })
+                }),
+                store.pins.contains_key(&u32::from(request.relid)),
+                entry.map(|entry| entry.load_ms),
+            )
+        });
     Ok(ResidentLoadEstimate {
         relid: request.relid,
         loaded,
+        resident_rows,
+        selected_columns_have_no_null_sidecars,
         pinned,
         estimated_bytes,
         fixed_width,

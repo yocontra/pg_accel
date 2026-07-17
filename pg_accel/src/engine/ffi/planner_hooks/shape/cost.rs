@@ -1,12 +1,14 @@
 //! DeviceLimits-derived costing for neutral aggregate shapes.
 
 use crate::engine::cost::{GPU_LAUNCH_OVERHEAD, PgCost, Rows, TypedCostModel, WorkProduct};
+use crate::engine::executor::agg::dense_atomic_one_shot_rows_eligible;
 use crate::engine::spec::{
-    AggQuerySpec, ColumnRef, FilterSpec, GroupKeySource, MeasureExpr, SpatialOperand,
+    AggQuerySpec, AggregateKind, AggregateOutput, AggregateSource, BinaryMeasureOp, ColumnRef,
+    FilterSpec, GroupKeySource, JoinMultiplicity, MaskKind, MeasureExpr, SpatialOperand,
     SpatialPredicateKind, SpatialValueKind,
 };
 
-use super::{ResidencyEstimate, ShapeInput};
+use super::{DescriptorGroupingMode, DescriptorResolution, ResidencyEstimate, ShapeInput};
 
 /// Named cost components. No component is adjusted to undercut PostgreSQL.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -30,6 +32,15 @@ impl ShapeCost {
     /// reserves from disappearing when only residency evidence changes.
     pub(crate) fn replace_amortized_auto_load(&mut self, load: PgCost) {
         self.amortized_auto_load = load;
+        self.recompute_total();
+    }
+
+    pub(crate) fn replace_aggregate(&mut self, aggregate: PgCost) {
+        self.aggregate = aggregate;
+        self.recompute_total();
+    }
+
+    fn recompute_total(&mut self) {
         self.total = PgCost::new(
             self.fact_scan.get()
                 + self.dimension_setup.get()
@@ -41,6 +52,133 @@ impl ShapeCost {
                 + self.amortized_auto_load.get(),
         );
     }
+}
+
+const SUM_OUTPUT: AggregateOutput = AggregateOutput {
+    source: AggregateSource::Value,
+    kind: AggregateKind::Sum,
+};
+const COUNT_OUTPUT: AggregateOutput = AggregateOutput {
+    source: AggregateSource::Value,
+    kind: AggregateKind::Count,
+};
+
+fn dense_descriptor_structure(spec: &AggQuerySpec, resolution: &DescriptorResolution) -> bool {
+    let grouping_is_dense = match resolution {
+        DescriptorResolution::Ready => spec.group_keys.is_empty(),
+        DescriptorResolution::BeginTimeArtifacts {
+            dictionary_keys,
+            derived_keys,
+            grouping_mode: DescriptorGroupingMode::DenseDictionary,
+            max_group_count,
+            ..
+        } => {
+            !spec.group_keys.is_empty()
+                && dictionary_keys.len() == spec.group_keys.len()
+                && derived_keys.is_empty()
+                && *max_group_count > 0
+        }
+        DescriptorResolution::BeginTimeArtifacts { .. } => false,
+    };
+    grouping_is_dense
+        && spec.group_keys.iter().all(|key| {
+            matches!(
+                key.source,
+                GroupKeySource::FactColumn(_) | GroupKeySource::StarDimension { .. }
+            )
+        })
+        && spec
+            .star_dims
+            .iter()
+            .all(|dimension| dimension.multiplicity == JoinMultiplicity::Unique)
+}
+
+fn dense_atomic_sum_count_per_row_cost(
+    spec: &AggQuerySpec,
+    fact_columns_have_no_null_sidecars: bool,
+    model: &TypedCostModel,
+) -> Option<PgCost> {
+    if !matches!(
+        spec.fact_filter,
+        FilterSpec::None
+            | FilterSpec::Mask {
+                kind: MaskKind::Sql,
+                ..
+            }
+    ) || spec.measures.len() != 2
+        || spec
+            .measures
+            .iter()
+            .any(|measure| measure.filter != FilterSpec::None)
+    {
+        return None;
+    }
+    let value = &spec.measures[0];
+    let count = &spec.measures[1];
+    if value.outputs.as_slice() != [SUM_OUTPUT]
+        || count.expression != MeasureExpr::CountStar
+        || count.outputs.as_slice() != [COUNT_OUTPUT]
+    {
+        return None;
+    }
+    const INT4OID: u32 = 23;
+    match &value.expression {
+        MeasureExpr::Column(column) if column.type_oid == INT4OID => {
+            let state_updates = if fact_columns_have_no_null_sidecars {
+                2.0
+            } else {
+                // A nullable SUM lane maintains a third atomic nonnull state.
+                3.0
+            };
+            Some(PgCost::new(
+                model.coefficients.gpu_op_cost_reduce.get() * state_updates,
+            ))
+        }
+        MeasureExpr::Binary {
+            op: BinaryMeasureOp::Mul,
+            lhs,
+            rhs,
+        } if lhs.type_oid == INT4OID
+            && rhs.type_oid == INT4OID
+            && fact_columns_have_no_null_sidecars =>
+        {
+            // The fused kernel still evaluates one integer multiplication per
+            // qualifying row in addition to the SUM and COUNT state updates.
+            Some(PgCost::new(
+                model
+                    .coefficients
+                    .gpu_op_cost_reduce
+                    .get()
+                    .mul_add(2.0, model.coefficients.gpu_op_cost_filter.get()),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Return operation-count aggregate cost only when exact resident evidence
+/// proves that the runtime will take the dense atomic one-shot branch.
+pub(crate) fn dense_atomic_sum_count_cost(
+    spec: &AggQuerySpec,
+    resolution: &DescriptorResolution,
+    estimated_fact_rows: u64,
+    resident_fact_rows: Option<u64>,
+    fact_columns_have_no_null_sidecars: Option<bool>,
+    model: &TypedCostModel,
+) -> Option<PgCost> {
+    let resident_fact_rows_u64 = resident_fact_rows?;
+    if estimated_fact_rows < resident_fact_rows_u64 {
+        return None;
+    }
+    let resident_fact_rows = usize::try_from(resident_fact_rows_u64).ok()?;
+    if !dense_atomic_one_shot_rows_eligible(resident_fact_rows)
+        || !dense_descriptor_structure(spec, resolution)
+    {
+        return None;
+    }
+    let per_row =
+        dense_atomic_sum_count_per_row_cost(spec, fact_columns_have_no_null_sidecars?, model)?;
+    Some(PgCost::new(resident_fact_rows_u64 as f64 * per_row.get()))
 }
 
 /// Device-derived capability gate, separate from cost comparison with a

@@ -20,6 +20,18 @@ mod spatial;
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
 pub use execute::AggExecState;
 
+/// Hard fact-row ceiling for the dense atomic one-shot executor.
+///
+/// Planner costing and runtime dispatch must share this boundary: a path may
+/// use atomic operation-count costing only when current resident evidence
+/// proves the runtime descriptor cannot fall back to the bounded session.
+pub(crate) const DENSE_ATOMIC_ONE_SHOT_MAX_ROWS: usize = 1_000_000;
+
+#[must_use]
+pub(crate) const fn dense_atomic_one_shot_rows_eligible(row_count: usize) -> bool {
+    row_count <= DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
+}
+
 #[cfg(feature = "pg_test")]
 pub(crate) use descriptor::{configure_dense_dispatch_test, dense_dispatch_test_completed_calls};
 
