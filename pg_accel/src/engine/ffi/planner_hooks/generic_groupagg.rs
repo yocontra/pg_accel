@@ -222,8 +222,11 @@ fn unamortized_resident_load_cost(
         // established conservative materialization row charge for that class.
         model.coefficients.preagg_dim_materialize_cost
     };
-    rows as f64 * row_cost.get()
-        + bytes as f64 * model.coefficients.resident_load_per_byte_cost.get()
+    // Keep the products separate so admission retains the established
+    // multiply-then-add rounding instead of using a fused operation.
+    let row_charge = rows as f64 * row_cost.get();
+    let byte_charge = bytes as f64 * model.coefficients.resident_load_per_byte_cost.get();
+    row_charge + byte_charge
 }
 
 fn apply_exact_residency(
@@ -602,6 +605,8 @@ unsafe fn path_list_is_serial(pathlist: *mut List, depth: usize) -> bool {
     for index in 0..len {
         // SAFETY: index is within the live planner List.
         let path = unsafe { pg_sys::list_nth(pathlist, index).cast::<pg_sys::Path>() };
+        // SAFETY: list_nth returned a planner-owned Path pointer; a null list
+        // element is accepted by path_tree_is_serial and fails closed.
         if !unsafe { path_tree_is_serial(path, depth) } {
             return false;
         }
@@ -615,6 +620,7 @@ unsafe fn path_tree_is_serial(path: *mut pg_sys::Path, depth: usize) -> bool {
     }
     // `parallel_safe` only describes eligibility. These two fields describe
     // an execution path that actually participates in parallel execution.
+    // SAFETY: path was checked non-null above and is planner-owned for this walk.
     if unsafe { (*path).parallel_aware || (*path).parallel_workers > 0 } {
         return false;
     }
@@ -623,10 +629,13 @@ unsafe fn path_tree_is_serial(path: *mut pg_sys::Path, depth: usize) -> bool {
     // are selected by that tag. Unknown path kinds fail closed because their
     // possible children cannot be proved serial.
     let next_depth = depth + 1;
+    // SAFETY: path was checked non-null above, and every Path starts with NodeTag.
     match unsafe { (*path).type_ } {
         NodeTag::T_GatherPath | NodeTag::T_GatherMergePath => false,
         NodeTag::T_AggPath => {
             let path = path.cast::<pg_sys::AggPath>();
+            // SAFETY: the T_AggPath tag proves the cast, and PostgreSQL owns the
+            // AggPath and its subpath for the duration of planner traversal.
             unsafe {
                 (*path).aggsplit == pg_sys::AggSplit::AGGSPLIT_SIMPLE
                     && path_tree_is_serial((*path).subpath, next_depth)
@@ -634,22 +643,32 @@ unsafe fn path_tree_is_serial(path: *mut pg_sys::Path, depth: usize) -> bool {
         }
         NodeTag::T_SortPath | NodeTag::T_IncrementalSortPath => {
             let path = path.cast::<pg_sys::SortPath>();
+            // SAFETY: both matched tags share SortPath's subpath layout, and the
+            // planner owns that child pointer for this traversal.
             unsafe { path_tree_is_serial((*path).subpath, next_depth) }
         }
         NodeTag::T_ProjectionPath => {
             let path = path.cast::<pg_sys::ProjectionPath>();
+            // SAFETY: the matched tag proves the ProjectionPath cast and its
+            // planner-owned subpath remains live during this walk.
             unsafe { path_tree_is_serial((*path).subpath, next_depth) }
         }
         NodeTag::T_MaterialPath => {
             let path = path.cast::<pg_sys::MaterialPath>();
+            // SAFETY: the matched tag proves the MaterialPath cast and its
+            // planner-owned subpath remains live during this walk.
             unsafe { path_tree_is_serial((*path).subpath, next_depth) }
         }
         NodeTag::T_MemoizePath => {
             let path = path.cast::<pg_sys::MemoizePath>();
+            // SAFETY: the matched tag proves the MemoizePath cast and its
+            // planner-owned subpath remains live during this walk.
             unsafe { path_tree_is_serial((*path).subpath, next_depth) }
         }
         NodeTag::T_NestPath | NodeTag::T_MergePath | NodeTag::T_HashPath => {
             let path = path.cast::<pg_sys::JoinPath>();
+            // SAFETY: all matched join path structs embed JoinPath at this
+            // location; PostgreSQL owns both child paths during planning.
             unsafe {
                 path_tree_is_serial((*path).outerjoinpath, next_depth)
                     && path_tree_is_serial((*path).innerjoinpath, next_depth)
@@ -657,10 +676,14 @@ unsafe fn path_tree_is_serial(path: *mut pg_sys::Path, depth: usize) -> bool {
         }
         NodeTag::T_AppendPath => {
             let path = path.cast::<pg_sys::AppendPath>();
+            // SAFETY: the matched tag proves the AppendPath cast, and subpaths
+            // is a planner-owned List of Path pointers.
             unsafe { path_list_is_serial((*path).subpaths, next_depth) }
         }
         NodeTag::T_MergeAppendPath => {
             let path = path.cast::<pg_sys::MergeAppendPath>();
+            // SAFETY: the matched tag proves the MergeAppendPath cast, and
+            // subpaths is a planner-owned List of Path pointers.
             unsafe { path_list_is_serial((*path).subpaths, next_depth) }
         }
         // Extension and FDW implementations are opaque to this proof even
@@ -683,15 +706,22 @@ unsafe fn cheapest_serial_agg_path_from_iter(
 ) -> *mut pg_sys::Path {
     let mut best: *mut pg_sys::Path = std::ptr::null_mut();
     for path in paths {
+        // SAFETY: non-null iterator entries are caller-owned live Path values;
+        // every Path exposes NodeTag at the common header.
         if path.is_null() || unsafe { (*path).type_ != NodeTag::T_AggPath } {
             continue;
         }
         let agg = path.cast::<pg_sys::AggPath>();
+        // SAFETY: the checked T_AggPath tag proves the cast to AggPath.
         if unsafe { (*agg).aggsplit != pg_sys::AggSplit::AGGSPLIT_SIMPLE }
+            // SAFETY: path is a live caller-owned Path and recursive traversal
+            // validates each NodeTag before reading a concrete path layout.
             || !unsafe { path_tree_is_serial(path, 0) }
         {
             continue;
         }
+        // SAFETY: path is non-null and remains owned by the planner or test
+        // caller throughout selection.
         let valid_cost = unsafe {
             (*path).startup_cost.is_finite()
                 && (*path).startup_cost >= 0.0
@@ -701,6 +731,8 @@ unsafe fn cheapest_serial_agg_path_from_iter(
         if !valid_cost {
             continue;
         }
+        // SAFETY: path is the current validated entry; non-null best always
+        // points to an earlier validated entry with the same caller lifetime.
         if best.is_null() || unsafe { (*path).total_cost < (*best).total_cost } {
             best = path;
         }
@@ -714,14 +746,22 @@ unsafe fn cheapest_serial_input_path_from_iter(
 ) -> *mut pg_sys::Path {
     let mut best: *mut pg_sys::Path = std::ptr::null_mut();
     for path in paths {
-        if path.is_null()
-            || input_rel.is_null()
-            || unsafe { (*path).parent != input_rel }
-            || unsafe { !(*path).param_info.is_null() }
-            || !unsafe { path_tree_is_serial(path, 0) }
-        {
+        if path.is_null() || input_rel.is_null() {
             continue;
         }
+        // SAFETY: path and input_rel are live non-null caller pointers. The
+        // common Path header contains parent/param_info, and recursive traversal
+        // validates each concrete child layout from its NodeTag.
+        let incompatible = unsafe {
+            (*path).parent != input_rel
+                || !(*path).param_info.is_null()
+                || !path_tree_is_serial(path, 0)
+        };
+        if incompatible {
+            continue;
+        }
+        // SAFETY: path passed the non-null and ownership checks above and stays
+        // live for the duration of selection.
         let valid_cost = unsafe {
             (*path).startup_cost.is_finite()
                 && (*path).startup_cost >= 0.0
@@ -731,6 +771,8 @@ unsafe fn cheapest_serial_input_path_from_iter(
                 && (*path).rows >= 0.0
                 && !(*path).pathtarget.is_null()
         };
+        // SAFETY: path is the current validated entry; non-null best points to
+        // an earlier validated entry that remains live under the caller contract.
         if valid_cost && (best.is_null() || unsafe { (*path).total_cost < (*best).total_cost }) {
             best = path;
         }
@@ -744,12 +786,18 @@ unsafe fn consistent_agg_num_groups_from_iter(
 ) -> Option<f64> {
     let mut estimate: Option<f64> = None;
     for path in paths {
+        // SAFETY: non-null iterator entries are live Path values supplied by
+        // the planner or test, and NodeTag is in the common header.
         if path.is_null() || unsafe { (*path).type_ != NodeTag::T_AggPath } {
             continue;
         }
+        // SAFETY: short-circuiting proves both pointers non-null before reading
+        // the Path parent field.
         if output_rel.is_null() || unsafe { (*path).parent != output_rel } {
             return None;
         }
+        // SAFETY: the T_AggPath tag checked above proves this cast, and the path
+        // remains live for the iterator call.
         let groups = unsafe { (*path.cast::<pg_sys::AggPath>()).numGroups };
         if !groups.is_finite() || groups <= 0.0 {
             return None;
@@ -770,7 +818,8 @@ struct AggGroupEstimate {
 }
 
 fn conservative_output_rows(num_groups: f64) -> Option<u64> {
-    const U64_EXCLUSIVE_UPPER_BOUND: f64 = 18_446_744_073_709_551_616.0;
+    // Exact IEEE-754 representation of 2^64, the first value outside u64.
+    const U64_EXCLUSIVE_UPPER_BOUND: f64 = f64::from_bits(0x43f0_0000_0000_0000);
 
     if !num_groups.is_finite() || num_groups <= 0.0 || num_groups >= U64_EXCLUSIVE_UPPER_BOUND {
         return None;
@@ -785,7 +834,11 @@ unsafe fn consistent_agg_group_estimate(output_rel: *mut RelOptInfo) -> Option<A
     // SAFETY: output_rel is the live upper relation supplied to this planner
     // callback, and pathlist contains planner-owned Path pointers.
     let pathlist = unsafe { (*output_rel).pathlist };
+    // SAFETY: pathlist is either PostgreSQL's null empty-list representation or
+    // a live planner-owned List.
     let len = unsafe { pg_sys::list_length(pathlist) };
+    // SAFETY: every index is bounded by list_length; list entries and output_rel
+    // remain planner-owned and live throughout the consistency scan.
     let num_groups = unsafe {
         consistent_agg_num_groups_from_iter(
             (0..len).map(|index| pg_sys::list_nth(pathlist, index).cast()),
@@ -833,14 +886,21 @@ unsafe fn serial_sorted_agg_cost_lower_bound(
     {
         return None;
     }
+    // SAFETY: root was checked non-null and is the live PlannerInfo supplied by
+    // PostgreSQL for this callback.
     let group_clause = unsafe { (*root).processed_groupClause };
+    // SAFETY: serial_input was checked non-null and is a live planner Path.
     let input_target = unsafe { (*serial_input).pathtarget };
+    // SAFETY: output_rel was checked non-null and is a live planner relation.
     let output_target = unsafe { (*output_rel).reltarget };
     if group_clause.is_null() || input_target.is_null() || output_target.is_null() {
         return None;
     }
+    // SAFETY: group_clause is a non-null, planner-owned PostgreSQL List.
     let group_columns = unsafe { pg_sys::list_length(group_clause) };
+    // SAFETY: output_target is non-null and planner-owned for this callback.
     let target_cost = unsafe { (*output_target).cost };
+    // SAFETY: input_target is non-null and planner-owned for this callback.
     let input_width = unsafe { (*input_target).width };
     if group_columns <= 0
         || input_width < 0
@@ -853,6 +913,9 @@ unsafe fn serial_sorted_agg_cost_lower_bound(
     }
 
     let mut lower_bound = pg_sys::Path::default();
+    // SAFETY: all planner pointers were checked non-null, group_clause and
+    // targets are live, costs points to caller-owned initialized clause costs,
+    // and lower_bound is valid writable storage for cost_agg's output.
     unsafe {
         pg_sys::cost_agg(
             &raw mut lower_bound,
@@ -870,8 +933,11 @@ unsafe fn serial_sorted_agg_cost_lower_bound(
         );
     }
     lower_bound.startup_cost += target_cost.startup;
-    lower_bound.total_cost += target_cost.startup + target_cost.per_tuple * lower_bound.rows;
+    let per_tuple_cost = target_cost.per_tuple * lower_bound.rows;
+    lower_bound.total_cost += target_cost.startup + per_tuple_cost;
 
+    // SAFETY: serial_input was checked non-null and remains planner-owned while
+    // the derived lower bound is validated.
     (lower_bound.disabled_nodes == unsafe { (*serial_input).disabled_nodes }
         && lower_bound.rows.is_finite()
         && lower_bound.rows >= 0.0
@@ -892,19 +958,32 @@ unsafe fn reconstructed_serial_agg_cost(
     if root.is_null() || input_rel.is_null() || output_rel.is_null() || extra.is_null() {
         return None;
     }
+    // SAFETY: root was checked non-null and is the live planner root supplied
+    // to this upper-path callback.
     let parse = unsafe { (*root).parse };
     let extra = extra.cast::<pg_sys::GroupPathExtraData>();
-    if parse.is_null()
-        || unsafe { !(*parse).hasAggs }
-        || unsafe { !(*parse).groupingSets.is_null() }
-        || unsafe { (*output_rel).reltarget.is_null() }
-        || unsafe { (*extra).havingQual != (*parse).havingQual }
-    {
+    if parse.is_null() {
+        return None;
+    }
+    // SAFETY: parse is now non-null and owned by root; output_rel is non-null,
+    // and extra is the valid GroupPathExtraData promised by the callback.
+    let unsupported = unsafe {
+        !(*parse).hasAggs
+            || !(*parse).groupingSets.is_null()
+            || (*output_rel).reltarget.is_null()
+            || (*extra).havingQual != (*parse).havingQual
+    };
+    if unsupported {
         return None;
     }
 
+    // SAFETY: input_rel is non-null and is the live planner input relation.
     let input_paths = unsafe { (*input_rel).pathlist };
+    // SAFETY: input_paths is either PostgreSQL's null empty-list value or a
+    // live planner-owned List.
     let input_len = unsafe { pg_sys::list_length(input_paths) };
+    // SAFETY: each index is bounded by list_length, every entry is a planner
+    // Path, and input_rel remains live during selection.
     let serial_input = unsafe {
         cheapest_serial_input_path_from_iter(
             (0..input_len).map(|index| pg_sys::list_nth(input_paths, index).cast()),
@@ -915,17 +994,23 @@ unsafe fn reconstructed_serial_agg_cost(
         return None;
     }
 
+    // SAFETY: parse is non-null and owned by the active PlannerInfo.
     let grouped = unsafe { !(*parse).groupClause.is_null() };
     let strategy = if grouped {
+        // SAFETY: root is non-null and its processed grouping list is live for
+        // this planner invocation.
         if unsafe { (*root).processed_groupClause.is_null() } {
             return None;
         }
+        // SAFETY: extra is the valid GroupPathExtraData pointer from the
+        // callback contract.
         let hash_enabled = grouping_capability_enabled(
             unsafe { (*extra).flags } as u32,
             pg_sys::GROUPING_CAN_USE_HASH,
         );
         hash_enabled.then_some(pg_sys::AggStrategy::AGG_HASHED)
     } else {
+        // SAFETY: root is non-null and owned by the active planner invocation.
         if unsafe { !(*root).processed_groupClause.is_null() } {
             return None;
         }
@@ -933,8 +1018,13 @@ unsafe fn reconstructed_serial_agg_cost(
     };
 
     let mut costs = pg_sys::AggClauseCosts::default();
+    // SAFETY: root is the live PlannerInfo and costs is initialized writable
+    // storage retained for all subsequent path construction in this function.
     unsafe { get_agg_clause_costs(root, pg_sys::AggSplit::AGGSPLIT_SIMPLE, &raw mut costs) };
     let reconstructed = strategy.and_then(|strategy| {
+        // SAFETY: root, output_rel, serial_input, parse, and extra are validated
+        // live planner pointers; costs remains initialized, and all list/target
+        // arguments belong to this same planner invocation.
         let candidate = unsafe {
             pg_sys::create_agg_path(
                 root,
@@ -953,6 +1043,8 @@ unsafe fn reconstructed_serial_agg_cost(
             return None;
         }
         let path = candidate.cast::<pg_sys::Path>();
+        // SAFETY: candidate was checked non-null, create_agg_path returns an
+        // AggPath, and serial_input/output_rel remain live while it is validated.
         let valid = unsafe {
             (*candidate).aggsplit == pg_sys::AggSplit::AGGSPLIT_SIMPLE
                 && (*candidate).subpath == serial_input
@@ -964,15 +1056,20 @@ unsafe fn reconstructed_serial_agg_cost(
                 && (*path).total_cost >= (*path).startup_cost
                 && path_tree_is_serial(path, 0)
         };
+        // SAFETY: path aliases the non-null candidate and remains live regardless
+        // of whether the validation predicate succeeded.
         valid.then(|| unsafe { (*path).total_cost })
     });
     if !grouped {
         return reconstructed;
     }
+    // SAFETY: extra is the validated GroupPathExtraData from the callback.
     let sorted_lower_bound = if grouping_capability_enabled(
         unsafe { (*extra).flags } as u32,
         pg_sys::GROUPING_CAN_USE_SORT,
     ) {
+        // SAFETY: all pointers and costs were validated above; serial_input is
+        // a proven live serial Path and the callee performs its own null checks.
         unsafe {
             serial_sorted_agg_cost_lower_bound(
                 root,
@@ -999,14 +1096,23 @@ unsafe fn cheapest_native_cost(
     if output_rel.is_null() {
         return None;
     }
+    // SAFETY: output_rel is non-null and is the live upper planner relation.
     let pathlist = unsafe { (*output_rel).pathlist };
+    // SAFETY: pathlist is either PostgreSQL's null empty-list value or a live
+    // planner-owned List.
     let len = unsafe { pg_sys::list_length(pathlist) };
+    // SAFETY: every index is bounded by list_length and entries remain live
+    // planner Paths throughout selection.
     let existing = unsafe {
         cheapest_serial_agg_path_from_iter(
             (0..len).map(|index| pg_sys::list_nth(pathlist, index).cast()),
         )
     };
+    // SAFETY: a non-null existing pointer was selected from the live pathlist
+    // after its costs were validated.
     let existing_cost = (!existing.is_null()).then(|| unsafe { (*existing).total_cost });
+    // SAFETY: the caller contract supplies planner-owned root/input/output/extra
+    // pointers; the callee checks every nullable argument before dereferencing.
     let reconstructed =
         unsafe { reconstructed_serial_agg_cost(root, input_rel, output_rel, extra, num_groups) };
     minimum_valid_cost([existing_cost, reconstructed])
@@ -1048,6 +1154,8 @@ pub(super) unsafe fn try_inject(
         // truth for both admission and the injected path's output cardinality.
         // Missing, invalid, or disagreeing estimates fail closed before catalog
         // shape extraction and resident-byte estimation.
+        // SAFETY: try_inject's contract supplies the live planner-owned
+        // output_rel; the helper checks null and bounds every pathlist access.
         let group_estimate = unsafe { consistent_agg_group_estimate(output_rel) }
             .ok_or(AdmissionDecline::GroupEstimateUnavailable)?;
         // SAFETY: root and output_rel are the live planner-owned pointers supplied
@@ -1170,9 +1278,10 @@ mod tests {
     };
 
     fn test_leaf() -> pg_sys::Path {
-        let mut path = pg_sys::Path::default();
-        path.type_ = NodeTag::T_Path;
-        path
+        pg_sys::Path {
+            type_: NodeTag::T_Path,
+            ..Default::default()
+        }
     }
 
     fn test_agg(
@@ -1209,6 +1318,8 @@ mod tests {
             pg_sys::AggSplit::AGGSPLIT_FINAL_DESERIAL,
         );
 
+        // SAFETY: every pointer targets a test-owned path that remains live for
+        // this call; each NodeTag and child link was initialized above.
         let selected = unsafe {
             cheapest_serial_agg_path_from_iter([
                 std::ptr::from_mut(&mut finalize_agg.path),
@@ -1240,6 +1351,8 @@ mod tests {
             20.0,
             pg_sys::AggSplit::AGGSPLIT_SIMPLE,
         );
+        // SAFETY: every pointer targets a test-owned path that remains live for
+        // this call; each NodeTag and child link was initialized above.
         let selected = unsafe {
             cheapest_serial_agg_path_from_iter([
                 std::ptr::from_mut(&mut nested_parallel_agg.path),
@@ -1264,6 +1377,8 @@ mod tests {
             pg_sys::AggSplit::AGGSPLIT_SIMPLE,
         );
 
+        // SAFETY: every pointer targets a test-owned path that remains live for
+        // this call; each NodeTag and child link was initialized above.
         let selected = unsafe {
             cheapest_serial_agg_path_from_iter([
                 std::ptr::from_mut(&mut first.path),
@@ -1288,6 +1403,8 @@ mod tests {
             pg_sys::AggSplit::AGGSPLIT_SIMPLE,
         );
 
+        // SAFETY: every pointer targets a test-owned path that remains live for
+        // this call; each NodeTag and child link was initialized above.
         let selected = unsafe {
             cheapest_serial_agg_path_from_iter([
                 std::ptr::from_mut(&mut invalid.path),
@@ -1298,6 +1415,8 @@ mod tests {
 
         valid.path.startup_cost = 30.0;
         assert!(
+            // SAFETY: both pointers target test-owned AggPaths that remain live
+            // for this call and have initialized NodeTags and child links.
             unsafe {
                 cheapest_serial_agg_path_from_iter([
                     std::ptr::from_mut(&mut invalid.path),
@@ -1321,6 +1440,8 @@ mod tests {
             pg_sys::AggSplit::AGGSPLIT_SIMPLE,
         );
 
+        // SAFETY: agg and its linked test-owned GatherPath remain live for this
+        // call, with their NodeTags initialized above.
         let selected =
             unsafe { cheapest_serial_agg_path_from_iter([std::ptr::from_mut(&mut agg.path)]) };
         assert!(selected.is_null());
@@ -1343,6 +1464,8 @@ mod tests {
             pg_sys::AggSplit::AGGSPLIT_SIMPLE,
         );
 
+        // SAFETY: all pointers target test-owned paths that remain live for this
+        // call, with matching NodeTags initialized above.
         let selected = unsafe {
             cheapest_serial_agg_path_from_iter([
                 std::ptr::from_mut(&mut custom_agg.path),
@@ -1370,6 +1493,8 @@ mod tests {
             pg_sys::AggSplit::AGGSPLIT_SIMPLE,
         );
 
+        // SAFETY: agg and its linked test-owned join tree remain live for this
+        // call, with every concrete path tagged above.
         let selected =
             unsafe { cheapest_serial_agg_path_from_iter([std::ptr::from_mut(&mut agg.path)]) };
         assert!(selected.is_null());
@@ -1401,6 +1526,8 @@ mod tests {
         gather.path.total_cost = 5.0;
         gather.path.rows = 1_000.0;
 
+        // SAFETY: every pointer targets a test-owned Path or RelOptInfo that
+        // remains live for this call, with parent/target links initialized above.
         let selected = unsafe {
             cheapest_serial_input_path_from_iter(
                 [
@@ -1433,6 +1560,8 @@ mod tests {
         second.path.parent = std::ptr::from_mut(&mut rel);
         second.numGroups = 17.0;
 
+        // SAFETY: both pointers target test-owned AggPaths with matching tags and
+        // a shared live test-owned RelOptInfo parent.
         let consistent = unsafe {
             consistent_agg_num_groups_from_iter(
                 [
@@ -1445,6 +1574,8 @@ mod tests {
         assert_eq!(consistent, Some(17.0));
 
         second.numGroups = 18.0;
+        // SAFETY: both pointers target test-owned AggPaths with matching tags and
+        // a shared live test-owned RelOptInfo parent.
         let inconsistent = unsafe {
             consistent_agg_num_groups_from_iter(
                 [
@@ -1456,6 +1587,8 @@ mod tests {
         };
         assert_eq!(inconsistent, None);
 
+        // SAFETY: leaf and rel are test-owned and live for this call; leaf's
+        // non-AggPath NodeTag was initialized by test_leaf.
         let absent = unsafe {
             consistent_agg_num_groups_from_iter(
                 [std::ptr::from_mut(&mut leaf)],
@@ -1465,6 +1598,8 @@ mod tests {
         assert_eq!(absent, None);
 
         second.numGroups = 0.0;
+        // SAFETY: second is a live test-owned AggPath with its matching NodeTag
+        // and test-owned RelOptInfo parent initialized above.
         let nonpositive = unsafe {
             consistent_agg_num_groups_from_iter(
                 [std::ptr::from_mut(&mut second.path)],

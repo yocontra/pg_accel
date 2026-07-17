@@ -1398,9 +1398,9 @@ fn auto_load_cost_is_amortized_by_explicit_reuse_evidence() {
         .residency
         .missing_bytes
         .expect("fixture has catalog-width byte evidence");
-    let expected = (1_000_000_f64 * limits.preagg_dim_materialize_cost
-        + missing_bytes as f64 * limits.resident_load_per_byte_cost)
-        / 4.0;
+    let expected_row_cost = 1_000_000_f64 * limits.preagg_dim_materialize_cost;
+    let expected_byte_cost = missing_bytes as f64 * limits.resident_load_per_byte_cost;
+    let expected = (expected_row_cost + expected_byte_cost) / 4.0;
     assert_eq!(plan.residency.missing_rows, 1_000_000);
     assert_eq!(plan.residency.amortized_load_cost.get(), expected);
     assert_eq!(plan.cost.amortized_auto_load.get(), expected);

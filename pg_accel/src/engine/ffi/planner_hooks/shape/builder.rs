@@ -721,9 +721,8 @@ fn build_residency(
     let byte_cost = missing_bytes.map_or(0.0, |bytes| {
         bytes as f64 * model.coefficients.resident_load_per_byte_cost.get()
     });
-    let load_cost = (missing_rows as f64 * model.coefficients.preagg_dim_materialize_cost.get()
-        + byte_cost)
-        / f64::from(input.expected_reuses.get());
+    let row_cost = missing_rows as f64 * model.coefficients.preagg_dim_materialize_cost.get();
+    let load_cost = (row_cost + byte_cost) / f64::from(input.expected_reuses.get());
     Ok(ResidencyEstimate {
         relations,
         total_required_bytes,
