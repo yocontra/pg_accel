@@ -266,32 +266,55 @@ mod tests {
         );
     }
 
-    fn assert_default_cost_decline_matches_native(query: &str) {
+    fn assert_default_cost_selects_and_matches_native(table: &str, query: &str) {
         Spi::run("SET LOCAL pg_accel.cost_multiplier = DEFAULT")
             .expect("restore production generic aggregate cost");
         Spi::run("SET LOCAL pg_accel.enabled = off").expect("disable pg_accel");
         let native = result_rows(query);
 
         Spi::run("SET LOCAL pg_accel.enabled = on").expect("enable pg_accel");
-        let before = kernel_executions();
         let plan = explain_text(query);
+        assert_descriptor_plan(&plan);
+        for expected in [
+            "gpu resident pipeline: true",
+            "gpu resident proof version: 2",
+            "gpu resident boundary: none: no cpu boundary",
+        ] {
+            assert!(
+                plan.contains(expected),
+                "default-cost descriptor plan missing '{expected}':\n{plan}"
+            );
+        }
         assert!(
-            !plan.contains("custom scan (gpuaccelagg)"),
-            "cold default-cost query unexpectedly selected GPU:\n{plan}"
+            !plan.contains("seq scan on "),
+            "default-cost descriptor CustomScan must be childless:\n{plan}"
         );
-        assert_eq!(
-            crate::engine::stats::read_last_planner_rejection_reason(),
-            Some("generic_cost_not_competitive")
-        );
-        let default_result = result_rows(query);
+
+        let after_explain = resident_status(table);
+        assert_eq!(after_explain.raw_bytes, 0);
+        assert_eq!(after_explain.derived_bytes, 0);
+        assert!(after_explain.pinned);
+
+        Spi::run("SELECT pg_accel_reset_stats()")
+            .expect("reset pg_accel stats before default-cost execution");
+        let before = kernel_executions();
+        let accelerated = result_rows(query);
         let after = kernel_executions();
-        assert_eq!(
-            after, before,
-            "default cost decline must not dispatch a GPU kernel"
+        assert!(
+            after > before,
+            "default-cost generic aggregate did not dispatch a GPU kernel: \
+             before={before} after={after}"
+        );
+        assert_eq!(accelerated_and_stock_counts(), (1, 0));
+        let loaded = assert_loaded_status(table);
+        assert!(loaded.pinned);
+        assert!(
+            !derived_artifact_identities(table).is_empty(),
+            "default-cost execution must publish a derived artifact"
         );
         assert_eq!(
-            default_result, native,
-            "default cost-declined result differs from native PostgreSQL"
+            accelerated, native,
+            "default-cost generic aggregate differs from native PostgreSQL"
         );
     }
 
@@ -487,7 +510,7 @@ mod tests {
         assert_eq!(invalidated.raw_bytes, 0);
         assert_eq!(invalidated.derived_bytes, 0);
         assert!(invalidated.pinned);
-        assert_default_cost_decline_matches_native(&original_query);
+        assert_default_cost_selects_and_matches_native(original, &original_query);
         assert_eq!(
             Spi::get_one::<i64>(&format!("SELECT pg_accel_refresh('{original}'::regclass)"))
                 .expect("refresh after ADD COLUMN should succeed")
@@ -555,7 +578,7 @@ mod tests {
         assert_eq!(type_invalidated.derived_bytes, 0);
         assert!(type_invalidated.pinned);
         let int8_query = int8_grouped_query(renamed, "grp", "val");
-        assert_default_cost_decline_matches_native(&int8_query);
+        assert_default_cost_selects_and_matches_native(renamed, &int8_query);
         assert_eq!(
             Spi::get_one::<i64>(&format!("SELECT pg_accel_refresh('{renamed}'::regclass)"))
                 .expect("refresh after ALTER COLUMN TYPE should succeed")

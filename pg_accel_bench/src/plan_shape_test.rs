@@ -24,7 +24,7 @@ const DIRECT_COST_OVERRIDE_SOURCE: &str = "pg_accel/src/tests/phase2_cache.rs";
 const DIRECT_COST_OVERRIDE_ALLOW_MARKER: &str =
     "// admission-audit-allow: direct cost_multiplier executor contract test";
 const DIRECT_COST_DEFAULT_PROOF_LINE: &str =
-    "fn assert_default_cost_decline_matches_native(query: &str) {";
+    "fn assert_default_cost_selects_and_matches_native(table: &str, query: &str) {";
 const DIRECT_MIN_BATCH_SOURCE: &str = "pg_accel/src/tests/mod.rs";
 const DIRECT_MIN_BATCH_ALLOW_MARKER: &str =
     "// admission-audit-allow: direct min_batch_size GUC contract test";
