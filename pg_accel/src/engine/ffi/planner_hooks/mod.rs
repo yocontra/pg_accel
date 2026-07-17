@@ -205,8 +205,9 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         // Generic resident aggregate admission performs its structural
         // preflight before device discovery, then applies GPU/residency gates.
         pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG if gucs::gpu_enabled() => {
-            // SAFETY: root and output_rel are the live pointers supplied for this hook call.
-            let _ = unsafe { generic_groupagg::try_inject(root, output_rel) };
+            // SAFETY: all pointers are the live GROUP_AGG hook arguments. At
+            // this stage `extra` points to PostgreSQL's GroupPathExtraData.
+            let _ = unsafe { generic_groupagg::try_inject(root, input_rel, output_rel, extra) };
         }
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
             // Segmented device kernels exist, but the legacy WindowExecState

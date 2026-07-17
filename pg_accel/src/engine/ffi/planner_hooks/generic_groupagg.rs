@@ -1,7 +1,7 @@
 //! Generic descriptor aggregate admission and childless path construction.
 
 use std::collections::BTreeMap;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 use std::num::NonZeroU32;
 
 use pgrx::pg_sys::{self, List, NodeTag, RelOptInfo};
@@ -28,6 +28,16 @@ use crate::engine::stats;
 const GENERIC_SHAPE_PATH_CONTEXT: &str = "upper_paths_generic_groupagg";
 const AGG_QUERY_SPEC_SENTINEL: c_int = i32::from_be_bytes(*b"AQS3");
 const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = i32::from_be_bytes(*b"AOP2");
+
+unsafe extern "C" {
+    // PostgreSQL declares this in optimizer/prep.h and exports it from the
+    // backend, but pgrx does not currently include it in pg_sys for PG18/19.
+    fn get_agg_clause_costs(
+        root: *mut pg_sys::PlannerInfo,
+        aggsplit: pg_sys::AggSplit::Type,
+        costs: *mut pg_sys::AggClauseCosts,
+    );
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AdmissionPolicy {
@@ -664,28 +674,178 @@ unsafe fn cheapest_serial_agg_path_from_iter(
     best
 }
 
-unsafe fn cheapest_native_cost(output_rel: *mut RelOptInfo) -> Option<f64> {
+unsafe fn cheapest_serial_input_path_from_iter(
+    paths: impl IntoIterator<Item = *mut pg_sys::Path>,
+    input_rel: *mut RelOptInfo,
+) -> *mut pg_sys::Path {
+    let mut best: *mut pg_sys::Path = std::ptr::null_mut();
+    for path in paths {
+        if path.is_null()
+            || input_rel.is_null()
+            || unsafe { (*path).parent != input_rel }
+            || unsafe { !(*path).param_info.is_null() }
+            || !unsafe { path_tree_is_serial(path, 0) }
+        {
+            continue;
+        }
+        let valid_cost = unsafe {
+            (*path).startup_cost.is_finite()
+                && (*path).startup_cost >= 0.0
+                && (*path).total_cost.is_finite()
+                && (*path).total_cost >= (*path).startup_cost
+                && (*path).rows.is_finite()
+                && (*path).rows >= 0.0
+                && !(*path).pathtarget.is_null()
+        };
+        if valid_cost && (best.is_null() || unsafe { (*path).total_cost < (*best).total_cost }) {
+            best = path;
+        }
+    }
+    best
+}
+
+unsafe fn consistent_agg_num_groups_from_iter(
+    paths: impl IntoIterator<Item = *mut pg_sys::Path>,
+    output_rel: *mut RelOptInfo,
+) -> Option<f64> {
+    let mut estimate: Option<f64> = None;
+    for path in paths {
+        if path.is_null() || unsafe { (*path).type_ != NodeTag::T_AggPath } {
+            continue;
+        }
+        if output_rel.is_null() || unsafe { (*path).parent != output_rel } {
+            return None;
+        }
+        let groups = unsafe { (*path.cast::<pg_sys::AggPath>()).numGroups };
+        if !groups.is_finite() || groups <= 0.0 {
+            return None;
+        }
+        match estimate {
+            Some(previous) if previous.to_bits() != groups.to_bits() => return None,
+            None => estimate = Some(groups),
+            _ => {}
+        }
+    }
+    estimate
+}
+
+fn minimum_valid_cost(first: Option<f64>, second: Option<f64>) -> Option<f64> {
+    [first, second]
+        .into_iter()
+        .flatten()
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
+        .min_by(f64::total_cmp)
+}
+
+unsafe fn reconstructed_serial_agg_cost(
+    root: *mut pg_sys::PlannerInfo,
+    input_rel: *mut RelOptInfo,
+    output_rel: *mut RelOptInfo,
+    extra: *mut c_void,
+) -> Option<f64> {
+    if root.is_null() || input_rel.is_null() || output_rel.is_null() || extra.is_null() {
+        return None;
+    }
+    let parse = unsafe { (*root).parse };
+    let extra = extra.cast::<pg_sys::GroupPathExtraData>();
+    if parse.is_null()
+        || unsafe { !(*parse).hasAggs }
+        || unsafe { !(*parse).groupingSets.is_null() }
+        || unsafe { (*output_rel).reltarget.is_null() }
+        || unsafe { (*extra).havingQual != (*parse).havingQual }
+    {
+        return None;
+    }
+
+    let input_paths = unsafe { (*input_rel).pathlist };
+    let input_len = unsafe { pg_sys::list_length(input_paths) };
+    let serial_input = unsafe {
+        cheapest_serial_input_path_from_iter(
+            (0..input_len).map(|index| pg_sys::list_nth(input_paths, index).cast()),
+            input_rel,
+        )
+    };
+    if serial_input.is_null() {
+        return None;
+    }
+
+    let output_paths = unsafe { (*output_rel).pathlist };
+    let output_len = unsafe { pg_sys::list_length(output_paths) };
+    let num_groups = unsafe {
+        consistent_agg_num_groups_from_iter(
+            (0..output_len).map(|index| pg_sys::list_nth(output_paths, index).cast()),
+            output_rel,
+        )?
+    };
+
+    let grouped = unsafe { !(*parse).groupClause.is_null() };
+    let strategy = if grouped {
+        let hash_enabled = unsafe { (*extra).flags } as u32 & pg_sys::GROUPING_CAN_USE_HASH != 0;
+        if !hash_enabled || unsafe { (*root).processed_groupClause.is_null() } {
+            return None;
+        }
+        pg_sys::AggStrategy::AGG_HASHED
+    } else {
+        if unsafe { !(*root).processed_groupClause.is_null() } {
+            return None;
+        }
+        pg_sys::AggStrategy::AGG_PLAIN
+    };
+
+    let mut costs = pg_sys::AggClauseCosts::default();
+    unsafe { get_agg_clause_costs(root, pg_sys::AggSplit::AGGSPLIT_SIMPLE, &raw mut costs) };
+    let candidate = unsafe {
+        pg_sys::create_agg_path(
+            root,
+            output_rel,
+            serial_input,
+            (*output_rel).reltarget,
+            strategy,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+            (*root).processed_groupClause,
+            (*extra).havingQual.cast::<List>(),
+            &raw const costs,
+            num_groups,
+        )
+    };
+    if candidate.is_null() {
+        return None;
+    }
+    let path = candidate.cast::<pg_sys::Path>();
+    let valid = unsafe {
+        (*candidate).aggsplit == pg_sys::AggSplit::AGGSPLIT_SIMPLE
+            && (*candidate).subpath == serial_input
+            && (*path).parent == output_rel
+            && (*path).disabled_nodes <= (*serial_input).disabled_nodes
+            && (*path).startup_cost.is_finite()
+            && (*path).startup_cost >= 0.0
+            && (*path).total_cost.is_finite()
+            && (*path).total_cost >= (*path).startup_cost
+            && path_tree_is_serial(path, 0)
+    };
+    valid.then(|| unsafe { (*path).total_cost })
+}
+
+unsafe fn cheapest_native_cost(
+    root: *mut pg_sys::PlannerInfo,
+    input_rel: *mut RelOptInfo,
+    output_rel: *mut RelOptInfo,
+    extra: *mut c_void,
+) -> Option<f64> {
     if output_rel.is_null() {
         return None;
     }
-    // SAFETY: output_rel is non-null and planner-owned; its pathlist is valid
-    // for this upper-path callback and contains Path pointers.
     let pathlist = unsafe { (*output_rel).pathlist };
-    if pathlist.is_null() {
-        return None;
-    }
-    // SAFETY: pathlist is a live planner List.
     let len = unsafe { pg_sys::list_length(pathlist) };
-    let paths = (0..len).map(|index| {
-        // SAFETY: index is within the planner-owned List.
-        unsafe { pg_sys::list_nth(pathlist, index).cast::<pg_sys::Path>() }
-    });
-    // SAFETY: every iterator item is a live Path pointer from output_rel.
-    let path = unsafe { cheapest_serial_agg_path_from_iter(paths) };
-    (!path.is_null()).then(|| {
-        // SAFETY: the selector returned a non-null planner-owned Path.
-        unsafe { (*path).total_cost }
-    })
+    let existing = unsafe {
+        cheapest_serial_agg_path_from_iter(
+            (0..len).map(|index| pg_sys::list_nth(pathlist, index).cast()),
+        )
+    };
+    let existing_cost = (!existing.is_null()).then(|| unsafe { (*existing).total_cost });
+    let reconstructed =
+        unsafe { reconstructed_serial_agg_cost(root, input_rel, output_rel, extra) };
+    minimum_valid_cost(existing_cost, reconstructed)
 }
 
 fn record_decline(decline: &AdmissionDecline, output_rel: *mut RelOptInfo) {
@@ -699,11 +859,13 @@ fn record_decline(decline: &AdmissionDecline, output_rel: *mut RelOptInfo) {
 ///
 /// # Safety
 ///
-/// `root` and `output_rel` must be valid planner-owned pointers for the active
-/// `UPPERREL_GROUP_AGG` callback.
+/// All pointers must be the planner-owned arguments for the active
+/// `UPPERREL_GROUP_AGG` callback; `extra` must point to GroupPathExtraData.
 pub(super) unsafe fn try_inject(
     root: *mut pg_sys::PlannerInfo,
+    input_rel: *mut RelOptInfo,
     output_rel: *mut RelOptInfo,
+    extra: *mut c_void,
 ) -> bool {
     if !gucs::gpu_enabled() {
         return false;
@@ -788,7 +950,7 @@ pub(super) unsafe fn try_inject(
             &model,
         )?;
         // SAFETY: output_rel remains the live planner-owned upper relation.
-        let native_cost = unsafe { cheapest_native_cost(output_rel) };
+        let native_cost = unsafe { cheapest_native_cost(root, input_rel, output_rel, extra) };
         let effective_cost = effective_path_cost(&shape, gucs::cost_multiplier());
         gate_cost(
             &shape,
@@ -996,6 +1158,96 @@ mod tests {
         let selected =
             unsafe { cheapest_serial_agg_path_from_iter([std::ptr::from_mut(&mut agg.path)]) };
         assert!(selected.is_null());
+    }
+
+    #[test]
+    fn reconstructed_baseline_selects_cheapest_proved_serial_input() {
+        let mut rel = pg_sys::RelOptInfo::default();
+        let mut target = pg_sys::PathTarget::default();
+        rel.reltarget = std::ptr::from_mut(&mut target);
+
+        let mut first = test_leaf();
+        first.parent = std::ptr::from_mut(&mut rel);
+        first.pathtarget = rel.reltarget;
+        first.startup_cost = 0.0;
+        first.total_cost = 80.0;
+        first.rows = 1_000.0;
+        let mut second = test_leaf();
+        second.parent = std::ptr::from_mut(&mut rel);
+        second.pathtarget = rel.reltarget;
+        second.startup_cost = 2.0;
+        second.total_cost = 40.0;
+        second.rows = 1_000.0;
+        let mut gather = pg_sys::GatherPath::default();
+        gather.path.type_ = NodeTag::T_GatherPath;
+        gather.path.parent = std::ptr::from_mut(&mut rel);
+        gather.path.pathtarget = rel.reltarget;
+        gather.path.startup_cost = 1.0;
+        gather.path.total_cost = 5.0;
+        gather.path.rows = 1_000.0;
+
+        let selected = unsafe {
+            cheapest_serial_input_path_from_iter(
+                [
+                    std::ptr::from_mut(&mut first),
+                    std::ptr::from_mut(&mut gather.path),
+                    std::ptr::from_mut(&mut second),
+                ],
+                std::ptr::from_mut(&mut rel),
+            )
+        };
+        assert_eq!(selected, std::ptr::from_mut(&mut second));
+    }
+
+    #[test]
+    fn reconstructed_baseline_requires_consistent_live_group_estimate() {
+        let mut rel = pg_sys::RelOptInfo::default();
+        let mut leaf = test_leaf();
+        let mut first = test_agg(
+            std::ptr::from_mut(&mut leaf),
+            10.0,
+            pg_sys::AggSplit::AGGSPLIT_FINAL_DESERIAL,
+        );
+        first.path.parent = std::ptr::from_mut(&mut rel);
+        first.numGroups = 17.0;
+        let mut second = test_agg(
+            std::ptr::from_mut(&mut leaf),
+            20.0,
+            pg_sys::AggSplit::AGGSPLIT_SIMPLE,
+        );
+        second.path.parent = std::ptr::from_mut(&mut rel);
+        second.numGroups = 17.0;
+
+        let consistent = unsafe {
+            consistent_agg_num_groups_from_iter(
+                [
+                    std::ptr::from_mut(&mut first.path),
+                    std::ptr::from_mut(&mut second.path),
+                ],
+                std::ptr::from_mut(&mut rel),
+            )
+        };
+        assert_eq!(consistent, Some(17.0));
+
+        second.numGroups = 18.0;
+        let inconsistent = unsafe {
+            consistent_agg_num_groups_from_iter(
+                [
+                    std::ptr::from_mut(&mut first.path),
+                    std::ptr::from_mut(&mut second.path),
+                ],
+                std::ptr::from_mut(&mut rel),
+            )
+        };
+        assert_eq!(inconsistent, None);
+    }
+
+    #[test]
+    fn native_baseline_uses_cheapest_valid_serial_cost() {
+        assert_eq!(minimum_valid_cost(Some(90.0), Some(40.0)), Some(40.0));
+        assert_eq!(minimum_valid_cost(Some(25.0), None), Some(25.0));
+        assert_eq!(minimum_valid_cost(Some(f64::NAN), Some(30.0)), Some(30.0));
+        assert_eq!(minimum_valid_cost(Some(-1.0), None), None);
     }
 
     fn count_contract() -> (AggQuerySpec, AggOutputProjection) {
