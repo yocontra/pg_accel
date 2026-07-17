@@ -891,6 +891,9 @@ struct FusedInt8ReduceRow {
     count: i64,
 }
 
+const SHAPE_UNSUPPORTED_PREDICATE: &str = "shape_unsupported_predicate";
+const SHAPE_MULTI_FILTER_RELATION: &str = "shape_multi_filter_relation";
+
 fn last_planner_rejection_reason(c: &mut Client) -> Option<String> {
     c.query_one("SELECT pg_accel_last_planner_rejection_reason()", &[])
         .ok()
@@ -1275,6 +1278,7 @@ fn assert_fused_gpuexpr_count_matches_native(
     c: &mut Client,
     label: &str,
     sql: &str,
+    expected_rejection: &str,
     expected: FusedCountExpectation,
 ) {
     c.simple_query("SET pg_accel.enabled = off")
@@ -1305,11 +1309,7 @@ fn assert_fused_gpuexpr_count_matches_native(
         plan.contains("aggregate") && plan.contains("seq scan"),
         "{label} should stay on PostgreSQL native aggregate/scan:\n{plan}"
     );
-    assert_rejection_reason_observed(
-        c,
-        &["shape_unsupported_predicate"],
-        &format!("{label} fused count"),
-    );
+    assert_rejection_reason_observed(c, &[expected_rejection], &format!("{label} fused count"));
     let before = kernel_executions(c);
     let accel_count = scalar_i64(c, sql);
     let after = kernel_executions(c);
@@ -1397,6 +1397,7 @@ fn assert_fused_gpuexpr_int8_reduce_matches_native(
     c: &mut Client,
     label: &str,
     sql: &str,
+    expected_rejection: &str,
     _rows_dispatched: i64,
     _batches: i64,
 ) {
@@ -1430,7 +1431,7 @@ fn assert_fused_gpuexpr_int8_reduce_matches_native(
     );
     assert_rejection_reason_observed(
         c,
-        &["shape_unsupported_predicate"],
+        &[expected_rejection],
         &format!("{label} filtered i64 reduce"),
     );
     let before = kernel_executions(c);
@@ -2348,7 +2349,13 @@ fn plan_shape_fused_gpuexpr_count_stays_native_until_resident() {
     ];
 
     for (label, sql, expected) in cases {
-        assert_fused_gpuexpr_count_matches_native(&mut c, label, &sql, expected);
+        assert_fused_gpuexpr_count_matches_native(
+            &mut c,
+            label,
+            &sql,
+            SHAPE_UNSUPPORTED_PREDICATE,
+            expected,
+        );
     }
 }
 
@@ -2467,6 +2474,7 @@ fn plan_shape_fused_gpuexpr_int8_reduce_stays_native_until_resident() {
         &mut c,
         "two-predicate bigint filtered reduce",
         &sql,
+        SHAPE_MULTI_FILTER_RELATION,
         1_000_000,
         1,
     );
@@ -2490,6 +2498,7 @@ fn plan_shape_fused_gpuexpr_count_bigint_exact_constants_stay_native_until_resid
         &mut c,
         "bigint exact-constant two-predicate fused count",
         &sql,
+        SHAPE_MULTI_FILTER_RELATION,
         FusedCountExpectation {
             count: 250_000,
             rows_dispatched: 1_000_000,
@@ -2711,6 +2720,7 @@ fn plan_shape_fused_gpuexpr_count_two_predicate_stays_native_until_resident() {
         &mut c,
         "isolated PG18 two-predicate direct-USM fused count",
         &sql,
+        SHAPE_UNSUPPORTED_PREDICATE,
         FusedCountExpectation {
             count: 498_000,
             rows_dispatched: 2_000_000,
@@ -2735,6 +2745,7 @@ fn plan_shape_fused_gpuexpr_count_nullable_prefix_stays_native_until_resident() 
         "nullable-prefix two predicates",
         "SELECT count(*) FROM bench_gpuexpr_nullable_prefix_gate \
          WHERE val > 500.0::float4 AND category < 50",
+        SHAPE_UNSUPPORTED_PREDICATE,
         FusedCountExpectation {
             count: 225_000,
             rows_dispatched: 1_000_000,
@@ -2756,6 +2767,7 @@ fn plan_shape_fused_gpuexpr_count_multibatch_null_mask_stays_native_until_reside
         "multi-batch nullable two predicates",
         "SELECT count(*) FROM bench_gpuexpr_multibatch_mask_gate \
          WHERE val > 500.0::float4 AND category < 50",
+        SHAPE_UNSUPPORTED_PREDICATE,
         FusedCountExpectation {
             count: 1_068_156,
             rows_dispatched: 4_300_000,
@@ -2777,6 +2789,7 @@ fn plan_shape_fused_gpuexpr_count_pg_nan_equality_stays_native_until_resident() 
         "float4 NaN equality",
         "SELECT count(*) FROM bench_gpuexpr_nan_gate \
          WHERE val = 'NaN'::float4",
+        SHAPE_UNSUPPORTED_PREDICATE,
         FusedCountExpectation {
             count: 1_000_000,
             rows_dispatched: 1_000_000,

@@ -278,7 +278,13 @@ fn assert_grouped_h3_declines_and_matches_native(name: &str, rows: usize) {
     c.simple_query("SET pg_accel.enabled = off")
         .expect("disable pg_accel for stock H3 baseline");
     let baseline_sql = wl.baseline_query_sql().unwrap_or_else(|| wl.query_sql());
-    let native = execute_to_rows(&mut c, &baseline_sql, H3_EXPLAIN_ROW_CAP);
+    let mut native = execute_to_rows(&mut c, &baseline_sql, rows);
+    native.sort_unstable();
+    assert_eq!(
+        grouped_count_total(&native),
+        rows,
+        "{name}: stock h3-pg grouped output must consume every input row"
+    );
 
     c.simple_query("SET pg_accel.enabled = on;          SELECT pg_accel_reset_stats()")
         .expect("enable pg_accel and reset planner stats");
@@ -296,11 +302,17 @@ fn assert_grouped_h3_declines_and_matches_native(name: &str, rows: usize) {
     );
 
     let before = kernel_executions(&mut c);
-    let enabled = execute_to_rows(&mut c, &query, H3_EXPLAIN_ROW_CAP);
+    let mut enabled = execute_to_rows(&mut c, &query, rows);
     let after = kernel_executions(&mut c);
+    enabled.sort_unstable();
     assert_eq!(
         after, before,
         "{name}: grouped H3 structural decline must not dispatch a GPU kernel"
+    );
+    assert_eq!(
+        grouped_count_total(&enabled),
+        rows,
+        "{name}: enabled native grouped output must consume every input row"
     );
     assert_eq!(
         enabled, native,
@@ -325,9 +337,13 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
     setup
         .simple_query("SET pg_accel.enabled = off")
         .expect("disable pg_accel for stock H3 parent baselines");
-    let mut selected_native =
-        execute_to_rows(&mut setup, &selected_native_query, H3_EXPLAIN_ROW_CAP);
+    let mut selected_native = execute_to_rows(&mut setup, &selected_native_query, rows);
     selected_native.sort_unstable();
+    assert_eq!(
+        grouped_count_total(&selected_native),
+        rows,
+        "stock h3-pg parent/count output must consume every input row"
+    );
     let mut capacity_cases = Vec::new();
     for resolution in [4, 5] {
         let query = format!(
@@ -340,6 +356,11 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
         );
         let mut native = execute_to_rows(&mut setup, &native_query, rows);
         native.sort_unstable();
+        assert_eq!(
+            grouped_count_total(&native),
+            rows,
+            "stock h3-pg res7-to-res{resolution} output must consume every input row"
+        );
         capacity_cases.push((resolution, query, native));
     }
 
@@ -422,7 +443,7 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
     );
 
     let before = kernel_executions(&mut c);
-    let mut selected = execute_to_rows(&mut c, &selected_query, H3_EXPLAIN_ROW_CAP);
+    let mut selected = execute_to_rows(&mut c, &selected_query, rows);
     let after = kernel_executions(&mut c);
     selected.sort_unstable();
     assert!(
@@ -433,18 +454,9 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
         selected, selected_native,
         "resident H3 parent/count output differs from stock h3-pg"
     );
-    let selected_input_rows = selected
-        .iter()
-        .map(|row| {
-            row.rsplit_once('|')
-                .unwrap_or_else(|| panic!("malformed H3 grouped row `{row}`"))
-                .1
-                .parse::<usize>()
-                .unwrap_or_else(|error| panic!("invalid H3 grouped count in `{row}`: {error}"))
-        })
-        .sum::<usize>();
     assert_eq!(
-        selected_input_rows, rows,
+        grouped_count_total(&selected),
+        rows,
         "selected H3 parent/count must consume every input row"
     );
     let material = c
@@ -492,18 +504,9 @@ fn assert_h3_parent_resident_selection_and_declines(rows: usize) {
             capacity, capacity_native,
             "capacity-declined res7-to-res{resolution} output differs from stock h3-pg"
         );
-        let capacity_input_rows = capacity
-            .iter()
-            .map(|row| {
-                row.rsplit_once('|')
-                    .unwrap_or_else(|| panic!("malformed H3 capacity row `{row}`"))
-                    .1
-                    .parse::<usize>()
-                    .unwrap_or_else(|error| panic!("invalid H3 capacity count in `{row}`: {error}"))
-            })
-            .sum::<usize>();
         assert_eq!(
-            capacity_input_rows, rows,
+            grouped_count_total(&capacity),
+            rows,
             "capacity-declined res7-to-res{resolution} must consume every input row"
         );
     }
@@ -610,6 +613,23 @@ fn h3_protection_canonical_parity_names_registered() {
             "canonical parity lane `{name}` is not registered in the workload list"
         );
     }
+}
+
+#[test]
+fn h3_explain_row_cap_is_reserved_for_explain_output() {
+    let marker = ["H3_EXPLAIN_", "ROW_CAP"].concat();
+    let uses = include_str!("h3_protection_test.rs")
+        .lines()
+        .filter(|line| line.contains(&marker))
+        .collect::<Vec<_>>();
+
+    assert_eq!(uses.len(), 2, "H3 EXPLAIN cap escaped into result evidence");
+    assert!(uses[0].trim_start().starts_with("const "));
+    assert!(
+        uses[1].contains("execute_to_rows(c, &explain"),
+        "H3 EXPLAIN cap may only bound EXPLAIN output: {}",
+        uses[1]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,15 +1046,18 @@ fn h3_grouped_count_sql(table: &str, function: &str, resolution: i32) -> String 
 
 #[cfg(feature = "integration_tests")]
 fn grouped_count_total(rows: &[String]) -> usize {
-    rows.iter()
-        .map(|row| {
-            row.rsplit_once('|')
-                .unwrap_or_else(|| panic!("grouped-count row missing count separator: {row}"))
-                .1
-                .parse::<usize>()
-                .unwrap_or_else(|e| panic!("grouped-count row has non-numeric count `{row}`: {e}"))
-        })
-        .sum()
+    rows.iter().fold(0_usize, |total, row| {
+        let count = row
+            .rsplit_once('|')
+            .unwrap_or_else(|| panic!("grouped-count row missing count separator: {row}"))
+            .1
+            .parse::<usize>()
+            .unwrap_or_else(|e| panic!("grouped-count row has non-numeric count `{row}`: {e}"));
+        assert!(count > 0, "grouped-count row has a zero count: {row}");
+        total
+            .checked_add(count)
+            .unwrap_or_else(|| panic!("grouped-count total overflowed at row: {row}"))
+    })
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1137,7 +1160,13 @@ fn h3_warm_grouped_fallback_latency_bounded() {
     let baseline_sql = wl
         .baseline_query_sql()
         .expect("h3_bulk has a stock h3-pg baseline");
-    let native = execute_to_rows(&mut c, &baseline_sql, H3_EXPLAIN_ROW_CAP);
+    let mut native = execute_to_rows(&mut c, &baseline_sql, H3_GROUPED_DISPATCH_ROWS);
+    native.sort_unstable();
+    assert_eq!(
+        grouped_count_total(&native),
+        H3_GROUPED_DISPATCH_ROWS,
+        "h3_bulk warm stock baseline must consume every input row"
+    );
 
     c.simple_query("SET pg_accel.enabled = on;          SELECT pg_accel_reset_stats()")
         .expect("enable pg_accel and reset H3 fallback stats");
@@ -1153,16 +1182,28 @@ fn h3_warm_grouped_fallback_latency_bounded() {
         "h3_bulk warm grouped fallback",
     );
 
-    let warm = execute_to_rows(&mut c, &query, H3_EXPLAIN_ROW_CAP);
+    let mut warm = execute_to_rows(&mut c, &query, H3_GROUPED_DISPATCH_ROWS);
+    warm.sort_unstable();
+    assert_eq!(
+        grouped_count_total(&warm),
+        H3_GROUPED_DISPATCH_ROWS,
+        "h3_bulk warmup must consume every input row"
+    );
     assert_eq!(warm, native);
     let before = kernel_executions(&mut c);
     let t0 = Instant::now();
-    let measured = execute_to_rows(&mut c, &query, H3_EXPLAIN_ROW_CAP);
+    let mut measured = execute_to_rows(&mut c, &query, H3_GROUPED_DISPATCH_ROWS);
     let elapsed = t0.elapsed();
     let after = kernel_executions(&mut c);
+    measured.sort_unstable();
 
     apply_cleanup(&mut c, &wl);
 
+    assert_eq!(
+        grouped_count_total(&measured),
+        H3_GROUPED_DISPATCH_ROWS,
+        "h3_bulk measured fallback must consume every input row"
+    );
     assert_eq!(measured, native);
     assert_eq!(
         after, before,
