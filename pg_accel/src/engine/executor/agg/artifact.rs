@@ -758,6 +758,17 @@ fn prepare_dimension(
                 .ok_or_else(|| "dimension multiplicity exceeds u64".to_owned())?;
         }
     }
+    // A counted join only needs a multiplicity lane when at least one
+    // filter-qualified key actually fans out. The match lane already carries
+    // zero-versus-one membership, so retaining an all-zero/one multiplicity
+    // buffer would needlessly force exact COUNT(*) through the serial weighted
+    // aggregation path.
+    if multiplicity
+        .as_ref()
+        .is_some_and(|values| values.iter().all(|&count| count <= 1))
+    {
+        multiplicity = None;
+    }
 
     let mut fact_codes = Vec::with_capacity(fact_rows);
     for row in 0..fact_rows {
@@ -1576,6 +1587,36 @@ mod tests {
         .expect("counted dimension prepares");
         assert_eq!(prepared.fact_codes, vec![0, 1, -1, -1]);
         assert_eq!(prepared.multiplicity_by_key, Some(vec![2, 1]));
+    }
+
+    #[test]
+    fn filtered_counted_dimension_without_fanout_uses_match_lane_only() {
+        let columns = host_columns(
+            HostColumn::I32 {
+                type_oid: INT4OID,
+                values: vec![1, 2, 3, 4],
+                nulls: None,
+            },
+            HostColumn::I32 {
+                type_oid: INT4OID,
+                values: vec![1, 2, 4],
+                nulls: None,
+            },
+        );
+        let mut counted = dimension(INT4OID, JoinMultiplicity::Counted);
+        counted.filter = FilterSpec::Ranges {
+            input: column(200, INT4OID),
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(1),
+                hi: ScalarValue::I32(2),
+            }],
+        };
+        let prepared = prepare_dimension(&counted, &columns, 4, false)
+            .expect("filtered non-fanout counted dimension prepares");
+
+        assert_eq!(prepared.fact_codes, vec![0, 1, -1, 2]);
+        assert_eq!(prepared.match_by_key, vec![1, 1, 0]);
+        assert_eq!(prepared.multiplicity_by_key, None);
     }
 
     #[test]
