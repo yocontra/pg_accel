@@ -1421,6 +1421,7 @@ fn cmd_resume(
         .clone()
         .ok_or("resume plan has retry cells but no saved benchmark config")?;
     let retry_artifacts = output_dir.unwrap_or_else(|| artifacts::default_run_dir("resume"));
+    let workload_boxes = resolve_resume_workloads(&plan)?;
 
     if dry_run {
         eprintln!(
@@ -1438,7 +1439,6 @@ fn cmd_resume(
         source_artifact.display()
     );
 
-    let workload_boxes = resolve_resume_workloads(&plan)?;
     let cells: Vec<runner::WorkloadRunCell<'_>> = workload_boxes
         .iter()
         .map(|(workload, rows)| runner::WorkloadRunCell {
@@ -1604,6 +1604,11 @@ fn resolve_resume_workloads(
             )
         })?;
         validate_supported_repro_rows(workload.as_ref(), cell.rows, "resume")?;
+        let current_query_identity = artifacts::BenchmarkQueryIdentity::resolve(
+            workload.query_sql(),
+            workload.baseline_query_sql(),
+        )?;
+        resume::validate_retry_cell_query_identity(cell, &current_query_identity)?;
         out.push((workload, cell.rows));
     }
     Ok(out)

@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::artifacts::BenchmarkQueryIdentity;
 use crate::report::CrashedScale;
 use crate::runner::{CacheMode, TimingMode};
 
@@ -32,6 +33,8 @@ pub struct RetryConfig {
 pub struct RetryCell {
     pub workload: String,
     pub rows: usize,
+    pub accel_query_sql: String,
+    pub baseline_query_sql: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,6 +96,8 @@ struct SavedPreRiskContext {
     realistic_gucs: bool,
     skip_guc_verify: bool,
     capture_plans: bool,
+    accel_query_sql: String,
+    baseline_query_sql: String,
 }
 
 #[derive(Serialize)]
@@ -133,6 +138,8 @@ impl RetryConfig {
 /// as the source of truth for seed, timing, cache, GUC, and plan-capture
 /// settings. Those contexts are written before risky execution, so they
 /// survive backend crashes and let the resume path avoid terminal scrollback.
+/// The saved effective query pair is also retained for exact comparison with
+/// the current workload before any retry can run.
 pub fn load_retry_plan(source_dir: &Path) -> Result<RetryPlan, Box<dyn std::error::Error>> {
     let manifest_path = source_dir.join(RESUME_AUDIT_MANIFEST_JSON);
     let manifest_text = fs::read_to_string(&manifest_path).map_err(|err| {
@@ -185,6 +192,7 @@ pub fn load_retry_plan(source_dir: &Path) -> Result<RetryPlan, Box<dyn std::erro
             )
             .into());
         }
+        let query_identity = saved_query_identity(&context)?;
 
         let config = retry_config_from_context(&context)?;
         if let Some(existing) = &shared_config {
@@ -210,6 +218,8 @@ pub fn load_retry_plan(source_dir: &Path) -> Result<RetryPlan, Box<dyn std::erro
         cells.push(RetryCell {
             workload: crash.workload.clone(),
             rows: crash.rows,
+            accel_query_sql: query_identity.accel_query_sql().to_owned(),
+            baseline_query_sql: query_identity.baseline_query_sql().to_owned(),
         });
     }
 
@@ -381,7 +391,59 @@ fn load_pre_risk_context(
             ),
         )
     })?;
-    Ok(serde_json::from_str(&context_text)?)
+    serde_json::from_str(&context_text).map_err(|err| {
+        format!(
+            "invalid pre-risk context for {} @ {} rows at {}: {err}",
+            crash.workload,
+            crash.rows,
+            context_path.display()
+        )
+        .into()
+    })
+}
+
+fn saved_query_identity(
+    context: &SavedPreRiskContext,
+) -> Result<BenchmarkQueryIdentity, Box<dyn std::error::Error>> {
+    BenchmarkQueryIdentity::from_effective(
+        context.accel_query_sql.clone(),
+        context.baseline_query_sql.clone(),
+    )
+    .map_err(|err| {
+        format!(
+            "invalid saved query identity for {} @ {} rows: {err}",
+            context.workload, context.rows
+        )
+        .into()
+    })
+}
+
+pub fn validate_retry_cell_query_identity(
+    cell: &RetryCell,
+    current: &BenchmarkQueryIdentity,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let saved = BenchmarkQueryIdentity::from_effective(
+        cell.accel_query_sql.clone(),
+        cell.baseline_query_sql.clone(),
+    )?;
+    if &saved == current {
+        return Ok(());
+    }
+
+    let mut mismatched_fields = Vec::new();
+    if saved.accel_query_sql() != current.accel_query_sql() {
+        mismatched_fields.push("accel_query_sql");
+    }
+    if saved.baseline_query_sql() != current.baseline_query_sql() {
+        mismatched_fields.push("baseline_query_sql");
+    }
+    Err(format!(
+        "resume query identity mismatch for {} @ {} rows: saved {} does not exactly match the current resolved workload query identity",
+        cell.workload,
+        cell.rows,
+        mismatched_fields.join(" and ")
+    )
+    .into())
 }
 
 fn pre_risk_context_artifact(workload: &str, rows: usize) -> String {
@@ -544,6 +606,116 @@ mod tests {
         }
     }
 
+    fn saved_context_value() -> serde_json::Value {
+        json!({
+            "workload": "query_identity",
+            "rows": 100,
+            "seed": 42,
+            "iterations": 10,
+            "warmup": 5,
+            "timing_mode": "raw",
+            "cache_mode": "warm",
+            "realistic_gucs": false,
+            "skip_guc_verify": false,
+            "capture_plans": true,
+            "accel_query_sql": "SELECT accel_fn()",
+            "baseline_query_sql": "SELECT native_fn()"
+        })
+    }
+
+    fn retry_cell(accel_query_sql: &str, baseline_query_sql: &str) -> RetryCell {
+        RetryCell {
+            workload: "query_identity".to_owned(),
+            rows: 100,
+            accel_query_sql: accel_query_sql.to_owned(),
+            baseline_query_sql: baseline_query_sql.to_owned(),
+        }
+    }
+
+    #[test]
+    fn saved_query_identity_requires_present_nonnull_nonempty_sql() {
+        for field in ["accel_query_sql", "baseline_query_sql"] {
+            let mut missing = saved_context_value();
+            missing
+                .as_object_mut()
+                .expect("saved context should be an object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<SavedPreRiskContext>(missing).is_err(),
+                "missing {field} must fail"
+            );
+
+            let mut null = saved_context_value();
+            null[field] = serde_json::Value::Null;
+            assert!(
+                serde_json::from_value::<SavedPreRiskContext>(null).is_err(),
+                "null {field} must fail"
+            );
+
+            let mut empty = saved_context_value();
+            empty[field] = serde_json::Value::String(" \n\t".to_owned());
+            let context: SavedPreRiskContext =
+                serde_json::from_value(empty).expect("empty SQL is syntactically a string");
+            let error = saved_query_identity(&context).expect_err("empty SQL must fail closed");
+            assert!(error.to_string().contains("must be nonempty"));
+        }
+    }
+
+    #[test]
+    fn resume_query_identity_accepts_exact_default_and_explicit_pairs() {
+        let default = retry_cell("SELECT 1", "SELECT 1");
+        let current_default = BenchmarkQueryIdentity::resolve("SELECT 1".to_owned(), None)
+            .expect("default identity should resolve");
+        validate_retry_cell_query_identity(&default, &current_default)
+            .expect("matching default identity should pass");
+
+        let explicit = retry_cell("SELECT accel_fn()", "SELECT native_fn()");
+        let current_explicit = BenchmarkQueryIdentity::resolve(
+            "SELECT accel_fn()".to_owned(),
+            Some("SELECT native_fn()".to_owned()),
+        )
+        .expect("explicit identity should resolve");
+        validate_retry_cell_query_identity(&explicit, &current_explicit)
+            .expect("matching explicit identity should pass");
+    }
+
+    #[test]
+    fn resume_query_identity_rejects_tampered_swapped_and_override_drift() {
+        let explicit = retry_cell("SELECT accel_fn()", "SELECT native_fn()");
+        let hostile_current = [
+            BenchmarkQueryIdentity::from_effective(
+                "SELECT tampered_fn()".to_owned(),
+                "SELECT native_fn()".to_owned(),
+            )
+            .expect("tampered accel identity should resolve"),
+            BenchmarkQueryIdentity::from_effective(
+                "SELECT accel_fn()".to_owned(),
+                "SELECT tampered_fn()".to_owned(),
+            )
+            .expect("tampered baseline identity should resolve"),
+            BenchmarkQueryIdentity::from_effective(
+                "SELECT native_fn()".to_owned(),
+                "SELECT accel_fn()".to_owned(),
+            )
+            .expect("swapped identity should resolve"),
+        ];
+        for current in hostile_current {
+            let error = validate_retry_cell_query_identity(&explicit, &current)
+                .expect_err("changed query identity must fail closed");
+            assert!(error.to_string().contains("does not exactly match"));
+        }
+
+        let saved_default = retry_cell("SELECT accel_fn()", "SELECT accel_fn()");
+        let current_explicit = BenchmarkQueryIdentity::resolve(
+            "SELECT accel_fn()".to_owned(),
+            Some("SELECT native_fn()".to_owned()),
+        )
+        .expect("explicit identity should resolve");
+        let error = validate_retry_cell_query_identity(&saved_default, &current_explicit)
+            .expect_err("default-to-explicit drift must fail closed");
+        assert!(error.to_string().contains("baseline_query_sql"));
+    }
+
     #[test]
     fn load_retry_plan_uses_pre_risk_context_for_crashed_cells() {
         let dir = TestDir::new("plan");
@@ -584,7 +756,9 @@ mod tests {
                 "cache_mode": "warm",
                 "realistic_gucs": true,
                 "skip_guc_verify": true,
-                "capture_plans": true
+                "capture_plans": true,
+                "accel_query_sql": "SELECT count(*) FROM bench",
+                "baseline_query_sql": "SELECT count(*) FROM bench"
             })
             .to_string(),
         )
@@ -596,6 +770,8 @@ mod tests {
             vec![RetryCell {
                 workload: "gpu/hash agg".to_owned(),
                 rows: 100_000,
+                accel_query_sql: "SELECT count(*) FROM bench".to_owned(),
+                baseline_query_sql: "SELECT count(*) FROM bench".to_owned(),
             }]
         );
         assert_eq!(
@@ -625,6 +801,8 @@ mod tests {
         plan.cells = vec![RetryCell {
             workload: "h3_bulk".to_owned(),
             rows: 100_000,
+            accel_query_sql: "SELECT accel_fn()".to_owned(),
+            baseline_query_sql: "SELECT native_fn()".to_owned(),
         }];
         plan.config = Some(RetryConfig {
             seed: 42,
@@ -644,6 +822,10 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&text).expect("resume source artifact should be valid json");
         assert_eq!(value["retried_cells"][0]["workload"], "h3_bulk");
+        assert_eq!(
+            value["retried_cells"][0]["baseline_query_sql"],
+            "SELECT native_fn()"
+        );
         assert_eq!(value["config"]["timing_mode"], "both");
         assert_eq!(value["config"]["cache_mode"], "cold");
         assert_eq!(
@@ -762,7 +944,9 @@ mod tests {
                 "cache_mode": "warm",
                 "realistic_gucs": false,
                 "skip_guc_verify": false,
-                "capture_plans": true
+                "capture_plans": true,
+                "accel_query_sql": "SELECT accel_fn()",
+                "baseline_query_sql": "SELECT native_fn()"
             })
             .to_string(),
         )

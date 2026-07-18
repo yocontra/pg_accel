@@ -10,7 +10,7 @@ use postgres::{Client, NoTls};
 use rand::Rng;
 use serde::Serialize;
 
-use crate::artifacts::{ArtifactWriter, PreRiskContext};
+use crate::artifacts::{ArtifactWriter, BenchmarkQueryIdentity, PreRiskContext};
 use crate::bench_model::{CachePurgeState, CacheState};
 #[allow(unused_imports)]
 pub use crate::config::{
@@ -2897,6 +2897,8 @@ fn run_workload_with_config(
     config: &BenchConfig,
     artifacts: Option<&ArtifactWriter>,
 ) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
+    let query_identity =
+        BenchmarkQueryIdentity::resolve(workload.query_sql(), workload.baseline_query_sql())?;
     setup(connection, workload, rows, config.seed)?;
 
     // VACUUM (ANALYZE, VERBOSE) after load, before timing begins. This proves the parallel
@@ -2913,8 +2915,14 @@ fn run_workload_with_config(
     let thermal = capture_thermal_state();
 
     if let Some(artifact_writer) = artifacts
-        && let Err(e) =
-            capture_and_write_pre_risk_context(connection, workload, rows, config, artifact_writer)
+        && let Err(e) = capture_and_write_pre_risk_context(
+            connection,
+            workload,
+            rows,
+            config,
+            &query_identity,
+            artifact_writer,
+        )
     {
         eprintln!(
             "[artifacts] pre-risk context write failed for {} @ {rows}: {e}",
@@ -2927,6 +2935,7 @@ fn run_workload_with_config(
             connection,
             workload,
             rows,
+            &query_identity,
             artifact_writer,
         )?)
     } else {
@@ -3115,11 +3124,12 @@ fn capture_and_write_correctness_diff(
     connection: &str,
     workload: &dyn Workload,
     rows: usize,
+    query_identity: &BenchmarkQueryIdentity,
     artifact_writer: &ArtifactWriter,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let artifact = match capture_correctness_diff(connection, workload, rows) {
+    let artifact = match capture_correctness_diff(connection, workload, rows, query_identity) {
         Ok(artifact) => artifact,
-        Err(e) => correctness_error_artifact(workload, rows, e.to_string()),
+        Err(e) => correctness_error_artifact(workload, rows, query_identity, e.to_string()),
     };
     let path = artifact_writer.write_correctness_diff(workload.name(), rows, &artifact)?;
     let relative_path = path
@@ -3146,13 +3156,12 @@ fn capture_correctness_diff(
     connection: &str,
     workload: &dyn Workload,
     rows: usize,
+    query_identity: &BenchmarkQueryIdentity,
 ) -> Result<CorrectnessDiffArtifact, Box<dyn std::error::Error>> {
-    let accel_query_sql = workload.query_sql();
-    let baseline_query_sql = workload
-        .baseline_query_sql()
-        .unwrap_or_else(|| accel_query_sql.clone());
+    let accel_query_sql = query_identity.accel_query_sql();
+    let baseline_query_sql = query_identity.baseline_query_sql();
     let order_sensitive =
-        has_top_level_order_by(&accel_query_sql) || has_top_level_order_by(&baseline_query_sql);
+        has_top_level_order_by(accel_query_sql) || has_top_level_order_by(baseline_query_sql);
     let pre_query_sql = workload.pre_query_sql();
 
     let mut client = Client::connect(connection, NoTls)?;
@@ -3161,7 +3170,7 @@ fn capture_correctness_diff(
     create_correctness_table(
         &mut client,
         CORRECTNESS_ACCEL_TABLE,
-        &accel_query_sql,
+        accel_query_sql,
         workload.name(),
         BenchMode::Accel,
         &pre_query_sql,
@@ -3170,7 +3179,7 @@ fn capture_correctness_diff(
     create_correctness_table(
         &mut client,
         CORRECTNESS_BASELINE_TABLE,
-        &baseline_query_sql,
+        baseline_query_sql,
         workload.name(),
         BenchMode::PgParallel,
         &pre_query_sql,
@@ -3225,8 +3234,8 @@ fn capture_correctness_diff(
         sample_limit: CORRECTNESS_DIFF_SAMPLE_LIMIT,
         accel_minus_baseline_samples,
         baseline_minus_accel_samples,
-        accel_query_sql,
-        baseline_query_sql,
+        accel_query_sql: accel_query_sql.to_owned(),
+        baseline_query_sql: baseline_query_sql.to_owned(),
         error: None,
     })
 }
@@ -3571,19 +3580,18 @@ fn correctness_diff_samples(
 fn correctness_error_artifact(
     workload: &dyn Workload,
     rows: usize,
+    query_identity: &BenchmarkQueryIdentity,
     error: String,
 ) -> CorrectnessDiffArtifact {
-    let accel_query_sql = workload.query_sql();
-    let baseline_query_sql = workload
-        .baseline_query_sql()
-        .unwrap_or_else(|| accel_query_sql.clone());
+    let accel_query_sql = query_identity.accel_query_sql();
+    let baseline_query_sql = query_identity.baseline_query_sql();
     CorrectnessDiffArtifact {
         schema_version: CORRECTNESS_DIFF_SCHEMA_VERSION,
         workload: workload.name().to_owned(),
         rows,
         status: "error".to_owned(),
-        order_sensitive: has_top_level_order_by(&accel_query_sql)
-            || has_top_level_order_by(&baseline_query_sql),
+        order_sensitive: has_top_level_order_by(accel_query_sql)
+            || has_top_level_order_by(baseline_query_sql),
         accel_rows: None,
         baseline_rows: None,
         accel_minus_baseline_count: None,
@@ -3591,8 +3599,8 @@ fn correctness_error_artifact(
         sample_limit: CORRECTNESS_DIFF_SAMPLE_LIMIT,
         accel_minus_baseline_samples: Vec::new(),
         baseline_minus_accel_samples: Vec::new(),
-        accel_query_sql,
-        baseline_query_sql,
+        accel_query_sql: accel_query_sql.to_owned(),
+        baseline_query_sql: baseline_query_sql.to_owned(),
         error: Some(error),
     }
 }
@@ -3667,12 +3675,13 @@ fn capture_and_write_pre_risk_context(
     workload: &dyn Workload,
     rows: usize,
     config: &BenchConfig,
+    query_identity: &BenchmarkQueryIdentity,
     artifact_writer: &ArtifactWriter,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pre_query_sql = workload.pre_query_sql();
     let setup_sql = workload.setup_sql(rows);
-    let accel_query_sql = workload.query_sql();
-    let baseline_query_sql = workload.baseline_query_sql();
+    let accel_query_sql = query_identity.accel_query_sql();
+    let baseline_query_sql = query_identity.baseline_query_sql();
     let explain_sql = format!("EXPLAIN (VERBOSE, COSTS OFF) {accel_query_sql}");
 
     let mut backend_pid = None;
@@ -3738,14 +3747,14 @@ fn capture_and_write_pre_risk_context(
         backend_pid_error: backend_pid_error.as_deref(),
         setup_sql: &setup_sql,
         pre_query_sql: &pre_query_sql,
-        accel_query_sql: &accel_query_sql,
-        baseline_query_sql: baseline_query_sql.as_deref(),
+        accel_query_sql,
+        baseline_query_sql: Some(baseline_query_sql),
         explain_sql: &explain_sql,
         explain: explain.as_deref(),
         explain_error: explain_error.as_deref(),
     };
 
-    artifact_writer.write_pre_risk_context(workload.name(), rows, &context)?;
+    artifact_writer.write_pre_risk_context(workload.name(), rows, &context, query_identity)?;
     Ok(())
 }
 

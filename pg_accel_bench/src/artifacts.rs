@@ -70,6 +70,52 @@ struct LogStartOffset {
     len_bytes: u64,
 }
 
+/// Effective accelerated/baseline SQL captured once for benchmark evidence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BenchmarkQueryIdentity {
+    accel_query_sql: String,
+    baseline_query_sql: String,
+}
+
+impl BenchmarkQueryIdentity {
+    pub fn resolve(
+        accel_query_sql: String,
+        baseline_query_sql: Option<String>,
+    ) -> io::Result<Self> {
+        let baseline_query_sql = baseline_query_sql.unwrap_or_else(|| accel_query_sql.clone());
+        Self::from_effective(accel_query_sql, baseline_query_sql)
+    }
+
+    pub fn from_effective(accel_query_sql: String, baseline_query_sql: String) -> io::Result<Self> {
+        if accel_query_sql.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "accelerated benchmark query SQL must be nonempty",
+            ));
+        }
+        if baseline_query_sql.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "baseline benchmark query SQL must be nonempty",
+            ));
+        }
+        Ok(Self {
+            accel_query_sql,
+            baseline_query_sql,
+        })
+    }
+
+    #[must_use]
+    pub fn accel_query_sql(&self) -> &str {
+        &self.accel_query_sql
+    }
+
+    #[must_use]
+    pub fn baseline_query_sql(&self) -> &str {
+        &self.baseline_query_sql
+    }
+}
+
 #[derive(Serialize)]
 pub struct PreRiskContext<'a> {
     pub workload: &'a str,
@@ -244,7 +290,9 @@ impl ArtifactWriter {
         workload: &str,
         rows: usize,
         context: &PreRiskContext<'_>,
+        query_identity: &BenchmarkQueryIdentity,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        validate_pre_risk_query_identity(context, query_identity)?;
         let path = self.pre_risk_context_path(workload, rows);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -707,6 +755,33 @@ impl ArtifactWriter {
     }
 }
 
+fn validate_pre_risk_query_identity(
+    context: &PreRiskContext<'_>,
+    expected: &BenchmarkQueryIdentity,
+) -> io::Result<()> {
+    let baseline_query_sql = context.baseline_query_sql.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pre-risk context baseline_query_sql must be a nonnull string",
+        )
+    })?;
+    if context.accel_query_sql.trim().is_empty() || baseline_query_sql.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pre-risk context query SQL must be nonempty",
+        ));
+    }
+    if context.accel_query_sql != expected.accel_query_sql()
+        || baseline_query_sql != expected.baseline_query_sql()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "pre-risk context query identity does not match the resolved benchmark queries",
+        ));
+    }
+    Ok(())
+}
+
 fn clear_managed_artifacts(root: &Path) -> io::Result<()> {
     if !root.exists() {
         return Ok(());
@@ -1112,6 +1187,33 @@ mod tests {
         }
     }
 
+    fn test_pre_risk_context<'a>(
+        accel_query_sql: &'a str,
+        baseline_query_sql: Option<&'a str>,
+    ) -> PreRiskContext<'a> {
+        PreRiskContext {
+            workload: "query_identity",
+            rows: 100,
+            seed: 42,
+            iterations: 1,
+            warmup: 0,
+            timing_mode: "raw",
+            cache_mode: "warm",
+            realistic_gucs: false,
+            skip_guc_verify: false,
+            capture_plans: false,
+            backend_pid: None,
+            backend_pid_error: None,
+            setup_sql: &[],
+            pre_query_sql: &[],
+            accel_query_sql,
+            baseline_query_sql,
+            explain_sql: "EXPLAIN (VERBOSE, COSTS OFF) SELECT 1",
+            explain: None,
+            explain_error: None,
+        }
+    }
+
     fn mock_report_with_selected_boundary() -> BenchReport {
         let iterations = (0..5)
             .map(|_| IterationResult {
@@ -1471,6 +1573,71 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_query_identity_resolves_default_and_explicit_baselines_exactly() {
+        let default = BenchmarkQueryIdentity::resolve("SELECT 1".to_owned(), None)
+            .expect("default baseline should resolve");
+        assert_eq!(default.accel_query_sql(), "SELECT 1");
+        assert_eq!(default.baseline_query_sql(), "SELECT 1");
+
+        let explicit = BenchmarkQueryIdentity::resolve(
+            "SELECT accel_fn()".to_owned(),
+            Some("SELECT native_fn()".to_owned()),
+        )
+        .expect("explicit baseline should resolve");
+        assert_eq!(explicit.accel_query_sql(), "SELECT accel_fn()");
+        assert_eq!(explicit.baseline_query_sql(), "SELECT native_fn()");
+
+        assert!(BenchmarkQueryIdentity::resolve(" \n".to_owned(), None).is_err());
+        assert!(
+            BenchmarkQueryIdentity::resolve("SELECT 1".to_owned(), Some("\t".to_owned())).is_err()
+        );
+    }
+
+    #[test]
+    fn pre_risk_writer_rejects_null_or_mismatched_query_identity() {
+        let artifacts = TestDir::new("query_identity_rejection");
+        let writer = ArtifactWriter::new(artifacts.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+        let identity = BenchmarkQueryIdentity::resolve("SELECT 1".to_owned(), None)
+            .expect("query identity should resolve");
+
+        let null_baseline = test_pre_risk_context("SELECT 1", None);
+        let error = writer
+            .write_pre_risk_context("query_identity", 100, &null_baseline, &identity)
+            .expect_err("null risk baseline must fail");
+        assert!(error.to_string().contains("nonnull string"));
+
+        let mismatched = test_pre_risk_context("SELECT 1", Some("SELECT 2"));
+        let error = writer
+            .write_pre_risk_context("query_identity", 100, &mismatched, &identity)
+            .expect_err("mismatched risk baseline must fail");
+        assert!(error.to_string().contains("does not match"));
+        assert!(
+            !artifacts
+                .path()
+                .join("pre_risk_contexts/query_identity-100.json")
+                .exists(),
+            "invalid context must not be written"
+        );
+
+        let explicit_identity = BenchmarkQueryIdentity::resolve(
+            "SELECT accel_fn()".to_owned(),
+            Some("SELECT native_fn()".to_owned()),
+        )
+        .expect("explicit query identity should resolve");
+        let exact = test_pre_risk_context("SELECT accel_fn()", Some("SELECT native_fn()"));
+        let path = writer
+            .write_pre_risk_context("query_identity", 100, &exact, &explicit_identity)
+            .expect("exact explicit risk identity should be written");
+        let value: Value = serde_json::from_str(
+            &fs::read_to_string(path).expect("explicit risk context should be readable"),
+        )
+        .expect("explicit risk context should be valid json");
+        assert_eq!(value["accel_query_sql"], "SELECT accel_fn()");
+        assert_eq!(value["baseline_query_sql"], "SELECT native_fn()");
+    }
+
+    #[test]
     fn artifact_index_tracks_generated_files_with_sizes_and_timestamps() {
         let artifacts = TestDir::new("index");
         let sources = TestDir::new("log_source");
@@ -1482,6 +1649,9 @@ mod tests {
         writer
             .write_plan_snippet("hash/join", 100, "Custom Scan\n")
             .expect("plan snippet should be written");
+        let query_identity =
+            BenchmarkQueryIdentity::resolve("SELECT count(*) FROM bench".to_owned(), None)
+                .expect("query identity should resolve");
         let pre_query_sql = vec!["SET work_mem = '4MB'".to_owned()];
         let context = PreRiskContext {
             workload: "hash/join",
@@ -1499,13 +1669,13 @@ mod tests {
             setup_sql: &[],
             pre_query_sql: &pre_query_sql,
             accel_query_sql: "SELECT count(*) FROM bench",
-            baseline_query_sql: None,
+            baseline_query_sql: Some("SELECT count(*) FROM bench"),
             explain_sql: "EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM bench",
             explain: Some("Aggregate\n"),
             explain_error: None,
         };
         writer
-            .write_pre_risk_context("hash/join", 100, &context)
+            .write_pre_risk_context("hash/join", 100, &context, &query_identity)
             .expect("pre-risk context should be written");
         writer
             .write_correctness_diff(
@@ -1527,6 +1697,23 @@ mod tests {
         let index: Value =
             serde_json::from_str(&index_text).expect("artifact index should be valid json");
         assert_eq!(index["schema_version"], ARTIFACT_INDEX_SCHEMA_VERSION);
+
+        let context_text = fs::read_to_string(
+            artifacts
+                .path()
+                .join("pre_risk_contexts/hash-join-100.json"),
+        )
+        .expect("pre-risk context should be readable");
+        let context_json: Value =
+            serde_json::from_str(&context_text).expect("pre-risk context should be valid json");
+        assert_eq!(
+            context_json["accel_query_sql"],
+            "SELECT count(*) FROM bench"
+        );
+        assert_eq!(
+            context_json["baseline_query_sql"],
+            "SELECT count(*) FROM bench"
+        );
 
         let entries = index["entries"]
             .as_array()
