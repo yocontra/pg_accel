@@ -3361,6 +3361,109 @@ class ResidentV5RegressionTests(unittest.TestCase):
         self.assertEqual(entry.guaranteed_output_parameter_positions, ())
         self.assertEqual(entry.output_parameter_position_variants, ((0,), (1,)))
 
+    def test_grouped_completion_detail_requires_awaited_device_copyback(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            struct GroupedCompletion {
+              pgaccel_status status;
+              int detail;
+            };
+            void pgaccel_record_gpu_exec();
+
+            static void launch_grouped_completion(
+                sycl::queue& q, GroupedCompletion* const workspace) {
+              q.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace->status = PGACCEL_OK;
+                workspace->detail = 7;
+              });
+              q.wait_and_throw();
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_copyback(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              launch_grouped_completion(q, workspace);
+              GroupedCompletion completion{};
+              const auto* workspace_bytes =
+                  reinterpret_cast<const unsigned char*>(workspace);
+              q.memcpy(&completion, workspace, sizeof(completion)).wait_and_throw();
+              q.memcpy(detail,
+                       workspace_bytes + sizeof(pgaccel_status),
+                       sizeof(completion.detail)).wait_and_throw();
+              return completion.status;
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_host_publish(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              launch_grouped_completion(q, workspace);
+              GroupedCompletion completion{};
+              q.memcpy(&completion, workspace, sizeof(completion)).wait_and_throw();
+              *detail = completion.detail;
+              pgaccel_record_gpu_exec();
+              return completion.status;
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_unawaited(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              launch_grouped_completion(q, workspace);
+              GroupedCompletion completion{};
+              q.memcpy(&completion, workspace, sizeof(completion)).wait_and_throw();
+              const auto* workspace_bytes =
+                  reinterpret_cast<const unsigned char*>(workspace);
+              q.memcpy(detail,
+                       workspace_bytes + sizeof(pgaccel_status),
+                       sizeof(completion.detail));
+              return completion.status;
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_host_source(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              launch_grouped_completion(q, workspace);
+              GroupedCompletion completion{};
+              q.memcpy(&completion, workspace, sizeof(completion)).wait_and_throw();
+              q.memcpy(detail, &completion.detail, sizeof(completion.detail)).wait_and_throw();
+              return completion.status;
+            }
+
+            extern "C" pgaccel_status pgaccel_grouped_detail_ignored_launch(int* detail) {
+              sycl::queue q;
+              auto* workspace = static_cast<GroupedCompletion*>(
+                  sycl::malloc_device(sizeof(GroupedCompletion), q));
+              auto deferred = [&]() { launch_grouped_completion(q, workspace); };
+              (void)deferred;
+              *detail = 7;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        green = entries["pgaccel_grouped_detail_copyback"]
+        self.assertTrue(green.ok, green.detail)
+        self.assertIn("device_copyback", green.classifications)
+
+        host_publish = entries["pgaccel_grouped_detail_host_publish"]
+        self.assertFalse(host_publish.ok, host_publish.detail)
+        self.assertIn("host_output_write", host_publish.classifications)
+        self.assertIn("fake_gpu_counter", host_publish.classifications)
+
+        for name in (
+            "pgaccel_grouped_detail_unawaited",
+            "pgaccel_grouped_detail_host_source",
+            "pgaccel_grouped_detail_ignored_launch",
+        ):
+            with self.subTest(name=name):
+                entry = entries[name]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertNotIn("device_copyback", entry.classifications)
+
     def test_kernel_written_usm_copyback_forms_are_proven(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE

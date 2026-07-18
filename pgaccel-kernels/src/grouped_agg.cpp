@@ -231,6 +231,7 @@ struct DeviceCompletion {
 };
 
 static_assert(std::is_standard_layout_v<DeviceCompletion>);
+static_assert(offsetof(DeviceCompletion, detail) == sizeof(decltype(DeviceCompletion::status)));
 static_assert(std::is_same_v<decltype(DeviceCompletion::emitted),
                              decltype(pgaccel_grouped_agg_out::emitted_group_count)>);
 static_assert(sizeof(decltype(DeviceCompletion::emitted)) ==
@@ -491,11 +492,12 @@ bool hash_slot_capacity(size_t group_capacity, size_t* slot_count) {
 
 bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) {
   ArenaSizer arena;
-  // Lifecycle metadata stays at a shape-independent offset so a changed
-  // descriptor cannot reinterpret some other workspace lane as session state.
-  if (!arena.add<KernelParams>(1, &layout->params) || !arena.add<DeviceMeta>(1, &layout->meta) ||
+  // Completion stays at the exact typed workspace base. Besides making its
+  // device lineage explicit, this keeps the lifecycle result independent of
+  // the descriptor's shape-specific lanes.
+  if (!arena.add<DeviceCompletion>(1, &layout->completion) || layout->completion != 0 ||
+      !arena.add<KernelParams>(1, &layout->params) || !arena.add<DeviceMeta>(1, &layout->meta) ||
       !arena.add<DevicePublishParams>(1, &layout->publish_params) ||
-      !arena.add<DeviceCompletion>(1, &layout->completion) ||
       !arena.add<uint8_t>(desc.group_capacity, &layout->active))
     return false;
 
@@ -576,7 +578,7 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
       if (!arena.add<AtomicU64Words>(desc.group_capacity, &layout->dense_integer_atomic_sum) ||
           (!statically_nonnull &&
            !arena.add<AtomicU64Words>(desc.group_capacity,
-                                     &layout->dense_integer_atomic_nonnull)) ||
+                                      &layout->dense_integer_atomic_nonnull)) ||
           !arena.add<AtomicU64Words>(desc.group_capacity, &layout->dense_integer_atomic_count))
         return false;
     } else {
@@ -2037,8 +2039,7 @@ inline void run_dense_integer_chunk(KernelParams* params_ptr, size_t chunk) {
     }
     if (filter == FilterResult::Reject)
       continue;
-    DenseIntegerPartial& partial =
-        params.dense_integer_partials[row_group * chunk_count + chunk];
+    DenseIntegerPartial& partial = params.dense_integer_partials[row_group * chunk_count + chunk];
     ++partial.rows;
 
     const pgaccel_grouped_agg_measure& measure = params.measures[0];
@@ -2541,7 +2542,7 @@ void bind_publish_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLa
   params->measure_count = desc.measure_count;
   params->output_mode = desc.output_mode;
   params->meta = arena_ptr<DeviceMeta>(scratch, layout.meta);
-  params->completion = arena_ptr<DeviceCompletion>(scratch, layout.completion);
+  params->completion = static_cast<DeviceCompletion*>(scratch);
   params->source_offsets.completion = layout.completion;
   params->source_offsets.active = layout.active;
   params->source_offsets.group_codes = layout.staged_group_codes;
@@ -2936,30 +2937,9 @@ class ScratchOwner {
   void* pointer_ = nullptr;
 };
 
-DeviceCompletion launch_grouped_agg_device(sycl::queue& queue,
-                                            const pgaccel_grouped_agg_desc& desc,
-                                            uint64_t output_mask, int32_t* detail,
-                                            void* const device_workspace,
-                                            const WorkspaceLayout& layout) {
-  KernelParams host_params;
-  bind_params(desc, layout, device_workspace, &host_params);
-  DevicePublishParams host_publish_params;
-  bind_publish_params(desc, layout, device_workspace, output_mask, &host_publish_params);
-  auto* device_params =
-      reinterpret_cast<KernelParams*>(static_cast<uint8_t*>(device_workspace) + layout.params);
-  auto* device_publish_params = reinterpret_cast<DevicePublishParams*>(
-      static_cast<uint8_t*>(device_workspace) + layout.publish_params);
-  auto* const completion_output = reinterpret_cast<DeviceCompletion*>(
-      static_cast<uint8_t*>(device_workspace) + layout.completion);
-  if (desc.scratch_space == PGACCEL_MEM_SPACE_SHARED_USM) {
-    *device_params = host_params;
-    *device_publish_params = host_publish_params;
-  } else {
-    queue.memcpy(device_params, &host_params, sizeof(host_params)).wait_and_throw();
-    queue.memcpy(device_publish_params, &host_publish_params, sizeof(host_publish_params))
-        .wait_and_throw();
-  }
-
+void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
+                             const WorkspaceLayout& layout, const KernelParams& host_params,
+                             KernelParams* const device_params) {
   const bool parallel_dense_count =
       parallel_dense_count_star_shape(desc) && desc.row_count <= UINT32_MAX;
   const bool parallel_dense_integer = layout.dense_integer_parallel;
@@ -3018,15 +2998,44 @@ DeviceCompletion launch_grouped_agg_device(sycl::queue& queue,
   } else {
     queue.single_task<GroupedAggDenseKernel>([=]() { run_dense_kernel(device_params); });
   }
+}
+
+pgaccel_status launch_grouped_agg_device(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
+                                         uint64_t output_mask, void* const device_workspace,
+                                         const WorkspaceLayout& layout,
+                                         DeviceCompletion* const device_completion) {
+  KernelParams host_params;
+  bind_params(desc, layout, device_workspace, &host_params);
+  DevicePublishParams host_publish_params;
+  bind_publish_params(desc, layout, device_workspace, output_mask, &host_publish_params);
+  auto* const device_params =
+      reinterpret_cast<KernelParams*>(static_cast<uint8_t*>(device_workspace) + layout.params);
+  auto* const device_publish_params = reinterpret_cast<DevicePublishParams*>(
+      static_cast<uint8_t*>(device_workspace) + layout.publish_params);
+  if (desc.scratch_space == PGACCEL_MEM_SPACE_SHARED_USM) {
+    *device_params = host_params;
+    *device_publish_params = host_publish_params;
+  } else {
+    queue.memcpy(device_params, &host_params, sizeof(host_params)).wait_and_throw();
+    queue.memcpy(device_publish_params, &host_publish_params, sizeof(host_publish_params))
+        .wait_and_throw();
+  }
+
+  submit_grouped_agg_mode(queue, desc, layout, host_params, device_params);
+  // The process-wide execution queue is in-order, so completion observes all
+  // preceding prepare, accumulate, and commit kernels before it publishes.
+  queue.single_task<GroupedAggCompletionKernel>([=]() {
+    const DeviceCompletion published = build_completion(device_publish_params);
+    device_completion->status = published.status;
+    device_completion->detail = published.detail;
+    device_completion->emitted = published.emitted;
+    device_completion->selected = published.selected;
+    device_completion->uncertain = published.uncertain;
+    for (size_t slot = 0; slot < kPublishCommandCount; ++slot)
+      device_completion->commands[slot] = published.commands[slot];
+  });
   queue.wait_and_throw();
-  queue.single_task<GroupedAggCompletionKernel>(
-      [=]() { *completion_output = build_completion(device_publish_params); });
-  queue.wait_and_throw();
-  DeviceCompletion completion{};
-  queue.memcpy(&completion, completion_output, sizeof(completion));
-  queue.wait_and_throw();
-  *detail = completion.detail;
-  return completion;
+  return PGACCEL_OK;
 }
 
 pgaccel_status execute_grouped_agg_finalize(sycl::queue& queue,
@@ -3161,14 +3170,20 @@ pgaccel_status execute_grouped_agg_finalize(sycl::queue& queue,
           static_cast<uint64_t>(measure3_rhs_count_output != nullptr) |
       publish_bit(kPublishMeasures + 3 * kPublishMeasureLaneCount + 8) *
           static_cast<uint64_t>(measure3_rhs_nonnull_output != nullptr);
-  const DeviceCompletion completion =
-      launch_grouped_agg_device(queue, desc, output_mask, detail, device_workspace, layout);
+  auto* const device_completion = static_cast<DeviceCompletion*>(device_workspace);
+  const pgaccel_status launch_status = launch_grouped_agg_device(
+      queue, desc, output_mask, device_workspace, layout, device_completion);
+  if (launch_status != PGACCEL_OK)
+    return launch_status;
 
   const auto* const workspace_bytes = static_cast<const uint8_t*>(device_workspace);
+  const auto* const completion_bytes = reinterpret_cast<const uint8_t*>(device_completion);
+  DeviceCompletion completion{};
+  queue.memcpy(&completion, device_completion, sizeof(completion)).wait_and_throw();
   pgaccel_record_gpu_exec();
 
-  const size_t emitted_offset = layout.completion + offsetof(DeviceCompletion, emitted);
-  queue.memcpy(&out->emitted_group_count, workspace_bytes + emitted_offset,
+  queue.memcpy(detail, completion_bytes + sizeof(completion.status), sizeof(completion.detail));
+  queue.memcpy(&out->emitted_group_count, &device_completion->emitted,
                sizeof(out->emitted_group_count));
   {
     {
@@ -3440,12 +3455,14 @@ pgaccel_status execute_grouped_agg_finalize(sycl::queue& queue,
     {
       const DeviceCopyCommand& command = completion.commands[kPublishSelected];
       if (command.bytes != 0)
-        queue.memcpy(&out->selected_count, workspace_bytes + command.source_offset, command.bytes);
+        queue.memcpy(&out->selected_count, &device_completion->selected,
+                     sizeof(out->selected_count));
     }
     {
       const DeviceCopyCommand& command = completion.commands[kPublishUncertain];
       if (command.bytes != 0)
-        queue.memcpy(&out->uncertain_count, workspace_bytes + command.source_offset, command.bytes);
+        queue.memcpy(&out->uncertain_count, &device_completion->uncertain,
+                     sizeof(out->uncertain_count));
     }
   }
   queue.wait_and_throw();
@@ -3456,9 +3473,18 @@ pgaccel_status execute_grouped_agg_accumulate(sycl::queue& queue,
                                               const pgaccel_grouped_agg_desc& desc, int32_t* detail,
                                               void* const device_workspace,
                                               const WorkspaceLayout& layout) {
-  const DeviceCompletion completion = launch_grouped_agg_device(
-      queue, desc, publish_bit(kPublishDetail), detail, device_workspace, layout);
+  auto* const device_completion = static_cast<DeviceCompletion*>(device_workspace);
+  const pgaccel_status launch_status = launch_grouped_agg_device(
+      queue, desc, publish_bit(kPublishDetail), device_workspace, layout, device_completion);
+  if (launch_status != PGACCEL_OK)
+    return launch_status;
+
+  const auto* const completion_bytes = reinterpret_cast<const uint8_t*>(device_completion);
+  DeviceCompletion completion{};
+  queue.memcpy(&completion, device_completion, sizeof(completion)).wait_and_throw();
   pgaccel_record_gpu_exec();
+  queue.memcpy(detail, completion_bytes + sizeof(completion.status), sizeof(completion.detail));
+  queue.wait_and_throw();
   return static_cast<pgaccel_status>(completion.status);
 }
 
