@@ -1793,7 +1793,12 @@ extern "C" pgaccel_status pgaccel_expr_device_alloc_copy(const void* src, size_t
   if (ptr != nullptr) {
     try {
       sycl::free(ptr, *q);
-    } catch (...) {}
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "pgaccel: resident shared copy cleanup failed: %s\n", e.what());
+    } catch (...) {
+      std::fprintf(stderr,
+                   "pgaccel: resident shared copy cleanup failed (unknown C++ exception)\n");
+    }
   }
   return PGACCEL_ERROR;
 #else

@@ -6638,6 +6638,25 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertEqual(second.declaration_hash, self.abi.declaration_hash)
         self.assertEqual(second.per_file, self.abi.per_file)
 
+    def test_production_gpu_sources_have_no_empty_catch_blocks(self) -> None:
+        empty_catches = []
+        for path in [*self.source_paths, *self.header_paths]:
+            tokens = audit.lex_cpp(path.read_text(encoding="utf-8"))
+            forward, _ = audit._delimiter_pairs(tokens)
+            for index, token in enumerate(tokens):
+                if token.value != "catch" or index + 1 >= len(tokens):
+                    continue
+                catch_open = index + 1
+                catch_close = forward.get(catch_open)
+                if catch_close is None or catch_close + 1 >= len(tokens):
+                    continue
+                body_open = catch_close + 1
+                body_close = forward.get(body_open)
+                if body_close == body_open + 1:
+                    empty_catches.append(f"{path.relative_to(REPO_ROOT)}:{token.line}")
+
+        self.assertEqual(empty_catches, [])
+
     def test_point_in_polygon_staged_copyback_is_proven(self) -> None:
         entry = self.by_name["pgaccel_point_in_polygon_bulk"]
         self.assertTrue(entry.ok, entry.detail)

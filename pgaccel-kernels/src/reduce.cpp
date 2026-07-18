@@ -16,7 +16,9 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <numeric>
 #include <type_traits>
@@ -53,8 +55,12 @@ static constexpr size_t WG_SIZE = 256;
 
 static void wait_for_submitted_work(sycl::queue& q) noexcept {
   try {
-    q.wait();
-  } catch (...) {}
+    q.wait_and_throw();
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "pgaccel: SYCL cleanup wait failed: %s\n", e.what());
+  } catch (...) {
+    std::fprintf(stderr, "pgaccel: SYCL cleanup wait failed (unknown C++ exception)\n");
+  }
 }
 
 /// Generic two-pass tree reduction. Pass 1 reduces within work-groups using
