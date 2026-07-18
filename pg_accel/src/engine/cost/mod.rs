@@ -20,6 +20,7 @@ pub use constants::{
     GPU_SPATIAL_PER_ROW_COST, PER_DATUM_EXTRACT_COST, PREAGG_FIXED_OVERHEAD,
     SPATIAL_INDEX_COST_RATIO_THRESHOLD, SPATIAL_INDEX_SELECTIVITY_THRESHOLD,
 };
+pub(crate) use device_limits::GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS;
 pub use device_limits::{
     DeviceLimits, DeviceLimitsSource, DeviceLimitsValidationError, device_limits,
     device_limits_source,

@@ -16,7 +16,7 @@ use super::artifact::{
 };
 use super::output::{DescriptorAggOutput, validate_h3_compact_key_buffers};
 use super::spatial::{SpatialAggArtifact, SpatialTransformPlan, SpatialWorkspace};
-use super::{DENSE_ATOMIC_ONE_SHOT_MAX_ROWS, dense_atomic_one_shot_rows_eligible};
+use crate::engine::cost::{ExecutorLimits, GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS, Rows};
 use crate::engine::executor::bounded::{
     BoundedDispatchError, bounded_dispatch_call_count, cleanup_before_rethrow,
     dispatch_warning_threshold_exceeded, run_bounded_dispatch,
@@ -55,8 +55,8 @@ const DATEOID: u32 = 1082;
 const TIMESTAMPOID: u32 = 1114;
 const TIMESTAMPTZOID: u32 = 1184;
 
-// Ordered integer statistics still use the bounded native partial layout
-// mirrored here. Atomic SUM one-shot execution only needs the shared row cap.
+// Atomic SUM one-shot execution only needs the row cap. Ordered integer
+// statistics still use the bounded native partial layout mirrored here.
 const DENSE_INTEGER_CHUNK_ROWS: usize = 1_024;
 const DENSE_INTEGER_PARTIAL_BYTES: usize = 56;
 const DENSE_INTEGER_MAX_PARTIAL_BYTES: usize = 32 * 1_024 * 1_024;
@@ -745,6 +745,7 @@ pub(super) struct DescriptorAggPlan {
     dispatch_columns: Vec<ResidentColumnRef>,
     max_groups: usize,
     dispatch_chunk_rows: usize,
+    grouped_agg_one_shot_max_rows: Rows,
     artifact_kind: DescriptorArtifactKind,
 }
 
@@ -868,6 +869,7 @@ impl DescriptorAggPlan {
         validate_internal_runtime_capability(&spec, &projection)?;
         validate_catalog_contract(&spec, &projection)?;
         let limits = crate::engine::cost::device_limits();
+        let executor_limits = ExecutorLimits::from(limits);
         let (artifact_kind, catalog_fingerprint) =
             if let Some((cell, resolution, result_type_oid)) = h3_parent_group(&spec) {
                 // SAFETY: executor Begin runs on PostgreSQL's main backend thread.
@@ -904,9 +906,9 @@ impl DescriptorAggPlan {
         }
         let dispatch_columns = dispatch_column_refs(&spec)?;
         let dispatch_chunk_rows = if h3_parent_group(&spec).is_some() {
-            limits.gpu_h3_max_chunk_rows
+            executor_limits.gpu_h3_max_chunk_rows.get()
         } else {
-            limits.gpu_reduce_max_chunk
+            executor_limits.gpu_reduce_max_chunk.get()
         };
         Ok(Self {
             spec,
@@ -918,6 +920,7 @@ impl DescriptorAggPlan {
             dispatch_columns,
             max_groups: limits.gpu_hash_agg_max_groups,
             dispatch_chunk_rows,
+            grouped_agg_one_shot_max_rows: executor_limits.gpu_grouped_agg_one_shot_max_rows,
             artifact_kind,
         })
     }
@@ -1144,6 +1147,7 @@ impl DescriptorAggPlan {
                 &self.dispatch_columns,
                 &self.projection,
                 self.dispatch_chunk_rows,
+                self.grouped_agg_one_shot_max_rows.get(),
             ),
             DescriptorArtifactKind::H3Parent { cell, .. } => {
                 match with_derived_artifact_inputs::<H3ParentArtifact, _>(
@@ -1874,12 +1878,12 @@ enum DenseBoundedFailure {
 
 enum DenseExecutionSetup {
     OneShot {
-        dispatch: DescriptorAggDispatch,
+        dispatch: Box<DescriptorAggDispatch>,
         elapsed: Duration,
     },
     Bounded {
-        session: GroupedAggSession,
-        metadata: DescriptorExecutionMetadata,
+        session: Box<GroupedAggSession>,
+        metadata: Box<DescriptorExecutionMetadata>,
     },
 }
 
@@ -1887,24 +1891,35 @@ enum DenseExecutionSetup {
 static TEST_DENSE_CHUNK_ROWS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "pg_test")]
+static TEST_DENSE_ONE_SHOT_MAX_ROWS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(feature = "pg_test")]
 static TEST_DENSE_TIMEOUT_AFTER_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(feature = "pg_test")]
 static TEST_DENSE_COMPLETED_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-/// Configure the live PostgreSQL cancellation fixture. A zero chunk override
-/// preserves the production device limit; a zero timeout count disables the
-/// timeout arm. This code is absent from release builds.
+/// Configure the live PostgreSQL cancellation fixture. Zero chunk and
+/// one-shot overrides preserve their independent production device limits; a
+/// zero timeout count disables the timeout arm. This code is absent from
+/// release builds.
 #[cfg(feature = "pg_test")]
 pub(crate) fn configure_dense_dispatch_test(
     chunk_rows: usize,
+    one_shot_max_rows: usize,
     timeout_after_calls: usize,
-) -> (usize, usize) {
+) -> (usize, usize, usize) {
     let previous_chunk_rows = TEST_DENSE_CHUNK_ROWS.swap(chunk_rows, Ordering::SeqCst);
+    let previous_one_shot_max_rows =
+        TEST_DENSE_ONE_SHOT_MAX_ROWS.swap(one_shot_max_rows, Ordering::SeqCst);
     let previous_timeout_after =
         TEST_DENSE_TIMEOUT_AFTER_CALLS.swap(timeout_after_calls, Ordering::SeqCst);
     TEST_DENSE_COMPLETED_CALLS.store(0, Ordering::SeqCst);
-    (previous_chunk_rows, previous_timeout_after)
+    (
+        previous_chunk_rows,
+        previous_one_shot_max_rows,
+        previous_timeout_after,
+    )
 }
 
 #[cfg(feature = "pg_test")]
@@ -1924,15 +1939,21 @@ fn effective_dense_chunk_rows(device_limit: usize) -> usize {
     device_limit
 }
 
-fn dense_one_shot_row_cap() -> usize {
-    #[cfg(feature = "pg_test")]
-    {
-        let test_limit = TEST_DENSE_CHUNK_ROWS.load(Ordering::SeqCst);
-        if test_limit != 0 {
-            return test_limit.min(DENSE_ATOMIC_ONE_SHOT_MAX_ROWS);
-        }
+fn clamp_dense_one_shot_row_cap(device_limit: usize, test_override: usize) -> usize {
+    let production_limit = device_limit.min(GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS);
+    if test_override == 0 {
+        production_limit
+    } else {
+        test_override.min(production_limit)
     }
-    DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
+}
+
+fn dense_one_shot_row_cap(device_limit: usize) -> usize {
+    #[cfg(feature = "pg_test")]
+    let test_override = TEST_DENSE_ONE_SHOT_MAX_ROWS.load(Ordering::SeqCst);
+    #[cfg(not(feature = "pg_test"))]
+    let test_override = 0;
+    clamp_dense_one_shot_row_cap(device_limit, test_override)
 }
 
 fn canonical_null_value(value: &PgaccelVal) -> bool {
@@ -2111,6 +2132,7 @@ fn execute_bounded_dense_artifact(
     requests: &[ResidentColumnRef],
     projection: &AggOutputProjection,
     max_chunk_rows: usize,
+    one_shot_max_rows: usize,
 ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
     let bounded_chunk_rows = effective_dense_chunk_rows(max_chunk_rows);
     if bounded_chunk_rows == 0 {
@@ -2136,7 +2158,8 @@ fn execute_bounded_dense_artifact(
             // submits or dereferences those pointer values after return.
             let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
                 .map_err(|error| gpu_execution_error("grouped descriptor rejected", error))?;
-            if dense_one_shot_eligible(plan.descriptor(), dense_one_shot_row_cap()) {
+            if dense_one_shot_eligible(plan.descriptor(), dense_one_shot_row_cap(one_shot_max_rows))
+            {
                 let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
                     gpu_execution_error("grouped one-shot output allocation failed", error)
                 })?;
@@ -2155,13 +2178,13 @@ fn execute_bounded_dense_artifact(
                 )
                 .map_err(DescriptorAggExecutionError::Failure)?;
                 return Ok(DenseExecutionSetup::OneShot {
-                    dispatch: DescriptorAggDispatch {
+                    dispatch: Box::new(DescriptorAggDispatch {
                         output,
                         fact_rows: inputs.artifact.fact_rows,
                         batches_executed: 1,
                         dispatch_time_us: u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
                         residency: None,
-                    },
+                    }),
                     elapsed,
                 });
             }
@@ -2172,7 +2195,10 @@ fn execute_bounded_dense_artifact(
                 domains: inputs.artifact.domains.clone(),
                 resolved_spec: inputs.artifact.resolved_spec.clone(),
             };
-            Ok::<_, DescriptorAggExecutionError>(DenseExecutionSetup::Bounded { session, metadata })
+            Ok::<_, DescriptorAggExecutionError>(DenseExecutionSetup::Bounded {
+                session: Box::new(session),
+                metadata: Box::new(metadata),
+            })
         },
     )
     .map_err(DescriptorDispatchFailure::Residency)?
@@ -2183,15 +2209,20 @@ fn execute_bounded_dense_artifact(
             warn_if_grouped_dispatch_slow("one-shot", elapsed);
             return match capture_postgres_interrupt() {
                 Some(caught) => cleanup_before_rethrow(dispatch, caught, |caught| caught.rethrow()),
-                None => Ok(dispatch),
+                None => Ok(*dispatch),
             };
         }
         DenseExecutionSetup::Bounded { session, metadata } => (session, metadata),
     };
+    let DescriptorExecutionMetadata {
+        fact_rows,
+        domains,
+        resolved_spec,
+    } = *metadata;
 
     let dispatch_started = Instant::now();
     let dispatch = run_bounded_dispatch(
-        metadata.fact_rows,
+        fact_rows,
         bounded_chunk_rows,
         |range| {
             let elapsed = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
@@ -2283,25 +2314,20 @@ fn execute_bounded_dense_artifact(
 
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    let completed_calls = bounded_dispatch_call_count(metadata.fact_rows, bounded_chunk_rows)
-        .ok_or_else(|| {
+    let completed_calls =
+        bounded_dispatch_call_count(fact_rows, bounded_chunk_rows).ok_or_else(|| {
             DescriptorDispatchFailure::Execution(DescriptorAggExecutionError::Failure(
                 "grouped aggregate bounded dispatch call count overflowed".to_owned(),
             ))
         })?;
     debug_assert_eq!(completed_calls, launches.saturating_add(1));
-    let output = DescriptorAggOutput::new(
-        storage,
-        outcome,
-        metadata.domains,
-        metadata.resolved_spec,
-        projection.clone(),
-    )
-    .map_err(DescriptorAggExecutionError::Failure)
-    .map_err(DescriptorDispatchFailure::Execution)?;
+    let output =
+        DescriptorAggOutput::new(storage, outcome, domains, resolved_spec, projection.clone())
+            .map_err(DescriptorAggExecutionError::Failure)
+            .map_err(DescriptorDispatchFailure::Execution)?;
     Ok(DescriptorAggDispatch {
         output,
-        fact_rows: metadata.fact_rows,
+        fact_rows,
         batches_executed: u64::try_from(completed_calls).unwrap_or(u64::MAX),
         dispatch_time_us,
         residency: None,
@@ -2448,7 +2474,7 @@ mod tests {
         let release_shape = parallel_dense_integer_desc(1_000_000, 350);
         assert!(dense_one_shot_eligible(
             &release_shape,
-            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
         ));
 
         let chunks = release_shape.row_count.div_ceil(DENSE_INTEGER_CHUNK_ROWS);
@@ -2456,7 +2482,7 @@ mod tests {
         let over_budget = parallel_dense_integer_desc(1_000_000, max_groups + 1);
         assert!(dense_one_shot_eligible(
             &over_budget,
-            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
         ));
         let mut ordered_over_budget = over_budget;
         ordered_over_budget.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_SUM
@@ -2464,21 +2490,21 @@ mod tests {
             | abi::PGACCEL_GROUPED_AGG_LANE_MAX;
         assert!(!dense_one_shot_eligible(
             &ordered_over_budget,
-            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
         ));
 
         assert!(!dense_one_shot_eligible(&release_shape, 999_999));
         let oversized = parallel_dense_integer_desc(1_000_001, 350);
         assert!(!dense_one_shot_eligible(
             &oversized,
-            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
         ));
 
         let mut unsupported = release_shape;
         unsupported.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_SUB;
         assert!(!dense_one_shot_eligible(
             &unsupported,
-            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
         ));
 
         let mask = [1_i8];
@@ -2487,22 +2513,55 @@ mod tests {
         noncanonical.where_filter.mask = mask.as_ptr();
         assert!(dense_one_shot_eligible(
             &noncanonical,
-            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
         ));
         noncanonical.where_filter.predicate_range_count = 1;
         assert!(!dense_one_shot_eligible(
             &noncanonical,
-            DENSE_ATOMIC_ONE_SHOT_MAX_ROWS
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
         ));
     }
 
     #[test]
-    fn dense_count_one_shot_still_honors_forced_small_chunks() {
+    fn dense_count_one_shot_honors_explicit_limit() {
         let mut desc = parallel_dense_integer_desc(10, 1);
         desc.measure_count = 1;
         desc.measures[0] = desc.measures[1];
         assert!(dense_one_shot_eligible(&desc, 10));
         assert!(!dense_one_shot_eligible(&desc, 4));
+    }
+
+    #[test]
+    fn one_shot_limit_boundary_preserves_bounded_cancellation_contract() {
+        const DEVICE_ONE_SHOT_LIMIT: usize = 250_000;
+        const SESSION_CHUNK_ROWS: usize = 65_536;
+
+        assert_eq!(
+            clamp_dense_one_shot_row_cap(DEVICE_ONE_SHOT_LIMIT, 0),
+            DEVICE_ONE_SHOT_LIMIT
+        );
+        assert_eq!(
+            clamp_dense_one_shot_row_cap(DEVICE_ONE_SHOT_LIMIT, 1),
+            1,
+            "the pg_test one-shot override is independent of session chunking"
+        );
+        assert_eq!(
+            clamp_dense_one_shot_row_cap(GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS + 1, 0),
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
+        );
+
+        let at_limit = parallel_dense_integer_desc(DEVICE_ONE_SHOT_LIMIT, 350);
+        assert!(dense_one_shot_eligible(&at_limit, DEVICE_ONE_SHOT_LIMIT));
+        let above_limit = parallel_dense_integer_desc(DEVICE_ONE_SHOT_LIMIT + 1, 350);
+        assert!(!dense_one_shot_eligible(
+            &above_limit,
+            DEVICE_ONE_SHOT_LIMIT
+        ));
+        assert_eq!(
+            bounded_dispatch_call_count(above_limit.row_count, SESSION_CHUNK_ROWS),
+            Some(5),
+            "limit+1 must use four bounded calls plus finalize, leaving interrupt boundaries"
+        );
     }
 
     fn projection(

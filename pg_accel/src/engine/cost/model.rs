@@ -263,6 +263,8 @@ impl From<&DeviceLimits> for PlannerPolicy {
 pub struct ExecutorLimits {
     /// Maximum elements per GPU reduce dispatch chunk.
     pub gpu_reduce_max_chunk: Rows,
+    /// Maximum rows in one synchronous atomic dense grouped aggregate.
+    pub gpu_grouped_agg_one_shot_max_rows: Rows,
     /// Maximum elements for GPU sort dispatch.
     pub gpu_sort_max_elements: Rows,
     /// Maximum resident H3 rows per device-to-device transform launch.
@@ -281,6 +283,7 @@ impl From<&DeviceLimits> for ExecutorLimits {
     fn from(limits: &DeviceLimits) -> Self {
         Self {
             gpu_reduce_max_chunk: Rows::new(limits.gpu_reduce_max_chunk),
+            gpu_grouped_agg_one_shot_max_rows: Rows::new(limits.gpu_grouped_agg_one_shot_max_rows),
             gpu_sort_max_elements: Rows::new(limits.gpu_sort_max_elements),
             gpu_h3_max_chunk_rows: Rows::new(limits.gpu_h3_max_chunk_rows),
             gpu_spatial_pairwise_chunk_rows: Rows::new(limits.gpu_spatial_pairwise_chunk_rows),
@@ -531,6 +534,10 @@ mod tests {
         assert_eq!(
             model.executor.gpu_reduce_max_chunk.get(),
             limits.gpu_reduce_max_chunk,
+        );
+        assert_eq!(
+            model.executor.gpu_grouped_agg_one_shot_max_rows.get(),
+            limits.gpu_grouped_agg_one_shot_max_rows,
         );
         assert_eq!(
             model.executor.gpu_sort_max_elements.get(),

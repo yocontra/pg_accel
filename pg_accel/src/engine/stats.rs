@@ -622,6 +622,10 @@ fn pg_accel_device_limits() -> TableIterator<
             limits.gpu_reduce_max_chunk.to_string(),
         ),
         (
+            "gpu_grouped_agg_one_shot_max_rows".into(),
+            limits.gpu_grouped_agg_one_shot_max_rows.to_string(),
+        ),
+        (
             "gpu_sort_max_elements".into(),
             limits.gpu_sort_max_elements.to_string(),
         ),
@@ -1182,7 +1186,21 @@ mod tests {
         let count = Spi::get_one::<i64>("SELECT COUNT(*) FROM pg_accel_device_limits()")
             .expect("pg_accel_device_limits() should succeed")
             .expect("pg_accel_device_limits() should return a row count");
-        assert_eq!(count, 74, "expected one SRF row per DeviceLimits field");
+        assert_eq!(count, 75, "expected one SRF row per DeviceLimits field");
+
+        let grouped_one_shot_limit = Spi::get_one::<String>(
+            "SELECT value FROM pg_accel_device_limits() \
+             WHERE name = 'gpu_grouped_agg_one_shot_max_rows'",
+        )
+        .expect("grouped aggregate one-shot limit lookup should succeed")
+        .expect("grouped aggregate one-shot limit should be exposed")
+        .parse::<usize>()
+        .expect("grouped aggregate one-shot limit should be an integer");
+        assert!(
+            (1..=crate::engine::cost::GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS)
+                .contains(&grouped_one_shot_limit),
+            "grouped aggregate one-shot limit must remain within its proven bound"
+        );
 
         let phase6_count = Spi::get_one::<i64>(
             "SELECT COUNT(*) FROM pg_accel_device_limits() WHERE name IN (\

@@ -30,6 +30,7 @@ constexpr uint32_t kHashEmptyOwner = UINT32_MAX;
 constexpr size_t kHashMaxRows = UINT32_MAX;
 constexpr size_t kHashMaxGroupCapacity = size_t{1} << 30;
 constexpr size_t kDenseIntegerChunkRows = 1024;
+constexpr size_t kDenseIntegerAtomicMaxRows = 1'000'000;
 // A one-million-row date x part grouping with 350 dense groups needs about
 // 19 MiB of deterministic per-chunk partials. Keep enough bounded headroom
 // for that release shape while retaining a hard fallback for high cardinality.
@@ -182,6 +183,16 @@ struct DeviceMeasureBuffers {
   uint64_t* rhs_nonnull = nullptr;
 };
 
+struct alignas(8) AtomicU64Words {
+  uint32_t low;
+  uint32_t high;
+};
+static_assert(sizeof(AtomicU64Words) == sizeof(uint64_t));
+static_assert(alignof(AtomicU64Words) == alignof(uint64_t));
+static_assert(offsetof(AtomicU64Words, low) == 0);
+static_assert(offsetof(AtomicU64Words, high) == sizeof(uint32_t));
+static_assert(std::is_standard_layout_v<AtomicU64Words>);
+
 struct DeviceMeta {
   size_t emitted;
   uint64_t selected;
@@ -290,6 +301,9 @@ struct KernelParams {
   uint32_t* hash_counts;
   uint32_t* hash_group_count;
   uint32_t* dense_chunk_counts;
+  AtomicU64Words* dense_integer_atomic_sum;
+  AtomicU64Words* dense_integer_atomic_nonnull;
+  AtomicU64Words* dense_integer_atomic_count;
   DenseIntegerPartial* dense_integer_partials;
   size_t dense_integer_chunk_count;
   DeviceMeta* meta;
@@ -320,6 +334,9 @@ struct WorkspaceLayout {
   size_t hash_counts = kNoOffset;
   size_t hash_group_count = kNoOffset;
   size_t dense_chunk_counts = kNoOffset;
+  size_t dense_integer_atomic_sum = kNoOffset;
+  size_t dense_integer_atomic_nonnull = kNoOffset;
+  size_t dense_integer_atomic_count = kNoOffset;
   size_t dense_integer_partials = kNoOffset;
   size_t dense_integer_chunk_count = 0;
   size_t dense_integer_partial_count = 0;
@@ -546,18 +563,31 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
     size_t allocation_count = 0;
     layout->dense_integer_atomic_one_shot =
         desc.execution_flags == PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN &&
-        desc.row_count <= 1'000'000 &&
+        desc.row_count <= kDenseIntegerAtomicMaxRows &&
         desc.measures[0].agg_mask == PGACCEL_GROUPED_AGG_LANE_SUM;
     layout->dense_integer_parallel =
         dense_integer_partial_shape(desc, &layout->dense_integer_chunk_count,
                                     &layout->dense_integer_partial_count, &allocation_count);
-    // Reserve the largest partial layout reachable by any shorter lifecycle
-    // chunk. Parallel eligibility becomes false after the bounded partial
-    // budget, so sizing only from the current row count would undersize a
-    // shared session. Atomic one-shot execution does not use partials.
-    if (!layout->dense_integer_atomic_one_shot && allocation_count != 0 &&
-        !arena.add<DenseIntegerPartial>(allocation_count, &layout->dense_integer_partials))
-      return false;
+    if (layout->dense_integer_atomic_one_shot) {
+      const pgaccel_grouped_agg_measure& measure = desc.measures[0];
+      const bool statically_nonnull =
+          measure.value.nulls == nullptr &&
+          (measure.op != PGACCEL_GROUPED_AGG_MEASURE_MUL || measure.rhs.nulls == nullptr);
+      if (!arena.add<AtomicU64Words>(desc.group_capacity, &layout->dense_integer_atomic_sum) ||
+          (!statically_nonnull &&
+           !arena.add<AtomicU64Words>(desc.group_capacity,
+                                     &layout->dense_integer_atomic_nonnull)) ||
+          !arena.add<AtomicU64Words>(desc.group_capacity, &layout->dense_integer_atomic_count))
+        return false;
+    } else {
+      // Reserve the largest partial layout reachable by any shorter
+      // lifecycle chunk. Parallel eligibility becomes false after the
+      // bounded partial budget, so sizing only from the current row count
+      // would undersize a shared session.
+      if (allocation_count != 0 &&
+          !arena.add<DenseIntegerPartial>(allocation_count, &layout->dense_integer_partials))
+        return false;
+    }
   }
   layout->bytes = arena.size();
   return layout->bytes != 0;
@@ -1845,6 +1875,12 @@ inline void run_dense_integer_prepare_kernel(KernelParams* params_ptr) {
         if (buffers.nonnull != nullptr)
           buffers.nonnull[group] = 0;
       }
+      if (params.dense_integer_atomic_sum != nullptr) {
+        params.dense_integer_atomic_sum[group] = {};
+        params.dense_integer_atomic_count[group] = {};
+        if (params.dense_integer_atomic_nonnull != nullptr)
+          params.dense_integer_atomic_nonnull[group] = {};
+      }
     }
     if (params.key_count == 0)
       params.active[0] = 1;
@@ -1859,17 +1895,20 @@ inline void run_dense_integer_prepare_kernel(KernelParams* params_ptr) {
   }
 }
 
-inline void atomic_add_u64(uint64_t* target, uint64_t increment) {
+inline void atomic_add_u64(AtomicU64Words& target, uint64_t increment) {
   // AdaptiveCpp's Metal path does not provide a stable 64-bit fetch-add.
   // Adding the low word first and then its carry plus the high word is an
   // exact modular 64-bit sum because both 32-bit additions are commutative.
-  auto* words = reinterpret_cast<uint32_t*>(target);
   const uint32_t low_increment = static_cast<uint32_t>(increment);
-  DeviceAtomic<uint32_t> low(words[0]);
+  DeviceAtomic<uint32_t> low(target.low);
   const uint32_t old_low = low.fetch_add(low_increment);
   const uint32_t carry = old_low > UINT32_MAX - low_increment ? 1 : 0;
-  DeviceAtomic<uint32_t> high(words[1]);
+  DeviceAtomic<uint32_t> high(target.high);
   high.fetch_add(static_cast<uint32_t>(increment >> 32) + carry);
+}
+
+inline uint64_t atomic_u64_value(const AtomicU64Words& value) {
+  return static_cast<uint64_t>(value.low) | (static_cast<uint64_t>(value.high) << 32);
 }
 
 inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
@@ -1892,9 +1931,7 @@ inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
   if (filter == FilterResult::Reject)
     return;
 
-  DeviceMeasureBuffers& value_buffers = params.buffers[0];
-  DeviceMeasureBuffers& count_buffers = params.buffers[1];
-  atomic_add_u64(&count_buffers.count[group], 1);
+  atomic_add_u64(params.dense_integer_atomic_count[group], 1);
 
   const pgaccel_grouped_agg_measure& measure = params.measures[0];
   bool lhs_null = false;
@@ -1924,12 +1961,12 @@ inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
 
   // This path is capped at one million rows. Every accepted term is int4, so
   // its absolute SUM is below INT64_MAX and modular atomic addition is exact.
-  atomic_add_u64(&value_buffers.sum[group], sycl::bit_cast<uint64_t>(value));
+  atomic_add_u64(params.dense_integer_atomic_sum[group], sycl::bit_cast<uint64_t>(value));
   const bool statically_nonnull =
       measure.value.nulls == nullptr &&
       (measure.op != PGACCEL_GROUPED_AGG_MEASURE_MUL || measure.rhs.nulls == nullptr);
   if (!statically_nonnull)
-    atomic_add_u64(&value_buffers.nonnull[group], 1);
+    atomic_add_u64(params.dense_integer_atomic_nonnull[group], 1);
 }
 
 inline void run_dense_integer_atomic_commit_kernel(KernelParams* params_ptr) {
@@ -1946,14 +1983,16 @@ inline void run_dense_integer_atomic_commit_kernel(KernelParams* params_ptr) {
       (measure.op != PGACCEL_GROUPED_AGG_MEASURE_MUL || measure.rhs.nulls == nullptr);
   uint64_t selected = 0;
   for (size_t group = 0; group < params.group_capacity; ++group) {
-    const uint64_t count = params.buffers[1].count[group];
+    const uint64_t count = atomic_u64_value(params.dense_integer_atomic_count[group]);
+    params.buffers[0].sum[group] = atomic_u64_value(params.dense_integer_atomic_sum[group]);
+    params.buffers[0].nonnull[group] =
+        statically_nonnull ? count : atomic_u64_value(params.dense_integer_atomic_nonnull[group]);
+    params.buffers[1].count[group] = count;
     if (!add_u64(selected, count, &selected)) {
       meta.failure_flags = kFailureNumericOverflow;
       meta.lifecycle_state = kLifecycleFailed;
       return;
     }
-    if (statically_nonnull)
-      params.buffers[0].nonnull[group] = count;
     if (count != 0)
       params.active[group] = 1;
   }
@@ -2464,6 +2503,12 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   params->hash_counts = arena_ptr<uint32_t>(scratch, layout.hash_counts);
   params->hash_group_count = arena_ptr<uint32_t>(scratch, layout.hash_group_count);
   params->dense_chunk_counts = arena_ptr<uint32_t>(scratch, layout.dense_chunk_counts);
+  params->dense_integer_atomic_sum =
+      arena_ptr<AtomicU64Words>(scratch, layout.dense_integer_atomic_sum);
+  params->dense_integer_atomic_nonnull =
+      arena_ptr<AtomicU64Words>(scratch, layout.dense_integer_atomic_nonnull);
+  params->dense_integer_atomic_count =
+      arena_ptr<AtomicU64Words>(scratch, layout.dense_integer_atomic_count);
   params->dense_integer_partials =
       arena_ptr<DenseIntegerPartial>(scratch, layout.dense_integer_partials);
   params->dense_integer_chunk_count = layout.dense_integer_chunk_count;

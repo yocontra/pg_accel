@@ -1361,6 +1361,17 @@ void test_parallel_dense_sum_mask_unique_dimension_shape() {
   desc.where_filter.mask = mask.data();
 
   const pgaccel_grouped_agg_workspace_req one_shot_req = workspace_req(desc);
+  pgaccel_grouped_agg_desc serial_one_shot_shape = desc;
+  serial_one_shot_shape.dims[0].multiplicity_by_key = multiplicity0.data();
+  const pgaccel_grouped_agg_workspace_req serial_one_shot_req =
+      workspace_req(serial_one_shot_shape);
+  CHECK(one_shot_req.alignment >= alignof(uint64_t));
+  CHECK(one_shot_req.alignment % alignof(uint64_t) == 0);
+  const auto add_atomic_words = [&](size_t bytes) {
+    const size_t alignment_mask = one_shot_req.alignment - 1;
+    return ((bytes + alignment_mask) & ~alignment_mask) + groups * sizeof(uint64_t);
+  };
+  CHECK(one_shot_req.bytes == add_atomic_words(add_atomic_words(serial_one_shot_req.bytes)));
   pgaccel_grouped_agg_desc session_shape = desc;
   session_shape.execution_flags =
       PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
@@ -1524,8 +1535,68 @@ void test_parallel_dense_sum_atomic_low_word_carry() {
   CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
   CHECK(output.out.selected_count == rows);
   for (size_t group = 0; group < groups; ++group) {
+    CHECK(output.group_codes[group] == group);
+    CHECK(output.key_values[0][group] == static_cast<int32_t>(group));
     CHECK(output.i64(output.measures[0].sum, group) == expected_sum[group]);
     CHECK(output.measures[0].nonnull[group] == expected_count[group]);
+    CHECK(output.measures[1].count[group] == expected_count[group]);
+    CHECK(output.active[group] == 1);
+  }
+}
+
+void test_parallel_dense_sum_atomic_negative_nullable_publication() {
+  std::printf("--- row-parallel dense negative nullable SUM publication ---\n");
+  constexpr size_t rows = 65539;
+  constexpr size_t groups = 17;
+  std::vector<int32_t> host_keys(rows);
+  std::vector<int32_t> host_values(rows, -INT32_MAX);
+  std::vector<uint8_t> host_nulls(rows);
+  std::array<int64_t, groups> expected_sum{};
+  std::array<uint64_t, groups> expected_nonnull{};
+  std::array<uint64_t, groups> expected_count{};
+  for (size_t row = 0; row < rows; ++row) {
+    const size_t group = (row * 7 + 3) % groups;
+    host_keys[row] = static_cast<int32_t>(group);
+    host_nulls[row] = row % 19 == 0 ? 1 : 0;
+    ++expected_count[group];
+    if (host_nulls[row] == 0) {
+      expected_sum[group] += host_values[row];
+      ++expected_nonnull[group];
+    }
+  }
+  for (const int64_t sum : expected_sum)
+    CHECK(sum < -static_cast<int64_t>(UINT32_MAX));
+
+  SharedArray<int32_t> keys(host_keys);
+  SharedArray<int32_t> values(host_values);
+  SharedArray<uint8_t> nulls(host_nulls);
+  pgaccel_grouped_agg_desc desc = base_desc(rows);
+  set_fact_key(desc, 0, keys.data(), nullptr, 0, groups);
+  set_i32_view(desc.measures[0].value, values.data(), nulls.data());
+  finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                     PGACCEL_GROUPED_AGG_LANE_SUM);
+  set_count_star(desc, 1);
+
+  const pgaccel_grouped_agg_workspace_req nullable_req = workspace_req(desc);
+  pgaccel_grouped_agg_desc nonnull_desc = desc;
+  nonnull_desc.measures[0].value.nulls = nullptr;
+  const pgaccel_grouped_agg_workspace_req nonnull_req = workspace_req(nonnull_desc);
+  const size_t mask = nullable_req.alignment - 1;
+  const size_t expected_nullable_bytes =
+      ((nonnull_req.bytes + mask) & ~mask) + groups * sizeof(uint64_t);
+  CHECK(nullable_req.alignment == nonnull_req.alignment);
+  CHECK(nullable_req.bytes == expected_nullable_bytes);
+
+  OutputStorage output(desc, true, true);
+  CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+  CHECK(output.out.selected_count == rows);
+  CHECK(output.out.uncertain_count == 0);
+  CHECK(output.out.emitted_group_count == groups);
+  for (size_t group = 0; group < groups; ++group) {
+    CHECK(output.group_codes[group] == group);
+    CHECK(output.key_values[0][group] == static_cast<int32_t>(group));
+    CHECK(output.i64(output.measures[0].sum, group) == expected_sum[group]);
+    CHECK(output.measures[0].nonnull[group] == expected_nonnull[group]);
     CHECK(output.measures[1].count[group] == expected_count[group]);
     CHECK(output.active[group] == 1);
   }
@@ -2564,6 +2635,7 @@ int main() {
     test_parallel_dense_sum_mask_unique_dimension_shape();
     test_parallel_dense_count_unique_dimension_shape();
     test_parallel_dense_sum_atomic_low_word_carry();
+    test_parallel_dense_sum_atomic_negative_nullable_publication();
     test_i64_four_measure_lanes();
     test_f64_stats_pair_and_nan_ordering();
     test_global_and_measure_filters();

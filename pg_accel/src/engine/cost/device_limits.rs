@@ -4,6 +4,10 @@ use std::fmt;
 
 use super::platform::PlatformProfile;
 
+/// Absolute proof bound for one synchronous atomic dense grouped aggregate.
+/// At this row count every accepted int4 term still fits an exact int64 SUM.
+pub(crate) const GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS: usize = 1_000_000;
+
 // ---------------------------------------------------------------------------
 // Dynamic device limits
 // ---------------------------------------------------------------------------
@@ -56,6 +60,10 @@ pub struct DeviceLimits {
     /// Maximum elements per GPU reduce dispatch chunk.
     /// GPU runtime may abort on very large dispatch ranges.
     pub gpu_reduce_max_chunk: usize,
+    /// Maximum fact rows in one synchronous atomic dense grouped aggregate.
+    /// This is calibrated from compute throughput and capped by the absolute
+    /// int4-to-int64 SUM proof bound.
+    pub gpu_grouped_agg_one_shot_max_rows: usize,
     /// Maximum elements for GPU sort dispatch.
     /// Falls back to PG sort above this limit to avoid GPU runtime aborts.
     pub gpu_sort_max_elements: usize,
@@ -462,6 +470,20 @@ impl DeviceLimits {
             256_000
         };
 
+        // The M2 Max baseline completes the resident atomic grouped sentinel
+        // well below the synchronous-dispatch warning threshold at one
+        // million rows. Scale weaker devices down by compute units so query
+        // cancellation still reaches a boundary promptly; faster devices are
+        // capped by the exact int64 accumulator proof.
+        let gpu_grouped_agg_one_shot_max_rows = {
+            let scaled = (GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS as u64)
+                .saturating_mul(u64::from(cus))
+                / u64::from(Self::BASELINE_CUS);
+            usize::try_from(scaled)
+                .unwrap_or(GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS)
+                .clamp(64_000, GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS)
+        };
+
         // Maximum elements for direct GPU sort dispatch. Sort requires two
         // arrays (keys + indices) ≈ 12 bytes per element. The executor's
         // full-sort path currently declines GPU above this cap and sorts
@@ -521,6 +543,7 @@ impl DeviceLimits {
             gpu_hash_agg_unsafe_input_rows,
             gpu_hash_agg_max_groups,
             gpu_reduce_max_chunk,
+            gpu_grouped_agg_one_shot_max_rows,
             gpu_sort_max_elements,
             gpu_sort_topk_max_limit: 128,
             gpu_sort_heap_topk_max_fraction: 0.25,
@@ -730,6 +753,7 @@ impl DeviceLimits {
             gpu_hash_agg_unsafe_input_rows: 100_000,
             gpu_hash_agg_max_groups: 10_000,
             gpu_reduce_max_chunk: 256_000,
+            gpu_grouped_agg_one_shot_max_rows: GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS,
             gpu_sort_max_elements: 2_000_000,
             gpu_sort_topk_max_limit: 128,
             gpu_sort_heap_topk_max_fraction: 0.25,
@@ -856,6 +880,7 @@ impl DeviceLimits {
             gpu_hash_agg_unsafe_input_rows,
             gpu_hash_agg_max_groups,
             gpu_reduce_max_chunk,
+            gpu_grouped_agg_one_shot_max_rows,
             gpu_sort_max_elements,
             gpu_sort_topk_max_limit,
             gpu_sort_heap_topk_max_width_bytes,
@@ -895,6 +920,14 @@ impl DeviceLimits {
         );
 
         require_ordered!(gpu_sort_min_rows, gpu_sort_planner_min_rows);
+        if self.gpu_grouped_agg_one_shot_max_rows > GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS {
+            return Err(DeviceLimitsValidationError::InvertedRange {
+                lower_field: "gpu_grouped_agg_one_shot_max_rows",
+                lower: self.gpu_grouped_agg_one_shot_max_rows as u128,
+                upper_field: "GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS",
+                upper: GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS as u128,
+            });
+        }
         require_ordered!(
             resident_domain_max_exact_value_bytes,
             resident_memory_budget_bytes
@@ -1058,6 +1091,23 @@ mod tests {
     }
 
     #[test]
+    fn grouped_agg_one_shot_limit_scales_with_compute_and_stays_proven() {
+        let low = DeviceLimits::from_profile(&profile(8, 256 * 1024 * 1024));
+        let baseline = DeviceLimits::from_profile(&profile(32, 256 * 1024 * 1024));
+        let high = DeviceLimits::from_profile(&profile(128, 256 * 1024 * 1024));
+
+        assert_eq!(low.gpu_grouped_agg_one_shot_max_rows, 250_000);
+        assert_eq!(
+            baseline.gpu_grouped_agg_one_shot_max_rows,
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
+        );
+        assert_eq!(
+            high.gpu_grouped_agg_one_shot_max_rows,
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
+        );
+    }
+
+    #[test]
     fn validation_rejects_zero_counts_with_the_field_name() {
         let mut limits = DeviceLimits::cpu_only();
         limits.gpu_h3_max_chunk_rows = 0;
@@ -1079,6 +1129,17 @@ mod tests {
             Err(DeviceLimitsValidationError::InvertedRange {
                 lower_field: "gpu_h3_group_min_rows",
                 upper_field: "gpu_h3_max_chunk_rows",
+                ..
+            })
+        ));
+
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_grouped_agg_one_shot_max_rows = GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS + 1;
+        assert!(matches!(
+            limits.validate(),
+            Err(DeviceLimitsValidationError::InvertedRange {
+                lower_field: "gpu_grouped_agg_one_shot_max_rows",
+                upper_field: "GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS",
                 ..
             })
         ));

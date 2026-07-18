@@ -159,15 +159,16 @@ mod tests {
 
     #[cfg(feature = "pg_test")]
     struct DenseDispatchTestGuard {
-        previous: (usize, usize),
+        previous: (usize, usize, usize),
     }
 
     #[cfg(feature = "pg_test")]
     impl DenseDispatchTestGuard {
-        fn new(chunk_rows: usize, timeout_after_calls: usize) -> Self {
+        fn new(chunk_rows: usize, one_shot_max_rows: usize, timeout_after_calls: usize) -> Self {
             Self {
                 previous: crate::engine::executor::agg::configure_dense_dispatch_test(
                     chunk_rows,
+                    one_shot_max_rows,
                     timeout_after_calls,
                 ),
             }
@@ -184,6 +185,7 @@ mod tests {
             crate::engine::executor::agg::configure_dense_dispatch_test(
                 self.previous.0,
                 self.previous.1,
+                self.previous.2,
             );
         }
     }
@@ -734,7 +736,7 @@ mod tests {
             + 1;
 
         {
-            let fixture = DenseDispatchTestGuard::new(SUCCESS_CHUNK_ROWS, 0);
+            let fixture = DenseDispatchTestGuard::new(SUCCESS_CHUNK_ROWS, 1, 0);
             let before = kernel_executions();
             assert_eq!(result_rows(&query), expected_rows);
             let after = kernel_executions();
@@ -750,7 +752,7 @@ mod tests {
             .expect("create a test-unique panic artifact");
 
         {
-            let fixture = DenseDispatchTestGuard::new(1, CANCEL_AFTER_CALLS);
+            let fixture = DenseDispatchTestGuard::new(1, 1, CANCEL_AFTER_CALLS);
             let kernels_before = kernel_executions();
             let attempt = PgTryBuilder::new(|| Attempt::Completed(result_rows(&query).len()))
                 .catch_others(|caught| Attempt::Error(error_code(&caught)))
@@ -789,7 +791,7 @@ mod tests {
         // A second exact GPU run proves that the interrupted session and its
         // workspace were dropped and did not poison backend-local state.
         {
-            let fixture = DenseDispatchTestGuard::new(SUCCESS_CHUNK_ROWS, 0);
+            let fixture = DenseDispatchTestGuard::new(SUCCESS_CHUNK_ROWS, 1, 0);
             let kernels_before = kernel_executions();
             assert_eq!(result_rows(&query), expected_rows);
             let kernels_after = kernel_executions();
