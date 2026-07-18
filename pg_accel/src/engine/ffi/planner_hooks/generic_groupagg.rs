@@ -20,7 +20,7 @@ use crate::engine::gucs;
 use crate::engine::residency::{
     MaterializationBoundary, ResidentBudgetSnapshot, ResidentLoadEstimate, ResidentOperatorClass,
     ResidentOperatorStage, ResidentPipelineProof, SelectedRelation, estimate_selected_relation,
-    resident_budget_snapshot,
+    resident_budget_snapshot, revalidate_loaded_estimates,
 };
 use crate::engine::spec::{AggOutputProjection, FilterSpec, MeasureExpr};
 use crate::engine::stats;
@@ -72,6 +72,7 @@ enum AdmissionDecline {
     },
     ResidencyBytesOverflow,
     ResidencyBudgetSnapshotUnavailable,
+    ResidencyEvidenceChanged,
     DerivedArtifactEstimateUnavailable,
     GroupEstimateUnavailable,
     ResidencyBudgetExceeded {
@@ -109,6 +110,7 @@ impl AdmissionDecline {
             Self::ResidencyBudgetSnapshotUnavailable => {
                 "generic_residency_budget_snapshot_unavailable"
             }
+            Self::ResidencyEvidenceChanged => "generic_residency_evidence_changed",
             Self::DerivedArtifactEstimateUnavailable => {
                 "generic_derived_artifact_estimate_unavailable"
             }
@@ -174,32 +176,53 @@ fn selected_relation(
     })
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ExactResidencySnapshot {
+    requests: Vec<SelectedRelation>,
+    estimates: Vec<ResidentLoadEstimate>,
+}
+
 fn exact_residency_estimates(
     shape: &ShapePlan,
-) -> Result<Vec<ResidentLoadEstimate>, AdmissionDecline> {
+) -> Result<ExactResidencySnapshot, AdmissionDecline> {
     exact_residency_estimates_with(shape, estimate_selected_relation)
 }
 
 fn exact_residency_estimates_with<E>(
     shape: &ShapePlan,
     mut estimate: impl FnMut(&SelectedRelation) -> Result<ResidentLoadEstimate, E>,
-) -> Result<Vec<ResidentLoadEstimate>, AdmissionDecline>
+) -> Result<ExactResidencySnapshot, AdmissionDecline>
 where
     E: std::fmt::Display,
 {
     super::with_planner_hooks_suspended(|| {
-        shape
+        let requests = shape
             .required_relations
             .iter()
-            .map(|required| {
-                let selected = selected_relation(required)?;
-                estimate(&selected).map_err(|error| AdmissionDecline::ResidencyEstimateFailed {
-                    relation_oid: required.relation_oid,
+            .map(selected_relation)
+            .collect::<Result<Vec<_>, _>>()?;
+        let estimates = requests
+            .iter()
+            .map(|selected| {
+                estimate(selected).map_err(|error| AdmissionDecline::ResidencyEstimateFailed {
+                    relation_oid: u32::from(selected.relid),
                     detail: error.to_string(),
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ExactResidencySnapshot {
+            requests,
+            estimates,
+        })
     })
+}
+
+fn require_coherent_resident_evidence(
+    snapshot: &ExactResidencySnapshot,
+) -> Result<(), AdmissionDecline> {
+    revalidate_loaded_estimates(&snapshot.requests, &snapshot.estimates)
+        .then_some(())
+        .ok_or(AdmissionDecline::ResidencyEvidenceChanged)
 }
 
 fn add_bytes(total: u64, bytes: u64) -> Result<u64, AdmissionDecline> {
@@ -365,6 +388,7 @@ fn apply_exact_residency(
         estimated_fact_rows,
         resident_fact_rows,
         fact_columns_have_no_null_sidecars,
+        model.executor.gpu_grouped_agg_one_shot_max_rows,
         model,
     ) {
         shape.cost.replace_aggregate(aggregate);
@@ -1263,16 +1287,18 @@ pub(super) unsafe fn try_inject(
             if !test_forceable_spatial_cost_gate(shape.cost_gate) {
                 return Err(AdmissionDecline::DeviceCostGate(shape.cost_gate));
             }
-            let estimates = exact_residency_estimates(&shape)?;
-            let selected_relids = estimates
+            let residency_snapshot = exact_residency_estimates(&shape)?;
+            let selected_relids = residency_snapshot
+                .estimates
                 .iter()
                 .map(|estimate| estimate.relid)
                 .collect::<Vec<_>>();
             let budget_snapshot = resident_budget_snapshot(&selected_relids)
                 .ok_or(AdmissionDecline::ResidencyBudgetSnapshotUnavailable)?;
+            require_coherent_resident_evidence(&residency_snapshot)?;
             apply_exact_residency(
                 &mut shape,
-                &estimates,
+                &residency_snapshot.estimates,
                 AdmissionPolicy {
                     auto_load: gucs::auto_load(),
                     budget_bytes: gucs::resident_memory_budget_bytes(),
@@ -1298,16 +1324,18 @@ pub(super) unsafe fn try_inject(
         }
 
         validate_shape_capability(&shape)?;
-        let estimates = exact_residency_estimates(&shape)?;
-        let selected_relids = estimates
+        let residency_snapshot = exact_residency_estimates(&shape)?;
+        let selected_relids = residency_snapshot
+            .estimates
             .iter()
             .map(|estimate| estimate.relid)
             .collect::<Vec<_>>();
         let budget_snapshot = resident_budget_snapshot(&selected_relids)
             .ok_or(AdmissionDecline::ResidencyBudgetSnapshotUnavailable)?;
+        require_coherent_resident_evidence(&residency_snapshot)?;
         apply_exact_residency(
             &mut shape,
-            &estimates,
+            &residency_snapshot.estimates,
             AdmissionPolicy {
                 auto_load: gucs::auto_load(),
                 budget_bytes: gucs::resident_memory_budget_bytes(),
@@ -1356,8 +1384,9 @@ mod tests {
     use crate::engine::cost::{DeviceLimits, Rows, WorkProduct};
     use crate::engine::ffi::planner_hooks::shape::{
         DescriptorGroupingMode, DescriptorMeasurePlan, DescriptorResolution,
-        DictionaryKeyRequirement, RequiredRelation, ShapeCost,
+        DictionaryKeyRequirement, RequiredRelation, ShapeCost, dense_atomic_fact_row_floor,
     };
+    use crate::engine::residency::ResidentDependencyStamp;
     use crate::engine::spec::{
         AggOutputSlot, AggOutputSource, AggQuerySpec, AggregateKind, AggregateOutput,
         AggregateSource, BinaryMeasureOp, ColumnRef, DimSpec, GroupKeyEncoding, GroupKeyRef,
@@ -1907,6 +1936,13 @@ mod tests {
         ResidentLoadEstimate {
             relid: pg_sys::Oid::from(relation_oid),
             loaded,
+            resident_dependency: loaded.then_some(ResidentDependencyStamp {
+                relid: pg_sys::Oid::from(relation_oid),
+                generation: 1,
+                global_generation: 1,
+                relfilenode: pg_sys::Oid::from(relation_oid + 100),
+            }),
+            resident_selected_columns: loaded.then_some(vec![1]),
             resident_rows: loaded.then_some(100_000),
             selected_columns_have_no_null_sidecars: loaded.then_some(true),
             pinned: false,
@@ -2039,6 +2075,7 @@ mod tests {
             1_000_000,
             Some(1_000_000),
             Some(true),
+            model.executor.gpu_grouped_agg_one_shot_max_rows,
             &model,
         )
         .expect("exact resident dense SUM/COUNT is atomic one-shot");
@@ -2053,6 +2090,7 @@ mod tests {
             2_000_000,
             Some(1_000_000),
             Some(true),
+            model.executor.gpu_grouped_agg_one_shot_max_rows,
             &model,
         )
         .expect("exact resident rows, not a high estimate, size atomic work");
@@ -2079,6 +2117,7 @@ mod tests {
             1_000_000,
             Some(1_000_000),
             Some(true),
+            model.executor.gpu_grouped_agg_one_shot_max_rows,
             &model,
         )
         .expect("nonnull int4 product SUM/COUNT is atomic one-shot");
@@ -2092,6 +2131,48 @@ mod tests {
     }
 
     #[test]
+    fn dense_atomic_exact_rows_must_clear_the_applicable_shape_floor() {
+        let model = model();
+        let shape = dense_sum_count_shape(10_000_000);
+        let grouped_floor = dense_atomic_fact_row_floor(&shape.spec, &model);
+        assert_eq!(grouped_floor, model.planner.gpu_hash_agg_min_rows);
+        let below_floor = u64::try_from(grouped_floor.get() - 1).expect("test floor fits u64");
+        let at_floor = u64::try_from(grouped_floor.get()).expect("test floor fits u64");
+
+        let cost = |resident_rows| {
+            dense_atomic_sum_count_cost(
+                &shape.spec,
+                &shape.descriptor_resolution,
+                10_000_000,
+                Some(resident_rows),
+                Some(true),
+                model.executor.gpu_grouped_agg_one_shot_max_rows,
+                &model,
+            )
+        };
+        assert!(
+            cost(below_floor).is_none(),
+            "a stale-high reltuples estimate cannot satisfy the exact-row floor"
+        );
+        assert!(cost(at_floor).is_some(), "the exact floor is inclusive");
+
+        let mut global = shape.clone();
+        global.spec.group_keys.clear();
+        global.spec.star_dims.clear();
+        assert_eq!(
+            dense_atomic_fact_row_floor(&global.spec, &model),
+            model.planner.gpu_reduce_min_rows
+        );
+
+        let mut star = shape;
+        add_star_dimension(&mut star, JoinMultiplicity::Unique);
+        assert_eq!(
+            dense_atomic_fact_row_floor(&star.spec, &model),
+            model.planner.gpu_preagg_min_fact_rows
+        );
+    }
+
+    #[test]
     fn dense_atomic_cost_requires_runtime_proof_boundaries() {
         let model = model();
         let mut shape = dense_sum_count_shape(1_000_000);
@@ -2102,12 +2183,26 @@ mod tests {
                 1_000_000,
                 rows,
                 no_nulls,
+                model.executor.gpu_grouped_agg_one_shot_max_rows,
                 &model,
             )
         };
         assert!(cost(&shape, None, Some(true)).is_none());
         assert!(cost(&shape, Some(1_000_000), None).is_none());
         assert!(cost(&shape, Some(1_000_001), Some(true)).is_none());
+        assert!(
+            dense_atomic_sum_count_cost(
+                &shape.spec,
+                &shape.descriptor_resolution,
+                1_000_000,
+                Some(1_000_000),
+                Some(true),
+                Rows::new(999_999),
+                &model,
+            )
+            .is_none(),
+            "planner proof must use the snapshotted executor one-shot limit"
+        );
 
         let nullable = cost(&shape, Some(1_000_000), Some(false))
             .expect("nullable direct SUM retains its nonnull atomic update");
@@ -2186,6 +2281,23 @@ mod tests {
         assert_eq!(
             underestimated.cost.aggregate, ordinary,
             "a low catalog estimate cannot unlock or size the one-shot discount"
+        );
+
+        let exact_floor = model.planner.gpu_hash_agg_min_rows.get() as u64;
+        let mut below_floor = dense_sum_count_shape(10_000_000);
+        let ordinary = below_floor.cost.aggregate;
+        apply_resident_evidence(&mut below_floor, exact_floor - 1, true);
+        assert_eq!(
+            below_floor.cost.aggregate, ordinary,
+            "a stale-high estimate cannot unlock a discount below the exact-row floor"
+        );
+
+        let mut at_floor = dense_sum_count_shape(10_000_000);
+        apply_resident_evidence(&mut at_floor, exact_floor, true);
+        assert_eq!(
+            at_floor.cost.aggregate,
+            PgCost::new(exact_floor as f64 * model.coefficients.gpu_op_cost_reduce.get() * 2.0),
+            "the exact-row floor is inclusive"
         );
 
         let mut over_cap = dense_sum_count_shape(1_000_001);
@@ -2292,11 +2404,13 @@ mod tests {
     #[test]
     fn exact_residency_estimate_batch_suspends_planner_hooks() {
         let shape = count_shape();
-        let estimates = exact_residency_estimates_with(&shape, |request| {
+        let snapshot = exact_residency_estimates_with(&shape, |request| {
             assert!(super::super::planner_hooks_suspended());
             Ok::<_, std::convert::Infallible>(ResidentLoadEstimate {
                 relid: request.relid,
                 loaded: false,
+                resident_dependency: None,
+                resident_selected_columns: None,
                 resident_rows: None,
                 selected_columns_have_no_null_sidecars: None,
                 pinned: false,
@@ -2307,7 +2421,10 @@ mod tests {
             })
         })
         .expect("mock estimate succeeds");
-        assert_eq!(estimates, [estimate(false, 4096)]);
+        assert_eq!(snapshot.estimates, [estimate(false, 4096)]);
+        assert_eq!(snapshot.requests.len(), 1);
+        assert_eq!(snapshot.requests[0].relid, pg_sys::Oid::from(42_u32));
+        assert!(snapshot.requests[0].columns.is_empty());
         assert!(!super::super::planner_hooks_suspended());
     }
 

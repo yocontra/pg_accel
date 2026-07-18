@@ -1233,6 +1233,12 @@ pub struct ResidentRelationStatus {
 pub struct ResidentLoadEstimate {
     pub relid: pg_sys::Oid,
     pub loaded: bool,
+    /// Dependency identity of the loaded entry inspected for this estimate.
+    /// Missing/partial entries have no dependency proof.
+    pub resident_dependency: Option<ResidentDependencyStamp>,
+    /// Exact selected-column request covered by `resident_dependency`.
+    /// This prevents row/null facts from being reused for a different union.
+    pub resident_selected_columns: Option<Vec<i16>>,
     /// Exact row count of the current resident entry when it covers every
     /// selected column. Missing/partial entries have no exact row proof.
     pub resident_rows: Option<u64>,
@@ -1825,6 +1831,20 @@ fn has_requested_columns(entry: &ResidentRelation, attnos: &[i16]) -> bool {
     attnos.iter().all(|attno| entry.columns.contains_key(attno))
 }
 
+fn selected_columns_have_no_null_sidecars(
+    entry: &ResidentRelation,
+    attnos: &[i16],
+) -> Option<bool> {
+    has_requested_columns(entry, attnos).then(|| {
+        attnos.iter().all(|attno| {
+            entry
+                .columns
+                .get(attno)
+                .is_some_and(|column| !column.has_null_sidecar())
+        })
+    })
+}
+
 fn missing_load_is_authorized(force: bool, pinned: bool, auto_load: bool) -> bool {
     force || pinned || auto_load
 }
@@ -1972,39 +1992,100 @@ pub fn estimate_selected_relation(
         loader::columns_have_fixed_width_load(&columns).map_err(ResidentLoadError::Loader)?;
     let estimated_bytes = loader::estimate_resident_bytes(request.relid, &columns)
         .map_err(ResidentLoadError::Loader)?;
-    let (loaded, resident_rows, selected_columns_have_no_null_sidecars, pinned, last_load_ms) =
-        STORE.with(|store| {
-            let store = store.borrow();
-            let entry = store
-                .entries
-                .iter()
-                .find(|entry| entry.relid == request.relid);
-            let loaded_entry = entry.filter(|entry| has_requested_columns(entry, &request.columns));
-            (
-                loaded_entry.is_some(),
-                loaded_entry.map(|entry| entry.row_count),
-                loaded_entry.map(|entry| {
-                    request.columns.iter().all(|attno| {
-                        entry
-                            .columns
-                            .get(attno)
-                            .is_some_and(|column| !column.has_null_sidecar())
-                    })
-                }),
-                store.pins.contains_key(&u32::from(request.relid)),
-                entry.map(|entry| entry.load_ms),
-            )
-        });
+    let (resident_evidence, pinned, last_load_ms) = STORE.with(|store| {
+        let store = store.borrow();
+        let entry = store
+            .entries
+            .iter()
+            .find(|entry| entry.relid == request.relid);
+        let loaded_entry = entry.filter(|entry| has_requested_columns(entry, &request.columns));
+        (
+            loaded_entry.map(|entry| {
+                (
+                    ResidentDependencyStamp::from_relation(entry),
+                    entry.row_count,
+                    selected_columns_have_no_null_sidecars(entry, &request.columns)
+                        .expect("loaded entry covers every selected column"),
+                )
+            }),
+            store.pins.contains_key(&u32::from(request.relid)),
+            entry.map(|entry| entry.load_ms),
+        )
+    });
     Ok(ResidentLoadEstimate {
         relid: request.relid,
-        loaded,
-        resident_rows,
-        selected_columns_have_no_null_sidecars,
+        loaded: resident_evidence.is_some(),
+        resident_dependency: resident_evidence.map(|evidence| evidence.0),
+        resident_selected_columns: resident_evidence.map(|_| request.columns.clone()),
+        resident_rows: resident_evidence.map(|evidence| evidence.1),
+        selected_columns_have_no_null_sidecars: resident_evidence.map(|evidence| evidence.2),
         pinned,
         estimated_bytes,
         fixed_width,
         last_load_ms,
         amortization_queries: crate::engine::cost::device_limits().auto_load_amortization_queries,
+    })
+}
+
+fn loaded_estimate_matches(
+    store: &RelationStore,
+    request: &SelectedRelation,
+    estimate: &ResidentLoadEstimate,
+) -> bool {
+    if estimate.relid != request.relid {
+        return false;
+    }
+    if !estimate.loaded {
+        return estimate.resident_dependency.is_none()
+            && estimate.resident_selected_columns.is_none()
+            && estimate.resident_rows.is_none()
+            && estimate.selected_columns_have_no_null_sidecars.is_none();
+    }
+    let (Some(dependency), Some(selected_columns), Some(row_count), Some(no_null_sidecars)) = (
+        estimate.resident_dependency,
+        estimate.resident_selected_columns.as_deref(),
+        estimate.resident_rows,
+        estimate.selected_columns_have_no_null_sidecars,
+    ) else {
+        return false;
+    };
+    if selected_columns != request.columns.as_slice() {
+        return false;
+    }
+    let Some(entry) = store
+        .entries
+        .iter()
+        .find(|entry| entry.relid == request.relid)
+    else {
+        return false;
+    };
+    ResidentDependencyStamp::from_relation(entry) == dependency
+        && entry.row_count == row_count
+        && selected_columns_have_no_null_sidecars(entry, &request.columns) == Some(no_null_sidecars)
+}
+
+/// Revalidate one planner candidate's loaded row/null evidence atomically.
+///
+/// Pending invalidations are processed once, then every loaded estimate is
+/// compared with its exact request under one immutable store borrow. Cached
+/// PostgreSQL costs remain planning snapshots: executor generation checks
+/// preserve correctness after DML and may select bounded GPU execution, but
+/// do not make an earlier cost estimate predictive of the changed relation.
+#[must_use]
+pub fn revalidate_loaded_estimates(
+    requests: &[SelectedRelation],
+    estimates: &[ResidentLoadEstimate],
+) -> bool {
+    process_invalidations();
+    if requests.len() != estimates.len() {
+        return false;
+    }
+    STORE.with(|store| {
+        let store = store.borrow();
+        requests
+            .iter()
+            .zip(estimates)
+            .all(|(request, estimate)| loaded_estimate_matches(&store, request, estimate))
     })
 }
 
@@ -4177,6 +4258,158 @@ pub(super) mod tests {
                     .map(|(index, relid)| empty_relation(*relid, false, index as u64 + 1)),
             );
         });
+    }
+
+    fn install_planner_evidence_relation(relid: u32, row_count: u64) {
+        let mut relation = empty_relation(relid, false, 1);
+        relation.columns.insert(
+            1,
+            ResidentColumn::Empty {
+                type_oid: pg_sys::INT4OID,
+            },
+        );
+        relation.row_count = row_count;
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            store.entries.clear();
+            store.entries.push(relation);
+        });
+    }
+
+    fn planner_evidence_estimate(request: &SelectedRelation) -> ResidentLoadEstimate {
+        STORE.with(|store| {
+            let store = store.borrow();
+            let entry = store
+                .entries
+                .iter()
+                .find(|entry| entry.relid == request.relid)
+                .expect("test relation is resident");
+            ResidentLoadEstimate {
+                relid: request.relid,
+                loaded: true,
+                resident_dependency: Some(ResidentDependencyStamp::from_relation(entry)),
+                resident_selected_columns: Some(request.columns.clone()),
+                resident_rows: Some(entry.row_count),
+                selected_columns_have_no_null_sidecars: selected_columns_have_no_null_sidecars(
+                    entry,
+                    &request.columns,
+                ),
+                pinned: false,
+                estimated_bytes: 0,
+                fixed_width: true,
+                last_load_ms: Some(entry.load_ms),
+                amortization_queries: 1,
+            }
+        })
+    }
+
+    #[test]
+    fn planner_loaded_evidence_revalidation_rejects_every_mutable_fact() {
+        const RELID: u32 = 1_450;
+        let request = SelectedRelation {
+            relid: pg_sys::Oid::from(RELID),
+            columns: vec![1],
+        };
+
+        let setup = || {
+            install_planner_evidence_relation(RELID, 250_000);
+            planner_evidence_estimate(&request)
+        };
+
+        let estimate = setup();
+        assert!(revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+
+        let estimate = setup();
+        STORE.with(|store| store.borrow_mut().entries[0].generation.relation += 1);
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+
+        let estimate = setup();
+        STORE.with(|store| store.borrow_mut().entries[0].generation.global += 1);
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+
+        let estimate = setup();
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            let relfilenode = u32::from(store.entries[0].relfilenode);
+            store.entries[0].relfilenode = pg_sys::Oid::from(relfilenode + 1);
+        });
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+
+        let estimate = setup();
+        STORE.with(|store| store.borrow_mut().entries[0].row_count += 1);
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+
+        let mut estimate = setup();
+        estimate.selected_columns_have_no_null_sidecars = Some(false);
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+
+        let estimate = setup();
+        STORE.with(|store| {
+            store.borrow_mut().entries[0].columns.remove(&1);
+        });
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+
+        let mut estimate = setup();
+        estimate.resident_selected_columns = Some(vec![2]);
+        assert!(!revalidate_loaded_estimates(
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&estimate)
+        ));
+    }
+
+    #[test]
+    fn planner_loaded_evidence_revalidation_drains_pending_invalidation_once_for_batch() {
+        install_planner_evidence_relation(1_451, 50_000);
+        STORE.with(|store| {
+            let mut relation = empty_relation(1_452, false, 2);
+            relation.columns.insert(
+                1,
+                ResidentColumn::Empty {
+                    type_oid: pg_sys::INT4OID,
+                },
+            );
+            relation.row_count = 50_000;
+            store.borrow_mut().entries.push(relation);
+        });
+        let requests = [
+            SelectedRelation {
+                relid: pg_sys::Oid::from(1_451_u32),
+                columns: vec![1],
+            },
+            SelectedRelation {
+                relid: pg_sys::Oid::from(1_452_u32),
+                columns: vec![1],
+            },
+        ];
+        let estimates = requests
+            .iter()
+            .map(planner_evidence_estimate)
+            .collect::<Vec<_>>();
+
+        schedule_test_generation_bump(requests[1].relid);
+        assert!(!revalidate_loaded_estimates(&requests, &estimates));
+        assert!(TEST_PENDING_GENERATION_BUMP.with(Cell::take).is_none());
     }
 
     #[test]

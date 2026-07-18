@@ -1,7 +1,6 @@
 //! DeviceLimits-derived costing for neutral aggregate shapes.
 
 use crate::engine::cost::{GPU_LAUNCH_OVERHEAD, PgCost, Rows, TypedCostModel, WorkProduct};
-use crate::engine::executor::agg::dense_atomic_one_shot_rows_eligible;
 use crate::engine::spec::{
     AggQuerySpec, AggregateKind, AggregateOutput, AggregateSource, BinaryMeasureOp, ColumnRef,
     FilterSpec, GroupKeySource, JoinMultiplicity, MaskKind, MeasureExpr, SpatialOperand,
@@ -156,14 +155,25 @@ fn dense_atomic_sum_count_per_row_cost(
     }
 }
 
+pub fn dense_atomic_fact_row_floor(spec: &AggQuerySpec, model: &TypedCostModel) -> Rows {
+    if !spec.star_dims.is_empty() {
+        model.planner.gpu_preagg_min_fact_rows
+    } else if spec.group_keys.is_empty() {
+        model.planner.gpu_reduce_min_rows
+    } else {
+        model.planner.gpu_hash_agg_min_rows
+    }
+}
+
 /// Return operation-count aggregate cost only when exact resident evidence
 /// proves that the runtime will take the dense atomic one-shot branch.
-pub(crate) fn dense_atomic_sum_count_cost(
+pub fn dense_atomic_sum_count_cost(
     spec: &AggQuerySpec,
     resolution: &DescriptorResolution,
     estimated_fact_rows: u64,
     resident_fact_rows: Option<u64>,
     fact_columns_have_no_null_sidecars: Option<bool>,
+    one_shot_max_rows: Rows,
     model: &TypedCostModel,
 ) -> Option<PgCost> {
     let resident_fact_rows_u64 = resident_fact_rows?;
@@ -171,7 +181,9 @@ pub(crate) fn dense_atomic_sum_count_cost(
         return None;
     }
     let resident_fact_rows = usize::try_from(resident_fact_rows_u64).ok()?;
-    if !dense_atomic_one_shot_rows_eligible(resident_fact_rows)
+    let exact_rows = Rows::new(resident_fact_rows);
+    if exact_rows > one_shot_max_rows
+        || exact_rows < dense_atomic_fact_row_floor(spec, model)
         || !dense_descriptor_structure(spec, resolution)
     {
         return None;

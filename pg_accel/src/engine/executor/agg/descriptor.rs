@@ -2049,10 +2049,7 @@ fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
 }
 
 fn dense_one_shot_eligible(desc: &abi::PgaccelGroupedAggDesc, row_cap: usize) -> bool {
-    if row_cap == 0
-        || desc.row_count > row_cap
-        || !dense_atomic_one_shot_rows_eligible(desc.row_count)
-    {
+    if row_cap == 0 || desc.row_count > row_cap {
         return false;
     }
     if parallel_dense_count_shape(desc) {
