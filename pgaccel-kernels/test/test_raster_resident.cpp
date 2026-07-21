@@ -266,7 +266,21 @@ void expect_valid(ResidentCase* test_case, const std::vector<uint8_t>& output,
   const auto validation = test_case->validation();
   require(mapped_detail(validation) == PGACCEL_RASTER_DETAIL_NONE,
           "valid device validation failed");
-  require(test_case->output() == output, "valid output bytes differ");
+  const auto actual_output = test_case->output();
+  if (actual_output != output) {
+    size_t first_difference = 0;
+    while (first_difference < actual_output.size() && first_difference < output.size() &&
+           actual_output[first_difference] == output[first_difference])
+      ++first_difference;
+    char message[192];
+    std::snprintf(message, sizeof(message),
+                  "valid output bytes differ at %zu (actual=%u expected=%u; sizes=%zu/%zu)",
+                  first_difference,
+                  first_difference < actual_output.size() ? actual_output[first_difference] : 0,
+                  first_difference < output.size() ? output[first_difference] : 0,
+                  actual_output.size(), output.size());
+    throw std::runtime_error(message);
+  }
   require(test_case->actions() == actions, "valid row actions differ");
 }
 

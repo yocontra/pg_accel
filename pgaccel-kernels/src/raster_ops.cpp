@@ -179,22 +179,22 @@ inline double raster_resident_read_pixel(const uint8_t* pointer, uint32_t pixel_
     case PGACCEL_RESIDENT_RASTER_UINT8:
       return static_cast<double>(pointer[0]);
     case PGACCEL_RESIDENT_RASTER_INT8: {
-      const int32_t value = pointer[0] < 0x80 ? static_cast<int32_t>(pointer[0])
-                                              : static_cast<int32_t>(pointer[0]) - 0x100;
+      const int32_t value = (pointer[0] & 0x80u) != 0 ? static_cast<int32_t>(pointer[0]) - 0x100
+                                                      : static_cast<int32_t>(pointer[0]);
       return static_cast<double>(value);
     }
     case PGACCEL_RESIDENT_RASTER_INT16: {
       const uint16_t raw = raster_resident_load_u16_le(pointer);
       const int32_t value =
-          raw < 0x8000 ? static_cast<int32_t>(raw) : static_cast<int32_t>(raw) - 0x10000;
+          (raw & 0x8000u) != 0 ? static_cast<int32_t>(raw) - 0x10000 : static_cast<int32_t>(raw);
       return static_cast<double>(value);
     }
     case PGACCEL_RESIDENT_RASTER_UINT16:
       return static_cast<double>(raster_resident_load_u16_le(pointer));
     case PGACCEL_RESIDENT_RASTER_INT32: {
       const uint32_t raw = raster_resident_load_u32_le(pointer);
-      const int64_t value =
-          raw < 0x80000000u ? static_cast<int64_t>(raw) : static_cast<int64_t>(raw) - 0x100000000ll;
+      const int64_t value = (raw & 0x80000000u) != 0 ? static_cast<int64_t>(raw) - 0x100000000ll
+                                                     : static_cast<int64_t>(raw);
       return static_cast<double>(value);
     }
     case PGACCEL_RESIDENT_RASTER_UINT32:
