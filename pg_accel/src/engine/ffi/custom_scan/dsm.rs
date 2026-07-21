@@ -1,15 +1,10 @@
-//! Parallel-worker DSM callbacks for pg_accel Custom Scan nodes.
+//! DSM callbacks for pg_accel Custom Scan nodes.
 //!
-//! pg_accel's Custom Scan is `parallel_safe` but NOT `parallel_aware`: every
-//! worker runs a complete, independent copy of the node on its slice of
-//! tuples, and output tuples flow to the leader through Gather's `shm_mq`.
-//!
-//! We still allocate a tiny DSM coordinate block. PostgreSQL has no
-//! `CustomExecMethods` recheck callback; scan rechecks are owned by the
-//! provider's executor state. The coordinate block is therefore the explicit
-//! leader-to-worker handshake that tells a worker it is allowed to run
-//! worker-local spatial Layer-3 rechecks and lets us tag executor state with
-//! the worker number for instrumentation.
+//! The active childless aggregate and raster paths are neither parallel-safe
+//! nor parallel-aware, so PostgreSQL does not normally invoke the worker hooks.
+//! Their complete vtable surface is retained with a fixed-size coordinate for
+//! lifecycle compatibility and aggregate observability if a future resident
+//! path opts into parallel execution. No table-scan state lives in this block.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -17,11 +12,10 @@ use pgrx::pg_sys;
 
 use super::{GpuAccelScanState, GpuStrategy};
 use crate::engine::executor::agg::AggExecState;
-use crate::engine::executor::scan::ScanExecState;
 
 const DSM_MAGIC: u32 = 0x5047_4143; // "PGAC"
 const DSM_VERSION: u32 = 3;
-pub(super) const DSM_FLAG_WORKER_SPATIAL_RECHECK: u32 = 1 << 0;
+const DSM_FLAG_RESIDENT_EXECUTOR: u32 = 1 << 0;
 pub(super) const DSM_COORD_SIZE: pg_sys::Size = align_up_const(
     std::mem::size_of::<GpuAccelDsmState>(),
     pg_sys::MAXIMUM_ALIGNOF as usize,
@@ -56,7 +50,7 @@ impl GpuAccelDsmState {
         Self {
             magic: DSM_MAGIC,
             version: DSM_VERSION,
-            flags: DSM_FLAG_WORKER_SPATIAL_RECHECK,
+            flags: DSM_FLAG_RESIDENT_EXECUTOR,
             expected_threads,
             pscan_offset,
             pscan_len: 0,
@@ -108,8 +102,8 @@ const fn align_up_const(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }
 
-/// `EstimateDSMCustomScan`: each worker runs its own local scan+reduce;
-/// the DSM block is only a small capability/observability handshake.
+/// `EstimateDSMCustomScan`: reserve the fixed compatibility/observability
+/// coordinate required by the complete CustomExecMethods lifecycle.
 ///
 /// The parallel fused-count aggregate lane (a shared `ParallelTableScanDesc`
 /// carved out after the coordination header) was retired with the host-staged
@@ -171,13 +165,13 @@ pub(super) unsafe extern "C-unwind" fn initialize_dsm_custom_scan(
     tracing::debug!(
         node = "pg_accel_custom_scan",
         expected_threads,
-        flags = DSM_FLAG_WORKER_SPATIAL_RECHECK,
+        flags = DSM_FLAG_RESIDENT_EXECUTOR,
         "dsm.initialize"
     );
 }
 
-/// `ReInitializeDSMCustomScan`: leader-side DSM re-init (e.g. nested-loop
-/// re-execution). No shared state to reset.
+/// `ReInitializeDSMCustomScan`: rebuild the leader-side coordinate and reset
+/// aggregate observability counters for a rescan.
 ///
 /// # Safety
 /// Called in the leader when the plan is rescanned.
@@ -201,6 +195,10 @@ pub(super) unsafe extern "C-unwind" fn reinitialize_dsm_custom_scan(
 }
 
 /// `InitializeWorkerCustomScan`: per-worker backend init after fork.
+///
+/// Active resident paths do not request parallel workers. This defensive hook
+/// keeps a future parallel resident path's backend-local GPU initialization and
+/// coordinate attachment explicit.
 ///
 /// Ensures the GPU bridge is initialised in the forked worker. On macOS
 /// arm64 the Metal backend lazily creates its device/archive cache on
@@ -247,22 +245,10 @@ pub(super) unsafe extern "C-unwind" fn initialize_worker_custom_scan(
         let worker_number = unsafe { pg_sys::ParallelWorkerNumber };
         // SAFETY: state is our extended CustomScanState.
         unsafe {
-            let strategy = GpuStrategy::decode((*state).accel.strategy);
-            if strategy == GpuStrategy::Scan && flags & DSM_FLAG_WORKER_SPATIAL_RECHECK == 0 {
-                pgrx::error!(
-                    "pg_accel: custom scan worker missing DSM spatial recheck capability; \
-                     refusing to run parallel scan without worker-local recheck state"
-                );
-            }
             (*state).accel.parallel_worker_number = worker_number;
             (*state).accel.dsm_flags = flags;
             (*state).accel.dsm_state = dsm_state_ptr;
             (*state).accel.dsm_counters_recorded = false;
-
-            if strategy == GpuStrategy::Scan && !(*state).accel.executor.is_null() {
-                let scan_exec = &mut *(*state).accel.executor.cast::<ScanExecState>();
-                scan_exec.mark_parallel_worker(worker_number, flags);
-            }
         }
     }
 

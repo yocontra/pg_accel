@@ -161,10 +161,9 @@ bridge_status_fns! {
     ///
     /// `points_xy` / `ring_xy` mirror the C ABI (`pgaccel_ffi.h:338-343`):
     /// untyped `const void*` buffers whose element type is selected by
-    /// `use_fp64` (`false` = f32, `true` = f64). Prefer the typed
-    /// [`pgaccel_point_in_ring_bulk_f32`] / [`pgaccel_point_in_ring_bulk_f64`]
-    /// wrappers, which make the buffer-type/flag pairing impossible to get
-    /// wrong.
+    /// `use_fp64` (`false` = f32, `true` = f64). The retained
+    /// [`pgaccel_point_in_ring_bulk_f64`] helper binds f64 buffers to `true`;
+    /// f32 callers must bind their raw buffers to `false` explicitly.
     pub fn pgaccel_point_in_ring_bulk(
         points_xy: *const std::ffi::c_void,
         point_count: usize,
@@ -181,9 +180,9 @@ bridge_status_fns! {
     ///
     /// `points_a` / `points_b` / `distances` mirror the C ABI
     /// (`pgaccel_ffi.h:345-350`): untyped `void*` buffers whose element type
-    /// is selected by `use_fp64`. Prefer the typed
-    /// [`pgaccel_sphere_distance_bulk_f32`] / [`pgaccel_sphere_distance_bulk_f64`]
-    /// wrappers.
+    /// is selected by `use_fp64`. The retained
+    /// [`pgaccel_sphere_distance_bulk_f64`] helper binds f64 buffers to `true`;
+    /// f32 callers must bind their raw buffers to `false` explicitly.
     pub fn pgaccel_sphere_distance_bulk(
         points_a: *const std::ffi::c_void,
         points_b: *const std::ffi::c_void,
@@ -1219,46 +1218,17 @@ unsafe extern "C" {
 // Typed spatial wrappers over the `void* + use_fp64` C ABI
 // ---------------------------------------------------------------------------
 //
-// The three spatial predicate kernels take untyped `void*` buffers whose
-// element type is selected by a `use_fp64` flag (`pgaccel_ffi.h:338-357`).
-// The raw wrappers above mirror that ABI exactly; the typed pairs below fix
-// the buffer type and the flag together so the type system prevents the
-// f64-through-f32-buffer mismatch. New call sites should use these.
-
-/// `pgaccel_point_in_ring_bulk` with fp32 buffers (`use_fp64 = false`).
-///
-/// # Safety
-/// `points_xy` must hold `point_count * 2` f32 values, `ring_xy` must hold
-/// `vertex_count * 2` f32 values, and `results` must have room for
-/// `point_count` bytes. `pgaccel_init()` must have been called.
-#[must_use]
-pub unsafe fn pgaccel_point_in_ring_bulk_f32(
-    points_xy: *const f32,
-    point_count: usize,
-    ring_xy: *const f32,
-    vertex_count: usize,
-    results: *mut i8,
-) -> PgaccelStatus {
-    // SAFETY: forwards to the void* ABI with the flag matching the buffer
-    // element type (f32 / false); caller upholds the pointer contract.
-    unsafe {
-        pgaccel_point_in_ring_bulk(
-            points_xy.cast(),
-            point_count,
-            ring_xy.cast(),
-            vertex_count,
-            false,
-            results,
-        )
-    }
-}
+// The spatial predicate kernels take untyped `void*` buffers whose element
+// type is selected by a `use_fp64` flag (`pgaccel_ffi.h:338-357`). The raw
+// declarations above mirror that ABI exactly. Retained typed helpers bind
+// their Rust buffer element type to the matching flag.
 
 /// `pgaccel_point_in_ring_bulk` with fp64 buffers (`use_fp64 = true`).
 ///
 /// # Safety
-/// Same contract as [`pgaccel_point_in_ring_bulk_f32`] with f64 elements.
+/// Typed f64 wrapper over the raw point-in-ring ABI.
 #[allow(dead_code)]
-// reason: typed pair of the f32 wrapper; the f64 three-layer contract lands with the shared typed-geometry work
+// reason: retained typed compatibility helper for the raw point-in-ring ABI
 #[must_use]
 pub unsafe fn pgaccel_point_in_ring_bulk_f64(
     points_xy: *const f64,
@@ -1281,40 +1251,12 @@ pub unsafe fn pgaccel_point_in_ring_bulk_f64(
     }
 }
 
-/// `pgaccel_sphere_distance_bulk` with fp32 buffers (`use_fp64 = false`).
-///
-/// # Safety
-/// `points_a` / `points_b` must each hold `count * 2` f32 lon/lat values;
-/// `distances` must have room for `count` f32 values; `uncertain` must have
-/// room for `count` bytes. `pgaccel_init()` must have been called.
-#[must_use]
-pub unsafe fn pgaccel_sphere_distance_bulk_f32(
-    points_a: *const f32,
-    points_b: *const f32,
-    count: usize,
-    distances: *mut f32,
-    uncertain: *mut u8,
-) -> PgaccelStatus {
-    // SAFETY: forwards to the void* ABI with the flag matching the buffer
-    // element type (f32 / false); caller upholds the pointer contract.
-    unsafe {
-        pgaccel_sphere_distance_bulk(
-            points_a.cast(),
-            points_b.cast(),
-            count,
-            false,
-            distances.cast(),
-            uncertain,
-        )
-    }
-}
-
 /// `pgaccel_sphere_distance_bulk` with fp64 buffers (`use_fp64 = true`).
 ///
 /// # Safety
-/// Same contract as [`pgaccel_sphere_distance_bulk_f32`] with f64 elements.
+/// Typed f64 wrapper over the raw sphere-distance ABI.
 #[allow(dead_code)]
-// reason: typed pair of the f32 wrapper; engine/dispatch/spatial.rs (agent 2B's file) migrates to it next phase
+// reason: retained typed compatibility helper for the raw sphere-distance ABI
 #[must_use]
 pub unsafe fn pgaccel_sphere_distance_bulk_f64(
     points_a: *const f64,

@@ -129,8 +129,9 @@ Custom Scan (GpuAccelAgg)
 
 `GPU Kernel Dispatched` is present only under `EXPLAIN ANALYZE`. The property
 names are emitted by
-`pg_accel/src/engine/ffi/custom_scan/explain.rs:47-138`; the Custom Scan name is
-registered at `pg_accel/src/engine/ffi/custom_scan/mod.rs:254-278`.
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:44-150`; the aggregate and raster
+method tables are defined and registered at
+`pg_accel/src/engine/ffi/custom_scan/mod.rs:251-309`.
 
 To prove the native decline boundary with the same table:
 
@@ -146,27 +147,30 @@ SELECT pg_accel_last_planner_rejection_reason();
 
 A base scan/filter plan does not contain a pg_accel Custom Scan. The production
 base-relation hook records the decline and leaves the PostgreSQL path intact at
-`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:483-502`.
+`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:607-627`.
 
 ## Capability matrix
 
 Kernel or bridge presence is not equivalent to production planner selection.
 The normal upper-path hook injects only the generic aggregate candidate at
-`pg_accel/src/engine/ffi/planner_hooks/mod.rs:204-208`; base scans, row-returning
-joins, windows, and target-list SRFs explicitly remain native.
+`pg_accel/src/engine/ffi/planner_hooks/mod.rs:205-243`. Only aggregate and raster
+Custom Scan method tables are registered. Normal production planning selects
+the aggregate path; raster admission is test-only. Base scans, row-returning
+joins, sorts, windows, and standalone function/SRF shapes remain native and
+have no registered executor.
 
-| Capability | Kernel or bridge | Production planner | Current boundary |
+| Capability | Implementation surface | Production planner | Current boundary |
 |---|---|---|---|
 | Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. Stored generated columns are physical base attributes and remain selectable when their types and aggregate shape pass those same gates. |
 | Resident star join plus aggregate | Present | Selectable | The join is represented inside one childless aggregate descriptor; this is not a row-returning join path. |
 | H3-derived group key inside a resident aggregate | Present | Selectable | Covered `h3_cell_to_parent` and `h3_latlng_to_cell` group expressions can be encoded in the aggregate descriptor. |
 | PostGIS spatial filter inside a resident aggregate | Present | Test-only | The descriptor lane is dark in normal planning and is admitted only by a test GUC. |
-| Standalone PostGIS or H3 function/SRF | Present and some names registered | Not selectable | Function and target-list SRF hooks record `no_gpu_resident_pipeline`. |
-| Base scan, WHERE filter, or projection | Present | Not selectable | The production base-relation hook injects no host-staged CustomPath. |
-| Row-returning hash or inequality join | Present | Not selectable | The production join hook injects no host-staged CustomPath. |
-| Sort or top-k | Present | Not selectable | Sort opportunities remain PostgreSQL-native without a resident producer/consumer path. |
-| Window | Present | Not selectable | Segmented Metal kernels dispatch in device coverage; planner-visible full/reducing window SQL records `no_gpu_resident_pipeline` because no resident consumer exists. |
-| Raster | Present | Not selectable | Production planning is observation-only; forced admission is test-only. |
+| Standalone PostGIS or H3 function/SRF | Aggregate primitives and adapter registry metadata remain; standalone executor removed | Not selectable | PostgreSQL executes standalone calls. Function and target-list SRF hooks record `no_gpu_resident_pipeline`. |
+| Base scan, WHERE filter, or projection | No registered Custom Scan executor; host-staged implementation retired | Not selectable | PostgreSQL executes the base path. The production hook observes and records declines but injects no scan CustomPath. |
+| Row-returning hash or inequality join | No registered row-returning executor; host-staged implementation retired | Not selectable | PostgreSQL executes the join. Resident join membership exists only inside childless `GpuAccelAgg` descriptors. |
+| Sort or top-k | Kernel or descriptor code may remain; no registered executor | Not selectable | Sort opportunities remain PostgreSQL-native without a complete resident producer/consumer path. |
+| Window | Kernel source may remain; no registered executor | Not selectable | Planner-visible full and reducing window SQL remains PostgreSQL-native and records `no_gpu_resident_pipeline`. |
+| Raster | Registered childless resident executor | Test-only | Production planning is observation-only; a test GUC can force the resident raster path. |
 
 The extension adapters currently register these names for OID discovery. This
 table is registry metadata, not a standalone SQL support promise:

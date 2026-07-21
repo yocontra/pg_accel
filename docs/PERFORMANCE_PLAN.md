@@ -77,6 +77,40 @@ reconciled before calling the small lanes supported.
   capability regression to investigate, not proof that the old implementation
   met today's evidence contract.
 
+### Active-path diagnosis
+
+The 10M `kernel_delta=410` values in the baseline cover ten measured queries:
+they mean 41 completed grouped-aggregate bridge calls per query, not 410 device
+launches per query. With the current 256K generic reduce cap, a 10M bounded
+dense statement performs 40 ACCUMULATE calls and one FINALIZE call. Source
+inspection of the dense integer partial branch accounts for six in-order queue
+commands per accumulate and three for finalize, or about 243 commands per
+query before any implementation change. The public counter is dispatch proof;
+it does not expose that command count.
+
+Each current Shared-USM grouped call also reaches one completion wait, copies
+completion metadata through the queue and waits, then copies detail or output
+and waits again. Rust reacquires the dependency-stamped artifact and rebuilds
+and resolves the ABI descriptor at every bounded call. Those boundaries are
+required for invalidation and cancellation safety, but repeated collection
+allocation, lookup, descriptor construction, and already-satisfied Shared-USM
+copies are separate costs to remove.
+
+The fixed `hashjoin_10k_1m` winner is not the retired row-returning hash-join
+executor. Its selected plan is one childless `GpuAccelAgg` descriptor for
+ungrouped `COUNT(*)`, with dimension membership folded into the resident
+artifact and the dense count kernel. Warm execution does not construct a hash
+table. The older 19.464 ms observation therefore directs profiling toward
+membership-artifact reuse, count batching, residence validation, command
+submission and waits, and output materialization; it cannot identify a source
+regression without a recorded SHA.
+
+Dense artifact construction is a separate cold-path concern. Current artifact
+preparation copies requested resident columns to host vectors, creates
+fact-length dictionary or join-code lanes, and uploads those derived lanes.
+Warm timing must not hide this cost, but it also must not attribute cold build
+work to every warm execution.
+
 ## Single source of truth
 
 Introduce one typed `PerformanceEnvelope` registry consumed by both production
@@ -106,17 +140,22 @@ can promote a forced candidate into the production envelope.
 
 ### P0: Make admission truthful
 
-1. Immediately make the three losing 10M lanes decline in production:
-   `grouped_agg_int4`, `predicate_expression_grouped_agg_int4`, and
-   `ssbm_resident_int4_star`.
-2. Extend costing to include dense-accumulation chunk count, reset/accumulate/
-   finalize phases, command submissions, waits, output reconstruction, and
-   resident load amortization. A single-row-count floor is not a sufficient
-   model.
-3. Generate benchmark expectations from `PerformanceEnvelope`, and add a
-   focused test proving that planner admission and matrix classification agree
-   at every boundary.
-4. Keep these lanes native until the optimized implementation independently
+The baseline artifact selected three losing 10M lanes. Current production code
+mitigates that failure by declining exact dense integer SUM/COUNT descriptors
+above the proven one-shot row maximum with
+`DenseOneShotRowsExceedDeviceMaximum`. Preserve that fail-closed gate until a
+replacement lifecycle independently clears the invariant.
+
+1. Extend the typed execution envelope to identify the runtime algorithm,
+   shape-specific chunk cap, exact bridge-call count, modeled queue-command and
+   wait count, workspace bytes, output reconstruction, and resident load or
+   artifact-build amortization. A single row-count floor is insufficient.
+2. Generate benchmark expectations from `PerformanceEnvelope`, and add a
+   focused test proving planner admission and matrix classification agree at
+   every boundary.
+3. Keep `grouped_agg_int4`,
+   `predicate_expression_grouped_agg_int4`, and
+   `ssbm_resident_int4_star` native at 10M until the optimized implementation
    clears the full invariant. Do not lower cost multipliers to force selection.
 
 Exit criterion: no production-selected cell in the 29-cell final matrix is
@@ -124,32 +163,129 @@ below `1.15x`; all known sub-threshold cells visibly decline with a stable
 reason. Any production-selectable family outside that matrix must first be
 added with the same floor and boundary evidence.
 
-### P1: Remove dense accumulation lifecycle cost
+### P1: Remove wrapper and synchronization overhead
 
-The exact dense grouped path currently accepts a one-shot atomic input only up
-to 1M rows, then uses roughly 256K-row chunks. A 10M query therefore performs
-about forty accumulate calls plus finalization, and each call submits command
-phases and waits. The device partial-state budget already supports a larger
-dense working set.
+Make the lowest-risk active-path changes before changing kernel arithmetic:
 
-1. Allocate persistent dense aggregate state once per statement, reset it once,
-   accumulate all input chunks into it, and finalize it once.
-2. Use a dense-specific target of 1M input rows per outer chunk on the reference
-   M2 Max, bounded dynamically by the partial-state and resident-memory budgets.
-3. Batch command recording and submission across reset, accumulation, and
-   finalization so host/device synchronization occurs only where dependencies or
-   bounded output require it.
-4. Preserve PostgreSQL interrupt and `statement_timeout` responsiveness between
-   outer batches. Never replace the bounded loop with one uninterruptible
-   over-cap device call.
-5. Expose chunk count, command submissions, wait time, and kernel time in
-   benchmark evidence so the cost model uses observed lifecycle cost.
+1. Begin already prepares the descriptor artifact. On first execution, attempt
+   dispatch against that prepared artifact instead of unconditionally ensuring
+   it again. If fresh invalidation processing reports `ArtifactNotFound` or
+   `ArtifactDependencyChanged`, rebuild and retry exactly once. Rescan retains
+   its explicit ensure.
+2. Replace repeated dependency clones and BTreeSet/Vec construction with a
+   precomputed artifact-access plan. Each call must still process invalidations,
+   validate stored dependency stamps and physical identity, remove a stale
+   artifact atomically, resolve fresh column views, and keep the residency
+   borrow live only through the synchronous callback. No device pointer may
+   escape that callback.
+3. For a workspace proven to be Shared USM, read completion metadata and copy
+   the bounded final output on the host after the existing completion wait.
+   Preserve the queue-copy path for Device scratch. Do not remove workspace
+   zeroing until poison-filled tests prove every active lane is initialized.
+4. Add cheap backend-local counters for algorithm branch, lifecycle flags,
+   chunk count and rows, queue commands by kind, host waits and wait time,
+   maximum synchronous-call duration, descriptor/reacquire time, artifact
+   outcome and bytes, workspace bytes, and output materialization. Kernel event
+   profiling stays opt-in so observation does not change the normal queue.
+
+Exit criterion: correctness, invalidation, rescan, cancellation, and memory
+tests remain green; predicted lifecycle calls and waits match observed
+counters; qualified 1M absolute medians do not regress by more than 5 percent
+in repeated exact-SHA runs.
+
+### P2: Recover fixed count-join throughput
+
+The fixed hash-join workload is the count-only aggregate descriptor described
+above. Profile and optimize that implementation, not the retired hash executor.
+
+1. Introduce separate outer chunk limits for dense count, persistent dense
+   integer accumulation, and dense partial accumulation instead of applying
+   `gpu_reduce_max_chunk` to every non-H3 descriptor.
+2. Choose the dense-count cap from a measured maximum synchronous-call and
+   cancellation target, bounded by exact allocation and integer limits. Keep an
+   interrupt check before the first call and after every completed call.
+3. Record dimension membership artifact Hit/Built/Rebuilt outcomes, validation
+   time, count-kernel calls, commands, waits, and final output separately.
+   Stable dimension generations must reuse the membership artifact;
+   invalidation must rebuild it exactly once and then return to Hit.
+
+Exit criterion on the reference M2 Max: fixed count join at 10M reaches at most
+25 ms and at least 5.0x over the matched PostgreSQL baseline, without regressing
+the 100K or 1M absolute medians by more than 5 percent. These are engineering
+targets, not current measured claims.
+
+### P3: Add a persistent atomic dense lifecycle
+
+The three declined 10M lanes use exact int4 SUM/COUNT structures. Re-enable
+them only with a multi-call atomic algorithm whose arithmetic safety is proven
+before dispatch.
+
+1. Add a known descriptor flag in existing ABI flag space for a Rust-proven
+   atomic-total bound. Set it only when exact resident rows prove
+   `fact_rows * 2^31 <= INT64_MAX`, COUNT fits PostgreSQL bigint, every
+   dimension has unique rather than counted multiplicity, and int4 product
+   expressions retain their per-row overflow check. A final-value-only proof is
+   insufficient because a PostgreSQL accumulation prefix can overflow and
+   later cancel.
+2. Make workspace layout choose the same atomic state for RESET, ACCUMULATE,
+   and FINALIZE independent of the current chunk row count. RESET clears once;
+   bounded ACCUMULATE calls update atomic sum/count/nonnull state without
+   restaging cumulative results; FINALIZE scans groups, validates status, stages
+   keys, and publishes output exactly once.
+3. Give this branch its own device-specific bounded chunk cap and lifecycle
+   cost. Preserve cleanup-before-rethrow and interrupt checks between completed
+   calls; one uninterruptible 10M call is not an acceptable optimization.
+4. Keep unsafe totals, MIN/MAX, weighted dimensions, and unsupported shapes on
+   their exact partial path or PostgreSQL-native path. Improving that path
+   requires replacing its serial 1024-row inner work, not routing it through
+   unchecked modular atomics.
 
 Exit criterion: the three 10M aggregate lanes each clear `>= 1.15x`, with a
-working target of `>= 1.30x` headroom, while all smaller qualified cells retain
-their absolute median within 5 percent across repeated matched runs.
+working target of `>= 1.30x` admission headroom, while smaller qualified cells
+retain their absolute median within 5 percent across repeated matched runs.
 
-### P1: Restore small exact resident thresholds
+### P4: Reduce derived-artifact footprint
+
+Specialize bounded-range int4 keys without changing SQL semantics:
+
+1. For exact narrow int4 group domains, point the dispatch descriptor at the
+   freshly resolved raw resident lane and use the existing `code_min` encoding.
+   Retain a small reversible host domain; holes are `Unused`, and NULL receives
+   a distinct checked code.
+2. For exact narrow int4 dimension keys, retain a bounded range membership or
+   lookup lane keyed by `key_min` and use the raw resident fact key directly.
+   Preserve duplicate detection, NULL behavior, dimension filters, and unique
+   versus counted multiplicity.
+3. Retain dictionary artifacts for text, arbitrary, or excessively wide
+   domains. A direct bool filter needs an explicit ABI NULL/false contract and
+   must not reinterpret false as an uncertain mask value.
+4. Report raw, derived, transient-build, and retained bytes separately. This
+   work primarily targets cold build and memory pressure until warm-query
+   evidence proves another effect.
+
+Exit criterion: exact-result, invalidation, eviction, and accounting tests pass;
+the cold artifact report shows which fact-length copies or uploads were avoided;
+no warm speedup is claimed without matched measurements.
+
+### P5: Bound workspace and H3 preparation
+
+1. Reserve the exact grouped workspace requirement through a statement-scoped
+   ledger charge before allocation and release it on Drop. Include this
+   transient workspace in projected peak admission. Do not create an uncharged
+   backend-local pool.
+2. Keep the warm H3 parent artifact rather than recomputing it per query. Prove
+   Built on first use, Hit on stable generations, one Rebuilt after
+   invalidation, exact retained bytes, and one warm aggregate bridge call.
+3. Refactor multi-chunk H3 artifact construction so every synchronous transform
+   releases its residency borrow, reaches an interrupt boundary, reacquires and
+   validates the generation-stamped input, and publishes only after final
+   generation validation. Partial output remains unpublished on error.
+
+Exit criterion: workspace peak accounting is exact; H3 cold/warm/invalidation
+artifacts are separated; cancellation leaves no published partial artifact and
+the backend remains usable.
+
+### P6: Restore small exact resident thresholds
 
 The group benchmark registry begins at 10K while production hardware admission
 currently floors grouped aggregation near 250K; the star path has a separate
@@ -164,7 +300,7 @@ explicit decline sentinels rather than nominal winners.
 Exit criterion: every small exact cell has one unambiguous production outcome,
 and no threshold exists solely because a historical implementation once won.
 
-### P1: Restore FP64 min/max capability
+### P7: Restore FP64 min/max capability
 
 Trace the current `reduce_f64_minmax` decline through semantic admission and
 device capability checks. Restore a resident scalar reduction only if it
@@ -174,19 +310,6 @@ envelope and cost model.
 
 Exit criterion: the intended FP64 min/max lane either selects with `>= 1.15x`
 and complete semantic proof, or remains an explicit documented native decline.
-
-### P2: Profile and recover fixed hash-join 10M throughput
-
-Preserve the current qualified 3.425x win while explaining the directional
-40.720 ms versus historical 19.464 ms gap. Profile build-artifact reuse, hash
-table construction, probe batching, transfer volume, kernel duration, command
-submission, synchronization, and output materialization separately. Verify
-that stable resident dimension generations reuse the build artifact and that
-invalidation rebuilds it exactly once.
-
-Exit criterion on the reference M2 Max: fixed hash join at 10M reaches at most
-25 ms and at least 5.0x over the matched PostgreSQL baseline, without regressing
-the 100K or 1M absolute medians by more than 5 percent.
 
 ## Residency and first-use policy
 
@@ -239,13 +362,15 @@ The performance program is complete for a candidate only when:
 - the three current 10M aggregate failures either clear the invariant after the
   lifecycle work or decline in production;
 - small exact thresholds and FP64 min/max have measured select/decline outcomes;
-- fixed hash join meets its recovery target while retaining its current win;
+- fixed count-join descriptor meets its recovery target while retaining its
+  current qualified win;
 - warm preload amortization and first-use behavior both have explicit evidence;
 - repeated exact-SHA runs explain or bound the observed mixed/SSBM variance;
 - no product or publication claim is made until a qualified external run
   reproduces the candidate artifact under the release evidence contract.
 
-Sequence the work as admission truth, dense lifecycle optimization, threshold
-and FP64 restoration, fixed hash-join recovery, then the full repeated matrix.
-Admission remains fail-closed throughout; optimization earns selection only
-after measurement.
+Sequence the work as admission truth, wrapper/synchronization removal,
+fixed count-join batching, persistent atomic dense execution, artifact and H3
+memory/cancellation work, threshold and FP64 reconciliation, then the full
+repeated matrix. Admission remains fail-closed throughout; optimization earns
+selection only after measurement.

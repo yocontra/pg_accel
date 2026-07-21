@@ -104,6 +104,7 @@ impl<'a> IntListReader<'a> {
     }
 
     #[must_use]
+    #[cfg(feature = "pg_test")]
     pub(super) fn cursor_at(&self, index: usize) -> IntListCursor<'_, 'a> {
         IntListCursor {
             reader: self,
@@ -113,11 +114,13 @@ impl<'a> IntListReader<'a> {
 }
 
 /// Sequential reader for self-describing sections of an integer list.
+#[cfg(feature = "pg_test")]
 pub(super) struct IntListCursor<'reader, 'source> {
     reader: &'reader IntListReader<'source>,
     index: usize,
 }
 
+#[cfg(feature = "pg_test")]
 impl IntListCursor<'_, '_> {
     #[must_use]
     pub(super) const fn position(&self) -> usize {
@@ -140,10 +143,6 @@ impl IntListCursor<'_, '_> {
 
     pub(super) fn read_oid(&mut self) -> pg_sys::Oid {
         pg_sys::Oid::from(self.read_u32())
-    }
-
-    pub(super) fn read_bool(&mut self) -> bool {
-        self.read_int() != 0
     }
 
     pub(super) fn read_i64_halves(&mut self) -> i64 {
@@ -182,6 +181,7 @@ impl PgListWriter {
         self.push_int(c_int::from(value));
     }
 
+    #[cfg(feature = "pg_test")]
     pub(super) fn push_len(&mut self, value: usize) {
         self.push_int(c_int::try_from(value).unwrap_or_else(|_| {
             pgrx::error!("pg_accel: private-data length {value} exceeds i32 wire capacity")
@@ -192,10 +192,12 @@ impl PgListWriter {
         self.push_int(value as c_int);
     }
 
+    #[cfg(feature = "pg_test")]
     pub(super) fn push_oid(&mut self, value: pg_sys::Oid) {
         self.push_u32(u32::from(value));
     }
 
+    #[cfg(feature = "pg_test")]
     pub(super) fn push_i64_halves(&mut self, value: i64) {
         let value = value as u64;
         self.push_int((value >> 32) as c_int);

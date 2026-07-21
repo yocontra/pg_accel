@@ -9,7 +9,7 @@ use pgrx::pg_sys;
 
 use super::{GpuStrategy, OutputShapeDisc};
 use crate::engine::executor::raster::RasterExecPlan;
-use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSpec};
+use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc};
 use crate::engine::gucs;
 use crate::engine::raster::{RASTER_QUERY_SPEC_MAX_WORDS, RasterSpecCodecError};
 use crate::engine::registry::AccelStrategy;
@@ -21,7 +21,6 @@ use crate::engine::spec::{
     AGG_OUTPUT_PROJECTION_MAX_WORDS, AGG_QUERY_SPEC_MAX_WORDS, AggOutputProjection, AggQuerySpec,
     ProjectionCodecError, SpecCodecError,
 };
-use crate::gpu::PgaccelKeyType;
 
 mod list_codec;
 
@@ -1139,32 +1138,6 @@ pub(super) struct CustomPrivateData {
     pub(super) gpu_strategy: GpuStrategy,
     pub(super) batch_size: c_int,
     pub(super) expected_threads: c_int,
-    pub(super) fn_oid: pg_sys::Oid,
-    pub(super) target_attno: i32,
-    pub(super) accel_strategy: AccelStrategy,
-    /// Inner relation join key attno (1-based). Only for `GpuHashJoin`.
-    pub(super) hash_inner_attno: i32,
-    /// Key type for hash join (0=i32, 1=i64, 2=f64). Only for `GpuHashJoin`.
-    pub(super) hash_key_type: i32,
-    /// True for the fused `COUNT(*)` over `GpuHashJoin` path.
-    pub(super) hash_count_only: bool,
-    /// NLJ predicate shape. `2` = BETWEEN/range-containment.
-    pub(super) nlj_shape: i32,
-    /// NLJ key type (0=i32 promoted to i64, 1=i64, 2=f64).
-    pub(super) nlj_key_type: i32,
-    /// NLJ inequality opcode for single-predicate shapes. Reserved for the
-    /// non-BETWEEN shape; decoded now so the private-data layout stays stable.
-    #[allow(dead_code)]
-    pub(super) nlj_op: i32,
-    /// Inner lower-bound attno for BETWEEN NLJ.
-    pub(super) nlj_inner_lo_attno: i32,
-    /// Inner upper-bound attno for BETWEEN NLJ.
-    pub(super) nlj_inner_hi_attno: i32,
-    /// Window function specifications. Only meaningful when `gpu_strategy == Window`.
-    pub(super) window_specs: Vec<WindowFuncSpec>,
-    /// Scan relation index for direct heap scan (Window vectorized path).
-    /// 0 means use child plan; > 0 means open this relation directly.
-    pub(super) window_scan_relid: pg_sys::Index,
     /// Neutral grouped-aggregate query contract carried by the v2 wire.
     /// Residency resolves its relation/column references after decode.
     pub(super) agg_query_spec: Option<AggQuerySpec>,
@@ -1174,121 +1147,6 @@ pub(super) struct CustomPrivateData {
     pub(super) raster_exec_plan: Option<RasterExecPlan>,
     /// Versioned resident-pipeline proof decoded from the plan trailer.
     pub(super) resident_proof: ResidentProofSnapshot,
-}
-
-impl CustomPrivateData {
-    #[must_use]
-    pub(super) fn hash_join_validation_error(&self) -> Option<&'static str> {
-        if self.accel_strategy != AccelStrategy::GpuHashJoin {
-            return None;
-        }
-        if self.gpu_strategy != GpuStrategy::Join {
-            return Some("hash join accel requires join strategy");
-        }
-        if self.target_attno <= 0 || self.hash_inner_attno <= 0 {
-            return Some("join key attno must be positive");
-        }
-        if !matches!(self.hash_key_type, 0..=2) {
-            return Some("join key type is unsupported");
-        }
-        None
-    }
-
-    #[must_use]
-    pub(super) fn nlj_validation_error(&self) -> Option<&'static str> {
-        if self.accel_strategy != AccelStrategy::GpuNestedLoopIneq {
-            return None;
-        }
-        if self.gpu_strategy != GpuStrategy::Join {
-            return Some("NLJ accel requires join strategy");
-        }
-        if self.nlj_shape != 2 {
-            return Some("NLJ shape is unsupported");
-        }
-        if self.target_attno <= 0 || self.nlj_inner_lo_attno <= 0 || self.nlj_inner_hi_attno <= 0 {
-            return Some("NLJ attnos must be positive");
-        }
-        if !matches!(self.nlj_key_type, 0..=2) {
-            return Some("NLJ key type is unsupported");
-        }
-        None
-    }
-}
-
-struct PlanPayloadReader<'reader, 'source> {
-    fields: &'reader IntListReader<'source>,
-}
-
-impl<'reader, 'source> PlanPayloadReader<'reader, 'source> {
-    const WINDOW_COUNT: usize = PLAN_PAYLOAD_START;
-    const WINDOW_SPECS: usize = Self::WINDOW_COUNT + 1;
-    const HASH_INNER_ATTNO: usize = PLAN_PAYLOAD_START;
-    const HASH_KEY_TYPE: usize = PLAN_PAYLOAD_START + 1;
-    const HASH_COUNT_ONLY: usize = PLAN_PAYLOAD_START + 2;
-    const NLJ_SHAPE: usize = PLAN_PAYLOAD_START;
-    const NLJ_KEY_TYPE: usize = PLAN_PAYLOAD_START + 1;
-    const NLJ_OP: usize = PLAN_PAYLOAD_START + 2;
-    const NLJ_INNER_LO_ATTNO: usize = PLAN_PAYLOAD_START + 3;
-    const NLJ_INNER_HI_ATTNO: usize = PLAN_PAYLOAD_START + 4;
-
-    #[must_use]
-    const fn new(fields: &'reader IntListReader<'source>) -> Self {
-        PlanPayloadReader { fields }
-    }
-
-    #[must_use]
-    fn window_specs(&self) -> Vec<WindowFuncSpec> {
-        let count = self.fields.int_at(Self::WINDOW_COUNT) as usize;
-        let mut specs = Vec::with_capacity(count);
-        for spec_index in 0..count {
-            let offset = Self::WINDOW_SPECS + spec_index * WINDOW_SPEC_INTS;
-            if !self.fields.contains_range(offset, WINDOW_SPEC_INTS) {
-                pgrx::error!("pg_accel: truncated validated window private payload");
-            }
-            let mut spec = self.fields.cursor_at(offset);
-            let func = WindowFunc::from_i32(spec.read_int()).unwrap_or_else(|| {
-                pgrx::error!("pg_accel: invalid function in validated window private payload")
-            });
-            specs.push(WindowFuncSpec {
-                func,
-                partition_attno: spec.read_int(),
-                order_attno: spec.read_int(),
-                value_attno: spec.read_int(),
-                offset: spec.read_int(),
-                default_val: f64::from_bits(spec.read_int() as u64),
-                result_type_oid: spec.read_u32(),
-                uses_fp64: spec.read_bool(),
-            });
-        }
-        specs
-    }
-
-    #[must_use]
-    fn window_scan_relid(&self) -> pg_sys::Index {
-        let spec_count = self.fields.int_at(Self::WINDOW_COUNT) as usize;
-        let relid_idx = Self::WINDOW_SPECS + spec_count * WINDOW_SPEC_INTS;
-        self.fields.int_at(relid_idx) as pg_sys::Index
-    }
-
-    #[must_use]
-    fn hash_join_info(&self) -> (i32, i32, bool) {
-        (
-            self.fields.int_at(Self::HASH_INNER_ATTNO),
-            self.fields.int_at(Self::HASH_KEY_TYPE),
-            self.fields.int_at(Self::HASH_COUNT_ONLY) == 1,
-        )
-    }
-
-    #[must_use]
-    fn nlj_info(&self) -> (i32, i32, i32, i32, i32) {
-        (
-            self.fields.int_at(Self::NLJ_SHAPE),
-            self.fields.int_at(Self::NLJ_KEY_TYPE),
-            self.fields.int_at(Self::NLJ_OP),
-            self.fields.int_at(Self::NLJ_INNER_LO_ATTNO),
-            self.fields.int_at(Self::NLJ_INNER_HI_ATTNO),
-        )
-    }
 }
 
 #[derive(Debug)]
@@ -2323,65 +2181,13 @@ pub(super) unsafe fn deserialize_custom_private(
     let plan_private = validated.plan_private;
     let gpu_strategy = plan_private.gpu_strategy;
     let resident_proof = validated.resident_proof;
-    let payload = PlanPayloadReader::new(&fields);
     let batch_size = plan_private.batch_size;
     let expected_threads = plan_private.expected_threads;
-    let fn_oid = plan_private.fn_oid;
-    let target_attno = plan_private.target_attno;
-    let accel_strategy = plan_private.accel_strategy;
-
-    // For Window strategy, read window function specs starting at index 6.
-    // Layout: [num_specs, func0, part_attno0, order_attno0, value_attno0,
-    //   offset0, default_bits0, result_type0, ...]
-    let window_specs = if matches!(gpu_strategy, GpuStrategy::Window) {
-        payload.window_specs()
-    } else {
-        vec![]
-    };
-
-    // For Window strategy, read scan_relid after the specs.
-    // Plan layout: [...base 6 fields..., num_specs, spec0..., scan_relid]
-    let window_scan_relid: pg_sys::Index = if matches!(gpu_strategy, GpuStrategy::Window) {
-        payload.window_scan_relid()
-    } else {
-        0
-    };
-
-    // For Join strategy with GpuHashJoin accel, read hash join info at index 6+.
-    // Layout: [...base 6 fields..., inner_attno, key_type]
-    let (hash_inner_attno, hash_key_type, hash_count_only) =
-        if accel_strategy == AccelStrategy::GpuHashJoin {
-            payload.hash_join_info()
-        } else {
-            (0, 0, false)
-        };
-
-    // For Join strategy with GpuNestedLoopIneq accel, read NLJ info at index 6+.
-    // Layout: [...base 6 fields..., shape, key_type, op, inner_lo_attno, inner_hi_attno]
-    let (nlj_shape, nlj_key_type, nlj_op, nlj_inner_lo_attno, nlj_inner_hi_attno) =
-        if accel_strategy == AccelStrategy::GpuNestedLoopIneq {
-            payload.nlj_info()
-        } else {
-            (0, 0, 0, 0, 0)
-        };
 
     CustomPrivateData {
         gpu_strategy,
         batch_size,
         expected_threads,
-        fn_oid,
-        target_attno,
-        accel_strategy,
-        hash_inner_attno,
-        hash_key_type,
-        hash_count_only,
-        nlj_shape,
-        nlj_key_type,
-        nlj_op,
-        nlj_inner_lo_attno,
-        nlj_inner_hi_attno,
-        window_specs,
-        window_scan_relid,
         agg_query_spec: validated.agg_query_spec,
         agg_output_projection: validated.agg_output_projection,
         raster_exec_plan: validated.raster_exec_plan,
@@ -2616,6 +2422,7 @@ pub const FUNCTIONSCAN_SENTINEL: c_int = 0x4653_4341; // b"FSCA"
 /// admitted by the production planner. The type and codec remain stable so a
 /// future complete resident function pipeline need not alter the
 /// `custom_private` layout.
+#[cfg(feature = "pg_test")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionScanPrivData {
     /// OID of the registered SRF / record-returning function.
@@ -2657,6 +2464,7 @@ pub struct FunctionScanPrivData {
 /// Must be called in a valid PG memory context on the main backend
 /// thread. `list` may be null or a valid PG `List *`.
 #[allow(clippy::cast_possible_wrap)]
+#[cfg(feature = "pg_test")]
 pub unsafe fn append_functionscan_priv(
     list: *mut pg_sys::List,
     priv_data: &FunctionScanPrivData,
@@ -2702,6 +2510,7 @@ pub unsafe fn append_functionscan_priv(
 ///
 /// `list` must be a valid PG `List *` of `Integer` nodes.
 #[allow(clippy::cast_sign_loss)]
+#[cfg(feature = "pg_test")]
 pub unsafe fn deserialize_functionscan_priv(
     list: *mut pg_sys::List,
     start_idx: usize,
@@ -2815,6 +2624,7 @@ pub const SRF_TARGET_LIST_SENTINEL: c_int = 0x5354_4C53; // b"STLS"
 /// - `qual_args`: the constant args to the SRF (`k=1` in
 ///   `h3_grid_disk(cell, 1)`). Datum + type OID pairs, same encoding as
 ///   `FunctionScanPrivData::args`.
+#[cfg(feature = "pg_test")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrfTargetListPrivData {
     /// OID of the registered SRF function.
@@ -2855,6 +2665,7 @@ pub struct SrfTargetListPrivData {
 ///
 /// Must be called in a valid PG memory context on the main backend thread.
 #[allow(clippy::cast_possible_wrap)]
+#[cfg(feature = "pg_test")]
 pub unsafe fn append_srf_target_list_priv(
     list: *mut pg_sys::List,
     priv_data: &SrfTargetListPrivData,
@@ -2928,6 +2739,7 @@ pub unsafe fn append_srf_target_list_priv(
 ///
 /// `list` must be a valid PG `List *` of `Integer` nodes.
 #[allow(clippy::cast_sign_loss)]
+#[cfg(feature = "pg_test")]
 pub unsafe fn deserialize_srf_target_list_priv(
     list: *mut pg_sys::List,
     start_idx: usize,

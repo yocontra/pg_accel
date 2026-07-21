@@ -4,6 +4,8 @@
 //! pgrx's test framework.  They exercise the public SQL interface rather than
 //! internal Rust APIs.
 
+#[cfg(any(test, feature = "pg_test"))]
+mod active_engine;
 /// Phase 2 GPU bridge FFI safety unit tests (no PostgreSQL / no GPU needed;
 /// runs under plain `cargo test -p pg_accel --lib`).
 #[cfg(test)]

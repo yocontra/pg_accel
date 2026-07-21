@@ -1,9 +1,10 @@
 # Reading pg_accel EXPLAIN Output
 
 The current production planner can select a resident aggregate as
-`Custom Scan (GpuAccelAgg)`. Other Custom Scan vtables exist in the codebase,
-but normal base-scan, row-returning join, window, function/SRF, sort, and raster
-paths are not production-selectable at this revision.
+`Custom Scan (GpuAccelAgg)`. The extension registers only aggregate and raster
+Custom Scan method tables. Raster injection is test-only; base-scan,
+row-returning join, window, standalone function/SRF, and sort executors are not
+registered, so those production shapes remain PostgreSQL-native.
 
 ## Selected resident aggregate
 
@@ -48,7 +49,7 @@ Sort
         GPU Kernel Dispatched: true
         Rows Returned To CPU: <final aggregate rows>
         Rows Dispatched: <resident fact rows>
-        Batches: <device calls>
+        Batches: <completed synchronous aggregate lifecycle calls>
         Rows Per Batch: <derived average>
         Dispatch Time: <device call time> ms
         Avg Dispatch Time Per Batch: <derived average> ms
@@ -59,10 +60,10 @@ above the Custom Scan. Selection proof is the exact `GpuAccelAgg` node and its
 properties, not the root node of the plan.
 
 The common property names are emitted at
-`pg_accel/src/engine/ffi/custom_scan/explain.rs:43-148`. Descriptor fields and
-residency summaries are emitted at
-`pg_accel/src/engine/ffi/custom_scan/explain.rs:468-609` and
-`pg_accel/src/engine/ffi/custom_scan/explain.rs:829-855`.
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:44-150`. Descriptor fields are
+emitted by `explain_descriptor_agg` at
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:756-785`; its residency summary
+is built at `pg_accel/src/engine/ffi/custom_scan/explain.rs:486-536`.
 
 ## Plain EXPLAIN versus ANALYZE
 
@@ -111,7 +112,10 @@ SELECT pg_accel_kernel_executions() AS after;
 ```
 
 Run all three statements in the same backend. The counter API and reset
-behavior are documented at `pg_accel/src/engine/stats.rs:487-525`.
+behavior are documented at `pg_accel/src/engine/stats.rs:484-523`. For a
+grouped aggregate this delta counts completed bridge/lifecycle executions. It
+proves dispatch, but it is not a count of individual SYCL queue commands or
+device kernels submitted inside each execution.
 
 ## What the properties mean
 
@@ -129,7 +133,7 @@ behavior are documented at `pg_accel/src/engine/stats.rs:487-525`.
 | `GPU Descriptor Generations` | Relation/global/relfilenode evidence used to identify the resident inputs. |
 | `Rows Returned To CPU` | Bounded final rows materialized for PostgreSQL. This is not a CPU executor fallback. |
 | `Rows Dispatched` | Fact rows presented to resident aggregate dispatch. |
-| `Batches` | Completed bounded device aggregate calls. |
+| `Batches` | Completed synchronous aggregate lifecycle calls. One call may submit several queue commands and wait more than once. |
 | `GPU Kernel Dispatched` | Execution-time dispatch proof from this node. |
 
 ## Native decline example
@@ -154,9 +158,9 @@ SELECT pg_accel_planner_rejection_count('no_gpu_resident_pipeline');
 
 The expected plan is PostgreSQL-native and contains no `Custom Scan
 (GpuAccel...)`. The reason is recorded by the production base-relation hook at
-`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:483-502` through the
+`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:607-627` through the
 stable stats key at
-`pg_accel/src/engine/ffi/planner_hooks/decision.rs:111-112`.
+`pg_accel/src/engine/ffi/planner_hooks/decision.rs:108-116`.
 
 Other native shapes can have more specific stable reasons from the shape or
 opportunity observer. Capture the returned reason; do not infer one from the SQL
@@ -186,7 +190,7 @@ GROUP BY g;
 Turning `pg_accel.enabled` off after a Custom Scan was planned does not convert
 that plan to PostgreSQL execution. If the existing Custom Scan reaches
 execution, it raises an error rather than passing rows through; the guard is at
-`pg_accel/src/engine/ffi/custom_scan/mod.rs:2901-2918`.
+`pg_accel/src/engine/ffi/custom_scan/mod.rs:753-758`.
 
 Other frequently misread GUCs:
 

@@ -469,6 +469,7 @@ pub enum PgaccelAggState {}
 /// what the kernel actually receives.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: numeric variants are part of the stable C hash-key ABI
 pub enum PgaccelKeyType {
     Int32 = 0,
     Int64 = 1,
@@ -494,6 +495,7 @@ pub enum PgaccelHashTable {}
 /// Geometry type tag (mirrors `pgaccel_geom_type` in `pgaccel_ffi.h`).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // reason: numeric variants are part of PgaccelGeometry's stable C ABI
 pub enum PgaccelGeomType {
     Point = 0,
     LineString = 1,

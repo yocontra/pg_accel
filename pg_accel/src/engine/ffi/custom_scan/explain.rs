@@ -7,11 +7,8 @@ use std::ffi::{CStr, CString, c_int};
 
 use pgrx::pg_sys;
 
-use super::{GpuAccelScanState, GpuStrategy, dsm, function_scan, srf_target_list};
+use super::{GpuAccelScanState, GpuStrategy, dsm};
 use crate::engine::executor::agg::AggExecState;
-use crate::engine::executor::join::JoinExecState;
-use crate::engine::executor::scan::ScanExecState;
-use crate::engine::registry::AccelStrategy;
 use crate::engine::residency::{
     ArtifactEnsureOutcome, ResidentProofSnapshot, ResidentRelationEvidence,
 };
@@ -45,14 +42,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
         let strategy = GpuStrategy::decode((*state).accel.strategy);
 
         pg_sys::ExplainPropertyText(c"Strategy".as_ptr(), strategy.label().as_ptr(), es);
-        if strategy == GpuStrategy::Scan && !(*state).accel.executor.is_null() {
-            let scan_state = &*(*state).accel.executor.cast::<ScanExecState>();
-            pg_sys::ExplainPropertyText(
-                c"Accel Strategy".as_ptr(),
-                accel_strategy_label(scan_state.strategy()).as_ptr(),
-                es,
-            );
-        }
         pg_sys::ExplainPropertyBool(c"Plan Selected".as_ptr(), true, es);
         pg_sys::ExplainPropertyInteger(
             c"Batch Size".as_ptr(),
@@ -209,15 +198,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
                 );
             }
 
-            if strategy == GpuStrategy::Scan {
-                pg_sys::ExplainPropertyInteger(
-                    c"Parallel Worker".as_ptr(),
-                    std::ptr::null(),
-                    i64::from((*state).accel.parallel_worker_number),
-                    es,
-                );
-            }
-
             // For Agg strategy, report whether GPU reduce was used and
             // whether this is a partial (worker-side) aggregate path.
             if strategy == GpuStrategy::Agg && !(*state).accel.executor.is_null() {
@@ -248,59 +228,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
                     );
                 }
             }
-
-            if strategy == GpuStrategy::Join && !(*state).accel.executor.is_null() {
-                // SAFETY: executor was Box::into_raw'd as JoinExecState.
-                let join_state = &*(*state).accel.executor.cast::<JoinExecState>();
-                pg_sys::ExplainPropertyBool(
-                    c"Hash Join Count Only".as_ptr(),
-                    join_state.hash_join_count_only(),
-                    es,
-                );
-                if join_state.strategy() == crate::engine::registry::AccelStrategy::GpuHashJoin {
-                    let telemetry = join_state.hash_join_telemetry();
-                    pg_sys::ExplainPropertyInteger(
-                        c"Hash Join Build Count".as_ptr(),
-                        std::ptr::null(),
-                        telemetry.build_count() as i64,
-                        es,
-                    );
-                    pg_sys::ExplainPropertyInteger(
-                        c"Hash Join Redundant Builds".as_ptr(),
-                        std::ptr::null(),
-                        telemetry.redundant_inner_builds() as i64,
-                        es,
-                    );
-                    pg_sys::ExplainPropertyInteger(
-                        c"Hash Join Build Rows".as_ptr(),
-                        std::ptr::null(),
-                        telemetry.build_rows() as i64,
-                        es,
-                    );
-                    pg_sys::ExplainPropertyInteger(
-                        c"Hash Join Build Non-Null Rows".as_ptr(),
-                        std::ptr::null(),
-                        telemetry.build_non_null_rows() as i64,
-                        es,
-                    );
-                    pg_sys::ExplainPropertyInteger(
-                        c"Hash Join Probe Batches".as_ptr(),
-                        std::ptr::null(),
-                        telemetry.probe_batches() as i64,
-                        es,
-                    );
-                    pg_sys::ExplainPropertyBool(
-                        c"GPU Hash Table Reused Across Probe Batches".as_ptr(),
-                        join_state.hash_join_reuses_build_across_probe_batches(),
-                        es,
-                    );
-                    pg_sys::ExplainPropertyBool(
-                        c"Shared GPU Inner Reuse".as_ptr(),
-                        join_state.hash_join_shared_inner_reuse(),
-                        es,
-                    );
-                }
-            }
         }
     }
 }
@@ -308,20 +235,6 @@ pub(super) unsafe extern "C-unwind" fn explain_custom_scan(
 /// Determine expected thread count (GPU-only: always 1, no CPU worker pool).
 pub(super) fn resolve_thread_count() -> c_int {
     1
-}
-
-const fn accel_strategy_label(strategy: AccelStrategy) -> &'static CStr {
-    match strategy {
-        AccelStrategy::GpuSpatial => c"GpuSpatial",
-        AccelStrategy::GpuRaster => c"GpuRaster",
-        AccelStrategy::GpuH3 => c"GpuH3",
-        AccelStrategy::GpuSort => c"GpuSort",
-        AccelStrategy::GpuReduce => c"GpuReduce",
-        AccelStrategy::GpuExpr => c"GpuExpr",
-        AccelStrategy::GpuHashJoin => c"GpuHashJoin",
-        AccelStrategy::GpuWindow => c"GpuWindow",
-        AccelStrategy::GpuNestedLoopIneq => c"GpuNestedLoopIneq",
-    }
 }
 
 unsafe fn gpu_kernel_dispatched_for_explain(
@@ -336,31 +249,17 @@ unsafe fn gpu_kernel_dispatched_for_explain(
     }
 
     match strategy {
-        // GpuSort retired: begin_custom_scan rejects the strategy before an
-        // executor exists, so EXPLAIN can never reach this arm.
-        GpuStrategy::Sort => false,
-        GpuStrategy::FunctionScan => {
-            // SAFETY: for FunctionScan, `executor` is the still-live state
-            // pointer produced by function_scan::init_state.
-            unsafe { function_scan::dispatched_ok(executor) }
-        }
-        GpuStrategy::SrfTargetList => {
-            // SAFETY: for SrfTargetList, `executor` is the still-live state
-            // pointer produced by srf_target_list::init_state.
-            unsafe { srf_target_list::batches_executed(executor) > 0 }
-        }
-        // GpuPreAgg retired: begin_custom_scan rejects the strategy before an
-        // executor exists, so EXPLAIN can never reach this arm.
-        GpuStrategy::PreAgg => false,
-        GpuStrategy::Scan
-        | GpuStrategy::Join
-        | GpuStrategy::Agg
-        | GpuStrategy::Window
-        | GpuStrategy::Raster => {
-            // SAFETY: these strategies store counters directly in the same
-            // live GpuAccelScanState supplied to the EXPLAIN callback.
+        GpuStrategy::Agg | GpuStrategy::Raster => {
+            // SAFETY: resident executors store counters in this live state.
             unsafe { (*state).accel.batches_executed > 0 }
         }
+        GpuStrategy::Scan
+        | GpuStrategy::Join
+        | GpuStrategy::Sort
+        | GpuStrategy::Window
+        | GpuStrategy::PreAgg
+        | GpuStrategy::FunctionScan
+        | GpuStrategy::SrfTargetList => false,
     }
 }
 
@@ -399,14 +298,14 @@ fn avg_dispatch_time_per_batch_ms_for_explain(dispatch_time_us: u64, batches_exe
 
 fn gpu_resident_boundary_reason(strategy: GpuStrategy) -> &'static CStr {
     match strategy {
-        GpuStrategy::Scan => c"GpuScan consumes heap or child tuples on CPU via table_scan_getnextslot/ExecProcNode/MinimalTuple staging and emits PostgreSQL slots",
-        GpuStrategy::Join => c"GpuJoin collects child rows through ExecProcNode into host MinimalTuple/key buffers and reconstructs joined PostgreSQL slots",
-        GpuStrategy::Agg => c"GpuAgg drains heap or child tuples on CPU and stages host input/key/value buffers before GPU reduce or grouped aggregation",
+        GpuStrategy::Scan => c"GpuScan retired; no executable method table is registered",
+        GpuStrategy::Join => c"GpuJoin retired; resident joins execute inside GpuAgg descriptors",
+        GpuStrategy::Agg => c"GpuAgg requires a sealed resident proof and childless descriptor",
         GpuStrategy::Sort => c"GpuSort strategy retired; no plan can carry it",
-        GpuStrategy::Window => c"GpuWindow buffers input MinimalTuples, extracts host columns, stores host result vectors, and emits PostgreSQL slots",
+        GpuStrategy::Window => c"GpuWindow retired; no executable method table is registered",
         GpuStrategy::PreAgg => c"GpuPreAgg strategy retired; no plan can carry it",
-        GpuStrategy::FunctionScan => c"GpuFunctionScan dispatches constant arguments once, buffers host Datums, and drains output through PostgreSQL slots",
-        GpuStrategy::SrfTargetList => c"GpuAccelSrfTargetList drives ProjectSet input through ExecProcNode, buffers per-row SRF output, and emits expanded PostgreSQL tuples",
+        GpuStrategy::FunctionScan => c"GpuFunctionScan retired; no executable method table is registered",
+        GpuStrategy::SrfTargetList => c"GpuAccelSrfTargetList retired; no executable method table is registered",
         GpuStrategy::Raster => c"GpuRaster reads a generation-stamped resident raster column, retains only reconstructed output WKB, and materializes PostgreSQL raster values at final output",
     }
 }
@@ -1168,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn every_gpu_strategy_has_non_resident_boundary_reason() {
+    fn every_gpu_strategy_has_explicit_compatibility_boundary() {
         for strategy in [
             GpuStrategy::Scan,
             GpuStrategy::Join,
@@ -1181,22 +1080,10 @@ mod tests {
                 .to_str()
                 .expect("reason is utf8");
             assert!(
-                reason.contains("CPU")
-                    || reason.contains("ExecProcNode")
-                    || reason.contains("host")
-                    || reason.contains("PostgreSQL slots"),
-                "{strategy:?} reason must name the CPU/PostgreSQL boundary: {reason}"
+                !reason.is_empty(),
+                "{strategy:?} must have a boundary reason"
             );
         }
-    }
-
-    #[test]
-    fn accel_strategy_labels_are_explain_stable() {
-        assert_eq!(accel_strategy_label(AccelStrategy::GpuExpr), c"GpuExpr");
-        assert_eq!(
-            accel_strategy_label(AccelStrategy::GpuSpatial),
-            c"GpuSpatial"
-        );
     }
 
     #[test]
@@ -1234,42 +1121,6 @@ mod tests {
         // SAFETY: the same live local state remains valid and the Agg branch
         // reads only its inline batch counter.
         assert!(unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Agg, &raw const state) });
-    }
-
-    #[test]
-    fn explain_dispatch_flag_uses_batch_counters_for_scan_like_strategies() {
-        let mut state = GpuAccelScanState {
-            // SAFETY: CustomScanState is a PostgreSQL C aggregate containing
-            // pointer/scalar fields; zero is a valid inert test fixture state.
-            css: unsafe { std::mem::zeroed() },
-            accel: super::super::GpuAccelState {
-                strategy: GpuStrategy::Scan as i32,
-                exec_method: super::super::PlanExecMethod::Scan as i32,
-                batch_size: 1024,
-                expected_threads: 1,
-                rows_dispatched: 0,
-                batches_executed: 0,
-                dispatch_time_us: 0,
-                parallel_worker_number: -1,
-                dsm_flags: 0,
-                dsm_state: std::ptr::null_mut(),
-                dsm_counters_recorded: false,
-                parallel_agg_participants: 0,
-                parallel_agg_active_participants: 0,
-                parallel_agg_rows_dispatched: 0,
-                parallel_agg_batches_executed: 0,
-                parallel_agg_dispatch_time_us: 0,
-                resident_proof: ResidentProofSnapshot::not_proven(),
-                executor: std::ptr::dangling_mut::<u8>().cast(),
-            },
-        };
-
-        // SAFETY: `state` is a live local GpuAccelScanState and the Scan branch
-        // reads only its inline batch counter, not the dangling executor.
-        assert!(!unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Scan, &raw const state) });
-        state.accel.batches_executed = 1;
-        // SAFETY: the same live local state remains valid for the counter read.
-        assert!(unsafe { gpu_kernel_dispatched_for_explain(GpuStrategy::Scan, &raw const state) });
     }
 
     #[test]

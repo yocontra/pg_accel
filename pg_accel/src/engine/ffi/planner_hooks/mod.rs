@@ -210,12 +210,12 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             let _ = unsafe { generic_groupagg::try_inject(root, input_rel, output_rel, extra) };
         }
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => {
-            // Segmented device kernels exist, but the legacy WindowExecState
-            // materializes MinimalTuples and host result vectors. Keep both
-            // full-output and reducing SQL shapes native until a downstream
-            // consumer can carry an explicit resident proof. If PostgreSQL has
-            // worker partial input paths, also keep the missing partial-window
-            // hook visible until worker-local resident work can be injected.
+            // Segmented device kernels exist, but there is no resident window
+            // output protocol. Keep both full-output and reducing SQL shapes
+            // native until a downstream consumer can carry an explicit resident
+            // proof. If PostgreSQL has worker partial input paths, also keep the
+            // missing partial-window hook visible until worker-local resident work
+            // can be injected.
             // SAFETY: input_rel is the planner-owned input relation for this hook call.
             unsafe { record_window_partial_path_no_parallel_hook(input_rel) };
             if gucs::gpu_enabled() {

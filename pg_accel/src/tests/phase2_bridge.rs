@@ -13,9 +13,6 @@
 //!    derived from the C headers (`pgaccel_ffi.h`, `pgaccel_expr.h`,
 //!    `pgaccel_hash_agg.h`, `pgaccel_fused.h`) on LP64 targets. The C side
 //!    mirrors the same numbers with `static_assert`s.
-//! 4. `expr` batch guard — caller-supplied `num_rows` that disagrees with
-//!    `batch.num_rows` is rejected before any FFI call (heap-overflow
-//!    fieldless-enum FFI foot-gun).
 
 #![allow(clippy::unwrap_used)] // reason: test module
 
@@ -244,34 +241,4 @@ fn pgaccel_geometry_layout_matches_pgaccel_ffi_h() {
     assert_eq!(offset_of!(PgaccelGeometry, coord_count), 24);
     assert_eq!(offset_of!(PgaccelGeometry, ring_offsets), 32);
     assert_eq!(offset_of!(PgaccelGeometry, ring_count), 40);
-}
-
-// ---------------------------------------------------------------------------
-// 4. expr batch guard — num_rows mismatch is rejected before any FFI call
-// ---------------------------------------------------------------------------
-
-#[test]
-fn expr_template_cmp_const_rejects_num_rows_mismatch_before_dispatch() {
-    // A batch that claims 5 rows with null column pointers. If the guard
-    // failed and the wrapper dispatched, the kernel would read through the
-    // null pointers — the `None` return must come from the mismatch check
-    // alone (no GPU / no init in this test binary path).
-    let batch = PgaccelBatch {
-        num_rows: 5,
-        num_cols: 0,
-        col_data: std::ptr::null(),
-        col_nulls: std::ptr::null(),
-        col_types: std::ptr::null(),
-    };
-    let expr_failures_before = kernel_failure_count(GpuFailureDomain::Expr);
-    let got = crate::gpu::expr_template_cmp_const(&batch, 0, 0, 1.0, 3);
-    assert!(
-        got.is_none(),
-        "caller num_rows (3) != batch.num_rows (5) must be rejected"
-    );
-    assert_eq!(
-        kernel_failure_count(GpuFailureDomain::Expr),
-        expr_failures_before + 1,
-        "the rejected mismatch must be counted as an expr failure"
-    );
 }

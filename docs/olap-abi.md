@@ -184,9 +184,14 @@ select a reinterpretation path.
 
 Every executable pg_accel CustomScan private list ends with one canonical
 resident-proof block followed by `[0x50435732, 2, total_words, exec_method]`.
-The method identity is distinct for Scan, Join, Agg, Window, FunctionScan, and
-SRF-target-list vtables. The serialized `GpuStrategy`, method footer, selected
-`CustomScanMethods`, and concrete `CustomExecMethods` must all agree.
+The wire enum preserves distinct historical identities for Scan, Join, Agg,
+Window, FunctionScan, SRF-target-list, and Raster frames so old or malformed
+private data can be decoded and rejected deterministically. This does not imply
+that each identity has an executor: only Agg and Raster method tables are
+registered in this revision, and Raster injection is test-only. A frame naming
+a retired method is rejected before execution. For an active frame, the
+serialized `GpuStrategy`, method footer, selected `CustomScanMethods`, and
+concrete `CustomExecMethods` must all agree.
 
 Before PostgreSQL allocates an executor state, the decoder validates every
 Integer NodeTag, the exact frame length, all strategy-specific tags/counts and
@@ -723,6 +728,11 @@ marked poisoned after ERROR, OOM, TIMEOUT, or NO_DEVICE. A well-formed
 UNSUPPORTED capability does not poison state. Unknown raw status integers are
 logged/counted and become the generic hard execution error; they are never
 laundered into UNSUPPORTED.
+
+`ResidentByteAccounting` covers retained relation and derived-artifact memory,
+not this statement-scoped workspace. `req.bytes` is therefore additional peak
+device memory that admission and allocation policy must reserve explicitly;
+workspace reuse must not create an uncharged backend-local pool.
 
 The bridge owns every output buffer and derives its pointer matrix solely from
 the descriptor lane bits. Each output owner is identity-bound to the resolved

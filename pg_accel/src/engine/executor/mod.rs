@@ -1,24 +1,16 @@
 //! Executor nodes for pg_accel Custom Scan.
 //!
-//! - [`scan`]: Batch-dispatch scan executor that accumulates child tuples,
-//!   dispatches them through the strategy pipeline, and yields results one
-//!   at a time back to the PG executor.
-//! - [`join`]: Batched nested-loop join executor with residual condition
-//!   evaluation.
 //! - [`agg`]: Batched aggregate executor for GPU-accelerated reductions.
-//! - [`sort`]: Sort executor with GPU sort dispatch hook.
-//! - [`deser`]: Column-at-a-time deserialization helpers for late
-//!   materialization and predicate cost ordering.
+//! - [`sort`] and [`window`]: retired executor wire descriptors retained
+//!   for private-data compatibility.
 //! - [`ExecMetrics`], [`ResultDrain`], and [`OwnedMinimalTuple`]: small
 //!   reusable executor primitives for executor state ownership.
 
 pub mod agg;
 mod bounded;
-pub mod join;
 pub mod metrics;
 pub mod raster;
 pub mod result_drain;
-pub mod scan;
 pub mod sort;
 pub(crate) mod state;
 pub mod tuple;

@@ -28,10 +28,15 @@ claim is implied by the entries below.
 
 ### Changed
 
-- Production planning now exposes only complete GPU-resident aggregate
-  pipelines. Base scans, row-returning joins, sorts, windows, standalone
-  function scans, and raster plans remain PostgreSQL-native unless and until a
-  complete resident producer/consumer path is admitted.
+- Production execution registers only the childless aggregate and raster
+  Custom Scan method tables. Normal production planning selects only complete
+  GPU-resident aggregate pipelines; raster injection remains test-only.
+- Dormant host-staged base-scan and row-returning join executors, standalone
+  FunctionScan/target-list SRF executors, and executable window bridge surfaces
+  were removed. Planner observers remain only to record native declines;
+  PostgreSQL executes those SQL shapes. Sort also has no registered production
+  executor, and resident star joins exist only inside childless `GpuAccelAgg`
+  descriptors.
 - AdaptiveCpp provenance has one source of truth: the exact commit recorded in
   `.acpp-version`. Setup scripts, CI, documentation, notices, and package
   metadata must derive or reproduce that value.

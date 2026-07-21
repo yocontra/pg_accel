@@ -25,9 +25,6 @@ pub mod grouped_agg;
 
 pub mod three_layer;
 
-#[cfg(feature = "pg_test")]
-mod three_layer_tests;
-
 // Types are declared once in `types.rs` and re-exported so callers don't
 // need to know the bridge module layout.
 #[allow(unused_imports)]
@@ -59,41 +56,28 @@ pub use error::{
 mod counters;
 mod expr;
 mod h3;
-mod hash_agg;
-mod hash_join;
-mod nested_loop_ineq;
 mod raster;
 mod runtime;
 mod spatial;
-mod window;
-
-#[cfg(feature = "pg_test")]
-mod mod_tests;
 
 pub use counters::*;
 pub use expr::*;
 pub use grouped_agg::*;
 pub use h3::*;
-pub use hash_agg::*;
-pub use hash_join::*;
-pub use nested_loop_ineq::*;
 pub use raster::*;
 pub use runtime::*;
 pub use spatial::*;
-pub use window::*;
 
 #[cfg(test)]
 mod backend_local_owner_tests {
     use static_assertions::assert_not_impl_any;
 
     use super::{
-        ExprDeviceBuffer, GpuHashTable, GroupedAggChunk, GroupedAggOutputStorage,
-        GroupedAggSession, GroupedAggWorkspace, HashAggResult, ResolvedGroupedAggPlan,
+        ExprDeviceBuffer, GroupedAggChunk, GroupedAggOutputStorage, GroupedAggSession,
+        GroupedAggWorkspace, ResolvedGroupedAggPlan,
     };
 
     assert_not_impl_any!(ExprDeviceBuffer<u8>: Send, Sync);
-    assert_not_impl_any!(HashAggResult: Send, Sync);
-    assert_not_impl_any!(GpuHashTable: Send, Sync);
     assert_not_impl_any!(ResolvedGroupedAggPlan<'static>: Send, Sync);
     assert_not_impl_any!(GroupedAggChunk<'static, 'static>: Send, Sync);
     assert_not_impl_any!(GroupedAggWorkspace: Send, Sync);
