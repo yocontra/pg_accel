@@ -2883,11 +2883,49 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             ("EntryBuilder.CreateAlloca(", "EntryBuilder.CreateCall("),
             ("Builder.CreateICmpULT(Sum, Old)", "Builder.CreateICmpEQ(Sum, Old)"),
             (
+                "Builder.CreateOr(PriorOverflow, Overflow)",
+                "Builder.CreateAnd(PriorOverflow, Overflow)",
+            ),
+            (
                 "BatchInputs.push_back(llvm::ConstantInt::get(I32, Slot + 1))",
                 "BatchInputs.push_back(llvm::ConstantInt::get(I32, Slot))",
             ),
+            (
+                "BatchInputs.push_back(Builder.CreateLoad(I1, Accumulator.overflow))",
+                "BatchInputs.push_back(llvm::ConstantInt::getFalse(Ctx))",
+            ),
+            (
+                "(BatchBundle->Inputs.size() % 3) != 0",
+                "(BatchBundle->Inputs.size() % 2) != 0",
+            ),
             ('os << " [[buffer(30)]]"', 'os << " [[buffer(29)]]"'),
             ("metal_device_profile_buffer_index = 30", "metal_device_profile_buffer_index = 29"),
+            (
+                "const uint64_t LowSlot = Slot->getZExtValue() * 2",
+                "const uint64_t LowSlot = Slot->getZExtValue()",
+            ),
+            ("const uint64_t HighSlot = LowSlot + 1", "const uint64_t HighSlot = LowSlot"),
+            (
+                "static_cast<uint64_t>(deviceProfileCounterCount) * 2",
+                "static_cast<uint64_t>(deviceProfileCounterCount)",
+            ),
+            ("__acpp_profile_carry_", "__acpp_profile_no_carry_"),
+            (
+                '" < __acpp_profile_high_step_"',
+                '" == __acpp_profile_high_step_"',
+            ),
+            (
+                "const std::size_t slots = logical_slots * 2 + 1",
+                "const std::size_t slots = logical_slots + 1",
+            ),
+            (
+                "const bool overflow = counters[overflow_slot] != 0",
+                "const bool overflow = false",
+            ),
+            (
+                "static_cast<uint64_t>(counters[low_slot + 1]) << 32",
+                "static_cast<uint64_t>(counters[low_slot + 1])",
+            ),
             ('Name.consume_front("\\1")', 'Name.consume_front("_")'),
             (
                 "if (!any_nonzero && !overflow) return;",
@@ -2972,11 +3010,16 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("no_profile_instrument_function", fixture)
         self.assertIn('asm("llvm.instrprof.increment.step")', fixture)
+        self.assertIn("UINT64_MAX", fixture)
         self.assertIn("UINT64_C(0x100000000)", fixture)
+        self.assertEqual(fixture.count("overflow_profile_name, 0x12345678u"), 2)
+        self.assertEqual(fixture.count("overflow_profile_step();"), 1)
         self.assertIn("metal_overflow_only_probe", fixture)
+        self.assertIn("metal_wide_counter_probe", fixture)
         self.assertIn("metal_profile_flush_probe", fixture)
         self.assertIn("metal_short_write_probe", fixture)
         self.assertIn('mode == "ordinary"', fixture)
+        self.assertIn('mode == "wide"', fixture)
         self.assertIn('mode == "short-write"', fixture)
         self.assertIn("SIGXFSZ", fixture)
         self.assertIn("setrlimit(RLIMIT_FSIZE", fixture)
@@ -2994,6 +3037,9 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn('ACPP_METAL_DEVICE_PROFILE_DIR="$output_path"', runner)
         self.assertIn('"$overflow_count" != 1', runner)
         self.assertIn('"$proftext_count" != 0', runner)
+        self.assertIn('"$wide_overflow_count" != 0', runner)
+        self.assertIn('"$wide_proftext_count" != 1', runner)
+        self.assertIn('"$wide_value" != 4294967296', runner)
         self.assertIn("expect_flush_failure regular-file", runner)
         self.assertIn("expect_flush_failure unwritable-overflow", runner)
         self.assertIn("expect_flush_failure unwritable-proftext", runner)
@@ -3047,6 +3093,12 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.overflow"\n'
                 "  exit 0\n"
                 "fi\n"
+                "if [[ \"$ACPP_METAL_DEVICE_PROFILE_DIR\" == */wide/profiles ]]; then\n"
+                "  printf 'metal_wide_counter_probe\\n# Func Hash:\\n1\\n"
+                "# Num Counters:\\n1\\n# Counter Values:\\n4294967296\\n' > "
+                '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.proftext"\n'
+                "  exit 0\n"
+                "fi\n"
                 "exit 9\n"
             )
             passed = subprocess.run(
@@ -3055,6 +3107,10 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             )
             self.assertEqual(passed.returncode, 0, passed.stderr)
             self.assertIn("overflow=1 proftext=0", passed.stdout)
+            self.assertIn(
+                "wide profile: PASS (overflow=0 proftext=1 value=4294967296)",
+                passed.stdout,
+            )
 
             install_fake_probe(
                 "#!/usr/bin/env bash\n"

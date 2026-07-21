@@ -63,6 +63,27 @@ if [[ "$overflow_count" != 1 || "$proftext_count" != 0 ]]; then
 fi
 echo "overflow-only profile: PASS (overflow=1 proftext=0)"
 
+mkdir -p "$work_dir/wide/profiles"
+if ! run_probe "$work_dir/wide" "$work_dir/wide/profiles" wide; then
+    echo "wide profile unexpectedly failed" >&2
+    exit 1
+fi
+wide_overflow_count="$(find "$work_dir/wide/profiles" -maxdepth 1 -name '*.overflow' | wc -l | tr -d ' ')"
+wide_proftext_count="$(find "$work_dir/wide/profiles" -maxdepth 1 -name '*.proftext' | wc -l | tr -d ' ')"
+wide_value=missing
+if [[ "$wide_proftext_count" == 1 ]]; then
+    wide_profile="$(find "$work_dir/wide/profiles" -maxdepth 1 -name '*.proftext' -print -quit)"
+    wide_value="$(awk '
+        $0 == "metal_wide_counter_probe" { target = 1; next }
+        target && $0 == "# Counter Values:" { getline; print; exit }
+    ' "$wide_profile")"
+fi
+if [[ "$wide_overflow_count" != 0 || "$wide_proftext_count" != 1 || "$wide_value" != 4294967296 ]]; then
+    echo "wide profile mismatch: overflow=$wide_overflow_count proftext=$wide_proftext_count value=$wide_value" >&2
+    exit 1
+fi
+echo "wide profile: PASS (overflow=0 proftext=1 value=4294967296)"
+
 expect_flush_failure() {
     local label="$1"
     local case_dir="$2"

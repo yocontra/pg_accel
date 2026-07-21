@@ -13,6 +13,7 @@ extern "C" void profile_step(const char*, std::uint64_t, std::uint32_t,
     asm("llvm.instrprof.increment.step");
 
 static const char overflow_profile_name[] = "metal_overflow_only_probe";
+static const char wide_profile_name[] = "metal_wide_counter_probe";
 static const char ordinary_profile_name[] = "metal_profile_flush_probe";
 static const char short_write_profile_name[] =
     "metal_short_write_probe_"
@@ -28,11 +29,22 @@ static const char short_write_profile_name[] =
 
 SYCL_EXTERNAL __attribute__((noinline)) void overflow_profile_step() {
   profile_step(overflow_profile_name, 0x12345678u, 1u, 0u,
-               UINT64_C(0x100000000));
+               UINT64_MAX);
+  profile_step(overflow_profile_name, 0x12345678u, 1u, 0u,
+               UINT64_C(1));
 }
 
 struct OverflowOnlyProfileKernel {
   void operator()() const { overflow_profile_step(); }
+};
+
+SYCL_EXTERNAL __attribute__((noinline)) void wide_profile_step() {
+  profile_step(wide_profile_name, 0x23456789u, 1u, 0u,
+               UINT64_C(0x100000000));
+}
+
+struct WideProfileKernel {
+  void operator()() const { wide_profile_step(); }
 };
 
 SYCL_EXTERNAL __attribute__((noinline)) void ordinary_profile_step() {
@@ -57,6 +69,8 @@ int main(int argc, char** argv) {
   const std::string_view mode{argv[1]};
   if (mode == "overflow") {
     queue.single_task(OverflowOnlyProfileKernel{}).wait();
+  } else if (mode == "wide") {
+    queue.single_task(WideProfileKernel{}).wait();
   } else if (mode == "ordinary") {
     queue.single_task(OrdinaryProfileKernel{}).wait();
   } else if (mode == "short-write") {
