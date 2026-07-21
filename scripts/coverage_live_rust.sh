@@ -231,7 +231,7 @@ require_nonempty_file "$source_hashes"
 printf '%s  %s\n' "$actual_object_sha" "$bench_bin" > "$artifact_dir/object.sha256"
 
 provenance_path="$artifact_dir/provenance.json"
-COVERAGE_LIVE_SCHEMA_VERSION="$COVERAGE_LIVE_SCHEMA_VERSION" \
+env COVERAGE_LIVE_SCHEMA_VERSION="$COVERAGE_LIVE_SCHEMA_VERSION" \
 COVERAGE_LIVE_CANDIDATE="$actual_candidate" COVERAGE_LIVE_TREE="$actual_tree" \
 COVERAGE_LIVE_OBJECT_SHA="$actual_object_sha" COVERAGE_LIVE_REPO_ROOT="$repo_root" \
 COVERAGE_LIVE_BUILD_DIR="$build_dir" COVERAGE_LIVE_BENCH_BIN="$bench_bin" \

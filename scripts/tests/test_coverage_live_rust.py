@@ -54,6 +54,19 @@ class CoverageLiveRustTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_provenance_environment_does_not_assign_readonly_shell_state(self) -> None:
+        harness = HARNESS.read_text(encoding="utf-8")
+        self.assertIn(
+            'env COVERAGE_LIVE_SCHEMA_VERSION="$COVERAGE_LIVE_SCHEMA_VERSION" \\\n',
+            harness,
+        )
+
+        result = call_library(
+            'env COVERAGE_LIVE_SCHEMA_VERSION="$COVERAGE_LIVE_SCHEMA_VERSION" '
+            "/bin/sh -c 'test \"$COVERAGE_LIVE_SCHEMA_VERSION\" = 1'"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_help_needs_no_database(self) -> None:
         result = subprocess.run(
             ["bash", str(HARNESS), "--help"],
