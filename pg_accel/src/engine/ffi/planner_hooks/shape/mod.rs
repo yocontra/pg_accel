@@ -25,7 +25,6 @@ pub use crate::engine::spec::{
 };
 
 pub use builder::build_shape;
-#[cfg(test)]
 pub(super) use cost::dense_atomic_fact_row_floor;
 pub use cost::{ShapeCost, ShapeCostGate, estimate_shape_cost};
 pub(super) use cost::{dense_atomic_sum_count_cost, dense_atomic_sum_count_lifecycle};

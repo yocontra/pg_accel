@@ -8,7 +8,8 @@ use pgrx::pg_sys::{self, List, NodeTag, RelOptInfo};
 
 use super::shape::{
     RelationResidency, RelationResidencyRequirement, ResidencyEstimate, ShapeCostGate,
-    ShapeDecline, ShapePlan, dense_atomic_sum_count_cost, dense_atomic_sum_count_lifecycle,
+    ShapeDecline, ShapePlan, dense_atomic_fact_row_floor, dense_atomic_sum_count_cost,
+    dense_atomic_sum_count_lifecycle,
 };
 use super::{add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
@@ -396,21 +397,32 @@ fn apply_exact_residency(
     ) {
         shape.cost.replace_aggregate(aggregate);
     }
-    if shape.cost_gate == ShapeCostGate::Eligible
-        && dense_atomic_sum_count_lifecycle(&shape.spec, &shape.descriptor_resolution, model)
+    if dense_atomic_sum_count_lifecycle(&shape.spec, &shape.descriptor_resolution, model)
+        && matches!(
+            shape.cost_gate,
+            ShapeCostGate::Eligible | ShapeCostGate::FactRowsBelowDeviceMinimum { .. }
+        )
     {
-        // Exact loaded rows are authoritative. Before first load, use the
-        // conservative planner estimate so an obviously oversized descriptor
-        // cannot be admitted into the slow bounded lifecycle.
+        // Exact loaded rows replace the generic estimate-derived row gate.
+        // Before first load, the planner estimate remains the best available
+        // evidence. Other shape gates are deliberately never overwritten.
         let lifecycle_fact_rows = resident_fact_rows.unwrap_or(estimated_fact_rows);
         let lifecycle_fact_rows =
             Rows::new(usize::try_from(lifecycle_fact_rows).unwrap_or(usize::MAX));
-        if lifecycle_fact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows {
-            shape.cost_gate = ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+        let required = dense_atomic_fact_row_floor(&shape.spec, model);
+        shape.cost_gate = if lifecycle_fact_rows < required {
+            ShapeCostGate::FactRowsBelowDeviceMinimum {
+                estimated: lifecycle_fact_rows,
+                required,
+            }
+        } else if lifecycle_fact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows {
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
                 fact_rows: lifecycle_fact_rows,
                 maximum: model.executor.gpu_grouped_agg_one_shot_max_rows,
-            };
-        }
+            }
+        } else {
+            ShapeCostGate::Eligible
+        };
     }
     Ok(())
 }
@@ -2251,11 +2263,71 @@ mod tests {
             &star.descriptor_resolution,
             &model
         ));
+        let count_only = count_shape();
+        assert!(!dense_atomic_sum_count_lifecycle(
+            &count_only.spec,
+            &count_only.descriptor_resolution,
+            &model
+        ));
         assert!(!dense_atomic_sum_count_lifecycle(
             &h3_parent_shape().spec,
             &h3_parent_shape().descriptor_resolution,
             &model
         ));
+    }
+
+    #[test]
+    fn exact_resident_rows_replace_only_the_generic_dense_row_gate() {
+        let model = model();
+        let floor = dense_atomic_fact_row_floor(&dense_sum_count_shape(1).spec, &model);
+        let below_floor = floor.get() - 1;
+        let at_floor = floor.get();
+
+        let mut stale_high = dense_sum_count_shape(10_000_000);
+        apply_resident_evidence(
+            &mut stale_high,
+            u64::try_from(below_floor).expect("test floor fits u64"),
+            true,
+        );
+        assert_eq!(
+            stale_high.cost_gate,
+            ShapeCostGate::FactRowsBelowDeviceMinimum {
+                estimated: Rows::new(below_floor),
+                required: floor,
+            },
+            "exact small residency must replace a stale-high eligible estimate"
+        );
+
+        let mut stale_low =
+            dense_sum_count_shape(u64::try_from(below_floor).expect("test floor fits u64"));
+        stale_low.cost_gate = ShapeCostGate::FactRowsBelowDeviceMinimum {
+            estimated: Rows::new(below_floor),
+            required: floor,
+        };
+        apply_resident_evidence(
+            &mut stale_low,
+            u64::try_from(at_floor).expect("test floor fits u64"),
+            true,
+        );
+        assert_eq!(
+            stale_low.cost_gate,
+            ShapeCostGate::Eligible,
+            "exact in-band residency must replace a stale-low row-floor estimate"
+        );
+
+        let unrelated_gate = ShapeCostGate::GroupsExceedDeviceMaximum {
+            estimated: Rows::new(11),
+            maximum: Rows::new(10),
+        };
+        let mut unrelated =
+            dense_sum_count_shape(u64::try_from(at_floor).expect("test floor fits u64"));
+        unrelated.cost_gate = unrelated_gate;
+        apply_resident_evidence(
+            &mut unrelated,
+            u64::try_from(at_floor).expect("test floor fits u64"),
+            true,
+        );
+        assert_eq!(unrelated.cost_gate, unrelated_gate);
     }
 
     #[test]
