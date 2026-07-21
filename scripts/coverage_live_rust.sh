@@ -46,6 +46,10 @@ sha256_text() {
     fi
 }
 
+normalize_sha256() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 require_nonempty_file() {
     local path="$1"
     [ -f "$path" ] && [ -s "$path" ] || die "required evidence is missing or empty: $path"
@@ -190,7 +194,7 @@ actual_tree="$(git rev-parse 'HEAD^{tree}')"
     die "live Rust coverage requires an exact clean source tree"
 
 actual_object_sha="$(sha256_file "$bench_bin")"
-[ "${actual_object_sha,,}" = "${expected_object_sha,,}" ] || \
+[ "$actual_object_sha" = "$(normalize_sha256 "$expected_object_sha")" ] || \
     die "instrumented benchmark object hash mismatch"
 expected_extension_sha="$(sha256_file "$expected_extension_bin")"
 

@@ -40,6 +40,20 @@ class CoverageLiveRustTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_live_shell_path_is_macos_bash_compatible(self) -> None:
+        harness = HARNESS.read_text(encoding="utf-8")
+        gate = COVERAGE_GATE.read_text(encoding="utf-8")
+
+        self.assertNotRegex(harness, r"\$\{[^}]+,,\}")
+        self.assertNotIn("BASHPID", gate)
+        self.assertIn('database_name="pgaccel_cov_rust_pg${pg}_$$"', gate)
+
+        uppercase = "A" * 64
+        result = call_library(
+            f'[ "$(normalize_sha256 {uppercase})" = "{uppercase.lower()}" ]'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_help_needs_no_database(self) -> None:
         result = subprocess.run(
             ["bash", str(HARNESS), "--help"],
@@ -181,7 +195,7 @@ class CoverageLiveRustTests(unittest.TestCase):
             '--candidate-sha "$git_commit"',
             '--source-tree "$git_source_tree"',
             '--object-sha256 "$production_object_sha"',
-            'database_name="pgaccel_cov_rust_pg${pg}_${BASHPID}"',
+            'database_name="pgaccel_cov_rust_pg${pg}_$$"',
             '"$(sha256_file "$bench_bin")" != "$production_object_sha"',
         ):
             with self.subTest(required=required):

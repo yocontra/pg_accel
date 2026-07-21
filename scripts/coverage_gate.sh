@@ -361,7 +361,7 @@ run_live_rust_coverage_harness() (
         return 1
     fi
     admin_connection="host=localhost port=$port dbname=postgres"
-    database_name="pgaccel_cov_rust_pg${pg}_${BASHPID}"
+    database_name="pgaccel_cov_rust_pg${pg}_$$"
     connection="host=localhost port=$port dbname=$database_name"
     if [ "$(sha256_file "$bench_bin")" != "$production_object_sha" ]; then
         fail_live_extension_install \
