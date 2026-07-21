@@ -64,7 +64,7 @@ CITATION_RE = re.compile(
 GUC_TABLE_HEADER = ("Parameter", "Type", "Default", "Context", "Range", "Effect")
 CAPABILITY_TABLE_HEADER = (
     "Capability",
-    "Kernel or bridge",
+    "Implementation surface",
     "Production planner",
     "Current boundary",
 )
@@ -80,14 +80,23 @@ EXPECTED_CAPABILITIES = {
     "H3-derived group key inside a resident aggregate": ("Present", "Selectable"),
     "PostGIS spatial filter inside a resident aggregate": ("Present", "Test-only"),
     "Standalone PostGIS or H3 function/SRF": (
-        "Present and some names registered",
+        "Aggregate primitives and adapter registry metadata remain; standalone executor removed",
         "Not selectable",
     ),
-    "Base scan, WHERE filter, or projection": ("Present", "Not selectable"),
-    "Row-returning hash or inequality join": ("Present", "Not selectable"),
-    "Sort or top-k": ("Present", "Not selectable"),
-    "Window": ("Present", "Not selectable"),
-    "Raster": ("Present", "Not selectable"),
+    "Base scan, WHERE filter, or projection": (
+        "No registered Custom Scan executor; host-staged implementation retired",
+        "Not selectable",
+    ),
+    "Row-returning hash or inequality join": (
+        "No registered row-returning executor; host-staged implementation retired",
+        "Not selectable",
+    ),
+    "Sort or top-k": (
+        "Kernel or descriptor code may remain; no registered executor",
+        "Not selectable",
+    ),
+    "Window": ("Kernel source may remain; no registered executor", "Not selectable"),
+    "Raster": ("Registered childless resident executor", "Test-only"),
 }
 
 GUC_EFFECT_MARKERS = {
@@ -645,13 +654,13 @@ def parse_capability_table(text: str) -> tuple[dict[str, tuple[str, str]], list[
     except ValueError as error:
         return {}, [str(error)]
     if not rows:
-        return {}, ["kernel-versus-planner capability table was not found"]
+        return {}, ["implementation-versus-planner capability table was not found"]
     table: dict[str, tuple[str, str]] = {}
-    for capability, kernel, planner, _boundary in rows:
+    for capability, implementation, planner, _boundary in rows:
         if capability in table:
             errors.append(f"duplicate capability row: {capability}")
             continue
-        table[capability] = (kernel, planner)
+        table[capability] = (implementation, planner)
     return table, errors
 
 
