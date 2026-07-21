@@ -7012,7 +7012,7 @@ mod tests {
             failures[0].kind,
             BenchmarkShipGateFailureKind::ExpectedWinnerBelowThreshold
         );
-        assert!((failures[0].gate_floor - 1.1).abs() < f64::EPSILON);
+        assert!((failures[0].gate_floor - 1.15).abs() < f64::EPSILON);
     }
 
     #[test]

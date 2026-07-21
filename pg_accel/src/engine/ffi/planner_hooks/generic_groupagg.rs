@@ -8,10 +8,10 @@ use pgrx::pg_sys::{self, List, NodeTag, RelOptInfo};
 
 use super::shape::{
     RelationResidency, RelationResidencyRequirement, ResidencyEstimate, ShapeCostGate,
-    ShapeDecline, ShapePlan, dense_atomic_sum_count_cost,
+    ShapeDecline, ShapePlan, dense_atomic_sum_count_cost, dense_atomic_sum_count_lifecycle,
 };
 use super::{add_gpu_path_with_resident_proof, rel_rows_estimate};
-use crate::engine::cost::{self, PgCost, TypedCostModel};
+use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
     estimate_descriptor_artifact_bytes_upper_bound, validate_descriptor_capability,
 };
@@ -119,6 +119,9 @@ impl AdmissionDecline {
             Self::DeviceCostGate(ShapeCostGate::Eligible) => "generic_invalid_eligible_cost_gate",
             Self::DeviceCostGate(ShapeCostGate::FactRowsBelowDeviceMinimum { .. }) => {
                 "generic_fact_rows_below_device_minimum"
+            }
+            Self::DeviceCostGate(ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum { .. }) => {
+                "generic_fact_rows_exceed_dense_one_shot_maximum"
             }
             Self::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum { .. }) => {
                 "h3_rows_below_grouped_agg_min"
@@ -392,6 +395,22 @@ fn apply_exact_residency(
         model,
     ) {
         shape.cost.replace_aggregate(aggregate);
+    }
+    if shape.cost_gate == ShapeCostGate::Eligible
+        && dense_atomic_sum_count_lifecycle(&shape.spec, &shape.descriptor_resolution, model)
+    {
+        // Exact loaded rows are authoritative. Before first load, use the
+        // conservative planner estimate so an obviously oversized descriptor
+        // cannot be admitted into the slow bounded lifecycle.
+        let lifecycle_fact_rows = resident_fact_rows.unwrap_or(estimated_fact_rows);
+        let lifecycle_fact_rows =
+            Rows::new(usize::try_from(lifecycle_fact_rows).unwrap_or(usize::MAX));
+        if lifecycle_fact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows {
+            shape.cost_gate = ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: lifecycle_fact_rows,
+                maximum: model.executor.gpu_grouped_agg_one_shot_max_rows,
+            };
+        }
     }
     Ok(())
 }
@@ -2170,6 +2189,73 @@ mod tests {
             dense_atomic_fact_row_floor(&star.spec, &model),
             model.planner.gpu_preagg_min_fact_rows
         );
+    }
+
+    #[test]
+    fn dense_sum_count_admission_stops_at_the_device_one_shot_boundary() {
+        let model = model();
+        let maximum = model.executor.gpu_grouped_agg_one_shot_max_rows;
+        let maximum_u64 = u64::try_from(maximum.get()).expect("test row limit fits u64");
+
+        let mut at_maximum = dense_sum_count_shape(maximum_u64);
+        apply_resident_evidence(&mut at_maximum, maximum_u64, true);
+        assert_eq!(at_maximum.cost_gate, ShapeCostGate::Eligible);
+
+        let above_u64 = maximum_u64 + 1;
+        let mut above_maximum = dense_sum_count_shape(above_u64);
+        apply_resident_evidence(&mut above_maximum, above_u64, true);
+        assert_eq!(
+            above_maximum.cost_gate,
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: Rows::new(maximum.get() + 1),
+                maximum,
+            }
+        );
+        let decline = gate_cost(
+            &above_maximum,
+            Some(f64::MAX),
+            model.planner.gpu_agg_cost_ratio,
+            effective_path_cost(&above_maximum, 1.0),
+        )
+        .expect_err("limit + 1 must stay on PostgreSQL");
+        assert_eq!(
+            decline.code(),
+            "generic_fact_rows_exceed_dense_one_shot_maximum"
+        );
+
+        let mut first_use = dense_sum_count_shape(above_u64);
+        apply_exact_residency(
+            &mut first_use,
+            &[estimate(false, 4_096)],
+            AdmissionPolicy {
+                auto_load: true,
+                budget_bytes: u64::MAX,
+                budget_snapshot: budget_snapshot(0, 0, 0),
+            },
+            &model,
+        )
+        .expect("first-use estimate fits the unbounded test budget");
+        assert_eq!(
+            first_use.cost_gate,
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: Rows::new(maximum.get() + 1),
+                maximum,
+            },
+            "the planner estimate must fail closed before the first resident load"
+        );
+
+        let mut star = dense_sum_count_shape(above_u64);
+        add_star_dimension(&mut star, JoinMultiplicity::Unique);
+        assert!(dense_atomic_sum_count_lifecycle(
+            &star.spec,
+            &star.descriptor_resolution,
+            &model
+        ));
+        assert!(!dense_atomic_sum_count_lifecycle(
+            &h3_parent_shape().spec,
+            &h3_parent_shape().descriptor_resolution,
+            &model
+        ));
     }
 
     #[test]

@@ -165,6 +165,20 @@ pub fn dense_atomic_fact_row_floor(spec: &AggQuerySpec, model: &TypedCostModel) 
     }
 }
 
+/// Whether this descriptor has the dense integer SUM/COUNT lifecycle whose
+/// fast path is bounded by `gpu_grouped_agg_one_shot_max_rows`.
+///
+/// This deliberately excludes count-only and H3 descriptors: their measured
+/// large-row paths use different execution strategies.
+pub fn dense_atomic_sum_count_lifecycle(
+    spec: &AggQuerySpec,
+    resolution: &DescriptorResolution,
+    model: &TypedCostModel,
+) -> bool {
+    dense_descriptor_structure(spec, resolution)
+        && dense_atomic_sum_count_per_row_cost(spec, true, model).is_some()
+}
+
 /// Return operation-count aggregate cost only when exact resident evidence
 /// proves that the runtime will take the dense atomic one-shot branch.
 pub fn dense_atomic_sum_count_cost(
@@ -184,7 +198,7 @@ pub fn dense_atomic_sum_count_cost(
     let exact_rows = Rows::new(resident_fact_rows);
     if exact_rows > one_shot_max_rows
         || exact_rows < dense_atomic_fact_row_floor(spec, model)
-        || !dense_descriptor_structure(spec, resolution)
+        || !dense_atomic_sum_count_lifecycle(spec, resolution, model)
     {
         return None;
     }
@@ -201,6 +215,10 @@ pub enum ShapeCostGate {
     FactRowsBelowDeviceMinimum {
         estimated: Rows,
         required: Rows,
+    },
+    DenseOneShotRowsExceedDeviceMaximum {
+        fact_rows: Rows,
+        maximum: Rows,
     },
     H3RowsBelowDeviceMinimum {
         estimated: Rows,

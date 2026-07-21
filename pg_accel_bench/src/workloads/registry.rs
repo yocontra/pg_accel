@@ -648,10 +648,6 @@ const FP64_CALIBRATION: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::NotGated,
     flags: EvidenceEligibility::FP64_CALIBRATION,
 };
-const FP64_WINNER: EvidenceEligibility = EvidenceEligibility {
-    threshold: ThresholdEvidenceEligibility::GpuWinner,
-    flags: EvidenceEligibility::FP64_CALIBRATION,
-};
 const FP64_NATIVE_DECLINE: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::NativeDeclineOnly,
     flags: EvidenceEligibility::FP64_CALIBRATION,
@@ -1062,7 +1058,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .pins(PINS_H3_PARENT)
         .extensions(H3)
         .h3(H3LaneClass::Winning {
-            min_warm_speedup: 1.1,
+            min_warm_speedup: 1.15,
         })
         .evidence(H3_WINNER),
     workload("h3_grid_distance", C::GpuH3, K::H3LatLng)
@@ -1231,7 +1227,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .evidence(FP64_NATIVE_DECLINE),
     workload("reduce_f64_minmax", C::Fp64Matrix, K::ResidentF64Reduce)
         .pins(PINS_REDUCE_F64)
-        .evidence(FP64_WINNER),
+        .evidence(FP64_NATIVE_DECLINE),
     workload("reduce_f64_stats", C::Fp64Matrix, K::ResidentF64Reduce)
         .pins(PINS_REDUCE_F64)
         .evidence(FP64_NATIVE_DECLINE),

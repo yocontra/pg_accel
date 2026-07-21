@@ -982,13 +982,16 @@ const SPATIAL_BREAK_EVEN_VERTS_X_ROWS: u64 = 500_000_000;
 const SPATIAL_MAX_VERTS_X_ROWS: u64 = 50_000_000_000;
 const SPATIAL_MAX_OUTPUT_FRACTION_PCT: usize = 80;
 const SPATIAL_DEFAULT_MIN_BATCH_SIZE: usize = 65_536;
-const H3_GROUPED_WINNER_MIN_ROWS: usize = 25_000;
+const H3_GROUPED_WINNER_MIN_ROWS: usize = 100_000;
 const RASTER_STANDALONE_MIN_ROWS: usize = 200_000;
-const GROUPAGG_WINNER_MIN_ROWS: usize = 10_000;
+const GROUPAGG_WINNER_MIN_ROWS: usize = 250_000;
+const PREAGG_WINNER_MIN_ROWS: usize = 50_000;
+const DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS: usize = 1_000_000;
 const FILTERED_GROUPAGG_WINNER_MIN_ROWS: usize = 100_000;
-const SSBM_WINNER_MIN_ROWS: usize = 10_000;
+const SSBM_WINNER_MIN_ROWS: usize = PREAGG_WINNER_MIN_ROWS;
 const CORRECTNESS_DIFF_EVIDENCE: &str =
     "correctness_diffs artifact must pass before timing when artifacts are enabled";
+const FINAL_MATRIX_MIN_WARM_SPEEDUP: f64 = 1.15;
 const GENERIC_GPU_DISPATCH_EVIDENCE: &str =
     "dispatch counter delta > 0 and accel output rows consumed";
 const GENERIC_NATIVE_DISPATCH_EVIDENCE: &str =
@@ -1277,17 +1280,17 @@ fn groupagg_threshold_matrix_entry(
     };
     let expectation = semantic_decline_reason.map_or_else(
         || {
-            if rows >= winner_min_rows {
+            if rows > DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS {
+                BenchmarkLaneExpectation::NativeDecline {
+                    reason: "generic_fact_rows_exceed_dense_one_shot_maximum",
+                }
+            } else if rows >= winner_min_rows {
                 BenchmarkLaneExpectation::GpuWinner {
-                    min_warm_speedup: 1.0,
+                    min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
                 }
             } else {
                 BenchmarkLaneExpectation::NativeDecline {
-                    reason: if name == "filtered_grouped_agg" {
-                        "resident_groupagg_filtered_rows_below_selective_min"
-                    } else {
-                        "resident_groupagg_rows_below_olap_min"
-                    },
+                    reason: "generic_fact_rows_below_device_minimum",
                 }
             }
         },
@@ -1327,6 +1330,10 @@ fn groupagg_threshold_matrix_entry(
         },
         threshold_basis: if semantic_decline_reason.is_some() {
             "current PG18 planner preflight structurally declines this grouped-aggregate shape"
+        } else if rows > DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS {
+            "M2 Max DeviceLimits dense grouped one-shot maximum"
+        } else if rows < winner_min_rows {
+            "M2 Max DeviceLimits grouped-aggregate fact-row minimum"
         } else {
             threshold_basis
         },
@@ -1344,13 +1351,17 @@ fn olap_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
         _ => None,
     };
     let expectation = structural_decline.map_or(
-        if rows >= SSBM_WINNER_MIN_ROWS {
+        if rows > DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS {
+            BenchmarkLaneExpectation::NativeDecline {
+                reason: "generic_fact_rows_exceed_dense_one_shot_maximum",
+            }
+        } else if rows >= SSBM_WINNER_MIN_ROWS {
             BenchmarkLaneExpectation::GpuWinner {
-                min_warm_speedup: 1.0,
+                min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
             }
         } else {
             BenchmarkLaneExpectation::NativeDecline {
-                reason: "ssbm_rows_below_olap_min",
+                reason: "generic_fact_rows_below_device_minimum",
             }
         },
         |reason| BenchmarkLaneExpectation::NativeDecline { reason },
@@ -1387,6 +1398,10 @@ fn olap_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
         },
         threshold_basis: if structural_decline.is_some() {
             "current PG18 planner preflight structurally declines this canonical SSBM query"
+        } else if rows > DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS {
+            "M2 Max DeviceLimits dense grouped one-shot maximum"
+        } else if rows < SSBM_WINNER_MIN_ROWS {
+            "M2 Max DeviceLimits preaggregation fact-row minimum"
         } else {
             profile.threshold_basis
         },
@@ -1939,6 +1954,7 @@ fn reduce_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
         };
         let structural_decline = match name {
             "reduce_f64_sum" => Some("shape_floating_accumulator_semantics"),
+            "reduce_f64_minmax" => Some("no_gpu_resident_pipeline"),
             "reduce_f64_stats" => Some("shape_unsupported_aggregate"),
             _ => None,
         };
@@ -2189,6 +2205,38 @@ fn hashjoin_threshold_matrix_entry(
     } else if name == "mixed_join_agg" {
         BenchmarkLaneExpectation::NativeDecline {
             reason: "shape_floating_accumulator_semantics",
+        }
+    } else if name == "mixed_join_agg_int4" && rows < PREAGG_WINNER_MIN_ROWS {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_fact_rows_below_device_minimum",
+        }
+    } else if name == "mixed_join_agg_int4" && rows > DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_fact_rows_exceed_dense_one_shot_maximum",
+        }
+    } else if name == "mixed_join_agg_int4" {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        }
+    } else if name == "hash_join" && rows < PREAGG_WINNER_MIN_ROWS {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_fact_rows_below_device_minimum",
+        }
+    } else if name == "hash_join" {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        }
+    } else if name == "hashjoin_10k_1m" && rows < 100_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "shape_ambiguous_fact_relation",
+        }
+    } else if name == "hashjoin_10k_1m" && rows < 1_000_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_cost_not_competitive",
+        }
+    } else if name == "hashjoin_10k_1m" {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
         }
     } else if (min_build_rows..=HASHJOIN_MAX_BUILD_ROWS).contains(&inner_rows) {
         BenchmarkLaneExpectation::GpuWinner {
@@ -3072,12 +3120,15 @@ mod tests {
     #[test]
     fn test_metal_ship_gate_cells_are_exact_registered_winners() {
         let expected = [
-            ("grouped_agg_int4", 1.0),
-            ("predicate_expression_grouped_agg_int4", 1.0),
-            ("mixed_join_agg_int4", 1.0),
-            ("ssbm_resident_int4_star", 1.0),
-            ("hashjoin_10k_1m", 1.0),
-            ("h3_cell_to_parent", 1.1),
+            ("grouped_agg_int4", FINAL_MATRIX_MIN_WARM_SPEEDUP),
+            (
+                "predicate_expression_grouped_agg_int4",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            ("mixed_join_agg_int4", FINAL_MATRIX_MIN_WARM_SPEEDUP),
+            ("ssbm_resident_int4_star", FINAL_MATRIX_MIN_WARM_SPEEDUP),
+            ("hashjoin_10k_1m", FINAL_MATRIX_MIN_WARM_SPEEDUP),
+            ("h3_cell_to_parent", FINAL_MATRIX_MIN_WARM_SPEEDUP),
         ];
         assert_eq!(METAL_SHIP_GATE_CELLS.len(), expected.len());
 
@@ -3693,27 +3744,22 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_matrix_marks_fp64_minmax_as_the_exact_resident_winner() {
+    fn test_threshold_matrix_keeps_unreachable_fp64_minmax_native() {
         let entry = benchmark_threshold_matrix_entry("reduce_f64_minmax", 100_000)
             .expect("fp64 minmax threshold");
         assert_eq!(
-            entry.expectation,
-            BenchmarkLaneExpectation::GpuWinner {
-                min_warm_speedup: 1.0,
-            }
+            entry.expectation.decline_reason(),
+            Some("no_gpu_resident_pipeline")
         );
         assert!(entry.lane.starts_with("resident_f64_reduce"));
-        assert!(
-            entry
-                .dispatch_evidence
-                .contains("stock fallback counter = 0")
-        );
+        assert_eq!(entry.dispatch_evidence, GENERIC_NATIVE_DISPATCH_EVIDENCE);
     }
 
     #[test]
     fn test_threshold_matrix_keeps_fp64_structural_declines_at_every_scale() {
         for (name, reason) in [
             ("reduce_f64_sum", "shape_floating_accumulator_semantics"),
+            ("reduce_f64_minmax", "no_gpu_resident_pipeline"),
             ("reduce_f64_stats", "shape_unsupported_aggregate"),
         ] {
             for rows in [10_000, 100_000, 1_000_000] {
@@ -3726,24 +3772,17 @@ mod tests {
                 );
             }
         }
-
-        let minmax = benchmark_threshold_matrix_entry("reduce_f64_minmax", 10_000)
-            .expect("below-floor fp64 minmax threshold");
-        assert_eq!(
-            minmax.expectation.decline_reason(),
-            Some("rows_below_typed_reduce_break_even")
-        );
     }
 
     #[test]
-    fn test_threshold_matrix_marks_exact_int4_groupagg_family_as_winners() {
+    fn test_threshold_matrix_pins_exact_int4_groupagg_device_band() {
         for name in ["grouped_agg_int4", "predicate_expression_grouped_agg_int4"] {
-            let entry = benchmark_threshold_matrix_entry(name, 10_000)
+            let entry = benchmark_threshold_matrix_entry(name, 1_000_000)
                 .expect("exact resident groupagg threshold entry");
             assert_eq!(
                 entry.expectation,
                 BenchmarkLaneExpectation::GpuWinner {
-                    min_warm_speedup: 1.0,
+                    min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
                 }
             );
             assert!(entry.lane.contains("resident_"));
@@ -3754,14 +3793,24 @@ mod tests {
                     .contains("stock fallback counter = 0")
             );
             assert!(entry.cache_gate.contains("warm median"));
-        }
 
-        let below_floor = benchmark_threshold_matrix_entry("grouped_agg_int4", 9_999)
-            .expect("resident groupagg below-floor threshold entry");
-        assert_eq!(
-            below_floor.expectation.decline_reason(),
-            Some("resident_groupagg_rows_below_olap_min")
-        );
+            for rows in [10_000, 100_000] {
+                assert_eq!(
+                    benchmark_threshold_matrix_entry(name, rows)
+                        .expect("below-floor groupagg entry")
+                        .expectation
+                        .decline_reason(),
+                    Some("generic_fact_rows_below_device_minimum")
+                );
+            }
+            assert_eq!(
+                benchmark_threshold_matrix_entry(name, 10_000_000)
+                    .expect("above-cap groupagg entry")
+                    .expectation
+                    .decline_reason(),
+                Some("generic_fact_rows_exceed_dense_one_shot_maximum")
+            );
+        }
     }
 
     #[test]
@@ -3843,18 +3892,32 @@ mod tests {
 
     #[test]
     fn test_threshold_matrix_pins_ssbm_exact_winner_and_canonical_declines() {
-        let sentinel = benchmark_threshold_matrix_entry("ssbm_resident_int4_star", 10_000)
+        let sentinel = benchmark_threshold_matrix_entry("ssbm_resident_int4_star", 100_000)
             .expect("SSBM exact sentinel threshold entry");
         assert_eq!(
             sentinel.expectation,
             BenchmarkLaneExpectation::GpuWinner {
-                min_warm_speedup: 1.0,
+                min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
             }
         );
         assert_eq!(sentinel.lane, "ssbm_resident_int4_year_size_revenue");
         assert!(sentinel.threshold_basis.contains("two-dimension star"));
         assert!(sentinel.index_pruning_shape.contains("date and part"));
         assert!(sentinel.output_size.contains("d_year, p_size"));
+        assert_eq!(
+            benchmark_threshold_matrix_entry("ssbm_resident_int4_star", 10_000)
+                .expect("below-floor SSBM entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_fact_rows_below_device_minimum")
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("ssbm_resident_int4_star", 10_000_000)
+                .expect("above-cap SSBM entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_fact_rows_exceed_dense_one_shot_maximum")
+        );
 
         for (name, reason) in [
             ("ssbm_q1_1", "shape_multi_filter_relation"),
@@ -3901,6 +3964,44 @@ mod tests {
         let winner = benchmark_threshold_matrix_entry("hashjoin_10k_1m", 1_000_000)
             .expect("hashjoin_10k_1m threshold entry");
         assert_eq!(winner.expectation.label(), "gpu_winner");
+        assert_eq!(
+            benchmark_threshold_matrix_entry("hashjoin_10k_1m", 10_000)
+                .expect("tiny sweep entry")
+                .expectation
+                .decline_reason(),
+            Some("shape_ambiguous_fact_relation")
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("hashjoin_10k_1m", 100_000)
+                .expect("cost-decline sweep entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_cost_not_competitive")
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("hashjoin_10k_1m", 10_000_000)
+                .expect("large sweep winner")
+                .expectation
+                .label(),
+            "gpu_winner"
+        );
+
+        for rows in [100_000, 1_000_000, 10_000_000] {
+            assert_eq!(
+                benchmark_threshold_matrix_entry("hash_join", rows)
+                    .expect("hash_join winner entry")
+                    .expectation
+                    .label(),
+                "gpu_winner"
+            );
+        }
+        assert_eq!(
+            benchmark_threshold_matrix_entry("hash_join", 10_000)
+                .expect("hash_join below-floor entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_fact_rows_below_device_minimum")
+        );
 
         let too_small = benchmark_threshold_matrix_entry("hashjoin_1k_1m", 1_000_000)
             .expect("hashjoin_1k_1m threshold entry");
@@ -3938,13 +4039,28 @@ mod tests {
             );
         }
 
-        let exact = benchmark_threshold_matrix_entry("mixed_join_agg_int4", 1_000_000)
-            .expect("mixed_join_agg_int4 threshold entry");
+        for rows in [100_000, 1_000_000] {
+            assert_eq!(
+                benchmark_threshold_matrix_entry("mixed_join_agg_int4", rows)
+                    .expect("mixed_join_agg_int4 winner entry")
+                    .expectation
+                    .label(),
+                "gpu_winner"
+            );
+        }
         assert_eq!(
-            exact.expectation,
-            BenchmarkLaneExpectation::GpuWinner {
-                min_warm_speedup: 1.0,
-            }
+            benchmark_threshold_matrix_entry("mixed_join_agg_int4", 10_000)
+                .expect("mixed exact below-floor entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_fact_rows_below_device_minimum")
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("mixed_join_agg_int4", 10_000_000)
+                .expect("mixed exact large native entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_fact_rows_exceed_dense_one_shot_maximum")
         );
 
         let filter_large = benchmark_threshold_matrix_entry("gpu_hashjoin_filter", 10_000_000)
@@ -4062,10 +4178,26 @@ mod tests {
         assert_eq!(
             parent.expectation,
             BenchmarkLaneExpectation::GpuWinner {
-                min_warm_speedup: 1.1,
+                min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
             }
         );
         assert!(parent.threshold_basis.contains("Phase 7"));
+        for rows in [100_000, 1_000_000, 10_000_000] {
+            assert_eq!(
+                benchmark_threshold_matrix_entry("h3_cell_to_parent", rows)
+                    .expect("H3 winner entry")
+                    .expectation
+                    .label(),
+                "gpu_winner"
+            );
+        }
+        assert_eq!(
+            benchmark_threshold_matrix_entry("h3_cell_to_parent", 10_000)
+                .expect("H3 below-floor entry")
+                .expectation
+                .decline_reason(),
+            Some("h3_rows_below_grouped_agg_min")
+        );
 
         let srf = benchmark_threshold_matrix_entry("h3_srf_grid_disk", 10_000)
             .expect("h3_srf_grid_disk threshold entry");
