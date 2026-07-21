@@ -4889,12 +4889,18 @@ def inspect_gpu_evidence(
     ctest_result_lines = [
         line for line in log_text.splitlines() if re.search(r"\bTest\s+#\d+:", line)
     ]
-    expected_ctest_matches = [
-        (str(index), str(len(pinned_tests)), str(index), test_name)
-        for index, test_name in enumerate(pinned_tests, start=1)
-    ]
-    if ctest_matches != expected_ctest_matches or len(ctest_result_lines) != len(
-        ctest_matches
+    expected_total = len(pinned_tests)
+    progress_numbers = [int(match[0]) for match in ctest_matches]
+    reported_totals = {int(match[1]) for match in ctest_matches}
+    test_numbers = {int(match[2]) for match in ctest_matches}
+    if (
+        len(ctest_matches) != expected_total
+        or len(ctest_result_lines) != len(ctest_matches)
+        or progress_numbers != list(range(1, expected_total + 1))
+        or reported_totals != {expected_total}
+        or test_numbers != set(range(1, expected_total + 1))
+        or len(set(passed_tests)) != expected_total
+        or set(passed_tests) != set(pinned_tests)
     ):
         errors.append("full pinned CTest inventory did not pass exactly once")
     expected_summary = f"100% tests passed, 0 tests failed out of {len(pinned_tests)}"

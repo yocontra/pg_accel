@@ -3153,6 +3153,13 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             valid_ctest = ctest_pass_log(names)
             log.write_text(valid_ctest, encoding="utf-8")
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
+            registration_order = names[7:] + names[:7]
+            log.write_text(ctest_pass_log(registration_order), encoding="utf-8")
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
+            duplicated_order = registration_order[:-1] + [registration_order[0]]
+            log.write_text(ctest_pass_log(duplicated_order), encoding="utf-8")
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            log.write_text(valid_ctest, encoding="utf-8")
 
             first_name, second_name = names[:2]
             first_log = per_test / f"{first_name}-fixture.log"
