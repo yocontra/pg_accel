@@ -3013,13 +3013,22 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn("UINT64_MAX", fixture)
         self.assertIn("UINT64_C(0x100000000)", fixture)
         self.assertEqual(fixture.count("overflow_profile_name, 0x12345678u"), 2)
-        self.assertEqual(fixture.count("overflow_profile_step();"), 1)
+        self.assertEqual(
+            fixture.count("void operator()() const { overflow_profile_step(); }"),
+            1,
+        )
         self.assertIn("metal_overflow_only_probe", fixture)
+        self.assertIn("metal_global_overflow_probe", fixture)
+        self.assertIn("metal_low_word_carry_probe", fixture)
         self.assertIn("metal_wide_counter_probe", fixture)
         self.assertIn("metal_profile_flush_probe", fixture)
         self.assertIn("metal_short_write_probe", fixture)
         self.assertIn('mode == "ordinary"', fixture)
         self.assertIn('mode == "wide"', fixture)
+        self.assertIn('mode == "global-overflow"', fixture)
+        self.assertIn('mode == "carry"', fixture)
+        self.assertIn("sycl::range<1>{2}", fixture)
+        self.assertIn("sycl::range<1>{256}", fixture)
         self.assertIn('mode == "short-write"', fixture)
         self.assertIn("SIGXFSZ", fixture)
         self.assertIn("setrlimit(RLIMIT_FSIZE", fixture)
@@ -3040,6 +3049,11 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn('"$wide_overflow_count" != 0', runner)
         self.assertIn('"$wide_proftext_count" != 1', runner)
         self.assertIn('"$wide_value" != 4294967296', runner)
+        self.assertIn('"$global_overflow_count" != 1', runner)
+        self.assertIn('"$global_proftext_count" != 0', runner)
+        self.assertIn('"$carry_overflow_count" != 0', runner)
+        self.assertIn('"$carry_proftext_count" != 1', runner)
+        self.assertIn('"$carry_value" != 4294967296', runner)
         self.assertIn("expect_flush_failure regular-file", runner)
         self.assertIn("expect_flush_failure unwritable-overflow", runner)
         self.assertIn("expect_flush_failure unwritable-proftext", runner)
@@ -3093,6 +3107,17 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.overflow"\n'
                 "  exit 0\n"
                 "fi\n"
+                "if [[ \"$ACPP_METAL_DEVICE_PROFILE_DIR\" == */global-overflow/profiles ]]; then\n"
+                "  printf 'overflow\\n' > "
+                '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.overflow"\n'
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"$ACPP_METAL_DEVICE_PROFILE_DIR\" == */carry/profiles ]]; then\n"
+                "  printf 'metal_low_word_carry_probe\\n# Func Hash:\\n1\\n"
+                "# Num Counters:\\n1\\n# Counter Values:\\n4294967296\\n' > "
+                '"$ACPP_METAL_DEVICE_PROFILE_DIR/device.proftext"\n'
+                "  exit 0\n"
+                "fi\n"
                 "if [[ \"$ACPP_METAL_DEVICE_PROFILE_DIR\" == */wide/profiles ]]; then\n"
                 "  printf 'metal_wide_counter_probe\\n# Func Hash:\\n1\\n"
                 "# Num Counters:\\n1\\n# Counter Values:\\n4294967296\\n' > "
@@ -3109,6 +3134,14 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             self.assertIn("overflow=1 proftext=0", passed.stdout)
             self.assertIn(
                 "wide profile: PASS (overflow=0 proftext=1 value=4294967296)",
+                passed.stdout,
+            )
+            self.assertIn(
+                "global-overflow profile: PASS (overflow=1 proftext=0)",
+                passed.stdout,
+            )
+            self.assertIn(
+                "carry profile: PASS (overflow=0 proftext=1 value=4294967296)",
                 passed.stdout,
             )
 

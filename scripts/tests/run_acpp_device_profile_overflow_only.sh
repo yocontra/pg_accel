@@ -63,6 +63,41 @@ if [[ "$overflow_count" != 1 || "$proftext_count" != 0 ]]; then
 fi
 echo "overflow-only profile: PASS (overflow=1 proftext=0)"
 
+mkdir -p "$work_dir/global-overflow/profiles"
+if ! run_probe "$work_dir/global-overflow" \
+    "$work_dir/global-overflow/profiles" global-overflow; then
+    echo "global-overflow profile unexpectedly failed" >&2
+    exit 1
+fi
+global_overflow_count="$(find "$work_dir/global-overflow/profiles" -maxdepth 1 -name '*.overflow' | wc -l | tr -d ' ')"
+global_proftext_count="$(find "$work_dir/global-overflow/profiles" -maxdepth 1 -name '*.proftext' | wc -l | tr -d ' ')"
+if [[ "$global_overflow_count" != 1 || "$global_proftext_count" != 0 ]]; then
+    echo "global-overflow profile mismatch: overflow=$global_overflow_count proftext=$global_proftext_count" >&2
+    exit 1
+fi
+echo "global-overflow profile: PASS (overflow=1 proftext=0)"
+
+mkdir -p "$work_dir/carry/profiles"
+if ! run_probe "$work_dir/carry" "$work_dir/carry/profiles" carry; then
+    echo "carry profile unexpectedly failed" >&2
+    exit 1
+fi
+carry_overflow_count="$(find "$work_dir/carry/profiles" -maxdepth 1 -name '*.overflow' | wc -l | tr -d ' ')"
+carry_proftext_count="$(find "$work_dir/carry/profiles" -maxdepth 1 -name '*.proftext' | wc -l | tr -d ' ')"
+carry_value=missing
+if [[ "$carry_proftext_count" == 1 ]]; then
+    carry_profile="$(find "$work_dir/carry/profiles" -maxdepth 1 -name '*.proftext' -print -quit)"
+    carry_value="$(awk '
+        $0 == "metal_low_word_carry_probe" { target = 1; next }
+        target && $0 == "# Counter Values:" { getline; print; exit }
+    ' "$carry_profile")"
+fi
+if [[ "$carry_overflow_count" != 0 || "$carry_proftext_count" != 1 || "$carry_value" != 4294967296 ]]; then
+    echo "carry profile mismatch: overflow=$carry_overflow_count proftext=$carry_proftext_count value=$carry_value" >&2
+    exit 1
+fi
+echo "carry profile: PASS (overflow=0 proftext=1 value=4294967296)"
+
 mkdir -p "$work_dir/wide/profiles"
 if ! run_probe "$work_dir/wide" "$work_dir/wide/profiles" wide; then
     echo "wide profile unexpectedly failed" >&2
