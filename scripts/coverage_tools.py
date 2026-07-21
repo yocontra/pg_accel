@@ -28,6 +28,11 @@ BASELINE_SQL_ASSERTIONS = 287
 BASELINE_CPP_SOURCES = 21
 BASELINE_CPP_DEVICE_OBJECTS = 20
 BASELINE_CPP_TESTS = 29
+SQL_COVERAGE_KERNEL_TIMEOUT_MS = 60_000
+COVERAGE_HELPER_TEST_PATTERN = "test_coverage*.py"
+REQUIRED_COVERAGE_HELPER_TESTS = frozenset(
+    {"test_coverage_tools.py", "test_coverage_live_rust.py"}
+)
 DEVICE_PROFILE_INTRINSIC_MARKER = b"llvm.instrprof."
 UINT32_MAX = (1 << 32) - 1
 UINT64_MAX = (1 << 64) - 1
@@ -50,6 +55,8 @@ REQUIRED_STAGES = {
         "production_tests",
         "supplemental_tests",
         "pgrx_tests",
+        "live_extension_install",
+        "live_cli",
         "toolchain",
         "coverage_report",
         "coverage_summary",
@@ -72,6 +79,7 @@ REQUIRED_STAGES = {
     "sql": {
         "extension_install",
         "extension_init",
+        "session_profile",
         "sql_tests",
         "semantic_inventory",
         "raw_evidence",
@@ -334,15 +342,14 @@ def llvm_json_files(
     return files
 
 
-def lcov_files(
-    path: pathlib.Path, repo_root: pathlib.Path
-) -> dict[str, dict[int, int]]:
+def lcov_records(path: pathlib.Path, repo_root: pathlib.Path) -> dict[str, dict[str, Any]]:
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
         raise CoverageError(f"cannot read LCOV report {path}: {exc}") from exc
-    files: dict[str, dict[int, int]] = {}
+    records: dict[str, dict[str, Any]] = {}
     current: str | None = None
+    current_record: dict[str, Any] | None = None
     record_open = False
     saw_record = False
     for raw in lines:
@@ -354,16 +361,20 @@ def lcov_files(
             record_open = True
             relative = normalize_repo_path(repo_root, raw[3:])
             current = relative
+            current_record = {
+                "line_hits": {},
+                "lines_found": None,
+                "lines_hit": None,
+            }
             if relative is not None:
-                if relative in files:
+                if relative in records:
                     raise CoverageError(f"duplicate LCOV source record for {relative}")
-                files[relative] = {}
+                records[relative] = current_record
             saw_record = True
         elif raw.startswith("DA:"):
             if not record_open:
                 raise CoverageError(f"LCOV DA record is outside a source record: {raw}")
-            if current is None:
-                continue
+            assert current_record is not None
             fields = raw[3:].split(",")
             if len(fields) < 2:
                 raise CoverageError(f"invalid LCOV DA record: {raw}")
@@ -372,19 +383,87 @@ def lcov_files(
                 hits = int(fields[1])
             except ValueError as exc:
                 raise CoverageError(f"invalid LCOV DA record: {raw}") from exc
-            if line <= 0 or hits < 0 or line in files[current]:
+            line_hits = current_record["line_hits"]
+            if line <= 0 or hits < 0 or line in line_hits:
                 raise CoverageError(f"invalid or duplicate LCOV line record: {raw}")
-            files[current][line] = hits
+            line_hits[line] = hits
+        elif raw.startswith("LF:") or raw.startswith("LH:"):
+            if not record_open:
+                raise CoverageError(
+                    f"LCOV line summary is outside a source record: {raw}"
+                )
+            assert current_record is not None
+            key = "lines_found" if raw.startswith("LF:") else "lines_hit"
+            if current_record[key] is not None:
+                raise CoverageError(f"duplicate LCOV line summary: {raw}")
+            try:
+                value = int(raw[3:])
+            except ValueError as exc:
+                raise CoverageError(f"invalid LCOV line summary: {raw}") from exc
+            if value < 0:
+                raise CoverageError(f"invalid LCOV line summary: {raw}")
+            current_record[key] = value
         elif raw == "end_of_record":
             if not record_open:
                 raise CoverageError("LCOV end_of_record has no open source record")
+            assert current_record is not None
+            lines_found = current_record["lines_found"]
+            lines_hit = current_record["lines_hit"]
+            if (lines_found is None) != (lines_hit is None):
+                raise CoverageError("LCOV source record has an incomplete line summary")
+            if (
+                lines_found is not None
+                and lines_hit is not None
+                and lines_hit > lines_found
+            ):
+                raise CoverageError("LCOV source record has more hit than found lines")
             record_open = False
             current = None
+            current_record = None
     if record_open:
         raise CoverageError("LCOV source record is not terminated")
     if not saw_record:
         raise CoverageError("LCOV report contains no source records")
-    return files
+    return records
+
+
+def lcov_files(
+    path: pathlib.Path, repo_root: pathlib.Path
+) -> dict[str, dict[int, int]]:
+    return {
+        relative: record["line_hits"]
+        for relative, record in lcov_records(path, repo_root).items()
+    }
+
+
+def llvm_json_lcov_total_errors(
+    exported: dict[str, dict[str, Any]],
+    lcov: dict[str, dict[str, Any]],
+    included: set[str],
+    layer: str,
+) -> list[str]:
+    errors: list[str] = []
+    for relative in sorted(included.intersection(exported).intersection(lcov)):
+        lines = exported[relative].get("summary", {}).get("lines")
+        record = lcov[relative]
+        file_total = lines.get("count") if isinstance(lines, dict) else None
+        file_covered = lines.get("covered") if isinstance(lines, dict) else None
+        if (
+            not _is_int(file_total)
+            or not _is_int(file_covered)
+            or file_total < 0
+            or file_covered < 0
+            or file_covered > file_total
+        ):
+            errors.append(f"{layer}: invalid raw line metrics for {relative}")
+            continue
+        lines_found = record.get("lines_found")
+        lines_hit = record.get("lines_hit")
+        if not _is_int(lines_found) or not _is_int(lines_hit):
+            errors.append(f"{layer}: LCOV line summary is missing for {relative}")
+        elif lines_found != file_total or lines_hit != file_covered:
+            errors.append(f"{layer}: raw LCOV and JSON totals differ for {relative}")
+    return errors
 
 
 def initial_execution() -> dict[str, Any]:
@@ -754,7 +833,17 @@ def seal_layer_evidence(args: argparse.Namespace) -> int:
             "rust/coverage.profdata",
             "rust/object-manifest.json",
             "rust/production-config.json",
+            "rust/production-bench.sha256",
             "rust/toolchain.json",
+            "rust/live-cli.log",
+            "rust/live-extension-install.log",
+            "rust/live-extension-stop.log",
+            "rust/live-extension-objects.tsv",
+            "rust/live-server-profile-manifest.tsv",
+            "rust/live-cli/provenance.json",
+            "rust/live-cli/evidence-validation.json",
+            "rust/live-cli/profile-manifest.tsv",
+            "rust/live-cli/selected/provenance.json",
         },
         "cpp": {
             "cpp/raw-coverage.json",
@@ -771,6 +860,7 @@ def seal_layer_evidence(args: argparse.Namespace) -> int:
         "sql": {
             "sql/assertion-inventory.json",
             "sql/test-run/results.tsv",
+            "sql/test-run/session-profile.tsv",
         },
     }[args.layer]
     missing = sorted(required.difference(names))
@@ -3141,10 +3231,17 @@ def capture_coverage_bundle(args: argparse.Namespace) -> int:
         raise CoverageError("retained objects omit required source mappings")
     pathlib.Path(args.json_output).write_text(json_export.stdout, encoding="utf-8")
     pathlib.Path(args.lcov_output).write_text(lcov_export.stdout, encoding="utf-8")
-    if included.intersection(
-        lcov_files(pathlib.Path(args.lcov_output), repo_root)
-    ) != set(mapped_files):
+    lcov_document = lcov_records(pathlib.Path(args.lcov_output), repo_root)
+    if included.intersection(lcov_document) != set(mapped_files):
         raise CoverageError("retained LLVM JSON and LCOV mappings differ")
+    total_errors = llvm_json_lcov_total_errors(
+        llvm_json_files(json_document, repo_root),
+        lcov_document,
+        included,
+        args.layer,
+    )
+    if total_errors:
+        raise CoverageError("; ".join(total_errors))
     summary_output = getattr(args, "summary_output", None)
     if summary_output:
         summary = run_llvm_report(args.llvm_cov, profdata_path, retained)
@@ -3554,7 +3651,17 @@ def validate_raw_evidence_manifest(
             "rust/coverage.profdata",
             "rust/object-manifest.json",
             "rust/production-config.json",
+            "rust/production-bench.sha256",
             "rust/toolchain.json",
+            "rust/live-cli.log",
+            "rust/live-extension-install.log",
+            "rust/live-extension-stop.log",
+            "rust/live-extension-objects.tsv",
+            "rust/live-server-profile-manifest.tsv",
+            "rust/live-cli/provenance.json",
+            "rust/live-cli/evidence-validation.json",
+            "rust/live-cli/profile-manifest.tsv",
+            "rust/live-cli/selected/provenance.json",
         },
         "cpp": {
             "cpp/raw-coverage.json",
@@ -3568,7 +3675,11 @@ def validate_raw_evidence_manifest(
             "cpp/gpu-correctness-evidence.json",
             "cpp/device-profile-audit.json",
         },
-        "sql": {"sql/assertion-inventory.json", "sql/test-run/results.tsv"},
+        "sql": {
+            "sql/assertion-inventory.json",
+            "sql/test-run/results.tsv",
+            "sql/test-run/session-profile.tsv",
+        },
     }[layer]
     if not required.issubset(seen):
         errors.append(f"{layer}: required raw evidence files are absent")
@@ -3725,19 +3836,19 @@ def recompute_raw_line_layer(
             else artifact_dir / "rust/raw-coverage.json"
         )
         declared = lcov_files(production_lcov, repo_root)
-        hits = lcov_files(final_lcov, repo_root)
+        hit_records = lcov_records(final_lcov, repo_root)
+        hits = {
+            relative: record["line_hits"]
+            for relative, record in hit_records.items()
+        }
         exported = llvm_json_files(read_json(final_json), repo_root)
         if included.intersection(hits) != included.intersection(exported):
             errors.append("rust: raw LCOV and JSON source mappings differ")
-        for relative in included.intersection(hits).intersection(exported):
-            lines = exported[relative].get("summary", {}).get("lines")
-            if (
-                not isinstance(lines, dict)
-                or lines.get("count") != len(hits[relative])
-                or lines.get("covered")
-                != sum(1 for value in hits[relative].values() if value > 0)
-            ):
-                errors.append(f"rust: raw LCOV and JSON totals differ for {relative}")
+        errors.extend(
+            llvm_json_lcov_total_errors(
+                exported, hit_records, included, "rust"
+            )
+        )
         mapped = included.intersection(declared)
         production_manifest = read_json(
             artifact_dir / "rust/production-object-manifest.json"
@@ -3787,7 +3898,11 @@ def recompute_raw_line_layer(
             else artifact_dir / "cpp/raw-lcov.info"
         )
         reports = llvm_json_files(read_json(final_json), repo_root)
-        lcov_reports = lcov_files(final_lcov, repo_root)
+        lcov_records_by_file = lcov_records(final_lcov, repo_root)
+        lcov_reports = {
+            relative: record["line_hits"]
+            for relative, record in lcov_records_by_file.items()
+        }
         if included.intersection(reports) != included.intersection(lcov_reports):
             errors.append("cpp: raw LCOV and JSON source mappings differ")
         mapped = included.intersection(reports)
@@ -3811,15 +3926,13 @@ def recompute_raw_line_layer(
             ):
                 errors.append(f"cpp: invalid raw line metrics for {relative}")
                 continue
-            if (
-                relative not in lcov_reports
-                or len(lcov_reports[relative]) != file_total
-                or sum(1 for value in lcov_reports[relative].values() if value > 0)
-                != file_covered
-            ):
-                errors.append(f"cpp: raw LCOV and JSON totals differ for {relative}")
             total += file_total
             covered += file_covered
+        errors.extend(
+            llvm_json_lcov_total_errors(
+                reports, lcov_records_by_file, included, "cpp"
+            )
+        )
     if missing:
         errors.append(f"{layer}: required raw source mappings are missing")
     if total <= 0:
@@ -4060,6 +4173,150 @@ def validate_retained_sql_evidence(
     return errors
 
 
+def validate_retained_sql_session_profile(artifact_dir: pathlib.Path) -> list[str]:
+    path = artifact_dir / "sql/test-run/session-profile.tsv"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return [f"retained SQL session profile cannot be read: {exc}"]
+    expected = (
+        "pg_accel.kernel_timeout_ms\t"
+        f"{SQL_COVERAGE_KERNEL_TIMEOUT_MS}\tms\tclient"
+    )
+    if lines != [expected]:
+        return [
+            "retained SQL session profile does not prove the exact coverage-only "
+            "kernel timeout setting"
+        ]
+    return []
+
+
+def validate_retained_live_rust_evidence(
+    artifact_dir: pathlib.Path, provenance: dict[str, Any]
+) -> list[str]:
+    errors: list[str] = []
+    sha_pattern = re.compile(r"[0-9a-f]{64}")
+    try:
+        harness = read_json(artifact_dir / "rust/live-cli/provenance.json")
+        validation = read_json(
+            artifact_dir / "rust/live-cli/evidence-validation.json"
+        )
+        backend = read_json(
+            artifact_dir / "rust/live-cli/selected/provenance.json"
+        )
+    except CoverageError as exc:
+        return [f"rust: retained live CLI evidence cannot be read: {exc}"]
+    if not all(isinstance(item, dict) for item in (harness, validation, backend)):
+        return ["rust: retained live CLI evidence is not an object"]
+
+    extension_sha = harness.get("instrumented_extension_sha256")
+    object_sha = harness.get("instrumented_object_sha256")
+    source_tree = harness.get("source_tree")
+    if (
+        harness.get("schema_version") != 1
+        or harness.get("candidate_sha") != provenance.get("commit")
+        or not isinstance(source_tree, str)
+        or re.fullmatch(r"[0-9a-f]{40,64}", source_tree) is None
+        or not isinstance(object_sha, str)
+        or sha_pattern.fullmatch(object_sha) is None
+        or not isinstance(extension_sha, str)
+        or sha_pattern.fullmatch(extension_sha) is None
+        or harness.get("performance_evidence_eligible") is not False
+        or harness.get("cache_policy") != "warm-only"
+    ):
+        errors.append("rust: live CLI provenance identity/policy is invalid")
+
+    if (
+        validation.get("schema_version") != 1
+        or validation.get("performance_evidence_eligible") is not False
+        or validation.get("all_outputs_consumed") is not True
+        or validation.get("loaded_extension_hash_bound") is not True
+        or validation.get("extension_object_sha256") != extension_sha
+    ):
+        errors.append("rust: live CLI semantic evidence is invalid")
+
+    try:
+        production_fields = (
+            artifact_dir / "rust/production-bench.sha256"
+        ).read_text(encoding="utf-8").split()
+    except OSError as exc:
+        errors.append(f"rust: production benchmark identity cannot be read: {exc}")
+        production_fields = []
+    if not production_fields or production_fields[0] != object_sha:
+        errors.append("rust: live CLI object differs from the production benchmark build")
+
+    try:
+        rows = (
+            artifact_dir / "rust/live-extension-objects.tsv"
+        ).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        errors.append(f"rust: extension object evidence cannot be read: {exc}")
+        rows = []
+    parsed_roles: dict[str, str] = {}
+    if rows[:1] != ["role\tsha256\tpath"]:
+        errors.append("rust: extension object evidence header is invalid")
+    for row in rows[1:]:
+        fields = row.split("\t")
+        if len(fields) != 3 or fields[0] in parsed_roles:
+            errors.append("rust: extension object evidence row is invalid")
+            continue
+        parsed_roles[fields[0]] = fields[1]
+    if parsed_roles != {"built": extension_sha, "installed": extension_sha}:
+        errors.append("rust: built and installed extension hashes are not identical")
+
+    if (
+        backend.get("errors") != []
+        or backend.get("status") not in {"pass", "warning"}
+    ):
+        errors.append("rust: live backend provenance was not accepted")
+    for role in ("expected_binary", "installed_binary"):
+        probe = backend.get(role)
+        if not isinstance(probe, dict) or probe.get("sha256") != extension_sha:
+            errors.append(f"rust: live backend {role} hash is not bound")
+    loaded = backend.get("loaded_binaries")
+    if not isinstance(loaded, list) or not loaded:
+        errors.append("rust: live backend loaded-binary evidence is absent")
+    elif any(
+        not isinstance(probe, dict) or probe.get("sha256") != extension_sha
+        for probe in loaded
+    ):
+        errors.append("rust: live backend loaded an unbound extension object")
+
+    final_profiles = artifact_dir / "rust/profiles"
+    final_hashes = {
+        sha256(path)
+        for path in final_profiles.glob("*.profraw")
+        if path.is_file() and path.stat().st_size > 0
+    }
+    for relative, label in (
+        ("rust/live-cli/profile-manifest.tsv", "client"),
+        ("rust/live-server-profile-manifest.tsv", "backend"),
+    ):
+        path = artifact_dir / relative
+        try:
+            rows = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            errors.append(f"rust: {label} profile manifest cannot be read: {exc}")
+            continue
+        manifest_hashes: set[str] = set()
+        for row in rows:
+            fields = row.split("\t")
+            if (
+                len(fields) != 3
+                or sha_pattern.fullmatch(fields[0]) is None
+                or not fields[1].isdigit()
+                or int(fields[1]) <= 0
+            ):
+                errors.append(f"rust: {label} profile manifest row is invalid")
+                continue
+            manifest_hashes.add(fields[0])
+        if not manifest_hashes:
+            errors.append(f"rust: {label} profile manifest is empty")
+        elif not manifest_hashes.issubset(final_hashes):
+            errors.append(f"rust: {label} raw profiles were not retained for merge")
+    return errors
+
+
 def validate_retained_toolchain_and_profiles(
     artifact_dir: pathlib.Path, layer: str
 ) -> list[str]:
@@ -4201,6 +4458,8 @@ def aggregate(args: argparse.Namespace) -> int:
         errors.extend(validate_raw_evidence_manifest(artifact_dir, layer, provenance))
         if layer == "cpp":
             errors.extend(validate_device_profile_audit(artifact_dir, copied_baseline))
+        if layer == "rust":
+            errors.extend(validate_retained_live_rust_evidence(artifact_dir, provenance))
         if layer in LINE_LAYERS:
             errors.extend(validate_retained_toolchain_and_profiles(artifact_dir, layer))
         stage_path = artifact_dir / layer / "stage-status.json"
@@ -4241,6 +4500,7 @@ def aggregate(args: argparse.Namespace) -> int:
                 errors.append(f"{layer}: raw evidence recomputation failed: {exc}")
 
     inventory_path = artifact_dir / "sql/assertion-inventory.json"
+    errors.extend(validate_retained_sql_session_profile(artifact_dir))
     try:
         inventory = read_json(inventory_path)
         sql = layers.get("sql", {})
@@ -5015,8 +5275,66 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
     return errors
 
 
+def coverage_helper_test_discovery_errors(
+    justfile: str,
+    coverage_gate: str,
+    discovered_names: Iterable[str],
+) -> list[str]:
+    errors: list[str] = []
+    recipe_lines: list[str] = []
+    lines = justfile.splitlines()
+    try:
+        recipe_start = lines.index("coverage-audit:") + 1
+    except ValueError:
+        errors.append("justfile coverage-audit recipe is absent")
+    else:
+        for line in lines[recipe_start:]:
+            if not line or not line[0].isspace():
+                break
+            recipe_lines.append(line)
+
+    discovery = re.compile(
+        r"python3\s+-m\s+unittest\s+discover\s+"
+        r"-s\s+scripts/tests\s+-p\s+(['\"])([^'\"]+)\1"
+    )
+    for label, source in (
+        ("justfile coverage-audit", "\n".join(recipe_lines)),
+        ("coverage gate", coverage_gate.replace("\\\n", " ")),
+    ):
+        patterns = [match.group(2) for match in discovery.finditer(source)]
+        if patterns != [COVERAGE_HELPER_TEST_PATTERN]:
+            errors.append(
+                f"{label} must discover coverage helper tests exactly once with "
+                f"-p '{COVERAGE_HELPER_TEST_PATTERN}'; found {patterns}"
+            )
+
+    discovered = {
+        name
+        for name in discovered_names
+        if fnmatch.fnmatchcase(name, COVERAGE_HELPER_TEST_PATTERN)
+    }
+    missing = sorted(REQUIRED_COVERAGE_HELPER_TESTS - discovered)
+    if missing:
+        errors.append(f"required coverage helper tests are absent: {missing}")
+    return errors
+
+
 def audit_scope(args: argparse.Namespace) -> int:
     repo_root = pathlib.Path(args.repo_root).resolve()
+    coverage_gate = (repo_root / "scripts/coverage_gate.sh").read_text(encoding="utf-8")
+    justfile = (repo_root / "justfile").read_text(encoding="utf-8")
+    helper_test_names = [
+        path.name
+        for path in (repo_root / "scripts/tests").glob(
+            COVERAGE_HELPER_TEST_PATTERN
+        )
+        if path.is_file()
+    ]
+    discovery_errors = coverage_helper_test_discovery_errors(
+        justfile, coverage_gate, helper_test_names
+    )
+    if discovery_errors:
+        raise CoverageError("; ".join(discovery_errors))
     document = read_json(pathlib.Path(args.scope))
     baseline_path = pathlib.Path(args.baseline)
     baseline = read_json(baseline_path)
@@ -5069,7 +5387,6 @@ def audit_scope(args: argparse.Namespace) -> int:
     )
     if patch_errors:
         raise CoverageError("; ".join(patch_errors))
-    coverage_gate = (repo_root / "scripts/coverage_gate.sh").read_text(encoding="utf-8")
     if coverage_gate.count("--include-build-script") != 2:
         raise CoverageError(
             "Rust coverage gate must instrument and report pg_accel/build.rs explicitly"
@@ -5100,6 +5417,23 @@ def audit_scope(args: argparse.Namespace) -> int:
         '--object "$build_dir/test_ooo_overlap"',
         '--per-test-log-dir "$per_test_log_dir"',
         '--baseline "$baseline_file"',
+        "run_live_rust_coverage_harness()",
+        '"$output_dir" "$build_dir" "$production_bench_sha"',
+        "record_stage rust live_cli",
+        "record_stage rust live_extension_install",
+        "scripts/coverage_live_rust.sh",
+        'just install-pg-accel "$pg"',
+        'cargo pgrx stop --package pg_accel "pg$pg"',
+        'PG_ACCEL_EXPECTED_DYLIB="$built_extension"',
+        "pgaccel-live-server-%p-%m.profraw",
+        "live-extension-objects.tsv",
+        "live-server-profile-manifest.tsv",
+        '--candidate-sha "$git_commit"',
+        '--source-tree "$git_source_tree"',
+        '--object-sha256 "$production_object_sha"',
+        "sql_coverage_kernel_timeout_ms=60000",
+        'PGOPTIONS="-c pg_accel.kernel_timeout_ms=${sql_coverage_kernel_timeout_ms}"',
+        'PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS="$sql_coverage_kernel_timeout_ms"',
         'aggregate --artifact-dir "$artifact_dir"',
     ):
         if required_text not in coverage_gate:
@@ -5122,6 +5456,16 @@ def audit_scope(args: argparse.Namespace) -> int:
             )
     if coverage_gate.count("seal-layer-evidence") != len(EXPECTED_LAYERS):
         raise CoverageError("every coverage layer must seal retained raw evidence")
+    sql_runner = (repo_root / "sql/tests/run_all.sh").read_text(encoding="utf-8")
+    if (
+        "PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS" not in sql_runner
+        or "session-profile.tsv" not in sql_runner
+        or "has_forbidden_release_evidence" not in sql_runner
+        or "PG_ACCEL_SQL_TEST_ALLOWED_WARNING" in sql_runner
+    ):
+        raise CoverageError(
+            "coverage SQL sessions must prove the exact timeout profile without a warning allowlist"
+        )
 
     cmake_path = repo_root / "pgaccel-kernels/CMakeLists.txt"
     cmake = cmake_path.read_text(encoding="utf-8")

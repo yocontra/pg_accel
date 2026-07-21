@@ -38,11 +38,14 @@ PASSES=0
 TOTAL=0
 FAILED_TESTS=()
 ARTIFACT_DIR="${PG_ACCEL_SQL_TEST_ARTIFACT_DIR:-}"
+EXPECTED_KERNEL_TIMEOUT_MS="${PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS:-}"
 RESULTS_FILE=""
+SESSION_PROFILE_FILE=""
 
 if [ -n "$ARTIFACT_DIR" ]; then
     mkdir -p "$ARTIFACT_DIR/logs"
     RESULTS_FILE="$ARTIFACT_DIR/results.tsv"
+    SESSION_PROFILE_FILE="$ARTIFACT_DIR/session-profile.tsv"
     printf 'file\tstatus\texit_code\tlog\n' > "$RESULTS_FILE"
 fi
 
@@ -92,6 +95,32 @@ has_forbidden_release_evidence() {
     grep -Eiq '(^|[[:space:]])WARNING:|(^|[^[:alnum:]_])SKIP(PED)?([^[:alnum:]_]|$)|caught.*exception'
 }
 
+capture_expected_session_profile() {
+    [ -n "$EXPECTED_KERNEL_TIMEOUT_MS" ] || return 0
+    if ! [[ "$EXPECTED_KERNEL_TIMEOUT_MS" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: expected SQL test kernel timeout must be an integer." >&2
+        return 2
+    fi
+
+    local output status expected
+    set +e
+    output="$(psql "$CONNSTR" -X -v ON_ERROR_STOP=1 -At -F $'\t' \
+        -c "SELECT name, setting, COALESCE(unit, ''), source FROM pg_settings WHERE name = 'pg_accel.kernel_timeout_ms'" \
+        2>&1)"
+    status=$?
+    set -e
+    expected=$'pg_accel.kernel_timeout_ms\t'"${EXPECTED_KERNEL_TIMEOUT_MS}"$'\tms\tclient'
+    if [ "$status" -ne 0 ] || [ "$output" != "$expected" ]; then
+        echo "ERROR: SQL test session does not have the exact expected kernel timeout profile." >&2
+        printf '%s\n' "$output" | tail -5 | sed 's/^/       | /' >&2
+        return 1
+    fi
+    if [ -n "$SESSION_PROFILE_FILE" ]; then
+        printf '%s\n' "$output" > "$SESSION_PROFILE_FILE"
+    fi
+    echo "SQL session profile: pg_accel.kernel_timeout_ms=${EXPECTED_KERNEL_TIMEOUT_MS}ms source=client"
+}
+
 echo "========================================"
 echo " pg_accel integration tests"
 echo "========================================"
@@ -125,6 +154,8 @@ if ! printf '%s\n' "$extension_check_output" | grep -Eq '^[[:space:]]*1[[:space:
     echo "SKIP: pg_accel extension is not installed. Skipping all tests."
     exit 0
 fi
+
+capture_expected_session_profile
 
 for test_file in "$TESTS_DIR"/[0-9]*.sql; do
     [ -f "$test_file" ] || continue

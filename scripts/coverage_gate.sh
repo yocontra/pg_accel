@@ -16,6 +16,7 @@ minimum_default="${COVERAGE_MIN_PERCENT:-90}"
 rust_minimum="${COVERAGE_MIN_RUST_LINES:-$minimum_default}"
 cpp_minimum="${COVERAGE_MIN_CPP_LINES:-$minimum_default}"
 sql_minimum="${COVERAGE_MIN_SQL_ASSERTIONS:-$minimum_default}"
+sql_coverage_kernel_timeout_ms=60000
 test_threads="${RUST_TEST_THREADS:-1}"
 
 # Artifact roots and a valid red schema exist before any tool, PostgreSQL,
@@ -145,6 +146,15 @@ llvm_export_artifacts() {
     return "$status"
 }
 
+sha256_file() {
+    local path="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    else
+        shasum -a 256 "$path" | awk '{print $1}'
+    fi
+}
+
 if ! command -v python3 >/dev/null 2>&1; then
     echo "error: python3 is required to validate coverage evidence" >&2
     exit 2
@@ -193,8 +203,10 @@ cp "$adaptivecpp_coverage_patch" \
 
 git_commit="unknown"
 git_tree="unknown"
+git_source_tree="unknown"
 if command -v git >/dev/null 2>&1; then
     git_commit="$(git rev-parse --verify HEAD 2>/dev/null || printf unknown)"
+    git_source_tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null || printf unknown)"
     if [ -z "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
         git_tree="clean"
     else
@@ -218,6 +230,7 @@ cat > "$artifact_dir/coverage-scope.txt" <<EOF
 Gate: pg_accel three-layer release coverage
 Git commit: ${git_commit}
 Git tree: ${git_tree}
+Git source tree: ${git_source_tree}
 PostgreSQL major: ${pg}
 Rust threshold: ${rust_minimum}% production source lines
 C++ threshold: ${cpp_minimum}% host-object source lines
@@ -228,7 +241,11 @@ pg_accel_bench/src, and pg_accel/build.rs. Its denominator is the compiler-
 derived pg${pg} build map produced without the pg_test feature. The same
 configuration is tested before pg_test tests may supplement hits. Separately
 compiled test files are pinned exclusions. Missing production mappings fail
-closed.
+closed. The instrumented production pg_accel_bench object also runs a bounded,
+warm-only live CLI matrix against a disposable database after the exact
+instrumented extension is installed into the fixed pgrx cluster. Client and
+backend profiles join the final merge. Instrumented timings are explicitly
+ineligible as performance evidence.
 
 C++ scope is host-object source coverage for every owned implementation under
 pgaccel-kernels/src and executable inline header under pgaccel-kernels/include.
@@ -252,7 +269,7 @@ if ! python3 scripts/coverage_tools.py audit-scope \
     mark_all_layers scope_audit "checked-in coverage scope or manifest audit failed" 2
 fi
 if ! env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
-    -s scripts/tests -p 'test_coverage_tools.py' \
+    -s scripts/tests -p 'test_coverage*.py' \
     > "$artifact_dir/tool-tests.log" 2>&1; then
     cat "$artifact_dir/tool-tests.log" >&2
     mark_all_layers tool_tests "coverage helper regression tests failed" 2
@@ -284,12 +301,170 @@ if [ "$pg_ready" -eq 0 ]; then
         "PostgreSQL/pgrx prerequisites failed" 1
 fi
 
+run_live_rust_coverage_harness() (
+    local output_dir="$1"
+    local build_dir="$2"
+    local production_object_sha="$3"
+    local bench_bin="$build_dir/debug/pg_accel_bench"
+    local live_artifact_dir="$output_dir/live-cli"
+    local live_profile_dir="$build_dir/live-cli-profiles"
+    local server_profile_dir="$build_dir/live-server-profiles"
+    local pg_config psql_bin port admin_connection connection database_name
+    local pkglibdir built_extension installed_extension built_sha installed_sha
+    local harness_status=0
+    local should_stop=0
+    local built_extensions=()
+
+    stop_live_extension() {
+        if [ "$should_stop" -eq 0 ]; then
+            return 0
+        fi
+        if run_logged "$output_dir/live-extension-stop.log" env \
+            CARGO_TARGET_DIR="$build_dir" \
+            cargo pgrx stop --package pg_accel "pg$pg"; then
+            printf 'fixed pgrx cluster pg%s stopped after live Rust coverage\n' \
+                "$pg" >> "$output_dir/live-extension-stop.log"
+            should_stop=0
+            return 0
+        fi
+        return 1
+    }
+
+    fail_live_extension_install() {
+        local message="$1"
+        echo "error: $message" >&2
+        record_stage rust live_extension_install 1 "$message"
+        return 1
+    }
+
+    [ "$git_tree" = "clean" ] || {
+        fail_live_extension_install \
+            "live Rust coverage requires the exact clean candidate"
+        return 1
+    }
+    [ -x "$bench_bin" ] || {
+        fail_live_extension_install \
+            "instrumented pg_accel_bench object is missing: $bench_bin"
+        return 1
+    }
+    if ! pg_config="$(pg_accel_pg_config_for_pg "$pg")"; then
+        fail_live_extension_install "could not resolve the pgrx pg_config"
+        return 1
+    fi
+    psql_bin="$("$pg_config" --bindir)/psql"
+    [ -x "$psql_bin" ] || {
+        fail_live_extension_install "PostgreSQL client is unavailable: $psql_bin"
+        return 1
+    }
+    if ! port="$(pg_accel_pgrx_port_for_pg "$pg")"; then
+        fail_live_extension_install "could not resolve the fixed pgrx port"
+        return 1
+    fi
+    admin_connection="host=localhost port=$port dbname=postgres"
+    database_name="pgaccel_cov_rust_pg${pg}_${BASHPID}"
+    connection="host=localhost port=$port dbname=$database_name"
+    if [ "$(sha256_file "$bench_bin")" != "$production_object_sha" ]; then
+        fail_live_extension_install \
+            "instrumented pg_accel_bench changed after the production build"
+        return 1
+    fi
+
+    mkdir -p "$live_artifact_dir" "$live_profile_dir" "$server_profile_dir"
+    find "$live_artifact_dir" -mindepth 1 -delete
+    find "$live_profile_dir" -mindepth 1 -delete
+    find "$server_profile_dir" -mindepth 1 -delete
+
+    # The install recipe owns the fixed pgrx cluster from its initial stop
+    # through its final start. The EXIT trap also covers partial install paths.
+    should_stop=1
+    trap 'stop_live_extension >/dev/null 2>&1 || true' EXIT
+    trap 'exit 130' INT TERM
+    if ! run_logged "$output_dir/live-extension-install.log" env \
+        CARGO_TARGET_DIR="$build_dir" \
+        LLVM_PROFILE_FILE="$server_profile_dir/pgaccel-live-server-%p-%m.profraw" \
+        just install-pg-accel "$pg"; then
+        fail_live_extension_install \
+            "instrumented extension install/start on the fixed pgrx cluster failed"
+        return 1
+    fi
+
+    while IFS= read -r -d '' candidate; do
+        built_extensions+=("$candidate")
+    done < <(find "$build_dir/release" -maxdepth 1 -type f \
+        \( -name 'libpg_accel.so' -o -name 'libpg_accel.dylib' \
+        -o -name 'pg_accel.dll' -o -name 'libpg_accel.dll' \) -print0 \
+        2>/dev/null)
+    if [ "${#built_extensions[@]}" -ne 1 ]; then
+        fail_live_extension_install \
+            "expected exactly one instrumented release extension object"
+        return 1
+    fi
+    built_extension="${built_extensions[0]}"
+    pkglibdir="$("$pg_config" --pkglibdir)"
+    installed_extension="$pkglibdir/pg_accel.${built_extension##*.}"
+    if [ ! -f "$installed_extension" ]; then
+        fail_live_extension_install \
+            "installed extension object is missing: $installed_extension"
+        return 1
+    fi
+    built_sha="$(sha256_file "$built_extension")"
+    installed_sha="$(sha256_file "$installed_extension")"
+    if [ "$built_sha" != "$installed_sha" ]; then
+        fail_live_extension_install \
+            "installed extension hash does not match the instrumented release object"
+        return 1
+    fi
+    printf 'role\tsha256\tpath\n' > "$output_dir/live-extension-objects.tsv"
+    printf 'built\t%s\t%s\ninstalled\t%s\t%s\n' \
+        "$built_sha" "$built_extension" "$installed_sha" "$installed_extension" \
+        >> "$output_dir/live-extension-objects.tsv"
+    record_stage rust live_extension_install 0
+
+    PG_CONFIG="$pg_config" PG_ACCEL_EXPECTED_DYLIB="$built_extension" \
+        scripts/coverage_live_rust.sh \
+        --repo-root "$repo_root" \
+        --build-dir "$build_dir" \
+        --artifact-dir "$live_artifact_dir" \
+        --bench-bin "$bench_bin" \
+        --profile-dir "$live_profile_dir" \
+        --psql-bin "$psql_bin" \
+        --admin-connection "$admin_connection" \
+        --connection "$connection" \
+        --database-name "$database_name" \
+        --candidate-sha "$git_commit" \
+        --source-tree "$git_source_tree" \
+        --object-sha256 "$production_object_sha" || harness_status=$?
+
+    if ! stop_live_extension; then
+        echo "error: fixed pgrx cluster did not stop after live Rust coverage" >&2
+        harness_status=1
+    fi
+    trap - EXIT INT TERM
+    if ! find "$server_profile_dir" -type f -name '*.profraw' -size +0c \
+        -print -quit 2>/dev/null | grep -q .; then
+        echo "error: instrumented PostgreSQL execution produced no backend raw profile" >&2
+        harness_status=1
+    else
+        : > "$output_dir/live-server-profile-manifest.tsv"
+        while IFS= read -r -d '' profile; do
+            printf '%s\t%s\t%s\n' \
+                "$(sha256_file "$profile")" \
+                "$(stat -f '%z' "$profile" 2>/dev/null || stat -c '%s' "$profile")" \
+                "$profile" >> "$output_dir/live-server-profile-manifest.tsv"
+        done < <(find "$server_profile_dir" -type f -name '*.profraw' \
+            -size +0c -print0 | sort -z)
+    fi
+    return "$harness_status"
+)
+
 rust_coverage() (
     local output_dir="$artifact_dir/rust"
     local build_dir="$build_root/rust"
     local execution_status=0
     local profile_dir="$output_dir/profiles"
     local production_profile_dir="$output_dir/production-profiles"
+    local production_bench_bin="$build_dir/debug/pg_accel_bench"
+    local production_bench_sha=""
     mkdir -p "$output_dir" "$build_dir" "$profile_dir" "$production_profile_dir"
     find "$profile_dir" -type f -delete
     find "$production_profile_dir" -type f -delete
@@ -353,7 +528,11 @@ rust_coverage() (
     if run_logged "$output_dir/production-build.log" env \
         CARGO_TARGET_DIR="$build_dir" \
         cargo build --workspace --locked --no-default-features \
-            --features "pg${pg}"; then
+            --features "pg${pg}" \
+        && [ -x "$production_bench_bin" ] \
+        && production_bench_sha="$(sha256_file "$production_bench_bin")"; then
+        printf '%s  %s\n' "$production_bench_sha" "$production_bench_bin" \
+            > "$output_dir/production-bench.sha256"
         record_stage rust production_build 0
     else
         execution_status=1
@@ -421,6 +600,15 @@ rust_coverage() (
     else
         execution_status=1
         record_stage rust pgrx_tests 1 "cargo pgrx tests failed"
+    fi
+    if run_logged "$output_dir/live-cli.log" \
+        run_live_rust_coverage_harness \
+            "$output_dir" "$build_dir" "$production_bench_sha"; then
+        record_stage rust live_cli 0
+    else
+        execution_status=1
+        record_stage rust live_cli 1 \
+            "instrumented production pg_accel_bench live CLI harness failed"
     fi
     if ! copy_profiles "$build_dir" "$profile_dir" \
         > "$output_dir/copy-profiles.log" 2>&1; then
@@ -816,15 +1004,27 @@ sql_coverage() (
                 record_stage sql extension_init 1 "extension initialization failed"
             fi
             if run_logged "$output_dir/sql-tests.log" env \
+                PGOPTIONS="-c pg_accel.kernel_timeout_ms=${sql_coverage_kernel_timeout_ms}" \
                 PG_ACCEL_PG_MAJOR="$pg" \
                 PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 \
                 PG_ACCEL_RELEASE_MODE=1 \
+                PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS="$sql_coverage_kernel_timeout_ms" \
                 PG_ACCEL_SQL_TEST_ARTIFACT_DIR="$test_run_dir" \
                 sql/tests/run_all.sh "$connection"; then
                 record_stage sql sql_tests 0
             else
                 execution_status=1
                 record_stage sql sql_tests 1 "SQL integration test runner failed"
+            fi
+            local expected_session_profile
+            expected_session_profile=$'pg_accel.kernel_timeout_ms\t'"${sql_coverage_kernel_timeout_ms}"$'\tms\tclient'
+            if [ -f "$test_run_dir/session-profile.tsv" ] \
+                && [ "$(<"$test_run_dir/session-profile.tsv")" = "$expected_session_profile" ]; then
+                record_stage sql session_profile 0
+            else
+                execution_status=1
+                record_stage sql session_profile 1 \
+                    "exact coverage-only SQL session profile was not retained"
             fi
         else
             execution_status=1

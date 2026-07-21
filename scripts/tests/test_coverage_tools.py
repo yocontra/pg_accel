@@ -138,6 +138,91 @@ class LineCoverageTests(unittest.TestCase):
             artifact_dir=None,
         )
 
+    def test_llvm20_lcov_summary_normalizes_da_representation_differences(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "crate/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("fn covered() {}\nfn folded() {}\n", encoding="utf-8")
+            report = root / "raw.info"
+            report.write_text(
+                "\n".join(
+                    (
+                        "TN:",
+                        f"SF:{source}",
+                        "DA:1,0",
+                        "LF:2",
+                        "LH:1",
+                        "end_of_record",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            records = coverage_tools.lcov_records(report, root)
+            exported = {
+                "crate/src/lib.rs": {
+                    "summary": {"lines": {"count": 2, "covered": 1}}
+                }
+            }
+
+            self.assertEqual(
+                coverage_tools.llvm_json_lcov_total_errors(
+                    exported, records, {"crate/src/lib.rs"}, "rust"
+                ),
+                [],
+            )
+            self.assertEqual(records["crate/src/lib.rs"]["line_hits"], {1: 0})
+
+    def test_lcov_line_summaries_fail_closed_on_malformed_evidence(self) -> None:
+        mutations = (
+            ("LF:1\n", "incomplete"),
+            ("LF:1\nLF:1\nLH:1\n", "duplicate"),
+            ("LF:-1\nLH:0\n", "negative"),
+            ("LF:1\nLH:2\n", "impossible"),
+        )
+        for summary, label in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                source = root / "crate/src/lib.rs"
+                source.parent.mkdir(parents=True)
+                source.write_text("fn covered() {}\n", encoding="utf-8")
+                report = root / "raw.info"
+                report.write_text(
+                    f"TN:\nSF:{source}\nDA:1,1\n{summary}end_of_record\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaises(coverage_tools.CoverageError):
+                    coverage_tools.lcov_records(report, root)
+
+    def test_lcov_and_json_summary_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "crate/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("fn covered() {}\n", encoding="utf-8")
+            report = root / "raw.info"
+            report.write_text(
+                f"TN:\nSF:{source}\nDA:1,1\nLF:1\nLH:1\nend_of_record\n",
+                encoding="utf-8",
+            )
+            errors = coverage_tools.llvm_json_lcov_total_errors(
+                {
+                    "crate/src/lib.rs": {
+                        "summary": {"lines": {"count": 2, "covered": 1}}
+                    }
+                },
+                coverage_tools.lcov_records(report, root),
+                {"crate/src/lib.rs"},
+                "rust",
+            )
+            self.assertEqual(
+                errors,
+                ["rust: raw LCOV and JSON totals differ for crate/src/lib.rs"],
+            )
+
     def test_summarize_fails_below_fixed_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -830,6 +915,118 @@ class SqlSemanticCoverageTests(unittest.TestCase):
                 )
 
 
+class SqlIntegrationRunnerTests(unittest.TestCase):
+    def write_fake_psql(self, root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        log = root / "pgoptions.log"
+        psql = bin_dir / "psql"
+        psql.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "${PGOPTIONS:-}" >> "$PGACCEL_FAKE_PSQL_LOG"
+arguments="$*"
+if [[ "$arguments" == *"FROM pg_extension"* ]]; then
+    printf '1\n'
+    exit 0
+fi
+if [[ "$arguments" == *"FROM pg_settings"* ]]; then
+    if [ "${PGOPTIONS:-}" = '-c pg_accel.kernel_timeout_ms=60000' ]; then
+        printf 'pg_accel.kernel_timeout_ms\t60000\tms\tclient\n'
+    else
+        printf 'pg_accel.kernel_timeout_ms\t5000\tms\tdefault\n'
+    fi
+    exit 0
+fi
+test_file=''
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = '-f' ]; then
+        shift
+        test_file="$1"
+        break
+    fi
+    shift
+done
+[ -n "$test_file" ] || exit 2
+stem="$(basename "$test_file" .sql)"
+if [ "${PGACCEL_FAKE_WARNING_STEM:-}" = "$stem" ]; then
+    printf 'WARNING: synthetic strict-runner warning\n'
+fi
+printf 'PGACCEL_FILE_OK:%s\n' "$stem"
+""",
+            encoding="utf-8",
+        )
+        psql.chmod(0o755)
+        return bin_dir, log
+
+    def run_runner(
+        self,
+        root: pathlib.Path,
+        *,
+        warning_stem: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        bin_dir, log = self.write_fake_psql(root)
+        artifact_dir = root / "artifacts"
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{bin_dir}:{env['PATH']}",
+                "PGOPTIONS": "-c pg_accel.kernel_timeout_ms=60000",
+                "PGACCEL_FAKE_PSQL_LOG": str(log),
+                "PG_ACCEL_SQL_TEST_ARTIFACT_DIR": str(artifact_dir),
+                "PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS": "60000",
+                "PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION": "1",
+                "PG_ACCEL_RELEASE_MODE": "1",
+            }
+        )
+        if warning_stem is not None:
+            env["PGACCEL_FAKE_WARNING_STEM"] = warning_stem
+            env["PG_ACCEL_SQL_TEST_ALLOWED_WARNING"] = warning_stem
+        return subprocess.run(
+            [str(REPO_ROOT / "sql/tests/run_all.sh"), "dbname=synthetic"],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+
+    def test_coverage_profile_reaches_every_psql_and_is_retained(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            result = self.run_runner(root)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            expected_calls = (
+                len(list((REPO_ROOT / "sql/tests").glob("[0-9]*.sql"))) + 2
+            )
+            calls = (root / "pgoptions.log").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(
+                calls,
+                ["-c pg_accel.kernel_timeout_ms=60000"] * expected_calls,
+            )
+            self.assertEqual(
+                (root / "artifacts/session-profile.tsv").read_text(
+                    encoding="utf-8"
+                ),
+                "pg_accel.kernel_timeout_ms\t60000\tms\tclient\n",
+            )
+
+    def test_strict_warning_is_not_suppressed_by_allowlist_environment(self) -> None:
+        first_test = sorted((REPO_ROOT / "sql/tests").glob("[0-9]*.sql"))[0]
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.run_runner(
+                pathlib.Path(directory), warning_stem=first_test.stem
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn(
+                f"FAIL: {first_test.name} (warning/skip/caught exception evidence)",
+                result.stdout,
+            )
+
+
 class AggregateNegativeMatrixTests(unittest.TestCase):
     def initialize_valid_gate(self, root: pathlib.Path) -> None:
         quiet_call(
@@ -1031,6 +1228,8 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
                     (
                         f"SF:{repo_root / relative}",
                         f"DA:1,{hits}",
+                        "LF:1",
+                        f"LH:{1 if hits > 0 else 0}",
                         "end_of_record",
                     )
                 )
@@ -1178,6 +1377,8 @@ if "-format=lcov" in sys.argv:
     for filename in sorted(files):
         print(f"SF:{filename}")
         print(f"DA:1,{hits}")
+        print("LF:1")
+        print(f"LH:{1 if hits > 0 else 0}")
         print("end_of_record")
 else:
     print(json.dumps({
@@ -1472,6 +1673,10 @@ raise SystemExit(2)
         (root / "sql/test-run/results.tsv").write_text(
             "\n".join(result_lines) + "\n", encoding="utf-8"
         )
+        (root / "sql/test-run/session-profile.tsv").write_text(
+            "pg_accel.kernel_timeout_ms\t60000\tms\tclient\n",
+            encoding="utf-8",
+        )
         coverage_tools.write_json(
             root / "sql/assertion-inventory.json",
             {
@@ -1532,6 +1737,71 @@ raise SystemExit(2)
             capture_output=True,
             text=True,
         ).stdout.strip()
+        extension_sha = "a" * 64
+        benchmark_sha = "b" * 64
+        final_profile = root / "rust/profiles/fixture.profraw"
+        final_profile_sha = coverage_tools.sha256(final_profile)
+        final_profile_size = final_profile.stat().st_size
+        live_cli = root / "rust/live-cli"
+        (live_cli / "selected").mkdir(parents=True)
+        (root / "rust/production-bench.sha256").write_text(
+            f"{benchmark_sha}  /coverage/debug/pg_accel_bench\n",
+            encoding="utf-8",
+        )
+        (root / "rust/live-cli.log").write_text("live CLI PASS\n", encoding="utf-8")
+        (root / "rust/live-extension-install.log").write_text(
+            "instrumented install PASS\n", encoding="utf-8"
+        )
+        (root / "rust/live-extension-stop.log").write_text(
+            "fixed cluster stopped\n", encoding="utf-8"
+        )
+        (root / "rust/live-extension-objects.tsv").write_text(
+            "role\tsha256\tpath\n"
+            f"built\t{extension_sha}\t/coverage/release/libpg_accel.so\n"
+            f"installed\t{extension_sha}\t/pgrx/lib/pg_accel.so\n",
+            encoding="utf-8",
+        )
+        (root / "rust/live-server-profile-manifest.tsv").write_text(
+            f"{final_profile_sha}\t{final_profile_size}\t/coverage/backend.profraw\n",
+            encoding="utf-8",
+        )
+        (live_cli / "profile-manifest.tsv").write_text(
+            f"{final_profile_sha}\t{final_profile_size}\traw-profiles/client.profraw\n",
+            encoding="utf-8",
+        )
+        coverage_tools.write_json(
+            live_cli / "provenance.json",
+            {
+                "schema_version": 1,
+                "candidate_sha": commit,
+                "source_tree": "c" * 40,
+                "instrumented_object_sha256": benchmark_sha,
+                "instrumented_extension_sha256": extension_sha,
+                "performance_evidence_eligible": False,
+                "cache_policy": "warm-only",
+            },
+        )
+        coverage_tools.write_json(
+            live_cli / "evidence-validation.json",
+            {
+                "schema_version": 1,
+                "performance_evidence_eligible": False,
+                "all_outputs_consumed": True,
+                "loaded_extension_hash_bound": True,
+                "extension_object_sha256": extension_sha,
+            },
+        )
+        file_probe = {"sha256": extension_sha}
+        coverage_tools.write_json(
+            live_cli / "selected/provenance.json",
+            {
+                "status": "pass",
+                "errors": [],
+                "expected_binary": file_probe,
+                "installed_binary": file_probe,
+                "loaded_binaries": [file_probe],
+            },
+        )
         coverage_tools.write_json(
             root / "provenance.json",
             {
@@ -1616,6 +1886,38 @@ raise SystemExit(2)
             root = pathlib.Path(directory)
             self.initialize_valid_gate(root)
             self.assertEqual(self.aggregate(root), 0)
+
+    def test_sql_session_profile_is_exact_and_fail_closed(self) -> None:
+        mutations = {
+            "wrong_value": "pg_accel.kernel_timeout_ms\t59999\tms\tclient\n",
+            "wrong_unit": "pg_accel.kernel_timeout_ms\t60000\ts\tclient\n",
+            "wrong_source": "pg_accel.kernel_timeout_ms\t60000\tms\tconfiguration file\n",
+            "duplicate": (
+                "pg_accel.kernel_timeout_ms\t60000\tms\tclient\n"
+                "pg_accel.kernel_timeout_ms\t60000\tms\tclient\n"
+            ),
+        }
+        for label, contents in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                self.initialize_valid_gate(root)
+                profile = root / "sql/test-run/session-profile.tsv"
+                profile.write_text(contents, encoding="utf-8")
+                self.reseal(root, "sql")
+                self.assertEqual(self.aggregate(root), 1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            (root / "sql/test-run/session-profile.tsv").unlink()
+            self.assertEqual(
+                quiet_call(
+                    coverage_tools.seal_layer_evidence,
+                    argparse.Namespace(artifact_dir=str(root), layer="sql"),
+                ),
+                1,
+            )
+            self.assertEqual(self.aggregate(root), 1)
 
     def test_ooo_overlap_diagnostic_log_is_required_raw_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1771,6 +2073,17 @@ raise SystemExit(2)
             stage = json.loads(stage_path.read_text())
             del stage["stages"]["pgrx_tests"]
             stage_path.write_text(json.dumps(stage), encoding="utf-8")
+            self.assertEqual(self.aggregate(root), 1)
+
+    def test_live_backend_extension_hash_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            path = root / "rust/live-cli/selected/provenance.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["loaded_binaries"][0]["sha256"] = "d" * 64
+            coverage_tools.write_json(path, document)
+            self.reseal(root, "rust")
             self.assertEqual(self.aggregate(root), 1)
 
     def test_invalid_mapping_is_rejected(self) -> None:
@@ -2077,6 +2390,52 @@ class ImmutableBaselineTests(unittest.TestCase):
             ),
         )
         return path
+
+    def test_coverage_helper_test_discovery_is_pinned(self) -> None:
+        canonical_justfile = (
+            "coverage-audit:\n"
+            "    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover "
+            "-s scripts/tests -p 'test_coverage*.py'\n"
+        )
+        canonical_gate = (
+            "if ! env PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \\\n"
+            "    -s scripts/tests -p 'test_coverage*.py' \\\n"
+            "    > tool-tests.log 2>&1; then\n"
+            "    exit 1\n"
+            "fi\n"
+        )
+        names = {"test_coverage_tools.py", "test_coverage_live_rust.py"}
+        self.assertEqual(
+            coverage_tools.coverage_helper_test_discovery_errors(
+                canonical_justfile, canonical_gate, names
+            ),
+            [],
+        )
+
+        mutations = {
+            "single_file_just_recipe": (
+                canonical_justfile.replace(
+                    "test_coverage*.py", "test_coverage_tools.py"
+                ),
+                canonical_gate,
+                names,
+            ),
+            "broad_gate_pattern": (
+                canonical_justfile,
+                canonical_gate.replace("test_coverage*.py", "test_*.py"),
+                names,
+            ),
+            "missing_live_harness_tests": (
+                canonical_justfile,
+                canonical_gate,
+                {"test_coverage_tools.py"},
+            ),
+        }
+        for label, inputs in mutations.items():
+            with self.subTest(label=label):
+                self.assertTrue(
+                    coverage_tools.coverage_helper_test_discovery_errors(*inputs)
+                )
 
     def test_release_baseline_update_requires_explicit_acknowledgement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

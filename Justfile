@@ -376,7 +376,7 @@ coverage pg="":
 # negative cases, and shell syntax without starting PostgreSQL or a GPU device.
 coverage-audit:
     bash -n scripts/coverage_gate.sh sql/tests/run_all.sh
-    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_coverage_tools.py'
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_coverage*.py'
     python3 scripts/coverage_tools.py audit-scope --scope coverage/scope.json --repo-root .
 
 # Run the immutable qualified-Metal performance ratchet. The Rust command fixes
