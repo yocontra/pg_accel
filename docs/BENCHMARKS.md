@@ -146,9 +146,15 @@ These values are an explicit reproducible invocation, not published performance
 evidence. `run --help` is authoritative for supported flags. `--dry-run` checks
 the generated run plan without executing measurements.
 
-## Qualified Metal ship gate
+`--cache-mode both` requests a real OS page-cache purge for its cold arm and is
+therefore an optional operator-authorized certification run. The unprivileged
+local performance gate uses `--cache-mode warm`. Project-owned AdaptiveCpp
+JIT/archive-cache cold-start evidence is captured separately by the Metal
+stress gate and must not be represented as an OS page-cache purge.
 
-The bounded live performance ratchet is:
+## Qualified Metal cold-cache certification
+
+The full warm-plus-OS-cold certification ratchet is:
 
 ```bash
 just metal-benchmark-ship-gate 18
@@ -158,16 +164,18 @@ The recipe installs the current release build, runs the CPU-cheat audit and
 provenance checks, and invokes `pg_accel_bench metal-ship-gate`. The command
 does not accept sampling or workload overrides. It fixes seed 42, ten measured
 iterations, five warmups, raw wall-clock timing, cache mode `both`, plan
-capture, and the following exact 1M-row winner cells:
+capture, and the following exact 1M-row winner cells. Because its cold arm
+purges the OS page cache, this recipe is optional manual certification rather
+than the unprivileged local warm gate:
 
 | Workload | Protected lane | Minimum warm median vs PostgreSQL parallel |
 |---|---|---:|
-| `grouped_agg_int4` | exact resident grouped SUM(int4)/COUNT | 1.00x |
-| `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.00x |
-| `mixed_join_agg_int4` | exact resident hash join plus grouped SUM(int4)/COUNT | 1.00x |
-| `ssbm_resident_int4_star` | exact two-dimension date+part star grouped by year and part size, SUM(int4)/COUNT | 1.00x |
-| `hashjoin_10k_1m` | resident equality hash join COUNT | 1.00x |
-| `h3_cell_to_parent` | fused H3 parent grouped count | 1.10x |
+| `grouped_agg_int4` | exact resident grouped SUM(int4)/COUNT | 1.15x |
+| `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.15x |
+| `mixed_join_agg_int4` | exact resident hash join plus grouped SUM(int4)/COUNT | 1.15x |
+| `ssbm_resident_int4_star` | exact two-dimension date+part star grouped by year and part size, SUM(int4)/COUNT | 1.15x |
+| `hashjoin_10k_1m` | resident equality hash join COUNT | 1.15x |
+| `h3_cell_to_parent` | fused H3 parent grouped count | 1.15x |
 
 The similarly named legacy workloads remain in the harness as fail-closed
 coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
@@ -188,7 +196,7 @@ fresh independent write-once random selection before executing release gates;
 retained predecessor evidence is transition history only.
 
 The threshold matrix is the executable source of truth. Before timing, the
-command rejects missing, duplicate, unregistered, non-winner, or sub-parity
+command rejects missing, duplicate, unregistered, non-winner, or below-floor
 contract entries. After timing, it fails on an incomplete matrix, a debug
 harness, a crash, missing accelerated/native plans or correctness artifacts,
 stock-executor fallback, missed GPU selection or dispatch, absent dispatch
@@ -197,10 +205,11 @@ threshold regression, or missing H3 cold/warm evidence.
 
 The qualified self-hosted Metal jobs in both `ci.yml` and `release.yml` run the
 same recipe and upload the deterministic
-`artifacts/benchmark-ship-gate-pg18-qualified-metal` bundle. Release creation
-depends on the release workflow job. Checked-in workflow wiring is not run
-evidence: the release checklist remains open until the exact candidate has a
-successful CI artifact URL.
+`artifacts/benchmark-ship-gate-pg18-qualified-metal` bundle. That bundle is
+OS-cold certification evidence, not a prerequisite for the unprivileged warm
+matrix. Checked-in workflow wiring is not run evidence: the corresponding
+release-checklist row remains open until the exact candidate has a successful
+CI artifact URL.
 
 ## Timing and ordering
 

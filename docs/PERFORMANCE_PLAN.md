@@ -29,12 +29,15 @@ family becomes production-selectable, its full boundary matrix must adopt the
 same `1.15x` floor; current raster eligibility and other future envelopes remain
 explicit reconciliation work rather than implied coverage by the 29 cells.
 
-## Measured baseline
+## Historical measured baseline
 
-The current reference is commit `68163da64f9ed1eed98bc410bf843c74a036ba0d`,
-tree `9c13ffdb1b9e907904f30acc4872b51167799331`, from
+The immutable historical comparison baseline is commit
+`68163da64f9ed1eed98bc410bf843c74a036ba0d`, tree
+`9c13ffdb1b9e907904f30acc4872b51167799331`, from
 `.codex/scratch/final-warm-benchmark-68163da6-20260721T191432Z`. Times are warm
 medians in milliseconds from ten measured iterations after five warmups.
+These rows describe that historical candidate only; they are not results for
+the release candidate that is still being finalized.
 
 | Workload | Rows | pg_accel | PostgreSQL | Speedup | Conclusion |
 |---|---:|---:|---:|---:|---|
@@ -339,7 +342,10 @@ Run the complete 29-cell scale matrix for every performance candidate on the
 same host class and frozen server configuration:
 
 1. Use 10 measured iterations, 5 warmups, randomized arm order, fully consumed
-   output, and separate cold and warm series.
+   output, and a warm series for the production-selection invariant. Capture
+   project-owned AdaptiveCpp JIT/archive-cache cold first dispatch separately.
+   A privileged OS page-cache cold series is optional manual certification and
+   must remain explicitly unclaimed when it was not run.
 2. Capture absolute medians, p90, raw samples, and speedup. Speedup alone cannot
    distinguish a pg_accel regression from an improving PostgreSQL plan.
 3. Record PostgreSQL and pg_accel plan signatures, parallel settings, exact
