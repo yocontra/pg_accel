@@ -915,4 +915,336 @@ mod tests {
         let ranked = ranked_qualified_candidates(&candidates);
         assert!((ranked[0].multiplier - 24.0).abs() < f64::EPSILON);
     }
+
+    struct DummyWorkload;
+
+    impl Workload for DummyWorkload {
+        fn name(&self) -> &'static str {
+            "dummy_fp64"
+        }
+
+        fn description(&self) -> &'static str {
+            "dummy fp64 workload"
+        }
+
+        fn setup_sql(&self, rows: usize) -> Vec<String> {
+            vec![format!("SELECT {rows}")]
+        }
+
+        fn pre_query_sql(&self) -> Vec<String> {
+            vec!["SET work_mem = '4MB'".to_owned()]
+        }
+
+        fn query_sql(&self) -> String {
+            "SELECT 42".to_owned()
+        }
+
+        fn baseline_query_sql(&self) -> Option<String> {
+            Some("SELECT 41".to_owned())
+        }
+
+        fn row_scales(&self) -> &'static [usize] {
+            &[10, 20]
+        }
+
+        fn cleanup_sql(&self) -> Vec<String> {
+            vec!["SELECT 0".to_owned()]
+        }
+    }
+
+    #[test]
+    fn multiplier_workload_delegates_contract_and_prepends_cost_setting() {
+        let workload = Fp64MultiplierWorkload::new(Box::new(DummyWorkload), 16.5);
+        assert_eq!(workload.name(), "dummy_fp64");
+        assert_eq!(workload.description(), "dummy fp64 workload");
+        assert_eq!(workload.setup_sql(123), ["SELECT 123"]);
+        assert_eq!(
+            workload.pre_query_sql(),
+            [
+                "SET pg_accel.soft_fp64_cost_multiplier = 16.5",
+                "SET work_mem = '4MB'",
+            ]
+        );
+        assert_eq!(workload.query_sql(), "SELECT 42");
+        assert_eq!(workload.baseline_query_sql().as_deref(), Some("SELECT 41"));
+        assert_eq!(workload.row_scales(), &[10, 20]);
+        assert_eq!(workload.cleanup_sql(), ["SELECT 0"]);
+    }
+
+    #[test]
+    fn multiplier_and_size_parsers_reject_malformed_empty_and_nonfinite_inputs() {
+        for raw in ["", ",,", "abc", "NaN", "inf", "-inf", "0", "65"] {
+            assert!(parse_multiplier_list(raw).is_err(), "raw={raw:?}");
+        }
+        assert_eq!(
+            parse_multiplier_list("1, 64, 1.0").expect("boundary multipliers"),
+            vec![1.0, 64.0]
+        );
+        assert!(sizes_with_optional_cap(Some("not-a-size")).is_err());
+        assert!(sizes_with_optional_cap(Some("10k")).is_err());
+        assert_eq!(
+            sizes_with_optional_cap(Some("1M")).expect("1M cap"),
+            vec![100_000, 1_000_000]
+        );
+    }
+
+    #[test]
+    fn size_groups_and_expected_matrix_follow_canonical_workload_contract() {
+        let grouped = group_sizes_by_iterations(&[100_000, 1_000_000_000, 1_000_000]);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0], (3, vec![1_000_000_000]));
+        assert_eq!(grouped[1], (5, vec![100_000, 1_000_000]));
+
+        let matrix = expected_matrix_for_sizes(&[100_000, 1_000_000]);
+        let names = workloads::fp64_matrix::fp64_matrix_workload_names();
+        assert_eq!(matrix.len(), names.len() * 2);
+        for name in names {
+            assert!(matrix.contains(&(name.to_owned(), 100_000)));
+            assert!(matrix.contains(&(name.to_owned(), 1_000_000)));
+        }
+    }
+
+    #[test]
+    fn candidate_records_crashes_unexpected_cells_and_counter_failures() {
+        let mut row = result("unexpected", 100_000, 10.0, 20.0);
+        row.dispatch_counter_captured = false;
+        row.dispatch_counter_error = Some("stats unavailable".to_owned());
+        row.pg_accel_stock_exec_delta = 2;
+        let mut report = report_for(vec![row]);
+        report.crashes.push(crate::report::CrashedScale {
+            workload: "reduce_f64_sum".to_owned(),
+            rows: 100_000,
+            error: "backend reset".to_owned(),
+            repro_command: None,
+            plan_snippet_artifact: None,
+            correctness_diff_artifact: None,
+            log_tail_artifacts: Vec::new(),
+        });
+        let matrix = expected(&[("reduce_f64_sum", 100_000)]);
+        let candidate = summarize_candidate(12.0, &[report], &matrix);
+        assert!(!candidate.qualified);
+        let reasons = candidate.disqualifications.join(" | ");
+        assert!(reasons.contains("crashed: backend reset"));
+        assert!(reasons.contains("unexpected fp64 cell observed"));
+        assert!(reasons.contains("stats unavailable"));
+        assert!(reasons.contains("stock executor fallback delta 2"));
+        assert!(reasons.contains("missing fp64 cell"));
+        assert!(!reasons.contains("observed 1 fp64 cells, expected 1"));
+    }
+
+    #[test]
+    fn summarize_cell_uses_default_counter_error_and_rejects_nonfinite_speedup() {
+        let mut row = result("reduce_f64_sum", 100_000, 10.0, 20.0);
+        row.dispatch_counter_captured = false;
+        row.dispatch_counter_error = None;
+        row.speedup_median_vs_parallel = f64::NAN;
+        let cell = summarize_cell(&row);
+        assert_eq!(cell.status, Fp64CellStatus::Fail);
+        let failure = cell.failure.expect("cell failure");
+        assert!(failure.contains("dispatch counter capture unavailable"));
+        assert!(failure.contains("median speedup below parity: NaNx"));
+    }
+
+    fn calibration_cell(
+        workload: &str,
+        speedup: f64,
+        plan_selected: bool,
+        function_dispatch: bool,
+    ) -> Fp64CalibrationCell {
+        Fp64CalibrationCell {
+            workload: workload.to_owned(),
+            rows: 100_000,
+            speedup_median: speedup,
+            speedup_mean: speedup + 0.05,
+            gpu_kernel_dispatched: true,
+            plan_selected,
+            function_srf_kernel_dispatched: function_dispatch,
+            dispatch_counter_captured: true,
+            gpu_kernel_execution_delta: 3,
+            pg_accel_stock_exec_delta: 0,
+            status: Fp64CellStatus::Pass,
+            failure: None,
+        }
+    }
+
+    fn candidate_summary(
+        multiplier: f64,
+        qualified: bool,
+        geomean: Option<f64>,
+        disqualifications: Vec<String>,
+    ) -> Fp64CandidateSummary {
+        Fp64CandidateSummary {
+            multiplier,
+            qualified,
+            geomean_speedup: geomean,
+            min_speedup: geomean,
+            cells_observed: 1,
+            cells_expected: 1,
+            disqualifications,
+            cells: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn candidate_ranking_orders_geomean_and_filters_unqualified_entries() {
+        let candidates = [
+            candidate_summary(8.0, false, Some(99.0), vec!["failed".to_owned()]),
+            candidate_summary(32.0, true, Some(3.0), Vec::new()),
+            candidate_summary(16.0, true, Some(2.0), Vec::new()),
+            candidate_summary(4.0, true, None, Vec::new()),
+        ];
+        let ranked = ranked_qualified_candidates(&candidates);
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|candidate| candidate.multiplier)
+                .collect::<Vec<_>>(),
+            [32.0, 16.0]
+        );
+        assert_eq!(
+            compare_candidate_rank(&candidates[1], &candidates[2]),
+            Ordering::Less
+        );
+        assert_eq!(compare_f64_ascending(f64::NAN, 1.0), Ordering::Equal);
+        assert_eq!(compare_f64_descending(f64::NAN, 1.0), Ordering::Equal);
+    }
+
+    #[test]
+    fn markdown_and_json_artifacts_cover_selected_runner_up_and_dispatch_labels() {
+        let temp = std::env::temp_dir().join(format!(
+            "pg_accel_fp64_summary_{}_{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let summary = Fp64CalibrationSummary {
+            generated_at_unix_seconds: unix_now(),
+            artifact_dir: temp.display().to_string(),
+            sizes: vec![100_000, 1_000_000],
+            multipliers: vec![16.0, 24.5, 32.0],
+            selected_multiplier: Some(16.0),
+            runner_up_multiplier: Some(24.5),
+            selected_geomean_speedup: Some(2.0),
+            runner_up_geomean_speedup: Some(1.5),
+            parity_close_speedup: PARITY_CLOSE_SPEEDUP,
+            parity_close_cells: vec![
+                calibration_cell("function", 1.05, false, true),
+                calibration_cell("custom", 1.08, true, false),
+                calibration_cell("counter", 1.10, false, false),
+            ],
+            candidates: vec![
+                candidate_summary(16.0, true, Some(2.0), Vec::new()),
+                candidate_summary(
+                    24.5,
+                    false,
+                    None,
+                    vec!["cell failed".to_owned(), "missing dispatch".to_owned()],
+                ),
+            ],
+            fp64_disabled_proof: Some(Fp64ExplainProof {
+                workload: "sort_f64_keys".to_owned(),
+                rows: 100_000,
+                multiplier: 16.0,
+                fp64_enabled: false,
+                custom_scan_selected: false,
+                plan: "Seq Scan on bench_fp64\n".to_owned(),
+            }),
+        };
+
+        let markdown = summary.to_markdown();
+        assert!(markdown.contains("Selected: `16` (geomean 2.0000x)"));
+        assert!(markdown.contains("Runner-up: `24.5` (geomean 1.5000x)"));
+        assert!(markdown.contains("function/SRF"));
+        assert!(markdown.contains("Custom Scan"));
+        assert!(markdown.contains("counter-only"));
+        assert!(markdown.contains("cell failed<br>missing dispatch"));
+        assert!(markdown.contains("Seq Scan on bench_fp64"));
+        assert_eq!(
+            summary
+                .selected_candidate()
+                .map(|candidate| candidate.multiplier),
+            Some(16.0)
+        );
+
+        write_summary_artifacts(&summary).expect("summary artifacts");
+        let json =
+            fs::read_to_string(temp.join("fp64_calibration_summary.json")).expect("summary json");
+        assert!(json.contains("\"selected_multiplier\": 16.0"));
+        let persisted_markdown =
+            fs::read_to_string(temp.join("fp64_calibration_summary.md")).expect("summary markdown");
+        assert_eq!(persisted_markdown, markdown);
+        fs::remove_dir_all(&temp).expect("remove summary test directory");
+    }
+
+    #[test]
+    fn markdown_without_qualified_candidate_uses_explicit_empty_sections() {
+        let summary = Fp64CalibrationSummary {
+            generated_at_unix_seconds: 0,
+            artifact_dir: "none".to_owned(),
+            sizes: vec![100_000],
+            multipliers: vec![16.0],
+            selected_multiplier: None,
+            runner_up_multiplier: None,
+            selected_geomean_speedup: None,
+            runner_up_geomean_speedup: None,
+            parity_close_speedup: PARITY_CLOSE_SPEEDUP,
+            parity_close_cells: Vec::new(),
+            candidates: vec![candidate_summary(16.0, false, None, Vec::new())],
+            fp64_disabled_proof: None,
+        };
+        let markdown = summary.to_markdown();
+        assert!(markdown.contains("Selected: none"));
+        assert!(markdown.contains("Runner-up: none"));
+        assert!(markdown.contains("None."));
+        assert!(markdown.contains("No proof captured"));
+        assert!(summary.selected_candidate().is_none());
+        assert_eq!(format_optional_speedup(None), "-");
+        assert_eq!(format_optional_speedup(Some(f64::NAN)), "-");
+        assert_eq!(format_optional_speedup(Some(1.23456)), "1.2346x");
+        assert_eq!(format_multiplier(16.0), "16");
+        assert_eq!(format_multiplier(16.25), "16.25");
+    }
+
+    #[test]
+    fn empty_size_calibration_persists_an_explicit_unqualified_summary_without_running_cells() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock after epoch")
+            .as_nanos();
+        let artifact_root = std::env::temp_dir().join(format!(
+            "pg_accel_fp64_empty_matrix_{}_{nonce}",
+            std::process::id()
+        ));
+        let options = Fp64CalibrationOptions {
+            multipliers: vec![16.0],
+            sizes: Vec::new(),
+            warmup: 5,
+            seed: 42,
+            timing_mode: runner::TimingMode::RawWallClock,
+            cache_mode: runner::CacheMode::Warm,
+            guc_profile: None,
+            skip_guc_verify: false,
+            capture_plans: false,
+            artifact_root: artifact_root.clone(),
+        };
+
+        let summary = run_fp64_calibration("unused", &options)
+            .expect("an empty size matrix must not construct database run cells");
+        assert_eq!(summary.sizes, Vec::<usize>::new());
+        assert_eq!(summary.multipliers, vec![16.0]);
+        assert_eq!(summary.candidates.len(), 1);
+        assert!((summary.candidates[0].multiplier - 16.0).abs() < f64::EPSILON);
+        assert!(!summary.candidates[0].qualified);
+        assert_eq!(summary.candidates[0].cells_observed, 0);
+        assert_eq!(summary.candidates[0].cells_expected, 0);
+        assert!(summary.selected_candidate().is_none());
+        assert!(summary.fp64_disabled_proof.is_none());
+        assert!(
+            artifact_root
+                .join("fp64_calibration_summary.json")
+                .is_file()
+        );
+        assert!(artifact_root.join("fp64_calibration_summary.md").is_file());
+
+        fs::remove_dir_all(artifact_root).expect("remove empty calibration artifacts");
+    }
 }

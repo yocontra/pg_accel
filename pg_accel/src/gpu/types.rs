@@ -719,6 +719,48 @@ mod resident_abi_tests {
     use super::*;
 
     #[test]
+    fn resident_raster_defaults_are_null_empty_and_abi_versioned() {
+        let view = PgaccelResidentRasterView::default();
+        assert_eq!(view.abi_version, PGACCEL_RESIDENT_RASTER_ABI_VERSION);
+        assert_eq!(view.flags, 0);
+        assert!(view.pixels.is_null());
+        assert_eq!(view.pixels_bytes, 0);
+        assert!(view.band_offsets.is_null());
+        assert_eq!(view.band_offsets_bytes, 0);
+        assert!(view.rows.is_null());
+        assert_eq!(view.rows_bytes, 0);
+        assert!(view.bands.is_null());
+        assert_eq!(view.bands_bytes, 0);
+        assert!(view.nulls.is_null());
+        assert_eq!(view.nulls_bytes, 0);
+        assert_eq!(view.row_count, 0);
+        assert_eq!(view.band_count, 0);
+
+        let request = PgaccelRasterReclassResidentRequest::default();
+        assert_eq!(request.abi_version, PGACCEL_RESIDENT_RASTER_ABI_VERSION);
+        assert_eq!(request.output_pixel_type, PGACCEL_RESIDENT_RASTER_UINT8);
+        assert_eq!(
+            request.input.abi_version,
+            PGACCEL_RESIDENT_RASTER_ABI_VERSION
+        );
+        assert_eq!(request.first_row, 0);
+        assert_eq!(request.count, 0);
+        assert!(request.rules.is_null());
+        assert_eq!(request.rules_bytes, 0);
+        assert_eq!(request.rule_count, 0);
+        assert!(request.output_offsets.is_null());
+        assert_eq!(request.output_offsets_bytes, 0);
+        assert!(request.output_pixels.is_null());
+        assert_eq!(request.output_pixels_bytes, 0);
+        assert!(request.row_actions.is_null());
+        assert_eq!(request.row_actions_bytes, 0);
+        assert!(request.validation_scratch.is_null());
+        assert_eq!(request.validation_scratch_bytes, 0);
+        assert_eq!(request.max_total_pixels, 0);
+        assert_eq!(request.max_chunk_pixels, 0);
+    }
+
+    #[test]
     fn resident_memory_space_discriminants_match_c_header() {
         assert_eq!(PgaccelMemSpace::Host as i32, 0);
         assert_eq!(PgaccelMemSpace::SharedUsm as i32, 1);

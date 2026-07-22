@@ -607,6 +607,283 @@ pub fn estimate_threads(profile: &PlatformProfile, available_budget: usize) -> u
 }
 
 #[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    fn sort_input(limits: &DeviceLimits) -> SortAdmissionInput {
+        SortAdmissionInput {
+            rows: limits.gpu_sort_planner_min_rows.max(10_000),
+            limit_tuples: Some(10.0),
+            estimated_row_width: limits.gpu_sort_heap_topk_max_width_bytes.min(32),
+            key_count: 1,
+            key_class: Some(SortKeyClass::Integer),
+            algorithm: SortAlgorithm::StandaloneTopK,
+            materialized_output_fraction: 0.0,
+            chunk_count: 1,
+            cold_jit: false,
+        }
+    }
+
+    fn assert_declined(
+        input: SortAdmissionInput,
+        limits: &DeviceLimits,
+        expected: SortDeclineReason,
+    ) {
+        let decision = sort_admission(input, limits);
+        assert!(!decision.eligible, "unexpected admission: {decision:?}");
+        assert_eq!(decision.reason, Some(expected));
+        assert!(decision.estimated_cost.get().is_finite());
+    }
+
+    #[test]
+    fn scalar_admission_helpers_cover_boundaries() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_min_rows = 100;
+        limits.gpu_hash_agg_unsafe_input_rows = 1_000;
+        limits.gpu_hash_join_build_max_rows = 50;
+        limits.gpu_join_max_output_rows = 500;
+
+        assert!(!should_batch(99, 1.0, 100));
+        assert!(!should_batch(100, 0.01, 100));
+        assert!(should_batch(100, 0.011, 100));
+
+        let profile = PlatformProfile {
+            cpu_cores: 8,
+            has_gpu: true,
+            estimated_gpu_gflops: 1.0,
+            compute_units: 1,
+            gpu_max_alloc_bytes: 1,
+            has_native_fp64: true,
+        };
+        let gpu_min_rows = device_limits().gpu_min_rows;
+        if gpu_min_rows > 0 {
+            assert!(!should_use_gpu(&profile, gpu_min_rows - 1, 1.0));
+        }
+        assert!(!should_use_gpu(&profile, gpu_min_rows, 0.01));
+        assert!(should_use_gpu(&profile, gpu_min_rows, 0.011));
+        assert!(!should_use_gpu(
+            &PlatformProfile {
+                has_gpu: false,
+                ..profile
+            },
+            gpu_min_rows,
+            1.0
+        ));
+
+        assert!(hashagg_input_rows_safe(999, &limits));
+        assert!(!hashagg_input_rows_safe(1_000, &limits));
+        assert!(hashjoin_cardinality_safe(50, 500, &limits));
+        assert!(!hashjoin_cardinality_safe(51, 500, &limits));
+        assert!(!hashjoin_cardinality_safe(50, 501, &limits));
+        assert_eq!(conservative_input_rows(9.9, 10.9), 10);
+        assert_eq!(conservative_input_rows(-1.0, -2.0), 0);
+    }
+
+    #[test]
+    fn nlj_gates_cover_size_work_and_selectivity_boundaries() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_nlj_min_outer_rows = 10;
+        limits.gpu_nlj_min_inner_rows = 20;
+        limits.gpu_nlj_max_output_rows = 100;
+        limits.gpu_nlj_per_pair_cost = GPU_LAUNCH_OVERHEAD;
+
+        assert!(!nlj_break_even(9, 20, 1, &limits));
+        assert!(!nlj_break_even(10, 19, 1, &limits));
+        assert!(!nlj_break_even(10, 20, 101, &limits));
+        assert!(nlj_break_even(10, 20, 100, &limits));
+        limits.gpu_nlj_per_pair_cost = 0.0;
+        assert!(!nlj_break_even(10, 20, 100, &limits));
+
+        assert!(!nlj_selectivity_useful(0, 20, 0, 0.5));
+        assert!(!nlj_selectivity_useful(10, 0, 0, 0.5));
+        assert!(nlj_selectivity_useful(10, 20, 100, 0.5));
+        assert!(!nlj_selectivity_useful(10, 20, 101, 0.5));
+    }
+
+    #[test]
+    fn sort_admission_reports_every_structural_decline() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_sort_planner_min_rows = 100;
+        limits.gpu_sort_topk_max_limit = 1_000;
+        limits.gpu_sort_heap_topk_max_fraction = 0.25;
+        limits.gpu_sort_heap_topk_max_width_bytes = 64;
+        limits.gpu_sort_max_elements = 1_000_000;
+        let base = sort_input(&limits);
+
+        assert_declined(
+            SortAdmissionInput { rows: 0, ..base },
+            &limits,
+            SortDeclineReason::EmptyInput,
+        );
+        for key_count in [0, 2] {
+            assert_declined(
+                SortAdmissionInput { key_count, ..base },
+                &limits,
+                SortDeclineReason::TooManyKeys,
+            );
+        }
+        assert_declined(
+            SortAdmissionInput {
+                key_class: Some(SortKeyClass::Unsupported),
+                ..base
+            },
+            &limits,
+            SortDeclineReason::UnsupportedKeyClass,
+        );
+        assert_declined(
+            SortAdmissionInput { rows: 99, ..base },
+            &limits,
+            SortDeclineReason::TooFewRows,
+        );
+        assert_declined(
+            SortAdmissionInput {
+                algorithm: SortAlgorithm::StandaloneFullOutput,
+                ..base
+            },
+            &limits,
+            SortDeclineReason::FullOutputMaterialization,
+        );
+        for limit_tuples in [None, Some(f64::NAN), Some(-1.0)] {
+            assert_declined(
+                SortAdmissionInput {
+                    limit_tuples,
+                    ..base
+                },
+                &limits,
+                SortDeclineReason::MissingLimit,
+            );
+        }
+        assert_declined(
+            SortAdmissionInput {
+                limit_tuples: Some(0.1),
+                ..base
+            },
+            &limits,
+            SortDeclineReason::LimitTooSmall,
+        );
+        assert_declined(
+            SortAdmissionInput {
+                limit_tuples: Some(base.rows as f64),
+                ..base
+            },
+            &limits,
+            SortDeclineReason::LimitNotSelective,
+        );
+        assert_declined(
+            SortAdmissionInput {
+                materialized_output_fraction: 0.5,
+                ..base
+            },
+            &limits,
+            SortDeclineReason::MaterializesTooMuch,
+        );
+        assert_declined(
+            SortAdmissionInput {
+                rows: 100_000,
+                limit_tuples: Some(1_001.0),
+                ..base
+            },
+            &limits,
+            SortDeclineReason::LimitAboveTopKCap,
+        );
+        assert_declined(
+            SortAdmissionInput {
+                estimated_row_width: 65,
+                ..base
+            },
+            &limits,
+            SortDeclineReason::RowTooWide,
+        );
+        assert_declined(
+            SortAdmissionInput {
+                chunk_count: 2,
+                ..base
+            },
+            &limits,
+            SortDeclineReason::TooManyChunks,
+        );
+        assert_declined(
+            SortAdmissionInput {
+                rows: 1_000_001,
+                ..base
+            },
+            &limits,
+            SortDeclineReason::TooManyChunks,
+        );
+    }
+
+    #[test]
+    fn sort_admission_accepts_bounded_topk_and_internal_pipelines() {
+        let mut limits = DeviceLimits::cpu_only();
+        limits.gpu_sort_planner_min_rows = 100;
+        limits.gpu_sort_topk_max_limit = 1_000;
+        limits.gpu_sort_heap_topk_max_fraction = 0.25;
+        limits.gpu_sort_heap_topk_max_width_bytes = 64;
+        limits.gpu_sort_max_elements = 1_000_000;
+        let base = sort_input(&limits);
+
+        let topk = sort_admission(base, &limits);
+        assert!(topk.eligible);
+        assert_eq!(topk.reason, None);
+        assert!(topk.materialized_output_fraction <= 0.25);
+
+        let internal = sort_admission(
+            SortAdmissionInput {
+                algorithm: SortAlgorithm::Internal,
+                key_class: Some(SortKeyClass::Float),
+                materialized_output_fraction: 0.2,
+                cold_jit: true,
+                ..base
+            },
+            &limits,
+        );
+        assert!(internal.eligible);
+        assert!(internal.estimated_cost.get() > topk.estimated_cost.get());
+
+        for fraction in [1.0, f64::INFINITY] {
+            assert_declined(
+                SortAdmissionInput {
+                    algorithm: SortAlgorithm::Internal,
+                    materialized_output_fraction: fraction,
+                    ..base
+                },
+                &limits,
+                SortDeclineReason::FullOutputMaterialization,
+            );
+        }
+    }
+
+    #[test]
+    fn limit_fraction_and_thread_helpers_are_conservative() {
+        for absent in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(!sort_limit_present(absent));
+        }
+        assert!(sort_limit_present(1.0));
+
+        let profile = PlatformProfile {
+            cpu_cores: 8,
+            has_gpu: false,
+            estimated_gpu_gflops: 0.0,
+            compute_units: 0,
+            gpu_max_alloc_bytes: 0,
+            has_native_fp64: false,
+        };
+        assert_eq!(estimate_threads(&profile, 100), 7);
+        assert_eq!(estimate_threads(&profile, 0), 1);
+        assert_eq!(
+            estimate_threads(
+                &PlatformProfile {
+                    cpu_cores: 0,
+                    ..profile
+                },
+                100
+            ),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
 mod spatial_output_tests {
     use super::*;
 

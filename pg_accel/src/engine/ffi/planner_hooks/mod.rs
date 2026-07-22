@@ -624,6 +624,161 @@ fn node_has_accel_func(node: *mut pg_sys::Node, reg: &registry::AdapterRegistry)
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn planner_hook_suspension_is_nested_and_unwind_safe() {
+        assert!(!planner_hooks_suspended());
+        with_planner_hooks_suspended(|| {
+            assert!(planner_hooks_suspended());
+            with_planner_hooks_suspended(|| assert!(planner_hooks_suspended()));
+            assert!(planner_hooks_suspended());
+        });
+        assert!(!planner_hooks_suspended());
+
+        let panic = std::panic::catch_unwind(|| {
+            with_planner_hooks_suspended(|| {
+                assert!(planner_hooks_suspended());
+                panic!("exercise suspension guard unwind");
+            });
+        });
+        assert!(panic.is_err());
+        assert!(!planner_hooks_suspended());
+    }
+
+    #[test]
+    fn null_and_stack_planner_facts_fail_closed() {
+        assert_eq!(rel_rows_estimate(std::ptr::null_mut()), None);
+        let mut rel = RelOptInfo {
+            rows: -10.0,
+            ..Default::default()
+        };
+        assert_eq!(rel_rows_estimate(&raw mut rel), Some(0));
+        rel.rows = 42.9;
+        assert_eq!(rel_rows_estimate(&raw mut rel), Some(42));
+
+        // SAFETY: all helpers explicitly accept null, or inspect only the live
+        // stack RelOptInfo fields initialized above.
+        unsafe {
+            assert!(!add_gpu_path_with_resident_proof(
+                "unit_null_path",
+                &raw mut rel,
+                std::ptr::null_mut(),
+                ResidentProofSnapshot::default(),
+            ));
+            record_window_partial_path_no_parallel_hook(std::ptr::null_mut());
+            record_window_partial_path_no_parallel_hook(&raw mut rel);
+            assert!(!rel_pathlist_contains_node_tag(
+                std::ptr::null_mut(),
+                NodeTag::T_RecursiveUnionPath,
+            ));
+            assert!(!rel_pathlist_contains_node_tag(
+                &raw mut rel,
+                NodeTag::T_RecursiveUnionPath,
+            ));
+            assert!(find_cheapest_path(std::ptr::null_mut()).is_null());
+        }
+    }
+
+    #[test]
+    fn target_srf_and_upper_stage_classification_are_exact() {
+        // SAFETY: null and a PlannerInfo with a null parse pointer are supported.
+        assert!(!unsafe { query_has_target_srfs(std::ptr::null_mut()) });
+        let mut root = PlannerInfo::default();
+        assert!(!unsafe { query_has_target_srfs(&raw mut root) });
+        let mut query = pg_sys::Query::default();
+        root.parse = &raw mut query;
+        assert!(!unsafe { query_has_target_srfs(&raw mut root) });
+        query.hasTargetSRFs = true;
+        assert!(query.hasTargetSRFs);
+        assert!(unsafe { query_has_target_srfs(&raw mut root) });
+
+        assert_eq!(
+            setop_reason_for_recursive_union(false),
+            SETOP_NO_GPU_KERNEL_REASON
+        );
+        assert_eq!(
+            setop_reason_for_recursive_union(true),
+            RECURSIVEUNION_NO_GPU_KERNEL_REASON
+        );
+        assert_eq!(
+            upper_stage_candidate(pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG),
+            "GpuAgg"
+        );
+        assert_eq!(
+            upper_stage_candidate(pg_sys::UpperRelationKind::UPPERREL_WINDOW),
+            "GpuWindow"
+        );
+        assert_eq!(
+            upper_stage_candidate(pg_sys::UpperRelationKind::UPPERREL_FINAL),
+            "GpuSrfTargetList"
+        );
+        assert_eq!(
+            upper_stage_candidate(pg_sys::UpperRelationKind::UPPERREL_SETOP),
+            "UpperPath"
+        );
+    }
+
+    #[test]
+    fn unwrap_var_handles_plain_nested_and_malformed_nodes() {
+        // SAFETY: null is part of unwrap_var's public contract.
+        assert!(unsafe { unwrap_var(std::ptr::null_mut()) }.is_null());
+
+        let mut other = pg_sys::Node {
+            type_: NodeTag::T_Const,
+        };
+        // SAFETY: other is a live stack Node with a non-Var tag.
+        assert!(unsafe { unwrap_var(&raw mut other) }.is_null());
+
+        let mut var = pg_sys::Var::default();
+        var.xpr.type_ = NodeTag::T_Var;
+        // SAFETY: the tag matches the live stack Var allocation.
+        assert_eq!(unsafe { unwrap_var((&raw mut var).cast()) }, &raw mut var);
+
+        let mut relabel = pg_sys::RelabelType::default();
+        relabel.xpr.type_ = NodeTag::T_RelabelType;
+        relabel.arg = (&raw mut var).cast();
+        // SAFETY: the RelabelType points at the live tag-correct Var above.
+        assert_eq!(
+            unsafe { unwrap_var((&raw mut relabel).cast()) },
+            &raw mut var
+        );
+
+        relabel.arg = std::ptr::null_mut();
+        // SAFETY: a null relabel argument is an explicitly handled malformed tree.
+        assert!(unsafe { unwrap_var((&raw mut relabel).cast()) }.is_null());
+    }
+
+    #[test]
+    fn recursive_acceleration_probe_rejects_unregistered_and_empty_nodes() {
+        let registry = registry::AdapterRegistry::new();
+        assert!(!node_has_accel_func(std::ptr::null_mut(), &registry));
+
+        let mut other = pg_sys::Node {
+            type_: NodeTag::T_Const,
+        };
+        assert!(!node_has_accel_func(&raw mut other, &registry));
+
+        let mut function = pg_sys::FuncExpr::default();
+        function.xpr.type_ = NodeTag::T_FuncExpr;
+        function.funcid = pg_sys::Oid::from(4_000_000_000);
+        function.args = std::ptr::null_mut();
+        assert!(!node_has_accel_func((&raw mut function).cast(), &registry));
+
+        let mut operator = pg_sys::OpExpr::default();
+        operator.xpr.type_ = NodeTag::T_OpExpr;
+        operator.opfuncid = pg_sys::Oid::from(4_000_000_001);
+        operator.args = std::ptr::null_mut();
+        assert!(!node_has_accel_func((&raw mut operator).cast(), &registry));
+
+        let mut boolean = pg_sys::BoolExpr::default();
+        boolean.xpr.type_ = NodeTag::T_BoolExpr;
+        boolean.args = std::ptr::null_mut();
+        assert!(!node_has_accel_func((&raw mut boolean).cast(), &registry));
+
+        // Drop records a timing sample through the same atomic stats path used
+        // by every hook entry point; construction itself carries the hook label.
+        drop(HookElapsedGuard::new("unit_hook"));
+    }
 }
 
 #[cfg(feature = "pg_test")]

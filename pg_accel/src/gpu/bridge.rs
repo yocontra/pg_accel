@@ -1432,6 +1432,25 @@ mod tests {
         assert_eq!(PgaccelStatus::from_raw(-7), Err(-7));
     }
 
+    #[test]
+    fn bridge_status_conversion_preserves_known_failures_and_fails_unknown_closed() {
+        for (raw, expected) in [
+            (0, PgaccelStatus::Ok),
+            (-1, PgaccelStatus::Error),
+            (-2, PgaccelStatus::ErrorUnsupported),
+            (-3, PgaccelStatus::ErrorOom),
+            (-4, PgaccelStatus::ErrorTimeout),
+            (-5, PgaccelStatus::ErrorNoDevice),
+            (-6, PgaccelStatus::InvalidArgument),
+        ] {
+            assert_eq!(convert_status("pgaccel_test_status", raw), expected);
+        }
+        assert_eq!(
+            convert_status("pgaccel_test_unknown_status", i32::MIN),
+            PgaccelStatus::Error
+        );
+    }
+
     // -----------------------------------------------------------------------
     // PgaccelGeomType discriminants
     // -----------------------------------------------------------------------

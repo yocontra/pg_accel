@@ -1006,6 +1006,189 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_property_helpers_cover_every_logical_variant() {
+        let first = ColumnRef {
+            relation_oid: 10,
+            attno: 1,
+            type_oid: 23,
+        };
+        let second = ColumnRef {
+            relation_oid: 10,
+            attno: 2,
+            type_oid: 701,
+        };
+        assert_eq!(format_or_none(std::iter::empty()), "none");
+        assert_eq!(
+            format_or_none(["a".to_owned(), "b".to_owned()].into_iter()),
+            "a; b"
+        );
+        assert_eq!(
+            group_key_source_summary(&GroupKeySource::FactColumn(first)),
+            "fact(10.1:type=23)"
+        );
+        assert_eq!(
+            group_key_source_summary(&GroupKeySource::Expression {
+                inputs: vec![first, second],
+                program: vec![1, 2, 3],
+            }),
+            "expression(inputs=2, words=3)"
+        );
+        assert!(
+            group_key_source_summary(&GroupKeySource::H3LatLngToCell {
+                latitude: first,
+                longitude: second,
+                resolution: 9,
+            })
+            .contains("resolution=9")
+        );
+
+        assert_eq!(
+            group_key_encoding_summary(GroupKeyEncoding::DenseI32 {
+                code_min: -2,
+                cardinality: 7,
+                null_code: None,
+            }),
+            "dense_i32(min=-2, cardinality=7, null=none)"
+        );
+        assert_eq!(
+            group_key_encoding_summary(GroupKeyEncoding::DictionaryI32 {
+                cardinality: 8,
+                null_code: Some(7),
+            }),
+            "dictionary_i32(cardinality=8, null=7)"
+        );
+
+        for (expression, expected) in [
+            (
+                MeasureExpr::Binary {
+                    op: BinaryMeasureOp::Mul,
+                    lhs: first,
+                    rhs: second,
+                },
+                "mul(10.1:type=23, 10.2:type=701)",
+            ),
+            (
+                MeasureExpr::Binary {
+                    op: BinaryMeasureOp::Sub,
+                    lhs: first,
+                    rhs: second,
+                },
+                "sub(10.1:type=23, 10.2:type=701)",
+            ),
+            (
+                MeasureExpr::StatsPair {
+                    value: first,
+                    rhs: second,
+                },
+                "stats_pair(10.1:type=23, 10.2:type=701)",
+            ),
+            (
+                MeasureExpr::Bytecode {
+                    inputs: vec![first],
+                    program: vec![4, 5],
+                    result_type_oid: 20,
+                },
+                "bytecode(inputs=1, words=2, result_type=20)",
+            ),
+        ] {
+            assert_eq!(measure_expr_summary(&expression), expected);
+        }
+
+        assert_eq!(aggregate_source_label(AggregateSource::Value), "value");
+        assert_eq!(aggregate_source_label(AggregateSource::Rhs), "rhs");
+        for (kind, label) in [
+            (AggregateKind::Sum, "sum"),
+            (AggregateKind::Count, "count"),
+            (AggregateKind::Min, "min"),
+            (AggregateKind::Max, "max"),
+            (AggregateKind::Avg, "avg"),
+            (AggregateKind::StddevSamp, "stddev_samp"),
+        ] {
+            assert_eq!(aggregate_kind_label(kind), label);
+        }
+
+        assert_eq!(
+            filter_summary(&FilterSpec::Bytecode {
+                inputs: vec![first, second],
+                program: vec![1],
+            }),
+            "bytecode(inputs=2, words=1)"
+        );
+        assert_eq!(
+            filter_summary(&FilterSpec::Mask {
+                input: first,
+                kind: MaskKind::Recheck,
+            }),
+            "recheck_mask(input=10.1:type=23)"
+        );
+        let geometry = SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: -1,
+            srid: None,
+        };
+        let geography = SpatialValueMetadata {
+            kind: SpatialValueKind::Geography,
+            typmod: 7,
+            srid: Some(4_326),
+        };
+        assert_eq!(
+            spatial_metadata_summary(geometry),
+            "kind=geometry, typmod=-1, srid=dynamic"
+        );
+        assert_eq!(
+            spatial_metadata_summary(geography),
+            "kind=geography, typmod=7, srid=4326"
+        );
+        assert!(
+            spatial_operand_summary(&SpatialOperand::Column {
+                column: first,
+                metadata: geometry,
+            })
+            .starts_with("column(")
+        );
+        assert!(
+            spatial_operand_summary(&SpatialOperand::Constant {
+                metadata: geography,
+                bytes: vec![1_u8, 2].into_boxed_slice(),
+            })
+            .contains("bytes=2")
+        );
+
+        for (predicate, label) in [
+            (SpatialPredicateKind::Intersects, "intersects"),
+            (SpatialPredicateKind::Contains, "contains"),
+            (SpatialPredicateKind::Within, "within"),
+            (SpatialPredicateKind::DWithin, "dwithin"),
+            (SpatialPredicateKind::Disjoint, "disjoint"),
+            (SpatialPredicateKind::Equals, "equals"),
+            (SpatialPredicateKind::Touches, "touches"),
+            (SpatialPredicateKind::Crosses, "crosses"),
+            (SpatialPredicateKind::Overlaps, "overlaps"),
+        ] {
+            assert_eq!(spatial_predicate_label(predicate), label);
+        }
+        assert_eq!(mask_kind_label(MaskKind::Sql), "sql");
+        assert_eq!(mask_kind_label(MaskKind::Recheck), "recheck");
+        assert_eq!(join_multiplicity_label(JoinMultiplicity::Unique), "unique");
+        assert_eq!(
+            join_multiplicity_label(JoinMultiplicity::Counted),
+            "counted"
+        );
+        assert_eq!(
+            artifact_ensure_outcome_label(ArtifactEnsureOutcome::Hit),
+            "hit"
+        );
+        assert_eq!(
+            artifact_ensure_outcome_label(ArtifactEnsureOutcome::Built),
+            "built"
+        );
+        assert_eq!(
+            artifact_ensure_outcome_label(ArtifactEnsureOutcome::Rebuilt),
+            "rebuilt"
+        );
+    }
+
+    #[test]
     fn descriptor_residency_summary_reports_exact_generations_and_charges() {
         let evidence = [
             ResidentRelationEvidence {

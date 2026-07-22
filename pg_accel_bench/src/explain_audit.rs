@@ -1063,4 +1063,194 @@ Custom Scan (GpuAccelJoin)
             ));
         }
     }
+
+    fn finding(status: ResidentBoundaryStatus) -> ResidentBoundaryFinding {
+        ResidentBoundaryFinding {
+            node: "Custom Scan (GpuAccelAgg)".to_owned(),
+            strategy: (status != ResidentBoundaryStatus::MissingStrategy)
+                .then(|| "GpuAgg".to_owned()),
+            pipeline: match status {
+                ResidentBoundaryStatus::Pass | ResidentBoundaryStatus::MissingProofEvidence => {
+                    Some(true)
+                }
+                ResidentBoundaryStatus::NonResidentPipeline => Some(false),
+                ResidentBoundaryStatus::MissingStrategy
+                | ResidentBoundaryStatus::MissingPipeline => None,
+            },
+            boundary_reason: Some("test boundary".to_owned()),
+            status,
+            detail: format!("detail for {status:?}"),
+        }
+    }
+
+    #[test]
+    fn property_parsers_and_boundary_statuses_fail_closed() {
+        assert!(direct_explain_property_lines(&[]).is_empty());
+        assert!(direct_explain_property_lines(&["Custom Scan (GpuAccelAgg)"]).is_empty());
+        assert_eq!(
+            explain_text_property(&["  Strategy: GpuAgg"], "Strategy"),
+            Some("GpuAgg".to_owned())
+        );
+        assert_eq!(
+            explain_text_property(&["  Strategy GpuAgg"], "Strategy"),
+            None
+        );
+        assert_eq!(
+            explain_bool_property(&["  Enabled: TRUE"], "Enabled"),
+            Some(true)
+        );
+        assert_eq!(
+            explain_bool_property(&["  Enabled: false"], "Enabled"),
+            Some(false)
+        );
+        assert_eq!(
+            explain_bool_property(&["  Enabled: maybe"], "Enabled"),
+            None
+        );
+        assert_eq!(
+            explain_integer_property(&["  Count: -7"], "Count"),
+            Some(-7)
+        );
+        assert_eq!(explain_integer_property(&["  Count: seven"], "Count"), None);
+
+        let cases = [
+            (
+                resident_boundary_status(None, Some(true), true),
+                ResidentBoundaryStatus::MissingStrategy,
+                "missing `Strategy`",
+            ),
+            (
+                resident_boundary_status(Some("GpuAgg"), None, true),
+                ResidentBoundaryStatus::MissingPipeline,
+                "missing `GPU Resident Pipeline: true`",
+            ),
+            (
+                resident_boundary_status(Some("GpuAgg"), Some(true), false),
+                ResidentBoundaryStatus::MissingProofEvidence,
+                "without resident proof",
+            ),
+            (
+                resident_boundary_status(Some("GpuAgg"), Some(false), true),
+                ResidentBoundaryStatus::NonResidentPipeline,
+                "reports `GPU Resident Pipeline: false`",
+            ),
+            (
+                resident_boundary_status(Some("GpuAgg"), Some(true), true),
+                ResidentBoundaryStatus::Pass,
+                "selected GPU-resident pipeline",
+            ),
+        ];
+        for ((actual, detail), expected, fragment) in cases {
+            assert_eq!(actual, expected);
+            assert!(detail.contains(fragment));
+        }
+    }
+
+    #[test]
+    fn proof_evidence_requires_every_positive_resident_field() {
+        let complete = [
+            "GPU Resident Proof Version: 2",
+            "GPU Resident Operator Class: resident_groupagg",
+            "GPU Resident Stage Mask: 5",
+            "GPU Resident Device Columns: 2",
+        ];
+        assert!(resident_proof_evidence_present(&complete));
+        for index in 0..complete.len() {
+            let incomplete = complete
+                .iter()
+                .enumerate()
+                .filter_map(|(candidate, line)| (candidate != index).then_some(*line))
+                .collect::<Vec<_>>();
+            assert!(!resident_proof_evidence_present(&incomplete));
+        }
+        assert!(!resident_proof_evidence_present(&[
+            "GPU Resident Proof Version: 0",
+            "GPU Resident Operator Class: resident_groupagg",
+            "GPU Resident Stage Mask: 5",
+            "GPU Resident Device Columns: 2",
+        ]));
+    }
+
+    #[test]
+    fn shape_parser_handles_gather_merge_scope_exit_and_arrow_indentation() {
+        assert_eq!(leading_indent("    ->  Node"), 8);
+        assert_eq!(leading_indent("Node"), 0);
+        assert!(shape_has_customscan_under_gather(
+            "Gather Merge\n  ->  Sort\n        ->  Custom Scan (GpuAccelSort)\n"
+        ));
+        assert!(!shape_has_customscan_under_gather(
+            "Gather\n  ->  Seq Scan on t\nCustom Scan (GpuAccelAgg)\n"
+        ));
+        assert!(!shape_has_customscan_under_gather(
+            "Gather\n  ->  Custom Scan (OtherProvider)\n"
+        ));
+        assert!(!shape_has_customscan_under_gather("\n\nGather\n"));
+    }
+
+    #[test]
+    fn report_renderer_handles_every_ratchet_and_boundary_status() {
+        let outcomes = vec![
+            AuditOutcome {
+                name: "pass".to_owned(),
+                description: "required success".to_owned(),
+                expectation: RatchetExpectation::RequiredToday,
+                shape_matched: true,
+                explain: "Gather\n  -> Custom Scan (GpuAccelAgg)\n".to_owned(),
+                resident_audit: vec![finding(ResidentBoundaryStatus::Pass)],
+            },
+            AuditOutcome {
+                name: "fail".to_owned(),
+                description: "required failure".to_owned(),
+                expectation: RatchetExpectation::RequiredToday,
+                shape_matched: false,
+                explain: "Seq Scan on t\n".to_owned(),
+                resident_audit: Vec::new(),
+            },
+            AuditOutcome {
+                name: "boundary".to_owned(),
+                description: "resident failures".to_owned(),
+                expectation: RatchetExpectation::RequiredToday,
+                shape_matched: true,
+                explain: "Custom Scan (GpuAccelAgg)\n".to_owned(),
+                resident_audit: vec![
+                    finding(ResidentBoundaryStatus::MissingStrategy),
+                    finding(ResidentBoundaryStatus::MissingPipeline),
+                    finding(ResidentBoundaryStatus::MissingProofEvidence),
+                    finding(ResidentBoundaryStatus::NonResidentPipeline),
+                ],
+            },
+            AuditOutcome {
+                name: "gated".to_owned(),
+                description: "future lane".to_owned(),
+                expectation: RatchetExpectation::RequiredAfterPhase("Phase X"),
+                shape_matched: false,
+                explain: String::new(),
+                resident_audit: Vec::new(),
+            },
+            AuditOutcome {
+                name: "optional".to_owned(),
+                description: "optional lane".to_owned(),
+                expectation: RatchetExpectation::OptionalForever,
+                shape_matched: false,
+                explain: String::new(),
+                resident_audit: Vec::new(),
+            },
+            AuditOutcome {
+                name: "quarantine".to_owned(),
+                description: "quarantined lane".to_owned(),
+                expectation: RatchetExpectation::Quarantined("known issue"),
+                shape_matched: false,
+                explain: "QUARANTINED\n".to_owned(),
+                resident_audit: Vec::new(),
+            },
+        ];
+
+        assert_eq!(outcomes[0].status(), RowStatus::Pass);
+        assert_eq!(outcomes[1].status(), RowStatus::Fail);
+        assert_eq!(outcomes[2].status(), RowStatus::FailResidentBoundary);
+        assert_eq!(outcomes[3].status(), RowStatus::SkipGated);
+        assert_eq!(outcomes[4].status(), RowStatus::OptionalNotMet);
+        assert_eq!(outcomes[5].status(), RowStatus::Quarantined);
+        print_report(&outcomes);
+    }
 }

@@ -286,4 +286,94 @@ mod tests {
             .is_ok()
         );
     }
+
+    #[test]
+    fn every_error_domain_and_operation_has_a_stable_label() {
+        let domains = [
+            (GpuErrorDomain::Runtime, "runtime"),
+            (GpuErrorDomain::Memory, "memory"),
+            (GpuErrorDomain::Descriptor, "descriptor"),
+            (GpuErrorDomain::Expression, "expression"),
+            (GpuErrorDomain::Spatial, "spatial"),
+            (GpuErrorDomain::H3, "h3"),
+            (GpuErrorDomain::Raster, "raster"),
+            (GpuErrorDomain::Sort, "sort"),
+            (GpuErrorDomain::Reduce, "reduce"),
+            (GpuErrorDomain::HashAgg, "hash_agg"),
+            (GpuErrorDomain::GroupedAgg, "grouped_agg"),
+            (GpuErrorDomain::HashJoin, "hash_join"),
+            (GpuErrorDomain::Window, "window"),
+        ];
+        for (domain, label) in domains {
+            assert_eq!(domain.to_string(), label);
+        }
+
+        let operations = [
+            (GpuOperation::Init, "init"),
+            (GpuOperation::Shutdown, "shutdown"),
+            (GpuOperation::QueryDevice, "query_device"),
+            (GpuOperation::ValidateDeviceInput, "validate_device_input"),
+            (GpuOperation::ValidateDeviceOutput, "validate_device_output"),
+            (GpuOperation::ValidateCsrOutput, "validate_csr_output"),
+            (GpuOperation::BuildColumnBatch, "build_column_batch"),
+            (GpuOperation::Kernel("scan"), "kernel(scan)"),
+        ];
+        for (operation, label) in operations {
+            assert_eq!(operation.to_string(), label);
+        }
+    }
+
+    #[test]
+    fn every_status_detail_has_a_stable_label_and_success_bit() {
+        let details = [
+            (GpuStatusDetail::Ok, "ok", true),
+            (GpuStatusDetail::ExecutionFailed, "execution_failed", false),
+            (GpuStatusDetail::Unsupported, "unsupported", false),
+            (GpuStatusDetail::OutOfMemory, "out_of_memory", false),
+            (GpuStatusDetail::Timeout, "timeout", false),
+            (GpuStatusDetail::NoDevice, "no_device", false),
+            (GpuStatusDetail::InvalidArgument, "invalid_argument", false),
+            (
+                GpuStatusDetail::InvalidDescriptor,
+                "invalid_descriptor",
+                false,
+            ),
+            (GpuStatusDetail::ShapeMismatch, "shape_mismatch", false),
+            (
+                GpuStatusDetail::CapacityOverflow,
+                "capacity_overflow",
+                false,
+            ),
+            (GpuStatusDetail::NumericOverflow, "numeric_overflow", false),
+        ];
+        for (detail, label, is_ok) in details {
+            assert_eq!(detail.to_string(), label);
+            assert_eq!(detail.is_ok(), is_ok);
+        }
+    }
+
+    #[test]
+    fn gpu_error_display_includes_optional_detail() {
+        let plain = GpuError::new(
+            GpuErrorDomain::HashJoin,
+            GpuOperation::Kernel("probe"),
+            GpuStatusDetail::CapacityOverflow,
+        );
+        assert_eq!(
+            plain.to_string(),
+            "GPU hash_join kernel(probe) failed with capacity_overflow"
+        );
+
+        let detailed = GpuError::with_detail(
+            GpuErrorDomain::Raster,
+            GpuOperation::ValidateDeviceOutput,
+            GpuStatusDetail::ShapeMismatch,
+            "row count changed",
+        );
+        assert_eq!(
+            detailed.to_string(),
+            "GPU raster validate_device_output failed with shape_mismatch: row count changed"
+        );
+        assert!(std::error::Error::source(&detailed).is_none());
+    }
 }

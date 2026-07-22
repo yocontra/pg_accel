@@ -2090,4 +2090,193 @@ mod tests {
             "counted-dimension measure FILTER was accepted"
         );
     }
+
+    #[test]
+    fn codec_errors_report_precise_framing_context() {
+        let invalid_spec = SpecValidationError::new("bad query shape");
+        let cases = [
+            (
+                SpecCodecError::InvalidSpec(invalid_spec),
+                "invalid aggregate spec: bad query shape",
+            ),
+            (
+                SpecCodecError::Truncated {
+                    index: 7,
+                    context: "measure",
+                },
+                "truncated aggregate spec at word 7 while reading measure",
+            ),
+            (
+                SpecCodecError::InvalidMagic(0x1234),
+                "invalid aggregate spec magic 0x1234",
+            ),
+            (
+                SpecCodecError::UnsupportedVersion(99),
+                "unsupported aggregate spec version 99",
+            ),
+            (
+                SpecCodecError::LengthMismatch {
+                    declared: 8,
+                    actual: 9,
+                },
+                "aggregate spec length is 9, header declares 8",
+            ),
+            (
+                SpecCodecError::InvalidTag {
+                    index: 4,
+                    context: "filter",
+                    tag: -1,
+                },
+                "invalid filter tag -1 at word 4",
+            ),
+            (
+                SpecCodecError::InvalidValue {
+                    index: 5,
+                    context: "boolean flag",
+                },
+                "invalid boolean flag at word 5",
+            ),
+            (
+                SpecCodecError::TrailingWords {
+                    index: 12,
+                    total: 14,
+                },
+                "aggregate spec has trailing words at 12 of 14",
+            ),
+            (
+                SpecCodecError::NonCanonical { index: 3 },
+                "aggregate spec is not canonically encoded at word 3",
+            ),
+            (
+                SpecCodecError::LimitExceeded {
+                    index: 2,
+                    context: "wire length",
+                    declared: 101,
+                    maximum: 100,
+                },
+                "wire length 101 at word 2 exceeds schema maximum 100",
+            ),
+            (
+                SpecCodecError::AllocationFailed {
+                    context: "group keys",
+                },
+                "could not allocate aggregate spec group keys",
+            ),
+            (
+                SpecCodecError::LengthOverflow,
+                "aggregate spec exceeds i32-list length limit",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+
+        let oversized = Encoder {
+            words: vec![0; AGG_QUERY_SPEC_MAX_WORDS + 1],
+        };
+        assert!(matches!(
+            oversized.finish(),
+            Err(SpecCodecError::LimitExceeded {
+                context: "wire length",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn scalar_wire_grammar_round_trips_every_logical_type() {
+        let values = [
+            ScalarValue::Bool(true),
+            ScalarValue::I32(i32::MIN),
+            ScalarValue::I64(i64::MIN + 1),
+            ScalarValue::F32(1.25),
+            ScalarValue::F64(-2.5),
+            ScalarValue::Date(-12_345),
+            ScalarValue::Timestamp(-9_876_543_210),
+            ScalarValue::TimestampTz(9_876_543_210),
+        ];
+
+        for value in values {
+            let mut encoder = Encoder { words: Vec::new() };
+            encoder.push_scalar(value);
+            let mut decoder = Decoder::new(&encoder.words);
+            assert_eq!(decoder.read_scalar().expect("decode scalar"), value);
+            assert_eq!(decoder.index, encoder.words.len());
+        }
+
+        let mut invalid_bool = Decoder::new(&[1, 2]);
+        assert!(matches!(
+            invalid_bool.read_scalar(),
+            Err(SpecCodecError::InvalidValue {
+                context: "boolean scalar",
+                ..
+            })
+        ));
+        let mut reserved_tag = Decoder::new(&[0]);
+        assert!(matches!(
+            reserved_tag.read_scalar(),
+            Err(SpecCodecError::InvalidTag {
+                context: "scalar",
+                tag: 0,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn spatial_wire_grammar_round_trips_every_predicate_and_metadata_family() {
+        for (predicate, distance) in [
+            (SpatialPredicateKind::Intersects, None),
+            (SpatialPredicateKind::Contains, None),
+            (SpatialPredicateKind::Within, None),
+            (SpatialPredicateKind::DWithin, Some(ScalarValue::F64(42.5))),
+            (SpatialPredicateKind::Disjoint, None),
+            (SpatialPredicateKind::Equals, None),
+            (SpatialPredicateKind::Touches, None),
+            (SpatialPredicateKind::Crosses, None),
+            (SpatialPredicateKind::Overlaps, None),
+        ] {
+            let metadata = SpatialValueMetadata {
+                kind: SpatialValueKind::Geography,
+                typmod: -1,
+                srid: Some(4_326),
+            };
+            let filter = FilterSpec::Spatial {
+                predicate,
+                left: SpatialOperand::Column {
+                    column: column(10, 1, 9_999),
+                    metadata,
+                },
+                right: SpatialOperand::Constant {
+                    metadata,
+                    bytes: vec![1, 2, 3, 4, 5].into_boxed_slice(),
+                },
+                distance,
+            };
+            let mut encoder = Encoder { words: Vec::new() };
+            encoder.push_filter(&filter).expect("encode spatial filter");
+            let mut decoder = Decoder::new(&encoder.words);
+            assert_eq!(
+                decoder.read_filter().expect("decode spatial filter"),
+                filter
+            );
+            assert_eq!(decoder.index, encoder.words.len());
+        }
+
+        let metadata_without_srid = SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: 12,
+            srid: None,
+        };
+        let mut encoder = Encoder { words: Vec::new() };
+        encoder.push_spatial_metadata(metadata_without_srid);
+        let mut decoder = Decoder::new(&encoder.words);
+        assert_eq!(
+            decoder
+                .read_spatial_metadata()
+                .expect("decode metadata without SRID"),
+            metadata_without_srid
+        );
+    }
 }

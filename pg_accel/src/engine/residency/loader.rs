@@ -2395,6 +2395,371 @@ mod unit_tests {
         assert!(error.contains("exceeding the per-value limit"));
         assert!(capped.rows.is_empty());
     }
+
+    #[test]
+    fn raw_extension_datum_wrappers_have_exact_null_and_roundtrip_contracts() {
+        let h3_bits = 0xfedc_ba98_7654_3210_u64;
+        let h3 = RawH3Datum(h3_bits);
+        assert_eq!(
+            h3.into_datum().map(pg_sys::Datum::value),
+            Some(h3_bits as usize)
+        );
+        assert_eq!(RawH3Datum::type_oid(), pg_sys::InvalidOid);
+        assert!(RawH3Datum::is_compatible_with(pg_sys::Oid::from(99)));
+
+        let geometry = RawGeometryDatum(vec![1, 2, 3]);
+        assert_eq!(geometry.into_datum(), None);
+        assert_eq!(RawGeometryDatum::type_oid(), pg_sys::InvalidOid);
+        assert!(RawGeometryDatum::is_compatible_with(pg_sys::Oid::from(99)));
+        // SAFETY: a true null flag prevents any dereference of the sentinel Datum.
+        assert!(
+            unsafe {
+                RawGeometryDatum::from_polymorphic_datum(
+                    pg_sys::Datum::from(1_usize),
+                    true,
+                    pg_sys::Oid::from(99),
+                )
+            }
+            .is_none()
+        );
+
+        let raster_datum = pg_sys::Datum::from(0x1234_usize);
+        // SAFETY: RawRasterDatum only checks the by-value payload for this test.
+        let raster = unsafe {
+            RawRasterDatum::from_polymorphic_datum(
+                raster_datum,
+                false,
+                raster_catalog_identity().raster_type_oid,
+            )
+        }
+        .expect("nonzero present raster Datum is retained");
+        assert_eq!(raster.into_datum(), Some(raster_datum));
+        // SAFETY: null and zero payloads are rejected before any catalog access.
+        assert!(
+            unsafe {
+                RawRasterDatum::from_polymorphic_datum(
+                    raster_datum,
+                    true,
+                    raster_catalog_identity().raster_type_oid,
+                )
+            }
+            .is_none()
+        );
+        assert!(
+            unsafe {
+                RawRasterDatum::from_polymorphic_datum(
+                    pg_sys::Datum::from(0_usize),
+                    false,
+                    raster_catalog_identity().raster_type_oid,
+                )
+            }
+            .is_none()
+        );
+        assert_eq!(RawRasterDatum::type_oid(), pg_sys::InvalidOid);
+        assert!(RawRasterDatum::is_compatible_with(pg_sys::Oid::from(99)));
+    }
+
+    #[test]
+    fn every_builtin_builder_stages_values_nulls_and_exact_byte_counts() {
+        let mut boolean = ColumnBuilder::for_type(pg_sys::BOOLOID).expect("bool builder");
+        let mut int2 = ColumnBuilder::for_type(pg_sys::INT2OID).expect("int2 builder");
+        let mut int4 = ColumnBuilder::for_type(pg_sys::INT4OID).expect("int4 builder");
+        let mut date = ColumnBuilder::for_type(pg_sys::DATEOID).expect("date builder");
+        let mut int8 = ColumnBuilder::for_type(pg_sys::INT8OID).expect("int8 builder");
+        let mut timestamp =
+            ColumnBuilder::for_type(pg_sys::TIMESTAMPOID).expect("timestamp builder");
+        let mut timestamptz =
+            ColumnBuilder::for_type(pg_sys::TIMESTAMPTZOID).expect("timestamptz builder");
+        let mut float4 = ColumnBuilder::for_type(pg_sys::FLOAT4OID).expect("float4 builder");
+        let mut float8 = ColumnBuilder::for_type(pg_sys::FLOAT8OID).expect("float8 builder");
+        let mut text = ColumnBuilder::for_type(pg_sys::TEXTOID).expect("text builder");
+        let varchar = ColumnBuilder::for_type(pg_sys::VARCHAROID).expect("varchar builder");
+        let bpchar = ColumnBuilder::for_type(pg_sys::BPCHAROID).expect("bpchar builder");
+
+        for builder in [
+            &mut boolean,
+            &mut int2,
+            &mut int4,
+            &mut date,
+            &mut int8,
+            &mut timestamp,
+            &mut timestamptz,
+            &mut float4,
+            &mut float8,
+            &mut text,
+        ] {
+            builder.try_reserve(3).expect("small host reserve succeeds");
+        }
+        assert_eq!(boolean.type_oid(), pg_sys::BOOLOID);
+        assert_eq!(int2.type_oid(), pg_sys::INT2OID);
+        assert_eq!(int4.type_oid(), pg_sys::INT4OID);
+        assert_eq!(date.type_oid(), pg_sys::DATEOID);
+        assert_eq!(int8.type_oid(), pg_sys::INT8OID);
+        assert_eq!(timestamp.type_oid(), pg_sys::TIMESTAMPOID);
+        assert_eq!(timestamptz.type_oid(), pg_sys::TIMESTAMPTZOID);
+        assert_eq!(float4.type_oid(), pg_sys::FLOAT4OID);
+        assert_eq!(float8.type_oid(), pg_sys::FLOAT8OID);
+        assert_eq!(text.type_oid(), pg_sys::TEXTOID);
+        assert_eq!(varchar.type_oid(), pg_sys::VARCHAROID);
+        assert_eq!(bpchar.type_oid(), pg_sys::BPCHAROID);
+
+        // SAFETY: all present Datums are by-value values matching their builder;
+        // every sentinel payload paired with is_null=true is never interpreted.
+        unsafe {
+            boolean
+                .push_datum(true.into_datum().expect("bool Datum"), false, 1)
+                .expect("bool value stages");
+            boolean
+                .push_datum(pg_sys::Datum::from(0_usize), true, 1)
+                .expect("bool null stages");
+            int2.push_datum((-7_i16).into_datum().expect("int2 Datum"), false, 2)
+                .expect("int2 value stages");
+            int4.push_datum((-17_i32).into_datum().expect("int4 Datum"), false, 3)
+                .expect("int4 value stages");
+            date.push_datum(pg_sys::Datum::from(0_usize), true, 4)
+                .expect("date null stages");
+            int8.push_datum((-33_i64).into_datum().expect("int8 Datum"), false, 5)
+                .expect("int8 value stages");
+            timestamp
+                .push_datum(pg_sys::Datum::from(0_usize), true, 6)
+                .expect("timestamp null stages");
+            timestamptz
+                .push_datum(pg_sys::Datum::from(0_usize), true, 7)
+                .expect("timestamptz null stages");
+            float4
+                .push_datum(1.5_f32.into_datum().expect("float4 Datum"), false, 8)
+                .expect("float4 value stages");
+            float8
+                .push_datum((-2.25_f64).into_datum().expect("float8 Datum"), false, 9)
+                .expect("float8 value stages");
+            text.push_datum(pg_sys::Datum::from(0_usize), true, 10)
+                .expect("text null stages");
+        }
+
+        let StagedColumn::Bool { values, nulls, .. } = boolean.finish().expect("bool finishes")
+        else {
+            panic!("bool builder changed representation");
+        };
+        assert_eq!(values, vec![1, 0]);
+        assert_eq!(nulls, Some(vec![0, 1]));
+        let bool_stage = StagedColumn::Bool {
+            type_oid: pg_sys::BOOLOID,
+            values,
+            nulls,
+        };
+        assert_eq!(bool_stage.device_bytes(), Ok(4));
+        assert_eq!(
+            bool_stage.accounting().map(|value| value.device_bytes),
+            Ok(4)
+        );
+
+        let StagedColumn::I32 { values, nulls, .. } = int2.finish().expect("int2 finishes") else {
+            panic!("int2 builder changed representation");
+        };
+        assert_eq!(values, vec![-7]);
+        assert_eq!(nulls, None);
+        assert_eq!(
+            StagedColumn::I32 {
+                type_oid: pg_sys::INT2OID,
+                values,
+                nulls,
+            }
+            .device_bytes(),
+            Ok(4)
+        );
+
+        let StagedColumn::I32 { values, nulls, .. } = int4.finish().expect("int4 finishes") else {
+            panic!("int4 builder changed representation");
+        };
+        assert_eq!(values, vec![-17]);
+        assert_eq!(nulls, None);
+        let StagedColumn::I32 { values, nulls, .. } = date.finish().expect("date finishes") else {
+            panic!("date builder changed representation");
+        };
+        assert_eq!(values, vec![0]);
+        assert_eq!(nulls, Some(vec![1]));
+
+        let StagedColumn::I64 { values, nulls, .. } = int8.finish().expect("int8 finishes") else {
+            panic!("int8 builder changed representation");
+        };
+        assert_eq!(values, vec![-33]);
+        assert_eq!(nulls, None);
+        for staged in [timestamp.finish(), timestamptz.finish()] {
+            let StagedColumn::I64 { values, nulls, .. } = staged.expect("time builder finishes")
+            else {
+                panic!("time builder changed representation");
+            };
+            assert_eq!(values, vec![0]);
+            assert_eq!(nulls, Some(vec![1]));
+        }
+
+        let StagedColumn::F32 { values, nulls, .. } = float4.finish().expect("float4 finishes")
+        else {
+            panic!("float4 builder changed representation");
+        };
+        assert_eq!(values, vec![1.5]);
+        assert_eq!(nulls, None);
+        assert_eq!(
+            StagedColumn::F32 {
+                type_oid: pg_sys::FLOAT4OID,
+                values,
+                nulls,
+            }
+            .device_bytes(),
+            Ok(4)
+        );
+        let StagedColumn::F64 { values, nulls, .. } = float8.finish().expect("float8 finishes")
+        else {
+            panic!("float8 builder changed representation");
+        };
+        assert_eq!(values, vec![-2.25]);
+        assert_eq!(nulls, None);
+        assert_eq!(
+            StagedColumn::F64 {
+                type_oid: pg_sys::FLOAT8OID,
+                values,
+                nulls,
+            }
+            .device_bytes(),
+            Ok(8)
+        );
+
+        let StagedColumn::TextDictionary {
+            codes,
+            nulls,
+            labels,
+            ..
+        } = text.finish().expect("text finishes")
+        else {
+            panic!("text builder changed representation");
+        };
+        assert_eq!(codes, vec![0]);
+        assert_eq!(nulls, Some(vec![1]));
+        assert!(labels.is_empty());
+        assert_eq!(
+            StagedColumn::TextDictionary {
+                type_oid: pg_sys::TEXTOID,
+                codes,
+                nulls,
+                labels,
+            }
+            .device_bytes(),
+            Ok(5)
+        );
+    }
+
+    #[test]
+    fn extension_builders_and_empty_columns_preserve_type_and_accounting() {
+        let geometry_oid = pg_sys::Oid::from(70_001);
+        let raster_oid = raster_catalog_identity().raster_type_oid;
+        let mut geometry = ColumnBuilder::Geometry {
+            type_oid: geometry_oid,
+            builder: ResidentGeometryBuilder::new(1_024, 128),
+        };
+        let mut raster =
+            ColumnBuilder::Raster(RasterColumnBuilder::new(raster_catalog_identity(), 1_024));
+        let mut h3 = ColumnBuilder::H3 {
+            type_oid: pg_sys::Oid::from(50_001),
+            values: Vec::new(),
+            nulls: Vec::new(),
+            saw_null: false,
+        };
+        geometry.try_reserve(2).expect("geometry reserve");
+        raster.try_reserve(2).expect("raster reserve");
+        h3.try_reserve(2).expect("H3 reserve");
+        assert_eq!(geometry.type_oid(), geometry_oid);
+        assert_eq!(raster.type_oid(), raster_oid);
+        assert_eq!(h3.type_oid(), pg_sys::Oid::from(50_001));
+
+        // SAFETY: all three null payloads are rejected before any Datum access;
+        // the raster builder carries a synthetic but internally coherent catalog identity.
+        unsafe {
+            geometry
+                .push_datum(pg_sys::Datum::from(0_usize), true, 1)
+                .expect("NULL geometry stages");
+            raster
+                .push_datum(pg_sys::Datum::from(0_usize), true, 2)
+                .expect("NULL raster stages");
+            h3.push_datum(pg_sys::Datum::from(0_usize), true, 3)
+                .expect("NULL H3 stages");
+        }
+        let geometry = geometry.finish().expect("geometry finishes");
+        let ColumnBuilder::Raster(raster) = raster else {
+            panic!("raster builder changed representation");
+        };
+        let raster = raster
+            .finish_for_test()
+            .expect("synthetic raster catalog finishes without backend revalidation");
+        let h3 = h3.finish().expect("H3 finishes");
+        assert_eq!(
+            geometry.accounting().map(|value| value.device_bytes),
+            Ok(73)
+        );
+        assert_eq!(raster.accounting().map(|value| value.device_bytes), Ok(81));
+        assert_eq!(h3.device_bytes(), Ok(9));
+
+        for type_oid in [
+            pg_sys::BOOLOID,
+            pg_sys::INT2OID,
+            pg_sys::INT4OID,
+            pg_sys::DATEOID,
+            pg_sys::INT8OID,
+            pg_sys::TIMESTAMPOID,
+            pg_sys::TIMESTAMPTZOID,
+            pg_sys::FLOAT4OID,
+            pg_sys::FLOAT8OID,
+            pg_sys::TEXTOID,
+            pg_sys::VARCHAROID,
+            pg_sys::BPCHAROID,
+        ] {
+            let empty = ColumnBuilder::for_type(type_oid)
+                .expect("builtin builder")
+                .finish_empty()
+                .expect("empty builtin finishes");
+            assert_eq!(empty.device_bytes(), Ok(0));
+            assert!(
+                matches!(empty, StagedColumn::Empty { type_oid: actual } if actual == type_oid)
+            );
+        }
+
+        let empty_geometry = ColumnBuilder::Geometry {
+            type_oid: geometry_oid,
+            builder: ResidentGeometryBuilder::new(1_024, 128),
+        }
+        .finish_empty()
+        .expect("empty geometry still builds its structural domain");
+        assert!(matches!(
+            empty_geometry,
+            StagedColumn::Geometry { type_oid, .. } if type_oid == geometry_oid
+        ));
+    }
+
+    #[test]
+    fn text_dictionary_is_sorted_deduplicated_and_null_aware() {
+        let staged = ColumnBuilder::Text {
+            type_oid: pg_sys::TEXTOID,
+            values: vec![
+                Some("zeta".to_owned()),
+                None,
+                Some("alpha".to_owned()),
+                Some("zeta".to_owned()),
+            ],
+        }
+        .finish()
+        .expect("text dictionary builds");
+        let StagedColumn::TextDictionary {
+            codes,
+            nulls,
+            labels,
+            ..
+        } = staged
+        else {
+            panic!("text builder changed representation");
+        };
+        assert_eq!(labels, vec!["alpha", "zeta"]);
+        assert_eq!(codes, vec![1, 0, 0, 1]);
+        assert_eq!(nulls, Some(vec![0, 1, 0, 0]));
+    }
 }
 
 #[cfg(feature = "pg_test")]

@@ -780,4 +780,74 @@ mod tests {
         validate_h3_compact_key_buffers(&values, None, 5, 3)
             .expect("high-bit keys are unsigned ascending; unused tail is outside the prefix");
     }
+
+    #[test]
+    fn nontext_group_materialization_enforces_type_null_and_domain_contracts() {
+        let slot = |type_oid| AggOutputSlot {
+            source: AggOutputSource::GroupKey { key_index: 0 },
+            source_type_oid: type_oid,
+            result_type_oid: type_oid,
+            result_typmod: -1,
+            result_collation_oid: 0,
+            nullable: true,
+        };
+        let domain = |type_oid| GroupDomain {
+            type_oid,
+            collation_oid: 0,
+            values: Vec::new(),
+            null_code: None,
+        };
+
+        for (type_oid, value, expected) in [
+            (BOOLOID, GroupDatum::Bool(true), 1_usize),
+            (INT2OID, GroupDatum::I32(-7), (-7_i16) as usize),
+            (INT4OID, GroupDatum::I32(-9), (-9_i32) as usize),
+            (DATEOID, GroupDatum::I32(12), 12_usize),
+            (INT8OID, GroupDatum::I64(17), 17_usize),
+            (TIMESTAMPOID, GroupDatum::I64(19), 19_usize),
+            (TIMESTAMPTZOID, GroupDatum::I64(23), 23_usize),
+            (
+                FLOAT4OID,
+                GroupDatum::F32(1.25),
+                1.25_f32.to_bits() as usize,
+            ),
+            (FLOAT8OID, GroupDatum::F64(2.5), 2.5_f64.to_bits() as usize),
+        ] {
+            // SAFETY: these non-text cases only perform scalar Datum conversion
+            // and invoke no PostgreSQL catalog or allocation callbacks.
+            let (datum, is_null) =
+                unsafe { group_datum(&slot(type_oid), &domain(type_oid), &value) }
+                    .expect("matching non-text group datum materializes");
+            assert!(!is_null);
+            assert_eq!(datum.value(), expected);
+        }
+
+        // SAFETY: NULL returns before any PostgreSQL callback.
+        let (datum, is_null) =
+            unsafe { group_datum(&slot(INT4OID), &domain(INT4OID), &GroupDatum::Null) }
+                .expect("NULL group materializes");
+        assert!(is_null);
+        assert_eq!(datum.value(), 0);
+
+        // SAFETY: each rejection occurs before any PostgreSQL callback.
+        assert!(
+            unsafe { group_datum(&slot(INT8OID), &domain(INT4OID), &GroupDatum::I32(1)) }.is_err()
+        );
+        assert!(
+            unsafe { group_datum(&slot(INT2OID), &domain(INT2OID), &GroupDatum::I32(i32::MAX),) }
+                .is_err()
+        );
+        assert!(
+            unsafe { group_datum(&slot(INT4OID), &domain(INT4OID), &GroupDatum::Unused) }.is_err()
+        );
+        assert!(
+            unsafe { group_datum(&slot(INT4OID), &domain(INT4OID), &GroupDatum::Bool(true)) }
+                .is_err()
+        );
+
+        assert_eq!(
+            validate_h3_compact_key_buffers(&[], None, usize::MAX, 0),
+            Err("compact H3 key byte count overflows usize".to_owned())
+        );
+    }
 }

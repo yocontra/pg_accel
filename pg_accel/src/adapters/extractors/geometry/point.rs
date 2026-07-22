@@ -228,3 +228,87 @@ pub(super) fn extract_point_geom(
         ring_offsets: Vec::new(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point_bytes(with_bbox: bool, with_npoints: bool, x: f64, y: f64) -> Vec<u8> {
+        let geom_start = if with_bbox {
+            MIN_HEADER_LEN + BOX2DF_SIZE
+        } else {
+            MIN_HEADER_LEN
+        };
+        let mut bytes = vec![0; geom_start];
+        if with_bbox {
+            bytes[SRID_FLAGS_OFFSET..SRID_FLAGS_OFFSET + 4]
+                .copy_from_slice(&HAS_BBOX_BIT.to_le_bytes());
+        }
+        bytes.extend_from_slice(&WKB_POINT_TYPE.to_le_bytes());
+        if with_npoints {
+            bytes.extend_from_slice(&1_u32.to_le_bytes());
+        }
+        bytes.extend_from_slice(&x.to_le_bytes());
+        bytes.extend_from_slice(&y.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn point_parser_accepts_compact_npoints_and_bbox_layouts() {
+        for (bbox, npoints) in [(false, false), (false, true), (true, false), (true, true)] {
+            let bytes = point_bytes(bbox, npoints, -12.5, 42.25);
+            assert_eq!(extract_point_from_bytes(&bytes), Some((-12.5, 42.25)));
+        }
+    }
+
+    #[test]
+    fn point_parser_rejects_truncation_and_other_geometry_types() {
+        assert_eq!(extract_point_from_bytes(&[]), None);
+        assert_eq!(extract_point_from_bytes(&[0; MIN_HEADER_LEN]), None);
+
+        let mut wrong_type = point_bytes(false, true, 1.0, 2.0);
+        wrong_type[MIN_HEADER_LEN..MIN_HEADER_LEN + 4].copy_from_slice(&2_u32.to_le_bytes());
+        assert_eq!(extract_point_from_bytes(&wrong_type), None);
+
+        let mut truncated = point_bytes(true, true, 1.0, 2.0);
+        truncated.truncate(MIN_HEADER_LEN + BOX2DF_SIZE + 4 + 16 - 1);
+        assert_eq!(extract_point_from_bytes(&truncated), None);
+    }
+
+    #[test]
+    fn point_geometry_uses_embedded_or_coordinate_bbox() {
+        let bytes = point_bytes(false, true, 3.5, -7.25);
+        let derived = extract_point_geom(&bytes, MIN_HEADER_LEN, None).expect("valid point");
+        assert_eq!(derived.geom_type, GeomType::Point);
+        assert_eq!(derived.coords, vec![3.5, -7.25]);
+        assert_eq!(derived.coord_count, 1);
+        assert_eq!(derived.bbox, [3.5, -7.25, 3.5, -7.25]);
+        assert!(derived.ring_offsets.is_empty());
+
+        let embedded = [1.0, 2.0, 8.0, 9.0];
+        let extracted =
+            extract_point_geom(&bytes, MIN_HEADER_LEN, Some(embedded)).expect("valid point");
+        assert_eq!(extracted.bbox, embedded);
+    }
+
+    #[test]
+    fn point_geometry_rejects_invalid_offsets_and_short_coordinates() {
+        let bytes = point_bytes(false, false, 1.0, 2.0);
+        assert!(extract_point_geom(&bytes[..19], 0, None).is_none());
+        assert!(extract_point_geom(&bytes, bytes.len() + 1, None).is_none());
+
+        let mut npoints_layout = point_bytes(false, true, 1.0, 2.0);
+        npoints_layout.truncate(MIN_HEADER_LEN + 4 + 16 - 1);
+        assert!(extract_point_geom(&npoints_layout, MIN_HEADER_LEN, None).is_none());
+    }
+
+    #[test]
+    fn point_xy_offset_only_skips_a_canonical_singleton_count() {
+        let singleton = point_bytes(false, true, 1.0, 2.0);
+        assert_eq!(point_xy_offset(&singleton, MIN_HEADER_LEN), Some(16));
+
+        let mut non_singleton = singleton;
+        non_singleton[12..16].copy_from_slice(&2_u32.to_le_bytes());
+        assert_eq!(point_xy_offset(&non_singleton, MIN_HEADER_LEN), Some(12));
+    }
+}

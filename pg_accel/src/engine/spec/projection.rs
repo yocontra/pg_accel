@@ -935,4 +935,369 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn projection_errors_report_precise_wire_context() {
+        let cases = [
+            (
+                ProjectionCodecError::InvalidProjection("bad lane"),
+                "invalid aggregate output projection: bad lane",
+            ),
+            (
+                ProjectionCodecError::Truncated {
+                    index: 7,
+                    field: "result type",
+                },
+                "truncated aggregate output projection at word 7 while reading result type",
+            ),
+            (
+                ProjectionCodecError::InvalidMagic(0x1234),
+                "invalid aggregate output projection magic 0x1234",
+            ),
+            (
+                ProjectionCodecError::UnsupportedVersion(9),
+                "unsupported aggregate output projection version 9",
+            ),
+            (
+                ProjectionCodecError::InvalidLength {
+                    declared: 10,
+                    actual: 11,
+                },
+                "aggregate output projection length is 11, header declares 10",
+            ),
+            (
+                ProjectionCodecError::InvalidTag {
+                    index: 4,
+                    field: "source",
+                    raw: -1,
+                },
+                "invalid source tag -1 at word 4",
+            ),
+            (
+                ProjectionCodecError::InvalidValue {
+                    index: 12,
+                    field: "nullable",
+                    raw: 2,
+                },
+                "invalid nullable value 2 at word 12",
+            ),
+            (
+                ProjectionCodecError::LimitExceeded {
+                    index: 3,
+                    field: "slot count",
+                    declared: 4,
+                    maximum: 3,
+                },
+                "slot count 4 at word 3 exceeds schema maximum 3",
+            ),
+            (
+                ProjectionCodecError::NonCanonical { index: 6 },
+                "aggregate output projection is not canonically encoded at word 6",
+            ),
+            (
+                ProjectionCodecError::AllocationFailed,
+                "could not allocate aggregate output projection",
+            ),
+            (
+                ProjectionCodecError::LengthOverflow,
+                "aggregate output projection length overflows i32",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn validation_rejects_each_projection_contract_violation() {
+        let base_spec = spec();
+
+        let mut invalid_spec = base_spec.clone();
+        invalid_spec.fact_rel = 0;
+        assert_eq!(
+            projection().validate(&invalid_spec),
+            Err(ProjectionCodecError::InvalidProjection(
+                "query spec is invalid"
+            ))
+        );
+        assert_eq!(
+            AggOutputProjection { slots: Vec::new() }.validate(&base_spec),
+            Err(ProjectionCodecError::InvalidProjection(
+                "projection has no output slots"
+            ))
+        );
+
+        let mut invalid = projection();
+        invalid.slots[0].result_type_oid = 0;
+        assert_eq!(
+            invalid.validate(&base_spec),
+            Err(ProjectionCodecError::InvalidProjection(
+                "output slot has invalid result type OID"
+            ))
+        );
+        let mut invalid = projection();
+        invalid.slots[0].result_typmod = -2;
+        assert_eq!(
+            invalid.validate(&base_spec),
+            Err(ProjectionCodecError::InvalidProjection(
+                "output slot has invalid typmod"
+            ))
+        );
+        let mut invalid = projection();
+        invalid.slots[0].source = AggOutputSource::GroupKey { key_index: 1 };
+        assert_eq!(
+            invalid.validate(&base_spec),
+            Err(ProjectionCodecError::InvalidProjection(
+                "output references a missing group key"
+            ))
+        );
+        let mut invalid = projection();
+        invalid.slots[0].source_type_oid = INT8_OID;
+        invalid.slots[0].result_type_oid = INT8_OID;
+        assert_eq!(
+            invalid.validate(&base_spec),
+            Err(ProjectionCodecError::InvalidProjection(
+                "group-key source type does not match query spec"
+            ))
+        );
+        let mut invalid = projection();
+        invalid.slots[1].source = AggOutputSource::Aggregate {
+            measure_index: 1,
+            source: AggregateSource::Value,
+            kind: AggregateKind::Sum,
+        };
+        assert_eq!(
+            invalid.validate(&base_spec),
+            Err(ProjectionCodecError::InvalidProjection(
+                "output references a missing measure"
+            ))
+        );
+        let mut invalid = projection();
+        invalid.slots[1].source = AggOutputSource::Aggregate {
+            measure_index: 0,
+            source: AggregateSource::Value,
+            kind: AggregateKind::Min,
+        };
+        assert_eq!(
+            invalid.validate(&base_spec),
+            Err(ProjectionCodecError::InvalidProjection(
+                "output references an aggregate lane not projected by its measure"
+            ))
+        );
+
+        let mut int8_sum_spec = base_spec.clone();
+        int8_sum_spec.group_keys.clear();
+        int8_sum_spec.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 10,
+            attno: 2,
+            type_oid: INT8_OID,
+        });
+        let int8_sum = AggOutputProjection {
+            slots: vec![AggOutputSlot {
+                source: AggOutputSource::Aggregate {
+                    measure_index: 0,
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Sum,
+                },
+                source_type_oid: INT8_OID,
+                result_type_oid: INT8_OID,
+                result_typmod: -1,
+                result_collation_oid: 0,
+                nullable: true,
+            }],
+        };
+        assert_eq!(
+            int8_sum.validate(&int8_sum_spec),
+            Err(ProjectionCodecError::InvalidProjection(
+                "aggregate source/kind has no canonical result type mapping"
+            ))
+        );
+
+        let slot = projection().slots[0];
+        let oversized = AggOutputProjection {
+            slots: vec![slot; MAX_AGG_OUTPUT_PROJECTION_SLOTS + 1],
+        };
+        assert!(matches!(
+            oversized.validate(&base_spec),
+            Err(ProjectionCodecError::LimitExceeded {
+                field: "output slot count",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn source_type_and_lane_wire_matrices_are_complete() {
+        let column = ColumnRef {
+            relation_oid: 10,
+            attno: 2,
+            type_oid: FLOAT8_OID,
+        };
+        let rhs = ColumnRef {
+            relation_oid: 10,
+            attno: 3,
+            type_oid: FLOAT8_OID,
+        };
+        let outputs = vec![
+            AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Sum,
+            },
+            AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Count,
+            },
+            AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Min,
+            },
+            AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Max,
+            },
+            AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Avg,
+            },
+            AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::StddevSamp,
+            },
+            AggregateOutput {
+                source: AggregateSource::Rhs,
+                kind: AggregateKind::Sum,
+            },
+            AggregateOutput {
+                source: AggregateSource::Rhs,
+                kind: AggregateKind::Count,
+            },
+            AggregateOutput {
+                source: AggregateSource::Rhs,
+                kind: AggregateKind::Avg,
+            },
+        ];
+        let matrix_spec = AggQuerySpec {
+            fact_rel: 10,
+            group_keys: Vec::new(),
+            measures: vec![MeasureSpec {
+                expression: MeasureExpr::StatsPair { value: column, rhs },
+                outputs: outputs.clone(),
+                filter: FilterSpec::None,
+            }],
+            fact_filter: FilterSpec::None,
+            star_dims: Vec::new(),
+            having: None,
+        };
+        let matrix_projection = AggOutputProjection {
+            slots: outputs
+                .iter()
+                .map(|output| AggOutputSlot {
+                    source: AggOutputSource::Aggregate {
+                        measure_index: 0,
+                        source: output.source,
+                        kind: output.kind,
+                    },
+                    source_type_oid: FLOAT8_OID,
+                    result_type_oid: if output.kind == AggregateKind::Count {
+                        INT8_OID
+                    } else {
+                        FLOAT8_OID
+                    },
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: output.kind != AggregateKind::Count,
+                })
+                .collect(),
+        };
+        let encoded = matrix_projection
+            .encode_i32(&matrix_spec)
+            .expect("encode complete aggregate lane matrix");
+        assert_eq!(
+            AggOutputProjection::decode_i32(&encoded, &matrix_spec)
+                .expect("decode complete aggregate lane matrix"),
+            matrix_projection
+        );
+
+        let count_star = MeasureSpec {
+            expression: MeasureExpr::CountStar,
+            outputs: Vec::new(),
+            filter: FilterSpec::None,
+        };
+        assert_eq!(
+            measure_source_type(&count_star, AggregateSource::Value),
+            Ok(0)
+        );
+        assert!(measure_source_type(&count_star, AggregateSource::Rhs).is_err());
+        let bytecode = MeasureSpec {
+            expression: MeasureExpr::Bytecode {
+                inputs: vec![column],
+                program: vec![0],
+                result_type_oid: FLOAT8_OID,
+            },
+            outputs: Vec::new(),
+            filter: FilterSpec::None,
+        };
+        assert_eq!(
+            measure_source_type(&bytecode, AggregateSource::Value),
+            Ok(FLOAT8_OID)
+        );
+        assert_eq!(
+            measure_source_type(&matrix_spec.measures[0], AggregateSource::Value),
+            Ok(FLOAT8_OID)
+        );
+        assert_eq!(
+            measure_source_type(&matrix_spec.measures[0], AggregateSource::Rhs),
+            Ok(FLOAT8_OID)
+        );
+    }
+
+    #[test]
+    fn decoder_distinguishes_header_shape_tag_and_flag_failures() {
+        let spec = spec();
+        let encoded = projection().encode_i32(&spec).expect("encode projection");
+
+        let mut invalid = encoded.clone();
+        invalid[1] = 99;
+        assert!(matches!(
+            AggOutputProjection::decode_i32(&invalid, &spec),
+            Err(ProjectionCodecError::UnsupportedVersion(99))
+        ));
+        let mut invalid = encoded.clone();
+        invalid[2] = -1;
+        assert!(matches!(
+            AggOutputProjection::decode_i32(&invalid, &spec),
+            Err(ProjectionCodecError::InvalidValue {
+                index: 2,
+                field: "wire length",
+                ..
+            })
+        ));
+        let mut invalid = encoded.clone();
+        invalid[3] = 1;
+        assert!(matches!(
+            AggOutputProjection::decode_i32(&invalid, &spec),
+            Err(ProjectionCodecError::InvalidLength { declared: 13, .. })
+        ));
+        for (index, expected_field) in [
+            (13, "output source"),
+            (15, "aggregate source"),
+            (16, "aggregate kind"),
+        ] {
+            let mut invalid = encoded.clone();
+            invalid[index] = 99;
+            assert!(matches!(
+                AggOutputProjection::decode_i32(&invalid, &spec),
+                Err(ProjectionCodecError::InvalidTag { field, .. }) if field == expected_field
+            ));
+        }
+        let mut invalid = encoded;
+        invalid[21] = 2;
+        assert!(matches!(
+            AggOutputProjection::decode_i32(&invalid, &spec),
+            Err(ProjectionCodecError::InvalidValue {
+                field: "nullable flag",
+                ..
+            })
+        ));
+    }
 }

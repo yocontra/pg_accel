@@ -846,4 +846,42 @@ mod tests {
         record_allocation(&mut b, -5);
         assert_eq!(b.total_allocated, 0);
     }
+
+    #[test]
+    fn panic_payload_messages_cover_borrowed_owned_and_non_string_values() {
+        let borrowed: Box<dyn std::any::Any + Send> = Box::new("borrowed");
+        let owned: Box<dyn std::any::Any + Send> = Box::new(String::from("owned"));
+        let opaque: Box<dyn std::any::Any + Send> = Box::new(7_u32);
+        assert_eq!(panic_message(&*borrowed), "borrowed");
+        assert_eq!(panic_message(&*owned), "owned");
+        assert_eq!(panic_message(&*opaque), "non-string panic payload");
+    }
+
+    #[test]
+    fn record_allocation_claims_a_free_slot_and_degrades_to_global_only_when_full() {
+        let mut available = empty_budget();
+        record_allocation(&mut available, 3);
+        assert_eq!(available.total_allocated, 3);
+        let pid = current_pid();
+        assert_eq!(
+            available
+                .backends
+                .iter()
+                .find(|slot| slot.pid == pid)
+                .map(|slot| slot.allocated),
+            Some(3)
+        );
+
+        let mut full = empty_budget();
+        for (index, slot) in full.backends.iter_mut().enumerate() {
+            *slot = BackendSlot {
+                pid: -1 - index as i32,
+                allocated: 1,
+            };
+        }
+        full.total_allocated = MAX_BACKENDS as i32;
+        record_allocation(&mut full, 5);
+        assert_eq!(full.total_allocated, MAX_BACKENDS as i32 + 5);
+        assert!(full.backends.iter().all(|slot| slot.pid != pid));
+    }
 }

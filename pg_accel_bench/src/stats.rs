@@ -1119,4 +1119,114 @@ mod tests {
     fn test_geomean_all_invalid_returns_one() {
         assert!((geomean(&[f64::NAN, -1.0, 0.0]) - 1.0).abs() < EPSILON);
     }
+
+    fn workload_result(
+        name: &str,
+        category: &str,
+        accel_ms: f64,
+        parallel_ms: f64,
+        p_value: f64,
+    ) -> crate::report::WorkloadResult {
+        let iterations = (0..3)
+            .map(|_| crate::report::IterationResult {
+                accel_ms,
+                parallel_ms,
+                cache_purge: crate::bench_model::CachePurgeState::NotRequested,
+                cache_state: crate::bench_model::CacheState::Warm,
+            })
+            .collect();
+        let mut result = crate::report::WorkloadResult::from_iterations(
+            name.to_owned(),
+            "test workload".to_owned(),
+            category.to_owned(),
+            "test_kernel".to_owned(),
+            100_000,
+            iterations,
+            false,
+        );
+        result.p_value_vs_parallel = p_value;
+        result
+    }
+
+    #[test]
+    fn cv_and_zero_variance_tests_cover_defined_and_undefined_cases() {
+        assert!(cv_percent(&[]).is_nan());
+        assert!(cv_percent(&[-2.0, 0.0]).is_nan());
+        assert!((cv_percent(&[10.0, 10.0]) - 0.0).abs() < EPSILON);
+        assert!(welch_t_test_p(&[1.0, 1.0], &[2.0, 2.0]).abs() < EPSILON);
+        assert!(paired_t_test_p(&[2.0, 2.0], &[1.0, 1.0]).abs() < EPSILON);
+    }
+
+    #[test]
+    fn category_geomeans_and_bonferroni_counts_use_report_fields() {
+        let results = vec![
+            workload_result("a", "joins", 10.0, 20.0, 0.001),
+            workload_result("b", "joins", 20.0, 80.0, 0.010),
+            workload_result("c", "spatial", 25.0, 25.0, f64::NAN),
+        ];
+
+        let grouped = geomean_by_category(&results);
+        assert!((grouped["joins"] - (8.0_f64).sqrt()).abs() < EPSILON);
+        assert!((grouped["spatial"] - 1.0).abs() < EPSILON);
+
+        let filtered = geomean_by_category_filtered(&results, |row| {
+            row.name != "b" && row.speedup_vs_parallel > 1.0
+        });
+        assert_eq!(filtered.len(), 1);
+        assert!((filtered["joins"] - 2.0).abs() < EPSILON);
+        assert!(geomean_by_category_filtered(&results, |_| false).is_empty());
+
+        assert_eq!(significant_after_bonferroni(&results, 0.05), 2);
+        assert_eq!(significant_after_bonferroni(&[], 0.05), 0);
+    }
+
+    #[test]
+    fn t_critical_lookup_covers_every_sample_size_band() {
+        let expected = [
+            (1, 12.706),
+            (2, 4.303),
+            (3, 3.182),
+            (4, 2.776),
+            (5, 2.571),
+            (6, 2.447),
+            (7, 2.365),
+            (8, 2.306),
+            (9, 2.262),
+            (10, 2.228),
+            (11, 2.201),
+            (12, 2.179),
+            (13, 2.160),
+            (14, 2.145),
+            (15, 2.131),
+            (20, 2.086),
+            (30, 2.042),
+            (60, 2.000),
+            (120, 1.980),
+            (121, 1.960),
+        ];
+        for (df, value) in expected {
+            assert!((t_critical_95(df) - value).abs() < EPSILON, "df={df}");
+        }
+    }
+
+    #[test]
+    fn distribution_helpers_cover_invalid_large_df_symmetry_and_reflection() {
+        assert!(approx_t_p_value(1.0, 0.0).is_nan());
+        assert!(approx_t_p_value(f64::NAN, 10.0).is_nan());
+        assert!(approx_t_p_value(1.0, f64::NAN).is_nan());
+
+        let large_df = approx_t_p_value(1.96, 500.0);
+        assert!(large_df > 0.04 && large_df < 0.06, "p={large_df}");
+        assert!(normal_sf(-1.0) > 0.5);
+        assert!((erfc_approx(-0.5) + erfc_approx(0.5) - 2.0).abs() < 1.0e-6);
+
+        assert!(regularized_incomplete_beta(0.0, 2.0, 3.0).abs() < EPSILON);
+        assert!((regularized_incomplete_beta(1.0, 2.0, 3.0) - 1.0).abs() < EPSILON);
+        let left = regularized_incomplete_beta(0.8, 2.0, 3.0);
+        let reflected = 1.0 - regularized_incomplete_beta(0.2, 3.0, 2.0);
+        assert!((left - reflected).abs() < 1.0e-10);
+        assert!(ln_beta(2.0, 3.0).is_finite());
+        assert!(ln_gamma(0.25).is_finite());
+        assert!((ln_gamma(1.0) - 0.0).abs() < 1.0e-10);
+    }
 }

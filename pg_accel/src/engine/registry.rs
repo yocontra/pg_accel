@@ -875,4 +875,35 @@ mod tests {
         // disable the retry path.
         assert!(!RETRYING_LOOKUP.with(std::cell::Cell::get));
     }
+
+    #[test]
+    fn poisoned_registry_fails_closed_without_catalog_access() {
+        let reg = AdapterRegistry::new();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = reg.state.write().expect("fresh registry lock");
+            panic!("poison registry for fail-closed test");
+        }));
+        assert!(poisoned.is_err());
+        assert!(reg.state.is_poisoned());
+
+        reg.register_function(
+            pgrx::pg_sys::Oid::from(42_u32),
+            FunctionAccelEntry::scalar("public", "ignored", AccelStrategy::GpuReduce),
+        );
+        reg.register_adapter(ExtensionAdapter {
+            name: "ignored",
+            functions: Vec::new(),
+        });
+        reg.resolve_oids();
+        reg.resolve_oids_again();
+
+        assert!(reg.is_empty());
+        assert_eq!(reg.resolved_count(), 0);
+        assert_eq!(reg.adapter_count(), 0);
+        assert!(reg.adapters().is_empty());
+        assert!(
+            reg.lookup_no_retry(pgrx::pg_sys::Oid::from(42_u32))
+                .is_none()
+        );
+    }
 }

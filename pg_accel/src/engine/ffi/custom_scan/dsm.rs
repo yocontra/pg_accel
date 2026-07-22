@@ -346,3 +346,218 @@ pub(super) unsafe fn parallel_agg_counter_snapshot(
     let dsm = unsafe { &*accel.dsm_state };
     dsm.is_valid().then(|| dsm.snapshot_agg_counters())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::GpuAccelState;
+    use super::*;
+    use crate::engine::residency::ResidentProofSnapshot;
+
+    fn scan_state(expected_threads: i32) -> GpuAccelScanState {
+        GpuAccelScanState {
+            css: pg_sys::CustomScanState::default(),
+            accel: GpuAccelState {
+                strategy: GpuStrategy::Agg as i32,
+                exec_method: 0,
+                batch_size: 1_024,
+                expected_threads,
+                rows_dispatched: 0,
+                batches_executed: 0,
+                dispatch_time_us: 0,
+                parallel_worker_number: -1,
+                dsm_flags: 0,
+                dsm_state: std::ptr::null_mut(),
+                dsm_counters_recorded: false,
+                parallel_agg_participants: 0,
+                parallel_agg_active_participants: 0,
+                parallel_agg_rows_dispatched: 0,
+                parallel_agg_batches_executed: 0,
+                parallel_agg_dispatch_time_us: 0,
+                resident_proof: ResidentProofSnapshot::default(),
+                executor: std::ptr::null_mut(),
+            },
+        }
+    }
+
+    fn counters(
+        participants: u32,
+        active_participants: u32,
+        rows_dispatched: u64,
+        batches_executed: u64,
+        dispatch_time_us: u64,
+    ) -> ParallelAggDsmCounters {
+        ParallelAggDsmCounters {
+            participants,
+            active_participants,
+            rows_dispatched,
+            batches_executed,
+            dispatch_time_us,
+        }
+    }
+
+    #[test]
+    fn coordinate_layout_validation_and_atomic_counters_are_exact() {
+        assert_eq!(DSM_COORD_SIZE % pg_sys::MAXIMUM_ALIGNOF as usize, 0);
+        assert!(DSM_COORD_SIZE >= std::mem::size_of::<GpuAccelDsmState>());
+        assert_eq!(align_up_const(0, 8), 0);
+        assert_eq!(align_up_const(1, 8), 8);
+        assert_eq!(align_up_const(8, 8), 8);
+        assert_eq!(align_up_const(9, 8), 16);
+
+        let mut state = GpuAccelDsmState::new(6, DSM_COORD_SIZE);
+        assert!(state.is_valid());
+        assert_eq!(state.expected_threads, 6);
+        assert_eq!(state.pscan_offset, DSM_COORD_SIZE);
+        assert_eq!(state.pscan_len, 0);
+        assert_eq!(state.flags, DSM_FLAG_RESIDENT_EXECUTOR);
+        assert_eq!(state.snapshot_agg_counters(), counters(0, 0, 0, 0, 0));
+
+        state.add_agg_counters(0, 0, 11);
+        assert_eq!(state.snapshot_agg_counters(), counters(1, 0, 0, 0, 11));
+        state.add_agg_counters(25, 0, 7);
+        state.add_agg_counters(0, 3, 5);
+        assert_eq!(state.snapshot_agg_counters(), counters(3, 2, 25, 3, 23));
+        state.reset_agg_counters();
+        assert_eq!(state.snapshot_agg_counters(), counters(0, 0, 0, 0, 0));
+
+        state.magic ^= 1;
+        assert!(!state.is_valid());
+        state.magic = DSM_MAGIC;
+        state.version += 1;
+        assert!(!state.is_valid());
+    }
+
+    #[test]
+    fn leader_initialize_and_reinitialize_replace_the_coordinate() {
+        let mut scan = scan_state(9);
+        let mut coordinate = std::mem::MaybeUninit::<GpuAccelDsmState>::uninit();
+        let coordinate_ptr = coordinate.as_mut_ptr();
+
+        // SAFETY: coordinate is aligned writable storage for the advertised DSM
+        // size and scan embeds CustomScanState as its first field.
+        unsafe {
+            initialize_dsm_custom_scan(
+                &raw mut scan.css,
+                std::ptr::null_mut(),
+                coordinate_ptr.cast(),
+            );
+        }
+        // SAFETY: initialize_dsm_custom_scan initialized coordinate in full.
+        let coordinate = unsafe { coordinate.assume_init_mut() };
+        assert!(coordinate.is_valid());
+        assert_eq!(coordinate.expected_threads, 9);
+        assert_eq!(scan.accel.dsm_state, coordinate_ptr);
+        assert!(!scan.accel.dsm_counters_recorded);
+
+        coordinate.add_agg_counters(41, 2, 99);
+        scan.accel.dsm_counters_recorded = true;
+        // SAFETY: the same initialized coordinate and live stack scan remain valid.
+        unsafe {
+            reinitialize_dsm_custom_scan(
+                &raw mut scan.css,
+                std::ptr::null_mut(),
+                coordinate_ptr.cast(),
+            );
+        }
+        assert_eq!(coordinate.snapshot_agg_counters(), counters(0, 0, 0, 0, 0));
+        assert_eq!(coordinate.expected_threads, 9);
+        assert!(!scan.accel.dsm_counters_recorded);
+
+        // A future caller without a local scan state still gets a valid neutral
+        // coordinate rather than inheriting the leader's thread count.
+        // SAFETY: coordinate remains aligned writable storage for the full object.
+        unsafe {
+            initialize_dsm_custom_scan(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                coordinate_ptr.cast(),
+            );
+        }
+        assert_eq!(coordinate.expected_threads, 0);
+        // SAFETY: the estimate callback ignores both nullable planner pointers.
+        assert_eq!(
+            unsafe { estimate_dsm_custom_scan(std::ptr::null_mut(), std::ptr::null_mut()) },
+            DSM_COORD_SIZE
+        );
+    }
+
+    #[test]
+    fn one_shot_recording_and_snapshot_handoff_fail_closed() {
+        let mut dsm = GpuAccelDsmState::new(4, DSM_COORD_SIZE);
+        let mut scan = scan_state(4);
+        scan.accel.dsm_state = &raw mut dsm;
+
+        // SAFETY: null is an explicitly supported no-op input.
+        unsafe {
+            record_parallel_agg_counters_once(std::ptr::null_mut(), GpuStrategy::Agg, 1, 1, 1);
+        }
+        // SAFETY: scan and dsm are live, but a raster strategy is deliberately ignored.
+        unsafe {
+            record_parallel_agg_counters_once(&raw mut scan, GpuStrategy::Raster, 10, 2, 7);
+        }
+        assert_eq!(dsm.snapshot_agg_counters(), counters(0, 0, 0, 0, 0));
+
+        // SAFETY: scan points at the live, valid stack DSM coordinate.
+        unsafe {
+            record_parallel_agg_counters_once(&raw mut scan, GpuStrategy::Agg, 10, 2, 7);
+            record_parallel_agg_counters_once(&raw mut scan, GpuStrategy::Agg, 90, 8, 70);
+        }
+        assert!(scan.accel.dsm_counters_recorded);
+        assert_eq!(dsm.snapshot_agg_counters(), counters(1, 1, 10, 2, 7));
+        // SAFETY: scan and its attached coordinate remain live during the read.
+        assert_eq!(
+            unsafe { parallel_agg_counter_snapshot(&raw const scan) },
+            Some(counters(1, 1, 10, 2, 7))
+        );
+
+        scan.accel.parallel_agg_participants = 5;
+        scan.accel.parallel_agg_active_participants = 3;
+        scan.accel.parallel_agg_rows_dispatched = 101;
+        scan.accel.parallel_agg_batches_executed = 12;
+        scan.accel.parallel_agg_dispatch_time_us = 88;
+        assert_eq!(
+            // SAFETY: scan is live and the cached snapshot does not dereference DSM.
+            unsafe { parallel_agg_counter_snapshot(&raw const scan) },
+            Some(counters(5, 3, 101, 12, 88))
+        );
+
+        scan.accel.parallel_agg_participants = 0;
+        // SAFETY: scan and dsm remain live for the shutdown handoff.
+        unsafe { snapshot_parallel_agg_counters_to_state(&raw mut scan) };
+        assert!(scan.accel.dsm_state.is_null());
+        assert_eq!(scan.accel.parallel_agg_participants, 1);
+        assert_eq!(scan.accel.parallel_agg_active_participants, 1);
+        assert_eq!(scan.accel.parallel_agg_rows_dispatched, 10);
+        assert_eq!(scan.accel.parallel_agg_batches_executed, 2);
+        assert_eq!(scan.accel.parallel_agg_dispatch_time_us, 7);
+
+        assert_eq!(
+            // SAFETY: null is an explicitly supported snapshot input.
+            unsafe { parallel_agg_counter_snapshot(std::ptr::null()) },
+            None
+        );
+        let mut detached = scan_state(1);
+        assert_eq!(
+            // SAFETY: detached is live and carries no DSM pointer or cached counters.
+            unsafe { parallel_agg_counter_snapshot(&raw const detached) },
+            None
+        );
+        // SAFETY: null and detached states are explicitly supported no-op inputs.
+        unsafe {
+            snapshot_parallel_agg_counters_to_state(std::ptr::null_mut());
+            snapshot_parallel_agg_counters_to_state(&raw mut detached);
+        }
+
+        let mut invalid = GpuAccelDsmState::new(1, DSM_COORD_SIZE);
+        invalid.version += 1;
+        detached.accel.dsm_state = &raw mut invalid;
+        assert_eq!(
+            // SAFETY: pointer is live but deliberately carries an invalid version.
+            unsafe { parallel_agg_counter_snapshot(&raw const detached) },
+            None
+        );
+        // SAFETY: invalid coordinates fail closed and are detached after inspection.
+        unsafe { snapshot_parallel_agg_counters_to_state(&raw mut detached) };
+        assert!(detached.accel.dsm_state.is_null());
+    }
+}

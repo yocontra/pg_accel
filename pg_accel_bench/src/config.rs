@@ -490,4 +490,84 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn toy_profile_and_default_config_are_stable() {
+        let toy = GucProfile::toy();
+        assert_eq!(toy.shared_buffers, "128MB");
+        assert_eq!(toy.work_mem, "4MB");
+        assert_eq!(toy.effective_cache_size, "4GB");
+        assert_eq!(toy.max_parallel_workers_per_gather, 2);
+        assert_eq!(toy.max_worker_processes, 8);
+        assert_eq!(toy.max_parallel_workers, 4);
+        assert_eq!(toy.maintenance_work_mem, "64MB");
+        assert_eq!(toy.jit, "off");
+        assert_eq!(toy.jit_above_cost, "100000");
+        assert_eq!(toy.random_page_cost, "4.0");
+        assert_eq!(toy.effective_io_concurrency, 1);
+        assert_eq!(toy.track_io_timing, "off");
+        assert_eq!(toy.parallel_leader_participation, "on");
+        assert_eq!(toy.requested_settings().len(), 13);
+
+        let config = BenchConfig::default();
+        assert_eq!(config.iterations, 10);
+        assert_eq!(config.warmup, 5);
+        assert_eq!(config.seed, 42);
+        assert_eq!(config.timing_mode, TimingMode::RawWallClock);
+        assert_eq!(config.cache_mode, CacheMode::Warm);
+        assert!(config.plans_capture_path.is_none());
+        assert!(config.guc_profile.is_none());
+        assert!(!config.skip_guc_verify);
+        assert!(config.artifacts_dir.is_none());
+        assert_eq!(TimingMode::default(), TimingMode::RawWallClock);
+        assert_eq!(CacheMode::default(), CacheMode::Warm);
+    }
+
+    #[test]
+    fn postgres_byte_parser_accepts_units_case_and_whitespace() {
+        assert_eq!(parse_pg_bytes("0"), Some(0));
+        assert_eq!(parse_pg_bytes("7B"), Some(7));
+        assert_eq!(parse_pg_bytes(" 8kB "), Some(8 * 1024));
+        assert_eq!(parse_pg_bytes("2MB"), Some(2 * 1024 * 1024));
+        assert_eq!(parse_pg_bytes("3gb"), Some(3 * 1024 * 1024 * 1024));
+        assert_eq!(parse_pg_bytes("1TB"), Some(1024_u64 * 1024 * 1024 * 1024));
+        for invalid in ["", " ", "-1MB", "1.5GB", "12pages", "MB", "oneGB"] {
+            assert_eq!(parse_pg_bytes(invalid), None, "input={invalid:?}");
+        }
+    }
+
+    #[test]
+    fn setting_equivalence_is_case_insensitive_but_rejects_invalid_memory() {
+        assert!(pg_setting_values_equivalent("jit", "OFF", "off"));
+        assert!(pg_setting_values_equivalent(
+            "effective_cache_size",
+            "4GB",
+            "4194304kB"
+        ));
+        assert!(!pg_setting_values_equivalent(
+            "effective_cache_size",
+            "4gigabytes",
+            "4194304kB"
+        ));
+        assert!(!pg_setting_values_equivalent(
+            "random_page_cost",
+            "1",
+            "1.0"
+        ));
+    }
+
+    #[test]
+    fn postmaster_mismatch_message_is_actionable() {
+        let mismatch = PostmasterMismatch {
+            name: "shared_buffers".to_owned(),
+            requested: "16GB".to_owned(),
+            observed: "128MB".to_owned(),
+        };
+        let message = mismatch.to_string();
+        assert!(message.contains("postmaster restart required"));
+        assert!(message.contains("shared_buffers"));
+        assert!(message.contains("128MB"));
+        assert!(message.contains("16GB"));
+        assert!(message.contains("--skip-guc-verify"));
+    }
 }

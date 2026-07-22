@@ -1962,4 +1962,113 @@ mod tests {
         assert_eq!(inventory.provenance, vec!["provenance-warnings.txt"]);
         assert_eq!(inventory.failure, vec!["failure-setup.txt"]);
     }
+
+    #[test]
+    fn provenance_crash_and_managed_cleanup_artifacts_preserve_diagnostics() {
+        let artifacts = TestDir::new("provenance-cleanup");
+        let writer = ArtifactWriter::new(artifacts.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+
+        let provenance = serde_json::json!({"status": "fail", "probe": "semantic"});
+        let path = writer
+            .write_provenance(
+                &provenance,
+                &["module timestamp differs".to_owned()],
+                &["module digest differs".to_owned()],
+            )
+            .expect("provenance should be persisted");
+        assert_eq!(path, artifacts.path().join("provenance.json"));
+        let warnings = fs::read_to_string(artifacts.path().join("provenance-warnings.txt"))
+            .expect("diagnostic text should be readable");
+        assert!(warnings.contains("Errors:\n- module digest differs"));
+        assert!(warnings.contains("Warnings:\n- module timestamp differs"));
+
+        writer
+            .write_crashes(&[CrashedScale {
+                workload: "failing|workload".to_owned(),
+                rows: 42,
+                error: "backend\nterminated".to_owned(),
+                repro_command: Some("pg_accel_bench crash-repro".to_owned()),
+                plan_snippet_artifact: Some("plan.txt".to_owned()),
+                correctness_diff_artifact: Some("correctness.json".to_owned()),
+                log_tail_artifacts: vec!["one.log".to_owned(), "two.log".to_owned()],
+            }])
+            .expect("complete crash evidence should be persisted");
+        let crash_markdown = fs::read_to_string(artifacts.path().join("crashes.md"))
+            .expect("crash markdown should be readable");
+        assert!(crash_markdown.contains("failing\\|workload"));
+        assert!(crash_markdown.contains("backend<br>terminated"));
+        assert!(crash_markdown.contains("one.log<br>two.log"));
+
+        fs::create_dir_all(artifacts.path().join("correctness_diffs/nested"))
+            .expect("managed directory should be created");
+        fs::write(artifacts.path().join("report.json"), "stale")
+            .expect("managed file should be created");
+        fs::write(artifacts.path().join("failure-old.txt"), "stale")
+            .expect("managed failure should be created");
+        fs::write(artifacts.path().join("keep.me"), "operator-owned")
+            .expect("unmanaged file should be created");
+        clear_managed_artifacts(artifacts.path()).expect("managed cleanup should succeed");
+        assert!(!artifacts.path().join("correctness_diffs").exists());
+        assert!(!artifacts.path().join("report.json").exists());
+        assert!(!artifacts.path().join("failure-old.txt").exists());
+        assert!(artifacts.path().join("keep.me").is_file());
+        remove_managed_path(&artifacts.path().join("already-absent"))
+            .expect("absent managed paths are idempotent");
+    }
+
+    #[test]
+    fn log_discovery_and_bounded_readers_handle_rotation_and_truncation() {
+        let fixture = TestDir::new("log-discovery");
+        let data = fixture.path().join("data");
+        fs::create_dir_all(data.join("log")).expect("log directory should be created");
+        fs::create_dir_all(data.join("pg_log")).expect("pg_log directory should be created");
+        for relative in [
+            "postgresql.log",
+            "events.csv",
+            "pg_accel_otel.jsonl",
+            "log/newest.log",
+            "pg_log/older.log",
+        ] {
+            let path = data.join(relative);
+            fs::write(path, format!("source={relative}\n")).expect("log fixture should be written");
+        }
+        fs::write(data.join("ignored.txt"), "not a log").expect("non-log fixture should exist");
+
+        let mut candidates = Vec::new();
+        append_pgdata_log_candidates(&mut candidates, &data);
+        assert!(candidates.contains(&data.join("pg_accel_panic.log")));
+        assert!(candidates.contains(&data.join("pg_accel_traces.jsonl")));
+        assert!(
+            candidates
+                .iter()
+                .any(|path| path.ends_with("postgresql.log"))
+        );
+        assert!(!candidates.iter().any(|path| path.ends_with("ignored.txt")));
+        assert!(is_log_like(Path::new("server.log")));
+        assert!(!is_log_like(Path::new("server.txt")));
+        assert!(is_telemetry_candidate(Path::new("trace.jsonl")));
+        assert!(!is_telemetry_candidate(Path::new("trace.log")));
+
+        let bounded = fixture.path().join("bounded.log");
+        fs::write(&bounded, "old-line\nnew-line-one\nnew-line-two\n")
+            .expect("bounded reader fixture should be written");
+        assert_eq!(
+            read_tail(&bounded, 18).expect("tail should read"),
+            "new-line-two\n"
+        );
+        assert_eq!(
+            read_delta(&bounded, 0, 18).expect("delta should read"),
+            "new-line-two\n"
+        );
+        assert_eq!(
+            read_delta(&bounded, u64::MAX, 18).expect("oversized offset should clamp"),
+            ""
+        );
+        let offsets = capture_log_start_offsets(&[bounded, fixture.path().join("missing.log")]);
+        assert!(offsets[0].existed);
+        assert_eq!(offsets[0].len_bytes, 35);
+        assert!(!offsets[1].existed);
+        assert_eq!(offsets[1].len_bytes, 0);
+    }
 }

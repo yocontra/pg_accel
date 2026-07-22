@@ -879,3 +879,426 @@ impl AggQuerySpec {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod validation_edge_tests {
+    use super::*;
+
+    fn column(relation_oid: u32, type_oid: u32) -> ColumnRef {
+        ColumnRef {
+            relation_oid,
+            attno: 1,
+            type_oid,
+        }
+    }
+
+    fn metadata(kind: SpatialValueKind, srid: Option<i32>) -> SpatialValueMetadata {
+        SpatialValueMetadata {
+            kind,
+            typmod: -1,
+            srid,
+        }
+    }
+
+    fn operand(relation_oid: u32, kind: SpatialValueKind, srid: Option<i32>) -> SpatialOperand {
+        SpatialOperand::Column {
+            column: column(relation_oid, 1),
+            metadata: metadata(kind, srid),
+        }
+    }
+
+    fn output(source: AggregateSource, kind: AggregateKind) -> AggregateOutput {
+        AggregateOutput { source, kind }
+    }
+
+    fn count_measure() -> MeasureSpec {
+        MeasureSpec {
+            expression: MeasureExpr::CountStar,
+            outputs: vec![output(AggregateSource::Value, AggregateKind::Count)],
+            filter: FilterSpec::None,
+        }
+    }
+
+    fn dimension() -> DimSpec {
+        DimSpec {
+            relation_oid: 2,
+            fact_key: column(1, INT4OID),
+            dim_key: column(2, INT4OID),
+            collation_oid: 0,
+            multiplicity: JoinMultiplicity::Unique,
+            filter: FilterSpec::None,
+        }
+    }
+
+    fn error(result: Result<(), SpecValidationError>) -> &'static str {
+        result.expect_err("case must be rejected").reason
+    }
+
+    #[test]
+    fn scalar_and_range_boundaries_are_total() {
+        assert_eq!(
+            error(column(0, INT4OID).validate()),
+            "invalid column reference"
+        );
+        assert_eq!(ScalarValue::Bool(true).type_oid(), BOOLOID);
+
+        assert!(!ScalarValue::Bool(true).is_nonnegative_finite());
+        assert!(ScalarValue::I32(0).is_nonnegative_finite());
+        assert!(!ScalarValue::I64(-1).is_nonnegative_finite());
+        assert!(ScalarValue::F32(0.0).is_nonnegative_finite());
+        assert!(!ScalarValue::F64(f64::INFINITY).is_nonnegative_finite());
+        assert!(!ScalarValue::Date(0).is_nonnegative_finite());
+
+        ScalarRange {
+            lo: ScalarValue::Bool(false),
+            hi: ScalarValue::Bool(true),
+        }
+        .validate(BOOLOID)
+        .expect("ordered booleans");
+        assert_eq!(
+            error(
+                ScalarRange {
+                    lo: ScalarValue::I32(2),
+                    hi: ScalarValue::I32(1),
+                }
+                .validate(INT4OID)
+            ),
+            "range lower bound exceeds upper bound"
+        );
+        assert_eq!(
+            error(
+                ScalarRange {
+                    lo: ScalarValue::I32(1),
+                    hi: ScalarValue::I64(2),
+                }
+                .validate(INT4OID)
+            ),
+            "range endpoint type does not match input column"
+        );
+    }
+
+    #[test]
+    fn spatial_metadata_operands_and_distance_fail_closed() {
+        let mut invalid = metadata(SpatialValueKind::Geometry, Some(4326));
+        invalid.typmod = -2;
+        assert_eq!(error(invalid.validate()), "invalid spatial typmod");
+        invalid.typmod = -1;
+        invalid.srid = Some(1_000_000);
+        assert_eq!(error(invalid.validate()), "invalid spatial SRID");
+
+        let empty = SpatialOperand::Constant {
+            metadata: metadata(SpatialValueKind::Geometry, Some(4326)),
+            bytes: Box::new([]),
+        };
+        assert_eq!(
+            error(empty.validate()),
+            "invalid spatial constant payload length"
+        );
+        let unstable = SpatialOperand::Constant {
+            metadata: metadata(SpatialValueKind::Geometry, None),
+            bytes: Box::new([1]),
+        };
+        assert_eq!(
+            error(unstable.validate()),
+            "spatial constant is missing a stable SRID"
+        );
+
+        let constant = |kind, srid| SpatialOperand::Constant {
+            metadata: metadata(kind, srid),
+            bytes: Box::new([1]),
+        };
+        let filter = |predicate, left, right, distance| FilterSpec::Spatial {
+            predicate,
+            left,
+            right,
+            distance,
+        };
+        assert_eq!(
+            error(
+                filter(
+                    SpatialPredicateKind::Intersects,
+                    constant(SpatialValueKind::Geometry, Some(1)),
+                    constant(SpatialValueKind::Geometry, Some(1)),
+                    None,
+                )
+                .validate()
+            ),
+            "spatial filter has no relation operand"
+        );
+        assert_eq!(
+            error(
+                filter(
+                    SpatialPredicateKind::Intersects,
+                    operand(1, SpatialValueKind::Geometry, Some(1)),
+                    constant(SpatialValueKind::Geography, Some(1)),
+                    None,
+                )
+                .validate()
+            ),
+            "spatial operand families do not match"
+        );
+        assert_eq!(
+            error(
+                filter(
+                    SpatialPredicateKind::Intersects,
+                    operand(1, SpatialValueKind::Geometry, Some(1)),
+                    constant(SpatialValueKind::Geometry, Some(2)),
+                    None,
+                )
+                .validate()
+            ),
+            "spatial operand SRIDs do not match"
+        );
+        assert_eq!(
+            error(
+                filter(
+                    SpatialPredicateKind::DWithin,
+                    operand(1, SpatialValueKind::Geometry, Some(1)),
+                    constant(SpatialValueKind::Geometry, Some(1)),
+                    Some(ScalarValue::Bool(true)),
+                )
+                .validate()
+            ),
+            "invalid spatial distance"
+        );
+    }
+
+    #[test]
+    fn filter_program_shape_scope_and_references_are_checked() {
+        assert_eq!(
+            error(validate_program(&[], &[])),
+            "invalid bytecode program shape"
+        );
+        assert_eq!(
+            error(
+                FilterSpec::Ranges {
+                    input: column(1, INT4OID),
+                    ranges: Vec::new(),
+                }
+                .validate()
+            ),
+            "invalid filter range count"
+        );
+
+        let bytecode = FilterSpec::Bytecode {
+            inputs: vec![column(3, INT4OID)],
+            program: vec![1],
+        };
+        assert!(bytecode.references_relation(3));
+        assert!(!bytecode.references_relation(4));
+        let spatial = FilterSpec::Spatial {
+            predicate: SpatialPredicateKind::Equals,
+            left: operand(1, SpatialValueKind::Geometry, Some(0)),
+            right: operand(2, SpatialValueKind::Geometry, Some(0)),
+            distance: None,
+        };
+        assert!(spatial.references_relation(2));
+        assert!(!spatial.references_relation(4));
+    }
+
+    #[test]
+    fn group_encoding_and_sources_reject_invalid_contracts() {
+        assert_eq!(
+            error(
+                GroupKeyEncoding::DictionaryI32 {
+                    cardinality: 0,
+                    null_code: None,
+                }
+                .validate()
+            ),
+            "zero group-key cardinality"
+        );
+        assert_eq!(
+            error(
+                GroupKeyEncoding::DenseI32 {
+                    code_min: i32::MAX,
+                    cardinality: 2,
+                    null_code: None,
+                }
+                .validate()
+            ),
+            "group-key code range overflows i32"
+        );
+        assert_eq!(
+            error(
+                GroupKeyEncoding::DenseI32 {
+                    code_min: 10,
+                    cardinality: 2,
+                    null_code: Some(9),
+                }
+                .validate()
+            ),
+            "NULL code is outside key range"
+        );
+
+        let key = |source| GroupKeyRef {
+            source,
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        };
+        assert_eq!(
+            error(key(GroupKeySource::FactColumn(column(2, INT4OID))).validate(1, &[])),
+            "fact key belongs to another relation"
+        );
+        assert_eq!(
+            error(
+                key(GroupKeySource::StarDimension {
+                    dim_index: 0,
+                    group_column: column(2, INT4OID),
+                })
+                .validate(1, &[])
+            ),
+            "group key references missing dimension"
+        );
+        assert_eq!(
+            error(
+                key(GroupKeySource::StarDimension {
+                    dim_index: 0,
+                    group_column: column(3, INT4OID),
+                })
+                .validate(1, &[dimension()])
+            ),
+            "dimension key belongs to another relation"
+        );
+        assert_eq!(
+            error(
+                key(GroupKeySource::Expression {
+                    inputs: vec![column(2, INT4OID)],
+                    program: vec![1],
+                })
+                .validate(1, &[])
+            ),
+            "group-key expression references a non-fact relation"
+        );
+        assert_eq!(
+            error(
+                key(GroupKeySource::H3LatLngToCell {
+                    latitude: column(1, INT4OID),
+                    longitude: column(1, INT4OID),
+                    resolution: 9,
+                })
+                .validate(1, &[])
+            ),
+            "invalid H3 lat/lng group key"
+        );
+    }
+
+    #[test]
+    fn measure_dimension_and_having_contracts_reject_bad_references() {
+        let mut measure = count_measure();
+        measure.outputs.clear();
+        assert_eq!(
+            error(measure.validate(1, &[])),
+            "invalid aggregate output count"
+        );
+        measure = count_measure();
+        measure.outputs.push(measure.outputs[0]);
+        assert_eq!(
+            error(measure.validate(1, &[])),
+            "duplicate aggregate output"
+        );
+
+        measure = MeasureSpec {
+            expression: MeasureExpr::Binary {
+                op: BinaryMeasureOp::Mul,
+                lhs: column(1, INT4OID),
+                rhs: column(2, INT4OID),
+            },
+            outputs: vec![output(AggregateSource::Value, AggregateKind::Sum)],
+            filter: FilterSpec::None,
+        };
+        assert_eq!(
+            error(measure.validate(1, &[])),
+            "measure references a non-fact relation"
+        );
+        measure.expression = MeasureExpr::Bytecode {
+            inputs: vec![column(1, INT4OID)],
+            program: vec![1],
+            result_type_oid: 0,
+        };
+        assert_eq!(
+            error(measure.validate(1, &[])),
+            "bytecode measure has invalid result type"
+        );
+        measure.expression = MeasureExpr::Bytecode {
+            inputs: vec![column(2, INT4OID)],
+            program: vec![1],
+            result_type_oid: INT4OID,
+        };
+        assert_eq!(
+            error(measure.validate(1, &[])),
+            "measure references a non-fact relation"
+        );
+
+        let mut dim = dimension();
+        dim.relation_oid = 0;
+        assert_eq!(error(dim.validate(1)), "invalid dimension relation OID");
+        dim = dimension();
+        dim.fact_key.relation_oid = 3;
+        assert_eq!(
+            error(dim.validate(1)),
+            "join key belongs to another relation"
+        );
+
+        let invalid_having = HavingSpec {
+            inputs: Vec::new(),
+            program: Vec::new(),
+        };
+        assert_eq!(
+            error(invalid_having.validate(&[count_measure()])),
+            "invalid HAVING program"
+        );
+        let missing_measure = HavingSpec {
+            inputs: vec![AggregateRef {
+                measure_index: 1,
+                source: AggregateSource::Value,
+                kind: AggregateKind::Count,
+            }],
+            program: vec![1],
+        };
+        assert_eq!(
+            error(missing_measure.validate(&[count_measure()])),
+            "HAVING references a missing aggregate output"
+        );
+        let missing_output = HavingSpec {
+            inputs: vec![AggregateRef {
+                measure_index: 0,
+                source: AggregateSource::Value,
+                kind: AggregateKind::Sum,
+            }],
+            program: vec![1],
+        };
+        assert_eq!(
+            error(missing_output.validate(&[count_measure()])),
+            "HAVING references a missing aggregate output"
+        );
+    }
+
+    #[test]
+    fn aggregate_shape_rejects_mixed_key_strategies() {
+        let fact = column(1, INT4OID);
+        let key = |encoding| GroupKeyRef {
+            source: GroupKeySource::FactColumn(fact),
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding,
+        };
+        let spec = AggQuerySpec {
+            fact_rel: 1,
+            group_keys: vec![
+                key(GroupKeyEncoding::Hash),
+                key(GroupKeyEncoding::DenseI32 {
+                    code_min: 0,
+                    cardinality: 2,
+                    null_code: None,
+                }),
+            ],
+            measures: vec![count_measure()],
+            fact_filter: FilterSpec::None,
+            star_dims: Vec::new(),
+            having: None,
+        };
+        assert_eq!(error(spec.validate()), "mixed dense/hash key encodings");
+    }
+}

@@ -653,7 +653,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 .unwrap_or_else(|error| {
                     pgrx::error!(
                         "pg_accel: aggregate output projection/{name} TupleDesc mismatch: {error}"
-                    )
+                    );
                 });
         }
     }
@@ -813,7 +813,7 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
                 (*(*state).accel.executor.cast::<RasterExecState>()).reset_for_rescan();
             }
             strategy => {
-                pgrx::error!("pg_accel: retired {strategy:?} strategy reached resident rescan")
+                pgrx::error!("pg_accel: retired {strategy:?} strategy reached resident rescan");
             }
         }
         reset_observability(&mut (*state).accel);

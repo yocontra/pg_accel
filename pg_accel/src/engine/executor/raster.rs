@@ -2269,6 +2269,113 @@ mod tests {
     }
 
     #[test]
+    fn raster_borrow_failures_map_to_exact_gpu_status_and_detail() {
+        let cases = [
+            (
+                RasterBorrowFailure::RepeatedLaunch,
+                GpuStatusDetail::InvalidDescriptor,
+                "launched more than once",
+            ),
+            (
+                RasterBorrowFailure::EmptyInputMismatch,
+                GpuStatusDetail::InvalidDescriptor,
+                "different input column",
+            ),
+            (
+                RasterBorrowFailure::NonRasterInput,
+                GpuStatusDetail::InvalidDescriptor,
+                "non-raster input column",
+            ),
+            (
+                RasterBorrowFailure::InputSpanOverflow,
+                GpuStatusDetail::NumericOverflow,
+                "input byte span overflowed",
+            ),
+            (
+                RasterBorrowFailure::InputTypeOrRowCountChanged,
+                GpuStatusDetail::InvalidDescriptor,
+                "type or row count changed",
+            ),
+            (
+                RasterBorrowFailure::MissingRules,
+                GpuStatusDetail::InvalidDescriptor,
+                "rules buffer is missing",
+            ),
+            (
+                RasterBorrowFailure::MissingOutputOffsets,
+                GpuStatusDetail::InvalidDescriptor,
+                "output-offset buffer is missing",
+            ),
+            (
+                RasterBorrowFailure::MissingOutputPixels,
+                GpuStatusDetail::InvalidDescriptor,
+                "output-pixel buffer is missing",
+            ),
+            (
+                RasterBorrowFailure::MissingRowActions,
+                GpuStatusDetail::InvalidDescriptor,
+                "row-action buffer is missing",
+            ),
+            (
+                RasterBorrowFailure::MissingValidationScratch,
+                GpuStatusDetail::InvalidDescriptor,
+                "validation buffer is missing",
+            ),
+            (
+                RasterBorrowFailure::WorkspaceSpanOverflow,
+                GpuStatusDetail::NumericOverflow,
+                "workspace byte span overflowed",
+            ),
+            (
+                RasterBorrowFailure::WorkspaceLengthMismatch,
+                GpuStatusDetail::ShapeMismatch,
+                "buffer lengths changed",
+            ),
+        ];
+        for (failure, expected_status, expected_detail) in cases {
+            let ResidentLoadError::Gpu(error) = borrow_failure_error(failure) else {
+                panic!("borrow failure must map to a GPU error");
+            };
+            assert_eq!(error.domain, GpuErrorDomain::Raster);
+            assert_eq!(error.operation, GpuOperation::ValidateDeviceInput);
+            assert_eq!(error.status, expected_status);
+            assert!(
+                error
+                    .detail
+                    .is_some_and(|detail| detail.contains(expected_detail))
+            );
+        }
+
+        for (error, operation, status, detail) in [
+            (
+                allocation_error("allocation"),
+                GpuOperation::BuildColumnBatch,
+                GpuStatusDetail::OutOfMemory,
+                "allocation",
+            ),
+            (
+                invalid_workspace("workspace"),
+                GpuOperation::ValidateDeviceInput,
+                GpuStatusDetail::InvalidDescriptor,
+                "workspace",
+            ),
+            (
+                invalid_output("output"),
+                GpuOperation::ValidateDeviceOutput,
+                GpuStatusDetail::ShapeMismatch,
+                "output",
+            ),
+        ] {
+            let ResidentLoadError::Gpu(error) = error else {
+                panic!("raster helper must map to a GPU error");
+            };
+            assert_eq!(error.operation, operation);
+            assert_eq!(error.status, status);
+            assert_eq!(error.detail, Some(detail));
+        }
+    }
+
+    #[test]
     fn only_successful_reconstruction_becomes_publishable() {
         let spec = spec(7);
         let preflight =

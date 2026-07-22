@@ -1495,4 +1495,46 @@ mod tests {
             SpatialTransformPlan::new(&contradictory_constant_typmod, &catalog(), 1_024).is_err()
         );
     }
+
+    #[test]
+    fn shape_accounting_helpers_reject_malformed_metadata_and_overflow() {
+        assert_eq!(
+            geometry_typmod_shape(SpatialValueMetadata {
+                kind: SpatialValueKind::Geography,
+                typmod: geometry_typmod(1, TEST_SRID),
+                srid: Some(TEST_SRID),
+            }),
+            None
+        );
+        assert_eq!(
+            geometry_typmod_shape(SpatialValueMetadata {
+                kind: SpatialValueKind::Geometry,
+                typmod: -1,
+                srid: Some(TEST_SRID),
+            }),
+            None
+        );
+        assert_eq!(
+            geometry_typmod_shape(SpatialValueMetadata {
+                kind: SpatialValueKind::Geometry,
+                typmod: 1,
+                srid: Some(TEST_SRID),
+            }),
+            None
+        );
+
+        let oversized = SpatialConstantShape {
+            exact_bytes: usize::MAX,
+            coordinate_pairs: usize::MAX,
+            ring_count: usize::MAX,
+        };
+        assert_eq!(oversized.referenced_bytes(), None);
+        assert_eq!(oversized.device_bytes(), None);
+        assert_eq!(oversized.host_bytes(), None);
+
+        let mut malformed = shape(1);
+        malformed.dimension_count = malformed.dimensions.len() + 1;
+        assert_eq!(padded_base_device_bytes(&malformed), None);
+        assert_eq!(chunk_device_bytes(usize::MAX), None);
+    }
 }

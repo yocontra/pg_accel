@@ -1070,13 +1070,24 @@ fn shared_preload_contains_pg_accel(value: Option<&str>) -> bool {
 fn parse_control_default_version(text: &str) -> Option<String> {
     for line in text.lines() {
         let without_comment = line.split('#').next().unwrap_or_default().trim();
-        let Some(rest) = without_comment.strip_prefix("default_version") else {
+        let Some((key, raw_value)) = without_comment.split_once('=') else {
             continue;
         };
-        let Some((_, value)) = rest.split_once('=') else {
+        if key.trim() != "default_version" {
+            continue;
+        }
+        let raw_value = raw_value.trim();
+        let value = raw_value
+            .strip_prefix('\'')
+            .and_then(|value| value.strip_suffix('\''))
+            .or_else(|| {
+                raw_value
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+            });
+        let Some(value) = value else {
             continue;
         };
-        let value = value.trim().trim_matches('"').trim_matches('\'');
         if !value.is_empty() {
             return Some(value.to_owned());
         }
@@ -5212,7 +5223,32 @@ mod tests {
             parse_control_default_version("default_version = \"2.3.4\" # generated").as_deref(),
             Some("2.3.4")
         );
-        assert!(parse_control_default_version("comment = 'no version'").is_none());
+        assert_eq!(
+            parse_control_default_version(
+                "default_version_suffix = 'wrong'\n\
+                 \tdefault_version\t=\t'3.4.5'\t # generated"
+            )
+            .as_deref(),
+            Some("3.4.5")
+        );
+
+        for invalid in [
+            "comment = 'no version'",
+            "default_version_suffix = '1.0.0'",
+            "prefix_default_version = '1.0.0'",
+            "default_version extra = '1.0.0'",
+            "default_version",
+            "default_version = ''",
+            "default_version = 1.0.0",
+            "default_version = 'unterminated",
+            "default_version = \"mismatched'",
+            "default_version == '1.0.0'",
+        ] {
+            assert!(
+                parse_control_default_version(invalid).is_none(),
+                "input={invalid:?}"
+            );
+        }
     }
 
     #[test]
@@ -5250,5 +5286,1357 @@ mod tests {
         };
         let warning = file_probe_warning("loaded backend binary", Some(&probe));
         assert!(warning.is_some_and(|text| text.contains("hash tool missing")));
+    }
+
+    struct RunnerWorkload;
+
+    impl Workload for RunnerWorkload {
+        fn name(&self) -> &'static str {
+            "runner_workload"
+        }
+
+        fn description(&self) -> &'static str {
+            "runner unit-test workload"
+        }
+
+        fn setup_sql(&self, _rows: usize) -> Vec<String> {
+            vec![
+                "CREATE TABLE runner_primary (id bigint)".to_owned(),
+                "CREATE TABLE IF NOT EXISTS runner_secondary (id bigint)".to_owned(),
+                "CREATE TABLE".to_owned(),
+                "CREATE TABLE (".to_owned(),
+                "ANALYZE runner_primary".to_owned(),
+            ]
+        }
+
+        fn pre_query_sql(&self) -> Vec<String> {
+            vec!["SET work_mem = '8MB'".to_owned()]
+        }
+
+        fn query_sql(&self) -> String {
+            "SELECT count(*) FROM runner_primary".to_owned()
+        }
+
+        fn baseline_query_sql(&self) -> Option<String> {
+            Some("SELECT count(*) FROM runner_secondary".to_owned())
+        }
+
+        fn cleanup_sql(&self) -> Vec<String> {
+            vec!["DROP TABLE runner_primary, runner_secondary".to_owned()]
+        }
+    }
+
+    struct MinimalRunnerWorkload;
+
+    impl Workload for MinimalRunnerWorkload {
+        fn name(&self) -> &'static str {
+            "minimal_runner_workload"
+        }
+
+        fn description(&self) -> &'static str {
+            "minimal runner unit-test workload"
+        }
+
+        fn setup_sql(&self, _rows: usize) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn query_sql(&self) -> String {
+            "SELECT 1\n".to_owned()
+        }
+
+        fn cleanup_sql(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    fn runner_query_identity() -> BenchmarkQueryIdentity {
+        BenchmarkQueryIdentity::resolve(
+            RunnerWorkload.query_sql(),
+            RunnerWorkload.baseline_query_sql(),
+        )
+        .expect("runner workload query identity should be valid")
+    }
+
+    fn provenance_file(path: &str, hash: Option<&str>, modified: Option<u64>) -> FileProvenance {
+        FileProvenance {
+            path: path.to_owned(),
+            exists: true,
+            sha256: hash.map(str::to_owned),
+            len_bytes: Some(64),
+            modified_unix_seconds: modified,
+            mapping_deleted: false,
+            error: hash.is_none().then(|| "digest unavailable".to_owned()),
+        }
+    }
+
+    fn valid_provenance_report() -> ProvenanceReport {
+        ProvenanceReport {
+            schema_version: PROVENANCE_SCHEMA_VERSION,
+            status: ProvenanceStatus::Pass,
+            expected_extension_version: EXPECTED_EXTENSION_VERSION.to_owned(),
+            postgres: PostgresProvenance {
+                backend_pid: 42,
+                server_version: Some("18.0".to_owned()),
+                data_directory: Some("/pg/data".to_owned()),
+                config_file: Some("/pg/data/postgresql.conf".to_owned()),
+                shared_preload_libraries: Some("pg_stat_statements, pg_accel".to_owned()),
+                postmaster_start_time: Some("2026-07-21 00:00:00Z".to_owned()),
+                postmaster_start_unix_seconds: Some(100),
+            },
+            sql: SqlExtensionProvenance {
+                extversion: Some(EXPECTED_EXTENSION_VERSION.to_owned()),
+                pg_accel_version: Some(EXPECTED_EXTENSION_VERSION.to_owned()),
+                function_probin: Some("$libdir/pg_accel".to_owned()),
+                function_prosrc: Some("pg_accel_version".to_owned()),
+            },
+            live_smoke: LiveExtensionSmoke {
+                backend_pid: 42,
+                pg_accel_version: Some(EXPECTED_EXTENSION_VERSION.to_owned()),
+                kernel_executions: Some(0),
+                stats_rows: Some(1),
+                error: None,
+            },
+            pg_config: PgConfigProvenance {
+                command: Some("pg_config".to_owned()),
+                pkglibdir: Some("/pg/lib".to_owned()),
+                sharedir: Some("/pg/share".to_owned()),
+                error: None,
+                control_file: Some(provenance_file(
+                    "/pg/share/pg_accel.control",
+                    Some("aa"),
+                    Some(50),
+                )),
+                control_default_version: Some(EXPECTED_EXTENSION_VERSION.to_owned()),
+                sql_files: vec![provenance_file(
+                    "/pg/share/pg_accel--1.sql",
+                    Some("bb"),
+                    Some(50),
+                )],
+            },
+            expected_binary: Some(provenance_file(
+                "/build/libpg_accel.dylib",
+                Some("same"),
+                Some(50),
+            )),
+            installed_binary: Some(provenance_file(
+                "/pg/lib/pg_accel.dylib",
+                Some("same"),
+                Some(50),
+            )),
+            loaded_binaries: vec![provenance_file(
+                "/pg/lib/pg_accel.dylib",
+                Some("same"),
+                Some(50),
+            )],
+            mapped_library_discovery: MappedLibraryDiscovery {
+                method: "lsof".to_owned(),
+                mapped_paths: vec!["/pg/lib/pg_accel.dylib".to_owned()],
+                warning: None,
+            },
+            device_limits_sources: vec!["metal".to_owned()],
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn provenance_evaluator_accepts_a_consistent_live_install() {
+        let mut report = valid_provenance_report();
+        evaluate_provenance(&mut report);
+
+        assert!(report.errors.is_empty());
+        assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn provenance_version_and_smoke_failures_are_specific() {
+        let mut wrong = valid_provenance_report();
+        wrong.sql.extversion = Some("0.0.1".to_owned());
+        wrong.sql.pg_accel_version = Some("0.0.2".to_owned());
+        wrong.live_smoke.pg_accel_version = Some("0.0.3".to_owned());
+        check_extension_versions(&mut wrong);
+        check_live_extension_smoke(&mut wrong);
+        assert_eq!(wrong.errors.len(), 3);
+        assert!(wrong.errors[0].contains("pg_extension.extversion is 0.0.1"));
+        assert!(wrong.errors[1].contains("pg_accel_version() returned 0.0.2"));
+        assert!(wrong.errors[2].contains("live pg_accel smoke returned version 0.0.3"));
+
+        let mut missing = valid_provenance_report();
+        missing.sql.extversion = None;
+        missing.sql.pg_accel_version = None;
+        missing.live_smoke.pg_accel_version = None;
+        missing.live_smoke.kernel_executions = None;
+        missing.live_smoke.stats_rows = Some(0);
+        check_extension_versions(&mut missing);
+        check_live_extension_smoke(&mut missing);
+        assert_eq!(missing.errors.len(), 5);
+        assert!(
+            missing
+                .errors
+                .iter()
+                .any(|error| error.contains("does not list"))
+        );
+        assert!(
+            missing
+                .errors
+                .iter()
+                .any(|error| error.contains("did not return a version"))
+        );
+        assert!(
+            missing
+                .errors
+                .iter()
+                .any(|error| error.contains("could not read"))
+        );
+        assert!(
+            missing
+                .errors
+                .iter()
+                .any(|error| error.contains("did not get a row"))
+        );
+
+        let mut failed = valid_provenance_report();
+        failed.live_smoke.error = Some("symbol lookup failed".to_owned());
+        failed.live_smoke.kernel_executions = None;
+        failed.live_smoke.stats_rows = None;
+        check_live_extension_smoke(&mut failed);
+        assert_eq!(failed.errors.len(), 1);
+        assert!(failed.errors[0].contains("backend 42: symbol lookup failed"));
+    }
+
+    #[test]
+    fn provenance_control_and_device_limit_checks_cover_all_states() {
+        let mut report = valid_provenance_report();
+        report.pg_config.control_default_version = Some("old".to_owned());
+        check_control_version(&mut report);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("is old"));
+
+        report.warnings.clear();
+        report.pg_config.control_default_version = None;
+        check_control_version(&mut report);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("could not read"));
+
+        report.warnings.clear();
+        report.pg_config.sharedir = None;
+        check_control_version(&mut report);
+        assert!(report.warnings.is_empty());
+
+        report.device_limits_sources.clear();
+        check_device_limits(&mut report);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("no source rows"));
+
+        report.errors.clear();
+        report.device_limits_sources = vec!["metal".to_owned(), "fallback_cpu_only".to_owned()];
+        check_device_limits(&mut report);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("real GPU path"));
+    }
+
+    #[test]
+    fn provenance_binary_relationships_reject_unprovable_or_stale_mappings() {
+        let mut report = valid_provenance_report();
+        report.expected_binary = Some(provenance_file("/missing/expected", None, None));
+        report
+            .expected_binary
+            .as_mut()
+            .expect("expected probe")
+            .exists = false;
+        report.installed_binary = Some(provenance_file("/pg/lib/pg_accel.dylib", None, Some(50)));
+        report.loaded_binaries = vec![FileProvenance {
+            mapping_deleted: true,
+            ..provenance_file("/pg/lib/pg_accel.dylib (deleted)", None, Some(150))
+        }];
+        evaluate_provenance(&mut report);
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("does not exist"))
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("could not compute SHA-256"))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("could not compute SHA-256"))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("deleted/replaced"))
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.contains("modified after"))
+        );
+
+        let mut hashes = valid_provenance_report();
+        hashes
+            .expected_binary
+            .as_mut()
+            .expect("expected probe")
+            .sha256 = Some("expected".to_owned());
+        hashes
+            .installed_binary
+            .as_mut()
+            .expect("installed probe")
+            .sha256 = Some("installed".to_owned());
+        hashes.loaded_binaries[0].sha256 = Some("loaded".to_owned());
+        check_hash_relationships(&mut hashes);
+        assert_eq!(hashes.errors.len(), 1);
+        assert!(hashes.errors[0].contains("expected local build hash expected"));
+        assert_eq!(hashes.warnings.len(), 2);
+        assert!(
+            hashes
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("installed pg_accel binary hash"))
+        );
+        assert!(
+            hashes
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("pkglibdir binary hash"))
+        );
+
+        let mut undiscovered = valid_provenance_report();
+        undiscovered.loaded_binaries.clear();
+        evaluate_provenance(&mut undiscovered);
+        assert!(
+            undiscovered
+                .errors
+                .iter()
+                .any(|error| error.contains("cannot prove the loaded dylib hash"))
+        );
+    }
+
+    #[test]
+    fn provenance_restart_check_uses_loaded_then_installed_binary() {
+        let mut unknown_start = valid_provenance_report();
+        unknown_start.postgres.postmaster_start_unix_seconds = None;
+        check_postmaster_restart_required(&mut unknown_start);
+        assert_eq!(unknown_start.warnings.len(), 1);
+
+        let mut installed_fallback = valid_provenance_report();
+        installed_fallback.loaded_binaries.clear();
+        installed_fallback
+            .installed_binary
+            .as_mut()
+            .expect("installed probe")
+            .modified_unix_seconds = Some(101);
+        check_postmaster_restart_required(&mut installed_fallback);
+        assert_eq!(installed_fallback.errors.len(), 1);
+        assert!(installed_fallback.errors[0].contains("installed pg_accel binary"));
+
+        let mut not_preloaded = valid_provenance_report();
+        not_preloaded.postgres.shared_preload_libraries = Some("pg_stat_statements".to_owned());
+        not_preloaded.loaded_binaries[0].modified_unix_seconds = Some(101);
+        check_postmaster_restart_required(&mut not_preloaded);
+        assert!(not_preloaded.errors.is_empty());
+
+        let failure = ProvenanceFailure {
+            errors: vec!["first".to_owned(), "second".to_owned()],
+        };
+        assert_eq!(
+            failure.to_string(),
+            "pg_accel provenance gate failed: first; second"
+        );
+    }
+
+    #[test]
+    fn provenance_file_and_metadata_helpers_inspect_real_files() {
+        let dir = TestDir::new("provenance-files");
+        let data = dir.path().join("payload.bin");
+        fs::write(&data, b"abc").expect("fixture should be written");
+
+        let digest = sha256_file(&data).expect("a system SHA-256 tool should be available");
+        assert_eq!(
+            digest,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        let inspected = inspect_file(&data, false);
+        assert!(inspected.exists);
+        assert_eq!(inspected.len_bytes, Some(3));
+        assert_eq!(inspected.sha256.as_deref(), Some(digest.as_str()));
+
+        let missing = inspect_file(&dir.path().join("missing"), true);
+        assert!(!missing.exists);
+        assert!(missing.mapping_deleted);
+        assert!(missing.error.is_some());
+
+        let deleted = inspect_mapped_library(&MappedLibrary {
+            path: data.clone(),
+            display_path: format!("{} (deleted)", data.display()),
+            deleted: true,
+        });
+        assert!(!deleted.exists);
+        assert!(deleted.mapping_deleted);
+        assert!(
+            deleted
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("deleted"))
+        );
+
+        let extension = dir.path().join("share/extension");
+        fs::create_dir_all(&extension).expect("extension fixture directory should be created");
+        fs::write(
+            extension.join("pg_accel.control"),
+            format!("default_version = '{EXPECTED_EXTENSION_VERSION}'\n"),
+        )
+        .expect("control fixture should be written");
+        fs::write(extension.join("pg_accel--1.sql"), "SELECT 1;")
+            .expect("SQL fixture should be written");
+        fs::write(extension.join("pg_accel--2.SQL"), "SELECT 2;")
+            .expect("SQL fixture should be written");
+        fs::write(extension.join("other--1.sql"), "SELECT 3;")
+            .expect("noise fixture should be written");
+        let (control, version, sql) =
+            capture_extension_metadata_files(&dir.path().join("share").display().to_string());
+        assert!(control.is_some_and(|probe| probe.exists));
+        assert_eq!(version.as_deref(), Some(EXPECTED_EXTENSION_VERSION));
+        assert_eq!(sql.len(), 2);
+        assert!(sql[0].path.ends_with("pg_accel--1.sql"));
+        assert!(sql[1].path.ends_with("pg_accel--2.SQL"));
+
+        let installed_name = installed_extension_library_names()
+            .pop()
+            .expect("at least one installed library name");
+        fs::write(dir.path().join(&installed_name), b"library")
+            .expect("installed library fixture should be written");
+        assert_eq!(
+            find_installed_extension_binary(&dir.path().display().to_string()),
+            Some(dir.path().join(installed_name))
+        );
+        assert!(find_installed_extension_binary("/definitely/missing/pg/lib").is_none());
+    }
+
+    #[test]
+    fn provenance_command_mapping_and_time_helpers_are_deterministic() {
+        assert_eq!(
+            command_stdout("sh", &["-c", "printf '  value  '"])
+                .expect("shell fixture should succeed"),
+            "value"
+        );
+        assert!(command_stdout("sh", &["-c", "exit 7"]).is_err());
+        assert!(command_stdout("/definitely/missing/command", &[]).is_err());
+
+        let library = MappedLibrary {
+            path: PathBuf::from("/pg/lib/pg_accel.dylib"),
+            display_path: "/pg/lib/pg_accel.dylib".to_owned(),
+            deleted: false,
+        };
+        let probe = mapped_library_probe("fixture", vec![library], Some("note".to_owned()));
+        assert_eq!(probe.discovery.method, "fixture");
+        assert_eq!(probe.discovery.mapped_paths, ["/pg/lib/pg_accel.dylib"]);
+        assert_eq!(probe.discovery.warning.as_deref(), Some("note"));
+        assert_eq!(probe.libraries.len(), 1);
+
+        let root = Path::new("/workspace");
+        let candidates = build_output_candidates(root);
+        assert_eq!(candidates.len(), 4);
+        assert!(candidates[0].starts_with("/workspace/target/release"));
+        assert_eq!(system_time_unix_secs(UNIX_EPOCH), Some(0));
+        assert_eq!(
+            system_time_unix_secs(UNIX_EPOCH + std::time::Duration::from_secs(9)),
+            Some(9)
+        );
+        assert_eq!(
+            system_time_unix_secs(UNIX_EPOCH - std::time::Duration::from_secs(1)),
+            None
+        );
+    }
+
+    fn dispatch_test_result() -> WorkloadResult {
+        WorkloadResult::from_iterations(
+            "dispatch".to_owned(),
+            "dispatch merge".to_owned(),
+            "gpu".to_owned(),
+            "unclassified".to_owned(),
+            10_000,
+            vec![iter_at(1.0, 2.0, CacheState::Warm)],
+            true,
+        )
+    }
+
+    #[test]
+    fn dispatch_counter_helpers_clamp_delta_merge_and_preserve_first_error() {
+        assert_eq!(i64_to_u64(-1), 0);
+        assert_eq!(i64_to_u64(17), 17);
+
+        let delta = dispatch_stats_delta(
+            DispatchStatsSnapshot {
+                rows_dispatched: 10,
+                batches_executed: 20,
+                stock_exec_count: 30,
+                gpu_rows_processed: 40,
+                gpu_kernel_executions: 50,
+            },
+            DispatchStatsSnapshot {
+                rows_dispatched: 15,
+                batches_executed: 19,
+                stock_exec_count: 32,
+                gpu_rows_processed: 44,
+                gpu_kernel_executions: 55,
+            },
+        );
+        assert_eq!(delta.rows_dispatched, 5);
+        assert_eq!(delta.batches_executed, 0);
+        assert_eq!(delta.stock_exec_count, 2);
+        assert_eq!(delta.gpu_rows_processed, 4);
+        assert_eq!(delta.gpu_kernel_executions, 5);
+
+        let mut target = dispatch_test_result();
+        merge_dispatch_counter_capture(
+            &mut target,
+            DispatchCounterCapture {
+                captured: true,
+                delta,
+                error: Some("first".to_owned()),
+            },
+        );
+        assert!(target.dispatch_counter_captured);
+        assert_eq!(target.gpu_kernel_execution_delta, 5);
+        assert_eq!(target.pg_accel_rows_dispatched_delta, 5);
+        assert_eq!(target.pg_accel_stock_exec_delta, 2);
+        assert_eq!(target.dispatch_counter_error.as_deref(), Some("first"));
+
+        let mut source = dispatch_test_result();
+        source.dispatch_counter_captured = true;
+        source.gpu_kernel_execution_delta = u64::MAX;
+        source.pg_accel_rows_dispatched_delta = u64::MAX;
+        source.pg_accel_batches_executed_delta = 8;
+        source.pg_accel_gpu_rows_processed_delta = 9;
+        source.pg_accel_stock_exec_delta = 10;
+        source.accel_output_rows_consumed = 11;
+        source.dispatch_counter_error = Some("second".to_owned());
+        merge_dispatch_counter_fields(&mut target, &source);
+        assert_eq!(target.gpu_kernel_execution_delta, u64::MAX);
+        assert_eq!(target.pg_accel_rows_dispatched_delta, u64::MAX);
+        assert_eq!(target.pg_accel_batches_executed_delta, 8);
+        assert_eq!(target.pg_accel_gpu_rows_processed_delta, 13);
+        assert_eq!(target.pg_accel_stock_exec_delta, 12);
+        assert_eq!(target.accel_output_rows_consumed, 11);
+        assert_eq!(target.dispatch_counter_error.as_deref(), Some("first"));
+
+        let unavailable = DispatchCounterCapture::unavailable("stats missing");
+        assert!(!unavailable.captured);
+        assert_eq!(unavailable.error.as_deref(), Some("stats missing"));
+    }
+
+    #[test]
+    fn workload_table_parser_handles_plain_and_if_not_exists_forms() {
+        assert_eq!(
+            workload_tables(&RunnerWorkload, 123),
+            ["runner_primary", "runner_secondary"]
+        );
+    }
+
+    #[test]
+    fn crash_context_artifact_contains_repro_config_sql_paths_and_excerpts() {
+        let dir = TestDir::new("crash-context");
+        let writer = ArtifactWriter::new(dir.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+        let large_plan = vec![b'p'; CRASH_CONTEXT_EMBED_BYTES + 7];
+        fs::write(dir.path().join("plan.txt"), large_plan).expect("plan fixture should be written");
+        fs::write(dir.path().join("log.txt"), "tail line\n")
+            .expect("log fixture should be written");
+        fs::write(dir.path().join(RUST_BACKTRACE_ARTIFACT), "enabled\n")
+            .expect("backtrace fixture should be written");
+        fs::write(dir.path().join("guc_snapshot.json"), "{}\n")
+            .expect("GUC fixture should be written");
+        fs::write(dir.path().join("provenance.json"), "{}\n")
+            .expect("provenance fixture should be written");
+
+        let config = BenchConfig {
+            iterations: 7,
+            warmup: 3,
+            seed: 99,
+            timing_mode: TimingMode::Both,
+            cache_mode: CacheMode::Cold,
+            plans_capture_path: Some(dir.path().join("plans/all.txt")),
+            guc_profile: Some(GucProfile::toy()),
+            skip_guc_verify: true,
+            artifacts_dir: Some(dir.path().to_path_buf()),
+        };
+        let logs = vec!["log.txt".to_owned()];
+        let context = CrashContext {
+            connection: "host=local dbname='quoted db'",
+            workload: &RunnerWorkload,
+            rows: 12_345,
+            config: &config,
+            label: "crash 001/runner",
+            error: "backend closed",
+            repro_command: "cargo run -- repro",
+            plan_snippet_artifact: Some("plan.txt"),
+            correctness_diff_artifact: Some("missing-correctness.json"),
+            log_tail_artifacts: &logs,
+        };
+        let relative = write_crash_context_artifact(&writer, &context)
+            .expect("crash context should be written");
+        assert_eq!(relative, "crash_contexts/crash-001-runner.txt");
+        let text = fs::read_to_string(dir.path().join(relative))
+            .expect("crash context should be readable");
+        assert!(text.contains("workload: runner_workload"));
+        assert!(text.contains("iterations: 7"));
+        assert!(text.contains("timing: both"));
+        assert!(text.contains("cache_mode: cold"));
+        assert!(text.contains("realistic_gucs: true"));
+        assert!(text.contains("--- pre-query 1 ---"));
+        assert!(text.contains("--- baseline query ---"));
+        assert!(text.contains("plan_snippet: plan.txt"));
+        assert!(text.contains("provenance: provenance.json"));
+        assert!(text.contains("[truncated to last"));
+        assert!(text.contains("<could not read"));
+        assert!(text.contains("tail line"));
+
+        let mut absent = String::new();
+        append_optional_artifact_excerpt(&mut absent, dir.path(), "Absent", None);
+        assert!(absent.contains("<not available>"));
+        assert_eq!(
+            existing_artifact_path(dir.path(), "log.txt").as_deref(),
+            Some("log.txt")
+        );
+        assert!(existing_artifact_path(dir.path(), "does-not-exist").is_none());
+        assert_eq!(
+            artifact_display_path(dir.path(), "log.txt"),
+            dir.path().join("log.txt")
+        );
+        assert_eq!(
+            artifact_display_path(dir.path(), "/tmp/absolute"),
+            PathBuf::from("/tmp/absolute")
+        );
+        assert_eq!(
+            relative_artifact_path(dir.path(), &dir.path().join("log.txt")),
+            "log.txt"
+        );
+    }
+
+    #[test]
+    fn plan_initialization_and_crash_record_cover_optional_artifact_paths() {
+        let dir = TestDir::new("plans-and-crash");
+        let mut config = BenchConfig::default();
+        initialize_plans_file(&config);
+        assert_eq!(
+            fs::read_dir(dir.path())
+                .expect("test directory should be readable")
+                .count(),
+            0
+        );
+        config.plans_capture_path = Some(dir.path().join("nested/plans.txt"));
+        initialize_plans_file(&config);
+        assert_eq!(
+            fs::read_to_string(config.plans_capture_path.as_ref().expect("plan path"))
+                .expect("plans file should be readable"),
+            "=== pg_accel benchmark plans - captured once per workload/scale ===\n"
+        );
+        config.plans_capture_path = Some(dir.path().to_path_buf());
+        initialize_plans_file(&config);
+        assert!(dir.path().is_dir());
+
+        let crashed = record_crash(
+            "host=localhost dbname=bench",
+            &RunnerWorkload,
+            50_000,
+            &config,
+            None,
+            4,
+            "connection reset",
+        );
+        assert_eq!(crashed.workload, "runner_workload");
+        assert_eq!(crashed.rows, 50_000);
+        assert_eq!(crashed.error, "connection reset");
+        assert!(crashed.plan_snippet_artifact.is_none());
+        assert!(crashed.correctness_diff_artifact.is_none());
+        assert!(crashed.log_tail_artifacts.is_empty());
+        assert!(crashed.repro_command.as_deref().is_some_and(|command| {
+            command.contains("crash-repro --workload runner_workload --rows 50000")
+        }));
+
+        assert_eq!(sanitize_artifact_component(&"x".repeat(120)).len(), 96);
+        assert_eq!(shell_quote("plain/path:1"), "plain/path:1");
+        assert_eq!(shell_quote("a'b"), "'a'\"'\"'b'");
+    }
+
+    #[test]
+    fn failed_pre_risk_capture_persists_complete_diagnostic_context() {
+        let dir = TestDir::new("pre-risk-connect-failure");
+        let writer = ArtifactWriter::new(dir.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+        let identity = runner_query_identity();
+        let config = BenchConfig {
+            iterations: 13,
+            warmup: 6,
+            seed: 77,
+            timing_mode: TimingMode::Both,
+            cache_mode: CacheMode::Cold,
+            plans_capture_path: Some(dir.path().join("plans.txt")),
+            guc_profile: Some(GucProfile::toy()),
+            skip_guc_verify: true,
+            ..BenchConfig::default()
+        };
+
+        capture_and_write_pre_risk_context(
+            "host=/definitely/missing/pg_accel_socket dbname=missing connect_timeout=1",
+            &RunnerWorkload,
+            222,
+            &config,
+            &identity,
+            &writer,
+        )
+        .expect("connection failure should be captured as evidence, not returned");
+
+        let relative = writer
+            .existing_pre_risk_context_artifact("runner_workload", 222)
+            .expect("pre-risk context should exist");
+        let value: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(artifact_display_path(dir.path(), &relative))
+                .expect("pre-risk context should be readable"),
+        )
+        .expect("pre-risk context should be valid JSON");
+        assert_eq!(value["workload"], "runner_workload");
+        assert_eq!(value["rows"], 222);
+        assert_eq!(value["iterations"], 13);
+        assert_eq!(value["warmup"], 6);
+        assert_eq!(value["seed"], 77);
+        assert_eq!(value["timing_mode"], "both");
+        assert_eq!(value["cache_mode"], "cold");
+        assert_eq!(value["realistic_gucs"], true);
+        assert_eq!(value["skip_guc_verify"], true);
+        assert_eq!(value["capture_plans"], true);
+        assert!(value["backend_pid"].is_null());
+        assert!(
+            value["backend_pid_error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty())
+        );
+        assert_eq!(value["accel_query_sql"], identity.accel_query_sql());
+        assert_eq!(value["baseline_query_sql"], identity.baseline_query_sql());
+        assert_eq!(value["pre_query_sql"][0], "SET work_mem = '8MB'");
+        assert!(value["explain_sql"].as_str().is_some_and(|sql| {
+            sql == "EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM runner_primary"
+        }));
+        assert!(
+            value["explain_error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty())
+        );
+    }
+
+    #[test]
+    fn failed_correctness_capture_writes_a_linkable_error_artifact() {
+        let dir = TestDir::new("correctness-connect-failure");
+        let writer = ArtifactWriter::new(dir.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+        let identity = runner_query_identity();
+
+        let error = capture_and_write_correctness_diff(
+            "host=/definitely/missing/pg_accel_socket dbname=missing connect_timeout=1",
+            &RunnerWorkload,
+            333,
+            &identity,
+            &writer,
+        )
+        .expect_err("failed connection must fail correctness gating")
+        .to_string();
+        assert!(error.contains("correctness diff failed for runner_workload @ 333 rows"));
+        assert!(error.contains("status=error"));
+
+        let relative = writer
+            .existing_correctness_diff_artifact("runner_workload", 333)
+            .expect("correctness error artifact should exist");
+        let value: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(artifact_display_path(dir.path(), &relative))
+                .expect("correctness artifact should be readable"),
+        )
+        .expect("correctness artifact should be valid JSON");
+        assert_eq!(value["schema_version"], CORRECTNESS_DIFF_SCHEMA_VERSION);
+        assert_eq!(value["status"], "error");
+        assert_eq!(value["workload"], "runner_workload");
+        assert_eq!(value["rows"], 333);
+        assert_eq!(value["order_sensitive"], false);
+        assert_eq!(value["sample_limit"], CORRECTNESS_DIFF_SAMPLE_LIMIT);
+        assert!(value["accel_rows"].is_null());
+        assert!(value["baseline_rows"].is_null());
+        assert_eq!(value["accel_query_sql"], identity.accel_query_sql());
+        assert_eq!(value["baseline_query_sql"], identity.baseline_query_sql());
+        assert!(
+            value["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty())
+        );
+
+        let ordered_identity = BenchmarkQueryIdentity::from_effective(
+            "SELECT id FROM runner_primary ORDER BY id".to_owned(),
+            "SELECT id FROM runner_secondary".to_owned(),
+        )
+        .expect("ordered identity should be valid");
+        let ordered = correctness_error_artifact(
+            &RunnerWorkload,
+            444,
+            &ordered_identity,
+            "ordered failure".to_owned(),
+        );
+        assert!(ordered.order_sensitive);
+        assert_eq!(ordered.error.as_deref(), Some("ordered failure"));
+    }
+
+    #[test]
+    fn crash_record_resolves_plan_correctness_log_and_context_artifacts() {
+        let dir = TestDir::new("linked-crash");
+        let writer = ArtifactWriter::new(dir.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+        writer
+            .write_plan_snippet("runner_workload", 777, "Custom Scan (GpuAccel)\n")
+            .expect("plan snippet should be written");
+        writer
+            .write_correctness_diff(
+                "runner_workload",
+                777,
+                &serde_json::json!({"status": "error"}),
+            )
+            .expect("correctness fixture should be written");
+
+        let crash = record_crash(
+            "host=localhost dbname=bench",
+            &RunnerWorkload,
+            777,
+            &BenchConfig::default(),
+            Some(&writer),
+            9,
+            "backend exited",
+        );
+        assert_eq!(
+            crash.plan_snippet_artifact.as_deref(),
+            Some("plan_snippets/runner_workload-777.txt")
+        );
+        assert_eq!(
+            crash.correctness_diff_artifact.as_deref(),
+            Some("correctness_diffs/runner_workload-777.json")
+        );
+        assert_eq!(crash.log_tail_artifacts.len(), 2);
+        assert!(crash.log_tail_artifacts[0].starts_with("crash_contexts/"));
+        assert!(crash.log_tail_artifacts[1].ends_with("no-log-files-found.txt"));
+        let context = fs::read_to_string(artifact_display_path(
+            dir.path(),
+            &crash.log_tail_artifacts[0],
+        ))
+        .expect("crash context should be readable");
+        assert!(context.contains("label: crash-009-runner_workload-777"));
+        assert!(context.contains("plan_snippet: plan_snippets/runner_workload-777.txt"));
+        assert!(context.contains("correctness_diff: correctness_diffs/runner_workload-777.json"));
+        assert!(context.contains("no-log-files-found.txt"));
+    }
+
+    #[test]
+    fn crash_helpers_render_absent_paths_minimal_sql_and_outside_paths() {
+        let dir = TestDir::new("minimal-crash-helpers");
+        let writer = ArtifactWriter::new(dir.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+        let config = BenchConfig::default();
+        let context = CrashContext {
+            connection: "unused",
+            workload: &MinimalRunnerWorkload,
+            rows: 1,
+            config: &config,
+            label: "minimal",
+            error: "failure",
+            repro_command: "repro",
+            plan_snippet_artifact: None,
+            correctness_diff_artifact: None,
+            log_tail_artifacts: &[],
+        };
+        let mut paths = String::new();
+        append_crash_artifact_paths(&mut paths, &writer, &context);
+        assert!(paths.contains("plan_snippet: <not captured before failure>"));
+        assert!(paths.contains("correctness_diff: <not captured before failure>"));
+        assert!(paths.contains("guc_snapshot: <not available>"));
+        assert!(paths.contains("log_tails: <not available>"));
+
+        let mut sql = String::new();
+        append_crash_sql(&mut sql, &MinimalRunnerWorkload);
+        assert_eq!(
+            sql,
+            "\n## SQL\n\npre_query_sql: <none>\n--- accel query ---\nSELECT 1\n"
+        );
+
+        let outside = dir
+            .path()
+            .parent()
+            .expect("temp path should have a parent")
+            .join("outside");
+        assert_eq!(
+            relative_artifact_path(dir.path(), &outside),
+            outside.display().to_string()
+        );
+    }
+
+    #[test]
+    fn runner_diagnostic_artifacts_persist_settings_gucs_and_setup_failures() {
+        let dir = TestDir::new("runner-diagnostics");
+        let writer = ArtifactWriter::new(dir.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+        let setting = RustBacktraceSetting {
+            effective_value: "full".to_owned(),
+            previous_value: Some("0".to_owned()),
+            action: "already-enabled",
+        };
+        persist_rust_backtrace_setting(Some(&writer), &setting);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(RUST_BACKTRACE_ARTIFACT))
+                .expect("backtrace artifact should be readable"),
+            "RUST_BACKTRACE=full\naction=already-enabled\nprevious=0\nnote=This records the benchmark runner process environment. Existing PostgreSQL postmasters may need a restart to inherit changed environment variables.\n"
+        );
+
+        let observed = ObservedGucs {
+            settings: vec![
+                ("shared_buffers".to_owned(), "16GB".to_owned()),
+                ("work_mem".to_owned(), "512MB".to_owned()),
+            ],
+            postmaster_start_time: Some("2026-07-21 12:00:00Z".to_owned()),
+        };
+        persist_guc_snapshot(Some(&writer), "unused", Some(&observed));
+        let gucs: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(dir.path().join("guc_snapshot.json"))
+                .expect("GUC artifact should be readable"),
+        )
+        .expect("GUC artifact should be valid JSON");
+        assert_eq!(
+            gucs["settings"][0],
+            serde_json::json!(["shared_buffers", "16GB"])
+        );
+        assert_eq!(gucs["postmaster_start_time"], "2026-07-21 12:00:00Z");
+
+        record_setup_failure(Some(&writer), "fixture/setup", "setup failed exactly");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("failure-fixture-setup.txt"))
+                .expect("failure artifact should be readable"),
+            "setup failed exactly\n"
+        );
+        assert!(
+            dir.path()
+                .join("log_tails/fixture-setup/no-log-files-found.txt")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn runner_pure_early_exits_do_not_attempt_database_work() {
+        let workloads: Vec<Box<dyn Workload>> = Vec::new();
+        let error = run_all("unused", &workloads, MIN_ITERATIONS - 1, 2, 7)
+            .expect_err("too few iterations should fail before setup")
+            .to_string();
+        assert_eq!(
+            error,
+            "minimum 10 iterations required for statistical validity (got 9)"
+        );
+        assert!(
+            prepare_artifacts("unused", &BenchConfig::default())
+                .expect("disabled artifacts should succeed")
+                .is_none()
+        );
+        assert!(validate_result_oracle_from_connection("unused", &RunnerWorkload, 1).is_ok());
+        assert!(
+            capture_benchmark_sanity_checks("unused", &RunnerWorkload)
+                .expect("non-SSBM workloads need no sanity query")
+                .is_empty()
+        );
+        assert_eq!(cold_shared_buffers_resident("unused", &[]), None);
+    }
+
+    #[test]
+    fn remaining_projection_and_plan_parser_branches_are_exact() {
+        let hashagg = correctness_projection_sql(
+            "SELECT grp, SUM(v), COUNT(*) FROM t GROUP BY grp",
+            "hashagg_10g",
+            false,
+        );
+        assert!(hashagg.contains("'grp', q.grp"));
+        assert!(hashagg.contains("round(q.sum::numeric, 3)"));
+
+        let medium = correctness_projection_sql(
+            "SELECT user_id, COUNT(*), SUM(v) FROM t GROUP BY user_id",
+            "gpu_hashagg_med_card",
+            false,
+        );
+        assert!(medium.contains("'user_id', q.user_id"));
+        assert!(medium.contains("'count', q.count"));
+
+        let filtered = correctness_projection_sql(
+            "SELECT dept, SUM(v), AVG(v), COUNT(*) FROM t GROUP BY dept",
+            "filtered_grouped_agg",
+            false,
+        );
+        assert!(filtered.contains("round(q.avg::numeric, 5)"));
+
+        let f64_sum = correctness_projection_sql("SELECT SUM(v) FROM t", "reduce_f64_sum", false);
+        assert!(f64_sum.contains("round(q.sum::numeric, 3)"));
+
+        assert!(has_top_level_order_by("ORDER BY id"));
+        assert!(!has_top_level_order_by("SELECT \"order by\" FROM t"));
+        assert!(!has_top_level_order_by("SELECT (id)) FROM t"));
+        assert!(!has_top_level_order_by(
+            "SELECT 'escaped \\' order by id' FROM t"
+        ));
+        assert!(!starts_with_order_by("xorder by y", 1));
+        assert!(!starts_with_order_by("order by_field", 0));
+
+        for marker in [
+            r#"{"gpu dispatched": false}"#,
+            r#"{"gpu dispatched":"false"}"#,
+            r#"{"gpu dispatched": "false"}"#,
+            r#"{"gpu kernel dispatched": false}"#,
+            r#"{"gpu kernel dispatched":false}"#,
+            r#"{"gpu kernel dispatched":"false"}"#,
+            r#"{"gpu kernel dispatched": "false"}"#,
+        ] {
+            assert_eq!(
+                explicit_gpu_dispatched(marker),
+                Some(false),
+                "marker={marker}"
+            );
+        }
+        for marker in [
+            r#"{"gpu dispatched": true}"#,
+            r#"{"gpu dispatched":true}"#,
+            r#"{"gpu dispatched":"true"}"#,
+            r#"{"gpu dispatched": "true"}"#,
+            r#"{"gpu kernel dispatched": true}"#,
+            r#"{"gpu kernel dispatched":true}"#,
+            r#"{"gpu kernel dispatched":"true"}"#,
+            r#"{"gpu kernel dispatched": "true"}"#,
+        ] {
+            assert_eq!(
+                explicit_gpu_dispatched(marker),
+                Some(true),
+                "marker={marker}"
+            );
+        }
+        assert_eq!(explicit_gpu_dispatched("Seq Scan on t"), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn pmset_parser_accepts_documented_separators_and_rejects_bad_values() {
+        let text = "\n CPU_Scheduler_Limit = 100\nCPU_Speed_Limit: 87 percent\n";
+        assert_eq!(parse_pmset_limit(text, "CPU_Scheduler_Limit"), Some(100));
+        assert_eq!(parse_pmset_limit(text, "CPU_Speed_Limit"), Some(87));
+        assert_eq!(
+            parse_pmset_limit("CPU_Speed_Limit = fast", "CPU_Speed_Limit"),
+            None
+        );
+        assert_eq!(parse_pmset_limit(text, "Missing"), None);
+    }
+
+    #[test]
+    fn provenance_and_repro_edge_helpers_fail_closed() {
+        assert!(rust_backtrace_enabled("1"));
+        assert!(rust_backtrace_enabled(" full "));
+        assert!(!rust_backtrace_enabled("0"));
+        assert!(!rust_backtrace_enabled("FULL"));
+
+        assert!(file_probe_warning("none", None).is_none());
+        let missing = FileProvenance {
+            path: "/missing/libpg_accel.dylib".to_owned(),
+            exists: false,
+            sha256: Some("irrelevant".to_owned()),
+            len_bytes: None,
+            modified_unix_seconds: None,
+            mapping_deleted: false,
+            error: None,
+        };
+        assert_eq!(
+            file_probe_warning("fixture", Some(&missing)).as_deref(),
+            Some("fixture does not exist: /missing/libpg_accel.dylib")
+        );
+
+        let dir = TestDir::new("missing-extension-metadata");
+        let (control, version, sql) =
+            capture_extension_metadata_files(&dir.path().display().to_string());
+        assert!(control.is_none());
+        assert!(version.is_none());
+        assert!(sql.is_empty());
+
+        let file = dir.path().join("libpg_accel.dylib");
+        fs::write(&file, b"mapped").expect("mapped library fixture should be written");
+        let mapped = inspect_mapped_library(&MappedLibrary {
+            path: file.clone(),
+            display_path: file.display().to_string(),
+            deleted: false,
+        });
+        assert!(mapped.exists);
+        assert_eq!(mapped.len_bytes, Some(6));
+        assert!(!mapped.mapping_deleted);
+
+        assert!(parse_control_default_version("default_version # missing equals").is_none());
+        assert!(parse_control_default_version("default_version = ''").is_none());
+        assert!(parse_control_default_version("default_version = # empty").is_none());
+
+        let mut report = valid_provenance_report();
+        report.loaded_binaries[0].modified_unix_seconds = None;
+        check_postmaster_restart_required(&mut report);
+        assert!(report.errors.is_empty());
+        assert!(report.warnings.is_empty());
+
+        let config = BenchConfig {
+            timing_mode: TimingMode::ExplainAnalyze,
+            cache_mode: CacheMode::Both,
+            ..BenchConfig::default()
+        };
+        let command = repro_command("dbname=quoted bench", "work load", 5, &config);
+        assert!(command.contains("--workload 'work load'"));
+        assert!(command.contains("--timing explain"));
+        assert!(command.contains("--cache-mode both"));
+        assert!(command.contains("--connection 'dbname=quoted bench'"));
+    }
+
+    #[test]
+    fn finalizing_an_empty_report_writes_a_complete_success_artifact_set() {
+        let dir = TestDir::new("finalize-empty-report");
+        let writer = ArtifactWriter::new(dir.path().to_path_buf(), Vec::new())
+            .expect("artifact writer should initialize");
+        let mut report = mock_report_missing_resident_boundary();
+        report.workloads.clear();
+
+        finalize_report_artifacts(&writer, &mut report, "empty-complete")
+            .expect("empty report should pass every audit");
+        assert_eq!(
+            report.artifact_dir.as_deref(),
+            Some(dir.path().display().to_string().as_str())
+        );
+        for artifact in [
+            "crashes.json",
+            "crashes.md",
+            "report.json",
+            "report.md",
+            "report.csv",
+        ] {
+            assert!(dir.path().join(artifact).is_file(), "artifact={artifact}");
+        }
+    }
+
+    #[test]
+    fn dispatch_warning_paths_preserve_counter_and_plan_diagnostics() {
+        let input =
+            |plan_selected, plan_text_dispatched, explicitly_off, function| DispatchWarningInput {
+                workload: "warning_fixture",
+                rows: 10_000,
+                plan_selected,
+                plan_text_dispatched,
+                plan_explicitly_not_dispatched: explicitly_off,
+                function_kernel_candidate: function,
+            };
+
+        let mut result = dispatch_test_result();
+        result.dispatch_counter_captured = false;
+        result.dispatch_counter_error = Some("stats unavailable".to_owned());
+        emit_dispatch_classification_warning(input(false, false, false, false), &result);
+
+        result.dispatch_counter_captured = true;
+        result.pg_accel_stock_exec_delta = 3;
+        result.gpu_kernel_execution_delta = 2;
+        emit_dispatch_classification_warning(input(false, false, false, false), &result);
+
+        result.pg_accel_stock_exec_delta = 0;
+        result.gpu_kernel_execution_delta = 0;
+        emit_dispatch_classification_warning(input(true, true, false, false), &result);
+
+        result.gpu_kernel_execution_delta = 2;
+        emit_dispatch_classification_warning(input(true, false, true, false), &result);
+
+        result.gpu_kernel_execution_delta = 0;
+        emit_dispatch_classification_warning(input(false, true, false, false), &result);
+
+        result.gpu_kernel_execution_delta = 2;
+        result.accel_output_rows_consumed = 0;
+        emit_dispatch_classification_warning(input(false, false, false, true), &result);
+
+        result.accel_output_rows_consumed = 1;
+        emit_dispatch_classification_warning(input(false, false, false, true), &result);
+    }
+
+    #[test]
+    fn extension_metadata_probe_filters_and_orders_only_pg_accel_sql_files() {
+        let shared = TestDir::new("extension-metadata-complete");
+        let extension = shared.path().join("extension");
+        fs::create_dir(&extension).expect("extension directory should be created");
+        fs::write(
+            extension.join("pg_accel.control"),
+            "comment = 'fixture'\ndefault_version = '2.4.6'\n",
+        )
+        .expect("control file should be written");
+        fs::write(extension.join("pg_accel--2.4.6.sql"), "SELECT 1;")
+            .expect("base SQL should be written");
+        fs::write(extension.join("pg_accel--2.4.5--2.4.6.SQL"), "SELECT 2;")
+            .expect("upgrade SQL should be written");
+        fs::write(extension.join("other--1.sql"), "SELECT 3;")
+            .expect("unrelated SQL should be written");
+        let (control, version, sql_files) =
+            capture_extension_metadata_files(&shared.path().display().to_string());
+        assert!(control.is_some_and(|probe| probe.exists && probe.sha256.is_some()));
+        assert_eq!(version.as_deref(), Some("2.4.6"));
+        assert_eq!(sql_files.len(), 2);
+        let names = sql_files
+            .iter()
+            .map(|probe| {
+                Path::new(&probe.path)
+                    .file_name()
+                    .expect("probe path should have a filename")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["pg_accel--2.4.5--2.4.6.SQL", "pg_accel--2.4.6.sql"]
+        );
+    }
+
+    #[test]
+    fn provenance_path_helpers_fail_closed_without_running_external_commands() {
+        let dir = TestDir::new("pure-provenance-paths");
+        let candidates = build_output_candidates(dir.path());
+        assert_eq!(candidates.len(), 4);
+        assert!(
+            candidates
+                .iter()
+                .any(|path| path.starts_with(dir.path().join("target/release")))
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|path| path.starts_with(dir.path().join("target/debug")))
+        );
+
+        let installed_names = installed_extension_library_names();
+        assert_eq!(installed_names.len(), 2);
+        assert!(
+            find_installed_extension_binary(dir.path().to_str().expect("UTF-8 temp path"))
+                .is_none()
+        );
+        let installed = dir.path().join(&installed_names[0]);
+        fs::write(&installed, b"fixture").expect("installed-library fixture");
+        assert_eq!(
+            find_installed_extension_binary(dir.path().to_str().expect("UTF-8 temp path")),
+            Some(installed)
+        );
+
+        let missing = dir.path().join("missing-library.dylib");
+        let missing_probe = inspect_file(&missing, false);
+        assert!(!missing_probe.exists);
+        assert!(missing_probe.sha256.is_none());
+        assert!(missing_probe.error.is_some());
+
+        let deleted = MappedLibrary {
+            path: missing.clone(),
+            display_path: format!("{} (deleted)", missing.display()),
+            deleted: true,
+        };
+        let deleted_probe = inspect_mapped_library(&deleted);
+        assert!(!deleted_probe.exists);
+        assert!(deleted_probe.mapping_deleted);
+        assert!(
+            deleted_probe
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("deleted"))
+        );
+
+        let mapped = mapped_library_probe("fixture", vec![deleted], Some("diagnostic".to_owned()));
+        assert_eq!(mapped.discovery.method, "fixture");
+        assert_eq!(mapped.discovery.mapped_paths.len(), 1);
+        assert_eq!(mapped.discovery.warning.as_deref(), Some("diagnostic"));
+        assert_eq!(mapped.libraries.len(), 1);
+
+        assert!(is_pg_accel_library_path("/tmp/libpg_accel.dylib"));
+        assert!(is_pg_accel_library_path("C:/tmp/pg_accel.DLL"));
+        assert!(!is_pg_accel_library_path("/tmp/libpg_accel.txt"));
+        assert!(!is_pg_accel_library_path("/tmp/libother.dylib"));
+        assert!(!is_pg_accel_library_path("/"));
+        assert_eq!(
+            system_time_unix_secs(UNIX_EPOCH - std::time::Duration::from_secs(1)),
+            None
+        );
+        assert!(workspace_root().join("pg_accel_bench").is_dir());
+    }
+
+    #[test]
+    fn expected_binary_override_reports_a_missing_path_without_hashing() {
+        let dir = TestDir::new("missing-expected-binary");
+        let missing = dir.path().join("missing-pg-accel.dylib");
+        let original = std::env::var_os("PG_ACCEL_EXPECTED_DYLIB");
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("PG_ACCEL_EXPECTED_DYLIB", &missing);
+        }
+
+        let mut warnings = Vec::new();
+        let probe = capture_expected_binary(&mut warnings)
+            .expect("an explicit override always produces provenance");
+        assert_eq!(probe.path, missing.display().to_string());
+        assert!(!probe.exists);
+        assert!(probe.sha256.is_none());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("points to a missing file"));
+
+        #[allow(unsafe_code)]
+        unsafe {
+            match original {
+                Some(value) => std::env::set_var("PG_ACCEL_EXPECTED_DYLIB", value),
+                None => std::env::remove_var("PG_ACCEL_EXPECTED_DYLIB"),
+            }
+        }
+    }
+
+    #[test]
+    fn rust_backtrace_policy_covers_enabled_replaced_and_absent_states() {
+        let original = std::env::var_os("RUST_BACKTRACE");
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("RUST_BACKTRACE", "full");
+        }
+        let enabled = ensure_rust_backtrace();
+        assert_eq!(enabled.effective_value, "full");
+        assert_eq!(enabled.previous_value, None);
+        assert_eq!(enabled.action, "already-enabled");
+
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("RUST_BACKTRACE", "0");
+        }
+        let replaced = ensure_rust_backtrace();
+        assert_eq!(replaced.effective_value, "1");
+        assert_eq!(replaced.previous_value.as_deref(), Some("0"));
+        assert_eq!(replaced.action, "set-by-runner");
+
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::remove_var("RUST_BACKTRACE");
+        }
+        let absent = ensure_rust_backtrace();
+        assert_eq!(absent.effective_value, "1");
+        assert_eq!(absent.previous_value, None);
+        assert_eq!(absent.action, "set-by-runner");
+
+        #[allow(unsafe_code)]
+        unsafe {
+            match original {
+                Some(value) => std::env::set_var("RUST_BACKTRACE", value),
+                None => std::env::remove_var("RUST_BACKTRACE"),
+            }
+        }
     }
 }

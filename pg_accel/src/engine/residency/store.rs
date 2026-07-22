@@ -3727,6 +3727,324 @@ pub(super) mod tests {
         assert_ne!(shape_digest(&[1, -2, 3]), shape_digest(&[3, -2, 1]));
     }
 
+    fn test_device_buffer<T>(values: &[T]) -> ExprDeviceBuffer<T> {
+        ExprDeviceBuffer::copy_from_slice(values).expect("test device buffer")
+    }
+
+    #[test]
+    fn resident_column_variants_report_exact_views_lengths_and_accounting() {
+        let mut point = vec![0_u8, 0, 0, 0, 0, 0x10, 0xe6, 0];
+        point.extend_from_slice(&1_u32.to_le_bytes());
+        point.extend_from_slice(&1_u32.to_le_bytes());
+        point.extend_from_slice(&1.25_f64.to_le_bytes());
+        point.extend_from_slice(&(-2.5_f64).to_le_bytes());
+        let geometry = crate::engine::residency::geometry::materialize_resident_geometry_constant(
+            &point, 1_024, 8,
+        )
+        .expect("resident point");
+
+        let columns = vec![
+            ResidentColumn::Empty {
+                type_oid: pg_sys::InvalidOid,
+            },
+            ResidentColumn::Bool {
+                type_oid: pg_sys::BOOLOID,
+                values: test_device_buffer(&[1_u8, 0]),
+                nulls: Some(test_device_buffer(&[0_u8, 1])),
+            },
+            ResidentColumn::I32 {
+                type_oid: pg_sys::INT4OID,
+                values: test_device_buffer(&[1_i32, -2]),
+                nulls: Some(test_device_buffer(&[0_u8, 1])),
+            },
+            ResidentColumn::I64 {
+                type_oid: pg_sys::INT8OID,
+                values: test_device_buffer(&[1_i64, -2]),
+                nulls: Some(test_device_buffer(&[0_u8, 1])),
+            },
+            ResidentColumn::H3 {
+                type_oid: pg_sys::Oid::from(50_001_u32),
+                values: test_device_buffer(&[1_u64, u64::MAX]),
+                nulls: Some(test_device_buffer(&[0_u8, 1])),
+            },
+            ResidentColumn::Geometry {
+                type_oid: pg_sys::Oid::from(50_002_u32),
+                data: geometry,
+            },
+            ResidentColumn::Raster {
+                type_oid: pg_sys::Oid::from(50_003_u32),
+                pixels: Some(test_device_buffer(&[3_u8, 4, 5])),
+                band_offsets: test_device_buffer(&[0_u64, 3]),
+                rows: test_device_buffer(&[ResidentRasterRow::default()]),
+                bands: Some(test_device_buffer(&[ResidentRasterBand::default()])),
+                nulls: Some(test_device_buffer(&[0_u8])),
+                exact: RetainedExactValues {
+                    offsets: vec![0_u64, 1].into_boxed_slice(),
+                    bytes: vec![9_u8].into_boxed_slice(),
+                },
+                stats: ResidentRasterStats::empty(),
+            },
+            ResidentColumn::F32 {
+                type_oid: pg_sys::FLOAT4OID,
+                values: test_device_buffer(&[1.0_f32, -2.0]),
+                nulls: Some(test_device_buffer(&[0_u8, 1])),
+            },
+            ResidentColumn::F64 {
+                type_oid: pg_sys::FLOAT8OID,
+                values: test_device_buffer(&[1.0_f64, -2.0]),
+                nulls: Some(test_device_buffer(&[0_u8, 1])),
+            },
+            ResidentColumn::TextDictionary {
+                type_oid: pg_sys::TEXTOID,
+                codes: test_device_buffer(&[0_i32, 1]),
+                nulls: Some(test_device_buffer(&[0_u8, 1])),
+                labels: vec!["alpha".to_owned(), "beta".to_owned()],
+            },
+        ];
+        let expected = [
+            (pg_sys::InvalidOid, 0, false),
+            (pg_sys::BOOLOID, 2, true),
+            (pg_sys::INT4OID, 2, true),
+            (pg_sys::INT8OID, 2, true),
+            (pg_sys::Oid::from(50_001_u32), 2, true),
+            (pg_sys::Oid::from(50_002_u32), 1, false),
+            (pg_sys::Oid::from(50_003_u32), 1, true),
+            (pg_sys::FLOAT4OID, 2, true),
+            (pg_sys::FLOAT8OID, 2, true),
+            (pg_sys::TEXTOID, 2, true),
+        ];
+
+        for (column, (type_oid, len, has_nulls)) in columns.iter().zip(expected) {
+            assert_eq!(column.type_oid(), type_oid);
+            assert_eq!(column.len(), len);
+            assert_eq!(column.is_empty(), len == 0);
+            assert_eq!(column.has_null_sidecar(), has_nulls);
+            assert!(column.device_bytes().is_some());
+            assert!(column.accounting().is_some());
+            let view = column.view();
+            assert_eq!(view.type_oid(), type_oid);
+            assert_eq!(view.len(), len);
+            assert_eq!(view.is_empty(), len == 0);
+        }
+
+        assert!(matches!(
+            columns[0].view(),
+            ResidentColumnView::Empty { .. }
+        ));
+        assert!(matches!(columns[1].view(), ResidentColumnView::Bool { .. }));
+        assert!(matches!(columns[2].view(), ResidentColumnView::I32 { .. }));
+        assert!(matches!(columns[3].view(), ResidentColumnView::I64 { .. }));
+        assert!(matches!(columns[4].view(), ResidentColumnView::H3 { .. }));
+        assert!(matches!(
+            columns[5].view(),
+            ResidentColumnView::Geometry { .. }
+        ));
+        assert!(matches!(
+            columns[6].view(),
+            ResidentColumnView::Raster { .. }
+        ));
+        assert!(matches!(columns[7].view(), ResidentColumnView::F32 { .. }));
+        assert!(matches!(columns[8].view(), ResidentColumnView::F64 { .. }));
+        assert!(matches!(
+            columns[9].view(),
+            ResidentColumnView::TextDictionary { .. }
+        ));
+        assert_eq!(columns[1].device_bytes(), Some(4));
+        assert_eq!(columns[2].device_bytes(), Some(10));
+        assert_eq!(columns[3].device_bytes(), Some(18));
+        assert_eq!(columns[4].device_bytes(), Some(18));
+        assert_eq!(columns[7].device_bytes(), Some(10));
+        assert_eq!(columns[8].device_bytes(), Some(18));
+        assert_eq!(columns[9].device_bytes(), Some(10));
+        assert_eq!(
+            columns[6]
+                .accounting()
+                .expect("raster accounting")
+                .retained_host_exact_bytes,
+            17
+        );
+    }
+
+    #[test]
+    fn resident_identity_decoders_and_accounting_helpers_preserve_contracts() {
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![7, -3, 11]);
+        assert_eq!(identity.digest(), shape_digest(&[7, -3, 11]));
+        assert_eq!(identity.canonical_words(), &[7, -3, 11]);
+
+        let labels = vec!["alpha".to_owned(), "beta".to_owned()];
+        let decoder = ResidentKeyDecoder::TextDictionary(&labels);
+        assert_eq!(decoder.decode_text(0), Some("alpha"));
+        assert_eq!(decoder.decode_text(1), Some("beta"));
+        assert_eq!(decoder.decode_text(-1), None);
+        assert_eq!(decoder.decode_text(2), None);
+        assert_eq!(
+            ResidentKeyDecoder::Scalar(pg_sys::INT4OID).decode_text(0),
+            None
+        );
+
+        let artifact = AccountedArtifact {
+            device_bytes: 13,
+            retained_host_exact_bytes: 17,
+        };
+        assert_eq!(
+            artifact_accounting(&artifact),
+            ResidentByteAccounting {
+                device_bytes: 13,
+                retained_host_exact_bytes: 17,
+            }
+        );
+        let workspace = AccountedWorkspace {
+            device_bytes: 19,
+            host_bytes: 23,
+        };
+        assert_eq!(
+            workspace_accounting(&workspace),
+            ResidentByteAccounting {
+                device_bytes: 19,
+                retained_host_exact_bytes: 23,
+            }
+        );
+    }
+
+    #[test]
+    fn geometry_snapshot_rejects_invalid_storage_and_offsets() {
+        let column = ResidentColumnRef {
+            relid: pg_sys::Oid::from(7_u32),
+            attno: 2,
+        };
+        let dependency = ResidentDependencyStamp {
+            relid: column.relid,
+            generation: 1,
+            global_generation: 2,
+            relfilenode: pg_sys::Oid::from(3_u32),
+        };
+        let mismatched_offsets = RetainedExactValues {
+            offsets: vec![0_u64].into_boxed_slice(),
+            bytes: Box::default(),
+        };
+        assert!(matches!(
+            build_geometry_exact_snapshot(
+                column,
+                dependency,
+                pg_sys::Oid::from(4_u32),
+                1,
+                &mismatched_offsets,
+                vec![0_u64; 2].into_boxed_slice(),
+            ),
+            Err(ResidentLoadError::Loader(detail)) if detail.contains("offsets")
+        ));
+
+        let exact = RetainedExactValues {
+            offsets: vec![0_u64, 9].into_boxed_slice(),
+            bytes: vec![1_u8; 9].into_boxed_slice(),
+        };
+        assert!(matches!(
+            build_geometry_exact_snapshot(
+                column,
+                dependency,
+                pg_sys::Oid::from(4_u32),
+                1,
+                &exact,
+                vec![0_u64; 1].into_boxed_slice(),
+            ),
+            Err(ResidentLoadError::Loader(detail)) if detail.contains("offset table")
+        ));
+        assert!(matches!(
+            build_geometry_exact_snapshot(
+                column,
+                dependency,
+                pg_sys::Oid::from(4_u32),
+                1,
+                &exact,
+                vec![0_u64; 3].into_boxed_slice(),
+            ),
+            Err(ResidentLoadError::Loader(detail)) if detail.contains("exact payload")
+        ));
+    }
+
+    #[test]
+    fn resident_load_errors_render_actionable_variant_specific_messages() {
+        let relid = pg_sys::Oid::from(42_u32);
+        let accounting = ResidentByteAccounting {
+            device_bytes: 1,
+            retained_host_exact_bytes: 2,
+        };
+        let errors = vec![
+            (
+                ResidentLoadError::AutoLoadDisabled { relid },
+                "auto_load is off",
+            ),
+            (ResidentLoadError::MissingRelation(relid), "is not resident"),
+            (
+                ResidentLoadError::MissingColumn { relid, attno: 3 },
+                "no resident attribute 3",
+            ),
+            (
+                ResidentLoadError::BudgetExceeded {
+                    requested: 5,
+                    live: 7,
+                    budget: 11,
+                },
+                "allocation of 5 bytes",
+            ),
+            (
+                ResidentLoadError::from("loader detail".to_owned()),
+                "loader detail",
+            ),
+            (
+                ResidentLoadError::InvalidArtifactDependencies("duplicate".to_owned()),
+                "invalid resident artifact dependencies",
+            ),
+            (ResidentLoadError::ArtifactNotFound { digest: 10 }, "0xa"),
+            (
+                ResidentLoadError::ArtifactTypeMismatch { digest: 11 },
+                "different Rust type",
+            ),
+            (
+                ResidentLoadError::ArtifactDependencyChanged { relid },
+                "changed during resolution",
+            ),
+            (
+                ResidentLoadError::DispatchColumnIndexOutOfBounds {
+                    index: 4,
+                    column_count: 2,
+                },
+                "index 4 exceeds column count 2",
+            ),
+            (
+                ResidentLoadError::DispatchDependencyIndexOutOfBounds {
+                    index: 5,
+                    dependency_count: 3,
+                },
+                "index 5 exceeds dependency count 3",
+            ),
+            (
+                ResidentLoadError::ArtifactAccountingOverflow,
+                "accounting overflows u64",
+            ),
+            (
+                ResidentLoadError::ArtifactAccountingMismatch {
+                    declared: accounting,
+                    actual: ResidentByteAccounting::default(),
+                },
+                "artifact accounting mismatch",
+            ),
+            (
+                ResidentLoadError::TransformWorkspaceAccountingMismatch {
+                    declared: accounting,
+                    actual: ResidentByteAccounting::default(),
+                },
+                "workspace accounting mismatch",
+            ),
+        ];
+        for (error, expected) in errors {
+            assert!(
+                error.to_string().contains(expected),
+                "{error} did not contain {expected:?}"
+            );
+        }
+    }
+
     #[test]
     fn pending_relcache_overflow_fails_closed() {
         let mut pending = PendingRelcacheInvalidations::empty();

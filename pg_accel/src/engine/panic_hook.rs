@@ -286,4 +286,21 @@ mod tests {
         };
         assert!(!is_postgres_error_control_flow(&caught));
     }
+
+    #[test]
+    fn json_string_escapes_every_control_family_and_preserves_unicode() {
+        let rendered =
+            JsonStr("quote=\" slash=\\ newline=\n return=\r tab=\t nul=\0 snowman=\u{2603}")
+                .to_string();
+        assert_eq!(
+            rendered,
+            "\"quote=\\\" slash=\\\\ newline=\\n return=\\r tab=\\t nul=\\u0000 snowman=\u{2603}\""
+        );
+    }
+
+    #[test]
+    fn json_string_handles_empty_and_plain_payloads() {
+        assert_eq!(JsonStr("").to_string(), "\"\"");
+        assert_eq!(JsonStr("ordinary panic").to_string(), "\"ordinary panic\"");
+    }
 }

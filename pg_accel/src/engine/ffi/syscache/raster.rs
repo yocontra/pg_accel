@@ -1605,6 +1605,235 @@ mod postgis_raster_tests {
             normalized_catalog_source("SELECT public.g($1)")
         );
     }
+
+    fn assert_common_rejected(shape: &H3FunctionShape, valid: &H3FunctionShape) {
+        assert!(
+            validate_raster_function_common(
+                shape,
+                valid.schema_oid,
+                &valid.name,
+                &valid.language_name,
+                &valid.argument_types,
+                valid.return_type,
+                valid.strict,
+                valid.argument_defaults,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raster_type_rejects_each_outer_contract_family() {
+        let valid = valid_raster_type();
+
+        let mut changed = valid.clone();
+        changed.base.name = "not_raster".to_owned();
+        assert!(validate_postgis_raster_type_shape(&changed, valid.base.schema_oid).is_err());
+
+        let mut changed = valid.clone();
+        changed.input_fn = pg_sys::InvalidOid;
+        assert_eq!(
+            validate_postgis_raster_type_shape(&changed, valid.base.schema_oid),
+            Err("PostGIS raster type is missing input/output functions".to_owned())
+        );
+
+        let mut changed = valid.clone();
+        changed.send_fn = oid(60_004);
+        assert!(validate_postgis_raster_type_shape(&changed, valid.base.schema_oid).is_err());
+    }
+
+    #[test]
+    fn common_function_validator_rejects_every_catalog_invariant() {
+        let arguments = vec![pg_sys::INT4OID, pg_sys::BOOLOID];
+        let valid = valid_function("f", arguments, pg_sys::INT8OID, "SELECT 1");
+        assert_eq!(
+            validate_raster_function_common(
+                &valid,
+                valid.schema_oid,
+                &valid.name,
+                &valid.language_name,
+                &valid.argument_types,
+                valid.return_type,
+                true,
+                0,
+            ),
+            Ok(())
+        );
+
+        type ShapeMutation = Box<dyn Fn(&mut H3FunctionShape)>;
+        let mutations: Vec<ShapeMutation> = vec![
+            Box::new(|shape| shape.name = "g".to_owned()),
+            Box::new(|shape| shape.schema_oid = oid(99)),
+            Box::new(|shape| shape.language_name = "plpgsql".to_owned()),
+            Box::new(|shape| shape.kind = pg_sys::PROKIND_AGGREGATE),
+            Box::new(|shape| shape.argument_types = vec![pg_sys::INT8OID]),
+            Box::new(|shape| shape.return_type = pg_sys::BOOLOID),
+            Box::new(|shape| shape.strict = false),
+            Box::new(|shape| shape.argument_defaults = 1),
+            Box::new(|shape| shape.security_definer = true),
+            Box::new(|shape| shape.support_function = oid(91)),
+            Box::new(|shape| shape.returns_set = true),
+            Box::new(|shape| shape.volatility = pg_sys::PROVOLATILE_STABLE),
+            Box::new(|shape| shape.parallel = pg_sys::PROPARALLEL_RESTRICTED),
+        ];
+        for mutate in mutations {
+            let mut changed = valid.clone();
+            mutate(&mut changed);
+            assert_common_rejected(&changed, &valid);
+        }
+    }
+
+    #[test]
+    fn composite_validator_checks_base_shape_and_text_collation() {
+        let mut valid = valid_summary_composite();
+        valid.base.name = "textrecord".to_owned();
+        valid.fields = vec![CompositeFieldShape {
+            name: "label".to_owned(),
+            type_oid: pg_sys::TEXTOID,
+            typmod: -1,
+            collation_oid: pg_sys::DEFAULT_COLLATION_OID,
+            not_null: false,
+            tuple_xmin: 31,
+            tuple_block: 40,
+            tuple_offset: 1,
+        }];
+        let expected = [("label", pg_sys::TEXTOID)];
+        assert_eq!(
+            validate_composite_type_shape(&valid, valid.base.schema_oid, "textrecord", &expected,),
+            Ok(())
+        );
+
+        let mut changed = valid.clone();
+        changed.base.typisdefined = false;
+        assert!(
+            validate_composite_type_shape(
+                &changed,
+                valid.base.schema_oid,
+                "textrecord",
+                &expected,
+            )
+            .is_err()
+        );
+
+        let mut changed = valid;
+        changed.fields[0].collation_oid = pg_sys::InvalidOid;
+        assert_eq!(
+            validate_composite_type_shape(
+                &changed,
+                changed.base.schema_oid,
+                "textrecord",
+                &expected,
+            ),
+            Err("PostGIS Raster textrecord.label has a noncanonical collation".to_owned())
+        );
+    }
+
+    #[test]
+    fn plpgsql_wrapper_requires_exact_variadic_shape_and_body() {
+        let raster_oid = oid(60_001);
+        let array_oid = oid(60_031);
+        let variadic_oid = oid(60_030);
+        let source = "BEGIN -- delegate\n RETURN public._st_reclass($1, VARIADIC $2); END";
+        let mut valid = valid_function(
+            "st_reclass",
+            vec![raster_oid, array_oid],
+            raster_oid,
+            source,
+        );
+        valid.language_name = "plpgsql".to_owned();
+        valid.variadic_type = variadic_oid;
+        assert_eq!(
+            validate_raster_plpgsql_function(
+                &valid,
+                valid.schema_oid,
+                "st_reclass",
+                &valid.argument_types,
+                raster_oid,
+                variadic_oid,
+                " begin return PUBLIC._ST_RECLASS($1,variadic $2); end ",
+            ),
+            Ok(())
+        );
+
+        let mut changed = valid.clone();
+        changed.variadic_type = oid(99);
+        assert!(
+            validate_raster_plpgsql_function(
+                &changed,
+                changed.schema_oid,
+                "st_reclass",
+                &changed.argument_types,
+                raster_oid,
+                variadic_oid,
+                source,
+            )
+            .is_err()
+        );
+
+        let mut changed = valid.clone();
+        changed.binary = Some(POSTGIS_RASTER_LIBRARY.to_owned());
+        assert!(
+            validate_raster_plpgsql_function(
+                &changed,
+                changed.schema_oid,
+                "st_reclass",
+                &changed.argument_types,
+                raster_oid,
+                variadic_oid,
+                source,
+            )
+            .is_err()
+        );
+
+        let mut changed = valid;
+        changed.source = "BEGIN RETURN NULL; END".to_owned();
+        assert_eq!(
+            validate_raster_plpgsql_function(
+                &changed,
+                changed.schema_oid,
+                "st_reclass",
+                &changed.argument_types,
+                raster_oid,
+                variadic_oid,
+                source,
+            ),
+            Err("PostGIS Raster st_reclass PL/pgSQL wrapper body is noncanonical".to_owned())
+        );
+    }
+
+    fn invalid_catalog_identity() -> PostgisRasterCatalogIdentity {
+        PostgisRasterCatalogIdentity {
+            extension_oid: pg_sys::InvalidOid,
+            schema_oid: pg_sys::InvalidOid,
+            raster_type_oid: pg_sys::InvalidOid,
+            summary_stats_type_oid: pg_sys::InvalidOid,
+            reclass_fn_oid: pg_sys::InvalidOid,
+            summary_stats_fn_oid: pg_sys::InvalidOid,
+            summary_stats_default_band_fn_oid: pg_sys::InvalidOid,
+            as_wkb_fn_oid: pg_sys::InvalidOid,
+            rast_from_wkb_fn_oid: pg_sys::InvalidOid,
+            reclass_impl_fn_oid: pg_sys::InvalidOid,
+            summary_stats_impl_fn_oid: pg_sys::InvalidOid,
+            fingerprint_words: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn wkb_conversion_rejects_invalid_identity_before_backend_calls() {
+        let identity = invalid_catalog_identity();
+        // SAFETY: each call fails its argument guard before any PostgreSQL API use.
+        let export = unsafe { postgis_raster_datum_to_wkb(&identity, pg_sys::Datum::from(0usize)) };
+        assert_eq!(
+            export,
+            Err("PostGIS Raster WKB export received an invalid identity or Datum".to_owned())
+        );
+        // SAFETY: the invalid function OID is rejected before bytea allocation.
+        let import = unsafe { postgis_raster_datum_from_wkb(&identity, &[]) };
+        assert!(matches!(
+            import,
+            Err(message) if message == "PostGIS Raster WKB import has no catalog-proved function"
+        ));
+    }
 }
 
 #[cfg(feature = "pg_test")]

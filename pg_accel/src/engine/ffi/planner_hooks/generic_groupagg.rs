@@ -3128,4 +3128,243 @@ mod tests {
         let proof = shape_resident_proof(&h3_parent_shape());
         assert_ne!(proof.stage_mask & ResidentOperatorStage::H3.bit(), 0);
     }
+
+    #[test]
+    fn admission_decline_codes_cover_every_local_reason() {
+        let row_pair = (Rows::new(1), Rows::new(2));
+        let work_pair = (WorkProduct::new(1), WorkProduct::new(2));
+        let cases = [
+            (
+                AdmissionDecline::Shape(ShapeDecline::NotSelect),
+                ShapeDecline::NotSelect.code(),
+            ),
+            (
+                AdmissionDecline::AttributeNumberOutOfRange {
+                    relation_oid: 1,
+                    attno: i32::MAX,
+                },
+                "generic_residency_attno_out_of_range",
+            ),
+            (
+                AdmissionDecline::ResidencyEstimateFailed {
+                    relation_oid: 1,
+                    detail: "error".to_owned(),
+                },
+                "generic_residency_estimate_failed",
+            ),
+            (
+                AdmissionDecline::MissingResidencyEstimate { relation_oid: 1 },
+                "generic_residency_estimate_missing",
+            ),
+            (
+                AdmissionDecline::UnexpectedResidencyEstimate { relation_oid: 1 },
+                "generic_residency_estimate_unexpected",
+            ),
+            (
+                AdmissionDecline::DescriptorCapability {
+                    detail: "unsupported".to_owned(),
+                },
+                "generic_descriptor_capability",
+            ),
+            (
+                AdmissionDecline::AutoLoadDisabled {
+                    relation_oid: 1,
+                    estimated_bytes: 1,
+                },
+                "generic_auto_load_disabled",
+            ),
+            (
+                AdmissionDecline::ResidencyBytesOverflow,
+                "generic_residency_bytes_overflow",
+            ),
+            (
+                AdmissionDecline::ResidencyBudgetSnapshotUnavailable,
+                "generic_residency_budget_snapshot_unavailable",
+            ),
+            (
+                AdmissionDecline::ResidencyEvidenceChanged,
+                "generic_residency_evidence_changed",
+            ),
+            (
+                AdmissionDecline::DerivedArtifactEstimateUnavailable,
+                "generic_derived_artifact_estimate_unavailable",
+            ),
+            (
+                AdmissionDecline::GroupEstimateUnavailable,
+                "generic_group_estimate_unavailable",
+            ),
+            (
+                AdmissionDecline::ResidencyBudgetExceeded {
+                    cluster_live_bytes: 1,
+                    current_backend_live_bytes: 1,
+                    other_backend_live_bytes: 0,
+                    pinned_unselected_raw_bytes: 0,
+                    evictable_or_replaced_local_bytes: 0,
+                    selected_raw_bytes: 1,
+                    derived_artifact_bytes: 1,
+                    projected_final_bytes: 2,
+                    budget_bytes: 1,
+                },
+                "generic_residency_budget_exceeded",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(ShapeCostGate::Eligible),
+                "generic_invalid_eligible_cost_gate",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(ShapeCostGate::FactRowsBelowDeviceMinimum {
+                    estimated: row_pair.0,
+                    required: row_pair.1,
+                }),
+                "generic_fact_rows_below_device_minimum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(
+                    ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                        fact_rows: row_pair.1,
+                        maximum: row_pair.0,
+                    },
+                ),
+                "generic_fact_rows_exceed_dense_one_shot_maximum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum {
+                    estimated: row_pair.0,
+                    required: row_pair.1,
+                }),
+                "h3_rows_below_grouped_agg_min",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(ShapeCostGate::SpatialRowsBelowDeviceMinimum {
+                    estimated: row_pair.0,
+                    required: row_pair.1,
+                }),
+                "postgis_rows_below_device_minimum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(
+                    ShapeCostGate::SpatialVerticesBelowDeviceMinimum {
+                        estimated: row_pair.0,
+                        required: row_pair.1,
+                    },
+                ),
+                "postgis_vertices_below_device_minimum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(
+                    ShapeCostGate::SpatialVerticesExceedDeviceMaximum {
+                        estimated: row_pair.1,
+                        maximum: row_pair.0,
+                    },
+                ),
+                "postgis_vertices_exceed_device_maximum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(ShapeCostGate::SpatialWorkBelowDeviceMinimum {
+                    estimated: work_pair.0,
+                    required: work_pair.1,
+                }),
+                "postgis_work_below_device_minimum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(ShapeCostGate::SpatialWorkExceedsDeviceMaximum {
+                    estimated: work_pair.1,
+                    maximum: work_pair.0,
+                }),
+                "postgis_work_exceeds_device_maximum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(ShapeCostGate::DimensionRowsExceedDeviceMaximum {
+                    estimated: row_pair.1,
+                    maximum: row_pair.0,
+                }),
+                "generic_dimension_rows_exceed_device_maximum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(ShapeCostGate::GroupsExceedDeviceMaximum {
+                    estimated: row_pair.1,
+                    maximum: row_pair.0,
+                }),
+                "generic_groups_exceed_device_maximum",
+            ),
+            (
+                AdmissionDecline::NativePathUnavailable,
+                "generic_native_path_unavailable",
+            ),
+            (
+                AdmissionDecline::CostNotCompetitive {
+                    gpu_cost: 2.0,
+                    native_cost: 1.0,
+                    required_cost: 1.0,
+                },
+                "generic_cost_not_competitive",
+            ),
+            (AdmissionDecline::PathNotAdded, "generic_path_not_added"),
+        ];
+        for (decline, expected) in cases {
+            assert_eq!(decline.code(), expected);
+            assert!(decline.to_string().starts_with(expected));
+        }
+    }
+
+    #[test]
+    fn pure_residency_error_guards_preserve_decline_identity() {
+        let required = RequiredRelation {
+            relation_oid: 42,
+            attnos: vec![i32::MAX],
+        };
+        assert!(matches!(
+            selected_relation(&required),
+            Err(AdmissionDecline::AttributeNumberOutOfRange { .. })
+        ));
+
+        let shape = count_shape();
+        assert!(matches!(
+            exact_residency_estimates_with(&shape, |_| Err::<ResidentLoadEstimate, _>("boom")),
+            Err(AdmissionDecline::ResidencyEstimateFailed { .. })
+        ));
+        assert!(matches!(
+            add_bytes(u64::MAX, 1),
+            Err(AdmissionDecline::ResidencyBytesOverflow)
+        ));
+
+        let incoherent = ExactResidencySnapshot {
+            requests: vec![SelectedRelation {
+                relid: pg_sys::Oid::from(42_u32),
+                columns: Vec::new(),
+            }],
+            estimates: Vec::new(),
+        };
+        assert_eq!(
+            require_coherent_resident_evidence(&incoherent),
+            Err(AdmissionDecline::ResidencyEvidenceChanged)
+        );
+    }
+
+    #[test]
+    fn null_path_guards_and_filter_stages_need_no_postgres_backend() {
+        let mut shape = count_shape();
+        let effective = effective_path_cost(&shape, 1.0);
+        // SAFETY: the null output relation is rejected before any dereference or
+        // PostgreSQL allocation.
+        assert!(
+            !unsafe { inject_childless_shape_path(std::ptr::null_mut(), &shape, effective) }
+                .expect("null relation declines")
+        );
+        // SAFETY: a null List is the canonical empty PostgreSQL list and the
+        // function returns before invoking any backend symbol.
+        assert!(unsafe { path_list_is_serial(std::ptr::null_mut(), 0) });
+
+        shape.spec.measures[0].filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: shape.spec.fact_rel,
+                attno: 1,
+                type_oid: u32::from(pg_sys::BOOLOID),
+            },
+            kind: MaskKind::Sql,
+        };
+        let (stages, has_filter) = shape_stages(&shape);
+        assert!(has_filter);
+        assert!(stages.contains(&ResidentOperatorStage::Expression));
+    }
 }

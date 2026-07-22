@@ -1678,4 +1678,207 @@ mod tests {
             supported.len()
         );
     }
+
+    #[test]
+    fn host_column_validation_and_value_accessors_fail_closed() {
+        let invalid_bool = HostColumn::Bool {
+            type_oid: BOOLOID,
+            values: vec![0, 2],
+            nulls: None,
+        };
+        assert_eq!(
+            invalid_bool.validate_nulls(),
+            Err("resident boolean column contains a noncanonical value".to_owned())
+        );
+        let invalid_null_shape = HostColumn::I32 {
+            type_oid: INT4OID,
+            values: vec![1, 2],
+            nulls: Some(vec![0]),
+        };
+        assert_eq!(
+            invalid_null_shape.validate_nulls(),
+            Err("resident NULL bitmap has an invalid shape/value".to_owned())
+        );
+        let invalid_null_value = HostColumn::I32 {
+            type_oid: INT4OID,
+            values: vec![1],
+            nulls: Some(vec![2]),
+        };
+        assert!(invalid_null_value.validate_nulls().is_err());
+
+        let nullable = HostColumn::I64 {
+            type_oid: INT8OID,
+            values: vec![7, 8],
+            nulls: Some(vec![1, 0]),
+        };
+        assert_eq!(nullable.dictionary_value(0), Ok(None));
+        assert_eq!(
+            nullable.dictionary_value(1),
+            Ok(Some((CanonicalKey::I64(8), GroupDatum::I64(8))))
+        );
+        assert_eq!(
+            nullable.is_null(2),
+            Err("resident row 2 is out of bounds".to_owned())
+        );
+
+        let bools = HostColumn::Bool {
+            type_oid: BOOLOID,
+            values: vec![1],
+            nulls: None,
+        };
+        assert_eq!(
+            bools.dictionary_value(0),
+            Ok(Some((CanonicalKey::Bool(true), GroupDatum::Bool(true))))
+        );
+        assert_eq!(bools.filter_value(0), Ok(Some(ScalarValue::Bool(true))));
+        assert!(bools.join_key(0).is_err());
+
+        let int4 = HostColumn::I32 {
+            type_oid: INT4OID,
+            values: vec![-4],
+            nulls: None,
+        };
+        assert_eq!(
+            int4.dictionary_value(0),
+            Ok(Some((CanonicalKey::I32(-4), GroupDatum::I32(-4))))
+        );
+        assert_eq!(int4.filter_value(0), Ok(Some(ScalarValue::I32(-4))));
+        assert_eq!(int4.join_key(0), Ok(Some(CanonicalKey::I32(-4))));
+
+        let float4 = HostColumn::F32 {
+            type_oid: FLOAT4OID,
+            values: vec![-0.0],
+            nulls: None,
+        };
+        assert_eq!(
+            float4.dictionary_value(0),
+            Ok(Some((CanonicalKey::F32(0), GroupDatum::F32(-0.0))))
+        );
+        assert_eq!(float4.filter_value(0), Ok(Some(ScalarValue::F32(-0.0))));
+
+        let float8 = HostColumn::F64 {
+            type_oid: FLOAT8OID,
+            values: vec![2.5],
+            nulls: None,
+        };
+        assert_eq!(
+            float8.dictionary_value(0),
+            Ok(Some((
+                CanonicalKey::F64(2.5_f64.to_bits()),
+                GroupDatum::F64(2.5)
+            )))
+        );
+        assert_eq!(float8.filter_value(0), Ok(Some(ScalarValue::F64(2.5))));
+
+        let text = HostColumn::Text {
+            type_oid: BPCHAROID,
+            codes: vec![0],
+            nulls: None,
+            labels: vec!["EU  ".to_owned()],
+        };
+        assert_eq!(
+            text.dictionary_value(0),
+            Ok(Some((
+                CanonicalKey::Text("EU".to_owned()),
+                GroupDatum::Text("EU  ".to_owned())
+            )))
+        );
+        assert_eq!(
+            text.join_key(0),
+            Ok(Some(CanonicalKey::Text("EU".to_owned())))
+        );
+        assert_eq!(
+            text.filter_value(0),
+            Err("text columns are not scalar range filters".to_owned())
+        );
+        for codes in [vec![-1], vec![1]] {
+            let invalid = HostColumn::Text {
+                type_oid: TEXTOID,
+                codes,
+                nulls: None,
+                labels: vec!["only".to_owned()],
+            };
+            assert!(invalid.dictionary_value(0).is_err());
+        }
+    }
+
+    #[test]
+    fn host_column_lookup_and_scalar_comparison_cover_all_domains() {
+        let columns = HostColumns {
+            columns: BTreeMap::from([(
+                (100, 1),
+                HostColumn::I32 {
+                    type_oid: INT4OID,
+                    values: vec![1],
+                    nulls: None,
+                },
+            )]),
+            row_counts: BTreeMap::from([(100, 1)]),
+        };
+        assert_eq!(
+            columns.get(column(100, INT4OID)).map(HostColumn::len),
+            Ok(1)
+        );
+        assert!(columns.get(column(100, INT8OID)).is_err());
+        assert!(columns.get(column(200, INT4OID)).is_err());
+        let mut oversized_attno = column(100, INT4OID);
+        oversized_attno.attno = i32::MAX;
+        assert!(columns.get(oversized_attno).is_err());
+        assert_eq!(columns.row_count(100), Ok(1));
+        assert!(columns.row_count(200).is_err());
+
+        for (left, right, expected) in [
+            (
+                ScalarValue::Bool(false),
+                ScalarValue::Bool(true),
+                std::cmp::Ordering::Less,
+            ),
+            (
+                ScalarValue::I32(2),
+                ScalarValue::I32(1),
+                std::cmp::Ordering::Greater,
+            ),
+            (
+                ScalarValue::I64(4),
+                ScalarValue::I64(4),
+                std::cmp::Ordering::Equal,
+            ),
+            (
+                ScalarValue::Date(1),
+                ScalarValue::Date(2),
+                std::cmp::Ordering::Less,
+            ),
+            (
+                ScalarValue::Timestamp(3),
+                ScalarValue::Timestamp(2),
+                std::cmp::Ordering::Greater,
+            ),
+            (
+                ScalarValue::TimestampTz(3),
+                ScalarValue::TimestampTz(3),
+                std::cmp::Ordering::Equal,
+            ),
+            (
+                ScalarValue::F32(f32::NAN),
+                ScalarValue::F32(1.0),
+                std::cmp::Ordering::Greater,
+            ),
+            (
+                ScalarValue::F32(1.0),
+                ScalarValue::F32(f32::NAN),
+                std::cmp::Ordering::Less,
+            ),
+            (
+                ScalarValue::F64(f64::NAN),
+                ScalarValue::F64(f64::NAN),
+                std::cmp::Ordering::Equal,
+            ),
+        ] {
+            assert_eq!(scalar_cmp(left, right), Ok(expected));
+        }
+        assert_eq!(
+            scalar_cmp(ScalarValue::I32(1), ScalarValue::I64(1)),
+            Err("scalar filter type mismatch".to_owned())
+        );
+    }
 }

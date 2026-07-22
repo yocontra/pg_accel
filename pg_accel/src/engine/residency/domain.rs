@@ -1343,4 +1343,137 @@ mod tests {
         };
         assert!(raster.validate(MAX_EXACT_VALUE_BYTES).is_err());
     }
+
+    #[test]
+    fn domain_errors_widths_and_null_free_h3_accounting_are_total() {
+        assert_eq!(
+            DomainContractError::Invalid("invalid").to_string(),
+            "invalid"
+        );
+        assert_eq!(
+            DomainContractError::ByteCountOverflow.to_string(),
+            "resident domain byte count overflow"
+        );
+        assert_eq!(raster_pixel_width(RESIDENT_RASTER_FLOAT64), Some(8));
+        assert_eq!(
+            ResidentH3Lane {
+                values: vec![1, 2],
+                nulls: None,
+            }
+            .accounting()
+            .expect("null-free H3 lane")
+            .device_bytes,
+            16
+        );
+    }
+
+    #[test]
+    fn geometry_shape_variants_reject_bad_pairing_offsets_and_cardinality() {
+        let mut malformed = point_geometry();
+        malformed.coordinates.push(3.0);
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = point_geometry();
+        malformed.geometry_offsets = vec![1, 1];
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = point_geometry();
+        malformed.coordinates.extend([3.0, 4.0]);
+        malformed.geometry_offsets[1] = 2;
+        malformed.bboxes[0] = [1.0, 2.0, 3.0, 4.0];
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = point_geometry();
+        malformed.rows[0].geom_type = RESIDENT_GEOMETRY_LINESTRING;
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = point_geometry();
+        malformed.rows[0].first_ring = 1;
+        malformed.rows[0].ring_count = 1;
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+    }
+
+    fn polygon_geometry(coordinate_pairs: usize) -> ResidentGeometryData {
+        let coordinates: Vec<f64> = (0..coordinate_pairs)
+            .flat_map(|index| [index as f64, index as f64])
+            .collect();
+        ResidentGeometryData {
+            coordinates,
+            bboxes: vec![[0.0, 0.0, coordinate_pairs as f64, coordinate_pairs as f64]],
+            geometry_offsets: vec![0, coordinate_pairs as u64],
+            ring_offsets: vec![0],
+            rows: vec![ResidentGeometryRow {
+                geom_type: RESIDENT_GEOMETRY_POLYGON,
+                first_ring: 0,
+                ring_count: 1,
+                flags: RESIDENT_GEOMETRY_BBOX_VALID,
+                ..ResidentGeometryRow::default()
+            }],
+            nulls: None,
+            exact: exact(vec![0, 1], vec![1]),
+        }
+    }
+
+    #[test]
+    fn polygon_rings_and_terminal_geometry_lanes_are_canonical() {
+        polygon_geometry(3)
+            .validate(MAX_EXACT_VALUE_BYTES)
+            .expect("single triangle ring");
+
+        let mut malformed = polygon_geometry(3);
+        malformed.ring_offsets[0] = 1;
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = polygon_geometry(2);
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = point_geometry();
+        malformed.ring_offsets.push(0);
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = point_geometry();
+        malformed.coordinates[0] = f64::NAN;
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+    }
+
+    #[test]
+    fn raster_validation_and_statistics_reject_each_cross_lane_mismatch() {
+        let mut malformed = one_band_raster();
+        malformed.band_offsets = vec![0, 3];
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = one_band_raster();
+        malformed.exact.offsets[1] = 63;
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = one_band_raster();
+        malformed.rows[0].flags = 1;
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = one_band_raster();
+        malformed.rows[0].srid = 1_000_000;
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = one_band_raster();
+        malformed.rows[0].width = 2;
+        assert!(malformed.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        let orphan = ResidentRasterData {
+            pixels: Vec::new(),
+            band_offsets: vec![0, 0],
+            rows: Vec::new(),
+            bands: vec![ResidentRasterBand {
+                pixel_type: RESIDENT_RASTER_UINT8,
+                ..ResidentRasterBand::default()
+            }],
+            nulls: None,
+            exact: exact(vec![0], Vec::new()),
+        };
+        assert!(orphan.validate(MAX_EXACT_VALUE_BYTES).is_err());
+
+        malformed = one_band_raster();
+        malformed.exact.offsets[1] = 4;
+        malformed.exact.bytes = vec![0; 4].into_boxed_slice();
+        assert!(malformed.stats().is_err());
+    }
 }

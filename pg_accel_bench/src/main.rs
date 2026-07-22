@@ -1797,6 +1797,144 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    fn measured_result(name: &str, rows: usize) -> report::WorkloadResult {
+        let category = workloads::workload_metadata(name).map_or_else(
+            || "test".to_owned(),
+            |metadata| metadata.category.as_str().to_owned(),
+        );
+        let iterations = vec![
+            report::IterationResult {
+                accel_ms: 5.0,
+                parallel_ms: 10.0,
+                cache_purge: bench_model::CachePurgeState::NotRequested,
+                cache_state: bench_model::CacheState::Warm,
+            },
+            report::IterationResult {
+                accel_ms: 6.0,
+                parallel_ms: 12.0,
+                cache_purge: bench_model::CachePurgeState::NotRequested,
+                cache_state: bench_model::CacheState::Warm,
+            },
+        ];
+        report::WorkloadResult::from_iterations(
+            name.to_owned(),
+            "test workload".to_owned(),
+            category,
+            report::classify_kernel(name),
+            rows,
+            iterations,
+            false,
+        )
+    }
+
+    fn evidenced_result(name: &str, rows: usize) -> report::WorkloadResult {
+        let mut result = measured_result(name, rows);
+        result.plan_snippet = Some("Seq Scan on benchmark_input".to_owned());
+        result.baseline_plan_snippet = Some("Seq Scan on benchmark_input".to_owned());
+        result.correctness_diff_artifact = Some("correctness.json".to_owned());
+        result.dispatch_counter_captured = true;
+        result.native_decline_evidence = Some(report::NativeDeclineEvidence {
+            reason: "test_planner_decline".to_owned(),
+            source: report::DeclineReasonSource::PlannerReported,
+        });
+        result
+    }
+
+    fn bench_report(workloads: Vec<report::WorkloadResult>) -> BenchReport {
+        let row_scales = workloads
+            .iter()
+            .map(|result| result.rows)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        BenchReport {
+            hardware: None,
+            gucs: None,
+            methodology: report::Methodology {
+                iterations: 2,
+                warmup: 0,
+                row_scales,
+                ordering: "paired".to_owned(),
+                statistical_tests: Vec::new(),
+                timing_mode: "raw-wallclock".to_owned(),
+                cache_mode: "warm".to_owned(),
+                harness_profile: "debug".to_owned(),
+            },
+            workloads,
+            artifact_dir: None,
+            crashes: Vec::new(),
+            postmaster_start_time: None,
+        }
+    }
+
+    fn crashed_scale(workload: &str, rows: usize, error: &str) -> report::CrashedScale {
+        report::CrashedScale {
+            workload: workload.to_owned(),
+            rows,
+            error: error.to_owned(),
+            repro_command: None,
+            plan_snippet_artifact: None,
+            correctness_diff_artifact: None,
+            log_tail_artifacts: Vec::new(),
+        }
+    }
+
+    fn complete_phase6_report() -> BenchReport {
+        let mut results = Vec::new();
+        for contract in workloads::PHASE6_DOMAIN_CONTRACTS {
+            for rows in contract.verification_rows {
+                let mut result = evidenced_result(contract.workload, *rows);
+                if contract.oracle == workloads::Phase6DomainOracle::PostgisExactRecheck {
+                    result.plan_selected = true;
+                    result.gpu_kernel_dispatched = true;
+                    result.gpu_kernel_execution_delta = 1;
+                    result.native_decline_evidence = None;
+                    result.plan_snippet = Some(
+                        "Custom Scan (pg_accel)\nGPU Descriptor Filter: spatial(exact_recheck)"
+                            .to_owned(),
+                    );
+                }
+                results.push(result);
+            }
+        }
+        bench_report(results)
+    }
+
+    fn complete_phase9_report() -> BenchReport {
+        bench_report(
+            workloads::PHASE9_OPERATOR_DECLINES
+                .iter()
+                .map(|contract| measured_result(contract.workload, PHASE9_VERIFICATION_ROWS))
+                .collect(),
+        )
+    }
+
+    fn complete_metal_report() -> BenchReport {
+        let results = workloads::METAL_SHIP_GATE_CELLS
+            .iter()
+            .map(|contract| evidenced_result(contract.workload, contract.rows))
+            .collect();
+        let mut report = bench_report(results);
+        report.methodology.iterations = METAL_SHIP_GATE_ITERATIONS;
+        report.methodology.warmup = METAL_SHIP_GATE_WARMUP;
+        report.methodology.row_scales = vec![1_000_000];
+        report.methodology.cache_mode = "both".to_owned();
+        report.methodology.harness_profile = "release".to_owned();
+        report
+    }
+
+    fn gate_error(result: Result<(), Box<dyn std::error::Error>>) -> String {
+        result.expect_err("gate should fail").to_string()
+    }
+
+    fn unique_temp_path(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("pg-accel-{label}-{}-{nonce}", std::process::id()))
+    }
+
     #[test]
     fn run_help_matches_publication_guc_profile() {
         let mut command = Cli::command();
@@ -1826,6 +1964,277 @@ mod tests {
                 "run --help still contains retired profile token {retired:?}:\n{help}"
             );
         }
+    }
+
+    #[test]
+    fn cli_value_parsers_accept_aliases_and_reject_unknown_values() {
+        assert!(matches!(
+            "EXPLAIN-ANALYZE".parse::<TimingArg>(),
+            Ok(TimingArg::Explain)
+        ));
+        assert!(matches!(
+            "analyze".parse::<TimingArg>(),
+            Ok(TimingArg::Explain)
+        ));
+        assert!(matches!("wall".parse::<TimingArg>(), Ok(TimingArg::Raw)));
+        assert!(matches!(
+            "WALL-CLOCK".parse::<TimingArg>(),
+            Ok(TimingArg::Raw)
+        ));
+        assert!(matches!("both".parse::<TimingArg>(), Ok(TimingArg::Both)));
+        assert_eq!(TimingArg::Explain.to_string(), "explain");
+        assert_eq!(TimingArg::Raw.to_string(), "raw");
+        assert_eq!(TimingArg::Both.to_string(), "both");
+        assert_eq!(
+            "sampled"
+                .parse::<TimingArg>()
+                .expect_err("unknown timing mode should fail"),
+            "unknown timing mode: sampled"
+        );
+        assert_eq!(
+            runner::TimingMode::from(&TimingArg::Explain),
+            runner::TimingMode::ExplainAnalyze
+        );
+        assert_eq!(
+            runner::TimingMode::from(&TimingArg::Raw),
+            runner::TimingMode::RawWallClock
+        );
+        assert_eq!(
+            runner::TimingMode::from(&TimingArg::Both),
+            runner::TimingMode::Both
+        );
+
+        assert!(matches!(
+            "COLD".parse::<CacheModeArg>(),
+            Ok(CacheModeArg::Cold)
+        ));
+        assert!(matches!(
+            "warm".parse::<CacheModeArg>(),
+            Ok(CacheModeArg::Warm)
+        ));
+        assert!(matches!(
+            "both".parse::<CacheModeArg>(),
+            Ok(CacheModeArg::Both)
+        ));
+        assert_eq!(CacheModeArg::Cold.to_string(), "cold");
+        assert_eq!(CacheModeArg::Warm.to_string(), "warm");
+        assert_eq!(CacheModeArg::Both.to_string(), "both");
+        assert_eq!(
+            "mixed"
+                .parse::<CacheModeArg>()
+                .expect_err("unknown cache mode should fail"),
+            "unknown cache mode: mixed"
+        );
+        assert_eq!(
+            runner::CacheMode::from(&CacheModeArg::Cold),
+            runner::CacheMode::Cold
+        );
+        assert_eq!(
+            runner::CacheMode::from(&CacheModeArg::Warm),
+            runner::CacheMode::Warm
+        );
+        assert_eq!(
+            runner::CacheMode::from(&CacheModeArg::Both),
+            runner::CacheMode::Both
+        );
+
+        assert!(matches!(
+            "MD".parse::<ReportFormat>(),
+            Ok(ReportFormat::Markdown)
+        ));
+        assert!(matches!(
+            "json".parse::<ReportFormat>(),
+            Ok(ReportFormat::Json)
+        ));
+        assert!(matches!(
+            "CSV".parse::<ReportFormat>(),
+            Ok(ReportFormat::Csv)
+        ));
+        assert_eq!(ReportFormat::Markdown.to_string(), "markdown");
+        assert_eq!(ReportFormat::Json.to_string(), "json");
+        assert_eq!(ReportFormat::Csv.to_string(), "csv");
+        assert_eq!(
+            "html"
+                .parse::<ReportFormat>()
+                .expect_err("unknown report format should fail"),
+            "unknown format: html"
+        );
+    }
+
+    #[test]
+    fn phase6_matrix_and_evidence_accept_complete_typed_report() {
+        let report = complete_phase6_report();
+        enforce_phase6_matrix_complete(&report).expect("complete Phase 6 matrix");
+        enforce_phase6_evidence(&report).expect("complete Phase 6 evidence");
+    }
+
+    #[test]
+    fn phase6_matrix_reports_missing_duplicate_unexpected_and_crashed_cells() {
+        let mut report = complete_phase6_report();
+        let missing = report.workloads.remove(0);
+        let duplicate = report.workloads[0].clone();
+        let duplicate_name = duplicate.name.clone();
+        let duplicate_rows = duplicate.rows;
+        report.workloads.push(duplicate);
+        report
+            .workloads
+            .push(measured_result("unexpected_phase6_cell", 777));
+        report
+            .crashes
+            .push(crashed_scale("crashed_phase6_cell", 888, "backend exited"));
+
+        let error = gate_error(enforce_phase6_matrix_complete(&report));
+        assert!(error.starts_with("Phase 6 domain matrix is incomplete:"));
+        assert!(error.contains(&format!(
+            "`{}` @ {}: expected one result, found 0",
+            missing.name, missing.rows
+        )));
+        assert!(error.contains(&format!(
+            "`{duplicate_name}` @ {duplicate_rows}: expected one result, found 2"
+        )));
+        assert!(error.contains("unexpected result `unexpected_phase6_cell` @ 777"));
+        assert!(error.contains("crashed_phase6_cell @ 888 crashed: backend exited"));
+    }
+
+    #[test]
+    fn phase6_evidence_reports_all_release_contract_violations() {
+        let native = workloads::PHASE6_DOMAIN_CONTRACTS
+            .iter()
+            .find(|contract| contract.oracle == workloads::Phase6DomainOracle::NativeH3)
+            .expect("native H3 Phase 6 contract");
+        let mut missing = measured_result(native.workload, native.verification_rows[0]);
+        missing.dispatch_counter_error = Some("counter unavailable".to_owned());
+        missing.pg_accel_stock_exec_delta = 2;
+
+        let spatial = workloads::PHASE6_DOMAIN_CONTRACTS
+            .iter()
+            .find(|contract| contract.oracle == workloads::Phase6DomainOracle::PostgisExactRecheck)
+            .expect("spatial Phase 6 contract");
+        let mut spatial_without_descriptor =
+            evidenced_result(spatial.workload, spatial.verification_rows[0]);
+        spatial_without_descriptor.plan_selected = true;
+        spatial_without_descriptor.gpu_kernel_dispatched = true;
+        spatial_without_descriptor.gpu_kernel_execution_delta = 1;
+        spatial_without_descriptor.native_decline_evidence = None;
+        spatial_without_descriptor.plan_snippet = Some("Custom Scan (pg_accel)".to_owned());
+
+        let fail_closed = workloads::PHASE6_DOMAIN_CONTRACTS
+            .iter()
+            .find(|contract| contract.oracle == workloads::Phase6DomainOracle::NativeH3FailClosed)
+            .expect("fail-closed H3 Phase 6 contract");
+        let mut violated_fail_closed =
+            evidenced_result(fail_closed.workload, fail_closed.verification_rows[0]);
+        violated_fail_closed.plan_selected = true;
+        violated_fail_closed.gpu_kernel_dispatched = true;
+        violated_fail_closed.gpu_kernel_execution_delta = 3;
+
+        let report = bench_report(vec![
+            missing,
+            spatial_without_descriptor,
+            violated_fail_closed,
+            evidenced_result("untyped_phase6_workload", 999),
+        ]);
+        let error = gate_error(enforce_phase6_evidence(&report));
+
+        assert!(error.starts_with("Phase 6 evidence gate failed:"));
+        assert!(error.contains(&format!(
+            "{} @ {} has no native-oracle correctness artifact",
+            native.workload, native.verification_rows[0]
+        )));
+        assert!(error.contains(&format!(
+            "{} @ {} is missing accel or native plan evidence",
+            native.workload, native.verification_rows[0]
+        )));
+        assert!(error.contains("has no dispatch-counter evidence: counter unavailable"));
+        assert!(error.contains("used 2 stock executor fallback(s)"));
+        assert!(error.contains("stayed native without a planner-reported decline"));
+        assert!(error.contains("dispatched without a spatial descriptor/recheck contract"));
+        assert!(error.contains("violated the fail-closed H3 topology lane"));
+        assert!(error.contains("untyped_phase6_workload @ 999 has no typed Phase 6 contract"));
+    }
+
+    #[test]
+    fn phase9_matrix_accepts_complete_report_and_aggregates_failures() {
+        let complete = complete_phase9_report();
+        enforce_phase9_matrix_complete(&complete).expect("complete Phase 9 matrix");
+
+        let mut incomplete = complete;
+        let missing = incomplete.workloads.remove(0);
+        let duplicate = incomplete.workloads[0].clone();
+        let duplicate_name = duplicate.name.clone();
+        incomplete.workloads.push(duplicate);
+        incomplete.crashes.push(crashed_scale(
+            "phase9_crash",
+            PHASE9_VERIFICATION_ROWS,
+            "signal 11",
+        ));
+
+        let error = gate_error(enforce_phase9_matrix_complete(&incomplete));
+        assert!(error.starts_with("Phase 9 operator matrix is incomplete:"));
+        assert!(error.contains(&format!("`{}`", missing.name)));
+        assert!(error.contains("found 0"));
+        assert!(error.contains(&format!("`{duplicate_name}`")));
+        assert!(error.contains("found 2"));
+        assert!(error.contains("phase9_crash: crashed at 10000 rows (signal 11)"));
+    }
+
+    #[test]
+    fn metal_ship_gate_accepts_complete_release_evidence() {
+        enforce_metal_ship_gate_complete(&complete_metal_report())
+            .expect("complete Metal ship-gate evidence");
+    }
+
+    #[test]
+    fn metal_ship_gate_aggregates_cell_evidence_crash_and_methodology_failures() {
+        let mut report = complete_metal_report();
+        let missing = report.workloads.remove(0);
+        let duplicate = report.workloads[0].clone();
+        let duplicate_name = duplicate.name.clone();
+        report.workloads.push(duplicate);
+
+        let evidence_target = &mut report.workloads[1];
+        let evidence_name = evidence_target.name.clone();
+        evidence_target.plan_snippet = None;
+        evidence_target.baseline_plan_snippet = None;
+        evidence_target.correctness_diff_artifact = None;
+        evidence_target.pg_accel_stock_exec_delta = 4;
+        report
+            .workloads
+            .push(evidenced_result("unexpected_metal_cell", 1_000_000));
+        report
+            .crashes
+            .push(crashed_scale("metal_crash", 1_000_000, "device lost"));
+        report.methodology.iterations = 3;
+        report.methodology.warmup = 1;
+        report.methodology.row_scales = vec![10_000, 1_000_000];
+        report.methodology.timing_mode = "explain-analyze".to_owned();
+        report.methodology.cache_mode = "warm".to_owned();
+        report.methodology.harness_profile = "debug".to_owned();
+
+        let error = gate_error(enforce_metal_ship_gate_complete(&report));
+        assert!(error.starts_with("Metal benchmark ship-gate evidence is incomplete:"));
+        assert!(error.contains(&format!(
+            "`{}` @ {}: expected one result, found 0",
+            missing.name, missing.rows
+        )));
+        assert!(error.contains(&format!(
+            "`{duplicate_name}` @ 1000000: expected one result, found 2"
+        )));
+        assert!(error.contains("unexpected result `unexpected_metal_cell` @ 1000000"));
+        assert!(error.contains(&format!(
+            "`{evidence_name}` @ 1000000 is missing accelerated or PostgreSQL plan evidence"
+        )));
+        assert!(error.contains(&format!(
+            "`{evidence_name}` @ 1000000 is missing its correctness-diff artifact"
+        )));
+        assert!(error.contains("used 4 stock-executor fallback(s)"));
+        assert!(error.contains("metal_crash @ 1000000 crashed: device lost"));
+        assert!(error.contains("expected 10 measured iterations, report recorded 3"));
+        assert!(error.contains("expected 5 warmups, report recorded 1"));
+        assert!(error.contains("expected only the 1M row scale"));
+        assert!(error.contains("expected raw-wallclock timing, report recorded `explain-analyze`"));
+        assert!(error.contains("expected cache mode both, report recorded `warm`"));
+        assert!(error.contains("expected a release benchmark harness, report recorded `debug`"));
     }
 
     #[test]
@@ -1910,13 +2319,42 @@ mod tests {
 
         let manifest: serde_json::Value =
             serde_json::from_slice(&left_bytes).expect("valid contract JSON");
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(manifest["gate"], "qualified_metal_benchmark_ship_gate");
+        assert_eq!(manifest["comparison"], "postgresql_parallel");
         assert_eq!(manifest["iterations"], METAL_SHIP_GATE_ITERATIONS);
         assert_eq!(manifest["warmup"], METAL_SHIP_GATE_WARMUP);
+        assert_eq!(manifest["seed"], METAL_SHIP_GATE_SEED);
+        assert_eq!(manifest["timing_mode"], "raw-wallclock");
         assert_eq!(manifest["cache_mode"], "both");
+        assert_eq!(manifest["required_harness_profile"], "release");
         assert_eq!(
-            manifest["cells"].as_array().map(Vec::len),
-            Some(workloads::METAL_SHIP_GATE_CELLS.len())
+            manifest["generic_min_speedup"].as_f64(),
+            Some(report::BENCHMARK_SHIP_GATE_MIN_SPEEDUP)
         );
+        assert_eq!(
+            manifest["threshold_source"],
+            "benchmark_threshold_matrix_entry"
+        );
+        let cells = manifest["cells"].as_array().expect("contract cells array");
+        assert_eq!(cells.len(), workloads::METAL_SHIP_GATE_CELLS.len());
+        for (cell, contract) in cells.iter().zip(workloads::METAL_SHIP_GATE_CELLS) {
+            let entry =
+                workloads::benchmark_threshold_matrix_entry(contract.workload, contract.rows)
+                    .expect("Metal cell threshold entry");
+            let workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } =
+                entry.expectation
+            else {
+                panic!("Metal cell must be a GPU winner");
+            };
+            assert_eq!(cell["workload"], contract.workload);
+            assert_eq!(cell["rows"], contract.rows);
+            assert_eq!(cell["lane"], entry.lane);
+            assert_eq!(
+                cell["min_warm_speedup_vs_postgresql_parallel"].as_f64(),
+                Some(min_warm_speedup)
+            );
+        }
         assert!(
             write_metal_ship_gate_contract(&left)
                 .expect_err("non-empty evidence directory must fail")
@@ -1928,11 +2366,79 @@ mod tests {
     }
 
     #[test]
+    fn metal_ship_gate_manifest_rejects_files_and_accepts_existing_empty_directories() {
+        let base = unique_temp_path("metal-contract-paths");
+        fs::create_dir_all(&base).expect("create contract path test root");
+
+        let occupied_file = base.join("occupied");
+        fs::write(&occupied_file, b"not a directory").expect("create occupied file");
+        let error = write_metal_ship_gate_contract(&occupied_file)
+            .expect_err("existing file path must fail")
+            .to_string();
+        assert!(error.contains("exists and is not a directory"));
+
+        let empty_dir = base.join("empty");
+        fs::create_dir(&empty_dir).expect("create empty evidence directory");
+        write_metal_ship_gate_contract(&empty_dir)
+            .expect("existing empty evidence directory should be writable");
+        assert!(empty_dir.join(METAL_SHIP_GATE_CONTRACT_FILE).is_file());
+
+        fs::remove_dir_all(base).expect("remove contract path test root");
+    }
+
+    #[test]
+    fn workload_resolution_supports_name_category_all_and_useful_errors() {
+        let named = resolve_workloads(Some("gpu_reduce_sum"), Some("not_a_category"))
+            .expect("exact workload name should resolve");
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0].name(), "gpu_reduce_sum");
+
+        let h3 =
+            resolve_workloads(None, Some(" gpu_h3 ")).expect("trimmed category should resolve");
+        assert!(!h3.is_empty());
+        assert!(h3.iter().all(|workload| {
+            workloads::workload_metadata(workload.name())
+                .is_some_and(|metadata| metadata.category == workloads::WorkloadCategory::GpuH3)
+        }));
+
+        let all = resolve_workloads(None, None).expect("unfiltered registry should resolve");
+        assert_eq!(all.len(), workloads::all_workloads().len());
+
+        let unknown = resolve_workloads(Some("not_a_real_workload"), None)
+            .err()
+            .expect("unknown workload should fail")
+            .to_string();
+        assert_eq!(unknown, "unknown workload: not_a_real_workload");
+        let no_category = resolve_workloads(None, Some("not_a_category"))
+            .err()
+            .expect("unknown category should fail")
+            .to_string();
+        assert_eq!(
+            no_category,
+            "no workloads match category filter: not_a_category"
+        );
+    }
+
+    #[test]
     fn h3_repro_rows_must_match_workload_scales() {
         let h3_srf = workloads::find_workload("h3_srf_grid_disk")
             .expect("h3_srf_grid_disk should be registered");
         assert!(validate_supported_repro_rows(h3_srf.as_ref(), 10_000, "crash-repro").is_ok());
-        assert!(validate_supported_repro_rows(h3_srf.as_ref(), 10_000_000, "crash-repro").is_err());
+        let error = validate_supported_repro_rows(h3_srf.as_ref(), 10_000_000, "crash-repro")
+            .expect_err("unregistered H3 row scale must fail")
+            .to_string();
+        let supported = h3_srf
+            .row_scales()
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(
+            error,
+            format!(
+                "crash-repro: refusing unsupported H3 row scale for h3_srf_grid_disk: rows=10000000; supported row scales: [{supported}]"
+            )
+        );
 
         let reduce = workloads::find_workload("gpu_reduce_sum")
             .expect("gpu_reduce_sum should be registered");
@@ -1940,5 +2446,247 @@ mod tests {
             validate_supported_repro_rows(reduce.as_ref(), 12_345, "crash-repro").is_ok(),
             "non-H3 crash repro keeps arbitrary row-count support"
         );
+    }
+
+    #[test]
+    fn pure_cli_validation_rendering_and_release_gate_wrappers_are_executable() {
+        cmd_validate(Some("gpu_reduce_sum"), None, 10_000)
+            .expect("a registered release workload should validate without a database");
+        cmd_validate(None, Some("gpu_h3"), 10_000)
+            .expect("the registered H3 category should validate without a database");
+        cmd_dry_run(Some("gpu_reduce_sum"), None)
+            .expect("dry-run should render a validated workload without executing it");
+
+        let empty = bench_report(Vec::new());
+        for format in [
+            ReportFormat::Markdown,
+            ReportFormat::Json,
+            ReportFormat::Csv,
+        ] {
+            print_report(&empty, &format).expect("every report format should render");
+        }
+        enforce_benchmark_ship_gate(&empty).expect("an empty synthetic report has no failures");
+        enforce_h3_lane_gate(&empty).expect("an empty synthetic report has no H3 failures");
+
+        let mut generic = evidenced_result("grouped_agg_int4", 1_000_000);
+        generic.plan_selected = true;
+        generic.gpu_kernel_dispatched = true;
+        generic.gpu_kernel_execution_delta = 2;
+        generic.native_decline_evidence = None;
+        generic.speedup_median_vs_parallel = 0.8;
+        let generic_error = enforce_benchmark_ship_gate(&bench_report(vec![generic]))
+            .expect_err("a selected sub-floor lane must fail the process wrapper")
+            .to_string();
+        assert!(generic_error.contains("benchmark ship gate"));
+
+        let mut h3 = evidenced_result("h3_cell_to_parent", 100_000);
+        h3.plan_selected = true;
+        h3.gpu_kernel_dispatched = true;
+        h3.gpu_kernel_execution_delta = 2;
+        h3.native_decline_evidence = None;
+        h3.speedup_median_vs_parallel = 0.8;
+        let h3_error = enforce_h3_lane_gate(&bench_report(vec![h3]))
+            .expect_err("a selected sub-floor H3 winner must fail its lane wrapper")
+            .to_string();
+        assert!(h3_error.contains("h3 lane gate"));
+    }
+
+    #[test]
+    fn resume_resolution_revalidates_registry_rows_and_query_identity() {
+        let workload = workloads::find_workload("gpu_reduce_sum")
+            .expect("gpu_reduce_sum should be registered");
+        let identity = artifacts::BenchmarkQueryIdentity::resolve(
+            workload.query_sql(),
+            workload.baseline_query_sql(),
+        )
+        .expect("registered workload should expose a valid query identity");
+        let mut plan = resume::RetryPlan {
+            source_dir: PathBuf::from("source-artifacts"),
+            source_manifest: PathBuf::from("source-artifacts/resume_audit_manifest.json"),
+            manifest_summary: resume::ManifestSummary {
+                completed: 1,
+                correctness: 2,
+                pre_risk: 3,
+                plan: 4,
+                crash: 5,
+                log: 6,
+                provenance: 7,
+                failure: 8,
+            },
+            cells: vec![resume::RetryCell {
+                workload: workload.name().to_owned(),
+                rows: 10_000,
+                accel_query_sql: identity.accel_query_sql().to_owned(),
+                baseline_query_sql: identity.baseline_query_sql().to_owned(),
+            }],
+            config: Some(resume::RetryConfig {
+                seed: 42,
+                iterations: 10,
+                warmup: 5,
+                timing_mode: runner::TimingMode::RawWallClock,
+                cache_mode: runner::CacheMode::Warm,
+                realistic_gucs: true,
+                skip_guc_verify: false,
+                capture_plans: true,
+            }),
+        };
+
+        print_resume_plan(&plan);
+        let resolved = resolve_resume_workloads(&plan)
+            .expect("saved identity should resolve to the same registered workload");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0.name(), "gpu_reduce_sum");
+        assert_eq!(resolved[0].1, 10_000);
+
+        plan.cells[0].baseline_query_sql.push_str(" /* changed */");
+        let mismatch = resolve_resume_workloads(&plan)
+            .err()
+            .expect("resume must reject query drift")
+            .to_string();
+        assert!(mismatch.contains("query identity"), "{mismatch}");
+
+        plan.cells[0].workload = "missing_resume_workload".to_owned();
+        let unknown = resolve_resume_workloads(&plan)
+            .err()
+            .expect("resume must reject an unknown workload")
+            .to_string();
+        assert!(unknown.contains("unknown workload"), "{unknown}");
+    }
+
+    fn dispatch_failure(command: Command) -> String {
+        dispatch(Cli { command })
+            .expect_err("fixture command should fail before external work")
+            .to_string()
+    }
+
+    #[test]
+    fn dispatcher_preserves_pure_validation_boundaries_for_external_commands() {
+        let setup = dispatch_failure(Command::Setup {
+            rows: 10_000,
+            seed: 42,
+            connection: "unused".to_owned(),
+            workload: Some("missing_setup_workload".to_owned()),
+            category: None,
+        });
+        assert_eq!(setup, "unknown workload: missing_setup_workload");
+
+        dispatch(Cli {
+            command: Command::Run {
+                workload: Some("gpu_reduce_sum".to_owned()),
+                category: None,
+                iterations: 10,
+                warmup: 5,
+                seed: 42,
+                connection: "unused".to_owned(),
+                format: ReportFormat::Markdown,
+                dry_run: true,
+                realistic_gucs: false,
+                capture_plans: false,
+                timing: TimingArg::Raw,
+                cache_mode: CacheModeArg::Warm,
+                skip_guc_verify: false,
+                artifacts_dir: None,
+            },
+        })
+        .expect("run --dry-run must stop before database execution");
+
+        let run = dispatch_failure(Command::Run {
+            workload: Some("missing_run_workload".to_owned()),
+            category: None,
+            iterations: 10,
+            warmup: 5,
+            seed: 42,
+            connection: "unused".to_owned(),
+            format: ReportFormat::Json,
+            dry_run: false,
+            realistic_gucs: true,
+            capture_plans: true,
+            timing: TimingArg::Both,
+            cache_mode: CacheModeArg::Both,
+            skip_guc_verify: true,
+            artifacts_dir: Some(PathBuf::from("unused")),
+        });
+        assert_eq!(run, "unknown workload: missing_run_workload");
+
+        let crash = dispatch_failure(Command::CrashRepro {
+            workload: "missing_crash_workload".to_owned(),
+            rows: 1,
+            iterations: 1,
+            warmup: 0,
+            seed: 7,
+            connection: "unused".to_owned(),
+            format: ReportFormat::Csv,
+            realistic_gucs: false,
+            capture_plans: false,
+            timing: TimingArg::Explain,
+            cache_mode: CacheModeArg::Cold,
+            skip_guc_verify: false,
+            artifacts_dir: None,
+        });
+        assert_eq!(crash, "unknown workload: missing_crash_workload");
+
+        let missing_resume = unique_temp_path("dispatch-missing-resume");
+        let resume = dispatch_failure(Command::Resume {
+            artifacts_dir: missing_resume.clone(),
+            connection: "unused".to_owned(),
+            output_dir: None,
+            format: ReportFormat::Markdown,
+            dry_run: true,
+        });
+        assert!(resume.contains("resume manifest not readable"), "{resume}");
+        assert!(
+            resume.contains(&missing_resume.display().to_string()),
+            "{resume}"
+        );
+
+        dispatch(Cli {
+            command: Command::Validate {
+                workload: Some("gpu_reduce_sum".to_owned()),
+                category: None,
+                rows: 10_000,
+            },
+        })
+        .expect("registered workload validation is process-free");
+
+        let multiplier = dispatch_failure(Command::Fp64Calibrate {
+            connection: "unused".to_owned(),
+            multipliers: "not-a-number".to_owned(),
+            max_size: None,
+            warmup: 5,
+            seed: 42,
+            realistic_gucs: false,
+            capture_plans: false,
+            timing: TimingArg::Raw,
+            cache_mode: CacheModeArg::Warm,
+            skip_guc_verify: false,
+            artifacts_dir: None,
+        });
+        assert!(
+            multiplier.contains("invalid fp64 multiplier"),
+            "{multiplier}"
+        );
+
+        let size = dispatch_failure(Command::Fp64Calibrate {
+            connection: "unused".to_owned(),
+            multipliers: "16".to_owned(),
+            max_size: Some("not-a-size".to_owned()),
+            warmup: 5,
+            seed: 42,
+            realistic_gucs: true,
+            capture_plans: true,
+            timing: TimingArg::Both,
+            cache_mode: CacheModeArg::Both,
+            skip_guc_verify: true,
+            artifacts_dir: Some(PathBuf::from("unused")),
+        });
+        assert!(size.contains("invalid fp64 max-size token"), "{size}");
+
+        if cfg!(debug_assertions) {
+            let metal = dispatch_failure(Command::MetalShipGate {
+                connection: "unused".to_owned(),
+                artifacts_dir: None,
+            });
+            assert!(metal.contains("requires a release harness"), "{metal}");
+        }
     }
 }

@@ -4786,4 +4786,239 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn every_registered_workload_exposes_complete_boundary_scale_contracts() {
+        let boundary_scales = [10_000, 100_000, 1_000_000, 10_000_000];
+        for workload in all_workloads() {
+            let name = workload.name();
+            assert!(!name.trim().is_empty());
+            assert!(!workload.description().trim().is_empty(), "workload={name}");
+            let metadata = workload_metadata(name)
+                .unwrap_or_else(|| panic!("registered workload lacks metadata: {name}"));
+            assert_eq!(workload.category(), metadata.category.as_str());
+            assert!(!workload.row_scales().is_empty(), "workload={name}");
+
+            let query = workload.query_sql();
+            assert!(!query.trim().is_empty(), "workload={name}");
+            if let Some(baseline) = workload.baseline_query_sql() {
+                assert!(!baseline.trim().is_empty(), "workload={name}");
+            }
+            for statement in workload.pre_query_sql() {
+                assert!(!statement.trim().is_empty(), "workload={name}");
+            }
+            for statement in workload.cleanup_sql() {
+                assert!(!statement.trim().is_empty(), "workload={name}");
+            }
+
+            let mut scales = workload.row_scales().to_vec();
+            scales.extend(boundary_scales);
+            scales.sort_unstable();
+            scales.dedup();
+            for rows in scales {
+                let setup = workload.setup_sql(rows);
+                assert!(!setup.is_empty(), "workload={name} rows={rows}");
+                assert!(
+                    setup.iter().all(|statement| !statement.trim().is_empty()),
+                    "workload={name} rows={rows}"
+                );
+                if let Some(oracle) = workload.result_oracle(rows) {
+                    assert!(
+                        !oracle.query_sql.trim().is_empty(),
+                        "workload={name} rows={rows}"
+                    );
+                    assert!(
+                        !oracle.expected_row.is_empty(),
+                        "workload={name} rows={rows}"
+                    );
+                }
+            }
+        }
+    }
+
+    struct InvalidContractWorkload;
+
+    impl Workload for InvalidContractWorkload {
+        fn name(&self) -> &'static str {
+            "invalid_contract"
+        }
+
+        fn description(&self) -> &'static str {
+            "deliberately invalid validation fixture"
+        }
+
+        fn setup_sql(&self, _rows: usize) -> Vec<String> {
+            vec![String::new(), "CREATE TABLE orphaned (id int".to_owned()]
+        }
+
+        fn query_sql(&self) -> String {
+            "SELECT * FROM unrelated)".to_owned()
+        }
+
+        fn cleanup_sql(&self) -> Vec<String> {
+            vec!["ANALYZE orphaned".to_owned()]
+        }
+    }
+
+    struct EmptyContract;
+
+    impl Workload for EmptyContract {
+        fn name(&self) -> &'static str {
+            "empty_contract"
+        }
+
+        fn description(&self) -> &'static str {
+            "empty validation fixture"
+        }
+
+        fn setup_sql(&self, _rows: usize) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn query_sql(&self) -> String {
+            String::new()
+        }
+
+        fn cleanup_sql(&self) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn validation_reports_each_independent_structural_contract_failure() {
+        let issues = validate_workload(&InvalidContractWorkload, 10);
+        for expected in [
+            "setup_sql[0] is empty/whitespace",
+            "unbalanced parentheses",
+            "unmatched closing paren",
+            "does not reference any table",
+            "does not contain DROP",
+            "missing IF EXISTS",
+            "created in setup but not dropped",
+        ] {
+            assert!(
+                issues.iter().any(|issue| issue.contains(expected)),
+                "missing {expected:?} in {issues:?}"
+            );
+        }
+
+        let empty = validate_workload(&EmptyContract, 10);
+        assert!(
+            empty
+                .iter()
+                .any(|issue| issue.contains("setup_sql is empty"))
+        );
+        assert!(
+            empty
+                .iter()
+                .any(|issue| issue.contains("query_sql is empty"))
+        );
+        assert!(
+            empty
+                .iter()
+                .any(|issue| issue.contains("cleanup_sql is empty"))
+        );
+    }
+
+    #[test]
+    fn threshold_matrix_builders_cover_all_named_lanes_and_boundary_outcomes() {
+        let mut names = all_workloads()
+            .into_iter()
+            .map(|workload| workload.name())
+            .collect::<Vec<_>>();
+        names.extend([
+            "spatial_sel_repro_simple_s10_b64k_w0_jitoff",
+            "spatial_sel_repro_simple_s90_b64k_w0_jitoff",
+            "spatial_sel_repro_simple_s90_b8k_w0_jitoff",
+            "spatial_sel_repro_simple_s90_b64k_w4_jitoff",
+            "spatial_sel_repro_simple_s90_b64k_w4_jiton",
+            "spatial_sel_repro_coop1024_s10_b64k_w0_jitoff",
+            "spatial_sel_repro_coop1024_s90_b64k_w0_jitoff",
+            "spatial_sel_repro_coop1024_s90_b8k_w0_jitoff",
+            "spatial_sel_repro_coop1024_s90_b64k_w4_jitoff",
+            "spatial_sel_repro_coop1024_s90_b64k_w4_jiton",
+        ]);
+        names.sort_unstable();
+        names.dedup();
+
+        for name in names {
+            for rows in [
+                1, 9_999, 10_000, 80_000, 100_000, 150_000, 1_000_000, 10_000_000,
+            ] {
+                let Some(entry) = benchmark_threshold_matrix_entry(name, rows) else {
+                    continue;
+                };
+                assert!(entry.workload == name || entry.workload == "unknown");
+                assert_eq!(entry.rows, rows);
+                assert!(!entry.lane.is_empty());
+                assert!(!entry.result_count.is_empty());
+                assert!(!entry.batch_count.is_empty());
+                assert!(!entry.threshold_basis.is_empty());
+                match entry.expectation {
+                    BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
+                        assert!(min_warm_speedup.is_finite() && min_warm_speedup > 0.0);
+                        assert_eq!(entry.expectation.label(), "gpu_winner");
+                        assert_eq!(entry.expectation.decline_reason(), None);
+                    }
+                    BenchmarkLaneExpectation::NativeDecline { reason } => {
+                        assert!(!reason.is_empty());
+                        assert_eq!(entry.expectation.label(), "native_decline");
+                        assert_eq!(entry.expectation.decline_reason(), Some(reason));
+                    }
+                }
+            }
+        }
+
+        let outcomes = [
+            spatial_matrix_expectation(10_000, 15, None, true),
+            spatial_matrix_expectation(10, 500, None, true),
+            spatial_matrix_expectation(usize::MAX, 100_000, None, true),
+            // Reach break-even so the downstream selectivity and registration
+            // policies, rather than the work-product policy, decide the lane.
+            spatial_matrix_expectation(1_000_000, 500, Some(90), true),
+            spatial_matrix_expectation(1_000_000, 500, Some(10), false),
+            spatial_matrix_expectation(1_000_000, 500, Some(10), true),
+        ];
+        assert_eq!(
+            outcomes[0].decline_reason(),
+            Some("spatial_vertices_below_break_even")
+        );
+        assert_eq!(
+            outcomes[1].decline_reason(),
+            Some("spatial_work_below_break_even")
+        );
+        assert_eq!(outcomes[2].decline_reason(), Some("spatial_work_above_max"));
+        assert_eq!(
+            outcomes[3].decline_reason(),
+            Some("spatial_high_output_fraction")
+        );
+        assert_eq!(
+            outcomes[4].decline_reason(),
+            Some("spatial_no_registered_gpu_predicate")
+        );
+        assert!(matches!(
+            outcomes[5],
+            BenchmarkLaneExpectation::GpuWinner { .. }
+        ));
+
+        for (vertices, expected) in [
+            (15, "15 polygon vertices"),
+            (20, "20 polygon vertices"),
+            (32, "32 polygon vertices"),
+            (500, "500 polygon vertices"),
+            (1_000, "~1000 polygon vertices"),
+            (1_024, "1024+ polygon vertices"),
+            (10_000, "~10000 polygon vertices"),
+            (100_000, "~100000 polygon vertices"),
+            (7, "polygon vertex-count matrix"),
+        ] {
+            assert_eq!(spatial_vertex_bucket(vertices), expected);
+        }
+        assert!(spatial_result_count(10_000, None).contains("predicate-dependent"));
+        assert_eq!(
+            spatial_result_count(10_000, Some(25)),
+            "~2500 matching heap rows (25%)"
+        );
+        assert!(spatial_batch_count(100_000, 8_192).contains("13 batches"));
+    }
 }

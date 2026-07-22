@@ -1418,4 +1418,456 @@ mod h3_tests {
             function_fingerprint(&flag_change)
         );
     }
+
+    #[test]
+    fn catalog_free_invalid_inputs_fail_closed_before_syscache_access() {
+        assert!(postgres_error_requires_rethrow(
+            PgLogLevel::FATAL,
+            PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE
+        ));
+        assert!(postgres_error_requires_rethrow(
+            PgLogLevel::PANIC,
+            PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE
+        ));
+        for code in [
+            PgSqlErrorCode::ERRCODE_DATA_EXCEPTION,
+            PgSqlErrorCode::ERRCODE_DATATYPE_MISMATCH,
+            PgSqlErrorCode::ERRCODE_EXTERNAL_ROUTINE_EXCEPTION,
+            PgSqlErrorCode::ERRCODE_FEATURE_NOT_SUPPORTED,
+            PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+            PgSqlErrorCode::ERRCODE_INVALID_PARAMETER_VALUE,
+            PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION,
+            PgSqlErrorCode::ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+            PgSqlErrorCode::ERRCODE_UNDEFINED_COLUMN,
+            PgSqlErrorCode::ERRCODE_UNDEFINED_FUNCTION,
+            PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
+        ] {
+            assert!(!postgres_error_requires_rethrow(PgLogLevel::ERROR, code));
+        }
+        assert!(postgres_error_requires_rethrow(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
+        ));
+
+        // SAFETY: every call exits on an invalid OID or embedded NUL before it
+        // can enter a PostgreSQL catalog helper.
+        unsafe {
+            assert_eq!(function_schema_and_name(pg_sys::InvalidOid), None);
+            assert_eq!(type_name(pg_sys::InvalidOid), None);
+            assert!(!function_is_extension_member(pg_sys::InvalidOid, "h3"));
+            assert!(!type_is_extension_member(pg_sys::InvalidOid, "h3"));
+            assert!(!object_is_extension_member(
+                pg_sys::TypeRelationId,
+                oid(1),
+                "not\0an-extension"
+            ));
+            assert_eq!(type_oid_in_schema("bad\0schema", "h3index"), None);
+            assert_eq!(type_oid_in_schema("public", "bad\0type"), None);
+        }
+    }
+
+    #[test]
+    fn every_h3_type_invariant_has_a_specific_rejection() {
+        let valid = valid_type();
+        let schema_oid = valid.schema_oid;
+        let cases: Vec<(H3TypeShape, &str)> = vec![
+            (
+                {
+                    let mut value = valid.clone();
+                    value.name = "h3index_spoof".to_owned();
+                    value
+                },
+                "is named",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.schema_oid = oid(99);
+                    value
+                },
+                "outside extension schema",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typtype = pg_sys::TYPTYPE_DOMAIN;
+                    value
+                },
+                "must be a base type",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typisdefined = false;
+                    value
+                },
+                "only a shell type",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typlen = 4;
+                    value
+                },
+                "8-byte pass-by-value",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typbyval = false;
+                    value
+                },
+                "8-byte pass-by-value",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typalign = pg_sys::TYPALIGN_INT;
+                    value
+                },
+                "double alignment",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typstorage = pg_sys::TYPSTORAGE_EXTENDED;
+                    value
+                },
+                "plain storage",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typrelid = oid(1);
+                    value
+                },
+                "composite, domain, or array-like",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typsubscript = oid(1);
+                    value
+                },
+                "composite, domain, or array-like",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typelem = oid(1);
+                    value
+                },
+                "composite, domain, or array-like",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typbasetype = oid(1);
+                    value
+                },
+                "composite, domain, or array-like",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.typndims = 1;
+                    value
+                },
+                "composite, domain, or array-like",
+            ),
+            (
+                {
+                    let mut value = valid;
+                    value.typcollation = oid(1);
+                    value
+                },
+                "must not be collatable",
+            ),
+        ];
+        for (shape, expected) in cases {
+            let error = validate_h3_type_shape(&shape, schema_oid)
+                .expect_err("each mutated type invariant must fail");
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn every_h3_function_invariant_has_a_specific_rejection() {
+        let valid = valid_function();
+        let schema_oid = valid.schema_oid;
+        let type_oid = oid(50_001);
+        let cases: Vec<(H3FunctionShape, &str)> = vec![
+            (
+                {
+                    let mut value = valid.clone();
+                    value.name = "h3_cell_to_parent_spoof".to_owned();
+                    value
+                },
+                "not extension-schema",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.schema_oid = oid(99);
+                    value
+                },
+                "not extension-schema",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.kind = pg_sys::PROKIND_PROCEDURE;
+                    value
+                },
+                "ordinary function",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.language_name = "sql".to_owned();
+                    value
+                },
+                "C language",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.source.push_str("_spoof");
+                    value
+                },
+                "canonical C symbol",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.binary = None;
+                    value
+                },
+                "canonical C symbol",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.argument_types.pop();
+                    value
+                },
+                "noncanonical signature",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.return_type = pg_sys::INT8OID;
+                    value
+                },
+                "noncanonical signature",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.argument_defaults = 1;
+                    value
+                },
+                "argument defaults",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.security_definer = true;
+                    value
+                },
+                "security definer",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.support_function = oid(1);
+                    value
+                },
+                "planner support function",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.variadic_type = type_oid;
+                    value
+                },
+                "scalar and nonvariadic",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.returns_set = true;
+                    value
+                },
+                "scalar and nonvariadic",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.strict = false;
+                    value
+                },
+                "must be strict",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.volatility = pg_sys::PROVOLATILE_STABLE;
+                    value
+                },
+                "must be immutable",
+            ),
+            (
+                {
+                    let mut value = valid;
+                    value.parallel = pg_sys::PROPARALLEL_RESTRICTED;
+                    value
+                },
+                "parallel safe",
+            ),
+        ];
+        for (shape, expected) in cases {
+            let error = validate_h3_function_shape(&shape, schema_oid, type_oid)
+                .expect_err("each mutated function invariant must fail");
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn every_h3_equality_operator_invariant_has_a_specific_rejection() {
+        let valid = valid_equality_operator();
+        let schema_oid = valid.schema_oid;
+        let type_oid = oid(50_001);
+        let cases: Vec<(H3OperatorShape, &str)> = vec![
+            (
+                {
+                    let mut value = valid.clone();
+                    value.name = "==".to_owned();
+                    value
+                },
+                "not the extension-schema",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.schema_oid = oid(99);
+                    value
+                },
+                "not the extension-schema",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.kind = b'l';
+                    value
+                },
+                "must have signature",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.left_type = pg_sys::INT8OID;
+                    value
+                },
+                "must have signature",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.right_type = pg_sys::INT8OID;
+                    value
+                },
+                "must have signature",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.result_type = pg_sys::INT8OID;
+                    value
+                },
+                "must have signature",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.can_hash = false;
+                    value
+                },
+                "hashable and mergeable",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.can_merge = false;
+                    value
+                },
+                "hashable and mergeable",
+            ),
+            (
+                {
+                    let mut value = valid.clone();
+                    value.commutator_oid = oid(99);
+                    value
+                },
+                "own commutator",
+            ),
+            (
+                {
+                    let mut value = valid;
+                    value.function_oid = pg_sys::InvalidOid;
+                    value
+                },
+                "no implementation function",
+            ),
+        ];
+        for (shape, expected) in cases {
+            let error = validate_h3_equality_operator_shape(&shape, schema_oid, type_oid)
+                .expect_err("each mutated operator invariant must fail");
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn primitive_and_catalog_fingerprints_preserve_every_identity_word() {
+        let high_bit_oid = oid(0xfeed_beef);
+        assert_eq!(
+            oid_word(high_bit_oid).to_ne_bytes(),
+            0xfeed_beef_u32.to_ne_bytes()
+        );
+        assert_eq!(
+            u32_word(0x8765_4321).to_ne_bytes(),
+            0x8765_4321_u32.to_ne_bytes()
+        );
+        let words = u64_words(0x1122_3344_aabb_ccdd);
+        assert_eq!(words[0].to_ne_bytes(), 0xaabb_ccdd_u32.to_ne_bytes());
+        assert_eq!(words[1].to_ne_bytes(), 0x1122_3344_u32.to_ne_bytes());
+        assert_ne!(fnv1a64(&[b"ab", b"c"]), fnv1a64(&[b"a", b"bc"]));
+        assert_eq!(fnv1a64(&[]), 0xcbf2_9ce4_8422_2325);
+
+        let type_shape = valid_type();
+        let type_words = type_fingerprint(&type_shape);
+        assert_eq!(type_words.len(), 8);
+        assert_eq!(type_words[0], oid_word(type_shape.type_oid));
+        assert_eq!(type_words[7], i32::from(type_shape.typstorage));
+
+        let mut function = valid_function();
+        function.binary = None;
+        let function_words = function_fingerprint(&function);
+        assert_eq!(function_words.len(), 19 + function.argument_types.len());
+        assert_eq!(function_words[0], oid_word(function.fn_oid));
+        let implementation_hash = fnv1a64(&[
+            function.name.as_bytes(),
+            function.language_name.as_bytes(),
+            function.source.as_bytes(),
+            b"",
+        ]);
+        let [hash_low, hash_high] = u64_words(implementation_hash);
+        assert_eq!(&function_words[17..19], &[hash_low, hash_high]);
+
+        let operator = valid_equality_operator();
+        let operator_words = operator_fingerprint(&operator);
+        assert_eq!(operator_words.len(), 15);
+        assert_eq!(operator_words[0], oid_word(operator.operator_oid));
+        assert_eq!(operator_words[12], oid_word(operator.function_oid));
+    }
 }

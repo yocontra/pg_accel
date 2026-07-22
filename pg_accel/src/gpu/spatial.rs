@@ -1338,4 +1338,30 @@ mod resident_spatial_tests {
         assert_eq!(outcome.status, PgaccelStatus::InvalidArgument as i32);
         assert_eq!(outcome.detail, ResidentSpatialDetail::RecheckIndex as i32);
     }
+
+    #[test]
+    fn builder_errors_and_detail_conversion_keep_typed_context() {
+        let error = resident_builder_error(
+            GpuStatusDetail::CapacityOverflow,
+            "spatial capacity exceeded",
+        );
+        assert_eq!(error.domain, GpuErrorDomain::Spatial);
+        assert_eq!(error.operation, RESIDENT_SPATIAL_OPERATION);
+        assert_eq!(error.status, GpuStatusDetail::CapacityOverflow);
+        assert_eq!(error.detail, Some("spatial capacity exceeded"));
+
+        for detail in [
+            ResidentSpatialDetail::None,
+            ResidentSpatialDetail::Contract,
+            ResidentSpatialDetail::Geometry,
+            ResidentSpatialDetail::SridMismatch,
+            ResidentSpatialDetail::ByteBudget,
+            ResidentSpatialDetail::TriState,
+            ResidentSpatialDetail::RecheckIndex,
+            ResidentSpatialDetail::RecheckPatch,
+        ] {
+            assert_eq!(ResidentSpatialDetail::try_from(detail as i32), Ok(detail));
+        }
+        assert_eq!(ResidentSpatialDetail::try_from(-1), Err(-1));
+    }
 }

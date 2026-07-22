@@ -264,3 +264,118 @@ impl Workload for SpatialSelectivityRepro {
         vec!["DROP TABLE IF EXISTS bench_spatial_sel_repro".to_owned()]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selectivity_sweep_builds_exact_inside_and_outside_populations() {
+        let workload = SpatialSelectivitySweep {
+            name: "spatial_selectivity_25",
+            description: "25 percent selectivity",
+            inside_fraction: 0.25,
+        };
+
+        assert_eq!(workload.name(), "spatial_selectivity_25");
+        assert_eq!(workload.description(), "25 percent selectivity");
+        assert_eq!(workload.row_scales(), &[10_000, 100_000, 1_000_000]);
+        let setup = workload.setup_sql(80);
+        assert_eq!(setup.len(), 5);
+        assert!(setup[2].contains("generate_series(1, 20)"));
+        assert!(setup[3].contains("generate_series(1, 60)"));
+        assert!(setup[4].contains("ANALYZE bench_selsweep_pts"));
+        assert!(workload.query_sql().contains("ST_Buffer"));
+        assert_eq!(
+            workload.cleanup_sql(),
+            ["DROP TABLE IF EXISTS bench_selsweep_pts"]
+        );
+    }
+
+    #[test]
+    fn repro_variants_encode_polygon_worker_selectivity_and_jit_axes() {
+        let cases = [
+            (
+                SpatialSelectivityRepro {
+                    name: "simple",
+                    description: "simple path",
+                    polygon: ReproPolygon::Simple500v,
+                    selectivity_pct: 10,
+                    rel_parallel_workers: 0,
+                    jit: ReproJit::Off,
+                },
+                10,
+                90,
+                "125",
+                "generated ST_Buffer simple path ~500 vertices",
+                vec!["SET jit = off"],
+            ),
+            (
+                SpatialSelectivityRepro {
+                    name: "cooperative",
+                    description: "cooperative path",
+                    polygon: ReproPolygon::Coop1024v,
+                    selectivity_pct: 90,
+                    rel_parallel_workers: 4,
+                    jit: ReproJit::On,
+                },
+                90,
+                10,
+                "256",
+                "generated ST_Buffer cooperative path 1024+ vertices",
+                vec![
+                    "SET jit = on",
+                    "SET jit_above_cost = 0",
+                    "SET jit_inline_above_cost = 0",
+                    "SET jit_optimize_above_cost = 0",
+                ],
+            ),
+        ];
+
+        for (workload, inside, outside, polygon_segments, polygon_label, jit_sql) in cases {
+            assert_eq!(workload.category(), "gpu_spatial_repro");
+            let setup = workload.setup_sql(100);
+            assert_eq!(setup.len(), 7);
+            assert!(setup[2].contains(&format!(
+                "parallel_workers = {}",
+                workload.rel_parallel_workers
+            )));
+            assert!(setup[3].contains(polygon_label));
+            assert!(setup[3].contains(&format!(
+                "target_selectivity={}pct",
+                workload.selectivity_pct
+            )));
+            assert!(setup[4].contains(&format!("generate_series(1, {inside})")));
+            assert!(setup[5].contains(&format!("generate_series(1, {outside})")));
+            assert!(setup[5].contains(&format!("SELECT ({inside} + g)::bigint")));
+            assert!(workload.query_sql().contains(polygon_segments));
+
+            let pre_query = workload.pre_query_sql();
+            assert_eq!(&pre_query[5..], jit_sql.as_slice());
+            assert_eq!(workload.name(), workload.name);
+            assert_eq!(workload.description(), workload.description);
+            assert_eq!(
+                workload.cleanup_sql(),
+                ["DROP TABLE IF EXISTS bench_spatial_sel_repro"]
+            );
+        }
+    }
+
+    #[test]
+    fn repro_setup_uses_saturating_counts_for_hostile_percentages() {
+        let workload = SpatialSelectivityRepro {
+            name: "hostile",
+            description: "hostile percentage",
+            polygon: ReproPolygon::Simple500v,
+            selectivity_pct: usize::MAX,
+            rel_parallel_workers: 1,
+            jit: ReproJit::Off,
+        };
+        let setup = workload.setup_sql(2);
+        assert!(setup[4].contains(&format!(
+            "generate_series(1, {})",
+            2usize.saturating_mul(usize::MAX) / 100
+        )));
+        assert!(setup[5].contains("generate_series(1, 0)"));
+    }
+}

@@ -21,6 +21,11 @@ artifact:
    timeout/cancellation samples are all zero.
 5. The artifact identifies the exact commit, candidate tree, installed module,
    runtime, device, fixtures, GUCs, raw samples, and arm order.
+6. A production-declined cell must preserve PostgreSQL performance: compare
+   extension-enabled native execution with the same query and pg_accel disabled.
+   The enabled arm may not lose more than the larger of 2 percent or 0.25 ms in
+   warm median, and may not lose more than 5 percent in p95. A statistically
+   unresolved result is a regression to investigate, not a parity pass.
 
 If a cell cannot prove the complete invariant, production must decline it. A
 benchmark-only force switch may measure an unqualified candidate, but must not
@@ -165,6 +170,36 @@ Exit criterion: no production-selected cell in the 29-cell final matrix is
 below `1.15x`; all known sub-threshold cells visibly decline with a stable
 reason. Any production-selectable family outside that matrix must first be
 added with the same floor and boundary evidence.
+
+### P0A: Make native declines effectively free
+
+Fail-closed admission is only a complete performance policy when queries that
+remain PostgreSQL-native do not pay meaningful extension overhead. Add a third
+paired benchmark arm for every native-decline sentinel: pg_accel loaded and
+enabled, but production planning declines the query. Compare it with the
+existing pg_accel-disabled PostgreSQL arm under the same randomized order,
+session settings, prepared fixture, and output-consumption path.
+
+1. Split the decline path into measured stages: hook entry, shape recognition,
+   catalog/syscache work, statistics lookup, residency probe, cost calculation,
+   and path rejection. Record calls and elapsed time with cheap counters that
+   are disabled outside profiling runs.
+2. Cache immutable capability and registry decisions per backend, and cache
+   relation facts only with the same relcache/generation invalidation contract
+   used by residency. Do not cache a negative decision across a dependency that
+   can change its semantics or eligibility.
+3. Add early constant-time filters before expression walking or catalog access:
+   command type, relation/path kind, supported aggregate/operator identity, and
+   device availability. Preserve exact visible decline reasons in evidence even
+   when the production fast path uses a compact reason code.
+4. Extend the final matrix analyzer to enforce the native-parity bounds above.
+   Report absolute median and p95 deltas as well as ratios so sub-millisecond
+   noise cannot be mistaken for a product regression.
+
+Exit criterion: every decline sentinel passes the paired extension-on versus
+extension-off parity gate, and no planner hook stage accounts for an unresolved
+regression. A cell that misses parity blocks release just like a selected cell
+that misses `1.15x`.
 
 ### P1: Remove wrapper and synchronization overhead
 
@@ -348,6 +383,8 @@ same host class and frozen server configuration:
    must remain explicitly unclaimed when it was not run.
 2. Capture absolute medians, p90, raw samples, and speedup. Speedup alone cannot
    distinguish a pg_accel regression from an improving PostgreSQL plan.
+   For native declines, also capture an extension-enabled native arm and enforce
+   the P0A median/p95 parity bounds against the disabled arm.
 3. Record PostgreSQL and pg_accel plan signatures, parallel settings, exact
    commit/tree/module identity, runtime and device identity, fixture digest,
    residency generations, GUCs, dispatch counters, and failure inventory.
@@ -365,6 +402,8 @@ The performance program is complete for a candidate only when:
 - all 29 cells match the production `PerformanceEnvelope` expectation;
 - every selected warm cell is `>= 1.15x` and carries correctness, resident
   dispatch, consumed output, exact provenance, and zero-fallback/crash proof;
+- every production-declined cell clears the extension-enabled native parity
+  gate, with no unresolved hook or classification overhead regression;
 - the three current 10M aggregate failures either clear the invariant after the
   lifecycle work or decline in production;
 - small exact thresholds and FP64 min/max have measured select/decline outcomes;
@@ -375,7 +414,8 @@ The performance program is complete for a candidate only when:
 - no product or publication claim is made until a qualified external run
   reproduces the candidate artifact under the release evidence contract.
 
-Sequence the work as admission truth, wrapper/synchronization removal,
+Sequence the work as admission truth, native-decline parity,
+wrapper/synchronization removal,
 fixed count-join batching, persistent atomic dense execution, artifact and H3
 memory/cancellation work, threshold and FP64 reconciliation, then the full
 repeated matrix. Admission remains fail-closed throughout; optimization earns

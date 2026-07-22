@@ -8,6 +8,12 @@ set -euo pipefail
 readonly COVERAGE_LIVE_SCHEMA_VERSION=1
 readonly SAFE_DATABASE_PREFIX="pgaccel_cov_"
 
+# Stateful command validation is bound to the live harness's disposable target.
+# The environment defaults make the validator independently testable; executable
+# runs overwrite them with canonical paths after argument validation.
+coverage_live_expected_connection="${PGACCEL_COVERAGE_EXPECTED_CONNECTION:-}"
+coverage_live_expected_artifact_root="${PGACCEL_COVERAGE_EXPECTED_ARTIFACT_ROOT:-}"
+
 die() {
     printf 'error: %s\n' "$*" >&2
     exit 1
@@ -70,17 +76,36 @@ assert_profile_for_label() {
 assert_safe_bench_command() {
     [ "$#" -gt 0 ] || die "empty benchmark command"
     case "$1" in
-        --help | run | validate | provenance | crash-repro | phase9-gate | \
+        --help | setup | run | validate | provenance | crash-repro | phase9-gate | \
             fp64-calibrate | report | resume) ;;
         *) die "benchmark command is outside the coverage allowlist: $1" ;;
     esac
 
     local -a argv=("$@")
     local index token next
-    for ((index = 0; index < ${#argv[@]}; index++)); do
+    local command="${argv[0]}"
+    local workload_value=""
+    local rows_value=""
+    local iterations_value=""
+    local warmup_value=""
+    local cache_value=""
+    local timing_value=""
+    local artifacts_value=""
+    local connection_value=""
+    local format_value=""
+    local seed_value=""
+    local multipliers_value=""
+    local max_size_value=""
+    local output_dir_value=""
+    local category_seen=0
+    local dry_run_seen=0
+    local capture_plans_seen=0
+    local skip_guc_verify_seen=0
+    for ((index = 1; index < ${#argv[@]}; index++)); do
         token="${argv[index]}"
         case "$token" in
-            sudo | osascript | purge | clear-jit | gpu-test-cold | cold | both)
+            sudo | osascript | purge | clear-jit | gpu-test-cold | cold | both | \
+                --realistic-gucs | --realistic-gucs=*)
                 die "forbidden coverage command or mode: $token"
                 ;;
             metal-ship-gate | phase6-gate)
@@ -90,24 +115,237 @@ assert_safe_bench_command() {
                 [ $((index + 1)) -lt ${#argv[@]} ] || die "--cache-mode requires a value"
                 next="${argv[index + 1]}"
                 [ "$next" = "warm" ] || die "coverage cache mode must be warm, got: $next"
+                cache_value="$next"
                 index=$((index + 1))
                 ;;
             --cache-mode=*)
                 [ "${token#*=}" = "warm" ] || \
                     die "coverage cache mode must be warm, got: ${token#*=}"
+                cache_value="${token#*=}"
                 ;;
             --timing)
                 [ $((index + 1)) -lt ${#argv[@]} ] || die "--timing requires a value"
                 next="${argv[index + 1]}"
                 [ "$next" = "raw" ] || die "coverage timing mode must be raw, got: $next"
+                timing_value="$next"
                 index=$((index + 1))
                 ;;
             --timing=*)
                 [ "${token#*=}" = "raw" ] || \
                     die "coverage timing mode must be raw, got: ${token#*=}"
+                timing_value="${token#*=}"
                 ;;
+            --workload | --rows | --iterations | --warmup | --artifacts-dir | --connection | \
+                --format | --seed | --multipliers | --max-size | --output-dir | --category)
+                [ $((index + 1)) -lt ${#argv[@]} ] || die "$token requires a value"
+                next="${argv[index + 1]}"
+                case "$token" in
+                    --workload) workload_value="$next" ;;
+                    --rows) rows_value="$next" ;;
+                    --iterations) iterations_value="$next" ;;
+                    --warmup) warmup_value="$next" ;;
+                    --artifacts-dir) artifacts_value="$next" ;;
+                    --connection) connection_value="$next" ;;
+                    --format) format_value="$next" ;;
+                    --seed) seed_value="$next" ;;
+                    --multipliers) multipliers_value="$next" ;;
+                    --max-size) max_size_value="$next" ;;
+                    --output-dir) output_dir_value="$next" ;;
+                    --category) category_seen=1 ;;
+                esac
+                index=$((index + 1))
+                ;;
+            --workload=*) workload_value="${token#*=}" ;;
+            --rows=*) rows_value="${token#*=}" ;;
+            --iterations=*) iterations_value="${token#*=}" ;;
+            --warmup=*) warmup_value="${token#*=}" ;;
+            --artifacts-dir=*) artifacts_value="${token#*=}" ;;
+            --connection=*) connection_value="${token#*=}" ;;
+            --format=*) format_value="${token#*=}" ;;
+            --seed=*) seed_value="${token#*=}" ;;
+            --multipliers=*) multipliers_value="${token#*=}" ;;
+            --max-size=*) max_size_value="${token#*=}" ;;
+            --output-dir=*) output_dir_value="${token#*=}" ;;
+            --category | --category=*) category_seen=1 ;;
+            --dry-run) dry_run_seen=1 ;;
+            --capture-plans) capture_plans_seen=1 ;;
+            --skip-guc-verify) skip_guc_verify_seen=1 ;;
+            *) die "unrecognized benchmark option or positional token: $token" ;;
         esac
     done
+
+    # Setup and non-dry-run `run` are deliberately narrower than the general
+    # CLI allowlist. Pinning the one tiny raster lane and its exact sampling
+    # budget prevents a future coverage edit from turning this evidence path
+    # into an unbounded benchmark sweep.
+    case "$command" in
+        setup)
+            [ -n "$coverage_live_expected_connection" ] || \
+                die "coverage setup has no bound target connection"
+            [ "$connection_value" = "$coverage_live_expected_connection" ] || \
+                die "coverage setup must use the harness target connection"
+            [ "$workload_value" = "raster_ndvi" ] || \
+                die "coverage setup is limited to raster_ndvi"
+            [ "$rows_value" = "100" ] || \
+                die "coverage setup requires exactly 100 rows"
+            [ "$seed_value" = "42" ] || \
+                die "coverage setup requires deterministic seed 42"
+            [ "$category_seen" -eq 0 ] || \
+                die "coverage setup cannot use a category sweep"
+            ;;
+        run)
+            if [ "$dry_run_seen" -eq 0 ]; then
+                [ -n "$coverage_live_expected_connection" ] || \
+                    die "live coverage run has no bound target connection"
+                [ -n "$coverage_live_expected_artifact_root" ] || \
+                    die "live coverage run has no bound artifact root"
+                [ "$connection_value" = "$coverage_live_expected_connection" ] || \
+                    die "live coverage run must use the harness target connection"
+                [ "$artifacts_value" = \
+                    "$coverage_live_expected_artifact_root/normal-run-raster" ] || \
+                    die "live coverage run must use its harness artifact directory"
+                [ "$workload_value" = "raster_ndvi" ] || \
+                    die "live coverage run is limited to raster_ndvi"
+                [ "$iterations_value" = "10" ] || \
+                    die "live coverage run requires exactly 10 measured iterations"
+                [ "$warmup_value" = "5" ] || \
+                    die "live coverage run requires exactly 5 warmups"
+                [ "$cache_value" = "warm" ] || \
+                    die "live coverage run requires an explicit warm cache mode"
+                [ "$timing_value" = "raw" ] || \
+                    die "live coverage run requires explicit raw timing"
+                [ "$seed_value" = "42" ] || \
+                    die "live coverage run requires deterministic seed 42"
+                [ "$format_value" = "csv" ] || \
+                    die "live coverage run requires CSV output"
+                [ "$capture_plans_seen" -eq 1 ] || \
+                    die "live coverage run requires plan capture"
+                [ "$skip_guc_verify_seen" -eq 1 ] || \
+                    die "live coverage run requires explicit GUC-verification bypass"
+                [ "$category_seen" -eq 0 ] || \
+                    die "live coverage run cannot use a category sweep"
+            fi
+            ;;
+        crash-repro)
+            [ -n "$coverage_live_expected_connection" ] || \
+                die "live coverage crash-repro has no bound target connection"
+            [ -n "$coverage_live_expected_artifact_root" ] || \
+                die "live coverage crash-repro has no bound artifact root"
+            [ "$connection_value" = "$coverage_live_expected_connection" ] || \
+                die "live coverage crash-repro must use the harness target connection"
+            local expected_crash_artifact=""
+            case "${workload_value}@${rows_value}" in
+                grouped_agg_int4@1000000) expected_crash_artifact="selected" ;;
+                window_full_output_decline@10000) expected_crash_artifact="declined" ;;
+                reduce_f64_minmax@100000) expected_crash_artifact="fp64-native" ;;
+                mixed_join_agg_int4@100000) expected_crash_artifact="mixed-resident" ;;
+                ssbm_resident_int4_star@100000) expected_crash_artifact="ssbm-resident" ;;
+                hash_join@100000) expected_crash_artifact="hash-join" ;;
+                h3_cell_to_parent@100000) expected_crash_artifact="h3-parent" ;;
+                spatial_mega_1kv@80000) expected_crash_artifact="spatial-mega" ;;
+                raster_reclass@100) expected_crash_artifact="raster-reclass" ;;
+                *) die "live coverage crash-repro cell is outside the bounded matrix" ;;
+            esac
+            [ "$artifacts_value" = \
+                "$coverage_live_expected_artifact_root/$expected_crash_artifact" ] || \
+                die "live coverage crash-repro must use its exact harness artifact directory"
+            [ "$iterations_value" = "1" ] || \
+                die "live coverage crash-repro requires exactly one measured iteration"
+            [ "$warmup_value" = "0" ] || \
+                die "live coverage crash-repro requires zero warmups"
+            [ "$cache_value" = "warm" ] || \
+                die "live coverage crash-repro requires an explicit warm cache mode"
+            [ "$timing_value" = "raw" ] || \
+                die "live coverage crash-repro requires explicit raw timing"
+            [ "$format_value" = "json" ] || \
+                die "live coverage crash-repro requires JSON output"
+            [ "$seed_value" = "42" ] || \
+                die "live coverage crash-repro requires deterministic seed 42"
+            [ "$capture_plans_seen" -eq 1 ] || \
+                die "live coverage crash-repro requires plan capture"
+            [ "$skip_guc_verify_seen" -eq 1 ] || \
+                die "live coverage crash-repro requires explicit GUC-verification bypass"
+            [ "$category_seen" -eq 0 ] || \
+                die "live coverage crash-repro cannot use a category sweep"
+            [ "$dry_run_seen" -eq 0 ] || \
+                die "live coverage crash-repro cannot be a dry run"
+            ;;
+        phase9-gate)
+            [ -n "$coverage_live_expected_connection" ] || \
+                die "live coverage phase9-gate has no bound target connection"
+            [ -n "$coverage_live_expected_artifact_root" ] || \
+                die "live coverage phase9-gate has no bound artifact root"
+            [ "$connection_value" = "$coverage_live_expected_connection" ] || \
+                die "live coverage phase9-gate must use the harness target connection"
+            [ "$artifacts_value" = "$coverage_live_expected_artifact_root/phase9" ] || \
+                die "live coverage phase9-gate must use its harness artifact directory"
+            ;;
+        fp64-calibrate)
+            [ -n "$coverage_live_expected_connection" ] || \
+                die "live coverage fp64-calibrate has no bound target connection"
+            [ -n "$coverage_live_expected_artifact_root" ] || \
+                die "live coverage fp64-calibrate has no bound artifact root"
+            [ "$connection_value" = "$coverage_live_expected_connection" ] || \
+                die "live coverage fp64-calibrate must use the harness target connection"
+            [ "$max_size_value" = "100k" ] || \
+                die "live coverage fp64-calibrate requires exactly max-size 100k"
+            [ "$warmup_value" = "0" ] || \
+                die "live coverage fp64-calibrate requires zero warmups"
+            [ "$seed_value" = "42" ] || \
+                die "live coverage fp64-calibrate requires deterministic seed 42"
+            [ "$cache_value" = "warm" ] || \
+                die "live coverage fp64-calibrate requires an explicit warm cache mode"
+            [ "$timing_value" = "raw" ] || \
+                die "live coverage fp64-calibrate requires explicit raw timing"
+            [ "$capture_plans_seen" -eq 1 ] || \
+                die "live coverage fp64-calibrate requires plan capture"
+            [ "$skip_guc_verify_seen" -eq 1 ] || \
+                die "live coverage fp64-calibrate requires explicit GUC-verification bypass"
+            case "$multipliers_value" in
+                16)
+                    [ "$artifacts_value" = \
+                        "$coverage_live_expected_artifact_root/fp64-calibration" ] || \
+                        die "live coverage fp64-calibrate must use its harness artifact directory"
+                    ;;
+                0.5)
+                    # Exact parser-negative branch retained for CLI error coverage.
+                    [ "$artifacts_value" = \
+                        "$coverage_live_expected_artifact_root/fp64-calibration-invalid" ] || \
+                        die "live coverage invalid fp64 probe must use its harness artifact directory"
+                    ;;
+                *) die "live coverage fp64-calibrate multiplier is outside the bounded contract" ;;
+            esac
+            ;;
+        provenance)
+            [ -n "$coverage_live_expected_connection" ] || \
+                die "live coverage provenance has no bound target connection"
+            case "$connection_value" in
+                "$coverage_live_expected_connection" | \
+                    "host=/__pg_accel_coverage_missing_socket__ connect_timeout=1 dbname=missing") ;;
+                *) die "live coverage provenance must use the harness target or fixed missing socket" ;;
+            esac
+            ;;
+        resume)
+            [ -n "$coverage_live_expected_connection" ] || \
+                die "live coverage resume has no bound target connection"
+            [ -n "$coverage_live_expected_artifact_root" ] || \
+                die "live coverage resume has no bound artifact root"
+            [ "$dry_run_seen" -eq 1 ] || \
+                die "live coverage resume is limited to dry-run planning"
+            [ "$connection_value" = "$coverage_live_expected_connection" ] || \
+                die "live coverage resume must use the harness target connection"
+            [ "$output_dir_value" = \
+                "$coverage_live_expected_artifact_root/resume-output" ] || \
+                die "live coverage resume must use its harness output directory"
+            [ "$format_value" = "json" ] || \
+                die "live coverage resume requires JSON output"
+            case "$artifacts_value" in
+                "$coverage_live_expected_artifact_root/declined" | \
+                    "$coverage_live_expected_artifact_root/resume-missing") ;;
+                *) die "live coverage resume source is outside the harness artifact root" ;;
+            esac
+            ;;
+    esac
 }
 
 if [ "${PGACCEL_COVERAGE_LIVE_LIBRARY_ONLY:-0}" = "1" ]; then
@@ -206,6 +444,8 @@ else
     mkdir -p "$artifact_dir"
 fi
 artifact_dir="$(cd "$artifact_dir" && pwd -P)"
+coverage_live_expected_connection="$connection"
+coverage_live_expected_artifact_root="$artifact_dir"
 mkdir -p "$profile_dir"
 profile_dir="$(cd "$profile_dir" && pwd -P)"
 [ -z "$(find "$profile_dir" -type f -name '*.profraw' -print -quit)" ] || \
@@ -215,7 +455,7 @@ case "$profile_dir" in
     *) die "profile directory must be beneath the artifact or build directory" ;;
 esac
 
-mkdir -p "$artifact_dir"/{logs,selected,declined,fp64-native,phase9,fp64-calibration,resume-output,resume-missing}
+mkdir -p "$artifact_dir"/{logs,selected,declined,fp64-native,mixed-resident,ssbm-resident,hash-join,h3-parent,spatial-mega,raster-reclass,phase9,fp64-calibration,resume-output,resume-missing}
 ledger="$artifact_dir/command-ledger.tsv"
 external_ledger="$artifact_dir/external-command-ledger.tsv"
 printf 'label\texpected_exit\tactual_exit\tprofile_files\tlog\tcommand\n' > "$ledger"
@@ -382,6 +622,15 @@ run_bench validate_fp64_registry 0 validate --category fp64_matrix --rows 100000
 run_bench invalid_workload 1 validate --workload coverage_missing_workload --rows 10000
 grep -q 'unknown workload' "$artifact_dir/logs/invalid_workload.log" || \
     die "invalid workload failure did not reach the CLI error branch"
+run_bench validate_all_bounded 0 validate --rows 100
+grep -Eq '\[validate\] all [0-9]+ workload\(s\) passed validation' \
+    "$artifact_dir/logs/validate_all_bounded.log" || \
+    die "bounded all-workload validation did not retain its completion proof"
+run_bench workload_matrix_dry_run 0 run --dry-run \
+    --iterations 10 --warmup 5 --timing raw --cache-mode warm
+grep -Eq '^=== All [0-9]+ workload\(s\) validated ===$' \
+    "$artifact_dir/logs/workload_matrix_dry_run.log" || \
+    die "all-workload dry run did not retain its completion proof"
 
 # The database name is validated above and must be absent so cleanup can never
 # destroy pre-existing state.
@@ -407,11 +656,19 @@ grep -Eq 'provenance.*failure|could not connect|No such file' \
     "$artifact_dir/logs/provenance_failure.log" || \
     die "provenance failure branch did not emit diagnostic evidence"
 
-# One selected grouped-aggregate lane, two intentional native declines, and the fixed
-# bounded Phase 9 matrix cover runner/config/stats/artifact/report plan paths.
-# The selected winner may return 1 because its release ship gate demands cold
-# evidence that this warm-only coverage harness intentionally forbids. The
-# durable report is consumed below and must still prove selection and dispatch.
+# Exercise the dedicated setup command with a fixed 100-row/16x16-tile raster
+# fixture. The command validator rejects every other setup workload and size.
+run_bench bounded_setup 0 setup --workload raster_ndvi --rows 100 --seed 42 \
+    --connection "$connection"
+grep -q '\[setup\] raster_ndvi -- seed 42 .* 100 rows' \
+    "$artifact_dir/logs/bounded_setup.log" || \
+    die "bounded setup did not retain its workload/row proof"
+
+# Selected aggregate and resident-domain lanes, intentional native declines,
+# and the fixed bounded Phase 9 matrix cover runner/config/stats/artifact/report
+# paths. Selected winners may return 1 because their release ship gates demand
+# performance evidence that instrumented warm-only coverage cannot provide. The
+# durable reports are consumed below and must still prove selection and dispatch.
 run_bench selected_crash_repro any01 crash-repro --workload grouped_agg_int4 --rows 1000000 \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
     --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
@@ -424,12 +681,79 @@ run_bench fp64_native_crash_repro 0 crash-repro --workload reduce_f64_minmax --r
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
     --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
     --artifacts-dir "$artifact_dir/fp64-native"
+
+# One exact cell per remaining resident/domain path keeps the live matrix small
+# while reaching the real loaders, descriptors, private data, executors, and
+# extension adapters. The spatial and raster contracts are positive bounded
+# execution probes whose current expected result is a proven native decline.
+run_bench mixed_resident_crash_repro any01 crash-repro \
+    --workload mixed_join_agg_int4 --rows 100000 \
+    --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
+    --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --artifacts-dir "$artifact_dir/mixed-resident"
+run_bench ssbm_resident_crash_repro any01 crash-repro \
+    --workload ssbm_resident_int4_star --rows 100000 \
+    --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
+    --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --artifacts-dir "$artifact_dir/ssbm-resident"
+run_bench hash_join_crash_repro any01 crash-repro --workload hash_join --rows 100000 \
+    --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
+    --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --artifacts-dir "$artifact_dir/hash-join"
+run_bench h3_parent_crash_repro any01 crash-repro \
+    --workload h3_cell_to_parent --rows 100000 \
+    --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
+    --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --artifacts-dir "$artifact_dir/h3-parent"
+run_bench spatial_mega_decline 0 crash-repro --workload spatial_mega_1kv --rows 80000 \
+    --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
+    --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --artifacts-dir "$artifact_dir/spatial-mega"
+run_bench raster_reclass_decline 0 crash-repro --workload raster_reclass --rows 100 \
+    --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
+    --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --artifacts-dir "$artifact_dir/raster-reclass"
+for domain_report in \
+    "$artifact_dir/mixed-resident/report.json" \
+    "$artifact_dir/ssbm-resident/report.json" \
+    "$artifact_dir/hash-join/report.json" \
+    "$artifact_dir/h3-parent/report.json" \
+    "$artifact_dir/spatial-mega/report.json" \
+    "$artifact_dir/raster-reclass/report.json"; do
+    require_nonempty_file "$domain_report"
+done
+
 run_bench phase9_bounded 0 phase9-gate --connection "$connection" \
     --artifacts-dir "$artifact_dir/phase9"
+
+# Cover the normal `run_all_with_config` path (distinct from crash-repro and
+# selected-cell gates) with the raster suite's fixed 100-row smoke scale. Ten
+# measured iterations and five warmups satisfy its real statistical contract
+# while remaining a small, warm-only coverage workload.
+run_bench normal_run_raster 0 run --workload raster_ndvi \
+    --iterations 10 --warmup 5 --seed 42 --connection "$connection" --format csv \
+    --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --artifacts-dir "$artifact_dir/normal-run-raster"
+require_nonempty_file "$artifact_dir/normal-run-raster/report.json"
+grep -q '^workload,category,kernel_class,' \
+    "$artifact_dir/logs/normal_run_raster.log" || \
+    die "normal bounded run did not emit its requested CSV report"
 
 # Re-consume a stored report through stdin, then cover malformed report input.
 run_bench_input report_from_artifact 0 "$artifact_dir/fp64-native/report.json" \
     report --format markdown
+grep -q '^# pg_accel Benchmark Report$' \
+    "$artifact_dir/logs/report_from_artifact.log" || \
+    die "stored report did not render as markdown"
+run_bench_input report_json_from_artifact 0 "$artifact_dir/fp64-native/report.json" \
+    report --format json
+python3 -m json.tool "$artifact_dir/logs/report_json_from_artifact.log" >/dev/null || \
+    die "stored report did not render as valid JSON"
+run_bench_input report_csv_from_artifact 0 "$artifact_dir/fp64-native/report.json" \
+    report --format csv
+grep -q '^workload,category,kernel_class,' \
+    "$artifact_dir/logs/report_csv_from_artifact.log" || \
+    die "stored report did not render as CSV"
 printf '{not valid json}\n' > "$artifact_dir/malformed-report.json"
 run_bench_input report_failure 1 "$artifact_dir/malformed-report.json" report --format json
 grep -qi 'error' "$artifact_dir/logs/report_failure.log" || \
@@ -451,7 +775,8 @@ run_bench fp64_calibration any01 fp64-calibrate --connection "$connection" \
     --artifacts-dir "$artifact_dir/fp64-calibration"
 require_nonempty_file "$artifact_dir/fp64-calibration/fp64_calibration_summary.json"
 run_bench fp64_invalid_multiplier 1 fp64-calibrate --connection "$connection" \
-    --multipliers 0.5 --max-size 100k --warmup 0 --timing raw --cache-mode warm \
+    --multipliers 0.5 --max-size 100k --warmup 0 --seed 42 --capture-plans \
+    --timing raw --cache-mode warm \
     --skip-guc-verify --artifacts-dir "$artifact_dir/fp64-calibration-invalid"
 grep -q 'fp64 multiplier must be finite' "$artifact_dir/logs/fp64_invalid_multiplier.log" || \
     die "invalid fp64 multiplier did not reach the parser failure branch"
@@ -462,7 +787,14 @@ python3 - \
     "$artifact_dir/selected/report.json" \
     "$artifact_dir/declined/report.json" \
     "$artifact_dir/fp64-native/report.json" \
+    "$artifact_dir/mixed-resident/report.json" \
+    "$artifact_dir/ssbm-resident/report.json" \
+    "$artifact_dir/hash-join/report.json" \
+    "$artifact_dir/h3-parent/report.json" \
+    "$artifact_dir/spatial-mega/report.json" \
+    "$artifact_dir/raster-reclass/report.json" \
     "$artifact_dir/phase9/report.json" \
+    "$artifact_dir/normal-run-raster/report.json" \
     "$artifact_dir/fp64-calibration/fp64_calibration_summary.json" \
     "$artifact_dir/evidence-validation.json" \
     "$artifact_dir/selected/provenance.json" \
@@ -471,16 +803,69 @@ import json
 import pathlib
 import sys
 
-selected_path, declined_path, fp64_path, phase9_path, calibration_path, output_path = map(pathlib.Path, sys.argv[1:7])
-extension_provenance_path = pathlib.Path(sys.argv[7])
-expected_extension_sha = sys.argv[8]
+(
+    selected_path,
+    declined_path,
+    fp64_path,
+    mixed_path,
+    ssbm_path,
+    hash_path,
+    h3_path,
+    spatial_path,
+    raster_reclass_path,
+    phase9_path,
+    raster_path,
+    calibration_path,
+    output_path,
+) = map(pathlib.Path, sys.argv[1:14])
+extension_provenance_path = pathlib.Path(sys.argv[14])
+expected_extension_sha = sys.argv[15]
 
 def load(path):
     if not path.is_file() or path.stat().st_size == 0:
         raise SystemExit(f"missing evidence: {path}")
     return json.loads(path.read_text())
 
-def one(report, expected_name, expected_rows):
+def retained_artifact_path(report_path, relative_name, description):
+    if not isinstance(relative_name, str) or not relative_name:
+        raise SystemExit(f"{description}: artifact name is missing")
+    relative = pathlib.Path(relative_name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SystemExit(f"{description}: artifact path escapes the run directory")
+    artifact = report_path.parent / relative
+    if not artifact.is_file() or artifact.stat().st_size == 0:
+        raise SystemExit(f"{description}: artifact is missing or empty: {artifact}")
+    return artifact
+
+def require_correctness_artifact(report_path, relative_name, expected_name, expected_rows):
+    description = f"{expected_name} correctness diff"
+    artifact_path = retained_artifact_path(report_path, relative_name, description)
+    artifact = load(artifact_path)
+    if not isinstance(artifact, dict) or artifact.get("schema_version") != 1:
+        raise SystemExit(f"{description}: schema mismatch")
+    if (artifact.get("workload"), artifact.get("rows")) != (expected_name, expected_rows):
+        raise SystemExit(f"{description}: workload identity mismatch")
+    if artifact.get("status") != "pass" or artifact.get("error") is not None:
+        raise SystemExit(f"{description}: status is not pass")
+    accel_rows = artifact.get("accel_rows")
+    baseline_rows = artifact.get("baseline_rows")
+    if type(accel_rows) is not int or type(baseline_rows) is not int or accel_rows != baseline_rows:
+        raise SystemExit(f"{description}: result row counts are not equal")
+    if (
+        artifact.get("accel_minus_baseline_count") != 0
+        or artifact.get("baseline_minus_accel_count") != 0
+        or artifact.get("accel_minus_baseline_samples") != []
+        or artifact.get("baseline_minus_accel_samples") != []
+    ):
+        raise SystemExit(f"{description}: bidirectional result diff is not empty")
+    if type(artifact.get("order_sensitive")) is not bool or artifact.get("sample_limit") != 20:
+        raise SystemExit(f"{description}: comparison contract mismatch")
+    for query_field in ("accel_query_sql", "baseline_query_sql"):
+        if not isinstance(artifact.get(query_field), str) or not artifact[query_field].strip():
+            raise SystemExit(f"{description}: {query_field} is missing")
+
+def one(report_path, expected_name, expected_rows, expected_iterations=1, expected_warmup=0):
+    report = load(report_path)
     if report.get("crashes") != []:
         raise SystemExit(f"{expected_name}: crash evidence is not empty")
     workloads = report.get("workloads")
@@ -492,35 +877,139 @@ def one(report, expected_name, expected_rows):
     methodology = report.get("methodology", {})
     if methodology.get("cache_mode") != "warm" or methodology.get("timing_mode") != "raw-wallclock":
         raise SystemExit(f"{expected_name}: unsafe methodology")
-    if not isinstance(row.get("iterations"), list) or not row["iterations"]:
-        raise SystemExit(f"{expected_name}: measured output was not retained")
+    if methodology.get("iterations") != expected_iterations or methodology.get("warmup") != expected_warmup:
+        raise SystemExit(f"{expected_name}: sampling budget mismatch")
+    if not isinstance(row.get("iterations"), list) or len(row["iterations"]) != expected_iterations:
+        raise SystemExit(f"{expected_name}: exact measured output was not retained")
+    if not row.get("plan_snippet"):
+        raise SystemExit(f"{expected_name}: captured plan snippet is missing")
+    require_correctness_artifact(
+        report_path,
+        row.get("correctness_diff_artifact"),
+        expected_name,
+        expected_rows,
+    )
+    plans_path = report_path.parent / "plans.txt"
+    if not plans_path.is_file() or plans_path.stat().st_size == 0:
+        raise SystemExit(f"{expected_name}: captured plans artifact is missing or empty")
     return row
 
-selected = one(load(selected_path), "grouped_agg_int4", 1000000)
-if not selected.get("plan_selected") or not selected.get("gpu_kernel_dispatched"):
-    raise SystemExit("selected grouped-aggregate coverage cell did not select and dispatch")
-if not selected.get("dispatch_counter_captured") or selected.get("gpu_kernel_execution_delta", 0) <= 0:
-    raise SystemExit("selected grouped-aggregate coverage cell lacks dispatch evidence")
-if selected.get("accel_output_rows_consumed", 0) <= 0:
-    raise SystemExit("selected grouped-aggregate output was not consumed")
+def require_selected_dispatch(row, expected_name):
+    if row.get("planner_declined") or not row.get("plan_selected") or not row.get("gpu_kernel_dispatched"):
+        raise SystemExit(f"{expected_name}: selected dispatch was not proven")
+    if not row.get("dispatch_counter_captured") or row.get("gpu_kernel_execution_delta", 0) <= 0:
+        raise SystemExit(f"{expected_name}: positive dispatch counter evidence is missing")
+    if row.get("accel_output_rows_consumed", 0) <= 0:
+        raise SystemExit(f"{expected_name}: accelerated output was not consumed")
+    if row.get("pg_accel_stock_exec_delta") != 0:
+        raise SystemExit(f"{expected_name}: stock executor fallback was observed")
+
+def require_planner_decline(row, expected_name, expected_reason=None):
+    if row.get("plan_selected") or row.get("gpu_kernel_dispatched") or not row.get("planner_declined"):
+        raise SystemExit(f"{expected_name}: native decline was not proven")
+    evidence = row.get("native_decline_evidence")
+    if not isinstance(evidence, dict) or not evidence.get("reason"):
+        raise SystemExit(f"{expected_name}: planner decline reason is missing")
+    if evidence.get("source") != "planner_reported":
+        raise SystemExit(f"{expected_name}: decline source is not planner_reported")
+    if expected_reason is not None and evidence.get("reason") != expected_reason:
+        raise SystemExit(
+            f"{expected_name}: expected decline reason {expected_reason!r}, got {evidence!r}"
+        )
+
+selected = one(selected_path, "grouped_agg_int4", 1000000)
+require_selected_dispatch(selected, "grouped_agg_int4")
 
 for path, name, rows in [
     (declined_path, "window_full_output_decline", 10000),
     (fp64_path, "reduce_f64_minmax", 100000),
 ]:
-    row = one(load(path), name, rows)
-    if not row.get("planner_declined") or row.get("gpu_kernel_dispatched") or row.get("plan_selected"):
-        raise SystemExit(f"{name}: native decline was not proven")
-    evidence = row.get("native_decline_evidence")
-    if not isinstance(evidence, dict) or not evidence.get("reason"):
-        raise SystemExit(f"{name}: planner decline reason is missing")
+    row = one(path, name, rows)
+    require_planner_decline(row, name)
+
+resident_selected_cells = [
+    (mixed_path, "mixed_join_agg_int4", 100000),
+    (ssbm_path, "ssbm_resident_int4_star", 100000),
+    (hash_path, "hash_join", 100000),
+    (h3_path, "h3_cell_to_parent", 100000),
+]
+for path, name, rows in resident_selected_cells:
+    require_selected_dispatch(one(path, name, rows), name)
+
+for path, name, rows, reason in [
+    (spatial_path, "spatial_mega_1kv", 80000, "generic_descriptor_capability"),
+    (raster_reclass_path, "raster_reclass", 100, "shape_unsupported_rte"),
+]:
+    row = one(path, name, rows)
+    require_planner_decline(row, name, reason)
 
 phase9 = load(phase9_path)
-if phase9.get("crashes") != [] or len(phase9.get("workloads", [])) < 10:
+phase9_contracts = {
+    "window_full_output_decline": "no_gpu_resident_pipeline",
+    "window_row_number": "no_gpu_resident_pipeline",
+    "window_rank": "no_gpu_resident_pipeline",
+    "window_dense_rank": "no_gpu_resident_pipeline",
+    "window_running_sum": "no_gpu_resident_pipeline",
+    "window_analytics": "no_gpu_resident_pipeline",
+    "window_reducing_decline": "no_gpu_resident_pipeline",
+    "semi_join_null_decline": "no_gpu_resident_pipeline",
+    "in_join_null_decline": "no_gpu_resident_pipeline",
+    "anti_join_null_decline": "no_gpu_resident_pipeline",
+    "not_in_join_null_decline": "shape_sublink",
+    "aggregate_semantic_modifier_decline": "shape_aggregate_modifier",
+    "aggregate_ordered_set_decline": "shape_aggregate_modifier",
+    "numeric_agg_decline": "shape_numeric_accumulator_unavailable",
+    "avg_nonfloat_decline": "shape_numeric_accumulator_unavailable",
+    "setop_intersect_decline": "setop_no_gpu_kernel",
+    "recursive_union_decline": "recursiveunion_no_gpu_kernel",
+    "mergejoin_decline": "mergejoin_no_gpu_kernel",
+    "gpu_sort_multikey": "sort_multikey_no_gpu_kernel",
+    "gpu_nlj_between": "shape_non_equality_join",
+}
+phase9_workloads = phase9.get("workloads")
+if phase9.get("crashes") != [] or not isinstance(phase9_workloads, list):
     raise SystemExit("bounded Phase 9 report is incomplete")
-for row in phase9["workloads"]:
-    if row.get("rows") != 10000 or not row.get("planner_declined") or row.get("gpu_kernel_dispatched"):
-        raise SystemExit(f"Phase 9 decline mismatch: {row.get('name')}")
+phase9_names = [row.get("name") for row in phase9_workloads if isinstance(row, dict)]
+if len(phase9_names) != len(phase9_contracts) or set(phase9_names) != set(phase9_contracts):
+    raise SystemExit("bounded Phase 9 workload identities do not match the exact contract")
+phase9_methodology = phase9.get("methodology", {})
+if (
+    phase9_methodology.get("cache_mode") != "warm"
+    or phase9_methodology.get("timing_mode") != "raw-wallclock"
+    or phase9_methodology.get("iterations") != 1
+    or phase9_methodology.get("warmup") != 0
+):
+    raise SystemExit("bounded Phase 9 methodology does not match the exact contract")
+for row in phase9_workloads:
+    name = row["name"]
+    if row.get("rows") != 10000:
+        raise SystemExit(f"Phase 9 row scale mismatch: {name}")
+    require_planner_decline(row, name, phase9_contracts[name])
+    if not row.get("dispatch_counter_captured") or row.get("gpu_kernel_execution_delta") != 0:
+        raise SystemExit(f"Phase 9 zero-dispatch counter evidence is missing: {name}")
+    if row.get("function_srf_kernel_dispatched") or row.get("pg_accel_stock_exec_delta", 0) != 0:
+        raise SystemExit(f"Phase 9 execution classification mismatch: {name}")
+    if not isinstance(row.get("iterations"), list) or len(row["iterations"]) != 1:
+        raise SystemExit(f"Phase 9 measured output is incomplete: {name}")
+    if not row.get("plan_snippet"):
+        raise SystemExit(f"Phase 9 plan evidence is missing: {name}")
+    require_correctness_artifact(
+        phase9_path,
+        row.get("correctness_diff_artifact"),
+        name,
+        10000,
+    )
+
+raster_report = load(raster_path)
+raster = one(raster_path, "raster_ndvi", 100, expected_iterations=10, expected_warmup=5)
+raster_methodology = raster_report.get("methodology", {})
+if raster_methodology.get("iterations") != 10 or raster_methodology.get("warmup") != 5:
+    raise SystemExit("bounded normal run sampling contract mismatch")
+if len(raster.get("iterations", [])) != 10:
+    raise SystemExit("bounded normal run did not retain ten measured iterations")
+require_planner_decline(raster, "raster_ndvi", "shape_unsupported_rte")
+if not raster.get("correctness_diff_artifact") or not raster.get("plan_snippet"):
+    raise SystemExit("bounded raster run is missing correctness or plan evidence")
 
 calibration = load(calibration_path)
 if calibration.get("sizes") != [100000] or calibration.get("multipliers") != [16.0]:
@@ -545,8 +1034,12 @@ validation = {
     "schema_version": 1,
     "performance_evidence_eligible": False,
     "selected_cell": "grouped_agg_int4@1000000",
+    "resident_selected_cells": [f"{name}@{rows}" for _, name, rows in resident_selected_cells],
+    "domain_decline_cells": ["spatial_mega_1kv@80000", "raster_reclass@100"],
     "native_decline_cells": ["window_full_output_decline@10000", "reduce_f64_minmax@100000"],
-    "phase9_cells": len(phase9["workloads"]),
+    "phase9_cells": len(phase9_workloads),
+    "bounded_normal_run": "raster_ndvi@100",
+    "bounded_normal_run_iterations": len(raster["iterations"]),
     "fp64_candidates": len(calibration["candidates"]),
     "all_outputs_consumed": True,
     "extension_object_sha256": expected_extension_sha,

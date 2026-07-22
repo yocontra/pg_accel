@@ -83,7 +83,7 @@ mod tests {
                 PgaccelStatus::InvalidArgument,
                 H3_PARENT_DETAIL_INVALID_CELL,
             )
-            .unwrap_err()
+            .expect_err("an invalid H3 cell detail must fail")
             .status,
             GpuStatusDetail::InvalidArgument,
         );
@@ -92,13 +92,13 @@ mod tests {
                 PgaccelStatus::InvalidArgument,
                 H3_PARENT_DETAIL_RES_MISMATCH,
             )
-            .unwrap_err()
+            .expect_err("an H3 resolution mismatch detail must fail")
             .status,
             GpuStatusDetail::ShapeMismatch,
         );
         assert_eq!(
             h3_parent_resident_result(PgaccelStatus::Ok, H3_PARENT_DETAIL_CONTRACT)
-                .unwrap_err()
+                .expect_err("a successful H3 status with an error detail must fail")
                 .status,
             GpuStatusDetail::InvalidDescriptor,
         );

@@ -985,6 +985,243 @@ mod tests {
         assert!(err.contains("correctness_artifacts"));
     }
 
+    #[test]
+    fn parsers_cover_aliases_unknown_modes_and_safe_artifact_labels() {
+        for raw in ["raw", "RAW-WALLCLOCK", "wall", "wall-clock"] {
+            assert_eq!(parse_timing_mode(raw), Ok(TimingMode::RawWallClock));
+        }
+        for raw in ["explain", "EXPLAIN-ANALYZE", "analyze"] {
+            assert_eq!(parse_timing_mode(raw), Ok(TimingMode::ExplainAnalyze));
+        }
+        assert_eq!(parse_timing_mode("both"), Ok(TimingMode::Both));
+        assert!(parse_timing_mode("cpu-time").is_err());
+        assert_eq!(parse_cache_mode("WARM"), Ok(CacheMode::Warm));
+        assert_eq!(parse_cache_mode("cold"), Ok(CacheMode::Cold));
+        assert_eq!(parse_cache_mode("both"), Ok(CacheMode::Both));
+        assert!(parse_cache_mode("mixed").is_err());
+
+        assert_eq!(timing_mode_arg(TimingMode::ExplainAnalyze), "explain");
+        assert_eq!(timing_mode_arg(TimingMode::RawWallClock), "raw");
+        assert_eq!(timing_mode_arg(TimingMode::Both), "both");
+        assert_eq!(cache_mode_arg(CacheMode::Cold), "cold");
+        assert_eq!(cache_mode_arg(CacheMode::Warm), "warm");
+        assert_eq!(cache_mode_arg(CacheMode::Both), "both");
+
+        assert_eq!(sanitize_label(" -- "), "artifact");
+        assert_eq!(sanitize_label("gpu/hash agg"), "gpu-hash-agg");
+        assert_eq!(sanitize_label("safe_name.1"), "safe_name.1");
+        assert_eq!(sanitize_label(&"x".repeat(200)).len(), 96);
+        assert_eq!(
+            pre_risk_context_artifact("gpu/hash agg", 123),
+            "pre_risk_contexts/gpu-hash-agg-123.json"
+        );
+    }
+
+    #[test]
+    fn artifact_path_validation_rejects_escape_and_non_normal_components() {
+        assert!(validate_relative_artifact_path("artifact.json").is_ok());
+        for path in [
+            "",
+            "/tmp/outside",
+            "../outside",
+            "a/../outside",
+            "./artifact",
+        ] {
+            assert!(
+                validate_relative_artifact_path(path).is_err(),
+                "path={path:?}"
+            );
+        }
+        let dir = TestDir::new("relative-artifacts");
+        assert!(validate_existing_artifact(dir.path(), "missing.json").is_err());
+        assert!(validate_existing_artifact(dir.path(), "../outside").is_err());
+        write_artifact(dir.path(), "nested/present.json");
+        assert!(validate_existing_artifact(dir.path(), "nested/present.json").is_ok());
+    }
+
+    #[test]
+    fn retry_plan_rejects_missing_invalid_and_wrong_schema_manifests() {
+        let missing = TestDir::new("missing-manifest");
+        let error = load_retry_plan(missing.path()).expect_err("missing manifest");
+        assert!(error.to_string().contains("resume manifest not readable"));
+
+        let invalid = TestDir::new("invalid-manifest");
+        fs::write(invalid.path().join(RESUME_AUDIT_MANIFEST_JSON), "not json")
+            .expect("invalid manifest");
+        assert!(load_retry_plan(invalid.path()).is_err());
+
+        let wrong_schema = TestDir::new("wrong-schema");
+        write_base_files(wrong_schema.path());
+        fs::write(
+            wrong_schema.path().join(RESUME_AUDIT_MANIFEST_JSON),
+            json!({
+                "schema_version": RESUME_AUDIT_SCHEMA_VERSION + 1,
+                "inventory": {
+                    "completed_artifacts": [],
+                    "correctness_artifacts": [],
+                    "pre_risk_artifacts": [],
+                    "plan_artifacts": [],
+                    "crash_artifacts": [],
+                    "log_artifacts": [],
+                    "provenance_artifacts": [],
+                    "failure_artifacts": []
+                }
+            })
+            .to_string(),
+        )
+        .expect("wrong schema manifest");
+        let error = load_retry_plan(wrong_schema.path()).expect_err("wrong schema");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported resume audit manifest schema")
+        );
+    }
+
+    #[test]
+    fn retry_plan_rejects_invalid_crash_json_and_context_identity_mismatch() {
+        let invalid_crashes = TestDir::new("invalid-crashes");
+        write_manifest(invalid_crashes.path(), &[], &[], &[], &[], &[]);
+        fs::write(invalid_crashes.path().join(CRASHES_JSON), "not json")
+            .expect("invalid crash json");
+        assert!(load_retry_plan(invalid_crashes.path()).is_err());
+
+        let mismatch = TestDir::new("context-mismatch");
+        let pre_risk = "pre_risk_contexts/h3_bulk-100000.json";
+        let crash_log = "log_tails/h3_bulk.log";
+        write_manifest(
+            mismatch.path(),
+            &[pre_risk],
+            &[],
+            &[],
+            &[crash_log],
+            &[crash_log],
+        );
+        fs::write(
+            mismatch.path().join(CRASHES_JSON),
+            serde_json::to_string(&vec![CrashedScale {
+                workload: "h3_bulk".to_owned(),
+                rows: 100_000,
+                error: "reset".to_owned(),
+                repro_command: None,
+                plan_snippet_artifact: None,
+                correctness_diff_artifact: None,
+                log_tail_artifacts: vec![crash_log.to_owned()],
+            }])
+            .expect("crash json"),
+        )
+        .expect("write crashes");
+        let mut context = saved_context_value();
+        context["workload"] = json!("other_workload");
+        context["rows"] = json!(100_000);
+        fs::write(mismatch.path().join(pre_risk), context.to_string())
+            .expect("write mismatched context");
+        let error = load_retry_plan(mismatch.path()).expect_err("context mismatch");
+        assert!(error.to_string().contains("pre-risk context mismatch"));
+    }
+
+    #[test]
+    fn retry_plan_rejects_mixed_configs_across_crashed_cells() {
+        let dir = TestDir::new("mixed-configs");
+        let first_context = "pre_risk_contexts/first-100.json";
+        let second_context = "pre_risk_contexts/second-200.json";
+        let first_log = "log_tails/first.log";
+        let second_log = "log_tails/second.log";
+        write_manifest(
+            dir.path(),
+            &[first_context, second_context],
+            &[],
+            &[],
+            &[first_log, second_log],
+            &[first_log, second_log],
+        );
+        let crashes = vec![
+            CrashedScale {
+                workload: "first".to_owned(),
+                rows: 100,
+                error: "reset".to_owned(),
+                repro_command: None,
+                plan_snippet_artifact: None,
+                correctness_diff_artifact: None,
+                log_tail_artifacts: vec![first_log.to_owned()],
+            },
+            CrashedScale {
+                workload: "second".to_owned(),
+                rows: 200,
+                error: "reset".to_owned(),
+                repro_command: None,
+                plan_snippet_artifact: None,
+                correctness_diff_artifact: None,
+                log_tail_artifacts: vec![second_log.to_owned()],
+            },
+        ];
+        fs::write(
+            dir.path().join(CRASHES_JSON),
+            serde_json::to_string(&crashes).expect("crashes"),
+        )
+        .expect("write crashes");
+        for (path, workload, rows, iterations) in [
+            (first_context, "first", 100, 3),
+            (second_context, "second", 200, 4),
+        ] {
+            fs::write(
+                dir.path().join(path),
+                json!({
+                    "workload": workload,
+                    "rows": rows,
+                    "seed": 42,
+                    "iterations": iterations,
+                    "warmup": 1,
+                    "timing_mode": "both",
+                    "cache_mode": "cold",
+                    "realistic_gucs": false,
+                    "skip_guc_verify": false,
+                    "capture_plans": true,
+                    "accel_query_sql": "SELECT 1",
+                    "baseline_query_sql": "SELECT 1"
+                })
+                .to_string(),
+            )
+            .expect("write context");
+        }
+        let error = load_retry_plan(dir.path()).expect_err("mixed configs");
+        assert!(error.to_string().contains("mixed benchmark configs"));
+        assert!(error.to_string().contains("second @ 200 rows"));
+    }
+
+    #[test]
+    fn optional_crash_artifacts_must_exist_and_be_in_manifest() {
+        let dir = TestDir::new("optional-linked");
+        let crash = CrashedScale {
+            workload: "linked".to_owned(),
+            rows: 100,
+            error: "reset".to_owned(),
+            repro_command: None,
+            plan_snippet_artifact: Some("plans/linked.txt".to_owned()),
+            correctness_diff_artifact: Some("correctness/linked.json".to_owned()),
+            log_tail_artifacts: vec!["logs/linked.txt".to_owned()],
+        };
+        for path in [
+            "plans/linked.txt",
+            "correctness/linked.json",
+            "logs/linked.txt",
+        ] {
+            write_artifact(dir.path(), path);
+        }
+        let inventory = ResumeArtifactInventory {
+            completed: Vec::new(),
+            correctness: vec!["correctness/linked.json".to_owned()],
+            pre_risk: Vec::new(),
+            plan: vec!["plans/linked.txt".to_owned()],
+            crash: vec!["logs/linked.txt".to_owned()],
+            log: vec!["logs/linked.txt".to_owned()],
+            provenance: Vec::new(),
+            failure: Vec::new(),
+        };
+        validate_crash_artifacts(dir.path(), &inventory, &crash)
+            .expect("all optional linked artifacts should validate");
+    }
+
     fn write_manifest(
         root: &Path,
         pre_risk: &[&str],

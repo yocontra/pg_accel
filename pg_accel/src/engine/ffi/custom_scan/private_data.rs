@@ -1131,6 +1131,484 @@ mod typed_private_tests {
         assert!(!proof.has_device_selection);
         assert!(proof.has_device_projection);
     }
+
+    fn valid_frame(method: PlanExecMethod) -> Vec<i32> {
+        valid_plan_frames()
+            .into_iter()
+            .find_map(|(candidate, words)| (candidate == method).then_some(words))
+            .expect("method has a canonical test frame")
+    }
+
+    fn reseal_len(words: &mut [i32]) {
+        let length_index = words.len() - 2;
+        words[length_index] = words.len() as i32;
+    }
+
+    fn remove_payload_word(words: &mut Vec<i32>, index: usize) {
+        words.remove(index);
+        reseal_len(words);
+    }
+
+    fn insert_before_proof(words: &mut Vec<i32>, value: i32) {
+        let proof_start = words.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
+        words.insert(proof_start, value);
+        reseal_len(words);
+    }
+
+    #[test]
+    fn execution_method_and_strategy_contracts_are_exhaustive() {
+        let method_cases = [
+            (GpuStrategy::Scan, Some(PlanExecMethod::Scan)),
+            (GpuStrategy::Join, Some(PlanExecMethod::Join)),
+            (GpuStrategy::Agg, Some(PlanExecMethod::Agg)),
+            (GpuStrategy::Window, Some(PlanExecMethod::Window)),
+            (
+                GpuStrategy::FunctionScan,
+                Some(PlanExecMethod::FunctionScan),
+            ),
+            (
+                GpuStrategy::SrfTargetList,
+                Some(PlanExecMethod::SrfTargetList),
+            ),
+            (GpuStrategy::Raster, Some(PlanExecMethod::Raster)),
+            (GpuStrategy::Sort, None),
+            (GpuStrategy::PreAgg, None),
+        ];
+        for (strategy, method) in method_cases {
+            assert_eq!(PlanExecMethod::for_strategy(strategy), method);
+        }
+        for raw in 1..=7 {
+            assert_eq!(
+                PlanExecMethod::from_i32(raw).map(|method| method as i32),
+                Some(raw)
+            );
+        }
+        assert_eq!(PlanExecMethod::from_i32(0), None);
+        assert_eq!(PlanExecMethod::from_i32(8), None);
+
+        let accel_cases = [
+            AccelStrategy::GpuSpatial,
+            AccelStrategy::GpuRaster,
+            AccelStrategy::GpuH3,
+            AccelStrategy::GpuSort,
+            AccelStrategy::GpuReduce,
+            AccelStrategy::GpuExpr,
+            AccelStrategy::GpuHashJoin,
+            AccelStrategy::GpuWindow,
+            AccelStrategy::GpuNestedLoopIneq,
+        ];
+        for (index, accel) in accel_cases.into_iter().enumerate() {
+            assert_eq!(decode_accel_strategy(index as i32 + 1), Ok(accel));
+        }
+
+        let valid_pairs = [
+            (GpuStrategy::Scan, AccelStrategy::GpuSpatial),
+            (GpuStrategy::Scan, AccelStrategy::GpuRaster),
+            (GpuStrategy::Scan, AccelStrategy::GpuH3),
+            (GpuStrategy::Scan, AccelStrategy::GpuReduce),
+            (GpuStrategy::Scan, AccelStrategy::GpuExpr),
+            (GpuStrategy::Join, AccelStrategy::GpuHashJoin),
+            (GpuStrategy::Join, AccelStrategy::GpuNestedLoopIneq),
+            (GpuStrategy::Agg, AccelStrategy::GpuReduce),
+            (GpuStrategy::Window, AccelStrategy::GpuWindow),
+            (GpuStrategy::FunctionScan, AccelStrategy::GpuSpatial),
+            (GpuStrategy::FunctionScan, AccelStrategy::GpuRaster),
+            (GpuStrategy::FunctionScan, AccelStrategy::GpuH3),
+            (GpuStrategy::SrfTargetList, AccelStrategy::GpuSpatial),
+            (GpuStrategy::SrfTargetList, AccelStrategy::GpuRaster),
+            (GpuStrategy::SrfTargetList, AccelStrategy::GpuH3),
+            (GpuStrategy::Raster, AccelStrategy::GpuRaster),
+        ];
+        for (strategy, accel) in valid_pairs {
+            assert_eq!(validate_strategy_accel(strategy, accel), Ok(()));
+        }
+        for strategy in [GpuStrategy::Sort, GpuStrategy::PreAgg] {
+            assert_eq!(
+                validate_strategy_accel(strategy, AccelStrategy::GpuSort),
+                Err(DecodeError::StrategyAccelMismatch {
+                    strategy,
+                    accel: AccelStrategy::GpuSort,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn functionscan_payload_rejects_invalid_identity_shape_counts_and_types() {
+        let base = valid_frame(PlanExecMethod::FunctionScan);
+        let cases = [
+            (6, 0, "FunctionScan sentinel"),
+            (7, 0, "FunctionScan function OID"),
+            (8, 99, "FunctionScan output shape"),
+            (9, 1, "FunctionScan field count"),
+            (10, -1, "FunctionScan argument count"),
+            (13, 0, "FunctionScan argument type OID"),
+        ];
+        for (index, raw, field) in cases {
+            let mut words = base.clone();
+            words[index] = raw;
+            assert!(matches!(
+                validate_plan_wire_slice(&words, PlanExecMethod::FunctionScan),
+                Err(DecodeError::InvalidValue { field: actual, .. }) if actual == field
+            ));
+        }
+
+        let mut record_without_fields = base.clone();
+        record_without_fields[8] = OutputShapeDisc::Record as i32;
+        assert!(matches!(
+            validate_plan_wire_slice(&record_without_fields, PlanExecMethod::FunctionScan),
+            Err(DecodeError::InvalidValue {
+                field: "FunctionScan field count",
+                ..
+            })
+        ));
+
+        let mut too_many = base.clone();
+        too_many[10] = MAX_FUNCTION_ARGS as i32 + 1;
+        assert!(matches!(
+            validate_plan_wire_slice(&too_many, PlanExecMethod::FunctionScan),
+            Err(DecodeError::LimitExceeded {
+                field: "FunctionScan argument count",
+                ..
+            })
+        ));
+
+        let mut truncated = base;
+        truncated[10] = 2;
+        assert!(matches!(
+            validate_plan_wire_slice(&truncated, PlanExecMethod::FunctionScan),
+            Err(DecodeError::Truncated {
+                field: "FunctionScan argument count",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn srf_payload_rejects_invalid_shape_positions_passthrough_and_qual_args() {
+        let base = valid_frame(PlanExecMethod::SrfTargetList);
+        let cases = [
+            (6, 0, "SRF target-list sentinel"),
+            (7, 0, "SRF function OID"),
+            (8, 99, "SRF output shape"),
+            (9, 1, "SRF field count"),
+            (10, 0, "SRF argument attno"),
+            (11, -1, "SRF target-list position"),
+            (13, 0, "SRF passthrough attno"),
+            (14, 1, "SRF passthrough attno"),
+            (18, 0, "SRF argument type OID"),
+        ];
+        for (index, raw, field) in cases {
+            let mut words = base.clone();
+            words[index] = raw;
+            assert!(matches!(
+                validate_plan_wire_slice(&words, PlanExecMethod::SrfTargetList),
+                Err(DecodeError::InvalidValue { field: actual, .. }) if actual == field
+            ));
+        }
+
+        let mut empty_passthrough = base.clone();
+        empty_passthrough[12] = 0;
+        assert!(matches!(
+            validate_plan_wire_slice(&empty_passthrough, PlanExecMethod::SrfTargetList),
+            Err(DecodeError::InvalidValue {
+                field: "SRF target-list position",
+                ..
+            })
+        ));
+
+        let mut position_out_of_range = base.clone();
+        position_out_of_range[11] = 2;
+        assert!(matches!(
+            validate_plan_wire_slice(&position_out_of_range, PlanExecMethod::SrfTargetList),
+            Err(DecodeError::InvalidValue {
+                field: "SRF target-list position",
+                ..
+            })
+        ));
+
+        let mut too_many_passthrough = base.clone();
+        too_many_passthrough[12] = MAX_TUPLE_COLUMNS as i32 + 1;
+        assert!(matches!(
+            validate_plan_wire_slice(&too_many_passthrough, PlanExecMethod::SrfTargetList),
+            Err(DecodeError::LimitExceeded {
+                field: "SRF passthrough count",
+                ..
+            })
+        ));
+
+        let mut negative_qual_count = base.clone();
+        negative_qual_count[15] = -1;
+        assert!(matches!(
+            validate_plan_wire_slice(&negative_qual_count, PlanExecMethod::SrfTargetList),
+            Err(DecodeError::InvalidValue {
+                field: "SRF constant argument count",
+                ..
+            })
+        ));
+
+        let mut too_many_qual_args = base;
+        too_many_qual_args[15] = MAX_FUNCTION_ARGS as i32 + 1;
+        assert!(matches!(
+            validate_plan_wire_slice(&too_many_qual_args, PlanExecMethod::SrfTargetList),
+            Err(DecodeError::LimitExceeded {
+                field: "SRF constant argument count",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn window_payload_rejects_invalid_count_function_attnos_type_flag_and_relation() {
+        let base = valid_frame(PlanExecMethod::Window);
+        let cases = [
+            (6, 0, "window spec count"),
+            (7, 99, "window function"),
+            (8, -1, "window attno"),
+            (9, -1, "window attno"),
+            (10, -1, "window attno"),
+            (13, 0, "window result type OID"),
+            (14, 2, "window uses-fp64 flag"),
+            (15, -1, "window scan relid"),
+        ];
+        for (index, raw, field) in cases {
+            let mut words = base.clone();
+            words[index] = raw;
+            assert!(matches!(
+                validate_plan_wire_slice(&words, PlanExecMethod::Window),
+                Err(DecodeError::InvalidValue { field: actual, .. }) if actual == field
+            ));
+        }
+
+        let mut too_many = base.clone();
+        too_many[6] = MAX_WINDOW_SPECS as i32 + 1;
+        assert!(matches!(
+            validate_plan_wire_slice(&too_many, PlanExecMethod::Window),
+            Err(DecodeError::LimitExceeded {
+                field: "window spec count",
+                ..
+            })
+        ));
+
+        let mut truncated = base;
+        truncated[6] = 2;
+        assert!(matches!(
+            validate_plan_wire_slice(&truncated, PlanExecMethod::Window),
+            Err(DecodeError::Truncated {
+                field: "window spec count",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn join_payloads_reject_wrong_lengths_flags_keys_and_nlj_contracts() {
+        let hash = valid_frame(PlanExecMethod::Join);
+        for (index, raw) in [(4, 0), (6, 0), (7, 3)] {
+            let mut words = hash.clone();
+            words[index] = raw;
+            assert!(matches!(
+                validate_plan_wire_slice(&words, PlanExecMethod::Join),
+                Err(DecodeError::InvalidValue {
+                    field: "hash join payload",
+                    ..
+                })
+            ));
+        }
+        let mut bad_flag = hash.clone();
+        bad_flag[8] = 2;
+        assert!(matches!(
+            validate_plan_wire_slice(&bad_flag, PlanExecMethod::Join),
+            Err(DecodeError::InvalidValue {
+                field: "hash count-only flag",
+                ..
+            })
+        ));
+        let mut short_hash = hash;
+        remove_payload_word(&mut short_hash, 8);
+        assert_eq!(
+            validate_plan_wire_slice(&short_hash, PlanExecMethod::Join),
+            Err(DecodeError::LengthMismatch {
+                declared: 3,
+                actual: 2,
+            })
+        );
+
+        let mut nlj_header = header(GpuStrategy::Join, AccelStrategy::GpuNestedLoopIneq);
+        nlj_header[4] = 1;
+        nlj_header.extend([2, 0, 0, 1, 2]);
+        let nlj = frame(nlj_header, GpuStrategy::Join, PlanExecMethod::Join);
+        validate_plan_wire_slice(&nlj, PlanExecMethod::Join).expect("canonical NLJ payload");
+        for (index, raw) in [(4, 0), (6, 1), (7, 3), (8, 1), (9, 0), (10, 0)] {
+            let mut words = nlj.clone();
+            words[index] = raw;
+            assert!(matches!(
+                validate_plan_wire_slice(&words, PlanExecMethod::Join),
+                Err(DecodeError::InvalidValue {
+                    field: "NLJ payload",
+                    ..
+                })
+            ));
+        }
+        let mut long_nlj = nlj;
+        insert_before_proof(&mut long_nlj, 9);
+        assert_eq!(
+            validate_plan_wire_slice(&long_nlj, PlanExecMethod::Join),
+            Err(DecodeError::LengthMismatch {
+                declared: 5,
+                actual: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn resident_proof_decoder_rejects_each_corrupt_wire_field() {
+        let base = valid_frame(PlanExecMethod::Scan);
+        let proof = base.len() - PLAN_WIRE_FOOTER_INTS - RESIDENT_PROOF_TRAILER_INTS;
+        let invalid_proof_fields = [
+            (proof, 0, "sentinel"),
+            (proof + 1, 99, "version"),
+            (proof + 2, 99, "operator class"),
+            (proof + 3, i32::MIN, "stage mask"),
+            (proof + 4, 99, "materialization"),
+            (proof + 8, 99, "CPU boundary"),
+        ];
+        for (index, raw, field) in invalid_proof_fields {
+            let mut words = base.clone();
+            words[index] = raw;
+            assert!(matches!(
+                validate_plan_wire_slice(&words, PlanExecMethod::Scan),
+                Err(DecodeError::InvalidResidentProof { field: actual }) if actual == field
+            ));
+        }
+        for (index, field) in [
+            (proof + 6, "resident proof selection"),
+            (proof + 7, "resident proof projection"),
+        ] {
+            let mut words = base.clone();
+            words[index] = 2;
+            assert!(matches!(
+                validate_plan_wire_slice(&words, PlanExecMethod::Scan),
+                Err(DecodeError::InvalidValue { field: actual, .. }) if actual == field
+            ));
+        }
+
+        let mut noncanonical_host = base;
+        noncanonical_host[proof + 2] = ResidentOperatorClass::ResidentSource as i32;
+        assert_eq!(
+            validate_plan_wire_slice(&noncanonical_host, PlanExecMethod::Scan),
+            Err(DecodeError::InvalidResidentProof {
+                field: "canonical form",
+            })
+        );
+    }
+
+    #[test]
+    fn aggregate_and_raster_payloads_preserve_nested_codec_errors() {
+        let aggregate = generic_agg_frame();
+        let projection_sentinel = aggregate
+            .iter()
+            .position(|word| *word == AGG_OUTPUT_PROJECTION_SENTINEL)
+            .expect("projection sentinel");
+
+        let mut bad_spec_sentinel = aggregate.clone();
+        bad_spec_sentinel[PLAN_PAYLOAD_START] = 0;
+        assert!(matches!(
+            validate_plan_wire_slice(&bad_spec_sentinel, PlanExecMethod::Agg),
+            Err(DecodeError::InvalidValue {
+                field: "aggregate query spec sentinel",
+                ..
+            })
+        ));
+
+        let mut bad_spec_magic = aggregate.clone();
+        bad_spec_magic[PLAN_PAYLOAD_START + 1] = 0;
+        assert!(matches!(
+            validate_plan_wire_slice(&bad_spec_magic, PlanExecMethod::Agg),
+            Err(DecodeError::InvalidAggQuerySpec(
+                SpecCodecError::InvalidMagic(0)
+            ))
+        ));
+
+        let mut bad_projection_sentinel = aggregate.clone();
+        bad_projection_sentinel[projection_sentinel] = 0;
+        assert!(matches!(
+            validate_plan_wire_slice(&bad_projection_sentinel, PlanExecMethod::Agg),
+            Err(DecodeError::InvalidValue {
+                field: "aggregate output projection sentinel",
+                ..
+            })
+        ));
+
+        let projection_length = projection_sentinel + 3;
+        let mut negative_projection_length = aggregate.clone();
+        negative_projection_length[projection_length] = -1;
+        assert!(matches!(
+            validate_plan_wire_slice(&negative_projection_length, PlanExecMethod::Agg),
+            Err(DecodeError::InvalidValue {
+                field: "aggregate output projection length",
+                ..
+            })
+        ));
+
+        let mut huge_projection = aggregate.clone();
+        huge_projection[projection_length] = AGG_OUTPUT_PROJECTION_MAX_WORDS as i32 + 1;
+        assert!(matches!(
+            validate_plan_wire_slice(&huge_projection, PlanExecMethod::Agg),
+            Err(DecodeError::LimitExceeded {
+                field: "aggregate output projection length",
+                ..
+            })
+        ));
+
+        let mut bad_projection_magic = aggregate.clone();
+        bad_projection_magic[projection_sentinel + 1] = 0;
+        assert!(matches!(
+            validate_plan_wire_slice(&bad_projection_magic, PlanExecMethod::Agg),
+            Err(DecodeError::InvalidAggOutputProjection(
+                ProjectionCodecError::InvalidMagic(0)
+            ))
+        ));
+
+        let mut aggregate_trailing = aggregate;
+        insert_before_proof(&mut aggregate_trailing, 9);
+        assert!(matches!(
+            validate_plan_wire_slice(&aggregate_trailing, PlanExecMethod::Agg),
+            Err(DecodeError::TrailingPayload { .. })
+        ));
+
+        let mut raster = raster_frame();
+        raster[PLAN_PAYLOAD_START] = 0;
+        assert!(matches!(
+            validate_plan_wire_slice(&raster, PlanExecMethod::Raster),
+            Err(DecodeError::InvalidRasterQuerySpec(
+                RasterSpecCodecError::InvalidMagic(0)
+            ))
+        ));
+    }
+
+    #[test]
+    fn decode_error_wrappers_and_diagnostics_retain_source_variant() {
+        let spec = SpecCodecError::InvalidMagic(7);
+        let projection = ProjectionCodecError::InvalidMagic(8);
+        let raster = RasterSpecCodecError::InvalidMagic(9);
+        assert_eq!(
+            DecodeError::from(spec.clone()),
+            DecodeError::InvalidAggQuerySpec(spec)
+        );
+        assert_eq!(
+            DecodeError::from(projection.clone()),
+            DecodeError::InvalidAggOutputProjection(projection)
+        );
+        assert_eq!(
+            DecodeError::from(raster.clone()),
+            DecodeError::InvalidRasterQuerySpec(raster)
+        );
+
+        let error = DecodeError::InvalidExecutionMethod { raw: 99 };
+        assert_eq!(error.to_string(), "InvalidExecutionMethod { raw: 99 }");
+        assert!(std::error::Error::source(&error).is_none());
+    }
 }
 
 /// Deserialized acceleration metadata from `custom_private`.

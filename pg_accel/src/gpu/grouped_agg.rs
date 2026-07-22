@@ -1999,4 +1999,79 @@ mod tests {
         assert!(finish_successful_call(&mut workspace, Some(&storage), Some(&raw)).is_err());
         assert!(workspace.is_poisoned());
     }
+
+    #[test]
+    fn descriptor_shell_rejects_each_noncanonical_control_class() {
+        let assert_detail = |desc: &abi::PgaccelGroupedAggDesc, expected| {
+            let error = validate_descriptor_shell(desc).expect_err("descriptor must be rejected");
+            assert_eq!(error.domain, GpuErrorDomain::Descriptor);
+            assert_eq!(error.status, GpuStatusDetail::InvalidDescriptor);
+            assert_eq!(error.detail, Some(expected));
+        };
+
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.abi_version += 1;
+        assert_detail(&desc, "grouped descriptor ABI version/size mismatch");
+
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.measure_count = 0;
+        assert_detail(&desc, "grouped descriptor count/capacity is invalid");
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.group_capacity = 0;
+        assert_detail(&desc, "grouped descriptor count/capacity is invalid");
+
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.grouping_mode = 99;
+        assert_detail(&desc, "grouped descriptor mode is invalid");
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.output_mode = 99;
+        assert_detail(&desc, "grouped descriptor mode is invalid");
+
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.execution_flags = 1;
+        assert_detail(
+            &desc,
+            "resolved plan must use canonical execution/workspace fields",
+        );
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.scratch = std::ptr::NonNull::<u8>::dangling().as_ptr().cast();
+        assert_detail(
+            &desc,
+            "resolved plan must use canonical execution/workspace fields",
+        );
+
+        let mut desc = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        desc.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+        assert_detail(&desc, "HASH grouping requires COMPACT output");
+    }
+
+    #[test]
+    fn value_width_offsets_and_plan_accessors_preserve_exact_shape() {
+        for (tag, width) in [
+            (PgaccelValTag::Bool, 1),
+            (PgaccelValTag::Int32, 4),
+            (PgaccelValTag::Float32, 4),
+            (PgaccelValTag::Date, 4),
+            (PgaccelValTag::Int64, 8),
+            (PgaccelValTag::Float64, 8),
+            (PgaccelValTag::Timestamp, 8),
+        ] {
+            assert_eq!(value_width(tag), Ok(width));
+        }
+        let null_error = value_width(PgaccelValTag::Null).expect_err("NULL has no active width");
+        assert_eq!(null_error.status, GpuStatusDetail::InvalidDescriptor);
+        assert!(checked_byte_offset(usize::MAX, 2).is_err());
+        assert!(checked_byte_offset(isize::MAX as usize + 1, 1).is_err());
+
+        let allocation = allocation_error("test allocation");
+        assert_eq!(allocation.domain, GpuErrorDomain::Memory);
+        assert_eq!(allocation.status, GpuStatusDetail::OutOfMemory);
+        assert_eq!(allocation.detail, Some("test allocation"));
+
+        let plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        assert_eq!(plan.row_count(), 0);
+        assert_eq!(plan.group_capacity(), 4);
+        assert_eq!(plan.descriptor().group_capacity, 4);
+        assert_eq!(plan.chunk().desc.group_capacity, 4);
+    }
 }

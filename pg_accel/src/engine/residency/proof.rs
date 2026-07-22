@@ -663,4 +663,390 @@ mod tests {
             PgaccelMemSpace::Device
         );
     }
+
+    #[test]
+    fn resident_stage_wire_values_bits_labels_and_masks_are_exhaustive() {
+        let expected_labels = [
+            "scan",
+            "expression",
+            "aggregate",
+            "grouped_aggregate",
+            "join",
+            "preagg",
+            "sort",
+            "window",
+            "function_scan",
+            "srf_target_list",
+            "h3",
+            "postgis",
+            "raster",
+            "variable_output",
+            "final_materialization",
+        ];
+
+        let mut expected_mask = 0u32;
+        for (index, stage) in ResidentOperatorStage::ALL.iter().copied().enumerate() {
+            assert_eq!(stage.to_i32(), index as c_int);
+            assert_eq!(ResidentOperatorStage::from_i32(index as c_int), Some(stage));
+            assert_eq!(stage.bit(), 1u32 << index);
+            assert_eq!(stage.label(), expected_labels[index]);
+            expected_mask |= stage.bit();
+        }
+        assert_eq!(ResidentOperatorStage::from_i32(-1), None);
+        assert_eq!(ResidentOperatorStage::from_i32(15), None);
+        assert_eq!(stage_mask(&ResidentOperatorStage::ALL), expected_mask);
+        assert_eq!(stages_from_mask(expected_mask), ResidentOperatorStage::ALL);
+        assert_eq!(stages_from_mask(1u32 << 31), Vec::new());
+        assert_eq!(
+            stages_from_mask(
+                ResidentOperatorStage::Scan.bit() | ResidentOperatorStage::Raster.bit()
+            ),
+            vec![ResidentOperatorStage::Scan, ResidentOperatorStage::Raster]
+        );
+    }
+
+    #[test]
+    fn operator_class_wire_values_labels_and_specification_are_exhaustive() {
+        let cases = [
+            (ResidentOperatorClass::Unspecified, "unspecified", false),
+            (
+                ResidentOperatorClass::ResidentSource,
+                "resident_source",
+                true,
+            ),
+            (
+                ResidentOperatorClass::ResidentExpression,
+                "resident_expression",
+                true,
+            ),
+            (
+                ResidentOperatorClass::ResidentGroupAgg,
+                "resident_groupagg",
+                true,
+            ),
+            (ResidentOperatorClass::ResidentJoin, "resident_join", true),
+            (
+                ResidentOperatorClass::ResidentPreAgg,
+                "resident_preagg",
+                true,
+            ),
+            (
+                ResidentOperatorClass::ResidentSortTopK,
+                "resident_sort_topk",
+                true,
+            ),
+            (
+                ResidentOperatorClass::ResidentWindow,
+                "resident_window",
+                true,
+            ),
+            (
+                ResidentOperatorClass::ResidentVariableOutput,
+                "resident_variable_output",
+                true,
+            ),
+            (
+                ResidentOperatorClass::ResidentFinalMaterialization,
+                "resident_final_materialization",
+                true,
+            ),
+        ];
+
+        for (index, (class, label, specified)) in cases.into_iter().enumerate() {
+            assert_eq!(class.to_i32(), index as c_int);
+            assert_eq!(ResidentOperatorClass::from_i32(index as c_int), Some(class));
+            assert_eq!(class.label(), label);
+            assert_eq!(class.is_specified(), specified);
+        }
+        assert_eq!(ResidentOperatorClass::from_i32(-1), None);
+        assert_eq!(ResidentOperatorClass::from_i32(10), None);
+    }
+
+    #[test]
+    fn cpu_boundaries_and_materialization_kinds_roundtrip_exhaustively() {
+        let boundaries = [
+            (CpuBoundaryReason::None, "none: no CPU boundary", false),
+            (
+                CpuBoundaryReason::HostInputStaging,
+                "host_input_staging: PostgreSQL heap/slot rows were read before GPU handoff",
+                true,
+            ),
+            (
+                CpuBoundaryReason::ExecProcNodeInput,
+                "execprocnode_input: a PostgreSQL child executor produced intermediate rows",
+                true,
+            ),
+            (
+                CpuBoundaryReason::HostHashState,
+                "host_hash_state: intermediate grouping/join state lives in host memory",
+                true,
+            ),
+            (
+                CpuBoundaryReason::HostVariableOutput,
+                "host_variable_output: variable-cardinality output is buffered on the host",
+                true,
+            ),
+            (
+                CpuBoundaryReason::HostTupleReconstruction,
+                "host_tuple_reconstruction: PostgreSQL tuples are reconstructed before a downstream GPU consumer",
+                true,
+            ),
+            (
+                CpuBoundaryReason::FinalOutputMaterialization,
+                "final_output_materialization: only bounded final output is materialized for PostgreSQL",
+                false,
+            ),
+        ];
+
+        for (index, (boundary, label, blocks)) in boundaries.into_iter().enumerate() {
+            assert_eq!(boundary.to_i32(), index as c_int);
+            assert_eq!(CpuBoundaryReason::from_i32(index as c_int), Some(boundary));
+            assert_eq!(boundary.label(), label);
+            assert_eq!(boundary.blocks_resident_pipeline(), blocks);
+        }
+        assert_eq!(CpuBoundaryReason::from_i32(-1), None);
+        assert_eq!(CpuBoundaryReason::from_i32(7), None);
+
+        let materializations = [
+            (
+                ResidentMaterializationKind::None,
+                MaterializationBoundary::None,
+            ),
+            (
+                ResidentMaterializationKind::FinalOutput,
+                MaterializationBoundary::FinalOutput,
+            ),
+            (
+                ResidentMaterializationKind::HostIntermediate,
+                MaterializationBoundary::HostIntermediate(CpuBoundaryReason::HostHashState),
+            ),
+        ];
+        for (index, (kind, boundary)) in materializations.into_iter().enumerate() {
+            assert_eq!(kind.to_i32(), index as c_int);
+            assert_eq!(
+                ResidentMaterializationKind::from_i32(index as c_int),
+                Some(kind)
+            );
+            assert_eq!(
+                kind.to_materialization(CpuBoundaryReason::HostHashState),
+                boundary
+            );
+            assert_eq!(boundary.kind(), kind);
+        }
+        assert_eq!(ResidentMaterializationKind::from_i32(-1), None);
+        assert_eq!(ResidentMaterializationKind::from_i32(3), None);
+
+        assert_eq!(
+            MaterializationBoundary::None.cpu_boundary(),
+            CpuBoundaryReason::None
+        );
+        assert!(MaterializationBoundary::None.allows_resident_pipeline());
+        assert_eq!(
+            MaterializationBoundary::FinalOutput.cpu_boundary(),
+            CpuBoundaryReason::None
+        );
+        assert!(MaterializationBoundary::FinalOutput.allows_resident_pipeline());
+        let host = MaterializationBoundary::HostIntermediate(CpuBoundaryReason::ExecProcNodeInput);
+        assert_eq!(host.cpu_boundary(), CpuBoundaryReason::ExecProcNodeInput);
+        assert!(!host.allows_resident_pipeline());
+    }
+
+    #[test]
+    fn device_buffer_descriptor_validates_pointer_and_residency_without_dereference() {
+        let empty = DeviceBufferRef::new(
+            std::ptr::null(),
+            0,
+            None,
+            BatchResidency::HostColumnar,
+            ResidentOperatorStage::Scan,
+        );
+        assert!(empty.is_valid());
+        assert!(!empty.is_device_resident());
+        assert_eq!(empty.mem_space(), PgaccelMemSpace::Host);
+
+        let invalid = DeviceBufferRef::new(
+            std::ptr::null(),
+            8,
+            Some(PgaccelValTag::Int64),
+            BatchResidency::SharedUsmHostWritable,
+            ResidentOperatorStage::Expression,
+        );
+        assert!(!invalid.is_valid());
+        assert!(!invalid.is_device_resident());
+        assert_eq!(invalid.mem_space(), PgaccelMemSpace::SharedUsm);
+
+        let device = DeviceBufferRef::new(
+            std::ptr::dangling(),
+            8,
+            Some(PgaccelValTag::Int64),
+            BatchResidency::DeviceResident,
+            ResidentOperatorStage::Aggregate,
+        );
+        assert!(device.is_valid());
+        assert!(device.is_device_resident());
+        assert_eq!(device.mem_space(), PgaccelMemSpace::Device);
+    }
+
+    #[test]
+    fn pipeline_proofs_expose_canonical_host_and_device_evidence() {
+        let host = ResidentPipelineProof::host_staged(CpuBoundaryReason::HostInputStaging);
+        assert!(!host.gpu_resident_pipeline());
+        assert_eq!(host.operator_class(), ResidentOperatorClass::Unspecified);
+        assert!(host.stages().is_empty());
+        assert_eq!(
+            host.materialization(),
+            MaterializationBoundary::HostIntermediate(CpuBoundaryReason::HostInputStaging)
+        );
+        assert_eq!(host.device_columns(), 0);
+        assert!(!host.has_device_selection());
+        assert!(!host.has_device_projection());
+        assert_eq!(host.cpu_boundary(), CpuBoundaryReason::HostInputStaging);
+        assert_eq!(
+            host.boundary_label(),
+            CpuBoundaryReason::HostInputStaging.label()
+        );
+        assert_eq!(host.stage_mask(), 0);
+        assert_eq!(
+            host.snapshot(),
+            ResidentProofSnapshot::host_staged(CpuBoundaryReason::HostInputStaging)
+        );
+
+        let stages = vec![
+            ResidentOperatorStage::Scan,
+            ResidentOperatorStage::Expression,
+            ResidentOperatorStage::FinalMaterialization,
+        ];
+        let device = ResidentPipelineProof::device_resident(
+            ResidentOperatorClass::ResidentExpression,
+            stages.clone(),
+            MaterializationBoundary::FinalOutput,
+            3,
+            true,
+            true,
+        );
+        assert!(device.gpu_resident_pipeline());
+        assert_eq!(
+            device.operator_class(),
+            ResidentOperatorClass::ResidentExpression
+        );
+        assert_eq!(device.stages(), stages);
+        assert_eq!(
+            device.materialization(),
+            MaterializationBoundary::FinalOutput
+        );
+        assert_eq!(device.device_columns(), 3);
+        assert!(device.has_device_selection());
+        assert!(device.has_device_projection());
+        assert_eq!(device.cpu_boundary(), CpuBoundaryReason::None);
+        assert_eq!(device.boundary_label(), CpuBoundaryReason::None.label());
+
+        let snapshot = device.snapshot();
+        assert!(snapshot.gpu_resident_pipeline());
+        assert_eq!(snapshot.operator_class_label(), "resident_expression");
+        assert_eq!(snapshot.boundary_label(), "none: no CPU boundary");
+        assert_eq!(snapshot.to_proof().expect("snapshot proof"), device);
+    }
+
+    #[test]
+    fn snapshot_decode_distinguishes_every_missing_resident_requirement() {
+        let default = ResidentProofSnapshot::default();
+        assert_eq!(default, ResidentProofSnapshot::not_proven());
+        assert!(!default.gpu_resident_pipeline());
+        assert_eq!(
+            default.to_proof(),
+            Err(ResidentProofDecodeError::MissingOperatorClass)
+        );
+
+        let missing_stage = ResidentProofSnapshot {
+            operator_class: ResidentOperatorClass::ResidentSource,
+            ..default
+        };
+        assert_eq!(
+            missing_stage.to_proof(),
+            Err(ResidentProofDecodeError::MissingResidentStage)
+        );
+
+        let missing_columns = ResidentProofSnapshot {
+            stage_mask: ResidentOperatorStage::Scan.bit(),
+            ..missing_stage
+        };
+        assert_eq!(
+            missing_columns.to_proof(),
+            Err(ResidentProofDecodeError::MissingDeviceColumns)
+        );
+
+        let host = ResidentProofSnapshot::host_staged(CpuBoundaryReason::HostHashState);
+        assert!(!host.gpu_resident_pipeline());
+        assert_eq!(host.operator_class_label(), "unspecified");
+        assert_eq!(
+            host.boundary_label(),
+            CpuBoundaryReason::HostHashState.label()
+        );
+        assert_eq!(
+            host.to_proof().expect("host proof"),
+            ResidentPipelineProof::host_staged(CpuBoundaryReason::HostHashState)
+        );
+    }
+
+    #[test]
+    fn proof_constructors_reject_noncanonical_claims() {
+        assert!(
+            std::panic::catch_unwind(|| {
+                ResidentPipelineProof::host_staged(CpuBoundaryReason::None)
+            })
+            .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| {
+                ResidentProofSnapshot::host_staged(CpuBoundaryReason::FinalOutputMaterialization)
+            })
+            .is_err()
+        );
+
+        let valid_stage = vec![ResidentOperatorStage::Scan];
+        for invalid in [
+            std::panic::catch_unwind(|| {
+                ResidentPipelineProof::device_resident(
+                    ResidentOperatorClass::ResidentSource,
+                    Vec::new(),
+                    MaterializationBoundary::None,
+                    1,
+                    false,
+                    false,
+                )
+            }),
+            std::panic::catch_unwind(|| {
+                ResidentPipelineProof::device_resident(
+                    ResidentOperatorClass::ResidentSource,
+                    valid_stage.clone(),
+                    MaterializationBoundary::HostIntermediate(CpuBoundaryReason::HostInputStaging),
+                    1,
+                    false,
+                    false,
+                )
+            }),
+            std::panic::catch_unwind(|| {
+                ResidentPipelineProof::device_resident(
+                    ResidentOperatorClass::Unspecified,
+                    valid_stage.clone(),
+                    MaterializationBoundary::None,
+                    1,
+                    false,
+                    false,
+                )
+            }),
+            std::panic::catch_unwind(|| {
+                ResidentPipelineProof::device_resident(
+                    ResidentOperatorClass::ResidentSource,
+                    valid_stage.clone(),
+                    MaterializationBoundary::None,
+                    0,
+                    false,
+                    false,
+                )
+            }),
+        ] {
+            assert!(invalid.is_err());
+        }
+    }
 }

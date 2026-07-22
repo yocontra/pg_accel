@@ -2321,6 +2321,259 @@ fn qualifier_conjunct_bound_rejects_empty_and_oversized_lists() {
 }
 
 #[test]
+fn every_shape_decline_has_a_stable_machine_code_and_display_prefix() {
+    let cases = vec![
+        (ShapeDecline::NotSelect, "shape_not_select"),
+        (ShapeDecline::NoAggregate, "shape_no_aggregate"),
+        (ShapeDecline::WindowFunctions, "shape_window_functions"),
+        (ShapeDecline::TargetSetReturningFunction, "shape_target_srf"),
+        (ShapeDecline::Sublink, "shape_sublink"),
+        (ShapeDecline::RecursiveQuery, "shape_recursive_query"),
+        (ShapeDecline::ModifyingCte, "shape_modifying_cte"),
+        (ShapeDecline::RowSecurity, "shape_row_security"),
+        (ShapeDecline::Distinct, "shape_distinct"),
+        (ShapeDecline::GroupingSets, "shape_grouping_sets"),
+        (ShapeDecline::GroupDistinct, "shape_group_distinct"),
+        (ShapeDecline::Having, "shape_having"),
+        (ShapeDecline::SetOperations, "shape_set_operations"),
+        (ShapeDecline::RowMarks, "shape_row_marks"),
+        (
+            ShapeDecline::UnsupportedRangeTableEntry { varno: 2 },
+            "shape_unsupported_rte",
+        ),
+        (ShapeDecline::TableSample, "shape_table_sample"),
+        (ShapeDecline::UnsupportedOuterJoin, "shape_outer_join"),
+        (
+            ShapeDecline::UnsupportedPredicate,
+            "shape_unsupported_predicate",
+        ),
+        (
+            ShapeDecline::SpatialFilterOutsideFactRelation,
+            "shape_spatial_filter_outside_fact",
+        ),
+        (
+            ShapeDecline::SpatialWorkShapeUnproved,
+            "shape_spatial_work_shape_unproved",
+        ),
+        (
+            ShapeDecline::InvalidSpatialConstant,
+            "shape_invalid_spatial_constant",
+        ),
+        (
+            ShapeDecline::PostgisCatalog("catalog".to_owned()),
+            "shape_postgis_catalog",
+        ),
+        (
+            ShapeDecline::UnsupportedFilterType { type_oid: 1 },
+            "shape_unsupported_filter_type",
+        ),
+        (
+            ShapeDecline::UnsupportedAggregate { aggregate_oid: 2 },
+            "shape_unsupported_aggregate",
+        ),
+        (
+            ShapeDecline::NumericAccumulatorUnavailable { aggregate_oid: 3 },
+            "shape_numeric_accumulator_unavailable",
+        ),
+        (
+            ShapeDecline::NumericAccumulatorTypeUnavailable { type_oid: 4 },
+            "shape_numeric_accumulator_type_unavailable",
+        ),
+        (
+            ShapeDecline::UnsupportedMeasureType { type_oid: 5 },
+            "shape_unsupported_measure_type",
+        ),
+        (
+            ShapeDecline::UnsupportedJoinKeyType { type_oid: 6 },
+            "shape_unsupported_join_key_type",
+        ),
+        (
+            ShapeDecline::NondeterministicKeyCollation { collation_oid: 7 },
+            "shape_nondeterministic_key_collation",
+        ),
+        (
+            ShapeDecline::InvalidKeyCollation {
+                type_oid: 8,
+                collation_oid: 9,
+            },
+            "shape_invalid_key_collation",
+        ),
+        (
+            ShapeDecline::UnsupportedGroupKeyType { type_oid: 10 },
+            "shape_unsupported_group_key_type",
+        ),
+        (
+            ShapeDecline::IntegerExpressionOverflowSemantics,
+            "shape_integer_expression_overflow_semantics",
+        ),
+        (
+            ShapeDecline::FloatingExpressionSemantics,
+            "shape_floating_expression_semantics",
+        ),
+        (
+            ShapeDecline::FloatingAccumulatorSemantics,
+            "shape_floating_accumulator_semantics",
+        ),
+        (
+            ShapeDecline::UnsupportedAggregateInput {
+                kind: AggregateKind::Sum,
+                type_oid: 11,
+            },
+            "shape_unsupported_aggregate_input",
+        ),
+        (
+            ShapeDecline::ProjectionSourceTypeMismatch {
+                expected_type_oid: 12,
+                actual_type_oid: 13,
+            },
+            "shape_projection_source_type",
+        ),
+        (
+            ShapeDecline::AggregateResultTypeMismatch {
+                source_type_oid: 14,
+                kind: AggregateKind::Min,
+                result_type_oid: 15,
+            },
+            "shape_aggregate_result_type",
+        ),
+        (
+            ShapeDecline::UnsupportedBinaryMeasure,
+            "shape_unsupported_binary_measure",
+        ),
+        (
+            ShapeDecline::UnsupportedAggregateModifier,
+            "shape_aggregate_modifier",
+        ),
+        (
+            ShapeDecline::UnsupportedMeasureExpression,
+            "shape_measure_expression",
+        ),
+        (ShapeDecline::UnsupportedProjection, "shape_projection"),
+        (
+            ShapeDecline::UnprojectedGroupKey {
+                relation_oid: 16,
+                attno: 1,
+            },
+            "shape_unprojected_group_key",
+        ),
+        (
+            ShapeDecline::UnsupportedGroupExpression,
+            "shape_group_expression",
+        ),
+        (
+            ShapeDecline::UnsupportedColumn {
+                relation_oid: 17,
+                attno: 2,
+            },
+            "shape_unsupported_column",
+        ),
+        (
+            ShapeDecline::TooManyRelations {
+                actual: 3,
+                maximum: 2,
+            },
+            "shape_too_many_relations",
+        ),
+        (
+            ShapeDecline::TooManyGroupKeys {
+                actual: 3,
+                maximum: 2,
+            },
+            "shape_too_many_group_keys",
+        ),
+        (
+            ShapeDecline::TooManyDimensions {
+                actual: 3,
+                maximum: 2,
+            },
+            "shape_too_many_dimensions",
+        ),
+        (
+            ShapeDecline::TooManyMeasures {
+                actual: 3,
+                maximum: 2,
+            },
+            "shape_too_many_measures",
+        ),
+        (
+            ShapeDecline::SelfJoinUsesAmbiguousRelationOid { relation_oid: 18 },
+            "shape_self_join",
+        ),
+        (
+            ShapeDecline::DuplicatePlannerRelation { varno: 3 },
+            "shape_duplicate_varno",
+        ),
+        (
+            ShapeDecline::JoinKeyTypeMismatch {
+                left_type_oid: 19,
+                right_type_oid: 20,
+            },
+            "shape_join_key_type_mismatch",
+        ),
+        (
+            ShapeDecline::JoinKeyCollationMismatch {
+                left_collation_oid: 21,
+                right_collation_oid: 22,
+            },
+            "shape_join_key_collation_mismatch",
+        ),
+        (ShapeDecline::NonEqualityJoin, "shape_non_equality_join"),
+        (
+            ShapeDecline::CompositeJoinKeyUnsupported,
+            "shape_composite_join_key",
+        ),
+        (
+            ShapeDecline::DisconnectedJoinGraph,
+            "shape_disconnected_join_graph",
+        ),
+        (ShapeDecline::NonStarJoinGraph, "shape_non_star_join_graph"),
+        (
+            ShapeDecline::AmbiguousFactRelation,
+            "shape_ambiguous_fact_relation",
+        ),
+        (
+            ShapeDecline::GroupedByNonUniqueDimension {
+                relation_oid: 23,
+                attno: 4,
+            },
+            "shape_nonunique_dimension_group",
+        ),
+        (
+            ShapeDecline::MultipleFiltersPerRelation { relation_oid: 24 },
+            "shape_multi_filter_relation",
+        ),
+        (
+            ShapeDecline::InvalidFilterRange,
+            "shape_invalid_filter_range",
+        ),
+        (
+            ShapeDecline::InvalidProjectionReference {
+                aggregate_index: 25,
+            },
+            "shape_projection_reference",
+        ),
+        (
+            ShapeDecline::DescriptorArtifactsRequireResolution,
+            "shape_descriptor_artifacts_require_resolution",
+        ),
+        (
+            ShapeDecline::InvalidGroupKeyResolution,
+            "shape_invalid_group_key_resolution",
+        ),
+        (
+            ShapeDecline::InvalidSpec("spec".to_owned()),
+            "shape_invalid_spec",
+        ),
+        (ShapeDecline::Codec("codec".to_owned()), "shape_codec"),
+    ];
+
+    for (decline, expected_code) in cases {
+        assert_eq!(decline.code(), expected_code);
+        assert!(decline.to_string().starts_with(expected_code));
+    }
+}
+
+#[test]
 fn binary_measure_uses_frozen_neutral_expression() {
     let mut input = single_table_input();
     let lhs = column(1, 100, 2, u32::from(pg_sys::INT8OID));

@@ -383,3 +383,344 @@ fn field_specs_from_metadata(
         .map(|(type_oid, name)| FieldSpec::new(name, type_oid))
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(
+        name: &'static str,
+        strategy: AccelStrategy,
+        output_shape: OutputShape,
+        output_field_types: &[u32],
+        output_field_names: &[&'static str],
+    ) -> FunctionAccelEntry {
+        FunctionAccelEntry {
+            schema: "public",
+            name,
+            strategy,
+            output_shape,
+            output_field_types: output_field_types.to_vec(),
+            output_field_names: output_field_names.to_vec(),
+        }
+    }
+
+    #[test]
+    fn kernel_operations_cover_every_strategy_and_shape_family() {
+        let cases = [
+            (
+                entry(
+                    "st_contains",
+                    AccelStrategy::GpuSpatial,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::SpatialPredicate,
+            ),
+            (
+                entry(
+                    "st_area",
+                    AccelStrategy::GpuSpatial,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::SpatialMeasurement,
+            ),
+            (
+                entry(
+                    "st_distance",
+                    AccelStrategy::GpuSpatial,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::SpatialMeasurement,
+            ),
+            (
+                entry(
+                    "st_length",
+                    AccelStrategy::GpuSpatial,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::SpatialMeasurement,
+            ),
+            (
+                entry(
+                    "st_mapalgebra",
+                    AccelStrategy::GpuRaster,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::RasterScalar,
+            ),
+            (
+                entry(
+                    "st_mapalgebra_many",
+                    AccelStrategy::GpuRaster,
+                    OutputShape::VarLen,
+                    &[23],
+                    &["value"],
+                ),
+                KernelOp::RasterScalar,
+            ),
+            (
+                entry(
+                    "st_summarystats",
+                    AccelStrategy::GpuRaster,
+                    OutputShape::Record { field_count: 1 },
+                    &[20],
+                    &["count"],
+                ),
+                KernelOp::RasterSummaryStats,
+            ),
+            (
+                entry(
+                    "h3_get_resolution",
+                    AccelStrategy::GpuH3,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::H3Scalar,
+            ),
+            (
+                entry(
+                    "h3_record",
+                    AccelStrategy::GpuH3,
+                    OutputShape::Record { field_count: 1 },
+                    &[20],
+                    &["cell"],
+                ),
+                KernelOp::H3Record,
+            ),
+            (
+                entry(
+                    "h3_grid_disk",
+                    AccelStrategy::GpuH3,
+                    OutputShape::VarLen,
+                    &[20],
+                    &["cell"],
+                ),
+                KernelOp::H3VarLen,
+            ),
+            (
+                entry(
+                    "sort",
+                    AccelStrategy::GpuSort,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::Sort,
+            ),
+            (
+                entry(
+                    "reduce",
+                    AccelStrategy::GpuReduce,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::Reduce,
+            ),
+            (
+                entry(
+                    "expr",
+                    AccelStrategy::GpuExpr,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::Expr,
+            ),
+            (
+                entry(
+                    "hashjoin",
+                    AccelStrategy::GpuHashJoin,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::HashJoin,
+            ),
+            (
+                entry(
+                    "window",
+                    AccelStrategy::GpuWindow,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::Window,
+            ),
+            (
+                entry(
+                    "nested_loop",
+                    AccelStrategy::GpuNestedLoopIneq,
+                    OutputShape::Scalar,
+                    &[],
+                    &[],
+                ),
+                KernelOp::NestedLoopIneq,
+            ),
+        ];
+
+        for (entry, expected) in cases {
+            assert_eq!(KernelOp::from_entry(&entry), expected, "{}", entry.name);
+            assert_eq!(entry.kernel_op(), expected, "{}", entry.name);
+            assert_eq!(expected.strategy(), entry.strategy, "{}", entry.name);
+
+            let dispatch = entry.dispatch_op().expect("valid dispatch contract");
+            assert_eq!(dispatch.kernel(), expected);
+            assert_eq!(dispatch.strategy(), entry.strategy);
+            assert_eq!(dispatch.output().output_shape(), entry.output_shape);
+        }
+    }
+
+    #[test]
+    fn field_type_and_field_specs_roundtrip_runtime_and_static_oids() {
+        let runtime = FieldSpec::new("runtime", 0);
+        assert_eq!(runtime.field_type, FieldTypeSpec::RuntimeResolved);
+        assert_eq!(runtime.type_oid(), 0);
+
+        let static_field = FieldSpec::new("static", 23);
+        assert_eq!(static_field.field_type, FieldTypeSpec::StaticOid(23));
+        assert_eq!(static_field.type_oid(), 23);
+        assert_eq!(FieldTypeSpec::from_type_oid(0).as_type_oid(), 0);
+        assert_eq!(
+            FieldTypeSpec::from_type_oid(u32::MAX).as_type_oid(),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn output_contracts_preserve_shapes_and_ordered_field_metadata() {
+        let scalar = OutputContract::from_shape_metadata(OutputShape::Scalar, &[], &[])
+            .expect("metadata-free scalar");
+        assert_eq!(scalar, OutputContract::Scalar { field: None });
+        assert_eq!(scalar.output_shape(), OutputShape::Scalar);
+        assert!(scalar.fields().is_empty());
+
+        let scalar_with_field =
+            OutputContract::from_shape_metadata(OutputShape::Scalar, &[0], &["value"])
+                .expect("scalar field");
+        assert_eq!(scalar_with_field.fields(), &[FieldSpec::new("value", 0)]);
+
+        let record = OutputContract::from_shape_metadata(
+            OutputShape::Record { field_count: 2 },
+            &[20, 0],
+            &["count", "dynamic"],
+        )
+        .expect("record metadata");
+        assert_eq!(
+            record.fields(),
+            &[FieldSpec::new("count", 20), FieldSpec::new("dynamic", 0)]
+        );
+        assert_eq!(
+            record.output_shape(),
+            OutputShape::Record { field_count: 2 }
+        );
+
+        let varlen = OutputContract::from_shape_metadata(OutputShape::VarLen, &[20], &["element"])
+            .expect("varlen metadata");
+        assert_eq!(varlen.fields(), &[FieldSpec::new("element", 20)]);
+        assert_eq!(varlen.output_shape(), OutputShape::VarLen);
+
+        let entry = entry(
+            "record",
+            AccelStrategy::GpuH3,
+            OutputShape::Record { field_count: 2 },
+            &[20, 0],
+            &["count", "dynamic"],
+        );
+        assert_eq!(entry.output_contract().expect("entry contract"), record);
+        assert_eq!(
+            OutputContract::from_entry(&entry).expect("entry contract"),
+            record
+        );
+    }
+
+    #[test]
+    fn output_contract_rejects_every_shape_and_metadata_mismatch() {
+        let cases = [
+            (
+                OutputContract::from_shape_metadata(OutputShape::Scalar, &[20], &[]),
+                OutputContractError::FieldMetadataLengthMismatch { types: 1, names: 0 },
+            ),
+            (
+                OutputContract::from_shape_metadata(OutputShape::Scalar, &[20, 23], &["a", "b"]),
+                OutputContractError::ScalarFieldCountMismatch { actual: 2 },
+            ),
+            (
+                OutputContract::from_shape_metadata(
+                    OutputShape::Record { field_count: 0 },
+                    &[],
+                    &[],
+                ),
+                OutputContractError::EmptyRecord,
+            ),
+            (
+                OutputContract::from_shape_metadata(
+                    OutputShape::Record { field_count: 2 },
+                    &[20],
+                    &["only"],
+                ),
+                OutputContractError::RecordFieldCountMismatch {
+                    expected: 2,
+                    actual: 1,
+                },
+            ),
+            (
+                OutputContract::from_shape_metadata(OutputShape::VarLen, &[], &[]),
+                OutputContractError::VarLenFieldCountMismatch { actual: 0 },
+            ),
+            (
+                OutputContract::from_shape_metadata(OutputShape::VarLen, &[20, 20], &["a", "b"]),
+                OutputContractError::VarLenFieldCountMismatch { actual: 2 },
+            ),
+        ];
+
+        for (actual, expected) in cases {
+            assert_eq!(actual.expect_err("invalid contract"), expected);
+        }
+    }
+
+    #[test]
+    fn output_contract_errors_have_stable_operator_diagnostics() {
+        let cases = [
+            (
+                OutputContractError::FieldMetadataLengthMismatch { types: 2, names: 1 },
+                "output field metadata length mismatch: 2 type OIDs, 1 names",
+            ),
+            (
+                OutputContractError::ScalarFieldCountMismatch { actual: 3 },
+                "scalar output expected 0 or 1 fields, got 3",
+            ),
+            (
+                OutputContractError::EmptyRecord,
+                "record output must declare at least one field",
+            ),
+            (
+                OutputContractError::RecordFieldCountMismatch {
+                    expected: 6,
+                    actual: 5,
+                },
+                "record output expected 6 fields from output_shape, got 5",
+            ),
+            (
+                OutputContractError::VarLenFieldCountMismatch { actual: 0 },
+                "varlen output expected exactly 1 element field, got 0",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+            assert!(std::error::Error::source(&error).is_none());
+        }
+    }
+}

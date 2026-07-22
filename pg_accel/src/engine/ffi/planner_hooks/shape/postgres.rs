@@ -1776,3 +1776,180 @@ pub(super) unsafe fn extract_input(
         modifiers,
     })
 }
+
+#[cfg(test)]
+mod pure_tests {
+    use super::*;
+
+    #[test]
+    fn scalar_bounds_cover_every_supported_planner_type() {
+        let cases = [
+            (
+                ScalarValue::Bool(true),
+                ScalarValue::Bool(false),
+                ScalarValue::Bool(true),
+            ),
+            (
+                ScalarValue::I32(7),
+                ScalarValue::I32(i32::MIN),
+                ScalarValue::I32(i32::MAX),
+            ),
+            (
+                ScalarValue::I64(7),
+                ScalarValue::I64(i64::MIN),
+                ScalarValue::I64(i64::MAX),
+            ),
+            (
+                ScalarValue::F32(7.0),
+                ScalarValue::F32(f32::NEG_INFINITY),
+                ScalarValue::F32(f32::INFINITY),
+            ),
+            (
+                ScalarValue::F64(7.0),
+                ScalarValue::F64(f64::NEG_INFINITY),
+                ScalarValue::F64(f64::INFINITY),
+            ),
+            (
+                ScalarValue::Date(7),
+                ScalarValue::Date(i32::MIN),
+                ScalarValue::Date(i32::MAX),
+            ),
+            (
+                ScalarValue::Timestamp(7),
+                ScalarValue::Timestamp(i64::MIN),
+                ScalarValue::Timestamp(i64::MAX),
+            ),
+            (
+                ScalarValue::TimestampTz(7),
+                ScalarValue::TimestampTz(i64::MIN),
+                ScalarValue::TimestampTz(i64::MAX),
+            ),
+        ];
+        for (value, minimum, maximum) in cases {
+            assert_eq!(scalar_min(value), minimum);
+            assert_eq!(scalar_max(value), maximum);
+        }
+    }
+
+    #[test]
+    fn scalar_comparison_successor_and_predecessor_are_type_exact() {
+        use std::cmp::Ordering;
+
+        assert_eq!(
+            scalar_cmp(ScalarValue::Bool(false), ScalarValue::Bool(true)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            scalar_cmp(ScalarValue::I32(2), ScalarValue::I32(1)),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            scalar_cmp(ScalarValue::I64(2), ScalarValue::I64(2)),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            scalar_cmp(ScalarValue::F32(1.0), ScalarValue::F32(2.0)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            scalar_cmp(ScalarValue::F64(2.0), ScalarValue::F64(1.0)),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            scalar_cmp(ScalarValue::Date(1), ScalarValue::Date(1)),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            scalar_cmp(ScalarValue::Timestamp(1), ScalarValue::Timestamp(2)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            scalar_cmp(ScalarValue::TimestampTz(2), ScalarValue::TimestampTz(1)),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(scalar_cmp(ScalarValue::I32(1), ScalarValue::I64(1)), None);
+        assert_eq!(
+            scalar_cmp(ScalarValue::F64(f64::NAN), ScalarValue::F64(1.0)),
+            None
+        );
+
+        for (value, next, previous) in [
+            (
+                ScalarValue::I32(3),
+                ScalarValue::I32(4),
+                ScalarValue::I32(2),
+            ),
+            (
+                ScalarValue::I64(3),
+                ScalarValue::I64(4),
+                ScalarValue::I64(2),
+            ),
+            (
+                ScalarValue::Date(3),
+                ScalarValue::Date(4),
+                ScalarValue::Date(2),
+            ),
+            (
+                ScalarValue::Timestamp(3),
+                ScalarValue::Timestamp(4),
+                ScalarValue::Timestamp(2),
+            ),
+            (
+                ScalarValue::TimestampTz(3),
+                ScalarValue::TimestampTz(4),
+                ScalarValue::TimestampTz(2),
+            ),
+        ] {
+            assert_eq!(scalar_next(value), Some(next));
+            assert_eq!(scalar_previous(value), Some(previous));
+        }
+        for unsupported in [
+            ScalarValue::Bool(false),
+            ScalarValue::F32(1.0),
+            ScalarValue::F64(1.0),
+        ] {
+            assert_eq!(scalar_next(unsupported), None);
+            assert_eq!(scalar_previous(unsupported), None);
+        }
+        assert_eq!(scalar_next(ScalarValue::I32(i32::MAX)), None);
+        assert_eq!(scalar_previous(ScalarValue::I32(i32::MIN)), None);
+        assert_eq!(scalar_next(ScalarValue::I64(i64::MAX)), None);
+        assert_eq!(scalar_previous(ScalarValue::I64(i64::MIN)), None);
+        assert_eq!(scalar_next(ScalarValue::Date(i32::MAX)), None);
+        assert_eq!(scalar_previous(ScalarValue::Date(i32::MIN)), None);
+        assert_eq!(scalar_next(ScalarValue::Timestamp(i64::MAX)), None);
+        assert_eq!(scalar_previous(ScalarValue::Timestamp(i64::MIN)), None);
+        assert_eq!(scalar_next(ScalarValue::TimestampTz(i64::MAX)), None);
+        assert_eq!(scalar_previous(ScalarValue::TimestampTz(i64::MIN)), None);
+    }
+
+    #[test]
+    fn row_estimates_and_rte_kinds_fail_closed_at_boundaries() {
+        assert_eq!(estimate_rows(f64::NAN), 0);
+        assert_eq!(estimate_rows(f64::NEG_INFINITY), 0);
+        assert_eq!(estimate_rows(-1.0), 0);
+        assert_eq!(estimate_rows(0.0), 0);
+        assert_eq!(estimate_rows(1.01), 2);
+        assert_eq!(estimate_rows(f64::INFINITY), 0);
+        assert_eq!(estimate_rows(u64::MAX as f64), u64::MAX);
+
+        assert_eq!(
+            preflight_kind(pg_sys::RTEKind::RTE_RELATION),
+            PreflightRangeTableKind::BaseRelation
+        );
+        for synthetic in [
+            pg_sys::RTEKind::RTE_JOIN,
+            pg_sys::RTEKind::RTE_RESULT,
+            pg_sys::RTEKind::RTE_GROUP,
+        ] {
+            assert_eq!(
+                preflight_kind(synthetic),
+                PreflightRangeTableKind::Synthetic
+            );
+        }
+        assert_eq!(
+            preflight_kind(pg_sys::RTEKind::RTE_FUNCTION),
+            PreflightRangeTableKind::Unsupported
+        );
+    }
+}

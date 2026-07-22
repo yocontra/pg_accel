@@ -1270,4 +1270,148 @@ mod tests {
             Err(RasterExecutionError::ByteCountOverflow)
         );
     }
+
+    #[test]
+    fn error_display_null_values_and_layout_accessors_are_total() {
+        let error = RasterExecutionError::InvalidSnapshot("broken");
+        assert_eq!(format!("{error}"), "InvalidSnapshot(\"broken\")");
+
+        let preflight =
+            preflight_raster_execution(&spec(RasterPixelType::UInt8), snapshot(&[None]))
+                .expect("NULL raster preflight");
+        assert_eq!(preflight.layout.total_pixels(), 0);
+        let output = reconstruct_raster_output(&preflight, &[], &[RESIDENT_RASTER_WORK_NULL])
+            .expect("NULL reconstruction");
+        assert_eq!(output.value(0), None);
+        assert_eq!(output.is_null(1), None);
+    }
+
+    #[test]
+    fn retained_wkb_header_errors_and_pixel_tags_are_rejected() {
+        assert!(matches!(
+            exact_wkb_shape(&[], 7),
+            Err(RasterExecutionError::InvalidRow { row: 7, .. })
+        ));
+
+        let mut bad_endian = vec![0_u8; RASTER_WKB_HEADER_BYTES];
+        bad_endian[0] = 2;
+        assert!(matches!(
+            exact_wkb_shape(&bad_endian, 0),
+            Err(RasterExecutionError::InvalidRow { .. })
+        ));
+
+        let mut bad_version = vec![0_u8; RASTER_WKB_HEADER_BYTES];
+        bad_version[0] = 1;
+        bad_version[1] = 1;
+        assert!(matches!(
+            exact_wkb_shape(&bad_version, 0),
+            Err(RasterExecutionError::InvalidRow { .. })
+        ));
+        assert_eq!(pixel_width_from_tag(11), Some(8));
+        assert_eq!(pixel_width_from_tag(12), None);
+    }
+
+    #[test]
+    fn work_row_metadata_declines_each_noncanonical_form() {
+        let raster = wkb(true, 1, 1, &[(4, 0, vec![0], vec![1])]);
+        let base = snapshot(&[Some(raster.clone())]).stats.work_rows[0];
+
+        let mut work = base;
+        work.reserved[0] = 1;
+        assert!(checked_row_layout(0, work, &raster, 1).is_err());
+
+        work = base;
+        work.action = RESIDENT_RASTER_WORK_NULL;
+        assert!(checked_row_layout(0, work, &raster, 1).is_err());
+
+        work = base;
+        work.action = RESIDENT_RASTER_WORK_MISSING_BAND;
+        work.source_pixel_width = 0;
+        assert!(checked_row_layout(0, work, &raster, 1).is_err());
+
+        let mut bad_flags = raster.clone();
+        bad_flags[RASTER_WKB_HEADER_BYTES] |= 0x10;
+        assert!(checked_row_layout(0, base, &bad_flags, 1).is_err());
+
+        let mut truncated = raster;
+        truncated.pop();
+        work = base;
+        work.exact_wkb_bytes = truncated.len() as u64;
+        assert!(checked_row_layout(0, work, &truncated, 1).is_err());
+
+        work = ResidentRasterWorkRow {
+            action: u8::MAX,
+            ..ResidentRasterWorkRow::default()
+        };
+        assert!(checked_row_layout(0, work, &[], 1).is_err());
+    }
+
+    #[test]
+    fn floating_outputs_and_disagreeing_statistics_fail_before_allocation() {
+        let empty = ResidentRasterStats::empty();
+        let exact = RetainedExactValues {
+            offsets: Box::new([0]),
+            bytes: Box::new([]),
+        };
+        assert!(matches!(
+            size_raster_execution(&spec(RasterPixelType::Float32), &empty, &exact),
+            Err(RasterExecutionError::InvalidSpec(_))
+        ));
+        assert!(matches!(
+            size_empty_raster_execution(&spec(RasterPixelType::Float64)),
+            Err(RasterExecutionError::InvalidSpec(_))
+        ));
+
+        let input = wkb(true, 1, 1, &[(4, 0, vec![0], vec![1])]);
+        let mut inconsistent = snapshot(&[Some(input)]);
+        inconsistent.stats.non_null_rows = 0;
+        assert!(matches!(
+            size_raster_execution(
+                &spec(RasterPixelType::UInt8),
+                &inconsistent.stats,
+                &inconsistent.exact,
+            ),
+            Err(RasterExecutionError::InvalidSnapshot(_))
+        ));
+    }
+
+    #[test]
+    fn narrow_output_ranges_and_missing_band_reconstruction_are_exact() {
+        assert!(validate_narrow_output(RasterPixelType::UInt2, &[0, 3]));
+        assert!(!validate_narrow_output(RasterPixelType::UInt2, &[4]));
+        assert!(validate_narrow_output(RasterPixelType::UInt4, &[0, 15]));
+        assert!(!validate_narrow_output(RasterPixelType::UInt4, &[16]));
+
+        let zero_band = wkb(true, 1, 1, &[]);
+        let preflight = preflight_raster_execution(
+            &spec(RasterPixelType::UInt8),
+            snapshot(&[Some(zero_band.clone())]),
+        )
+        .expect("zero-band preflight");
+        let output =
+            reconstruct_raster_output(&preflight, &[], &[RESIDENT_RASTER_WORK_MISSING_BAND])
+                .expect("zero-band passthrough");
+        assert_eq!(output.value(0), Some(zero_band.as_slice()));
+    }
+
+    #[test]
+    fn reconstruction_detects_corrupt_owned_wkb_offsets() {
+        let input = wkb(true, 1, 1, &[(4, 0, vec![0], vec![1])]);
+        let mut preflight =
+            preflight_raster_execution(&spec(RasterPixelType::UInt8), snapshot(&[Some(input)]))
+                .expect("preflight");
+        preflight.layout.output_wkb_offsets[1] += 1;
+        assert!(matches!(
+            reconstruct_raster_output(&preflight, &[1], &[RESIDENT_RASTER_WORK_RECLASS]),
+            Err(RasterExecutionError::InvalidRow { .. })
+        ));
+
+        let mut empty = preflight_raster_execution(&spec(RasterPixelType::UInt8), snapshot(&[]))
+            .expect("empty preflight");
+        empty.layout.output_wkb_offsets[0] = 1;
+        assert!(matches!(
+            reconstruct_raster_output(&empty, &[], &[]),
+            Err(RasterExecutionError::InvalidSnapshot(_))
+        ));
+    }
 }

@@ -24,6 +24,27 @@ const FUNCTION_SRF_GPU_FUNCTIONS: &[&str] = &[
     "h3_cells_to_multi_polygon",
 ];
 
+fn deserialize_stat_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or(f64::NAN))
+}
+
+fn deserialize_stat_f64_pair<'de, D>(deserializer: D) -> Result<(f64, f64), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let (lower, upper) = <(Option<f64>, Option<f64>)>::deserialize(deserializer)?;
+    match (lower, upper) {
+        (Some(lower), Some(upper)) => Ok((lower, upper)),
+        (None, None) => Ok((f64::NAN, f64::NAN)),
+        _ => Err(serde::de::Error::custom(
+            "statistical interval endpoints must both be numbers or both be null",
+        )),
+    }
+}
+
 /// Where a native-decline reason came from. Distinguishes a real planner
 /// decision from an unconfirmed static-matrix expectation so the report can
 /// never launder an *expected* decline into *verified* evidence.
@@ -71,20 +92,24 @@ pub struct CacheModeSummary {
     pub accel_stddev_ms: f64,
     pub accel_p95_ms: f64,
     pub accel_cv_pct: f64,
+    #[serde(deserialize_with = "deserialize_stat_f64_pair")]
     pub accel_ci_95: (f64, f64),
     pub parallel_mean_ms: f64,
     pub parallel_median_ms: f64,
     pub parallel_stddev_ms: f64,
     pub parallel_p95_ms: f64,
     pub parallel_cv_pct: f64,
+    #[serde(deserialize_with = "deserialize_stat_f64_pair")]
     pub parallel_ci_95: (f64, f64),
     /// `parallel_mean / accel_mean` over this subsample.
     pub speedup_mean_vs_parallel: f64,
     /// `parallel_median / accel_median` over this subsample.
     pub speedup_median_vs_parallel: f64,
     /// Paired t-test p-value over this subsample.
+    #[serde(deserialize_with = "deserialize_stat_f64")]
     pub p_value_vs_parallel: f64,
     /// Cohen's d over this subsample.
+    #[serde(deserialize_with = "deserialize_stat_f64")]
     pub cohens_d_vs_parallel: f64,
     /// `|d| >= 0.5` over this subsample.
     pub effect_size_meaningful: bool,
@@ -267,6 +292,7 @@ pub struct WorkloadResult {
     pub accel_p75_ms: f64,
     pub accel_p95_ms: f64,
     pub accel_cv_pct: f64,
+    #[serde(deserialize_with = "deserialize_stat_f64_pair")]
     pub accel_ci_95: (f64, f64),
     pub accel_outliers: Vec<usize>,
     pub accel_min_ms: f64,
@@ -279,6 +305,7 @@ pub struct WorkloadResult {
     pub parallel_p75_ms: f64,
     pub parallel_p95_ms: f64,
     pub parallel_cv_pct: f64,
+    #[serde(deserialize_with = "deserialize_stat_f64_pair")]
     pub parallel_ci_95: (f64, f64),
     pub parallel_outliers: Vec<usize>,
     pub parallel_min_ms: f64,
@@ -291,10 +318,12 @@ pub struct WorkloadResult {
     /// robust to the 22% CV cold-start contamination that inflates the mean.
     pub speedup_median_vs_parallel: f64,
     /// Paired t-test p-value: accel vs parallel.
+    #[serde(deserialize_with = "deserialize_stat_f64")]
     pub p_value_vs_parallel: f64,
     /// Cohen's d: accel vs parallel. Positive values mean parallel is larger
     /// (i.e. pg_accel is faster). See `stats::cohens_d` for the pooled-sd
     /// formula.
+    #[serde(deserialize_with = "deserialize_stat_f64")]
     pub cohens_d_vs_parallel: f64,
     /// `|d| >= 0.5`, i.e. effect size at least "medium" (action_items C9 /
     /// Reviewer 1 Sin #16). The significance gate uses BOTH this AND
@@ -306,6 +335,7 @@ pub struct WorkloadResult {
     /// min(cv_accel, cv_baseline). Values > 3 indicate the two samples
     /// have very different jitter characteristics and should be reported
     /// with an asymmetric-variance note.
+    #[serde(deserialize_with = "deserialize_stat_f64")]
     pub cv_ratio: f64,
     /// Plan diagnostic text captured once per (workload, scale) by the
     /// runner with `pg_accel.enabled = on`. Contains the first few lines of
@@ -8359,6 +8389,246 @@ mod tests {
             serde_json::from_str(&json_str).expect("deserialization should succeed");
         assert_eq!(deserialized.workloads.len(), 1);
         assert_eq!(deserialized.workloads[0].rows, 100_000);
+        assert!(
+            (deserialized.workloads[0].accel_mean_ms - report.workloads[0].accel_mean_ms).abs()
+                < f64::EPSILON
+        );
+        assert_eq!(
+            deserialized.workloads[0].accel_ci_95,
+            report.workloads[0].accel_ci_95
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn test_single_iteration_json_roundtrip_preserves_undefined_statistics() {
+        let workload = WorkloadResult::from_iterations(
+            "single_iteration".to_owned(),
+            "single iteration report round-trip".to_owned(),
+            "regression".to_owned(),
+            classify_kernel("unclassified"),
+            1_000,
+            vec![IterationResult {
+                accel_ms: 5.0,
+                parallel_ms: 10.0,
+                cache_purge: CachePurgeState::NotRequested,
+                cache_state: CacheState::Warm,
+            }],
+            false,
+        );
+        let json = mock_report(vec![workload])
+            .to_json()
+            .expect("single-iteration report should serialize");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("serialized report should be JSON");
+
+        assert_eq!(
+            value["workloads"][0]["accel_ci_95"],
+            serde_json::json!([null, null])
+        );
+        assert!(value["workloads"][0]["p_value_vs_parallel"].is_null());
+        assert!(value["workloads"][0]["cohens_d_vs_parallel"].is_null());
+        assert!(value["workloads"][0]["cv_ratio"].is_null());
+        assert_eq!(
+            value["workloads"][0]["warm_summary"]["parallel_ci_95"],
+            serde_json::json!([null, null])
+        );
+
+        let decoded: BenchReport =
+            serde_json::from_str(&json).expect("null statistics should deserialize");
+        let decoded_workload = &decoded.workloads[0];
+        assert!(decoded_workload.accel_ci_95.0.is_nan());
+        assert!(decoded_workload.accel_ci_95.1.is_nan());
+        assert!(decoded_workload.p_value_vs_parallel.is_nan());
+        assert!(decoded_workload.cohens_d_vs_parallel.is_nan());
+        assert!(decoded_workload.cv_ratio.is_nan());
+        let warm = decoded_workload
+            .warm_summary
+            .expect("warm summary should survive the round-trip");
+        assert!(warm.parallel_ci_95.0.is_nan());
+        assert!(warm.parallel_ci_95.1.is_nan());
+        assert!((decoded_workload.accel_mean_ms - 5.0).abs() < f64::EPSILON);
+        assert!((decoded_workload.speedup_vs_parallel - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn test_producer_nullable_statistics_accept_json_null() {
+        const WORKLOAD_SCALAR_STATS: &[&str] =
+            &["p_value_vs_parallel", "cohens_d_vs_parallel", "cv_ratio"];
+        const CACHE_SCALAR_STATS: &[&str] = &["p_value_vs_parallel", "cohens_d_vs_parallel"];
+        const PAIR_STATS: &[&str] = &["accel_ci_95", "parallel_ci_95"];
+
+        fn replace_stats_with_null(
+            object: &mut serde_json::Map<String, serde_json::Value>,
+            scalar_fields: &[&str],
+            pair_fields: &[&str],
+        ) {
+            for field in scalar_fields {
+                object.insert((*field).to_owned(), serde_json::Value::Null);
+            }
+            for field in pair_fields {
+                object.insert((*field).to_owned(), serde_json::json!([null, null]));
+            }
+        }
+
+        fn assert_stats_are_null(
+            object: &serde_json::Map<String, serde_json::Value>,
+            scalar_fields: &[&str],
+            pair_fields: &[&str],
+        ) {
+            for field in scalar_fields {
+                assert!(
+                    object[*field].is_null(),
+                    "{field} did not round-trip as null"
+                );
+            }
+            for field in pair_fields {
+                assert_eq!(
+                    object[*field],
+                    serde_json::json!([null, null]),
+                    "{field} did not round-trip as a null pair"
+                );
+            }
+        }
+
+        let report = mock_report(vec![mock_workload_result("all_stats", 100_000, 8.0, 16.0)]);
+        let mut value = serde_json::to_value(report).expect("report should serialize");
+        let workload = value["workloads"][0]
+            .as_object_mut()
+            .expect("workload should be an object");
+        replace_stats_with_null(workload, WORKLOAD_SCALAR_STATS, PAIR_STATS);
+        let warm = workload["warm_summary"]
+            .as_object_mut()
+            .expect("warm summary should be an object");
+        replace_stats_with_null(warm, CACHE_SCALAR_STATS, PAIR_STATS);
+
+        let decoded: BenchReport =
+            serde_json::from_value(value).expect("producer-nullable statistics should deserialize");
+        let encoded = serde_json::to_value(decoded).expect("decoded report should serialize");
+        let encoded_workload = encoded["workloads"][0]
+            .as_object()
+            .expect("encoded workload should be an object");
+        assert_stats_are_null(encoded_workload, WORKLOAD_SCALAR_STATS, PAIR_STATS);
+        let encoded_warm = encoded_workload["warm_summary"]
+            .as_object()
+            .expect("encoded warm summary should be an object");
+        assert_stats_are_null(encoded_warm, CACHE_SCALAR_STATS, PAIR_STATS);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn test_ordinary_statistics_and_whole_null_ci_pairs_remain_strict() {
+        const WORKLOAD_SCALAR_STATS: &[&str] = &[
+            "accel_mean_ms",
+            "accel_stddev_ms",
+            "accel_median_ms",
+            "accel_p25_ms",
+            "accel_p75_ms",
+            "accel_p95_ms",
+            "accel_cv_pct",
+            "accel_min_ms",
+            "accel_max_ms",
+            "parallel_mean_ms",
+            "parallel_stddev_ms",
+            "parallel_median_ms",
+            "parallel_p25_ms",
+            "parallel_p75_ms",
+            "parallel_p95_ms",
+            "parallel_cv_pct",
+            "parallel_min_ms",
+            "parallel_max_ms",
+            "speedup_vs_parallel",
+            "speedup_median_vs_parallel",
+        ];
+        const CACHE_SCALAR_STATS: &[&str] = &[
+            "accel_mean_ms",
+            "accel_median_ms",
+            "accel_stddev_ms",
+            "accel_p95_ms",
+            "accel_cv_pct",
+            "parallel_mean_ms",
+            "parallel_median_ms",
+            "parallel_stddev_ms",
+            "parallel_p95_ms",
+            "parallel_cv_pct",
+            "speedup_mean_vs_parallel",
+            "speedup_median_vs_parallel",
+        ];
+        const PAIR_STATS: &[&str] = &["accel_ci_95", "parallel_ci_95"];
+
+        let make_value = || {
+            serde_json::to_value(mock_report(vec![mock_workload_result(
+                "strict_stats",
+                100_000,
+                8.0,
+                16.0,
+            )]))
+            .expect("report should serialize")
+        };
+
+        for field in WORKLOAD_SCALAR_STATS {
+            let mut value = make_value();
+            value["workloads"][0][*field] = serde_json::Value::Null;
+            let error = serde_json::from_value::<BenchReport>(value)
+                .expect_err("ordinary workload statistic must reject null")
+                .to_string();
+            assert!(
+                error.contains("invalid type: null"),
+                "{field} failed for an unexpected reason: {error}"
+            );
+        }
+        for field in CACHE_SCALAR_STATS {
+            let mut value = make_value();
+            value["workloads"][0]["warm_summary"][*field] = serde_json::Value::Null;
+            let error = serde_json::from_value::<BenchReport>(value)
+                .expect_err("ordinary cache statistic must reject null")
+                .to_string();
+            assert!(
+                error.contains("invalid type: null"),
+                "{field} failed for an unexpected reason: {error}"
+            );
+        }
+        for field in PAIR_STATS {
+            let mut workload_value = make_value();
+            workload_value["workloads"][0][*field] = serde_json::Value::Null;
+            let workload_error = serde_json::from_value::<BenchReport>(workload_value)
+                .expect_err("whole-null workload CI must fail")
+                .to_string();
+            assert!(workload_error.contains("invalid type: null"));
+
+            let mut cache_value = make_value();
+            cache_value["workloads"][0]["warm_summary"][*field] = serde_json::Value::Null;
+            let cache_error = serde_json::from_value::<BenchReport>(cache_value)
+                .expect_err("whole-null cache CI must fail")
+                .to_string();
+            assert!(cache_error.contains("invalid type: null"));
+
+            for mixed_pair in [
+                serde_json::json!([null, 5.0]),
+                serde_json::json!([5.0, null]),
+            ] {
+                let mut workload_value = make_value();
+                workload_value["workloads"][0][*field] = mixed_pair.clone();
+                let workload_error = serde_json::from_value::<BenchReport>(workload_value)
+                    .expect_err("mixed-null workload CI must fail")
+                    .to_string();
+                assert!(
+                    workload_error.contains("endpoints must both be numbers or both be null"),
+                    "{field} accepted malformed workload interval: {workload_error}"
+                );
+
+                let mut cache_value = make_value();
+                cache_value["workloads"][0]["warm_summary"][*field] = mixed_pair;
+                let cache_error = serde_json::from_value::<BenchReport>(cache_value)
+                    .expect_err("mixed-null cache CI must fail")
+                    .to_string();
+                assert!(
+                    cache_error.contains("endpoints must both be numbers or both be null"),
+                    "{field} accepted malformed cache interval: {cache_error}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1129,3 +1129,515 @@ pub fn build_shape(input: ShapeInput, model: &TypedCostModel) -> Result<ShapePla
         cost_gate,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use super::super::{AggregateExpr, EquiJoin, OutputMetadata, RelationShape};
+    use super::*;
+    use crate::engine::cost::DeviceLimits;
+    use crate::engine::spec::{
+        AggregateOutput, BinaryMeasureOp, ColumnRef, ScalarRange, ScalarValue, SpatialOperand,
+        SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
+    };
+
+    fn column(relation_oid: u32, attno: i32, type_oid: u32) -> ColumnRef {
+        ColumnRef {
+            relation_oid,
+            attno,
+            type_oid,
+        }
+    }
+
+    fn planner_column(
+        varno: pgrx::pg_sys::Index,
+        relation_oid: u32,
+        attno: i32,
+        type_oid: u32,
+    ) -> PlannerColumn {
+        PlannerColumn {
+            varno,
+            column: column(relation_oid, attno, type_oid),
+            type_modifier: -1,
+            collation_oid: 0,
+            collation_is_deterministic: true,
+        }
+    }
+
+    fn relation(varno: pgrx::pg_sys::Index, relation_oid: u32) -> RelationShape {
+        RelationShape {
+            varno,
+            relation_oid,
+            estimated_rows: 100,
+            unique_attnos: BTreeSet::new(),
+            column_widths: BTreeMap::from([(1, 4), (2, 8), (3, 16)]),
+            residency: RelationResidency::Unknown,
+        }
+    }
+
+    fn aggregate(expression: MeasureExpr, kind: AggregateKind) -> AggregateExpr {
+        AggregateExpr {
+            expression,
+            output: AggregateOutput {
+                source: AggregateSource::Value,
+                kind,
+            },
+            filter: FilterSpec::None,
+        }
+    }
+
+    fn input() -> ShapeInput {
+        ShapeInput {
+            relations: vec![relation(1, 100)],
+            joins: Vec::new(),
+            group_keys: Vec::new(),
+            aggregates: vec![aggregate(MeasureExpr::CountStar, AggregateKind::Count)],
+            projections: vec![InputProjection::Aggregate {
+                aggregate_index: 0,
+                output: OutputMetadata {
+                    source_type_oid: 0,
+                    result_type_oid: 20,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: false,
+                },
+            }],
+            relation_filters: Vec::new(),
+            estimated_output_rows: 1,
+            expected_reuses: NonZeroU32::MIN,
+            modifiers: ShapeModifiers::default(),
+        }
+    }
+
+    #[test]
+    fn modifier_and_key_metadata_rejections_are_complete_and_ordered() {
+        type ModifierCase = (fn(&mut ShapeModifiers), ShapeDecline);
+        let cases: &[ModifierCase] = &[
+            (
+                |m| m.has_window_functions = true,
+                ShapeDecline::WindowFunctions,
+            ),
+            (
+                |m| m.has_target_srfs = true,
+                ShapeDecline::TargetSetReturningFunction,
+            ),
+            (|m| m.has_sublinks = true, ShapeDecline::Sublink),
+            (
+                |m| m.has_recursive_query = true,
+                ShapeDecline::RecursiveQuery,
+            ),
+            (|m| m.has_modifying_cte = true, ShapeDecline::ModifyingCte),
+            (|m| m.has_row_security = true, ShapeDecline::RowSecurity),
+            (|m| m.has_distinct = true, ShapeDecline::Distinct),
+            (|m| m.has_grouping_sets = true, ShapeDecline::GroupingSets),
+            (|m| m.has_group_distinct = true, ShapeDecline::GroupDistinct),
+            (|m| m.has_having = true, ShapeDecline::Having),
+            (|m| m.has_set_operations = true, ShapeDecline::SetOperations),
+            (|m| m.has_row_marks = true, ShapeDecline::RowMarks),
+        ];
+        assert_eq!(reject_modifiers(ShapeModifiers::default()), Ok(()));
+        for (mutate, expected) in cases {
+            let mut modifiers = ShapeModifiers::default();
+            mutate(&mut modifiers);
+            assert_eq!(reject_modifiers(modifiers), Err(expected.clone()));
+        }
+
+        for type_oid in [16, 20, 21, 23, 25, 700, 701, 1042, 1043, 1082, 1114, 1184] {
+            assert_eq!(validate_group_key_type(type_oid), Ok(()));
+        }
+        assert_eq!(
+            validate_group_key_type(17),
+            Err(ShapeDecline::UnsupportedGroupKeyType { type_oid: 17 })
+        );
+        assert_eq!(validate_key_metadata(25, 100, true), Ok(()));
+        assert_eq!(
+            validate_key_metadata(25, 0, true),
+            Err(ShapeDecline::NondeterministicKeyCollation { collation_oid: 0 })
+        );
+        assert_eq!(
+            validate_key_metadata(1043, 100, false),
+            Err(ShapeDecline::NondeterministicKeyCollation { collation_oid: 100 })
+        );
+        assert_eq!(
+            validate_key_metadata(23, 100, true),
+            Err(ShapeDecline::InvalidKeyCollation {
+                type_oid: 23,
+                collation_oid: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn descriptor_measure_capability_covers_every_expression_family() {
+        let int4 = column(100, 1, 23);
+        let int8 = column(100, 2, 20);
+        let float8 = column(100, 3, 701);
+        let text = column(100, 4, 25);
+
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::CountStar,
+                AggregateKind::Count
+            )),
+            Ok(())
+        );
+        assert!(matches!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::CountStar,
+                AggregateKind::Sum
+            )),
+            Err(ShapeDecline::UnsupportedAggregateInput { type_oid: 0, .. })
+        ));
+        for kind in [
+            AggregateKind::Sum,
+            AggregateKind::Count,
+            AggregateKind::Min,
+            AggregateKind::Max,
+        ] {
+            assert_eq!(
+                validate_measure_descriptor_capability(&aggregate(MeasureExpr::Column(int4), kind)),
+                Ok(())
+            );
+        }
+        assert!(matches!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Column(int8),
+                AggregateKind::Sum
+            )),
+            Err(ShapeDecline::NumericAccumulatorTypeUnavailable { type_oid: 20 })
+        ));
+        assert!(matches!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Column(float8),
+                AggregateKind::Avg
+            )),
+            Err(ShapeDecline::FloatingAccumulatorSemantics)
+        ));
+        assert!(matches!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Column(int4),
+                AggregateKind::StddevSamp
+            )),
+            Err(ShapeDecline::UnsupportedAggregateInput { .. })
+        ));
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Column(text),
+                AggregateKind::Count
+            )),
+            Err(ShapeDecline::UnsupportedMeasureType { type_oid: 25 })
+        );
+
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Binary {
+                    op: BinaryMeasureOp::Sub,
+                    lhs: int4,
+                    rhs: int8,
+                },
+                AggregateKind::Sum,
+            )),
+            Err(ShapeDecline::UnsupportedBinaryMeasure)
+        );
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Binary {
+                    op: BinaryMeasureOp::Sub,
+                    lhs: float8,
+                    rhs: float8,
+                },
+                AggregateKind::Sum,
+            )),
+            Err(ShapeDecline::FloatingExpressionSemantics)
+        );
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Binary {
+                    op: BinaryMeasureOp::Mul,
+                    lhs: int8,
+                    rhs: int8,
+                },
+                AggregateKind::Count,
+            )),
+            Err(ShapeDecline::IntegerExpressionOverflowSemantics)
+        );
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::StatsPair {
+                    value: float8,
+                    rhs: float8,
+                },
+                AggregateKind::Count,
+            )),
+            Err(ShapeDecline::FloatingAccumulatorSemantics)
+        );
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Bytecode {
+                    inputs: vec![int4],
+                    program: vec![1],
+                    result_type_oid: 23,
+                },
+                AggregateKind::Count,
+            )),
+            Err(ShapeDecline::UnsupportedMeasureExpression)
+        );
+
+        let mut filtered = aggregate(MeasureExpr::Column(int4), AggregateKind::Count);
+        filtered.filter = FilterSpec::Ranges {
+            input: int4,
+            ranges: Vec::new(),
+        };
+        assert_eq!(
+            validate_measure_descriptor_capability(&filtered),
+            Err(ShapeDecline::UnsupportedAggregateModifier)
+        );
+        filtered.output.source = AggregateSource::Rhs;
+        filtered.filter = FilterSpec::None;
+        assert_eq!(
+            validate_measure_descriptor_capability(&filtered),
+            Err(ShapeDecline::UnsupportedAggregateModifier)
+        );
+    }
+
+    #[test]
+    fn relation_graph_validation_rejects_ambiguous_and_disconnected_inputs() {
+        let mut candidate = input();
+        candidate.relations.clear();
+        assert_eq!(
+            validate_relations(&candidate),
+            Err(ShapeDecline::DisconnectedJoinGraph)
+        );
+
+        candidate = input();
+        candidate.relations = (0..=MAX_RELATIONS)
+            .map(|index| relation(index as pgrx::pg_sys::Index + 1, index as u32 + 100))
+            .collect();
+        assert!(matches!(
+            validate_relations(&candidate),
+            Err(ShapeDecline::TooManyRelations { .. })
+        ));
+
+        candidate = input();
+        candidate.relations.push(relation(1, 200));
+        assert_eq!(
+            validate_relations(&candidate),
+            Err(ShapeDecline::DuplicatePlannerRelation { varno: 1 })
+        );
+        candidate = input();
+        candidate.relations.push(relation(2, 100));
+        assert_eq!(
+            validate_relations(&candidate),
+            Err(ShapeDecline::SelfJoinUsesAmbiguousRelationOid { relation_oid: 100 })
+        );
+
+        candidate = input();
+        candidate.relation_filters.push((999, FilterSpec::None));
+        assert_eq!(
+            validate_relations(&candidate),
+            Err(ShapeDecline::UnsupportedColumn {
+                relation_oid: 999,
+                attno: 0,
+            })
+        );
+        candidate = input();
+        candidate.relation_filters.push((
+            100,
+            FilterSpec::Bytecode {
+                inputs: Vec::new(),
+                program: vec![1],
+            },
+        ));
+        assert_eq!(
+            validate_relations(&candidate),
+            Err(ShapeDecline::UnsupportedColumn {
+                relation_oid: 0,
+                attno: 0,
+            })
+        );
+
+        assert_eq!(choose_fact_varno(&input()), Ok(1));
+        candidate = input();
+        let same = planner_column(1, 100, 1, 23);
+        candidate.joins.push(EquiJoin {
+            left: same,
+            right: same,
+        });
+        assert_eq!(
+            choose_fact_varno(&candidate),
+            Err(ShapeDecline::NonStarJoinGraph)
+        );
+
+        candidate = input();
+        candidate.relations.push(relation(2, 200));
+        candidate.joins.push(EquiJoin {
+            left: planner_column(1, 100, 1, 23),
+            right: planner_column(2, 200, 1, 20),
+        });
+        assert!(matches!(
+            choose_fact_varno(&candidate),
+            Err(ShapeDecline::JoinKeyTypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn filter_collection_binding_and_residency_estimates_are_exact() {
+        let bool_col = column(100, 1, 16);
+        let int_col = column(100, 2, 23);
+        let rhs_col = column(100, 3, 23);
+        let other_col = column(200, 1, 23);
+        let range = FilterSpec::Ranges {
+            input: int_col,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(1),
+                hi: ScalarValue::I32(9),
+            }],
+        };
+        assert_eq!(validate_dimension_filter(&range), Ok(()));
+        assert_eq!(
+            validate_dimension_filter(&FilterSpec::Mask {
+                input: bool_col,
+                kind: MaskKind::Sql,
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            validate_dimension_filter(&FilterSpec::Mask {
+                input: int_col,
+                kind: MaskKind::Recheck,
+            }),
+            Err(ShapeDecline::UnsupportedFilterType { type_oid: 23 })
+        );
+        assert_eq!(
+            validate_dimension_filter(&FilterSpec::Bytecode {
+                inputs: vec![int_col],
+                program: vec![1],
+            }),
+            Err(ShapeDecline::UnsupportedPredicate)
+        );
+
+        let metadata = SpatialValueMetadata {
+            kind: SpatialValueKind::Geometry,
+            typmod: -1,
+            srid: Some(4_326),
+        };
+        let spatial = FilterSpec::Spatial {
+            predicate: SpatialPredicateKind::Intersects,
+            left: SpatialOperand::Column {
+                column: int_col,
+                metadata,
+            },
+            right: SpatialOperand::Constant {
+                metadata,
+                bytes: vec![1, 2].into_boxed_slice(),
+            },
+            distance: None,
+        };
+        assert_eq!(
+            validate_dimension_filter(&spatial),
+            Err(ShapeDecline::SpatialFilterOutsideFactRelation)
+        );
+
+        let mut required = BTreeMap::new();
+        collect_filter_columns(&mut required, &FilterSpec::None);
+        collect_filter_columns(
+            &mut required,
+            &FilterSpec::Mask {
+                input: bool_col,
+                kind: MaskKind::Sql,
+            },
+        );
+        collect_filter_columns(&mut required, &range);
+        collect_filter_columns(
+            &mut required,
+            &FilterSpec::Bytecode {
+                inputs: vec![rhs_col, other_col],
+                program: vec![1],
+            },
+        );
+        collect_filter_columns(&mut required, &spatial);
+        collect_group_key_columns(
+            &mut required,
+            &GroupKeySource::H3LatLngToCell {
+                latitude: int_col,
+                longitude: rhs_col,
+                resolution: 7,
+            },
+        );
+        collect_measure_columns(
+            &mut required,
+            &MeasureExpr::StatsPair {
+                value: int_col,
+                rhs: rhs_col,
+            },
+        );
+        assert_eq!(required.get(&100), Some(&BTreeSet::from([1, 2, 3])));
+        assert_eq!(required.get(&200), Some(&BTreeSet::from([1])));
+
+        let mut measures = vec![MeasureSpec {
+            expression: MeasureExpr::StatsPair {
+                value: int_col,
+                rhs: rhs_col,
+            },
+            outputs: vec![AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Count,
+            }],
+            filter: FilterSpec::None,
+        }];
+        let binding = fact_filter_binding(
+            &mut measures,
+            &FilterSpec::Ranges {
+                input: rhs_col,
+                ranges: Vec::new(),
+            },
+        )
+        .expect("existing RHS lane binds");
+        assert_eq!(binding.projected_measure_count, 1);
+        assert_eq!(binding.descriptor_measure_count, 1);
+        assert_eq!(
+            binding.fact_filter,
+            Some(DescriptorFilterBinding {
+                measure_index: 0,
+                source: AggregateSource::Rhs,
+                hidden: false,
+            })
+        );
+
+        let hidden_col = column(100, 4, 23);
+        let hidden = fact_filter_binding(
+            &mut measures,
+            &FilterSpec::Ranges {
+                input: hidden_col,
+                ranges: Vec::new(),
+            },
+        )
+        .expect("missing filter lane appends a hidden measure");
+        assert_eq!(hidden.projected_measure_count, 1);
+        assert_eq!(hidden.descriptor_measure_count, 2);
+        assert!(hidden.fact_filter.expect("binding").hidden);
+
+        let mut shape_input = input();
+        assert_eq!(
+            estimate_relation_bytes(&shape_input, 100, &[1, 2]),
+            Some(1_200)
+        );
+        assert_eq!(estimate_relation_bytes(&shape_input, 100, &[99]), None);
+        assert_eq!(estimate_relation_bytes(&shape_input, 999, &[1]), None);
+        shape_input.relations[0].residency = RelationResidency::Resident;
+        let model = TypedCostModel::from_limits(&DeviceLimits::cpu_only());
+        let residency = build_residency(
+            &shape_input,
+            &[RequiredRelation {
+                relation_oid: 100,
+                attnos: vec![1, 2],
+            }],
+            &model,
+        )
+        .expect("known relation residency builds");
+        assert_eq!(residency.total_required_bytes, Some(1_200));
+        assert_eq!(residency.missing_bytes, Some(0));
+        assert_eq!(residency.missing_rows, 0);
+    }
+}

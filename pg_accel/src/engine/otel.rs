@@ -865,6 +865,225 @@ mod otlp_file {
         #[serde(skip_serializing_if = "Option::is_none")]
         bool_value: Option<bool>,
     }
+
+    #[cfg(test)]
+    mod tests {
+        use std::future::Future;
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+        use std::time::Duration;
+
+        use opentelemetry::trace::{Event, SpanContext, TraceFlags, TraceId, TraceState};
+        use opentelemetry::{Array, InstrumentationScope, KeyValue, Value};
+        use opentelemetry_sdk::trace::{SpanEvents, SpanLinks};
+
+        use super::*;
+        use crate::engine::otel::{RotationPolicy, tests::temp_trace_path};
+
+        fn ready<T>(future: impl Future<Output = T>) -> T {
+            let mut future = pin!(future);
+            let waker = Waker::noop();
+            let mut context = Context::from_waker(waker);
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => output,
+                Poll::Pending => panic!("file exporter unexpectedly returned a pending future"),
+            }
+        }
+
+        fn span_data(kind: SpanKind, status: Status, parent_span_id: SpanId) -> SpanData {
+            let mut events = SpanEvents::default();
+            events.events.push(Event::new(
+                "cache.loaded",
+                SystemTime::UNIX_EPOCH + Duration::from_nanos(333),
+                vec![KeyValue::new("event.rows", 41_i64)],
+                2,
+            ));
+
+            SpanData {
+                span_context: SpanContext::new(
+                    TraceId::from_bytes([0x11; 16]),
+                    SpanId::from_bytes([0x22; 8]),
+                    TraceFlags::SAMPLED,
+                    false,
+                    TraceState::default(),
+                ),
+                parent_span_id,
+                parent_span_is_remote: false,
+                span_kind: kind,
+                name: "resident.lookup".into(),
+                start_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(111),
+                end_time: SystemTime::UNIX_EPOCH + Duration::from_nanos(222),
+                attributes: vec![
+                    KeyValue::new("cache.hit", true),
+                    KeyValue::new("cache.rows", 17_i64),
+                    KeyValue::new("cache.ratio", 0.75_f64),
+                    KeyValue::new("cache.kind", "derived"),
+                    KeyValue::new("cache.array", Value::Array(Array::I64(vec![3, 5]))),
+                ],
+                dropped_attributes_count: 1,
+                events,
+                links: SpanLinks::default(),
+                status,
+                instrumentation_scope: InstrumentationScope::builder("pg_accel.tests")
+                    .with_version("1.0")
+                    .build(),
+            }
+        }
+
+        #[test]
+        fn value_conversion_covers_scalars_and_every_array_family() {
+            let cases = [
+                (Value::Bool(true), None, None, None, Some(true)),
+                (Value::I64(-9), None, Some("-9"), None, None),
+                (Value::F64(1.25), None, None, Some(1.25), None),
+                (
+                    Value::String("value".into()),
+                    Some("value"),
+                    None,
+                    None,
+                    None,
+                ),
+            ];
+            for (value, string, integer, double, boolean) in cases {
+                let converted = value_to_otlp(&value);
+                assert_eq!(converted.string_value.as_deref(), string);
+                assert_eq!(converted.int_value.as_deref(), integer);
+                assert_eq!(converted.double_value, double);
+                assert_eq!(converted.bool_value, boolean);
+            }
+
+            for array in [
+                Array::Bool(vec![true, false]),
+                Array::I64(vec![1, 2]),
+                Array::F64(vec![1.5, 2.5]),
+                Array::String(vec!["a".into(), "b".into()]),
+            ] {
+                let value = Value::Array(array);
+                let converted = value_to_otlp(&value);
+                assert_eq!(
+                    converted.string_value,
+                    Some(format!("{value:?}")),
+                    "array fallback must remain observable"
+                );
+                assert!(converted.int_value.is_none());
+                assert!(converted.double_value.is_none());
+                assert!(converted.bool_value.is_none());
+            }
+        }
+
+        #[test]
+        fn span_conversion_preserves_ids_timing_attributes_events_and_status() {
+            let parent = SpanId::from_bytes([0x33; 8]);
+            let span = to_otlp_span(&span_data(
+                SpanKind::Server,
+                Status::error("cache unavailable"),
+                parent,
+            ));
+
+            assert_eq!(span.trace_id, "11111111111111111111111111111111");
+            assert_eq!(span.span_id, "2222222222222222");
+            assert_eq!(span.parent_span_id, "3333333333333333");
+            assert_eq!(span.name, "resident.lookup");
+            assert_eq!(span.kind, 2);
+            assert_eq!(span.start_time_unix_nano, "111");
+            assert_eq!(span.end_time_unix_nano, "222");
+            assert_eq!(span.status.code, 2);
+            assert_eq!(span.status.message, "cache unavailable");
+            assert_eq!(span.attributes.len(), 5);
+            assert_eq!(span.events.len(), 1);
+            assert_eq!(span.events[0].name, "cache.loaded");
+            assert_eq!(span.events[0].time_unix_nano, "333");
+            assert_eq!(span.events[0].attributes.len(), 1);
+
+            for (kind, expected) in [
+                (SpanKind::Internal, 1),
+                (SpanKind::Server, 2),
+                (SpanKind::Client, 3),
+                (SpanKind::Producer, 4),
+                (SpanKind::Consumer, 5),
+            ] {
+                assert_eq!(
+                    to_otlp_span(&span_data(kind, Status::Unset, SpanId::INVALID)).kind,
+                    expected
+                );
+            }
+
+            let unset = to_otlp_span(&span_data(
+                SpanKind::Internal,
+                Status::Unset,
+                SpanId::INVALID,
+            ));
+            assert_eq!(unset.parent_span_id, "");
+            assert_eq!(unset.status.code, 0);
+            assert_eq!(unset.status.message, "");
+
+            let ok = to_otlp_span(&span_data(SpanKind::Client, Status::Ok, SpanId::INVALID));
+            assert_eq!(ok.status.code, 1);
+            assert_eq!(ok.status.message, "");
+            assert_eq!(
+                nanos(
+                    SystemTime::UNIX_EPOCH
+                        .checked_sub(Duration::from_nanos(1))
+                        .expect("one nanosecond before the Unix epoch is representable")
+                ),
+                ""
+            );
+        }
+
+        #[test]
+        fn exporter_writes_otlp_jsonl_resource_scope_and_span_batch() {
+            let (dir, path) = temp_trace_path("pg_accel_otel_export.jsonl");
+            let file = Arc::new(
+                BoundedFile::open(path.clone(), RotationPolicy::for_tests(0, 0))
+                    .expect("open exporter output"),
+            );
+            let mut exporter = FileSpanExporter::new(file);
+            assert_eq!(format!("{exporter:?}"), "FileSpanExporter");
+
+            ready(exporter.export(Vec::new())).expect("empty export succeeds");
+            assert_eq!(
+                std::fs::metadata(&path).expect("stat empty output").len(),
+                0
+            );
+
+            ready(exporter.export(vec![span_data(
+                SpanKind::Producer,
+                Status::Ok,
+                SpanId::INVALID,
+            )]))
+            .expect("span export succeeds");
+            exporter.shutdown().expect("exporter shutdown succeeds");
+
+            let bytes = std::fs::read(&path).expect("read exporter output");
+            assert_eq!(bytes.last(), Some(&b'\n'));
+            assert_eq!(
+                std::str::from_utf8(&bytes)
+                    .expect("exporter emits UTF-8 JSON")
+                    .lines()
+                    .count(),
+                1
+            );
+            let document: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("valid OTLP JSONL document");
+            let resource_span = &document["resourceSpans"][0];
+            assert_eq!(
+                resource_span["resource"]["attributes"][0]["key"],
+                "service.name"
+            );
+            assert_eq!(
+                resource_span["resource"]["attributes"][0]["value"]["stringValue"],
+                "pg_accel"
+            );
+            assert_eq!(resource_span["scopeSpans"][0]["scope"]["name"], "pg_accel");
+            assert_eq!(
+                resource_span["scopeSpans"][0]["spans"][0]["name"],
+                "resident.lookup"
+            );
+            assert_eq!(resource_span["scopeSpans"][0]["spans"][0]["kind"], 4);
+
+            std::fs::remove_dir_all(dir).expect("remove exporter temp directory");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1116,11 +1335,31 @@ mod tests {
         fs::remove_dir_all(dir).expect("remove temp trace dir");
     }
 
+    #[test]
+    fn flushing_writer_routes_write_and_flush_through_bounded_file() {
+        use tracing_subscriber::fmt::MakeWriter;
+
+        let (dir, path) = temp_trace_path("pg_accel_traces.jsonl");
+        let file = Arc::new(
+            BoundedFile::open(path.clone(), RotationPolicy::for_tests(0, 0))
+                .expect("open tracing output"),
+        );
+        let make_writer = FlushingWriter::new(file);
+        let mut writer = make_writer.make_writer();
+
+        assert_eq!(writer.write(b"span one\n").expect("write trace line"), 9);
+        assert_eq!(writer.write(&[]).expect("empty write"), 0);
+        writer.flush().expect("flush trace line");
+        assert_eq!(fs::read(&path).expect("read trace output"), b"span one\n");
+
+        fs::remove_dir_all(dir).expect("remove temp trace dir");
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
-    fn temp_trace_path(filename: &str) -> (PathBuf, PathBuf) {
+    pub(super) fn temp_trace_path(filename: &str) -> (PathBuf, PathBuf) {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());

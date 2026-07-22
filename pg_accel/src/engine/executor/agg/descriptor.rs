@@ -2421,9 +2421,10 @@ fn validate_h3_count_partition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::residency::ResidentInputBundle;
     use crate::engine::spec::{
-        AggOutputSlot, AggOutputSource, AggregateOutput, GroupKeyRef, MeasureSpec,
-        SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
+        AggOutputSlot, AggOutputSource, AggregateOutput, DimSpec, GroupKeyRef, MeasureSpec,
+        ScalarRange, SpatialPredicateKind, SpatialValueKind, SpatialValueMetadata,
     };
 
     const TEST_GEOMETRY_OID: u32 = 60_001;
@@ -3052,5 +3053,562 @@ mod tests {
                 DescriptorAggExecutionError::Failure(_)
             ));
         }
+    }
+
+    #[test]
+    fn execution_errors_and_residency_reports_preserve_semantics() {
+        assert_eq!(
+            DescriptorAggExecutionError::NumericOverflow.to_string(),
+            "numeric value out of range"
+        );
+        assert_eq!(
+            DescriptorAggExecutionError::ExternalRoutineException("external".to_owned())
+                .to_string(),
+            "external"
+        );
+        assert_eq!(
+            DescriptorAggExecutionError::from("failure".to_owned()),
+            DescriptorAggExecutionError::Failure("failure".to_owned())
+        );
+
+        let mut report = DescriptorResidencyReport {
+            artifact_outcome: ArtifactEnsureOutcome::Hit,
+            relations: Vec::new(),
+            loaded_relations: vec![pg_sys::Oid::from(10_u32)],
+            artifact_bytes: 10,
+            raw_load_ms: 1.5,
+            preparation_time_us: 7,
+        };
+        report.merge(DescriptorResidencyReport {
+            artifact_outcome: ArtifactEnsureOutcome::Built,
+            relations: Vec::new(),
+            loaded_relations: vec![pg_sys::Oid::from(10_u32), pg_sys::Oid::from(20_u32)],
+            artifact_bytes: 20,
+            raw_load_ms: 2.5,
+            preparation_time_us: 11,
+        });
+        assert_eq!(report.artifact_outcome, ArtifactEnsureOutcome::Built);
+        assert_eq!(
+            report.loaded_relations,
+            vec![pg_sys::Oid::from(10_u32), pg_sys::Oid::from(20_u32)]
+        );
+        assert_eq!(report.artifact_bytes, 20);
+        assert_eq!(report.raw_load_ms, 4.0);
+        assert_eq!(report.preparation_time_us, 18);
+
+        report.merge(DescriptorResidencyReport {
+            artifact_outcome: ArtifactEnsureOutcome::Hit,
+            relations: Vec::new(),
+            loaded_relations: Vec::new(),
+            artifact_bytes: 21,
+            raw_load_ms: 0.0,
+            preparation_time_us: u64::MAX,
+        });
+        assert_eq!(report.artifact_outcome, ArtifactEnsureOutcome::Built);
+        assert_eq!(report.artifact_bytes, 21);
+        assert_eq!(report.preparation_time_us, u64::MAX);
+    }
+
+    #[test]
+    fn h3_count_partition_reports_shape_and_capacity_errors() {
+        assert_eq!(
+            validate_h3_count_partition(&[1], 2, 1, 1),
+            Err("H3 COUNT(*) lane has length 1, expected 2".to_owned())
+        );
+        assert_eq!(
+            validate_h3_count_partition(&[1], 1, 2, 1),
+            Err("H3 emitted group count exceeds group capacity".to_owned())
+        );
+    }
+
+    fn relation_evidence(relid: u32) -> ResidentRelationEvidence {
+        ResidentRelationEvidence {
+            relid: pg_sys::Oid::from(relid),
+            generation: 1,
+            global_generation: 1,
+            relfilenode: pg_sys::Oid::from(relid + 10_000),
+            row_count: 0,
+            raw_bytes: 0,
+            raw_accounting: ResidentByteAccounting {
+                device_bytes: 0,
+                retained_host_exact_bytes: 0,
+            },
+            derived_bytes: 0,
+            loaded_at_us: 0,
+            last_used_us: 0,
+            load_ms: 0.0,
+        }
+    }
+
+    fn zero_artifact(spec: &AggQuerySpec, artifact_types: &[u32]) -> DescriptorAggArtifact {
+        let requests = artifact_column_refs(spec).expect("artifact requests resolve");
+        assert_eq!(requests.len(), artifact_types.len());
+        let columns = artifact_types
+            .iter()
+            .map(|type_oid| ResidentColumnView::Empty {
+                type_oid: pg_sys::Oid::from(*type_oid),
+            })
+            .collect();
+        let relids = dependency_relids(spec);
+        let prepared = prepare_agg_artifact(
+            spec,
+            &requests,
+            ResidentInputBundle {
+                columns,
+                evidence: relids
+                    .into_iter()
+                    .map(|relid| relation_evidence(u32::from(relid)))
+                    .collect(),
+            },
+            1_024,
+        )
+        .expect("zero-row artifact prepares");
+        assert_eq!(prepared.device_bytes, 0);
+        DescriptorAggArtifact::build(prepared.prepared).expect("empty lanes require no device")
+    }
+
+    fn zero_descriptor(
+        spec: &AggQuerySpec,
+        artifact_types: &[u32],
+        dispatch_types: &[u32],
+    ) -> abi::PgaccelGroupedAggDesc {
+        let artifact = zero_artifact(spec, artifact_types);
+        let requests = dispatch_column_refs(&artifact.resolved_spec).expect("dispatch requests");
+        assert_eq!(requests.len(), dispatch_types.len());
+        let views = dispatch_types
+            .iter()
+            .map(|type_oid| ResidentColumnView::Empty {
+                type_oid: pg_sys::Oid::from(*type_oid),
+            })
+            .collect::<Vec<_>>();
+        build_descriptor(&artifact, &requests, &views).expect("zero descriptor binds")
+    }
+
+    fn output(source: AggregateSource, kind: AggregateKind) -> AggregateOutput {
+        AggregateOutput { source, kind }
+    }
+
+    #[test]
+    fn primitive_capability_checks_cover_supported_and_rejected_domains() {
+        for oid in [TEXTOID, VARCHAROID, BPCHAROID] {
+            assert!(is_text_family(oid));
+            assert!(is_supported_group_type(oid));
+        }
+        for oid in [
+            BOOLOID,
+            INT2OID,
+            INT4OID,
+            INT8OID,
+            FLOAT4OID,
+            FLOAT8OID,
+            DATEOID,
+            TIMESTAMPOID,
+            TIMESTAMPTZOID,
+        ] {
+            assert!(!is_text_family(oid));
+            assert!(is_supported_group_type(oid));
+        }
+        assert!(!is_supported_group_type(60_001));
+
+        let range = |input| FilterSpec::Ranges {
+            input,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(1),
+                hi: ScalarValue::I32(2),
+            }],
+        };
+        assert!(validate_filter(&FilterSpec::None, 42, false, false).is_ok());
+        assert!(validate_filter(&range(column(INT4OID)), 42, false, false).is_ok());
+        assert!(validate_filter(&range(column(BOOLOID)), 42, true, false).is_ok());
+        assert!(validate_filter(&range(column(INT2OID)), 42, true, false).is_err());
+        assert!(validate_filter(&range(column(INT4OID)), 99, false, false).is_err());
+        assert!(
+            validate_filter(
+                &FilterSpec::Mask {
+                    input: column(BOOLOID),
+                    kind: MaskKind::Sql
+                },
+                42,
+                false,
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_filter(
+                &FilterSpec::Mask {
+                    input: column(INT4OID),
+                    kind: MaskKind::Sql
+                },
+                42,
+                false,
+                false,
+            )
+            .is_err()
+        );
+        let spatial = spatial_count_shape().0.fact_filter;
+        assert!(validate_filter(&spatial, 42, false, true).is_ok());
+        assert!(validate_filter(&spatial, 42, false, false).is_err());
+
+        let all_basic = [
+            output(AggregateSource::Value, AggregateKind::Sum),
+            output(AggregateSource::Value, AggregateKind::Count),
+            output(AggregateSource::Value, AggregateKind::Min),
+            output(AggregateSource::Value, AggregateKind::Max),
+        ];
+        assert!(validate_measure_outputs(&MeasureExpr::CountStar, &all_basic[1..2]).is_ok());
+        assert!(validate_measure_outputs(&MeasureExpr::CountStar, &all_basic[..1]).is_err());
+        assert!(
+            validate_measure_outputs(&MeasureExpr::Column(column(INT4OID)), &all_basic).is_ok()
+        );
+        assert!(
+            validate_measure_outputs(
+                &MeasureExpr::Column(column(INT4OID)),
+                &[output(AggregateSource::Value, AggregateKind::Avg)],
+            )
+            .is_err()
+        );
+        for oid in [INT8OID, FLOAT8OID] {
+            assert!(
+                validate_measure_outputs(
+                    &MeasureExpr::Column(column(oid)),
+                    &[all_basic[1], all_basic[2], all_basic[3]],
+                )
+                .is_ok()
+            );
+            assert!(
+                validate_measure_outputs(&MeasureExpr::Column(column(oid)), &all_basic[..1],)
+                    .is_err()
+            );
+        }
+        for oid in [BOOLOID, FLOAT4OID, DATEOID, TIMESTAMPOID, TIMESTAMPTZOID] {
+            assert!(
+                validate_measure_outputs(&MeasureExpr::Column(column(oid)), &all_basic[1..2],)
+                    .is_ok()
+            );
+        }
+        let mut rhs = column(INT4OID);
+        rhs.attno = 2;
+        for op in [BinaryMeasureOp::Mul, BinaryMeasureOp::Sub] {
+            assert!(
+                validate_measure_outputs(
+                    &MeasureExpr::Binary {
+                        op,
+                        lhs: column(INT4OID),
+                        rhs
+                    },
+                    &all_basic,
+                )
+                .is_ok()
+            );
+        }
+        let mut rhs64 = column(INT8OID);
+        rhs64.attno = 2;
+        assert!(
+            validate_measure_outputs(
+                &MeasureExpr::Binary {
+                    op: BinaryMeasureOp::Sub,
+                    lhs: column(INT8OID),
+                    rhs: rhs64
+                },
+                &[all_basic[1], all_basic[2], all_basic[3]],
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_measure_outputs(
+                &MeasureExpr::Binary {
+                    op: BinaryMeasureOp::Mul,
+                    lhs: column(INT8OID),
+                    rhs: rhs64
+                },
+                &all_basic[1..2],
+            )
+            .is_err()
+        );
+        assert!(
+            validate_measure_outputs(
+                &MeasureExpr::Column(column(INT4OID)),
+                &[output(AggregateSource::Rhs, AggregateKind::Count)],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn relation_and_dispatch_collection_cover_every_pure_source_shape() {
+        let mut collection_spec = spec(MeasureExpr::CountStar, AggregateKind::Count);
+        let mut fact_second = column(INT4OID);
+        fact_second.attno = 2;
+        let dim_key = ColumnRef {
+            relation_oid: 43,
+            attno: 1,
+            type_oid: INT4OID,
+        };
+        collection_spec.group_keys = vec![
+            GroupKeyRef {
+                source: GroupKeySource::FactColumn(column(INT4OID)),
+                type_oid: INT4OID,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            },
+            GroupKeyRef {
+                source: GroupKeySource::StarDimension {
+                    dim_index: 0,
+                    group_column: dim_key,
+                },
+                type_oid: INT4OID,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            },
+            GroupKeyRef {
+                source: GroupKeySource::Expression {
+                    inputs: vec![fact_second],
+                    program: vec![1],
+                },
+                type_oid: INT4OID,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            },
+            GroupKeyRef {
+                source: GroupKeySource::H3LatLngToCell {
+                    latitude: ColumnRef {
+                        relation_oid: 42,
+                        attno: 3,
+                        type_oid: FLOAT8OID,
+                    },
+                    longitude: ColumnRef {
+                        relation_oid: 42,
+                        attno: 4,
+                        type_oid: FLOAT8OID,
+                    },
+                    resolution: 7,
+                },
+                type_oid: 90_001,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            },
+        ];
+        collection_spec.measures = vec![
+            MeasureSpec {
+                expression: MeasureExpr::StatsPair {
+                    value: fact_second,
+                    rhs: column(INT4OID),
+                },
+                outputs: vec![output(AggregateSource::Value, AggregateKind::Count)],
+                filter: FilterSpec::Mask {
+                    input: column(BOOLOID),
+                    kind: MaskKind::Sql,
+                },
+            },
+            MeasureSpec {
+                expression: MeasureExpr::Bytecode {
+                    inputs: vec![ColumnRef {
+                        relation_oid: 42,
+                        attno: 5,
+                        type_oid: INT4OID,
+                    }],
+                    program: vec![1],
+                    result_type_oid: INT4OID,
+                },
+                outputs: vec![output(AggregateSource::Value, AggregateKind::Count)],
+                filter: FilterSpec::None,
+            },
+        ];
+        collection_spec.fact_filter = FilterSpec::Bytecode {
+            inputs: vec![ColumnRef {
+                relation_oid: 42,
+                attno: 6,
+                type_oid: BOOLOID,
+            }],
+            program: vec![1],
+        };
+        collection_spec.star_dims.push(DimSpec {
+            relation_oid: 43,
+            fact_key: fact_second,
+            dim_key,
+            collation_oid: 0,
+            multiplicity: JoinMultiplicity::Unique,
+            filter: FilterSpec::Mask {
+                input: ColumnRef {
+                    relation_oid: 43,
+                    attno: 2,
+                    type_oid: BOOLOID,
+                },
+                kind: MaskKind::Sql,
+            },
+        });
+        let selected = selected_relations(&collection_spec).expect("all column sources collect");
+        assert_eq!(
+            selected
+                .iter()
+                .map(|relation| u32::from(relation.relid))
+                .collect::<Vec<_>>(),
+            vec![42, 43]
+        );
+        assert!(selected[0].columns.len() >= 6);
+        assert_eq!(
+            dependency_relids(&collection_spec),
+            vec![pg_sys::Oid::from(42_u32), pg_sys::Oid::from(43_u32)]
+        );
+
+        let mut dispatch_spec = spec(MeasureExpr::Column(column(INT4OID)), AggregateKind::Count);
+        dispatch_spec.fact_filter = FilterSpec::Ranges {
+            input: fact_second,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(0),
+                hi: ScalarValue::I32(1),
+            }],
+        };
+        let refs = dispatch_column_refs(&dispatch_spec).expect("measure and range inputs collect");
+        assert_eq!(refs.len(), 2);
+        let mut invalid = column(INT4OID);
+        invalid.attno = i32::MAX;
+        dispatch_spec.measures[0].expression = MeasureExpr::Column(invalid);
+        assert!(dispatch_column_refs(&dispatch_spec).is_err());
+    }
+
+    #[test]
+    fn zero_row_descriptor_builder_covers_all_host_only_shapes() {
+        let global = spec(MeasureExpr::CountStar, AggregateKind::Count);
+        let desc = zero_descriptor(&global, &[], &[]);
+        assert_eq!(desc.row_count, 0);
+        assert_eq!(desc.measure_count, 1);
+        assert_eq!(
+            desc.measures[0].op,
+            abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR
+        );
+
+        let mut scalar = spec(MeasureExpr::Column(column(INT4OID)), AggregateKind::Sum);
+        scalar.measures[0].outputs = vec![
+            output(AggregateSource::Value, AggregateKind::Sum),
+            output(AggregateSource::Value, AggregateKind::Count),
+            output(AggregateSource::Value, AggregateKind::Min),
+            output(AggregateSource::Value, AggregateKind::Max),
+        ];
+        let desc = zero_descriptor(&scalar, &[], &[INT4OID]);
+        assert_eq!(desc.measures[0].op, abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN);
+        assert_eq!(
+            desc.measures[0].agg_mask,
+            abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                | abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                | abi::PGACCEL_GROUPED_AGG_LANE_MIN
+                | abi::PGACCEL_GROUPED_AGG_LANE_MAX
+        );
+
+        let mut rhs = column(INT4OID);
+        rhs.attno = 2;
+        let binary = spec(
+            MeasureExpr::Binary {
+                op: BinaryMeasureOp::Sub,
+                lhs: column(INT4OID),
+                rhs,
+            },
+            AggregateKind::Count,
+        );
+        let desc = zero_descriptor(&binary, &[], &[INT4OID, INT4OID]);
+        assert_eq!(desc.measures[0].op, abi::PGACCEL_GROUPED_AGG_MEASURE_SUB);
+
+        let mut ranged = spec(MeasureExpr::Column(column(INT4OID)), AggregateKind::Count);
+        ranged.fact_filter = FilterSpec::Ranges {
+            input: column(INT4OID),
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(-2),
+                hi: ScalarValue::I32(9),
+            }],
+        };
+        let desc = zero_descriptor(&ranged, &[], &[INT4OID]);
+        assert_eq!(desc.where_filter.predicate_range_count, 1);
+        assert_eq!(desc.where_filter.predicate_measure_slot, 0);
+
+        let mut masked = global.clone();
+        masked.fact_filter = FilterSpec::Mask {
+            input: column(BOOLOID),
+            kind: MaskKind::Sql,
+        };
+        let desc = zero_descriptor(&masked, &[BOOLOID], &[]);
+        assert_eq!(desc.where_filter.kind, abi::PGACCEL_GROUPED_AGG_FILTER_NONE);
+
+        let mut grouped = global.clone();
+        grouped.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::FactColumn(column(INT4OID)),
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        let desc = zero_descriptor(&grouped, &[INT4OID], &[]);
+        assert_eq!(desc.key_count, 1);
+        assert_eq!(
+            desc.keys[0].source,
+            abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT
+        );
+        assert_eq!(desc.keys[0].cardinality, 1);
+
+        let fact_key = column(INT4OID);
+        let dim_key = ColumnRef {
+            relation_oid: 43,
+            attno: 1,
+            type_oid: INT4OID,
+        };
+        let mut dimension = global;
+        dimension.star_dims.push(DimSpec {
+            relation_oid: 43,
+            fact_key,
+            dim_key,
+            collation_oid: 0,
+            multiplicity: JoinMultiplicity::Unique,
+            filter: FilterSpec::None,
+        });
+        dimension.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::StarDimension {
+                dim_index: 0,
+                group_column: dim_key,
+            },
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        let desc = zero_descriptor(&dimension, &[INT4OID, INT4OID], &[]);
+        assert_eq!(desc.dim_count, 1);
+        assert_eq!(
+            desc.keys[0].source,
+            abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_DIM0
+        );
+        assert_eq!(desc.dims[0].key_count, 0);
+    }
+
+    #[test]
+    fn empty_h3_descriptor_and_view_lookup_fail_closed_without_device_work() {
+        let (spec, _) = h3_count_shape();
+        let GroupKeySource::H3CellToParent { cell, .. } = spec.group_keys[0].source else {
+            unreachable!()
+        };
+        let artifact = H3ParentArtifact::new(spec, 0, 1, None).expect("empty H3 artifact");
+        let request = ResidentColumnRef {
+            relid: pg_sys::Oid::from(cell.relation_oid),
+            attno: 1,
+        };
+        let view = ResidentColumnView::Empty {
+            type_oid: pg_sys::Oid::from(cell.type_oid),
+        };
+        let desc = build_h3_descriptor(&artifact, &[request], &[view], cell)
+            .expect("empty H3 descriptor binds");
+        assert_eq!(desc.grouping_mode, abi::PGACCEL_GROUPED_AGG_GROUPING_HASH);
+        assert_eq!(desc.output_mode, abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
+        assert_eq!(desc.group_capacity, 1);
+        assert!(desc.keys[0].values.values.is_null());
+
+        assert!(find_view(&[], &[], cell).is_err());
+        assert!(find_view(&[request], &[], cell).is_err());
+        let wrong = ResidentColumnView::Empty {
+            type_oid: pg_sys::Oid::from(INT4OID),
+        };
+        assert!(find_view(&[request], &[wrong], cell).is_err());
+        let mut invalid = cell;
+        invalid.attno = i32::MAX;
+        let view = ResidentColumnView::Empty {
+            type_oid: pg_sys::Oid::from(cell.type_oid),
+        };
+        assert!(find_view(&[request], &[view], invalid).is_err());
     }
 }
