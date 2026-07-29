@@ -23,8 +23,8 @@
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
-#include "pgaccel_hash_agg.h"
 #include "pgaccel_hash_join.h"
+#include "pgaccel_resident_count.h"
 
 static const size_t N = 1000;
 static const float VAL = 25.0f;
@@ -104,22 +104,29 @@ static int run_fp64_fork_matrix(const char* label) {
     printf("[%s] fp64 matrix: reduce_sum_f64 OK\n", label);
   }
 
-  // ── sort_f64 (kv) ────────────────────────────────────────────────
+  // Resident count-only hash join.
   {
-    double keys[8] = {3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0};
-    uint32_t indices[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-    pgaccel_status st = pgaccel_sort_kv_f64(keys, indices, 8);
-    if (st != PGACCEL_OK) {
-      fprintf(stderr, "[%s] fp64 matrix: sort_kv_f64 status=%d\n", label, st);
+    const int64_t keys[] = {3, 1, 3, 5, 3, 1, 9, 2};
+    void* device_keys = nullptr;
+    pgaccel_status st = pgaccel_expr_device_alloc_copy(keys, sizeof(keys), &device_keys);
+    if (st != PGACCEL_OK || device_keys == nullptr) {
+      fprintf(stderr, "[%s] resident join key allocation status=%d\n", label, st);
       return 1;
     }
-    for (size_t i = 1; i < 8; ++i) {
-      if (keys[i] < keys[i - 1]) {
-        fprintf(stderr, "[%s] fp64 matrix: sort_kv_f64 non-monotone\n", label);
-        return 1;
-      }
+    pgaccel_hash_table* table =
+        pgaccel_hash_join_build_device_count(device_keys, nullptr, 8, PGACCEL_KEY_INT64);
+    size_t count = 0;
+    if (table != nullptr)
+      st = pgaccel_hash_join_count_device(table, device_keys, nullptr, 8, &count);
+    if (table == nullptr || st != PGACCEL_OK || count != 16) {
+      fprintf(stderr, "[%s] resident join status=%d count=%zu\n", label, st, count);
+      pgaccel_hash_join_free(table);
+      pgaccel_expr_device_free(device_keys);
+      return 1;
     }
-    printf("[%s] fp64 matrix: sort_kv_f64 OK\n", label);
+    pgaccel_hash_join_free(table);
+    pgaccel_expr_device_free(device_keys);
+    printf("[%s] resident count-only hash join OK\n", label);
   }
 
   // ── spatial_f64 (fp64 PIP recheck) ────────────────────────────────

@@ -1131,6 +1131,7 @@ mod tests {
             .map(|_| crate::report::IterationResult {
                 accel_ms,
                 parallel_ms,
+                accel_first: false,
                 cache_purge: crate::bench_model::CachePurgeState::NotRequested,
                 cache_state: crate::bench_model::CacheState::Warm,
             })

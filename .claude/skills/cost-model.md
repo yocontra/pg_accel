@@ -17,77 +17,38 @@ plan untouched — that is a runtime no-op, not a CPU path.
 - `pg_accel/src/engine/cost/formulas.rs` — `should_batch`, `should_use_gpu`, `self_scan_cost`, `optimal_batch_size`.
 - `pg_accel/src/engine/cost/constants.rs` — per-strategy per-row cost constants.
 - `pg_accel/src/engine/cost/availability.rs` — `gpu_hardware_available`, `gpu_is_usable`, `platform_has_fp64`.
-- `pg_accel/src/engine/ffi/planner_hooks/mod.rs` — `install()`, `pgaccel_create_upper_paths`, `pgaccel_inject_gpu_agg`, `pgaccel_inject_gpu_window`, `pgaccel_inject_gpu_preagg`.
-- `pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs` — `pgaccel_set_rel_pathlist` (scan-level gates), `try_inject_gpu_sort_path`.
-- `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs` — join-level injection.
-- `pg_accel/src/engine/dispatch/mod.rs` — runtime `dispatch` entry after planning.
+- `pg_accel/src/engine/ffi/planner_hooks/mod.rs` — installs hooks, injects only `generic_groupagg`, and records window/SRF declines.
+- `pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs` — observation-only base-scan, standalone-sort, and function declines.
+- `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs` — observation-only row-join declines; resident star joins are analyzed by the aggregate shape pass.
+- `pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs` — resident aggregate admission and costing.
 
 ## Planner hooks installed
 
 `install()` at `pg_accel/src/engine/ffi/planner_hooks/mod.rs:52` registers three hooks:
 
-- `set_rel_pathlist_hook` → `pgaccel_set_rel_pathlist` (scan + scan-level sort).
-- `set_join_pathlist_hook` → `pgaccel_set_join_pathlist` (GpuHashJoin).
-- `create_upper_paths_hook` → `pgaccel_create_upper_paths` (agg, window, preagg).
+- `set_rel_pathlist_hook` → observe base scans, standalone sort/top-k, and functions; add no path.
+- `set_join_pathlist_hook` → observe row-emitting joins; add no path.
+- `create_upper_paths_hook` → consider `generic_groupagg` at `UPPERREL_GROUP_AGG`; record native window/SRF declines elsewhere.
 
 Previous hooks are always chained first.
 
 ## Scan-level decision chain
 
-`pgaccel_set_rel_pathlist` (`rel_pathlist.rs:42`) runs these gates in order:
-
-1. Chain previous hook, record `stats::record_planner_hook_call()`.
-2. `gucs::enabled()` — `pg_accel.enabled` master switch.
-3. `parse.commandType == CMD_SELECT` — no INSERT/UPDATE/DELETE.
-4. `cost::gpu_is_usable()` — GPU hardware + `pg_accel.gpu_enabled` GUC (`availability.rs:35`).
-5. `reloptkind == RELOPT_BASEREL && rtekind == RTE_RELATION`.
-6. Skip system catalog relids (< `FirstNormalObjectId`).
-7. Early exit when no restriction clauses AND no `root.sort_pathkeys`.
-8. If `sort_pathkeys` present: try `try_inject_gpu_sort_path`.
-9. Early rows exit: `max(rel.tuples, rel.rows) < gucs::min_batch_size()`.
-10. `try_gpu_expr_match` (standard numeric WHERE) + adapter-registry `find_accelerable_match`
-    (spatial / H3 / raster). Registry match preferred.
-11. Per-strategy `per_row_cost` from `cost::GPU_*_PER_ROW_COST` + `cost::should_batch`.
-12. `GpuExpr`: `rows >= device_limits().gpu_expr_min_rows`.
-13. `GpuRaster`: `rows >= device_limits().gpu_min_rows * 5`.
-14. Spatial/Raster: defer to cheap GiST/SP-GiST index via `has_cheap_spatial_index_path`
-    (selectivity < `SPATIAL_INDEX_SELECTIVITY_THRESHOLD` or cost ratio <
-    `SPATIAL_INDEX_COST_RATIO_THRESHOLD` in `constants.rs`).
-15. `GpuSpatial` vertex gate (`rel_pathlist.rs:269`):
-    - `vertex_count >= gpu_spatial_min_vertices`.
-    - `vertex_count * rows` in
-      `[spatial_point_in_ring_break_even_verts_x_rows, spatial_point_in_ring_max_verts_x_rows]`.
-    - Unknown vertex count → treat as 0, reject.
-16. Baseline: `find_cheapest_seqscan_path` (not cheapest overall — Custom Scan always
-    does a full heap scan). Null → index paths dominate, skip.
-17. Build cost: `startup = base.startup + 1.0 + gpu_overhead`, `total = (base.total *
-    cost_margin + batch_overhead + gpu_overhead) * gucs::cost_multiplier()`.
-    - `gpu_overhead = GPU_LAUNCH_OVERHEAD` for Spatial/Raster/H3, `0.0` for `GpuExpr`
-      (inline template, no kernel).
-    - `cost_margin = GPU_COST_SAFETY_MARGIN * 0.5` for Spatial/Raster/H3, full
-      `GPU_COST_SAFETY_MARGIN` (0.7) for `GpuExpr`.
-18. Post-cost `has_cheaper_spatial_index_path(pathlist, total_cost)`.
-19. `create_custom_path` + `add_path`. `add_path` handles final domination vs PG's
-    parallel paths.
-
-Note: Custom Scan runs single-threaded on the main backend. Baseline intentionally uses
-the cheapest *non-parallel* seqscan (`find_cheapest_seqscan_path`) so the GPU batch
-speedup isn't required to overcome PG's `serial_cost / n_workers` bookkeeping on paper.
+`pgaccel_set_rel_pathlist` chains the previous hook, honors hook suspension and
+`pg_accel.enabled`, requires a SELECT, and records planner-hook timing. With GPU
+planning enabled it observes test-only raster eligibility, H3/PostGIS restriction
+shapes, and standalone sort shapes. It records typed reasons plus
+`no_gpu_resident_pipeline` and never calls `add_path`. Bounded top-k is not an
+exception: it records `sort_standalone_topk_no_gpu_kernel` and stays native on
+every backend.
 
 ## Upper-path decisions
 
-`pgaccel_create_upper_paths` (`planner_hooks/mod.rs:80`) handles `UPPERREL_GROUP_AGG`:
-
-1. `pgaccel_inject_gpu_preagg` — fused star-join + agg; gated by `gpu_preagg_min_fact_rows`,
-   `gpu_preagg_max_dim_rows`, cost ratio `gpu_preagg_cost_ratio`.
-2. `pgaccel_inject_gpu_agg` — reduce or hash-agg; gates on `gpu_reduce_min_rows`,
-   `gpu_hash_agg_min_rows`, `gpu_hash_agg_max_groups`. Fusion with an upstream GpuScan
-   requires `rows >= gpu_pipeline_fusion_min_rows`. Final cost ratio check against PG's
-   cheapest non-parallel agg uses `gpu_agg_cost_ratio` (default 0.80).
-3. `pgaccel_inject_gpu_window` — gated by `gpu_window_min_rows` and `gpu_window_cost_ratio`.
-
-PG's serial baseline is computed via `find_cheapest_nonparallel_path` / `_total_cost`
-(`planner_hooks/mod.rs:2191`, `:2264`), which strips top-level Gather/GatherMerge.
+At `UPPERREL_GROUP_AGG`, `generic_groupagg::try_inject` analyzes a reducing
+`AggQuerySpec`, proves residency and semantics, computes device-aware cost, and
+adds the sole normal-production pg_accel path when it wins. `UPPERREL_WINDOW`
+records `no_gpu_resident_pipeline` and adds no path. Numeric `GpuSort` and
+`GpuWindow` tags survive only in the private-data compatibility codec.
 
 ## DeviceLimits — hardware-derived thresholds
 
@@ -110,9 +71,9 @@ Unified memory halves most thresholds (no DMA copy). Memory-derived limits use
 ### Row-count gates
 
 - `gpu_min_rows`: generic GPU dispatch floor.
-- `gpu_sort_min_rows`, `gpu_sort_planner_min_rows`: sort dispatch floor (planner tracks
-  executor; earlier `* 10` mismatch removed, see comment at `:193`).
-- `gpu_window_min_rows`, `gpu_reduce_min_rows`, `gpu_hash_agg_min_rows`.
+- `gpu_sort_*` and `gpu_window_*`: retained calibration/compatibility fields;
+  they do not admit a standalone sort or window path.
+- `gpu_reduce_min_rows`, `gpu_hash_agg_min_rows`.
 - `gpu_pipeline_fusion_min_rows`: scan+agg fusion.
 - `gpu_preagg_min_fact_rows`, `gpu_preagg_max_dim_rows`.
 - `gpu_expr_min_rows`, `gpu_spatial_min_vertices`.
@@ -128,8 +89,8 @@ Unified memory halves most thresholds (no DMA copy). Memory-derived limits use
 
 - `gpu_reduce_max_chunk`: unified-memory uses 100M (chunking is pure loss on UMA);
   discrete uses `mem/32/8`.
-- `gpu_sort_max_elements`: `mem/32/12`, clamped to ≤ 4M per chunk; executor k-way
-  merges across chunks.
+- `gpu_sort_max_elements`: retained compatibility/calibration field; no standalone
+  sort executor consumes it.
 - `gpu_hash_agg_max_groups`: `mem/256/64`, clamp ≤ 100K.
 - `gpu_hash_join_build_max_rows`, `gpu_join_max_output_rows`.
 - `gpu_multi_key_sort_max_keys` (4).
@@ -202,8 +163,8 @@ overhead on tiny inputs, not to paper over correctness or perf bugs in the GPU p
 `formulas.rs:23` — `should_use_gpu(profile, rows, per_row_cost)`:
 `profile.has_gpu && rows >= device_limits().gpu_min_rows && per_row_cost > 0.01`.
 
-`self_scan_cost(rows, num_extract_cols, gpu_op_cost)` (`:40`) is the universal cost
-for self-scanning nodes (agg/sort/window): `scan + extract + kernel_launch + per_row_gpu`.
+`self_scan_cost(rows, num_extract_cols, gpu_op_cost)` remains a reusable formula;
+production selection applies it only through currently reachable resident paths.
 
 ## GUCs affecting cost decisions
 

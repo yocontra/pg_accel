@@ -250,7 +250,9 @@ ineligible as performance evidence.
 C++ scope is host-object source coverage for every owned implementation under
 pgaccel-kernels/src and executable inline header under pgaccel-kernels/include.
 The complete registered CTest suite is separate GPU correctness evidence,
-including the unchanged OOM-never invariant measured at 14.08GB peak RSS.
+including the fixed 900-second OOM-never invariant: every live family processes
+min(2 * max_alloc, 2 GiB) of logical input (exactly 2 GiB on this M2 candidate)
+and must satisfy the enforced RSS-delta bound.
 Host-object source coverage
 does not claim device kernel-line execution.
 
@@ -707,7 +709,7 @@ run_ooo_overlap_diagnostic() {
         return 1
     fi
     if ! grep -Fxq \
-        "test_ooo_overlap: sort/window GPU spans did not overlap" <<< "$output"; then
+        "test_ooo_overlap: resident/reduce GPU spans did not overlap" <<< "$output"; then
         echo "error: manual OOO overlap diagnostic did not report the pinned structural failure" >&2
         return 1
     fi
@@ -839,8 +841,9 @@ cpp_coverage() (
             "manual OOO overlap diagnostic did not fail in the expected structural mode with coverage"
     fi
 
-    # Do not override per-test timeouts: test_oom_invariant retains its 900s
-    # timeout and unchanged 2GB-per-family sweep (14.08GB measured peak RSS).
+    # Do not override per-test timeouts: test_oom_invariant retains its fixed
+    # 900s timeout, min(2 * max_alloc, 2 GiB) logical input per live family
+    # (exactly 2 GiB on this M2 candidate), and the RSS-delta bound.
     if ! run_logged "$output_dir/ctest.log" env \
         LLVM_PROFILE_FILE="$profile_dir/pgaccel-cpp-%p-%m.profraw" \
         ACPP_METAL_DEVICE_PROFILE_DIR="$profile_dir" \

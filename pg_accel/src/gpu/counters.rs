@@ -74,9 +74,7 @@ impl GpuFailureDomain {
             Self::H3
         } else if func.starts_with("pgaccel_raster_") {
             Self::Raster
-        } else if func.starts_with("pgaccel_sort_") || func.starts_with("pgaccel_topk_") {
-            Self::Sort
-        } else if func.starts_with("pgaccel_reduce_") || func.starts_with("pgaccel_fused_") {
+        } else if func.starts_with("pgaccel_reduce_") {
             Self::Reduce
         } else if func.starts_with("pgaccel_expr_") {
             Self::Expr
@@ -84,15 +82,8 @@ impl GpuFailureDomain {
             Self::GroupedAgg
         } else if func.starts_with("pgaccel_hash_join_") {
             Self::HashJoin
-        } else if func.starts_with("pgaccel_hash_agg_")
-            || func.starts_with("pgaccel_hash_count_")
-            || func.starts_with("pgaccel_agg_")
-        {
+        } else if func.starts_with("pgaccel_hash_count_") || func.starts_with("pgaccel_agg_") {
             Self::HashAgg
-        } else if func.starts_with("pgaccel_window_") {
-            Self::Window
-        } else if func.starts_with("pgaccel_nlj_") {
-            Self::NestedLoop
         } else if func.starts_with("pgaccel_point_")
             || func.starts_with("pgaccel_sphere_")
             || func.starts_with("pgaccel_segment_")

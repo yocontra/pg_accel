@@ -262,6 +262,13 @@ pgaccel_val val_i64(int64_t value) {
   return result;
 }
 
+pgaccel_val val_i32(int32_t value) {
+  pgaccel_val result = {};
+  result.tag = PGACCEL_VAL_INT32;
+  result.data.i32 = value;
+  return result;
+}
+
 pgaccel_val val_bool(bool value) {
   pgaccel_val result = {};
   result.tag = PGACCEL_VAL_BOOL;
@@ -536,6 +543,13 @@ void check_u64_lane(const std::vector<uint64_t>& lane, std::initializer_list<uin
   }
 }
 
+void check_device_invalid(const pgaccel_grouped_agg_desc& desc) {
+  OutputStorage output(desc);
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+}
+
 void test_workspace_and_descriptor_validation() {
   std::printf("--- workspace and descriptor validation ---\n");
   pgaccel_grouped_agg_desc desc = base_desc(0);
@@ -584,6 +598,69 @@ void test_workspace_and_descriptor_validation() {
 
   malformed = desc;
   malformed.measure_filters[3].value_cmp_opcode = 0;
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  set_fact_key(malformed, 0, nullptr, nullptr, 0, 1);
+  malformed.keys[0].flags = 1;
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  set_fact_key(malformed, 0, nullptr, nullptr, 0, 0);
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  set_fact_key(malformed, 0, nullptr, nullptr, 0, 1);
+  malformed.keys[0].values.type = PGACCEL_VAL_INT64;
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  malformed.key_count = 1;
+  malformed.keys[0].source = PGACCEL_GROUPED_AGG_KEY_SOURCE_DIM0;
+  malformed.keys[0].cardinality = 1;
+  malformed.keys[0].null_code = PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE;
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  malformed.group_capacity = 0;
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  malformed.grouping_mode = PGACCEL_GROUPED_AGG_GROUPING_HASH;
+  malformed.output_mode = PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+  malformed.group_capacity = 0;
+  malformed.key_count = 1;
+  malformed.keys[0].values.type = PGACCEL_VAL_INT64;
+  malformed.keys[0].source = PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT;
+  malformed.keys[0].null_code = PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE;
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  malformed.measures[1].flags = 1;
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  malformed.measure_filters[0].kind = 99;
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  malformed.dim_count = 1;
+  malformed.dims[0].fact_key.type = PGACCEL_VAL_INT32;
+  malformed.dims[0].flags = 1;
+  workspace_req(malformed, &status);
+  CHECK(status == PGACCEL_ERROR);
+
+  malformed = desc;
+  malformed.dims[1].flags = 1;
   workspace_req(malformed, &status);
   CHECK(status == PGACCEL_ERROR);
 
@@ -1710,6 +1787,82 @@ void test_f64_stats_pair_and_nan_ordering() {
   CHECK(output.f64(output.measures[0].rhs_sum, 2) == 110.0);
   CHECK(output.measures[0].rhs_count[2] == 2);
   CHECK(output.measures[0].rhs_nonnull[2] == 2);
+
+  SharedArray<double> both_nan({nan, nan});
+  pgaccel_grouped_agg_desc both_nan_desc = base_desc(2);
+  set_f64_view(both_nan_desc.measures[0].value, both_nan.data());
+  finish_f64_measure(both_nan_desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                     PGACCEL_GROUPED_AGG_LANE_MIN | PGACCEL_GROUPED_AGG_LANE_MAX);
+  OutputStorage both_nan_output(both_nan_desc);
+  CHECK_STATUS(execute_external(both_nan_desc, &both_nan_output.out), PGACCEL_OK);
+  CHECK(std::isnan(both_nan_output.f64(both_nan_output.measures[0].min, 0)));
+  CHECK(std::isnan(both_nan_output.f64(both_nan_output.measures[0].max, 0)));
+}
+
+void test_i64_stats_pair_and_f64_binary_measures() {
+  std::printf("--- I64 stats pair and F64 binary measures ---\n");
+  SharedArray<int64_t> stats_values({2, -3, 5, 7});
+  SharedArray<uint8_t> stats_nulls({0, 0, 1, 0});
+  SharedArray<int64_t> stats_rhs({10, 20, 30, 40});
+  SharedArray<uint8_t> stats_rhs_nulls({0, 1, 0, 0});
+  SharedArray<double> mul_values({2.0, -3.0, 4.0, 5.0});
+  SharedArray<double> mul_rhs({10.0, 2.0, -1.0, 0.5});
+  SharedArray<double> sub_values({100.0, 50.0, -10.0, 8.0});
+  SharedArray<double> sub_rhs({1.0, 70.0, -20.0, 3.0});
+
+  pgaccel_grouped_agg_desc desc = base_desc(4);
+  set_i64_view(desc.measures[0].value, stats_values.data(), stats_nulls.data());
+  set_i64_view(desc.measures[0].rhs, stats_rhs.data(), stats_rhs_nulls.data());
+  finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR,
+                     PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                         PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_COUNT |
+                         PGACCEL_GROUPED_AGG_LANE_RHS_SUM |
+                         PGACCEL_GROUPED_AGG_LANE_RHS_COUNT);
+
+  set_f64_view(desc.measures[1].value, mul_values.data());
+  set_f64_view(desc.measures[1].rhs, mul_rhs.data());
+  finish_f64_measure(desc, 1, PGACCEL_GROUPED_AGG_MEASURE_MUL,
+                     PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                         PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_SUMSQ |
+                         PGACCEL_GROUPED_AGG_LANE_COUNT);
+
+  set_f64_view(desc.measures[2].value, sub_values.data());
+  set_f64_view(desc.measures[2].rhs, sub_rhs.data());
+  finish_f64_measure(desc, 2, PGACCEL_GROUPED_AGG_MEASURE_SUB,
+                     PGACCEL_GROUPED_AGG_LANE_SUM | PGACCEL_GROUPED_AGG_LANE_MIN |
+                         PGACCEL_GROUPED_AGG_LANE_MAX | PGACCEL_GROUPED_AGG_LANE_SUMSQ |
+                         PGACCEL_GROUPED_AGG_LANE_COUNT);
+  set_count_star(desc, 3);
+
+  OutputStorage output(desc);
+  CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+  CHECK(output.out.selected_count == 4);
+  CHECK(output.out.uncertain_count == 0);
+  CHECK(output.out.emitted_group_count == 1);
+
+  CHECK(output.i64(output.measures[0].sum, 0) == 6);
+  CHECK(output.i64(output.measures[0].min, 0) == -3);
+  CHECK(output.i64(output.measures[0].max, 0) == 7);
+  CHECK(output.measures[0].count[0] == 3);
+  CHECK(output.measures[0].nonnull[0] == 3);
+  CHECK(output.i64(output.measures[0].rhs_sum, 0) == 80);
+  CHECK(output.measures[0].rhs_count[0] == 3);
+  CHECK(output.measures[0].rhs_nonnull[0] == 3);
+
+  CHECK(output.f64(output.measures[1].sum, 0) == 12.5);
+  CHECK(output.f64(output.measures[1].min, 0) == -6.0);
+  CHECK(output.f64(output.measures[1].max, 0) == 20.0);
+  CHECK(output.f64(output.measures[1].sumsq, 0) == 458.25);
+  CHECK(output.measures[1].count[0] == 4);
+  CHECK(output.measures[1].nonnull[0] == 4);
+
+  CHECK(output.f64(output.measures[2].sum, 0) == 94.0);
+  CHECK(output.f64(output.measures[2].min, 0) == -20.0);
+  CHECK(output.f64(output.measures[2].max, 0) == 99.0);
+  CHECK(output.f64(output.measures[2].sumsq, 0) == 10326.0);
+  CHECK(output.measures[2].count[0] == 4);
+  CHECK(output.measures[2].nonnull[0] == 4);
+  CHECK(output.measures[3].count[0] == 4);
 }
 
 void test_global_and_measure_filters() {
@@ -1765,6 +1918,25 @@ void test_global_and_measure_filters() {
 
 void test_predicate_only_physical_count() {
   std::printf("--- predicate-only physical COUNT lanes ---\n");
+
+  {
+    SharedArray<int32_t> values({0, 5, 9});
+    pgaccel_grouped_agg_desc desc = base_desc(3);
+    set_count_only_view(desc, 0, values.data(), nullptr, PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
+                        sizeof(int32_t), PGACCEL_GROUPED_AGG_ACCUM_I64);
+    desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+    desc.where_filter.predicate_measure_slot = 0;
+    desc.where_filter.predicate_range_count = 1;
+    desc.where_filter.predicate_lo[0] = val_i32(1);
+    desc.where_filter.predicate_hi[0] = val_i32(8);
+
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.out.selected_count == 1);
+    CHECK(output.out.uncertain_count == 0);
+    CHECK(output.measures[0].count[0] == 1);
+    CHECK(output.measures[0].nonnull[0] == 1);
+  }
 
   {
     SharedArray<uint8_t> values({0, 1, 1});
@@ -2008,6 +2180,760 @@ void test_group_activity_ignores_measure_validity() {
   check_i64_lane(output, output.measures[0].sum, {0, 0});
   check_u64_lane(output.measures[0].count, {0, 0});
   check_u64_lane(output.measures[0].nonnull, {0, 0});
+}
+
+void test_generic_device_error_matrix() {
+  std::printf("--- generic device error and rejection matrix ---\n");
+
+  {
+    SharedArray<uint8_t> values({2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_count_only_view(desc, 0, values.data(), nullptr, PGACCEL_GROUPED_AGG_PHYSICAL_BOOL,
+                        sizeof(uint8_t), PGACCEL_GROUPED_AGG_ACCUM_I64);
+    desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+    desc.where_filter.predicate_measure_slot = 0;
+    desc.where_filter.predicate_range_count = 1;
+    desc.where_filter.predicate_lo[0] = val_bool(false);
+    desc.where_filter.predicate_hi[0] = val_bool(true);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> values({7});
+    SharedArray<uint8_t> nulls({2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_INT32, sizeof(int32_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    desc.where_filter.predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+    desc.where_filter.predicate_measure_slot = 0;
+    desc.where_filter.predicate_range_count = 1;
+    desc.where_filter.predicate_lo[0] = val_i32(0);
+    desc.where_filter.predicate_hi[0] = val_i32(10);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({2});
+    SharedArray<double> values({1.0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1);
+    set_f64_view(desc.measures[0].value, values.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.out.selected_count == 0);
+    CHECK(output.f64(output.measures[0].sum, 0) == 0.0);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    SharedArray<uint8_t> dim_nulls({2});
+    SharedArray<double> values({1.0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), dim_nulls.data(), 0, 1);
+    set_f64_view(desc.measures[0].value, values.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    SharedArray<uint8_t> dim_match({2});
+    SharedArray<double> values({1.0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1, dim_match.data());
+    set_f64_view(desc.measures[0].value, values.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    SharedArray<uint64_t> multiplicity({0});
+    SharedArray<double> values({1.0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1, nullptr, multiplicity.data());
+    set_f64_view(desc.measures[0].value, values.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.out.selected_count == 0);
+    CHECK(output.f64(output.measures[0].sum, 0) == 0.0);
+  }
+
+  {
+    SharedArray<int32_t> keys({0});
+    SharedArray<uint8_t> key_nulls({2});
+    SharedArray<double> values({1.0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_fact_key(desc, 0, keys.data(), key_nulls.data(), 0, 2, 1);
+    set_f64_view(desc.measures[0].value, values.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    SharedArray<uint64_t> multiplicity({2});
+    SharedArray<int32_t> lookup({0});
+    SharedArray<double> values({1.0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1, nullptr, multiplicity.data());
+    set_dim_key(desc, 0, 0, lookup.data(), 0, 1);
+    set_f64_view(desc.measures[0].value, values.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> keys({1});
+    SharedArray<double> values({1.0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_fact_key(desc, 0, keys.data(), nullptr, 0, 1);
+    set_f64_view(desc.measures[0].value, values.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<double> values({1.0});
+    SharedArray<int8_t> mask({2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_f64_view(desc.measures[0].value, values.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    desc.measure_filters[0].kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    desc.measure_filters[0].mask = mask.data();
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int64_t> values({1});
+    SharedArray<uint8_t> nulls({2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i64_view(desc.measures[0].value, values.data(), nulls.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int64_t> lhs({1});
+    SharedArray<int64_t> rhs({2});
+    SharedArray<uint8_t> rhs_nulls({2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i64_view(desc.measures[0].value, lhs.data());
+    set_i64_view(desc.measures[0].rhs, rhs.data(), rhs_nulls.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_SUB,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<double> values({1.0});
+    SharedArray<uint8_t> nulls({2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_f64_view(desc.measures[0].value, values.data(), nulls.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<double> lhs({1.0});
+    SharedArray<double> rhs({2.0});
+    SharedArray<uint8_t> rhs_nulls({2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_f64_view(desc.measures[0].value, lhs.data());
+    set_f64_view(desc.measures[0].rhs, rhs.data(), rhs_nulls.data());
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_SUB,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int64_t> lhs({1});
+    SharedArray<int64_t> rhs({2});
+    SharedArray<uint8_t> rhs_nulls({2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i64_view(desc.measures[0].value, lhs.data());
+    set_i64_view(desc.measures[0].rhs, rhs.data(), rhs_nulls.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR,
+                       PGACCEL_GROUPED_AGG_LANE_RHS_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    SharedArray<uint64_t> multiplicity({2});
+    SharedArray<int64_t> lhs({1});
+    SharedArray<int64_t> rhs({std::numeric_limits<int64_t>::max()});
+    SharedArray<uint8_t> lhs_nulls({1});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1, nullptr, multiplicity.data());
+    set_i64_view(desc.measures[0].value, lhs.data(), lhs_nulls.data());
+    set_i64_view(desc.measures[0].rhs, rhs.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR,
+                       PGACCEL_GROUPED_AGG_LANE_RHS_SUM);
+    OutputStorage output(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
+  }
+}
+
+void test_specialized_dense_branch_matrix() {
+  std::printf("--- specialized dense branch matrix ---\n");
+
+  {
+    SharedArray<int32_t> dim_fact({0, 0, 4, 0, 1, 2, 2, 2, 2, 2});
+    SharedArray<uint8_t> dim_nulls({2, 1, 0, 0, 0, 0, 0, 0, 0, 0});
+    SharedArray<uint8_t> dim_match({2, 0, 1});
+    SharedArray<int32_t> keys({0, 0, 0, 0, 0, 0, 2, 0, 0, 0});
+    SharedArray<uint8_t> key_nulls({0, 0, 0, 0, 0, 1, 0, 0, 0, 0});
+    SharedArray<int8_t> where_mask(
+        {PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE,
+         PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE, 2, PGACCEL_EXPR_FALSE,
+         PGACCEL_EXPR_TRUE});
+
+    pgaccel_grouped_agg_desc desc = base_desc(10);
+    set_dim(desc, 0, dim_fact.data(), dim_nulls.data(), 0, dim_match.size(), dim_match.data());
+    set_fact_key(desc, 0, keys.data(), key_nulls.data(), 0, 2, 1);
+    set_count_star(desc, 0);
+    desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    desc.where_filter.mask = where_mask.data();
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> keys({0, 2, 0, 0, 0, 0, 0, 0});
+    SharedArray<uint8_t> key_nulls({2, 0, 0, 0, 0, 0, 0, 0});
+    SharedArray<int32_t> lhs(
+        {1, 1, std::numeric_limits<int32_t>::max(), 1, 1, 1, 1, 3});
+    SharedArray<int32_t> rhs({1, 1, 2, 1, 1, 1, 1, 4});
+    SharedArray<uint8_t> lhs_nulls({0, 0, 0, 2, 0, 0, 0, 0});
+    SharedArray<uint8_t> rhs_nulls({0, 0, 0, 0, 2, 0, 0, 0});
+    SharedArray<int8_t> where_mask(
+        {PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE, PGACCEL_EXPR_TRUE,
+         PGACCEL_EXPR_TRUE, 2, PGACCEL_EXPR_FALSE, PGACCEL_EXPR_TRUE});
+
+    pgaccel_grouped_agg_desc desc = base_desc(8);
+    set_fact_key(desc, 0, keys.data(), key_nulls.data(), 0, 2, 1);
+    set_i32_view(desc.measures[0].value, lhs.data(), lhs_nulls.data());
+    set_i32_view(desc.measures[0].rhs, rhs.data(), rhs_nulls.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_MUL,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    set_count_star(desc, 1);
+    desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    desc.where_filter.mask = where_mask.data();
+    check_device_invalid(desc);
+  }
+
+  {
+    constexpr size_t rows = 2048;
+    std::vector<int32_t> host_lhs(rows, 3);
+    std::vector<int32_t> host_rhs(rows, 4);
+    std::vector<uint8_t> host_lhs_nulls(rows, 0);
+    std::vector<uint8_t> host_rhs_nulls(rows, 0);
+    std::vector<int8_t> host_where_mask(rows, PGACCEL_EXPR_TRUE);
+    host_where_mask[0] = PGACCEL_EXPR_FALSE;
+    host_lhs_nulls[1] = 1;
+    host_rhs_nulls[2] = 1;
+    host_where_mask[4] = 2;
+    host_rhs_nulls[1024] = 2;
+
+    SharedArray<int32_t> lhs(host_lhs);
+    SharedArray<int32_t> rhs(host_rhs);
+    SharedArray<uint8_t> lhs_nulls(host_lhs_nulls);
+    SharedArray<uint8_t> rhs_nulls(host_rhs_nulls);
+    SharedArray<int8_t> where_mask(host_where_mask);
+    pgaccel_grouped_agg_desc desc = base_desc(rows);
+    set_i32_view(desc.measures[0].value, lhs.data(), lhs_nulls.data());
+    set_i32_view(desc.measures[0].rhs, rhs.data(), rhs_nulls.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_MUL,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    set_count_star(desc, 1);
+    desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    desc.where_filter.mask = where_mask.data();
+    desc.execution_flags =
+        PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+
+    const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+    SharedWorkspace workspace(req.bytes, req.alignment);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_in_workspace(desc, req, workspace, nullptr, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  }
+}
+
+void test_weighted_overflow_branch_matrix() {
+  std::printf("--- weighted overflow branch matrix ---\n");
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    SharedArray<uint64_t> multiplicity({std::numeric_limits<uint64_t>::max()});
+    SharedArray<int64_t> values({-2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1, nullptr, multiplicity.data());
+    set_i64_view(desc.measures[0].value, values.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    OutputStorage output(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0, 0});
+    SharedArray<uint64_t> multiplicity({std::numeric_limits<uint64_t>::max()});
+    pgaccel_grouped_agg_desc desc = base_desc(2);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1, nullptr, multiplicity.data());
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NUMERIC_OVERFLOW);
+  }
+
+  {
+    SharedArray<int64_t> lhs({2});
+    SharedArray<int64_t> rhs({3});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i64_view(desc.measures[0].value, lhs.data());
+    set_i64_view(desc.measures[0].rhs, rhs.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR,
+                       PGACCEL_GROUPED_AGG_LANE_RHS_COUNT);
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.measures[0].rhs_count[0] == 1);
+  }
+}
+
+void test_compact_full_lane_copy() {
+  std::printf("--- compact full-lane state copy ---\n");
+  SharedArray<int32_t> keys({1});
+  SharedArray<double> values({2.0});
+  SharedArray<double> rhs({3.0});
+
+  pgaccel_grouped_agg_desc desc = base_desc(1);
+  desc.output_mode = PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+  set_fact_key(desc, 0, keys.data(), nullptr, 0, 2);
+  set_f64_view(desc.measures[0].value, values.data());
+  set_f64_view(desc.measures[0].rhs, rhs.data());
+  finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR,
+                     PGACCEL_GROUPED_AGG_LANE_ALL_KNOWN);
+
+  OutputStorage output(desc, true);
+  CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+  CHECK(output.out.emitted_group_count == 1);
+  CHECK(output.out.selected_count == 1);
+  CHECK(output.group_codes[0] == 1);
+  CHECK(output.key_values[0][0] == 1);
+  CHECK(output.f64(output.measures[0].sum, 0) == 2.0);
+  CHECK(output.f64(output.measures[0].min, 0) == 2.0);
+  CHECK(output.f64(output.measures[0].max, 0) == 2.0);
+  CHECK(output.f64(output.measures[0].sumsq, 0) == 4.0);
+  CHECK(output.measures[0].count[0] == 1);
+  CHECK(output.measures[0].nonnull[0] == 1);
+  CHECK(output.f64(output.measures[0].rhs_sum, 0) == 3.0);
+  CHECK(output.measures[0].rhs_count[0] == 1);
+  CHECK(output.measures[0].rhs_nonnull[0] == 1);
+}
+
+void test_output_descriptor_validation() {
+  std::printf("--- grouped output descriptor validation ---\n");
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.flags = 1;
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.active_groups = nullptr;
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    desc.output_mode = PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.active_groups = reinterpret_cast<uint8_t*>(output.out.measures[0].count);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    desc.output_mode = PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+    set_fact_key(desc, 0, nullptr, nullptr, 0, 1);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.keys[0].values = nullptr;
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    desc.output_mode = PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+    set_fact_key(desc, 0, nullptr, nullptr, 0, 1);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.keys[0].type = PGACCEL_VAL_INT64;
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.keys[1].flags = 1;
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.measures[0].count = nullptr;
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.measures[1].count = output.out.measures[0].count;
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    desc.grouping_mode = PGACCEL_GROUPED_AGG_GROUPING_HASH;
+    desc.output_mode = PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+    desc.group_capacity = 4;
+    desc.key_count = 1;
+    desc.keys[0].values.type = PGACCEL_VAL_INT64;
+    desc.keys[0].source = PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT;
+    desc.keys[0].null_code = PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE;
+    set_count_star(desc, 0);
+    OutputStorage output(desc, true);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+}
+
+void test_pointer_span_validation() {
+  std::printf("--- grouped pointer span validation ---\n");
+  const uintptr_t invalid_address = std::numeric_limits<uintptr_t>::max();
+  const auto* invalid_i8 = reinterpret_cast<const int8_t*>(invalid_address);
+  const auto* invalid_u8 = reinterpret_cast<const uint8_t*>(invalid_address);
+  const auto* invalid_i32 = reinterpret_cast<const int32_t*>(invalid_address);
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_fact_key(desc, 0, invalid_i32, nullptr, 0, 1);
+    set_count_star(desc, 0);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> keys({0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_fact_key(desc, 0, keys.data(), invalid_u8, 0, 2, 1);
+    set_count_star(desc, 0);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1);
+    set_dim_key(desc, 0, 0, invalid_i32, 0, 1);
+    set_count_star(desc, 0);
+    check_device_invalid(desc);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, invalid_i32);
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> values({1});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, values.data(), invalid_u8);
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> lhs({1});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, lhs.data());
+    set_i32_view(desc.measures[0].rhs, invalid_i32);
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_MUL,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> lhs({1});
+    SharedArray<int32_t> rhs({2});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, lhs.data());
+    set_i32_view(desc.measures[0].rhs, rhs.data(), invalid_u8);
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_MUL,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> values({1});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, values.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    desc.measure_filters[0].kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    desc.measure_filters[0].mask = invalid_i8;
+    check_device_invalid(desc);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_count_star(desc, 0);
+    desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    desc.where_filter.mask = invalid_i8;
+    check_device_invalid(desc);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, invalid_i32, nullptr, 0, 1);
+    set_count_star(desc, 0);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), invalid_u8, 0, 1);
+    set_count_star(desc, 0);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1, invalid_u8);
+    set_count_star(desc, 0);
+    check_device_invalid(desc);
+  }
+
+  {
+    SharedArray<int32_t> dim_fact({0});
+    const auto* invalid_u64 = reinterpret_cast<const uint64_t*>(invalid_address);
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1, nullptr, invalid_u64);
+    set_count_star(desc, 0);
+    check_device_invalid(desc);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    OutputStorage output(desc, true);
+    output.out.group_codes = reinterpret_cast<size_t*>(invalid_address);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.active_groups = reinterpret_cast<uint8_t*>(invalid_address);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    desc.output_mode = PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+    set_fact_key(desc, 0, nullptr, nullptr, 0, 1);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.keys[0].values = reinterpret_cast<void*>(invalid_address);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    desc.output_mode = PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+    set_fact_key(desc, 0, nullptr, nullptr, 0, 2, 1);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.keys[0].nulls = reinterpret_cast<uint8_t*>(invalid_address);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_f64_view(desc.measures[0].value, nullptr);
+    set_f64_view(desc.measures[0].rhs, nullptr);
+    finish_f64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_STATS_PAIR,
+                       PGACCEL_GROUPED_AGG_LANE_ALL_KNOWN);
+    for (size_t index = 0; index < 9; ++index) {
+      OutputStorage output(desc);
+      pgaccel_grouped_agg_measure_out& measure = output.out.measures[0];
+      switch (index) {
+        case 0:
+          measure.sum = reinterpret_cast<void*>(invalid_address);
+          break;
+        case 1:
+          measure.min = reinterpret_cast<void*>(invalid_address);
+          break;
+        case 2:
+          measure.max = reinterpret_cast<void*>(invalid_address);
+          break;
+        case 3:
+          measure.sumsq = reinterpret_cast<void*>(invalid_address);
+          break;
+        case 4:
+          measure.count = reinterpret_cast<uint64_t*>(invalid_address);
+          break;
+        case 5:
+          measure.nonnull_count = reinterpret_cast<uint64_t*>(invalid_address);
+          break;
+        case 6:
+          measure.rhs_sum = reinterpret_cast<void*>(invalid_address);
+          break;
+        case 7:
+          measure.rhs_count = reinterpret_cast<uint64_t*>(invalid_address);
+          break;
+        case 8:
+          measure.rhs_nonnull_count = reinterpret_cast<uint64_t*>(invalid_address);
+          break;
+      }
+      CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+    }
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+    const uintptr_t aligned_invalid =
+        invalid_address & ~(static_cast<uintptr_t>(req.alignment) - 1);
+    desc.scratch = reinterpret_cast<void*>(aligned_invalid);
+    desc.scratch_bytes = req.bytes;
+    desc.scratch_space = PGACCEL_MEM_SPACE_SHARED_USM;
+    desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+    OutputStorage output(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(pgaccel_grouped_agg_execute_ex(&desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  }
+
+  {
+    SharedArray<int32_t> placeholder({7});
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, placeholder.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+    SharedWorkspace workspace(req.bytes, req.alignment);
+    desc.measures[0].value.values = workspace.data();
+    desc.scratch = workspace.data();
+    desc.scratch_bytes = req.bytes;
+    desc.scratch_space = PGACCEL_MEM_SPACE_SHARED_USM;
+    desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+    OutputStorage output(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(pgaccel_grouped_agg_execute_ex(&desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  }
+
+  {
+    int32_t host_value = 7;
+    pgaccel_grouped_agg_desc desc = base_desc(1);
+    set_i32_view(desc.measures[0].value, &host_value);
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN,
+                       PGACCEL_GROUPED_AGG_LANE_SUM);
+    OutputStorage output(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    OutputStorage output(desc);
+    output.out.output_space = PGACCEL_MEM_SPACE_SHARED_USM;
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    SharedArray<uint8_t> shared_active(1);
+    OutputStorage output(desc);
+    output.out.active_groups = shared_active.data();
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_ERROR);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    SharedArray<uint8_t> active(1);
+    SharedArray<uint64_t> count(1);
+    active[0] = 0xa5;
+    count[0] = OutputStorage::kSentinel;
+    pgaccel_grouped_agg_out output = {};
+    output.abi_version = PGACCEL_OLAP_ABI_VERSION;
+    output.size_bytes = sizeof(output);
+    output.group_capacity = 1;
+    output.output_space = PGACCEL_MEM_SPACE_SHARED_USM;
+    output.active_groups = active.data();
+    output.measures[0].count = count.data();
+    CHECK_STATUS(execute_external(desc, &output), PGACCEL_OK);
+    CHECK(output.emitted_group_count == 1);
+    CHECK(output.selected_count == 0);
+    CHECK(active[0] == 1);
+    CHECK(count[0] == 0);
+  }
+
+  {
+    pgaccel_grouped_agg_desc desc = base_desc(0);
+    set_count_star(desc, 0);
+    const pgaccel_grouped_agg_workspace_req req = workspace_req(desc);
+    alignas(64) static std::array<uint8_t, 65536> host_workspace{};
+    CHECK(req.bytes <= host_workspace.size());
+    desc.scratch = host_workspace.data();
+    desc.scratch_bytes = req.bytes;
+    desc.scratch_space = PGACCEL_MEM_SPACE_SHARED_USM;
+    desc.scratch_alignment = static_cast<uint32_t>(req.alignment);
+    OutputStorage output(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(pgaccel_grouped_agg_execute_ex(&desc, &output.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  }
 }
 
 void test_integer_expression_overflow_semantics() {
@@ -2638,12 +3564,19 @@ int main() {
     test_parallel_dense_sum_atomic_negative_nullable_publication();
     test_i64_four_measure_lanes();
     test_f64_stats_pair_and_nan_ordering();
+    test_i64_stats_pair_and_f64_binary_measures();
     test_global_and_measure_filters();
     test_predicate_only_physical_count();
     test_four_dimensions_and_multiplicity();
     test_mixed_radix_compact_and_keyed_empty();
     test_device_publication_contract();
     test_group_activity_ignores_measure_validity();
+    test_generic_device_error_matrix();
+    test_specialized_dense_branch_matrix();
+    test_weighted_overflow_branch_matrix();
+    test_compact_full_lane_copy();
+    test_output_descriptor_validation();
+    test_pointer_span_validation();
     test_integer_expression_overflow_semantics();
     test_error_and_unsupported_statuses();
     test_fixed_seed_mixed_radix_fuzz();

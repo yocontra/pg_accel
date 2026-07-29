@@ -1219,6 +1219,7 @@ mod tests {
             .map(|_| IterationResult {
                 accel_ms: 10.0,
                 parallel_ms: 50.0,
+                accel_first: false,
                 cache_purge: CachePurgeState::NotRequested,
                 cache_state: CacheState::Warm,
             })

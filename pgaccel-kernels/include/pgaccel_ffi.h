@@ -120,15 +120,6 @@ void pgaccel_record_gpu_exec();
 extern "C" {
 #endif
 
-/* ── Memory Pool (USM arena allocator) ────────────────────────────── */
-
-/*
- * The USM bump arena (pgaccel_alloc/free/bytes_used/prefetch) was removed —
- * it had zero kernel callers. pgaccel_pool_reset() is retained as a no-op
- * because pgaccel_shutdown() still calls it during teardown.
- */
-void pgaccel_pool_reset(void);
-
 /* ── Bounding Box Overlap ──────────────────────────────────────────── */
 
 /*
@@ -147,45 +138,6 @@ pgaccel_status pgaccel_bbox_intersects_bulk_f32(const float* boxes_a, size_t cou
 pgaccel_status pgaccel_bbox_intersects_bulk_f64(const double* boxes_a, size_t count_a,
                                                 const double* boxes_b, size_t count_b,
                                                 uint8_t* result, size_t* hit_count);
-
-/* ── Sort Kernels ─────────────────────────────────────────────────── */
-
-pgaccel_status pgaccel_sort_f32(float* data, size_t count);
-pgaccel_status pgaccel_sort_f64(double* data, size_t count);
-pgaccel_status pgaccel_sort_i32(int32_t* data, size_t count);
-pgaccel_status pgaccel_sort_i64(int64_t* data, size_t count);
-pgaccel_status pgaccel_sort_u64(uint64_t* data, size_t count);
-
-/*
- * Key-value sort: sorts keys[] and permutes indices[] to match.
- * Stable for equal keys (preserves original row order).
- */
-pgaccel_status pgaccel_sort_kv_f32(float* keys, uint32_t* indices, size_t count);
-pgaccel_status pgaccel_sort_kv_f64(double* keys, uint32_t* indices, size_t count);
-pgaccel_status pgaccel_sort_kv_i32(int32_t* keys, uint32_t* indices, size_t count);
-pgaccel_status pgaccel_sort_kv_i64(int64_t* keys, uint32_t* indices, size_t count);
-
-/*
- * USM-resident key-value sort for int32 keys. `keys` and `indices` must be
- * SYCL USM device/shared allocations; unlike the public host-slice i32 sort,
- * this path never materializes the row-key payload in host vectors.
- */
-pgaccel_status pgaccel_sort_kv_i32_device(int32_t* keys, uint32_t* indices, size_t count);
-pgaccel_status pgaccel_sort_kv_i32_nonnegative_device(int32_t* keys, uint32_t* indices,
-                                                      size_t count, uint32_t radix_bits);
-
-/*
- * Bounded key-value top-k: returns row indices for the first k rows in ORDER
- * BY order without sorting the full input. `largest != 0` means descending.
- */
-pgaccel_status pgaccel_topk_kv_f32(const float* keys, size_t count, size_t k, uint8_t largest,
-                                   uint32_t* out_indices, size_t* out_count);
-pgaccel_status pgaccel_topk_kv_f64(const double* keys, size_t count, size_t k, uint8_t largest,
-                                   uint32_t* out_indices, size_t* out_count);
-pgaccel_status pgaccel_topk_kv_i32(const int32_t* keys, size_t count, size_t k, uint8_t largest,
-                                   uint32_t* out_indices, size_t* out_count);
-pgaccel_status pgaccel_topk_kv_i64(const int64_t* keys, size_t count, size_t k, uint8_t largest,
-                                   uint32_t* out_indices, size_t* out_count);
 
 /* ── Reduce Kernels ──────────────────────────────────────────────── */
 
@@ -993,13 +945,6 @@ typedef struct {
 pgaccel_status
 pgaccel_raster_reclass_resident_ex(const pgaccel_raster_reclass_resident_request* request,
                                    int32_t* detail);
-
-/* Window-function declarations live in pgaccel_window.h (separate header
- * so the dispatcher can include just the window API without the rest of
- * the FFI surface). */
-
-/* NLJ scalar-inequality declarations live in pgaccel_nested_loop_ineq.h
- * (separate header so the dispatcher only depends on the relevant subset). */
 
 /* ── ABI pins ─────────────────────────────────────────────────────── */
 /*

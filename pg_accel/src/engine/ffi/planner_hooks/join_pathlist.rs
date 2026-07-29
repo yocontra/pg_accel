@@ -189,12 +189,11 @@ unsafe fn observe_mergejoin_opportunity(joinrel: *mut RelOptInfo) {
 /// inequality path is safe to expose to the planner.
 #[must_use]
 fn selected_gpu_nlj_kernel_available() -> bool {
-    // The pair kernel exists, but the selected Custom Scan path still buffers
-    // both children as MinimalTuples and reconstructs PostgreSQL joined slots.
-    // A release-harness correctness run (`gpu_nlj_between @ 50K`, 2026-06-09)
-    // closed the backend connection before timing, so production exposure is
-    // disabled until the NLJ path is GPU-resident or the host boundary is
-    // reproven crash-free.
+    // No row-pair kernel ships. The prior Custom Scan path buffered both
+    // children as MinimalTuples and reconstructed PostgreSQL joined slots; a
+    // release-harness correctness run (`gpu_nlj_between @ 50K`, 2026-06-09)
+    // closed the backend connection before timing. Production exposure stays
+    // disabled until an end-to-end resident consumer exists.
     false
 }
 
@@ -615,12 +614,11 @@ unsafe fn count_correlated_scalar_inequalities(
 /// Observe the disabled selected BETWEEN shape before the generic scalar-NLJ
 /// opportunity counter.
 ///
-/// The `pgaccel-kernels/src/nested_loop_ineq.cpp` pair kernel exists, but the
-/// current selected Custom Scan path is a host-boundary implementation that
-/// collects both children through `ExecProcNode`, reconstructs PostgreSQL
-/// slots, and has fresh release-harness crash evidence. Keep this decline
-/// reason distinct from the broader `nestloop_scalar_no_gpu_kernel` counter so
-/// reports can prove the BETWEEN workload is intentionally gated.
+/// No standalone row-pair kernel ships: reconstructing PostgreSQL slots after
+/// a device pair-emission pass crosses the unsafe host boundary and has release
+/// harness crash evidence. Keep this decline reason distinct from the broader
+/// `nestloop_scalar_no_gpu_kernel` counter so reports can prove the BETWEEN
+/// workload is intentionally gated.
 ///
 /// # Safety
 ///
@@ -662,9 +660,9 @@ unsafe fn observe_gated_nlj_between_opportunity(
 /// scalar-inequality opportunity signal when a `T_NestPath` is present AND
 /// `restrictlist` contains at least one cross-rel scalar inequality.
 ///
-/// This is observability only. The narrow BETWEEN pair kernel is separately
-/// crash-gated above, and all other scalar-inequality NLJ shapes still lack a
-/// selected safe GPU implementation. Falls through to normal hash-join
+/// This is observability only. The BETWEEN host-boundary shape is separately
+/// decline-gated above, and all other scalar-inequality NLJ shapes still lack
+/// a selected safe GPU implementation. Falls through to normal hash-join
 /// recognition in the caller, which will itself bail when no equi-join key is
 /// present.
 ///

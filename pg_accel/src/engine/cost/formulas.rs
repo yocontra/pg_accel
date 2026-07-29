@@ -149,24 +149,24 @@ pub fn conservative_input_rows(rows: f64, tuples: f64) -> usize {
     rows.max(tuples).max(0.0) as usize
 }
 
-/// Whether a NestedLoop scalar-inequality join is GPU-eligible by size.
+/// Whether a NestedLoop scalar-inequality opportunity clears legacy size gates.
 ///
-/// The kernel does an O(N×M) tiled cross-product scan. To be worth
-/// dispatching, both sides must clear the per-side minimum, the estimated
-/// output must fit under `gpu_nlj_max_output_rows`, and the work product
-/// must exceed the kernel-launch overhead. The break-even formula is:
+/// A future resident implementation is expected to do O(N×M) pair work. Both
+/// sides must clear the per-side minimum, the estimated output must fit under
+/// `gpu_nlj_max_output_rows`, and the work product must exceed the retained
+/// launch-cost proxy. The break-even formula is:
 ///
 /// ```text
 ///   outer_rows × inner_rows × per_pair_cost  ≥  launch_overhead
 /// ```
 ///
 /// where `launch_overhead` is approximated by `GPU_LAUNCH_OVERHEAD` (the
-/// same baseline used by other planner gates). Returns `true` when the
-/// kernel is expected to amortise its launch over the per-pair work.
+/// same baseline used by other planner gates). This helper is diagnostic only;
+/// it does not make NLJ dispatchable while the structural decline is active.
 ///
 /// The selectivity gate (output ≪ outer × inner) is enforced separately
 /// via `estimated_output_rows ≤ limits.gpu_nlj_max_output_rows`. Near
-/// 100% selectivity the kernel is a Cartesian product and CPU NLJ wins
+/// 100% selectivity the opportunity is a Cartesian product and PG native wins
 /// on memory ordering; the planner declines that case explicitly.
 #[must_use]
 #[inline]
@@ -196,9 +196,9 @@ pub fn nlj_break_even(
 
 /// Whether a NestedLoop scalar-inequality join has a useful selectivity gate.
 ///
-/// The kernel only wins when the output is much smaller than the
-/// cross-product. At selectivity = 1.0 (every pair matches) the kernel
-/// is a Cartesian product and CPU NLJ wins on memory ordering. This
+/// A future resident path only wins when the output is much smaller than the
+/// cross-product. At selectivity = 1.0 (every pair matches), PG native wins on
+/// memory ordering. This
 /// helper returns `true` when `selectivity <= max_selectivity` — i.e.
 /// when the kernel is genuinely filtering down the pair stream.
 ///
@@ -353,14 +353,12 @@ fn clamp_fraction(value: f64) -> f64 {
     }
 }
 
-/// Conservative GPU sort admission and cost estimate.
+/// Historical GPU sort admission and cost-model calibration.
 ///
-/// Standalone full-output heap sorts are declined for now: they materialize
-/// every result tuple through Custom Scan and currently lose badly. Standalone
-/// top-k remains eligible only when LIMIT materially reduces output, projected
-/// rows are narrow, the key shape is supported, and no chunked/full-output
-/// path is required. Internal sort users can pass [`SortAlgorithm::Internal`]
-/// with their own materialization fraction.
+/// No production planner hook consumes this function: every standalone sort
+/// and top-k shape structurally declines. The standalone algorithm variants
+/// remain only for calibration snapshot compatibility; internal-model callers
+/// may pass [`SortAlgorithm::Internal`] with their own materialization fraction.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn sort_admission(input: SortAdmissionInput, limits: &DeviceLimits) -> SortAdmissionDecision {
@@ -497,12 +495,10 @@ pub fn sort_admission(input: SortAdmissionInput, limits: &DeviceLimits) -> SortA
     }
 }
 
-/// Whether a sort path has a LIMIT and therefore avoids the known full-sort
-/// loser lane.
+/// Whether a historical sort-model input contains a finite positive LIMIT.
 ///
-/// Full-output heap GpuSort is planner-rejected until it has a real GPU
-/// dispatch path that wins end-to-end. Bounded top-k remains eligible. If a
-/// selected GpuSort cannot dispatch on GPU, the executor errors.
+/// This compatibility/calibration helper is not consumed by production
+/// standalone-sort admission; all standalone sort and top-k shapes decline.
 #[must_use]
 #[inline]
 pub fn sort_limit_present(limit_tuples: f64) -> bool {

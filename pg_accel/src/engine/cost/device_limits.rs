@@ -38,11 +38,11 @@ pub struct DeviceLimits {
     pub resident_load_per_byte_cost: f64,
     /// Minimum rows before generic GPU dispatch is considered.
     pub gpu_min_rows: usize,
-    /// Minimum rows for GPU sort at executor level.
+    /// Historical GPU sort executor threshold retained for calibration ABI.
     pub gpu_sort_min_rows: usize,
-    /// Minimum rows for GPU sort at planner level (more conservative).
+    /// Historical GPU sort planner threshold retained for calibration ABI.
     pub gpu_sort_planner_min_rows: usize,
-    /// Minimum rows for GPU window functions.
+    /// Historical GPU window threshold retained for calibration ABI.
     pub gpu_window_min_rows: usize,
     /// Minimum rows for GPU reduce / aggregate.
     pub gpu_reduce_min_rows: usize,
@@ -64,24 +64,13 @@ pub struct DeviceLimits {
     /// This is calibrated from compute throughput and capped by the absolute
     /// int4-to-int64 SUM proof bound.
     pub gpu_grouped_agg_one_shot_max_rows: usize,
-    /// Maximum elements for GPU sort dispatch.
-    /// Falls back to PG sort above this limit to avoid GPU runtime aborts.
+    /// Historical GPU sort element cap retained for calibration ABI.
     pub gpu_sort_max_elements: usize,
-    /// Maximum LIMIT for standalone heap-backed GPU top-k sort exposure.
-    ///
-    /// This mirrors the executor's currently implemented top-k bound. Larger
-    /// limits are left to PostgreSQL until the GPU sort path can materialize
-    /// only the final narrow result set or run inside a GPU-resident pipeline.
+    /// Historical standalone top-k LIMIT cap retained for calibration ABI.
     pub gpu_sort_topk_max_limit: usize,
-    /// Maximum output fraction for standalone heap-backed GPU top-k sort.
-    ///
-    /// Full-output ORDER BY and weak LIMIT clauses are declined because they
-    /// still materialize most heap tuples through the Custom Scan path.
+    /// Historical standalone top-k output fraction retained for calibration.
     pub gpu_sort_heap_topk_max_fraction: f64,
-    /// Maximum projected tuple width for standalone heap-backed GPU top-k.
-    ///
-    /// Wide rows make heap materialization dominate the sort kernel. Keep the
-    /// public planner path narrow until late-fetch/full-output work lands.
+    /// Historical standalone top-k tuple-width cap retained for calibration.
     pub gpu_sort_heap_topk_max_width_bytes: usize,
     /// Maximum output rows for GPU hash join injection.
     /// Custom Scan yield overhead (~3μs/row) makes large-output joins
@@ -301,31 +290,19 @@ pub struct DeviceLimits {
 
     // -- NestedLoop scalar-inequality gates ---------------------------------
     //
-    // The Phase 4 NLJ kernel
-    // (`pgaccel-kernels/src/nested_loop_ineq.cpp`) does an O(N*M)
-    // tiled cross-product scan, so the planner / cost model needs
-    // explicit row-count floors and an output-size cap. The break-even
-    // shape is: `outer × inner × per_pair_cost >= launch + transfer + emit`.
+    // These legacy, wire-stable values bound opportunity and decline
+    // calculations. No standalone NLJ kernel ships, and these values must not
+    // be interpreted as enabling dispatch.
     //
     // Per CLAUDE.md rule #10, these live here rather than as constants
     // anywhere in dispatch / executor / planner code.
-    /// Minimum outer-side rows before the GPU NLJ kernel is considered.
-    /// Below this, launch + transfer overhead dominates the per-pair work.
+    /// Minimum outer-side rows for a potentially useful resident NLJ shape.
     pub gpu_nlj_min_outer_rows: usize,
-    /// Minimum inner-side rows. Same break-even reasoning as outer.
+    /// Minimum inner-side rows for the same opportunity calculation.
     pub gpu_nlj_min_inner_rows: usize,
-    /// Maximum output rows for the NLJ kernel before declining to PG
-    /// native. Above this, the cross-product is too close to a Cartesian
-    /// product for GPU to win on memory ordering; emit cost dominates
-    /// any kernel-time savings. Caller MUST respect the kernel's
-    /// `*pair_count_out > max_pairs` overflow signal.
+    /// Maximum estimated output rows retained for decline diagnostics.
     pub gpu_nlj_max_output_rows: usize,
-    /// Per-pair cost factor used in the cost model. Calibrated against
-    /// the kernel's measured throughput: each `(i, j)` pair is one
-    /// comparison + an atomic increment when matched. We charge a
-    /// conservative per-pair value (in PG cost units / pair) so the
-    /// planner accepts the path only when `outer * inner * per_pair_cost`
-    /// exceeds the fixed launch+transfer overhead.
+    /// Legacy per-pair cost factor retained for wire-stable diagnostics.
     pub gpu_nlj_per_pair_cost: f64,
 
     // -- fp64 emulation cost gate -------------------------------------------
@@ -417,10 +394,9 @@ impl DeviceLimits {
 
         let gpu_min_rows = cu_scale(10_000).clamp(1_000, 100_000);
         let gpu_sort_min_rows = cu_scale(100_000).clamp(10_000, 1_000_000);
-        // Planner threshold must track the executor threshold: if the planner
-        // injects a GpuSort path, the executor must actually dispatch to GPU.
-        // Previously this was `gpu_sort_min_rows * 10`, which starved the GPU
-        // path at sizes the executor was happy to run (tests hit this).
+        // Retain matching historical sort thresholds so calibration snapshots
+        // and serialized device profiles remain stable. No production
+        // standalone-sort admission consumes either value.
         let gpu_sort_planner_min_rows = gpu_sort_min_rows;
         let gpu_window_min_rows = cu_scale(100_000).clamp(50_000, 500_000);
         // 2026-04-12: raised from 10K to 25K. GPU reduce at 10K is 0.11x
@@ -484,11 +460,9 @@ impl DeviceLimits {
                 .clamp(64_000, GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS)
         };
 
-        // Maximum elements for direct GPU sort dispatch. Sort requires two
-        // arrays (keys + indices) ≈ 12 bytes per element. The executor's
-        // full-sort path currently declines GPU above this cap and sorts
-        // inside Custom Scan, so the planner separately rejects no-limit full
-        // sorts until the chunked GPU merge path is competitive.
+        // Historical direct-sort element cap. Keep its memory-derived value
+        // stable for calibration snapshots; no production standalone-sort
+        // admission or executor consumes it.
         let gpu_sort_max_elements = if mem > 0 {
             (mem / 32 / 12).clamp(64_000, 4_000_000)
         } else {
@@ -698,26 +672,17 @@ impl DeviceLimits {
             expr_min_predicate_complexity_x_rows: 50_000,
             hashjoin_min_build_rows: cu_scale(5_000).clamp(1_000, 50_000),
 
-            // NestedLoop scalar-inequality gates. The kernel is O(N*M)
-            // so floors are higher than typical hash-join thresholds
-            // (a 1K x 1K NLJ = 1M pair-comparisons, still well below
-            // a typical GPU launch break-even). cu_scale lets newer
-            // GPUs accept smaller batches because their launch is cheaper.
+            // NestedLoop scalar-inequality opportunity gates. A future
+            // resident implementation remains O(N*M), so floors are higher
+            // than typical hash-join thresholds. These values do not enable
+            // dispatch while the structural decline is active.
             gpu_nlj_min_outer_rows: cu_scale(1_000).clamp(200, 50_000),
             gpu_nlj_min_inner_rows: cu_scale(1_000).clamp(200, 50_000),
-            // Output cap reuses the hashjoin output ceiling: above it,
-            // Custom Scan yield cost (~3us/row) dominates the kernel
-            // work and PG native wins on tuple-flow ordering.
+            // Output cap reuses the hashjoin output ceiling: above it, row
+            // reconstruction would dominate any device-side pair filtering.
             gpu_nlj_max_output_rows: gpu_join_max_output_rows,
-            // Per-pair cost: one comparison plus an atomic-add when
-            // matched. The kernel reads two operands and (rarely)
-            // writes two u32s. The fixed launch+transfer is amortised
-            // across all pairs, so the marginal per-pair charge is
-            // small. 1e-7 / pair × 1M pairs = 0.1 PG cost units, which
-            // is in the same ballpark as a CPU per-row tuple cost
-            // (`cpu_tuple_cost` is ~0.01 / row). This value remains a
-            // conservative ceiling until the executor has measured device
-            // throughput, biasing the planner toward declining marginal cases.
+            // Legacy per-pair proxy for opportunity diagnostics. A future
+            // resident implementation must recalibrate this before dispatch.
             gpu_nlj_per_pair_cost: 1.0e-7,
 
             // fp64 emulation cost gate. `from_profile` is the only entry

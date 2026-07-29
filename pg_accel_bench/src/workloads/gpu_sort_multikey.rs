@@ -42,8 +42,8 @@ impl Workload for GpuSortMultikey {
     }
 
     fn description(&self) -> &'static str {
-        "deterministic nullable ORDER BY key1/key2/id on ~120-byte rows - native planner decline \
-         (`sort_multikey_no_gpu_kernel`) until cascaded multi-key GPU sort lands"
+        "deterministic nullable ORDER BY key1/key2/id on ~120-byte rows - structural native \
+         decline (`sort_multikey_no_gpu_kernel`); no standalone GPU sort surface exists"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

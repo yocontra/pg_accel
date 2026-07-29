@@ -110,9 +110,9 @@ pub struct CostCoefficients {
     pub gpu_op_cost_reduce: PgCost,
     /// GPU hash-aggregation per-row operation cost.
     pub gpu_op_cost_hash_agg: PgCost,
-    /// GPU sort per-row operation cost.
+    /// Historical GPU sort calibration coefficient.
     pub gpu_op_cost_sort: PgCost,
-    /// GPU window per-row operation cost.
+    /// Historical GPU window calibration coefficient.
     pub gpu_op_cost_window: PgCost,
     /// GPU filter per-row operation cost.
     pub gpu_op_cost_filter: PgCost,
@@ -167,11 +167,11 @@ pub struct PlannerPolicy {
     pub auto_load_amortization_queries: NonZeroU32,
     /// Minimum rows before generic GPU dispatch is considered.
     pub gpu_min_rows: Rows,
-    /// Minimum rows for GPU sort at executor level.
+    /// Historical GPU sort executor threshold retained for calibration ABI.
     pub gpu_sort_min_rows: Rows,
-    /// Minimum rows for GPU sort at planner level.
+    /// Historical GPU sort planner threshold retained for calibration ABI.
     pub gpu_sort_planner_min_rows: Rows,
-    /// Minimum rows for GPU window functions.
+    /// Historical GPU window threshold retained for calibration ABI.
     pub gpu_window_min_rows: Rows,
     /// Minimum rows for GPU reduce / aggregate.
     pub gpu_reduce_min_rows: Rows,
@@ -205,9 +205,9 @@ pub struct PlannerPolicy {
     pub reduce_i64_break_even_rows: Rows,
     /// Minimum average rows per group for GPU hash aggregation.
     pub hashagg_min_rows_per_group: Rows,
-    /// Minimum rows for integer-key GPU sort.
+    /// Historical integer-key GPU sort break-even calibration.
     pub sort_break_even_rows_int: Rows,
-    /// Minimum rows for floating-point-key GPU sort.
+    /// Historical floating-point-key GPU sort break-even calibration.
     pub sort_break_even_rows_float: Rows,
     /// Minimum vertex-by-row work product for point-in-ring dispatch.
     pub spatial_point_in_ring_break_even_verts_x_rows: WorkProduct,
@@ -265,7 +265,7 @@ pub struct ExecutorLimits {
     pub gpu_reduce_max_chunk: Rows,
     /// Maximum rows in one synchronous atomic dense grouped aggregate.
     pub gpu_grouped_agg_one_shot_max_rows: Rows,
-    /// Maximum elements for GPU sort dispatch.
+    /// Historical GPU sort element cap retained for calibration ABI.
     pub gpu_sort_max_elements: Rows,
     /// Maximum resident H3 rows per device-to-device transform launch.
     pub gpu_h3_max_chunk_rows: Rows,

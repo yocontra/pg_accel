@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "pgaccel_ffi.h"
-#include "pgaccel_hash_join.h"
 
 // ---------------------------------------------------------------------------
 // Minimal test harness
@@ -150,95 +149,6 @@ test_spatial_cross_product(const pgaccel_geometry* geoms_a, size_t count_a,
     ++*pair_count;
   }
   return PGACCEL_OK;
-}
-
-// =========================================================================
-// HASH JOIN EDGE CASES
-// =========================================================================
-
-static void test_hash_join_large_threshold_correctness() {
-  printf("--- hash_join: 100k inner rows uses only safe GPU/debug path ---\n");
-  constexpr size_t N = 100000;
-  constexpr size_t DUP_KEYS = 16;
-  constexpr size_t PER_KEY = N / DUP_KEYS;
-  std::vector<int32_t> inner(N);
-  std::vector<uint32_t> indices(N);
-  for (size_t i = 0; i < N; ++i) {
-    inner[i] = static_cast<int32_t>(i % DUP_KEYS);
-    indices[i] = static_cast<uint32_t>(i);
-  }
-
-  pgaccel_hash_table* ht =
-      pgaccel_hash_join_build(inner.data(), nullptr, indices.data(), N, PGACCEL_KEY_INT32);
-  if (ht == nullptr) {
-    ASSERT_TRUE("large hash join build declined without safe GPU path", true);
-    return;
-  }
-
-  int32_t outer[] = {7, 15, 99};
-  const size_t expected = PER_KEY * 2;
-  std::vector<uint32_t> pairs(expected * 2, UINT32_MAX);
-  size_t match_count = 0;
-  pgaccel_status st =
-      pgaccel_hash_join_probe(ht, outer, nullptr, 3, pairs.data(), expected, &match_count);
-  ASSERT_STATUS_OK("large hash join probe", st);
-  ASSERT_EQ("large hash join match count", match_count, expected);
-
-  bool valid_pairs = true;
-  size_t outer0 = 0;
-  size_t outer1 = 0;
-  size_t outer2 = 0;
-  for (size_t i = 0; i < match_count && i < expected; ++i) {
-    const uint32_t oi = pairs[i * 2];
-    const uint32_t ii = pairs[i * 2 + 1];
-    if (ii >= inner.size() || oi >= 3 || inner[ii] != outer[oi]) {
-      valid_pairs = false;
-      break;
-    }
-    if (oi == 0)
-      outer0++;
-    else if (oi == 1)
-      outer1++;
-    else if (oi == 2)
-      outer2++;
-  }
-  ASSERT_TRUE("large hash join output pairs valid", valid_pairs);
-  ASSERT_EQ("large hash join key 7 matches", outer0, PER_KEY);
-  ASSERT_EQ("large hash join key 15 matches", outer1, PER_KEY);
-  ASSERT_EQ("large hash join missing key matches", outer2, 0);
-  pgaccel_hash_join_free(ht);
-}
-
-static void test_hash_join_small_build_is_supported() {
-  printf("--- hash_join: small build is supported ---\n");
-  int32_t inner[] = {5, 5, 7};
-  uint32_t indices[] = {0, 1, 2};
-  pgaccel_hash_table* ht = pgaccel_hash_join_build(inner, nullptr, indices, 3, PGACCEL_KEY_INT32);
-  ASSERT_TRUE("small hash join build returns a table", ht != nullptr);
-  if (ht != nullptr)
-    pgaccel_hash_join_free(ht);
-}
-
-static void test_hash_join_max_matches_overflow_rejected() {
-  printf("--- hash_join: impossible max_matches rejected before writes ---\n");
-  int32_t inner[] = {1};
-  uint32_t indices[] = {0};
-  pgaccel_hash_table* ht = pgaccel_hash_join_build(inner, nullptr, indices, 1, PGACCEL_KEY_INT32);
-  if (ht == nullptr) {
-    ASSERT_TRUE("overflow-capacity build declined without safe GPU path", true);
-    return;
-  }
-
-  int32_t outer[] = {1};
-  uint32_t pairs[] = {123, 456};
-  size_t match_count = 999;
-  pgaccel_status st = pgaccel_hash_join_probe(ht, outer, nullptr, 1, pairs,
-                                              std::numeric_limits<size_t>::max(), &match_count);
-  ASSERT_EQ("overflow-capacity probe status", st, PGACCEL_UNSUPPORTED);
-  ASSERT_EQ("overflow-capacity match_count reset", match_count, 0);
-  ASSERT_EQ("overflow-capacity pair[0] unchanged", pairs[0], 123);
-  ASSERT_EQ("overflow-capacity pair[1] unchanged", pairs[1], 456);
-  pgaccel_hash_join_free(ht);
 }
 
 // =========================================================================
@@ -1075,134 +985,6 @@ static void test_h3_cell_to_parent_higher_res() {
   ASSERT_EQ("higher res parent -> 0", parent, 0ULL);
 }
 
-template <typename K>
-using TopkFn = pgaccel_status (*)(const K*, size_t, size_t, uint8_t, uint32_t*, size_t*);
-
-template <typename K>
-static bool topk_test_less(K a, K b) {
-  const bool a_nan = a != a;
-  const bool b_nan = b != b;
-  if (a_nan)
-    return false;
-  if (b_nan)
-    return true;
-  return a < b;
-}
-
-template <typename K>
-static void check_topk(const char* tag, const std::vector<K>& keys, size_t k, bool largest,
-                       TopkFn<K> fn) {
-  std::vector<uint32_t> expected(keys.size());
-  for (size_t i = 0; i < expected.size(); ++i)
-    expected[i] = static_cast<uint32_t>(i);
-  std::stable_sort(expected.begin(), expected.end(), [&](uint32_t a, uint32_t b) {
-    return largest ? topk_test_less(keys[b], keys[a]) : topk_test_less(keys[a], keys[b]);
-  });
-
-  const size_t take = std::min(k, keys.size());
-  std::vector<uint32_t> output(take, std::numeric_limits<uint32_t>::max());
-  size_t out_count = std::numeric_limits<size_t>::max();
-  const pgaccel_status status =
-      fn(keys.data(), keys.size(), k, largest ? 1 : 0, output.data(), &out_count);
-  ASSERT_STATUS_OK(tag, status);
-  ASSERT_EQ(tag, out_count, take);
-
-  bool matches = out_count == take;
-  for (size_t i = 0; matches && i < take; ++i)
-    matches = output[i] == expected[i];
-  ASSERT_TRUE(tag, matches);
-}
-
-static void test_topk_direct() {
-  constexpr size_t count = 3073;
-  constexpr size_t k = 37;
-
-  std::vector<int32_t> i32_keys(count);
-  std::vector<int64_t> i64_keys(count);
-  std::vector<float> f32_keys(count);
-  std::vector<double> f64_keys(count);
-  for (size_t i = 0; i < count; ++i) {
-    switch (i % 11) {
-      case 0:
-        i32_keys[i] = std::numeric_limits<int32_t>::min();
-        i64_keys[i] = std::numeric_limits<int64_t>::min();
-        f32_keys[i] = -std::numeric_limits<float>::infinity();
-        f64_keys[i] = -std::numeric_limits<double>::infinity();
-        break;
-      case 1:
-        i32_keys[i] = std::numeric_limits<int32_t>::max();
-        i64_keys[i] = std::numeric_limits<int64_t>::max();
-        f32_keys[i] = std::numeric_limits<float>::infinity();
-        f64_keys[i] = std::numeric_limits<double>::infinity();
-        break;
-      case 2:
-        i32_keys[i] = 0;
-        i64_keys[i] = 0;
-        f32_keys[i] = -0.0f;
-        f64_keys[i] = -0.0;
-        break;
-      case 3:
-        i32_keys[i] = 0;
-        i64_keys[i] = 0;
-        f32_keys[i] = 0.0f;
-        f64_keys[i] = 0.0;
-        break;
-      case 4:
-      case 5:
-        i32_keys[i] = 42;
-        i64_keys[i] = 42;
-        f32_keys[i] = std::numeric_limits<float>::quiet_NaN();
-        f64_keys[i] = std::numeric_limits<double>::quiet_NaN();
-        break;
-      default:
-        i32_keys[i] = static_cast<int32_t>(i % 7) - 3;
-        i64_keys[i] = static_cast<int64_t>(i % 7) - 3;
-        f32_keys[i] = static_cast<float>(static_cast<int>(i % 7) - 3);
-        f64_keys[i] = static_cast<double>(static_cast<int>(i % 7) - 3);
-        break;
-    }
-  }
-
-  check_topk("topk i32 ascending", i32_keys, k, false, pgaccel_topk_kv_i32);
-  check_topk("topk i32 descending", i32_keys, k, true, pgaccel_topk_kv_i32);
-  check_topk("topk i64 ascending", i64_keys, k, false, pgaccel_topk_kv_i64);
-  check_topk("topk i64 descending", i64_keys, k, true, pgaccel_topk_kv_i64);
-  check_topk("topk f32 ascending", f32_keys, k, false, pgaccel_topk_kv_f32);
-  check_topk("topk f32 descending", f32_keys, k, true, pgaccel_topk_kv_f32);
-  check_topk("topk f64 ascending", f64_keys, k, false, pgaccel_topk_kv_f64);
-  check_topk("topk f64 descending", f64_keys, k, true, pgaccel_topk_kv_f64);
-
-  const std::vector<int32_t> short_keys = {3, -1, 3, 0, -1};
-  check_topk("topk k greater than count", short_keys, 99, false, pgaccel_topk_kv_i32);
-
-  size_t out_count = 99;
-  pgaccel_status status = pgaccel_topk_kv_i32(nullptr, 7, 0, 0, nullptr, &out_count);
-  ASSERT_STATUS_OK("topk k zero status", status);
-  ASSERT_EQ("topk k zero count", out_count, 0);
-
-  out_count = 99;
-  status = pgaccel_topk_kv_i32(nullptr, 0, 7, 0, nullptr, &out_count);
-  ASSERT_STATUS_OK("topk count zero status", status);
-  ASSERT_EQ("topk count zero output", out_count, 0);
-
-  uint32_t output = 99;
-  out_count = 99;
-  status = pgaccel_topk_kv_i32(short_keys.data(), short_keys.size(), 1, 0, nullptr, &out_count);
-  ASSERT_EQ("topk null output status", status, PGACCEL_ERROR);
-  ASSERT_EQ("topk null output resets count", out_count, 0);
-  status = pgaccel_topk_kv_i32(short_keys.data(), short_keys.size(), 1, 0, &output, nullptr);
-  ASSERT_EQ("topk null count status", status, PGACCEL_ERROR);
-
-  if (std::numeric_limits<size_t>::max() > std::numeric_limits<uint32_t>::max()) {
-    out_count = 99;
-    status = pgaccel_topk_kv_i32(short_keys.data(),
-                                 static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1, 1,
-                                 0, &output, &out_count);
-    ASSERT_EQ("topk oversized count status", status, PGACCEL_ERROR);
-    ASSERT_EQ("topk oversized count resets output", out_count, 0);
-  }
-}
-
 // =========================================================================
 // main
 // =========================================================================
@@ -1275,7 +1057,6 @@ int main() {
   test_h3_lat_lng_fp32_high_res_exact_fixup();
   test_h3_get_resolution_invalid_cell();
 
-
   // -- Bbox edge cases --
   printf("\n== Bbox ==\n");
   test_bbox_identical_boxes();
@@ -1287,12 +1068,6 @@ int main() {
   test_bbox_large_batch();
   test_bbox_separated();
   test_bbox_nested();
-
-  // -- Hash join edge cases --
-  printf("\n== Hash Join ==\n");
-  test_hash_join_large_threshold_correctness();
-  test_hash_join_small_build_is_supported();
-  test_hash_join_max_matches_overflow_rejected();
 
   // -- fp64 round-trip sanity (W5 fp64-unlock plan) --
   // Round-trip a random fp64 vector through GPU reduce_sum_f64 and
@@ -1342,82 +1117,6 @@ int main() {
     }
     g_tests_run++;
   }
-
-  // -- fp64 sort (stable) --
-  printf("\n== fp64 sort ==\n");
-  for (size_t N : {(size_t)1024, (size_t)65536, (size_t)262144, (size_t)1048576}) {
-    std::mt19937_64 rng(0xABCDEF ^ N);
-    std::uniform_real_distribution<double> dist(-1e6, 1e6);
-    std::vector<double> data(N);
-    for (size_t i = 0; i < N; ++i)
-      data[i] = dist(rng);
-    std::vector<double> expected(data);
-    std::sort(expected.begin(), expected.end());
-    pgaccel_status st = pgaccel_sort_f64(data.data(), N);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "sort_f64 N=%zu status OK", N);
-    ASSERT_EQ(buf, st, PGACCEL_OK);
-    // Compare bit-exact (0 ULP) — sort is a permutation, values aren't
-    // mutated.
-    bool bitmatch = true;
-    for (size_t i = 0; i < N; ++i) {
-      uint64_t got_bits, exp_bits;
-      std::memcpy(&got_bits, &data[i], 8);
-      std::memcpy(&exp_bits, &expected[i], 8);
-      if (got_bits != exp_bits) {
-        bitmatch = false;
-        fprintf(stderr, "  FAIL sort_f64 N=%zu mismatch at i=%zu: got %.17g expected %.17g\n", N, i,
-                data[i], expected[i]);
-        break;
-      }
-    }
-    snprintf(buf, sizeof(buf), "sort_f64 N=%zu bit-exact match", N);
-    ASSERT_EQ(buf, bitmatch, true);
-  }
-
-  // -- fp64 kv-sort (stable) --
-  printf("\n== fp64 kv-sort ==\n");
-  for (size_t N : {(size_t)1024, (size_t)65536, (size_t)262144, (size_t)1048576}) {
-    std::mt19937_64 rng(0xFEEDFACE ^ N);
-    // Duplicate keys on purpose to exercise stability.
-    std::uniform_int_distribution<int> key_int(0, 1000);
-    std::vector<double> keys(N);
-    std::vector<uint32_t> indices(N);
-    for (size_t i = 0; i < N; ++i) {
-      keys[i] = static_cast<double>(key_int(rng));
-      indices[i] = static_cast<uint32_t>(i);
-    }
-    pgaccel_status st = pgaccel_sort_kv_f64(keys.data(), indices.data(), N);
-    char buf[64];
-    snprintf(buf, sizeof(buf), "sort_kv_f64 N=%zu status OK", N);
-    ASSERT_EQ(buf, st, PGACCEL_OK);
-    // Monotone keys check (bit-exact).
-    bool monotone = true;
-    for (size_t i = 1; i < N; ++i) {
-      if (keys[i] < keys[i - 1]) {
-        monotone = false;
-        fprintf(stderr, "  FAIL sort_kv_f64 N=%zu non-monotone at i=%zu\n", N, i);
-        break;
-      }
-    }
-    snprintf(buf, sizeof(buf), "sort_kv_f64 N=%zu monotone keys", N);
-    ASSERT_EQ(buf, monotone, true);
-    // Stable-sort: among equal keys, original indices must be
-    // non-decreasing.
-    bool stable = true;
-    for (size_t i = 1; i < N; ++i) {
-      if (keys[i] == keys[i - 1] && indices[i] < indices[i - 1]) {
-        stable = false;
-        fprintf(stderr, "  FAIL sort_kv_f64 N=%zu stable-sort violated at i=%zu\n", N, i);
-        break;
-      }
-    }
-    snprintf(buf, sizeof(buf), "sort_kv_f64 N=%zu stable", N);
-    ASSERT_EQ(buf, stable, true);
-  }
-
-  printf("\n== direct top-k ==\n");
-  test_topk_direct();
 
   pgaccel_shutdown();
 

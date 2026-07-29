@@ -36,22 +36,17 @@ set(KERNEL_SOURCES
     src/archive_stats.cpp
     src/bbox_ops.cpp
     src/bbox_ops_f64.cpp
-    src/mem_pool.cpp
-    src/sort.cpp
     src/reduce.cpp
     src/spatial_predicates.cpp
     src/spatial_dispatch.cpp
     src/h3_ops.cpp
     src/raster_ops.cpp
     src/expr_eval.cpp
-    src/expr_templates.cpp
+    src/expr_memory.cpp
     src/hash_join.cpp
-    src/hash_agg.cpp
+    src/resident_count.cpp
     src/grouped_agg.cpp
     src/grouped_agg_workspace.cpp
-    src/window.cpp
-    src/fused_ops.cpp
-    src/nested_loop_ineq.cpp
 )
 
 # Static library for embedding into the Rust extension.
@@ -90,36 +85,23 @@ target_compile_options(pgaccel_kernels_shared PRIVATE -ffast-math)
 #   spatial_predicates — isfinite gates NaN/Inf → UNCERTAIN
 #   spatial_dispatch   — resident fp64 validation and uncertainty gates depend
 #                         on finite intermediates and signed-zero semantics.
-#   sort               — pad_value<float>() uses +infinity as the bitonic
-#                         sentinel; -ffast-math's no-infinities assumption
-#                         makes pad elements leak into the output with
-#                         index = UINT32_MAX.
-#   hash_agg           — sort-based path uses +infinity as the NULL-key
-#                         sentinel (sorts NULLs to the end); MIN/MAX
-#                         accumulators initialise to ±infinity so the
-#                         first real value supersedes the sentinel.
-#   fused_ops          — MIN/MAX fused reductions initialise to ±infinity.
 #   bbox_ops_f64       — raw IEEE-754 ordering preserves conservative NaN/Inf
 #                         behavior without invoking Metal fp64 lowering.
-#   window             — sycl_window_sum uses Kahan compensated summation
-#                         (window.cpp `comp` term); -ffast-math licenses
-#                         reassociation that algebraically deletes the
-#                         compensation term, silently degrading SUM
-#                         accuracy over large partitions.
 #   reduce             — the fused multi-reduce NaN-propagation contract
 #                         (pgaccel_ffi.h "NaN handling matches PG's
 #                         SUM/MIN/MAX semantics") is void under
 #                         -ffinite-math-only; MIN/MAX identities are ±inf.
+#   expr_eval          — PostgreSQL-compatible comparisons detect NaN with
+#                         x != x, which -ffinite-math-only may fold to false.
+#   grouped_agg        — floating predicates and MIN/MAX use explicit NaN
+#                         detection and PostgreSQL NaN ordering.
 set_source_files_properties(
     src/raster_ops.cpp
     src/spatial_predicates.cpp
     src/spatial_dispatch.cpp
-    src/sort.cpp
-    src/hash_agg.cpp
-    src/fused_ops.cpp
     src/bbox_ops_f64.cpp
-    src/window.cpp
     src/reduce.cpp
+    src/expr_eval.cpp
     src/grouped_agg.cpp
     PROPERTIES COMPILE_FLAGS "-fno-fast-math -fhonor-nans -fhonor-infinities")
 
@@ -145,8 +127,8 @@ target_link_libraries(test_spatial_resident PRIVATE pgaccel_kernels_shared)
 add_executable(test_h3 test/test_h3.cpp)
 target_link_libraries(test_h3 PRIVATE pgaccel_kernels_shared)
 
-add_executable(test_window test/test_window.cpp)
-target_link_libraries(test_window PRIVATE pgaccel_kernels_shared)
+add_executable(test_reduce_matrix test/test_reduce_matrix.cpp)
+target_link_libraries(test_reduce_matrix PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_hash_agg_keys test/test_hash_agg_keys.cpp)
 target_link_libraries(test_hash_agg_keys PRIVATE pgaccel_kernels_shared)
@@ -154,11 +136,20 @@ target_link_libraries(test_hash_agg_keys PRIVATE pgaccel_kernels_shared)
 add_executable(test_hash_join test/test_hash_join.cpp)
 target_link_libraries(test_hash_join PRIVATE pgaccel_kernels_shared)
 
+add_executable(test_hash_domain_matrix test/test_hash_domain_matrix.cpp)
+target_link_libraries(test_hash_domain_matrix PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_hashagg_spatial_matrix test/test_hashagg_spatial_matrix.cpp)
+target_link_libraries(test_hashagg_spatial_matrix PRIVATE pgaccel_kernels_shared)
+
 add_executable(test_hash_agg_partial test/test_hash_agg_partial.cpp)
 target_link_libraries(test_hash_agg_partial PRIVATE pgaccel_kernels_shared)
 
-add_executable(test_expr_templates test/test_expr_templates.cpp)
-target_link_libraries(test_expr_templates PRIVATE pgaccel_kernels_shared)
+add_executable(test_expr_memory test/test_expr_memory.cpp)
+target_link_libraries(test_expr_memory PRIVATE pgaccel_kernels_shared)
+
+add_executable(test_expr_vm_matrix test/test_expr_vm_matrix.cpp)
+target_link_libraries(test_expr_vm_matrix PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_raster_resident test/test_raster_resident.cpp)
 target_link_libraries(test_raster_resident PRIVATE pgaccel_kernels_shared)
@@ -202,9 +193,6 @@ target_link_libraries(test_reduce_bool_bit PRIVATE pgaccel_kernels_shared)
 add_executable(test_exec_gpu test/test_exec_gpu.cpp)
 target_link_libraries(test_exec_gpu PRIVATE pgaccel_kernels_shared)
 
-add_executable(test_sort_bench test/test_sort_bench.cpp)
-target_link_libraries(test_sort_bench PRIVATE pgaccel_kernels_shared)
-
 add_executable(test_ooo_overlap
     test/test_ooo_overlap.cpp
     test/ooo_overlap_support.cpp)
@@ -241,16 +229,12 @@ add_fp64_transcendental_probe(test_fp64_probe_asin 5)
 add_fp64_transcendental_probe(test_fp64_probe_atan2 6)
 add_fp64_transcendental_probe(test_fp64_probe_haversine 7)
 
-# OOM-never invariant test (W5 fp64-unlock plan §5). Exercises every
-# fp64 kernel family with an input > 2 × caps.max_alloc_bytes / sizeof(double)
-# and asserts completion, correctness, and peak RSS < 3 × max_alloc.
+# OOM-never invariant test (W5 fp64-unlock plan §5). Exercises reduce_f64,
+# expr_vm_f64, grouped_agg_i32_mul, spatial_f64, and h3_f64 with a logical input
+# of up to 2 GiB per family and asserts correctness, real device dispatch, and
+# peak RSS growth < 3 × caps.max_alloc_bytes.
 add_executable(test_oom_invariant test/test_oom_invariant.cpp)
 target_link_libraries(test_oom_invariant PRIVATE pgaccel_kernels_shared)
-
-# Scalar-inequality NLJ kernel coverage for planner-recognized NestedLoop
-# shapes observed by `observe_nestloop_scalar_opportunity`.
-add_executable(test_nested_loop_ineq test/test_nested_loop_ineq.cpp)
-target_link_libraries(test_nested_loop_ineq PRIVATE pgaccel_kernels_shared)
 
 # Induced-failure honesty gate: a dispatch whose staging cannot succeed
 # must return PGACCEL_OOM / PGACCEL_ERROR — never PGACCEL_OK over unwritten
@@ -258,6 +242,12 @@ target_link_libraries(test_nested_loop_ineq PRIVATE pgaccel_kernels_shared)
 # regression coverage for synchronous queue errors crossing the extern-C ABI.
 add_executable(test_kernel_failure_status test/test_kernel_failure_status.cpp)
 target_link_libraries(test_kernel_failure_status PRIVATE pgaccel_kernels_shared)
+
+# Host-only public API contracts. This target intentionally never initializes a
+# SYCL device, so its empty-input and descriptor-validation checks remain
+# runnable on coverage workers without a GPU backend.
+add_executable(test_host_api_contract test/test_host_api_contract.cpp)
+target_link_libraries(test_host_api_contract PRIVATE pgaccel_kernels_shared)
 
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter QUIET)
@@ -285,6 +275,9 @@ function(add_pgaccel_gpu_test test_target)
     endif()
 endfunction()
 
+add_test(NAME test_host_api_contract COMMAND test_host_api_contract)
+set_tests_properties(test_host_api_contract PROPERTIES LABELS host)
+
 add_pgaccel_gpu_test(test_device)
 add_pgaccel_gpu_test(test_bbox)
 add_pgaccel_gpu_test(test_spatial)
@@ -308,30 +301,34 @@ add_pgaccel_gpu_test(test_grouped_agg_workspace)
 add_pgaccel_gpu_test(test_hash_agg_partial)
 add_pgaccel_gpu_test(test_hash_agg_keys)
 add_pgaccel_gpu_test(test_hash_join)
-add_pgaccel_gpu_test(test_window)
-add_pgaccel_gpu_test(test_expr_templates)
-# test_oom_invariant sweeps 2GB fp64 inputs per family on soft-fp64 devices;
-# measured 441.5s warm-JIT on M2 Max (2026-07-07, /usr/bin/time -l, exit 0,
-# peak RSS 14.08GB). Budget = measured * ~2 to cover cold-JIT runs
-# (gpu-test-cold-all). This is a runtime budget, not a hidden skip.
+add_pgaccel_gpu_test(test_hash_domain_matrix)
+add_pgaccel_gpu_test(test_hashagg_spatial_matrix)
+add_pgaccel_gpu_test(test_reduce_matrix)
+add_pgaccel_gpu_test(test_expr_memory)
+add_pgaccel_gpu_test(test_expr_vm_matrix)
+# Each live family processes min(2 * max_alloc, 2 GiB) of logical input. Artifact
+# oom-invariant-basic-tier-20260729T043721Z processed 2 GiB per family and
+# observed 73.29s elapsed on Apple M2 Max; the CTest gate keeps its fixed 900s
+# timeout.
 add_pgaccel_gpu_test(test_oom_invariant TIMEOUT 900)
 add_pgaccel_gpu_test(test_fp64_mul_probe)
-add_pgaccel_gpu_test(test_nested_loop_ineq)
 add_pgaccel_gpu_test(test_kernel_failure_status)
 # test_fork_archive_stress stays outside the warm-cache CTest suite. The
 # gpu-stress-archive recipe and Metal release gate establish and independently
 # verify its empty-cache boundary before launching the fork matrix.
-# test_ooo_overlap is intentionally NOT registered with CTest: it asserts the
-# acceptance criterion of the never-built out-of-order kernel-overlap feature
-# (dropped by the 2026-07 architecture decision). It cannot pass on the pinned
-# AdaptiveCpp Metal backend: every dispatch marks all USM buffers Read|Write
+# test_ooo_overlap is intentionally NOT registered with CTest. It is a
+# representative backend serialization diagnostic built from two independent
+# synthetic compute branches; it does not call or provide coverage for
+# production reduce or resident-count kernels. The diagnostic cannot pass on the
+# pinned AdaptiveCpp Metal backend: every dispatch marks all USM buffers Read|Write
 # (metal_queue.cpp:225-227) on hazard-tracked storage (metal_allocator.cpp:395),
 # so Metal serializes all compute device-wide (observed sub-microsecond gaps
 # between "overlapping" kernels across 6/6 runs). The binary still builds as a
-# manual diagnostic probe for any future fork work on untracked-hazard buffers.
+# manual expected-failure/profile diagnostic for future runtime work on
+# untracked-hazard buffers.
 
 install(TARGETS pgaccel_kernels LIBRARY DESTINATION lib)
-install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h include/pgaccel_fused.h
-              include/pgaccel_olap.h
-              include/pgaccel_nested_loop_ineq.h
+install(FILES include/pgaccel_ffi.h include/pgaccel_expr.h
+              include/pgaccel_hash_join.h include/pgaccel_olap.h
+              include/pgaccel_resident_count.h
         DESTINATION include)

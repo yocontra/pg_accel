@@ -1046,13 +1046,16 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
         ]
         ctest_names = [
             "test_device",
-            *(f"test_{index:02d}" for index in range(1, 28)),
+            *(
+                f"test_{index:02d}"
+                for index in range(1, coverage_tools.BASELINE_CPP_TESTS - 1)
+            ),
             "test_oom_invariant",
         ]
         families = [
             "reduce_f64",
-            "sort_f64",
-            "hashagg_f64",
+            "expr_vm_f64",
+            "grouped_agg_i32_mul",
             "spatial_f64",
             "h3_f64",
         ]
@@ -1611,7 +1614,7 @@ raise SystemExit(2)
         ctest_log = root / "cpp/ctest.log"
         ctest_log.write_text(ctest_pass_log(ctest_names), encoding="utf-8")
         (root / "cpp/ooo-overlap-diagnostic.log").write_text(
-            "test_ooo_overlap: sort/window GPU spans did not overlap\n"
+            "test_ooo_overlap: resident/reduce GPU spans did not overlap\n"
             "manual OOO overlap coverage: PASS "
             "(expected no-overlap structural failure)\n",
             encoding="utf-8",
@@ -2458,6 +2461,46 @@ class ImmutableBaselineTests(unittest.TestCase):
                 coverage_tools.read_json(REPO_ROOT / "coverage/release-baseline.json"),
             )
 
+    def test_cmake_inventory_includes_literal_host_and_gpu_tests(self) -> None:
+        cmake = """
+add_test(NAME test_host_contract COMMAND test_host_contract)
+add_pgaccel_gpu_test(test_device)
+add_pgaccel_gpu_test(test_oom_invariant TIMEOUT 900)
+add_test(NAME ${test_target} COMMAND ${test_target})
+"""
+        self.assertEqual(
+            coverage_tools.cmake_registered_tests(cmake),
+            ["test_device", "test_host_contract", "test_oom_invariant"],
+        )
+
+    def test_checked_in_cpp_baseline_pins_resident_v2_survivors(self) -> None:
+        baseline = coverage_tools.read_json(
+            REPO_ROOT / "coverage/release-baseline.json"
+        )
+        cpp = baseline["cpp"]
+        self.assertEqual(coverage_tools.FIXED_THRESHOLD, 90.0)
+        self.assertEqual(baseline["minimum_percent"], 90.0)
+        self.assertEqual(coverage_tools.BASELINE_CPP_SOURCES, 16)
+        self.assertEqual(coverage_tools.BASELINE_CPP_DEVICE_OBJECTS, 15)
+        self.assertEqual(coverage_tools.BASELINE_CPP_TESTS, 32)
+        self.assertEqual(len(cpp["sources"]), 16)
+        self.assertEqual(len(cpp["ctest_names"]), 32)
+        self.assertEqual(cpp["exclude"], [])
+        self.assertEqual(
+            cpp["oom_families"],
+            [
+                "reduce_f64",
+                "expr_vm_f64",
+                "grouped_agg_i32_mul",
+                "spatial_f64",
+                "h3_f64",
+            ],
+        )
+        self.assertEqual(
+            set(cpp["executable_headers"]),
+            coverage_tools.PINNED_CPP_EXECUTABLE_HEADERS,
+        )
+
     def test_rust_build_script_and_nonempty_owned_scope_are_pinned(self) -> None:
         mutations = ("remove_build", "exclude_all")
         for mutation in mutations:
@@ -3070,7 +3113,7 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn("record_stage cpp ooo_overlap_diagnostic 1", gate)
         self.assertIn('if [ "$status" -ne 1 ]', gate)
         self.assertIn(
-            "test_ooo_overlap: sort/window GPU spans did not overlap", gate
+            "test_ooo_overlap: resident/reduce GPU spans did not overlap", gate
         )
         self.assertIn('--object "$build_dir/test_ooo_overlap"', gate)
         self.assertIn("execution_status=1", gate)
@@ -3170,13 +3213,16 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             output = root / "evidence.json"
             per_test = root / "per-test"
             per_test.mkdir()
-            names = [f"test_{index:02d}" for index in range(28)] + [
+            names = [
+                f"test_{index:02d}"
+                for index in range(coverage_tools.BASELINE_CPP_TESTS - 1)
+            ] + [
                 "test_oom_invariant"
             ]
             families = [
                 "reduce_f64",
-                "sort_f64",
-                "hashagg_f64",
+                "expr_vm_f64",
+                "grouped_agg_i32_mul",
                 "spatial_f64",
                 "h3_f64",
             ]
@@ -3286,24 +3332,28 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             nested.rmdir()
             log.write_text(
                 valid_ctest.replace(
-                    "100% tests passed, 0 tests failed out of 29",
-                    "100% tests passed, 0 tests failed out of 28",
+                    f"100% tests passed, 0 tests failed out of {len(names)}",
+                    f"100% tests passed, 0 tests failed out of {len(names) - 1}",
                 ),
                 encoding="utf-8",
             )
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
             log.write_text(
-                valid_ctest + "50% tests passed, 1 tests failed out of 29\n",
+                valid_ctest
+                + f"50% tests passed, 1 tests failed out of {len(names)}\n",
                 encoding="utf-8",
             )
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
             log.write_text(
-                valid_ctest.replace("1/29 Test #1", "2/29 Test #1", 1),
+                valid_ctest.replace(
+                    f"1/{len(names)} Test #1", f"2/{len(names)} Test #1", 1
+                ),
                 encoding="utf-8",
             )
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
             log.write_text(
-                valid_ctest + " 50% tests passed, 1 tests failed out of 29\n",
+                valid_ctest
+                + f" 50% tests passed, 1 tests failed out of {len(names)}\n",
                 encoding="utf-8",
             )
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
@@ -3346,22 +3396,39 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 ("families=5", "families=18446744073709551616"),
                 ("input_doubles=25", "input_doubles=18446744073709551616"),
                 (
-                    "peak_rss_bytes=100 rss_baseline_bytes=90 "
-                    "rss_delta_bytes=10 rss_limit_bytes=300",
-                    "peak_rss_bytes=301 rss_baseline_bytes=291 "
-                    "rss_delta_bytes=10 rss_limit_bytes=300",
-                ),
-                (
                     "peak_rss_bytes=100 rss_baseline_bytes=90 rss_delta_bytes=10",
                     "peak_rss_bytes=100 rss_baseline_bytes=101 rss_delta_bytes=0",
                 ),
                 ("rss_baseline_bytes=90", "rss_baseline_bytes=0"),
                 ("rss_delta_bytes=10", "rss_delta_bytes=9"),
+                (
+                    "peak_rss_bytes=100 rss_baseline_bytes=90 "
+                    "rss_delta_bytes=10 rss_limit_bytes=300",
+                    "peak_rss_bytes=400 rss_baseline_bytes=90 "
+                    "rss_delta_bytes=310 rss_limit_bytes=300",
+                ),
                 ('backend="cuda"', 'backend="definitely-not-cuda-host"'),
             ):
                 with self.subTest(arithmetic=f"{old}->{new}"):
                     write_oom_body(valid_oom_body.replace(old, new, 1))
                     self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
+            # The invariant is a per-family RSS-growth contract. A process
+            # lifetime peak above the growth limit is valid when the captured
+            # baseline accounts for the already-resident input and prior work.
+            absolute_peak_above_limit = valid_oom_body.replace(
+                "peak_rss_bytes=100 rss_baseline_bytes=90 "
+                "rss_delta_bytes=10 rss_limit_bytes=300",
+                "peak_rss_bytes=301 rss_baseline_bytes=291 "
+                "rss_delta_bytes=10 rss_limit_bytes=300",
+                1,
+            )
+            write_oom_body(absolute_peak_above_limit)
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
+            evidence = coverage_tools.read_json(output)
+            self.assertEqual(
+                evidence["oom_rss_contract"],
+                "per_family_peak_minus_baseline_growth",
+            )
             write_oom_body(valid_oom_body.replace("dispatches=1", "dispatches=0", 1))
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
             write_oom_body("PGACCEL_UNSUPPORTED\n" + valid_oom_body)

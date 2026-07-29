@@ -5,7 +5,7 @@ description: How to add a new extension adapter (PostGIS, h3-pg, raster, etc.) t
 
 # pg_accel Adapter Development
 
-An adapter is a tiny Rust module that declares the SQL functions pg_accel can accelerate and tags each with an [`AccelStrategy`]. Adapters produce data only; all execution (GPU dispatch, planner hooks, Custom Scan nodes) is already wired up and strategy-driven.
+An adapter is a small Rust module that declares SQL functions pg_accel can recognize and tags each with an [`AccelStrategy`]. Registration is metadata, not planner admission: a function becomes selectable only after its shape, resident representation, descriptor binding, kernel, and semantic tests are wired into the resident aggregate or raster pipeline.
 
 ## File Layout
 
@@ -29,6 +29,7 @@ pub enum AccelStrategy {
     GpuSpatial = 1, GpuRaster = 2, GpuH3 = 3,
     GpuSort = 4,    GpuReduce = 5, GpuExpr = 6,
     GpuHashJoin = 7, GpuWindow = 8,
+    GpuNestedLoopIneq = 9,
 }
 
 pub struct FunctionAccelEntry {
@@ -45,7 +46,7 @@ pub struct ExtensionAdapter {
 }
 ```
 
-There is no `BatchedEval` strategy. There is no CPU path. `AccelStrategy` is an integer-coded enum with a conservative `from_i32` default (see `registry.rs:46`).
+There is no `BatchedEval` strategy and no CPU fallback inside pg_accel. Numeric IDs 4-9 remain wire-stable so stored strategy tags decode deterministically, but their former standalone executors/kernels are retired or non-selectable. Do not assign those IDs to a new adapter. `from_i32` returns `None` for unknown values.
 
 ## Minimal Adapter
 
@@ -92,14 +93,14 @@ The registry is populated lazily on the first planner hook call (`lazy_init`, `r
 
 ## Choosing a Strategy
 
-Strategy determines which execution path the planner/dispatcher routes to. Per-datum (row-wise) dispatch is only implemented for `GpuSpatial`, `GpuH3`, and `GpuRaster` — see `engine/dispatch/mod.rs:82`. The remaining strategies are handled by dedicated Custom Scan executor nodes (`engine/executor/{sort,agg,join,window,preagg,sort_scan,vectorized_scan}`), which consume rows independently of the adapter dispatch interface and return `DispatchResult::Deferred` if fed through `dispatch()`.
+Strategy classifies registry metadata; it does not create a planner path. `GpuSpatial`, `GpuH3`, and `GpuRaster` retain domain dispatch primitives, but production selection still requires an explicit resident consumer. The normal production planner injects only the childless resident aggregate path; raster path construction is test-only. IDs for the retired standalone sort, reduce, expression, row-emitting join, window, and inequality-NLJ paths remain solely for wire compatibility and decline observability.
 
 | Strategy | When to use | Execution path |
 | --- | --- | --- |
-| `GpuSpatial` | Spatial predicate (bool result, geometric relation). Requires a matching kernel in `pgaccel-kernels` and an `extract_geometry` path. | 3-layer pipeline: bbox → fast-path kernel → PG recheck for uncertain pairs. `dispatch/spatial.rs`. |
-| `GpuH3` | Pure integer/trig H3 cell math. | `dispatch/h3.rs` — extracts H3 cell IDs or points, calls kernels in `crate::gpu::h3_*`. |
-| `GpuRaster` | Per-pixel raster map algebra / clip / reclass. | `dispatch/raster.rs`. |
-| `GpuSort`, `GpuReduce`, `GpuHashJoin`, `GpuWindow`, `GpuExpr` | Full-plan-node offload; the planner swaps in a Custom Scan. | Dedicated executor; adapter-declared functions surface through plan-level recognition. |
+| `GpuSpatial` | Spatial predicate/measurement metadata backed by a resident geometry representation and kernel. | Selectable only when explicitly encoded in a supported resident descriptor; uncertain rows use the defined PostGIS recheck stage. |
+| `GpuH3` | H3 metadata backed by resident integer/coordinate lanes and a supported aggregate shape. | Selectable only through an implemented resident aggregate expression; standalone calls remain native. |
+| `GpuRaster` | Raster metadata backed by resident raster lanes and an implemented operation. | Registered raster execution is test-only until production admission is enabled with evidence. |
+| `GpuSort`, `GpuReduce`, `GpuExpr`, `GpuHashJoin`, `GpuWindow`, `GpuNestedLoopIneq` | Do not use for new adapters. | Wire-stable retired/non-selectable identities; the planner leaves standalone or row-emitting shapes native and records a decline. |
 
 If your function does not fit any strategy, **do not add a "BatchedEval" fallback** — it no longer exists and CPU fallbacks are a compile-time rule violation (top-level `CLAUDE.md` rule 11/12). Either write the GPU kernel or leave the function unregistered so PG's native path runs.
 

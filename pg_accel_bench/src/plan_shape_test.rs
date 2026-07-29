@@ -2073,7 +2073,7 @@ fn plan_shape_parallel_full_sort_stays_native() {
     );
     assert!(
         !plan.contains("customscan(pg_accel)") && !plan.contains("gpusort"),
-        "full-output sort should not select GpuSort until output stays GPU-resident:\n{plan}"
+        "retired standalone GpuSort surface must remain unreachable:\n{plan}"
     );
     assert_rejection_reason_observed(
         &mut c,

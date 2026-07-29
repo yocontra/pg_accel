@@ -269,8 +269,21 @@ PredicateRun run_predicate(const DeviceLane& left, bool left_constant, const Dev
 
 void check_results(const char* label, const PredicateRun& run,
                    std::initializer_list<int8_t> expected) {
-  CHECK(label, run.status == PGACCEL_OK && run.detail == PGACCEL_SPATIAL_DETAIL_NONE &&
-                   run.results == std::vector<int8_t>(expected));
+  const std::vector<int8_t> expected_results(expected);
+  const bool matches = run.status == PGACCEL_OK && run.detail == PGACCEL_SPATIAL_DETAIL_NONE &&
+                       run.results == expected_results;
+  if (!matches) {
+    std::fprintf(stderr, "%s: status=%d detail=%d actual=[", label, static_cast<int>(run.status),
+                 run.detail);
+    for (size_t i = 0; i < run.results.size(); ++i)
+      std::fprintf(stderr, "%s%d", i == 0 ? "" : ",", static_cast<int>(run.results[i]));
+    std::fprintf(stderr, "] expected=[");
+    size_t index = 0;
+    for (const int8_t value : expected_results)
+      std::fprintf(stderr, "%s%d", index++ == 0 ? "" : ",", static_cast<int>(value));
+    std::fprintf(stderr, "]\n");
+  }
+  CHECK(label, matches);
 }
 
 struct DistanceRun {
@@ -360,6 +373,28 @@ void test_intersects_pair_matrix() {
       run_predicate(square, true, polygons, false, 3, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
       {1, -1, 0});
 
+  const DeviceLane contained_polygon =
+      make_lane({polygon({0.5, 0.5, 1.5, 0.5, 1.5, 1.5, 0.5, 1.5, 0.5, 0.5})});
+  check_results(
+      "Contained Polygon/Polygon",
+      run_predicate(contained_polygon, true, square, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {1});
+  check_results(
+      "Containing Polygon/Polygon",
+      run_predicate(square, true, contained_polygon, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {1});
+
+  const DeviceLane unclosed_polygon = make_lane({polygon({0, 0, 2, 0, 2, 2, 0, 2})});
+  const DeviceLane crossing_line = make_lane({line({-1, 1, 3, 1})});
+  check_results("Line/unclosed polygon remains conservative",
+                run_predicate(crossing_line, true, unclosed_polygon, true, 1,
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {0});
+  check_results(
+      "Polygon/unclosed polygon remains conservative",
+      run_predicate(square, true, unclosed_polygon, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+      {0});
+
   const DeviceLane mixed_left =
       make_lane({point(1, 1), point(0, 0), point(1, 1), line({0, 0, 2, 0}), line({0, 0, 2, 2}),
                  line({-1, 1, 3, 1}), polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0}),
@@ -416,6 +451,13 @@ void test_holes_boundaries_and_predicates() {
                               PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
                 {0});
 
+  const DeviceLane infinite_delta_line_a = make_lane({line({-1e308, -1e308, 1e308, 1e308})});
+  const DeviceLane infinite_delta_line_b = make_lane({line({-1e308, 1e308, 1e308, -1e308})});
+  check_results("nonfinite orientation deltas are uncertain",
+                run_predicate(infinite_delta_line_a, true, infinite_delta_line_b, true, 1,
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {0});
+
   const DeviceLane large_square = make_lane({polygon({0, 0, 10, 0, 10, 10, 0, 10, 0, 0})});
   DeviceLane non_tight_point = make_lane({point(5, 5)});
   const double covering_bbox[4] = {-1, -1, 11, 11};
@@ -439,6 +481,73 @@ void test_holes_boundaries_and_predicates() {
       "NULL and EMPTY filters",
       run_predicate(null_empty, false, square, true, 2, PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
       {-1, -1});
+}
+
+void test_contains_geometry_family_matrix() {
+  const DeviceLane line_outer = make_lane({line({0, 0, 1, 1, 2, 0}), line({0, 0, 1, 1, 2, 0}),
+                                           line({0, 0, 1, 1, 2, 0}), line({0, 0, 1, 1, 2, 0})});
+  const DeviceLane point_inner =
+      make_lane({point(1, 1), point(0, 0), point(0.5, 0.5), point(3, 3)});
+  check_results(
+      "Line contains point vertex/endpoint/edge/outside matrix",
+      run_predicate(line_outer, false, point_inner, false, 4, PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+      {1, 0, 0, -1});
+  check_results(
+      "Point within line vertex/endpoint/edge/outside matrix",
+      run_predicate(point_inner, false, line_outer, false, 4, PGACCEL_SPATIAL_PREDICATE_WITHIN),
+      {1, 0, 0, -1});
+
+  const DeviceLane point_outer = make_lane({point(1, 1), point(1, 1), point(1, 1)});
+  const DeviceLane point_or_line_inner = make_lane({point(1, 1), point(2, 2), line({0, 0, 2, 2})});
+  check_results("Point contains equal/different/non-point matrix",
+                run_predicate(point_outer, false, point_or_line_inner, false, 3,
+                              PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+                {1, -1, -1});
+
+  const DeviceLane line_equal_outer =
+      make_lane({line({0, 0, 1, 1, 2, 0}), line({0, 0, 1, 1, 2, 0}), line({0, 0, 1, 1, 2, 0}),
+                 line({0, 0, 1, 1, 2, 0})});
+  const DeviceLane line_equal_inner = make_lane({line({0, 0, 1, 1, 2, 0}), line({2, 0, 1, 1, 0, 0}),
+                                                 line({0, 0, 2, 0}), line({0, 0, 1, 0, 2, 0})});
+  check_results("Line contains forward/reverse/length/different matrix",
+                run_predicate(line_equal_outer, false, line_equal_inner, false, 4,
+                              PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+                {1, 1, 0, 0});
+
+  const DeviceLane holed_outer =
+      make_lane({polygon({0, 0, 4, 0, 4, 4, 0, 4, 0, 0, 1, 1, 3, 1, 3, 3, 1, 3, 1, 1}, {0, 5})});
+  const DeviceLane inner_polygon =
+      make_lane({polygon({0.25, 0.25, 0.75, 0.25, 0.75, 0.75, 0.25, 0.75, 0.25, 0.25})});
+  check_results(
+      "Holed polygon containment remains conservative",
+      run_predicate(holed_outer, true, inner_polygon, true, 1, PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+      {0});
+
+  const DeviceLane square_outer = make_lane({polygon({0, 0, 2, 0, 2, 2, 0, 2, 0, 0})});
+  const DeviceLane boundary_touching_line = make_lane({line({0, 1, 1, 1})});
+  check_results("Boundary-touching line containment remains conservative",
+                run_predicate(square_outer, true, boundary_touching_line, true, 1,
+                              PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+                {0});
+
+  const DeviceLane unclosed_outer = make_lane({polygon({0, 0, 2, 0, 2, 2, 0, 2})});
+  const DeviceLane center = make_lane({point(1, 1)});
+  check_results(
+      "Unclosed polygon containment remains conservative",
+      run_predicate(unclosed_outer, true, center, true, 1, PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+      {0});
+
+  const DeviceLane constant_line = make_lane({line({0, 0, 1, 1, 2, 0})});
+  const DeviceLane null_and_empty = make_lane({null_geometry(), empty_point()});
+  check_results("Contains rejects NULL and EMPTY operands",
+                run_predicate(constant_line, true, null_and_empty, false, 2,
+                              PGACCEL_SPATIAL_PREDICATE_CONTAINS),
+                {-1, -1});
+
+  const DeviceLane short_ring = make_lane({polygon({0, 0, 2, 0, 0, 2})});
+  check_results(
+      "Three-vertex polygon remains conservative",
+      run_predicate(short_ring, true, center, true, 1, PGACCEL_SPATIAL_PREDICATE_CONTAINS), {0});
 }
 
 void test_distance() {
@@ -496,6 +605,70 @@ void test_distance() {
                               PGACCEL_SPATIAL_PREDICATE_DWITHIN, 2.5),
                 {-1, -1, -1, -1, -1, -1, 1, 1, 1});
   CHECK("mixed DWithin batch records one aggregate execution", pgaccel_gpu_exec_count() == 1);
+
+  const DeviceLane overflow_left = make_lane({point(-1e308, -1e308)});
+  const DeviceLane overflow_right = make_lane({point(1e308, 1e308)});
+  const DistanceRun overflow_distance = run_distance(overflow_left, true, overflow_right, true, 1);
+  CHECK("overflowing point delta is uncertain",
+        overflow_distance.status == PGACCEL_OK &&
+            overflow_distance.distances == std::vector<double>({0.0}) &&
+            overflow_distance.uncertain == std::vector<uint8_t>({1}));
+  check_results("DWithin rejects overflowing disjoint bbox lower bound",
+                run_predicate(overflow_left, true, overflow_right, true, 1,
+                              PGACCEL_SPATIAL_PREDICATE_DWITHIN, 1.0),
+                {-1});
+  check_results("DWithin reverse rejects overflowing disjoint bbox lower bound",
+                run_predicate(overflow_right, true, overflow_left, true, 1,
+                              PGACCEL_SPATIAL_PREDICATE_DWITHIN, 1.0),
+                {-1});
+
+  const DeviceLane projection_cases = make_lane({point(0, 0), point(0, 0.5), point(0, 2)});
+  const DeviceLane segment_cases =
+      make_lane({line({3, 0, 3, 0}), line({3, 0, 3, 1}), line({3, 0, 3, 1})});
+  const DistanceRun projection_matrix =
+      run_distance(projection_cases, false, segment_cases, false, 3);
+  CHECK("degenerate/interior/endpoint projection distance matrix",
+        projection_matrix.status == PGACCEL_OK && projection_matrix.distances.size() == 3 &&
+            std::fabs(projection_matrix.distances[0] - 3.0) < 1e-12 &&
+            std::fabs(projection_matrix.distances[1] - 3.0) < 1e-12 &&
+            std::fabs(projection_matrix.distances[2] - std::sqrt(10.0)) < 1e-12 &&
+            projection_matrix.uncertain == std::vector<uint8_t>({0, 0, 0}));
+
+  const DeviceLane null_and_empty = make_lane({null_geometry(), empty_point()});
+  const DeviceLane distance_target = make_lane({point(1, 1), point(1, 1)});
+  const DistanceRun missing_distance =
+      run_distance(null_and_empty, false, distance_target, false, 2);
+  CHECK("NULL and EMPTY distances are uncertain",
+        missing_distance.status == PGACCEL_OK &&
+            missing_distance.distances == std::vector<double>({0.0, 0.0}) &&
+            missing_distance.uncertain == std::vector<uint8_t>({1, 1}));
+
+  const DeviceLane huge_offset_point = make_lane({point(1e308, 1)});
+  const DeviceLane tiny_segment = make_lane({line({0, 0, 1e-308, 0})});
+  const DistanceRun huge_offset_distance =
+      run_distance(huge_offset_point, true, tiny_segment, true, 1);
+  CHECK("scaled projection overflow is uncertain",
+        huge_offset_distance.status == PGACCEL_OK &&
+            huge_offset_distance.distances == std::vector<double>({0.0}) &&
+            huge_offset_distance.uncertain == std::vector<uint8_t>({1}));
+
+  const DeviceLane nonfinite_offset_point = make_lane({point(1e308, 0)});
+  const DeviceLane finite_wide_segment = make_lane({line({-1e308, 0, -1e307, 0})});
+  const DistanceRun nonfinite_offset_distance =
+      run_distance(nonfinite_offset_point, true, finite_wide_segment, true, 1);
+  CHECK("nonfinite point-to-segment offset is uncertain",
+        nonfinite_offset_distance.status == PGACCEL_OK &&
+            nonfinite_offset_distance.distances == std::vector<double>({0.0}) &&
+            nonfinite_offset_distance.uncertain == std::vector<uint8_t>({1}));
+
+  const DeviceLane degenerate_segments = make_lane(
+      {line({0, 0, 0, 0}), line({-1, 0, 1, 0}), line({0, 0, 0, 0, 0, 2}), line({0, 0, 0, 0})});
+  const DeviceLane degenerate_peers =
+      make_lane({line({0, 0, 0, 0}), line({0, 0, 0, 0}), point(0, 1), line({-1, 0, 1, 0})});
+  check_results("Degenerate segment ordering matrix",
+                run_predicate(degenerate_segments, false, degenerate_peers, false, 4,
+                              PGACCEL_SPATIAL_PREDICATE_INTERSECTS),
+                {1, 0, 0, 0});
 }
 
 void test_hard_failures() {
@@ -644,6 +817,30 @@ void test_hard_failures() {
   CHECK("invalid NULL sidecar is hard",
         invalid_null_run.status == PGACCEL_INVALID_ARGUMENT &&
             invalid_null_run.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY);
+  const PredicateRun invalid_null_contains =
+      run_predicate(invalid_null, true, right, true, 1, PGACCEL_SPATIAL_PREDICATE_CONTAINS);
+  CHECK("contains suppresses writes after geometry validation failure",
+        invalid_null_contains.status == PGACCEL_INVALID_ARGUMENT &&
+            invalid_null_contains.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY &&
+            invalid_null_contains.results.empty());
+  const DistanceRun invalid_null_distance = run_distance(invalid_null, true, right, true, 1);
+  CHECK("distance suppresses writes after geometry validation failure",
+        invalid_null_distance.status == PGACCEL_INVALID_ARGUMENT &&
+            invalid_null_distance.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY &&
+            invalid_null_distance.distances.empty() && invalid_null_distance.uncertain.empty());
+
+  DeviceLane invalid_terminal_offset = make_lane({point(0, 0)});
+  const uint64_t zero_terminal_offset = 0;
+  CHECK("terminal geometry offset setup",
+        pgaccel_expr_device_copy_from_host(invalid_terminal_offset.geometry_offsets.get() + 1,
+                                           &zero_terminal_offset,
+                                           sizeof(zero_terminal_offset)) == PGACCEL_OK);
+  const PredicateRun invalid_terminal_offset_run = run_predicate(
+      invalid_terminal_offset, true, right, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS);
+  CHECK("terminal geometry offset is hard",
+        invalid_terminal_offset_run.status == PGACCEL_INVALID_ARGUMENT &&
+            invalid_terminal_offset_run.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY &&
+            invalid_terminal_offset_run.results.empty());
 
   DeviceLane invalid_coordinate = make_lane({point(0, 0)});
   const double nan_coordinate = std::numeric_limits<double>::quiet_NaN();
@@ -666,6 +863,177 @@ void test_hard_failures() {
   CHECK("negative-zero empty bbox is hard",
         invalid_empty_run.status == PGACCEL_INVALID_ARGUMENT &&
             invalid_empty_run.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY);
+
+  const auto expect_geometry_failure = [&](const char* label, const DeviceLane& invalid) {
+    const PredicateRun run =
+        run_predicate(invalid, true, right, true, 1, PGACCEL_SPATIAL_PREDICATE_INTERSECTS);
+    CHECK(label, run.status == PGACCEL_INVALID_ARGUMENT &&
+                     run.detail == PGACCEL_SPATIAL_DETAIL_GEOMETRY && run.results.empty());
+  };
+
+  DeviceLane noncanonical_null = make_lane({null_geometry()});
+  const pgaccel_resident_geometry_row noncanonical_null_row = {PGACCEL_RESIDENT_GEOMETRY_POINT, 0,
+                                                               0, 0, 0};
+  CHECK("noncanonical NULL row setup",
+        pgaccel_expr_device_copy_from_host(noncanonical_null.rows.get(), &noncanonical_null_row,
+                                           sizeof(noncanonical_null_row)) == PGACCEL_OK);
+  expect_geometry_failure("noncanonical NULL row is hard", noncanonical_null);
+
+  DeviceLane unknown_type = make_lane({point(0, 0)});
+  const pgaccel_resident_geometry_row unknown_type_row = {99, 4326, 0, 0,
+                                                          PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID};
+  CHECK("unknown geometry type setup",
+        pgaccel_expr_device_copy_from_host(unknown_type.rows.get(), &unknown_type_row,
+                                           sizeof(unknown_type_row)) == PGACCEL_OK);
+  expect_geometry_failure("unknown geometry type is hard", unknown_type);
+
+  DeviceLane reversed_bbox = make_lane({point(0, 0)});
+  const double reversed_bbox_values[4] = {1, 1, 0, 0};
+  CHECK("reversed bbox setup",
+        pgaccel_expr_device_copy_from_host(reversed_bbox.bboxes.get(), reversed_bbox_values,
+                                           sizeof(reversed_bbox_values)) == PGACCEL_OK);
+  expect_geometry_failure("reversed bbox is hard", reversed_bbox);
+
+  DeviceLane oversized_point = make_lane({line({0, 0, 1, 1})});
+  const pgaccel_resident_geometry_row oversized_point_row = {
+      PGACCEL_RESIDENT_GEOMETRY_POINT, 4326, 0, 0, PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID};
+  CHECK("oversized point setup",
+        pgaccel_expr_device_copy_from_host(oversized_point.rows.get(), &oversized_point_row,
+                                           sizeof(oversized_point_row)) == PGACCEL_OK);
+  expect_geometry_failure("point with two coordinates is hard", oversized_point);
+
+  DeviceLane undersized_line = make_lane({point(0, 0)});
+  const pgaccel_resident_geometry_row undersized_line_row = {
+      PGACCEL_RESIDENT_GEOMETRY_LINESTRING, 4326, 0, 0, PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID};
+  CHECK("undersized line setup",
+        pgaccel_expr_device_copy_from_host(undersized_line.rows.get(), &undersized_line_row,
+                                           sizeof(undersized_line_row)) == PGACCEL_OK);
+  expect_geometry_failure("line with one coordinate is hard", undersized_line);
+
+  DeviceLane line_with_ring = make_lane({polygon({0, 0, 1, 0, 0, 1})});
+  const pgaccel_resident_geometry_row line_with_ring_row = {
+      PGACCEL_RESIDENT_GEOMETRY_LINESTRING, 4326, 0, 1, PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID};
+  CHECK("line ring metadata setup",
+        pgaccel_expr_device_copy_from_host(line_with_ring.rows.get(), &line_with_ring_row,
+                                           sizeof(line_with_ring_row)) == PGACCEL_OK);
+  expect_geometry_failure("non-polygon ring metadata is hard", line_with_ring);
+
+  DeviceLane polygon_without_ring = make_lane({line({0, 0, 1, 0, 0, 1})});
+  const pgaccel_resident_geometry_row polygon_without_ring_row = {
+      PGACCEL_RESIDENT_GEOMETRY_POLYGON, 4326, 0, 0, PGACCEL_RESIDENT_GEOMETRY_BBOX_VALID};
+  CHECK("ringless polygon setup", pgaccel_expr_device_copy_from_host(
+                                      polygon_without_ring.rows.get(), &polygon_without_ring_row,
+                                      sizeof(polygon_without_ring_row)) == PGACCEL_OK);
+  expect_geometry_failure("nonempty polygon without a ring is hard", polygon_without_ring);
+
+  DeviceLane malformed_ring = make_lane({polygon({0, 0, 1, 0, 0, 1})});
+  const uint64_t bad_ring_offset = 1;
+  CHECK("malformed ring offset setup",
+        pgaccel_expr_device_copy_from_host(malformed_ring.ring_offsets.get(), &bad_ring_offset,
+                                           sizeof(bad_ring_offset)) == PGACCEL_OK);
+  expect_geometry_failure("malformed ring range is hard", malformed_ring);
+
+  pgaccel_spatial_resident_request contract_request = legacy_request;
+  contract_request.predicate_results = output.get();
+  detail = 77;
+  CHECK("null request is rejected",
+        run_resident_request(nullptr, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+  CHECK("null detail is rejected",
+        run_resident_request(&contract_request, nullptr) == PGACCEL_INVALID_ARGUMENT);
+
+  pgaccel_spatial_resident_request bad_view_request = contract_request;
+  bad_view_request.left.view.flags = 1;
+  detail = -1;
+  CHECK("noncanonical resident view flags are rejected",
+        run_resident_request(&bad_view_request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  bad_view_request = contract_request;
+  bad_view_request.left.view.coordinate_pair_count = std::numeric_limits<size_t>::max();
+  detail = -1;
+  CHECK("resident coordinate scalar overflow is rejected",
+        run_resident_request(&bad_view_request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  bad_view_request = contract_request;
+  bad_view_request.left.view.coordinates = nullptr;
+  bad_view_request.left.view.coordinates_bytes = 0;
+  detail = -1;
+  CHECK("resident coordinate pointer shape is rejected",
+        run_resident_request(&bad_view_request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  bad_view_request = contract_request;
+  bad_view_request.left.view.nulls = nullptr;
+  detail = -1;
+  CHECK("resident NULL sidecar byte shape is rejected",
+        run_resident_request(&bad_view_request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  pgaccel_spatial_resident_request aliased_output_request = contract_request;
+  aliased_output_request.predicate_results =
+      reinterpret_cast<int8_t*>(const_cast<double*>(aliased_output_request.left.view.coordinates));
+  detail = -1;
+  CHECK("resident output/input alias is rejected",
+        run_resident_request(&aliased_output_request, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  DeviceBuffer<uint8_t> misaligned_storage(16);
+  DeviceBuffer<uint8_t> distance_uncertain(1);
+  pgaccel_spatial_resident_request misaligned_distance = contract_request;
+  misaligned_distance.predicate = PGACCEL_SPATIAL_PREDICATE_DISTANCE;
+  misaligned_distance.predicate_results = nullptr;
+  misaligned_distance.predicate_results_bytes = 0;
+  misaligned_distance.distances =
+      reinterpret_cast<double*>(misaligned_storage.get() + sizeof(uint8_t));
+  misaligned_distance.distances_bytes = sizeof(double);
+  misaligned_distance.distance_uncertain = distance_uncertain.get();
+  misaligned_distance.distance_uncertain_bytes = sizeof(uint8_t);
+  detail = -1;
+  CHECK("misaligned resident distance output is rejected",
+        run_resident_request(&misaligned_distance, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  pgaccel_spatial_resident_request overflowing_output = contract_request;
+  overflowing_output.predicate_results =
+      reinterpret_cast<int8_t*>(std::numeric_limits<uintptr_t>::max() - 3);
+  overflowing_output.predicate_results_bytes = 8;
+  overflowing_output.output_capacity = 8;
+  detail = -1;
+  CHECK("overflowing resident output address is rejected",
+        run_resident_request(&overflowing_output, &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  DeviceWorkspace invalid_workspace;
+  pgaccel_spatial_workspace invalid_workspace_view = invalid_workspace.view();
+  invalid_workspace_view.abi_version += 1;
+  detail = -1;
+  CHECK("invalid resident workspace ABI is rejected",
+        pgaccel_spatial_eval_resident_launch(&contract_request, &invalid_workspace_view, &detail) ==
+                PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  invalid_workspace_view = invalid_workspace.view();
+  invalid_workspace_view.failure_flags =
+      reinterpret_cast<uint32_t*>(invalid_workspace_view.control);
+  detail = -1;
+  CHECK("overlapping resident workspace spans are rejected",
+        pgaccel_spatial_eval_resident_launch(&contract_request, &invalid_workspace_view, &detail) ==
+                PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
+
+  DeviceWorkspace output_alias_workspace;
+  const pgaccel_spatial_workspace output_alias_workspace_view = output_alias_workspace.view();
+  pgaccel_spatial_resident_request output_alias_request = contract_request;
+  output_alias_request.predicate_results =
+      reinterpret_cast<int8_t*>(output_alias_workspace.control.get());
+  output_alias_request.predicate_results_bytes = sizeof(int8_t);
+  detail = -1;
+  CHECK("resident output/workspace alias is rejected",
+        pgaccel_spatial_eval_resident_launch(&output_alias_request, &output_alias_workspace_view,
+                                             &detail) == PGACCEL_INVALID_ARGUMENT &&
+            detail == PGACCEL_SPATIAL_DETAIL_CONTRACT);
 }
 
 void test_recheck_helpers() {
@@ -1067,6 +1435,7 @@ int main() {
   }
   test_intersects_pair_matrix();
   test_holes_boundaries_and_predicates();
+  test_contains_geometry_family_matrix();
   test_distance();
   test_hard_failures();
   test_recheck_helpers();

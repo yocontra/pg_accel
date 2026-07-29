@@ -168,8 +168,8 @@ have no registered executor.
 | Standalone PostGIS or H3 function/SRF | Aggregate primitives and adapter registry metadata remain; standalone executor removed | Not selectable | PostgreSQL executes standalone calls. Function and target-list SRF hooks record `no_gpu_resident_pipeline`. |
 | Base scan, WHERE filter, or projection | No registered Custom Scan executor; host-staged implementation retired | Not selectable | PostgreSQL executes the base path. The production hook observes and records declines but injects no scan CustomPath. |
 | Row-returning hash or inequality join | No registered row-returning executor; host-staged implementation retired | Not selectable | PostgreSQL executes the join. Resident join membership exists only inside childless `GpuAccelAgg` descriptors. |
-| Sort or top-k | Kernel or descriptor code may remain; no registered executor | Not selectable | Sort opportunities remain PostgreSQL-native without a complete resident producer/consumer path. |
-| Window | Kernel source may remain; no registered executor | Not selectable | Planner-visible full and reducing window SQL remains PostgreSQL-native and records `no_gpu_resident_pipeline`. |
+| Standalone sort or top-k | Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding | Not selectable | All standalone sort shapes remain PostgreSQL-native. Full-output sorts record `sort_heap_full_output`; bounded top-k records `sort_standalone_topk_no_gpu_kernel`. |
+| Window | Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding | Not selectable | Full-output and reducing window SQL remains PostgreSQL-native and records `no_gpu_resident_pipeline`. |
 | Raster | Registered childless resident executor | Test-only | Production planning is observation-only; a test GUC can force the resident raster path. |
 
 The extension adapters currently register these names for OID discovery. This

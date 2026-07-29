@@ -30,6 +30,12 @@
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
+#include "pgaccel_olap.h"
+
+namespace sycl {
+class queue;
+}
+extern sycl::queue* g_queue;
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -107,20 +113,15 @@ int main() {
   // machine that HAS a GPU, so a missing device fails the test honestly.
   if (pgaccel_init() != PGACCEL_OK) {
     fprintf(stderr, "FAIL: pgaccel_init() failed — no usable GPU device\n");
+    if (pgaccel_shutdown() != PGACCEL_OK)
+      fprintf(stderr, "FAIL: pgaccel_shutdown() failed after initialization failure\n");
     return 1;
   }
 
-  // ── Positive control: the same entry points succeed on a small batch ──
+  // ── Positive control: the VM entry points succeed on a small batch ──
   {
     HugeBatch small(4);
     int8_t results[4] = {99, 99, 99, 99};
-    pgaccel_status st =
-        pgaccel_expr_template_cmp_const(&small.batch, 0, PGACCEL_EXPR_OP_GT, 2.0, results);
-    ASSERT_TRUE("positive control: cmp_const on 4 rows returns OK", st == PGACCEL_OK);
-    ASSERT_TRUE("positive control: cmp_const results correct",
-                results[0] == PGACCEL_EXPR_FALSE && results[1] == PGACCEL_EXPR_FALSE &&
-                    results[2] == PGACCEL_EXPR_TRUE && results[3] == PGACCEL_EXPR_TRUE);
-
     pgaccel_val constant = {};
     constant.tag = PGACCEL_VAL_INT32;
     constant.data.i32 = 2;
@@ -139,7 +140,7 @@ int main() {
     predicate.num_cols = 1;
 
     std::memset(results, 99, sizeof(results));
-    st = pgaccel_expr_eval_predicate(&predicate, &small.batch, results);
+    pgaccel_status st = pgaccel_expr_eval_predicate(&predicate, &small.batch, results);
     ASSERT_TRUE("positive control: bytecode predicate returns OK", st == PGACCEL_OK);
     ASSERT_TRUE("positive control: bytecode predicate copyback correct",
                 results[0] == PGACCEL_EXPR_FALSE && results[1] == PGACCEL_EXPR_FALSE &&
@@ -192,16 +193,44 @@ int main() {
   // masks — orders of magnitude beyond any max_alloc. Deterministic OOM.
   const size_t kHugeRows = (size_t)1 << 59;
 
-  // ── Induced failure 1: template kernel (OneColScratch staging) ──
+  // A successfully initialized runtime with a temporarily unavailable queue
+  // is distinct from initialization failure. Pin every resident-memory C ABI
+  // to the documented NO_DEVICE status before restoring the live queue.
   {
-    HugeBatch huge(kHugeRows);
-    int8_t results[4] = {0, 0, 0, 0};
-    pgaccel_status st =
-        pgaccel_expr_template_cmp_const(&huge.batch, 0, PGACCEL_EXPR_OP_GT, 2.0, results);
-    assert_honest_failure("cmp_const with 2^59-row staging", st);
+    sycl::queue* live_queue = g_queue;
+    ASSERT_TRUE("queue-unavailable setup has a live queue", live_queue != nullptr);
+    g_queue = nullptr;
+
+    uint8_t byte = 0;
+    void* p = reinterpret_cast<void*>(0x1);
+    ASSERT_TRUE("shared alloc reports unavailable queue",
+                pgaccel_expr_shared_alloc(1, &p) == PGACCEL_ERROR_NO_DEVICE && p == nullptr);
+    pgaccel_expr_shared_free(&byte);
+
+    p = reinterpret_cast<void*>(0x1);
+    ASSERT_TRUE("device alloc reports unavailable queue",
+                pgaccel_expr_device_alloc(1, &p) == PGACCEL_ERROR_NO_DEVICE && p == nullptr);
+    p = reinterpret_cast<void*>(0x1);
+    ASSERT_TRUE("device alloc-copy reports unavailable queue",
+                pgaccel_expr_device_alloc_copy(&byte, 1, &p) == PGACCEL_ERROR_NO_DEVICE &&
+                    p == nullptr);
+    ASSERT_TRUE("device copy-from-host reports unavailable queue",
+                pgaccel_expr_device_copy_from_host(&byte, &byte, 1) == PGACCEL_ERROR_NO_DEVICE);
+    ASSERT_TRUE("device copy-to-host reports unavailable queue",
+                pgaccel_expr_device_copy_to_host(&byte, &byte, 1) == PGACCEL_ERROR_NO_DEVICE);
+    pgaccel_expr_device_free(&byte);
+
+    p = reinterpret_cast<void*>(0x1);
+    ASSERT_TRUE("grouped workspace alloc reports unavailable queue",
+                pgaccel_grouped_agg_workspace_alloc(1, alignof(void*), PGACCEL_MEM_SPACE_SHARED_USM,
+                                                    &p) == PGACCEL_ERROR_NO_DEVICE &&
+                    p == nullptr);
+    pgaccel_grouped_agg_workspace_free(&byte);
+
+    g_queue = live_queue;
   }
 
-  // ── Induced failure 2: bytecode VM entry point (stage_dispatch) ──
+  // ── Induced failure 1: bytecode VM entry point (stage_dispatch) ──
   //
   // Uses pgaccel_expr_eval_project rather than _predicate: the predicate
   // entry fulfils its documented "results always populated" contract by
@@ -229,7 +258,7 @@ int main() {
     assert_honest_failure("expr_eval_project with 2^59-row staging", st);
   }
 
-  // ── Induced failure 3: shared-USM allocator entry point ──
+  // ── Induced failure 2: shared-USM allocator entry point ──
   {
     void* p = reinterpret_cast<void*>(0x1);
     pgaccel_status st = pgaccel_expr_shared_alloc(kHugeRows * 8, &p);
@@ -237,18 +266,213 @@ int main() {
     ASSERT_TRUE("shared_alloc failure left no dangling pointer", p == nullptr || st == PGACCEL_OK);
   }
 
+  // The remaining resident allocators must contain the same impossible
+  // allocation without leaking a stale output pointer or crossing the C ABI.
+  {
+    void* p = reinterpret_cast<void*>(0x1);
+    pgaccel_status st = pgaccel_expr_device_alloc(kHugeRows * 8, &p);
+    assert_honest_failure("pgaccel_expr_device_alloc(2^62 bytes)", st);
+    ASSERT_TRUE("device_alloc failure left no dangling pointer", p == nullptr || st == PGACCEL_OK);
+  }
+
+  {
+    const uint8_t source = 0;
+    void* p = reinterpret_cast<void*>(0x1);
+    pgaccel_status st = pgaccel_expr_device_alloc_copy(&source, kHugeRows * 8, &p);
+    assert_honest_failure("pgaccel_expr_device_alloc_copy(2^62 bytes)", st);
+    ASSERT_TRUE("device_alloc_copy failure left no dangling pointer",
+                p == nullptr || st == PGACCEL_OK);
+  }
+
+  {
+    void* p = reinterpret_cast<void*>(0x1);
+    pgaccel_status st =
+        pgaccel_grouped_agg_workspace_alloc(kHugeRows * 8, 64, PGACCEL_MEM_SPACE_SHARED_USM, &p);
+    assert_honest_failure("pgaccel_grouped_agg_workspace_alloc(2^62 bytes)", st);
+    ASSERT_TRUE("grouped workspace failure left no dangling pointer",
+                p == nullptr || st == PGACCEL_OK);
+  }
+
+  // H3 bulk entry points allocate every count-sized staging span before
+  // reading the host arrays. The impossible count therefore tests each
+  // allocator's cleanup and C-boundary containment without an input overread.
+  {
+    const uint64_t cell = UINT64_C(0x8029fffffffffff);
+    int32_t i32_output = 0;
+    uint8_t byte_output = 0;
+    uint64_t cell_output = 0;
+
+    assert_honest_failure("h3_get_resolution with 2^59 rows",
+                          pgaccel_h3_get_resolution_bulk(&cell, kHugeRows, &i32_output));
+    assert_honest_failure("h3_get_base_cell with 2^59 rows",
+                          pgaccel_h3_get_base_cell_bulk(&cell, kHugeRows, &i32_output));
+    assert_honest_failure("h3_is_valid_cell with 2^59 rows",
+                          pgaccel_h3_is_valid_cell_bulk(&cell, kHugeRows, &byte_output));
+    assert_honest_failure("h3_is_pentagon with 2^59 rows",
+                          pgaccel_h3_is_pentagon_bulk(&cell, kHugeRows, &byte_output));
+    assert_honest_failure("h3_is_res_class_iii with 2^59 rows",
+                          pgaccel_h3_is_res_class_iii_bulk(&cell, kHugeRows, &byte_output));
+    assert_honest_failure("h3_cell_to_parent with 2^59 rows",
+                          pgaccel_h3_cell_to_parent_bulk(&cell, kHugeRows, 0, &cell_output));
+    assert_honest_failure("h3_cell_to_center_child with 2^59 rows",
+                          pgaccel_h3_cell_to_center_child_bulk(&cell, kHugeRows, 1, &cell_output));
+    assert_honest_failure("h3_grid_distance with 2^59 rows",
+                          pgaccel_h3_grid_distance_bulk(&cell, &cell, kHugeRows, &i32_output));
+
+    const size_t huge_slab_rows = kHugeRows / 4;
+    const double coordinate_f64 = 0.0;
+    const float coordinate_f32 = 0.0f;
+    pgaccel_agg_state* state = nullptr;
+    assert_honest_failure("h3 fp64 lat/lng with 2^57 rows",
+                          pgaccel_h3_lat_lng_to_cell_bulk(&coordinate_f64, &coordinate_f64,
+                                                          huge_slab_rows, 0, true, &cell_output,
+                                                          &byte_output));
+    assert_honest_failure("h3 fp32 lat/lng with 2^57 rows",
+                          pgaccel_h3_lat_lng_to_cell_bulk(&coordinate_f32, &coordinate_f32,
+                                                          huge_slab_rows, 0, false, &cell_output,
+                                                          &byte_output));
+    assert_honest_failure(
+        "h3 lat/lng count with 2^57 rows",
+        pgaccel_h3_lat_lng_count_bulk(&coordinate_f64, &coordinate_f64, huge_slab_rows, 0, &state));
+    assert_honest_failure("h3 fp32-exact count with 2^57 rows",
+                          pgaccel_h3_lat_lng_count_bulk_f32_exact(&coordinate_f32, &coordinate_f32,
+                                                                  &coordinate_f64, &coordinate_f64,
+                                                                  huge_slab_rows, 0, &state));
+    assert_honest_failure("h3 resident count with 2^57 rows",
+                          pgaccel_h3_lat_lng_count_resident_bulk(&coordinate_f64, &coordinate_f64,
+                                                                 &coordinate_f32, &coordinate_f32,
+                                                                 huge_slab_rows, 0, &state));
+  }
+
+  {
+    const double point[2] = {0.0, 0.0};
+    const double ring[8] = {0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0};
+    int8_t predicate_output = 0;
+    double distance_output = 0.0;
+    uint8_t uncertain_output = 0;
+
+    assert_honest_failure(
+        "point_in_ring with 2^59 points",
+        pgaccel_point_in_ring_bulk(point, kHugeRows, ring, 4, true, &predicate_output));
+    assert_honest_failure("sphere_distance with 2^59 pairs",
+                          pgaccel_sphere_distance_bulk(point, point, kHugeRows, true,
+                                                       &distance_output, &uncertain_output));
+    assert_honest_failure(
+        "segment_intersects with 2^58 pairs",
+        pgaccel_segment_intersects_bulk(ring, ring, kHugeRows / 2, true, &predicate_output));
+
+    // Shape the counts so the coordinate allocations wrap to a few elements
+    // while a later byte-sized allocation remains impossible. The functions
+    // check every allocation before their first memcpy, so these calls cover
+    // partial-allocation cleanup without reading beyond the tiny inputs.
+    const size_t cleanup_rows = (size_t{1} << 63) + 1;
+    assert_honest_failure(
+        "point_in_ring partial-allocation cleanup",
+        pgaccel_point_in_ring_bulk(point, 1, ring, kHugeRows, true, &predicate_output));
+    assert_honest_failure("sphere_distance fp32 partial-allocation cleanup",
+                          pgaccel_sphere_distance_bulk(
+                              reinterpret_cast<const float*>(point),
+                              reinterpret_cast<const float*>(point), cleanup_rows, false,
+                              reinterpret_cast<float*>(&distance_output), &uncertain_output));
+    assert_honest_failure("sphere_distance fp64 partial-allocation cleanup",
+                          pgaccel_sphere_distance_bulk(point, point, cleanup_rows, true,
+                                                       &distance_output, &uncertain_output));
+    assert_honest_failure(
+        "segment_intersects partial-allocation cleanup",
+        pgaccel_segment_intersects_bulk(ring, ring, cleanup_rows, true, &predicate_output));
+  }
+
+  // Point-in-polygon staging allocates the complete slab before building or
+  // reading host-side staging vectors. Exercise both simple and cooperative
+  // dispatch selection with an impossible point span.
+  {
+    const float point[2] = {0.0f, 0.0f};
+    const float bbox[4] = {-1.0f, -1.0f, 1.0f, 1.0f};
+    const float polygon[8] = {-1.0f, -1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f};
+    int8_t output = 0;
+    assert_honest_failure(
+        "point_in_polygon simple staging with 2^59 points",
+        pgaccel_point_in_polygon_bulk(point, kHugeRows, bbox, polygon, 4, nullptr, 0, &output));
+    assert_honest_failure(
+        "point_in_polygon cooperative staging with 2^59 points",
+        pgaccel_point_in_polygon_bulk(point, kHugeRows, bbox, polygon, 2048, nullptr, 0, &output));
+  }
+
+  {
+    const float box_f32[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+    const double box_f64[4] = {0.0, 0.0, 1.0, 1.0};
+    uint8_t intersects = 0;
+    assert_honest_failure(
+        "bbox f32 with 2^58 boxes",
+        pgaccel_bbox_intersects_bulk_f32(box_f32, kHugeRows / 2, box_f32, 1, &intersects, nullptr));
+    assert_honest_failure(
+        "bbox f64 with 2^58 boxes",
+        pgaccel_bbox_intersects_bulk_f64(box_f64, kHugeRows / 2, box_f64, 1, &intersects, nullptr));
+  }
+
+  {
+    const double f64 = 1.0;
+    const float f32 = 1.0f;
+    const int64_t i64 = 1;
+    const uint8_t byte = 1;
+    double f64_output = 0.0;
+    float f32_sum = 0.0f;
+    float f32_min = 0.0f;
+    float f32_max = 0.0f;
+    int64_t i64_sum = 0;
+    int64_t i64_min = 0;
+    int64_t i64_max = 0;
+    int64_t aggregate_count = 0;
+    size_t size_output = 0;
+    uint64_t u64_output = 0;
+
+    assert_honest_failure("reduce sum with 2^59 rows",
+                          pgaccel_reduce_sum_f64(&f64, kHugeRows, &f64_output));
+    assert_honest_failure("reduce min with 2^59 rows",
+                          pgaccel_reduce_min_f64(&f64, kHugeRows, &f64_output));
+    assert_honest_failure("reduce count with 2^59 rows",
+                          pgaccel_reduce_count(&byte, kHugeRows, &size_output));
+    assert_honest_failure(
+        "reduce multi with 2^59 rows",
+        pgaccel_reduce_multi_i64(&i64, kHugeRows, &i64_sum, &i64_min, &i64_max, &aggregate_count));
+    assert_honest_failure("reduce masked multi with 2^59 rows",
+                          pgaccel_reduce_multi_masked_f32(&f32, &byte, &byte, kHugeRows, &f32_sum,
+                                                          &f32_min, &f32_max, &aggregate_count));
+    assert_honest_failure("reduce sumsq with 2^59 rows",
+                          pgaccel_reduce_sum_sq_f64(&f64, kHugeRows, &f64_output));
+    assert_honest_failure(
+        "reduce stats with 2^59 rows",
+        pgaccel_reduce_stats_f32(&f32, kHugeRows, &u64_output, &f64_output, &f64_output));
+  }
+
   // ── Survival: a failing dispatch must not poison the process ──
   {
     HugeBatch small(4);
     int8_t results[4] = {99, 99, 99, 99};
-    pgaccel_status st =
-        pgaccel_expr_template_cmp_const(&small.batch, 0, PGACCEL_EXPR_OP_LE, 2.0, results);
-    ASSERT_TRUE("post-failure control: cmp_const still returns OK", st == PGACCEL_OK);
+    pgaccel_val constant = {};
+    constant.tag = PGACCEL_VAL_INT32;
+    constant.data.i32 = 2;
+    pgaccel_expr_instruction insts[3] = {};
+    insts[0].opcode = PGACCEL_EXPR_OP_LOAD_COL;
+    insts[0].arg = 0;
+    insts[1].opcode = PGACCEL_EXPR_OP_LOAD_CONST;
+    insts[1].arg = 0;
+    insts[2].opcode = PGACCEL_EXPR_OP_LE;
+    pgaccel_expr_program program = {};
+    program.instructions = insts;
+    program.inst_count = 3;
+    program.const_pool = &constant;
+    program.const_count = 1;
+    program.max_stack = 2;
+    program.num_cols = 1;
+    pgaccel_status st = pgaccel_expr_eval_predicate(&program, &small.batch, results);
+    ASSERT_TRUE("post-failure control: bytecode predicate still returns OK", st == PGACCEL_OK);
     ASSERT_TRUE("post-failure control: results correct",
                 results[0] == PGACCEL_EXPR_TRUE && results[1] == PGACCEL_EXPR_TRUE &&
                     results[2] == PGACCEL_EXPR_FALSE && results[3] == PGACCEL_EXPR_FALSE);
   }
 
+  ASSERT_TRUE("pgaccel_shutdown succeeds", pgaccel_shutdown() == PGACCEL_OK);
   printf("test_kernel_failure_status: %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

@@ -315,6 +315,61 @@ class CallGraphTests(unittest.TestCase):
         for entry in result.entrypoint_audits:
             self.assertIn("opaque_device_resource", entry.classifications)
 
+    def test_zero_work_empty_resource_requires_default_unmodified_state(self) -> None:
+        result = audit_fixture(
+            r"""
+            struct OpaqueState { std::vector<int> payload; };
+            extern "C" pgaccel_status pgaccel_zero_empty_clean(
+                int* input, size_t count, OpaqueState** out) {
+              *out = nullptr;
+              if (count == 0) {
+                auto* empty = new OpaqueState();
+                if (empty == nullptr) return PGACCEL_OOM;
+                *out = empty;
+                return PGACCEL_OK;
+              }
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<ZeroEmptyClean>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            extern "C" pgaccel_status pgaccel_zero_empty_mutated(
+                int* input, size_t count, OpaqueState** out) {
+              *out = nullptr;
+              if (count == 0) {
+                auto* empty = new OpaqueState();
+                if (empty == nullptr) return PGACCEL_OOM;
+                empty->payload.push_back(42);
+                *out = empty;
+                return PGACCEL_OK;
+              }
+              sycl::queue q;
+              int* device_result = sycl::malloc_shared<int>(count, q);
+              q.parallel_for<ZeroEmptyMutated>(sycl::range<1>(count), [=](sycl::id<1> id) {
+                device_result[id[0]] = input[id[0]];
+              }).wait();
+              auto* state = new OpaqueState();
+              state->payload.resize(count);
+              q.memcpy(state->payload.data(), device_result, count * sizeof(int)).wait();
+              *out = state;
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        clean = entries["pgaccel_zero_empty_clean"]
+        self.assertTrue(clean.ok, clean.detail)
+        self.assertIn("zero_work", clean.classifications)
+        hostile = entries["pgaccel_zero_empty_mutated"]
+        self.assertFalse(hostile.ok, hostile.detail)
+        self.assertIn("host_computation", hostile.classifications)
+
     def test_opaque_resource_hostile_provenance_mutants_fail(self) -> None:
         result = audit_fixture(
             r"""
@@ -6386,11 +6441,11 @@ class AbiInventoryTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
         manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
-        self.assertEqual(manifest.count, 166)
-        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 166)
+        self.assertEqual(manifest.count, 112)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 112)
         self.assertEqual(
             manifest.sha256,
-            "830ff6746a1ac51371995e23a4ec5d4f69f4e7f9723692ab9bf3128aee0c4783",
+            "171e1bdd86e450499d2aed088b3ac1d9c562b8d6dd735f46c6aab9e2c240d6ac",
         )
         self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
 
@@ -6597,15 +6652,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
-        self.assertEqual(len(self.abi.definitions), 166)
-        self.assertEqual(len({item.name for item in self.abi.definitions}), 166)
-        self.assertEqual(len({item.name for item in self.abi.declarations}), 166)
+        self.assertEqual(len(self.abi.definitions), 112)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 112)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 112)
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
-        self.assertEqual(self.abi.compiler["inventory_count"], 166)
+        self.assertEqual(self.abi.compiler["inventory_count"], 112)
         status_names = sorted(
             entry.entrypoint for entry in self.by_name.values() if entry.is_status
         )[:82]
@@ -6664,13 +6719,6 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertIn("large_input_gpu_chain", entry.classifications)
         self.assertIn("awaited queue memcpy", entry.detail)
 
-    def test_sort_i64_uses_independently_proven_concrete_dispatch(self) -> None:
-        entry = self.by_name["pgaccel_sort_i64"]
-        self.assertTrue(entry.ok, entry.detail)
-        self.assertEqual(entry.path.name, "sort.cpp")
-        self.assertIn("large_input_gpu_chain", entry.classifications)
-        self.assertNotIn("template_specialization_review", entry.classifications)
-
     def test_reduction_device_finalize_is_source_proven(self) -> None:
         entry = self.by_name["pgaccel_reduce_sum_f32"]
         self.assertTrue(entry.ok, entry.detail)
@@ -6694,32 +6742,31 @@ class ProductionWitnessTests(unittest.TestCase):
                 self.assertNotIn("ambiguous_status_type", entry.classifications)
                 self.assertNotIn("host_output_write", entry.classifications)
 
-    def test_non_status_hash_join_builds_have_device_resource_proof(self) -> None:
-        entries = (
-            self.by_name["pgaccel_hash_join_build"],
-            self.by_name["pgaccel_hash_join_build_device_count"],
-        )
-        for entry in entries:
-            with self.subTest(entrypoint=entry.entrypoint):
-                self.assertFalse(entry.is_status)
-                self.assertTrue(entry.ok, entry.detail)
-                self.assertEqual(entry.path.name, "hash_join.cpp")
-                self.assertEqual(entry.return_type, "pgaccel_hash_table *")
-                self.assertIn("opaque_device_resource", entry.classifications)
-                self.assertIn("kernel-derived opaque resource", entry.detail)
+    def test_resident_hash_join_build_has_device_resource_proof(self) -> None:
+        entry = self.by_name["pgaccel_hash_join_build_device_count"]
+        self.assertFalse(entry.is_status)
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertEqual(entry.path.name, "hash_join.cpp")
+        self.assertEqual(entry.return_type, "pgaccel_hash_table *")
+        self.assertIn("opaque_device_resource", entry.classifications)
+        self.assertIn("kernel-derived opaque resource", entry.detail)
 
-    def test_streaming_hash_agg_publishes_only_device_derived_state(self) -> None:
-        checked = self.by_name["pgaccel_hash_agg_execute_checked"]
+    def test_resident_count_publishes_only_device_derived_state(self) -> None:
+        checked = self.by_name[
+            "pgaccel_hash_count_i64_device_hash_execute_bounded_checked"
+        ]
         self.assertTrue(checked.ok, checked.detail)
-        self.assertEqual(checked.path.name, "hash_agg.cpp")
-        self.assertEqual(checked.guaranteed_output_parameter_positions, (9,))
-        self.assertEqual(checked.output_parameter_position_variants, ((9,),))
+        self.assertEqual(checked.path.name, "resident_count.cpp")
+        self.assertEqual(checked.guaranteed_output_parameter_positions, (3,))
+        self.assertEqual(checked.output_parameter_position_variants, ((3,),))
         self.assertIn("kernel-derived opaque resource", checked.detail)
 
-        wrapper = self.by_name["pgaccel_hash_agg_execute"]
+        wrapper = self.by_name[
+            "pgaccel_hash_count_i64_device_hash_execute_bounded"
+        ]
         self.assertTrue(wrapper.ok, wrapper.detail)
         self.assertFalse(wrapper.is_status)
-        self.assertEqual(wrapper.path.name, "hash_agg.cpp")
+        self.assertEqual(wrapper.path.name, "resident_count.cpp")
         self.assertIn("opaque_device_resource", wrapper.classifications)
         self.assertIn("publishes kernel-derived opaque resource", wrapper.detail)
 

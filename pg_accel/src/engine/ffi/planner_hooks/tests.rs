@@ -541,68 +541,6 @@ fn safety_margin_gate_boundary_exactly_at_margin() {
 }
 
 // =====================================================================
-// LIMIT gate logic (full no-limit sorts are rejected, top-k stays eligible)
-// =====================================================================
-
-#[test]
-fn limit_gate_small_limit_allows_topk_gpu_sort() {
-    let limit_tuples: f64 = 100.0;
-    assert!(
-        cost::sort_limit_present(limit_tuples),
-        "small positive LIMIT should keep top-k sort eligible"
-    );
-}
-
-#[test]
-fn limit_gate_large_limit_allows_gpu_sort() {
-    let limit_tuples: f64 = 500.0;
-    assert!(
-        cost::sort_limit_present(limit_tuples),
-        "large positive LIMIT should keep sort eligible"
-    );
-}
-
-#[test]
-fn limit_gate_zero_limit_rejects_full_gpu_sort() {
-    let limit_tuples: f64 = 0.0;
-    assert!(
-        !cost::sort_limit_present(limit_tuples),
-        "zero/no LIMIT should reject full scalar GPU sort"
-    );
-}
-
-#[test]
-fn limit_gate_negative_limit_rejects_full_gpu_sort() {
-    let limit_tuples: f64 = -1.0;
-    assert!(
-        !cost::sort_limit_present(limit_tuples),
-        "negative/no LIMIT should reject full scalar GPU sort"
-    );
-}
-
-// =====================================================================
-// Narrow-row gate (width < 40 skips GPU sort)
-// =====================================================================
-
-#[test]
-fn narrow_row_gate_width_39_skips() {
-    let output_width: usize = 39;
-    assert!(output_width < 40, "width 39 should skip GPU sort");
-}
-
-#[test]
-fn narrow_row_gate_width_40_allows() {
-    let output_width: usize = 40;
-    assert!(!(output_width < 40), "width 40 should allow GPU sort");
-}
-
-#[test]
-fn narrow_row_gate_width_120_allows() {
-    let output_width: usize = 120;
-    assert!(!(output_width < 40), "wide rows should allow GPU sort");
-}
-
-// =====================================================================
 // Per-row cost selection by strategy
 // =====================================================================
 
@@ -952,19 +890,17 @@ fn window_cost_helper_applies_multiplier_on_soft_fp64_device() {
 // IncrementalSort detect-and-decline smoke
 // =====================================================================
 //
-// The GPU sort executor is single-key (see `GPU_SORT_MAX_PATHKEYS` in
-// `rel_pathlist.rs`). Multi-key ORDER BY with a presorted prefix is the
-// classic IncrementalSort shape. pg_accel currently detects the
-// opportunity, emits a `debug1` line, bumps the planner-rejected counter,
-// and declines — cascaded multi-key GPU sort is post-1.0.
+// Multi-key ORDER BY with a presorted prefix is the classic IncrementalSort
+// shape. The retired standalone sort surface is not a release deferral:
+// pg_accel observes the shape, records a stable rejection, and leaves it
+// PostgreSQL-native on every backend.
 //
 // These pg_tests exist to ensure:
 // 1. The decline path does NOT crash the planner on a real multi-key
 //    ORDER BY query (the main risk, since we added a new FFI call to
 //    `pathkeys_count_contained_in` from the rel_pathlist hook).
-// 2. A single-key ORDER BY query still runs through cleanly (regression
-//    guard against the observability branch accidentally swallowing the
-//    path we can accelerate).
+// 2. A single-key ORDER BY query also stays native, returns correct rows,
+//    and performs no GPU dispatch.
 mod incremental_sort_detect {
     #[pgrx::pg_schema]
     mod tests {
@@ -972,8 +908,8 @@ mod incremental_sort_detect {
 
         /// Smoke: a 2-key ORDER BY query runs without the planner crashing
         /// and records an explicit planner decline. The classifier and FFI
-        /// call in `try_inject_gpu_sort_path` must be robust to the
-        /// `num_pathkeys > GPU_SORT_MAX_PATHKEYS` path.
+        /// call in the resident-only observer must be robust to multiple
+        /// pathkeys.
         #[pg_test]
         fn multi_key_order_by_records_planner_decline() {
             Spi::run("DROP TABLE IF EXISTS pgaccel_incsort_smoke").expect("drop prior");
@@ -990,7 +926,7 @@ mod incremental_sort_detect {
             Spi::run("SET pg_accel.enabled = on").expect("enable pg_accel");
 
             // EXPLAIN a 2-key ORDER BY: this hits the IncrementalSort
-            // classifier branch in try_inject_gpu_sort_path. We only assert
+            // classifier branch in the resident-only observer. We only assert
             // the planner returns something non-empty; we intentionally do
             // NOT assert "IncrementalSort" appears because selectivity may
             // give PG a plain Sort here and that is still a valid plan — the
@@ -1028,11 +964,8 @@ mod incremental_sort_detect {
             Spi::run("DROP TABLE pgaccel_incsort_smoke").expect("drop");
         }
 
-        /// Single-key ORDER BY regression guard: the observability branch
-        /// must not swallow the path we can accelerate. We only verify the
-        /// query runs to completion and returns the expected row count;
-        /// whether pg_accel injects a GPU sort depends on row count thresholds
-        /// and is not what this test covers.
+        /// Single-key ORDER BY regression guard: the retired standalone sort
+        /// surface must remain native without losing rows.
         #[pg_test]
         fn single_key_order_by_still_executes() {
             Spi::run("DROP TABLE IF EXISTS pgaccel_incsort_single").expect("drop prior");
@@ -1043,12 +976,18 @@ mod incremental_sort_detect {
              SELECT g FROM generate_series(1, 1000) g",
             )
             .expect("seed");
+            crate::gpu::reset_gpu_exec_count();
             let row_count = Spi::get_one::<i64>(
                 "SELECT count(*) FROM (SELECT * FROM pgaccel_incsort_single ORDER BY a LIMIT 50) q",
             )
             .expect("select ORDER BY a")
             .expect("row_count should be non-NULL");
             assert_eq!(row_count, 50);
+            assert_eq!(
+                crate::gpu::gpu_exec_count(),
+                0,
+                "standalone single-key top-k must stay PostgreSQL-native"
+            );
             Spi::run("DROP TABLE pgaccel_incsort_single").expect("drop");
         }
     }
@@ -1062,15 +1001,14 @@ mod incremental_sort_detect {
 // shaped `SELECT col FROM t ORDER BY col [DESC] LIMIT 1`
 // (`preprocess_minmax_aggregates` in
 // `src/backend/optimizer/plan/planagg.c`). The base-relation planner hook
-// would otherwise route this through `Strategy: GpuSort`, running a full
-// GPU sort to return one row at hundreds-of-ms latency vs ~10-20 ms for
-// PG's native IndexScan/SeqScan + Limit.
+// reaches the base-relation observation hook as a sort-shaped path. The hook
+// must classify it separately from an ordinary bounded sort while leaving the
+// native IndexScan/SeqScan + Limit plan untouched.
 //
-// `try_inject_gpu_sort_path` declines the inject via
+// The observation-only base hook classifies this via
 // `min_max_rewrite_shape(limit_tuples, num_pathkeys)` and records the
 // rejection with `RejectionReason::MinMaxRewriteNotASort` (stats key
-// `min_max_rewrite_not_a_sort`). This test asserts the plan no longer
-// shows `Custom Scan (GpuSort)` for the MIN-rewrite shape.
+// `min_max_rewrite_not_a_sort`). No standalone sort path exists.
 mod min_max_rewrite_decline {
     #[pgrx::pg_schema]
     mod tests {
@@ -1125,9 +1063,8 @@ mod min_max_rewrite_decline {
             );
 
             // Direct LIMIT 1 ORDER BY (the same shape PG emits for the
-            // MIN/MAX rewrite) must also decline GpuSort. A 1-row top-K is
-            // not what GpuSort is good for; PG's IndexScan/SeqScan + Limit
-            // wins on cost.
+            // MIN/MAX rewrite) is also native: the standalone sort executor
+            // is retired for every output width and LIMIT.
             let limit1_plan =
                 explain("SELECT vf8 FROM pgaccel_minmax_rewrite ORDER BY vf8 LIMIT 1");
             assert!(
@@ -1139,16 +1076,9 @@ mod min_max_rewrite_decline {
             Spi::run("DROP TABLE pgaccel_minmax_rewrite").expect("drop");
         }
 
-        /// Regression guard: legitimate bounded top-K (LIMIT well above 1)
-        /// must still go through the GpuSort lane when the row count clears
-        /// the planner's `gpu_sort_planner_min_rows` threshold. We don't
-        /// assert `Custom Scan (GpuSort)` literally appears, because the
-        /// cost model and small test fixtures may legitimately decline —
-        /// the assertion that matters is "this query is not blanket-rejected
-        /// with reason min_max_rewrite_not_a_sort". This is enforced by the
-        /// unit tests `min_max_rewrite_gate_rejects_bounded_topk_with_limit_above_one`
-        /// in `rel_pathlist::tests`. Here we just confirm the query runs to
-        /// completion and returns the right rows.
+        /// Bounded top-K is also a universal structural decline: verify a
+        /// native plan, exact row count, zero GPU dispatch, and the dedicated
+        /// rejection reason.
         #[pg_test]
         fn bounded_topk_limit_100_still_executes() {
             Spi::run("DROP TABLE IF EXISTS pgaccel_minmax_topk").expect("drop prior");
@@ -1164,7 +1094,16 @@ mod min_max_rewrite_decline {
             .expect("seed");
             Spi::run("ANALYZE pgaccel_minmax_topk").expect("analyze");
             Spi::run("SET pg_accel.enabled = on").expect("enable");
+            Spi::run("SET pg_accel.gpu_enabled = on").expect("enable GPU planning");
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
 
+            let plan = explain("SELECT x FROM pgaccel_minmax_topk ORDER BY x LIMIT 100");
+            assert!(
+                !plan.contains("Strategy: GpuSort") && !plan.contains("Custom Scan (GpuAccelSort)"),
+                "bounded top-k must stay PostgreSQL-native:\n{plan}"
+            );
+
+            crate::gpu::reset_gpu_exec_count();
             let row_count = Spi::get_one::<i64>(
                 "SELECT count(*) FROM (SELECT x FROM pgaccel_minmax_topk \
                  ORDER BY x LIMIT 100) q",
@@ -1174,6 +1113,21 @@ mod min_max_rewrite_decline {
             assert_eq!(
                 row_count, 100,
                 "bounded top-K LIMIT 100 should return 100 rows"
+            );
+            assert_eq!(
+                crate::gpu::gpu_exec_count(),
+                0,
+                "bounded standalone top-k must not dispatch GPU work"
+            );
+            let declines = Spi::get_one::<i64>(
+                "SELECT pg_accel_planner_rejection_count(\
+                 'sort_standalone_topk_no_gpu_kernel')",
+            )
+            .expect("top-k rejection query should succeed")
+            .expect("top-k rejection count should not be NULL");
+            assert!(
+                declines > 0,
+                "bounded top-k must record its structural decline"
             );
 
             Spi::run("DROP TABLE pgaccel_minmax_topk").expect("drop");

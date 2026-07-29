@@ -11,8 +11,8 @@
 //!    non-OK status bumps the per-domain failure counter.
 //! 3. Struct size **and field offset** pins for the shared FFI structs,
 //!    derived from the C headers (`pgaccel_ffi.h`, `pgaccel_expr.h`,
-//!    `pgaccel_hash_agg.h`, `pgaccel_fused.h`) on LP64 targets. The C side
-//!    mirrors the same numbers with `static_assert`s.
+//!    `pgaccel_resident_count.h`) on LP64 targets. The C side mirrors the same
+//!    numbers with `static_assert`s.
 
 #![allow(clippy::unwrap_used)] // reason: test module
 
@@ -140,21 +140,17 @@ fn failure_domain_classification_covers_every_symbol_family() {
         ("pgaccel_h3_lat_lng_to_cell_bulk", D::H3),
         ("pgaccel_h3_cell_to_parent_resident_ex", D::H3),
         ("pgaccel_raster_reclass_resident_ex", D::Raster),
-        ("pgaccel_sort_kv_i64", D::Sort),
-        ("pgaccel_topk_kv_f32", D::Sort),
         ("pgaccel_reduce_multi_masked_i64", D::Reduce),
-        ("pgaccel_fused_filter_multi_reduce_f32", D::Reduce),
-        ("pgaccel_expr_template_cmp_const", D::Expr),
+        ("pgaccel_expr_eval_predicate", D::Expr),
         ("pgaccel_grouped_agg_execute", D::GroupedAgg),
         ("pgaccel_grouped_agg_execute_ex", D::GroupedAgg),
         ("pgaccel_grouped_agg_workspace_alloc", D::GroupedAgg),
-        ("pgaccel_hash_join_probe", D::HashJoin),
-        ("pgaccel_hash_agg_execute", D::HashAgg),
-        ("pgaccel_hash_count_i64_execute", D::HashAgg),
-        ("pgaccel_agg_get_results", D::HashAgg),
-        ("pgaccel_window_row_number", D::Window),
-        ("pgaccel_nlj_ineq_i64", D::NestedLoop),
-        ("pgaccel_pool_reset", D::Memory),
+        ("pgaccel_hash_join_count_device", D::HashJoin),
+        (
+            "pgaccel_hash_count_i64_device_hash_execute_bounded",
+            D::HashAgg,
+        ),
+        ("pgaccel_agg_get_counts", D::HashAgg),
     ];
     for (symbol, expected) in cases {
         assert_eq!(

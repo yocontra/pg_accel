@@ -2324,17 +2324,17 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
         ),
         "gpu_sort_topk_wide" => (
             "float4 single key",
-            "LIMIT 1000 exceeds standalone top-k bound",
+            "LIMIT 1000 bounded standalone sort",
             "~120-byte heap row",
             "1000 heap rows",
-            "no_gpu_resident_pipeline",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "topk_wide" => (
             "float4 single key",
             "LIMIT 100 on wide heap rows",
             "~120-byte heap row",
             "100 heap rows",
-            "sort_heap_topk_wide_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "sort_int4" => (
             "int4 single key",
@@ -3648,7 +3648,11 @@ mod tests {
                 "shape_floating_accumulator_semantics",
             ),
             ("gpu_nlj_between", 50_000, "shape_non_equality_join"),
-            ("gpu_sort_topk_wide", 100_000, "no_gpu_resident_pipeline"),
+            (
+                "gpu_sort_topk_wide",
+                100_000,
+                "sort_standalone_topk_no_gpu_kernel",
+            ),
             ("h3_bulk", 100_000, "shape_unsupported_rte"),
             ("spatial_filter", 100_000, "shape_unsupported_predicate"),
             ("raster_reclass", 100, "shape_unsupported_rte"),
@@ -3949,7 +3953,7 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_matrix_marks_sort_multikey_as_decline() {
+    fn test_threshold_matrix_marks_standalone_sort_declines() {
         let entry = benchmark_threshold_matrix_entry("gpu_sort_multikey", 1_000_000)
             .expect("gpu_sort_multikey threshold entry");
         assert_eq!(entry.lane, "standalone_heap_sort");
@@ -3957,6 +3961,17 @@ mod tests {
             entry.expectation.decline_reason(),
             Some("sort_multikey_no_gpu_kernel")
         );
+
+        for name in ["gpu_sort_topk_wide", "topk_wide"] {
+            let entry = benchmark_threshold_matrix_entry(name, 100_000)
+                .unwrap_or_else(|| panic!("{name} threshold entry"));
+            assert_eq!(entry.lane, "standalone_heap_sort");
+            assert_eq!(
+                entry.expectation.decline_reason(),
+                Some("sort_standalone_topk_no_gpu_kernel"),
+                "{name}"
+            );
+        }
     }
 
     #[test]

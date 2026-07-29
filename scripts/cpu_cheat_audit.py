@@ -98,9 +98,9 @@ OUTPUT_ASSIGNMENTS = frozenset(
 )
 
 DEFAULT_ABI_MANIFEST = pathlib.Path(__file__).with_name("cpu_cheat_abi_manifest.txt")
-EXPECTED_ABI_MANIFEST_COUNT = 166
+EXPECTED_ABI_MANIFEST_COUNT = 112
 EXPECTED_ABI_MANIFEST_SHA256 = (
-    "830ff6746a1ac51371995e23a4ec5d4f69f4e7f9723692ab9bf3128aee0c4783"
+    "171e1bdd86e450499d2aed088b3ac1d9c562b8d6dd735f46c6aab9e2c240d6ac"
 )
 INTERNAL_NON_ABI_HEADERS = frozenset({"alloc_helper.h", "pgaccel_queue.h"})
 
@@ -344,117 +344,54 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
                 ("q", "==", "nullptr"),
             ),
         ),
-        "pgaccel_pool_reset": LifecycleContract(
-            "retired pool no-op reset",
-            (),
-            "void ()",
-            allow_empty_body=True,
-            exact_body_alternatives=((),),
-        ),
         "pgaccel_hash_join_free": LifecycleContract(
-            "hash-join allocation release",
-            (("free_table_storage", "("), ("delete", "ht")),
+            "resident hash-join allocation release",
+            (("free_table_storage", "("), ("delete", "table")),
             "void (pgaccel_hash_table *)",
-            noop_guard_conditions=(("ht", "==", "nullptr"),),
+            noop_guard_conditions=(("table", "==", "nullptr"),),
         ),
         "pgaccel_agg_free": LifecycleContract(
-            "hash-aggregate allocation release",
+            "resident-count result release",
             (("delete", "state"),),
             "void (pgaccel_agg_state *)",
         ),
         "pgaccel_agg_group_count": LifecycleContract(
-            "hash-aggregate group-count accessor",
-            (("state", "->", "group_count"),),
+            "resident-count group-count accessor",
+            (("state", "->", "group_keys", ".", "size", "("),),
             "size_t (const pgaccel_agg_state *)",
             noop_guard_conditions=(("state", "==", "nullptr"),),
+            allow_ternary=True,
         ),
         "pgaccel_agg_get_group_keys": LifecycleContract(
-            "hash-aggregate group-key accessor",
-            (("state", "->", "group_key_buf", ".", "data", "("),),
+            "resident-count group-key accessor",
+            (("state", "->", "group_keys", ".", "data", "("),),
             "const void * (const pgaccel_agg_state *)",
-            noop_guard_conditions=(("state", "==", "nullptr"),),
+            noop_guard_conditions=(
+                ("state", "==", "nullptr"),
+                ("state", "->", "group_keys", ".", "empty", "(", ")"),
+            ),
+            allow_ternary=True,
         ),
         "pgaccel_agg_get_results": LifecycleContract(
-            "hash-aggregate result accessor",
-            (("state", "->", "results", "["),),
+            "resident-count result accessor",
+            (("state", "->", "results", ".", "data", "("),),
             "const double * (const pgaccel_agg_state *, size_t)",
             noop_guard_conditions=(
-                (
-                    "state",
-                    "==",
-                    "nullptr",
-                    "||",
-                    "agg_idx",
-                    ">=",
-                    "state",
-                    "->",
-                    "num_aggs",
-                ),
-                (
-                    "state",
-                    "->",
-                    "results",
-                    ".",
-                    "size",
-                    "(",
-                    ")",
-                    "<=",
-                    "agg_idx",
-                ),
+                ("state", "==", "nullptr"),
+                ("agg_idx", "!=", "0"),
+                ("state", "->", "results", ".", "empty", "(", ")"),
             ),
-        ),
-        "pgaccel_agg_get_partial_results": LifecycleContract(
-            "hash-aggregate partial-result accessor",
-            (("state", "->", "partial_results", "["),),
-            "const double * (const pgaccel_agg_state *, size_t)",
-            noop_guard_conditions=(
-                (
-                    "state",
-                    "==",
-                    "nullptr",
-                    "||",
-                    "agg_idx",
-                    ">=",
-                    "state",
-                    "->",
-                    "num_aggs",
-                ),
-                (
-                    "state",
-                    "->",
-                    "partial_results",
-                    ".",
-                    "size",
-                    "(",
-                    ")",
-                    "<=",
-                    "agg_idx",
-                ),
-            ),
-        ),
-        "pgaccel_agg_get_partial_width": LifecycleContract(
-            "hash-aggregate partial-width accessor",
-            (("state", "->", "partial_widths", "["),),
-            "size_t (const pgaccel_agg_state *, size_t)",
-            noop_guard_conditions=(
-                (
-                    "state",
-                    "==",
-                    "nullptr",
-                    "||",
-                    "agg_idx",
-                    ">=",
-                    "state",
-                    "->",
-                    "num_aggs",
-                ),
-            ),
+            allow_ternary=True,
         ),
         "pgaccel_agg_get_counts": LifecycleContract(
-            "hash-aggregate count accessor",
+            "resident-count count accessor",
             (("state", "->", "counts", ".", "data", "("),),
             "const int64_t * (const pgaccel_agg_state *)",
-            noop_guard_conditions=(("state", "==", "nullptr"),),
+            noop_guard_conditions=(
+                ("state", "==", "nullptr"),
+                ("state", "->", "counts", ".", "empty", "(", ")"),
+            ),
+            allow_ternary=True,
         ),
     }
 )
@@ -7658,6 +7595,88 @@ def _proven_opaque_resource_handoffs(
 
     publication_evidence: list[_DispatchEvidence] = []
     proven_host_writes: set[int] = set()
+
+    def zero_work_empty_resource_publication(
+        resource: str, allocation_index: int, publication_index: int
+    ) -> bool:
+        """Accept only a default-constructed empty handle on an exact zero-work path."""
+
+        if not any(
+            region.zero_work
+            and region.start <= allocation_index < publication_index <= region.end
+            for region in regions
+        ):
+            return False
+
+        statement_end = allocation_index
+        while statement_end < publication_index and tokens[statement_end].value != ";":
+            statement_end += 1
+        if statement_end >= publication_index:
+            return False
+        new_index = next(
+            (
+                index
+                for index in range(allocation_index, statement_end)
+                if tokens[index].value == "new"
+            ),
+            None,
+        )
+        if new_index is None:
+            return False
+        initializer = max(
+            (
+                index
+                for index in range(new_index + 1, statement_end)
+                if tokens[index].value == "("
+                and forward.get(index) == statement_end - 1
+            ),
+            default=-1,
+        )
+        if initializer < 0 or forward[initializer] != initializer + 1:
+            return False
+
+        if _pointer_root_reassigned(
+            tokens,
+            resource,
+            allocation_index + 1,
+            publication_index,
+            lambda_ranges,
+        ):
+            return False
+        if any(
+            tokens[index].value == resource
+            and index + 1 < publication_index
+            and tokens[index + 1].value in {".", "->"}
+            for index in range(allocation_index + 1, publication_index)
+        ):
+            return False
+        if any(
+            indexed.index > statement_end
+            and indexed.index < publication_index
+            and _range_references_output(
+                tokens,
+                indexed.lparen + 1,
+                indexed.rparen,
+                {resource},
+            )
+            for indexed in _indexed_calls(tokens, function, lambda_ranges)
+        ):
+            return False
+
+        failure_returns = {
+            return_index
+            for return_index, expression in _returns(tokens, function, lambda_ranges)
+            if expression and expression[0].value in FAILURE_STATUSES
+        }
+        return any(
+            allocation_index < region.start < publication_index
+            and _condition_matches_exact_guard(
+                region.condition, (resource, "==", "nullptr")
+            )
+            and any(region.start <= index <= region.end for index in failure_returns)
+            for region in regions
+        )
+
     for index, _, _ in host_writes:
         if tokens[index].value not in output_roots:
             continue
@@ -7679,6 +7698,11 @@ def _proven_opaque_resource_handoffs(
             and _context_dominates(transfer.context, _context(index, regions))
         ]
         if not candidates:
+            allocation_index = resources.get(resource[0])
+            if allocation_index is not None and zero_work_empty_resource_publication(
+                resource[0], allocation_index, index
+            ):
+                proven_host_writes.add(index)
             continue
         if not resource_content_is_device_derived(resource[0], index, candidates):
             continue

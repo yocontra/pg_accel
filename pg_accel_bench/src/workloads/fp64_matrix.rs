@@ -474,7 +474,7 @@ impl Workload for ReduceF64Stats {
     }
 }
 
-/// 4. sort_f64_keys — ORDER BY on a float8 key (GpuSort, native fp64 path).
+/// 4. sort_f64_keys - native ORDER BY baseline for a float8 key.
 pub struct SortF64Keys;
 impl Workload for SortF64Keys {
     fn name(&self) -> &'static str {
@@ -487,8 +487,8 @@ impl Workload for SortF64Keys {
         fp64_num_setup(rows)
     }
     fn query_sql(&self) -> String {
-        // Use a LIMIT small enough that we're measuring sort work, not result
-        // materialization — the top-k path covers both kernel + pick.
+        // Bound result materialization while measuring PostgreSQL's native
+        // sort; pg_accel structurally declines standalone top-k.
         format!("SELECT k_f64 FROM {FP64_NUM_TABLE} ORDER BY k_f64 LIMIT 1000")
     }
     fn row_scales(&self) -> &'static [usize] {

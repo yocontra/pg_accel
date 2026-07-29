@@ -34,12 +34,11 @@ use crate::engine::registry::AccelStrategy;
 ///   `h3_get_resolution`).
 /// - **PostGIS raster** (`GpuRaster`): `false` — raster calls are not exposed
 ///   through the generic adapter; the exact-OID planner owns classification.
-/// - Other strategies (`GpuSort` / `GpuReduce` / `GpuHashAgg` / `GpuHashJoin`
-///   / `GpuWindow` / `GpuExpr`): these are op-level, not function-level — the
-///   planner hooks classify `uses_fp64` from the actual key/accumulator Oid
-///   at path-injection time. This helper returns `false` for them so callers
-///   that accidentally pass in an op-level strategy don't get a spurious
-///   `true` that would double-count the fp64 penalty.
+/// - Other strategy tags (`GpuSort` / `GpuReduce` / `GpuHashAgg` /
+///   `GpuHashJoin` / `GpuWindow` / `GpuExpr`) are op-level wire identities,
+///   several of which are retired and non-selectable. Reachable planner hooks
+///   classify `uses_fp64` from the actual key/accumulator Oid. This helper
+///   returns `false` for them defensively.
 #[must_use]
 pub fn uses_fp64(strategy: AccelStrategy, name: &str) -> bool {
     match strategy {

@@ -10,9 +10,8 @@ pub use super::spatial::{
 };
 pub use super::types::{
     PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo, PgaccelExprInstruction, PgaccelExprProgram,
-    PgaccelExprUsmCol, PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType,
-    PgaccelPlatformCaps, PgaccelRasterReclassResidentRequest, PgaccelStatus, PgaccelVal,
-    PgaccelValTag,
+    PgaccelExprUsmCol, PgaccelGeomType, PgaccelGeometry, PgaccelPlatformCaps,
+    PgaccelRasterReclassResidentRequest, PgaccelStatus, PgaccelVal, PgaccelValTag,
 };
 
 // ---------------------------------------------------------------------------
@@ -27,14 +26,8 @@ pub use super::types::{
 // cross-checking value on its own (the linker does not type-check, so an
 // unused declaration is dead surface that can silently drift):
 //
-//   - pgaccel_sort_u64                        (pgaccel_ffi.h:174)
-//   - pgaccel_sort_kv_i32_device              (pgaccel_ffi.h:190)
-//   - pgaccel_sort_kv_i32_nonnegative_device  (pgaccel_ffi.h:191)
 //   - pgaccel_archive_stats_snapshot          (pgaccel_ffi.h:126)
 //   - pgaccel_archive_jit_cache_dir           (pgaccel_ffi.h:131)
-//   - pgaccel_sort_{f32,f64,i32,i64}          (host tuplesort executor retired)
-//   - pgaccel_sort_kv_{f32,f64,i32,i64}       (host tuplesort executor retired)
-//   - pgaccel_topk_kv_{f32,f64,i32,i64}       (host top-k sort executor retired)
 //
 // When a caller for one of these lands, declare it here (through
 // `bridge_status_fns!` if it returns `pgaccel_status`) in the same change.
@@ -605,7 +598,7 @@ bridge_status_fns! {
         uncertain: *mut u8,
     ) -> PgaccelStatus;
 
-    // -- Expression template kernels --
+    // -- Expression resident-memory lifecycle --
 
     /// Allocate device memory for resident cached columns and scratch.
     pub fn pgaccel_expr_device_alloc(
@@ -666,312 +659,6 @@ bridge_status_fns! {
         detail: *mut i32,
     ) -> PgaccelStatus;
 
-    /// Template: col <cmp> const.
-    pub fn pgaccel_expr_template_cmp_const(
-        batch: *const PgaccelBatch,
-        col_idx: u32,
-        cmp_opcode: u16,
-        const_val: f64,
-        results: *mut i8,
-    ) -> PgaccelStatus;
-
-    /// Template: col <cmp> const, fused with COUNT(*) over TRUE rows.
-    pub fn pgaccel_expr_template_cmp_const_count(
-        batch: *const PgaccelBatch,
-        col_idx: u32,
-        cmp_opcode: u16,
-        const_val: f64,
-        true_count: *mut usize,
-        uncertain_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Template: already-staged shared-USM column <cmp> const, fused with
-    /// COUNT(*) over TRUE rows.
-    pub fn pgaccel_expr_template_cmp_const_count_usm(
-        col: PgaccelExprUsmCol,
-        row_count: usize,
-        cmp_opcode: u16,
-        const_val: f64,
-        true_count: *mut usize,
-        uncertain_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_expr_template_cmp_const_mask_usm(
-        col: PgaccelExprUsmCol,
-        row_count: usize,
-        cmp_opcode: u16,
-        const_val: f64,
-        selection: *mut u8,
-        true_count: *mut usize,
-        uncertain_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_expr_template_cmp_const_reduce_f32_usm(
-        pred_col: PgaccelExprUsmCol,
-        cmp_opcode: u16,
-        const_val: f64,
-        value_col: PgaccelExprUsmCol,
-        row_count: usize,
-        out_sum: *mut f32,
-        out_min: *mut f32,
-        out_max: *mut f32,
-        out_value_count: *mut i64,
-        true_count: *mut usize,
-        uncertain_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Template: col BETWEEN lo AND hi.
-    pub fn pgaccel_expr_template_between(
-        batch: *const PgaccelBatch,
-        col_idx: u32,
-        lo: f64,
-        hi: f64,
-        results: *mut i8,
-    ) -> PgaccelStatus;
-
-    /// Template: col IN (values...).
-    pub fn pgaccel_expr_template_in_list(
-        batch: *const PgaccelBatch,
-        col_idx: u32,
-        values: *const f64,
-        value_count: usize,
-        results: *mut i8,
-    ) -> PgaccelStatus;
-
-    /// Template: col IS NULL / IS NOT NULL.
-    pub fn pgaccel_expr_template_is_null(
-        batch: *const PgaccelBatch,
-        col_idx: u32,
-        check_not_null: bool,
-        results: *mut i8,
-    ) -> PgaccelStatus;
-
-    /// Template: col1 <cmp1> const1 AND col2 <cmp2> const2.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_expr_template_two_pred_and(
-        batch: *const PgaccelBatch,
-        col1_idx: u32,
-        cmp1_opcode: u16,
-        const1_val: f64,
-        col2_idx: u32,
-        cmp2_opcode: u16,
-        const2_val: f64,
-        results: *mut i8,
-    ) -> PgaccelStatus;
-
-    /// Template: col1 <cmp1> const1 AND col2 <cmp2> const2, fused with
-    /// COUNT(*) over TRUE rows.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_expr_template_two_pred_and_count(
-        batch: *const PgaccelBatch,
-        col1_idx: u32,
-        cmp1_opcode: u16,
-        const1_val: f64,
-        col2_idx: u32,
-        cmp2_opcode: u16,
-        const2_val: f64,
-        true_count: *mut usize,
-        uncertain_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Template: already-staged shared-USM two-predicate AND, fused with
-    /// COUNT(*) over TRUE rows.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_expr_template_two_pred_and_count_usm(
-        col1: PgaccelExprUsmCol,
-        cmp1_opcode: u16,
-        const1_val: f64,
-        col2: PgaccelExprUsmCol,
-        cmp2_opcode: u16,
-        const2_val: f64,
-        row_count: usize,
-        true_count: *mut usize,
-        uncertain_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_expr_template_two_pred_and_mask_usm(
-        col1: PgaccelExprUsmCol,
-        cmp1_opcode: u16,
-        const1_val: f64,
-        col2: PgaccelExprUsmCol,
-        cmp2_opcode: u16,
-        const2_val: f64,
-        row_count: usize,
-        selection: *mut u8,
-        true_count: *mut usize,
-        uncertain_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    pub fn pgaccel_expr_template_two_pred_and_reduce_f32_usm(
-        col1: PgaccelExprUsmCol,
-        cmp1_opcode: u16,
-        const1_val: f64,
-        col2: PgaccelExprUsmCol,
-        cmp2_opcode: u16,
-        const2_val: f64,
-        value_col: PgaccelExprUsmCol,
-        row_count: usize,
-        out_sum: *mut f32,
-        out_min: *mut f32,
-        out_max: *mut f32,
-        out_value_count: *mut i64,
-        true_count: *mut usize,
-        uncertain_count: *mut usize,
-    ) -> PgaccelStatus;
-
-
-    /// Probe the hash table with outer keys.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_hash_join_probe(
-        ht: *const PgaccelHashTable,
-        outer_keys: *const std::ffi::c_void,
-        outer_null_mask: *const u8,
-        outer_count: usize,
-        match_pairs: *mut u32,
-        max_matches: usize,
-        match_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Count matching pairs without materializing pair output.
-    pub fn pgaccel_hash_join_count(
-        ht: *const PgaccelHashTable,
-        outer_keys: *const std::ffi::c_void,
-        outer_null_mask: *const u8,
-        outer_count: usize,
-        match_count: *mut usize,
-    ) -> PgaccelStatus;
-
-    // -- Window function kernels --
-
-    /// Compute ROW_NUMBER within each partition.
-    pub fn pgaccel_window_row_number(
-        partition_starts: *const u8,
-        count: usize,
-        results: *mut i64,
-    ) -> PgaccelStatus;
-
-    /// Compute RANK within each partition (requires sorted input).
-    pub fn pgaccel_window_rank(
-        partition_starts: *const u8,
-        sort_keys: *const f64,
-        count: usize,
-        results: *mut i64,
-    ) -> PgaccelStatus;
-
-    /// Compute DENSE_RANK within each partition.
-    pub fn pgaccel_window_dense_rank(
-        partition_starts: *const u8,
-        sort_keys: *const f64,
-        count: usize,
-        results: *mut i64,
-    ) -> PgaccelStatus;
-
-    /// Compute running SUM within each partition (Kahan compensated).
-    pub fn pgaccel_window_sum(
-        partition_starts: *const u8,
-        values: *const f64,
-        null_mask: *const u8,
-        count: usize,
-        results: *mut f64,
-    ) -> PgaccelStatus;
-
-    /// Compute running COUNT within each partition.
-    pub fn pgaccel_window_count(
-        partition_starts: *const u8,
-        null_mask: *const u8,
-        count: usize,
-        results: *mut i64,
-    ) -> PgaccelStatus;
-
-    /// Compute LAG(value, offset, default) within each partition.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_window_lag(
-        partition_starts: *const u8,
-        values: *const f64,
-        null_mask: *const u8,
-        count: usize,
-        offset: i32,
-        default_val: f64,
-        results: *mut f64,
-        result_nulls: *mut u8,
-    ) -> PgaccelStatus;
-
-    /// Compute LEAD(value, offset, default) within each partition.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_window_lead(
-        partition_starts: *const u8,
-        values: *const f64,
-        null_mask: *const u8,
-        count: usize,
-        offset: i32,
-        default_val: f64,
-        results: *mut f64,
-        result_nulls: *mut u8,
-    ) -> PgaccelStatus;
-
-    // -- Fused filter + multi-reduce kernels --
-
-    // -- NestedLoop scalar inequality kernel --
-    //
-    // Mirrors `pgaccel-kernels/include/pgaccel_nested_loop_ineq.h`.
-    // The kernel evaluates one scalar btree inequality (or a BETWEEN-shape
-    // double inequality) per (outer_i, inner_j) pair and emits matching
-    // index pairs into `pairs_out`. Callers MUST strip NULL rows from the
-    // key arrays before invocation (PG INNER-join semantics exclude NULLs).
-    // Overflow is signalled when `*pair_count_out > max_pairs` — the caller
-    // must reject the result and let PG plan natively.
-
-    /// Single-predicate i64 inequality NLJ. `op` selects `<`, `<=`, `>=`, `>`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_nlj_ineq_i64(
-        outer_keys: *const i64,
-        n_outer: usize,
-        inner_keys: *const i64,
-        n_inner: usize,
-        op: i32,
-        pairs_out: *mut u32,
-        max_pairs: usize,
-        pair_count_out: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// Single-predicate f64 inequality NLJ.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_nlj_ineq_f64(
-        outer_keys: *const f64,
-        n_outer: usize,
-        inner_keys: *const f64,
-        n_inner: usize,
-        op: i32,
-        pairs_out: *mut u32,
-        max_pairs: usize,
-        pair_count_out: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// BETWEEN-shape i64 NLJ. Predicate: `inner_lo[j] <= outer[i] <= inner_hi[j]`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_nlj_between_i64(
-        outer_keys: *const i64,
-        n_outer: usize,
-        inner_lo: *const i64,
-        inner_hi: *const i64,
-        n_inner: usize,
-        pairs_out: *mut u32,
-        max_pairs: usize,
-        pair_count_out: *mut usize,
-    ) -> PgaccelStatus;
-
-    /// BETWEEN-shape f64 NLJ.
-    #[allow(clippy::too_many_arguments)]
-    pub fn pgaccel_nlj_between_f64(
-        outer_keys: *const f64,
-        n_outer: usize,
-        inner_lo: *const f64,
-        inner_hi: *const f64,
-        n_inner: usize,
-        pairs_out: *mut u32,
-        max_pairs: usize,
-        pair_count_out: *mut usize,
-    ) -> PgaccelStatus;
 }
 
 /// Raw resident raster entry point kept outside [`bridge_status_fns!`].
@@ -1156,42 +843,13 @@ unsafe extern "C" {
     /// Reset the GPU execution counter to zero.
     pub fn pgaccel_reset_gpu_exec_count();
 
-    // NOTE: the USM arena externs (pgaccel_alloc/free/pool_reset/
-    // pool_bytes_used/prefetch) were removed in Phase 3 — the arena had zero
-    // callers on either side of the FFI. The C symbol pgaccel_pool_reset
-    // still exists (device_manager.cpp calls it at shutdown) but no Rust
-    // code invokes it.
-
     /// Free a pointer returned by `pgaccel_expr_device_alloc_copy`.
     pub fn pgaccel_expr_device_free(ptr: *mut std::ffi::c_void);
 
     /// Free a pointer returned by `pgaccel_grouped_agg_workspace_alloc`.
     pub fn pgaccel_grouped_agg_workspace_free(ptr: *mut std::ffi::c_void);
 
-    // -- Hash join kernels --
-
-    /// Build a hash table from inner relation keys.
-    pub fn pgaccel_hash_join_build(
-        keys: *const std::ffi::c_void,
-        null_mask: *const u8,
-        indices: *const u32,
-        count: usize,
-        key_type: PgaccelKeyType,
-    ) -> *mut PgaccelHashTable;
-
-    /// Free a hash table.
-    pub fn pgaccel_hash_join_free(ht: *mut PgaccelHashTable);
-
-    // -- Hash aggregation kernels --
-
-    /// Deprecated host-key grouped COUNT(*) ABI. Always returns null before
-    /// GPU execution; resident callers use the device-buffer entry points.
-    #[allow(dead_code)] // reason: compatibility ABI hard-declines host-key grouping
-    pub fn pgaccel_hash_count_i64_execute(
-        group_keys: *const i64,
-        group_null_mask: *const u8,
-        row_count: usize,
-    ) -> *mut PgaccelAggState;
+    // -- Resident grouped COUNT kernel --
 
     /// Perform grouped COUNT(*) over a resident int64 key buffer using the
     /// bounded device hash-count path.
@@ -1573,17 +1231,6 @@ mod tests {
         assert_eq!(PgaccelValTag::Timestamp as i32, 7);
     }
 
-    #[test]
-    fn key_type_discriminant_values_match_c() {
-        assert_eq!(PgaccelKeyType::Int32 as i32, 0);
-        assert_eq!(PgaccelKeyType::Int64 as i32, 1);
-        assert_eq!(PgaccelKeyType::Float64 as i32, 2);
-        // Slot 3 reserved for CompositeInt4x2 (planner-only, never
-        // sent to kernel — see PgaccelKeyType doc comment).
-        assert_eq!(PgaccelKeyType::Uuid as i32, 4);
-        assert_eq!(PgaccelKeyType::Inet as i32, 5);
-    }
-
     // -----------------------------------------------------------------------
     // PgaccelVal type conversion helpers
     // -----------------------------------------------------------------------
@@ -1691,15 +1338,5 @@ mod tests {
         assert_eq!(cloned.compute_units, 16);
         let dbg = format!("{caps:?}");
         assert!(dbg.contains("PgaccelPlatformCaps"));
-    }
-
-    #[test]
-    fn key_type_clone_debug_partial_eq() {
-        let a = PgaccelKeyType::Float64;
-        let b = a;
-        assert_eq!(a, b);
-        assert_ne!(a, PgaccelKeyType::Int32);
-        let dbg = format!("{a:?}");
-        assert!(dbg.contains("Float64"));
     }
 }

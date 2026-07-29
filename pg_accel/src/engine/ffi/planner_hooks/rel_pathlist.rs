@@ -1,20 +1,13 @@
-//! `set_rel_pathlist_hook` — injects `CustomPath`s for base relations.
+//! `set_rel_pathlist_hook` — observes base-relation opportunities and records
+//! structural declines without injecting a host-staged `CustomPath`.
 //!
 //! Entry points:
 //! - `pgaccel_set_rel_pathlist` — main hook fn (registered in `install()`)
-//! - `try_inject_gpu_sort_path` — scan-level GPU sort injection helper
 
-use pgrx::pg_sys::{
-    self, CustomPath, List, NodeTag, Path, PlannerInfo, RangeTblEntry, RelOptInfo, lappend,
-};
+use pgrx::pg_sys::{self, List, NodeTag, Path, PlannerInfo, RangeTblEntry, RelOptInfo};
 
-use super::super::custom_scan;
-use super::{PREV_SET_REL_PATHLIST_HOOK, find_cheapest_path, unwrap_var};
-use crate::engine::cost;
-use crate::engine::executor::sort::SortKeyDesc;
-use crate::engine::expr_compiler::{CompiledExpr, TemplateKernel};
+use super::{PREV_SET_REL_PATHLIST_HOOK, unwrap_var};
 use crate::engine::gucs;
-use crate::engine::registry;
 use crate::engine::stats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -534,12 +527,9 @@ unsafe fn args_contain_wrapped_postgis_intersects(args: *mut List) -> bool {
 
 /// `set_rel_pathlist_hook` implementation.
 ///
-/// Injects a `CustomPath` for base relations when:
-/// 1. `pg_accel.enabled` is on.
-/// 2. The relation is a base relation (`RELOPT_BASEREL` + `RTE_RELATION`).
-/// 3. The estimated row count meets `pg_accel.min_batch_size`.
-/// 4. A cheapest path exists to wrap.
-/// 5. Restriction clauses contain a top-level `FuncExpr`.
+/// Resident v2 does not inject base-scan, standalone sort/top-k, or scalar
+/// function paths. This hook observes those opportunities, records stable
+/// structural-decline reasons, and leaves PostgreSQL's native paths untouched.
 ///
 /// # Safety
 ///
@@ -596,8 +586,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     let _span =
         tracing::info_span!("planner.rel_pathlist", relid = u32::from(rte_ref.relid)).entered();
 
-    // These cheap shape facts are needed both for resident-only fail-closed
-    // behavior and the normal scan/sort admission gates below.
+    // These cheap shape facts drive resident-only fail-closed observability.
     // SAFETY: root is a valid PlannerInfo pointer.
     let has_sort = unsafe { !(*root).sort_pathkeys.is_null() };
     let has_restrictions = !rel_ref.baserestrictinfo.is_null()
@@ -709,12 +698,16 @@ unsafe fn observe_resident_only_sort_declines(root: *mut PlannerInfo, rel: *mut 
     match classify_sort_shape(presorted, num_pathkeys) {
         SortShape::AlreadySorted { .. } => return,
         SortShape::IncrementalOpportunity { .. } => {
-            stats::increment_planner_rejected("sort_incremental_opportunity", rejected_rows);
+            stats::increment_planner_rejected(
+                super::RejectionReason::SortIncrementalOpportunity.stats_key(),
+                rejected_rows,
+            );
+            return;
         }
         SortShape::FullSort { .. } => {}
     }
 
-    if num_pathkeys > GPU_SORT_MAX_PATHKEYS {
+    if num_pathkeys > 1 {
         stats::increment_planner_rejected(
             super::RejectionReason::SortMultiKeyNoGpuKernel.stats_key(),
             rejected_rows,
@@ -722,11 +715,6 @@ unsafe fn observe_resident_only_sort_declines(root: *mut PlannerInfo, rel: *mut 
         return;
     }
 
-    #[allow(clippy::cast_sign_loss)]
-    let rows = rel_ref.rows.max(0.0) as usize;
-    if rows < cost::device_limits().gpu_sort_planner_min_rows {
-        return;
-    }
     if min_max_rewrite_shape(root_ref.limit_tuples, num_pathkeys) {
         stats::increment_planner_rejected(
             super::RejectionReason::MinMaxRewriteNotASort.stats_key(),
@@ -734,81 +722,39 @@ unsafe fn observe_resident_only_sort_declines(root: *mut PlannerInfo, rel: *mut 
         );
         return;
     }
-    if !heap_topk_sort_candidate(root_ref.limit_tuples, rows) {
-        stats::increment_planner_rejected(
-            super::RejectionReason::SortHeapFullOutput.stats_key(),
-            rejected_rows,
-        );
+    #[allow(clippy::cast_sign_loss)]
+    let rows = rel_ref.rows.max(0.0) as usize;
+    let reason = if standalone_sort_has_bounded_output(root_ref.limit_tuples, rows) {
+        super::RejectionReason::SortStandaloneTopKNoGpuKernel
+    } else {
+        super::RejectionReason::SortHeapFullOutput
+    };
+    stats::increment_planner_rejected(reason.stats_key(), rejected_rows);
+}
+
+/// Whether a native standalone sort has a positive LIMIT smaller than its
+/// estimated input. This is observability only: bounded top-k is still a
+/// structural decline because no standalone sort kernel or executor ships.
+#[must_use]
+#[inline]
+pub(super) fn standalone_sort_has_bounded_output(limit_tuples: f64, rows: usize) -> bool {
+    if rows == 0 || !limit_tuples.is_finite() || limit_tuples <= 0.0 {
+        return false;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    {
+        limit_tuples.ceil() < rows as f64
     }
 }
 
-/// Maximum number of pathkeys the GPU sort executor supports.
+/// Whether a single-key LIMIT 1 shape matches PostgreSQL's MIN/MAX rewrite.
 ///
-/// Pinned to 1: the executor in `engine/executor/sort/` only dispatches a
-/// single-key GPU sort. Multi-key sort requires cascaded stable passes
-/// (sort by last key first, then prior keys) and is tracked as post-1.0
-/// work. Planner + executor MUST agree on this bound — otherwise the
-/// planner injects paths the executor bails on, wasting a plan.
-pub(super) const GPU_SORT_MAX_PATHKEYS: i32 = 1;
-
-#[must_use]
-#[inline]
-pub(super) fn heap_topk_sort_candidate(limit_tuples: f64, rows: usize) -> bool {
-    #[allow(clippy::cast_precision_loss)]
-    let materialized_output_fraction = if rows == 0 {
-        1.0
-    } else {
-        limit_tuples.ceil() / rows as f64
-    };
-    cost::formulas::sort_admission(
-        cost::formulas::SortAdmissionInput {
-            rows,
-            limit_tuples: Some(limit_tuples),
-            estimated_row_width: 0,
-            key_count: 1,
-            key_class: None,
-            algorithm: cost::formulas::SortAlgorithm::StandaloneTopK,
-            materialized_output_fraction,
-            chunk_count: 1,
-            cold_jit: false,
-        },
-        cost::device_limits(),
-    )
-    .eligible
-}
-
-/// Whether a (`limit_tuples`, `num_pathkeys`) pair looks like PostgreSQL's
-/// MIN/MAX → IndexScan+Limit rewrite — equivalently, a single-column
-/// ORDER BY with LIMIT 1.
-///
-/// PostgreSQL rewrites `SELECT MIN(x) FROM t` / `SELECT MAX(x) FROM t` into
-/// an InitPlan shaped `SELECT x FROM t WHERE x IS NOT NULL ORDER BY x
-/// [DESC] LIMIT 1` (see `preprocess_minmax_aggregates` in
-/// `src/backend/optimizer/plan/planagg.c`). The base-relation planner hook
-/// sees this as a regular ORDER BY + LIMIT 1 single-key sort and would
-/// otherwise route it through `Strategy: GpuSort`, which runs a full GPU
-/// sort just to return the first row.
-///
-/// At LIMIT 1, GPU sort is the wrong shape regardless of provenance:
-/// - The MIN/MAX rewrite: PG's IndexScan+Limit (or sequential scan + Limit)
-///   is single-digit-millisecond on a real index, while GpuSort is
-///   hundreds-of-milliseconds for a full sort of the same input.
-/// - A user-written `SELECT * FROM t ORDER BY x LIMIT 1`: same story.
-///   GPU sort wins at large bounded top-K (LIMIT >= 2) where the win
-///   amortises over the result; at LIMIT 1 the GPU launch + sort cost
-///   dominates.
-///
-/// Predicate exact: `num_pathkeys == 1 && limit_tuples == 1.0`. This is
-/// deliberately narrow — `LIMIT 100` over a single-column ORDER BY remains
-/// a valid GpuSort path (handled by `heap_topk_sort_candidate`); multi-key
-/// LIMIT 1 is not the MIN/MAX rewrite (PG only rewrites single-aggregate
-/// MIN/MAX queries) so we leave it to the other gates.
+/// The observer retains a distinct reason because historical evidence uses
+/// `min_max_rewrite_not_a_sort`. It never admits a GPU path: the standalone
+/// sort kernel and executor are retired, including bounded top-k.
 #[must_use]
 #[inline]
 pub(super) fn min_max_rewrite_shape(limit_tuples: f64, num_pathkeys: i32) -> bool {
-    // LIMIT 1 is the canonical MIN/MAX rewrite output cardinality. Use a
-    // finite-equality check rather than a range so that LIMIT 2+ stays in
-    // the legitimate top-K lane.
     if !limit_tuples.is_finite() {
         return false;
     }
@@ -819,13 +765,11 @@ pub(super) fn min_max_rewrite_shape(limit_tuples: f64, num_pathkeys: i32) -> boo
     (limit_tuples > 0.0) && (limit_tuples < 2.0) && (num_pathkeys == 1)
 }
 
-/// Classification of how `root->sort_pathkeys` relates to the pathkeys of
-/// paths already attached to the base relation.
+/// Classification of how `root->sort_pathkeys` relates to native child paths.
 ///
-/// Used by [`try_inject_gpu_sort_path`] to decide between full-sort
-/// injection, a no-op (PG sees the sort as free), and an IncrementalSort
-/// opportunity the production planner currently declines because no complete
-/// resident IncrementalSort pipeline exists.
+/// This is used only for decline observability. Numeric sort strategy tags and
+/// descriptors remain in the private-data codec so old plans fail closed; no
+/// production sort path is injected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SortShape {
     /// No existing child path has any pathkey prefix of `sort_pathkeys`.
@@ -846,7 +790,7 @@ pub(super) enum SortShape {
     },
 }
 
-/// Pure classifier for [`SortShape`] given list lengths.
+/// Pure observer classifier for [`SortShape`] given list lengths.
 ///
 /// Separated from the FFI wrapper so it can be unit-tested without a live
 /// planner. `presorted` is the longest common prefix length between some
@@ -868,8 +812,7 @@ pub(super) const fn classify_sort_shape(presorted: i32, total: i32) -> SortShape
     }
 }
 
-/// Walk `rel->pathlist` and return the longest pathkey prefix of
-/// `sort_pathkeys` shared by any attached path.
+/// Return the longest `sort_pathkeys` prefix supplied by a native child path.
 ///
 /// Uses PG's own [`pg_sys::pathkeys_count_contained_in`] — the same helper
 /// `create_incremental_sort_path` uses in `src/backend/optimizer/util/pathkeys.c`
@@ -877,7 +820,8 @@ pub(super) const fn classify_sort_shape(presorted: i32, total: i32) -> SortShape
 /// be wrong because PG canonicalises pathkeys and semantically equal keys
 /// may be different `PathKey*` pointers.
 ///
-/// Returns 0 when `pathlist` is empty or no path shares any prefix.
+/// Returns 0 when `pathlist` is empty or no path shares any prefix. The result
+/// only refines structural-decline observability.
 ///
 /// # Safety
 ///
@@ -932,34 +876,8 @@ unsafe fn longest_presorted_prefix(
 #[cfg(test)]
 mod tests {
     use super::{
-        GPU_SORT_MAX_PATHKEYS, SortShape, classify_sort_shape, heap_topk_sort_candidate,
-        min_max_rewrite_shape,
+        SortShape, classify_sort_shape, min_max_rewrite_shape, standalone_sort_has_bounded_output,
     };
-    use crate::engine::cost::DeviceLimits;
-    use pgrx::pg_sys;
-
-    /// Regression guard: the planner sort gate and the executor sort
-    /// dispatcher must agree on the supported pathkey count. The executor
-    /// in `engine/executor/sort/` bails on anything other than a single
-    /// key (see `exec_gpu_sort`'s `sort_keys().len() == 1` path). If this
-    /// constant grows above 1 without cascaded stable-sort support being
-    /// landed in the executor, the planner will inject paths that bail
-    /// at execution, wasting a plan. Pin it until the executor work lands.
-    #[test]
-    fn gpu_sort_max_pathkeys_matches_executor_support() {
-        assert_eq!(
-            GPU_SORT_MAX_PATHKEYS, 1,
-            "executor only supports single-key GPU sort; see comment above GPU_SORT_MAX_PATHKEYS"
-        );
-    }
-
-    #[test]
-    fn heap_topk_width_cap_stays_narrow_until_late_fetch_lands() {
-        assert_eq!(
-            DeviceLimits::cpu_only().gpu_sort_heap_topk_max_width_bytes,
-            16
-        );
-    }
 
     // -- classify_sort_shape ------------------------------------------------
     //
@@ -1031,55 +949,37 @@ mod tests {
         );
     }
 
-    // -- heap_topk_sort_candidate ------------------------------------------
+    // -- standalone_sort_has_bounded_output -------------------------------
 
     #[test]
-    fn heap_topk_gate_rejects_no_limit_full_output_sort() {
-        assert!(!heap_topk_sort_candidate(-1.0, 1_000_000));
-        assert!(!heap_topk_sort_candidate(0.0, 1_000_000));
-        assert!(!heap_topk_sort_candidate(f64::NAN, 1_000_000));
-    }
-
-    #[test]
-    fn heap_topk_gate_rejects_limit_covering_all_rows() {
-        assert!(!heap_topk_sort_candidate(1_000_000.0, 1_000_000));
-        assert!(!heap_topk_sort_candidate(1_500_000.0, 1_000_000));
-    }
-
-    #[test]
-    fn heap_topk_gate_rejects_non_selective_limit() {
-        let rows = 1_000_000;
-        let non_selective_limit =
-            1_000_000.0 * (DeviceLimits::cpu_only().gpu_sort_heap_topk_max_fraction + 0.01);
-        assert!(!heap_topk_sort_candidate(non_selective_limit, rows));
-    }
-
-    #[test]
-    fn heap_topk_gate_rejects_limit_above_implemented_topk_bound() {
-        assert!(!heap_topk_sort_candidate(
-            DeviceLimits::cpu_only().gpu_sort_topk_max_limit as f64 + 1.0,
+    fn bounded_output_classifier_rejects_absent_or_invalid_limits() {
+        assert!(!standalone_sort_has_bounded_output(-1.0, 1_000_000));
+        assert!(!standalone_sort_has_bounded_output(0.0, 1_000_000));
+        assert!(!standalone_sort_has_bounded_output(f64::NAN, 1_000_000));
+        assert!(!standalone_sort_has_bounded_output(
+            f64::INFINITY,
             1_000_000
         ));
     }
 
     #[test]
-    fn heap_topk_gate_allows_bounded_topk() {
-        assert!(heap_topk_sort_candidate(2.0, 1_000_000));
-        assert!(heap_topk_sort_candidate(
-            DeviceLimits::cpu_only().gpu_sort_topk_max_limit as f64,
-            1_000_000
-        ));
+    fn bounded_output_classifier_rejects_limit_covering_all_rows() {
+        assert!(!standalone_sort_has_bounded_output(1_000_000.0, 1_000_000));
+        assert!(!standalone_sort_has_bounded_output(1_500_000.0, 1_000_000));
+    }
+
+    #[test]
+    fn bounded_output_classifier_identifies_topk_without_admitting_it() {
+        assert!(standalone_sort_has_bounded_output(1.0, 1_000_000));
+        assert!(standalone_sort_has_bounded_output(128.0, 1_000_000));
     }
 
     // -- min_max_rewrite_shape --------------------------------------------
     //
     // PG's `preprocess_minmax_aggregates` rewrites `SELECT MIN(x) FROM t`
-    // (and MAX) to a subplan shaped `ORDER BY x LIMIT 1`. The base-relation
-    // planner hook must NOT route this shape through `Strategy: GpuSort` —
-    // a full GPU sort to fetch one row is hundreds of ms vs ~10-20 ms for
-    // PG's native IndexScan/SeqScan + Limit. The gate is a pure function
-    // of `(limit_tuples, num_pathkeys)` so it is unit-testable without a
-    // live planner.
+    // (and MAX) to a subplan shaped `ORDER BY x LIMIT 1`. The observer keeps
+    // this historical reason distinct while every standalone sort remains
+    // PostgreSQL-native.
 
     #[test]
     fn min_max_rewrite_gate_matches_limit_1_single_key() {
@@ -1097,8 +997,8 @@ mod tests {
 
     #[test]
     fn min_max_rewrite_gate_rejects_bounded_topk_with_limit_above_one() {
-        // Legitimate top-K — LIMIT 100, LIMIT 1000 etc. — stays in the
-        // GpuSort lane handled by `heap_topk_sort_candidate`.
+        // LIMIT 2+ is not the MIN/MAX rewrite, but it remains a native
+        // structural decline under `sort_standalone_topk_no_gpu_kernel`.
         assert!(!min_max_rewrite_shape(2.0, 1));
         assert!(!min_max_rewrite_shape(100.0, 1));
         assert!(!min_max_rewrite_shape(1_000.0, 1));

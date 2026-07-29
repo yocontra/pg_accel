@@ -1,362 +1,298 @@
-// Standalone correctness tests for the narrow selected GPU hash-join path.
+// Semantic coverage for the resident count-only hash join.
 
-#include <algorithm>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
+#include <cstdlib>
+#include <limits>
 #include <vector>
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
 #include "pgaccel_hash_join.h"
 
-static int g_pass = 0;
-static int g_fail = 0;
+namespace {
 
-#define ASSERT_TRUE(desc, cond)              \
-  do {                                       \
-    if ((cond)) {                            \
-      g_pass++;                              \
-    } else {                                 \
-      fprintf(stderr, "FAIL: %s\n", (desc)); \
-      g_fail++;                              \
-    }                                        \
-  } while (0)
+int passes = 0;
+int failures = 0;
 
-#define ASSERT_EQ_SZ(desc, actual, expected)                                           \
-  do {                                                                                 \
-    if ((actual) == (expected)) {                                                      \
-      g_pass++;                                                                        \
-    } else {                                                                           \
-      fprintf(stderr, "FAIL: %s -- got %zu, expected %zu\n", (desc), (size_t)(actual), \
-              (size_t)(expected));                                                     \
-      g_fail++;                                                                        \
-    }                                                                                  \
-  } while (0)
-
-#define ASSERT_EQ_STATUS(desc, actual, expected)                                         \
-  do {                                                                                   \
-    if ((actual) == (expected)) {                                                        \
-      g_pass++;                                                                          \
-    } else {                                                                             \
-      fprintf(stderr, "FAIL: %s -- got status %d, expected %d\n", (desc), (int)(actual), \
-              (int)(expected));                                                          \
-      g_fail++;                                                                          \
-    }                                                                                    \
-  } while (0)
-
-static std::vector<std::pair<uint32_t, uint32_t>> collect_pairs(const uint32_t* pairs,
-                                                                size_t count) {
-  std::vector<std::pair<uint32_t, uint32_t>> out;
-  out.reserve(count);
-  for (size_t i = 0; i < count; ++i) {
-    out.emplace_back(pairs[i * 2], pairs[i * 2 + 1]);
+void check(bool condition, const char* label) {
+  if (condition) {
+    ++passes;
+  } else {
+    std::fprintf(stderr, "FAIL: %s\n", label);
+    ++failures;
   }
-  std::sort(out.begin(), out.end());
-  return out;
 }
 
-static uint64_t test_hash64(uint64_t k) {
-  k ^= k >> 33;
-  k *= 0xff51afd7ed558ccdULL;
-  k ^= k >> 33;
-  k *= 0xc4ceb9fe1a85ec53ULL;
-  k ^= k >> 33;
-  return k;
+void check_status(pgaccel_status actual, pgaccel_status expected, const char* label) {
+  if (actual == expected) {
+    ++passes;
+  } else {
+    std::fprintf(stderr, "FAIL: %s -- got %d, expected %d\n", label, static_cast<int>(actual),
+                 static_cast<int>(expected));
+    ++failures;
+  }
 }
 
-static std::vector<int32_t> colliding_int32_keys(size_t count, size_t table_capacity) {
-  std::vector<int32_t> keys;
-  keys.reserve(count);
-  const uint64_t mask = table_capacity - 1;
-  const uint64_t target_bucket = test_hash64(0) & mask;
-  for (uint32_t candidate = 0; keys.size() < count; ++candidate) {
-    if ((test_hash64(static_cast<uint64_t>(candidate)) & mask) == target_bucket) {
-      keys.push_back(static_cast<int32_t>(candidate));
+class DeviceBuffer {
+ public:
+  DeviceBuffer() = default;
+  DeviceBuffer(const DeviceBuffer&) = delete;
+  DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+
+  ~DeviceBuffer() { pgaccel_expr_device_free(pointer_); }
+
+  bool copy_from(const void* source, size_t bytes) {
+    return pgaccel_expr_device_alloc_copy(source, bytes, &pointer_) == PGACCEL_OK &&
+           pointer_ != nullptr;
+  }
+
+  void* get() const { return pointer_; }
+
+ private:
+  void* pointer_ = nullptr;
+};
+
+template <typename Key>
+void check_count(const std::vector<Key>& build_keys, const std::vector<uint8_t>& build_nulls,
+                 const std::vector<Key>& probe_keys, const std::vector<uint8_t>& probe_nulls,
+                 pgaccel_key_type key_type, size_t expected, const char* label) {
+  DeviceBuffer device_build_keys;
+  DeviceBuffer device_build_nulls;
+  DeviceBuffer device_probe_keys;
+  DeviceBuffer device_probe_nulls;
+  check(device_build_keys.copy_from(build_keys.data(), build_keys.size() * sizeof(Key)),
+        "build key allocation");
+  check(device_probe_keys.copy_from(probe_keys.data(), probe_keys.size() * sizeof(Key)),
+        "probe key allocation");
+  if (!build_nulls.empty()) {
+    check(device_build_nulls.copy_from(build_nulls.data(), build_nulls.size()),
+          "build null allocation");
+  }
+  if (!probe_nulls.empty()) {
+    check(device_probe_nulls.copy_from(probe_nulls.data(), probe_nulls.size()),
+          "probe null allocation");
+  }
+  if (device_build_keys.get() == nullptr || device_probe_keys.get() == nullptr ||
+      (!build_nulls.empty() && device_build_nulls.get() == nullptr) ||
+      (!probe_nulls.empty() && device_probe_nulls.get() == nullptr)) {
+    return;
+  }
+
+  const uint64_t before = pgaccel_gpu_exec_count();
+  pgaccel_hash_table* table = pgaccel_hash_join_build_device_count(
+      device_build_keys.get(), static_cast<const uint8_t*>(device_build_nulls.get()),
+      build_keys.size(), key_type);
+  check(table != nullptr, label);
+  if (table == nullptr)
+    return;
+
+  size_t count = std::numeric_limits<size_t>::max();
+  const pgaccel_status status = pgaccel_hash_join_count_device(
+      table, device_probe_keys.get(), static_cast<const uint8_t*>(device_probe_nulls.get()),
+      probe_keys.size(), &count);
+  check_status(status, PGACCEL_OK, "resident count status");
+  check(count == expected, "resident count result");
+  check(pgaccel_gpu_exec_count() >= before + 2, "resident build and count dispatch");
+  pgaccel_hash_join_free(table);
+}
+
+uint64_t test_hash64(uint64_t key) {
+  key ^= key >> 33;
+  key *= 0xff51afd7ed558ccdULL;
+  key ^= key >> 33;
+  key *= 0xc4ceb9fe1a85ec53ULL;
+  key ^= key >> 33;
+  return key;
+}
+
+std::vector<int32_t> colliding_keys(size_t count, size_t capacity) {
+  std::vector<int32_t> result;
+  const uint64_t bucket = test_hash64(0) & (capacity - 1);
+  for (uint32_t candidate = 0; result.size() < count; ++candidate) {
+    if ((test_hash64(candidate) & (capacity - 1)) == bucket)
+      result.push_back(static_cast<int32_t>(candidate));
+  }
+  return result;
+}
+
+void test_int32_duplicates_and_nulls() {
+  const std::vector<int32_t> build = {1, 2, 2, 3, 3, 3, 99};
+  const std::vector<uint8_t> build_nulls = {0, 0, 0, 0, 0, 0, 1};
+  const std::vector<int32_t> probe = {2, 3, 4, 2, 3};
+  const std::vector<uint8_t> probe_nulls = {0, 0, 0, 0, 1};
+  check_count(build, build_nulls, probe, probe_nulls, PGACCEL_KEY_INT32, 7,
+              "INT32 resident table build");
+}
+
+void test_int64_boundaries() {
+  const int64_t min = std::numeric_limits<int64_t>::min();
+  const int64_t max = std::numeric_limits<int64_t>::max();
+  const std::vector<int64_t> build = {min, max, -1, 0, max, min};
+  const std::vector<int64_t> probe = {max, min, 7, -1};
+  check_count(build, {}, probe, {}, PGACCEL_KEY_INT64, 5, "INT64 resident table build");
+}
+
+void test_collision_chains() {
+  constexpr size_t kDistinct = 12;
+  constexpr size_t kRepetitions = 32;
+  constexpr size_t kRows = kDistinct * kRepetitions;
+  constexpr size_t kCapacity = 1024;
+  const std::vector<int32_t> keys = colliding_keys(kDistinct, kCapacity);
+
+  std::vector<int32_t> build;
+  std::vector<uint8_t> nulls;
+  build.reserve(kRows);
+  nulls.reserve(kRows);
+  std::vector<size_t> live_per_key(kDistinct, 0);
+  for (size_t repetition = 0; repetition < kRepetitions; ++repetition) {
+    for (size_t index = 0; index < kDistinct; ++index) {
+      const bool is_null = ((repetition * kDistinct + index) % 19) == 0;
+      build.push_back(keys[index]);
+      nulls.push_back(static_cast<uint8_t>(is_null));
+      if (!is_null)
+        ++live_per_key[index];
     }
   }
-  return keys;
+  size_t expected = 0;
+  for (size_t live : live_per_key)
+    expected += live;
+  check_count(build, nulls, keys, {}, PGACCEL_KEY_INT32, expected,
+              "collision-heavy resident table build");
+
+  size_t self_join_expected = 0;
+  for (size_t live : live_per_key)
+    self_join_expected += live * live;
+  check_count(build, nulls, build, nulls, PGACCEL_KEY_INT32, self_join_expected,
+              "collision-heavy resident self join build");
 }
 
-static void test_int32_duplicates_nulls_and_dispatch_counter() {
-  printf("--- test_int32_duplicates_nulls_and_dispatch_counter ---\n");
+void test_empty_and_invalid_inputs() {
+  int32_t key = 1;
+  uint8_t null = 0;
+  DeviceBuffer device_key;
+  DeviceBuffer device_null;
+  check(device_key.copy_from(&key, sizeof(key)), "invalid-input key allocation");
+  check(device_null.copy_from(&null, sizeof(null)), "invalid-input null allocation");
+  if (device_key.get() == nullptr || device_null.get() == nullptr)
+    return;
 
-  std::vector<int32_t> build_keys = {1, 2, 3, 2, 0, 4};
-  std::vector<uint8_t> build_nulls = {0, 0, 0, 0, 1, 0};
-  std::vector<uint32_t> indices = {0, 1, 2, 3, 4, 5};
+  check(pgaccel_hash_join_build_device_count(nullptr, nullptr, 1, PGACCEL_KEY_INT32) == nullptr,
+        "null resident build keys rejected");
+  check(pgaccel_hash_join_build_device_count(device_key.get(), nullptr, 0, PGACCEL_KEY_INT32) ==
+            nullptr,
+        "empty resident build rejected");
+  check(pgaccel_hash_join_build_device_count(
+            device_key.get(), nullptr, static_cast<size_t>(std::numeric_limits<int32_t>::max()) + 1,
+            PGACCEL_KEY_INT32) == nullptr,
+        "oversized resident build rejected before dereference");
+  check(pgaccel_hash_join_build_device_count(
+            device_key.get(), nullptr, static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+            PGACCEL_KEY_INT32) == nullptr,
+        "largest addressable build rejected when table capacity exceeds index range");
+  check(pgaccel_hash_join_build_device_count(device_key.get(), nullptr, 1,
+                                             static_cast<pgaccel_key_type>(2)) == nullptr,
+        "unsupported resident key type rejected");
 
-  pgaccel_reset_gpu_exec_count();
-  pgaccel_hash_table* ht = pgaccel_hash_join_build(
-      build_keys.data(), build_nulls.data(), indices.data(), build_keys.size(), PGACCEL_KEY_INT32);
-  ASSERT_TRUE("INT32 hash join build returns a table", ht != nullptr);
-  if (ht == nullptr) {
+  pgaccel_hash_table* table = pgaccel_hash_join_build_device_count(
+      device_key.get(), static_cast<const uint8_t*>(device_null.get()), 1, PGACCEL_KEY_INT32);
+  check(table != nullptr, "validation table build");
+  if (table == nullptr)
+    return;
+
+  size_t count = 77;
+  check_status(pgaccel_hash_join_count_device(nullptr, device_key.get(), nullptr, 1, &count),
+               PGACCEL_ERROR, "null table rejected");
+  check_status(pgaccel_hash_join_count_device(table, nullptr, nullptr, 1, &count), PGACCEL_ERROR,
+               "null probe keys rejected");
+  check_status(pgaccel_hash_join_count_device(table, device_key.get(), nullptr, 1, nullptr),
+               PGACCEL_ERROR, "null count output rejected");
+  check_status(pgaccel_hash_join_count_device(table, device_key.get(), nullptr, 0, &count),
+               PGACCEL_OK, "empty probe accepted");
+  check(count == 0, "empty probe resets output");
+  count = 77;
+  check_status(pgaccel_hash_join_count_device(
+                   table, device_key.get(), nullptr,
+                   static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + size_t{1}, &count),
+               PGACCEL_UNSUPPORTED, "oversized probe rejected before dereference");
+  check(count == 0, "oversized probe resets output");
+  pgaccel_hash_join_free(table);
+  pgaccel_hash_join_free(nullptr);
+  ++passes;
+}
+
+void test_no_device_paths() {
+  const pgaccel_status init_status = pgaccel_init();
+  check(init_status != PGACCEL_OK, "no-device initialization rejected");
+  if (init_status == PGACCEL_OK) {
+    check_status(pgaccel_shutdown(), PGACCEL_OK, "unexpected no-device initialization shuts down");
     return;
   }
 
-  std::vector<int32_t> probe_keys = {2, 4, 9, 2};
-  std::vector<uint8_t> probe_nulls = {0, 0, 0, 1};
-  std::vector<uint32_t> pairs(8 * 2, 0);
-  size_t match_count = 0;
-  pgaccel_status st = pgaccel_hash_join_probe(ht, probe_keys.data(), probe_nulls.data(),
-                                              probe_keys.size(), pairs.data(), 8, &match_count);
-  ASSERT_EQ_STATUS("INT32 probe status", st, PGACCEL_OK);
-  ASSERT_EQ_SZ("INT32 probe match count", match_count, 3);
-
-  auto got = collect_pairs(pairs.data(), match_count);
-  std::vector<std::pair<uint32_t, uint32_t>> expected = {{0, 1}, {0, 3}, {1, 5}};
-  ASSERT_TRUE("INT32 probe pairs match expected duplicate/null semantics", got == expected);
-  ASSERT_TRUE("INT32 build+probe launched expected GPU kernels", pgaccel_gpu_exec_count() >= 2);
-
-  pgaccel_hash_join_free(ht);
+  const int32_t key = 1;
+  check(pgaccel_hash_join_build_device_count(&key, nullptr, 1, PGACCEL_KEY_INT32) == nullptr,
+        "resident build fails closed without a device");
+  pgaccel_hash_join_free(nullptr);
+  ++passes;
+  check_status(pgaccel_shutdown(), PGACCEL_OK, "failed no-device initialization shuts down");
 }
 
-static void test_int64_probe() {
-  printf("--- test_int64_probe ---\n");
-
-  std::vector<int64_t> build_keys = {10, -20, 30};
-  std::vector<uint8_t> build_nulls = {0, 0, 0};
-  std::vector<uint32_t> indices = {7, 8, 9};
-  pgaccel_hash_table* ht = pgaccel_hash_join_build(
-      build_keys.data(), build_nulls.data(), indices.data(), build_keys.size(), PGACCEL_KEY_INT64);
-  ASSERT_TRUE("INT64 hash join build returns a table", ht != nullptr);
-  if (ht == nullptr) {
-    return;
+bool run_no_device_child(const char* executable) {
+  const pid_t child = fork();
+  if (child < 0) {
+    std::fprintf(stderr, "FAIL: fork no-device hash join: errno=%d\n", errno);
+    return false;
+  }
+  if (child == 0) {
+    const char* visibility_mask = std::getenv("PGACCEL_TEST_NO_DEVICE_MASK");
+    setenv("ACPP_VISIBILITY_MASK", visibility_mask != nullptr ? visibility_mask : "cuda", 1);
+    setenv("PGACCEL_TEST_NO_DEVICE", "1", 1);
+    execl(executable, executable, static_cast<char*>(nullptr));
+    std::fprintf(stderr, "FAIL: exec no-device hash join: errno=%d\n", errno);
+    _exit(127);
   }
 
-  std::vector<int64_t> probe_keys = {-20, 99, 10};
-  std::vector<uint8_t> probe_nulls = {0, 0, 0};
-  std::vector<uint32_t> pairs(4 * 2, 0);
-  size_t match_count = 0;
-  pgaccel_status st = pgaccel_hash_join_probe(ht, probe_keys.data(), probe_nulls.data(),
-                                              probe_keys.size(), pairs.data(), 4, &match_count);
-  ASSERT_EQ_STATUS("INT64 probe status", st, PGACCEL_OK);
-  ASSERT_EQ_SZ("INT64 probe match count", match_count, 2);
-
-  auto got = collect_pairs(pairs.data(), match_count);
-  std::vector<std::pair<uint32_t, uint32_t>> expected = {{0, 8}, {2, 7}};
-  ASSERT_TRUE("INT64 probe pairs match expected indices", got == expected);
-
-  pgaccel_hash_join_free(ht);
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = waitpid(child, &status, 0);
+  } while (waited < 0 && errno == EINTR);
+  if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    std::fprintf(stderr, "FAIL: no-device hash join child: status=%d errno=%d\n", status, errno);
+    return false;
+  }
+  return true;
 }
 
-static void test_count_only_probe_avoids_pair_output() {
-  printf("--- test_count_only_probe_avoids_pair_output ---\n");
+}  // namespace
 
-  std::vector<int32_t> build_keys = {5, 5, 8, 9};
-  std::vector<uint8_t> build_nulls = {0, 0, 0, 0};
-  std::vector<uint32_t> indices = {0, 1, 2, 3};
-  pgaccel_hash_table* ht = pgaccel_hash_join_build(
-      build_keys.data(), build_nulls.data(), indices.data(), build_keys.size(), PGACCEL_KEY_INT32);
-  ASSERT_TRUE("count-only build returns a table", ht != nullptr);
-  if (ht == nullptr) {
-    return;
+int main(int argc, char** argv) {
+  std::printf("=== pgaccel resident hash join tests ===\n\n");
+
+  if (std::getenv("PGACCEL_TEST_NO_DEVICE") != nullptr) {
+    test_no_device_paths();
+    std::printf("PASS=%d FAIL=%d\n", passes, failures);
+    return failures == 0 ? 0 : 1;
   }
 
-  std::vector<int32_t> probe_keys = {5, 8, 7, 5, 0};
-  std::vector<uint8_t> probe_nulls = {0, 0, 0, 1, 1};
-  size_t match_count = 0;
-  pgaccel_status st = pgaccel_hash_join_count(ht, probe_keys.data(), probe_nulls.data(),
-                                              probe_keys.size(), &match_count);
-  ASSERT_EQ_STATUS("count-only probe status", st, PGACCEL_OK);
-  ASSERT_EQ_SZ("count-only probe match count", match_count, 3);
-
-  pgaccel_hash_join_free(ht);
-}
-
-static void test_device_count_table_rejects_pair_probe() {
-  printf("--- test_device_count_table_rejects_pair_probe ---\n");
-
-  std::vector<int32_t> build_keys = {5, 5, 8};
-  std::vector<uint8_t> build_nulls = {0, 0, 0};
-  void* device_keys = nullptr;
-  void* device_nulls = nullptr;
-  pgaccel_status st = pgaccel_expr_device_alloc_copy(
-      build_keys.data(), build_keys.size() * sizeof(int32_t), &device_keys);
-  ASSERT_EQ_STATUS("device-count keys allocation", st, PGACCEL_OK);
-  st = pgaccel_expr_device_alloc_copy(build_nulls.data(), build_nulls.size() * sizeof(uint8_t),
-                                      &device_nulls);
-  ASSERT_EQ_STATUS("device-count null allocation", st, PGACCEL_OK);
-  if (device_keys == nullptr || device_nulls == nullptr) {
-    pgaccel_expr_device_free(device_keys);
-    pgaccel_expr_device_free(device_nulls);
-    return;
-  }
-
-  pgaccel_hash_table* ht = pgaccel_hash_join_build_device_count(
-      device_keys, static_cast<const uint8_t*>(device_nulls), build_keys.size(), PGACCEL_KEY_INT32);
-  ASSERT_TRUE("device-count build returns a table", ht != nullptr);
-  if (ht == nullptr) {
-    pgaccel_expr_device_free(device_keys);
-    pgaccel_expr_device_free(device_nulls);
-    return;
-  }
-
-  size_t match_count = 0;
-  st = pgaccel_hash_join_count_device(ht, device_keys, static_cast<const uint8_t*>(device_nulls),
-                                      build_keys.size(), &match_count);
-  ASSERT_EQ_STATUS("device-count table count status", st, PGACCEL_OK);
-  ASSERT_EQ_SZ("device-count table count result", match_count, 5);
-
-  int32_t probe_key = 5;
-  uint8_t probe_null = 0;
-  uint32_t pairs[4] = {};
-  match_count = 99;
-  st = pgaccel_hash_join_probe(ht, &probe_key, &probe_null, 1, pairs, 2, &match_count);
-  ASSERT_EQ_STATUS("device-count table rejects materializing probe", st, PGACCEL_UNSUPPORTED);
-  ASSERT_EQ_SZ("device-count rejected probe resets match count", match_count, 0);
-
-  pgaccel_hash_join_free(ht);
-  pgaccel_expr_device_free(device_keys);
-  pgaccel_expr_device_free(device_nulls);
-}
-
-static void test_unsupported_float64_build_fails_closed() {
-  printf("--- test_unsupported_float64_build_fails_closed ---\n");
-
-  std::vector<double> build_keys = {1.0, 2.0};
-  std::vector<uint8_t> build_nulls = {0, 0};
-  std::vector<uint32_t> indices = {0, 1};
-  pgaccel_hash_table* ht =
-      pgaccel_hash_join_build(build_keys.data(), build_nulls.data(), indices.data(),
-                              build_keys.size(), PGACCEL_KEY_FLOAT64);
-  ASSERT_TRUE("FLOAT64 hash join build is unsupported", ht == nullptr);
-}
-
-static void test_duplicate_overflow_is_guarded() {
-  printf("--- test_duplicate_overflow_is_guarded ---\n");
-
-  std::vector<int32_t> build_keys = {7, 7, 7, 7, 7};
-  std::vector<uint8_t> build_nulls(build_keys.size(), 0);
-  std::vector<uint32_t> indices = {0, 1, 2, 3, 4};
-  pgaccel_hash_table* ht = pgaccel_hash_join_build(
-      build_keys.data(), build_nulls.data(), indices.data(), build_keys.size(), PGACCEL_KEY_INT32);
-  ASSERT_TRUE("overflow test build returns a table", ht != nullptr);
-  if (ht == nullptr) {
-    return;
-  }
-
-  int32_t probe_key = 7;
-  uint8_t probe_null = 0;
-  std::vector<uint32_t> pairs(4 * 2, 0);
-  size_t match_count = 0;
-  pgaccel_status st =
-      pgaccel_hash_join_probe(ht, &probe_key, &probe_null, 1, pairs.data(), 4, &match_count);
-  ASSERT_EQ_STATUS("duplicate overflow returns unsupported", st, PGACCEL_UNSUPPORTED);
-  ASSERT_EQ_SZ("duplicate overflow reports full match count", match_count, 5);
-
-  pgaccel_hash_join_free(ht);
-}
-
-static void test_adversarial_collisions_duplicates_nulls_and_device_build() {
-  printf("--- test_adversarial_collisions_duplicates_nulls_and_device_build ---\n");
-
-  constexpr size_t distinct_keys = 16;
-  constexpr size_t repetitions = 64;
-  constexpr size_t row_count = distinct_keys * repetitions;
-  constexpr size_t table_capacity = row_count * 2;
-  const std::vector<int32_t> collision_keys = colliding_int32_keys(distinct_keys, table_capacity);
-
-  std::vector<int32_t> build_keys;
-  std::vector<uint8_t> build_nulls;
-  std::vector<uint32_t> indices;
-  std::vector<std::vector<uint32_t>> expected_indices(distinct_keys);
-  build_keys.reserve(row_count);
-  build_nulls.reserve(row_count);
-  indices.reserve(row_count);
-
-  for (size_t repetition = 0; repetition < repetitions; ++repetition) {
-    for (size_t key_index = 0; key_index < distinct_keys; ++key_index) {
-      const size_t row = build_keys.size();
-      const uint8_t is_null = (row % 17 == 0 || (repetition == 31 && key_index == 7)) ? 1 : 0;
-      const uint32_t index = static_cast<uint32_t>(100000 + row * 7);
-      build_keys.push_back(collision_keys[key_index]);
-      build_nulls.push_back(is_null);
-      indices.push_back(index);
-      if (is_null == 0) {
-        expected_indices[key_index].push_back(index);
-      }
-    }
-  }
-
-  pgaccel_hash_table* ht = pgaccel_hash_join_build(build_keys.data(), build_nulls.data(),
-                                                   indices.data(), row_count, PGACCEL_KEY_INT32);
-  ASSERT_TRUE("collision-heavy host-input build returns a table", ht != nullptr);
-  if (ht == nullptr) {
-    return;
-  }
-
-  size_t expected_matches = 0;
-  std::vector<std::pair<uint32_t, uint32_t>> expected_pairs;
-  for (size_t key_index = 0; key_index < distinct_keys; ++key_index) {
-    expected_matches += expected_indices[key_index].size();
-    for (uint32_t index : expected_indices[key_index]) {
-      expected_pairs.emplace_back(static_cast<uint32_t>(key_index), index);
-    }
-  }
-  std::sort(expected_pairs.begin(), expected_pairs.end());
-
-  std::vector<uint32_t> pairs(expected_matches * 2, 0);
-  size_t match_count = 0;
-  pgaccel_status st =
-      pgaccel_hash_join_probe(ht, collision_keys.data(), nullptr, collision_keys.size(),
-                              pairs.data(), expected_matches, &match_count);
-  ASSERT_EQ_STATUS("collision-heavy pair probe status", st, PGACCEL_OK);
-  ASSERT_EQ_SZ("collision-heavy pair probe match count", match_count, expected_matches);
-  ASSERT_TRUE("collision-heavy pair probe preserves caller indices",
-              collect_pairs(pairs.data(), match_count) == expected_pairs);
-  pgaccel_hash_join_free(ht);
-
-  void* device_keys = nullptr;
-  void* device_nulls = nullptr;
-  st = pgaccel_expr_device_alloc_copy(build_keys.data(), build_keys.size() * sizeof(int32_t),
-                                      &device_keys);
-  ASSERT_EQ_STATUS("collision-heavy device keys allocation", st, PGACCEL_OK);
-  st = pgaccel_expr_device_alloc_copy(build_nulls.data(), build_nulls.size() * sizeof(uint8_t),
-                                      &device_nulls);
-  ASSERT_EQ_STATUS("collision-heavy device null allocation", st, PGACCEL_OK);
-  if (device_keys == nullptr || device_nulls == nullptr) {
-    pgaccel_expr_device_free(device_keys);
-    pgaccel_expr_device_free(device_nulls);
-    return;
-  }
-
-  ht = pgaccel_hash_join_build_device_count(device_keys, static_cast<const uint8_t*>(device_nulls),
-                                            row_count, PGACCEL_KEY_INT32);
-  ASSERT_TRUE("collision-heavy device-input build returns a table", ht != nullptr);
-  if (ht != nullptr) {
-    size_t expected_count = 0;
-    for (const auto& key_indices : expected_indices) {
-      expected_count += key_indices.size() * key_indices.size();
-    }
-    match_count = 0;
-    st = pgaccel_hash_join_count_device(ht, device_keys, static_cast<const uint8_t*>(device_nulls),
-                                        row_count, &match_count);
-    ASSERT_EQ_STATUS("collision-heavy device count status", st, PGACCEL_OK);
-    ASSERT_EQ_SZ("collision-heavy device count result", match_count, expected_count);
-    pgaccel_hash_join_free(ht);
-  }
-
-  pgaccel_expr_device_free(device_keys);
-  pgaccel_expr_device_free(device_nulls);
-}
-
-int main() {
-  printf("=== pgaccel hash_join selected-kernel tests ===\n\n");
-
-  pgaccel_status init = pgaccel_init();
+  check(argc > 0 && argv[0] != nullptr && run_no_device_child(argv[0]),
+        "no-device hash join child");
+  const pgaccel_status init = pgaccel_init();
   if (init != PGACCEL_OK) {
-    fprintf(stderr, "FATAL: pgaccel_init failed with status %d\n", (int)init);
+    std::fprintf(stderr, "FATAL: pgaccel_init failed with status %d\n", static_cast<int>(init));
     return 1;
   }
 
-  test_int32_duplicates_nulls_and_dispatch_counter();
-  test_int64_probe();
-  test_count_only_probe_avoids_pair_output();
-  test_device_count_table_rejects_pair_probe();
-  test_unsupported_float64_build_fails_closed();
-  test_duplicate_overflow_is_guarded();
-  test_adversarial_collisions_duplicates_nulls_and_device_build();
+  test_int32_duplicates_and_nulls();
+  test_int64_boundaries();
+  test_collision_chains();
+  test_empty_and_invalid_inputs();
 
-  printf("\nPASS=%d FAIL=%d\n", g_pass, g_fail);
-  return g_fail == 0 ? 0 : 1;
+  check_status(pgaccel_shutdown(), PGACCEL_OK, "runtime shuts down");
+  std::printf("PASS=%d FAIL=%d\n", passes, failures);
+  return failures == 0 ? 0 : 1;
 }

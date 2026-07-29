@@ -113,17 +113,17 @@ pub const GPU_RASTER_PER_ROW_COST: f64 = 0.04;
 /// small batches.
 pub const GPU_H3_PER_ROW_COST: f64 = 0.02;
 
-/// Estimated per-row cost for a GPU sort (key extraction + bitonic sort amortised).
+/// Historical per-row GPU sort calibration coefficient.
 ///
 /// Derivation: Measured on M2 Max with 10M wide rows (120 bytes/row):
 /// GPU bitonic sort throughput is ~2.2M rows/sec (4,569ms / 10M rows),
 /// PG external merge sort is ~660K rows/sec (15,137ms / 10M rows).
 /// GPU per-row cost in PG units: PG's sort cost for 10M rows is ~150
 /// in total_cost. 150 / 10M = 0.000015 per row PG-native. GPU is ~3.3x
-/// faster, so 0.000015 / 3.3 ≈ 0.0000045, but we use 0.015 to include
-/// key extraction, buffer setup, and provide a conservative estimate
-/// that ensures GPU sort is only chosen when disk spill makes it
-/// clearly beneficial.
+/// faster, so 0.000015 / 3.3 ≈ 0.0000045. The retained 0.015 coefficient
+/// includes historical key-extraction and buffer-setup estimates so calibration
+/// snapshots remain comparable. Production standalone sort admission is retired
+/// and does not consume this coefficient.
 pub const GPU_SORT_PER_ROW_COST: f64 = 0.015;
 
 /// Estimated per-row cost for a GPU reduction (sum, min, max, count).

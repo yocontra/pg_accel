@@ -5,9 +5,10 @@
 //! `registry.rs`, so callers can understand the public declaration surface
 //! without reading through mutable global-state mechanics.
 
-/// Strategy that `pg_accel` applies when accelerating a function call.
+/// Wire-stable strategy classification for registry entries and plan metadata.
 ///
-/// All strategies require GPU hardware. There is no CPU-only fallback path.
+/// Registry presence is not planner admission. IDs for retired standalone
+/// executors remain decodable so old or malformed plan data fails closed.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccelStrategy {
@@ -17,24 +18,23 @@ pub enum AccelStrategy {
     GpuRaster = 2,
     /// Offload H3 cell computation to the GPU.
     GpuH3 = 3,
-    /// GPU-accelerated sorting (e.g. radix sort on numeric keys).
+    /// Retired standalone sort identity; retained for wire compatibility.
     GpuSort = 4,
-    /// GPU-accelerated reduction / aggregate (sum, avg, min, max, count).
+    /// Retired standalone reduce identity; reduce kernels survive only behind
+    /// supported resident aggregate descriptors.
     GpuReduce = 5,
-    /// GPU expression evaluator - general WHERE clauses and projections.
+    /// Retired standalone expression identity; the expression VM is not a
+    /// row-returning Custom Scan executor.
     GpuExpr = 6,
-    /// GPU hash join - equi-join via hash build + probe.
+    /// Retired row-emitting hash-join identity. Resident count/membership work
+    /// is internal to reducing shapes, not a registry-selected join executor.
     GpuHashJoin = 7,
-    /// GPU window functions - currently running SUM/COUNT over numeric windows.
+    /// Retired standalone window identity; retained for wire compatibility.
     GpuWindow = 8,
-    /// GPU NestedLoop scalar-inequality join (BETWEEN, range overlap, `<`,
-    /// `<=`, `>=`, `>` between Var-Var across rels). Variant added in the
-    /// Phase 4 NLJ kernel landing — see
-    /// `pg_accel/src/gpu/nested_loop_ineq.rs` and
-    /// `pgaccel-kernels/src/nested_loop_ineq.cpp`. The strategy is not
-    /// planner-selectable yet: the kernel + bridge + cost model are in
-    /// place and the selected BETWEEN shape is planner-selectable via
-    /// `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs`.
+    /// Wire-stable strategy id used to classify scalar-inequality
+    /// opportunities. General row-emitting NLJ is a structural decline: no
+    /// standalone kernel or bridge ships, and the planner records the reason
+    /// before leaving the join native.
     GpuNestedLoopIneq = 9,
 }
 

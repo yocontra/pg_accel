@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <vector>
 
@@ -279,6 +280,49 @@ TEST(malformed_pairwise_rings_decline_before_dispatch) {
   ASSERT_EQ(pgaccel_gpu_exec_count(), 0u);
 }
 
+TEST(pairwise_contract_and_geometry_boundaries) {
+  float bbox[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  float point_coords[] = {0.5f, 0.5f};
+  float line_coords[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  float poly_coords[] = {0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.2f, 0.2f, 0.0f, 0.0f};
+  uint32_t offset_zero[] = {0};
+  uint32_t offset_one[] = {1};
+  uint32_t duplicate_offsets[] = {0, 0};
+  int8_t result = 99;
+
+  pgaccel_geometry valid_point = {PGACCEL_GEOM_POINT, bbox, point_coords, 1, nullptr, 0};
+  std::vector<pgaccel_geometry> invalid = {
+      {PGACCEL_GEOM_POINT, bbox, nullptr, 1, nullptr, 0},
+      {PGACCEL_GEOM_LINESTRING, bbox, line_coords, 1, nullptr, 0},
+      {PGACCEL_GEOM_POINT, bbox, point_coords, 1, offset_zero, 1},
+      {PGACCEL_GEOM_POLYGON, bbox, poly_coords, 3, duplicate_offsets, 2},
+      {PGACCEL_GEOM_POLYGON, bbox, poly_coords, 4, offset_one, 1},
+      {PGACCEL_GEOM_POLYGON, bbox, poly_coords, 6, duplicate_offsets, 2},
+  };
+
+  pgaccel_reset_gpu_exec_count();
+  for (const pgaccel_geometry& malformed : invalid) {
+    result = 99;
+    ASSERT_EQ(pgaccel_spatial_intersects_pairwise(&valid_point, &malformed, 1, &result),
+              PGACCEL_ERROR);
+    ASSERT_EQ(result, 99);
+  }
+  ASSERT_EQ(pgaccel_gpu_exec_count(), 0u);
+
+  ASSERT_EQ(pgaccel_spatial_intersects_pairwise(nullptr, nullptr, 0, nullptr), PGACCEL_OK);
+  ASSERT_EQ(pgaccel_spatial_intersects_pairwise(nullptr, &valid_point, 1, &result), PGACCEL_ERROR);
+  ASSERT_EQ(pgaccel_spatial_intersects_pairwise(&valid_point, nullptr, 1, &result), PGACCEL_ERROR);
+  ASSERT_EQ(pgaccel_spatial_intersects_pairwise(&valid_point, &valid_point, 1, nullptr),
+            PGACCEL_ERROR);
+
+  pgaccel_geometry no_bbox_a = {PGACCEL_GEOM_POINT, nullptr, point_coords, 1, nullptr, 0};
+  float other_coords[] = {0.75f, 0.75f};
+  pgaccel_geometry no_bbox_b = {PGACCEL_GEOM_POINT, nullptr, other_coords, 1, nullptr, 0};
+  result = 99;
+  ASSERT_EQ(pgaccel_spatial_intersects_pairwise(&no_bbox_a, &no_bbox_b, 1, &result), PGACCEL_OK);
+  ASSERT_EQ(result, -1);
+}
+
 /* ----------------------------------------------------------------
  * Test: 4 points vs 1 polygon
  *
@@ -444,6 +488,55 @@ TEST(line_vs_line) {
   ASSERT_EQ(r.dt_count + r.df_count + r.unc_count, 2u);
 }
 
+TEST(pairwise_reverse_polygon_and_line_boundaries) {
+  float common_bbox[] = {0.0f, 0.0f, 2.0f, 2.0f};
+  float square[] = {0.0f, 0.0f, 2.0f, 0.0f, 2.0f, 2.0f, 0.0f, 2.0f, 0.0f, 0.0f};
+  uint32_t rings[] = {0};
+  float inside[] = {1.0f, 1.0f};
+  float edge[] = {0.0f, 1.0f};
+  float outside[] = {3.0f, 1.0f};
+  float inside_bbox[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  float edge_bbox[] = {0.0f, 1.0f, 0.0f, 1.0f};
+  float outside_bbox[] = {3.0f, 1.0f, 3.0f, 1.0f};
+
+  pgaccel_geometry polygon = {PGACCEL_GEOM_POLYGON, common_bbox, square, 5, rings, 1};
+  pgaccel_geometry points[] = {
+      {PGACCEL_GEOM_POINT, inside_bbox, inside, 1, nullptr, 0},
+      {PGACCEL_GEOM_POINT, edge_bbox, edge, 1, nullptr, 0},
+      {PGACCEL_GEOM_POINT, outside_bbox, outside, 1, nullptr, 0},
+  };
+  pgaccel_geometry polygons[] = {polygon, polygon, polygon};
+  int8_t reverse_results[] = {99, 99, 99};
+  ASSERT_EQ(pgaccel_spatial_intersects_pairwise(polygons, points, 3, reverse_results), PGACCEL_OK);
+  ASSERT_EQ(reverse_results[0], 1);
+  ASSERT_EQ(reverse_results[1], 0);
+  ASSERT_EQ(reverse_results[2], -1);
+
+  float base_line[] = {0.0f, 0.0f, 2.0f, 0.0f};
+  float parallel_line[] = {0.0f, 1.0f, 2.0f, 1.0f};
+  float endpoint_line[] = {2.0f, 0.0f, 2.0f, 2.0f};
+  float collinear_line[] = {1.0f, 0.0f, 3.0f, 0.0f};
+  float zero_line[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  pgaccel_geometry line_a[] = {
+      {PGACCEL_GEOM_LINESTRING, common_bbox, base_line, 2, nullptr, 0},
+      {PGACCEL_GEOM_LINESTRING, common_bbox, base_line, 2, nullptr, 0},
+      {PGACCEL_GEOM_LINESTRING, common_bbox, base_line, 2, nullptr, 0},
+      {PGACCEL_GEOM_LINESTRING, common_bbox, zero_line, 2, nullptr, 0},
+  };
+  pgaccel_geometry line_b[] = {
+      {PGACCEL_GEOM_LINESTRING, common_bbox, parallel_line, 2, nullptr, 0},
+      {PGACCEL_GEOM_LINESTRING, common_bbox, endpoint_line, 2, nullptr, 0},
+      {PGACCEL_GEOM_LINESTRING, common_bbox, collinear_line, 2, nullptr, 0},
+      {PGACCEL_GEOM_LINESTRING, common_bbox, base_line, 2, nullptr, 0},
+  };
+  int8_t line_results[] = {99, 99, 99, 99};
+  ASSERT_EQ(pgaccel_spatial_intersects_pairwise(line_a, line_b, 4, line_results), PGACCEL_OK);
+  ASSERT_EQ(line_results[0], -1);
+  ASSERT_EQ(line_results[1], 0);
+  ASSERT_EQ(line_results[2], 0);
+  ASSERT_EQ(line_results[3], 0);
+}
+
 /* ----------------------------------------------------------------
  * Test: unknown geometry type → uncertain
  * ---------------------------------------------------------------- */
@@ -589,6 +682,42 @@ TEST(point_in_polygon_bulk_coop_1024v_100k) {
   ASSERT_EQ(counts.other, 0u);
 }
 
+TEST(point_in_polygon_ring_and_hole_boundaries) {
+  float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+  float small_polygon[] = {
+      -1.0f,  -1.0f,  1.0f,  -1.0f,  1.0f,  1.0f,  -1.0f,  1.0f,  -1.0f,  -1.0f,
+      -0.25f, -0.25f, 0.25f, -0.25f, 0.25f, 0.25f, -0.25f, 0.25f, -0.25f, -0.25f,
+  };
+  uint32_t small_rings[] = {0, 5};
+  float points[] = {0.0f, 0.0f, 0.75f, 0.0f, 2.0f, 0.0f, 0.25f, 0.0f, 1.0f, 0.0f};
+  int8_t simple_results[] = {99, 99, 99, 99, 99};
+  ASSERT_EQ(pgaccel_point_in_polygon_bulk(points, 5, bbox, small_polygon, 10, small_rings, 2,
+                                          simple_results),
+            PGACCEL_OK);
+  ASSERT_EQ(simple_results[0], -1);
+  ASSERT_EQ(simple_results[1], 1);
+  ASSERT_EQ(simple_results[2], -1);
+  ASSERT_EQ(simple_results[3], 0);
+  ASSERT_EQ(simple_results[4], 0);
+
+  constexpr size_t outer_vertices = 1024;
+  std::vector<float> cooperative = make_regular_ring(outer_vertices, 1.0f);
+  cooperative.insert(cooperative.end(), std::begin(small_polygon) + 10, std::end(small_polygon));
+  uint32_t cooperative_rings[] = {0, outer_vertices + 1};
+  int8_t cooperative_results[] = {99, 99, 99, 99, 99};
+  pgaccel_reset_gpu_exec_count();
+  ASSERT_EQ(pgaccel_point_in_polygon_bulk(points, 5, bbox, cooperative.data(),
+                                          cooperative.size() / 2, cooperative_rings, 2,
+                                          cooperative_results),
+            PGACCEL_OK);
+  ASSERT_EQ(cooperative_results[0], -1);
+  ASSERT_EQ(cooperative_results[1], 1);
+  ASSERT_EQ(cooperative_results[2], -1);
+  ASSERT_EQ(cooperative_results[3], 0);
+  ASSERT_EQ(cooperative_results[4], 0);
+  ASSERT_EQ(pgaccel_gpu_exec_count(), 1u);
+}
+
 /* ----------------------------------------------------------------
  * Test: unsupported geometry-type pairs must be UNCERTAIN, never
  * silently DEFINITE_TRUE or DEFINITE_FALSE from the predicate layer.
@@ -689,16 +818,23 @@ int main() {
   run_legacy_cross_product_declines();
   run_pairwise_recheck_boundaries();
   run_malformed_pairwise_rings_decline_before_dispatch();
+  run_pairwise_contract_and_geometry_boundaries();
   run_points_vs_polygon();
   run_all_bbox_miss();
   run_point_vs_point();
   run_line_vs_line();
+  run_pairwise_reverse_polygon_and_line_boundaries();
   run_unknown_geom_type();
   run_total_partitioning();
   run_point_in_polygon_bulk_simple_100k_selectivity_sweep();
   run_point_in_polygon_bulk_coop_1024v_100k();
+  run_point_in_polygon_ring_and_hole_boundaries();
   run_unsupported_pairs_are_uncertain();
 
+  if (pgaccel_shutdown() != PGACCEL_OK) {
+    fprintf(stderr, "pgaccel_shutdown failed\n");
+    g_tests_failed++;
+  }
   printf("\n%d passed, %d failed\n", g_tests_passed, g_tests_failed);
   return g_tests_failed > 0 ? 1 : 0;
 }

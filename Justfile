@@ -785,12 +785,9 @@ update-cpu-cheat-abi-manifest:
         --headers \
         pgaccel-kernels/include/pgaccel_ffi.h \
         pgaccel-kernels/include/pgaccel_expr.h \
-        pgaccel-kernels/include/pgaccel_fused.h \
-        pgaccel-kernels/include/pgaccel_hash_agg.h \
         pgaccel-kernels/include/pgaccel_hash_join.h \
-        pgaccel-kernels/include/pgaccel_nested_loop_ineq.h \
         pgaccel-kernels/include/pgaccel_olap.h \
-        pgaccel-kernels/include/pgaccel_window.h
+        pgaccel-kernels/include/pgaccel_resident_count.h
 
 # === CI ===
 

@@ -1,8 +1,8 @@
 //! Shared FFI types for the GPU kernel bridge.
 //!
-//! These `#[repr(C)]` types mirror `pgaccel-kernels/include/pgaccel_ffi.h`
-//! and `pgaccel_fused.h` exactly and are the single source of truth for
-//! the Rust side of the bridge (`bridge.rs`).
+//! These `#[repr(C)]` types mirror the public C headers in
+//! `pgaccel-kernels/include` and are the single source of truth for the Rust
+//! side of the bridge (`bridge.rs`).
 //!
 //! **Layout is load-bearing.** Do not reorder fields, change variant
 //! discriminants, or change underlying integer widths. Any drift corrupts
@@ -122,8 +122,7 @@ const _: () = assert!(std::mem::size_of::<PgaccelDeviceInfo>() == 216);
 //                            pgaccel_expr_program, pgaccel_batch,
 //                            pgaccel_expr_usm_col, resident batch fabric
 //   - `pgaccel_ffi.h`      — pgaccel_geometry and resident raster ABI
-//   - `pgaccel_hash_agg.h` — pgaccel_agg_col
-//   - `pgaccel_fused.h`    — pgaccel_reduce_col
+//   - `pgaccel_resident_count.h` — opaque resident grouped-count state
 // If one fires, the two sides drifted — fix the drift, never the number.
 // The C headers mirror the same values with static assertions.
 // ---------------------------------------------------------------------------
@@ -448,45 +447,11 @@ pub struct PgaccelDeviceVarOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Hash aggregation types (mirrors pgaccel_hash_agg.h).
+// Resident grouped COUNT types (mirrors pgaccel_resident_count.h).
 // ---------------------------------------------------------------------------
 
-/// Opaque handle to GPU hash aggregation state.
+/// Opaque handle to a resident grouped COUNT result.
 pub enum PgaccelAggState {}
-
-// ---------------------------------------------------------------------------
-// Hash join types (mirrors pgaccel_hash_join.h).
-// ---------------------------------------------------------------------------
-
-/// Key type for hash join / hash agg operations.
-///
-/// Discriminant values must match the C `pgaccel_key_type` enum in
-/// `pgaccel-kernels/include/pgaccel_hash_join.h`. Slot 3 is reserved
-/// on the planner side for `CompositeInt4x2` (two int4 columns packed
-/// into one int8); the executor unpacks composites to int8 before
-/// kernel dispatch, so the kernel never sees `key_type == 3`. UUID
-/// occupies slot 4 to keep the kernel-facing values one-to-one with
-/// what the kernel actually receives.
-#[repr(i32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // reason: numeric variants are part of the stable C hash-key ABI
-pub enum PgaccelKeyType {
-    Int32 = 0,
-    Int64 = 1,
-    Float64 = 2,
-    /// 16-byte UUID, host byte order. Hashed via two `hash64()` mixes
-    /// XORed together inside the kernel.
-    Uuid = 4,
-    /// 24-byte canonical INET / CIDR key (family + bits + 16-byte
-    /// ipaddr + 6-byte u64-alignment pad). Hashed via three
-    /// `hash64()` mixes XORed together. CIDR shares the slot — the
-    /// planner classifier maps both INETOID (869) and CIDROID (650)
-    /// to this variant.
-    Inet = 5,
-}
-
-/// Opaque handle to a GPU-side hash table.
-pub enum PgaccelHashTable {}
 
 // ---------------------------------------------------------------------------
 // Geometry types for the three-layer spatial pipeline.

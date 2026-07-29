@@ -156,6 +156,38 @@ static void test_f64_signed_zero_and_infinity() {
   CHECK(result[1] == 0 && hits == 0, "f64 infinity preserves ordered disjointness");
 }
 
+static void test_optional_hits_empty_axes_and_negative_ordering() {
+  float f32_box[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  double f64_box[] = {0.0, 0.0, 1.0, 1.0};
+  uint8_t result = 0;
+
+  CHECK(pgaccel_bbox_intersects_bulk_f32(f32_box, 1, f32_box, 1, &result, nullptr) == PGACCEL_OK,
+        "f32 optional hit count returns OK");
+  CHECK(result == 1, "f32 optional hit count preserves result");
+  result = 0;
+  CHECK(pgaccel_bbox_intersects_bulk_f64(f64_box, 1, f64_box, 1, &result, nullptr) == PGACCEL_OK,
+        "f64 optional hit count returns OK");
+  CHECK(result == 1, "f64 optional hit count preserves result");
+
+  CHECK(pgaccel_bbox_intersects_bulk_f32(nullptr, 0, f32_box, 1, nullptr, nullptr) == PGACCEL_OK,
+        "empty f32 left axis returns OK");
+  CHECK(pgaccel_bbox_intersects_bulk_f32(f32_box, 1, nullptr, 0, nullptr, nullptr) == PGACCEL_OK,
+        "empty f32 right axis returns OK");
+  CHECK(pgaccel_bbox_intersects_bulk_f64(nullptr, 0, f64_box, 1, nullptr, nullptr) == PGACCEL_OK,
+        "empty f64 left axis returns OK");
+  CHECK(pgaccel_bbox_intersects_bulk_f64(f64_box, 1, nullptr, 0, nullptr, nullptr) == PGACCEL_OK,
+        "empty f64 right axis returns OK");
+
+  double negative_a[] = {-10.0, -1.0, -5.0, 1.0};
+  double negative_b[] = {-4.0, -1.0, -3.0, 1.0};
+  size_t hits = 99;
+  result = 99;
+  CHECK(pgaccel_bbox_intersects_bulk_f64(negative_a, 1, negative_b, 1, &result, &hits) ==
+            PGACCEL_OK,
+        "negative f64 ordering returns OK");
+  CHECK(result == 0 && hits == 0, "negative f64 endpoints preserve ordered disjointness");
+}
+
 static void test_f64_multi_pair_layout() {
   double a[] = {
       0.0, 0.0, 2.0, 2.0, 10.0, 10.0, 12.0, 12.0,
@@ -191,6 +223,17 @@ static void test_f64_invalid_and_overflow() {
   CHECK(pgaccel_bbox_intersects_bulk_f64(box, overflowing_box_count, box, 1, &result, &hits) ==
             PGACCEL_ERROR,
         "overflowing f64 box count returns ERROR");
+  CHECK(pgaccel_bbox_intersects_bulk_f64(box, 1, box, overflowing_box_count, &result, &hits) ==
+            PGACCEL_ERROR,
+        "overflowing f64 right box count returns ERROR");
+  const size_t overflowing_byte_count = std::numeric_limits<size_t>::max() / sizeof(uint64_t) + 1;
+  CHECK(pgaccel_bbox_intersects_bulk_f64(box, overflowing_byte_count, box, 1, &result, &hits) ==
+            PGACCEL_ERROR,
+        "overflowing f64 byte count returns ERROR");
+  const size_t pair_overflow_count = std::numeric_limits<size_t>::max() / 32;
+  CHECK(pgaccel_bbox_intersects_bulk_f64(box, pair_overflow_count, box, 33, &result, &hits) ==
+            PGACCEL_ERROR,
+        "overflowing f64 pair product returns ERROR");
   CHECK(pgaccel_gpu_exec_count() == 0, "invalid f64 calls do not record GPU execution");
 }
 
@@ -207,6 +250,15 @@ static void test_null_pointers() {
 
   s = pgaccel_bbox_intersects_bulk_f32(a, 1, a, 1, nullptr, &hits);
   CHECK(s == PGACCEL_ERROR, "null result returns ERROR");
+
+  const size_t overflowing_box_count = std::numeric_limits<size_t>::max() / 4 + 1;
+  s = pgaccel_bbox_intersects_bulk_f32(a, overflowing_box_count, a, 1, &result, &hits);
+  CHECK(s == PGACCEL_ERROR, "overflowing f32 box count returns ERROR");
+  s = pgaccel_bbox_intersects_bulk_f32(a, 1, a, overflowing_box_count, &result, &hits);
+  CHECK(s == PGACCEL_ERROR, "overflowing f32 right box count returns ERROR");
+  s = pgaccel_bbox_intersects_bulk_f32(a, std::numeric_limits<size_t>::max() / 4, a, 5,
+                                       &result, &hits);
+  CHECK(s == PGACCEL_ERROR, "overflowing f32 pair product returns ERROR");
 }
 
 int main() {
@@ -221,6 +273,7 @@ int main() {
   test_f64_pair_semantics();
   test_f64_nan_is_conservative();
   test_f64_signed_zero_and_infinity();
+  test_optional_hits_empty_axes_and_negative_ordering();
   test_f64_multi_pair_layout();
   test_f64_invalid_and_overflow();
   test_null_pointers();

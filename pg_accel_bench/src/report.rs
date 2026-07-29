@@ -169,6 +169,11 @@ pub struct IterationResult {
     pub accel_ms: f64,
     /// Execution time in milliseconds with PG parallel workers (pg_accel off).
     pub parallel_ms: f64,
+    /// Whether the pg_accel-enabled arm ran before the disabled PostgreSQL
+    /// arm for this pair. Older reports deserialize this as `false`; release
+    /// analyzers require an explicitly balanced order in newly sealed runs.
+    #[serde(default)]
+    pub accel_first: bool,
     /// Outcome of the OS page-cache purge requested for this iteration.
     #[serde(default)]
     pub cache_purge: CachePurgeState,
@@ -2345,10 +2350,10 @@ pub fn gpu_resident_boundary_reason_for_strategy(strategy: &str) -> Option<&'sta
             "GpuAgg drains heap or child tuples on CPU and stages host input/key/value buffers before GPU reduce or grouped aggregation"
         }
         "GpuSort" => {
-            "GpuSort materializes input tuples on CPU, sends key vectors only, reorders host MinimalTuples, and emits PostgreSQL slots"
+            "GpuSort is a retired wire identity; standalone sort must stay PostgreSQL-native because no sort kernel/executor is registered"
         }
         "GpuWindow" => {
-            "GpuWindow buffers input MinimalTuples, extracts host columns, stores host result vectors, and emits PostgreSQL slots"
+            "GpuWindow is a retired wire identity; standalone window must stay PostgreSQL-native because no window kernel/executor is registered"
         }
         "GpuPreAgg" => {
             "GpuPreAgg materializes dimensions in host HashMap state and scans/probes fact rows through ExecProcNode/materialized slots"
@@ -5625,6 +5630,7 @@ mod tests {
                 IterationResult {
                     accel_ms: accel_ms + jitter,
                     parallel_ms: baseline_ms + jitter,
+                    accel_first: i % 2 == 0,
                     cache_purge: CachePurgeState::NotRequested,
                     cache_state: CacheState::Warm,
                 }
@@ -5754,6 +5760,7 @@ mod tests {
         let iters = vec![IterationResult {
             accel_ms: 5.0,
             parallel_ms: 10.0,
+            accel_first: false,
             cache_purge: CachePurgeState::NotRequested,
             cache_state: CacheState::Warm,
         }];
@@ -5768,6 +5775,18 @@ mod tests {
         );
         assert!((result.accel_mean_ms - 5.0).abs() < f64::EPSILON);
         assert!((result.speedup_vs_parallel - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn iteration_result_defaults_missing_arm_order_for_old_reports() {
+        let decoded: IterationResult = serde_json::from_value(serde_json::json!({
+            "accel_ms": 5.0,
+            "parallel_ms": 10.0,
+            "cache_purge": "not_requested",
+            "cache_state": "warm"
+        }))
+        .expect("legacy iteration should deserialize");
+        assert!(!decoded.accel_first);
     }
 
     /// Minimal `CacheModeSummary` builder for tests that need to plant a
@@ -5805,6 +5824,7 @@ mod tests {
             .map(|_| IterationResult {
                 accel_ms: 20.0,
                 parallel_ms: 40.0,
+                accel_first: false,
                 cache_purge: purge,
                 cache_state: CacheState::Cold,
             })
@@ -6134,18 +6154,21 @@ mod tests {
             IterationResult {
                 accel_ms: 250.0,
                 parallel_ms: 40.0,
+                accel_first: true,
                 cache_purge: CachePurgeState::NotRequested,
                 cache_state: CacheState::Warm,
             },
             IterationResult {
                 accel_ms: 30.0,
                 parallel_ms: 35.0,
+                accel_first: false,
                 cache_purge: CachePurgeState::NotRequested,
                 cache_state: CacheState::Warm,
             },
             IterationResult {
                 accel_ms: 80.0,
                 parallel_ms: 32.0,
+                accel_first: true,
                 cache_purge: CachePurgeState::NotRequested,
                 cache_state: CacheState::Warm,
             },
@@ -6166,12 +6189,14 @@ mod tests {
             IterationResult {
                 accel_ms: 50.0,
                 parallel_ms: 40.0,
+                accel_first: true,
                 cache_purge: CachePurgeState::NotRequested,
                 cache_state: CacheState::Warm,
             },
             IterationResult {
                 accel_ms: 1_500.0,
                 parallel_ms: 42.0,
+                accel_first: false,
                 cache_purge: CachePurgeState::NotRequested,
                 cache_state: CacheState::Warm,
             },
@@ -8340,11 +8365,11 @@ mod tests {
             ),
             (
                 "GpuSort",
-                "GpuSort materializes input tuples on CPU, sends key vectors only, reorders host MinimalTuples, and emits PostgreSQL slots",
+                "GpuSort is a retired wire identity; standalone sort must stay PostgreSQL-native because no sort kernel/executor is registered",
             ),
             (
                 "GpuWindow",
-                "GpuWindow buffers input MinimalTuples, extracts host columns, stores host result vectors, and emits PostgreSQL slots",
+                "GpuWindow is a retired wire identity; standalone window must stay PostgreSQL-native because no window kernel/executor is registered",
             ),
             (
                 "GpuPreAgg",
@@ -8369,6 +8394,7 @@ mod tests {
                 reason.contains("CPU")
                     || reason.contains("ExecProcNode")
                     || reason.contains("host")
+                    || reason.contains("PostgreSQL-native")
                     || reason.contains("PostgreSQL slots")
                     || reason.contains("PostgreSQL tuples"),
                 "{strategy} boundary reason must identify the CPU/PostgreSQL boundary: {reason}"
@@ -8411,6 +8437,7 @@ mod tests {
             vec![IterationResult {
                 accel_ms: 5.0,
                 parallel_ms: 10.0,
+                accel_first: false,
                 cache_purge: CachePurgeState::NotRequested,
                 cache_state: CacheState::Warm,
             }],

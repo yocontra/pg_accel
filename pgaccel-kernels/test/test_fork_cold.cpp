@@ -23,8 +23,8 @@
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
-#include "pgaccel_hash_agg.h"
 #include "pgaccel_hash_join.h"
+#include "pgaccel_resident_count.h"
 
 static size_t count_metalar_files() {
   const char* home = std::getenv("HOME");
@@ -213,15 +213,28 @@ int main() {
     }
     printf("Child: reduce_min_f32 = %f OK\n", min_val);
 
-    // Sort test
-    float keys[8] = {3.0f, 1.0f, 4.0f, 1.0f, 5.0f, 9.0f, 2.0f, 6.0f};
-    uint32_t vals[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-    st = pgaccel_sort_kv_f32(keys, vals, 8);
-    if (st != PGACCEL_OK) {
-      fprintf(stderr, "Child: sort_kv_f32 failed: status=%d\n", st);
-      _exit(6);
+    // Retained resident count-only join.
+    {
+      const int32_t keys[] = {3, 1, 3, 5, 3, 1, 9, 2};
+      void* device_keys = nullptr;
+      st = pgaccel_expr_device_alloc_copy(keys, sizeof(keys), &device_keys);
+      pgaccel_hash_table* table = nullptr;
+      if (st == PGACCEL_OK && device_keys != nullptr) {
+        table = pgaccel_hash_join_build_device_count(device_keys, nullptr, 8, PGACCEL_KEY_INT32);
+      }
+      size_t count = 0;
+      if (table != nullptr)
+        st = pgaccel_hash_join_count_device(table, device_keys, nullptr, 8, &count);
+      if (table == nullptr || st != PGACCEL_OK || count != 16) {
+        fprintf(stderr, "Child: resident join failed: status=%d count=%zu\n", st, count);
+        pgaccel_hash_join_free(table);
+        pgaccel_expr_device_free(device_keys);
+        _exit(6);
+      }
+      pgaccel_hash_join_free(table);
+      pgaccel_expr_device_free(device_keys);
+      printf("Child: resident count-only hash join OK\n");
     }
-    printf("Child: sort_kv_f32 OK (first 3 keys: %f %f %f)\n", keys[0], keys[1], keys[2]);
 
     // ── fp64 cold-dispatch matrix ──────────────────────────────────
     // Post fp64-unlock plan, fp64 GPU kernel families must cold-dispatch
@@ -242,17 +255,6 @@ int main() {
         _exit(10);
       }
       printf("Child: cold fp64 reduce_sum_f64 = %f OK\n", s64);
-    }
-    // sort_f64
-    {
-      double k[8] = {7.5, -1.0, 3.25, 2.0, 9.0, 0.0, -3.5, 4.0};
-      uint32_t idx[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-      st = pgaccel_sort_kv_f64(k, idx, 8);
-      if (st != PGACCEL_OK) {
-        fprintf(stderr, "Child: fp64 sort_kv_f64 status=%d\n", st);
-        _exit(11);
-      }
-      printf("Child: cold fp64 sort_kv_f64 OK (first=%f last=%f)\n", k[0], k[7]);
     }
     // spatial_f64 (PIP fp64 recheck)
     {
@@ -398,6 +400,11 @@ int main() {
     printf("Cold Metal init in forked child WORKS!\n");
     printf("GPU kernels execute on real GPU hardware after fork.\n");
     printf("Metal binary archives work directly in forked PG backends.\n");
+    st = pgaccel_shutdown();
+    if (st != PGACCEL_OK) {
+      fprintf(stderr, "Child: pgaccel_shutdown FAILED: %d\n", st);
+      _exit(24);
+    }
     _exit(0);
   }
 
@@ -436,6 +443,9 @@ int main() {
         break;
       case 19:
         printf("FAIL: Cold cooperative point-in-polygon produced wrong results.\n");
+        break;
+      case 24:
+        printf("FAIL: GPU runtime shutdown failed in the forked child.\n");
         break;
       default:
         printf("FAIL: Child exited with code %d\n", rc);

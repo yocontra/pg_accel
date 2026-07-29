@@ -43,7 +43,6 @@ static pid_t g_init_pid = 0;
 static pgaccel_device_info g_device_info = {};
 static pgaccel_platform_caps g_caps = {};
 
-// Accessed by other translation units (sort.cpp, window.cpp, mem_pool.cpp) via extern.
 sycl::queue* g_queue = nullptr;
 sycl::queue* g_ooo_queue = nullptr;
 
@@ -316,11 +315,6 @@ extern "C" pgaccel_status pgaccel_shutdown(void) {
   // guaranteed to be called from the PG backend main thread (single writer).
   if (g_queue != nullptr || g_ooo_queue != nullptr) {
     try {
-      if (g_ooo_queue != nullptr)
-        g_ooo_queue->wait_and_throw();
-      if (g_queue != nullptr)
-        g_queue->wait_and_throw();
-      pgaccel_pool_reset();
       if (g_ooo_queue != nullptr)
         g_ooo_queue->wait_and_throw();
       if (g_queue != nullptr)

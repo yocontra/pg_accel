@@ -288,7 +288,8 @@ pgaccel_status pgaccel_expr_eval_project(const pgaccel_expr_program* program,
 );
 
 /*
- * Allocate/free SYCL shared-USM memory owned by the expression-template ABI.
+ * Allocate/free SYCL shared-USM memory used by resident kernel tests and
+ * callers that require host-writable, device-readable storage.
  * Returned memory is host-writable and device-readable by pgaccel kernels.
  */
 pgaccel_status pgaccel_expr_shared_alloc(size_t bytes, void** out);
@@ -306,92 +307,6 @@ pgaccel_status pgaccel_expr_device_alloc_copy(const void* src, size_t bytes, voi
 pgaccel_status pgaccel_expr_device_copy_from_host(void* dst, const void* src, size_t bytes);
 pgaccel_status pgaccel_expr_device_copy_to_host(void* dst, const void* src, size_t bytes);
 void pgaccel_expr_device_free(void* ptr);
-
-/*
- * Fused template predicate + COUNT(*) helpers.
- *
- * These are for aggregate fusion: count only definite TRUE rows inside the
- * GPU kernel and return one scalar to the executor. FALSE and SQL NULL inputs
- * are excluded. Current template predicates do not produce UNCERTAIN, so
- * uncertain_count is set to 0 when provided.
- */
-pgaccel_status pgaccel_expr_template_cmp_const_count(const pgaccel_batch* batch, uint32_t col_idx,
-                                                     uint16_t cmp_opcode, double const_val,
-                                                     size_t* true_count, size_t* uncertain_count);
-
-pgaccel_status pgaccel_expr_template_two_pred_and_count(const pgaccel_batch* batch,
-                                                        uint32_t col1_idx, uint16_t cmp1_opcode,
-                                                        double const1_val, uint32_t col2_idx,
-                                                        uint16_t cmp2_opcode, double const2_val,
-                                                        size_t* true_count,
-                                                        size_t* uncertain_count);
-
-pgaccel_status pgaccel_expr_template_cmp_const_count_usm(pgaccel_expr_usm_col col, size_t row_count,
-                                                         uint16_t cmp_opcode, double const_val,
-                                                         size_t* true_count,
-                                                         size_t* uncertain_count);
-
-pgaccel_status pgaccel_expr_template_cmp_const_mask_usm(pgaccel_expr_usm_col col, size_t row_count,
-                                                        uint16_t cmp_opcode, double const_val,
-                                                        uint8_t* selection, size_t* true_count,
-                                                        size_t* uncertain_count);
-
-pgaccel_status pgaccel_expr_template_cmp_const_reduce_f32_usm(
-    pgaccel_expr_usm_col pred_col, uint16_t cmp_opcode, double const_val,
-    pgaccel_expr_usm_col value_col, size_t row_count, float* out_sum, float* out_min,
-    float* out_max, int64_t* out_value_count, size_t* true_count, size_t* uncertain_count);
-
-pgaccel_status pgaccel_expr_template_two_pred_and_count_usm(pgaccel_expr_usm_col col1,
-                                                            uint16_t cmp1_opcode, double const1_val,
-                                                            pgaccel_expr_usm_col col2,
-                                                            uint16_t cmp2_opcode, double const2_val,
-                                                            size_t row_count, size_t* true_count,
-                                                            size_t* uncertain_count);
-
-pgaccel_status pgaccel_expr_template_two_pred_and_mask_usm(
-    pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
-    uint16_t cmp2_opcode, double const2_val, size_t row_count, uint8_t* selection,
-    size_t* true_count, size_t* uncertain_count);
-
-pgaccel_status pgaccel_expr_template_two_pred_and_reduce_f32_usm(
-    pgaccel_expr_usm_col col1, uint16_t cmp1_opcode, double const1_val, pgaccel_expr_usm_col col2,
-    uint16_t cmp2_opcode, double const2_val, pgaccel_expr_usm_col value_col, size_t row_count,
-    float* out_sum, float* out_min, float* out_max, int64_t* out_value_count, size_t* true_count,
-    size_t* uncertain_count);
-
-/*
- * Simple predicate templates writing per-row three-result int8 outputs
- * (PGACCEL_EXPR_TRUE / _FALSE / _UNCERTAIN). These symbols are exported by
- * expr_templates.cpp and consumed by the Rust externs in
- * pg_accel/src/gpu/bridge.rs; until 2026-07 they were declared in no C
- * header at all, so nothing pinned the two sides together. Keep these
- * declarations byte-for-byte in sync with both the definitions and the
- * Rust externs.
- */
-
-/* Template: col <cmp> const. */
-pgaccel_status pgaccel_expr_template_cmp_const(const pgaccel_batch* batch, uint32_t col_idx,
-                                               uint16_t cmp_opcode, double const_val,
-                                               int8_t* results);
-
-/* Template: col BETWEEN lo AND hi (inclusive). */
-pgaccel_status pgaccel_expr_template_between(const pgaccel_batch* batch, uint32_t col_idx,
-                                             double lo, double hi, int8_t* results);
-
-/* Template: col IN (v0..vN) — up to 16 values. */
-pgaccel_status pgaccel_expr_template_in_list(const pgaccel_batch* batch, uint32_t col_idx,
-                                             const double* values, size_t value_count,
-                                             int8_t* results);
-
-/* Template: col IS NULL / IS NOT NULL. */
-pgaccel_status pgaccel_expr_template_is_null(const pgaccel_batch* batch, uint32_t col_idx,
-                                             bool check_not_null, int8_t* results);
-
-/* Template: col1 <cmp1> const1 AND col2 <cmp2> const2. */
-pgaccel_status pgaccel_expr_template_two_pred_and(const pgaccel_batch* batch, uint32_t col1_idx,
-                                                  uint16_t cmp1_opcode, double const1_val,
-                                                  uint32_t col2_idx, uint16_t cmp2_opcode,
-                                                  double const2_val, int8_t* results);
 
 /* ── ABI pins ─────────────────────────────────────────────────────── */
 /*

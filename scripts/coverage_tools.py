@@ -25,9 +25,9 @@ SCHEMA_VERSION = 2
 FIXED_THRESHOLD = 90.0
 BASELINE_SQL_FILES = 52
 BASELINE_SQL_ASSERTIONS = 287
-BASELINE_CPP_SOURCES = 21
-BASELINE_CPP_DEVICE_OBJECTS = 20
-BASELINE_CPP_TESTS = 29
+BASELINE_CPP_SOURCES = 16
+BASELINE_CPP_DEVICE_OBJECTS = 15
+BASELINE_CPP_TESTS = 32
 SQL_COVERAGE_KERNEL_TIMEOUT_MS = 60_000
 COVERAGE_HELPER_TEST_PATTERN = "test_coverage*.py"
 REQUIRED_COVERAGE_HELPER_TESTS = frozenset(
@@ -39,7 +39,6 @@ UINT64_MAX = (1 << 64) - 1
 ACCELERATOR_BACKENDS = {"metal", "cuda", "hip", "level_zero"}
 PINNED_CPP_EXECUTABLE_HEADERS = {
     "pgaccel-kernels/include/alloc_helper.h",
-    "pgaccel-kernels/include/pgaccel_hash_agg.h",
     "pgaccel-kernels/include/pgaccel_queue.h",
     "pgaccel-kernels/src/h3_exact_device.hpp",
     "pgaccel-kernels/src/h3_float_device.hpp",
@@ -2043,13 +2042,17 @@ def validate_sql_manifest(
 
 
 def cmake_registered_tests(cmake: str) -> list[str]:
-    return sorted(
-        re.findall(
+    gpu_tests = re.findall(
             r"^add_pgaccel_gpu_test\(([A-Za-z0-9_.-]+)(?:\s+TIMEOUT\s+[0-9]+)?\)\s*$",
             cmake,
             flags=re.MULTILINE,
         )
+    direct_tests = re.findall(
+        r"^\s*add_test\(\s*NAME\s+([A-Za-z0-9_.-]+)\s+COMMAND\b",
+        cmake,
+        flags=re.MULTILINE,
     )
+    return sorted(set(gpu_tests) | set(direct_tests))
 
 
 def release_baseline_document(
@@ -2113,8 +2116,8 @@ def release_baseline_document(
             },
             "oom_families": [
                 "reduce_f64",
-                "sort_f64",
-                "hashagg_f64",
+                "expr_vm_f64",
+                "grouped_agg_i32_mul",
                 "spatial_f64",
                 "h3_f64",
             ],
@@ -3885,7 +3888,8 @@ def recompute_raw_line_layer(
             or scope_required != required
         ):
             errors.append(
-                "cpp: owned sources differ from the 21-source release baseline"
+                "cpp: owned sources differ from the "
+                f"{BASELINE_CPP_SOURCES}-source release baseline"
             )
         final_json = (
             regenerated["json"]
@@ -5072,7 +5076,6 @@ def inspect_gpu_evidence(
             or family["peak_rss_bytes"] < family["rss_baseline_bytes"]
             or family["rss_delta_bytes"]
             != family["peak_rss_bytes"] - family["rss_baseline_bytes"]
-            or family["peak_rss_bytes"] > family["rss_limit_bytes"]
             or family["rss_delta_bytes"] > family["rss_limit_bytes"]
         ):
             errors.append(f"OOM proof is invalid for family {name}")
@@ -5134,6 +5137,7 @@ def inspect_gpu_evidence(
         "device": device,
         "families": families,
         "oom_invariant": invariant,
+        "oom_rss_contract": "per_family_peak_minus_baseline_growth",
         "total_oom_dispatches": sum(
             family["dispatches"] for family in families.values()
         ),
@@ -5436,7 +5440,7 @@ def audit_scope(args: argparse.Namespace) -> int:
         "record_stage cpp ooo_overlap_diagnostic",
         '"$build_dir/test_ooo_overlap"',
         'if [ "$status" -ne 1 ]',
-        "test_ooo_overlap: sort/window GPU spans did not overlap",
+        "test_ooo_overlap: resident/reduce GPU spans did not overlap",
         "pgaccel-ooo-%p-%m.profraw",
         '--object "$build_dir/test_ooo_overlap"',
         '--per-test-log-dir "$per_test_log_dir"',
@@ -5523,7 +5527,8 @@ def audit_scope(args: argparse.Namespace) -> int:
         or scoped_cpp_sources != pinned_cpp_sources
     ):
         raise CoverageError(
-            "C++ scope must equal the 20 shared-target sources plus OOO diagnostic support"
+            "C++ scope must equal the "
+            f"{BASELINE_CPP_DEVICE_OBJECTS} shared-target sources plus OOO diagnostic support"
         )
     executable_headers = {
         path
@@ -5552,8 +5557,8 @@ def audit_scope(args: argparse.Namespace) -> int:
         "std::min<size_t>(N, size_t{256} * 1024 * 1024)",
         "const size_t rss_ceiling = 3 * max_alloc;",
         "run_reduce_family(N_capped, rss_ceiling)",
-        "run_sort_family(N_capped / 2, rss_ceiling)",
-        "run_hashagg_family(N_capped / 2, rss_ceiling)",
+        "run_expr_vm_family(N_capped, rss_ceiling)",
+        "run_grouped_agg_family(N_capped, rss_ceiling)",
         "run_spatial_family(N_capped / 2, rss_ceiling)",
         "run_h3_family(N_capped / 2, rss_ceiling)",
         "PGACCEL_DEVICE_PROOF",

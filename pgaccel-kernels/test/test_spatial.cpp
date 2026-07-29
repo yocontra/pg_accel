@@ -1,3 +1,7 @@
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -922,6 +926,30 @@ static void test_point_in_polygon_bulk_coop_slab_large_batch_with_hole() {
   ASSERT_EQ("coop slab wrote every result", counts.untouched, (size_t)0);
 }
 
+static void test_point_in_polygon_bulk_coop_ring_layouts() {
+  printf("--- point_in_polygon_bulk: cooperative implicit and short rings ---\n");
+
+  constexpr size_t unique_vertices = 1024;
+  std::vector<float> polygon = make_regular_ring(unique_vertices, 1.0f);
+  const float bbox[] = {-1.0f, -1.0f, 1.0f, 1.0f};
+  const float point[] = {0.0f, 0.0f};
+  int8_t result = 99;
+
+  pgaccel_status status = pgaccel_point_in_polygon_bulk(point, 1, bbox, polygon.data(),
+                                                        unique_vertices + 1, nullptr, 0, &result);
+  ASSERT_EQ("coop implicit ring status OK", status, PGACCEL_OK);
+  ASSERT_EQ("coop implicit ring contains center", result, 1);
+
+  // The second ring has one vertex and is ignored. The first ring is still a
+  // valid implicit-closure polygon, so the center remains inside.
+  const uint32_t rings[] = {0, unique_vertices};
+  result = 99;
+  status = pgaccel_point_in_polygon_bulk(point, 1, bbox, polygon.data(), unique_vertices + 1, rings,
+                                         2, &result);
+  ASSERT_EQ("coop short trailing ring status OK", status, PGACCEL_OK);
+  ASSERT_EQ("coop short trailing ring is ignored", result, 1);
+}
+
 // ---------------------------------------------------------------------------
 // st_area_bulk tests — Shoelace formula on flat [x,y,x,y,...] CSR layout
 // ---------------------------------------------------------------------------
@@ -1197,6 +1225,60 @@ static void test_st_distance_polygon_polygon_degenerate() {
   ASSERT_EQ("degenerate → UNCERTAIN", unc[0], 1);
 }
 
+static void test_zero_capacity_rows_and_asymmetric_distance() {
+  printf("--- spatial CSR: zero-capacity rows and reverse distance sweep ---\n");
+
+  const uint32_t empty_offsets[] = {0, 0};
+  const float dummy_f32 = 0.0f;
+  const double dummy_f64 = 0.0;
+
+  float area = -1.0f;
+  ASSERT_EQ("empty nonzero area row status",
+            pgaccel_st_area_bulk(&dummy_f32, empty_offsets, 1, false, &area), PGACCEL_OK);
+  ASSERT_NEAR("empty nonzero area row value", area, 0.0f, 0.0f);
+
+  float length_f32 = -1.0f;
+  ASSERT_EQ("empty nonzero length f32 row status",
+            pgaccel_st_length_bulk(&dummy_f32, empty_offsets, 1, false, false, &length_f32),
+            PGACCEL_OK);
+  ASSERT_NEAR("empty nonzero length f32 row value", length_f32, 0.0f, 0.0f);
+
+  double length_f64 = -1.0;
+  ASSERT_EQ("empty nonzero length f64 row status",
+            pgaccel_st_length_bulk(&dummy_f64, empty_offsets, 1, true, false, &length_f64),
+            PGACCEL_OK);
+  ASSERT_NEAR("empty nonzero length f64 row value", length_f64, 0.0, 0.0);
+
+  float empty_distance = -1.0f;
+  uint8_t empty_uncertain = 0;
+  ASSERT_EQ("empty polygon pair status",
+            pgaccel_st_distance_polygon_polygon_bulk(&dummy_f32, empty_offsets, &dummy_f32,
+                                                     empty_offsets, 1, &empty_distance,
+                                                     &empty_uncertain),
+            PGACCEL_OK);
+  ASSERT_NEAR("empty polygon pair distance", empty_distance, 0.0f, 0.0f);
+  ASSERT_EQ("empty polygon pair uncertain", empty_uncertain, 1);
+
+  // A vertex of B is closest to the interior of A's upper edge. The reverse
+  // B-vertex-to-A-edge sweep must improve the first sweep's vertex distance.
+  const float rectangle[] = {
+      0.0f, 0.0f, 10.0f, 0.0f, 10.0f, 1.0f, 0.0f, 1.0f,
+  };
+  const float triangle[] = {
+      5.0f, 3.0f, 4.5f, 4.0f, 5.5f, 4.0f,
+  };
+  const uint32_t rectangle_offsets[] = {0, 8};
+  const uint32_t triangle_offsets[] = {0, 6};
+  float distance = -1.0f;
+  uint8_t uncertain = 1;
+  ASSERT_EQ("asymmetric distance status",
+            pgaccel_st_distance_polygon_polygon_bulk(rectangle, rectangle_offsets, triangle,
+                                                     triangle_offsets, 1, &distance, &uncertain),
+            PGACCEL_OK);
+  ASSERT_NEAR("asymmetric reverse-sweep distance", distance, 2.0f, 1.0e-5f);
+  ASSERT_EQ("asymmetric distance definite", uncertain, 0);
+}
+
 // ---------------------------------------------------------------------------
 // Algorithmic predicate tests (st_equals / _touches / _crosses / _overlaps).
 //
@@ -1229,6 +1311,127 @@ static pgaccel_geometry make_polygon_geom(const float* coords, size_t coord_coun
   g.ring_offsets = nullptr;
   g.ring_count = 0;
   return g;
+}
+
+static pgaccel_geometry make_linestring_geom(const float* coords, size_t coord_count,
+                                             const float* bbox) {
+  pgaccel_geometry g;
+  g.type = PGACCEL_GEOM_LINESTRING;
+  g.bbox = bbox;
+  g.coords = coords;
+  g.coord_count = coord_count;
+  g.ring_offsets = nullptr;
+  g.ring_count = 0;
+  return g;
+}
+
+static void test_pairwise_staging_and_validation_matrix() {
+  printf("--- spatial pairwise: implicit rings and staging validation ---\n");
+
+  const float square[] = {
+      0.0f, 0.0f, 2.0f, 0.0f, 2.0f, 2.0f, 0.0f, 2.0f, 0.0f, 0.0f,
+  };
+  const float square_bbox[] = {0.0f, 0.0f, 2.0f, 2.0f};
+  const float point_xy[] = {1.0f, 1.0f};
+  const float point_bbox[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  pgaccel_geometry point = make_point_geom(point_xy, point_bbox);
+  pgaccel_geometry polygon = make_polygon_geom(square, 5, square_bbox);
+
+  pgaccel_geometry left[] = {point, polygon};
+  pgaccel_geometry right[] = {polygon, point};
+  int8_t results[] = {99, 99};
+  ASSERT_EQ("implicit-ring pairwise status",
+            pgaccel_spatial_intersects_pairwise(left, right, 2, results), PGACCEL_OK);
+  ASSERT_EQ("point/polygon implicit ring intersects", results[0], 1);
+  ASSERT_EQ("polygon/point implicit ring intersects", results[1], 1);
+
+  int8_t sentinel = 77;
+  auto expect_invalid = [&](const char* label, const pgaccel_geometry& malformed) {
+    sentinel = 77;
+    ASSERT_EQ(label, pgaccel_spatial_intersects_pairwise(&malformed, &point, 1, &sentinel),
+              PGACCEL_ERROR);
+    ASSERT_EQ("invalid pairwise descriptor preserves output", sentinel, 77);
+  };
+
+  pgaccel_geometry malformed = make_linestring_geom(square, 2, square_bbox);
+  const uint32_t ring_zero[] = {0};
+  malformed.ring_offsets = ring_zero;
+  malformed.ring_count = 1;
+  expect_invalid("linestring rejects ring metadata", malformed);
+
+  malformed = make_polygon_geom(nullptr, 5, square_bbox);
+  expect_invalid("polygon rejects null coordinates", malformed);
+
+  malformed = make_polygon_geom(square, 3, square_bbox);
+  const uint32_t too_many_rings[] = {0, 1};
+  malformed.ring_offsets = too_many_rings;
+  malformed.ring_count = 2;
+  expect_invalid("polygon rejects excessive ring count", malformed);
+
+  malformed = make_polygon_geom(square, 5, square_bbox);
+  malformed.ring_count = 1;
+  expect_invalid("polygon rejects missing ring offsets", malformed);
+
+  const uint32_t nonzero_first_ring[] = {1};
+  malformed.ring_offsets = nonzero_first_ring;
+  expect_invalid("polygon rejects nonzero first ring", malformed);
+
+  malformed = make_polygon_geom(square, 6, square_bbox);
+  const uint32_t empty_first_ring[] = {0, 0};
+  malformed.ring_offsets = empty_first_ring;
+  malformed.ring_count = 2;
+  expect_invalid("polygon rejects empty ring span", malformed);
+
+  malformed = make_point_geom(point_xy, point_bbox);
+  malformed.coord_count = std::numeric_limits<size_t>::max();
+  expect_invalid("pairwise coordinate byte overflow rejected", malformed);
+
+  sentinel = 77;
+  ASSERT_EQ("pairwise metadata count overflow rejected",
+            pgaccel_spatial_intersects_pairwise(&point, &point, std::numeric_limits<size_t>::max(),
+                                                &sentinel),
+            PGACCEL_ERROR);
+  ASSERT_EQ("pairwise count overflow preserves output", sentinel, 77);
+
+  // SpatialPairwiseMeta is 56 bytes on this pinned 64-bit ABI. This count
+  // keeps each metadata multiplication representable while making the second
+  // aligned metadata region overflow the slab cursor.
+  const size_t pairwise_region_overflow_count =
+      std::numeric_limits<size_t>::max() / size_t{96} + 1;
+  ASSERT_EQ("pairwise metadata region overflow rejected",
+            pgaccel_spatial_intersects_pairwise(&point, &point, pairwise_region_overflow_count,
+                                                &sentinel),
+            PGACCEL_ERROR);
+
+  const pgaccel_platform_caps caps = pgaccel_get_caps();
+  if (caps.max_alloc_bytes > 0) {
+    malformed = make_point_geom(point_xy, point_bbox);
+    malformed.coord_count = caps.max_alloc_bytes / (2 * sizeof(float)) + 1;
+    sentinel = 77;
+    ASSERT_EQ("pairwise staged slab over device budget rejected",
+              pgaccel_spatial_intersects_pairwise(&malformed, &point, 1, &sentinel), PGACCEL_OOM);
+    ASSERT_EQ("pairwise budget rejection preserves output", sentinel, 77);
+  }
+}
+
+static void test_algorithmic_staging_overflow() {
+  printf("--- algorithmic predicate: staging overflow contract ---\n");
+
+  const float point_xy[] = {1.0f, 1.0f};
+  const float point_bbox[] = {1.0f, 1.0f, 1.0f, 1.0f};
+  const pgaccel_geometry point = make_point_geom(point_xy, point_bbox);
+  int8_t result = 77;
+  ASSERT_EQ("algorithmic metadata count overflow rejected",
+            pgaccel_st_equals_bulk(&point, &point, std::numeric_limits<size_t>::max(), &result),
+            PGACCEL_OOM);
+  ASSERT_EQ("algorithmic overflow preserves output", result, 77);
+
+  // AlgorithmicPredicateGeometryMeta is 72 bytes on the same ABI. Keep the
+  // multiplication valid but overflow when the second metadata region is
+  // appended, before any vector allocation or descriptor access.
+  const size_t region_overflow_count = std::numeric_limits<size_t>::max() / size_t{128} + 1;
+  ASSERT_EQ("algorithmic metadata region overflow rejected",
+            pgaccel_st_equals_bulk(&point, &point, region_overflow_count, &result), PGACCEL_OOM);
 }
 
 static void test_st_equals_bulk() {
@@ -1471,12 +1674,131 @@ static void test_algorithmic_predicate_slab_dispatch() {
   ASSERT_EQ("four algorithmic predicate kernels dispatched", (int)(after == before + 4), 1);
 }
 
+static void test_no_device_paths() {
+  printf("--- spatial APIs: no-device lifecycle ---\n");
+
+  const pgaccel_status init_status = pgaccel_init();
+  ASSERT_EQ("no-device initialization rejected", init_status != PGACCEL_OK, 1);
+  if (init_status == PGACCEL_OK) {
+    ASSERT_EQ("unexpected no-device initialization shuts down", pgaccel_shutdown(), PGACCEL_OK);
+    return;
+  }
+
+  const float point[] = {0.5f, 0.5f};
+  const double point64[] = {0.5, 0.5};
+  const float ring[] = {
+      0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+  };
+  const double ring64[] = {
+      0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0,
+  };
+  const float bbox[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  const uint32_t rings[] = {0};
+  const uint32_t offsets[] = {0, 10};
+  int8_t relation = 99;
+  float value = -1.0f;
+  double value64 = -1.0;
+  uint8_t uncertain = 0;
+
+  ASSERT_EQ("point-in-ring f32 reports no device",
+            pgaccel_point_in_ring_bulk(point, 1, ring, 5, false, &relation),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("point-in-ring f64 reports no device",
+            pgaccel_point_in_ring_bulk(point64, 1, ring64, 5, true, &relation),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("sphere distance f32 reports no device",
+            pgaccel_sphere_distance_bulk(point, point, 1, false, &value, &uncertain),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("sphere distance f64 reports no device",
+            pgaccel_sphere_distance_bulk(point64, point64, 1, true, &value64, &uncertain),
+            PGACCEL_ERROR_NO_DEVICE);
+
+  const float segment[] = {0.0f, 0.0f, 1.0f, 1.0f};
+  const double segment64[] = {0.0, 0.0, 1.0, 1.0};
+  ASSERT_EQ("segment f32 reports no device",
+            pgaccel_segment_intersects_bulk(segment, segment, 1, false, &relation),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("segment f64 reports no device",
+            pgaccel_segment_intersects_bulk(segment64, segment64, 1, true, &relation),
+            PGACCEL_ERROR_NO_DEVICE);
+
+  ASSERT_EQ("area reports no device", pgaccel_st_area_bulk(ring, offsets, 1, false, &value),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("length f32 reports no device",
+            pgaccel_st_length_bulk(ring, offsets, 1, false, true, &value), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("length f64 reports no device",
+            pgaccel_st_length_bulk(ring64, offsets, 1, true, true, &value64),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ(
+      "polygon distance reports no device",
+      pgaccel_st_distance_polygon_polygon_bulk(ring, offsets, ring, offsets, 1, &value, &uncertain),
+      PGACCEL_ERROR_NO_DEVICE);
+
+  const pgaccel_geometry geometry = make_point_geom(point, bbox);
+  ASSERT_EQ("equals reports no device", pgaccel_st_equals_bulk(&geometry, &geometry, 1, &relation),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("touches reports no device",
+            pgaccel_st_touches_bulk(&geometry, &geometry, 1, &relation), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("crosses reports no device",
+            pgaccel_st_crosses_bulk(&geometry, &geometry, 1, &relation), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("overlaps reports no device",
+            pgaccel_st_overlaps_bulk(&geometry, &geometry, 1, &relation), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("pairwise intersects reports no device",
+            pgaccel_spatial_intersects_pairwise(&geometry, &geometry, 1, &relation),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("point-in-polygon reports no device",
+            pgaccel_point_in_polygon_bulk(point, 1, bbox, ring, 5, rings, 1, &relation),
+            PGACCEL_ERROR_NO_DEVICE);
+
+  ASSERT_EQ("failed no-device initialization shuts down", pgaccel_shutdown(), PGACCEL_OK);
+}
+
+static bool run_no_device_child(const char* executable) {
+  const pid_t child = fork();
+  if (child < 0) {
+    std::fprintf(stderr, "FAIL fork no-device spatial matrix: errno=%d\n", errno);
+    return false;
+  }
+  if (child == 0) {
+    const char* visibility_mask = std::getenv("PGACCEL_TEST_NO_DEVICE_MASK");
+    setenv("ACPP_VISIBILITY_MASK", visibility_mask != nullptr ? visibility_mask : "cuda", 1);
+    setenv("PGACCEL_TEST_NO_DEVICE", "1", 1);
+    execl(executable, executable, static_cast<char*>(nullptr));
+    std::fprintf(stderr, "FAIL exec no-device spatial matrix: errno=%d\n", errno);
+    _exit(127);
+  }
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = waitpid(child, &status, 0);
+  } while (waited < 0 && errno == EINTR);
+  if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    std::fprintf(stderr, "FAIL no-device spatial matrix child: status=%d errno=%d\n", status,
+                 errno);
+    return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
-int main() {
+int main(int argc, char** argv) {
   printf("=== pgaccel spatial predicate tests ===\n\n");
+
+  if (std::getenv("PGACCEL_TEST_NO_DEVICE") != nullptr) {
+    test_no_device_paths();
+    printf("\n=== Results: %d/%d passed", g_tests_passed, g_tests_run);
+    if (g_tests_failed > 0)
+      printf(", %d FAILED", g_tests_failed);
+    printf(" ===\n");
+    return g_tests_failed > 0 ? 1 : 0;
+  }
+
+  ASSERT_EQ("no-device spatial child",
+            argc > 0 && argv[0] != nullptr && run_no_device_child(argv[0]), 1);
 
   // pgaccel_point_in_ring_bulk fp64 is a SYCL kernel (Phase 1 promotion);
   // it requires an initialized SYCL queue. Init is idempotent across the
@@ -1499,6 +1821,7 @@ int main() {
   test_point_in_polygon_bulk_coop_path();
   test_point_in_polygon_bulk_coop_hole_boundary();
   test_point_in_polygon_bulk_coop_slab_large_batch_with_hole();
+  test_point_in_polygon_bulk_coop_ring_layouts();
 
   test_sphere_distance_basic();
   test_sphere_distance_edge_cases();
@@ -1521,14 +1844,18 @@ int main() {
   test_st_distance_polygon_polygon_disjoint();
   test_st_distance_polygon_polygon_touching();
   test_st_distance_polygon_polygon_degenerate();
+  test_zero_capacity_rows_and_asymmetric_distance();
 
   test_st_equals_bulk();
+  test_pairwise_staging_and_validation_matrix();
+  test_algorithmic_staging_overflow();
   test_algorithmic_predicate_device_equality_adversarial();
   test_st_touches_bulk();
   test_st_crosses_bulk();
   test_st_overlaps_bulk();
   test_algorithmic_predicate_slab_dispatch();
 
+  ASSERT_EQ("pgaccel_shutdown", pgaccel_shutdown(), PGACCEL_OK);
   printf("\n=== Results: %d/%d passed", g_tests_passed, g_tests_run);
   if (g_tests_failed > 0) {
     printf(", %d FAILED", g_tests_failed);

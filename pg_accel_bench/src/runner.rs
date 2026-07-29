@@ -8,6 +8,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use postgres::{Client, NoTls};
 use rand::Rng;
+use rand::seq::SliceRandom;
 use serde::Serialize;
 
 use crate::artifacts::{ArtifactWriter, BenchmarkQueryIdentity, PreRiskContext};
@@ -1358,6 +1359,18 @@ pub fn setup(
     Ok(())
 }
 
+/// Build a randomized measured-arm schedule while keeping order exposure
+/// balanced. Even-sized runs contain exactly half accel-first pairs; odd
+/// runs randomize which arm receives the single extra first position.
+fn randomized_balanced_arm_order<R: Rng + ?Sized>(iterations: usize, rng: &mut R) -> Vec<bool> {
+    let extra_accel_first = iterations % 2 == 1 && rng.gen_bool(0.5);
+    let accel_first_count = iterations / 2 + usize::from(extra_accel_first);
+    let mut schedule = vec![false; iterations];
+    schedule[..accel_first_count].fill(true);
+    schedule.shuffle(rng);
+    schedule
+}
+
 /// Run a workload benchmark for the given number of iterations and return results.
 ///
 /// `warmup` iterations are run first and excluded from the statistics.
@@ -1485,6 +1498,7 @@ pub fn run_with_timing_and_cache(
     let mut results = Vec::with_capacity(iterations);
     let mut warmup_results = Vec::with_capacity(effective_warmup);
     let mut rng = rand::thread_rng();
+    let measured_accel_first = randomized_balanced_arm_order(iterations, &mut rng);
 
     // Two modes: accel vs PG parallel. Order randomized per iteration.
     let modes = [BenchMode::Accel, BenchMode::PgParallel];
@@ -1538,11 +1552,15 @@ pub fn run_with_timing_and_cache(
     for i in 0..total_runs {
         let is_warmup = i < effective_warmup;
 
-        // Randomize order to eliminate cache-warming bias.
-        let mut order: [usize; 2] = [0, 1];
-        if rng.gen_bool(0.5) {
-            order.swap(0, 1);
-        }
+        // Warmups are randomized independently. Measured pairs use a
+        // pre-shuffled balanced schedule so a ten-iteration release run has
+        // exactly five accel-first and five PostgreSQL-first observations.
+        let accel_first = if is_warmup {
+            rng.gen_bool(0.5)
+        } else {
+            measured_accel_first[i - effective_warmup]
+        };
+        let order: [usize; 2] = if accel_first { [0, 1] } else { [1, 0] };
 
         if !is_warmup && counter_before.is_none() && counter_capture_error.is_none() {
             match capture_dispatch_stats(&mut mode_clients[0]) {
@@ -1617,6 +1635,7 @@ pub fn run_with_timing_and_cache(
         let iteration_result = IterationResult {
             accel_ms,
             parallel_ms,
+            accel_first,
             cache_purge,
             cache_state: CacheState::from(cache_mode),
         };
@@ -4257,6 +4276,8 @@ fn parse_actual_rows(line: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     struct TestDir {
         path: PathBuf,
@@ -4289,6 +4310,24 @@ mod tests {
     }
 
     #[test]
+    fn measured_arm_order_is_randomized_and_balanced() {
+        for seed in 0..32 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let schedule = randomized_balanced_arm_order(10, &mut rng);
+            assert_eq!(schedule.len(), 10);
+            assert_eq!(
+                schedule.iter().filter(|&&accel_first| accel_first).count(),
+                5
+            );
+        }
+
+        let mut rng = StdRng::seed_from_u64(42);
+        let odd = randomized_balanced_arm_order(9, &mut rng);
+        let accel_first = odd.iter().filter(|&&value| value).count();
+        assert!(matches!(accel_first, 4 | 5));
+    }
+
+    #[test]
     fn explicit_gpu_dispatched_parses_gpu_kernel_dispatched_aliases() {
         assert_eq!(
             explicit_gpu_dispatched("Custom Scan\n  GPU Kernel Dispatched: true\n"),
@@ -4305,6 +4344,7 @@ mod tests {
             .map(|_| IterationResult {
                 accel_ms: 10.0,
                 parallel_ms: 20.0,
+                accel_first: false,
                 cache_purge: CachePurgeState::NotRequested,
                 cache_state: CacheState::Warm,
             })
@@ -4502,6 +4542,7 @@ mod tests {
         IterationResult {
             accel_ms,
             parallel_ms,
+            accel_first: false,
             cache_purge: if cache_state == CacheState::Cold {
                 CachePurgeState::Completed
             } else {

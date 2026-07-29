@@ -83,7 +83,10 @@ vectors that satisfy the typed output contract in
 
 `AccelStrategy` is registry/kernel classification. It is not the same as the
 Custom Scan execution strategy or the resident operator class reported by
-EXPLAIN.
+EXPLAIN. Numeric strategy IDs 4 through 9 are stable compatibility identities;
+their standalone sort, reduce, expression-template, hash-join, window, and
+nested-loop surfaces are retired and non-selectable. Do not reuse those IDs or
+treat registry presence as planner admission.
 
 ## Registry lifecycle
 

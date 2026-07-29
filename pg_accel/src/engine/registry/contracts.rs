@@ -30,20 +30,19 @@ pub enum KernelOp {
     H3VarLen,
     /// GPU H3 operation returning fixed-width records.
     H3Record,
-    /// Dedicated GPU sort executor path.
+    /// Wire identity for the retired standalone sort executor.
     Sort,
-    /// Dedicated GPU reduction / aggregate executor path.
+    /// Wire identity for retired standalone reduction; reducing descriptors
+    /// use the resident aggregate contract instead.
     Reduce,
-    /// Dedicated GPU expression executor path.
+    /// Wire identity for the retired standalone expression executor.
     Expr,
-    /// Dedicated GPU hash join executor path.
+    /// Wire identity for the retired row-emitting hash join executor.
     HashJoin,
-    /// Dedicated GPU window executor path.
+    /// Wire identity for the retired standalone window executor.
     Window,
-    /// Dedicated GPU NestedLoop scalar-inequality executor path.
-    /// See `pg_accel/src/gpu/nested_loop_ineq.rs` and the launchpad
-    /// notes in `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs`
-    /// (`selected_gpu_nlj_kernel_available`).
+    /// Wire/registry identity for scalar-inequality opportunities that are
+    /// structurally declined before dispatch. No standalone NLJ kernel ships.
     NestedLoopIneq,
 }
 

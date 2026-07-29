@@ -1,15 +1,21 @@
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
-#include "pgaccel_hash_agg.h"
+#include "pgaccel_resident_count.h"
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -374,6 +380,8 @@ static void test_cell_to_parent() {
   ASSERT_EQ("bulk parent[0]", parents[0], make_cell(5, 1, p0));
   ASSERT_EQ("bulk parent[1]", parents[1], make_cell(5, 1, p1));
   ASSERT_EQ("bulk parent[2]", parents[2], make_cell(5, 1, p2));
+
+  ASSERT_STATUS_OK("empty parent input", pgaccel_h3_cell_to_parent_bulk(nullptr, 0, 0, nullptr));
 }
 
 static void test_cell_to_parent_resident() {
@@ -414,6 +422,9 @@ static void test_cell_to_parent_resident() {
   ASSERT_EQ("resident ex success detail", detail, PGACCEL_H3_PARENT_DETAIL_NONE);
 
   std::vector<uint64_t> device_input = {cell_a, cell_b, cell_a};
+  int high_base_digits[15] = {0};
+  const uint64_t high_base_pentagon = make_cell(72, 3, high_base_digits);
+  device_input.push_back(high_base_pentagon);
   std::vector<uint64_t> device_expected(device_input.size(), 0);
   ASSERT_STATUS_OK("device resident oracle status",
                    pgaccel_h3_cell_to_parent_bulk(device_input.data(), device_input.size(), 2,
@@ -552,6 +563,40 @@ static void test_cell_to_parent_resident() {
                                                   device_expected.data(), &detail),
             PGACCEL_INVALID_ARGUMENT);
   ASSERT_EQ("resident ex host pointer detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
+
+  uint64_t contract_cell = input[0];
+  uint64_t contract_parent = sentinel;
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  ASSERT_EQ(
+      "resident ex null cells fail",
+      pgaccel_h3_cell_to_parent_resident_ex(nullptr, nullptr, 1, 3, &contract_parent, &detail),
+      PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex null cells detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  ASSERT_EQ("resident ex null parents fail",
+            pgaccel_h3_cell_to_parent_resident_ex(&contract_cell, nullptr, 1, 3, nullptr, &detail),
+            PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex null parents detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
+
+  const size_t span_overflow_count =
+      std::numeric_limits<size_t>::max() / sizeof(uint64_t) + size_t{1};
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  ASSERT_EQ("resident ex count span overflow fails",
+            pgaccel_h3_cell_to_parent_resident_ex(&contract_cell, nullptr, span_overflow_count, 3,
+                                                  &contract_parent, &detail),
+            PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex count span overflow detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
+
+  const uintptr_t near_address_limit =
+      std::numeric_limits<uintptr_t>::max() - sizeof(uint64_t) + uintptr_t{2};
+  const auto* overflowing_cells = reinterpret_cast<const uint64_t*>(near_address_limit);
+  detail = PGACCEL_H3_PARENT_DETAIL_NONE;
+  ASSERT_EQ("resident ex address span overflow fails",
+            pgaccel_h3_cell_to_parent_resident_ex(overflowing_cells, nullptr, 1, 3,
+                                                  &contract_parent, &detail),
+            PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident ex address span overflow detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
+
   ASSERT_STATUS_OK("resident empty input",
                    pgaccel_h3_cell_to_parent_resident(nullptr, nullptr, 0, 3, nullptr));
   detail = PGACCEL_H3_PARENT_DETAIL_CONTRACT;
@@ -619,6 +664,51 @@ static void test_grid_distance() {
   s = pgaccel_h3_grid_distance_bulk(&ca, &cb, 1, &dist);
   ASSERT_STATUS_OK("adjacent cells status", s);
   ASSERT_TRUE("adjacent cells distance > 0", dist > 0);
+
+  // Exercise every IJK direction and both subtraction orders in one device
+  // dispatch. Besides checking symmetry, this covers each min/max
+  // normalisation branch used by the same-base-cell distance kernel.
+  std::vector<uint64_t> direction_cells;
+  for (int digit = 0; digit <= 6; ++digit) {
+    int direction_digits[15] = {digit, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    direction_cells.push_back(make_cell(5, 1, direction_digits));
+  }
+  std::vector<uint64_t> direction_a;
+  std::vector<uint64_t> direction_b;
+  for (size_t a = 0; a < direction_cells.size(); ++a) {
+    for (size_t b = 0; b < direction_cells.size(); ++b) {
+      direction_a.push_back(direction_cells[a]);
+      direction_b.push_back(direction_cells[b]);
+    }
+  }
+  std::vector<int32_t> direction_distances(direction_a.size(), -99);
+  pgaccel_reset_gpu_exec_count();
+  s = pgaccel_h3_grid_distance_bulk(direction_a.data(), direction_b.data(), direction_a.size(),
+                                    direction_distances.data());
+  ASSERT_STATUS_OK("all-direction distance status", s);
+  ASSERT_TRUE("all-direction distance dispatched", pgaccel_gpu_exec_count() > 0);
+  bool direction_matrix_ok = true;
+  for (size_t a = 0; a < direction_cells.size(); ++a) {
+    for (size_t b = 0; b < direction_cells.size(); ++b) {
+      const int32_t ab = direction_distances[a * direction_cells.size() + b];
+      const int32_t ba = direction_distances[b * direction_cells.size() + a];
+      direction_matrix_ok = direction_matrix_ok && ab >= 0 && ab == ba && (a != b || ab == 0);
+    }
+  }
+  ASSERT_TRUE("all-direction distance matrix is symmetric", direction_matrix_ok);
+
+  // The simplified kernel rejects malformed active digits defensively. Keep
+  // this case in the batch so both malformed-input branches execute without
+  // weakening the valid-cell assertions above.
+  int invalid_digits[15] = {7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  const uint64_t invalid_digit_cell = make_cell(5, 1, invalid_digits);
+  uint64_t malformed_a[2] = {invalid_digit_cell, ca};
+  uint64_t malformed_b[2] = {ca, invalid_digit_cell};
+  int32_t malformed_distance[2] = {-99, -99};
+  s = pgaccel_h3_grid_distance_bulk(malformed_a, malformed_b, 2, malformed_distance);
+  ASSERT_STATUS_OK("malformed active digit distance status", s);
+  ASSERT_TRUE("malformed active digit distance is defined",
+              malformed_distance[0] >= 0 && malformed_distance[1] >= 0);
 
   // Empty count
   s = pgaccel_h3_grid_distance_bulk(nullptr, nullptr, 0, nullptr);
@@ -799,6 +889,92 @@ static void test_lat_lng_to_cell_bulk_edge_randomized() {
   }
 }
 
+static void test_lat_lng_to_cell_fp32_exact_matrix() {
+  printf("--- test_lat_lng_to_cell_fp32_exact_matrix ---\n");
+
+  std::vector<double> seed_lats;
+  std::vector<double> seed_lngs;
+  h3_add_edge_coverage_points(seed_lats, seed_lngs);
+  h3_add_deterministic_random_points(seed_lats, seed_lngs, 2048);
+
+  std::vector<float> lats(seed_lats.size());
+  std::vector<float> lngs(seed_lngs.size());
+  std::vector<double> exact_lats(seed_lats.size());
+  std::vector<double> exact_lngs(seed_lngs.size());
+  for (size_t i = 0; i < seed_lats.size(); ++i) {
+    lats[i] = static_cast<float>(seed_lats[i]);
+    lngs[i] = static_cast<float>(seed_lngs[i]);
+    // The exact oracle must use the values representable by the caller's
+    // fp32 input, rather than the pre-rounding doubles used to generate it.
+    exact_lats[i] = static_cast<double>(lats[i]);
+    exact_lngs[i] = static_cast<double>(lngs[i]);
+  }
+
+  const size_t count = lats.size();
+  std::vector<uint64_t> fast_cells(count, 0);
+  std::vector<uint64_t> exact_cells(count, 0);
+  std::vector<uint8_t> fast_valid(count, 0);
+  std::vector<uint8_t> exact_valid(count, 0);
+  std::vector<int32_t> resolutions(count, -1);
+
+  for (int resolution = 0; resolution < 12; ++resolution) {
+    pgaccel_reset_gpu_exec_count();
+    pgaccel_status status =
+        pgaccel_h3_lat_lng_to_cell_bulk(lats.data(), lngs.data(), count, resolution, /*use_fp64=*/0,
+                                        fast_cells.data(), fast_valid.data());
+    char label[160];
+    snprintf(label, sizeof(label), "fp32 public path res=%d status", resolution);
+    ASSERT_STATUS_OK(label, status);
+    snprintf(label, sizeof(label), "fp32 public path res=%d dispatched", resolution);
+    ASSERT_TRUE(label, pgaccel_gpu_exec_count() > 0);
+
+    status =
+        pgaccel_h3_lat_lng_to_cell_bulk(exact_lats.data(), exact_lngs.data(), count, resolution,
+                                        /*use_fp64=*/1, exact_cells.data(), exact_valid.data());
+    snprintf(label, sizeof(label), "fp32 exact oracle res=%d status", resolution);
+    ASSERT_STATUS_OK(label, status);
+
+    bool exact_match = true;
+    for (size_t i = 0; i < count; ++i) {
+      exact_match = exact_match && fast_valid[i] == 1 && exact_valid[i] == 1 &&
+                    fast_cells[i] != 0 && fast_cells[i] == exact_cells[i];
+    }
+    snprintf(label, sizeof(label), "fp32 public path res=%d matches rounded exact input",
+             resolution);
+    ASSERT_TRUE(label, exact_match);
+
+    status = pgaccel_h3_get_resolution_bulk(fast_cells.data(), count, resolutions.data());
+    snprintf(label, sizeof(label), "fp32 public path res=%d resolution status", resolution);
+    ASSERT_STATUS_OK(label, status);
+    snprintf(label, sizeof(label), "fp32 public path res=%d resolution fields", resolution);
+    ASSERT_TRUE(label, std::all_of(resolutions.begin(), resolutions.end(),
+                                   [=](int32_t value) { return value == resolution; }));
+  }
+
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float infinity = std::numeric_limits<float>::infinity();
+  const float invalid_lats[] = {90.001f, -90.001f, 0.0f, 0.0f, nan, 0.0f, infinity, -infinity};
+  const float invalid_lngs[] = {0.0f, 0.0f, 180.001f, -180.001f, 0.0f, nan, 0.0f, 0.0f};
+  constexpr size_t invalid_count = sizeof(invalid_lats) / sizeof(invalid_lats[0]);
+  uint64_t invalid_cells[invalid_count];
+  uint8_t invalid_valid[invalid_count];
+  for (int resolution : {0, 7, 11}) {
+    std::fill(std::begin(invalid_cells), std::end(invalid_cells), UINT64_MAX);
+    std::fill(std::begin(invalid_valid), std::end(invalid_valid), uint8_t{99});
+    pgaccel_status status =
+        pgaccel_h3_lat_lng_to_cell_bulk(invalid_lats, invalid_lngs, invalid_count, resolution,
+                                        /*use_fp64=*/0, invalid_cells, invalid_valid);
+    char label[160];
+    snprintf(label, sizeof(label), "fp32 invalid coordinates res=%d status", resolution);
+    ASSERT_STATUS_OK(label, status);
+    snprintf(label, sizeof(label), "fp32 invalid coordinates res=%d rejected", resolution);
+    ASSERT_TRUE(label, std::all_of(std::begin(invalid_valid), std::end(invalid_valid),
+                                   [](uint8_t value) { return value == 0; }) &&
+                           std::all_of(std::begin(invalid_cells), std::end(invalid_cells),
+                                       [](uint64_t value) { return value == 0; }));
+  }
+}
+
 static void test_lat_lng_count_bulk() {
   printf("--- test_lat_lng_count_bulk ---\n");
 
@@ -878,6 +1054,18 @@ static void test_lat_lng_count_bulk() {
   ASSERT_TRUE("lat_lng_count duplicate groups preserved", saw_duplicate_group);
 
   pgaccel_agg_free(state);
+
+  const double invalid_lat = 91.0;
+  const double valid_lng = 0.0;
+  for (int resolution : {3, 10}) {
+    state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+    s = pgaccel_h3_lat_lng_count_bulk(&invalid_lat, &valid_lng, 1, resolution, &state);
+    char label[128];
+    snprintf(label, sizeof(label), "lat_lng_count invalid coordinate res=%d", resolution);
+    ASSERT_EQ(label, s, PGACCEL_ERROR);
+    snprintf(label, sizeof(label), "lat_lng_count invalid res=%d clears state", resolution);
+    ASSERT_TRUE(label, state == nullptr);
+  }
 }
 
 static void
@@ -972,6 +1160,25 @@ static void test_cell_to_parent_count_bulk() {
   assert_count_state_matches_expected(state, expected, cells.size(), parent_res,
                                       "cell_to_parent_count");
   pgaccel_agg_free(state);
+
+  uint64_t invalid_cells[] = {0, cells[0]};
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  s = pgaccel_h3_cell_to_parent_count_bulk(invalid_cells, 2, parent_res, &state);
+  ASSERT_EQ("cell_to_parent_count rejects zero cell", s, PGACCEL_ERROR);
+  ASSERT_TRUE("cell_to_parent_count zero cell clears state", state == nullptr);
+
+  const uint64_t non_cell_mode = cells[0] & ~(UINT64_C(0xf) << 59);
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  s = pgaccel_h3_cell_to_parent_count_bulk(&non_cell_mode, 1, parent_res, &state);
+  ASSERT_EQ("cell_to_parent_count rejects nonzero malformed cell", s, PGACCEL_ERROR);
+  ASSERT_TRUE("cell_to_parent_count malformed cell clears state", state == nullptr);
+
+  int coarse_digits[15] = {2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  const uint64_t coarse_cell = make_cell(10, 1, coarse_digits);
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  s = pgaccel_h3_cell_to_parent_count_bulk(&coarse_cell, 1, parent_res, &state);
+  ASSERT_EQ("cell_to_parent_count rejects resolution mismatch", s, PGACCEL_ERROR);
+  ASSERT_TRUE("cell_to_parent_count resolution mismatch clears state", state == nullptr);
 }
 
 static void assert_lat_lng_count_matches_reference(const std::vector<double>& lats,
@@ -1173,6 +1380,158 @@ static void test_lat_lng_count_bulk_f32_exact_all_res_edge_randomized() {
     assert_lat_lng_count_f32_exact_matches_reference(lats, lngs, res,
                                                      "all-res edge/random f32 exact count");
   }
+
+  const float invalid_lat_f32 = 91.0f;
+  const float valid_lng_f32 = 0.0f;
+  const double invalid_lat = 91.0;
+  const double valid_lng = 0.0;
+  pgaccel_agg_state* state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  const pgaccel_status status = pgaccel_h3_lat_lng_count_bulk_f32_exact(
+      &invalid_lat_f32, &valid_lng_f32, &invalid_lat, &valid_lng, 1, 3, &state);
+  ASSERT_EQ("f32 exact count rejects invalid coordinate", status, PGACCEL_ERROR);
+  ASSERT_TRUE("f32 exact invalid coordinate clears state", state == nullptr);
+}
+
+static void test_lat_lng_count_resident_low_high_matrix() {
+  printf("--- test_lat_lng_count_resident_low_high_matrix ---\n");
+
+  std::vector<double> lats;
+  std::vector<double> lngs;
+  h3_add_edge_coverage_points(lats, lngs);
+  h3_add_deterministic_random_points(lats, lngs, 256);
+  const size_t unique_count = lats.size();
+  for (size_t i = 0; i < unique_count; i += 5) {
+    lats.push_back(lats[i]);
+    lngs.push_back(lngs[i]);
+  }
+
+  std::vector<float> lats_f32(lats.size());
+  std::vector<float> lngs_f32(lngs.size());
+  for (size_t i = 0; i < lats.size(); ++i) {
+    lats_f32[i] = static_cast<float>(lats[i]);
+    lngs_f32[i] = static_cast<float>(lngs[i]);
+  }
+
+  DeviceResidentAllocation device_lats(lats.data(), lats.size() * sizeof(double));
+  DeviceResidentAllocation device_lngs(lngs.data(), lngs.size() * sizeof(double));
+  DeviceResidentAllocation device_lats_f32(lats_f32.data(), lats_f32.size() * sizeof(float));
+  DeviceResidentAllocation device_lngs_f32(lngs_f32.data(), lngs_f32.size() * sizeof(float));
+
+  for (int resolution : {3, 10}) {
+    std::vector<uint64_t> reference_cells(lats.size(), 0);
+    std::vector<uint8_t> reference_valid(lats.size(), 0);
+    pgaccel_status status = pgaccel_h3_lat_lng_to_cell_bulk(
+        lats.data(), lngs.data(), lats.size(), resolution, /*use_fp64=*/1, reference_cells.data(),
+        reference_valid.data());
+    char label[192];
+    snprintf(label, sizeof(label), "resident count res=%d reference status", resolution);
+    ASSERT_STATUS_OK(label, status);
+
+    std::unordered_map<uint64_t, int64_t> expected;
+    bool reference_ok = true;
+    for (size_t i = 0; i < reference_cells.size(); ++i) {
+      reference_ok = reference_ok && reference_valid[i] == 1 && reference_cells[i] != 0;
+      expected[reference_cells[i]] += 1;
+    }
+    snprintf(label, sizeof(label), "resident count res=%d reference valid", resolution);
+    ASSERT_TRUE(label, reference_ok);
+
+    pgaccel_agg_state* state = nullptr;
+    pgaccel_reset_gpu_exec_count();
+    status = pgaccel_h3_lat_lng_count_resident_bulk(
+        static_cast<const double*>(device_lats.data()),
+        static_cast<const double*>(device_lngs.data()),
+        static_cast<const float*>(device_lats_f32.data()),
+        static_cast<const float*>(device_lngs_f32.data()), lats.size(), resolution, &state);
+    snprintf(label, sizeof(label), "resident count res=%d status", resolution);
+    ASSERT_STATUS_OK(label, status);
+    snprintf(label, sizeof(label), "resident count res=%d dispatched", resolution);
+    ASSERT_TRUE(label, pgaccel_gpu_exec_count() > 0);
+    snprintf(label, sizeof(label), "resident count res=%d state", resolution);
+    ASSERT_TRUE(label, state != nullptr);
+    if (state != nullptr) {
+      assert_count_state_matches_expected(state, expected, lats.size(), resolution,
+                                          "resident lat/lng count");
+      pgaccel_agg_free(state);
+    }
+  }
+
+  std::vector<double> copied_lats(lats.size(), 0.0);
+  std::vector<float> copied_lngs_f32(lngs_f32.size(), 0.0f);
+  ASSERT_STATUS_OK("resident exact input readback",
+                   pgaccel_expr_device_copy_to_host(copied_lats.data(), device_lats.data(),
+                                                    device_lats.bytes()));
+  ASSERT_STATUS_OK("resident fp32 input readback",
+                   pgaccel_expr_device_copy_to_host(copied_lngs_f32.data(), device_lngs_f32.data(),
+                                                    device_lngs_f32.bytes()));
+  ASSERT_TRUE("resident exact input preserved", copied_lats == lats);
+  ASSERT_TRUE("resident fp32 input preserved", copied_lngs_f32 == lngs_f32);
+
+  const double invalid_lat = 91.0;
+  const double valid_lng = 0.0;
+  const float invalid_lat_f32 = 91.0f;
+  const float valid_lng_f32 = 0.0f;
+  DeviceResidentAllocation device_invalid_lat(&invalid_lat, sizeof(invalid_lat));
+  DeviceResidentAllocation device_valid_lng(&valid_lng, sizeof(valid_lng));
+  DeviceResidentAllocation device_invalid_lat_f32(&invalid_lat_f32, sizeof(invalid_lat_f32));
+  DeviceResidentAllocation device_valid_lng_f32(&valid_lng_f32, sizeof(valid_lng_f32));
+  for (int resolution : {3, 10}) {
+    pgaccel_agg_state* state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+    const pgaccel_status status = pgaccel_h3_lat_lng_count_resident_bulk(
+        static_cast<const double*>(device_invalid_lat.data()),
+        static_cast<const double*>(device_valid_lng.data()),
+        static_cast<const float*>(device_invalid_lat_f32.data()),
+        static_cast<const float*>(device_valid_lng_f32.data()), 1, resolution, &state);
+    char label[192];
+    snprintf(label, sizeof(label), "resident invalid coordinate res=%d rejected", resolution);
+    ASSERT_EQ(label, status, PGACCEL_ERROR);
+    snprintf(label, sizeof(label), "resident invalid coordinate res=%d clears state", resolution);
+    ASSERT_TRUE(label, state == nullptr);
+  }
+
+  // Low-resolution resident input is screened by the fp32 kernel before exact
+  // fixups. Exercise every coordinate rejection arm, including non-finite
+  // input, through the device-pointer API.
+  const double nan_f64 = std::numeric_limits<double>::quiet_NaN();
+  const float nan_f32 = std::numeric_limits<float>::quiet_NaN();
+  const double invalid_exact_lats[] = {-91.0, 0.0, 0.0, nan_f64};
+  const double invalid_exact_lngs[] = {0.0, -181.0, 181.0, 0.0};
+  const float invalid_fast_lats[] = {-91.0f, 0.0f, 0.0f, nan_f32};
+  const float invalid_fast_lngs[] = {0.0f, -181.0f, 181.0f, 0.0f};
+  constexpr size_t invalid_count = std::size(invalid_exact_lats);
+  DeviceResidentAllocation device_invalid_exact_lats(invalid_exact_lats,
+                                                     sizeof(invalid_exact_lats));
+  DeviceResidentAllocation device_invalid_exact_lngs(invalid_exact_lngs,
+                                                     sizeof(invalid_exact_lngs));
+  DeviceResidentAllocation device_invalid_fast_lats(invalid_fast_lats, sizeof(invalid_fast_lats));
+  DeviceResidentAllocation device_invalid_fast_lngs(invalid_fast_lngs, sizeof(invalid_fast_lngs));
+  pgaccel_agg_state* invalid_state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  pgaccel_reset_gpu_exec_count();
+  pgaccel_status invalid_status = pgaccel_h3_lat_lng_count_resident_bulk(
+      static_cast<const double*>(device_invalid_exact_lats.data()),
+      static_cast<const double*>(device_invalid_exact_lngs.data()),
+      static_cast<const float*>(device_invalid_fast_lats.data()),
+      static_cast<const float*>(device_invalid_fast_lngs.data()), invalid_count, 3, &invalid_state);
+  ASSERT_EQ("resident fp32 invalid matrix rejected", invalid_status, PGACCEL_ERROR);
+  ASSERT_TRUE("resident fp32 invalid matrix clears state", invalid_state == nullptr);
+  ASSERT_TRUE("resident fp32 invalid matrix dispatched", pgaccel_gpu_exec_count() > 0);
+
+  // The edge corpus contains fp32 rows marked for exact correction. Supplying
+  // an invalid exact sidecar verifies that those rows cannot publish the fast
+  // candidate when exact projection rejects them.
+  std::vector<double> rejected_exact_lats(lats.size(), 91.0);
+  DeviceResidentAllocation device_rejected_exact_lats(rejected_exact_lats.data(),
+                                                      rejected_exact_lats.size() * sizeof(double));
+  pgaccel_agg_state* rejected_state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  pgaccel_reset_gpu_exec_count();
+  const pgaccel_status rejected_status = pgaccel_h3_lat_lng_count_resident_bulk(
+      static_cast<const double*>(device_rejected_exact_lats.data()),
+      static_cast<const double*>(device_lngs.data()),
+      static_cast<const float*>(device_lats_f32.data()),
+      static_cast<const float*>(device_lngs_f32.data()), lats.size(), 3, &rejected_state);
+  ASSERT_EQ("resident exact sidecar rejection status", rejected_status, PGACCEL_ERROR);
+  ASSERT_TRUE("resident exact sidecar rejection clears state", rejected_state == nullptr);
+  ASSERT_TRUE("resident exact sidecar rejection dispatched", pgaccel_gpu_exec_count() > 0);
 }
 
 static void test_lat_lng_res7_exact_edge_fixups() {
@@ -1294,6 +1653,178 @@ static void test_null_pointers() {
 
   s = pgaccel_h3_lat_lng_to_cell_bulk(nullptr, nullptr, 5, 0, true, nullptr, nullptr);
   ASSERT_EQ("lat_lng_to_cell null input", s, PGACCEL_ERROR_INIT);
+}
+
+static void test_api_contract_matrix() {
+  printf("--- test_api_contract_matrix ---\n");
+
+  int digits[15] = {0};
+  const uint64_t cell = make_cell(57, 3, digits);
+  int32_t i32_out = -1;
+  uint8_t u8_out = 99;
+  uint64_t u64_out = UINT64_MAX;
+  double lat = 0.0;
+  double lng = 0.0;
+  float lat_f32 = 0.0f;
+  float lng_f32 = 0.0f;
+  pgaccel_agg_state* state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+
+  ASSERT_STATUS_OK("get_base empty", pgaccel_h3_get_base_cell_bulk(nullptr, 0, nullptr));
+  ASSERT_EQ("get_base null input", pgaccel_h3_get_base_cell_bulk(nullptr, 1, &i32_out),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("get_base null output", pgaccel_h3_get_base_cell_bulk(&cell, 1, nullptr),
+            PGACCEL_ERROR_INIT);
+  ASSERT_STATUS_OK("is_valid empty", pgaccel_h3_is_valid_cell_bulk(nullptr, 0, nullptr));
+  ASSERT_EQ("is_valid null input", pgaccel_h3_is_valid_cell_bulk(nullptr, 1, &u8_out),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("is_valid null output", pgaccel_h3_is_valid_cell_bulk(&cell, 1, nullptr),
+            PGACCEL_ERROR_INIT);
+  ASSERT_STATUS_OK("is_pentagon empty", pgaccel_h3_is_pentagon_bulk(nullptr, 0, nullptr));
+  ASSERT_EQ("is_pentagon null input", pgaccel_h3_is_pentagon_bulk(nullptr, 1, &u8_out),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("is_pentagon null output", pgaccel_h3_is_pentagon_bulk(&cell, 1, nullptr),
+            PGACCEL_ERROR_INIT);
+  ASSERT_STATUS_OK("class III empty", pgaccel_h3_is_res_class_iii_bulk(nullptr, 0, nullptr));
+  ASSERT_EQ("class III null input", pgaccel_h3_is_res_class_iii_bulk(nullptr, 1, &u8_out),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("class III null output", pgaccel_h3_is_res_class_iii_bulk(&cell, 1, nullptr),
+            PGACCEL_ERROR_INIT);
+  ASSERT_STATUS_OK("center child empty",
+                   pgaccel_h3_cell_to_center_child_bulk(nullptr, 0, 3, nullptr));
+  ASSERT_EQ("center child null input",
+            pgaccel_h3_cell_to_center_child_bulk(nullptr, 1, 3, &u64_out), PGACCEL_ERROR_INIT);
+  ASSERT_EQ("center child null output", pgaccel_h3_cell_to_center_child_bulk(&cell, 1, 3, nullptr),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("center child negative resolution",
+            pgaccel_h3_cell_to_center_child_bulk(&cell, 1, -1, &u64_out),
+            PGACCEL_ERROR_UNSUPPORTED);
+
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  ASSERT_STATUS_OK("parent count empty",
+                   pgaccel_h3_cell_to_parent_count_bulk(nullptr, 0, 0, &state));
+  ASSERT_TRUE("parent count empty clears state", state == nullptr);
+  ASSERT_EQ("parent count null state", pgaccel_h3_cell_to_parent_count_bulk(&cell, 1, 0, nullptr),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("parent count null cells", pgaccel_h3_cell_to_parent_count_bulk(nullptr, 1, 0, &state),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("parent count invalid resolution",
+            pgaccel_h3_cell_to_parent_count_bulk(&cell, 1, 16, &state), PGACCEL_ERROR_UNSUPPORTED);
+
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  ASSERT_STATUS_OK("lat/lng count empty",
+                   pgaccel_h3_lat_lng_count_bulk(nullptr, nullptr, 0, 3, &state));
+  ASSERT_TRUE("lat/lng count empty clears state", state == nullptr);
+  ASSERT_EQ("lat/lng count null state", pgaccel_h3_lat_lng_count_bulk(&lat, &lng, 1, 3, nullptr),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("lat/lng count null coordinates",
+            pgaccel_h3_lat_lng_count_bulk(nullptr, &lng, 1, 3, &state), PGACCEL_ERROR_INIT);
+  ASSERT_EQ("lat/lng count invalid resolution",
+            pgaccel_h3_lat_lng_count_bulk(&lat, &lng, 1, -1, &state), PGACCEL_ERROR_UNSUPPORTED);
+
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  ASSERT_STATUS_OK("f32 exact count empty", pgaccel_h3_lat_lng_count_bulk_f32_exact(
+                                                nullptr, nullptr, nullptr, nullptr, 0, 3, &state));
+  ASSERT_TRUE("f32 exact count empty clears state", state == nullptr);
+  ASSERT_EQ("f32 exact count null state",
+            pgaccel_h3_lat_lng_count_bulk_f32_exact(&lat_f32, &lng_f32, &lat, &lng, 1, 3, nullptr),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("f32 exact count null coordinates",
+            pgaccel_h3_lat_lng_count_bulk_f32_exact(nullptr, &lng_f32, &lat, &lng, 1, 3, &state),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("f32 exact count invalid resolution",
+            pgaccel_h3_lat_lng_count_bulk_f32_exact(&lat_f32, &lng_f32, &lat, &lng, 1, 16, &state),
+            PGACCEL_ERROR_UNSUPPORTED);
+
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  ASSERT_STATUS_OK("resident count empty", pgaccel_h3_lat_lng_count_resident_bulk(
+                                               nullptr, nullptr, nullptr, nullptr, 0, 3, &state));
+  ASSERT_TRUE("resident count empty clears state", state == nullptr);
+  ASSERT_EQ("resident count null state",
+            pgaccel_h3_lat_lng_count_resident_bulk(&lat, &lng, &lat_f32, &lng_f32, 1, 3, nullptr),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("resident count null coordinate",
+            pgaccel_h3_lat_lng_count_resident_bulk(nullptr, &lng, &lat_f32, &lng_f32, 1, 3, &state),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("resident count invalid resolution",
+            pgaccel_h3_lat_lng_count_resident_bulk(&lat, &lng, &lat_f32, &lng_f32, 1, -1, &state),
+            PGACCEL_ERROR_UNSUPPORTED);
+
+  uint32_t offsets[2] = {99, 99};
+  uint64_t output_cell = UINT64_MAX;
+  double output_coord = 99.0;
+  float polygon_coords[2] = {0.0f, 0.0f};
+  uint32_t ring_offsets[2] = {0, 1};
+  uint32_t ring_count = 99;
+
+  ASSERT_EQ("grid disk size null", pgaccel_h3_grid_disk_output_size(nullptr, 1, 1, offsets),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("grid disk emit null", pgaccel_h3_grid_disk_emit(nullptr, 1, 1, offsets, &output_cell),
+            PGACCEL_ERROR_INIT);
+  ASSERT_STATUS_OK("grid ring size empty",
+                   pgaccel_h3_grid_ring_unsafe_output_size(nullptr, 0, 1, offsets));
+  ASSERT_EQ("grid ring size empty offset", offsets[0], 0u);
+  ASSERT_STATUS_OK("grid ring emit empty",
+                   pgaccel_h3_grid_ring_unsafe_emit(nullptr, 0, 1, nullptr, nullptr));
+  ASSERT_EQ("grid ring size null", pgaccel_h3_grid_ring_unsafe_output_size(nullptr, 1, 1, offsets),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("grid ring emit null",
+            pgaccel_h3_grid_ring_unsafe_emit(nullptr, 1, 1, offsets, &output_cell),
+            PGACCEL_ERROR_INIT);
+
+  ASSERT_STATUS_OK("children size empty",
+                   pgaccel_h3_cell_to_children_output_size(nullptr, 0, 3, offsets));
+  ASSERT_EQ("children size empty offset", offsets[0], 0u);
+  ASSERT_STATUS_OK("children emit empty",
+                   pgaccel_h3_cell_to_children_emit(nullptr, 0, 3, nullptr, nullptr));
+  ASSERT_EQ("children size null", pgaccel_h3_cell_to_children_output_size(nullptr, 1, 3, offsets),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("children emit null",
+            pgaccel_h3_cell_to_children_emit(nullptr, 1, 3, offsets, &output_cell),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("children size invalid resolution",
+            pgaccel_h3_cell_to_children_output_size(&cell, 1, 16, offsets),
+            PGACCEL_ERROR_UNSUPPORTED);
+  offsets[0] = 0;
+  offsets[1] = 1;
+  ASSERT_EQ("children emit invalid resolution",
+            pgaccel_h3_cell_to_children_emit(&cell, 1, -1, offsets, &output_cell),
+            PGACCEL_ERROR_UNSUPPORTED);
+
+  ASSERT_STATUS_OK("boundary size empty",
+                   pgaccel_h3_cell_to_boundary_output_size(nullptr, 0, offsets));
+  ASSERT_EQ("boundary size empty offset", offsets[0], 0u);
+  ASSERT_STATUS_OK("boundary emit empty",
+                   pgaccel_h3_cell_to_boundary_emit(nullptr, 0, nullptr, nullptr));
+  ASSERT_EQ("boundary size null", pgaccel_h3_cell_to_boundary_output_size(nullptr, 1, offsets),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("boundary emit null",
+            pgaccel_h3_cell_to_boundary_emit(nullptr, 1, offsets, &output_coord),
+            PGACCEL_ERROR_INIT);
+
+  ASSERT_STATUS_OK("polyfill size empty",
+                   pgaccel_h3_polyfill_output_size(nullptr, nullptr, 0, 3, offsets));
+  ASSERT_EQ("polyfill size empty offset", offsets[0], 0u);
+  ASSERT_STATUS_OK("polyfill emit empty",
+                   pgaccel_h3_polyfill_emit(nullptr, nullptr, 0, 3, nullptr, nullptr));
+  ASSERT_EQ("polyfill size null",
+            pgaccel_h3_polyfill_output_size(nullptr, ring_offsets, 1, 3, offsets),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("polyfill emit null",
+            pgaccel_h3_polyfill_emit(polygon_coords, nullptr, 1, 3, offsets, &output_cell),
+            PGACCEL_ERROR_INIT);
+
+  ASSERT_STATUS_OK("multi polygon size empty", pgaccel_h3_cells_to_multi_polygon_output_size(
+                                                   nullptr, 0, ring_offsets, &ring_count));
+  ASSERT_EQ("multi polygon size empty count", ring_count, 0u);
+  ASSERT_EQ("multi polygon size empty offset", ring_offsets[0], 0u);
+  ASSERT_STATUS_OK("multi polygon emit empty",
+                   pgaccel_h3_cells_to_multi_polygon_emit(nullptr, 0, nullptr, 0, nullptr));
+  ASSERT_EQ("multi polygon size null",
+            pgaccel_h3_cells_to_multi_polygon_output_size(nullptr, 1, ring_offsets, &ring_count),
+            PGACCEL_ERROR_INIT);
+  ASSERT_EQ("multi polygon emit null",
+            pgaccel_h3_cells_to_multi_polygon_emit(nullptr, 1, ring_offsets, 1, &output_coord),
+            PGACCEL_ERROR_INIT);
 }
 
 // ---------------------------------------------------------------------------
@@ -1459,14 +1990,28 @@ static void test_is_valid_cell() {
   ASSERT_STATUS_OK("is_valid_cell bad-base status", s);
   ASSERT_EQ("is_valid_cell bad base", v, 0);
 
-  // Bulk mix: valid, zero, bad-mode.
-  uint64_t cells[3] = {valid_cell, zero, bad_mode};
-  uint8_t valids[3] = {99, 99, 99};
-  s = pgaccel_h3_is_valid_cell_bulk(cells, 3, valids);
+  // Every reserved-bit rule is independent. Keep them in one device batch so
+  // a future validator cannot accidentally conflate the high, reserved, and
+  // trailing-digit checks.
+  const uint64_t bad_high_bit = valid_cell | (1ULL << 63);
+  const uint64_t bad_reserved_bits = valid_cell | (1ULL << 56);
+  uint64_t bad_trailing_digit = valid_cell;
+  bad_trailing_digit &= ~7ULL;
+  bad_trailing_digit |= 6ULL;
+
+  // Bulk mix: valid plus every structurally invalid family.
+  uint64_t cells[7] = {valid_cell,        zero, bad_mode, bad_base, bad_high_bit, bad_reserved_bits,
+                       bad_trailing_digit};
+  uint8_t valids[7] = {99, 99, 99, 99, 99, 99, 99};
+  s = pgaccel_h3_is_valid_cell_bulk(cells, std::size(cells), valids);
   ASSERT_STATUS_OK("is_valid_cell bulk status", s);
   ASSERT_EQ("is_valid_cell bulk[0]", valids[0], 1);
   ASSERT_EQ("is_valid_cell bulk[1]", valids[1], 0);
   ASSERT_EQ("is_valid_cell bulk[2]", valids[2], 0);
+  ASSERT_EQ("is_valid_cell bulk[3] bad base", valids[3], 0);
+  ASSERT_EQ("is_valid_cell bulk[4] high bit", valids[4], 0);
+  ASSERT_EQ("is_valid_cell bulk[5] reserved bits", valids[5], 0);
+  ASSERT_EQ("is_valid_cell bulk[6] trailing digit", valids[6], 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1737,6 +2282,25 @@ static void test_cell_to_children() {
     ASSERT_EQ("c2c r5 hex count", off[1], 49);
   }
 
+  // child_res = res + 3 exercises the nested base-7 divisor used to decode
+  // every digit after the leading child digit.
+  {
+    uint32_t off[2] = {99, 99};
+    pgaccel_status s = pgaccel_h3_cell_to_children_output_size(&parent_r3, 1, 6, off);
+    ASSERT_STATUS_OK("c2c r6 size status", s);
+    ASSERT_EQ("c2c r6 hex count", off[1], 343);
+
+    std::vector<uint64_t> out(off[1], 0);
+    s = pgaccel_h3_cell_to_children_emit(&parent_r3, 1, 6, off, out.data());
+    ASSERT_STATUS_OK("c2c r6 emit status", s);
+    int last_digits[15] = {0, 0, 0, 6, 6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    ASSERT_EQ("c2c r6 first child", out.front(), make_cell(57, 6, digits));
+    ASSERT_EQ("c2c r6 last child", out.back(), make_cell(57, 6, last_digits));
+    std::sort(out.begin(), out.end());
+    ASSERT_TRUE("c2c r6 children distinct",
+                std::adjacent_find(out.begin(), out.end()) == out.end());
+  }
+
   // Pentagon: child_res = res + 1 → 5 children (pentagon has 5 not 7).
   {
     uint64_t pent = make_pentagon_cell(3);
@@ -1744,6 +2308,42 @@ static void test_cell_to_children() {
     pgaccel_status s = pgaccel_h3_cell_to_children_output_size(&pent, 1, 4, off);
     ASSERT_STATUS_OK("c2c pent r4 size status", s);
     ASSERT_EQ("c2c pent r4 count", off[1], 5);
+  }
+
+  // Deep expansion exercises the multi-digit encoder for both low and high
+  // pentagon base-cell masks. An off-centre descendant of a pentagon base is
+  // a hexagon and therefore retains the full 7^delta fan-out.
+  {
+    int off_center_digits[15] = {2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint64_t parents[3] = {make_pentagon_cell(3), make_cell(72, 3, digits),
+                           make_cell(72, 3, off_center_digits)};
+    uint32_t off[4] = {99, 99, 99, 99};
+    pgaccel_status s = pgaccel_h3_cell_to_children_output_size(parents, 3, 5, off);
+    ASSERT_STATUS_OK("c2c deep pentagon size status", s);
+    ASSERT_EQ("c2c deep low pentagon count", off[1] - off[0], 35);
+    ASSERT_EQ("c2c deep high pentagon count", off[2] - off[1], 35);
+    ASSERT_EQ("c2c deep off-centre pentagon-base count", off[3] - off[2], 49);
+
+    std::vector<uint64_t> out(off[3], 0);
+    pgaccel_reset_gpu_exec_count();
+    s = pgaccel_h3_cell_to_children_emit(parents, 3, 5, off, out.data());
+    ASSERT_STATUS_OK("c2c deep pentagon emit status", s);
+    ASSERT_TRUE("c2c deep pentagon emit dispatched", pgaccel_gpu_exec_count() > 0);
+
+    bool rows_valid = true;
+    for (size_t row = 0; row < 3; ++row) {
+      std::vector<uint64_t> row_cells(out.begin() + off[row], out.begin() + off[row + 1]);
+      std::sort(row_cells.begin(), row_cells.end());
+      rows_valid = rows_valid && !row_cells.empty() && row_cells.front() != 0 &&
+                   std::adjacent_find(row_cells.begin(), row_cells.end()) == row_cells.end();
+      std::vector<int32_t> child_resolutions(row_cells.size(), -1);
+      s = pgaccel_h3_get_resolution_bulk(row_cells.data(), row_cells.size(),
+                                         child_resolutions.data());
+      rows_valid = rows_valid && s == PGACCEL_OK &&
+                   std::all_of(child_resolutions.begin(), child_resolutions.end(),
+                               [](int32_t value) { return value == 5; });
+    }
+    ASSERT_TRUE("c2c deep rows are distinct resolution-5 cells", rows_valid);
   }
 
   // Mixed rows exercise the shared-slab layout used by the size and emit
@@ -1772,6 +2372,20 @@ static void test_cell_to_children() {
     ASSERT_TRUE("c2c mixed emit writes non-empty rows", wrote_expected_rows);
   }
 
+  // Three valid 7^11 fan-outs exceed the uint32 offset ABI even though each
+  // individual row count fits. The size pass must reject the prefix sum before
+  // copying partial offsets to the caller.
+  {
+    uint64_t wide_parents[3] = {make_cell(57, 0, digits), make_cell(57, 0, digits),
+                                make_cell(57, 0, digits)};
+    uint32_t off[4] = {0xA5A5A5A5u, 0xA5A5A5A5u, 0xA5A5A5A5u, 0xA5A5A5A5u};
+    const pgaccel_status s = pgaccel_h3_cell_to_children_output_size(wide_parents, 3, 11, off);
+    ASSERT_EQ("c2c uint32 prefix overflow rejected", s, PGACCEL_ERROR_UNSUPPORTED);
+    ASSERT_TRUE("c2c overflow leaves caller offsets untouched",
+                std::all_of(std::begin(off), std::end(off),
+                            [](uint32_t value) { return value == 0xA5A5A5A5u; }));
+  }
+
   // Invalid: child_res < cell.res → 0 cells.
   {
     uint32_t off[2] = {99, 99};
@@ -1785,6 +2399,19 @@ static void test_cell_to_children() {
     ASSERT_STATUS_OK("c2c zero-output emit status", s);
     ASSERT_TRUE("c2c zero-output emit preserves output", untouched == 0xDEADBEEFCAFEBABEULL);
     ASSERT_EQ("c2c zero-output emit launches no GPU work", pgaccel_gpu_exec_count(), 0u);
+  }
+
+  // Defensive emit branches remain deterministic even if a caller supplies
+  // offsets that did not come from the size pass.
+  {
+    uint64_t defensive_cells[2] = {0, parent_r3};
+    uint32_t defensive_offsets[3] = {0, 1, 2};
+    uint64_t defensive_output[2] = {UINT64_MAX, UINT64_MAX};
+    const pgaccel_status s = pgaccel_h3_cell_to_children_emit(defensive_cells, 2, 2,
+                                                              defensive_offsets, defensive_output);
+    ASSERT_STATUS_OK("c2c defensive emit status", s);
+    ASSERT_EQ("c2c defensive zero cell emits zero", defensive_output[0], 0ULL);
+    ASSERT_EQ("c2c defensive coarser target emits zero", defensive_output[1], 0ULL);
   }
 }
 
@@ -1852,6 +2479,265 @@ static void test_cells_to_multi_polygon() {
   ASSERT_EQ("multi_polygon quarantine records zero GPU dispatches", pgaccel_gpu_exec_count(), 0u);
 }
 
+static void test_executed_h3_branch_matrix() {
+  printf("--- test_executed_h3_branch_matrix ---\n");
+
+  static const int pentagon_bases[] = {4, 14, 24, 38, 49, 58, 63, 72, 83, 97, 107, 117};
+  const auto is_pentagon_base = [](int base) {
+    static const int values[] = {4, 14, 24, 38, 49, 58, 63, 72, 83, 97, 107, 117};
+    return std::find(std::begin(values), std::end(values), base) != std::end(values);
+  };
+
+  // One dispatch per operation covers both base-cell mask halves, every
+  // resolution parity, pentagons, and ordinary hexagons.
+  std::vector<uint64_t> sweep_cells;
+  for (int base = 0; base < 122; ++base) {
+    for (int resolution = 0; resolution <= 15; ++resolution) {
+      int digits[15] = {0};
+      sweep_cells.push_back(make_cell(base, resolution, digits));
+    }
+  }
+  std::vector<int32_t> resolutions(sweep_cells.size(), -1);
+  std::vector<int32_t> bases(sweep_cells.size(), -1);
+  std::vector<uint8_t> valid(sweep_cells.size(), 99);
+  std::vector<uint8_t> pentagon(sweep_cells.size(), 99);
+  std::vector<uint8_t> class_iii(sweep_cells.size(), 99);
+  pgaccel_reset_gpu_exec_count();
+  ASSERT_STATUS_OK(
+      "H3 sweep resolution status",
+      pgaccel_h3_get_resolution_bulk(sweep_cells.data(), sweep_cells.size(), resolutions.data()));
+  ASSERT_STATUS_OK(
+      "H3 sweep base status",
+      pgaccel_h3_get_base_cell_bulk(sweep_cells.data(), sweep_cells.size(), bases.data()));
+  ASSERT_STATUS_OK(
+      "H3 sweep validity status",
+      pgaccel_h3_is_valid_cell_bulk(sweep_cells.data(), sweep_cells.size(), valid.data()));
+  ASSERT_STATUS_OK(
+      "H3 sweep pentagon status",
+      pgaccel_h3_is_pentagon_bulk(sweep_cells.data(), sweep_cells.size(), pentagon.data()));
+  ASSERT_STATUS_OK(
+      "H3 sweep class III status",
+      pgaccel_h3_is_res_class_iii_bulk(sweep_cells.data(), sweep_cells.size(), class_iii.data()));
+  bool sweep_ok = true;
+  for (int base = 0; base < 122; ++base) {
+    for (int resolution = 0; resolution <= 15; ++resolution) {
+      const size_t i = static_cast<size_t>(base * 16 + resolution);
+      sweep_ok = sweep_ok && resolutions[i] == resolution && bases[i] == base && valid[i] == 1 &&
+                 pentagon[i] == static_cast<uint8_t>(is_pentagon_base(base)) &&
+                 class_iii[i] == static_cast<uint8_t>(resolution & 1);
+    }
+  }
+  ASSERT_TRUE("H3 all-base/all-resolution sweep values", sweep_ok);
+  ASSERT_TRUE("H3 all-base/all-resolution sweep dispatched", pgaccel_gpu_exec_count() >= 5);
+
+  // Exercise every branch of the stricter validator used by the fused parent
+  // count kernel. All rows run even though the aggregate call rejects the
+  // batch after the validation pass.
+  int zero_digits[15] = {0};
+  const uint64_t ordinary = make_cell(57, 3, zero_digits);
+  int active_unused_digits[15] = {7, 0, 0};
+  int deleted_k_digits[15] = {1, 0, 0};
+  int deleted_k_late_digits[15] = {0, 1, 0};
+  uint64_t bad_trailing = ordinary & ~UINT64_C(7);
+  std::vector<uint64_t> malformed = {
+      0,
+      ordinary | (UINT64_C(1) << 63),
+      ordinary | (UINT64_C(1) << 56),
+      ordinary | (UINT64_C(1) << 57),
+      ordinary | (UINT64_C(1) << 58),
+      (ordinary & ~(UINT64_C(0xf) << 59)) | (UINT64_C(2) << 59),
+      (ordinary & ~(UINT64_C(0xf) << 59)) | (UINT64_C(15) << 59),
+      make_cell(122, 3, zero_digits),
+      make_cell(127, 3, zero_digits),
+      make_cell(57, 3, active_unused_digits),
+      bad_trailing,
+      make_cell(4, 3, deleted_k_digits),
+      make_cell(72, 3, deleted_k_late_digits),
+  };
+  pgaccel_agg_state* state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  pgaccel_reset_gpu_exec_count();
+  ASSERT_EQ("parent count malformed matrix rejected",
+            pgaccel_h3_cell_to_parent_count_bulk(malformed.data(), malformed.size(), 0, &state),
+            PGACCEL_ERROR);
+  ASSERT_TRUE("parent count malformed matrix clears state", state == nullptr);
+  ASSERT_TRUE("parent count malformed matrix dispatched", pgaccel_gpu_exec_count() > 0);
+
+  // Valid active digits cover both identity and masking paths, all digit
+  // directions, and both halves of the pentagon membership test.
+  std::vector<uint64_t> parent_count_cells;
+  for (int base = 0; base < 122; ++base) {
+    parent_count_cells.push_back(make_cell(base, 0, zero_digits));
+    for (int digit = 0; digit <= 6; ++digit) {
+      if (digit == 1 && is_pentagon_base(base))
+        continue;
+      int digits[15];
+      std::fill(std::begin(digits), std::end(digits), digit);
+      parent_count_cells.push_back(make_cell(base, 15, digits));
+    }
+  }
+  state = nullptr;
+  pgaccel_reset_gpu_exec_count();
+  ASSERT_STATUS_OK("parent count valid semantic matrix status",
+                   pgaccel_h3_cell_to_parent_count_bulk(parent_count_cells.data(),
+                                                        parent_count_cells.size(), 0, &state));
+  ASSERT_TRUE("parent count valid semantic matrix state", state != nullptr);
+  ASSERT_TRUE("parent count valid semantic matrix dispatched", pgaccel_gpu_exec_count() > 0);
+  pgaccel_agg_free(state);
+
+  // Deep same-base paths exercise all IJK directions repeatedly rather than
+  // only at resolution one.
+  std::vector<uint64_t> direction_cells;
+  for (int digit = 0; digit <= 6; ++digit) {
+    int digits[15];
+    std::fill(std::begin(digits), std::end(digits), digit);
+    direction_cells.push_back(make_cell(57, 15, digits));
+  }
+  std::vector<uint64_t> distance_a;
+  std::vector<uint64_t> distance_b;
+  for (uint64_t a : direction_cells) {
+    for (uint64_t b : direction_cells) {
+      distance_a.push_back(a);
+      distance_b.push_back(b);
+    }
+  }
+  std::vector<int32_t> distances(distance_a.size(), -1);
+  ASSERT_STATUS_OK("deep direction distance matrix status",
+                   pgaccel_h3_grid_distance_bulk(distance_a.data(), distance_b.data(),
+                                                 distance_a.size(), distances.data()));
+  bool distances_ok = true;
+  for (size_t a = 0; a < direction_cells.size(); ++a) {
+    for (size_t b = 0; b < direction_cells.size(); ++b) {
+      const int32_t ab = distances[a * direction_cells.size() + b];
+      const int32_t ba = distances[b * direction_cells.size() + a];
+      distances_ok = distances_ok && ab >= 0 && ab == ba && (a != b || ab == 0);
+    }
+  }
+  ASSERT_TRUE("deep direction distance matrix symmetric", distances_ok);
+
+  // Drive every exact coordinate rejection arm in the same kernels that also
+  // process valid rows.
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double infinity = std::numeric_limits<double>::infinity();
+  const double lats[] = {-90.001, 90.001, 0.0, 0.0, nan, infinity, -infinity, 0.0, 0.0, 45.0};
+  const double lngs[] = {0.0, 0.0, -180.001, 180.001, 0.0, 0.0, 0.0, nan, infinity, -73.0};
+  constexpr size_t coordinate_count = std::size(lats);
+  uint64_t cells[coordinate_count];
+  uint8_t coordinate_valid[coordinate_count];
+  for (int resolution : {0, 7, 15}) {
+    std::fill(std::begin(cells), std::end(cells), UINT64_MAX);
+    std::fill(std::begin(coordinate_valid), std::end(coordinate_valid), uint8_t{99});
+    ASSERT_STATUS_OK("exact coordinate semantic matrix status",
+                     pgaccel_h3_lat_lng_to_cell_bulk(lats, lngs, coordinate_count, resolution,
+                                                     /*use_fp64=*/1, cells, coordinate_valid));
+    bool rejection_ok =
+        coordinate_valid[coordinate_count - 1] == 1 && cells[coordinate_count - 1] != 0;
+    for (size_t i = 0; i + 1 < coordinate_count; ++i)
+      rejection_ok = rejection_ok && coordinate_valid[i] == 0 && cells[i] == 0;
+    ASSERT_TRUE("exact coordinate semantic matrix values", rejection_ok);
+  }
+
+  ASSERT_TRUE("pentagon fixture list remains complete", std::size(pentagon_bases) == 12);
+}
+
+static void test_no_device_paths() {
+  printf("--- H3 APIs: no-device lifecycle ---\n");
+
+  const pgaccel_status init_status = pgaccel_init();
+  ASSERT_TRUE("no-device initialization rejected", init_status != PGACCEL_OK);
+  if (init_status == PGACCEL_OK) {
+    ASSERT_STATUS_OK("unexpected no-device initialization shuts down", pgaccel_shutdown());
+    return;
+  }
+
+  int digits[15] = {0};
+  const uint64_t cell = make_cell(57, 3, digits);
+  int32_t integer_output = -1;
+  int32_t distance = -1;
+  uint8_t boolean_output = 99;
+  uint64_t cell_output = 0;
+  double lat = 37.7749;
+  double lng = -122.4194;
+  float lat_f32 = static_cast<float>(lat);
+  float lng_f32 = static_cast<float>(lng);
+  pgaccel_agg_state* state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+
+  ASSERT_EQ("resolution reports no device",
+            pgaccel_h3_get_resolution_bulk(&cell, 1, &integer_output), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("base cell reports no device", pgaccel_h3_get_base_cell_bulk(&cell, 1, &integer_output),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("validity reports no device", pgaccel_h3_is_valid_cell_bulk(&cell, 1, &boolean_output),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("pentagon reports no device", pgaccel_h3_is_pentagon_bulk(&cell, 1, &boolean_output),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("resolution class reports no device",
+            pgaccel_h3_is_res_class_iii_bulk(&cell, 1, &boolean_output), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("parent reports no device", pgaccel_h3_cell_to_parent_bulk(&cell, 1, 2, &cell_output),
+            PGACCEL_ERROR_NO_DEVICE);
+
+  int32_t detail = PGACCEL_H3_PARENT_DETAIL_CONTRACT;
+  ASSERT_EQ("resident parent reports no device",
+            pgaccel_h3_cell_to_parent_resident_ex(&cell, nullptr, 1, 2, &cell_output, &detail),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("resident parent leaves no failure detail", detail, PGACCEL_H3_PARENT_DETAIL_NONE);
+  ASSERT_EQ("parent count reports no device",
+            pgaccel_h3_cell_to_parent_count_bulk(&cell, 1, 2, &state), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_TRUE("parent count clears state without device", state == nullptr);
+  ASSERT_EQ("center child reports no device",
+            pgaccel_h3_cell_to_center_child_bulk(&cell, 1, 4, &cell_output),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("grid distance reports no device",
+            pgaccel_h3_grid_distance_bulk(&cell, &cell, 1, &distance), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("lat/lng conversion reports no device",
+            pgaccel_h3_lat_lng_to_cell_bulk(&lat, &lng, 1, 3, true, &cell_output, &boolean_output),
+            PGACCEL_ERROR_NO_DEVICE);
+
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  ASSERT_EQ("lat/lng count reports no device",
+            pgaccel_h3_lat_lng_count_bulk(&lat, &lng, 1, 3, &state), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_TRUE("lat/lng count clears state without device", state == nullptr);
+  state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
+  ASSERT_EQ("resident lat/lng count reports no device",
+            pgaccel_h3_lat_lng_count_resident_bulk(&lat, &lng, &lat_f32, &lng_f32, 1, 3, &state),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_TRUE("resident lat/lng count clears state without device", state == nullptr);
+
+  uint32_t offsets[2] = {0, 1};
+  ASSERT_EQ("children size reports no device",
+            pgaccel_h3_cell_to_children_output_size(&cell, 1, 4, offsets), PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("children emit reports no device",
+            pgaccel_h3_cell_to_children_emit(&cell, 1, 4, offsets, &cell_output),
+            PGACCEL_ERROR_NO_DEVICE);
+
+  ASSERT_STATUS_OK("failed no-device initialization shuts down", pgaccel_shutdown());
+}
+
+static bool run_no_device_child(const char* executable) {
+  const pid_t child = fork();
+  if (child < 0) {
+    std::fprintf(stderr, "FAIL fork no-device H3 matrix: errno=%d\n", errno);
+    return false;
+  }
+  if (child == 0) {
+    const char* visibility_mask = std::getenv("PGACCEL_TEST_NO_DEVICE_MASK");
+    setenv("ACPP_VISIBILITY_MASK", visibility_mask != nullptr ? visibility_mask : "cuda", 1);
+    setenv("PGACCEL_TEST_NO_DEVICE", "1", 1);
+    execl(executable, executable, static_cast<char*>(nullptr));
+    std::fprintf(stderr, "FAIL exec no-device H3 matrix: errno=%d\n", errno);
+    _exit(127);
+  }
+
+  int status = 0;
+  pid_t waited;
+  do {
+    waited = waitpid(child, &status, 0);
+  } while (waited < 0 && errno == EINTR);
+  if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    std::fprintf(stderr, "FAIL no-device H3 matrix child: status=%d errno=%d\n", status, errno);
+    return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 static const char* selected_test(int argc, char** argv) {
   const char* filter = std::getenv("PGACCEL_H3_TEST");
@@ -1876,6 +2762,14 @@ static bool should_run_test(const char* selected, const char* name) {
 int main(int argc, char** argv) {
   printf("=== pg_accel H3 kernel tests ===\n\n");
 
+  if (std::getenv("PGACCEL_TEST_NO_DEVICE") != nullptr) {
+    test_no_device_paths();
+    printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
+    return g_fail > 0 ? 1 : 0;
+  }
+
+  ASSERT_TRUE("no-device H3 child", argc > 0 && argv[0] != nullptr && run_no_device_child(argv[0]));
+
   const char* selected = selected_test(argc, argv);
   bool ran_any = false;
 #define RUN_TEST(fn)                      \
@@ -1897,13 +2791,16 @@ int main(int argc, char** argv) {
   RUN_TEST(test_grid_distance);
   RUN_TEST(test_lat_lng_to_cell);
   RUN_TEST(test_lat_lng_to_cell_bulk_edge_randomized);
+  RUN_TEST(test_lat_lng_to_cell_fp32_exact_matrix);
   RUN_TEST(test_cell_to_parent_count_bulk);
   RUN_TEST(test_lat_lng_count_bulk);
   RUN_TEST(test_lat_lng_count_bulk_all_res_duplicate_edges);
   RUN_TEST(test_lat_lng_count_bulk_f32_exact_all_res_edge_randomized);
+  RUN_TEST(test_lat_lng_count_resident_low_high_matrix);
   RUN_TEST(test_lat_lng_res7_exact_edge_fixups);
   RUN_TEST(test_lat_lng_to_cell_fp64_bulk);
   RUN_TEST(test_null_pointers);
+  RUN_TEST(test_api_contract_matrix);
 
   // Exact variable-output kernel plus topology fail-closed contracts.
   RUN_TEST(test_grid_disk);
@@ -1912,6 +2809,7 @@ int main(int argc, char** argv) {
   RUN_TEST(test_cell_to_boundary);
   RUN_TEST(test_polyfill);
   RUN_TEST(test_cells_to_multi_polygon);
+  RUN_TEST(test_executed_h3_branch_matrix);
 
 #undef RUN_TEST
 
@@ -1920,6 +2818,7 @@ int main(int argc, char** argv) {
     g_fail++;
   }
 
+  ASSERT_STATUS_OK("pgaccel_shutdown", pgaccel_shutdown());
   printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
 }

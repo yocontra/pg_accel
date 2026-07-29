@@ -1,8 +1,7 @@
 use super::Workload;
 
-/// Tests GPU sort on wide rows (~120 bytes/row) where PG external merge sort
-/// spills to disk. GPU sorts only 8-byte key+index pairs, avoiding full-tuple
-/// disk writes.
+/// Exercises PostgreSQL's native wide-row top-k baseline. Standalone sort is a
+/// structural pg_accel decline, independent of row width or spill behavior.
 pub struct LargeSort;
 
 impl Workload for LargeSort {
@@ -11,7 +10,7 @@ impl Workload for LargeSort {
     }
 
     fn description(&self) -> &'static str {
-        "Top-K ORDER BY sort_key, id on bench_sort_wide — wide-row GPU sort vs PG disk spill"
+        "Top-K ORDER BY sort_key, id on bench_sort_wide - structural native sort decline"
     }
 
     fn setup_sql(&self, rows: usize) -> Vec<String> {

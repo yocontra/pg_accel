@@ -8,7 +8,7 @@
 #include <stdexcept>
 
 #include "pgaccel_ffi.h"
-#include "pgaccel_hash_agg.h"
+#include "pgaccel_resident_count.h"
 #include "pgaccel_queue.h"
 
 #include "h3_exact_device.hpp"
@@ -20,6 +20,34 @@
 static sycl::queue& get_queue() {
   return pgaccel_require_queue();
 }
+
+class H3UsmAllocationGuard {
+ public:
+  H3UsmAllocationGuard(sycl::queue& queue, void* allocation) noexcept
+      : queue_(&queue), allocation_(allocation) {}
+
+  H3UsmAllocationGuard(const H3UsmAllocationGuard&) = delete;
+  H3UsmAllocationGuard& operator=(const H3UsmAllocationGuard&) = delete;
+
+  ~H3UsmAllocationGuard() noexcept {
+    try {
+      free_now();
+    } catch (...) {
+      // Cleanup must not replace an in-flight kernel or allocation exception.
+    }
+  }
+
+  void free_now() {
+    void* allocation = allocation_;
+    allocation_ = nullptr;
+    if (allocation != nullptr)
+      sycl::free(allocation, *queue_);
+  }
+
+ private:
+  sycl::queue* queue_;
+  void* allocation_;
+};
 
 // ---------------------------------------------------------------------------
 // H3 bit-layout constants
@@ -410,24 +438,6 @@ static inline bool h3_is_valid_cell(uint64_t cell) {
   return true;
 }
 
-static inline uint64_t h3_cell_to_parent(uint64_t cell, int parent_res) {
-  int res = h3_get_resolution(cell);
-  if (parent_res < 0 || parent_res > res)
-    return 0;
-  if (parent_res == res)
-    return cell;
-
-  uint64_t result = cell;
-  // Set resolution field
-  result = (result & ~H3_RES_MASK) | (static_cast<uint64_t>(parent_res) << 52);
-  // Clear child digits — set to 7 (unused)
-  for (int r = parent_res + 1; r <= H3_MAX_RESOLUTION; r++) {
-    int shift = (H3_MAX_RESOLUTION - r) * 3;
-    result |= (H3_UNUSED_DIGIT << shift);
-  }
-  return result;
-}
-
 static inline uint64_t h3_unused_digit_mask_after(int parent_res) {
   uint64_t mask = 0;
   for (int r = parent_res + 1; r <= H3_MAX_RESOLUTION; r++) {
@@ -456,57 +466,6 @@ static inline size_t h3_cell_count_at_resolution(int resolution) {
   for (int r = 0; r < resolution; ++r)
     pow7 *= 7;
   return 2 + 120 * pow7;
-}
-
-// ---------------------------------------------------------------------------
-// IJK coordinate helpers for grid distance within same base cell
-// ---------------------------------------------------------------------------
-
-// H3 direction vectors in IJK space for digits 1-6.
-// Digit 0 = center (no movement). Digit 7 = invalid.
-static const int DIR_I[7] = {0, 1, 0, -1, -1, 0, 1};
-static const int DIR_J[7] = {0, 0, 1, 1, 0, -1, -1};
-static const int DIR_K[7] = {0, 0, 0, 0, 1, 1, 0};
-
-// Hex distance in IJK space: max(|i|, |j|, |k|) after normalisation.
-static inline int32_t ijk_distance(int i1, int j1, int k1, int i2, int j2, int k2) {
-  int di = i1 - i2;
-  int dj = j1 - j2;
-  int dk = k1 - k2;
-  // Normalise so min component is 0
-  int m = di;
-  if (dj < m)
-    m = dj;
-  if (dk < m)
-    m = dk;
-  di -= m;
-  dj -= m;
-  dk -= m;
-  int d = di;
-  if (dj > d)
-    d = dj;
-  if (dk > d)
-    d = dk;
-  return static_cast<int32_t>(d);
-}
-
-// Accumulate IJK position for a cell's digit sequence.
-// At each resolution step, scale existing coords by 3 (aperture 7 approximation
-// via 3× scale in IJK) then add the direction for the digit.
-// This is a simplified model that works for same-base-cell distance.
-static inline void cell_to_ijk(uint64_t cell, int res, int& oi, int& oj, int& ok) {
-  oi = oj = ok = 0;
-  for (int r = 1; r <= res; r++) {
-    int d = h3_get_digit(cell, r);
-    if (d < 0 || d > 6) {
-      oi = oj = ok = 0;
-      return;
-    }
-    // Scale existing position (aperture 7 ≈ 3× in hex grid)
-    oi = oi * 3 + DIR_I[d];
-    oj = oj * 3 + DIR_J[d];
-    ok = ok * 3 + DIR_K[d];
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,11 +1089,7 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* c
     uint8_t* d_slab = sycl::malloc_shared<uint8_t>(slab_bytes, q);
     if (d_slab == nullptr)
       return PGACCEL_ERROR_OOM;
-
-    auto cleanup = [&]() {
-      if (d_slab != nullptr)
-        sycl::free(d_slab, q);
-    };
+    H3UsmAllocationGuard slab_guard(q, d_slab);
 
     auto* d_cells = reinterpret_cast<uint64_t*>(d_slab + cells_off);
     auto* d_parent_keys = reinterpret_cast<int64_t*>(d_slab + keys_off);
@@ -1175,20 +1130,22 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* c
     pgaccel_record_gpu_exec();
 
     if (*d_invalid != 0) {
-      cleanup();
+      slab_guard.free_now();
       return PGACCEL_ERROR;
     }
 
     const size_t max_distinct = h3_cell_count_at_resolution(parent_res);
-    pgaccel_agg_state* state =
-        pgaccel_hash_count_i64_device_hash_execute_bounded(d_parent_keys, count, max_distinct);
-    if (state == nullptr) {
-      cleanup();
-      return PGACCEL_ERROR_NO_DEVICE;
+    pgaccel_agg_state* state = nullptr;
+    const pgaccel_status count_status =
+        pgaccel_hash_count_i64_device_hash_execute_bounded_checked(d_parent_keys, count,
+                                                                   max_distinct, &state);
+    if (count_status != PGACCEL_OK) {
+      slab_guard.free_now();
+      return count_status;
     }
 
     *out_state = state;
-    cleanup();
+    slab_guard.free_now();
     return PGACCEL_OK;
   } catch (const pgaccel_no_device_error&) {
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1461,7 +1418,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array,
   // (handled via a separate kernel dispatched when `want_fp64` is set)
   // handles the high-resolution case.
   //
-  // ─── Argbuffer-reflection workaround (mirror of hash_agg.cpp:178-185) ───
+  // ─── Argbuffer-reflection workaround (same slab pattern as spatial dispatch) ───
   // The natural lambda capture for these kernels is six typed device
   // pointers (lats/lngs/cells/valid) plus a few scalars.
   // On Metal the AdaptiveCpp SSCP backend, once a kernel captures
@@ -1721,11 +1678,7 @@ h3_lat_lng_count_bulk_device_direct(const double* lat_array, const double* lng_a
     uint8_t* d_slab = sycl::malloc_shared<uint8_t>(layout.slab_bytes, q);
     if (d_slab == nullptr)
       return PGACCEL_ERROR_OOM;
-
-    auto cleanup = [&]() {
-      if (d_slab)
-        sycl::free(d_slab, q);
-    };
+    H3UsmAllocationGuard slab_guard(q, d_slab);
 
     auto* slab_lats32 = reinterpret_cast<float*>(d_slab + layout.lat32_off);
     auto* slab_lngs32 = reinterpret_cast<float*>(d_slab + layout.lng32_off);
@@ -1766,19 +1719,23 @@ h3_lat_lng_count_bulk_device_direct(const double* lat_array, const double* lng_a
 
     const auto* invalid = reinterpret_cast<const uint32_t*>(d_slab + layout.invalid_off);
     if (*invalid != 0) {
-      cleanup();
+      slab_guard.free_now();
       return PGACCEL_ERROR;
     }
 
     auto* mutable_keys = reinterpret_cast<int64_t*>(d_slab + layout.out_off);
-    pgaccel_agg_state* state = pgaccel_hash_count_i64_device_execute(mutable_keys, count);
-    if (state == nullptr) {
-      cleanup();
-      return PGACCEL_ERROR_NO_DEVICE;
+    const size_t max_distinct = h3_cell_count_at_resolution(resolution);
+    pgaccel_agg_state* state = nullptr;
+    const pgaccel_status count_status =
+        pgaccel_hash_count_i64_device_hash_execute_bounded_checked(
+            mutable_keys, count, max_distinct, &state);
+    if (count_status != PGACCEL_OK) {
+      slab_guard.free_now();
+      return count_status;
     }
 
     *out_state = state;
-    cleanup();
+    slab_guard.free_now();
     return PGACCEL_OK;
   } catch (const pgaccel_no_device_error&) {
     return PGACCEL_ERROR_NO_DEVICE;
@@ -1868,11 +1825,7 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_count_resident_bulk(
     uint8_t* d_slab = sycl::malloc_shared<uint8_t>(layout.slab_bytes, q);
     if (d_slab == nullptr)
       return PGACCEL_ERROR_OOM;
-
-    auto cleanup = [&]() {
-      if (d_slab != nullptr)
-        sycl::free(d_slab, q);
-    };
+    H3UsmAllocationGuard slab_guard(q, d_slab);
 
     h3_zero_lat_lng_cell_slab(d_slab, count);
 
@@ -1891,20 +1844,22 @@ extern "C" pgaccel_status pgaccel_h3_lat_lng_count_resident_bulk(
     auto* keys = reinterpret_cast<int64_t*>(d_slab + layout.out_off);
     auto* invalid = reinterpret_cast<uint32_t*>(d_slab + layout.invalid_off);
     if (*invalid != 0) {
-      cleanup();
+      slab_guard.free_now();
       return PGACCEL_ERROR;
     }
 
     const size_t max_distinct = h3_cell_count_at_resolution(resolution);
-    pgaccel_agg_state* state =
-        pgaccel_hash_count_i64_device_hash_execute_bounded(keys, count, max_distinct);
-    if (state == nullptr) {
-      cleanup();
-      return PGACCEL_ERROR_NO_DEVICE;
+    pgaccel_agg_state* state = nullptr;
+    const pgaccel_status count_status =
+        pgaccel_hash_count_i64_device_hash_execute_bounded_checked(keys, count, max_distinct,
+                                                                   &state);
+    if (count_status != PGACCEL_OK) {
+      slab_guard.free_now();
+      return count_status;
     }
 
     *out_state = state;
-    cleanup();
+    slab_guard.free_now();
     return PGACCEL_OK;
   } catch (const pgaccel_no_device_error&) {
     return PGACCEL_ERROR_NO_DEVICE;
@@ -2015,13 +1970,6 @@ extern "C" pgaccel_status pgaccel_h3_grid_ring_unsafe_emit(const uint64_t* cells
 // other combinations produce off-centre children. For pentagon parents we
 // skip combinations whose leading new digit is 1 (the missing direction).
 // ---------------------------------------------------------------------------
-
-static inline uint32_t h3_pow7(int n) {
-  uint32_t r = 1;
-  for (int i = 0; i < n; i++)
-    r *= 7;
-  return r;
-}
 
 struct H3ChildrenSizeCompletion {
   int32_t status;

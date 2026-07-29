@@ -1806,12 +1806,14 @@ mod tests {
             report::IterationResult {
                 accel_ms: 5.0,
                 parallel_ms: 10.0,
+                accel_first: true,
                 cache_purge: bench_model::CachePurgeState::NotRequested,
                 cache_state: bench_model::CacheState::Warm,
             },
             report::IterationResult {
                 accel_ms: 6.0,
                 parallel_ms: 12.0,
+                accel_first: false,
                 cache_purge: bench_model::CachePurgeState::NotRequested,
                 cache_state: bench_model::CacheState::Warm,
             },

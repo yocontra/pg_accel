@@ -825,6 +825,110 @@ void test_host_contract_failures_do_not_write() {
   }
 }
 
+void test_contract_and_device_validation_boundaries() {
+  require(pgaccel_raster_reclass_resident_ex(nullptr, nullptr) == PGACCEL_INVALID_ARGUMENT,
+          "null detail did not return INVALID_ARGUMENT");
+  int32_t detail = -1;
+  require(pgaccel_raster_reclass_resident_ex(nullptr, &detail) == PGACCEL_INVALID_ARGUMENT,
+          "null request did not return INVALID_ARGUMENT");
+  require(detail == PGACCEL_RASTER_DETAIL_CONTRACT, "null request detail differs");
+
+  auto base = [] {
+    return single_band_case(PGACCEL_RESIDENT_RASTER_UINT8, {1}, 1, {{1, 7}});
+  };
+  {
+    ResidentCase invalid(base());
+    invalid.request.abi_version++;
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    ResidentCase invalid(base());
+    invalid.request.flags = 1;
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    ResidentCase invalid(base());
+    invalid.request.pad = 1;
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    ResidentCase invalid(base());
+    invalid.request.input.abi_version++;
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    ResidentCase invalid(base());
+    invalid.request.input.flags = 1;
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    ResidentCase invalid(base());
+    invalid.request.first_row = invalid.request.input.row_count + 1;
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    ResidentCase invalid(base());
+    invalid.request.first_row = 1;
+    invalid.request.count = 1;
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    ResidentCase empty(base());
+    empty.request.count = 0;
+    const auto output_before = empty.output();
+    const auto actions_before = empty.actions();
+    detail = -1;
+    require(empty.invoke(&detail) == PGACCEL_OK, "zero-row request failed");
+    require(detail == PGACCEL_RASTER_DETAIL_NONE, "zero-row detail differs");
+    require(empty.output() == output_before, "zero-row request wrote output");
+    require(empty.actions() == actions_before, "zero-row request wrote row actions");
+  }
+  {
+    ResidentCase invalid(base());
+    invalid.request.output_pixel_type = UINT32_MAX;
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    ResidentCase invalid(base());
+    invalid.request.input.rows = nullptr;
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    ResidentCase invalid(base());
+    invalid.request.input.pixels =
+        reinterpret_cast<const uint8_t*>(std::numeric_limits<uintptr_t>::max());
+    expect_host_failure(&invalid, PGACCEL_RASTER_DETAIL_CONTRACT);
+  }
+  {
+    CaseData data = base();
+    data.nulls = {1};
+    ResidentCase invalid(data);
+    expect_device_failure(&invalid, PGACCEL_RASTER_DETAIL_VIEW);
+  }
+  {
+    CaseData data;
+    data.pixels = {1, 0, 2, 0};
+    data.band_offsets = {0, 4};
+    data.rows = {row(1, 1, 0, 1)};
+    data.bands = {band(PGACCEL_RESIDENT_RASTER_UINT16)};
+    data.rules = {{1, 7}};
+    data.output_offsets = {0, 1};
+    data.output_pixels = {0xa5};
+    data.row_actions = {0xa5};
+    data.max_total_pixels = 1;
+    data.max_chunk_pixels = 1;
+    ResidentCase invalid(data);
+    expect_device_failure(&invalid, PGACCEL_RASTER_DETAIL_VIEW);
+  }
+  {
+    CaseData data = single_band_case(PGACCEL_RESIDENT_RASTER_UINT8, {1}, 1, {{1, 7}},
+                                     PGACCEL_RESIDENT_RASTER_INT16);
+    data.output_offsets = {0, 1};
+    ResidentCase invalid(data);
+    expect_device_failure(&invalid, PGACCEL_RASTER_DETAIL_OFFSETS);
+  }
+}
+
 void test_chunk_boundary_stress() {
   constexpr size_t count = 65'537;
   CaseData data;
@@ -887,6 +991,8 @@ int main() {
            test_device_validation_failures_do_not_write);
   run_test("host spans/caps/overlap/overflow are hard failures",
            test_host_contract_failures_do_not_write);
+  run_test("contract and device-validation boundary matrix",
+           test_contract_and_device_validation_boundaries);
   run_test(">chunk row and pixel stress", test_chunk_boundary_stress);
 
   require(pgaccel_shutdown() == PGACCEL_OK, "pgaccel_shutdown failed");

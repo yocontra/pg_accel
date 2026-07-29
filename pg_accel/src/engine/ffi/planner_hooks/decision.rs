@@ -70,6 +70,10 @@ pub(super) enum RejectionReason {
     SortIncrementalOpportunity,
     SortMultiKeyNoGpuKernel,
     SortHeapFullOutput,
+    /// Standalone ORDER BY ... LIMIT still returns rows through PostgreSQL's
+    /// tuple boundary. The sort kernel/executor surface is retired, so bounded
+    /// top-k remains native regardless of backend.
+    SortStandaloneTopKNoGpuKernel,
     /// Single-column ORDER BY with LIMIT 1: looks like PG's MIN/MAX →
     /// IndexScan+Limit rewrite (or a legitimate user LIMIT 1 by a single
     /// column). Either way GpuSort is the wrong shape — a 1-row top-K is
@@ -145,6 +149,7 @@ impl RejectionReason {
             Self::SortIncrementalOpportunity => "sort_incremental_opportunity",
             Self::SortMultiKeyNoGpuKernel => "sort_multikey_no_gpu_kernel",
             Self::SortHeapFullOutput => "sort_heap_full_output",
+            Self::SortStandaloneTopKNoGpuKernel => "sort_standalone_topk_no_gpu_kernel",
             Self::MinMaxRewriteNotASort => "min_max_rewrite_not_a_sort",
             Self::UnsupportedType(reason) | Self::Other(reason) => reason,
         }
@@ -585,6 +590,10 @@ mod tests {
         assert_eq!(
             RejectionReason::SortHeapFullOutput.stats_key(),
             "sort_heap_full_output"
+        );
+        assert_eq!(
+            RejectionReason::SortStandaloneTopKNoGpuKernel.stats_key(),
+            "sort_standalone_topk_no_gpu_kernel"
         );
         assert_eq!(
             RejectionReason::MinMaxRewriteNotASort.stats_key(),

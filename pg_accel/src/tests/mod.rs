@@ -4499,39 +4499,46 @@ mod tests {
         );
     }
 
-    /// Verifies that an eligible top-k sort actually dispatches to the GPU.
+    /// Standalone top-k is a structural decline on every backend. The numeric
+    /// `GpuSort` strategy id remains only for deterministic wire decoding.
     #[pg_test]
-    fn test_sort_actually_uses_gpu() {
+    fn test_standalone_topk_stays_native_on_every_backend() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
         Spi::run("SET pg_accel.cost_multiplier = DEFAULT").expect("restore default GPU cost");
 
-        let rows = qualifying_device_rows("gpu_sort_planner_min_rows", 200_000);
         Spi::run(&format!(
             "CREATE TEMP TABLE _gpu_sort_t AS \
              SELECT (random() * 1e6)::float4 AS v \
-             FROM generate_series(1, {rows})"
+             FROM generate_series(1, {})",
+            200_000
         ))
         .expect("create temp table");
         Spi::run("ANALYZE _gpu_sort_t").expect("analyze sort table");
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset planner evidence");
+
+        let plan = explain_text("SELECT v FROM _gpu_sort_t ORDER BY v LIMIT 128");
+        assert!(
+            !plan.contains("Strategy: GpuSort") && !plan.contains("Custom Scan (GpuAccelSort)"),
+            "standalone top-k must stay PostgreSQL-native:\n{plan}"
+        );
 
         crate::gpu::reset_gpu_exec_count();
-
-        let _ = Spi::run("SELECT v FROM _gpu_sort_t ORDER BY v LIMIT 128").expect("sort query ok");
-
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(
-                crate::gpu::gpu_exec_count(),
-                0,
-                "Metal standalone top-k SQL path must stay planner-declined until the \
-                 backend-crashing path is fixed"
-            );
-            return;
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        crate::gpu::assert_gpu_executed(1);
+        let count = Spi::get_one::<i64>(
+            "SELECT count(*) FROM (SELECT v FROM _gpu_sort_t ORDER BY v LIMIT 128) q",
+        )
+        .expect("top-k query ok")
+        .expect("top-k count returned");
+        assert_eq!(count, 128, "native top-k must return the requested rows");
+        assert_eq!(
+            crate::gpu::gpu_exec_count(),
+            0,
+            "standalone top-k must not dispatch GPU work"
+        );
+        assert!(
+            planner_rejection_count("sort_standalone_topk_no_gpu_kernel") > 0,
+            "standalone top-k must record its structural decline"
+        );
     }
 
     /// Full-output standalone ORDER BY remains a known loser lane. The
@@ -4567,16 +4574,10 @@ mod tests {
         );
     }
 
-    /// Regression: GpuSort wrapped in a subquery scan must emit every input
-    /// row. The outer plan rebuilds the range table during setrefs, so the
-    /// RTE that `self_scan_relid` pointed to at plan time is no longer at
-    /// the same index at exec time. The RTE_RELATION guard at
-    /// `custom_scan/mod.rs:2497` correctly bypasses VectorizedScan setup
-    /// in that case, and the executor must fall through to consuming rows
-    /// from the child plan via `ExecProcNode`. A prior bug in this path
-    /// returned 0 rows; this test guards against silent regression.
+    /// A native sort inside a subquery must preserve every row while the
+    /// retired standalone GPU sort surface remains unreachable.
     #[pg_test]
-    fn test_gpu_sort_via_subquery_returns_all_rows() {
+    fn test_native_sort_subquery_returns_all_rows_without_gpu_dispatch() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
 
@@ -4588,32 +4589,37 @@ mod tests {
         .expect("create temp table");
         Spi::run("ANALYZE _sort_subq_t").expect("ANALYZE");
 
+        let plan =
+            explain_text("SELECT count(*) FROM (SELECT k_f64 FROM _sort_subq_t ORDER BY k_f64) sq");
+        assert!(
+            !plan.contains("Strategy: GpuSort") && !plan.contains("Custom Scan (GpuAccelSort)"),
+            "subquery sort must stay PostgreSQL-native:\n{plan}"
+        );
+        crate::gpu::reset_gpu_exec_count();
         let n = Spi::get_one::<i64>(
             "SELECT count(*) FROM (SELECT k_f64 FROM _sort_subq_t ORDER BY k_f64) sq",
         )
         .expect("count over sort-subquery should not error")
         .expect("count returned a value");
+        assert_eq!(n, 200_000, "native subquery sort must emit every input row");
         assert_eq!(
-            n, 200_000,
-            "GpuSort wrapped in subquery must emit every input row"
+            crate::gpu::gpu_exec_count(),
+            0,
+            "native subquery sort must not dispatch GPU work"
         );
     }
 
     // =========================================================================
-    // Parallel path injection (partial_pathlist → Gather ∘ CustomScan)
+    // Parallel native-path structural declines
     // =========================================================================
     //
-    // These tests verify the Phase 3 change in
-    // `src/engine/ffi/planner_hooks/rel_pathlist.rs`: the scan-level GpuSort
-    // injector also populates `rel->partial_pathlist`, so queries whose
-    // optimal plan is `Gather ∘ Parallel Scan` can pick up the GPU CustomPath.
-    // Generic GpuExpr no longer exposes a standalone partial CustomPath; the
-    // negative test below guards that planner behavior.
+    // Standalone sort and generic expression paths remain PostgreSQL-native
+    // even when parallel planning supplies partial paths.
 
     /// A full-output sort under default planning must remain a typed native
     /// decline; merely considering a partial path must not select it.
     #[pg_test]
-    fn test_gpu_sort_partial_path_injects() {
+    fn test_full_output_sort_partial_path_stays_native() {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
         Spi::run("RESET min_parallel_table_scan_size").expect("restore parallel scan size");

@@ -91,11 +91,14 @@ EXPECTED_CAPABILITIES = {
         "No registered row-returning executor; host-staged implementation retired",
         "Not selectable",
     ),
-    "Sort or top-k": (
-        "Kernel or descriptor code may remain; no registered executor",
+    "Standalone sort or top-k": (
+        "Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding",
         "Not selectable",
     ),
-    "Window": ("Kernel source may remain; no registered executor", "Not selectable"),
+    "Window": (
+        "Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding",
+        "Not selectable",
+    ),
     "Raster": ("Registered childless resident executor", "Test-only"),
 }
 

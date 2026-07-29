@@ -42,11 +42,11 @@ pub use types::{
     PGACCEL_RESIDENT_RASTER_UINT4, PGACCEL_RESIDENT_RASTER_UINT8, PGACCEL_RESIDENT_RASTER_UINT16,
     PGACCEL_RESIDENT_RASTER_UINT32, PgaccelAggState, PgaccelBatch, PgaccelDeviceInfo,
     PgaccelDeviceVarOutput, PgaccelExprInstruction, PgaccelExprProgram, PgaccelExprUsmCol,
-    PgaccelGeomType, PgaccelGeometry, PgaccelHashTable, PgaccelKeyType, PgaccelMemSpace,
-    PgaccelPlatformCaps, PgaccelRasterReclassResidentRequest, PgaccelResidentBatch,
-    PgaccelResidentColumnView, PgaccelResidentRasterBand, PgaccelResidentRasterReclassRule,
-    PgaccelResidentRasterRow, PgaccelResidentRasterValidationScratch, PgaccelResidentRasterView,
-    PgaccelStatus, PgaccelVal, PgaccelValTag,
+    PgaccelGeomType, PgaccelGeometry, PgaccelMemSpace, PgaccelPlatformCaps,
+    PgaccelRasterReclassResidentRequest, PgaccelResidentBatch, PgaccelResidentColumnView,
+    PgaccelResidentRasterBand, PgaccelResidentRasterReclassRule, PgaccelResidentRasterRow,
+    PgaccelResidentRasterValidationScratch, PgaccelResidentRasterView, PgaccelStatus, PgaccelVal,
+    PgaccelValTag,
 };
 
 pub use error::{

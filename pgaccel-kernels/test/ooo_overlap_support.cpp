@@ -1,3 +1,10 @@
+#include "ooo_overlap_support.h"
+
+// Representative backend serialization diagnostic only. These reduce-like and
+// count-like kernels deliberately avoid production APIs so their event
+// dependencies are fully controlled. Results may establish backend queue
+// serialization, never production-kernel correctness, coverage, or overlap.
+
 #include <sycl/sycl.hpp>
 
 #include <algorithm>
@@ -9,350 +16,250 @@
 #include <new>
 #include <vector>
 
-#include "ooo_overlap_support.h"
-#include "pgaccel_queue.h"
+sycl::queue* pgaccel_get_ooo_queue();
 
 namespace {
 
-using clk = std::chrono::steady_clock;
+using Clock = std::chrono::steady_clock;
+constexpr size_t kGroupCount = 64;
 
-struct run_report {
+pgaccel_status report_probe_failure(const std::exception* error) {
+  std::fprintf(stderr, "pgaccel: pgaccel_resident_reduce_overlap_probe: GPU kernel failure: %s\n",
+               error != nullptr ? error->what() : "unknown C++ exception");
+  return PGACCEL_ERROR;
+}
+
+struct RunReport {
   uint64_t wall_ns = 0;
-  uint64_t sort_start_ns = 0;
-  uint64_t sort_end_ns = 0;
-  uint64_t window_start_ns = 0;
-  uint64_t window_end_ns = 0;
+  uint64_t reduce_start_ns = 0;
+  uint64_t reduce_end_ns = 0;
+  uint64_t resident_start_ns = 0;
+  uint64_t resident_end_ns = 0;
   uint64_t final_start_ns = 0;
   uint64_t final_end_ns = 0;
-  uint64_t sort_kernel_count = 0;
 };
 
-static size_t next_power_of_two(size_t n) {
-  if (n <= 1)
-    return 2;
-  --n;
-  n |= n >> 1;
-  n |= n >> 2;
-  n |= n >> 4;
-  n |= n >> 8;
-  n |= n >> 16;
-  if constexpr (sizeof(size_t) == 8)
-    n |= n >> 32;
-  return n + 1;
-}
-
-static uint64_t ns_since_epoch(const sycl::event& e,
-                               sycl::info::event_profiling::command_start) {
+uint64_t event_start(const sycl::event& event) {
   return static_cast<uint64_t>(
-      e.get_profiling_info<sycl::info::event_profiling::command_start>());
+      event.get_profiling_info<sycl::info::event_profiling::command_start>());
 }
 
-static uint64_t ns_since_epoch(const sycl::event& e,
-                               sycl::info::event_profiling::command_end) {
+uint64_t event_end(const sycl::event& event) {
   return static_cast<uint64_t>(
-      e.get_profiling_info<sycl::info::event_profiling::command_end>());
+      event.get_profiling_info<sycl::info::event_profiling::command_end>());
 }
 
-static sycl::event submit_sort_step(sycl::queue& q, int32_t* keys, uint32_t* indices,
-                                    uint32_t* scratch, size_t n, size_t k, size_t j,
-                                    uint32_t spin_iters,
-                                    const std::vector<sycl::event>& deps,
-                                    size_t lane) {
-  return q.submit(sycl::property_list{
-                      sycl::property::command_group::AdaptiveCpp_prefer_execution_lane{lane}},
-                  [&](sycl::handler& h) {
-                    if (!deps.empty())
-                      h.depends_on(deps);
-                    h.parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
-                      const size_t i = id[0];
-                      const size_t partner = i ^ j;
-
-                      uint32_t mix = static_cast<uint32_t>(i ^ partner ^ k ^ j);
-                      for (uint32_t s = 0; s < spin_iters; ++s) {
-                        mix = mix * 1664525u + 1013904223u;
-                      }
-                      scratch[i] = mix;
-
-                      if (partner > i && partner < n) {
-                        const bool ascending = ((i & k) == 0);
-                        const int32_t vi = keys[i];
-                        const int32_t vp = keys[partner];
-                        const uint32_t ii = indices[i];
-                        const uint32_t ip = indices[partner];
-
-                        bool should_swap = ascending ? (vp < vi || (vp == vi && ip < ii))
-                                                     : (vi < vp || (vp == vi && ii < ip));
-                        if (should_swap) {
-                          keys[i] = vp;
-                          keys[partner] = vi;
-                          indices[i] = ip;
-                          indices[partner] = ii;
-                        }
-                      }
-                    });
-                  });
+sycl::event submit_reduce(sycl::queue& queue, const uint32_t* values, uint32_t* sum,
+                          uint32_t* scratch, size_t count, uint32_t spin_iters,
+                          const std::vector<sycl::event>& dependencies, size_t lane) {
+  return queue.submit(
+      sycl::property_list{sycl::property::command_group::AdaptiveCpp_prefer_execution_lane{lane}},
+      [&](sycl::handler& handler) {
+        if (!dependencies.empty())
+          handler.depends_on(dependencies);
+        handler.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+          const size_t row = id[0];
+          uint32_t mix = static_cast<uint32_t>(row);
+          for (uint32_t step = 0; step < spin_iters; ++step)
+            mix = mix * 1664525u + 1013904223u;
+          scratch[row] = mix;
+          sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                           sycl::access::address_space::global_space>
+              sum_ref(*sum);
+          sum_ref.fetch_add(values[row]);
+        });
+      });
 }
 
-static sycl::event submit_window_row_number(sycl::queue& q, const size_t* part_start,
-                                            int64_t* results, uint32_t* scratch, size_t n,
-                                            uint32_t spin_iters,
-                                            const std::vector<sycl::event>& deps,
-                                            size_t lane) {
-  return q.submit(sycl::property_list{
-                      sycl::property::command_group::AdaptiveCpp_prefer_execution_lane{lane}},
-                  [&](sycl::handler& h) {
-                    if (!deps.empty())
-                      h.depends_on(deps);
-                    h.parallel_for(sycl::range<1>(n), [=](sycl::id<1> id) {
-                      const size_t i = id[0];
-                      uint32_t mix = static_cast<uint32_t>(i);
-                      for (uint32_t s = 0; s < spin_iters; ++s) {
-                        mix = mix * 22695477u + 1u;
-                      }
-                      scratch[i] = mix;
-                      results[i] = static_cast<int64_t>(i - part_start[i] + 1);
-                    });
-                  });
+sycl::event submit_resident_count(sycl::queue& queue, const uint32_t* keys, uint32_t* counts,
+                                  uint32_t* scratch, size_t count, uint32_t spin_iters,
+                                  const std::vector<sycl::event>& dependencies, size_t lane) {
+  return queue.submit(
+      sycl::property_list{sycl::property::command_group::AdaptiveCpp_prefer_execution_lane{lane}},
+      [&](sycl::handler& handler) {
+        if (!dependencies.empty())
+          handler.depends_on(dependencies);
+        handler.parallel_for(sycl::range<1>(count), [=](sycl::id<1> id) {
+          const size_t row = id[0];
+          uint32_t mix = static_cast<uint32_t>(row ^ keys[row]);
+          for (uint32_t step = 0; step < spin_iters; ++step)
+            mix = mix * 22695477u + 1u;
+          scratch[row] = mix;
+          const size_t group = static_cast<size_t>(keys[row] & (kGroupCount - 1));
+          sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                           sycl::access::address_space::global_space>
+              count_ref(counts[group]);
+          count_ref.fetch_add(1u);
+        });
+      });
 }
 
-static sycl::event submit_final_marker(sycl::queue& q, const uint32_t* sort_scratch,
-                                       const uint32_t* window_scratch, uint32_t* marker,
-                                       const std::vector<sycl::event>& deps, size_t lane) {
-  return q.submit(sycl::property_list{
-                      sycl::property::command_group::AdaptiveCpp_prefer_execution_lane{lane}},
-                  [&](sycl::handler& h) {
-                    if (!deps.empty())
-                      h.depends_on(deps);
-                    h.single_task([=]() { marker[0] = sort_scratch[0] ^ window_scratch[0]; });
-                  });
+sycl::event submit_final_marker(sycl::queue& queue, const uint32_t* reduce_scratch,
+                                const uint32_t* resident_scratch, uint32_t* marker,
+                                const std::vector<sycl::event>& dependencies, size_t lane) {
+  return queue.submit(
+      sycl::property_list{sycl::property::command_group::AdaptiveCpp_prefer_execution_lane{lane}},
+      [&](sycl::handler& handler) {
+        handler.depends_on(dependencies);
+        handler.single_task([=]() { marker[0] = reduce_scratch[0] ^ resident_scratch[0]; });
+      });
 }
 
-static size_t bitonic_step_count(size_t n) {
-  size_t steps = 0;
-  for (size_t k = 2; k <= n; k *= 2) {
-    for (size_t j = k / 2; j > 0; j /= 2)
-      ++steps;
-  }
-  return steps;
-}
+pgaccel_status run_once(sycl::queue& queue, bool overlap, const uint32_t* device_values,
+                        const uint32_t* device_keys, uint32_t* device_sum, uint32_t* device_counts,
+                        uint32_t* reduce_scratch, uint32_t* resident_scratch, uint32_t* marker,
+                        size_t count, uint32_t spin_iters, RunReport* report) {
+  queue.memset(device_sum, 0, sizeof(*device_sum));
+  queue.memset(device_counts, 0, kGroupCount * sizeof(*device_counts));
+  queue.memset(reduce_scratch, 0, count * sizeof(*reduce_scratch));
+  queue.memset(resident_scratch, 0, count * sizeof(*resident_scratch));
+  queue.memset(marker, 0, sizeof(*marker));
+  queue.wait_and_throw();
 
-static pgaccel_status run_probe_once(sycl::queue& q, bool overlap, size_t n,
-                                     uint32_t spin_iters_per_sort_step,
-                                     const std::vector<int32_t>& input_keys,
-                                     const std::vector<uint32_t>& input_indices,
-                                     const std::vector<size_t>& input_part_start,
-                                     int32_t* d_keys, uint32_t* d_indices,
-                                     size_t* d_part_start, int64_t* d_window_results,
-                                     uint32_t* d_sort_scratch,
-                                     uint32_t* d_window_scratch, uint32_t* d_marker,
-                                     run_report* report) {
-  q.memcpy(d_keys, input_keys.data(), n * sizeof(int32_t));
-  q.memcpy(d_indices, input_indices.data(), n * sizeof(uint32_t));
-  q.memcpy(d_part_start, input_part_start.data(), n * sizeof(size_t));
-  q.memset(d_window_results, 0, n * sizeof(int64_t));
-  q.memset(d_sort_scratch, 0, n * sizeof(uint32_t));
-  q.memset(d_window_scratch, 0, n * sizeof(uint32_t));
-  q.memset(d_marker, 0, sizeof(uint32_t));
-  q.wait_and_throw();
+  const auto wall_start = Clock::now();
+  const sycl::event reduce =
+      submit_reduce(queue, device_values, device_sum, reduce_scratch, count, spin_iters, {}, 0);
+  const std::vector<sycl::event> resident_dependencies =
+      overlap ? std::vector<sycl::event>{} : std::vector<sycl::event>{reduce};
+  const sycl::event resident =
+      submit_resident_count(queue, device_keys, device_counts, resident_scratch, count, spin_iters,
+                            resident_dependencies, 1);
+  sycl::event final =
+      submit_final_marker(queue, reduce_scratch, resident_scratch, marker, {reduce, resident}, 2);
+  final.wait_and_throw();
+  const auto wall_end = Clock::now();
 
-  const uint32_t window_spin_iters = static_cast<uint32_t>(
-      std::min<uint64_t>(std::numeric_limits<uint32_t>::max(),
-                         static_cast<uint64_t>(spin_iters_per_sort_step) * bitonic_step_count(n) *
-                             2));
-
-  sycl::event first_sort_event;
-  sycl::event last_sort_event;
-  sycl::event window_event;
-  sycl::event final_event;
-  uint64_t sort_kernels = 0;
-
-  const auto wall_start = clk::now();
-  if (overlap) {
-    window_event = submit_window_row_number(q, d_part_start, d_window_results, d_window_scratch, n,
-                                            window_spin_iters, {}, 1);
-  }
-
-  std::vector<sycl::event> deps;
-  for (size_t k = 2; k <= n; k *= 2) {
-    for (size_t j = k / 2; j > 0; j /= 2) {
-      sycl::event e = submit_sort_step(q, d_keys, d_indices, d_sort_scratch, n, k, j,
-                                       spin_iters_per_sort_step, deps, 0);
-      if (sort_kernels == 0)
-        first_sort_event = e;
-      last_sort_event = e;
-      deps = {last_sort_event};
-      ++sort_kernels;
-    }
-  }
-
-  std::vector<sycl::event> window_deps;
-  if (!overlap) {
-    window_deps = {last_sort_event};
-    window_event = submit_window_row_number(q, d_part_start, d_window_results, d_window_scratch, n,
-                                            window_spin_iters, window_deps, 1);
-  }
-
-  final_event = submit_final_marker(q, d_sort_scratch, d_window_scratch, d_marker,
-                                    {last_sort_event, window_event}, 2);
-  final_event.wait_and_throw();
-  const auto wall_end = clk::now();
-
-  report->wall_ns =
-      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(wall_end -
-                                                                                 wall_start)
-                                .count());
-  report->sort_start_ns =
-      ns_since_epoch(first_sort_event, sycl::info::event_profiling::command_start{});
-  report->sort_end_ns = ns_since_epoch(last_sort_event, sycl::info::event_profiling::command_end{});
-  report->window_start_ns =
-      ns_since_epoch(window_event, sycl::info::event_profiling::command_start{});
-  report->window_end_ns =
-      ns_since_epoch(window_event, sycl::info::event_profiling::command_end{});
-  report->final_start_ns =
-      ns_since_epoch(final_event, sycl::info::event_profiling::command_start{});
-  report->final_end_ns = ns_since_epoch(final_event, sycl::info::event_profiling::command_end{});
-  report->sort_kernel_count = sort_kernels;
-
+  report->wall_ns = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(wall_end - wall_start).count());
+  report->reduce_start_ns = event_start(reduce);
+  report->reduce_end_ns = event_end(reduce);
+  report->resident_start_ns = event_start(resident);
+  report->resident_end_ns = event_end(resident);
+  report->final_start_ns = event_start(final);
+  report->final_end_ns = event_end(final);
   return PGACCEL_OK;
 }
 
 }  // namespace
 
-extern "C" pgaccel_status pgaccel_sort_window_overlap_probe(
-    size_t count, uint32_t spin_iters_per_sort_step, pgaccel_ooo_overlap_report* out) try {
+extern "C" pgaccel_status
+pgaccel_resident_reduce_overlap_probe(size_t count, uint32_t spin_iters,
+                                      pgaccel_ooo_overlap_report* out) try {
   if (out == nullptr)
     return PGACCEL_ERROR;
   std::memset(out, 0, sizeof(*out));
-  sycl::queue* ooo = pgaccel_get_ooo_queue();
-  if (ooo == nullptr || ooo->is_in_order())
+  sycl::queue* queue = pgaccel_get_ooo_queue();
+  if (queue == nullptr || queue->is_in_order())
     return PGACCEL_UNSUPPORTED;
 
-  size_t n = next_power_of_two(count);
-  if (n < 1024)
-    n = 1024;
-  if (n > 65536)
-    return PGACCEL_ERROR;
-  if (spin_iters_per_sort_step == 0)
-    spin_iters_per_sort_step = 1;
+  const size_t rows = std::clamp(count, size_t{1024}, size_t{65536});
+  if (spin_iters == 0)
+    spin_iters = 1;
 
-  sycl::queue& q = *ooo;
-
-  std::vector<int32_t> input_keys(n);
-  std::vector<uint32_t> input_indices(n);
-  std::vector<size_t> input_part_start(n, 0);
-  for (size_t i = 0; i < n; ++i) {
-    input_keys[i] = static_cast<int32_t>(n - i);
-    input_indices[i] = static_cast<uint32_t>(i);
+  std::vector<uint32_t> values(rows);
+  std::vector<uint32_t> keys(rows);
+  uint32_t expected_sum = 0;
+  uint32_t expected_counts[kGroupCount] = {};
+  for (size_t row = 0; row < rows; ++row) {
+    values[row] = static_cast<uint32_t>(row % 17);
+    keys[row] = static_cast<uint32_t>((row * 37 + 11) % kGroupCount);
+    expected_sum += values[row];
+    ++expected_counts[keys[row]];
   }
 
-  int32_t* d_keys = nullptr;
-  uint32_t* d_indices = nullptr;
-  size_t* d_part_start = nullptr;
-  int64_t* d_window_results = nullptr;
-  uint32_t* d_sort_scratch = nullptr;
-  uint32_t* d_window_scratch = nullptr;
-  uint32_t* d_marker = nullptr;
+  uint32_t* device_values = nullptr;
+  uint32_t* device_keys = nullptr;
+  uint32_t* device_sum = nullptr;
+  uint32_t* device_counts = nullptr;
+  uint32_t* reduce_scratch = nullptr;
+  uint32_t* resident_scratch = nullptr;
+  uint32_t* marker = nullptr;
   pgaccel_status status = PGACCEL_OK;
-
   try {
-    d_keys = sycl::malloc_device<int32_t>(n, q);
-    d_indices = sycl::malloc_device<uint32_t>(n, q);
-    d_part_start = sycl::malloc_device<size_t>(n, q);
-    d_window_results = sycl::malloc_device<int64_t>(n, q);
-    d_sort_scratch = sycl::malloc_device<uint32_t>(n, q);
-    d_window_scratch = sycl::malloc_device<uint32_t>(n, q);
-    d_marker = sycl::malloc_device<uint32_t>(1, q);
-    if (!d_keys || !d_indices || !d_part_start || !d_window_results || !d_sort_scratch ||
-        !d_window_scratch || !d_marker) {
+    device_values = sycl::malloc_device<uint32_t>(rows, *queue);
+    device_keys = sycl::malloc_device<uint32_t>(rows, *queue);
+    device_sum = sycl::malloc_device<uint32_t>(1, *queue);
+    device_counts = sycl::malloc_device<uint32_t>(kGroupCount, *queue);
+    reduce_scratch = sycl::malloc_device<uint32_t>(rows, *queue);
+    resident_scratch = sycl::malloc_device<uint32_t>(rows, *queue);
+    marker = sycl::malloc_device<uint32_t>(1, *queue);
+    if (device_values == nullptr || device_keys == nullptr || device_sum == nullptr ||
+        device_counts == nullptr || reduce_scratch == nullptr || resident_scratch == nullptr ||
+        marker == nullptr) {
       throw std::bad_alloc();
     }
+    queue->memcpy(device_values, values.data(), rows * sizeof(values[0]));
+    queue->memcpy(device_keys, keys.data(), rows * sizeof(keys[0]));
+    queue->wait_and_throw();
 
-    run_report warmup;
-    status = run_probe_once(q, true, n, 1, input_keys, input_indices, input_part_start, d_keys,
-                            d_indices, d_part_start, d_window_results, d_sort_scratch,
-                            d_window_scratch, d_marker, &warmup);
-    run_report serial;
-    run_report overlap;
-
+    RunReport warmup;
+    RunReport serial;
+    RunReport overlap;
+    status = run_once(*queue, true, device_values, device_keys, device_sum, device_counts,
+                      reduce_scratch, resident_scratch, marker, rows, 1, &warmup);
     if (status == PGACCEL_OK) {
-      status = run_probe_once(q, false, n, spin_iters_per_sort_step, input_keys, input_indices,
-                              input_part_start, d_keys, d_indices, d_part_start, d_window_results,
-                              d_sort_scratch, d_window_scratch, d_marker, &serial);
+      status = run_once(*queue, false, device_values, device_keys, device_sum, device_counts,
+                        reduce_scratch, resident_scratch, marker, rows, spin_iters, &serial);
     }
     if (status == PGACCEL_OK) {
-      status = run_probe_once(q, true, n, spin_iters_per_sort_step, input_keys, input_indices,
-                              input_part_start, d_keys, d_indices, d_part_start, d_window_results,
-                              d_sort_scratch, d_window_scratch, d_marker, &overlap);
+      status = run_once(*queue, true, device_values, device_keys, device_sum, device_counts,
+                        reduce_scratch, resident_scratch, marker, rows, spin_iters, &overlap);
     }
 
-    std::vector<int32_t> sorted_keys(n);
-    std::vector<int64_t> window_results(n);
+    uint32_t observed_sum = 0;
+    uint32_t observed_counts[kGroupCount] = {};
     if (status == PGACCEL_OK) {
-      q.memcpy(sorted_keys.data(), d_keys, n * sizeof(int32_t)).wait_and_throw();
-      q.memcpy(window_results.data(), d_window_results, n * sizeof(int64_t)).wait_and_throw();
-
-      for (size_t i = 1; i < n; ++i) {
-        if (sorted_keys[i] < sorted_keys[i - 1]) {
-          status = PGACCEL_ERROR;
-          break;
-        }
-      }
-    }
-    if (status == PGACCEL_OK) {
-      for (size_t i = 0; i < n; ++i) {
-        if (window_results[i] != static_cast<int64_t>(i + 1)) {
-          status = PGACCEL_ERROR;
-          break;
-        }
+      queue->memcpy(&observed_sum, device_sum, sizeof(observed_sum));
+      queue->memcpy(observed_counts, device_counts, sizeof(observed_counts));
+      queue->wait_and_throw();
+      if (observed_sum != expected_sum ||
+          !std::equal(std::begin(observed_counts), std::end(observed_counts),
+                      std::begin(expected_counts))) {
+        status = PGACCEL_ERROR;
       }
     }
 
     if (status == PGACCEL_OK) {
       out->serial_wall_ns = serial.wall_ns;
       out->overlap_wall_ns = overlap.wall_ns;
-      out->sort_start_ns = overlap.sort_start_ns;
-      out->sort_end_ns = overlap.sort_end_ns;
-      out->window_start_ns = overlap.window_start_ns;
-      out->window_end_ns = overlap.window_end_ns;
+      out->reduce_start_ns = overlap.reduce_start_ns;
+      out->reduce_end_ns = overlap.reduce_end_ns;
+      out->resident_start_ns = overlap.resident_start_ns;
+      out->resident_end_ns = overlap.resident_end_ns;
       out->final_start_ns = overlap.final_start_ns;
       out->final_end_ns = overlap.final_end_ns;
-      out->sort_kernel_count = overlap.sort_kernel_count;
-      out->spans_overlap = overlap.window_start_ns < overlap.sort_end_ns &&
-                           overlap.sort_start_ns < overlap.window_end_ns;
+      out->spans_overlap = overlap.resident_start_ns < overlap.reduce_end_ns &&
+                           overlap.reduce_start_ns < overlap.resident_end_ns;
       out->wall_time_improved = overlap.wall_ns < serial.wall_ns;
-
       pgaccel_record_gpu_exec();
     }
-  } catch (const sycl::exception& e) {
-    fprintf(stderr, "pgaccel: OOO overlap probe failed: %s\n", e.what());
+  } catch (const sycl::exception& error) {
+    std::fprintf(stderr, "pgaccel: resident/reduce OOO probe failed: %s\n", error.what());
     status = PGACCEL_ERROR;
   } catch (const std::bad_alloc&) {
     status = PGACCEL_OOM;
-  } catch (const std::exception& e) {
-    fprintf(stderr, "pgaccel: OOO overlap probe failed: %s\n", e.what());
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "pgaccel: resident/reduce OOO probe failed: %s\n", error.what());
     status = PGACCEL_ERROR;
   }
 
-  if (d_marker)
-    sycl::free(d_marker, q);
-  if (d_window_scratch)
-    sycl::free(d_window_scratch, q);
-  if (d_sort_scratch)
-    sycl::free(d_sort_scratch, q);
-  if (d_window_results)
-    sycl::free(d_window_results, q);
-  if (d_part_start)
-    sycl::free(d_part_start, q);
-  if (d_indices)
-    sycl::free(d_indices, q);
-  if (d_keys)
-    sycl::free(d_keys, q);
-
+  if (marker != nullptr)
+    sycl::free(marker, *queue);
+  if (resident_scratch != nullptr)
+    sycl::free(resident_scratch, *queue);
+  if (reduce_scratch != nullptr)
+    sycl::free(reduce_scratch, *queue);
+  if (device_counts != nullptr)
+    sycl::free(device_counts, *queue);
+  if (device_sum != nullptr)
+    sycl::free(device_sum, *queue);
+  if (device_keys != nullptr)
+    sycl::free(device_keys, *queue);
+  if (device_values != nullptr)
+    sycl::free(device_values, *queue);
   return status;
-} catch (const pgaccel_no_device_error&) {
-  return PGACCEL_ERROR_NO_DEVICE;
-} catch (const std::exception& e) {
-  return pgaccel_kernel_failure("pgaccel_sort_window_overlap_probe", &e);
+} catch (const std::exception& error) {
+  return report_probe_failure(&error);
 } catch (...) {
-  return pgaccel_kernel_failure("pgaccel_sort_window_overlap_probe", nullptr);
+  return report_probe_failure(nullptr);
 }
