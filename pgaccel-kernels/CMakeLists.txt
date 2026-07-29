@@ -275,7 +275,7 @@ function(add_pgaccel_gpu_test test_target)
     endif()
 endfunction()
 
-add_test(NAME test_host_api_contract COMMAND test_host_api_contract)
+add_pgaccel_gpu_test(test_host_api_contract)
 set_tests_properties(test_host_api_contract PROPERTIES LABELS host)
 
 add_pgaccel_gpu_test(test_device)
