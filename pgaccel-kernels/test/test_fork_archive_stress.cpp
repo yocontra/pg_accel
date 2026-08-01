@@ -69,10 +69,11 @@ static constexpr size_t REDUCE_N = 100'000;
 static constexpr size_t H3_N = 100'000;
 static constexpr size_t PIP_N = 100'000;
 
-// The stress loop has three logical dispatch families, but the fp64 H3 path
-// deliberately materializes two Metal code objects (projection + integer H3
-// assembly) to keep the soft-fp64 emitter tree small and fork-safe.
-static constexpr size_t EXPECTED_MAX_CACHE_IDS = 4;
+// The stress loop deterministically materializes five Metal code objects:
+// two-pass reduce emits an ndrange partial reduction plus a single_task
+// finalizer, fp64 H3 emits projection plus integer H3 assembly, and PIP emits
+// one code object.
+static constexpr size_t EXPECTED_EMPTY_CACHE_IDS = 5;
 
 // ──────────────────────────────────────────────────────────────────────
 // Archive-failure marker patterns. These are emitted by AdaptiveCpp's
@@ -771,15 +772,31 @@ int main() {
   std::printf("archive_skipped_intentional=%d (not a failure — large metallibs)\n", total_skipped);
   std::printf("posix_spawn_failures=%d\n", total_spawn_fail);
 
-  int hash_instability_failures = 0;
-  if (started_empty && (post_metallib_ids.size() > EXPECTED_MAX_CACHE_IDS ||
-                        post_metalar_ids.size() > EXPECTED_MAX_CACHE_IDS ||
-                        post_jit_ids.size() > EXPECTED_MAX_CACHE_IDS)) {
-    hash_instability_failures = 1;
-  }
-  std::printf("cache_hash_unique_ids: metallib=%zu metalar=%zu jit=%zu expected<=%zu started_empty=%d\n",
+  const bool empty_cache_counts_exact =
+      post_metallib_ids.size() == EXPECTED_EMPTY_CACHE_IDS &&
+      post_metalar_ids.size() == EXPECTED_EMPTY_CACHE_IDS &&
+      post_jit_ids.size() == EXPECTED_EMPTY_CACHE_IDS;
+  const bool metallib_metalar_ids_equal = post_metallib_ids == post_metalar_ids;
+  const bool metallib_jit_ids_equal = post_metallib_ids == post_jit_ids;
+  const bool cache_id_sets_identical = metallib_metalar_ids_equal && metallib_jit_ids_equal;
+  const int hash_instability_failures =
+      started_empty && (!empty_cache_counts_exact || !cache_id_sets_identical) ? 1 : 0;
+  const char* cache_hash_status =
+      !started_empty ? "not_enforced"
+                     : (hash_instability_failures == 0 ? "pass" : "fail");
+  std::printf("cache_hash_unique_ids: metallib=%zu metalar=%zu jit=%zu "
+              "expected_empty=%zu started_empty=%d counts_exact=%d\n",
               post_metallib_ids.size(), post_metalar_ids.size(), post_jit_ids.size(),
-              EXPECTED_MAX_CACHE_IDS, started_empty ? 1 : 0);
+              EXPECTED_EMPTY_CACHE_IDS, started_empty ? 1 : 0,
+              empty_cache_counts_exact ? 1 : 0);
+  std::printf("cache_hash_id_sets: metallib_metalar_equal=%d metallib_jit_equal=%d all_equal=%d\n",
+              metallib_metalar_ids_equal ? 1 : 0, metallib_jit_ids_equal ? 1 : 0,
+              cache_id_sets_identical ? 1 : 0);
+  std::printf("cache_hash_contract: mode=%s enforced=%d expected_ids_per_extension=%zu "
+              "counts_exact=%d sets_identical=%d status=%s\n",
+              started_empty ? "empty" : "nonempty_diagnostic", started_empty ? 1 : 0,
+              EXPECTED_EMPTY_CACHE_IDS, empty_cache_counts_exact ? 1 : 0,
+              cache_id_sets_identical ? 1 : 0, cache_hash_status);
   std::printf("cache_hash_ids_changed: metallib=%d metalar=%d jit=%d\n",
               pre_metallib_ids == post_metallib_ids ? 0 : 1,
               pre_metalar_ids == post_metalar_ids ? 0 : 1, pre_jit_ids == post_jit_ids ? 0 : 1);
