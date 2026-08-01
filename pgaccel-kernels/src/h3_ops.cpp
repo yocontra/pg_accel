@@ -32,8 +32,10 @@ class H3UsmAllocationGuard {
   ~H3UsmAllocationGuard() noexcept {
     try {
       free_now();
+    } catch (const std::exception& error) {
+      std::fprintf(stderr, "pgaccel: H3 USM cleanup failed: %s\n", error.what());
     } catch (...) {
-      // Cleanup must not replace an in-flight kernel or allocation exception.
+      std::fprintf(stderr, "pgaccel: H3 USM cleanup failed: unknown C++ exception\n");
     }
   }
 
