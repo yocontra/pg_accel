@@ -1538,21 +1538,25 @@ pgaccel_status pgaccel_expr_eval_predicate(const pgaccel_expr_program* program,
     pgaccel_expr_program* d_prog = s->d_prog;
     pgaccel_batch* d_batch = s->d_batch;
 
-    switch (tier) {
-      case ExprProgramTier::Basic:
-        submit_basic_predicate_kernel(*q, batch->num_rows, d_prog, d_batch, d_results);
-        break;
-      case ExprProgramTier::Common:
-        submit_predicate_kernel<false>(*q, batch->num_rows, d_prog, d_batch, d_results);
-        break;
-      case ExprProgramTier::Extended:
-        submit_predicate_kernel<true>(*q, batch->num_rows, d_prog, d_batch, d_results);
-        break;
+    if (tier == ExprProgramTier::Basic) {
+      submit_basic_predicate_kernel(*q, batch->num_rows, d_prog, d_batch, d_results);
+      q->memcpy(results, d_results, batch->num_rows * sizeof(int8_t)).wait_and_throw();
+      pgaccel_record_gpu_exec();
+      return PGACCEL_OK;
     }
-
-    q->memcpy(results, d_results, batch->num_rows * sizeof(int8_t)).wait_and_throw();
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
+    if (tier == ExprProgramTier::Common) {
+      submit_predicate_kernel<false>(*q, batch->num_rows, d_prog, d_batch, d_results);
+      q->memcpy(results, d_results, batch->num_rows * sizeof(int8_t)).wait_and_throw();
+      pgaccel_record_gpu_exec();
+      return PGACCEL_OK;
+    }
+    if (tier == ExprProgramTier::Extended) {
+      submit_predicate_kernel<true>(*q, batch->num_rows, d_prog, d_batch, d_results);
+      q->memcpy(results, d_results, batch->num_rows * sizeof(int8_t)).wait_and_throw();
+      pgaccel_record_gpu_exec();
+      return PGACCEL_OK;
+    }
+    return PGACCEL_ERROR;
   } catch (const std::exception& e) {
     std::memset(static_cast<void*>(results), 0, batch->num_rows * sizeof(int8_t));
     return pgaccel_kernel_failure("pgaccel_expr_eval_predicate", &e);
@@ -1598,24 +1602,31 @@ pgaccel_status pgaccel_expr_eval_project(const pgaccel_expr_program* program,
     pgaccel_expr_program* d_prog = s->d_prog;
     pgaccel_batch* d_batch = s->d_batch;
 
-    switch (tier) {
-      case ExprProgramTier::Basic:
-        submit_basic_project_kernel(*q, batch->num_rows, d_prog, d_batch, d_output, d_uncertain);
-        break;
-      case ExprProgramTier::Common:
-        submit_project_kernel<false>(*q, batch->num_rows, d_prog, d_batch, d_output, d_uncertain);
-        break;
-      case ExprProgramTier::Extended:
-        submit_project_kernel<true>(*q, batch->num_rows, d_prog, d_batch, d_output, d_uncertain);
-        break;
+    if (tier == ExprProgramTier::Basic) {
+      submit_basic_project_kernel(*q, batch->num_rows, d_prog, d_batch, d_output, d_uncertain);
+      q->memcpy(output, d_output, batch->num_rows * sizeof(pgaccel_val)).wait_and_throw();
+      if (uncertain_mask != nullptr)
+        q->memcpy(uncertain_mask, d_uncertain, batch->num_rows).wait_and_throw();
+      pgaccel_record_gpu_exec();
+      return PGACCEL_OK;
     }
-
-    q->memcpy(output, d_output, batch->num_rows * sizeof(pgaccel_val)).wait_and_throw();
-    if (uncertain_mask != nullptr)
-      q->memcpy(uncertain_mask, d_uncertain, batch->num_rows).wait_and_throw();
-
-    pgaccel_record_gpu_exec();
-    return PGACCEL_OK;
+    if (tier == ExprProgramTier::Common) {
+      submit_project_kernel<false>(*q, batch->num_rows, d_prog, d_batch, d_output, d_uncertain);
+      q->memcpy(output, d_output, batch->num_rows * sizeof(pgaccel_val)).wait_and_throw();
+      if (uncertain_mask != nullptr)
+        q->memcpy(uncertain_mask, d_uncertain, batch->num_rows).wait_and_throw();
+      pgaccel_record_gpu_exec();
+      return PGACCEL_OK;
+    }
+    if (tier == ExprProgramTier::Extended) {
+      submit_project_kernel<true>(*q, batch->num_rows, d_prog, d_batch, d_output, d_uncertain);
+      q->memcpy(output, d_output, batch->num_rows * sizeof(pgaccel_val)).wait_and_throw();
+      if (uncertain_mask != nullptr)
+        q->memcpy(uncertain_mask, d_uncertain, batch->num_rows).wait_and_throw();
+      pgaccel_record_gpu_exec();
+      return PGACCEL_OK;
+    }
+    return PGACCEL_ERROR;
   } catch (const std::exception& e) {
     return pgaccel_kernel_failure("pgaccel_expr_eval_project", &e);
   } catch (...) {

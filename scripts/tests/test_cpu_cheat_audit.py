@@ -6751,6 +6751,40 @@ class ProductionWitnessTests(unittest.TestCase):
         self.assertIn("opaque_device_resource", entry.classifications)
         self.assertIn("kernel-derived opaque resource", entry.detail)
 
+    def test_repaired_expr_and_hash_outputs_have_device_proof(self) -> None:
+        repaired = (
+            ("pgaccel_expr_eval_predicate", "expr_eval.cpp", (2,)),
+            ("pgaccel_expr_eval_project", "expr_eval.cpp", (2,)),
+            ("pgaccel_hash_join_count_device", "hash_join.cpp", (4,)),
+        )
+        required = {
+            "device_copyback",
+            "device_dispatch",
+            "large_input_gpu_chain",
+            "zero_work",
+        }
+        forbidden = {
+            "host_output_write",
+            "host_staging_review",
+            "rejected_terminal",
+            "undominated_success",
+        }
+        for name, source, output_positions in repaired:
+            with self.subTest(name=name):
+                entry = self.by_name[name]
+                self.assertTrue(entry.ok, entry.detail)
+                self.assertEqual(entry.path.name, source)
+                self.assertEqual(
+                    entry.guaranteed_output_parameter_positions, output_positions
+                )
+                self.assertEqual(
+                    entry.output_parameter_position_variants, (output_positions,)
+                )
+                self.assertTrue(required.issubset(entry.classifications))
+                self.assertTrue(forbidden.isdisjoint(entry.classifications))
+                if name == "pgaccel_hash_join_count_device":
+                    self.assertIn("failure_neutral_init", entry.classifications)
+
     def test_resident_count_publishes_only_device_derived_state(self) -> None:
         checked = self.by_name[
             "pgaccel_hash_count_i64_device_hash_execute_bounded_checked"

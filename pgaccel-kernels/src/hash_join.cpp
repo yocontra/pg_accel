@@ -282,22 +282,86 @@ pgaccel_hash_table* build_device_count_typed(const Key* device_keys,
 }
 
 template <typename Key>
+void count_rows_device(sycl::queue& queue, const Key* outer_keys, const uint8_t* outer_null_mask,
+                       size_t outer_count, const Key* build_keys, const int32_t* heads,
+                       const int32_t* next, size_t capacity, uint32_t* row_counts) {
+  const size_t mask = capacity - 1;
+  queue
+      .parallel_for(sycl::range<1>(outer_count),
+                    [=](sycl::id<1> id) {
+                      const size_t outer_row = id[0];
+                      row_counts[outer_row] = 0;
+                      if (outer_null_mask != nullptr && outer_null_mask[outer_row] != 0)
+                        return;
+
+                      const Key key = outer_keys[outer_row];
+                      const uint64_t hash = hash_key<Key>(key);
+                      for (size_t attempt = 0; attempt < capacity; ++attempt) {
+                        const size_t slot = (hash + attempt) & mask;
+                        const int32_t head = heads[slot];
+                        if (head == kEmptyHead)
+                          return;
+                        if (build_keys[static_cast<size_t>(head)] != key)
+                          continue;
+
+                        uint32_t local_count = 0;
+                        int32_t current = head;
+                        while (current != kEmptyHead) {
+                          if (local_count != std::numeric_limits<uint32_t>::max())
+                            ++local_count;
+                          current = next[static_cast<size_t>(current)];
+                        }
+                        row_counts[outer_row] = local_count;
+                        return;
+                      }
+                    })
+      .wait_and_throw();
+}
+
+void finalize_count_device(sycl::queue& queue, const uint32_t* row_counts, size_t outer_count,
+                           size_t* final_count, pgaccel_status* status) {
+  queue
+      .single_task([=]() {
+        size_t produced = 0;
+        uint32_t overflow = 0;
+        for (size_t row = 0; row < outer_count; ++row) {
+          const size_t count = static_cast<size_t>(row_counts[row]);
+          if (count > std::numeric_limits<size_t>::max() - produced) {
+            overflow = 1;
+            break;
+          }
+          produced += count;
+        }
+        final_count[0] = produced;
+        status[0] = overflow != 0 ? PGACCEL_UNSUPPORTED : PGACCEL_OK;
+      })
+      .wait_and_throw();
+}
+
+template <typename Key>
 pgaccel_status count_device_typed(const pgaccel_hash_table* table, const Key* outer_keys,
                                   const uint8_t* outer_null_mask, size_t outer_count,
                                   size_t* match_count) {
   if (table == nullptr || outer_keys == nullptr || match_count == nullptr)
     return PGACCEL_ERROR;
-  *match_count = 0;
-  if (outer_count == 0)
+  if (outer_count == 0) {
+    *match_count = 0;
     return PGACCEL_OK;
-  if (outer_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max()))
+  }
+  if (outer_count > static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+    *match_count = 0;
     return PGACCEL_UNSUPPORTED;
-  if (!has_count_storage(table))
+  }
+  if (!has_count_storage(table)) {
+    *match_count = 0;
     return PGACCEL_UNSUPPORTED;
+  }
 
   sycl::queue* queue = pgaccel_get_queue();
-  if (queue == nullptr || table->queue == nullptr || queue != table->queue)
+  if (queue == nullptr || table->queue == nullptr || queue != table->queue) {
+    *match_count = 0;
     return PGACCEL_ERROR_NO_DEVICE;
+  }
 
   uint32_t* row_counts = nullptr;
   size_t* final_count = nullptr;
@@ -317,6 +381,7 @@ pgaccel_status count_device_typed(const pgaccel_hash_table* table, const Key* ou
     status = sycl::malloc_device<pgaccel_status>(1, *queue);
     if (row_counts == nullptr || final_count == nullptr || status == nullptr) {
       cleanup();
+      *match_count = 0;
       return PGACCEL_OOM;
     }
 
@@ -324,55 +389,10 @@ pgaccel_status count_device_typed(const pgaccel_hash_table* table, const Key* ou
     const int32_t* heads = table->device_heads;
     const int32_t* next = table->device_next;
     const size_t capacity = table->capacity;
-    const size_t mask = capacity - 1;
 
-    queue
-        ->parallel_for(sycl::range<1>(outer_count),
-                       [=](sycl::id<1> id) {
-                         const size_t outer_row = id[0];
-                         row_counts[outer_row] = 0;
-                         if (outer_null_mask != nullptr && outer_null_mask[outer_row] != 0)
-                           return;
-
-                         const Key key = outer_keys[outer_row];
-                         const uint64_t hash = hash_key<Key>(key);
-                         for (size_t attempt = 0; attempt < capacity; ++attempt) {
-                           const size_t slot = (hash + attempt) & mask;
-                           const int32_t head = heads[slot];
-                           if (head == kEmptyHead)
-                             return;
-                           if (build_keys[static_cast<size_t>(head)] != key)
-                             continue;
-
-                           uint32_t local_count = 0;
-                           int32_t current = head;
-                           while (current != kEmptyHead) {
-                             if (local_count != std::numeric_limits<uint32_t>::max())
-                               ++local_count;
-                             current = next[static_cast<size_t>(current)];
-                           }
-                           row_counts[outer_row] = local_count;
-                           return;
-                         }
-                       })
-        .wait_and_throw();
-
-    queue
-        ->single_task([=]() {
-          size_t produced = 0;
-          uint32_t overflow = 0;
-          for (size_t row = 0; row < outer_count; ++row) {
-            const size_t count = static_cast<size_t>(row_counts[row]);
-            if (count > std::numeric_limits<size_t>::max() - produced) {
-              overflow = 1;
-              break;
-            }
-            produced += count;
-          }
-          final_count[0] = produced;
-          status[0] = overflow != 0 ? PGACCEL_UNSUPPORTED : PGACCEL_OK;
-        })
-        .wait_and_throw();
+    count_rows_device(*queue, outer_keys, outer_null_mask, outer_count, build_keys, heads, next,
+                      capacity, row_counts);
+    finalize_count_device(*queue, row_counts, outer_count, final_count, status);
     pgaccel_record_gpu_exec();
 
     pgaccel_status host_status = PGACCEL_ERROR;
@@ -382,11 +402,15 @@ pgaccel_status count_device_typed(const pgaccel_hash_table* table, const Key* ou
     return host_status;
   } catch (const sycl::exception& error) {
     std::fprintf(stderr, "pgaccel: resident hash join count failed: %s\n", error.what());
+    cleanup();
+    *match_count = 0;
+    return PGACCEL_ERROR_NO_DEVICE;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "pgaccel: resident hash join count failed: %s\n", error.what());
+    cleanup();
+    *match_count = 0;
+    return PGACCEL_ERROR_NO_DEVICE;
   }
-  cleanup();
-  return PGACCEL_ERROR_NO_DEVICE;
 }
 
 }  // namespace
@@ -436,10 +460,13 @@ pgaccel_status pgaccel_hash_join_count_device(const pgaccel_hash_table* table,
   }
   return PGACCEL_UNSUPPORTED;
 } catch (const pgaccel_no_device_error&) {
+  *match_count = 0;
   return PGACCEL_ERROR_NO_DEVICE;
 } catch (const std::exception& error) {
+  *match_count = 0;
   return pgaccel_kernel_failure("pgaccel_hash_join_count_device", &error);
 } catch (...) {
+  *match_count = 0;
   return pgaccel_kernel_failure("pgaccel_hash_join_count_device", nullptr);
 }
 
