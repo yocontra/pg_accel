@@ -666,6 +666,7 @@ unsafe fn inject_childless_shape_path(
     // cpath carries a complete resident proof in its private payload.
     Ok(unsafe {
         add_gpu_path_with_resident_proof(
+            stats::PlannerHookStage::UpperGroupAgg,
             GENERIC_SHAPE_PATH_CONTEXT,
             output_rel,
             cpath,
@@ -1262,7 +1263,6 @@ unsafe fn cheapest_native_cost(
 fn record_decline(decline: &AdmissionDecline, output_rel: *mut RelOptInfo) {
     let rows = rel_rows_estimate(output_rel).unwrap_or(0);
     stats::increment_planner_rejected(decline.code(), rows);
-    stats::record_planner_fast_decline(decline.code());
     pgrx::debug1!("pg_accel: generic aggregate declined: {decline}");
 }
 

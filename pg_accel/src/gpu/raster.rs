@@ -53,7 +53,7 @@ pub struct RasterResidentLaunchOutcome {
 
 /// Test-only hard failure retained after a real resident raster dispatch.
 #[cfg(feature = "pg_test")]
-pub(crate) const fn injected_raster_resident_failure() -> RasterResidentLaunchOutcome {
+pub const fn injected_raster_resident_failure() -> RasterResidentLaunchOutcome {
     RasterResidentLaunchOutcome {
         status: super::PgaccelStatus::Error as i32,
         detail: RASTER_DETAIL_NONE,

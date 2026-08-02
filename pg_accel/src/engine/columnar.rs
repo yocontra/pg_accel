@@ -793,7 +793,7 @@ mod tests {
     #[test]
     fn add_col_f64_stores_bytes_and_tag() {
         let mut owner = ColumnarBatchOwner::new(2, 1);
-        owner.add_col_f64(vec![3.14_f64, 2.71], vec![0, 0]);
+        owner.add_col_f64(vec![3.125_f64, 2.75], vec![0, 0]);
 
         assert_eq!(owner.col_types[0], PgaccelValTag::Float64);
         assert_eq!(
@@ -1327,7 +1327,7 @@ mod tests {
     #[test]
     fn val_tag_clone_and_copy() {
         let tag = PgaccelValTag::Float64;
-        let cloned = tag.clone();
+        let cloned = tag;
         let copied = tag;
         assert_eq!(tag, cloned);
         assert_eq!(tag, copied);

@@ -1,5 +1,5 @@
--- 60_window_functions.sql: GPU window function correctness tests.
--- Verifies window function results match between accel ON and OFF.
+-- 60_window_functions.sql: native window correctness and decline tests.
+-- Production window execution stays PostgreSQL-native with zero GPU dispatch.
 
 \echo '=== 60_window_functions ==='
 

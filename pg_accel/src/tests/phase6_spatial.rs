@@ -108,6 +108,17 @@ mod tests {
         }
     }
 
+    fn caught_error_code(caught: &pgrx::pg_sys::panic::CaughtError) -> pgrx::PgSqlErrorCode {
+        use pgrx::pg_sys::panic::CaughtError;
+
+        match caught {
+            CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => {
+                error.sql_error_code()
+            }
+            CaughtError::RustPanic { ereport, .. } => ereport.sql_error_code(),
+        }
+    }
+
     #[pg_test]
     fn forced_spatial_groupagg_matches_postgis_for_argument_orders_and_edge_rows() {
         if !ensure_extension("postgis") || !gpu_device_available() {
@@ -388,6 +399,103 @@ mod tests {
             count(&query),
             2,
             "native control remains independently valid"
+        );
+    }
+
+    #[pg_test]
+    fn exact_recheck_preserves_cancellation_but_types_ordinary_errors() {
+        use crate::engine::ffi::syscache::{
+            TestInjectedPostgresError, with_test_injected_postgres_error,
+        };
+
+        if !ensure_extension("postgis") || !gpu_device_available() {
+            return;
+        }
+        serialize_gpu_tests();
+        create_fixture("_spatial_exact_error");
+        configure_forced_spatial();
+        let query = format!(
+            "SELECT count(*) FROM _spatial_exact_error \
+             WHERE ST_Intersects(geom, {POLYGON})"
+        );
+        assert_forced_agg_plan(&query);
+
+        let capture = |error| {
+            with_test_injected_postgres_error(error, || {
+                PgTryBuilder::new(|| {
+                    let _ = Spi::get_one::<i64>(&query)
+                        .expect("forced spatial query must reach exact recheck");
+                    None
+                })
+                .catch_others(|caught| {
+                    Some((caught_error_code(&caught), caught_error_message(&caught)))
+                })
+                .execute()
+            })
+        };
+
+        let cleanup_before_ordinary =
+            crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        let (ordinary_code, ordinary_message) = capture(TestInjectedPostgresError::Ordinary)
+            .expect("ordinary exact-recheck ERROR must abort the selected query");
+        let cleanup_after_ordinary =
+            crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        assert_eq!(
+            cleanup_after_ordinary.installed,
+            cleanup_before_ordinary.installed + 1,
+            "ordinary cleanup counters: before={cleanup_before_ordinary:?}, after={cleanup_after_ordinary:?}, code={ordinary_code:?}, message={ordinary_message}"
+        );
+        assert_eq!(
+            cleanup_after_ordinary.normal_end,
+            cleanup_before_ordinary.normal_end
+        );
+        assert_eq!(
+            cleanup_after_ordinary.query_reset,
+            cleanup_before_ordinary.query_reset + 1,
+            "ordinary exact-recheck ERROR must release through query-context reset"
+        );
+        assert_eq!(ordinary_code, pgrx::PgSqlErrorCode::ERRCODE_INTERNAL_ERROR);
+        assert!(
+            ordinary_message.contains("PostGIS exact spatial recheck raised an error")
+                && ordinary_message.contains("injected protected PostGIS ordinary error"),
+            "ordinary exact-recheck ERROR must become a typed executor error: {ordinary_message}"
+        );
+        assert_eq!(
+            Spi::get_one::<i32>("SELECT 41").expect("backend usable after ordinary ERROR"),
+            Some(41)
+        );
+
+        let cleanup_before_cancel = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        let (cancel_code, cancel_message) = capture(TestInjectedPostgresError::QueryCanceled)
+            .expect("exact-recheck cancellation must abort the selected query");
+        let cleanup_after_cancel = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        assert_eq!(
+            cleanup_after_cancel.installed,
+            cleanup_before_cancel.installed + 1
+        );
+        assert_eq!(
+            cleanup_after_cancel.normal_end,
+            cleanup_before_cancel.normal_end
+        );
+        assert_eq!(
+            cleanup_after_cancel.query_reset,
+            cleanup_before_cancel.query_reset + 1,
+            "exact-recheck cancellation must release through query-context reset"
+        );
+        assert_eq!(
+            cancel_code,
+            pgrx::PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+            "exact-recheck cancellation must retain SQLSTATE 57014: {cancel_message}"
+        );
+        assert_eq!(
+            Spi::get_one::<i32>("SELECT 42").expect("backend usable after cancellation"),
+            Some(42)
+        );
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
+                .expect("fallback counter remains readable"),
+            Some(0),
+            "selected exact-recheck errors must not enter stock fallback"
         );
     }
 }

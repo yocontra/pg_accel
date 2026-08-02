@@ -557,13 +557,32 @@ impl RasterExecState {
     pub const fn ready(&self) -> Option<&RasterExecReady> {
         self.ready.as_ref()
     }
+
+    /// Prepare this state to be dropped from its parent query memory-context
+    /// reset callback.
+    ///
+    /// PostgreSQL deletes a memory context's children before invoking reset
+    /// callbacks registered on the parent. The raster output context is one
+    /// such child, so its pointer and the slot value it backed are already
+    /// invalid by the time the Custom Scan abort callback runs. Normal
+    /// `EndCustomScan` must not call this method because it still owns and
+    /// explicitly deletes the live child context.
+    ///
+    /// # Safety
+    /// Must only be called while PostgreSQL is resetting or deleting the
+    /// captured parent query memory context, after its children were deleted.
+    pub(crate) unsafe fn prepare_for_query_context_reset(&mut self) {
+        self.output_memory.context = std::ptr::null_mut();
+        self.output_memory.output_slot = std::ptr::null_mut();
+    }
 }
 
 impl Drop for RasterExecState {
     fn drop(&mut self) {
-        // SAFETY: RasterExecState is dropped synchronously by EndCustomScan on
-        // the backend main thread. On ERROR unwind, the parent es_query_cxt
-        // owns and releases this child even when EndCustomScan is bypassed.
+        // SAFETY: normal EndCustomScan runs while the child context and slot
+        // remain live. The query-context reset callback first calls
+        // prepare_for_query_context_reset(), making this a no-op after
+        // PostgreSQL has already deleted the child during abort cleanup.
         unsafe { self.output_memory.release() };
     }
 }

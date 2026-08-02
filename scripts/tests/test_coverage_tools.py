@@ -850,7 +850,7 @@ class SqlSemanticCoverageTests(unittest.TestCase):
                 REPO_ROOT / "coverage/sql-semantic-assertions.json"
             )
             self.assertEqual(generated, checked_in)
-            self.assertEqual(generated["declared_assertions"], 287)
+            self.assertEqual(generated["declared_assertions"], 293)
             matrix = next(
                 entry
                 for entry in generated["files"]
@@ -1078,10 +1078,10 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
         assertion_ids: list[str] = []
         sql_dir = repo_root / "sql/tests"
         sql_dir.mkdir(parents=True)
-        for file_index in range(52):
+        for file_index in range(54):
             stem = f"{file_index:02d}_fixture"
             name = f"{stem}.sql"
-            assertion_count = 6 if file_index < 27 else 5
+            assertion_count = 6 if file_index < 23 else 5
             source_lines: list[str] = []
             for assertion_index in range(1, assertion_count + 1):
                 identifier = f"{stem}.assert_{assertion_index:03d}"
@@ -1109,7 +1109,7 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
                     "assertions": assertions,
                 }
             )
-        self.assertEqual(len(assertion_ids), 287)
+        self.assertEqual(len(assertion_ids), 293)
 
         scope = {
             "schema_version": 2,
@@ -1139,10 +1139,10 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
             "schema_version": 2,
             "kind": "sql-semantic-assertion-manifest",
             "test_root": "sql/tests",
-            "baseline_files": 52,
-            "baseline_assertions": 287,
-            "declared_files": 52,
-            "declared_assertions": 287,
+            "baseline_files": 54,
+            "baseline_assertions": 293,
+            "declared_files": 54,
+            "declared_assertions": 293,
             "files": manifest_entries,
         }
         baseline = {
@@ -1672,7 +1672,7 @@ raise SystemExit(2)
                     "log_sha256": coverage_tools.sha256(log_path),
                 }
             )
-        self.assertEqual(len(successful_ids), 287)
+        self.assertEqual(len(successful_ids), 293)
         (root / "sql/test-run/results.tsv").write_text(
             "\n".join(result_lines) + "\n", encoding="utf-8"
         )
@@ -2133,7 +2133,7 @@ raise SystemExit(2)
 
     def test_impossible_sql_summary_is_rejected(self) -> None:
         self.assert_mutation_fails(
-            lambda value: value["manifest"].update(completed_files=53),
+            lambda value: value["manifest"].update(completed_files=55),
             layer="sql",
         )
 

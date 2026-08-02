@@ -378,7 +378,7 @@ fn optimal_batch_size_large_input_clamps_to_max() {
 #[test]
 fn optimal_batch_size_mid_range_returns_input() {
     let limits = cost::device_limits();
-    let mid = (limits.optimal_batch_min + limits.optimal_batch_max) / 2;
+    let mid = usize::midpoint(limits.optimal_batch_min, limits.optimal_batch_max);
     assert_eq!(cost::optimal_batch_size(mid), mid);
 }
 
@@ -388,50 +388,50 @@ fn optimal_batch_size_mid_range_returns_input() {
 
 #[test]
 fn gpu_launch_overhead_is_positive() {
-    assert!(cost::GPU_LAUNCH_OVERHEAD > 0.0);
+    const { assert!(cost::GPU_LAUNCH_OVERHEAD > 0.0) };
 }
 
 #[test]
 fn gpu_cost_safety_margin_between_zero_and_one() {
-    assert!(cost::GPU_COST_SAFETY_MARGIN > 0.0);
-    assert!(cost::GPU_COST_SAFETY_MARGIN < 1.0);
+    const { assert!(cost::GPU_COST_SAFETY_MARGIN > 0.0) };
+    const { assert!(cost::GPU_COST_SAFETY_MARGIN < 1.0) };
 }
 
 #[test]
 fn spatial_index_selectivity_threshold_between_zero_and_one() {
-    assert!(cost::SPATIAL_INDEX_SELECTIVITY_THRESHOLD > 0.0);
-    assert!(cost::SPATIAL_INDEX_SELECTIVITY_THRESHOLD < 1.0);
+    const { assert!(cost::SPATIAL_INDEX_SELECTIVITY_THRESHOLD > 0.0) };
+    const { assert!(cost::SPATIAL_INDEX_SELECTIVITY_THRESHOLD < 1.0) };
 }
 
 #[test]
 fn spatial_index_cost_ratio_threshold_between_zero_and_one() {
-    assert!(cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD > 0.0);
-    assert!(cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD < 1.0);
+    const { assert!(cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD > 0.0) };
+    const { assert!(cost::SPATIAL_INDEX_COST_RATIO_THRESHOLD < 1.0) };
 }
 
 #[test]
 fn gpu_spatial_per_row_cost_is_positive() {
-    assert!(cost::GPU_SPATIAL_PER_ROW_COST > 0.0);
+    const { assert!(cost::GPU_SPATIAL_PER_ROW_COST > 0.0) };
 }
 
 #[test]
 fn gpu_raster_per_row_cost_is_positive() {
-    assert!(cost::GPU_RASTER_PER_ROW_COST > 0.0);
+    const { assert!(cost::GPU_RASTER_PER_ROW_COST > 0.0) };
 }
 
 #[test]
 fn gpu_h3_per_row_cost_is_positive() {
-    assert!(cost::GPU_H3_PER_ROW_COST > 0.0);
+    const { assert!(cost::GPU_H3_PER_ROW_COST > 0.0) };
 }
 
 #[test]
 fn gpu_reduce_per_row_cost_is_positive() {
-    assert!(cost::GPU_REDUCE_PER_ROW_COST > 0.0);
+    const { assert!(cost::GPU_REDUCE_PER_ROW_COST > 0.0) };
 }
 
 #[test]
 fn per_datum_extract_cost_is_positive() {
-    assert!(cost::PER_DATUM_EXTRACT_COST > 0.0);
+    const { assert!(cost::PER_DATUM_EXTRACT_COST > 0.0) };
 }
 
 // =====================================================================
@@ -537,7 +537,7 @@ fn safety_margin_gate_boundary_exactly_at_margin() {
     let base_cost = 100.0;
     let total_cost = base_cost * cost::GPU_COST_SAFETY_MARGIN;
     // Exactly at margin should NOT pass the `>` check (it's not strictly greater).
-    assert!(!(total_cost > base_cost * cost::GPU_COST_SAFETY_MARGIN));
+    assert!(total_cost <= base_cost * cost::GPU_COST_SAFETY_MARGIN);
 }
 
 // =====================================================================
@@ -1637,16 +1637,46 @@ mod append_inject {
 // A 2026-05-14 four-way star-schema diagnosis found planning time inflated to
 // 37-40 ms with pg_accel hooks installed versus ~0.2 ms with
 // `pg_accel.enabled=off`, even though the query selected no pg_accel
-// path and dispatched zero GPU kernels. The upper-paths fast-decline gate
-// for `UPPERREL_GROUP_AGG` (unsupported GROUP BY type) must still produce a
-// measurable jump in the fast-decline counter for star-schema queries so the
-// bench harness can confirm the audit fired without re-parsing planning time
-// strings. Join-pathlist now has an INT32/INT64 hash-join kernel and must
-// inspect equi-join key shape before declining.
+// path and dispatched zero GPU kernels. Immutable planner-stage gates must
+// produce a measurable fast-decline signal, while shape/catalog/residency/cost
+// admission failures remain ordinary reason-coded planner rejections.
+// Join-pathlist now has an INT32/INT64 hash-join kernel and must inspect
+// equi-join key shape before declining.
 mod phase0_overhead_audit {
     #[pgrx::pg_schema]
     mod tests {
         use pgrx::prelude::{Spi, pg_test};
+
+        #[pg_test]
+        fn plain_base_scan_uses_catalog_free_rel_decline() {
+            Spi::run("DROP TABLE IF EXISTS pgaccel_p0_plain_scan").expect("drop prior");
+            Spi::run("CREATE TABLE pgaccel_p0_plain_scan (v int4 NOT NULL)")
+                .expect("create plain scan table");
+            Spi::run("INSERT INTO pgaccel_p0_plain_scan VALUES (42)")
+                .expect("seed plain scan table");
+
+            let before = crate::engine::stats::read_planner_stage(
+                crate::engine::stats::PlannerHookStage::RelPathlist,
+            );
+            let value = Spi::get_one::<i32>("SELECT v FROM pgaccel_p0_plain_scan LIMIT 1")
+                .expect("plain scan should execute")
+                .expect("plain scan result should be non-NULL");
+            let after = crate::engine::stats::read_planner_stage(
+                crate::engine::stats::PlannerHookStage::RelPathlist,
+            );
+
+            assert_eq!(value, 42);
+            assert!(
+                after.0 > before.0,
+                "rel_pathlist stage must observe the scan"
+            );
+            assert!(
+                after.2 > before.2,
+                "direct Var target must take the catalog-free immutable decline"
+            );
+
+            Spi::run("DROP TABLE pgaccel_p0_plain_scan").expect("drop plain scan table");
+        }
 
         /// Generic star-schema regression. A 4-way join with GROUP BY on a
         /// text column (`p_brand1`) is the canonical no-dispatch shape:
@@ -1654,9 +1684,9 @@ mod phase0_overhead_audit {
         /// - join hook fires once per join order considered and key-shape /
         ///   cost/cardinality gates decide whether the narrow integer
         ///   hash-join path is legal;
-        /// - upper-paths hook fires once with `UPPERREL_GROUP_AGG` and
-        ///   the upper-paths fast-decline gate must catch the text
-        ///   `p_brand1` group key before walking the target list.
+        /// - upper-paths hook performs exact aggregate admission and records
+        ///   its first precise shape/residency/cost blocker without
+        ///   misclassifying that analysis as an O(1) fast decline.
         ///
         /// We measure the fast-decline counter delta — a positive number
         /// means the audit is wired correctly. We deliberately do NOT
@@ -1736,9 +1766,8 @@ mod phase0_overhead_audit {
             let before_rejected = crate::engine::stats::read_planner_rejected();
             let before_total_us = crate::engine::stats::read_planner_hook_total_us();
 
-            // Run the star-schema query. p_brand1 is text -> upper_paths
-            // fast-decline. Join-pathlist may inspect integer equi-joins now
-            // that a narrow hash-join kernel exists.
+            // Run the star-schema query. Join-pathlist may inspect integer
+            // equi-joins now that a narrow hash-join kernel exists.
             let row_count = Spi::get_one::<i64>(
                 "SELECT count(*) FROM ( \
                    SELECT SUM(lo_revenue), d_year, p_brand1 \
@@ -1764,10 +1793,9 @@ mod phase0_overhead_audit {
             let after_rejected = crate::engine::stats::read_planner_rejected();
             let after_total_us = crate::engine::stats::read_planner_hook_total_us();
 
-            // The fast-decline counter must increase via the
-            // `UPPERREL_GROUP_AGG` unsupported text group key. We do not
-            // require join-pathlist fast-decline here because integer
-            // equi-join keys now have a selected GPU implementation.
+            // Cheap immutable rel/upper-stage gates must still fire somewhere
+            // in this no-dispatch query. Aggregate admission is counted as an
+            // ordinary reason-coded rejection because it requires shape work.
             assert!(
                 after_fast > before_fast,
                 "Phase 0 audit: planner_fast_decline counter must \
@@ -1780,7 +1808,6 @@ mod phase0_overhead_audit {
                  planner_rejected blocker for the PreAgg/GpuAgg hashagg path \
                  (before={before_rejected}, after={after_rejected})"
             );
-
             // Total planner-hook microseconds must increase by a finite
             // amount. This proves the elapsed-time guard fires on every
             // invocation. We deliberately do NOT assert an upper bound
@@ -1798,14 +1825,10 @@ mod phase0_overhead_audit {
             Spi::run("DROP TABLE pgaccel_p0_date").expect("drop d");
         }
 
-        /// Regression guard for the upper-paths fast-decline gate. A
-        /// query that groups by a numeric column must NOT take the
-        /// `upper_paths_unsupported_group_key` fast-decline — its group
-        /// key type is `INT4`, which is supported. We assert by
-        /// running a numeric-group-by query and noting that the
-        /// fast-decline counter delta is exclusively explained by
-        /// join-pathlist invocations (or none at all if the planner
-        /// shape doesn't trigger the join hook).
+        /// Regression guard for grouped-aggregate admission. A query that
+        /// groups by `INT4` must neither record the unsupported group-key
+        /// reason nor classify a later resident/cost rejection as an O(1)
+        /// `UpperGroupAgg` fast decline.
         ///
         /// This guards against over-decline: if the gate accidentally
         /// rejects a supported group key type, the upper_paths arm
@@ -1828,12 +1851,13 @@ mod phase0_overhead_audit {
             .expect("seed");
             Spi::run("ANALYZE pgaccel_p0_num_grp").expect("analyze");
 
-            // Run the same query twice with reset stats between, so we
-            // can distinguish per-invocation fast-decline contribution.
-            // Because resetting only clears thread-local counters and
-            // the fast-decline counter is process-wide atomic, we take
-            // before/after snapshots and check the delta is reasonable.
-            let before_fast = crate::engine::stats::read_planner_fast_decline();
+            let before_group_stage = crate::engine::stats::read_planner_stage(
+                crate::engine::stats::PlannerHookStage::UpperGroupAgg,
+            );
+            let before_unsupported_group =
+                crate::engine::stats::read_planner_rejection_reason_count(
+                    "shape_unsupported_group_key_type",
+                );
 
             let row_count = Spi::get_one::<i64>(
                 "SELECT count(*) FROM ( \
@@ -1847,18 +1871,23 @@ mod phase0_overhead_audit {
                 "numeric GROUP BY should produce 10 groups (g % 10)"
             );
 
-            let after_fast = crate::engine::stats::read_planner_fast_decline();
-            // The numeric-GROUP-BY query may legitimately increment the
-            // fast-decline counter through unrelated upper-path stages plus
-            // the resident-only group-aggregate gate. It MUST NOT take the
-            // unsupported group-key fast-decline, so keep a tight bound that
-            // allows those native planner-stage declines while still catching
-            // over-decline.
-            let delta = after_fast.saturating_sub(before_fast);
+            let after_group_stage = crate::engine::stats::read_planner_stage(
+                crate::engine::stats::PlannerHookStage::UpperGroupAgg,
+            );
+            let after_unsupported_group = crate::engine::stats::read_planner_rejection_reason_count(
+                "shape_unsupported_group_key_type",
+            );
             assert!(
-                delta <= 4,
-                "numeric GROUP BY must not over-trigger fast-decline \
-                 (before={before_fast}, after={after_fast}, delta={delta})"
+                after_group_stage.0 > before_group_stage.0,
+                "numeric GROUP BY must reach the UpperGroupAgg hook"
+            );
+            assert_eq!(
+                after_group_stage.2, before_group_stage.2,
+                "post-shape grouped-aggregate rejection must not be counted as an O(1) fast decline"
+            );
+            assert_eq!(
+                after_unsupported_group, before_unsupported_group,
+                "INT4 GROUP BY must not record shape_unsupported_group_key_type"
             );
 
             Spi::run("DROP TABLE pgaccel_p0_num_grp").expect("drop");
@@ -1866,7 +1895,5 @@ mod phase0_overhead_audit {
     }
 }
 
-// Unit tests for the upper_paths fast-decline classifier helpers cannot
-// directly exercise `grouped_query_has_unsupported_group_key` because it
-// takes a planner-populated `*mut PlannerInfo`. The pg_test integration above
-// covers the behavior for supported and unsupported group-key types.
+// The pg_test integration above covers reason-specific behavior for a
+// supported group-key type using planner-populated query structures.

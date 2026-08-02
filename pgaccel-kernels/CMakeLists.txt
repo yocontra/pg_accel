@@ -63,6 +63,10 @@ target_include_directories(pgaccel_kernels_shared PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+# The standalone shared-library tests get deterministic failure-injection
+# hooks. The production static library has no hook state or hot-path checks.
+target_compile_definitions(pgaccel_kernels_shared PRIVATE PGACCEL_TEST_HOOKS)
+
 add_sycl_to_target(TARGET pgaccel_kernels)
 add_sycl_to_target(TARGET pgaccel_kernels_shared)
 # AdaptiveCpp's CMake helper applies RULE_LAUNCH_LINK to every SYCL target.
@@ -108,6 +112,8 @@ set_source_files_properties(
 # Standalone test binary
 add_executable(test_device test/test_device.cpp)
 target_link_libraries(test_device PRIVATE pgaccel_kernels_shared)
+target_compile_definitions(test_device PRIVATE PGACCEL_TEST_HOOKS)
+add_sycl_to_target(TARGET test_device)
 
 add_executable(test_bbox test/test_bbox.cpp)
 target_link_libraries(test_bbox PRIVATE pgaccel_kernels_shared)
@@ -165,6 +171,7 @@ target_link_libraries(test_fork_cold PRIVATE pgaccel_kernels_shared)
 
 add_executable(test_fork_warmed test/test_fork_warmed.cpp)
 target_link_libraries(test_fork_warmed PRIVATE pgaccel_kernels_shared)
+target_compile_definitions(test_fork_warmed PRIVATE PGACCEL_TEST_HOOKS)
 
 add_executable(test_fork_archive_stress test/test_fork_archive_stress.cpp)
 target_link_libraries(test_fork_archive_stress PRIVATE pgaccel_kernels_shared)

@@ -2026,6 +2026,82 @@ void test_predicate_only_physical_count() {
   }
 }
 
+void test_ordered_physical_min_max_count() {
+  std::printf("--- ordered physical MIN/MAX/COUNT lanes ---\n");
+  constexpr uint32_t lanes = PGACCEL_GROUPED_AGG_LANE_MIN |
+                             PGACCEL_GROUPED_AGG_LANE_MAX |
+                             PGACCEL_GROUPED_AGG_LANE_COUNT;
+
+  {
+    SharedArray<uint8_t> values({1, 0, 1});
+    SharedArray<uint8_t> nulls({0, 0, 1});
+    pgaccel_grouped_agg_desc desc = base_desc(values.size());
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, sizeof(uint8_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    desc.measures[0].agg_mask = lanes;
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.i64(output.measures[0].min, 0) == 0);
+    CHECK(output.i64(output.measures[0].max, 0) == 1);
+    CHECK(output.measures[0].count[0] == 2);
+    CHECK(output.measures[0].nonnull[0] == 2);
+  }
+
+  {
+    SharedArray<float> values({-std::numeric_limits<float>::infinity(),
+                               std::numeric_limits<float>::max(),
+                               std::numeric_limits<float>::quiet_NaN(), 0.0F});
+    SharedArray<uint8_t> nulls({0, 0, 0, 1});
+    pgaccel_grouped_agg_desc desc = base_desc(values.size());
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32, sizeof(float),
+                        PGACCEL_GROUPED_AGG_ACCUM_F64);
+    desc.measures[0].agg_mask = lanes;
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(std::isinf(output.f64(output.measures[0].min, 0)) &&
+          output.f64(output.measures[0].min, 0) < 0.0);
+    CHECK(std::isnan(output.f64(output.measures[0].max, 0)));
+    CHECK(output.measures[0].count[0] == 3);
+    CHECK(output.measures[0].nonnull[0] == 3);
+  }
+
+  {
+    SharedArray<int32_t> values(
+        {std::numeric_limits<int32_t>::min(), 0, std::numeric_limits<int32_t>::max()});
+    SharedArray<uint8_t> nulls({0, 1, 0});
+    pgaccel_grouped_agg_desc desc = base_desc(values.size());
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_DATE, sizeof(int32_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    desc.measures[0].agg_mask = lanes;
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.i64(output.measures[0].min, 0) == std::numeric_limits<int32_t>::min());
+    CHECK(output.i64(output.measures[0].max, 0) == std::numeric_limits<int32_t>::max());
+    CHECK(output.measures[0].count[0] == 2);
+    CHECK(output.measures[0].nonnull[0] == 2);
+  }
+
+  {
+    SharedArray<int64_t> values(
+        {std::numeric_limits<int64_t>::min(), 0, std::numeric_limits<int64_t>::max()});
+    SharedArray<uint8_t> nulls({0, 1, 0});
+    pgaccel_grouped_agg_desc desc = base_desc(values.size());
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP, sizeof(int64_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    desc.measures[0].agg_mask = lanes;
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.i64(output.measures[0].min, 0) == std::numeric_limits<int64_t>::min());
+    CHECK(output.i64(output.measures[0].max, 0) == std::numeric_limits<int64_t>::max());
+    CHECK(output.measures[0].count[0] == 2);
+    CHECK(output.measures[0].nonnull[0] == 2);
+  }
+}
+
 void test_four_dimensions_and_multiplicity() {
   std::printf("--- four dimensions and multiplicity ---\n");
   SharedArray<int32_t> d0_key({0, 1, 0, 1, 0, 1});
@@ -3567,6 +3643,7 @@ int main() {
     test_i64_stats_pair_and_f64_binary_measures();
     test_global_and_measure_filters();
     test_predicate_only_physical_count();
+    test_ordered_physical_min_max_count();
     test_four_dimensions_and_multiplicity();
     test_mixed_radix_compact_and_keyed_empty();
     test_device_publication_contract();

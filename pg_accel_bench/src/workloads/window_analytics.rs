@@ -1,6 +1,6 @@
 use super::{ExpectedResultValue as Value, ResultOracle, Workload, usize_to_i64};
 
-/// Tests GPU window function acceleration with ROW_NUMBER and running SUM.
+/// Native-decline guard for ROW_NUMBER and running SUM.
 pub struct WindowAnalytics;
 
 impl Workload for WindowAnalytics {

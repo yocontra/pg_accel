@@ -4,6 +4,9 @@
 
 use pgrx::{FromDatum, PgLogLevel, pg_sys, prelude::PgSqlErrorCode};
 
+#[cfg(feature = "pg_test")]
+use std::cell::Cell;
+
 mod postgis;
 mod raster;
 
@@ -15,33 +18,136 @@ pub use raster::{
 };
 
 pub(crate) fn postgres_error_requires_rethrow(level: PgLogLevel, code: PgSqlErrorCode) -> bool {
-    use PgSqlErrorCode::{
-        ERRCODE_DATA_EXCEPTION, ERRCODE_DATATYPE_MISMATCH, ERRCODE_EXTERNAL_ROUTINE_EXCEPTION,
-        ERRCODE_FEATURE_NOT_SUPPORTED, ERRCODE_INSUFFICIENT_PRIVILEGE,
-        ERRCODE_INVALID_PARAMETER_VALUE, ERRCODE_INVALID_TEXT_REPRESENTATION,
-        ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, ERRCODE_UNDEFINED_COLUMN, ERRCODE_UNDEFINED_FUNCTION,
-        ERRCODE_UNDEFINED_TABLE,
-    };
     if matches!(level, PgLogLevel::FATAL | PgLogLevel::PANIC) {
         return true;
     }
 
-    // Only expected catalog-race, authorization, type, and datum-conversion
-    // failures may cross a PgTry boundary as an ordinary Rust error.
-    !matches!(
+    // ERROR is also used for ordinary PostGIS datum failures, including some
+    // reported as XX000. Preserve PostgreSQL's transaction/control-flow,
+    // resource, lock, and system conditions while allowing ordinary execution
+    // and datum errors to become typed extension failures.
+    matches!(
         code,
-        ERRCODE_DATA_EXCEPTION
-            | ERRCODE_DATATYPE_MISMATCH
-            | ERRCODE_EXTERNAL_ROUTINE_EXCEPTION
-            | ERRCODE_FEATURE_NOT_SUPPORTED
-            | ERRCODE_INSUFFICIENT_PRIVILEGE
-            | ERRCODE_INVALID_PARAMETER_VALUE
-            | ERRCODE_INVALID_TEXT_REPRESENTATION
-            | ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE
-            | ERRCODE_UNDEFINED_COLUMN
-            | ERRCODE_UNDEFINED_FUNCTION
-            | ERRCODE_UNDEFINED_TABLE
+        PgSqlErrorCode::ERRCODE_TRANSACTION_ROLLBACK
+            | PgSqlErrorCode::ERRCODE_T_R_INTEGRITY_CONSTRAINT_VIOLATION
+            | PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE
+            | PgSqlErrorCode::ERRCODE_T_R_STATEMENT_COMPLETION_UNKNOWN
+            | PgSqlErrorCode::ERRCODE_T_R_DEADLOCK_DETECTED
+            | PgSqlErrorCode::ERRCODE_INSUFFICIENT_RESOURCES
+            | PgSqlErrorCode::ERRCODE_DISK_FULL
+            | PgSqlErrorCode::ERRCODE_OUT_OF_MEMORY
+            | PgSqlErrorCode::ERRCODE_TOO_MANY_CONNECTIONS
+            | PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED
+            | PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED
+            | PgSqlErrorCode::ERRCODE_STATEMENT_TOO_COMPLEX
+            | PgSqlErrorCode::ERRCODE_TOO_MANY_COLUMNS
+            | PgSqlErrorCode::ERRCODE_TOO_MANY_ARGUMENTS
+            | PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE
+            | PgSqlErrorCode::ERRCODE_OPERATOR_INTERVENTION
+            | PgSqlErrorCode::ERRCODE_QUERY_CANCELED
+            | PgSqlErrorCode::ERRCODE_ADMIN_SHUTDOWN
+            | PgSqlErrorCode::ERRCODE_CRASH_SHUTDOWN
+            | PgSqlErrorCode::ERRCODE_CANNOT_CONNECT_NOW
+            | PgSqlErrorCode::ERRCODE_DATABASE_DROPPED
+            | PgSqlErrorCode::ERRCODE_SYSTEM_ERROR
+            | PgSqlErrorCode::ERRCODE_IO_ERROR
+            | PgSqlErrorCode::ERRCODE_UNDEFINED_FILE
+            | PgSqlErrorCode::ERRCODE_DUPLICATE_FILE
+            | PgSqlErrorCode::ERRCODE_SNAPSHOT_TOO_OLD
+            | PgSqlErrorCode::ERRCODE_ASSERT_FAILURE
+            | PgSqlErrorCode::ERRCODE_DATA_CORRUPTED
+            | PgSqlErrorCode::ERRCODE_INDEX_CORRUPTED
     )
+}
+
+/// Preserve PostgreSQL control-flow errors and Rust panics across a
+/// [`pg_sys::PgTryBuilder`] boundary.
+///
+/// Ordinary `ERROR` reports may become typed extension failures. Transaction
+/// rollback/retry, resource exhaustion, lock availability, operator
+/// intervention, system failures, FATAL, PANIC, and Rust unwinding must
+/// continue through PostgreSQL's normal error machinery.
+pub(crate) fn rethrow_if_required(
+    caught: pg_sys::panic::CaughtError,
+) -> pg_sys::panic::CaughtError {
+    use pg_sys::panic::CaughtError;
+
+    let rethrow = match &caught {
+        CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => {
+            postgres_error_requires_rethrow(error.level(), error.sql_error_code())
+        }
+        CaughtError::RustPanic { .. } => true,
+    };
+    if rethrow {
+        caught.rethrow();
+    }
+    caught
+}
+
+#[cfg(feature = "pg_test")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestInjectedPostgresError {
+    Ordinary,
+    QueryCanceled,
+    AssertFailure,
+    DataCorrupted,
+    IndexCorrupted,
+}
+
+#[cfg(feature = "pg_test")]
+thread_local! {
+    static TEST_INJECTED_POSTGRES_ERROR: Cell<Option<TestInjectedPostgresError>> = const { Cell::new(None) };
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn with_test_injected_postgres_error<R>(
+    error: TestInjectedPostgresError,
+    f: impl FnOnce() -> R,
+) -> R {
+    struct Restore(Option<TestInjectedPostgresError>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_INJECTED_POSTGRES_ERROR.with(|slot| slot.set(self.0));
+        }
+    }
+
+    let prior = TEST_INJECTED_POSTGRES_ERROR.with(|slot| slot.replace(Some(error)));
+    let _restore = Restore(prior);
+    f()
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn inject_test_postgres_error() {
+    let error = TEST_INJECTED_POSTGRES_ERROR.with(Cell::take);
+    match error {
+        Some(TestInjectedPostgresError::Ordinary) => pgrx::ereport!(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION,
+            "injected protected PostGIS ordinary error"
+        ),
+        Some(TestInjectedPostgresError::QueryCanceled) => pgrx::ereport!(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+            "injected protected PostGIS cancellation"
+        ),
+        Some(TestInjectedPostgresError::AssertFailure) => pgrx::ereport!(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_ASSERT_FAILURE,
+            "injected protected PostgreSQL assertion failure"
+        ),
+        Some(TestInjectedPostgresError::DataCorrupted) => pgrx::ereport!(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            "injected protected PostgreSQL data corruption"
+        ),
+        Some(TestInjectedPostgresError::IndexCorrupted) => pgrx::ereport!(
+            PgLogLevel::ERROR,
+            PgSqlErrorCode::ERRCODE_INDEX_CORRUPTED,
+            "injected protected PostgreSQL index corruption"
+        ),
+        None => {}
+    }
 }
 
 // pg_aggregate column attnos (see src/include/catalog/pg_aggregate_d.h).
@@ -1441,13 +1547,46 @@ mod h3_tests {
             PgSqlErrorCode::ERRCODE_UNDEFINED_COLUMN,
             PgSqlErrorCode::ERRCODE_UNDEFINED_FUNCTION,
             PgSqlErrorCode::ERRCODE_UNDEFINED_TABLE,
+            // PostGIS uses XX000 for some malformed datum errors. Treat it as
+            // an ordinary typed failure rather than classifying every
+            // extension-internal report as PostgreSQL control flow.
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
         ] {
             assert!(!postgres_error_requires_rethrow(PgLogLevel::ERROR, code));
         }
-        assert!(postgres_error_requires_rethrow(
-            PgLogLevel::ERROR,
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
-        ));
+        for code in [
+            PgSqlErrorCode::ERRCODE_TRANSACTION_ROLLBACK,
+            PgSqlErrorCode::ERRCODE_T_R_INTEGRITY_CONSTRAINT_VIOLATION,
+            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE,
+            PgSqlErrorCode::ERRCODE_T_R_STATEMENT_COMPLETION_UNKNOWN,
+            PgSqlErrorCode::ERRCODE_T_R_DEADLOCK_DETECTED,
+            PgSqlErrorCode::ERRCODE_INSUFFICIENT_RESOURCES,
+            PgSqlErrorCode::ERRCODE_DISK_FULL,
+            PgSqlErrorCode::ERRCODE_OUT_OF_MEMORY,
+            PgSqlErrorCode::ERRCODE_TOO_MANY_CONNECTIONS,
+            PgSqlErrorCode::ERRCODE_CONFIGURATION_LIMIT_EXCEEDED,
+            PgSqlErrorCode::ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+            PgSqlErrorCode::ERRCODE_STATEMENT_TOO_COMPLEX,
+            PgSqlErrorCode::ERRCODE_TOO_MANY_COLUMNS,
+            PgSqlErrorCode::ERRCODE_TOO_MANY_ARGUMENTS,
+            PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
+            PgSqlErrorCode::ERRCODE_OPERATOR_INTERVENTION,
+            PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+            PgSqlErrorCode::ERRCODE_ADMIN_SHUTDOWN,
+            PgSqlErrorCode::ERRCODE_CRASH_SHUTDOWN,
+            PgSqlErrorCode::ERRCODE_CANNOT_CONNECT_NOW,
+            PgSqlErrorCode::ERRCODE_DATABASE_DROPPED,
+            PgSqlErrorCode::ERRCODE_SYSTEM_ERROR,
+            PgSqlErrorCode::ERRCODE_IO_ERROR,
+            PgSqlErrorCode::ERRCODE_UNDEFINED_FILE,
+            PgSqlErrorCode::ERRCODE_DUPLICATE_FILE,
+            PgSqlErrorCode::ERRCODE_SNAPSHOT_TOO_OLD,
+            PgSqlErrorCode::ERRCODE_ASSERT_FAILURE,
+            PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            PgSqlErrorCode::ERRCODE_INDEX_CORRUPTED,
+        ] {
+            assert!(postgres_error_requires_rethrow(PgLogLevel::ERROR, code));
+        }
 
         // SAFETY: every call exits on an invalid OID or embedded NUL before it
         // can enter a PostgreSQL catalog helper.

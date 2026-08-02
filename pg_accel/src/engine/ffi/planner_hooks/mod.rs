@@ -93,6 +93,7 @@ pub(in crate::engine::ffi::planner_hooks) fn planner_hooks_suspended() -> bool {
 /// inflating the overhead it is trying to measure.
 pub(in crate::engine::ffi::planner_hooks) struct HookElapsedGuard {
     hook: &'static str,
+    stage: stats::PlannerHookStage,
     start: std::time::Instant,
 }
 
@@ -100,9 +101,14 @@ impl HookElapsedGuard {
     /// Begin timing one planner hook invocation. The matching elapsed
     /// sample is recorded automatically on `Drop`.
     #[must_use]
-    pub(in crate::engine::ffi::planner_hooks) fn new(hook: &'static str) -> Self {
+    pub(in crate::engine::ffi::planner_hooks) fn new(
+        hook: &'static str,
+        stage: stats::PlannerHookStage,
+    ) -> Self {
+        stats::record_planner_stage_call(stage);
         Self {
             hook,
+            stage,
             start: std::time::Instant::now(),
         }
     }
@@ -112,6 +118,7 @@ impl Drop for HookElapsedGuard {
     fn drop(&mut self) {
         let elapsed_us = u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX);
         stats::record_planner_hook_elapsed(self.hook, elapsed_us);
+        stats::record_planner_stage_elapsed(self.stage, elapsed_us);
     }
 }
 
@@ -177,7 +184,8 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
 
     // Time this invocation so the benchmark harness can detect no-dispatch
     // planner-overhead regressions through `pg_accel_planner_overhead_us()`.
-    let _hook_finish = HookElapsedGuard::new("upper_paths");
+    let hook_stage = upper_stage(stage);
+    let _hook_finish = HookElapsedGuard::new("upper_paths", hook_stage);
 
     // SAFETY: root is the planner-provided pointer for this hook invocation.
     let Some(_hook_context) =
@@ -194,7 +202,7 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // SAFETY: output_rel is the planner-owned upper relation supplied to this hook.
             let reason = unsafe { setop_decline_reason(output_rel) };
             stats::increment_planner_rejected(reason, rows_est.unwrap_or(0));
-            stats::record_planner_fast_decline("upper_paths_setop_no_gpu_kernel");
+            stats::record_planner_stage_fast_decline(hook_stage, "upper_paths_setop_no_gpu_kernel");
             pgrx::debug1!(
                 "pg_accel: upper_paths decline: UPPERREL_SETOP has no GPU SetOp/RecursiveUnion \
                  implementation; reason={}",
@@ -218,7 +226,11 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // SAFETY: input_rel is the planner-owned input relation for this hook call.
             unsafe { record_window_partial_path_no_parallel_hook(input_rel) };
             if gucs::gpu_enabled() {
-                record_no_gpu_resident_pipeline_decline("upper_paths_window", input_rel);
+                record_no_gpu_resident_pipeline_decline(
+                    hook_stage,
+                    "upper_paths_window",
+                    input_rel,
+                );
             }
             // When `gpu_enabled` is off, pg_accel injects nothing here.
         }
@@ -232,11 +244,15 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
             // do not initialize the GPU runtime just to decline.
             // SAFETY: root is the live PlannerInfo pointer supplied to this hook call.
             if !unsafe { query_has_target_srfs(root) } {
-                stats::record_planner_fast_decline("upper_paths_no_target_srf");
+                stats::record_planner_stage_fast_decline(hook_stage, "upper_paths_no_target_srf");
                 return;
             }
             if gucs::gpu_enabled() {
-                record_no_gpu_resident_pipeline_decline("upper_paths_srf_target_list", input_rel);
+                record_no_gpu_resident_pipeline_decline(
+                    hook_stage,
+                    "upper_paths_srf_target_list",
+                    input_rel,
+                );
             }
             // When `gpu_enabled` is off, pg_accel injects nothing here.
         }
@@ -253,10 +269,14 @@ fn rel_rows_estimate(rel: *mut RelOptInfo) -> Option<u64> {
     Some(unsafe { (*rel).rows.max(0.0) as u64 })
 }
 
-pub(super) fn record_no_gpu_resident_pipeline_decline(context: &'static str, rel: *mut RelOptInfo) {
+pub(super) fn record_no_gpu_resident_pipeline_decline(
+    stage: stats::PlannerHookStage,
+    context: &'static str,
+    rel: *mut RelOptInfo,
+) {
     let rows_est = rel_rows_estimate(rel).unwrap_or(0);
     stats::increment_planner_rejected(RejectionReason::NoGpuResidentPipeline.stats_key(), rows_est);
-    stats::record_planner_fast_decline(context);
+    stats::record_planner_stage_fast_decline(stage, context);
     pgrx::debug1!(
         "pg_accel: {context}: declined because pg_accel requires a proven GPU-resident pipeline"
     );
@@ -276,6 +296,7 @@ pub(super) fn record_no_gpu_resident_pipeline_decline(context: &'static str, rel
 /// PostgreSQL planner memory context.
 #[must_use]
 pub(super) unsafe fn add_gpu_path_with_resident_proof(
+    stage: stats::PlannerHookStage,
     context: &'static str,
     rel: *mut RelOptInfo,
     cpath: *mut CustomPath,
@@ -285,7 +306,7 @@ pub(super) unsafe fn add_gpu_path_with_resident_proof(
         return false;
     }
     if !proof.gpu_resident_pipeline() {
-        record_no_gpu_resident_pipeline_decline(context, rel);
+        record_no_gpu_resident_pipeline_decline(stage, context, rel);
         return false;
     }
     // SAFETY: cpath was checked non-null and both pointers are planner-owned for
@@ -393,6 +414,16 @@ fn upper_stage_candidate(stage: UpperRelationKind::Type) -> &'static str {
         pg_sys::UpperRelationKind::UPPERREL_WINDOW => "GpuWindow",
         pg_sys::UpperRelationKind::UPPERREL_FINAL => "GpuSrfTargetList",
         _ => "UpperPath",
+    }
+}
+
+fn upper_stage(stage: UpperRelationKind::Type) -> stats::PlannerHookStage {
+    match stage {
+        pg_sys::UpperRelationKind::UPPERREL_GROUP_AGG => stats::PlannerHookStage::UpperGroupAgg,
+        pg_sys::UpperRelationKind::UPPERREL_WINDOW => stats::PlannerHookStage::UpperWindow,
+        pg_sys::UpperRelationKind::UPPERREL_FINAL => stats::PlannerHookStage::UpperFinal,
+        pg_sys::UpperRelationKind::UPPERREL_SETOP => stats::PlannerHookStage::UpperSetop,
+        _ => stats::PlannerHookStage::UpperOther,
     }
 }
 
@@ -659,6 +690,7 @@ mod unit_tests {
         // stack RelOptInfo fields initialized above.
         unsafe {
             assert!(!add_gpu_path_with_resident_proof(
+                stats::PlannerHookStage::UpperOther,
                 "unit_null_path",
                 &raw mut rel,
                 std::ptr::null_mut(),
@@ -776,7 +808,10 @@ mod unit_tests {
 
         // Drop records a timing sample through the same atomic stats path used
         // by every hook entry point; construction itself carries the hook label.
-        drop(HookElapsedGuard::new("unit_hook"));
+        drop(HookElapsedGuard::new(
+            "unit_hook",
+            stats::PlannerHookStage::UpperOther,
+        ));
     }
 }
 

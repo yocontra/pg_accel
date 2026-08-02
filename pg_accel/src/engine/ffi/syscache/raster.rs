@@ -2,8 +2,8 @@
 
 use super::{
     FromDatum, H3FunctionShape, H3TypeShape, fnv1a64, function_fingerprint, oid_word, pg_sys,
-    postgres_error_requires_rethrow, read_h3_function_shape, read_h3_type_shape, type_fingerprint,
-    u32_word, u64_words,
+    postgres_error_requires_rethrow, read_h3_function_shape, read_h3_type_shape,
+    rethrow_if_required, type_fingerprint, u32_word, u64_words,
 };
 use pgrx::IntoDatum;
 
@@ -1186,6 +1186,8 @@ pub unsafe fn postgis_raster_datum_from_wkb(
         return Err("PostGIS Raster WKB import has no catalog-proved function".to_owned());
     }
     pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        #[cfg(feature = "pg_test")]
+        crate::engine::ffi::syscache::inject_test_postgres_error();
         // Keep the temporary bytea allocation inside the PostgreSQL ERROR
         // boundary. The caller's output context is reset when this returns an
         // error, covering allocation or importer failures alike.
@@ -1207,6 +1209,7 @@ pub unsafe fn postgis_raster_datum_from_wkb(
         }
     }))
     .catch_others(|caught| {
+        let caught = rethrow_if_required(caught);
         Err(format!(
             "PostGIS st_rastfromwkb raised ERROR: {}",
             caught_error_message(&caught)
@@ -1838,6 +1841,7 @@ mod postgis_raster_tests {
 
 #[cfg(feature = "pg_test")]
 #[pgrx::pg_schema]
+#[allow(clippy::wildcard_imports)]
 mod tests {
     use pgrx::prelude::*;
 
@@ -1972,6 +1976,79 @@ mod tests {
         );
         assert_eq!(
             Spi::get_one::<i32>("SELECT 42").expect("backend remains usable"),
+            Some(42)
+        );
+    }
+
+    #[pg_test]
+    fn importer_preserves_critical_sqlstates_but_types_ordinary_errors() {
+        use crate::engine::ffi::syscache::{
+            TestInjectedPostgresError, with_test_injected_postgres_error,
+        };
+
+        fn caught_code(caught: &pg_sys::panic::CaughtError) -> PgSqlErrorCode {
+            use pg_sys::panic::CaughtError;
+            match caught {
+                CaughtError::PostgresError(error) | CaughtError::ErrorReport(error) => {
+                    error.sql_error_code()
+                }
+                CaughtError::RustPanic { ereport, .. } => ereport.sql_error_code(),
+            }
+        }
+
+        ensure_postgis_raster();
+        // SAFETY: pg_test runs on the backend main thread.
+        let identity = unsafe { resolve_postgis_raster_catalog() }
+            .expect("resolve exact raster importer identity");
+
+        let ordinary =
+            with_test_injected_postgres_error(TestInjectedPostgresError::Ordinary, || {
+                // SAFETY: the injected ERROR fires before the hostile bytea is
+                // passed to the catalog-proved importer.
+                unsafe { postgis_raster_datum_from_wkb(&identity, &[0]) }
+            })
+            .expect_err("ordinary importer ERROR must become a typed Rust error");
+        assert_eq!(
+            ordinary,
+            "PostGIS st_rastfromwkb raised ERROR: injected protected PostGIS ordinary error"
+        );
+        assert_eq!(
+            Spi::get_one::<i32>("SELECT 41").expect("backend usable after ordinary ERROR"),
+            Some(41)
+        );
+
+        for (injected, expected) in [
+            (
+                TestInjectedPostgresError::QueryCanceled,
+                PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+            ),
+            (
+                TestInjectedPostgresError::AssertFailure,
+                PgSqlErrorCode::ERRCODE_ASSERT_FAILURE,
+            ),
+            (
+                TestInjectedPostgresError::DataCorrupted,
+                PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            ),
+            (
+                TestInjectedPostgresError::IndexCorrupted,
+                PgSqlErrorCode::ERRCODE_INDEX_CORRUPTED,
+            ),
+        ] {
+            let caught = pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+                with_test_injected_postgres_error(injected, || {
+                    // SAFETY: the injected ERROR fires before importer use.
+                    unsafe { postgis_raster_datum_from_wkb(&identity, &[0]) }
+                        .expect("critical PostgreSQL error must rethrow");
+                });
+                None
+            }))
+            .catch_others(|caught| Some(caught_code(&caught)))
+            .execute();
+            assert_eq!(caught, Some(expected));
+        }
+        assert_eq!(
+            Spi::get_one::<i32>("SELECT 42").expect("backend usable after rethrown errors"),
             Some(42)
         );
     }

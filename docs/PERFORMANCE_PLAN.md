@@ -277,6 +277,13 @@ session settings, prepared fixture, and output-consumption path.
    Continue reporting absolute median and p95 deltas as well as ratios so
    sub-millisecond noise cannot be mistaken for a product regression.
 
+Implementation progress: `pg_accel_planner_stage_stats()` now separates calls,
+elapsed microseconds, and immutable fast declines for the relation, join, and
+individual upper-path stages. Plain base scans whose non-junk targets are only
+direct `Var`, `Const`, or `Param` nodes return before tracing and function
+catalog inspection; callable and wrapped expressions deliberately retain the
+exact observer path. The paired sentinel rerun remains the exit gate.
+
 Exit criterion: every decline sentinel passes the paired extension-on versus
 extension-off parity gate, and no planner hook stage accounts for an unresolved
 regression. A cell that misses parity blocks release just like a selected cell

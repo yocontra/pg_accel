@@ -84,12 +84,63 @@ static PLANNER_HOOK_TOTAL_US: AtomicU64 = AtomicU64::new(0);
 /// Number of planner hook invocations that hit the O(1) early-decline
 /// fast path (Phase 0 audit, 2026-05-14). Incremented by
 /// `record_planner_fast_decline()` from hot decline gates like
-/// "no GPU hashjoin kernel + no spatial adapters" or "GROUP BY has an
-/// unsupported group-key type". Read alongside
+/// "plain native base scan", "final stage has no target SRF", or
+/// "SetOp stage has no GPU kernel". Read alongside
 /// `PLANNER_HOOK_TOTAL_US` to confirm the audit is working — high
 /// fast-decline counter + low total microseconds means hooks bail early
 /// instead of walking full pathlists.
 static PLANNER_FAST_DECLINE: AtomicU64 = AtomicU64::new(0);
+
+/// Stable planner stages used by the low-overhead performance counters.
+///
+/// Keep this list fixed and allocation-free: these counters execute inside
+/// PostgreSQL planner hooks, including paths that intentionally do no other
+/// extension work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum PlannerHookStage {
+    RelPathlist = 0,
+    JoinPathlist = 1,
+    UpperGroupAgg = 2,
+    UpperWindow = 3,
+    UpperFinal = 4,
+    UpperSetop = 5,
+    UpperOther = 6,
+}
+
+impl PlannerHookStage {
+    const COUNT: usize = 7;
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::RelPathlist => "rel_pathlist",
+            Self::JoinPathlist => "join_pathlist",
+            Self::UpperGroupAgg => "upper_group_agg",
+            Self::UpperWindow => "upper_window",
+            Self::UpperFinal => "upper_final",
+            Self::UpperSetop => "upper_setop",
+            Self::UpperOther => "upper_other",
+        }
+    }
+
+    const ALL: [Self; Self::COUNT] = [
+        Self::RelPathlist,
+        Self::JoinPathlist,
+        Self::UpperGroupAgg,
+        Self::UpperWindow,
+        Self::UpperFinal,
+        Self::UpperSetop,
+        Self::UpperOther,
+    ];
+}
+
+static PLANNER_STAGE_CALLS: [AtomicU64; PlannerHookStage::COUNT] =
+    [const { AtomicU64::new(0) }; PlannerHookStage::COUNT];
+static PLANNER_STAGE_TOTAL_US: [AtomicU64; PlannerHookStage::COUNT] =
+    [const { AtomicU64::new(0) }; PlannerHookStage::COUNT];
+static PLANNER_STAGE_FAST_DECLINES: [AtomicU64; PlannerHookStage::COUNT] =
+    [const { AtomicU64::new(0) }; PlannerHookStage::COUNT];
 
 // ---------------------------------------------------------------------------
 // Helpers to increment counters
@@ -302,6 +353,18 @@ pub fn record_planner_hook_elapsed(hook: &'static str, elapsed_us: u64) {
     );
 }
 
+/// Record entry into one concrete planner stage.
+#[inline]
+pub fn record_planner_stage_call(stage: PlannerHookStage) {
+    PLANNER_STAGE_CALLS[stage as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Add an elapsed sample to one concrete planner stage.
+#[inline]
+pub fn record_planner_stage_elapsed(stage: PlannerHookStage, elapsed_us: u64) {
+    PLANNER_STAGE_TOTAL_US[stage as usize].fetch_add(elapsed_us, Ordering::Relaxed);
+}
+
 /// Record that a planner hook returned via the O(1) early-decline path.
 ///
 /// Use from the Phase 0 fast-decline gates so the bench harness can
@@ -316,6 +379,34 @@ pub fn record_planner_fast_decline(reason: &'static str) {
         reason,
         "stats.planner_fast_decline"
     );
+}
+
+/// Record an immutable fast decline and attribute it to its planner stage.
+#[inline]
+pub fn record_planner_stage_fast_decline(stage: PlannerHookStage, reason: &'static str) {
+    PLANNER_STAGE_FAST_DECLINES[stage as usize].fetch_add(1, Ordering::Relaxed);
+    record_planner_fast_decline(reason);
+}
+
+/// Snapshot one planner stage's monotonic counters.
+#[inline]
+#[must_use]
+pub fn read_planner_stage(stage: PlannerHookStage) -> (u64, u64, u64) {
+    let index = stage as usize;
+    (
+        PLANNER_STAGE_CALLS[index].load(Ordering::Relaxed),
+        PLANNER_STAGE_TOTAL_US[index].load(Ordering::Relaxed),
+        PLANNER_STAGE_FAST_DECLINES[index].load(Ordering::Relaxed),
+    )
+}
+
+fn reset_planner_stage_stats() {
+    for stage in PlannerHookStage::ALL {
+        let index = stage as usize;
+        PLANNER_STAGE_CALLS[index].store(0, Ordering::Relaxed);
+        PLANNER_STAGE_TOTAL_US[index].store(0, Ordering::Relaxed);
+        PLANNER_STAGE_FAST_DECLINES[index].store(0, Ordering::Relaxed);
+    }
 }
 
 /// Snapshot of the cumulative planner-hook elapsed-time counter.
@@ -481,6 +572,28 @@ fn pg_accel_planner_fast_decline_count() -> i64 {
     read_planner_fast_decline() as i64
 }
 
+/// Returns allocation-free counters split by concrete planner-hook stage.
+#[pg_extern]
+fn pg_accel_planner_stage_stats() -> TableIterator<
+    'static,
+    (
+        name!(stage, &'static str),
+        name!(calls, i64),
+        name!(elapsed_us, i64),
+        name!(fast_declines, i64),
+    ),
+> {
+    TableIterator::new(PlannerHookStage::ALL.into_iter().map(|stage| {
+        let (calls, elapsed_us, fast_declines) = read_planner_stage(stage);
+        (
+            stage.name(),
+            calls as i64,
+            elapsed_us as i64,
+            fast_declines as i64,
+        )
+    }))
+}
+
 /// Returns the monotonic count of GPU kernel executions since this backend
 /// started. Cheap read (single atomic load via the C++ thread-local
 /// counter). The benchmark harness calls this before and after each timed
@@ -516,6 +629,7 @@ fn pg_accel_reset_stats() {
     GPU_CACHE_MISSES.store(0, Ordering::Relaxed);
     PLANNER_HOOK_TOTAL_US.store(0, Ordering::Relaxed);
     PLANNER_FAST_DECLINE.store(0, Ordering::Relaxed);
+    reset_planner_stage_stats();
     // `gpu_kernel_executions` is intentionally NOT reset here: it is a
     // monotonic counter owned by the C++ runtime (`crate::gpu::gpu_exec_count`)
     // that the harness reads by *delta* (before/after subtraction), not by
@@ -871,7 +985,7 @@ fn pg_accel_device_limits() -> TableIterator<
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "pg_test")]
-#[allow(clippy::unwrap_used, dead_code)]
+#[allow(clippy::unwrap_used, clippy::wildcard_imports, dead_code)]
 #[pgrx::pg_schema]
 mod tests {
     use super::*;
@@ -1111,7 +1225,7 @@ mod tests {
     fn planner_considered_counter_increments() {
         let before = read_planner_considered();
         increment_planner_considered("test_reason", 1_000_000);
-        assert!(read_planner_considered() >= before + 1);
+        assert!(read_planner_considered() > before);
     }
 
     #[test]
@@ -1119,7 +1233,7 @@ mod tests {
         reset();
         let before = read_planner_rejected();
         increment_planner_rejected("test_reason", 1_000_000);
-        assert!(read_planner_rejected() >= before + 1);
+        assert!(read_planner_rejected() > before);
         assert_eq!(read_last_planner_rejection_reason(), Some("test_reason"));
         assert_eq!(read_planner_rejection_reason_count("test_reason"), 1);
         assert_eq!(read_planner_rejection_reason_count("other_reason"), 0);
@@ -1133,7 +1247,7 @@ mod tests {
     fn degenerate_guard_counter_increments() {
         let before = read_degenerate_guard();
         increment_degenerate_guard();
-        assert!(read_degenerate_guard() >= before + 1);
+        assert!(read_degenerate_guard() > before);
     }
 
     #[test]
@@ -1142,8 +1256,40 @@ mod tests {
         let misses_before = read_gpu_cache_misses();
         increment_gpu_cache_hit();
         increment_gpu_cache_miss();
-        assert!(read_gpu_cache_hits() >= hits_before + 1);
-        assert!(read_gpu_cache_misses() >= misses_before + 1);
+        assert!(read_gpu_cache_hits() > hits_before);
+        assert!(read_gpu_cache_misses() > misses_before);
+    }
+
+    #[test]
+    fn planner_stage_counters_are_attributed_independently() {
+        let stage = PlannerHookStage::UpperSetop;
+        reset_planner_stage_stats();
+        record_planner_stage_call(stage);
+        record_planner_stage_elapsed(stage, 7);
+        record_planner_stage_fast_decline(stage, "unit_stage_decline");
+        let after = read_planner_stage(stage);
+
+        assert_eq!(after, (1, 7, 1));
+        pg_accel_reset_stats();
+        assert_eq!(read_planner_stage(stage), (0, 0, 0));
+        assert_eq!(PlannerHookStage::UpperGroupAgg.name(), "upper_group_agg");
+    }
+
+    #[pg_test]
+    fn planner_stage_stats_exposes_every_fixed_stage() {
+        let rows = Spi::get_one::<i64>("SELECT count(*) FROM pg_accel_planner_stage_stats()")
+            .expect("planner stage stats query should succeed")
+            .expect("planner stage stats count should be non-NULL");
+        assert_eq!(rows, PlannerHookStage::COUNT as i64);
+
+        let rel_rows = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_accel_planner_stage_stats() \
+             WHERE stage = 'rel_pathlist' AND calls >= 0 AND elapsed_us >= 0 \
+             AND fast_declines >= 0",
+        )
+        .expect("rel_pathlist stage lookup should succeed")
+        .expect("rel_pathlist stage lookup should be non-NULL");
+        assert_eq!(rel_rows, 1);
     }
 
     // -- pg_accel_device_limits SRF -----------------------------------------

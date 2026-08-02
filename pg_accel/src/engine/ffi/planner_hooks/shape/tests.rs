@@ -1762,6 +1762,31 @@ fn only_sample_float8_stddev_has_a_representable_aggregate_kind() {
 }
 
 #[test]
+fn time_aggregates_are_classified_then_decline_on_the_missing_resident_type() {
+    for (oid, kind) in [
+        (pg_sys::F_MIN_TIME, AggregateKind::Min),
+        (pg_sys::F_MAX_TIME, AggregateKind::Max),
+        (pg_sys::F_MIN_TIMETZ, AggregateKind::Min),
+        (pg_sys::F_MAX_TIMETZ, AggregateKind::Max),
+    ] {
+        assert_eq!(super::postgres::classify_aggregate(oid), Some(kind));
+    }
+
+    for type_oid in [u32::from(pg_sys::TIMEOID), u32::from(pg_sys::TIMETZOID)] {
+        let mut input = single_table_input();
+        input.aggregates[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 100,
+            attno: 2,
+            type_oid,
+        });
+        assert_eq!(
+            build_shape(input, &model()),
+            Err(ShapeDecline::UnsupportedMeasureType { type_oid })
+        );
+    }
+}
+
+#[test]
 fn unchecked_float_reductions_never_enter_the_exact_result_path() {
     for kind in [
         AggregateKind::Sum,
@@ -1829,11 +1854,58 @@ fn aggregate_filter_waits_for_the_phase9_filter_contract() {
 }
 
 #[test]
-fn unsupported_phase4_measure_types_decline_before_descriptor_build() {
-    for type_oid in [
-        u32::from(pg_sys::FLOAT4OID),
-        u32::from(pg_sys::DATEOID),
-        u32::from(pg_sys::TIMESTAMPOID),
+fn straightforward_column_aggregate_types_decline_without_performance_evidence() {
+    let declined = [
+        (u32::from(pg_sys::BOOLOID), AggregateKind::Count),
+        (u32::from(pg_sys::INT2OID), AggregateKind::Count),
+        (u32::from(pg_sys::INT2OID), AggregateKind::Min),
+        (u32::from(pg_sys::INT2OID), AggregateKind::Max),
+        (u32::from(pg_sys::FLOAT4OID), AggregateKind::Count),
+        (u32::from(pg_sys::FLOAT4OID), AggregateKind::Min),
+        (u32::from(pg_sys::FLOAT4OID), AggregateKind::Max),
+        (u32::from(pg_sys::DATEOID), AggregateKind::Count),
+        (u32::from(pg_sys::DATEOID), AggregateKind::Min),
+        (u32::from(pg_sys::DATEOID), AggregateKind::Max),
+        (u32::from(pg_sys::TIMESTAMPOID), AggregateKind::Count),
+        (u32::from(pg_sys::TIMESTAMPOID), AggregateKind::Min),
+        (u32::from(pg_sys::TIMESTAMPOID), AggregateKind::Max),
+        (u32::from(pg_sys::TIMESTAMPTZOID), AggregateKind::Count),
+        (u32::from(pg_sys::TIMESTAMPTZOID), AggregateKind::Min),
+        (u32::from(pg_sys::TIMESTAMPTZOID), AggregateKind::Max),
+    ];
+    for (type_oid, kind) in declined {
+        let mut input = single_table_input();
+        let result_type_oid = if kind == AggregateKind::Count {
+            u32::from(pg_sys::INT8OID)
+        } else {
+            type_oid
+        };
+        let (aggregate, projection) = aggregate(
+            MeasureExpr::Column(ColumnRef {
+                relation_oid: 100,
+                attno: 2,
+                type_oid,
+            }),
+            kind,
+            result_type_oid,
+        );
+        input.aggregates = vec![aggregate];
+        input.projections = vec![InputProjection::Aggregate {
+            aggregate_index: 0,
+            output: projection,
+        }];
+        assert_eq!(
+            build_shape(input, &model()),
+            Err(ShapeDecline::UnsupportedAggregateInput { kind, type_oid })
+        );
+    }
+
+    for (type_oid, kind) in [
+        (u32::from(pg_sys::BOOLOID), AggregateKind::Min),
+        (u32::from(pg_sys::INT2OID), AggregateKind::Sum),
+        (u32::from(pg_sys::FLOAT4OID), AggregateKind::Sum),
+        (u32::from(pg_sys::DATEOID), AggregateKind::Sum),
+        (u32::from(pg_sys::TIMESTAMPOID), AggregateKind::Sum),
     ] {
         let mut input = single_table_input();
         input.aggregates[0].expression = MeasureExpr::Column(ColumnRef {
@@ -1841,11 +1913,27 @@ fn unsupported_phase4_measure_types_decline_before_descriptor_build() {
             attno: 2,
             type_oid,
         });
-        assert_eq!(
+        input.aggregates[0].output.kind = kind;
+        assert!(matches!(
             build_shape(input, &model()),
-            Err(ShapeDecline::UnsupportedMeasureType { type_oid })
-        );
+            Err(ShapeDecline::UnsupportedAggregateInput {
+                kind: actual_kind,
+                type_oid: actual_type,
+            }) if actual_kind == kind && actual_type == type_oid
+        ));
     }
+
+    let time_oid = u32::from(pg_sys::TIMEOID);
+    let mut input = single_table_input();
+    input.aggregates[0].expression = MeasureExpr::Column(ColumnRef {
+        relation_oid: 100,
+        attno: 2,
+        type_oid: time_oid,
+    });
+    assert_eq!(
+        build_shape(input, &model()),
+        Err(ShapeDecline::UnsupportedMeasureType { type_oid: time_oid })
+    );
 }
 
 #[test]

@@ -11,7 +11,7 @@
 //! execution counters (rows dispatched, batches, dispatch time) for
 //! EXPLAIN ANALYZE.
 
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 
 use pgrx::pg_sys;
 
@@ -163,6 +163,57 @@ impl GpuStrategy {
 pub(super) struct GpuAccelScanState {
     pub(super) css: pg_sys::CustomScanState,
     pub(super) accel: GpuAccelState,
+    /// Registered on `EState.es_query_cxt` during BeginCustomScan. PostgreSQL
+    /// owns the callback link until that context is reset or deleted.
+    executor_cleanup: pg_sys::MemoryContextCallback,
+}
+
+type ExecutorDropFn = unsafe fn(*mut c_void);
+type ExecutorPrepareResetFn = unsafe fn(*mut c_void);
+
+#[cfg(any(test, feature = "pg_test"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TestExecutorCleanupCounts {
+    pub(crate) installed: usize,
+    pub(crate) normal_end: usize,
+    pub(crate) query_reset: usize,
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+thread_local! {
+    static TEST_EXECUTOR_CLEANUP_COUNTS: std::cell::Cell<TestExecutorCleanupCounts> =
+        const { std::cell::Cell::new(TestExecutorCleanupCounts {
+            installed: 0,
+            normal_end: 0,
+            query_reset: 0,
+        }) };
+}
+
+#[cfg(feature = "pg_test")]
+pub(crate) fn test_executor_cleanup_counts() -> TestExecutorCleanupCounts {
+    TEST_EXECUTOR_CLEANUP_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+fn record_executor_install() {
+    TEST_EXECUTOR_CLEANUP_COUNTS.with(|slot| {
+        let mut counts = slot.get();
+        counts.installed += 1;
+        slot.set(counts);
+    });
+}
+
+#[cfg(any(test, feature = "pg_test"))]
+fn record_executor_release(query_context_reset: bool) {
+    TEST_EXECUTOR_CLEANUP_COUNTS.with(|slot| {
+        let mut counts = slot.get();
+        if query_context_reset {
+            counts.query_reset += 1;
+        } else {
+            counts.normal_end += 1;
+        }
+        slot.set(counts);
+    });
 }
 
 /// Per-node execution counters, config, and batch executor pointer.
@@ -186,8 +237,112 @@ pub(super) struct GpuAccelState {
     pub(super) parallel_agg_dispatch_time_us: u64,
     pub(super) resident_proof: ResidentProofSnapshot,
     /// Opaque pointer to the selected `AggExecState` or `RasterExecState`.
-    /// Set in `begin_custom_scan` and freed in `end_custom_scan`.
-    pub(super) executor: *mut std::ffi::c_void,
+    /// Set in `begin_custom_scan` and released by normal end or query cleanup.
+    pub(super) executor: *mut c_void,
+    /// Concrete destructor paired with `executor`. Keeping the type-erased
+    /// pointer and destructor together lets abort cleanup remain independent
+    /// of mutable/corrupt strategy metadata.
+    executor_drop: Option<ExecutorDropFn>,
+    /// Optional typed preparation required after query-context children have
+    /// been deleted but before the executor destructor runs.
+    executor_prepare_reset: Option<ExecutorPrepareResetFn>,
+}
+
+unsafe fn drop_boxed_executor<T>(executor: *mut c_void) {
+    // SAFETY: install_boxed_executor stores the pointer produced by Box<T>
+    // with this exact monomorphized destructor.
+    unsafe { drop(Box::from_raw(executor.cast::<T>())) };
+}
+
+fn install_boxed_executor<T>(
+    slot: &mut *mut c_void,
+    drop_slot: &mut Option<ExecutorDropFn>,
+    prepare_reset_slot: &mut Option<ExecutorPrepareResetFn>,
+    executor: T,
+    prepare_reset: Option<ExecutorPrepareResetFn>,
+) {
+    debug_assert!(slot.is_null());
+    debug_assert!(drop_slot.is_none());
+    debug_assert!(prepare_reset_slot.is_none());
+    *drop_slot = Some(drop_boxed_executor::<T>);
+    *prepare_reset_slot = prepare_reset;
+    *slot = Box::into_raw(Box::new(executor)).cast();
+    #[cfg(any(test, feature = "pg_test"))]
+    record_executor_install();
+}
+
+unsafe fn drop_installed_executor(
+    slot: &mut *mut c_void,
+    drop_slot: &mut Option<ExecutorDropFn>,
+    prepare_reset_slot: &mut Option<ExecutorPrepareResetFn>,
+) {
+    let executor = std::mem::replace(slot, std::ptr::null_mut());
+    let drop_executor = drop_slot.take();
+    prepare_reset_slot.take();
+    if let (false, Some(drop_executor)) = (executor.is_null(), drop_executor) {
+        // The pointer is cleared before invoking user destructors, so a normal
+        // EndCustomScan followed by the context callback is exactly-once.
+        // SAFETY: the drop function was installed with this exact pointer.
+        unsafe { drop_executor(executor) };
+    }
+}
+
+unsafe fn prepare_raster_executor_for_query_context_reset(executor: *mut c_void) {
+    // SAFETY: raster installation pairs this callback with RasterExecState.
+    unsafe { (*executor.cast::<RasterExecState>()).prepare_for_query_context_reset() };
+}
+
+unsafe fn release_executor(state: &mut GpuAccelState, query_context_reset: bool) {
+    #[cfg(any(test, feature = "pg_test"))]
+    if !state.executor.is_null() {
+        record_executor_release(query_context_reset);
+    }
+    if query_context_reset && !state.executor.is_null() {
+        // PostgreSQL deletes es_query_cxt children before invoking callbacks
+        // on es_query_cxt. The typed callback, when present, makes its owner
+        // safe to drop after those child allocations have disappeared.
+        if let Some(prepare_reset) = state.executor_prepare_reset {
+            // SAFETY: installation paired this callback with the executor.
+            unsafe { prepare_reset(state.executor) };
+        }
+    }
+    // SAFETY: executor and its type-bound callbacks are installed and cleared
+    // as one ownership record.
+    unsafe {
+        drop_installed_executor(
+            &mut state.executor,
+            &mut state.executor_drop,
+            &mut state.executor_prepare_reset,
+        );
+    }
+}
+
+unsafe extern "C-unwind" fn executor_query_context_reset(arg: *mut c_void) {
+    if arg.is_null() {
+        return;
+    }
+    // SAFETY: arg points to the GpuAccelState embedded in query-context-owned
+    // GpuAccelScanState storage. PostgreSQL invokes this before freeing that
+    // storage and removes the callback from its list before entering it.
+    unsafe { release_executor(&mut *arg.cast::<GpuAccelState>(), true) };
+}
+
+unsafe fn register_executor_cleanup(
+    state: *mut GpuAccelScanState,
+    query_context: pg_sys::MemoryContext,
+) {
+    // SAFETY: state is the live extended scan allocation and its embedded
+    // callback remains valid for the lifetime of query_context.
+    unsafe {
+        let callback = &raw mut (*state).executor_cleanup;
+        if (*callback).func.is_some() {
+            pgrx::error!("pg_accel: Custom Scan executor cleanup registered more than once");
+        }
+        (*callback).func = Some(executor_query_context_reset);
+        (*callback).arg = (&raw mut (*state).accel).cast();
+        (*callback).next = std::ptr::null_mut();
+        pg_sys::MemoryContextRegisterResetCallback(query_context, callback);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -555,6 +710,8 @@ unsafe fn create_custom_scan_state(
         (*state).css.methods = exec_methods;
         (*state).accel.exec_method = method as i32;
         (*state).accel.executor = std::ptr::null_mut();
+        (*state).accel.executor_drop = None;
+        (*state).accel.executor_prepare_reset = None;
         (*state).accel.parallel_worker_number = -1;
         (*state).accel.resident_proof = ResidentProofSnapshot::not_proven();
 
@@ -667,7 +824,24 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         reset_observability(&mut (*state).accel);
     }
 
-    let executor = match private.gpu_strategy {
+    // PostgreSQL does not guarantee EndCustomScan after ERROR, cancellation,
+    // or failed portal execution. Tie the Rust executor to es_query_cxt as an
+    // abort-safe backstop; normal EndCustomScan releases it early and leaves
+    // the eventual callback as an idempotent no-op.
+    // SAFETY: node is an initialized executor state.
+    let estate = unsafe { (*node).ss.ps.state };
+    if estate.is_null() {
+        pgrx::error!("pg_accel: resident CustomScan has no executor state");
+    }
+    // SAFETY: the non-null EState owns its query memory context.
+    let query_context = unsafe { (*estate).es_query_cxt };
+    if query_context.is_null() {
+        pgrx::error!("pg_accel: resident CustomScan has no query memory context");
+    }
+    // SAFETY: state and query_context share the executor-query lifetime.
+    unsafe { register_executor_cleanup(state, query_context) };
+
+    match private.gpu_strategy {
         GpuStrategy::Agg => {
             let (spec, projection) = private
                 .agg_query_spec
@@ -676,29 +850,31 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     pgrx::error!("pg_accel: aggregate plan is missing its AQS3/AOP2 contract")
                 });
             let explain_only = (eflags as u32 & pg_sys::EXEC_FLAG_EXPLAIN_ONLY) != 0;
-            let exec = AggExecState::new_descriptor(spec, projection, explain_only).unwrap_or_else(
-                |error| {
+            let exec = AggExecState::new_descriptor_unprepared(spec, projection, explain_only)
+                .unwrap_or_else(|error| {
                     pgrx::error!(
                         "pg_accel: generic aggregate Begin failed ({error}); refusing CPU fallback"
                     )
-                },
-            );
-            Box::into_raw(Box::new(exec)).cast()
+                });
+            // SAFETY: state is our live extended allocation.
+            unsafe {
+                install_boxed_executor(
+                    &mut (*state).accel.executor,
+                    &mut (*state).accel.executor_drop,
+                    &mut (*state).accel.executor_prepare_reset,
+                    exec,
+                    None,
+                );
+                // Preparation can raise a PostgreSQL ERROR or cancellation.
+                // Install the concrete owner first so the registered query
+                // context callback releases it on every nonlocal exit.
+                (*(*state).accel.executor.cast::<AggExecState>()).prepare_descriptor();
+            }
         }
         GpuStrategy::Raster => {
             let plan = private.raster_exec_plan.unwrap_or_else(|| {
                 pgrx::error!("pg_accel: raster CustomScan is missing its exact RQS2 contract")
             });
-            // SAFETY: node is an initialized executor state.
-            let estate = unsafe { (*node).ss.ps.state };
-            if estate.is_null() {
-                pgrx::error!("pg_accel: raster CustomScan has no executor state");
-            }
-            // SAFETY: the non-null EState owns its query memory context.
-            let query_context = unsafe { (*estate).es_query_cxt };
-            if query_context.is_null() {
-                pgrx::error!("pg_accel: raster CustomScan has no query memory context");
-            }
             // SAFETY: the scan slot and query context belong to this node.
             let exec = unsafe {
                 RasterExecState::begin(plan, (*node).ss.ss_ScanTupleSlot, query_context)
@@ -718,13 +894,18 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 (*state).accel.dispatch_time_us =
                     crate::engine::executor::ExecutorState::dispatch_time_us(&exec);
             }
-            Box::into_raw(Box::new(exec)).cast()
+            // SAFETY: state is our live extended allocation.
+            unsafe {
+                install_boxed_executor(
+                    &mut (*state).accel.executor,
+                    &mut (*state).accel.executor_drop,
+                    &mut (*state).accel.executor_prepare_reset,
+                    exec,
+                    Some(prepare_raster_executor_for_query_context_reset),
+                );
+            }
         }
         _ => unreachable!("retired strategies rejected above"),
-    };
-    // SAFETY: state is live and executor owns its concrete box.
-    unsafe {
-        (*state).accel.executor = executor;
     }
 }
 
@@ -776,21 +957,10 @@ unsafe extern "C-unwind" fn exec_custom_scan(
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
     let state = node.cast::<GpuAccelScanState>();
-    // SAFETY: executor was allocated as the concrete type selected by strategy.
-    unsafe {
-        let executor = (*state).accel.executor;
-        if executor.is_null() {
-            return;
-        }
-        match GpuStrategy::decode((*state).accel.strategy) {
-            GpuStrategy::Agg => drop(Box::from_raw(executor.cast::<AggExecState>())),
-            GpuStrategy::Raster => drop(Box::from_raw(executor.cast::<RasterExecState>())),
-            strategy => pgrx::error!(
-                "pg_accel: retired {strategy:?} strategy has a resident executor pointer"
-            ),
-        }
-        (*state).accel.executor = std::ptr::null_mut();
-    }
+    // SAFETY: executor and its concrete destructor were installed together in
+    // BeginCustomScan. Clearing the pointer first makes repeated End calls and
+    // the later query-context callback harmless.
+    unsafe { release_executor(&mut (*state).accel, false) };
 }
 
 /// Reset an aggregate or raster executor without changing its exact contract.

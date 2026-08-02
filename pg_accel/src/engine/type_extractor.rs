@@ -419,7 +419,7 @@ pub fn extractor_for_oid(oid: pg_sys::Oid) -> Option<Box<dyn TypeExtractor>> {
 }
 
 #[cfg(feature = "pg_test")]
-#[allow(clippy::unwrap_used, dead_code)]
+#[allow(clippy::unwrap_used, clippy::wildcard_imports, dead_code)]
 mod tests {
     use super::*;
 
@@ -812,7 +812,7 @@ mod tests {
         let total_size: u32 = 12;
         let header = total_size << 2;
         let header_bytes = header.to_ne_bytes();
-        let mut buf = vec![0u8; 12];
+        let mut buf = [0u8; 12];
         buf[0] = header_bytes[0];
         buf[1] = header_bytes[1];
         buf[2] = header_bytes[2];
@@ -837,7 +837,7 @@ mod tests {
         // header byte = (5 << 1) | 1 = 11
         let total_size: u8 = 5;
         let header_byte = (total_size << 1) | 1;
-        let mut buf = vec![0u8; 5];
+        let mut buf = [0u8; 5];
         buf[0] = header_byte;
         buf[1] = b'A';
         buf[2] = b'B';

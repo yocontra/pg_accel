@@ -12,11 +12,15 @@
 #include <sycl/sycl.hpp>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <new>
+#include <stdexcept>
 #include <type_traits>
 
 #include "pgaccel_olap.h"
@@ -732,9 +736,17 @@ bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_cou
              measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_DATE ||
              measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP)))
         return false;
-      if (measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
-          measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT64 && !count_only_column)
-        validation->supported = false;
+      {
+        const bool ordered_column =
+            measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+            (measure.agg_mask & ~(PGACCEL_GROUPED_AGG_LANE_COUNT |
+                                  PGACCEL_GROUPED_AGG_LANE_MIN |
+                                  PGACCEL_GROUPED_AGG_LANE_MAX)) == 0;
+        if (measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
+            measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT64 &&
+            !count_only_column && !ordered_column)
+          validation->supported = false;
+      }
       if (rhs_required && measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
           measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT64)
         validation->supported = false;
@@ -753,8 +765,16 @@ bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_cou
             (!rhs_required || measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32 ||
              measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64)))
         return false;
-      if (measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64 && !count_only_column)
-        validation->supported = false;
+      {
+        const bool ordered_column =
+            measure.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+            (measure.agg_mask & ~(PGACCEL_GROUPED_AGG_LANE_COUNT |
+                                  PGACCEL_GROUPED_AGG_LANE_MIN |
+                                  PGACCEL_GROUPED_AGG_LANE_MAX)) == 0;
+        if (measure.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64 &&
+            !count_only_column && !ordered_column)
+          validation->supported = false;
+      }
       if (rhs_required && measure.rhs.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64)
         validation->supported = false;
       break;
@@ -1289,6 +1309,13 @@ inline FilterResult evaluate_filter(const pgaccel_grouped_agg_filter& filter,
 }
 
 inline bool load_i64(const pgaccel_grouped_agg_measure_col& col, size_t row, int64_t* value) {
+  if (col.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_BOOL) {
+    const uint8_t raw = static_cast<const uint8_t*>(col.values)[row];
+    if (raw > 1)
+      return false;
+    *value = raw;
+    return true;
+  }
   if (col.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32) {
     *value = static_cast<const int32_t*>(col.values)[row];
     return true;
@@ -1297,14 +1324,27 @@ inline bool load_i64(const pgaccel_grouped_agg_measure_col& col, size_t row, int
     *value = static_cast<const int64_t*>(col.values)[row];
     return true;
   }
+  if (col.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_DATE) {
+    *value = static_cast<const int32_t*>(col.values)[row];
+    return true;
+  }
+  if (col.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP) {
+    *value = static_cast<const int64_t*>(col.values)[row];
+    return true;
+  }
   return false;
 }
 
 inline bool load_f64(const pgaccel_grouped_agg_measure_col& col, size_t row, double* value) {
-  if (col.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64)
-    return false;
-  *value = static_cast<const double*>(col.values)[row];
-  return true;
+  if (col.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32) {
+    *value = static_cast<const float*>(col.values)[row];
+    return true;
+  }
+  if (col.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64) {
+    *value = static_cast<const double*>(col.values)[row];
+    return true;
+  }
+  return false;
 }
 
 inline pgaccel_grouped_agg_device_error accumulate_count(uint64_t* counts, size_t group,
@@ -2921,21 +2961,46 @@ class GroupedAggHashInitKernel;
 class GroupedAggHashCompactKernel;
 class GroupedAggCompletionKernel;
 
+#if defined(PGACCEL_TEST_HOOKS)
+static std::atomic<bool> g_test_throw_scratch_cleanup{false};
+static std::atomic<unsigned> g_test_caught_scratch_cleanup{0};
+#endif
+
 class ScratchOwner {
  public:
   ScratchOwner() = default;
   ScratchOwner(sycl::queue* queue, void* pointer) : queue_(queue), pointer_(pointer) {}
   ScratchOwner(const ScratchOwner&) = delete;
   ScratchOwner& operator=(const ScratchOwner&) = delete;
-  ~ScratchOwner() {
-    if (pointer_ != nullptr)
+  ~ScratchOwner() noexcept {
+    if (pointer_ == nullptr)
+      return;
+    try {
+#if defined(PGACCEL_TEST_HOOKS)
+      if (g_test_throw_scratch_cleanup.exchange(false, std::memory_order_acq_rel))
+        throw std::runtime_error("injected scratch cleanup failure");
+#endif
       sycl::free(pointer_, *queue_);
+    } catch (const std::exception& error) {
+#if defined(PGACCEL_TEST_HOOKS)
+      g_test_caught_scratch_cleanup.fetch_add(1, std::memory_order_relaxed);
+#endif
+      std::fprintf(stderr, "pgaccel: grouped aggregate scratch cleanup failed: %s\n", error.what());
+    } catch (...) {
+#if defined(PGACCEL_TEST_HOOKS)
+      g_test_caught_scratch_cleanup.fetch_add(1, std::memory_order_relaxed);
+#endif
+      std::fprintf(stderr,
+                   "pgaccel: grouped aggregate scratch cleanup failed: unknown C++ exception\n");
+    }
   }
 
  private:
   sycl::queue* queue_ = nullptr;
   void* pointer_ = nullptr;
 };
+
+static_assert(std::is_nothrow_destructible_v<ScratchOwner>);
 
 void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc& desc,
                              const WorkspaceLayout& layout, const KernelParams& host_params,
@@ -3489,6 +3554,18 @@ pgaccel_status execute_grouped_agg_accumulate(sycl::queue& queue,
 }
 
 }  // namespace
+
+#if defined(PGACCEL_TEST_HOOKS)
+extern "C" bool pgaccel_test_grouped_agg_cleanup_exception_is_caught(void) {
+  const unsigned caught_before = g_test_caught_scratch_cleanup.load(std::memory_order_relaxed);
+  g_test_throw_scratch_cleanup.store(true, std::memory_order_release);
+  {
+    ScratchOwner owner(nullptr, reinterpret_cast<void*>(uintptr_t{1}));
+  }
+  return !g_test_throw_scratch_cleanup.load(std::memory_order_acquire) &&
+         g_test_caught_scratch_cleanup.load(std::memory_order_relaxed) == caught_before + 1;
+}
+#endif
 
 extern "C" pgaccel_status
 pgaccel_grouped_agg_workspace_requirements(const pgaccel_grouped_agg_desc* desc,

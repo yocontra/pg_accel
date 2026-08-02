@@ -598,6 +598,7 @@ mod pixel_type_code_tests {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "pg_test")]
+#[allow(clippy::wildcard_imports)]
 mod test_helpers {
     use super::*;
 
@@ -699,7 +700,7 @@ mod test_helpers {
 }
 
 #[cfg(feature = "pg_test")]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::wildcard_imports)]
 mod tests {
     use super::test_helpers::build_test_raster;
     use super::*;

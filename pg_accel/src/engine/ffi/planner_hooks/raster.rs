@@ -588,7 +588,6 @@ fn exact_resident_work(spec: &crate::engine::raster::RasterQuerySpec) -> RasterW
 
 fn record(reason: RejectionReason, rows: u64) {
     stats::increment_planner_rejected(reason.stats_key(), rows);
-    stats::record_planner_fast_decline(reason.stats_key());
     pgrx::debug1!(
         "pg_accel: exact raster observer declined candidate: {}",
         reason.stats_key()
@@ -664,7 +663,7 @@ thread_local! {
 
 /// Scope forced raster path construction to one pg_test planner invocation.
 #[cfg(feature = "pg_test")]
-pub(crate) fn with_forced_raster_path<R>(f: impl FnOnce() -> R) -> R {
+pub fn with_forced_raster_path<R>(f: impl FnOnce() -> R) -> R {
     struct ForceGuard;
 
     impl Drop for ForceGuard {
@@ -685,7 +684,7 @@ fn forced_raster_path_enabled() -> bool {
 
 /// Scope an invalid planned importer OID to one pg_test planner invocation.
 #[cfg(feature = "pg_test")]
-pub(crate) fn with_tampered_raster_catalog_oid<R>(f: impl FnOnce() -> R) -> R {
+pub fn with_tampered_raster_catalog_oid<R>(f: impl FnOnce() -> R) -> R {
     struct TamperGuard;
 
     impl Drop for TamperGuard {
@@ -850,6 +849,7 @@ pub(super) unsafe fn try_force_inject(
     }
     unsafe {
         add_gpu_path_with_resident_proof(
+            stats::PlannerHookStage::UpperFinal,
             "pg_test_forced_raster",
             output_rel,
             cpath,
@@ -1058,7 +1058,6 @@ mod tests {
             client
                 .select(&format!("EXPLAIN (COSTS OFF) {sql}"), None, &[])
                 .expect("EXPLAIN raster candidate")
-                .into_iter()
                 .filter_map(|row| row.get::<String>(1).expect("read EXPLAIN row"))
                 .collect::<Vec<_>>()
                 .join("\n")
@@ -1131,7 +1130,6 @@ mod tests {
             loop {
                 let rows = cursor.fetch(2).expect("fetch raster result cursor batch");
                 if rows.is_empty() {
-                    drop(rows);
                     let repeated_eof = cursor.fetch(2).expect("repeat raster cursor EOF fetch");
                     assert!(
                         repeated_eof.is_empty(),
@@ -1461,6 +1459,7 @@ mod tests {
                    FROM pgaccel_raster_matrix";
         let native = raster_wkb_rows(sql);
         crate::gpu::reset_gpu_exec_count();
+        let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
         super::with_forced_raster_path(|| {
             Spi::run(&format!(
                 "DECLARE pgaccel_raster_rescan NO SCROLL CURSOR FOR {sql}"
@@ -1469,6 +1468,11 @@ mod tests {
         });
         let first = raster_wkb_rows("FETCH FORWARD ALL FROM pgaccel_raster_rescan");
         assert_eq!(first, native, "first cursor pass must match native output");
+        let cleanup_before_rewind = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        assert_eq!(
+            cleanup_before_rewind.installed,
+            cleanup_before.installed + 1
+        );
 
         // SAFETY: the named cursor is live in this pg_test transaction and the
         // helper validates its QueryDesc and top CustomScanState before rewind.
@@ -1479,8 +1483,23 @@ mod tests {
             raster_wkb_rows("FETCH FORWARD ALL FROM pgaccel_raster_rescan").is_empty(),
             "rewound cursor must reach stable EOF"
         );
+        assert_eq!(
+            crate::engine::ffi::custom_scan::test_executor_cleanup_counts(),
+            cleanup_before_rewind,
+            "ExecutorRewind must reset in place without dropping the resident executor"
+        );
         crate::gpu::assert_gpu_executed(1);
         Spi::run("CLOSE pgaccel_raster_rescan").expect("close forced raster rescan cursor");
+        let cleanup_after_close = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        assert_eq!(
+            cleanup_after_close.normal_end,
+            cleanup_before_rewind.normal_end + 1,
+            "portal close must release the executor through EndCustomScan"
+        );
+        assert_eq!(
+            cleanup_after_close.query_reset, cleanup_before_rewind.query_reset,
+            "normal portal close must not require abort cleanup"
+        );
     }
 
     #[pg_test]
@@ -1780,6 +1799,7 @@ mod tests {
         // SAFETY: pg_test runs synchronously on the backend main thread.
         let context_before = unsafe { pg_sys::CurrentMemoryContext };
         assert!(!context_before.is_null());
+        let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
         let (sqlstate, message) =
             crate::engine::executor::raster::with_test_raster_import_wkb_corruption(|| {
                 super::with_forced_raster_path(|| capture_sql_error(sql))
@@ -1789,6 +1809,14 @@ mod tests {
         // backend callback, where CurrentMemoryContext must be restored.
         let context_after = unsafe { pg_sys::CurrentMemoryContext };
         assert_eq!(context_after, context_before);
+        let cleanup_after = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        assert_eq!(cleanup_after.installed, cleanup_before.installed + 1);
+        assert_eq!(cleanup_after.normal_end, cleanup_before.normal_end);
+        assert_eq!(
+            cleanup_after.query_reset,
+            cleanup_before.query_reset + 1,
+            "raster importer ERROR must release the executor through query-context reset"
+        );
         assert_eq!(sqlstate, "XX000");
         assert_eq!(
             message,

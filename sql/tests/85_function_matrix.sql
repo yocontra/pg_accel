@@ -1,6 +1,5 @@
--- 85_function_matrix.sql: Function matrix with diverse inputs.
--- Tests uncovered PostGIS predicates plus GpuH3 and GpuRaster groups on 5000+ row tables.
--- Verifies ON/OFF results match and PostGIS groups do not install CPU-backed pg_accel plans.
+-- 85_function_matrix.sql: selected and native-decline function matrix.
+-- Verifies ON/OFF results and requires explicit plan evidence before any GPU claim.
 
 \echo '=== 85_function_matrix ==='
 
@@ -519,7 +518,7 @@ END $$;
 \echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_019'
 
 -- =========================================================================
--- GpuH3: Setup
+-- H3 compatibility setup
 -- =========================================================================
 
 CREATE TEMP TABLE _fm_h3pts (
@@ -550,7 +549,7 @@ INSERT INTO _fm_h3pts (lat, lng) VALUES
 ANALYZE _fm_h3pts;
 
 -- =========================================================================
--- GpuH3: h3_latlng_to_cell
+-- Native H3: h3_latlng_to_cell
 -- =========================================================================
 
 SET pg_accel.enabled = on;
@@ -935,7 +934,7 @@ END $$;
 \echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_034'
 
 -- =========================================================================
--- GpuH3: Combined H3 pipeline
+-- Native H3 combined-function pipeline
 -- =========================================================================
 
 -- 26. Full pipeline: latlng_to_cell -> get_resolution -> cell_to_parent
@@ -973,7 +972,7 @@ END $$;
 \echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_035'
 
 -- =========================================================================
--- GpuH3: Equator and prime meridian
+-- Native H3 equator and prime-meridian cases
 -- =========================================================================
 
 -- 27. Cells along equator
@@ -1001,7 +1000,7 @@ END $$;
 \echo 'PGACCEL_ASSERT_OK:85_function_matrix.assert_036'
 
 -- =========================================================================
--- GpuRaster: required release tests (PostGIS raster must be available)
+-- Native/test-only raster release guards (PostGIS raster must be available)
 -- =========================================================================
 
 -- 28-30. Raster operations (ST_MapAlgebra, ST_Clip, ST_Reclass)

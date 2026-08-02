@@ -13,6 +13,12 @@
 
 #include "pgaccel_ffi.h"
 
+#if defined(PGACCEL_TEST_HOOKS)
+extern "C" void pgaccel_test_seed_inherited_runtime_state(void);
+extern "C" void pgaccel_test_fail_after_fork_invalidation_once(void);
+extern "C" void pgaccel_test_clear_seeded_runtime_state(void);
+#endif
+
 static const size_t N = 100000;
 #if defined(__APPLE__)
 static const int FORK_CYCLES = 8;
@@ -156,6 +162,74 @@ int main() {
     if (rc != 0)
       return rc;
   }
+
+#if defined(PGACCEL_TEST_HOOKS)
+  printf("\n=== Warm-parent failed child reinitialization ===\n");
+  // Seed the exact process-global state published by a warmed parent without
+  // initializing AdaptiveCpp before fork. Forking a multithreaded Metal
+  // runtime is unsupported and can deadlock independently of pg_accel's state
+  // machine; this seam isolates the production PID/metadata transition.
+  pgaccel_test_seed_inherited_runtime_state();
+  const pgaccel_device_info parent_info = pgaccel_get_device_info();
+  if (parent_info.compute_units != 999 ||
+      std::strcmp(parent_info.device_name, "stale-parent-device") != 0) {
+    fprintf(stderr, "Parent: seeded warm metadata was not visible in its owning PID\n");
+    return 1;
+  }
+  pgaccel_test_fail_after_fork_invalidation_once();
+
+  const pid_t failure_pid = fork();
+  if (failure_pid < 0) {
+    perror("fork");
+    return 1;
+  }
+  if (failure_pid == 0) {
+    // Getters must reject inherited parent metadata even before the child asks
+    // pgaccel_init() to invalidate the inherited queue pointers.
+    const pgaccel_device_info inherited_info = pgaccel_get_device_info();
+    const pgaccel_platform_caps inherited_caps = pgaccel_get_caps();
+    if (inherited_info.compute_units != 0 || inherited_info.device_name[0] != '\0' ||
+        inherited_caps.compute_units != 0 || inherited_caps.backend_name[0] != '\0') {
+      fprintf(stderr, "Child: inherited parent metadata was externally visible\n");
+      _exit(20);
+    }
+
+    if (pgaccel_init() != PGACCEL_ERROR) {
+      fprintf(stderr, "Child: injected fresh initialization did not fail\n");
+      _exit(21);
+    }
+    const pgaccel_device_info failed_info = pgaccel_get_device_info();
+    const pgaccel_platform_caps failed_caps = pgaccel_get_caps();
+    if (failed_info.compute_units != 0 || failed_info.device_name[0] != '\0' ||
+        failed_caps.compute_units != 0 || failed_caps.backend_name[0] != '\0') {
+      fprintf(stderr, "Child: failed fresh initialization exposed stale metadata\n");
+      _exit(22);
+    }
+
+    if (pgaccel_init() != PGACCEL_OK) {
+      fprintf(stderr, "Child: retry after injected initialization failure did not succeed\n");
+      _exit(23);
+    }
+    const pgaccel_device_info retried_info = pgaccel_get_device_info();
+    const pgaccel_platform_caps retried_caps = pgaccel_get_caps();
+    if (retried_info.compute_units == 0 || retried_info.device_name[0] == '\0' ||
+        retried_caps.compute_units == 0 || retried_caps.backend_name[0] == '\0') {
+      fprintf(stderr, "Child: successful retry did not publish fresh metadata\n");
+      _exit(24);
+    }
+    pgaccel_shutdown();
+    _exit(0);
+  }
+
+  int failure_status = 0;
+  if (waitpid(failure_pid, &failure_status, 0) != failure_pid ||
+      !WIFEXITED(failure_status) || WEXITSTATUS(failure_status) != 0) {
+    fprintf(stderr, "Warm-parent failure/retry child failed (status=%d)\n", failure_status);
+    return 1;
+  }
+  // The child's inherited injection and runtime state are copy-on-write.
+  pgaccel_test_clear_seeded_runtime_state();
+#endif
 
   printf("\nPASS: all %d pre-fork policy GPU cycles completed.\n", FORK_CYCLES);
   return 0;

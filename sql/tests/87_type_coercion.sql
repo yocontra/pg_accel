@@ -1,4 +1,4 @@
--- 87_type_coercion.sql: Type handling with GPU-accelerated functions
+-- 87_type_coercion.sql: Type handling across selected and native-decline functions
 -- Tests float4/float8 coercion, integer casts, CASE expressions,
 -- mixed geometry/geography, and planner verification.
 

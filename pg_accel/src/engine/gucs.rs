@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn log_level_clone() {
         let original = PgAccelLogLevel::Warning;
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(original, cloned);
     }
 

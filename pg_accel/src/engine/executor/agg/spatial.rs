@@ -5,7 +5,9 @@ use std::any::Any;
 use pgrx::pg_sys;
 
 use super::artifact::{DescriptorAggArtifact, PreparedAggArtifact, prepare_spatial_base_artifact};
-use crate::engine::ffi::syscache::{PostgisCatalogIdentity, resolve_postgis_catalog};
+use crate::engine::ffi::syscache::{
+    PostgisCatalogIdentity, resolve_postgis_catalog, rethrow_if_required,
+};
 use crate::engine::residency::{
     DerivedArtifact, ResidentByteAccounting, ResidentColumnRef, ResidentColumnView,
     ResidentDispatchBundle, ResidentGeometryColumn, ResidentGeometryExactSnapshot,
@@ -968,6 +970,8 @@ impl SpatialWorkspace {
             (constant_datum, row_datum)
         };
         let result = pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            #[cfg(feature = "pg_test")]
+            crate::engine::ffi::syscache::inject_test_postgres_error();
             let result = if plan.predicate == ResidentSpatialPredicate::DWithin {
                 // SAFETY: the catalog identity proves the exact strict three-argument
                 // PostGIS OID. Both geometry Datums reference complete retained
@@ -994,6 +998,7 @@ impl SpatialWorkspace {
             Ok::<_, ResidentLoadError>(result)
         }))
         .catch_others(|caught| {
+            let caught = rethrow_if_required(caught);
             Err(ResidentLoadError::Loader(format!(
                 "PostGIS exact spatial recheck raised an error: {}",
                 Self::caught_error_message(&caught)

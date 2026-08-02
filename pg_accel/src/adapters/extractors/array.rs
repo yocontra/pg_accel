@@ -33,6 +33,9 @@
 //! - `ARR_OVERHEAD_NONULLS` / `ARR_OVERHEAD_WITHNULLS` (alignment of the
 //!   data pointer when no nullmap is present).
 
+use std::ops::Range;
+use std::ptr::NonNull;
+
 use pgrx::pg_sys;
 
 /// Errors returned when parsing a PG `ArrayType` varlena.
@@ -117,8 +120,8 @@ fn typalign_bytes(typalign: u8) -> Result<usize, ParseError> {
 /// Element walking is done by [`PgArrayIter`], which handles both
 /// fixed-width and variable-length elements based on `elem_len < 0`.
 ///
-/// The lifetime is `'a` over whatever buffer the detoasted varlena lives in;
-/// callers must NOT retain the iterator past the dispatch frame.
+/// Views returned by [`ParsedPgArray::view`] cannot outlive the owning
+/// detoasted-array guard.
 #[derive(Debug)]
 pub struct PgArray<'a> {
     /// Element type OID (read from the array header).
@@ -164,6 +167,140 @@ impl<'a> IntoIterator for &PgArray<'a> {
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
+}
+
+/// Owns the result of detoasting a PostgreSQL array and its validated layout.
+///
+/// PostgreSQL sometimes returns the original Datum pointer from
+/// `pg_detoast_datum` and sometimes allocates a flat copy. This guard retains
+/// either form and `pfree`s only a distinct copy when dropped. Borrowed array
+/// payloads are available through [`Self::view`] and are therefore tied to the
+/// guard rather than forged as `'static`.
+pub struct ParsedPgArray {
+    storage: DetoastedArrayStorage,
+    /// Element type OID (read from the array header).
+    pub elem_type: pg_sys::Oid,
+    /// Element length in bytes (PG's `typlen`). Negative for varlena
+    /// elements (typically `-1`).
+    pub elem_len: i16,
+    /// Element alignment byte (PG's `typalign`).
+    pub elem_align: u8,
+    /// Number of elements in the one-dimensional array.
+    pub nelems: usize,
+    nullmap_range: Option<Range<usize>>,
+    payload_range: Range<usize>,
+}
+
+impl core::fmt::Debug for ParsedPgArray {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ParsedPgArray")
+            .field("elem_type", &self.elem_type)
+            .field("elem_len", &self.elem_len)
+            .field("elem_align", &self.elem_align)
+            .field("nelems", &self.nelems)
+            .field("has_nullmap", &self.nullmap_range.is_some())
+            .field("payload_len", &self.payload_range.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ParsedPgArray {
+    /// Borrow the parsed array. Every returned slice is bounded by this guard.
+    #[must_use]
+    pub fn view(&self) -> PgArray<'_> {
+        let base_ptr = self.storage.as_ptr().cast::<u8>();
+        let nullmap = self.nullmap_range.as_ref().map(|range| {
+            // SAFETY: parse_array validated this complete range against the
+            // detoasted varlena size, and `self` retains that allocation.
+            unsafe {
+                std::slice::from_raw_parts(base_ptr.add(range.start), range.end - range.start)
+            }
+        });
+        // SAFETY: parse_array validated this complete range against the
+        // detoasted varlena size, and `self` retains that allocation.
+        let payload = unsafe {
+            std::slice::from_raw_parts(
+                base_ptr.add(self.payload_range.start),
+                self.payload_range.end - self.payload_range.start,
+            )
+        };
+        PgArray {
+            elem_type: self.elem_type,
+            elem_len: self.elem_len,
+            elem_align: self.elem_align,
+            nelems: self.nelems,
+            nullmap,
+            payload,
+        }
+    }
+
+    /// Iterate over the retained array payload.
+    #[must_use]
+    pub fn iter(&self) -> PgArrayIter<'_> {
+        self.view().iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ParsedPgArray {
+    type Item = Option<&'a [u8]>;
+    type IntoIter = PgArrayIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+struct DetoastedArrayStorage {
+    original: NonNull<pg_sys::varlena>,
+    detoasted: NonNull<pg_sys::varlena>,
+}
+
+impl DetoastedArrayStorage {
+    /// # Safety
+    ///
+    /// Both pointers must identify the original Datum and the corresponding
+    /// non-null flat result of `pg_detoast_datum`, respectively.
+    unsafe fn new(original: *mut pg_sys::varlena, detoasted: *mut pg_sys::varlena) -> Option<Self> {
+        Some(Self {
+            original: NonNull::new(original)?,
+            detoasted: NonNull::new(detoasted)?,
+        })
+    }
+
+    fn as_ptr(&self) -> *mut pg_sys::varlena {
+        self.detoasted.as_ptr()
+    }
+
+    fn owns_copy(&self) -> bool {
+        self.original != self.detoasted
+    }
+}
+
+impl Drop for DetoastedArrayStorage {
+    fn drop(&mut self) {
+        if self.owns_copy() {
+            // SAFETY: a distinct pg_detoast_datum result is a palloc-owned
+            // flat copy, and this guard releases it exactly once.
+            unsafe { release_detoasted_copy(self.detoasted) };
+        }
+    }
+}
+
+#[cfg(not(test))]
+unsafe fn release_detoasted_copy(pointer: NonNull<pg_sys::varlena>) {
+    // SAFETY: the caller established that this is the distinct palloc-owned
+    // result of pg_detoast_datum.
+    unsafe { pg_sys::pfree(pointer.as_ptr().cast()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DETOASTED_COPY_FREES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+unsafe fn release_detoasted_copy(_pointer: NonNull<pg_sys::varlena>) {
+    TEST_DETOASTED_COPY_FREES.with(|count| count.set(count.get() + 1));
 }
 
 /// Element iterator produced by [`PgArray::iter`].
@@ -293,24 +430,24 @@ impl<'a> Iterator for PgArrayIter<'a> {
     }
 }
 
-/// Parse a PG `ArrayType` varlena Datum into a [`PgArray`] view.
+/// Parse a PG `ArrayType` varlena Datum into an owning [`ParsedPgArray`].
 ///
 /// Detoasts via `pg_detoast_datum` first. Returns:
-/// - `Ok(PgArray)` for a well-formed 1-D array.
+/// - `Ok(ParsedPgArray)` for a well-formed 1-D array.
 /// - `Err(ParseError::Null)` if `datum.value() == 0`.
 /// - `Err(ParseError::Multidim(n))` if `ndim > 1`.
 /// - `Err(_)` for any other malformed header.
 ///
-/// The returned slices borrow from the detoasted varlena memory. The
-/// `'static` lifetime is a safety annotation: callers MUST consume the
-/// returned `PgArray` synchronously inside the same dispatch frame.
+/// The returned guard owns any distinct detoast allocation. Call [`ParsedPgArray::view`]
+/// or [`ParsedPgArray::iter`] to borrow its contents without copying.
 ///
 /// # Safety
 ///
 /// Must be called on the **main backend thread** (calls `pg_detoast_datum`).
 /// `datum` must either be zero (NULL) or point to a valid varlena
-/// representing an `ArrayType`.
-pub unsafe fn parse_array(datum: pg_sys::Datum) -> Result<PgArray<'static>, ParseError> {
+/// representing an `ArrayType`. The returned guard must be dropped on the
+/// backend main thread before the input's memory context is reset.
+pub unsafe fn parse_array(datum: pg_sys::Datum) -> Result<ParsedPgArray, ParseError> {
     if datum.value() == 0 {
         return Err(ParseError::Null);
     }
@@ -333,9 +470,16 @@ pub unsafe fn parse_array(datum: pg_sys::Datum) -> Result<PgArray<'static>, Pars
         // SAFETY: stub identity passes through the input pointer.
         unsafe { pg_detoast_datum(datum.cast_mut_ptr::<pg_sys::varlena>()) }
     };
-    if detoasted.is_null() {
-        return Err(ParseError::Null);
-    }
+    // SAFETY: datum is nonzero and detoasted is the corresponding flat result.
+    let storage =
+        unsafe { DetoastedArrayStorage::new(datum.cast_mut_ptr::<pg_sys::varlena>(), detoasted) }
+            .ok_or(ParseError::Null)?;
+
+    parse_detoasted_array(storage)
+}
+
+fn parse_detoasted_array(storage: DetoastedArrayStorage) -> Result<ParsedPgArray, ParseError> {
+    let detoasted = storage.as_ptr();
 
     // SAFETY: `detoasted` is a valid flat varlena. `varsize` reads the
     // 4-byte header.
@@ -444,7 +588,7 @@ pub unsafe fn parse_array(datum: pg_sys::Datum) -> Result<PgArray<'static>, Pars
 
     // Compute the data start offset and optional nullmap slice.
     let dataoffset = dataoffset_raw as usize;
-    let (data_start, nullmap_slice) = if dataoffset_raw == 0 {
+    let (data_start, nullmap_range) = if dataoffset_raw == 0 {
         // No nullmap. Data starts right after dim/lbound, MAXALIGN'd —
         // matches `ARR_OVERHEAD_NONULLS`.
         let raw_start = header_size + dim_lbound_bytes;
@@ -468,12 +612,10 @@ pub unsafe fn parse_array(datum: pg_sys::Datum) -> Result<PgArray<'static>, Pars
         if nullmap_start + nullmap_bytes > base_len {
             return Err(ParseError::TruncatedHeader);
         }
-        // SAFETY: bytes [nullmap_start, nullmap_start + nullmap_bytes) lie
-        // within the detoasted varlena's flat payload of length
-        // `base_len`.
-        let nullmap =
-            unsafe { std::slice::from_raw_parts(base_ptr.add(nullmap_start), nullmap_bytes) };
-        (dataoffset, Some(nullmap))
+        (
+            dataoffset,
+            Some(nullmap_start..nullmap_start + nullmap_bytes),
+        )
     };
 
     if data_start > base_len {
@@ -483,19 +625,14 @@ pub unsafe fn parse_array(datum: pg_sys::Datum) -> Result<PgArray<'static>, Pars
         });
     }
 
-    // SAFETY: bytes [data_start, base_len) lie within the detoasted
-    // varlena. The slice lifetime is bound to the detoasted memory's
-    // lifetime — caller MUST consume synchronously.
-    let payload =
-        unsafe { std::slice::from_raw_parts(base_ptr.add(data_start), base_len - data_start) };
-
-    Ok(PgArray {
+    Ok(ParsedPgArray {
+        storage,
         elem_type: elemtype,
         elem_len: typlen,
         elem_align: typalign as u8,
         nelems,
-        nullmap: nullmap_slice,
-        payload,
+        nullmap_range,
+        payload_range: data_start..base_len,
     })
 }
 
@@ -600,7 +737,7 @@ mod tests {
         // SAFETY: synthetic buffer, identity-stubbed pg_detoast_datum.
         let mut arr = unsafe { parse_array(datum) }.expect("parse ok");
         assert_eq!(arr.nelems, 4);
-        assert!(arr.nullmap.is_none());
+        assert!(arr.view().nullmap.is_none());
         // The cfg(test) get_typlenbyvalalign stub returns zeros; patch the
         // descriptors to match what the catalog would return for INT8.
         arr.elem_len = 8;
@@ -634,7 +771,7 @@ mod tests {
         // SAFETY: synthetic buffer.
         let mut arr = unsafe { parse_array(datum) }.expect("parse ok");
         assert_eq!(arr.nelems, 4);
-        assert!(arr.nullmap.is_some());
+        assert!(arr.view().nullmap.is_some());
         // Patch descriptors (cfg(test) catalog stub returns zeros).
         arr.elem_len = 8;
         arr.elem_align = pg_sys::TYPALIGN_DOUBLE;
@@ -792,5 +929,69 @@ mod tests {
         // SAFETY: synthetic buffer.
         let err = unsafe { parse_array(datum) }.unwrap_err();
         assert_eq!(err, ParseError::NegativeDimSize(-3));
+    }
+
+    fn reset_detoasted_copy_free_count() {
+        TEST_DETOASTED_COPY_FREES.with(|count| count.set(0));
+    }
+
+    fn detoasted_copy_free_count() -> usize {
+        TEST_DETOASTED_COPY_FREES.with(std::cell::Cell::get)
+    }
+
+    /// A distinct detoast copy stays live while the parsed owner exists and
+    /// is released exactly once when the owner drops.
+    #[test]
+    fn distinct_detoast_copy_is_owned_until_parsed_array_drop() {
+        reset_detoasted_copy_free_count();
+        let elemtype = pg_sys::Oid::from(20u32);
+        let (mut buf, _datum) = build_array(0, elemtype, &[], &[], None, &[]);
+        let mut original = std::mem::MaybeUninit::<pg_sys::varlena>::uninit();
+        // SAFETY: `buf` contains a complete synthetic flat ArrayType and the
+        // distinct original pointer is used only for ownership comparison.
+        let storage =
+            unsafe { DetoastedArrayStorage::new(original.as_mut_ptr(), buf.as_mut_ptr().cast()) }
+                .expect("non-null storage");
+        assert!(storage.owns_copy());
+
+        let parsed = parse_detoasted_array(storage).expect("parse copied array");
+        assert_eq!(detoasted_copy_free_count(), 0);
+        assert_eq!(parsed.iter().count(), 0);
+        drop(parsed);
+        assert_eq!(detoasted_copy_free_count(), 1);
+    }
+
+    /// Validation errors also drop the detoast owner rather than leaking the
+    /// temporary flat copy.
+    #[test]
+    fn parse_error_releases_distinct_detoast_copy() {
+        reset_detoasted_copy_free_count();
+        let mut buf = [0u8; 12];
+        let len_word = (buf.len() as u32) << 2;
+        buf[0..4].copy_from_slice(&len_word.to_le_bytes());
+        let mut original = std::mem::MaybeUninit::<pg_sys::varlena>::uninit();
+        // SAFETY: `buf` is readable for its declared varlena size. It is
+        // deliberately too short for ArrayType so parsing fails after taking
+        // ownership of the distinct detoast pointer.
+        let storage =
+            unsafe { DetoastedArrayStorage::new(original.as_mut_ptr(), buf.as_mut_ptr().cast()) }
+                .expect("non-null storage");
+
+        let err = parse_detoasted_array(storage).unwrap_err();
+        assert_eq!(err, ParseError::TruncatedHeader);
+        assert_eq!(detoasted_copy_free_count(), 1);
+    }
+
+    /// Identity detoast results remain owned by the Datum's PostgreSQL memory
+    /// context and must not be freed by the parsed guard.
+    #[test]
+    fn identity_detoast_result_is_not_freed() {
+        reset_detoasted_copy_free_count();
+        let elemtype = pg_sys::Oid::from(20u32);
+        let (_buf, datum) = build_array(0, elemtype, &[], &[], None, &[]);
+        // SAFETY: synthetic buffer, identity-stubbed pg_detoast_datum.
+        let parsed = unsafe { parse_array(datum) }.expect("parse identity array");
+        drop(parsed);
+        assert_eq!(detoasted_copy_free_count(), 0);
     }
 }

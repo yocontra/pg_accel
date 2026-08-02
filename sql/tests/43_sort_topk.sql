@@ -1,5 +1,5 @@
 -- 43_sort_topk.sql: ORDER BY LIMIT top-k tests.
--- Tests sort acceleration with LIMIT, OFFSET, edge cases, and DESC.
+-- Tests native sort/top-k decline behavior with LIMIT, OFFSET, edge cases, and DESC.
 
 \echo '=== 43_sort_topk ==='
 

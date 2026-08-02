@@ -1,7 +1,6 @@
 -- 12_h3_operations.sql: H3 discrete global grid function correctness
--- Protects the h3_latlng_to_cell winning lane and verifies cheap scalar H3
--- operations decline pg_accel's normal plan path unless a fused GPU pipeline
--- explicitly reintroduces them.
+-- Verifies standalone scalar H3 operations stay native. The production H3
+-- winner is the separate fused h3_cell_to_parent grouped-count pipeline.
 
 \echo '=== 12_h3_operations ==='
 
@@ -33,7 +32,7 @@ INSERT INTO _h3_points (lat, lng) VALUES
 
 ANALYZE _h3_points;
 
--- ========== Test 1: h3_latlng_to_cell (GpuH3) ==========
+-- ========== Test 1: h3_latlng_to_cell (native standalone) ==========
 SET pg_accel.enabled = off;
 CREATE TEMP TABLE _h3t1_off AS
 SELECT id, h3_latlng_to_cell(POINT(lng, lat), 5) AS cell

@@ -405,6 +405,8 @@ pub(super) fn classify_aggregate(aggregate_oid: u32) -> Option<AggregateKind> {
         | pg_sys::F_MIN_FLOAT4
         | pg_sys::F_MIN_FLOAT8
         | pg_sys::F_MIN_DATE
+        | pg_sys::F_MIN_TIME
+        | pg_sys::F_MIN_TIMETZ
         | pg_sys::F_MIN_TIMESTAMP
         | pg_sys::F_MIN_TIMESTAMPTZ => Some(AggregateKind::Min),
         pg_sys::F_MAX_INT2
@@ -413,6 +415,8 @@ pub(super) fn classify_aggregate(aggregate_oid: u32) -> Option<AggregateKind> {
         | pg_sys::F_MAX_FLOAT4
         | pg_sys::F_MAX_FLOAT8
         | pg_sys::F_MAX_DATE
+        | pg_sys::F_MAX_TIME
+        | pg_sys::F_MAX_TIMETZ
         | pg_sys::F_MAX_TIMESTAMP
         | pg_sys::F_MAX_TIMESTAMPTZ => Some(AggregateKind::Max),
         pg_sys::F_AVG_FLOAT4 | pg_sys::F_AVG_FLOAT8 => Some(AggregateKind::Avg),

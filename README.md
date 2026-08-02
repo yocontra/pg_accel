@@ -163,7 +163,7 @@ have no registered executor.
 |---|---|---|---|
 | Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. Stored generated columns are physical base attributes and remain selectable when their types and aggregate shape pass those same gates. |
 | Resident star join plus aggregate | Present | Selectable | The join is represented inside one childless aggregate descriptor; this is not a row-returning join path. |
-| H3-derived group key inside a resident aggregate | Present | Selectable | Covered `h3_cell_to_parent` and `h3_latlng_to_cell` group expressions can be encoded in the aggregate descriptor. |
+| H3-derived group key inside a resident aggregate | Present | Partially selectable | Production shape extraction selects fused `h3_cell_to_parent`; `h3_latlng_to_cell` descriptor support is not yet reachable from production planning. |
 | PostGIS spatial filter inside a resident aggregate | Present | Test-only | The descriptor lane is dark in normal planning and is admitted only by a test GUC. |
 | Standalone PostGIS or H3 function/SRF | Aggregate primitives and adapter registry metadata remain; standalone executor removed | Not selectable | PostgreSQL executes standalone calls. Function and target-list SRF hooks record `no_gpu_resident_pipeline`. |
 | Base scan, WHERE filter, or projection | No registered Custom Scan executor; host-staged implementation retired | Not selectable | PostgreSQL executes the base path. The production hook observes and records declines but injects no scan CustomPath. |
@@ -257,6 +257,7 @@ SELECT * FROM pg_accel_gpu_failures();
 SELECT pg_accel_kernel_executions();
 SELECT pg_accel_planner_overhead_us();
 SELECT pg_accel_planner_fast_decline_count();
+SELECT * FROM pg_accel_planner_stage_stats() ORDER BY stage;
 SELECT pg_accel_last_planner_rejection_reason();
 SELECT pg_accel_planner_rejection_count('no_gpu_resident_pipeline');
 ```

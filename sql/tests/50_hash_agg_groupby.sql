@@ -1,5 +1,5 @@
--- 50_hash_agg_groupby.sql: GPU hash aggregation with GROUP BY correctness tests.
--- Verifies grouped aggregate results match between accel ON and OFF.
+-- 50_hash_agg_groupby.sql: grouped-aggregate correctness and decline tests.
+-- ON/OFF parity alone is not a GPU claim; selected paths are asserted explicitly.
 
 \echo '=== 50_hash_agg_groupby ==='
 

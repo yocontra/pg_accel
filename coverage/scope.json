@@ -2,8 +2,8 @@
   "schema_version": 2,
   "minimum_percent": 90.0,
   "sql_manifest": "coverage/sql-semantic-assertions.json",
-  "sql_baseline_files": 52,
-  "sql_baseline_assertions": 287,
+  "sql_baseline_files": 54,
+  "sql_baseline_assertions": 293,
   "layers": {
     "rust": {
       "description": "Owned Rust production code exercised by workspace and pgrx tests, including benchmark classification.",

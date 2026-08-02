@@ -6,9 +6,12 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <stdexcept>
 #include <string>
 
 #include "pgaccel_ffi.h"
@@ -45,6 +48,67 @@ static pgaccel_platform_caps g_caps = {};
 
 sycl::queue* g_queue = nullptr;
 sycl::queue* g_ooo_queue = nullptr;
+
+#if defined(PGACCEL_TEST_HOOKS)
+static std::atomic<bool> g_test_fail_before_ooo_queue{false};
+static std::atomic<bool> g_test_fail_after_fork_invalidation{false};
+static std::atomic<unsigned> g_test_unpublished_queues{0};
+
+class TestUnpublishedQueue {
+ public:
+  TestUnpublishedQueue() { g_test_unpublished_queues.fetch_add(1, std::memory_order_relaxed); }
+  TestUnpublishedQueue(const TestUnpublishedQueue&) = delete;
+  TestUnpublishedQueue& operator=(const TestUnpublishedQueue&) = delete;
+  ~TestUnpublishedQueue() {
+    if (unpublished_)
+      g_test_unpublished_queues.fetch_sub(1, std::memory_order_relaxed);
+  }
+
+  void publish() {
+    g_test_unpublished_queues.fetch_sub(1, std::memory_order_relaxed);
+    unpublished_ = false;
+  }
+
+ private:
+  bool unpublished_ = true;
+};
+
+extern "C" void pgaccel_test_fail_before_ooo_queue_once(void) {
+  g_test_fail_before_ooo_queue.store(true, std::memory_order_release);
+}
+
+extern "C" unsigned pgaccel_test_unpublished_queue_count(void) {
+  return g_test_unpublished_queues.load(std::memory_order_acquire);
+}
+
+extern "C" void pgaccel_test_seed_inherited_runtime_state(void) {
+  g_device_info.compute_units = 999;
+  std::strncpy(g_device_info.device_name, "stale-parent-device",
+               sizeof(g_device_info.device_name) - 1);
+  g_caps.compute_units = 999;
+  std::strncpy(g_caps.backend_name, "stale-parent-backend", sizeof(g_caps.backend_name) - 1);
+  // Sentinel values are never dereferenced: the production fork branch clears
+  // them before any queue access, and the parent uses the reset hook below.
+  g_queue = reinterpret_cast<sycl::queue*>(uintptr_t{1});
+  g_ooo_queue = reinterpret_cast<sycl::queue*>(uintptr_t{2});
+  g_init_pid = getpid();
+  g_initialized.store(true, std::memory_order_release);
+}
+
+extern "C" void pgaccel_test_fail_after_fork_invalidation_once(void) {
+  g_test_fail_after_fork_invalidation.store(true, std::memory_order_release);
+}
+
+extern "C" void pgaccel_test_clear_seeded_runtime_state(void) {
+  g_queue = nullptr;
+  g_ooo_queue = nullptr;
+  std::memset(&g_device_info, 0, sizeof(g_device_info));
+  std::memset(&g_caps, 0, sizeof(g_caps));
+  g_init_pid = 0;
+  g_initialized.store(false, std::memory_order_release);
+  g_test_fail_after_fork_invalidation.store(false, std::memory_order_release);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Backend name detection
@@ -105,33 +169,37 @@ static int score_device(const sycl::device& dev) {
 // Populate caps from SYCL device
 // ---------------------------------------------------------------------------
 
-static void populate_caps(const sycl::device& dev, const std::string& backend) {
-  g_caps.has_native_fp64 = dev.has(sycl::aspect::fp64);
-  g_caps.has_atomic64 = dev.has(sycl::aspect::atomic64);
-  g_caps.has_ooo_queue = false;
-  g_caps.max_alloc_bytes = dev.get_info<sycl::info::device::max_mem_alloc_size>();
-  g_caps.compute_units = dev.get_info<sycl::info::device::max_compute_units>();
-  std::strncpy(g_caps.backend_name, backend.c_str(), sizeof(g_caps.backend_name) - 1);
-  g_caps.backend_name[sizeof(g_caps.backend_name) - 1] = '\0';
+static pgaccel_platform_caps make_caps(const sycl::device& dev, const std::string& backend) {
+  pgaccel_platform_caps caps = {};
+  caps.has_native_fp64 = dev.has(sycl::aspect::fp64);
+  caps.has_atomic64 = dev.has(sycl::aspect::atomic64);
+  caps.has_ooo_queue = false;
+  caps.max_alloc_bytes = dev.get_info<sycl::info::device::max_mem_alloc_size>();
+  caps.compute_units = dev.get_info<sycl::info::device::max_compute_units>();
+  std::strncpy(caps.backend_name, backend.c_str(), sizeof(caps.backend_name) - 1);
+  caps.backend_name[sizeof(caps.backend_name) - 1] = '\0';
+  return caps;
 }
 
 // ---------------------------------------------------------------------------
 // Populate device info from SYCL device
 // ---------------------------------------------------------------------------
 
-static void populate_device_info(const sycl::device& dev, const std::string& backend) {
+static pgaccel_device_info make_device_info(const sycl::device& dev, const std::string& backend) {
+  pgaccel_device_info info = {};
   // SAFETY: device name is always available on a valid SYCL device.
   std::string name = dev.get_info<sycl::info::device::name>();
-  std::strncpy(g_device_info.device_name, name.c_str(), sizeof(g_device_info.device_name) - 1);
-  g_device_info.device_name[sizeof(g_device_info.device_name) - 1] = '\0';
+  std::strncpy(info.device_name, name.c_str(), sizeof(info.device_name) - 1);
+  info.device_name[sizeof(info.device_name) - 1] = '\0';
 
-  std::strncpy(g_device_info.backend_name, backend.c_str(), sizeof(g_device_info.backend_name) - 1);
-  g_device_info.backend_name[sizeof(g_device_info.backend_name) - 1] = '\0';
+  std::strncpy(info.backend_name, backend.c_str(), sizeof(info.backend_name) - 1);
+  info.backend_name[sizeof(info.backend_name) - 1] = '\0';
 
-  g_device_info.compute_units = dev.get_info<sycl::info::device::max_compute_units>();
-  g_device_info.max_alloc_bytes = dev.get_info<sycl::info::device::max_mem_alloc_size>();
-  g_device_info.has_native_fp64 = dev.has(sycl::aspect::fp64);
-  g_device_info.has_atomic64 = dev.has(sycl::aspect::atomic64);
+  info.compute_units = dev.get_info<sycl::info::device::max_compute_units>();
+  info.max_alloc_bytes = dev.get_info<sycl::info::device::max_mem_alloc_size>();
+  info.has_native_fp64 = dev.has(sycl::aspect::fp64);
+  info.has_atomic64 = dev.has(sycl::aspect::atomic64);
+  return info;
 }
 
 // ===========================================================================
@@ -152,11 +220,20 @@ extern "C" pgaccel_status pgaccel_init(void) {
     // ROCm) or raises a clean error (CUDA / Level Zero) on the next use.
     g_queue = nullptr;
     g_ooo_queue = nullptr;
+    std::memset(&g_device_info, 0, sizeof(g_device_info));
+    std::memset(&g_caps, 0, sizeof(g_caps));
     fprintf(stderr,
             "pgaccel: fork detected (parent=%d, child=%d)"
             " — attempting fresh GPU init\n",
             g_init_pid, current_pid);
+    g_init_pid = 0;
     g_initialized.store(false, std::memory_order_release);
+#if defined(PGACCEL_TEST_HOOKS)
+    if (g_test_fail_after_fork_invalidation.exchange(false, std::memory_order_acq_rel)) {
+      fprintf(stderr, "pgaccel: FATAL: injected failure after fork-state invalidation\n");
+      return PGACCEL_ERROR;
+    }
+#endif
     // Fall through to normal init path below.
   }
 
@@ -219,8 +296,8 @@ extern "C" pgaccel_status pgaccel_init(void) {
         fprintf(stderr, "pgaccel: FATAL: no SYCL GPU device found\n");
       } else {
         std::string backend = detect_backend_name(best);
-        populate_caps(best, backend);
-        populate_device_info(best, backend);
+        pgaccel_platform_caps caps = make_caps(best, backend);
+        pgaccel_device_info device_info = make_device_info(best, backend);
 
         // Async exception handler: AdaptiveCpp's Metal backend (and
         // other backends) report kernel-launch failures asynchronously
@@ -250,12 +327,31 @@ extern "C" pgaccel_status pgaccel_init(void) {
           }
         };
 
-        g_queue = new sycl::queue(best, async_handler,
-                                  sycl::property_list{sycl::property::queue::in_order{}});
-        g_ooo_queue = new sycl::queue(best, async_handler,
-                                      sycl::property_list{
-                                          sycl::property::queue::enable_profiling{}});
-        g_caps.has_ooo_queue = !g_ooo_queue->is_in_order();
+        auto queue = std::make_unique<sycl::queue>(
+            best, async_handler, sycl::property_list{sycl::property::queue::in_order{}});
+#if defined(PGACCEL_TEST_HOOKS)
+        TestUnpublishedQueue queue_publication;
+        if (g_test_fail_before_ooo_queue.exchange(false, std::memory_order_acq_rel))
+          throw std::runtime_error("injected out-of-order queue construction failure");
+#endif
+        auto ooo_queue = std::make_unique<sycl::queue>(
+            best, async_handler, sycl::property_list{sycl::property::queue::enable_profiling{}});
+#if defined(PGACCEL_TEST_HOOKS)
+        TestUnpublishedQueue ooo_queue_publication;
+#endif
+        caps.has_ooo_queue = !ooo_queue->is_in_order();
+
+        // Publish only after both queues and all metadata have been created.
+        // Until this non-throwing block, local RAII owns both queues, so any
+        // failure leaves the process globals in their prior all-null state.
+        g_device_info = device_info;
+        g_caps = caps;
+#if defined(PGACCEL_TEST_HOOKS)
+        queue_publication.publish();
+        ooo_queue_publication.publish();
+#endif
+        g_queue = queue.release();
+        g_ooo_queue = ooo_queue.release();
 
         // Silent success: backend init fires per-forked-backend, so
         // logging here produces O(queries) log lines. See Justfile
@@ -307,6 +403,18 @@ sycl::queue* pgaccel_get_ooo_queue() {
 }
 
 extern "C" pgaccel_status pgaccel_shutdown(void) {
+  const pid_t current_pid = getpid();
+  if (g_initialized.load(std::memory_order_acquire) && g_init_pid != current_pid) {
+    // A forked child must never wait on or delete queue objects inherited from
+    // its parent. They belong to the parent's SYCL runtime context.
+    g_queue = nullptr;
+    g_ooo_queue = nullptr;
+    std::memset(&g_device_info, 0, sizeof(g_device_info));
+    std::memset(&g_caps, 0, sizeof(g_caps));
+    g_init_pid = 0;
+    g_initialized.store(false, std::memory_order_release);
+    return PGACCEL_OK;
+  }
   if (!g_initialized.load(std::memory_order_acquire)) {
     return PGACCEL_OK;
   }
@@ -338,15 +446,22 @@ extern "C" pgaccel_status pgaccel_shutdown(void) {
 
   std::memset(&g_device_info, 0, sizeof(g_device_info));
   std::memset(&g_caps, 0, sizeof(g_caps));
+  g_init_pid = 0;
   g_initialized.store(false, std::memory_order_release);
   return PGACCEL_OK;
 }
 
 extern "C" pgaccel_device_info pgaccel_get_device_info(void) {
+  if (!g_initialized.load(std::memory_order_acquire) || g_init_pid != getpid() ||
+      g_queue == nullptr || g_ooo_queue == nullptr)
+    return {};
   return g_device_info;
 }
 
 extern "C" pgaccel_platform_caps pgaccel_get_caps(void) {
+  if (!g_initialized.load(std::memory_order_acquire) || g_init_pid != getpid() ||
+      g_queue == nullptr || g_ooo_queue == nullptr)
+    return {};
   return g_caps;
 }
 

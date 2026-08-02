@@ -604,7 +604,6 @@ mod tests {
                 client
                     .select(query, None, &[])
                     .expect("grouped aggregate query succeeds")
-                    .into_iter()
                     .map(|row| {
                         (
                             row.get::<i32>(1)
@@ -631,6 +630,72 @@ mod tests {
         let accelerated = read_results();
         assert_eq!(accelerated, native, "generic aggregate result mismatch");
         crate::gpu::assert_gpu_executed(1);
+    }
+
+    #[pg_test]
+    fn test_straightforward_aggregate_types_decline_without_performance_evidence() {
+        if !gpu_device_available() {
+            pgrx::notice!("skipping straightforward aggregate decline test: no GPU device");
+            return;
+        }
+        serialize_gpu_tests();
+        Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
+        Spi::run("SET pg_accel.auto_load = off").expect("SET AUTO LOAD OFF");
+        Spi::run(
+            "CREATE TEMP TABLE _straightforward_aggregate_types AS \
+             SELECT (i % 4)::int4 AS g, \
+                    CASE i % 4 WHEN 0 THEN false WHEN 1 THEN true \
+                         WHEN 2 THEN NULL::bool ELSE (i % 2 = 0) END AS b, \
+                    CASE i % 4 WHEN 0 THEN '-32768'::int2 WHEN 1 THEN '32767'::int2 \
+                         WHEN 2 THEN NULL::int2 ELSE 0::int2 END AS s, \
+                    CASE i % 4 WHEN 0 THEN '-Infinity'::float4 WHEN 1 THEN 'NaN'::float4 \
+                         WHEN 2 THEN NULL::float4 ELSE 0::float4 END AS f, \
+                    CASE i % 4 WHEN 0 THEN '-infinity'::date WHEN 1 THEN 'infinity'::date \
+                         WHEN 2 THEN NULL::date ELSE DATE '2000-01-01' END AS d, \
+                    CASE i % 4 WHEN 0 THEN '-infinity'::timestamp \
+                         WHEN 1 THEN 'infinity'::timestamp WHEN 2 THEN NULL::timestamp \
+                         ELSE TIMESTAMP '2000-01-01 00:00:00' END AS ts, \
+                    CASE i % 4 WHEN 0 THEN '-infinity'::timestamptz \
+                         WHEN 1 THEN 'infinity'::timestamptz WHEN 2 THEN NULL::timestamptz \
+                         ELSE TIMESTAMPTZ '2000-01-01 00:00:00+00' END AS tstz \
+             FROM generate_series(1, 500000) AS rows(i)",
+        )
+        .expect("create straightforward aggregate fixture");
+        Spi::run("ANALYZE _straightforward_aggregate_types").expect("ANALYZE fixture");
+        let pinned = Spi::get_one::<i64>(
+            "SELECT pg_accel_pin( \
+               '_straightforward_aggregate_types'::regclass, \
+               ARRAY['g', 'b', 's', 'f', 'd', 'ts', 'tstz'])",
+        )
+        .expect("pin query succeeds")
+        .expect("pin returns row count");
+        assert_eq!(pinned, 500_000);
+
+        let queries = [
+            "SELECT g, count(b), count(s), min(s), max(s) \
+             FROM _straightforward_aggregate_types GROUP BY g",
+            "SELECT g, count(f), min(f), max(f), count(d), min(d), max(d) \
+             FROM _straightforward_aggregate_types GROUP BY g",
+            "SELECT g, count(ts), min(ts), max(ts), count(tstz), min(tstz), max(tstz) \
+             FROM _straightforward_aggregate_types GROUP BY g",
+        ];
+        for (index, query) in queries.into_iter().enumerate() {
+            Spi::run("SET pg_accel.enabled = on").expect("SET ON");
+            Spi::run("SELECT pg_accel_reset_stats()").expect("reset aggregate planner evidence");
+            let plan = explain_text(query);
+            assert!(
+                !plan.contains("Custom Scan (GpuAccelAgg)"),
+                "unproved aggregate query {index} must remain native:\n{plan}"
+            );
+            let rejection =
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("last rejection query succeeds")
+                    .expect("unproved aggregate type records a decline");
+            assert_eq!(
+                rejection, "shape_unsupported_aggregate_input",
+                "unproved aggregate query {index} must expose the stable decline"
+            );
+        }
     }
 
     #[pg_test]
@@ -698,7 +763,6 @@ mod tests {
                 client
                     .select(query, None, &[])
                     .expect("stored generated-column aggregate succeeds")
-                    .into_iter()
                     .map(|row| {
                         (
                             row.get::<i32>(1)
@@ -2448,7 +2512,6 @@ mod tests {
                         &[],
                     )
                     .expect("H3 grouped result query should succeed")
-                    .into_iter()
                     .map(|row| {
                         (
                             row.get::<String>(1).expect("H3 parent text read"),
@@ -4765,8 +4828,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("partial agg CPU-child decline should record a reason");
         assert_eq!(
-            rejection, "shape_unsupported_measure_type",
-            "float4 SUM should expose the exact generic measure-type decline; plan:\n{plan}"
+            rejection, "shape_unsupported_aggregate_input",
+            "float4 SUM should expose the exact unsupported aggregate-input decline; plan:\n{plan}"
         );
 
         Spi::run("DROP TABLE _agg_par_t").expect("drop table");

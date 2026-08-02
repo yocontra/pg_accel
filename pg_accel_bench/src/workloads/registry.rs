@@ -640,8 +640,8 @@ const H3_NATIVE_DECLINE: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::NativeDeclineOnly,
     flags: EvidenceEligibility::FUNCTION_KERNEL | EvidenceEligibility::CACHE_MODE_BOTH,
 };
-const RASTER_WINNER: EvidenceEligibility = EvidenceEligibility {
-    threshold: ThresholdEvidenceEligibility::GpuWinner,
+const RASTER_NATIVE_DECLINE: EvidenceEligibility = EvidenceEligibility {
+    threshold: ThresholdEvidenceEligibility::NativeDeclineOnly,
     flags: EvidenceEligibility::FUNCTION_KERNEL | EvidenceEligibility::CACHE_MODE_BOTH,
 };
 const FP64_CALIBRATION: EvidenceEligibility = EvidenceEligibility {
@@ -1176,16 +1176,16 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("mixed_spatial_sort", C::Mixed, K::Sort).extensions(POSTGIS),
     workload("raster_ndvi", C::GpuRaster, K::Raster)
         .extensions(POSTGIS_RASTER)
-        .evidence(RASTER_WINNER),
+        .evidence(RASTER_NATIVE_DECLINE),
     workload("raster_slope", C::GpuRaster, K::Raster)
         .extensions(POSTGIS_RASTER)
-        .evidence(RASTER_WINNER),
+        .evidence(RASTER_NATIVE_DECLINE),
     workload("raster_reclass", C::GpuRaster, K::Raster)
         .extensions(POSTGIS_RASTER)
-        .evidence(RASTER_WINNER),
+        .evidence(RASTER_NATIVE_DECLINE),
     workload("raster_algebra_deep", C::GpuRaster, K::Raster)
         .extensions(POSTGIS_RASTER)
-        .evidence(RASTER_WINNER),
+        .evidence(RASTER_NATIVE_DECLINE),
     workload("proximity", C::Regression, K::PointInRing).extensions(POSTGIS),
     workload("index_recheck", C::Regression, K::PointInRing).extensions(POSTGIS),
     workload("spatial_join", C::Regression, K::PointInRing).extensions(POSTGIS),

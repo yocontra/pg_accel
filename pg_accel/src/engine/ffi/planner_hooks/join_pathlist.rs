@@ -44,7 +44,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
 
     // Time every invocation so the benchmark harness can detect no-dispatch
     // queries that pay disproportionate planner-hook overhead.
-    let _hook_finish = HookElapsedGuard::new("join_pathlist");
+    let _hook_finish =
+        HookElapsedGuard::new("join_pathlist", stats::PlannerHookStage::JoinPathlist);
 
     // Record this planner hook invocation (main backend thread only).
     stats::record_planner_hook_call();
@@ -129,6 +130,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     // decline reasons; here we record the resident-pipeline decline.
     if gucs::gpu_enabled() {
         super::record_no_gpu_resident_pipeline_decline(
+            stats::PlannerHookStage::JoinPathlist,
             "join_pathlist_no_resident_pipeline",
             joinrel,
         );

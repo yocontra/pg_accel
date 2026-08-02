@@ -375,7 +375,10 @@ mod tests {
                 parallel_agg_dispatch_time_us: 0,
                 resident_proof: ResidentProofSnapshot::default(),
                 executor: std::ptr::null_mut(),
+                executor_drop: None,
+                executor_prepare_reset: None,
             },
+            executor_cleanup: pg_sys::MemoryContextCallback::default(),
         }
     }
 

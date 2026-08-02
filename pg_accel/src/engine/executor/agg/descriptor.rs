@@ -166,17 +166,18 @@ fn validate_measure_outputs(
             }
         }
         MeasureExpr::Column(column)
-            if matches!(column.type_oid, INT8OID | FLOAT8OID) && count_min_max() =>
+            if matches!(
+                column.type_oid,
+                INT2OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID
+            ) && count_min_max() =>
         {
             Ok(())
         }
         MeasureExpr::Column(column)
-            if matches!(
-                column.type_oid,
-                BOOLOID | FLOAT4OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID
-            ) && outputs
-                .iter()
-                .all(|output| output.kind == AggregateKind::Count) =>
+            if column.type_oid == BOOLOID
+                && outputs
+                    .iter()
+                    .all(|output| output.kind == AggregateKind::Count) =>
         {
             Ok(())
         }
@@ -1270,7 +1271,7 @@ fn measure_column(
                 abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL,
                 1,
             ),
-            INT4OID => (
+            INT2OID | INT4OID => (
                 std::ptr::null(),
                 std::ptr::null(),
                 abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
@@ -1322,7 +1323,7 @@ fn measure_column(
             type_oid,
             values,
             nulls,
-        } if u32::from(*type_oid) == INT4OID => (
+        } if matches!(u32::from(*type_oid), INT2OID | INT4OID) => (
             values.as_ptr().cast::<c_void>(),
             null_ptr(*nulls),
             abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32,
@@ -1904,7 +1905,7 @@ static TEST_DENSE_COMPLETED_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// zero timeout count disables the timeout arm. This code is absent from
 /// release builds.
 #[cfg(feature = "pg_test")]
-pub(crate) fn configure_dense_dispatch_test(
+pub fn configure_dense_dispatch_test(
     chunk_rows: usize,
     one_shot_max_rows: usize,
     timeout_after_calls: usize,
@@ -1924,7 +1925,7 @@ pub(crate) fn configure_dense_dispatch_test(
 
 #[cfg(feature = "pg_test")]
 #[must_use]
-pub(crate) fn dense_dispatch_test_completed_calls() -> usize {
+pub fn dense_dispatch_test_completed_calls() -> usize {
     TEST_DENSE_COMPLETED_CALLS.load(Ordering::SeqCst)
 }
 
@@ -2925,6 +2926,7 @@ mod tests {
     fn predicate_only_columns_use_exact_physical_types() {
         for (type_oid, expected_physical, expected_bytes) in [
             (BOOLOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, 1),
+            (INT2OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32, 4),
             (FLOAT4OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32, 4),
             (DATEOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE, 4),
             (TIMESTAMPOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP, 8),
@@ -2947,38 +2949,42 @@ mod tests {
     }
 
     #[test]
-    fn runtime_backstop_accepts_hidden_temporal_and_float4_counts() {
-        let cases = [
-            (FLOAT4OID, ScalarValue::F32(1.0), ScalarValue::F32(2.0)),
-            (DATEOID, ScalarValue::Date(1), ScalarValue::Date(2)),
+    fn runtime_backstop_matches_straightforward_aggregate_matrix() {
+        for (type_oid, kinds) in [
+            (BOOLOID, &[AggregateKind::Count][..]),
+            (
+                INT2OID,
+                &[AggregateKind::Count, AggregateKind::Min, AggregateKind::Max][..],
+            ),
+            (
+                FLOAT4OID,
+                &[AggregateKind::Count, AggregateKind::Min, AggregateKind::Max][..],
+            ),
+            (
+                DATEOID,
+                &[AggregateKind::Count, AggregateKind::Min, AggregateKind::Max][..],
+            ),
             (
                 TIMESTAMPOID,
-                ScalarValue::Timestamp(1),
-                ScalarValue::Timestamp(2),
+                &[AggregateKind::Count, AggregateKind::Min, AggregateKind::Max][..],
             ),
             (
                 TIMESTAMPTZOID,
-                ScalarValue::TimestampTz(1),
-                ScalarValue::TimestampTz(2),
+                &[AggregateKind::Count, AggregateKind::Min, AggregateKind::Max][..],
             ),
-        ];
-        for (type_oid, lo, hi) in cases {
-            let mut spec = spec(MeasureExpr::CountStar, AggregateKind::Count);
-            let input = column(type_oid);
-            spec.measures.push(MeasureSpec {
-                expression: MeasureExpr::Column(input),
-                outputs: vec![AggregateOutput {
-                    source: AggregateSource::Value,
-                    kind: AggregateKind::Count,
-                }],
-                filter: FilterSpec::None,
-            });
-            spec.fact_filter = FilterSpec::Ranges {
-                input,
-                ranges: vec![crate::engine::spec::ScalarRange { lo, hi }],
-            };
-            validate_runtime_capability(&spec, &projection(AggregateKind::Count, 0, INT8OID))
-                .unwrap_or_else(|error| panic!("type OID {type_oid} should bind: {error}"));
+        ] {
+            for &kind in kinds {
+                let spec = spec(MeasureExpr::Column(column(type_oid)), kind);
+                let result_type_oid = if kind == AggregateKind::Count {
+                    INT8OID
+                } else {
+                    type_oid
+                };
+                validate_runtime_capability(&spec, &projection(kind, type_oid, result_type_oid))
+                    .unwrap_or_else(|error| {
+                        panic!("type OID {type_oid} {kind:?} should bind: {error}")
+                    });
+            }
         }
     }
 
@@ -3268,7 +3274,15 @@ mod tests {
             )
             .is_err()
         );
-        for oid in [INT8OID, FLOAT8OID] {
+        for oid in [
+            INT2OID,
+            INT8OID,
+            FLOAT4OID,
+            FLOAT8OID,
+            DATEOID,
+            TIMESTAMPOID,
+            TIMESTAMPTZOID,
+        ] {
             assert!(
                 validate_measure_outputs(
                     &MeasureExpr::Column(column(oid)),
@@ -3281,12 +3295,14 @@ mod tests {
                     .is_err()
             );
         }
-        for oid in [BOOLOID, FLOAT4OID, DATEOID, TIMESTAMPOID, TIMESTAMPTZOID] {
-            assert!(
-                validate_measure_outputs(&MeasureExpr::Column(column(oid)), &all_basic[1..2],)
-                    .is_ok()
-            );
-        }
+        assert!(
+            validate_measure_outputs(&MeasureExpr::Column(column(BOOLOID)), &all_basic[1..2],)
+                .is_ok()
+        );
+        assert!(
+            validate_measure_outputs(&MeasureExpr::Column(column(BOOLOID)), &all_basic[2..4],)
+                .is_err()
+        );
         let mut rhs = column(INT4OID);
         rhs.attno = 2;
         for op in [BinaryMeasureOp::Mul, BinaryMeasureOp::Sub] {

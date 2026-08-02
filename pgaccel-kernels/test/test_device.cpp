@@ -1,11 +1,60 @@
+#include <sycl/sycl.hpp>
+
 #include <cstdio>
 
 #include "pgaccel_ffi.h"
 
+extern sycl::queue* g_queue;
+extern sycl::queue* g_ooo_queue;
+
+#if defined(PGACCEL_TEST_HOOKS)
+extern "C" void pgaccel_test_fail_before_ooo_queue_once(void);
+extern "C" unsigned pgaccel_test_unpublished_queue_count(void);
+extern "C" bool pgaccel_test_grouped_agg_cleanup_exception_is_caught(void);
+#endif
+
 int main() {
+#if defined(PGACCEL_TEST_HOOKS)
+  pgaccel_test_fail_before_ooo_queue_once();
+  if (pgaccel_init() != PGACCEL_ERROR) {
+    fprintf(stderr, "injected second-queue construction failure did not fail initialization\n");
+    return 1;
+  }
+  if (g_queue != nullptr || g_ooo_queue != nullptr ||
+      pgaccel_test_unpublished_queue_count() != 0) {
+    fprintf(stderr, "failed initialization published or leaked a queue\n");
+    return 1;
+  }
+  pgaccel_device_info failed_info = pgaccel_get_device_info();
+  pgaccel_platform_caps failed_caps = pgaccel_get_caps();
+  if (failed_info.device_name[0] != '\0' || failed_info.backend_name[0] != '\0' ||
+      failed_caps.backend_name[0] != '\0') {
+    fprintf(stderr, "failed initialization published device metadata\n");
+    return 1;
+  }
+  if (!pgaccel_test_grouped_agg_cleanup_exception_is_caught()) {
+    fprintf(stderr, "noexcept scratch cleanup did not catch the injected failure\n");
+    return 1;
+  }
+#endif
+
   pgaccel_status status = pgaccel_init();
   if (status != PGACCEL_OK) {
     fprintf(stderr, "pgaccel_init failed: %d\n", status);
+    return 1;
+  }
+
+  if (g_queue == nullptr || g_ooo_queue == nullptr) {
+    fprintf(stderr, "successful initialization did not publish both queues\n");
+    pgaccel_shutdown();
+    return 1;
+  }
+  sycl::queue* const initial_queue = g_queue;
+  sycl::queue* const initial_ooo_queue = g_ooo_queue;
+  if (pgaccel_init() != PGACCEL_OK || g_queue != initial_queue ||
+      g_ooo_queue != initial_ooo_queue) {
+    fprintf(stderr, "idempotent initialization replaced the published queue pair\n");
+    pgaccel_shutdown();
     return 1;
   }
 
@@ -56,6 +105,16 @@ int main() {
     fprintf(stderr, "pgaccel_shutdown failed: %d\n", status);
     return 1;
   }
+  if (g_queue != nullptr || g_ooo_queue != nullptr) {
+    fprintf(stderr, "shutdown did not clear the published queue pair\n");
+    return 1;
+  }
+#if defined(PGACCEL_TEST_HOOKS)
+  if (pgaccel_test_unpublished_queue_count() != 0) {
+    fprintf(stderr, "shutdown left queue publication ownership outstanding\n");
+    return 1;
+  }
+#endif
 
   printf("Shutdown OK.\n");
   return 0;

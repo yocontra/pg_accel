@@ -24,7 +24,9 @@ use super::geometry::{
     ResidentGeometryBuilder, ResidentGeometryColumn, ResidentGeometryReferencedBytes,
 };
 use super::ledger::{self, GenerationStamp, LedgerCharge};
-use super::store::{RelationFingerprint, ResidentColumn, ResidentRelation};
+use super::store::{
+    InvalidationTriggerFingerprint, RelationFingerprint, ResidentColumn, ResidentRelation,
+};
 
 const LOAD_INTERRUPT_CHECK_ROWS: usize = 8192;
 
@@ -1816,9 +1818,7 @@ fn scan_relation_direct_inner(
 #[cfg(feature = "pg_test")]
 fn inject_direct_scan_error(row_count: u64) {
     let error = TEST_DIRECT_SCAN_ERROR_AFTER_ROWS.with(|trigger| {
-        let Some((target, error)) = trigger.get() else {
-            return None;
-        };
+        let (target, error) = trigger.get()?;
         if target != row_count {
             return None;
         }
@@ -1848,7 +1848,7 @@ pub(super) fn stage_relation(
         let generation_before = ledger::generation_stamp(relid);
         let fingerprint_before = RelationFingerprint::capture(relid, requests).ok_or_else(|| {
             format!(
-                "relation OID {} or one of its requested columns disappeared before resident load",
+                "relation OID {}, one of its requested columns, or its invalidation trigger contract changed before resident load",
                 u32::from(relid)
             )
         })?;
@@ -1909,8 +1909,160 @@ pub(super) fn stage_relation(
     Err("resident load retry loop exhausted".to_owned())
 }
 
+const INVALIDATION_TRIGGER_NAME: &str = "__pg_accel_residency_v2_7d9e";
+
+struct InvalidationTriggerFunction {
+    oid: pg_sys::Oid,
+    catalog_xmin: u64,
+    catalog_tid: String,
+    qualified_name: String,
+}
+
+fn invalidation_trigger_function() -> Result<InvalidationTriggerFunction, String> {
+    let function_query = "SELECT p.oid::int8, p.xmin::text::int8, p.ctid::text, \
+        pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(p.proname) \
+        FROM pg_catalog.pg_proc p \
+        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+        JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_proc'::regclass \
+          AND d.objid = p.oid AND d.refclassid = 'pg_catalog.pg_extension'::regclass \
+          AND d.deptype = 'e' \
+        JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
+        WHERE e.extname = 'pg_accel' AND p.proname = 'pg_accel_residency_invalidate' \
+          AND p.pronargs = 0 AND p.prokind = 'f' \
+          AND p.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype";
+    Spi::connect(|client| {
+        let rows = client
+            .select(function_query, Some(2), &[])
+            .map_err(|error| {
+                format!("failed to resolve extension-owned residency trigger function: {error:?}")
+            })?;
+        if rows.is_empty() {
+            return Err(
+                "pg_accel_residency_invalidate() is not an extension-owned function".to_owned(),
+            );
+        }
+        if rows.len() != 1 {
+            return Err(
+                "pg_accel_residency_invalidate() extension identity is ambiguous".to_owned(),
+            );
+        }
+        let row = rows.first();
+        let oid = row
+            .get::<i64>(1)
+            .map_err(|error| format!("trigger function OID read failed: {error:?}"))?
+            .ok_or("trigger function OID is NULL")?;
+        let catalog_xmin = row
+            .get::<i64>(2)
+            .map_err(|error| format!("trigger function xmin read failed: {error:?}"))?
+            .ok_or("trigger function xmin is NULL")?
+            .try_into()
+            .map_err(|_| "trigger function xmin is not an unsigned integer".to_owned())?;
+        let name = row
+            .get::<String>(4)
+            .map_err(|error| format!("trigger function name read failed: {error:?}"))?
+            .ok_or("trigger function name is NULL")?;
+        let oid = u32::try_from(oid)
+            .map(pg_sys::Oid::from)
+            .map_err(|_| "trigger function OID exceeds oid range".to_owned())?;
+        let catalog_tid = row
+            .get::<String>(3)
+            .map_err(|error| format!("trigger function ctid read failed: {error:?}"))?
+            .ok_or("trigger function ctid is NULL")?;
+        Ok::<_, String>(InvalidationTriggerFunction {
+            oid,
+            catalog_xmin,
+            catalog_tid,
+            qualified_name: name,
+        })
+    })
+}
+
+pub(super) fn invalidation_trigger_fingerprint(
+    relid: pg_sys::Oid,
+) -> Option<InvalidationTriggerFingerprint> {
+    let function = invalidation_trigger_function().ok()?;
+    let existing_query = format!(
+        "SELECT oid::int8, xmin::text::int8, ctid::text, tgfoid::int8, tgtype::int4, tgenabled::text, tgnargs::int4, (tgattr::text = '') \
+         FROM pg_catalog.pg_trigger \
+         WHERE tgrelid = {}::oid AND tgname = '{}' AND NOT tgisinternal",
+        u32::from(relid),
+        INVALIDATION_TRIGGER_NAME
+    );
+    let existing = Spi::connect(|client| {
+        let rows = client
+            .select(&existing_query, Some(1), &[])
+            .map_err(|error| format!("failed to inspect residency trigger: {error:?}"))?;
+        if rows.is_empty() {
+            return Ok::<_, String>(None);
+        }
+        let row = rows.first();
+        Ok(Some((
+            row.get::<i64>(1)
+                .map_err(|error| format!("trigger oid read failed: {error:?}"))?
+                .ok_or("trigger oid is NULL")?,
+            row.get::<i64>(2)
+                .map_err(|error| format!("trigger xmin read failed: {error:?}"))?
+                .ok_or("trigger xmin is NULL")?,
+            row.get::<String>(3)
+                .map_err(|error| format!("trigger ctid read failed: {error:?}"))?
+                .ok_or("trigger ctid is NULL")?,
+            row.get::<i64>(4)
+                .map_err(|error| format!("tgfoid read failed: {error:?}"))?
+                .ok_or("tgfoid is NULL")?,
+            row.get::<i32>(5)
+                .map_err(|error| format!("tgtype read failed: {error:?}"))?
+                .ok_or("tgtype is NULL")?,
+            row.get::<String>(6)
+                .map_err(|error| format!("tgenabled read failed: {error:?}"))?
+                .ok_or("tgenabled is NULL")?,
+            row.get::<i32>(7)
+                .map_err(|error| format!("tgnargs read failed: {error:?}"))?
+                .ok_or("tgnargs is NULL")?,
+            row.get::<bool>(8)
+                .map_err(|error| format!("tgattr read failed: {error:?}"))?
+                .ok_or("tgattr emptiness is NULL")?,
+        )))
+    })
+    .ok()??;
+    let expected_type = i32::try_from(
+        pg_sys::TRIGGER_TYPE_INSERT
+            | pg_sys::TRIGGER_TYPE_DELETE
+            | pg_sys::TRIGGER_TYPE_UPDATE
+            | pg_sys::TRIGGER_TYPE_TRUNCATE,
+    )
+    .ok()?;
+    let (
+        trigger_oid,
+        trigger_catalog_xmin,
+        trigger_catalog_tid,
+        existing_function,
+        trigger_type,
+        enabled,
+        argument_count,
+        all_updates,
+    ) = existing;
+    let trigger_oid = u32::try_from(trigger_oid).ok().map(pg_sys::Oid::from)?;
+    let existing_function = u32::try_from(existing_function)
+        .ok()
+        .map(pg_sys::Oid::from)?;
+    let trigger_catalog_xmin = u64::try_from(trigger_catalog_xmin).ok()?;
+    (existing_function == function.oid
+        && trigger_type == expected_type
+        && enabled == "A"
+        && argument_count == 0
+        && all_updates)
+        .then_some(InvalidationTriggerFingerprint {
+            trigger_oid,
+            trigger_catalog_xmin,
+            trigger_catalog_tid,
+            function_oid: function.oid,
+            function_catalog_xmin: function.catalog_xmin,
+            function_catalog_tid: function.catalog_tid,
+            trigger_type,
+        })
+}
+
 pub(super) fn ensure_invalidation_trigger(relid: pg_sys::Oid) -> Result<TriggerInstall, String> {
-    const TRIGGER_NAME: &str = "__pg_accel_residency_v2_7d9e";
     let qualified = qualified_relation_name(relid)?;
     let ownership_query = format!(
         "SELECT pg_catalog.pg_has_role(c.relowner, 'USAGE') FROM pg_catalog.pg_class c WHERE c.oid = {}::oid",
@@ -1924,101 +2076,39 @@ pub(super) fn ensure_invalidation_trigger(relid: pg_sys::Oid) -> Result<TriggerI
             "cannot install pg_accel residency invalidation trigger on {qualified}: current role must own the table (or be a member of its owner role); run pg_accel_pin as the owner"
         ));
     }
-    let function_query = "SELECT p.oid::int8, \
-        pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(p.proname) \
-        FROM pg_catalog.pg_proc p \
-        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
-        JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_proc'::regclass \
-          AND d.objid = p.oid AND d.refclassid = 'pg_catalog.pg_extension'::regclass \
-          AND d.deptype = 'e' \
-        JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
-        WHERE e.extname = 'pg_accel' AND p.proname = 'pg_accel_residency_invalidate' \
-          AND p.pronargs = 0";
-    let (function_oid, function) = Spi::connect(|client| {
-        let rows = client
-            .select(function_query, Some(1), &[])
-            .map_err(|error| {
-                format!("failed to resolve extension-owned residency trigger function: {error:?}")
-            })?;
-        if rows.is_empty() {
-            return Err(
-                "pg_accel_residency_invalidate() is not an extension-owned function".to_owned(),
-            );
-        }
-        let row = rows.first();
-        let oid = row
-            .get::<i64>(1)
-            .map_err(|error| format!("trigger function OID read failed: {error:?}"))?
-            .ok_or("trigger function OID is NULL")?;
-        let name = row
-            .get::<String>(2)
-            .map_err(|error| format!("trigger function name read failed: {error:?}"))?
-            .ok_or("trigger function name is NULL")?;
-        Ok::<_, String>((oid, name))
-    })?;
+    let function = invalidation_trigger_function()?;
     let existing_query = format!(
-        "SELECT tgfoid::int8, tgtype::int4, tgenabled::text, tgnargs::int4, (tgattr::text = '') \
-         FROM pg_catalog.pg_trigger \
+        "SELECT 1 FROM pg_catalog.pg_trigger \
          WHERE tgrelid = {}::oid AND tgname = '{}' AND NOT tgisinternal",
         u32::from(relid),
-        TRIGGER_NAME
+        INVALIDATION_TRIGGER_NAME
     );
     let existing = Spi::connect(|client| {
-        let rows = client
+        client
             .select(&existing_query, Some(1), &[])
+            .map(|rows| !rows.is_empty())
             .map_err(|error| {
                 format!("failed to inspect residency trigger on {qualified}: {error:?}")
-            })?;
-        if rows.is_empty() {
-            return Ok::<_, String>(None);
-        }
-        let row = rows.first();
-        Ok(Some((
-            row.get::<i64>(1)
-                .map_err(|error| format!("tgfoid read failed: {error:?}"))?
-                .ok_or("tgfoid is NULL")?,
-            row.get::<i32>(2)
-                .map_err(|error| format!("tgtype read failed: {error:?}"))?
-                .ok_or("tgtype is NULL")?,
-            row.get::<String>(3)
-                .map_err(|error| format!("tgenabled read failed: {error:?}"))?
-                .ok_or("tgenabled is NULL")?,
-            row.get::<i32>(4)
-                .map_err(|error| format!("tgnargs read failed: {error:?}"))?
-                .ok_or("tgnargs is NULL")?,
-            row.get::<bool>(5)
-                .map_err(|error| format!("tgattr read failed: {error:?}"))?
-                .ok_or("tgattr emptiness is NULL")?,
-        )))
+            })
     })?;
-    let expected_type = i32::try_from(
-        pg_sys::TRIGGER_TYPE_INSERT
-            | pg_sys::TRIGGER_TYPE_DELETE
-            | pg_sys::TRIGGER_TYPE_UPDATE
-            | pg_sys::TRIGGER_TYPE_TRUNCATE,
-    )
-    .map_err(|_| "PostgreSQL trigger type mask exceeds int32")?;
-    if let Some((existing_function, trigger_type, enabled, argument_count, all_updates)) = existing
-    {
-        if existing_function == function_oid
-            && trigger_type == expected_type
-            && enabled == "A"
-            && argument_count == 0
-            && all_updates
-        {
+    if existing {
+        if invalidation_trigger_fingerprint(relid).is_some() {
             return Ok(TriggerInstall::Existing);
         }
         return Err(format!(
-            "cannot trust existing trigger {TRIGGER_NAME} on {qualified}: expected extension function OID {function_oid}, statement-level AFTER INSERT/UPDATE/DELETE/TRUNCATE, ENABLE ALWAYS; drop the conflicting trigger and retry"
+            "cannot trust existing trigger {INVALIDATION_TRIGGER_NAME} on {qualified}: expected extension function OID {}, statement-level AFTER INSERT/UPDATE/DELETE/TRUNCATE, ENABLE ALWAYS; drop the conflicting trigger and retry",
+            u32::from(function.oid)
         ));
     }
     let create_sql = format!(
-        "CREATE TRIGGER {TRIGGER_NAME} \
+        "CREATE TRIGGER {INVALIDATION_TRIGGER_NAME} \
          AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON {qualified} \
-         FOR EACH STATEMENT EXECUTE FUNCTION {function}()"
+         FOR EACH STATEMENT EXECUTE FUNCTION {}()",
+        function.qualified_name
     );
     Spi::run(&create_sql).map_err(|error| format!("cannot install pg_accel residency invalidation trigger on {qualified}: {error:?}; run pg_accel_pin as the table owner"))?;
-    let enable_sql = format!("ALTER TABLE {qualified} ENABLE ALWAYS TRIGGER {TRIGGER_NAME}");
+    let enable_sql =
+        format!("ALTER TABLE {qualified} ENABLE ALWAYS TRIGGER {INVALIDATION_TRIGGER_NAME}");
     Spi::run(&enable_sql).map_err(|error| format!("cannot mark pg_accel residency invalidation trigger ENABLE ALWAYS on {qualified}: {error:?}"))?;
     // The statement snapshot that waited to install this trigger can predate
     // DML which committed immediately before the DDL lock was acquired. Mark
@@ -2122,30 +2212,33 @@ mod unit_tests {
 
     #[test]
     fn cancellation_resource_and_deadlock_sqlstates_are_rethrown() {
-        assert!(syscache::postgres_error_requires_rethrow(
-            pgrx::PgLogLevel::ERROR,
-            PgSqlErrorCode::ERRCODE_QUERY_CANCELED
-        ));
-        assert!(syscache::postgres_error_requires_rethrow(
-            pgrx::PgLogLevel::ERROR,
-            PgSqlErrorCode::ERRCODE_T_R_DEADLOCK_DETECTED
-        ));
-        assert!(syscache::postgres_error_requires_rethrow(
-            pgrx::PgLogLevel::ERROR,
-            PgSqlErrorCode::ERRCODE_OUT_OF_MEMORY
-        ));
-        assert!(syscache::postgres_error_requires_rethrow(
-            pgrx::PgLogLevel::ERROR,
-            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR
-        ));
-        assert!(!syscache::postgres_error_requires_rethrow(
-            pgrx::PgLogLevel::ERROR,
-            PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE
-        ));
-        assert!(!syscache::postgres_error_requires_rethrow(
-            pgrx::PgLogLevel::ERROR,
-            PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION
-        ));
+        for code in [
+            PgSqlErrorCode::ERRCODE_QUERY_CANCELED,
+            PgSqlErrorCode::ERRCODE_T_R_SERIALIZATION_FAILURE,
+            PgSqlErrorCode::ERRCODE_T_R_DEADLOCK_DETECTED,
+            PgSqlErrorCode::ERRCODE_LOCK_NOT_AVAILABLE,
+            PgSqlErrorCode::ERRCODE_OUT_OF_MEMORY,
+            PgSqlErrorCode::ERRCODE_DISK_FULL,
+            PgSqlErrorCode::ERRCODE_IO_ERROR,
+            PgSqlErrorCode::ERRCODE_ASSERT_FAILURE,
+            PgSqlErrorCode::ERRCODE_DATA_CORRUPTED,
+            PgSqlErrorCode::ERRCODE_INDEX_CORRUPTED,
+        ] {
+            assert!(syscache::postgres_error_requires_rethrow(
+                pgrx::PgLogLevel::ERROR,
+                code
+            ));
+        }
+        for code in [
+            PgSqlErrorCode::ERRCODE_INSUFFICIENT_PRIVILEGE,
+            PgSqlErrorCode::ERRCODE_INVALID_TEXT_REPRESENTATION,
+            PgSqlErrorCode::ERRCODE_INTERNAL_ERROR,
+        ] {
+            assert!(!syscache::postgres_error_requires_rethrow(
+                pgrx::PgLogLevel::ERROR,
+                code
+            ));
+        }
     }
 
     #[test]
@@ -2764,6 +2857,7 @@ mod unit_tests {
 
 #[cfg(feature = "pg_test")]
 #[pgrx::pg_schema]
+#[allow(clippy::wildcard_imports)]
 mod tests {
     use super::*;
 
@@ -2817,6 +2911,7 @@ mod tests {
         )
         .expect("create ACL fixture");
         let acl_relid = relation_oid("pgaccel_loader_acl");
+        ensure_invalidation_trigger(acl_relid).expect("install ACL fixture invalidation trigger");
         let allowed = resolve_attnos(acl_relid, &[1]).expect("resolve allowed column");
         let denied = resolve_attnos(acl_relid, &[2]).expect("resolve denied column");
         Spi::run("SET ROLE pgaccel_loader_reader").expect("assume restricted role");
@@ -2883,6 +2978,8 @@ mod tests {
         )
         .expect("create MVCC/primitive fixture");
         let values_relid = relation_oid("pgaccel_loader_values");
+        ensure_invalidation_trigger(values_relid)
+            .expect("install primitive fixture invalidation trigger");
         let requests = resolve_attnos(values_relid, &(1_i16..=10).collect::<Vec<_>>())
             .expect("resolve primitive columns");
         let staged = stage_for_test(values_relid, &requests).expect("direct primitive load");
@@ -2973,6 +3070,8 @@ mod tests {
         )
         .expect("create cold-load fixture");
         let bench_relid = relation_oid("pgaccel_loader_bench");
+        ensure_invalidation_trigger(bench_relid)
+            .expect("install cold-load fixture invalidation trigger");
         let bench_requests = resolve_attnos(bench_relid, &[1, 2]).expect("resolve bench columns");
         let wall_started = Instant::now();
         let bench = stage_for_test(bench_relid, &bench_requests).expect("cold direct table load");

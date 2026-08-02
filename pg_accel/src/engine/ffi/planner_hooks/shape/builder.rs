@@ -111,9 +111,15 @@ fn validate_group_key_type(type_oid: u32) -> Result<(), ShapeDecline> {
 fn validate_measure_descriptor_capability(
     aggregate: &super::AggregateExpr,
 ) -> Result<(), ShapeDecline> {
+    const BOOLOID: u32 = 16;
+    const INT2OID: u32 = 21;
     const INT4OID: u32 = 23;
     const INT8OID: u32 = 20;
+    const FLOAT4OID: u32 = 700;
     const FLOAT8OID: u32 = 701;
+    const DATEOID: u32 = 1082;
+    const TIMESTAMPOID: u32 = 1114;
+    const TIMESTAMPTZOID: u32 = 1184;
     if matches!(aggregate.filter, FilterSpec::Spatial { .. }) {
         return Err(ShapeDecline::SpatialFilterOutsideFactRelation);
     }
@@ -122,6 +128,13 @@ fn validate_measure_descriptor_capability(
     }
     let validate_column =
         |column: &crate::engine::spec::ColumnRef| match (column.type_oid, aggregate.output.kind) {
+            (
+                BOOLOID | INT2OID | FLOAT4OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID,
+                AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
+            ) => Err(ShapeDecline::UnsupportedAggregateInput {
+                kind: aggregate.output.kind,
+                type_oid: column.type_oid,
+            }),
             (
                 INT4OID,
                 AggregateKind::Sum | AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
@@ -144,7 +157,19 @@ fn validate_measure_descriptor_capability(
                     type_oid: column.type_oid,
                 })
             }
-            _ if !matches!(column.type_oid, INT4OID | INT8OID | FLOAT8OID) => {
+            _ if !matches!(
+                column.type_oid,
+                BOOLOID
+                    | INT2OID
+                    | INT4OID
+                    | INT8OID
+                    | FLOAT4OID
+                    | FLOAT8OID
+                    | DATEOID
+                    | TIMESTAMPOID
+                    | TIMESTAMPTZOID
+            ) =>
+            {
                 Err(ShapeDecline::UnsupportedMeasureType {
                     type_oid: column.type_oid,
                 })
@@ -199,15 +224,27 @@ fn aggregate_source_type(aggregate: &super::AggregateExpr) -> Result<u32, ShapeD
 }
 
 fn expected_aggregate_result_type(source_type_oid: u32, kind: AggregateKind) -> Option<u32> {
+    const BOOLOID: u32 = 16;
+    const INT2OID: u32 = 21;
     const INT4OID: u32 = 23;
     const INT8OID: u32 = 20;
+    const FLOAT4OID: u32 = 700;
     const FLOAT8OID: u32 = 701;
+    const DATEOID: u32 = 1082;
+    const TIMESTAMPOID: u32 = 1114;
+    const TIMESTAMPTZOID: u32 = 1184;
     match (source_type_oid, kind) {
-        (0 | INT4OID | INT8OID | FLOAT8OID, AggregateKind::Count)
+        (
+            0 | BOOLOID | INT2OID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID
+            | TIMESTAMPOID | TIMESTAMPTZOID,
+            AggregateKind::Count,
+        )
         | (INT4OID, AggregateKind::Sum) => Some(INT8OID),
-        (INT4OID, AggregateKind::Min | AggregateKind::Max) => Some(INT4OID),
-        (INT8OID, AggregateKind::Min | AggregateKind::Max) => Some(INT8OID),
-        (FLOAT8OID, AggregateKind::Min | AggregateKind::Max) => Some(FLOAT8OID),
+        (
+            source @ (INT2OID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID | TIMESTAMPOID
+            | TIMESTAMPTZOID),
+            AggregateKind::Min | AggregateKind::Max,
+        ) => Some(source),
         _ => None,
     }
 }

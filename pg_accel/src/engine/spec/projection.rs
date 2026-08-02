@@ -4,6 +4,16 @@ use super::{
     AggQuerySpec, AggregateKind, AggregateOutput, AggregateSource, MeasureExpr, MeasureSpec,
 };
 
+const BOOL_OID: u32 = 16;
+const INT2_OID: u32 = 21;
+const INT4_OID: u32 = 23;
+const INT8_OID: u32 = 20;
+const FLOAT4_OID: u32 = 700;
+const FLOAT8_OID: u32 = 701;
+const DATE_OID: u32 = 1082;
+const TIMESTAMP_OID: u32 = 1114;
+const TIMESTAMPTZ_OID: u32 = 1184;
+
 pub const AGG_OUTPUT_PROJECTION_WIRE_MAGIC: i32 = 0x5047_4F32; // "PGO2"
 pub const AGG_OUTPUT_PROJECTION_VERSION: u32 = 2;
 pub const AGG_OUTPUT_PROJECTION_HEADER_WORDS: usize = 4;
@@ -135,10 +145,6 @@ impl std::fmt::Display for ProjectionCodecError {
 
 impl std::error::Error for ProjectionCodecError {}
 
-const INT4_OID: u32 = 23;
-const INT8_OID: u32 = 20;
-const FLOAT8_OID: u32 = 701;
-
 fn measure_source_type(
     measure: &MeasureSpec,
     source: AggregateSource,
@@ -169,14 +175,20 @@ fn measure_source_type(
 fn aggregate_result_type(source_type_oid: u32, kind: AggregateKind) -> Option<u32> {
     match (source_type_oid, kind) {
         (0, AggregateKind::Count) => Some(INT8_OID),
-        (INT4_OID | INT8_OID | FLOAT8_OID, AggregateKind::Count) => Some(INT8_OID),
+        (
+            BOOL_OID | INT2_OID | INT4_OID | INT8_OID | FLOAT4_OID | FLOAT8_OID | DATE_OID
+            | TIMESTAMP_OID | TIMESTAMPTZ_OID,
+            AggregateKind::Count,
+        ) => Some(INT8_OID),
         (INT4_OID, AggregateKind::Sum) => Some(INT8_OID),
         (FLOAT8_OID, AggregateKind::Sum | AggregateKind::Avg | AggregateKind::StddevSamp) => {
             Some(FLOAT8_OID)
         }
-        (source @ (INT4_OID | INT8_OID | FLOAT8_OID), AggregateKind::Min | AggregateKind::Max) => {
-            Some(source)
-        }
+        (
+            source @ (INT2_OID | INT4_OID | INT8_OID | FLOAT4_OID | FLOAT8_OID | DATE_OID
+            | TIMESTAMP_OID | TIMESTAMPTZ_OID),
+            AggregateKind::Min | AggregateKind::Max,
+        ) => Some(source),
         _ => None,
     }
 }
@@ -863,14 +875,25 @@ mod tests {
     fn phase5_aggregate_result_type_matrix_is_explicit() {
         for (source, kind, result) in [
             (0, AggregateKind::Count, INT8_OID),
+            (BOOL_OID, AggregateKind::Count, INT8_OID),
+            (INT2_OID, AggregateKind::Count, INT8_OID),
             (INT4_OID, AggregateKind::Count, INT8_OID),
             (INT8_OID, AggregateKind::Count, INT8_OID),
+            (FLOAT4_OID, AggregateKind::Count, INT8_OID),
             (FLOAT8_OID, AggregateKind::Count, INT8_OID),
+            (DATE_OID, AggregateKind::Count, INT8_OID),
+            (TIMESTAMP_OID, AggregateKind::Count, INT8_OID),
+            (TIMESTAMPTZ_OID, AggregateKind::Count, INT8_OID),
             (INT4_OID, AggregateKind::Sum, INT8_OID),
             (FLOAT8_OID, AggregateKind::Sum, FLOAT8_OID),
+            (INT2_OID, AggregateKind::Min, INT2_OID),
             (INT4_OID, AggregateKind::Min, INT4_OID),
             (INT8_OID, AggregateKind::Max, INT8_OID),
+            (FLOAT4_OID, AggregateKind::Max, FLOAT4_OID),
             (FLOAT8_OID, AggregateKind::Min, FLOAT8_OID),
+            (DATE_OID, AggregateKind::Min, DATE_OID),
+            (TIMESTAMP_OID, AggregateKind::Max, TIMESTAMP_OID),
+            (TIMESTAMPTZ_OID, AggregateKind::Min, TIMESTAMPTZ_OID),
             (FLOAT8_OID, AggregateKind::Avg, FLOAT8_OID),
             (FLOAT8_OID, AggregateKind::StddevSamp, FLOAT8_OID),
         ] {
@@ -881,6 +904,10 @@ mod tests {
             (INT8_OID, AggregateKind::Sum),
             (INT4_OID, AggregateKind::Avg),
             (INT4_OID, AggregateKind::StddevSamp),
+            (BOOL_OID, AggregateKind::Min),
+            (INT2_OID, AggregateKind::Sum),
+            (FLOAT4_OID, AggregateKind::Sum),
+            (DATE_OID, AggregateKind::Sum),
             (25, AggregateKind::Count),
         ] {
             assert_eq!(

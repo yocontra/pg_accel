@@ -386,6 +386,22 @@ impl DescriptorAggOutput {
         };
 
         match source_type_oid {
+            INT2OID if matches!(kind, AggregateKind::Min | AggregateKind::Max) => {
+                let value = self
+                    .storage
+                    .measure_i64_at(measure_index, lane, group)
+                    .map_err(|error| {
+                        MaterializeError::invalid(format!(
+                            "could not read I64 aggregate state for measure {measure_index}: {error}"
+                        ))
+                    })?;
+                let value = i16::try_from(value).map_err(|_| {
+                    MaterializeError::invalid(format!(
+                        "INT2 aggregate state {value} is outside the PostgreSQL int2 domain"
+                    ))
+                })?;
+                Ok((pg_sys::Datum::from(value), false))
+            }
             INT4OID => {
                 let value = self
                     .storage
@@ -418,6 +434,46 @@ impl DescriptorAggOutput {
                         ))
                     })?;
                 Ok((pg_sys::Datum::from(value), false))
+            }
+            DATEOID if matches!(kind, AggregateKind::Min | AggregateKind::Max) => {
+                let value = self
+                    .storage
+                    .measure_i64_at(measure_index, lane, group)
+                    .map_err(|error| {
+                        MaterializeError::invalid(format!(
+                            "could not read I64 aggregate state for measure {measure_index}: {error}"
+                        ))
+                    })?;
+                let value = i32::try_from(value).map_err(|_| {
+                    MaterializeError::invalid(format!(
+                        "DATE aggregate state {value} is outside the PostgreSQL date domain"
+                    ))
+                })?;
+                Ok((pg_sys::Datum::from(value), false))
+            }
+            TIMESTAMPOID | TIMESTAMPTZOID
+                if matches!(kind, AggregateKind::Min | AggregateKind::Max) =>
+            {
+                let value = self
+                    .storage
+                    .measure_i64_at(measure_index, lane, group)
+                    .map_err(|error| {
+                        MaterializeError::invalid(format!(
+                            "could not read I64 aggregate state for measure {measure_index}: {error}"
+                        ))
+                    })?;
+                Ok((pg_sys::Datum::from(value), false))
+            }
+            FLOAT4OID if matches!(kind, AggregateKind::Min | AggregateKind::Max) => {
+                let value = self
+                    .storage
+                    .measure_f64_at(measure_index, lane, group)
+                    .map_err(|error| {
+                        MaterializeError::invalid(format!(
+                            "could not read F64 aggregate state for measure {measure_index}: {error}"
+                        ))
+                    })? as f32;
+                Ok((pg_sys::Datum::from(value.to_bits() as usize), false))
             }
             FLOAT8OID if matches!(kind, AggregateKind::Min | AggregateKind::Max) => {
                 let value = self

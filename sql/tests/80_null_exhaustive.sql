@@ -1,6 +1,6 @@
--- 80_null_exhaustive.sql: Exhaustive NULL handling for all 11 GPU-accelerated functions.
--- Tests NULL in every argument position for uncovered PostGIS predicates, GpuH3, GpuRaster strategies,
--- plus NULL in JOIN keys, GROUP BY, ORDER BY, and all-NULL columns.
+-- 80_null_exhaustive.sql: NULL handling across selected and native-decline surfaces.
+-- ON/OFF parity for PostGIS, H3, raster, joins, grouping, and ordering is not
+-- treated as GPU coverage without an explicit selected-plan assertion.
 
 \echo '=== 80_null_exhaustive ==='
 
@@ -392,7 +392,7 @@ END $$;
 \echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_009'
 
 -- =========================================================================
--- GROUP E: GpuH3 — h3_latlng_to_cell with NULL lat/lng
+-- GROUP E: native h3_latlng_to_cell with NULL lat/lng
 -- =========================================================================
 
 SET pg_accel.enabled = on;
@@ -600,7 +600,7 @@ END $$;
 \echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_014'
 
 -- =========================================================================
--- GROUP I: GpuRaster — st_clip with NULL raster
+-- GROUP I: native raster st_clip with NULL raster
 -- =========================================================================
 
 SET pg_accel.enabled = on;
@@ -644,7 +644,7 @@ END $$;
 \echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_015'
 
 -- =========================================================================
--- GROUP J: GpuRaster — st_reclass with NULL raster
+-- GROUP J: native raster st_reclass with NULL raster
 -- =========================================================================
 
 SET pg_accel.enabled = on;
@@ -688,7 +688,7 @@ END $$;
 \echo 'PGACCEL_ASSERT_OK:80_null_exhaustive.assert_016'
 
 -- =========================================================================
--- GROUP K: GpuRaster — st_mapalgebra with NULL rasters
+-- GROUP K: native raster st_mapalgebra with NULL rasters
 -- =========================================================================
 
 SET pg_accel.enabled = on;

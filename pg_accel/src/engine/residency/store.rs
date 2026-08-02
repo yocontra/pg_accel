@@ -900,6 +900,21 @@ struct AttributeFingerprint {
     dropped: bool,
 }
 
+/// Exact catalog identity of the statement trigger that advances residency
+/// generations after table changes. Keeping this in the relation fingerprint
+/// makes trigger DDL part of the same fail-closed relcache revalidation as
+/// relation and attribute shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct InvalidationTriggerFingerprint {
+    pub(super) trigger_oid: pg_sys::Oid,
+    pub(super) trigger_catalog_xmin: u64,
+    pub(super) trigger_catalog_tid: String,
+    pub(super) function_oid: pg_sys::Oid,
+    pub(super) function_catalog_xmin: u64,
+    pub(super) function_catalog_tid: String,
+    pub(super) trigger_type: i32,
+}
+
 /// Catalog shape that determines whether a resident snapshot is still valid.
 ///
 /// Names are deliberately excluded: rename-only relcache invalidations do not
@@ -911,6 +926,7 @@ pub(super) struct RelationFingerprint {
     relfilenode: pg_sys::Oid,
     relnatts: i16,
     attributes: Box<[AttributeFingerprint]>,
+    invalidation_trigger: InvalidationTriggerFingerprint,
 }
 
 impl RelationFingerprint {
@@ -963,11 +979,13 @@ impl RelationFingerprint {
                 })
             })
             .collect::<Option<Vec<_>>>()?;
+        let invalidation_trigger = loader::invalidation_trigger_fingerprint(relid)?;
         Some(Self {
             relid,
             relfilenode,
             relnatts,
             attributes: attributes.into_boxed_slice(),
+            invalidation_trigger,
         })
     }
 
@@ -995,6 +1013,15 @@ impl RelationFingerprint {
             relfilenode: pg_sys::Oid::from(relid + 100),
             relnatts: 0,
             attributes: Box::default(),
+            invalidation_trigger: InvalidationTriggerFingerprint {
+                trigger_oid: pg_sys::Oid::from(relid + 200),
+                trigger_catalog_xmin: 1,
+                trigger_catalog_tid: "(1,1)".to_owned(),
+                function_oid: pg_sys::Oid::from(relid + 300),
+                function_catalog_xmin: 1,
+                function_catalog_tid: "(2,1)".to_owned(),
+                trigger_type: 0,
+            },
         }
     }
 }
@@ -1454,6 +1481,24 @@ unsafe extern "C-unwind" fn resident_relcache_callback(_arg: pg_sys::Datum, reli
 }
 
 #[cfg(not(test))]
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn resident_proc_syscache_callback(
+    _arg: pg_sys::Datum,
+    _cacheid: ::core::ffi::c_int,
+    _hashvalue: u32,
+) {
+    let has_resident_entries = STORE
+        .try_with(|store| match store.try_borrow() {
+            Ok(store) => !store.entries.is_empty(),
+            Err(_) => true,
+        })
+        .unwrap_or(false);
+    if has_resident_entries {
+        let _ = PENDING_RELCACHE_CLEAR_ALL.try_with(|pending| pending.set(true));
+    }
+}
+
+#[cfg(not(test))]
 fn ensure_relcache_callback() {
     if RELCACHE_CALLBACK_REGISTERED.with(Cell::get) {
         return;
@@ -1463,6 +1508,15 @@ fn ensure_relcache_callback() {
     unsafe {
         pg_sys::CacheRegisterRelcacheCallback(
             Some(resident_relcache_callback),
+            pg_sys::Datum::from(0),
+        );
+        // A CREATE OR REPLACE of the extension-owned trigger function need
+        // not invalidate any table relcache entry. Mark resident entries
+        // suspect on procedure catalog changes so the function tuple identity
+        // is re-proved before the next dispatch.
+        pg_sys::CacheRegisterSyscacheCallback(
+            pg_sys::SysCacheIdentifier::PROCOID as ::core::ffi::c_int,
+            Some(resident_proc_syscache_callback),
             pg_sys::Datum::from(0),
         );
     }
@@ -3733,6 +3787,7 @@ pub(super) mod tests {
 
     #[test]
     fn resident_column_variants_report_exact_views_lengths_and_accounting() {
+        let _guard = reserved_lifecycle_test_guard();
         let mut point = vec![0_u8, 0, 0, 0, 0, 0x10, 0xe6, 0];
         point.extend_from_slice(&1_u32.to_le_bytes());
         point.extend_from_slice(&1_u32.to_le_bytes());
@@ -4323,6 +4378,15 @@ pub(super) mod tests {
                 dropped: false,
             }]
             .into_boxed_slice(),
+            invalidation_trigger: InvalidationTriggerFingerprint {
+                trigger_oid: pg_sys::Oid::from(273_u32),
+                trigger_catalog_xmin: 1,
+                trigger_catalog_tid: "(1,1)".to_owned(),
+                function_oid: pg_sys::Oid::from(373_u32),
+                function_catalog_xmin: 1,
+                function_catalog_tid: "(2,1)".to_owned(),
+                trigger_type: 0,
+            },
         };
         let mut mismatches = Vec::new();
 
@@ -4341,6 +4405,40 @@ pub(super) mod tests {
         let mut dropped = original.clone();
         dropped.attributes[0].dropped = true;
         mismatches.push(dropped);
+
+        let mut trigger_oid = original.clone();
+        trigger_oid.invalidation_trigger.trigger_oid = pg_sys::Oid::from(274_u32);
+        mismatches.push(trigger_oid);
+
+        let mut trigger_catalog_xmin = original.clone();
+        trigger_catalog_xmin
+            .invalidation_trigger
+            .trigger_catalog_xmin = 2;
+        mismatches.push(trigger_catalog_xmin);
+
+        let mut trigger_catalog_tid = original.clone();
+        trigger_catalog_tid.invalidation_trigger.trigger_catalog_tid = "(1,2)".to_owned();
+        mismatches.push(trigger_catalog_tid);
+
+        let mut trigger_function = original.clone();
+        trigger_function.invalidation_trigger.function_oid = pg_sys::Oid::from(374_u32);
+        mismatches.push(trigger_function);
+
+        let mut function_catalog_xmin = original.clone();
+        function_catalog_xmin
+            .invalidation_trigger
+            .function_catalog_xmin = 2;
+        mismatches.push(function_catalog_xmin);
+
+        let mut function_catalog_tid = original.clone();
+        function_catalog_tid
+            .invalidation_trigger
+            .function_catalog_tid = "(2,2)".to_owned();
+        mismatches.push(function_catalog_tid);
+
+        let mut trigger_type = original.clone();
+        trigger_type.invalidation_trigger.trigger_type = 1;
+        mismatches.push(trigger_type);
 
         let snapshot = ResidentRevalidationSnapshot {
             relid: original.relid,
@@ -6488,6 +6586,8 @@ mod pg_tests {
         }
 
         fn install_catalog_backed_entry(relid: pg_sys::Oid) -> pg_sys::Oid {
+            loader::ensure_invalidation_trigger(relid)
+                .expect("catalog-backed fixture has a valid invalidation trigger");
             let relfilenode = loader::current_relfilenode(relid).expect("relation has relfilenode");
             STORE.with(|store| {
                 let mut store = store.borrow_mut();
@@ -6527,6 +6627,21 @@ mod pg_tests {
                 pg_sys::MemoryContextSwitchTo(old_context);
                 Spi::run(sql).expect("subtransaction statement succeeds");
                 pg_sys::ReleaseCurrentSubTransaction();
+                pg_sys::MemoryContextSwitchTo(old_context);
+                pg_sys::CurrentResourceOwner = old_owner;
+            }
+        }
+
+        fn run_in_rolled_back_subtransaction(sql: &str) {
+            // SAFETY: mirror the backend resource/context restoration required
+            // after an explicitly aborted internal subtransaction.
+            unsafe {
+                let old_context = pg_sys::CurrentMemoryContext;
+                let old_owner = pg_sys::CurrentResourceOwner;
+                pg_sys::BeginInternalSubTransaction(std::ptr::null());
+                pg_sys::MemoryContextSwitchTo(old_context);
+                Spi::run(sql).expect("rolled-back subtransaction statement succeeds");
+                pg_sys::RollbackAndReleaseCurrentSubTransaction();
                 pg_sys::MemoryContextSwitchTo(old_context);
                 pg_sys::CurrentResourceOwner = old_owner;
             }
@@ -6592,6 +6707,77 @@ mod pg_tests {
                 .expect("catalog-only ALTER TABLE succeeds");
             process_invalidations();
             STORE.with(|store| assert!(store.borrow().entries.is_empty()));
+            cleanup_backend();
+        }
+
+        #[pg_test]
+        fn live_trigger_integrity_changes_prune_before_resident_reuse() {
+            cleanup_backend();
+            Spi::run(
+                "CREATE TEMP TABLE pgaccel_residency_live_trigger (value int4); \
+                 CREATE FUNCTION pg_temp.pgaccel_spoof_invalidator() RETURNS trigger \
+                 LANGUAGE plpgsql AS 'BEGIN RETURN NULL; END'",
+            )
+            .expect("trigger integrity fixture creation succeeds");
+            let relid = test_relation_oid("pgaccel_residency_live_trigger");
+            install_catalog_backed_entry(relid);
+            process_invalidations();
+            STORE.with(|store| assert_eq!(store.borrow().entries.len(), 1));
+
+            // Restoring the enabled flag before revalidation must not conceal
+            // the interval in which DML would have bypassed invalidation.
+            Spi::run(
+                "ALTER TABLE pgaccel_residency_live_trigger \
+                   DISABLE TRIGGER __pg_accel_residency_v2_7d9e; \
+                 INSERT INTO pgaccel_residency_live_trigger VALUES (1); \
+                 ALTER TABLE pgaccel_residency_live_trigger \
+                   ENABLE ALWAYS TRIGGER __pg_accel_residency_v2_7d9e",
+            )
+            .expect("disable/DML/enable cycle succeeds");
+            assert!(loader::invalidation_trigger_fingerprint(relid).is_some());
+            process_invalidations();
+            STORE.with(|store| assert!(store.borrow().entries.is_empty()));
+
+            install_catalog_backed_entry(relid);
+            process_invalidations();
+            Spi::run(
+                "DROP TRIGGER __pg_accel_residency_v2_7d9e \
+                   ON pgaccel_residency_live_trigger; \
+                 CREATE TRIGGER __pg_accel_residency_v2_7d9e \
+                   AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE \
+                   ON pgaccel_residency_live_trigger FOR EACH STATEMENT \
+                   EXECUTE FUNCTION pg_temp.pgaccel_spoof_invalidator()",
+            )
+            .expect("spoof trigger replacement succeeds");
+            assert!(loader::invalidation_trigger_fingerprint(relid).is_none());
+            process_invalidations();
+            STORE.with(|store| assert!(store.borrow().entries.is_empty()));
+            assert!(loader::ensure_invalidation_trigger(relid).is_err());
+            cleanup_backend();
+        }
+
+        #[pg_test]
+        fn live_rolled_back_trigger_change_keeps_exact_residency() {
+            cleanup_backend();
+            Spi::run("CREATE TEMP TABLE pgaccel_residency_live_trigger_abort (value int4)")
+                .expect("rollback trigger fixture creation succeeds");
+            let relid = test_relation_oid("pgaccel_residency_live_trigger_abort");
+            install_catalog_backed_entry(relid);
+            process_invalidations();
+            let before = loader::invalidation_trigger_fingerprint(relid)
+                .expect("valid trigger fingerprint exists before rollback");
+
+            run_in_rolled_back_subtransaction(
+                "ALTER TABLE pgaccel_residency_live_trigger_abort \
+                   DISABLE TRIGGER __pg_accel_residency_v2_7d9e; \
+                 INSERT INTO pgaccel_residency_live_trigger_abort VALUES (1)",
+            );
+            assert_eq!(
+                loader::invalidation_trigger_fingerprint(relid),
+                Some(before)
+            );
+            process_invalidations();
+            STORE.with(|store| assert_eq!(store.borrow().entries.len(), 1));
             cleanup_backend();
         }
 

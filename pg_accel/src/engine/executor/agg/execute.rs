@@ -68,18 +68,16 @@ pub struct AggExecState {
 }
 
 impl AggExecState {
-    /// Validate a strict neutral contract and prepare its dependency-stamped
-    /// derived artifact during BeginCustomScan.
-    pub fn new_descriptor(
+    /// Validate a strict neutral contract without beginning fallible artifact
+    /// preparation. The caller must install this state into its query-context
+    /// cleanup owner before calling [`Self::prepare_descriptor`], because that
+    /// method may raise a PostgreSQL ERROR or cancellation.
+    pub(crate) fn new_descriptor_unprepared(
         spec: AggQuerySpec,
         projection: AggOutputProjection,
         explain_only: bool,
     ) -> Result<Self, String> {
         let plan = DescriptorAggPlan::new(spec, projection)?;
-        let residency = (!explain_only).then(|| {
-            plan.ensure_artifact()
-                .unwrap_or_else(|error| raise_descriptor_execution_error(error))
-        });
         Ok(Self {
             gpu_dispatched: false,
             rows_dispatched: 0,
@@ -89,9 +87,23 @@ impl AggExecState {
                 plan,
                 output: None,
                 explain_only,
-                residency,
+                residency: None,
             }),
         })
+    }
+
+    /// Prepare the dependency-stamped artifact after the executor has an
+    /// abort-safe owner. This may raise a PostgreSQL ERROR or cancellation;
+    /// calling it before ownership is installed would bypass Rust cleanup.
+    pub(crate) fn prepare_descriptor(&mut self) {
+        if !self.descriptor.explain_only && self.descriptor.residency.is_none() {
+            self.descriptor.residency = Some(
+                self.descriptor
+                    .plan
+                    .ensure_artifact()
+                    .unwrap_or_else(|error| raise_descriptor_execution_error(error)),
+            );
+        }
     }
 
     /// Borrow the neutral logical contract for generic EXPLAIN rendering.

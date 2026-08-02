@@ -34,10 +34,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// (`max_connections` + autovacuum workers + background workers + WAL
 /// senders, typically a few hundred). When `MaxBackends` still exceeds this
 /// ceiling, [`warn_if_backends_exceed_capacity`] emits a loud one-time
-/// WARNING and backends past the ceiling fall through to the degraded
-/// global-only accounting path in [`record_allocation`] (the cluster-wide
-/// total stays correct; only per-backend reclaim-on-crash is lost for those
-/// overflow backends).
+/// WARNING and requests without an owning slot fail closed. An unowned charge
+/// cannot be released reliably, so global-only accounting is not permitted.
 const MAX_BACKENDS: usize = 1024;
 
 // ---------------------------------------------------------------------------
@@ -178,8 +176,15 @@ pub fn request_threads(n: i32) -> i32 {
     // allocation so cleanup_backend can release it during backend exit.
     if max == 0 {
         let mut exclusive = BUDGET.exclusive();
-        record_allocation(&mut exclusive, n);
-        return n;
+        if try_record_allocation(&mut exclusive, n) {
+            return n;
+        }
+        reclaim_dead_backends(&mut exclusive);
+        return if try_record_allocation(&mut exclusive, n) {
+            n
+        } else {
+            0
+        };
     }
 
     let mut exclusive = BUDGET.exclusive();
@@ -195,8 +200,19 @@ pub fn request_threads(n: i32) -> i32 {
         return 0;
     }
 
-    record_allocation(&mut exclusive, granted);
-    granted
+    if try_record_allocation(&mut exclusive, granted) {
+        return granted;
+    }
+
+    // Budget may be available while every ownership slot is occupied. Reclaim
+    // dead holders once, then fail closed rather than creating an allocation
+    // that release_threads/cleanup_backend can never identify.
+    reclaim_dead_backends(&mut exclusive);
+    if try_record_allocation(&mut exclusive, granted) {
+        granted
+    } else {
+        0
+    }
 }
 
 /// Release `n` worker threads back to the cluster-wide budget.
@@ -364,9 +380,9 @@ fn reclaim_dead_backends(data: &mut ThreadBudgetData) {
 /// Record an allocation of `granted` threads for the current backend.
 ///
 /// Caller must hold the exclusive lock.
-fn record_allocation(data: &mut ThreadBudgetData, granted: i32) {
+fn try_record_allocation(data: &mut ThreadBudgetData, granted: i32) -> bool {
     if granted <= 0 {
-        return;
+        return false;
     }
     let pid = current_pid();
 
@@ -385,7 +401,7 @@ fn record_allocation(data: &mut ThreadBudgetData, granted: i32) {
             slot.allocated = saturating_add_checked(slot.allocated, granted, "backend slot");
             data.total_allocated =
                 saturating_add_checked(data.total_allocated, granted, "total_allocated");
-            return;
+            return true;
         }
     }
 
@@ -396,20 +412,18 @@ fn record_allocation(data: &mut ThreadBudgetData, granted: i32) {
             slot.allocated = granted;
             data.total_allocated =
                 saturating_add_checked(data.total_allocated, granted, "total_allocated");
-            return;
+            return true;
         }
     }
 
-    // No free slots — still update the global total so the budget stays
-    // correct, but per-backend tracking is degraded (cleanup_backend won't
-    // reclaim these). Rare: only when more than MAX_BACKENDS backends hold a
-    // pg_accel allocation simultaneously.
-    data.total_allocated = saturating_add_checked(data.total_allocated, granted, "total_allocated");
+    // No free slot means there is no durable owner for this charge. Fail
+    // closed; charging total_allocated here would leak budget permanently
+    // because release and backend-exit cleanup search by PID.
     warn_msg(&format!(
         "pg_accel: no free backend slot for PID {pid} (>{MAX_BACKENDS} tracked), \
-         thread tracking degraded — cluster total stays correct but this \
-         backend's threads will not be reclaimed on crash"
+         refusing an untracked thread allocation"
     ));
+    false
 }
 
 /// Add two non-negative thread counts, saturating at `i32::MAX` instead of
@@ -447,9 +461,9 @@ fn warn_msg(msg: &str) {
 /// `MaxBackends` is not known at `_PG_init` time (it is computed later during
 /// shared-memory sizing), so this cannot run at segment registration; instead
 /// it runs at most once, lazily, on the first thread request in a backend.
-/// When it fires, backends beyond slot `MAX_BACKENDS` still get a correct
-/// cluster-wide budget but lose per-backend crash reclaim — see the
-/// [`MAX_BACKENDS`] doc comment.
+/// When it fires, backends beyond slot `MAX_BACKENDS` fail closed instead of
+/// receiving an allocation which cannot be released — see the [`MAX_BACKENDS`]
+/// doc comment.
 #[cfg(not(test))]
 fn warn_if_backends_exceed_capacity() {
     use std::sync::Once;
@@ -462,10 +476,9 @@ fn warn_if_backends_exceed_capacity() {
         if max_backends > 0 && (max_backends as i64) > MAX_BACKENDS as i64 {
             pgrx::warning!(
                 "pg_accel: MaxBackends ({max_backends}) exceeds the {MAX_BACKENDS} \
-                 per-backend thread-budget slots; backends past the ceiling keep a \
-                 correct cluster-wide budget but will not have their threads reclaimed \
-                 on crash. Increase MAX_BACKENDS in thread_budget.rs if this cluster \
-                 routinely runs that many pg_accel backends."
+                 per-backend thread-budget slots; requests without an ownership slot \
+                 will be refused. Increase MAX_BACKENDS in thread_budget.rs if this \
+                 cluster routinely runs that many pg_accel backends."
             );
         }
     });
@@ -828,7 +841,7 @@ mod tests {
         };
         b.total_allocated = i32::MAX - 2;
 
-        record_allocation(&mut b, 100);
+        assert!(try_record_allocation(&mut b, 100));
 
         assert!(
             b.total_allocated >= 0,
@@ -842,8 +855,8 @@ mod tests {
     #[test]
     fn record_allocation_ignores_non_positive() {
         let mut b = empty_budget();
-        record_allocation(&mut b, 0);
-        record_allocation(&mut b, -5);
+        assert!(!try_record_allocation(&mut b, 0));
+        assert!(!try_record_allocation(&mut b, -5));
         assert_eq!(b.total_allocated, 0);
     }
 
@@ -858,9 +871,9 @@ mod tests {
     }
 
     #[test]
-    fn record_allocation_claims_a_free_slot_and_degrades_to_global_only_when_full() {
+    fn record_allocation_claims_a_free_slot_and_fails_closed_when_full() {
         let mut available = empty_budget();
-        record_allocation(&mut available, 3);
+        assert!(try_record_allocation(&mut available, 3));
         assert_eq!(available.total_allocated, 3);
         let pid = current_pid();
         assert_eq!(
@@ -880,8 +893,8 @@ mod tests {
             };
         }
         full.total_allocated = MAX_BACKENDS as i32;
-        record_allocation(&mut full, 5);
-        assert_eq!(full.total_allocated, MAX_BACKENDS as i32 + 5);
+        assert!(!try_record_allocation(&mut full, 5));
+        assert_eq!(full.total_allocated, MAX_BACKENDS as i32);
         assert!(full.backends.iter().all(|slot| slot.pid != pid));
     }
 }

@@ -1,4 +1,4 @@
--- 84_transaction_semantics.sql: Transaction interactions with GPU-accelerated queries
+-- 84_transaction_semantics.sql: Transaction interactions with selected and native-decline queries
 -- Tests savepoints, cursors, prepared statements, isolation levels, and ON CONFLICT.
 
 \echo '=== 84_transaction_semantics ==='

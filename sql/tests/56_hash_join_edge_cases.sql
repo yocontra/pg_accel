@@ -1,4 +1,4 @@
--- 56_hash_join_edge_cases.sql: Edge case tests for GPU hash join.
+-- 56_hash_join_edge_cases.sql: Join edge cases under pg_accel ON/OFF.
 -- Verifies hash join edge cases match between accel ON and OFF.
 
 \echo '=== 56_hash_join_edge_cases ==='

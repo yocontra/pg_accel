@@ -1,6 +1,8 @@
 use super::*;
 use crate::engine::executor::sort::{SORT_KEY_INTS, SortKeyDesc};
 use crate::engine::executor::window::{WINDOW_SPEC_INTS, WindowFunc, WindowFuncSpec};
+use std::cell::Cell;
+use std::rc::Rc;
 
 #[test]
 fn compatibility_strategy_tags_roundtrip() {
@@ -124,4 +126,117 @@ fn retired_descriptor_wire_widths_remain_stable() {
 #[test]
 fn thread_count_is_one_gpu_backend() {
     assert_eq!(resolve_thread_count(), 1);
+}
+
+#[test]
+fn executor_owner_drops_exactly_once_across_end_and_context_reset() {
+    struct DropProbe(Rc<Cell<usize>>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    let drops = Rc::new(Cell::new(0));
+    let mut executor = std::ptr::null_mut();
+    let mut drop_executor = None;
+    let mut prepare_reset = None;
+    install_boxed_executor(
+        &mut executor,
+        &mut drop_executor,
+        &mut prepare_reset,
+        DropProbe(Rc::clone(&drops)),
+        None,
+    );
+
+    assert!(!executor.is_null());
+    assert!(drop_executor.is_some());
+    // SAFETY: install_boxed_executor created this paired pointer/destructor.
+    unsafe { drop_installed_executor(&mut executor, &mut drop_executor, &mut prepare_reset) };
+    assert_eq!(drops.get(), 1);
+    assert!(executor.is_null());
+    assert!(drop_executor.is_none());
+
+    // Models the es_query_cxt callback after normal EndCustomScan.
+    // SAFETY: clearing an already-empty owner is explicitly supported.
+    unsafe { drop_installed_executor(&mut executor, &mut drop_executor, &mut prepare_reset) };
+    assert_eq!(drops.get(), 1);
+}
+
+#[test]
+fn executor_owner_context_reset_releases_without_normal_end() {
+    struct DropProbe(Rc<Cell<usize>>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    let drops = Rc::new(Cell::new(0));
+    let mut executor = std::ptr::null_mut();
+    let mut drop_executor = None;
+    let mut prepare_reset = None;
+    install_boxed_executor(
+        &mut executor,
+        &mut drop_executor,
+        &mut prepare_reset,
+        DropProbe(Rc::clone(&drops)),
+        None,
+    );
+
+    // Models ERROR/cancellation bypassing EndCustomScan and entering the
+    // registered es_query_cxt reset callback directly.
+    // SAFETY: install_boxed_executor created this paired pointer/destructor.
+    unsafe { drop_installed_executor(&mut executor, &mut drop_executor, &mut prepare_reset) };
+    assert_eq!(drops.get(), 1);
+    assert!(executor.is_null());
+    assert!(drop_executor.is_none());
+}
+
+#[test]
+fn executor_pre_reset_callback_is_type_bound_and_cleared_with_owner() {
+    struct ResetProbe {
+        prepares: Rc<Cell<usize>>,
+        drops: Rc<Cell<usize>>,
+    }
+
+    impl Drop for ResetProbe {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    unsafe fn prepare_probe(executor: *mut std::ffi::c_void) {
+        // SAFETY: this callback is installed only with ResetProbe below.
+        let probe = unsafe { &mut *executor.cast::<ResetProbe>() };
+        probe.prepares.set(probe.prepares.get() + 1);
+    }
+
+    let prepares = Rc::new(Cell::new(0));
+    let drops = Rc::new(Cell::new(0));
+    let mut executor = std::ptr::null_mut();
+    let mut drop_executor = None;
+    let mut prepare_reset = None;
+    install_boxed_executor(
+        &mut executor,
+        &mut drop_executor,
+        &mut prepare_reset,
+        ResetProbe {
+            prepares: Rc::clone(&prepares),
+            drops: Rc::clone(&drops),
+        },
+        Some(prepare_probe),
+    );
+
+    // SAFETY: installation paired this callback with ResetProbe.
+    unsafe { prepare_reset.expect("typed pre-reset callback")(executor) };
+    // SAFETY: installation created the paired pointer and callbacks.
+    unsafe { drop_installed_executor(&mut executor, &mut drop_executor, &mut prepare_reset) };
+    assert_eq!(prepares.get(), 1);
+    assert_eq!(drops.get(), 1);
+    assert!(executor.is_null());
+    assert!(drop_executor.is_none());
+    assert!(prepare_reset.is_none());
 }

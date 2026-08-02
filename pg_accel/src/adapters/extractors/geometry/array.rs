@@ -67,8 +67,8 @@ impl std::error::Error for ExtractError {}
 pub fn extract_geometry_array(datum: Datum) -> Result<Vec<ExtractedGeom>, ExtractError> {
     // SAFETY: callers route only PostgreSQL `geometry[]` Datums here on the
     // main backend thread, matching the scalar geometry extractor contract.
-    let arr = unsafe { parse_array(datum) }?;
-    extract_geometry_array_from_pg_array(&arr)
+    let parsed = unsafe { parse_array(datum) }?;
+    extract_geometry_array_from_pg_array(&parsed.view())
 }
 
 pub(crate) fn extract_geometry_array_from_pg_array(

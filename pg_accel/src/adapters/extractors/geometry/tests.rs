@@ -1,6 +1,6 @@
 //! Tests for geometry extractors.
 
-#![allow(clippy::unwrap_used, dead_code)]
+#![allow(clippy::unwrap_used, clippy::wildcard_imports, dead_code)]
 
 use super::header::HAS_BBOX_BIT;
 use super::*;
@@ -476,7 +476,7 @@ fn flag_has_z_and_m_no_bbox() {
 #[test]
 fn flag_has_bbox_with_srid() {
     // SRID=4326 + HasBBox
-    let srid_flags: u32 = 4326 | HAS_BBOX_BIT;
+    let srid_flags: u32 = 0x10e6 | HAS_BBOX_BIT;
     let buf = make_gserialized_with_flags(srid_flags, WKB_POINT_TYPE, 7.0, 8.0);
     assert!(has_bbox_flag(&buf));
 }
@@ -484,7 +484,7 @@ fn flag_has_bbox_with_srid() {
 #[test]
 fn flag_all_bits_set() {
     // HasZ + HasM + HasBBox + SRID
-    let srid_flags: u32 = 4326 | (1 << 21) | (1 << 22) | HAS_BBOX_BIT;
+    let srid_flags: u32 = 0x10e6 | (1 << 21) | (1 << 22) | HAS_BBOX_BIT;
     let buf = make_gserialized_with_flags(srid_flags, WKB_POINT_TYPE, 9.0, 10.0);
     assert!(has_bbox_flag(&buf));
     let datum = Datum::from(buf.as_ptr() as usize);

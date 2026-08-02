@@ -1,6 +1,6 @@
 //! Tests for cost estimation formulas.
 
-#![allow(clippy::unwrap_used, dead_code)]
+#![allow(clippy::unwrap_used, clippy::wildcard_imports, dead_code)]
 
 use super::formulas::{
     SortAdmissionInput, SortAlgorithm, SortDeclineReason, SortKeyClass, sort_admission,
@@ -94,13 +94,13 @@ fn gpu_boundary_exact_min_rows() {
 #[test]
 fn safety_margin_rejects_marginal() {
     // GPU cost 0.75x of CPU → above 0.7 margin → rejected.
-    assert!(0.75 > GPU_COST_SAFETY_MARGIN);
+    const { assert!(0.75 > GPU_COST_SAFETY_MARGIN) };
 }
 
 #[test]
 fn safety_margin_accepts_clear_win() {
     // GPU cost 0.5x of CPU → below 0.7 margin → accepted.
-    assert!(0.5 < GPU_COST_SAFETY_MARGIN);
+    const { assert!(0.5 < GPU_COST_SAFETY_MARGIN) };
 }
 
 // -- optimal_batch_size ---------------------------------------------------
@@ -177,9 +177,7 @@ fn threads_single_core_with_budget() {
 fn cpu_cores_nonzero() {
     // detect() calls gpu::ensure_init() which requires PG context,
     // so we test the CPU portion directly.
-    let cores = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(1);
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     assert!(cores >= 1);
 }
 
@@ -246,7 +244,7 @@ fn high_cu_gpu_lowers_thresholds() {
         compute_units: 128,
         gpu_max_alloc_bytes: 4096 * 1024 * 1024,
         estimated_gpu_gflops: 8000.0,
-        ..low.clone()
+        ..low
     };
     let ll = DeviceLimits::from_profile(&low);
     let lh = DeviceLimits::from_profile(&high);
@@ -267,7 +265,7 @@ fn spatial_pairwise_chunk_rows_derive_from_max_alloc() {
     };
     let high = PlatformProfile {
         gpu_max_alloc_bytes: 8 * 1024 * 1024 * 1024,
-        ..low.clone()
+        ..low
     };
 
     let low_rows = DeviceLimits::from_profile(&low).gpu_spatial_pairwise_chunk_rows;
@@ -539,18 +537,18 @@ fn platform_profile_clone() {
 
 #[test]
 fn gpu_launch_overhead_positive() {
-    assert!(GPU_LAUNCH_OVERHEAD > 0.0);
+    const { assert!(GPU_LAUNCH_OVERHEAD > 0.0) };
 }
 
 #[test]
 fn per_datum_extract_cost_positive() {
-    assert!(PER_DATUM_EXTRACT_COST > 0.0);
+    const { assert!(PER_DATUM_EXTRACT_COST > 0.0) };
 }
 
 #[test]
 fn spatial_per_row_exceeds_h3() {
     // Spatial deserialization is more expensive than H3 integer math.
-    assert!(GPU_SPATIAL_PER_ROW_COST > GPU_H3_PER_ROW_COST);
+    const { assert!(GPU_SPATIAL_PER_ROW_COST > GPU_H3_PER_ROW_COST) };
 }
 
 // -- PreAgg cost constants ---------------------------------------------------
@@ -567,8 +565,8 @@ fn resident_load_costs_are_positive_and_distinct_from_preagg_materialization() {
 fn preagg_fixed_overhead_less_than_gpu_launch() {
     // PreAgg is CPU-only — its fixed overhead must be strictly less
     // than GPU kernel launch overhead.
-    assert!(PREAGG_FIXED_OVERHEAD < GPU_LAUNCH_OVERHEAD);
-    assert!(PREAGG_FIXED_OVERHEAD > 0.0);
+    const { assert!(PREAGG_FIXED_OVERHEAD < GPU_LAUNCH_OVERHEAD) };
+    const { assert!(PREAGG_FIXED_OVERHEAD > 0.0) };
 }
 
 #[test]

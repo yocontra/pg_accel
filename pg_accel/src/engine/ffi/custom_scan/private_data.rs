@@ -3022,7 +3022,7 @@ pub unsafe fn deserialize_functionscan_priv(
 }
 
 #[cfg(feature = "pg_test")]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::wildcard_imports)]
 mod functionscan_tests {
     use super::*;
 
@@ -3265,7 +3265,7 @@ pub unsafe fn deserialize_srf_target_list_priv(
 }
 
 #[cfg(feature = "pg_test")]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::wildcard_imports)]
 mod srf_target_list_tests {
     use super::*;
 

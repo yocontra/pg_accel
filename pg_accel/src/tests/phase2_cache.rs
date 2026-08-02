@@ -750,6 +750,7 @@ mod tests {
             .expect("reset counters before cancellation attempt");
         let panic_artifact = crate::engine::panic_hook::PanicLogTestArtifact::fresh()
             .expect("create a test-unique panic artifact");
+        let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
 
         {
             let fixture = DenseDispatchTestGuard::new(1, 1, CANCEL_AFTER_CALLS);
@@ -771,6 +772,14 @@ mod tests {
                 "cancellation must occur between completed calls and before finalize"
             );
         }
+        let cleanup_after = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        assert_eq!(cleanup_after.installed, cleanup_before.installed + 1);
+        assert_eq!(cleanup_after.normal_end, cleanup_before.normal_end);
+        assert_eq!(
+            cleanup_after.query_reset,
+            cleanup_before.query_reset + 1,
+            "statement_timeout must release the Custom Scan executor through query-context reset"
+        );
 
         assert_eq!(accelerated_and_stock_counts(), (1, 0));
         assert_eq!(resident_live_bytes(), live_before_cancel);

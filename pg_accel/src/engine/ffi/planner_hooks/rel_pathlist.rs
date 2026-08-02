@@ -555,7 +555,8 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
 
     // Time this hook invocation so the benchmark harness can detect
     // star-schema no-dispatch regressions in planner overhead.
-    let _hook_finish = super::HookElapsedGuard::new("rel_pathlist");
+    let _hook_finish =
+        super::HookElapsedGuard::new("rel_pathlist", stats::PlannerHookStage::RelPathlist);
 
     // Record this planner hook invocation (main backend thread only).
     stats::record_planner_hook_call();
@@ -583,15 +584,37 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // SAFETY: rte is the planner-owned range-table entry supplied to this hook.
     let rte_ref = unsafe { &*rte };
 
-    let _span =
-        tracing::info_span!("planner.rel_pathlist", relid = u32::from(rte_ref.relid)).entered();
-
     // These cheap shape facts drive resident-only fail-closed observability.
     // SAFETY: root is a valid PlannerInfo pointer.
     let has_sort = unsafe { !(*root).sort_pathkeys.is_null() };
     let has_restrictions = !rel_ref.baserestrictinfo.is_null()
         // SAFETY: the non-null baserestrictinfo pointer is a planner-owned List.
         && unsafe { pg_sys::list_length(rel_ref.baserestrictinfo) } > 0;
+
+    // A plain base scan with only direct Vars, Consts, or Params in its target
+    // list cannot match any resident-v2 observer. Decline before creating a
+    // tracing span or performing raster/function catalog lookups. Wrappers and
+    // every callable expression deliberately fall through to exact observers.
+    // SAFETY: parse is the live Query checked above and its target list is
+    // planner-owned for this hook invocation.
+    if !has_sort
+        && !has_restrictions
+        && rte_ref.rtekind == pg_sys::RTEKind::RTE_RELATION
+        && matches!(
+            rel_ref.reloptkind,
+            pg_sys::RelOptKind::RELOPT_BASEREL | pg_sys::RelOptKind::RELOPT_OTHER_MEMBER_REL
+        )
+        && unsafe { query_has_only_plain_native_targets(&*parse) }
+    {
+        stats::record_planner_stage_fast_decline(
+            stats::PlannerHookStage::RelPathlist,
+            "rel_pathlist_plain_native",
+        );
+        return;
+    }
+
+    let _span =
+        tracing::info_span!("planner.rel_pathlist", relid = u32::from(rte_ref.relid)).entered();
 
     // GPU-resident-only admission: pg_accel no longer injects a host-staged
     // scan/sort/function-scan CustomPath. Record the honest decline and leave
@@ -607,12 +630,40 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
             }
             if rte_ref.rtekind == pg_sys::RTEKind::RTE_FUNCTION || has_sort || has_restrictions {
                 super::record_no_gpu_resident_pipeline_decline(
+                    stats::PlannerHookStage::RelPathlist,
                     "rel_pathlist_no_resident_pipeline",
                     rel,
                 );
             }
         }
     }
+}
+
+unsafe fn query_has_only_plain_native_targets(query: &pg_sys::Query) -> bool {
+    let len = unsafe { pg_sys::list_length(query.targetList) };
+    for index in 0..len {
+        // SAFETY: index is bounded by the target-list length measured above.
+        let target =
+            unsafe { pg_sys::list_nth(query.targetList, index).cast::<pg_sys::TargetEntry>() };
+        if target.is_null() {
+            return false;
+        }
+        // SAFETY: the target-list cell is a live planner-owned TargetEntry.
+        if unsafe { (*target).resjunk } {
+            continue;
+        }
+        // SAFETY: the TargetEntry expression belongs to the same planner tree.
+        let expression = unsafe { (*target).expr.cast::<pg_sys::Node>() };
+        if expression.is_null() || !plain_native_target_tag(unsafe { (*expression).type_ }) {
+            return false;
+        }
+    }
+    true
+}
+
+#[must_use]
+const fn plain_native_target_tag(tag: NodeTag) -> bool {
+    matches!(tag, NodeTag::T_Var | NodeTag::T_Const | NodeTag::T_Param)
 }
 
 unsafe fn observe_resident_only_rel_declines(
@@ -876,7 +927,8 @@ unsafe fn longest_presorted_prefix(
 #[cfg(test)]
 mod tests {
     use super::{
-        SortShape, classify_sort_shape, min_max_rewrite_shape, standalone_sort_has_bounded_output,
+        NodeTag, SortShape, classify_sort_shape, min_max_rewrite_shape, plain_native_target_tag,
+        standalone_sort_has_bounded_output,
     };
 
     // -- classify_sort_shape ------------------------------------------------
@@ -1030,5 +1082,17 @@ mod tests {
             RejectionReason::MinMaxRewriteNotASort.stats_key(),
             "min_max_rewrite_not_a_sort"
         );
+    }
+
+    #[test]
+    fn plain_native_target_classifier_never_skips_callable_or_wrapped_nodes() {
+        assert!(plain_native_target_tag(NodeTag::T_Var));
+        assert!(plain_native_target_tag(NodeTag::T_Const));
+        assert!(plain_native_target_tag(NodeTag::T_Param));
+
+        assert!(!plain_native_target_tag(NodeTag::T_FuncExpr));
+        assert!(!plain_native_target_tag(NodeTag::T_Aggref));
+        assert!(!plain_native_target_tag(NodeTag::T_RelabelType));
+        assert!(!plain_native_target_tag(NodeTag::T_CoerceViaIO));
     }
 }

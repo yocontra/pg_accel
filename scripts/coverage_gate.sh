@@ -257,8 +257,8 @@ Host-object source coverage
 does not claim device kernel-line execution.
 
 SQL scope is unique successful PGACCEL_ASSERT_OK IDs divided by the pinned
-coverage/sql-semantic-assertions.json declarations. The fixed floors are 52
-files and 287 assertions. File completion markers, warnings, skips, caught
+coverage/sql-semantic-assertions.json declarations. The fixed floors are 54
+files and 293 assertions. File completion markers, warnings, skips, caught
 exceptions, duplicate IDs, source/hash drift, or nonzero exits cannot earn
 semantic credit. SQL-triggered Rust source reachability is retained separately
 under sql-reachability and has no release percentage threshold.

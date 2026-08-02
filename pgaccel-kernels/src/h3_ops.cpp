@@ -6,10 +6,11 @@
 #include <limits>
 #include <new>
 #include <stdexcept>
+#include <type_traits>
 
 #include "pgaccel_ffi.h"
-#include "pgaccel_resident_count.h"
 #include "pgaccel_queue.h"
+#include "pgaccel_resident_count.h"
 
 #include "h3_exact_device.hpp"
 #include "h3_float_device.hpp"
@@ -937,18 +938,16 @@ static bool h3_current_device_pointer(sycl::queue& queue, const void* pointer) {
 
 class H3ResidentStatusOwner {
  public:
-  H3ResidentStatusOwner(sycl::queue& queue, uint32_t* status) : queue_(queue), status_(status) {}
+  H3ResidentStatusOwner(sycl::queue& queue, uint32_t* status) : allocation_(queue, status) {}
   H3ResidentStatusOwner(const H3ResidentStatusOwner&) = delete;
   H3ResidentStatusOwner& operator=(const H3ResidentStatusOwner&) = delete;
-  ~H3ResidentStatusOwner() {
-    if (status_ != nullptr)
-      sycl::free(status_, queue_);
-  }
+  ~H3ResidentStatusOwner() noexcept = default;
 
  private:
-  sycl::queue& queue_;
-  uint32_t* status_;
+  H3UsmAllocationGuard allocation_;
 };
+
+static_assert(std::is_nothrow_destructible_v<H3ResidentStatusOwner>);
 
 class H3CellToParentResidentValidateKernel;
 class H3CellToParentResidentTransformKernel;

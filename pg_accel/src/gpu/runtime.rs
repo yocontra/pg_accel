@@ -1,4 +1,23 @@
 use super::{PgaccelDeviceInfo, PgaccelPlatformCaps, PgaccelStatus, bridge};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// PID whose call to `pgaccel_init()` completed successfully. Failed attempts
+/// deliberately leave this zero so later calls retry in the same process.
+static INIT_PID: AtomicU32 = AtomicU32::new(0);
+
+fn record_successful_init(initialized_pid: &AtomicU32, pid: u32, status: PgaccelStatus) -> bool {
+    if status != PgaccelStatus::Ok {
+        return false;
+    }
+    initialized_pid.store(pid, Ordering::Release);
+    true
+}
+
+fn clear_successful_init(initialized_pid: &AtomicU32, pid: u32, status: PgaccelStatus) {
+    if status == PgaccelStatus::Ok {
+        let _ = initialized_pid.compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Unified safe wrappers
@@ -16,9 +35,6 @@ fn init() -> PgaccelStatus {
 /// runs directly in every PG backend (and in test binaries). Uses PID
 /// tracking to ensure `pgaccel_init()` is called at most once per process.
 pub fn ensure_init() {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static INIT_PID: AtomicU32 = AtomicU32::new(0);
-
     let pid = std::process::id();
     let prev = INIT_PID.load(Ordering::Acquire);
     if prev == pid {
@@ -27,13 +43,12 @@ pub fn ensure_init() {
 
     crate::ensure_backend_exit_callback();
     let status = init();
-    if status != PgaccelStatus::Ok {
+    if !record_successful_init(&INIT_PID, pid, status) {
         pgrx::warning!(
             "pg_accel: GPU init failed (status={:?}). GPU acceleration unavailable.",
             status,
         );
     }
-    INIT_PID.store(pid, Ordering::Release);
 }
 
 /// Establish Darwin fork-safety environment in the postmaster before fork.
@@ -48,7 +63,9 @@ pub fn prefork_warmup() {
 #[allow(dead_code)] // reason: Rust wrapper for pgaccel_shutdown FFI; called at extension teardown
 pub fn shutdown() -> PgaccelStatus {
     // SAFETY: pgaccel_shutdown is safe if init was called.
-    unsafe { bridge::pgaccel_shutdown() }
+    let status = unsafe { bridge::pgaccel_shutdown() };
+    clear_successful_init(&INIT_PID, std::process::id(), status);
+    status
 }
 
 /// Return information about the selected compute device.
@@ -87,3 +104,32 @@ pub fn get_caps() -> PgaccelPlatformCaps {
 // `has_native_fp64` on `PgaccelPlatformCaps` / `PgaccelDeviceInfo` is now a
 // cost-model signal only, not a dispatch skip-gate. Call sites below dispatch
 // the fp64 kernel unconditionally.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_initialization_is_retryable_and_shutdown_clears_success() {
+        let initialized_pid = AtomicU32::new(0);
+        let pid = 42;
+
+        assert_ne!(initialized_pid.load(Ordering::Acquire), pid);
+        // A failed call performs no store, so the same process must retry.
+        assert!(!record_successful_init(
+            &initialized_pid,
+            pid,
+            PgaccelStatus::Error
+        ));
+        assert_ne!(initialized_pid.load(Ordering::Acquire), pid);
+
+        assert!(record_successful_init(
+            &initialized_pid,
+            pid,
+            PgaccelStatus::Ok
+        ));
+        assert_eq!(initialized_pid.load(Ordering::Acquire), pid);
+        clear_successful_init(&initialized_pid, pid, PgaccelStatus::Ok);
+        assert_eq!(initialized_pid.load(Ordering::Acquire), 0);
+    }
+}

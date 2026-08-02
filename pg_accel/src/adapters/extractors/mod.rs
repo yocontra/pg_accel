@@ -4,4 +4,4 @@ pub mod array;
 pub mod geometry;
 pub mod raster;
 
-pub use array::{ParseError as ArrayParseError, PgArray, parse_array};
+pub use array::{ParseError as ArrayParseError, ParsedPgArray, PgArray, parse_array};

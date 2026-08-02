@@ -1,5 +1,5 @@
--- 55_hash_join.sql: GPU hash join correctness tests.
--- Verifies hash join results match between accel ON and OFF.
+-- 55_hash_join.sql: join correctness and planner-decline tests.
+-- ON/OFF parity alone is not a GPU claim; selected paths are asserted explicitly.
 
 \echo '=== 55_hash_join ==='
 

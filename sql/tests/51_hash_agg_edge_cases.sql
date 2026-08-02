@@ -1,4 +1,4 @@
--- 51_hash_agg_edge_cases.sql: Edge cases for GPU hash aggregation.
+-- 51_hash_agg_edge_cases.sql: Grouped-aggregate edge cases under pg_accel ON/OFF.
 -- Verifies edge-case grouped aggregate results match between accel ON and OFF.
 
 \echo '=== 51_hash_agg_edge_cases ==='

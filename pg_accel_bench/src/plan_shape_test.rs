@@ -2047,8 +2047,8 @@ fn plan_shape_parallel_unsupported_float_agg_stays_native() {
     }
     assert_rejection_reason_observed(
         &mut c,
-        &["shape_unsupported_measure_type"],
-        "parallel float aggregate should expose the generic measure-type decline",
+        &["shape_unsupported_aggregate_input"],
+        "parallel float aggregate should expose the earliest aggregate-input decline",
     );
 }
 

@@ -874,7 +874,13 @@
       "86_batch_boundary.assert_001": "ea5a3b1dafb80fddf6df716f05afa9f4d2a7b1ac06eb40dd0d1830554577138b",
       "87_type_coercion.assert_001": "7fa096131990404e9ad4b541e6f8e11b33cbef046c5ff8809ac751ece509feb9",
       "88_concurrent_features.assert_001": "515c34e69bb83e82fc71bce0d5f42fa58d10a79855740f19c268cbb99654ad84",
-      "89_regression_guards.assert_001": "c826e0e3ad8b7137d99ef3939bcd840dce34e0cf40dd9a54eba41f93eb6640dc"
+      "89_regression_guards.assert_001": "c826e0e3ad8b7137d99ef3939bcd840dce34e0cf40dd9a54eba41f93eb6640dc",
+      "90_selected_path_contract.assert_001": "d4d520768b7bf182f48953188d7225c35c332ea3d6beb179f0b97c9ccfde6fa2",
+      "91_selected_family_contracts.assert_001": "396227886956b74a2403fc2169a33160839d13013c3043240cdf90d8709d8007",
+      "91_selected_family_contracts.assert_002": "3e4dc689ee4140b650c651b389e3855ca21a9f1b4a291ffde95815b9ec752ff2",
+      "91_selected_family_contracts.assert_003": "f9172f6b08ac00cba99dc99a08a861d13f702e9668c60b85dfd08d40f61f4e04",
+      "91_selected_family_contracts.assert_004": "14a53a60eb7f6268e3895c7b4f0bb819a0127e6ac5cf8beb2653698370722c56",
+      "91_selected_family_contracts.assert_005": "33f985d684cce5c9b6f4122273c80e9bdffb6a78555c7bf27eca2d476c5cd590"
     },
     "assertion_ids": [
       "00_smoke.assert_001",
@@ -1163,7 +1169,13 @@
       "86_batch_boundary.assert_001",
       "87_type_coercion.assert_001",
       "88_concurrent_features.assert_001",
-      "89_regression_guards.assert_001"
+      "89_regression_guards.assert_001",
+      "90_selected_path_contract.assert_001",
+      "91_selected_family_contracts.assert_001",
+      "91_selected_family_contracts.assert_002",
+      "91_selected_family_contracts.assert_003",
+      "91_selected_family_contracts.assert_004",
+      "91_selected_family_contracts.assert_005"
     ],
     "files": [
       "00_smoke.sql",
@@ -1217,7 +1229,9 @@
       "86_batch_boundary.sql",
       "87_type_coercion.sql",
       "88_concurrent_features.sql",
-      "89_regression_guards.sql"
+      "89_regression_guards.sql",
+      "90_selected_path_contract.sql",
+      "91_selected_family_contracts.sql"
     ]
   }
 }

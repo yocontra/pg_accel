@@ -1294,7 +1294,10 @@ mod tests {
                 parallel_agg_dispatch_time_us: 0,
                 resident_proof: ResidentProofSnapshot::not_proven(),
                 executor: std::ptr::dangling_mut::<u8>().cast(),
+                executor_drop: None,
+                executor_prepare_reset: None,
             },
+            executor_cleanup: pg_sys::MemoryContextCallback::default(),
         };
 
         // SAFETY: `state` is a live local GpuAccelScanState for the duration

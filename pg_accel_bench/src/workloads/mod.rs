@@ -146,8 +146,9 @@ pub use recursive_union_decline::RecursiveUnionDecline;
 #[cfg(test)]
 pub use registry::Phase9OperatorLane;
 pub use registry::{
-    H3LaneClass, PHASE6_DOMAIN_CONTRACTS, PHASE9_OPERATOR_DECLINES, Phase6DomainOracle,
-    ResidentPinSpec, ThresholdEvidenceEligibility, WorkloadCategory, workload_metadata,
+    H3LaneClass, KernelClass, PHASE6_DOMAIN_CONTRACTS, PHASE9_OPERATOR_DECLINES,
+    Phase6DomainOracle, ResidentPinSpec, ThresholdEvidenceEligibility, WorkloadCategory,
+    workload_metadata,
 };
 pub use semi_anti_null_decline::{
     AntiJoinNullDecline, InJoinNullDecline, NotInJoinNullDecline, SemiJoinNullDecline,
@@ -864,14 +865,122 @@ impl BenchmarkLaneExpectation {
     }
 }
 
-/// One reportable planner threshold-matrix cell.
+/// Released planner/executor family that can satisfy a GPU winner contract.
+///
+/// These are deliberately narrower than the historical strategy tags: each
+/// variant names a production-reachable Resident v2 Custom Scan path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleasedPathFamily {
+    GroupedAggregate,
+    StarJoin,
+    H3Parent,
+}
+
+impl ReleasedPathFamily {
+    const fn supports(self, operation: KernelClass) -> bool {
+        match self {
+            Self::GroupedAggregate => matches!(
+                operation,
+                KernelClass::Reduce
+                    | KernelClass::HashAgg
+                    | KernelClass::ResidentF64Reduce
+                    | KernelClass::ResidentF64GroupedStats
+            ),
+            Self::StarJoin => matches!(
+                operation,
+                KernelClass::HashJoin | KernelClass::ResidentStarGroupAgg
+            ),
+            Self::H3Parent => matches!(operation, KernelClass::H3CellToParent),
+        }
+    }
+}
+
+/// Independently reviewed production-reachable workload and shape contract.
+///
+/// This table must not depend on [`BenchmarkLaneExpectation`]. A benchmark
+/// cell can claim a GPU win only when its exact workload and row shape appears
+/// here and the registry operation remains compatible with the released path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReleasedEnvelopeContract {
+    workload: &'static str,
+    min_rows: usize,
+    max_rows: usize,
+    family: ReleasedPathFamily,
+}
+
+const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
+    ReleasedEnvelopeContract {
+        workload: "grouped_agg_int4",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "predicate_expression_grouped_agg_int4",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "hash_join",
+        min_rows: PREAGG_WINNER_MIN_ROWS,
+        max_rows: usize::MAX,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "gpu_hashjoin_large_build",
+        min_rows: HASHJOIN_MIN_BUILD_ROWS,
+        max_rows: HASHJOIN_MAX_BUILD_ROWS,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "hashjoin_10k_1m",
+        min_rows: 1_000_000,
+        max_rows: usize::MAX,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "mixed_join_agg_int4",
+        min_rows: PREAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "ssbm_resident_int4_star",
+        min_rows: SSBM_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "h3_cell_to_parent",
+        min_rows: H3_GROUPED_WINNER_MIN_ROWS,
+        max_rows: usize::MAX,
+        family: ReleasedPathFamily::H3Parent,
+    },
+];
+
+/// Backend required by a performance-envelope cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeBackend {
+    ReleasedGpu,
+    PostgreSqlNative,
+}
+
+/// Residency contract required before the expected path is admissible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeResidency {
+    FullyResident,
+    NotRequired,
+}
+
+/// One reportable, typed performance envelope.
 ///
 /// The dimensions match the benchmark threshold contract: row count, type,
 /// cardinality, selectivity, row width, and output size. The matrix is used by
 /// the report renderer and the generic ship gate, so planner admission is tied
 /// to explicit measured break-even rows instead of a broad "large input" label.
 #[derive(Debug, Clone, PartialEq)]
-pub struct BenchmarkThresholdMatrixEntry {
+pub struct PerformanceEnvelope {
     pub lane: &'static str,
     pub workload: &'static str,
     pub rows: usize,
@@ -888,7 +997,50 @@ pub struct BenchmarkThresholdMatrixEntry {
     pub correctness_evidence: &'static str,
     pub cache_gate: &'static str,
     pub threshold_basis: &'static str,
+    /// Expected planner path. Native cells carry their exact decline reason.
     pub expectation: BenchmarkLaneExpectation,
+}
+
+/// Backward-compatible report name for the canonical performance envelope.
+pub type BenchmarkThresholdMatrixEntry = PerformanceEnvelope;
+
+impl PerformanceEnvelope {
+    /// Typed operation represented by this envelope.
+    #[must_use]
+    pub fn operation(&self) -> KernelClass {
+        workload_metadata(self.workload)
+            .map_or(KernelClass::Unclassified, |metadata| metadata.kernel_class)
+    }
+
+    /// Backend required to satisfy the expected path.
+    #[must_use]
+    pub const fn backend(&self) -> EnvelopeBackend {
+        match self.expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => EnvelopeBackend::ReleasedGpu,
+            BenchmarkLaneExpectation::NativeDecline { .. } => EnvelopeBackend::PostgreSqlNative,
+        }
+    }
+
+    /// Residency precondition for the expected path.
+    #[must_use]
+    pub const fn residency(&self) -> EnvelopeResidency {
+        match self.expectation {
+            BenchmarkLaneExpectation::GpuWinner { .. } => EnvelopeResidency::FullyResident,
+            BenchmarkLaneExpectation::NativeDecline { .. } => EnvelopeResidency::NotRequired,
+        }
+    }
+
+    /// Independently contracted production-reachable planner/executor family.
+    #[must_use]
+    pub fn released_path(&self) -> Option<ReleasedPathFamily> {
+        RELEASED_ENVELOPE_CONTRACTS
+            .iter()
+            .find(|contract| {
+                contract.workload == self.workload
+                    && (contract.min_rows..=contract.max_rows).contains(&self.rows)
+            })
+            .map(|contract| contract.family)
+    }
 }
 
 /// Exact winner cells exercised by the qualified Metal benchmark ship gate.
@@ -946,6 +1098,35 @@ pub fn benchmark_threshold_matrix_entry(
         .or_else(|| window_decline_matrix_entry(name, rows))
         .or_else(|| spatial_threshold_matrix_entry(name, rows))
         .or_else(|| regression_decline_matrix_entry(name, rows))
+        .map(validate_performance_envelope)
+}
+
+fn validate_performance_envelope(entry: PerformanceEnvelope) -> PerformanceEnvelope {
+    let released_path = entry.released_path();
+    let operation = entry.operation();
+    let compatible_released_path = released_path.filter(|family| family.supports(operation));
+    match (
+        entry.backend(),
+        entry.residency(),
+        released_path,
+        compatible_released_path,
+    ) {
+        (
+            EnvelopeBackend::ReleasedGpu,
+            EnvelopeResidency::FullyResident,
+            Some(
+                ReleasedPathFamily::GroupedAggregate
+                | ReleasedPathFamily::StarJoin
+                | ReleasedPathFamily::H3Parent,
+            ),
+            Some(_),
+        )
+        | (EnvelopeBackend::PostgreSqlNative, EnvelopeResidency::NotRequired, None, None) => entry,
+        contract => panic!(
+            "performance envelope `{}` at {} rows has an invalid typed path contract: {contract:?}",
+            entry.workload, entry.rows
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -983,7 +1164,6 @@ const SPATIAL_MAX_VERTS_X_ROWS: u64 = 50_000_000_000;
 const SPATIAL_MAX_OUTPUT_FRACTION_PCT: usize = 80;
 const SPATIAL_DEFAULT_MIN_BATCH_SIZE: usize = 65_536;
 const H3_GROUPED_WINNER_MIN_ROWS: usize = 100_000;
-const RASTER_STANDALONE_MIN_ROWS: usize = 200_000;
 const GROUPAGG_WINNER_MIN_ROWS: usize = 250_000;
 const PREAGG_WINNER_MIN_ROWS: usize = 50_000;
 const DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS: usize = 1_000_000;
@@ -1824,19 +2004,11 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
 fn raster_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = raster_matrix_profile(name)?;
     let pixels = raster_total_pixels(rows);
-    let current_generic_rte_decline = rows == 100;
-    let expectation = if current_generic_rte_decline {
-        BenchmarkLaneExpectation::NativeDecline {
-            reason: "shape_unsupported_rte",
-        }
-    } else if rows >= RASTER_STANDALONE_MIN_ROWS {
-        BenchmarkLaneExpectation::GpuWinner {
-            min_warm_speedup: profile.min_warm_speedup,
-        }
-    } else {
-        BenchmarkLaneExpectation::NativeDecline {
-            reason: "raster_rows_below_standalone_min",
-        }
+    // Production raster admission is observation-only. The resident reclass
+    // executor can be forced by tests, but no production SQL shape may be
+    // represented as a release GPU winner until planner and cost gates select it.
+    let expectation = BenchmarkLaneExpectation::NativeDecline {
+        reason: "shape_unsupported_rte",
     };
     Some(BenchmarkThresholdMatrixEntry {
         lane: profile.lane,
@@ -1864,12 +2036,8 @@ fn raster_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
             BenchmarkLaneExpectation::NativeDecline { .. } => GENERIC_NATIVE_DISPATCH_EVIDENCE,
         },
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
-        cache_gate: "warm median threshold plus cache-mode both raster artifact before release promotion",
-        threshold_basis: if current_generic_rte_decline {
-            "current generic RTE preflight precedes the raster standalone row floor"
-        } else {
-            profile.threshold_basis
-        },
+        cache_gate: "cache-mode both test-only raster evidence; no production winner gate before release promotion",
+        threshold_basis: profile.threshold_basis,
         expectation,
     })
 }
@@ -1880,7 +2048,6 @@ struct RasterMatrixProfile {
     cardinality: &'static str,
     row_width: &'static str,
     threshold_basis: &'static str,
-    min_warm_speedup: f64,
 }
 
 fn raster_matrix_profile(name: &str) -> Option<RasterMatrixProfile> {
@@ -1890,28 +2057,24 @@ fn raster_matrix_profile(name: &str) -> Option<RasterMatrixProfile> {
             cardinality: "two-band map algebra, ~3 FLOPs/pixel",
             row_width: "two 32BF bands per tile",
             threshold_basis: "raster per-pixel map algebra threshold matrix",
-            min_warm_speedup: 1.0,
         },
         "raster_slope" => RasterMatrixProfile {
             lane: "raster_slope_terrain",
             cardinality: "single-band terrain slope, ~35 FLOPs/pixel",
             row_width: "one 32BF elevation band per tile",
             threshold_basis: "raster terrain-analysis threshold matrix",
-            min_warm_speedup: 1.0,
         },
         "raster_reclass" => RasterMatrixProfile {
             lane: "raster_reclass_rules",
             cardinality: "single-band 5-class reclassification",
             row_width: "one 32BF source band plus rule text",
             threshold_basis: "raster reclass threshold matrix",
-            min_warm_speedup: 1.0,
         },
         "raster_algebra_deep" => RasterMatrixProfile {
             lane: "raster_mapalgebra_deep",
             cardinality: "three-band deep algebra, ~50 FLOPs/pixel",
             row_width: "three 32BF bands per tile",
             threshold_basis: "raster deep map algebra threshold matrix",
-            min_warm_speedup: 1.0,
         },
         _ => return None,
     })
@@ -1961,7 +2124,7 @@ fn reduce_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
         let expectation = structural_decline.map_or(
             if rows >= REDUCE_F64_BREAK_EVEN_ROWS {
                 BenchmarkLaneExpectation::GpuWinner {
-                    min_warm_speedup: 1.0,
+                    min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
                 }
             } else {
                 BenchmarkLaneExpectation::NativeDecline {
@@ -2234,13 +2397,9 @@ fn hashjoin_threshold_matrix_entry(
         BenchmarkLaneExpectation::NativeDecline {
             reason: "generic_cost_not_competitive",
         }
-    } else if name == "hashjoin_10k_1m" {
-        BenchmarkLaneExpectation::GpuWinner {
-            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
-        }
     } else if (min_build_rows..=HASHJOIN_MAX_BUILD_ROWS).contains(&inner_rows) {
         BenchmarkLaneExpectation::GpuWinner {
-            min_warm_speedup: 1.0,
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
         }
     } else if inner_rows < min_build_rows {
         BenchmarkLaneExpectation::NativeDecline {
@@ -2731,7 +2890,7 @@ fn spatial_matrix_expectation(
         }
     } else {
         BenchmarkLaneExpectation::GpuWinner {
-            min_warm_speedup: 1.0,
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
         }
     }
 }
@@ -4266,7 +4425,7 @@ mod tests {
         assert_eq!(small.lane, "raster_slope_terrain");
         assert_eq!(
             small.expectation.decline_reason(),
-            Some("raster_rows_below_standalone_min")
+            Some("shape_unsupported_rte")
         );
         assert!(small.cardinality.contains("35 FLOPs/pixel"));
         assert!(small.batch_count.contains("10K raster rows"));
@@ -4276,13 +4435,10 @@ mod tests {
         let large = benchmark_threshold_matrix_entry("raster_slope", 1_000_000)
             .expect("raster_slope threshold entry");
         assert_eq!(
-            large.expectation,
-            BenchmarkLaneExpectation::GpuWinner {
-                min_warm_speedup: 1.0,
-            }
+            large.expectation.decline_reason(),
+            Some("shape_unsupported_rte")
         );
-        assert!(large.dispatch_evidence.contains("raster counter delta > 0"));
-        assert!(large.dispatch_evidence.contains("digest output consumed"));
+        assert_eq!(large.dispatch_evidence, GENERIC_NATIVE_DISPATCH_EVIDENCE);
         assert!(large.correctness_evidence.contains("correctness_diffs"));
         assert!(large.cache_gate.contains("cache-mode both"));
         assert!(large.batch_count.contains("64M total pixels"));
@@ -4971,14 +5127,38 @@ mod tests {
                 assert!(!entry.threshold_basis.is_empty());
                 match entry.expectation {
                     BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
-                        assert!(min_warm_speedup.is_finite() && min_warm_speedup > 0.0);
+                        assert!(
+                            min_warm_speedup.is_finite()
+                                && min_warm_speedup >= FINAL_MATRIX_MIN_WARM_SPEEDUP,
+                            "{} @ {} claims a GPU win below the release floor: {}",
+                            entry.workload,
+                            entry.rows,
+                            min_warm_speedup
+                        );
                         assert_eq!(entry.expectation.label(), "gpu_winner");
                         assert_eq!(entry.expectation.decline_reason(), None);
+                        assert_eq!(entry.backend(), EnvelopeBackend::ReleasedGpu);
+                        assert_eq!(entry.residency(), EnvelopeResidency::FullyResident);
+                        assert_ne!(
+                            entry.operation(),
+                            KernelClass::Unclassified,
+                            "{} must have a typed operation before it can claim a GPU win",
+                            entry.workload
+                        );
+                        assert!(
+                            entry.released_path().is_some(),
+                            "{} @ {} claims a GPU win without a released Resident v2 planner/executor family",
+                            entry.workload,
+                            entry.rows
+                        );
                     }
                     BenchmarkLaneExpectation::NativeDecline { reason } => {
                         assert!(!reason.is_empty());
                         assert_eq!(entry.expectation.label(), "native_decline");
                         assert_eq!(entry.expectation.decline_reason(), Some(reason));
+                        assert_eq!(entry.backend(), EnvelopeBackend::PostgreSqlNative);
+                        assert_eq!(entry.residency(), EnvelopeResidency::NotRequired);
+                        assert_eq!(entry.released_path(), None);
                     }
                 }
             }
@@ -5035,5 +5215,49 @@ mod tests {
             "~2500 matching heap rows (25%)"
         );
         assert!(spatial_batch_count(100_000, 8_192).contains("13 batches"));
+    }
+
+    #[test]
+    fn released_path_contract_rejects_unsupported_winner_flip() {
+        let mut unsupported = benchmark_threshold_matrix_entry("grouped_agg", 1_000_000)
+            .expect("native float groupagg envelope");
+        assert_eq!(unsupported.released_path(), None);
+
+        unsupported.expectation = BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        };
+        assert_eq!(unsupported.released_path(), None);
+        assert!(
+            std::panic::catch_unwind(|| validate_performance_envelope(unsupported)).is_err(),
+            "changing an unsupported native lane to GpuWinner must not create a released path"
+        );
+    }
+
+    #[test]
+    fn released_path_contract_rejects_out_of_band_and_native_flips() {
+        let mut below_band = benchmark_threshold_matrix_entry("grouped_agg_int4", 10_000)
+            .expect("below-band exact groupagg envelope");
+        assert_eq!(below_band.released_path(), None);
+        below_band.expectation = BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        };
+        assert!(
+            std::panic::catch_unwind(|| validate_performance_envelope(below_band)).is_err(),
+            "changing an out-of-band native lane to GpuWinner must not create a released path"
+        );
+
+        let mut released = benchmark_threshold_matrix_entry("grouped_agg_int4", 1_000_000)
+            .expect("released exact groupagg envelope");
+        assert_eq!(
+            released.released_path(),
+            Some(ReleasedPathFamily::GroupedAggregate)
+        );
+        released.expectation = BenchmarkLaneExpectation::NativeDecline {
+            reason: "test_only_expectation_flip",
+        };
+        assert!(
+            std::panic::catch_unwind(|| validate_performance_envelope(released)).is_err(),
+            "a native expectation must not conceal a released winner cell"
+        );
     }
 }

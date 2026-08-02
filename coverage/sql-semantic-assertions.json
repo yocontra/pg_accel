@@ -1,8 +1,8 @@
 {
-  "baseline_assertions": 287,
-  "baseline_files": 52,
-  "declared_assertions": 287,
-  "declared_files": 52,
+  "baseline_assertions": 293,
+  "baseline_files": 54,
+  "declared_assertions": 293,
+  "declared_files": 54,
   "files": [
     {
       "assertions": [
@@ -192,12 +192,12 @@
           "guard_sha256": "f26b4c0c86dce378f7eabf2c4725e1105ad57fc5526f26a1344977675005e7d3",
           "guard_token_count": 1,
           "id": "12_h3_operations.assert_001",
-          "source_line": 176
+          "source_line": 175
         }
       ],
       "completion_id": "12_h3_operations",
       "file": "12_h3_operations.sql",
-      "sha256": "24655c119870621d64482eebb580f0c951a98bec15329faf27d217197675a19d"
+      "sha256": "21f2a2b9627b4ef5eb212b4592da5237a4a582e0b987007a646bf7cbe7d8791c"
     },
     {
       "assertions": [
@@ -687,7 +687,7 @@
       ],
       "completion_id": "43_sort_topk",
       "file": "43_sort_topk.sql",
-      "sha256": "006afa869affbbdbcff3903392762a48320290805aef3dcea317b8a37180577e"
+      "sha256": "2940e2f610193fc3e42bc1d79a62ac6d98b41541eef09e767ed2d5c105597b3e"
     },
     {
       "assertions": [
@@ -790,7 +790,7 @@
       ],
       "completion_id": "50_hash_agg_groupby",
       "file": "50_hash_agg_groupby.sql",
-      "sha256": "01748f907274d1ffca89b3cb6664e0569ae92ed2ac4dddbcab2e45b1ba022f1f"
+      "sha256": "212e79fc3ec2242ae7115a41870c8df36d3a25a1b615af30d589afa29230a517"
     },
     {
       "assertions": [
@@ -845,7 +845,7 @@
       ],
       "completion_id": "51_hash_agg_edge_cases",
       "file": "51_hash_agg_edge_cases.sql",
-      "sha256": "426719aec5e3f5896df5756adb32cae9035e44a4d086c9d7e107db8a8fe04556"
+      "sha256": "fec7d236056ee1fe0e5b7bd4cc572dc260065f87ab3669c98d06428378510484"
     },
     {
       "assertions": [
@@ -940,7 +940,7 @@
       ],
       "completion_id": "55_hash_join",
       "file": "55_hash_join.sql",
-      "sha256": "df6fb461f22507c4c60a81da01db97b7bb2cc5f89b8864dfa782d9bf22bf6e10"
+      "sha256": "6d8a66833d3d26dd1cf67804c54978aa004352b0cef0654cf10ced53fabea088"
     },
     {
       "assertions": [
@@ -1011,7 +1011,7 @@
       ],
       "completion_id": "56_hash_join_edge_cases",
       "file": "56_hash_join_edge_cases.sql",
-      "sha256": "7400dcd491d36f1757b42a61c1a3107d116d5311bdd7d3733a656c6d6b872264"
+      "sha256": "943be4e5d8925212ed8eb0732b307a3e83bd1d8d3e4787a1655c4bc729fc5970"
     },
     {
       "assertions": [
@@ -1114,7 +1114,7 @@
       ],
       "completion_id": "60_window_functions",
       "file": "60_window_functions.sql",
-      "sha256": "1e444e348457276263e0f2c6bdb7d41b536e53d49a1d5a76b5f22f43d9f394c6"
+      "sha256": "06cd3f607ab1c8c920ca632aba1e6021fbf06c7bd3cadbe2605408222f760e70"
     },
     {
       "assertions": [
@@ -1439,7 +1439,7 @@
       ],
       "completion_id": "80_null_exhaustive",
       "file": "80_null_exhaustive.sql",
-      "sha256": "e5ebd9ae78ec47e76ee5aa5a08050f3071f797dc9914a40222869696a124d746"
+      "sha256": "92dcfe1c4d8d02663ae08694b77051b0aeb9416f7c498adf3c6414a196e2819a"
     },
     {
       "assertions": [
@@ -2179,7 +2179,7 @@
       ],
       "completion_id": "84_transaction_semantics",
       "file": "84_transaction_semantics.sql",
-      "sha256": "d3542d0a06f3ba748139c082fba210d38d76d52e0e205d5d333ecbe568db1826"
+      "sha256": "e01efd2f00ab24e077d189fa3fbfa4a5b0ec7dad4a720704ed2d8c24fd57d46d"
     },
     {
       "assertions": [
@@ -2189,7 +2189,7 @@
           "guard_sha256": "3b2bc55c6b8f10898c37fae88cdad134f78b2178b9462d27455bbd202a5b420f",
           "guard_token_count": 2,
           "id": "85_function_matrix.assert_002",
-          "source_line": 99
+          "source_line": 98
         },
         {
           "emission": "echo",
@@ -2197,7 +2197,7 @@
           "guard_sha256": "ce3b1c24c903b76c05604854977e699cf21a14e6e97bf6c27680a3bd2448a541",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_003",
-          "source_line": 122
+          "source_line": 121
         },
         {
           "emission": "echo",
@@ -2205,7 +2205,7 @@
           "guard_sha256": "6ebc9d90f219fd060d10f2ab28d4af7121065fb290ecb4cbe433246870ca57ab",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_004",
-          "source_line": 145
+          "source_line": 144
         },
         {
           "emission": "echo",
@@ -2213,7 +2213,7 @@
           "guard_sha256": "22034919c0614f95c00c9947b9403c24c904991f25f38a055e7b50b8cd09321e",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_005",
-          "source_line": 168
+          "source_line": 167
         },
         {
           "emission": "echo",
@@ -2221,7 +2221,7 @@
           "guard_sha256": "33ecaff6aafcaf3860e430d95aaf6233fb1d7f7ceffef9a047125e343623c4fa",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_006",
-          "source_line": 191
+          "source_line": 190
         },
         {
           "emission": "echo",
@@ -2229,7 +2229,7 @@
           "guard_sha256": "2d44d38a2a773f65793b4bb950b900571ad765820745afd27b30ca1ad097b906",
           "guard_token_count": 2,
           "id": "85_function_matrix.assert_007",
-          "source_line": 216
+          "source_line": 215
         },
         {
           "emission": "echo",
@@ -2237,7 +2237,7 @@
           "guard_sha256": "9cdb6f5ec6fea6ac3ad56aeffae3e26f40b22fbd4ca0fce0efe862252da5f600",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_008",
-          "source_line": 239
+          "source_line": 238
         },
         {
           "emission": "echo",
@@ -2245,7 +2245,7 @@
           "guard_sha256": "fb003c704f75a8eae817fc73be9682b0e95f2e853b80678d3ea9330be002f3d0",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_009",
-          "source_line": 262
+          "source_line": 261
         },
         {
           "emission": "echo",
@@ -2253,7 +2253,7 @@
           "guard_sha256": "8858637975677c9d5e65e8a11021dfaa9ec21ecc9d9b209f961094372edf1e9b",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_010",
-          "source_line": 291
+          "source_line": 290
         },
         {
           "emission": "echo",
@@ -2261,7 +2261,7 @@
           "guard_sha256": "1a1e38589ac699736a1ee28b9f7dc2090fa3a02a4f1fe31bfe88cd781b79507a",
           "guard_token_count": 2,
           "id": "85_function_matrix.assert_011",
-          "source_line": 316
+          "source_line": 315
         },
         {
           "emission": "echo",
@@ -2269,7 +2269,7 @@
           "guard_sha256": "8c7adb8a27fc594e98f2c085839391fedcfb62422a99b1f05e7358d5992abacf",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_020",
-          "source_line": 339
+          "source_line": 338
         },
         {
           "emission": "echo",
@@ -2277,7 +2277,7 @@
           "guard_sha256": "8ffd89de1e5a3474bee6dc93031dd71f86153bda950fa7784f4604795eab6365",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_012",
-          "source_line": 348
+          "source_line": 347
         },
         {
           "emission": "echo",
@@ -2285,7 +2285,7 @@
           "guard_sha256": "4f763a79b770b2f9eebbdcc42f3b4d30350411d28c93d824bd7e03afdf7c6a68",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_013",
-          "source_line": 375
+          "source_line": 374
         },
         {
           "emission": "echo",
@@ -2293,7 +2293,7 @@
           "guard_sha256": "7945988025f066c6b65c3ef423c83796bdc1875bcc0fcaad551a32746a8028f2",
           "guard_token_count": 2,
           "id": "85_function_matrix.assert_014",
-          "source_line": 401
+          "source_line": 400
         },
         {
           "emission": "notice",
@@ -2301,7 +2301,7 @@
           "guard_sha256": "90084ff6c7a9a5697ce8760a96902b003faca470a4873eecd186e65a16efefa6",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_001",
-          "source_line": 421
+          "source_line": 420
         },
         {
           "emission": "echo",
@@ -2309,7 +2309,7 @@
           "guard_sha256": "3cc1d09fa7ccd0994d24f5286b9cddde29e2b1032b99d91251dba8f7ecfc5617",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_015",
-          "source_line": 427
+          "source_line": 426
         },
         {
           "emission": "echo",
@@ -2317,7 +2317,7 @@
           "guard_sha256": "ce370f5e7c84eee56de5a8fad6bd863c8cd7acbcb29ba1d5a72396d6d72aad4d",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_016",
-          "source_line": 452
+          "source_line": 451
         },
         {
           "emission": "echo",
@@ -2325,7 +2325,7 @@
           "guard_sha256": "d20e5f39cf022db58818877e87149dcf3e36232a1d5f6cd694a220339088a987",
           "guard_token_count": 6,
           "id": "85_function_matrix.assert_017",
-          "source_line": 477
+          "source_line": 476
         },
         {
           "emission": "echo",
@@ -2333,7 +2333,7 @@
           "guard_sha256": "9a7160cae80a8478b85ae484fc769d78b4701510cf7a08ae387055bed685027e",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_018",
-          "source_line": 498
+          "source_line": 497
         },
         {
           "emission": "echo",
@@ -2341,7 +2341,7 @@
           "guard_sha256": "903d174fb54b32b4b4d3e2ea0fe6f4c343a5d0a9c40b11c35bfe150add15632c",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_019",
-          "source_line": 519
+          "source_line": 518
         },
         {
           "emission": "echo",
@@ -2349,7 +2349,7 @@
           "guard_sha256": "3b7acbbb6129252e61da2904494748765d395a7ea9ad8a25629af40b2fa36ee4",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_021",
-          "source_line": 593
+          "source_line": 592
         },
         {
           "emission": "echo",
@@ -2357,7 +2357,7 @@
           "guard_sha256": "0bf0e78e035227564c5d4ac8bb8f1945dd60461d7e04648db513f9a99fab8195",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_022",
-          "source_line": 613
+          "source_line": 612
         },
         {
           "emission": "echo",
@@ -2365,7 +2365,7 @@
           "guard_sha256": "1c68b669d8f116dc54a166e520004a13e98caac2a67eaa02f0774908721b5396",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_023",
-          "source_line": 633
+          "source_line": 632
         },
         {
           "emission": "echo",
@@ -2373,7 +2373,7 @@
           "guard_sha256": "8121384dd98268839f0c7508010d3c9ddd042b8423cf071e807ae403112833c4",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_024",
-          "source_line": 653
+          "source_line": 652
         },
         {
           "emission": "echo",
@@ -2381,7 +2381,7 @@
           "guard_sha256": "49b979d1dc395bca32a58cc25acad76b03b50e16100208fc21d1ed7b7c165c23",
           "guard_token_count": 2,
           "id": "85_function_matrix.assert_025",
-          "source_line": 692
+          "source_line": 691
         },
         {
           "emission": "echo",
@@ -2389,7 +2389,7 @@
           "guard_sha256": "4621fabc3802caec4bc1575a7cf6269622dc325a68abbaaa0b8172f46853719e",
           "guard_token_count": 8,
           "id": "85_function_matrix.assert_026",
-          "source_line": 718
+          "source_line": 717
         },
         {
           "emission": "echo",
@@ -2397,7 +2397,7 @@
           "guard_sha256": "7c6c233a489373f5ef64ba278ad88153536405588ef3c1434684da302d78fa03",
           "guard_token_count": 2,
           "id": "85_function_matrix.assert_027",
-          "source_line": 743
+          "source_line": 742
         },
         {
           "emission": "echo",
@@ -2405,7 +2405,7 @@
           "guard_sha256": "d791567bdbb87a29f170bffdbea99aee023623997e5000f2da1e847bc16a912c",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_028",
-          "source_line": 767
+          "source_line": 766
         },
         {
           "emission": "echo",
@@ -2413,7 +2413,7 @@
           "guard_sha256": "a0e9ca0b74f4d27a59c93c914beb6c0aed168486f73c3ffa000134346230b7a9",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_029",
-          "source_line": 791
+          "source_line": 790
         },
         {
           "emission": "echo",
@@ -2421,7 +2421,7 @@
           "guard_sha256": "fe81f0750bcd9ed50298124d0684ef4d403aee5d615b242e5991eb27c16d9e89",
           "guard_token_count": 8,
           "id": "85_function_matrix.assert_030",
-          "source_line": 818
+          "source_line": 817
         },
         {
           "emission": "echo",
@@ -2429,7 +2429,7 @@
           "guard_sha256": "8cccc9f76f5dd97778148f59a70f57c2d2db03a66fa9524aa19b2953bc3e13e3",
           "guard_token_count": 2,
           "id": "85_function_matrix.assert_031",
-          "source_line": 856
+          "source_line": 855
         },
         {
           "emission": "echo",
@@ -2437,7 +2437,7 @@
           "guard_sha256": "f798f98c45beb99bcc631fe953c4c493eb267c29a82de3029069cfbb6a379b5a",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_032",
-          "source_line": 878
+          "source_line": 877
         },
         {
           "emission": "echo",
@@ -2445,7 +2445,7 @@
           "guard_sha256": "8249a6a591e832298b7afcd465b3f86de837a0ea65f6351571ef557b121b0731",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_033",
-          "source_line": 903
+          "source_line": 902
         },
         {
           "emission": "echo",
@@ -2453,7 +2453,7 @@
           "guard_sha256": "2c01afc4edfc9784d8d1a34b1f6eace48a26bfd953ce18b487893adeb4577ad7",
           "guard_token_count": 5,
           "id": "85_function_matrix.assert_034",
-          "source_line": 935
+          "source_line": 934
         },
         {
           "emission": "echo",
@@ -2461,7 +2461,7 @@
           "guard_sha256": "5ed2034ebc71c6baea9a7bc5aa0eec260760163e62a44f5cadca2e9670e28060",
           "guard_token_count": 9,
           "id": "85_function_matrix.assert_035",
-          "source_line": 973
+          "source_line": 972
         },
         {
           "emission": "echo",
@@ -2469,7 +2469,7 @@
           "guard_sha256": "d9213781506f1daabb468b91b42a05f96c1cfda6f67aa62a80ef67c2816caa04",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_036",
-          "source_line": 1001
+          "source_line": 1000
         },
         {
           "emission": "notice",
@@ -2477,7 +2477,7 @@
           "guard_sha256": "0fd01cc1d0b8d155ff402dc98140f0f8fdb6b22629967e4c68c7a7d51b2d0a93",
           "guard_token_count": 8,
           "id": "85_function_matrix.assert_037",
-          "source_line": 1064
+          "source_line": 1063
         },
         {
           "emission": "notice",
@@ -2485,7 +2485,7 @@
           "guard_sha256": "eb808ef31fcfafd29f6521ca45778fe84e98e819b2d6762d894081f59b08ade6",
           "guard_token_count": 8,
           "id": "85_function_matrix.assert_051",
-          "source_line": 1104
+          "source_line": 1103
         },
         {
           "emission": "notice",
@@ -2493,7 +2493,7 @@
           "guard_sha256": "674321f979975bb22d15413c7ef014c9b971816d036d071fa130ec4a7b5d24fc",
           "guard_token_count": 8,
           "id": "85_function_matrix.assert_052",
-          "source_line": 1144
+          "source_line": 1143
         },
         {
           "emission": "echo",
@@ -2501,7 +2501,7 @@
           "guard_sha256": "50e8f8f880ebe777d0c3c52fda110ceb8dd8c61bca06f4fcd66b820dd832b741",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_038",
-          "source_line": 1184
+          "source_line": 1183
         },
         {
           "emission": "echo",
@@ -2509,7 +2509,7 @@
           "guard_sha256": "26b822fa3c7fd20213f9dbbc4b243a4a9f5ec9de187771659725603564d094fb",
           "guard_token_count": 5,
           "id": "85_function_matrix.assert_039",
-          "source_line": 1217
+          "source_line": 1216
         },
         {
           "emission": "echo",
@@ -2517,7 +2517,7 @@
           "guard_sha256": "f3368346819673a3ca4159f9e2d4430ad39bec0a816f68c8689d1c4b49724f5b",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_040",
-          "source_line": 1246
+          "source_line": 1245
         },
         {
           "emission": "echo",
@@ -2525,7 +2525,7 @@
           "guard_sha256": "576a01535f7a62b2a4d428ba71bea4714d1fdc6aa012f748cf6ea28ff0fe9a56",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_041",
-          "source_line": 1270
+          "source_line": 1269
         },
         {
           "emission": "echo",
@@ -2533,7 +2533,7 @@
           "guard_sha256": "dc26936fc91b7629fad26ecad46818c0c00ce2e8d9f9f350df31a7be7fe5f986",
           "guard_token_count": 6,
           "id": "85_function_matrix.assert_042",
-          "source_line": 1295
+          "source_line": 1294
         },
         {
           "emission": "echo",
@@ -2541,7 +2541,7 @@
           "guard_sha256": "a1fb22ac65e78597164720e98d3f6680cf880bea76d6c2c7cbcf20b85be5fdb6",
           "guard_token_count": 7,
           "id": "85_function_matrix.assert_043",
-          "source_line": 1321
+          "source_line": 1320
         },
         {
           "emission": "echo",
@@ -2549,7 +2549,7 @@
           "guard_sha256": "c9718b9926cd8d71adf9fc318b09ebf97f3a1270cea100910e8c325a5b8a83b7",
           "guard_token_count": 8,
           "id": "85_function_matrix.assert_044",
-          "source_line": 1348
+          "source_line": 1347
         },
         {
           "emission": "echo",
@@ -2557,7 +2557,7 @@
           "guard_sha256": "d0f54ab2995fd793441c79e011b85c816dae18a0bc860fb7b382326b8bdce47c",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_045",
-          "source_line": 1379
+          "source_line": 1378
         },
         {
           "emission": "echo",
@@ -2565,7 +2565,7 @@
           "guard_sha256": "ddf18f86b8e9ca59ea2ce3a31b8043711249d59982ed8c07fe997e4d5e42b1ba",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_046",
-          "source_line": 1406
+          "source_line": 1405
         },
         {
           "emission": "echo",
@@ -2573,7 +2573,7 @@
           "guard_sha256": "2fe6ef488e1ce6a6baf807aec3242f8e3821a2d18b53e34f8baf6879d3723443",
           "guard_token_count": 9,
           "id": "85_function_matrix.assert_047",
-          "source_line": 1442
+          "source_line": 1441
         },
         {
           "emission": "echo",
@@ -2581,7 +2581,7 @@
           "guard_sha256": "cb1641fa955e3d71458891f37b548655ae8ec2cfdd55d6e9aa1b987d30a03859",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_048",
-          "source_line": 1471
+          "source_line": 1470
         },
         {
           "emission": "echo",
@@ -2589,7 +2589,7 @@
           "guard_sha256": "b230759b5e5f31552a117cf25ca5e514854864d1354f2ca9ce21202262649e75",
           "guard_token_count": 4,
           "id": "85_function_matrix.assert_049",
-          "source_line": 1496
+          "source_line": 1495
         },
         {
           "emission": "echo",
@@ -2597,12 +2597,12 @@
           "guard_sha256": "860946f3050e63752dc5af22119d82ca20d051d4831814c098170995ce5e3bec",
           "guard_token_count": 6,
           "id": "85_function_matrix.assert_050",
-          "source_line": 1531
+          "source_line": 1530
         }
       ],
       "completion_id": "85_function_matrix",
       "file": "85_function_matrix.sql",
-      "sha256": "a68d41242fa88691c4118d06040d8490bed3a466d7495236d6c0e5437228c1a4"
+      "sha256": "6b8956a376d384140822f3a8073e8f1c0d668e5550b50ce8a030cbd7977d66e6"
     },
     {
       "assertions": [
@@ -2632,7 +2632,7 @@
       ],
       "completion_id": "87_type_coercion",
       "file": "87_type_coercion.sql",
-      "sha256": "830ac228d2cf8b6cf089871d6cee41062677fd206ed8e99004ec5c761dcc93c4"
+      "sha256": "a16ff74d21990a11a05c1e8e7157b5bf16e8decc80650d687dba74ecac73af1e"
     },
     {
       "assertions": [
@@ -2663,6 +2663,68 @@
       "completion_id": "89_regression_guards",
       "file": "89_regression_guards.sql",
       "sha256": "7ea5c523a198233b782c7dddef3160949ae18b511b5b4f45012bcba7f3c13344"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 11,
+          "guard_sha256": "d4d520768b7bf182f48953188d7225c35c332ea3d6beb179f0b97c9ccfde6fa2",
+          "guard_token_count": 14,
+          "id": "90_selected_path_contract.assert_001",
+          "source_line": 128
+        }
+      ],
+      "completion_id": "90_selected_path_contract",
+      "file": "90_selected_path_contract.sql",
+      "sha256": "205763b23040cf312c8d491c636f22f7f09eba286eea72f5bb54b7860604479c"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "396227886956b74a2403fc2169a33160839d13013c3043240cdf90d8709d8007",
+          "guard_token_count": 15,
+          "id": "91_selected_family_contracts.assert_001",
+          "source_line": 113
+        },
+        {
+          "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "3e4dc689ee4140b650c651b389e3855ca21a9f1b4a291ffde95815b9ec752ff2",
+          "guard_token_count": 11,
+          "id": "91_selected_family_contracts.assert_002",
+          "source_line": 227
+        },
+        {
+          "emission": "echo",
+          "guard_count": 6,
+          "guard_sha256": "f9172f6b08ac00cba99dc99a08a861d13f702e9668c60b85dfd08d40f61f4e04",
+          "guard_token_count": 19,
+          "id": "91_selected_family_contracts.assert_003",
+          "source_line": 325
+        },
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "14a53a60eb7f6268e3895c7b4f0bb819a0127e6ac5cf8beb2653698370722c56",
+          "guard_token_count": 8,
+          "id": "91_selected_family_contracts.assert_004",
+          "source_line": 373
+        },
+        {
+          "emission": "echo",
+          "guard_count": 8,
+          "guard_sha256": "33f985d684cce5c9b6f4122273c80e9bdffb6a78555c7bf27eca2d476c5cd590",
+          "guard_token_count": 18,
+          "id": "91_selected_family_contracts.assert_005",
+          "source_line": 483
+        }
+      ],
+      "completion_id": "91_selected_family_contracts",
+      "file": "91_selected_family_contracts.sql",
+      "sha256": "ad620a47a3c15c5185791e74afedd5646b15e51e7ffdb1ac0ff4a84cebc7ccf8"
     }
   ],
   "kind": "sql-semantic-assertion-manifest",
