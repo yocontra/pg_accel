@@ -74,6 +74,36 @@ pub struct NativeDeclineEvidence {
     pub source: DeclineReasonSource,
 }
 
+/// Planner-hook work attributed to one stage during a single accelerated
+/// benchmark query. These are deltas from the backend-local cumulative stage
+/// counters, not snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannerStageDelta {
+    pub stage: String,
+    pub calls: u64,
+    pub elapsed_us: u64,
+    pub fast_declines: u64,
+}
+
+/// Off-clock planner-stage evidence for one measured accel/baseline pair.
+///
+/// `pair_index` indexes [`WorkloadResult::iterations`]. The snapshot query is
+/// prepared once before both snapshots, so its own planning is excluded from
+/// these deltas and the snapshots execute outside the timed query interval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannerStageCapture {
+    pub pair_index: usize,
+    pub cache_state: CacheState,
+    pub stages: Vec<PlannerStageDelta>,
+    /// Immediate second execution of the prepared observer statement. Every
+    /// delta must be zero; non-zero values mean observer planning may have
+    /// contaminated the target interval and make the capture invalid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observer_probe: Vec<PlannerStageDelta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Summary statistics for one cache state (warm or cold) of a workload.
 ///
 /// Populated by [`WorkloadResult::from_iterations`] by partitioning the
@@ -202,6 +232,10 @@ pub struct WorkloadResult {
     /// Row count this result was measured at.
     pub rows: usize,
     pub iterations: Vec<IterationResult>,
+    /// Per-pair, off-clock planner-stage deltas for native-decline benchmark
+    /// cells. Entries index `iterations`; absent for non-native cells.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planner_stage_captures: Vec<PlannerStageCapture>,
     /// Whether PostgreSQL selected a pg_accel Custom Scan plan node.
     ///
     /// This is intentionally separate from runtime GPU dispatch: aggregate
@@ -267,6 +301,11 @@ pub struct WorkloadResult {
     /// truth for GPU-dispatched wins.
     #[serde(default)]
     pub gpu_kernel_execution_delta: u64,
+    /// Delta of `pg_accel_stats().queries_accelerated` captured on the same
+    /// backend around measured accel executions. Selected Custom Scan credit
+    /// requires this to cover every measured pair.
+    #[serde(default)]
+    pub pg_accel_queries_accelerated_delta: u64,
     /// Delta of `pg_accel_stats().rows_dispatched`.
     #[serde(default)]
     pub pg_accel_rows_dispatched_delta: u64,
@@ -1022,6 +1061,7 @@ impl WorkloadResult {
             warmup_parallel_max_ms: None,
             dispatch_counter_captured: false,
             gpu_kernel_execution_delta: 0,
+            pg_accel_queries_accelerated_delta: 0,
             pg_accel_rows_dispatched_delta: 0,
             pg_accel_batches_executed_delta: 0,
             pg_accel_gpu_rows_processed_delta: 0,
@@ -1069,6 +1109,7 @@ impl WorkloadResult {
             cold_summary,
             cold_shared_buffers_resident: None,
             iterations,
+            planner_stage_captures: Vec::new(),
         }
     }
 
@@ -1253,10 +1294,12 @@ fn infer_dispatch_classification(
         || full_plan.is_some_and(plan_contains_custom_scan_marker);
     let explicit_gpu_dispatch_disabled = plan_explicit_gpu_dispatched(snippet) == Some(false)
         || full_plan.and_then(plan_explicit_gpu_dispatched) == Some(false);
-    let counter_capture_known = dispatch_counter_capture_known(w);
+    let counter_capture_known = w.dispatch_counter_captured;
     let counter_proves_kernel = w.gpu_kernel_execution_delta > 0;
     let function_candidate = known_function_srf_kernel_workload(w);
     let output_consumed = w.accel_output_rows_consumed > 0;
+    let selected_queries_consumed = usize::try_from(w.pg_accel_queries_accelerated_delta)
+        .is_ok_and(|queries| queries >= w.iterations.len());
     let function_srf_kernel_dispatched = function_candidate
         && !explicit_gpu_dispatch_disabled
         && !plan_selected
@@ -1265,10 +1308,12 @@ fn infer_dispatch_classification(
         && output_consumed
         && w.pg_accel_stock_exec_delta == 0;
 
-    let custom_scan_gpu_dispatched = counter_capture_known
+    let custom_scan_gpu_dispatched = plan_selected
+        && counter_capture_known
         && !explicit_gpu_dispatch_disabled
         && counter_proves_kernel
-        && (!function_candidate || plan_selected || output_consumed)
+        && selected_queries_consumed
+        && output_consumed
         && w.pg_accel_stock_exec_delta == 0;
 
     let gpu_kernel_dispatched = custom_scan_gpu_dispatched || function_srf_kernel_dispatched;
@@ -1389,17 +1434,6 @@ pub fn is_function_kernel_candidate(
         || description.to_ascii_lowercase().contains("st_mapalgebra")
         || description.to_ascii_lowercase().contains("st_slope")
         || description.to_ascii_lowercase().contains("st_reclass")
-}
-
-fn dispatch_counter_capture_known(w: &WorkloadResult) -> bool {
-    w.dispatch_counter_captured
-        || w.dispatch_counter_error.is_some()
-        || w.gpu_kernel_execution_delta > 0
-        || w.pg_accel_rows_dispatched_delta > 0
-        || w.pg_accel_batches_executed_delta > 0
-        || w.pg_accel_gpu_rows_processed_delta > 0
-        || w.pg_accel_stock_exec_delta > 0
-        || w.accel_output_rows_consumed > 0
 }
 
 #[allow(dead_code)]
@@ -3675,7 +3709,7 @@ impl BenchReport {
              function_srf_kernel_dispatched,planner_declined,\
              custom_scan_selected_not_dispatched,function_kernel_count,\
              rows_returned_to_cpu,gpu_resident_pipeline,dispatch_counter_captured,\
-             gpu_kernel_execution_delta,pg_accel_rows_dispatched_delta,\
+             gpu_kernel_execution_delta,pg_accel_queries_accelerated_delta,pg_accel_rows_dispatched_delta,\
              pg_accel_batches_executed_delta,pg_accel_gpu_rows_processed_delta,\
              pg_accel_stock_exec_delta,\
              accel_output_rows_consumed,rows,correctness_diff_artifact,\
@@ -3710,7 +3744,7 @@ impl BenchReport {
             let sanity_check_failed = w.sanity_checks.iter().filter(|check| !check.passed).count();
             let _ = writeln!(
                 out,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},\
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\
                  {},{},{},{},{},{},{},{},{},{},{},{},{},{},{},\
                  {:.4},{:.4},{:.4},{:.4},{:.4},{:.4},\
                  {:.4},{:.4},{:.4},\
@@ -3731,6 +3765,7 @@ impl BenchReport {
                 w.gpu_resident_pipeline.as_str(),
                 w.dispatch_counter_captured,
                 w.gpu_kernel_execution_delta,
+                w.pg_accel_queries_accelerated_delta,
                 w.pg_accel_rows_dispatched_delta,
                 w.pg_accel_batches_executed_delta,
                 w.pg_accel_gpu_rows_processed_delta,
@@ -4325,6 +4360,14 @@ impl BenchReport {
             .iter()
             .filter(|w| w.gpu_kernel_execution_delta > 0)
             .count();
+        let accelerated_query_coverage = report
+            .workloads
+            .iter()
+            .filter(|w| {
+                usize::try_from(w.pg_accel_queries_accelerated_delta)
+                    .is_ok_and(|queries| queries >= w.iterations.len())
+            })
+            .count();
         let stock_exec_positive = report
             .workloads
             .iter()
@@ -4396,6 +4439,10 @@ impl BenchReport {
         );
         let _ = writeln!(
             out,
+            "| Accelerated-query counter covers measured pairs | {accelerated_query_coverage} |"
+        );
+        let _ = writeln!(
+            out,
             "| pg_accel stock executor fallback delta > 0 | {stock_exec_positive} |"
         );
         let _ = writeln!(
@@ -4443,11 +4490,11 @@ impl BenchReport {
         let _ = writeln!(
             out,
             "| Workload | Scale | Classification | Function kernel count | Rows returned to CPU | \
-             Correctness diff | GPU-resident pipeline | Resident boundary | Kernel delta | Rows dispatched | GPU rows processed | Stock fallback |"
+             Correctness diff | GPU-resident pipeline | Resident boundary | Kernel delta | Accelerated queries | Rows dispatched | GPU rows processed | Stock fallback |"
         );
         let _ = writeln!(
             out,
-            "|---|---|---|---:|---:|---|---|---|---:|---:|---:|---:|"
+            "|---|---|---|---:|---:|---|---|---|---:|---:|---:|---:|---:|"
         );
         for w in &report.workloads {
             let classification = dispatch_evidence_label(w);
@@ -4455,7 +4502,7 @@ impl BenchReport {
             let correctness_diff = w.correctness_diff_artifact.as_deref().unwrap_or("-");
             let _ = writeln!(
                 out,
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                 markdown_cell(&w.name),
                 format_rows(w.rows),
                 classification,
@@ -4465,6 +4512,7 @@ impl BenchReport {
                 w.gpu_resident_pipeline.as_str(),
                 markdown_cell(resident_boundary),
                 w.gpu_kernel_execution_delta,
+                w.pg_accel_queries_accelerated_delta,
                 w.pg_accel_rows_dispatched_delta,
                 w.pg_accel_gpu_rows_processed_delta,
                 w.pg_accel_stock_exec_delta,
@@ -5636,7 +5684,7 @@ mod tests {
                 }
             })
             .collect();
-        WorkloadResult::from_iterations(
+        let mut result = WorkloadResult::from_iterations(
             name.to_owned(),
             format!("Mock workload: {name}"),
             "gpu".to_owned(),
@@ -5644,7 +5692,9 @@ mod tests {
             rows,
             iterations,
             true,
-        )
+        );
+        result.pg_accel_queries_accelerated_delta = 10;
+        result
     }
 
     #[test]
@@ -5832,6 +5882,9 @@ mod tests {
         workload.cold_summary =
             CacheModeSummary::from_iterations(CacheState::Cold, &cold_iterations);
         workload.iterations.extend(cold_iterations);
+        workload.pg_accel_queries_accelerated_delta = workload
+            .pg_accel_queries_accelerated_delta
+            .saturating_add(10);
         workload.cold_shared_buffers_resident = Some(false);
         workload
     }
@@ -6408,6 +6461,7 @@ mod tests {
         let mut dispatching = mock_workload_result("gpu_dispatch", 100_000, 10.0, 50.0);
         dispatching.dispatch_counter_captured = true;
         dispatching.gpu_kernel_execution_delta = 1;
+        dispatching.accel_output_rows_consumed = 10;
 
         let audit = mock_report(vec![
             clean,
@@ -6547,7 +6601,7 @@ mod tests {
         let csv = report.to_csv();
         assert!(csv.contains(
             "h3_cell_to_parent,gpu_h3,h3_cell_to_parent,true,true,false,false,false,0,10,\
-             reported,true,1,0,0,0,0,10,1000000"
+             reported,true,1,10,0,0,0,0,10,1000000"
         ));
     }
 
@@ -6705,6 +6759,7 @@ mod tests {
         let mut workload = mock_workload_result("generic_gpu_dispatch", 100_000, 20.0, 10.0);
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
         workload.plan_snippet = Some(
             "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Dispatched: true\n  \
              GPU Resident Pipeline: true\n  \
@@ -6746,9 +6801,13 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(
             failures[0].kind,
-            BenchmarkShipGateFailureKind::ExpectedWinnerMissingEvidence
+            BenchmarkShipGateFailureKind::SelectedPlanMissedDispatch
         );
-        assert!(failures[0].detail.contains("dispatch-counter"));
+        assert!(
+            failures[0]
+                .detail
+                .contains("without credited GPU kernel dispatch")
+        );
     }
 
     #[test]
@@ -7986,7 +8045,7 @@ mod tests {
         let csv = report.to_csv();
         assert!(csv.contains(
             "spatial_sel_90pct,gpu,unclassified,true,false,false,false,true,0,0,\
-             selected_not_dispatched,false,0,0,0,0,0,0,100000"
+             selected_not_dispatched,false,0,10,0,0,0,0,0,100000"
         ));
     }
 
@@ -8077,6 +8136,53 @@ mod tests {
         assert!(classification.plan_selected);
         assert!(!classification.gpu_kernel_dispatched);
         assert!(classification.custom_scan_selected_not_dispatched);
+    }
+
+    #[test]
+    fn dispatch_classification_requires_complete_counter_query_and_output_evidence() {
+        let mut workload = mock_workload_result("generic_gpu_dispatch", 100_000, 10.0, 20.0);
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.plan_snippet = Some("Custom Scan (GpuAccelAgg)".to_owned());
+        assert!(workload.dispatch_classification().gpu_kernel_dispatched);
+
+        workload.dispatch_counter_captured = false;
+        workload.dispatch_counter_error = Some("warm counter arm failed".to_owned());
+        assert!(
+            !workload.dispatch_classification().gpu_kernel_dispatched,
+            "an error marker and retained delta cannot replace complete capture"
+        );
+
+        workload.dispatch_counter_captured = true;
+        workload.dispatch_counter_error = None;
+        workload.pg_accel_queries_accelerated_delta = 9;
+        assert!(
+            !workload.dispatch_classification().gpu_kernel_dispatched,
+            "every measured selected pair needs queries_accelerated proof"
+        );
+
+        workload.pg_accel_queries_accelerated_delta = 10;
+        workload.accel_output_rows_consumed = 0;
+        assert!(
+            !workload.dispatch_classification().gpu_kernel_dispatched,
+            "kernel launch without consumed output is not performance credit"
+        );
+    }
+
+    #[test]
+    fn unattributed_kernel_delta_is_not_function_or_custom_scan_credit() {
+        let mut workload = mock_workload_result("generic_gpu_dispatch", 100_000, 10.0, 20.0);
+        workload.plan_selected = false;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 1;
+        workload.accel_output_rows_consumed = 10;
+        workload.plan_snippet = Some("Seq Scan on bench".to_owned());
+        let classification = workload.dispatch_classification();
+        assert!(!classification.gpu_kernel_dispatched);
+        assert!(!classification.function_srf_kernel_dispatched);
+        assert!(classification.planner_declined);
     }
 
     #[test]

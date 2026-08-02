@@ -11,6 +11,7 @@
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "pgaccel_expr.h"
@@ -24,6 +25,10 @@ static_assert(PGACCEL_H3_PARENT_DETAIL_NONE == 0);
 static_assert(PGACCEL_H3_PARENT_DETAIL_CONTRACT == 1);
 static_assert(PGACCEL_H3_PARENT_DETAIL_INVALID_CELL == 2);
 static_assert(PGACCEL_H3_PARENT_DETAIL_RES_MISMATCH == 3);
+static_assert(PGACCEL_H3_LATLNG_DETAIL_NONE == 0);
+static_assert(PGACCEL_H3_LATLNG_DETAIL_CONTRACT == 1);
+static_assert(PGACCEL_H3_LATLNG_DETAIL_NONFINITE == 2);
+static_assert(PGACCEL_H3_LATLNG_DETAIL_STRICT_RANGE == 3);
 
 template <typename T>
 class SharedResidentArray {
@@ -614,6 +619,200 @@ static void test_cell_to_parent_resident() {
             pgaccel_h3_cell_to_parent_resident_ex(nullptr, nullptr, 0, -1, nullptr, &detail),
             PGACCEL_INVALID_ARGUMENT);
   ASSERT_EQ("resident ex invalid resolution detail", detail, PGACCEL_H3_PARENT_DETAIL_CONTRACT);
+}
+
+static void test_lat_lng_to_cell_resident() {
+  printf("--- test_lat_lng_to_cell_resident ---\n");
+  const std::vector<double> latitudes = {0.0, 37.775938728915946, -33.8688, 12.0};
+  const std::vector<double> longitudes = {0.0, -122.41795063018799, 151.2093, 24.0};
+  const std::vector<uint8_t> latitude_nulls = {0, 0, 0, 1};
+  const std::vector<uint8_t> longitude_nulls = {0, 0, 0, 0};
+  std::vector<uint64_t> oracle(latitudes.size(), 0);
+  std::vector<uint8_t> oracle_valid(latitudes.size(), 0);
+  ASSERT_STATUS_OK("resident latlng oracle status",
+                   pgaccel_h3_lat_lng_to_cell_bulk(latitudes.data(), longitudes.data(),
+                                                   latitudes.size(), 9, 1, oracle.data(),
+                                                   oracle_valid.data()));
+
+  SharedResidentArray<double> resident_latitudes(latitudes);
+  SharedResidentArray<double> resident_longitudes(longitudes);
+  SharedResidentArray<uint8_t> resident_latitude_nulls(latitude_nulls);
+  SharedResidentArray<uint8_t> resident_longitude_nulls(longitude_nulls);
+  SharedResidentArray<uint64_t> cells(std::vector<uint64_t>(latitudes.size(), UINT64_MAX));
+  SharedResidentArray<uint8_t> output_nulls(std::vector<uint8_t>(latitudes.size(), 9));
+  int32_t detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+  pgaccel_reset_gpu_exec_count();
+  pgaccel_status status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      resident_latitudes.data(), resident_latitude_nulls.data(), resident_longitudes.data(),
+      resident_longitude_nulls.data(), latitudes.size(), 9, 1, 0, cells.data(), output_nulls.data(),
+      &detail);
+  ASSERT_STATUS_OK("resident latlng f64 status", status);
+  ASSERT_EQ("resident latlng success detail", detail, PGACCEL_H3_LATLNG_DETAIL_NONE);
+  ASSERT_TRUE("resident latlng dispatched", pgaccel_gpu_exec_count() > 0);
+  for (size_t row = 0; row < latitudes.size() - 1; ++row) {
+    ASSERT_EQ("resident latlng exact cell", cells[row], oracle[row]);
+    ASSERT_EQ("resident latlng nonnull output", output_nulls[row], uint8_t{0});
+  }
+  ASSERT_EQ("resident latlng NULL cell", cells[3], uint64_t{0});
+  ASSERT_EQ("resident latlng NULL sidecar", output_nulls[3], uint8_t{1});
+  ASSERT_TRUE("resident latitudes unchanged",
+              std::equal(latitudes.begin(), latitudes.end(), resident_latitudes.data()));
+  ASSERT_TRUE("resident longitudes unchanged",
+              std::equal(longitudes.begin(), longitudes.end(), resident_longitudes.data()));
+
+  const std::vector<float> latitudes_f32 = {10.25f, -45.5f};
+  const std::vector<float> longitudes_f32 = {-20.75f, 90.125f};
+  std::vector<uint64_t> oracle_f32(latitudes_f32.size(), 0);
+  std::vector<uint8_t> oracle_f32_valid(latitudes_f32.size(), 0);
+  ASSERT_STATUS_OK("resident latlng f32 oracle status",
+                   pgaccel_h3_lat_lng_to_cell_bulk(latitudes_f32.data(), longitudes_f32.data(),
+                                                   latitudes_f32.size(), 7, 0, oracle_f32.data(),
+                                                   oracle_f32_valid.data()));
+  SharedResidentArray<float> resident_latitudes_f32(latitudes_f32);
+  SharedResidentArray<float> resident_longitudes_f32(longitudes_f32);
+  SharedResidentArray<uint64_t> cells_f32(std::vector<uint64_t>(latitudes_f32.size(), UINT64_MAX));
+  SharedResidentArray<uint8_t> nulls_f32(std::vector<uint8_t>(latitudes_f32.size(), 9));
+  detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      resident_latitudes_f32.data(), nullptr, resident_longitudes_f32.data(), nullptr,
+      latitudes_f32.size(), 7, 0, 0, cells_f32.data(), nulls_f32.data(), &detail);
+  ASSERT_STATUS_OK("resident latlng f32 status", status);
+  ASSERT_EQ("resident latlng f32 detail", detail, PGACCEL_H3_LATLNG_DETAIL_NONE);
+  ASSERT_TRUE("resident latlng f32 cells exact",
+              std::equal(oracle_f32.begin(), oracle_f32.end(), cells_f32.data()));
+
+  SharedResidentArray<double> extended_latitude(std::vector<double>({100.0}));
+  SharedResidentArray<double> extended_longitude(std::vector<double>({540.0}));
+  SharedResidentArray<uint64_t> extended_cell(std::vector<uint64_t>({0}));
+  SharedResidentArray<uint8_t> extended_null(std::vector<uint8_t>({1}));
+  detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      extended_latitude.data(), nullptr, extended_longitude.data(), nullptr, 1, 5, 1, 0,
+      extended_cell.data(), extended_null.data(), &detail);
+  ASSERT_STATUS_OK("resident non-strict extended coordinates status", status);
+  ASSERT_EQ("resident non-strict extended coordinates detail", detail,
+            PGACCEL_H3_LATLNG_DETAIL_NONE);
+  ASSERT_EQ("resident non-strict extended coordinates match upstream wrapped H3", extended_cell[0],
+            UINT64_C(0x85015923fffffff));
+  ASSERT_EQ("resident non-strict extended coordinates are nonnull", extended_null[0], uint8_t{0});
+
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      extended_latitude.data(), nullptr, extended_longitude.data(), nullptr, 1, 5, 1, 1,
+      extended_cell.data(), extended_null.data(), &detail);
+  ASSERT_EQ("resident strict extended coordinates status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident strict extended coordinates detail", detail,
+            PGACCEL_H3_LATLNG_DETAIL_STRICT_RANGE);
+
+  SharedResidentArray<double> nonfinite_latitude(
+      std::vector<double>({std::numeric_limits<double>::infinity()}));
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      nonfinite_latitude.data(), nullptr, extended_longitude.data(), nullptr, 1, 5, 1, 0,
+      extended_cell.data(), extended_null.data(), &detail);
+  ASSERT_EQ("resident nonfinite coordinate status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident nonfinite coordinate detail", detail, PGACCEL_H3_LATLNG_DETAIL_NONFINITE);
+
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      nonfinite_latitude.data(), nullptr, extended_longitude.data(), nullptr, 1, 5, 1, 1,
+      extended_cell.data(), extended_null.data(), &detail);
+  ASSERT_EQ("resident strict nonfinite coordinate status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident strict nonfinite coordinate detail", detail,
+            PGACCEL_H3_LATLNG_DETAIL_NONFINITE);
+
+  SharedResidentArray<uint8_t> malformed_null(std::vector<uint8_t>({2}));
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      extended_latitude.data(), malformed_null.data(), extended_longitude.data(), nullptr, 1, 5, 1,
+      0, extended_cell.data(), extended_null.data(), &detail);
+  ASSERT_EQ("resident malformed latlng NULL status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident malformed latlng NULL detail", detail, PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      extended_latitude.data(), reinterpret_cast<const uint8_t*>(extended_latitude.data()),
+      extended_longitude.data(), nullptr, 1, 5, 1, 0, extended_cell.data(), extended_null.data(),
+      &detail);
+  ASSERT_EQ("resident overlapping latlng NULL status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident overlapping latlng NULL detail", detail, PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      resident_latitudes.data(), nullptr, resident_longitudes.data(), nullptr, latitudes.size(), 9,
+      1, 0, reinterpret_cast<uint64_t*>(resident_latitudes.data()), output_nulls.data(), &detail);
+  ASSERT_EQ("resident latlng output/input alias status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident latlng output/input alias detail", detail, PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      resident_latitudes.data(), nullptr, resident_longitudes.data(), nullptr, latitudes.size(), 9,
+      1, 0, cells.data(), reinterpret_cast<uint8_t*>(cells.data()), &detail);
+  ASSERT_EQ("resident latlng output/output alias status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident latlng output/output alias detail", detail,
+            PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+
+  SharedResidentArray<uint8_t> misaligned_coordinate_storage(
+      std::vector<uint8_t>(sizeof(double) + 1, 0));
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      misaligned_coordinate_storage.data() + 1, nullptr, extended_longitude.data(), nullptr, 1, 5,
+      1, 0, extended_cell.data(), extended_null.data(), &detail);
+  ASSERT_EQ("resident misaligned latlng input status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident misaligned latlng input detail", detail, PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+
+  const size_t overflowing_count = std::numeric_limits<size_t>::max() / sizeof(double) + 1;
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      resident_latitudes.data(), nullptr, resident_longitudes.data(), nullptr, overflowing_count, 5,
+      1, 0, extended_cell.data(), extended_null.data(), &detail);
+  ASSERT_EQ("resident overflowing latlng count status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident overflowing latlng count detail", detail, PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+
+  const uintptr_t aligned_near_end =
+      std::numeric_limits<uintptr_t>::max() & ~(uintptr_t{alignof(double)} - 1);
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+      reinterpret_cast<const void*>(aligned_near_end), nullptr, extended_longitude.data(), nullptr,
+      1, 5, 1, 0, extended_cell.data(), extended_null.data(), &detail);
+  ASSERT_EQ("resident overflowing latlng address status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident overflowing latlng address detail", detail,
+            PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+
+  uint64_t host_cell = 0;
+  uint8_t host_null = 0;
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(extended_latitude.data(), nullptr,
+                                                  extended_longitude.data(), nullptr, 1, 5, 1, 0,
+                                                  &host_cell, &host_null, &detail);
+  ASSERT_EQ("resident latlng host output status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident latlng host output detail", detail, PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+
+  for (const auto selectors : {std::pair<int32_t, int32_t>{2, 0}, {1, 2}}) {
+    detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+    status = pgaccel_h3_lat_lng_to_cell_resident_ex(
+        extended_latitude.data(), nullptr, extended_longitude.data(), nullptr, 1, 5,
+        selectors.first, selectors.second, extended_cell.data(), extended_null.data(), &detail);
+    ASSERT_EQ("resident invalid latlng selector status", status, PGACCEL_INVALID_ARGUMENT);
+    ASSERT_EQ("resident invalid latlng selector detail", detail, PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+  }
+
+  detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  status = pgaccel_h3_lat_lng_to_cell_resident_ex(latitudes.data(), nullptr, longitudes.data(),
+                                                  nullptr, latitudes.size(), 9, 1, 0, cells.data(),
+                                                  output_nulls.data(), &detail);
+  ASSERT_EQ("resident latlng host input status", status, PGACCEL_INVALID_ARGUMENT);
+  ASSERT_EQ("resident latlng host input detail", detail, PGACCEL_H3_LATLNG_DETAIL_CONTRACT);
+
+  detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+  ASSERT_STATUS_OK("resident latlng empty status",
+                   pgaccel_h3_lat_lng_to_cell_resident_ex(nullptr, nullptr, nullptr, nullptr, 0, 9,
+                                                          1, 0, nullptr, nullptr, &detail));
+  ASSERT_EQ("resident latlng empty detail", detail, PGACCEL_H3_LATLNG_DETAIL_NONE);
+  ASSERT_EQ("resident latlng null detail status",
+            pgaccel_h3_lat_lng_to_cell_resident_ex(nullptr, nullptr, nullptr, nullptr, 0, 9, 1, 0,
+                                                   nullptr, nullptr, nullptr),
+            PGACCEL_INVALID_ARGUMENT);
 }
 
 // ---------------------------------------------------------------------------
@@ -2690,6 +2889,13 @@ static void test_no_device_paths() {
   ASSERT_EQ("lat/lng conversion reports no device",
             pgaccel_h3_lat_lng_to_cell_bulk(&lat, &lng, 1, 3, true, &cell_output, &boolean_output),
             PGACCEL_ERROR_NO_DEVICE);
+  int32_t latlng_detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+  ASSERT_EQ("resident lat/lng conversion reports no device",
+            pgaccel_h3_lat_lng_to_cell_resident_ex(&lat, nullptr, &lng, nullptr, 1, 3, 1, 0,
+                                                   &cell_output, &boolean_output, &latlng_detail),
+            PGACCEL_ERROR_NO_DEVICE);
+  ASSERT_EQ("resident lat/lng leaves no failure detail without device", latlng_detail,
+            PGACCEL_H3_LATLNG_DETAIL_NONE);
 
   state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
   ASSERT_EQ("lat/lng count reports no device",
@@ -2787,6 +2993,7 @@ int main(int argc, char** argv) {
   RUN_TEST(test_is_res_class_iii);
   RUN_TEST(test_cell_to_parent);
   RUN_TEST(test_cell_to_parent_resident);
+  RUN_TEST(test_lat_lng_to_cell_resident);
   RUN_TEST(test_cell_to_center_child);
   RUN_TEST(test_grid_distance);
   RUN_TEST(test_lat_lng_to_cell);

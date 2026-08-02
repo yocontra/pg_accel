@@ -84,6 +84,57 @@ mod tests {
             .expect("kernel execution count should not be NULL")
     }
 
+    fn stock_exec_count() -> i64 {
+        Spi::get_one::<i64>("SELECT stock_exec_count FROM pg_accel_stats()")
+            .expect("stock executor counter query should succeed")
+            .expect("stock executor counter should not be NULL")
+    }
+
+    fn assert_planner_decline(query: &str, expected_reason: &str) {
+        Spi::run("SET LOCAL pg_accel.enabled = on").expect("acceleration should be enabled");
+        let plan = explain_text(query, false);
+        let reason = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("planner rejection reason should be readable");
+        assert!(
+            !plan.contains("custom scan (gpuaccelagg)"),
+            "declined query unexpectedly selected pg_accel:\n{plan}"
+        );
+        assert_eq!(reason.as_deref(), Some(expected_reason));
+    }
+
+    fn assert_native_decline_matches_native(query: &str, expected_reason: &str) {
+        Spi::run("SET LOCAL pg_accel.enabled = off").expect("native baseline should be selectable");
+        let native = result_rows(query);
+
+        Spi::run("SET LOCAL pg_accel.enabled = on").expect("acceleration should be enabled");
+        let plan = explain_text(query, false);
+        let reason = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("planner rejection reason should be readable");
+        assert!(
+            !plan.contains("custom scan (gpuaccelagg)"),
+            "declined query unexpectedly selected pg_accel:\n{plan}"
+        );
+        assert_eq!(reason.as_deref(), Some(expected_reason));
+
+        let kernels_before = kernel_executions();
+        let fallback_before = stock_exec_count();
+        let enabled = result_rows(query);
+        assert_eq!(
+            enabled, native,
+            "native decline result differs with pg_accel enabled"
+        );
+        assert_eq!(
+            kernel_executions(),
+            kernels_before,
+            "native decline dispatched a kernel"
+        );
+        assert_eq!(
+            stock_exec_count(),
+            fallback_before,
+            "native decline entered stock fallback"
+        );
+    }
+
     fn assert_selected_matches_native(query: &str) -> Vec<String> {
         Spi::run("SET LOCAL pg_accel.enabled = off").expect("native baseline should be selectable");
         let native = result_rows(query);
@@ -249,6 +300,134 @@ mod tests {
             )
             .expect("evicted status should be readable"),
             Some(0)
+        );
+    }
+
+    #[pg_test]
+    fn selected_int8_star_membership_preserves_nulls_and_multiplicity() {
+        if !begin_gpu_test() {
+            return;
+        }
+        let rows = device_rows();
+        Spi::run(&format!(
+            "CREATE UNLOGGED TABLE pgaccel_active_int8_fact (\
+               k int8, payload int4 NOT NULL); \
+             CREATE UNLOGGED TABLE pgaccel_active_int8_dim (k int8); \
+             INSERT INTO pgaccel_active_int8_fact \
+             SELECT -7::int8, 1 FROM generate_series(1, {rows}); \
+             INSERT INTO pgaccel_active_int8_fact VALUES \
+               (NULL, 2), (42, 3), ('-9223372036854775808', 4), \
+               ('9223372036854775807', 5), (-7, 6); \
+             INSERT INTO pgaccel_active_int8_dim VALUES \
+               ('-9223372036854775808'), (-7), (-7), \
+               ('9223372036854775807'), (NULL), (NULL); \
+             ANALYZE pgaccel_active_int8_fact; \
+             ANALYZE pgaccel_active_int8_dim"
+        ))
+        .expect("INT8 star membership fixture should be created");
+
+        pin("pgaccel_active_int8_fact", &["k", "payload"], rows + 5);
+        pin("pgaccel_active_int8_dim", &["k"], 6);
+
+        let query = "SELECT count(f.payload) AS matched_rows \
+                     FROM pgaccel_active_int8_fact AS f \
+                     JOIN pgaccel_active_int8_dim AS d ON f.k = d.k";
+        Spi::run("SET LOCAL pg_accel.enabled = off")
+            .expect("native INT8 membership baseline should be selectable");
+        let expected = rows * 2 + 4;
+        let native = Spi::get_one::<i64>(query)
+            .expect("native INT8 membership query should succeed")
+            .expect("native INT8 membership count should not be NULL");
+        assert_eq!(
+            native, expected,
+            "native fixture must exercise duplicate fanout and reject NULL/missing keys"
+        );
+
+        Spi::run("SET LOCAL pg_accel.enabled = on")
+            .expect("INT8 membership acceleration should be enabled");
+        let plan = explain_text(query, false);
+        assert!(
+            plan.contains("custom scan (gpuaccelagg)")
+                && plan.contains("gpu descriptor star dimensions:")
+                && plan.contains("type=20")
+                && plan.contains("multiplicity=counted"),
+            "single exact INT8 join must select counted resident membership:\n{plan}"
+        );
+        let before = kernel_executions();
+        let accelerated = Spi::get_one::<i64>(query)
+            .expect("selected INT8 membership query should succeed")
+            .expect("selected INT8 membership count should not be NULL");
+        let after = kernel_executions();
+        assert!(
+            after > before,
+            "selected INT8 membership did not dispatch: before={before}, after={after}"
+        );
+        assert_eq!(
+            accelerated, native,
+            "selected INT8 membership result differs from PostgreSQL"
+        );
+    }
+
+    #[pg_test]
+    fn one_scalar_range_selects_while_multiple_ranges_decline_with_native_parity() {
+        if !begin_gpu_test() {
+            return;
+        }
+        let rows = device_rows();
+        Spi::run(&format!(
+            "CREATE UNLOGGED TABLE pgaccel_active_and_ranges (\
+               product_id int4 NOT NULL, price int4, quantity int4 NOT NULL); \
+             INSERT INTO pgaccel_active_and_ranges \
+             SELECT (g % 256)::int4, \
+                    CASE WHEN g % 97 = 0 THEN NULL ELSE (1 + (g % 1000))::int4 END, \
+                    (1 + ((g / 256) % 10))::int4 \
+             FROM generate_series(1, {rows}) AS g; \
+             ANALYZE pgaccel_active_and_ranges"
+        ))
+        .expect("range predicate fixture should be created");
+        pin(
+            "pgaccel_active_and_ranges",
+            &["product_id", "price", "quantity"],
+            rows,
+        );
+
+        let selected_query = "SELECT product_id, sum(price * quantity) AS sum, count(*) AS count \
+             FROM pgaccel_active_and_ranges \
+             WHERE price <= 800 \
+             GROUP BY product_id ORDER BY product_id";
+        let fallback_before = stock_exec_count();
+        assert_eq!(assert_selected_matches_native(selected_query).len(), 256);
+        assert_eq!(
+            stock_exec_count(),
+            fallback_before,
+            "selected single range execution must not enter the stock executor"
+        );
+
+        assert_native_decline_matches_native(
+            "SELECT product_id, sum(price * quantity) AS sum, count(*) AS count \
+             FROM pgaccel_active_and_ranges \
+             WHERE price >= 200 AND price <= 800 \
+             GROUP BY product_id ORDER BY product_id",
+            "shape_multiple_range_predicates",
+        );
+
+        assert_planner_decline(
+            "SELECT product_id, sum(price * quantity), count(*) \
+             FROM pgaccel_active_and_ranges \
+             WHERE price >= 200 AND quantity <= 8 GROUP BY product_id",
+            "shape_multi_filter_relation",
+        );
+        assert_planner_decline(
+            "SELECT product_id, sum(price * quantity), count(*) \
+             FROM pgaccel_active_and_ranges \
+             WHERE price < 200 OR price > 800 GROUP BY product_id",
+            "shape_unsupported_predicate",
+        );
+        assert_planner_decline(
+            "SELECT product_id, sum(price * quantity), count(*) \
+             FROM pgaccel_active_and_ranges \
+             WHERE price >= 900 AND price <= 100 GROUP BY product_id",
+            "shape_multiple_range_predicates",
         );
     }
 }

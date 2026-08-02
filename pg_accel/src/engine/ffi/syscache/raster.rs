@@ -1096,6 +1096,15 @@ fn caught_error_message(caught: &pgrx::pg_sys::panic::CaughtError) -> String {
     }
 }
 
+fn has_catalog_proved_wkb_identity(identity: &PostgisRasterCatalogIdentity) -> bool {
+    identity.extension_oid != pg_sys::InvalidOid
+        && identity.schema_oid != pg_sys::InvalidOid
+        && identity.raster_type_oid != pg_sys::InvalidOid
+        && identity.as_wkb_fn_oid != pg_sys::InvalidOid
+        && identity.rast_from_wkb_fn_oid != pg_sys::InvalidOid
+        && !identity.fingerprint_words.is_empty()
+}
+
 /// Convert an exact PostGIS internal raster Datum to owned external WKB.
 ///
 /// The caller must pass a freshly resolved catalog identity. PostgreSQL ERRORs
@@ -1110,7 +1119,7 @@ pub unsafe fn postgis_raster_datum_to_wkb(
     identity: &PostgisRasterCatalogIdentity,
     raster: pg_sys::Datum,
 ) -> Result<Vec<u8>, String> {
-    if identity.as_wkb_fn_oid == pg_sys::InvalidOid || raster.value() == 0 {
+    if !has_catalog_proved_wkb_identity(identity) || raster.value() == 0 {
         return Err("PostGIS Raster WKB export received an invalid identity or Datum".to_owned());
     }
     pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
@@ -1182,40 +1191,83 @@ pub unsafe fn postgis_raster_datum_from_wkb(
     identity: &PostgisRasterCatalogIdentity,
     wkb: &[u8],
 ) -> Result<pg_sys::Datum, String> {
-    if identity.rast_from_wkb_fn_oid == pg_sys::InvalidOid {
+    if !has_catalog_proved_wkb_identity(identity) {
         return Err("PostGIS Raster WKB import has no catalog-proved function".to_owned());
     }
+    // SAFETY: the caller's live output memory context owns the returned bytea.
+    let bytea = unsafe { postgis_raster_wkb_bytea(wkb)? };
+    // SAFETY: bytea is owned by this call and the caller upholds the catalog
+    // identity and backend-thread contracts.
+    unsafe { postgis_raster_datum_from_owned_bytea(identity, bytea) }
+}
+
+/// Copy external WKB into a PostgreSQL bytea without performing catalog work.
+///
+/// # Safety
+/// Must run on the PostgreSQL backend main thread in a live memory context.
+pub unsafe fn postgis_raster_wkb_bytea(wkb: &[u8]) -> Result<pg_sys::Datum, String> {
     pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
-        #[cfg(feature = "pg_test")]
-        crate::engine::ffi::syscache::inject_test_postgres_error();
-        // Keep the temporary bytea allocation inside the PostgreSQL ERROR
-        // boundary. The caller's output context is reset when this returns an
-        // error, covering allocation or importer failures alike.
-        let bytea = wkb
-            .into_datum()
-            .ok_or_else(|| "could not allocate reconstructed raster WKB bytea".to_owned())?;
-        // SAFETY: the identity proves strict st_rastfromwkb(bytea) with the
-        // exact PostGIS raster result type.
-        let raster = unsafe {
-            pg_sys::OidFunctionCall1Coll(identity.rast_from_wkb_fn_oid, pg_sys::InvalidOid, bytea)
-        };
-        // SAFETY: IntoDatum allocated this temporary bytea in the current
-        // memory context and the strict importer returned normally.
-        unsafe { pg_sys::pfree(bytea.cast_mut_ptr::<std::ffi::c_void>()) };
-        if raster.value() == 0 {
-            Err("catalog-proved PostGIS st_rastfromwkb returned NULL".to_owned())
-        } else {
-            Ok(raster)
-        }
+        wkb.into_datum()
+            .ok_or_else(|| "could not allocate reconstructed raster WKB bytea".to_owned())
     }))
     .catch_others(|caught| {
         let caught = rethrow_if_required(caught);
         Err(format!(
-            "PostGIS st_rastfromwkb raised ERROR: {}",
+            "reconstructed raster WKB bytea allocation raised ERROR: {}",
             caught_error_message(&caught)
         ))
     })
     .execute()
+}
+
+/// Import and release one palloc-owned WKB bytea through the catalog-proved
+/// PostGIS function. The bytea is released on every recoverable result.
+///
+/// # Safety
+/// `bytea` must be a non-NULL bytea Datum owned by the current live memory
+/// context. The identity must be freshly revalidated and this must run on the
+/// PostgreSQL backend main thread.
+pub unsafe fn postgis_raster_datum_from_owned_bytea(
+    identity: &PostgisRasterCatalogIdentity,
+    bytea: pg_sys::Datum,
+) -> Result<pg_sys::Datum, String> {
+    if bytea.value() == 0 {
+        return Err("PostGIS Raster WKB import received a NULL bytea".to_owned());
+    }
+    let result = if has_catalog_proved_wkb_identity(identity) {
+        pgrx::pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+            #[cfg(feature = "pg_test")]
+            crate::engine::ffi::syscache::inject_test_postgres_error();
+            // SAFETY: the identity proves strict st_rastfromwkb(bytea) with the
+            // exact PostGIS raster result type.
+            let raster = unsafe {
+                pg_sys::OidFunctionCall1Coll(
+                    identity.rast_from_wkb_fn_oid,
+                    pg_sys::InvalidOid,
+                    bytea,
+                )
+            };
+            if raster.value() == 0 {
+                Err("catalog-proved PostGIS st_rastfromwkb returned NULL".to_owned())
+            } else {
+                Ok(raster)
+            }
+        }))
+        .catch_others(|caught| {
+            let caught = rethrow_if_required(caught);
+            Err(format!(
+                "PostGIS st_rastfromwkb raised ERROR: {}",
+                caught_error_message(&caught)
+            ))
+        })
+        .execute()
+    } else {
+        Err("PostGIS Raster WKB import has no catalog-proved function".to_owned())
+    };
+    // SAFETY: the caller transferred ownership of this non-NULL palloc Datum;
+    // recoverable PostgreSQL errors have returned to the original context.
+    unsafe { pg_sys::pfree(bytea.cast_mut_ptr::<std::ffi::c_void>()) };
+    result
 }
 
 /// Resolve one function OID to the exact public PostGIS Raster overload.
@@ -1836,6 +1888,26 @@ mod postgis_raster_tests {
             import,
             Err(message) if message == "PostGIS Raster WKB import has no catalog-proved function"
         ));
+
+        let mut partial = invalid_catalog_identity();
+        partial.extension_oid = pg_sys::Oid::from(1_u32);
+        partial.schema_oid = pg_sys::Oid::from(2_u32);
+        partial.raster_type_oid = pg_sys::Oid::from(3_u32);
+        partial.as_wkb_fn_oid = pg_sys::Oid::from(4_u32);
+        partial.rast_from_wkb_fn_oid = pg_sys::Oid::from(5_u32);
+        // SAFETY: the missing catalog fingerprint is rejected before the fake
+        // function OIDs or Datum can reach PostgreSQL.
+        let export = unsafe { postgis_raster_datum_to_wkb(&partial, pg_sys::Datum::from(1usize)) };
+        assert_eq!(
+            export,
+            Err("PostGIS Raster WKB export received an invalid identity or Datum".to_owned())
+        );
+        // SAFETY: the same pure identity guard runs before bytea allocation.
+        let import = unsafe { postgis_raster_datum_from_wkb(&partial, &[1]) };
+        assert_eq!(
+            import,
+            Err("PostGIS Raster WKB import has no catalog-proved function".to_owned())
+        );
     }
 }
 

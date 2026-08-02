@@ -37,10 +37,12 @@ pub use store::{
     ensure_derived_artifact, ensure_device_derived_artifact, ensure_selected_relations,
     ensure_staged_device_derived_artifact, ensure_staged_device_transform_artifact,
     estimate_selected_relation, register_derived_artifact, resident_budget_snapshot,
-    resident_geometry_exact_snapshot_words, resident_live_bytes, revalidate_loaded_estimates,
-    shape_digest, snapshot_resident_geometry_exact, with_derived_artifact,
-    with_derived_artifact_inputs, with_resident_column, with_resolved_artifact,
+    resident_geometry_exact_snapshot_words, resident_live_bytes, resident_selected_relation_rows,
+    revalidate_loaded_estimates, revalidate_planner_dependencies, shape_digest,
+    snapshot_resident_geometry_exact, with_derived_artifact, with_derived_artifact_inputs,
+    with_resident_column, with_resolved_artifact,
 };
+pub use store::{ResidentPlannerDependency, resident_planner_dependency};
 
 /// Register residency shared memory. Must be called from `_PG_init`.
 pub fn init_shmem() {

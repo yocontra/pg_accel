@@ -437,6 +437,20 @@ bridge_status_fns! {
         valid: *mut u8,
     ) -> PgaccelStatus;
 
+    pub fn pgaccel_h3_lat_lng_to_cell_resident_ex(
+        latitude: *const std::ffi::c_void,
+        latitude_nulls: *const u8,
+        longitude: *const std::ffi::c_void,
+        longitude_nulls: *const u8,
+        count: usize,
+        resolution: i32,
+        use_fp64: i32,
+        strict_ranges: i32,
+        cell_ids: *mut u64,
+        output_nulls: *mut u8,
+        detail: *mut i32,
+    ) -> PgaccelStatus;
+
     pub fn pgaccel_h3_lat_lng_count_bulk(
         lat_array: *const f64,
         lng_array: *const f64,

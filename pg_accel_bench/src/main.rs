@@ -121,6 +121,11 @@ enum Command {
         #[arg(long)]
         capture_plans: bool,
 
+        /// Capture planner-stage deltas for native-decline diagnostics. This
+        /// enables in-hook elapsed profiling and is not publication timing.
+        #[arg(long)]
+        capture_planner_stages: bool,
+
         /// Timing mode: `raw` (client-side `Instant::now()` wall clock,
         /// no instrumentation overhead — **default**, used for
         /// publication-quality numbers), `explain` (EXPLAIN ANALYZE,
@@ -191,6 +196,11 @@ enum Command {
         /// workload/scale to `plans.txt` inside the artifact directory.
         #[arg(long)]
         capture_plans: bool,
+
+        /// Capture planner-stage deltas for native-decline diagnostics. This
+        /// enables in-hook elapsed profiling and is not publication timing.
+        #[arg(long)]
+        capture_planner_stages: bool,
 
         /// Timing mode: `raw`, `explain`, or `both`.
         #[arg(long, default_value = "raw")]
@@ -536,6 +546,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
             realistic_gucs,
             capture_plans,
+            capture_planner_stages,
             timing,
             cache_mode,
             skip_guc_verify,
@@ -554,6 +565,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     &format,
                     realistic_gucs,
                     capture_plans,
+                    capture_planner_stages,
                     &timing,
                     &cache_mode,
                     skip_guc_verify,
@@ -571,6 +583,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             format,
             realistic_gucs,
             capture_plans,
+            capture_planner_stages,
             timing,
             cache_mode,
             skip_guc_verify,
@@ -585,6 +598,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             &format,
             realistic_gucs,
             capture_plans,
+            capture_planner_stages,
             &timing,
             &cache_mode,
             skip_guc_verify,
@@ -849,6 +863,7 @@ fn cmd_phase6_gate(
         seed: 42,
         timing_mode: runner::TimingMode::RawWallClock,
         cache_mode: runner::CacheMode::Both,
+        capture_planner_stages: false,
         plans_capture_path: Some(artifact_root.join("plans.txt")),
         guc_profile: None,
         skip_guc_verify: false,
@@ -941,6 +956,7 @@ fn cmd_phase9_gate(
         seed: 42,
         timing_mode: runner::TimingMode::RawWallClock,
         cache_mode: runner::CacheMode::Warm,
+        capture_planner_stages: false,
         plans_capture_path: Some(artifact_root.join("plans.txt")),
         guc_profile: None,
         skip_guc_verify: false,
@@ -1218,6 +1234,7 @@ fn cmd_metal_ship_gate(
         seed: METAL_SHIP_GATE_SEED,
         timing_mode: runner::TimingMode::RawWallClock,
         cache_mode: runner::CacheMode::Both,
+        capture_planner_stages: false,
         plans_capture_path: Some(artifact_root.join("plans.txt")),
         guc_profile: None,
         skip_guc_verify: false,
@@ -1303,7 +1320,7 @@ fn cmd_setup(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn cmd_run(
     connection: &str,
     workload_name: Option<&str>,
@@ -1314,6 +1331,7 @@ fn cmd_run(
     format: &ReportFormat,
     realistic_gucs: bool,
     capture_plans: bool,
+    capture_planner_stages: bool,
     timing: &TimingArg,
     cache_mode: &CacheModeArg,
     skip_guc_verify: bool,
@@ -1327,6 +1345,7 @@ fn cmd_run(
         seed,
         timing_mode: runner::TimingMode::from(timing),
         cache_mode: runner::CacheMode::from(cache_mode),
+        capture_planner_stages,
         plans_capture_path: if capture_plans {
             Some(run_artifacts.join("plans.txt"))
         } else {
@@ -1347,7 +1366,7 @@ fn cmd_run(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 fn cmd_crash_repro(
     connection: &str,
     workload_name: &str,
@@ -1358,6 +1377,7 @@ fn cmd_crash_repro(
     format: &ReportFormat,
     realistic_gucs: bool,
     capture_plans: bool,
+    capture_planner_stages: bool,
     timing: &TimingArg,
     cache_mode: &CacheModeArg,
     skip_guc_verify: bool,
@@ -1376,6 +1396,7 @@ fn cmd_crash_repro(
         seed,
         timing_mode: runner::TimingMode::from(timing),
         cache_mode: runner::CacheMode::from(cache_mode),
+        capture_planner_stages,
         plans_capture_path: if capture_plans {
             Some(repro_artifacts.join("plans.txt"))
         } else {
@@ -1452,6 +1473,7 @@ fn cmd_resume(
         seed: retry_config.seed,
         timing_mode: retry_config.timing_mode,
         cache_mode: retry_config.cache_mode,
+        capture_planner_stages: false,
         plans_capture_path: if retry_config.capture_plans {
             Some(retry_artifacts.join("plans.txt"))
         } else {
@@ -2255,7 +2277,7 @@ mod tests {
                 contract.verification_rows.len()
             })
             .sum::<usize>();
-        assert_eq!(cell_count, 36);
+        assert_eq!(cell_count, 40);
     }
 
     #[test]
@@ -2584,6 +2606,7 @@ mod tests {
                 dry_run: true,
                 realistic_gucs: false,
                 capture_plans: false,
+                capture_planner_stages: false,
                 timing: TimingArg::Raw,
                 cache_mode: CacheModeArg::Warm,
                 skip_guc_verify: false,
@@ -2603,6 +2626,7 @@ mod tests {
             dry_run: false,
             realistic_gucs: true,
             capture_plans: true,
+            capture_planner_stages: false,
             timing: TimingArg::Both,
             cache_mode: CacheModeArg::Both,
             skip_guc_verify: true,
@@ -2620,6 +2644,7 @@ mod tests {
             format: ReportFormat::Csv,
             realistic_gucs: false,
             capture_plans: false,
+            capture_planner_stages: false,
             timing: TimingArg::Explain,
             cache_mode: CacheModeArg::Cold,
             skip_guc_verify: false,

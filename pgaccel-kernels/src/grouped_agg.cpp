@@ -3556,7 +3556,7 @@ pgaccel_status execute_grouped_agg_accumulate(sycl::queue& queue,
 }  // namespace
 
 #if defined(PGACCEL_TEST_HOOKS)
-extern "C" bool pgaccel_test_grouped_agg_cleanup_exception_is_caught(void) {
+extern "C" bool pgacceltest_grouped_agg_cleanup_exception_is_caught(void) {
   const unsigned caught_before = g_test_caught_scratch_cleanup.load(std::memory_order_relaxed);
   g_test_throw_scratch_cleanup.store(true, std::memory_order_release);
   {

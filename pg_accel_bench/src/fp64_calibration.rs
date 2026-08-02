@@ -310,6 +310,7 @@ fn run_candidate(
             seed: options.seed,
             timing_mode: options.timing_mode,
             cache_mode: options.cache_mode,
+            capture_planner_stages: false,
             plans_capture_path: if options.capture_plans {
                 Some(artifact_dir.join("plans.txt"))
             } else {

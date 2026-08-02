@@ -6441,11 +6441,11 @@ class AbiInventoryTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
         manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
-        self.assertEqual(manifest.count, 112)
-        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 112)
+        self.assertEqual(manifest.count, 113)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 113)
         self.assertEqual(
             manifest.sha256,
-            "171e1bdd86e450499d2aed088b3ac1d9c562b8d6dd735f46c6aab9e2c240d6ac",
+            "4de83c9a21a0750616d135afbbb59c7277d65611b1ea8fe5e33a97c8200aac0f",
         )
         self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
 
@@ -6652,15 +6652,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
-        self.assertEqual(len(self.abi.definitions), 112)
-        self.assertEqual(len({item.name for item in self.abi.definitions}), 112)
-        self.assertEqual(len({item.name for item in self.abi.declarations}), 112)
+        self.assertEqual(len(self.abi.definitions), 113)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 113)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 113)
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
-        self.assertEqual(self.abi.compiler["inventory_count"], 112)
+        self.assertEqual(self.abi.compiler["inventory_count"], 113)
         status_names = sorted(
             entry.entrypoint for entry in self.by_name.values() if entry.is_status
         )[:82]

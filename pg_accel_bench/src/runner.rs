@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use postgres::{Client, NoTls};
+use postgres::{Client, NoTls, Statement};
 use rand::Rng;
 use rand::seq::SliceRandom;
 use serde::Serialize;
@@ -29,6 +29,15 @@ const CRASH_CONTEXT_EMBED_BYTES: usize = 128 * 1024;
 const CORRECTNESS_DIFF_SAMPLE_LIMIT: i64 = 20;
 const BENCH_STATEMENT_TIMEOUT: &str = "10min";
 const BENCH_LOCK_TIMEOUT: &str = "30s";
+const PLANNER_STAGE_NAMES: [&str; 7] = [
+    "rel_pathlist",
+    "join_pathlist",
+    "upper_group_agg",
+    "upper_window",
+    "upper_final",
+    "upper_setop",
+    "upper_other",
+];
 
 fn apply_benchmark_safety_settings(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
     client.batch_execute(&format!(
@@ -159,6 +168,8 @@ struct MappedLibraryProbe {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct DispatchStatsSnapshot {
+    backend_pid: i32,
+    queries_accelerated: u64,
     rows_dispatched: u64,
     batches_executed: u64,
     stock_exec_count: u64,
@@ -168,6 +179,7 @@ struct DispatchStatsSnapshot {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct DispatchStatsDelta {
+    queries_accelerated: u64,
     rows_dispatched: u64,
     batches_executed: u64,
     stock_exec_count: u64,
@@ -198,6 +210,36 @@ struct MeasurementOutcome {
     output_rows: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PlannerStageStatsSnapshot {
+    calls: u64,
+    elapsed_us: u64,
+    fast_declines: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PlannerStageMeasurement {
+    stages: Vec<report::PlannerStageDelta>,
+    observer_probe: Vec<report::PlannerStageDelta>,
+    error: Option<String>,
+}
+
+impl PlannerStageMeasurement {
+    fn unavailable(error: impl Into<String>) -> Self {
+        Self {
+            stages: Vec::new(),
+            observer_probe: Vec::new(),
+            error: Some(error.into()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ModeRunOutcome {
+    measurement: MeasurementOutcome,
+    planner_stages: Option<PlannerStageMeasurement>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RunnerDispatchClassification {
     gpu_kernel_dispatched: bool,
@@ -212,8 +254,10 @@ struct RunnerDispatchInput {
     function_kernel_candidate: bool,
     dispatch_counter_captured: bool,
     gpu_kernel_execution_delta: u64,
+    pg_accel_queries_accelerated_delta: u64,
     pg_accel_stock_exec_delta: u64,
     accel_output_rows_consumed: u64,
+    measured_iterations: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1437,23 +1481,45 @@ pub fn run_with_timing_and_cache(
     timing_mode: TimingMode,
     cache_mode: CacheMode,
 ) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
+    run_with_timing_and_cache_internal(
+        connection,
+        workload,
+        iterations,
+        warmup,
+        timing_mode,
+        cache_mode,
+        false,
+    )
+}
+
+fn run_with_timing_and_cache_internal(
+    connection: &str,
+    workload: &dyn Workload,
+    iterations: usize,
+    warmup: usize,
+    timing_mode: TimingMode,
+    cache_mode: CacheMode,
+    capture_planner_stages: bool,
+) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
     // For Both we delegate twice, cold then warm, and concatenate.
     if cache_mode == CacheMode::Both {
-        let cold = run_with_timing_and_cache(
+        let cold = run_with_timing_and_cache_internal(
             connection,
             workload,
             iterations,
             0,
             timing_mode,
             CacheMode::Cold,
+            capture_planner_stages,
         )?;
-        let warm = run_with_timing_and_cache(
+        let warm = run_with_timing_and_cache_internal(
             connection,
             workload,
             iterations,
             warmup,
             timing_mode,
             CacheMode::Warm,
+            capture_planner_stages,
         )?;
         let mut merged = cold.iterations.clone();
         merged.extend(warm.iterations.clone());
@@ -1472,12 +1538,27 @@ pub fn run_with_timing_and_cache(
         let mut warmup_iterations = cold.warmup_iterations.clone();
         warmup_iterations.extend(warm.warmup_iterations.clone());
         result.set_warmup_iterations(warmup_iterations);
+        result
+            .planner_stage_captures
+            .extend(cold.planner_stage_captures.clone());
+        let cold_iteration_count = cold.iterations.len();
+        result
+            .planner_stage_captures
+            .extend(
+                warm.planner_stage_captures
+                    .iter()
+                    .cloned()
+                    .map(|mut capture| {
+                        capture.pair_index =
+                            capture.pair_index.saturating_add(cold_iteration_count);
+                        capture
+                    }),
+            );
         // Carry resident-lane evidence from the sub-runs (both measure the
         // same workload; prefer the cold sub-run's off-clock load time).
         result.resident_lane = cold.resident_lane || warm.resident_lane;
         result.resident_load_ms = cold.resident_load_ms.or(warm.resident_load_ms);
-        merge_dispatch_counter_fields(&mut result, &cold);
-        merge_dispatch_counter_fields(&mut result, &warm);
+        merge_cache_mode_dispatch_counter_fields(&mut result, &cold, &warm);
         return Ok(result);
     }
     let effective_warmup = if cache_mode == CacheMode::Cold {
@@ -1541,16 +1622,27 @@ pub fn run_with_timing_and_cache(
                 modes[idx],
                 &pre_query,
                 timing_mode,
+                false,
             )?;
         }
     }
 
-    let mut counter_before: Option<DispatchStatsSnapshot> = None;
+    let mut counter_delta = DispatchStatsDelta::default();
+    let mut counter_iterations_captured = 0_usize;
     let mut counter_capture_error: Option<String> = None;
     let mut accel_output_rows_consumed = 0_u64;
+    let mut planner_stage_captures = Vec::with_capacity(iterations);
 
     for i in 0..total_runs {
         let is_warmup = i < effective_warmup;
+
+        // A resident transform may cache its complete derived output during
+        // warmup. Refresh the raw resident inputs once at the measurement
+        // boundary so at least one measured accel sample must rebuild and
+        // dispatch; subsequent samples may measure verified artifact hits.
+        if i == effective_warmup && workload_is_resident_lane(workload.name()) {
+            refresh_workload_resident_inputs(&mut mode_clients[0], workload)?;
+        }
 
         // Warmups are randomized independently. Measured pairs use a
         // pre-shuffled balanced schedule so a ten-iteration release run has
@@ -1561,18 +1653,6 @@ pub fn run_with_timing_and_cache(
             measured_accel_first[i - effective_warmup]
         };
         let order: [usize; 2] = if accel_first { [0, 1] } else { [1, 0] };
-
-        if !is_warmup && counter_before.is_none() && counter_capture_error.is_none() {
-            match capture_dispatch_stats(&mut mode_clients[0]) {
-                Ok(snapshot) => counter_before = Some(snapshot),
-                Err(e) => {
-                    let msg =
-                        format!("could not capture pg_accel dispatch counters before run: {e}");
-                    eprintln!("[dispatch] WARNING: {msg}");
-                    counter_capture_error = Some(msg);
-                }
-            }
-        }
 
         let mut timings = [MeasurementOutcome {
             elapsed_ms: 0.0,
@@ -1593,17 +1673,60 @@ pub fn run_with_timing_and_cache(
             if cache_mode == CacheMode::Cold {
                 purge_outcomes[idx] = purge_for_measurement();
             }
+            let dispatch_before = if !is_warmup
+                && matches!(modes[idx], BenchMode::Accel)
+                && counter_capture_error.is_none()
+            {
+                match capture_dispatch_stats(&mut mode_clients[idx]) {
+                    Ok(snapshot) => Some(snapshot),
+                    Err(error) => {
+                        counter_capture_error = Some(format!(
+                            "could not capture pg_accel dispatch counters before measured accel iteration: {error}"
+                        ));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let sql_for_mode = match modes[idx] {
                 BenchMode::Accel => query.as_str(),
                 BenchMode::PgParallel => baseline_query.as_str(),
             };
-            timings[idx] = run_with_mode(
+            let mode_outcome = run_with_mode(
                 &mut mode_clients[idx],
                 sql_for_mode,
                 modes[idx],
                 &pre_query,
                 timing_mode,
+                capture_planner_stages && !is_warmup && matches!(modes[idx], BenchMode::Accel),
             )?;
+            timings[idx] = mode_outcome.measurement;
+            if let Some(before) = dispatch_before {
+                match capture_dispatch_stats(&mut mode_clients[idx])
+                    .map_err(|error| error.to_string())
+                    .and_then(|after| dispatch_stats_delta(before, after))
+                {
+                    Ok(delta) => match accumulate_dispatch_stats(&mut counter_delta, delta) {
+                        Ok(()) => counter_iterations_captured += 1,
+                        Err(error) => counter_capture_error = Some(error),
+                    },
+                    Err(error) => {
+                        counter_capture_error = Some(format!(
+                            "could not capture coherent pg_accel dispatch counters after measured accel iteration: {error}"
+                        ));
+                    }
+                }
+            }
+            if let Some(capture) = mode_outcome.planner_stages {
+                planner_stage_captures.push(report::PlannerStageCapture {
+                    pair_index: i - effective_warmup,
+                    cache_state: CacheState::from(cache_mode),
+                    stages: capture.stages,
+                    observer_probe: capture.observer_probe,
+                    error: capture.error,
+                });
+            }
         }
         let cache_purge = combine_purge_states(purge_outcomes[0], purge_outcomes[1]);
 
@@ -1648,21 +1771,16 @@ pub fn run_with_timing_and_cache(
         }
     }
 
-    let counter_capture = match (counter_before, counter_capture_error) {
-        (Some(before), None) => match capture_dispatch_stats(&mut mode_clients[0]) {
-            Ok(after) => DispatchCounterCapture {
-                captured: true,
-                delta: dispatch_stats_delta(before, after),
-                error: None,
-            },
-            Err(e) => DispatchCounterCapture::unavailable(format!(
-                "could not capture pg_accel dispatch counters after run: {e}"
-            )),
+    let counter_capture = match counter_capture_error {
+        Some(error) => DispatchCounterCapture::unavailable(error),
+        None if counter_iterations_captured == iterations => DispatchCounterCapture {
+            captured: true,
+            delta: counter_delta,
+            error: None,
         },
-        (_, Some(error)) => DispatchCounterCapture::unavailable(error),
-        (None, None) => DispatchCounterCapture::unavailable(
-            "no measured iterations ran before dispatch counter capture".to_owned(),
-        ),
+        None => DispatchCounterCapture::unavailable(format!(
+            "captured coherent dispatch counters for {counter_iterations_captured} of {iterations} measured accel iterations"
+        )),
     };
 
     // Clean close.
@@ -1686,6 +1804,7 @@ pub fn run_with_timing_and_cache(
     result.accel_output_rows_consumed = accel_output_rows_consumed;
     result.resident_load_ms = resident_load_ms;
     result.resident_lane = workload_is_resident_lane(workload.name());
+    result.planner_stage_captures = planner_stage_captures;
     merge_dispatch_counter_capture(&mut result, counter_capture);
     Ok(result)
 }
@@ -1694,17 +1813,19 @@ fn capture_dispatch_stats(
     client: &mut Client,
 ) -> Result<DispatchStatsSnapshot, Box<dyn std::error::Error>> {
     let row = client.query_one(
-        "SELECT rows_dispatched, batches_executed, stock_exec_count, \
+        "SELECT pg_backend_pid(), queries_accelerated, rows_dispatched, batches_executed, stock_exec_count, \
                 gpu_rows_processed, gpu_kernel_executions \
            FROM pg_accel_stats()",
         &[],
     )?;
     Ok(DispatchStatsSnapshot {
-        rows_dispatched: i64_to_u64(row.get(0)),
-        batches_executed: i64_to_u64(row.get(1)),
-        stock_exec_count: i64_to_u64(row.get(2)),
-        gpu_rows_processed: i64_to_u64(row.get(3)),
-        gpu_kernel_executions: i64_to_u64(row.get(4)),
+        backend_pid: row.get(0),
+        queries_accelerated: nonnegative_dispatch_counter("queries_accelerated", row.get(1))?,
+        rows_dispatched: nonnegative_dispatch_counter("rows_dispatched", row.get(2))?,
+        batches_executed: nonnegative_dispatch_counter("batches_executed", row.get(3))?,
+        stock_exec_count: nonnegative_dispatch_counter("stock_exec_count", row.get(4))?,
+        gpu_rows_processed: nonnegative_dispatch_counter("gpu_rows_processed", row.get(5))?,
+        gpu_kernel_executions: nonnegative_dispatch_counter("gpu_kernel_executions", row.get(6))?,
     })
 }
 
@@ -1774,6 +1895,29 @@ fn prime_workload_accel_backend(
     Ok(resident_lane.then(|| resident_load_start.elapsed().as_secs_f64() * 1000.0))
 }
 
+fn refresh_workload_resident_inputs(
+    client: &mut Client,
+    workload: &dyn Workload,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for pin in resident_pin_specs(workload.name()) {
+        let refreshed_rows: i64 = client
+            .query_one(
+                "SELECT pg_accel_refresh($1::text::regclass)::bigint",
+                &[&pin.table],
+            )?
+            .get(0);
+        if refreshed_rows <= 0 {
+            return Err(format!(
+                "pg_accel_refresh loaded {refreshed_rows} rows from {} before measured dispatch for {}",
+                pin.table,
+                workload.name(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Whether a workload requires a GPU-resident cache preload (any of the
 /// `ssbm_*` / `resident_*` lanes). Used to tag resident-lane rows and to
 /// decide whether resident-load time should be recorded.
@@ -1792,33 +1936,110 @@ fn resident_pin(
 ) -> crate::workloads::ResidentPinSpec {
     crate::workloads::ResidentPinSpec { table, columns }
 }
-fn i64_to_u64(value: i64) -> u64 {
-    u64::try_from(value).unwrap_or(0)
+fn nonnegative_dispatch_counter(name: &str, value: i64) -> Result<u64, Box<dyn std::error::Error>> {
+    u64::try_from(value).map_err(|error| {
+        format!("dispatch counter `{name}` returned negative value {value}: {error}").into()
+    })
 }
 
 fn dispatch_stats_delta(
     before: DispatchStatsSnapshot,
     after: DispatchStatsSnapshot,
-) -> DispatchStatsDelta {
-    DispatchStatsDelta {
-        rows_dispatched: after.rows_dispatched.saturating_sub(before.rows_dispatched),
+) -> Result<DispatchStatsDelta, String> {
+    if before.backend_pid != after.backend_pid {
+        return Err(format!(
+            "dispatch counter backend changed from PID {} to {}",
+            before.backend_pid, after.backend_pid
+        ));
+    }
+    let delta = |name: &str, before: u64, after: u64| {
+        after
+            .checked_sub(before)
+            .ok_or_else(|| format!("dispatch counter `{name}` regressed from {before} to {after}"))
+    };
+    Ok(DispatchStatsDelta {
+        queries_accelerated: delta(
+            "queries_accelerated",
+            before.queries_accelerated,
+            after.queries_accelerated,
+        )?,
+        rows_dispatched: delta(
+            "rows_dispatched",
+            before.rows_dispatched,
+            after.rows_dispatched,
+        )?,
         batches_executed: after
             .batches_executed
-            .saturating_sub(before.batches_executed),
-        stock_exec_count: after
-            .stock_exec_count
-            .saturating_sub(before.stock_exec_count),
-        gpu_rows_processed: after
-            .gpu_rows_processed
-            .saturating_sub(before.gpu_rows_processed),
-        gpu_kernel_executions: after
-            .gpu_kernel_executions
-            .saturating_sub(before.gpu_kernel_executions),
-    }
+            .checked_sub(before.batches_executed)
+            .ok_or_else(|| {
+                format!(
+                    "dispatch counter `batches_executed` regressed from {} to {}",
+                    before.batches_executed, after.batches_executed
+                )
+            })?,
+        stock_exec_count: delta(
+            "stock_exec_count",
+            before.stock_exec_count,
+            after.stock_exec_count,
+        )?,
+        gpu_rows_processed: delta(
+            "gpu_rows_processed",
+            before.gpu_rows_processed,
+            after.gpu_rows_processed,
+        )?,
+        gpu_kernel_executions: delta(
+            "gpu_kernel_executions",
+            before.gpu_kernel_executions,
+            after.gpu_kernel_executions,
+        )?,
+    })
+}
+
+fn accumulate_dispatch_stats(
+    total: &mut DispatchStatsDelta,
+    delta: DispatchStatsDelta,
+) -> Result<(), String> {
+    let add = |name: &str, total: u64, value: u64| {
+        total
+            .checked_add(value)
+            .ok_or_else(|| format!("dispatch counter `{name}` overflowed while accumulating"))
+    };
+    total.queries_accelerated = add(
+        "queries_accelerated",
+        total.queries_accelerated,
+        delta.queries_accelerated,
+    )?;
+    total.rows_dispatched = add(
+        "rows_dispatched",
+        total.rows_dispatched,
+        delta.rows_dispatched,
+    )?;
+    total.batches_executed = add(
+        "batches_executed",
+        total.batches_executed,
+        delta.batches_executed,
+    )?;
+    total.stock_exec_count = add(
+        "stock_exec_count",
+        total.stock_exec_count,
+        delta.stock_exec_count,
+    )?;
+    total.gpu_rows_processed = add(
+        "gpu_rows_processed",
+        total.gpu_rows_processed,
+        delta.gpu_rows_processed,
+    )?;
+    total.gpu_kernel_executions = add(
+        "gpu_kernel_executions",
+        total.gpu_kernel_executions,
+        delta.gpu_kernel_executions,
+    )?;
+    Ok(())
 }
 
 fn merge_dispatch_counter_capture(target: &mut WorkloadResult, capture: DispatchCounterCapture) {
     target.dispatch_counter_captured = capture.captured;
+    target.pg_accel_queries_accelerated_delta = capture.delta.queries_accelerated;
     target.gpu_kernel_execution_delta = capture.delta.gpu_kernel_executions;
     target.pg_accel_rows_dispatched_delta = capture.delta.rows_dispatched;
     target.pg_accel_batches_executed_delta = capture.delta.batches_executed;
@@ -1827,32 +2048,93 @@ fn merge_dispatch_counter_capture(target: &mut WorkloadResult, capture: Dispatch
     target.dispatch_counter_error = capture.error;
 }
 
-fn merge_dispatch_counter_fields(target: &mut WorkloadResult, source: &WorkloadResult) {
-    target.dispatch_counter_captured =
-        target.dispatch_counter_captured || source.dispatch_counter_captured;
-    target.gpu_kernel_execution_delta = target
-        .gpu_kernel_execution_delta
-        .saturating_add(source.gpu_kernel_execution_delta);
-    target.pg_accel_rows_dispatched_delta = target
-        .pg_accel_rows_dispatched_delta
-        .saturating_add(source.pg_accel_rows_dispatched_delta);
-    target.pg_accel_batches_executed_delta = target
-        .pg_accel_batches_executed_delta
-        .saturating_add(source.pg_accel_batches_executed_delta);
-    target.pg_accel_gpu_rows_processed_delta = target
-        .pg_accel_gpu_rows_processed_delta
-        .saturating_add(source.pg_accel_gpu_rows_processed_delta);
-    target.pg_accel_stock_exec_delta = target
-        .pg_accel_stock_exec_delta
-        .saturating_add(source.pg_accel_stock_exec_delta);
-    target.accel_output_rows_consumed = target
-        .accel_output_rows_consumed
-        .saturating_add(source.accel_output_rows_consumed);
-    if target.dispatch_counter_error.is_none() {
-        target
-            .dispatch_counter_error
-            .clone_from(&source.dispatch_counter_error);
+fn merge_cache_mode_dispatch_counter_fields(
+    target: &mut WorkloadResult,
+    cold: &WorkloadResult,
+    warm: &WorkloadResult,
+) {
+    let add = |lhs: u64, rhs: u64| lhs.checked_add(rhs);
+    target.dispatch_counter_captured = cold.dispatch_counter_captured
+        && warm.dispatch_counter_captured
+        && cold.dispatch_counter_error.is_none()
+        && warm.dispatch_counter_error.is_none();
+    let merged = (
+        add(
+            cold.pg_accel_queries_accelerated_delta,
+            warm.pg_accel_queries_accelerated_delta,
+        ),
+        add(
+            cold.gpu_kernel_execution_delta,
+            warm.gpu_kernel_execution_delta,
+        ),
+        add(
+            cold.pg_accel_rows_dispatched_delta,
+            warm.pg_accel_rows_dispatched_delta,
+        ),
+        add(
+            cold.pg_accel_batches_executed_delta,
+            warm.pg_accel_batches_executed_delta,
+        ),
+        add(
+            cold.pg_accel_gpu_rows_processed_delta,
+            warm.pg_accel_gpu_rows_processed_delta,
+        ),
+        add(
+            cold.pg_accel_stock_exec_delta,
+            warm.pg_accel_stock_exec_delta,
+        ),
+        add(
+            cold.accel_output_rows_consumed,
+            warm.accel_output_rows_consumed,
+        ),
+    );
+    if let (
+        Some(queries),
+        Some(kernels),
+        Some(rows),
+        Some(batches),
+        Some(gpu_rows),
+        Some(stock),
+        Some(output),
+    ) = merged
+    {
+        target.pg_accel_queries_accelerated_delta = queries;
+        target.gpu_kernel_execution_delta = kernels;
+        target.pg_accel_rows_dispatched_delta = rows;
+        target.pg_accel_batches_executed_delta = batches;
+        target.pg_accel_gpu_rows_processed_delta = gpu_rows;
+        target.pg_accel_stock_exec_delta = stock;
+        target.accel_output_rows_consumed = output;
+    } else {
+        target.dispatch_counter_captured = false;
     }
+    let mut errors = [
+        cold.dispatch_counter_error.as_deref(),
+        warm.dispatch_counter_error.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    if !cold.dispatch_counter_captured && cold.dispatch_counter_error.is_none() {
+        errors.push("cold cache-mode dispatch counter capture was incomplete".to_owned());
+    }
+    if !warm.dispatch_counter_captured && warm.dispatch_counter_error.is_none() {
+        errors.push("warm cache-mode dispatch counter capture was incomplete".to_owned());
+    }
+    if merged.0.is_none()
+        || merged.1.is_none()
+        || merged.2.is_none()
+        || merged.3.is_none()
+        || merged.4.is_none()
+        || merged.5.is_none()
+        || merged.6.is_none()
+    {
+        errors.push(
+            "dispatch counters overflowed while merging cold and warm cache modes".to_owned(),
+        );
+    }
+    target.dispatch_counter_error = (!errors.is_empty()).then(|| errors.join("; "));
 }
 
 /// Measurement mode for a single run (two-way comparison).
@@ -1871,7 +2153,8 @@ fn run_with_mode(
     mode: BenchMode,
     pre_query: &[String],
     timing_mode: TimingMode,
-) -> Result<MeasurementOutcome, Box<dyn std::error::Error>> {
+    capture_planner_stages: bool,
+) -> Result<ModeRunOutcome, Box<dyn std::error::Error>> {
     apply_benchmark_safety_settings(client)?;
     for sql in pre_query {
         client.batch_execute(sql)?;
@@ -1890,7 +2173,33 @@ fn run_with_mode(
             )?;
         }
     }
-    match timing_mode {
+    let stage_statement = if capture_planner_stages {
+        match client.batch_execute("SET pg_accel.planner_profiling = on") {
+            Ok(()) => match prepare_planner_stage_statement(client) {
+                Ok(statement) => Some(Ok(statement)),
+                Err(error) => Some(Err(format!(
+                    "could not prepare pg_accel planner-stage capture: {error}"
+                ))),
+            },
+            Err(error) => Some(Err(format!(
+                "could not enable pg_accel planner profiling: {error}"
+            ))),
+        }
+    } else {
+        None
+    };
+    let stage_before = match stage_statement.as_ref() {
+        Some(Ok(statement)) => match capture_planner_stage_stats(client, statement) {
+            Ok(snapshot) => Some(Ok(snapshot)),
+            Err(error) => Some(Err(format!(
+                "could not capture pg_accel planner stages before query: {error}"
+            ))),
+        },
+        Some(Err(error)) => Some(Err(error.clone())),
+        None => None,
+    };
+
+    let measurement = match timing_mode {
         TimingMode::ExplainAnalyze => run_explain_analyze_outcome(client, query),
         TimingMode::RawWallClock => run_raw_wall_clock(client, query),
         TimingMode::Both => {
@@ -1911,7 +2220,153 @@ fn run_with_mode(
             }
             Ok(raw)
         }
+    }?;
+
+    let planner_stages = match (stage_statement.as_ref(), stage_before) {
+        (Some(Ok(statement)), Some(Ok(before))) => {
+            Some(match capture_planner_stage_stats(client, statement) {
+                Ok(after) => match planner_stage_stats_delta(&before, &after) {
+                    Ok(stages) => match capture_planner_stage_stats(client, statement) {
+                        Ok(probe) => match planner_stage_stats_delta(&after, &probe) {
+                            Ok(observer_probe) => {
+                                let contaminated = observer_probe.iter().any(|stage| {
+                                    stage.calls != 0
+                                        || stage.elapsed_us != 0
+                                        || stage.fast_declines != 0
+                                });
+                                PlannerStageMeasurement {
+                                    stages,
+                                    observer_probe,
+                                    error: contaminated.then(|| {
+                                        "prepared planner-stage observer changed planner counters; \
+                                         target attribution is invalid"
+                                            .to_owned()
+                                    }),
+                                }
+                            }
+                            Err(error) => PlannerStageMeasurement {
+                                stages,
+                                observer_probe: Vec::new(),
+                                error: Some(error),
+                            },
+                        },
+                        Err(error) => PlannerStageMeasurement {
+                            stages,
+                            observer_probe: Vec::new(),
+                            error: Some(format!(
+                                "could not verify prepared planner-stage observer: {error}"
+                            )),
+                        },
+                    },
+                    Err(error) => PlannerStageMeasurement::unavailable(error),
+                },
+                Err(error) => PlannerStageMeasurement::unavailable(format!(
+                    "could not capture pg_accel planner stages after query: {error}"
+                )),
+            })
+        }
+        (_, Some(Err(error))) => Some(PlannerStageMeasurement::unavailable(error)),
+        _ => None,
+    };
+
+    Ok(ModeRunOutcome {
+        measurement,
+        planner_stages,
+    })
+}
+
+fn prepare_planner_stage_statement(
+    client: &mut Client,
+) -> Result<Statement, Box<dyn std::error::Error>> {
+    Ok(client.prepare(
+        "SELECT stage, calls, elapsed_us, fast_declines \
+           FROM pg_accel_planner_stage_stats() ORDER BY stage",
+    )?)
+}
+
+fn capture_planner_stage_stats(
+    client: &mut Client,
+    statement: &Statement,
+) -> Result<BTreeMap<String, PlannerStageStatsSnapshot>, Box<dyn std::error::Error>> {
+    let mut stages = BTreeMap::new();
+    for row in client.query(statement, &[])? {
+        let stage = row.get::<_, String>(0);
+        if !PLANNER_STAGE_NAMES.contains(&stage.as_str()) {
+            return Err(format!("unknown planner stage `{stage}`").into());
+        }
+        let calls = nonnegative_planner_counter(&stage, "calls", row.get(1))?;
+        let elapsed_us = nonnegative_planner_counter(&stage, "elapsed_us", row.get(2))?;
+        let fast_declines = nonnegative_planner_counter(&stage, "fast_declines", row.get(3))?;
+        if stages
+            .insert(
+                stage.clone(),
+                PlannerStageStatsSnapshot {
+                    calls,
+                    elapsed_us,
+                    fast_declines,
+                },
+            )
+            .is_some()
+        {
+            return Err(format!("duplicate planner stage `{stage}`").into());
+        }
     }
+    if stages.len() != PLANNER_STAGE_NAMES.len() {
+        let missing = PLANNER_STAGE_NAMES
+            .iter()
+            .filter(|stage| !stages.contains_key(**stage))
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(format!("planner-stage snapshot missing: {}", missing.join(", ")).into());
+    }
+    Ok(stages)
+}
+
+fn nonnegative_planner_counter(
+    stage: &str,
+    counter: &str,
+    value: i64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    u64::try_from(value).map_err(|error| {
+        format!("planner stage `{stage}` returned negative {counter} ({value}): {error}").into()
+    })
+}
+
+fn planner_stage_stats_delta(
+    before: &BTreeMap<String, PlannerStageStatsSnapshot>,
+    after: &BTreeMap<String, PlannerStageStatsSnapshot>,
+) -> Result<Vec<report::PlannerStageDelta>, String> {
+    if before.keys().ne(after.keys()) {
+        return Err("planner-stage snapshot key sets differ".to_owned());
+    }
+    after
+        .iter()
+        .map(|(stage, after)| {
+            let before = before
+                .get(stage)
+                .copied()
+                .ok_or_else(|| format!("planner stage `{stage}` missing from before snapshot"))?;
+            Ok(report::PlannerStageDelta {
+                stage: stage.clone(),
+                calls: after
+                    .calls
+                    .checked_sub(before.calls)
+                    .ok_or_else(|| format!("planner stage `{stage}` calls counter regressed"))?,
+                elapsed_us: after
+                    .elapsed_us
+                    .checked_sub(before.elapsed_us)
+                    .ok_or_else(|| {
+                        format!("planner stage `{stage}` elapsed_us counter regressed")
+                    })?,
+                fast_declines: after
+                    .fast_declines
+                    .checked_sub(before.fast_declines)
+                    .ok_or_else(|| {
+                        format!("planner stage `{stage}` fast_declines counter regressed")
+                    })?,
+            })
+        })
+        .collect()
 }
 
 /// Measure query wall time client-side with `Instant::now()` around a plain
@@ -2639,6 +3094,11 @@ fn append_crash_config(text: &mut String, config: &BenchConfig) {
         "capture_plans: {}",
         config.plans_capture_path.is_some()
     );
+    let _ = writeln!(
+        text,
+        "capture_planner_stages: {}",
+        config.capture_planner_stages
+    );
     if let Some(path) = &config.plans_capture_path {
         let _ = writeln!(text, "plans_capture_path: {}", path.display());
     }
@@ -2828,6 +3288,9 @@ fn repro_command(connection: &str, workload: &str, rows: usize, config: &BenchCo
     if config.plans_capture_path.is_some() {
         parts.push("--capture-plans".to_owned());
     }
+    if config.capture_planner_stages {
+        parts.push("--capture-planner-stages".to_owned());
+    }
     if config.skip_guc_verify {
         parts.push("--skip-guc-verify".to_owned());
     }
@@ -3010,13 +3473,21 @@ fn run_workload_with_config(
         );
     }
 
-    let mut result = run_with_timing_and_cache(
+    let capture_planner_stages = config.capture_planner_stages
+        && should_capture_planner_stages(
+            workload.name(),
+            rows,
+            accel_plan.is_some(),
+            plan_selected,
+        );
+    let mut result = run_with_timing_and_cache_internal(
         connection,
         workload,
         config.iterations,
         config.warmup,
         config.timing_mode,
         config.cache_mode,
+        capture_planner_stages,
     )?;
     result.rows = rows;
     result.plan_selected = plan_selected;
@@ -3032,8 +3503,10 @@ fn run_workload_with_config(
         function_kernel_candidate,
         dispatch_counter_captured: result.dispatch_counter_captured,
         gpu_kernel_execution_delta: result.gpu_kernel_execution_delta,
+        pg_accel_queries_accelerated_delta: result.pg_accel_queries_accelerated_delta,
         pg_accel_stock_exec_delta: result.pg_accel_stock_exec_delta,
         accel_output_rows_consumed: result.accel_output_rows_consumed,
+        measured_iterations: result.iterations.len(),
     });
     result.function_srf_kernel_dispatched = dispatch_classification.function_srf_kernel_dispatched;
     result.gpu_kernel_dispatched = dispatch_classification.gpu_kernel_dispatched;
@@ -3382,6 +3855,13 @@ fn create_correctness_table(
 
 fn correctness_projection_sql(query: &str, workload_name: &str, order_sensitive: bool) -> String {
     let query = trim_sql_semicolon(query);
+    if workload_name == "raster_resident_exact_reclass" {
+        return format!(
+            "WITH q AS MATERIALIZED ({query}) \
+             SELECT NULL::bigint AS ord, encode(ST_AsBinary(q.rast), 'hex') AS row_repr \
+             FROM q"
+        );
+    }
     if workload_name == "spatial_sort" {
         return format!(
             "SELECT row_number() OVER () AS ord, \
@@ -3773,6 +4253,7 @@ fn capture_and_write_pre_risk_context(
         realistic_gucs: config.guc_profile.is_some(),
         skip_guc_verify: config.skip_guc_verify,
         capture_plans: config.plans_capture_path.is_some(),
+        capture_planner_stages: config.capture_planner_stages,
         backend_pid,
         backend_pid_error: backend_pid_error.as_deref(),
         setup_sql: &setup_sql,
@@ -3927,6 +4408,17 @@ fn benchmark_threshold_decline_reason(name: &str, rows: usize) -> Option<&'stati
         .and_then(|entry| entry.expectation.decline_reason())
 }
 
+fn should_capture_planner_stages(
+    workload: &str,
+    rows: usize,
+    plan_capture_available: bool,
+    plan_selected: bool,
+) -> bool {
+    plan_capture_available
+        && !plan_selected
+        && benchmark_threshold_decline_reason(workload, rows).is_some()
+}
+
 /// Determine whether a cold run's fixture fits inside `shared_buffers`.
 ///
 /// If the fixture (sum of `relpages` × `block_size`) is <= `shared_buffers`,
@@ -3985,17 +4477,22 @@ fn classify_runner_dispatch(input: RunnerDispatchInput) -> RunnerDispatchClassif
     let counter_proves_kernel =
         input.dispatch_counter_captured && input.gpu_kernel_execution_delta > 0;
     let stock_fallback_seen = input.pg_accel_stock_exec_delta > 0;
-    let function_output_consumed = input.accel_output_rows_consumed > 0;
+    let output_consumed = input.accel_output_rows_consumed > 0;
+    let selected_queries_consumed = usize::try_from(input.pg_accel_queries_accelerated_delta)
+        .is_ok_and(|queries| queries >= input.measured_iterations);
     let function_srf_kernel_dispatched = input.function_kernel_candidate
         && !input.plan_explicitly_not_dispatched
         && !input.plan_selected
         && counter_proves_kernel
-        && function_output_consumed
+        && output_consumed
         && !stock_fallback_seen;
-    let gpu_kernel_dispatched = !input.plan_explicitly_not_dispatched
+    let custom_scan_gpu_dispatched = input.plan_selected
+        && !input.plan_explicitly_not_dispatched
         && counter_proves_kernel
-        && (!input.function_kernel_candidate || input.plan_selected || function_output_consumed)
+        && selected_queries_consumed
+        && output_consumed
         && !stock_fallback_seen;
+    let gpu_kernel_dispatched = custom_scan_gpu_dispatched || function_srf_kernel_dispatched;
 
     RunnerDispatchClassification {
         gpu_kernel_dispatched,
@@ -4032,6 +4529,30 @@ fn emit_dispatch_classification_warning(input: DispatchWarningInput<'_>, result:
         eprintln!(
             "[dispatch] WARNING: {} @ {}: pg_accel plan selected but runtime \
              kernel counter delta is zero; counting as plan-selected only",
+            input.workload, input.rows
+        );
+    }
+    if input.plan_selected
+        && result.gpu_kernel_execution_delta > 0
+        && usize::try_from(result.pg_accel_queries_accelerated_delta)
+            .map_or(true, |queries| queries < result.iterations.len())
+    {
+        eprintln!(
+            "[dispatch] WARNING: {} @ {}: kernel counter advanced but accelerated-query \
+             delta={} does not cover {} measured pairs; excluding from GPU-dispatched wins",
+            input.workload,
+            input.rows,
+            result.pg_accel_queries_accelerated_delta,
+            result.iterations.len()
+        );
+    }
+    if input.plan_selected
+        && result.gpu_kernel_execution_delta > 0
+        && result.accel_output_rows_consumed == 0
+    {
+        eprintln!(
+            "[dispatch] WARNING: {} @ {}: kernel counter advanced but no accel output rows \
+             were consumed; excluding from GPU-dispatched wins",
             input.workload, input.rows
         );
     }
@@ -4327,6 +4848,92 @@ mod tests {
         assert!(matches!(accel_first, 4 | 5));
     }
 
+    fn planner_stage_snapshot(
+        calls: u64,
+        elapsed_us: u64,
+        fast_declines: u64,
+    ) -> BTreeMap<String, PlannerStageStatsSnapshot> {
+        PLANNER_STAGE_NAMES
+            .iter()
+            .map(|stage| {
+                (
+                    (*stage).to_owned(),
+                    PlannerStageStatsSnapshot {
+                        calls,
+                        elapsed_us,
+                        fast_declines,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn planner_stage_delta_is_exact_and_rejects_counter_regression() {
+        let before = planner_stage_snapshot(10, 100, 5);
+        let after = planner_stage_snapshot(12, 109, 6);
+        let delta = planner_stage_stats_delta(&before, &after).expect("valid stage delta");
+        assert_eq!(delta.len(), PLANNER_STAGE_NAMES.len());
+        assert!(delta.iter().all(|stage| {
+            stage.calls == 2 && stage.elapsed_us == 9 && stage.fast_declines == 1
+        }));
+
+        let regressed = planner_stage_snapshot(9, 109, 6);
+        assert!(
+            planner_stage_stats_delta(&before, &regressed)
+                .expect_err("regressed calls must invalidate capture")
+                .contains("calls counter regressed")
+        );
+    }
+
+    #[test]
+    fn planner_stage_delta_rejects_mismatched_stage_sets() {
+        let before = planner_stage_snapshot(10, 100, 5);
+        let mut after = planner_stage_snapshot(12, 109, 6);
+        after.remove("upper_other");
+        after.insert(
+            "unknown".to_owned(),
+            PlannerStageStatsSnapshot {
+                calls: 1,
+                elapsed_us: 1,
+                fast_declines: 1,
+            },
+        );
+        assert!(
+            planner_stage_stats_delta(&before, &after)
+                .expect_err("mismatched stages must invalidate capture")
+                .contains("key sets differ")
+        );
+    }
+
+    #[test]
+    fn planner_stage_capture_is_gated_to_observed_native_matrix_cells() {
+        assert!(should_capture_planner_stages(
+            "grouped_agg_int4",
+            10_000,
+            true,
+            false,
+        ));
+        assert!(!should_capture_planner_stages(
+            "grouped_agg_int4",
+            1_000_000,
+            true,
+            false,
+        ));
+        assert!(!should_capture_planner_stages(
+            "grouped_agg_int4",
+            10_000,
+            false,
+            false,
+        ));
+        assert!(!should_capture_planner_stages(
+            "grouped_agg_int4",
+            10_000,
+            true,
+            true,
+        ));
+    }
+
     #[test]
     fn explicit_gpu_dispatched_parses_gpu_kernel_dispatched_aliases() {
         assert_eq!(
@@ -4514,8 +5121,10 @@ mod tests {
             function_kernel_candidate: false,
             dispatch_counter_captured: true,
             gpu_kernel_execution_delta: 1,
+            pg_accel_queries_accelerated_delta: 1,
             pg_accel_stock_exec_delta: 0,
             accel_output_rows_consumed: 1,
+            measured_iterations: 1,
         });
 
         assert!(!classification.gpu_kernel_dispatched);
@@ -4530,12 +5139,55 @@ mod tests {
             function_kernel_candidate: true,
             dispatch_counter_captured: true,
             gpu_kernel_execution_delta: 3,
+            pg_accel_queries_accelerated_delta: 0,
             pg_accel_stock_exec_delta: 0,
             accel_output_rows_consumed: 12,
+            measured_iterations: 1,
         });
 
         assert!(classification.gpu_kernel_dispatched);
         assert!(classification.function_srf_kernel_dispatched);
+    }
+
+    #[test]
+    fn selected_dispatch_allows_verified_artifact_hits_but_requires_query_and_output_proof() {
+        let base = RunnerDispatchInput {
+            plan_selected: true,
+            plan_explicitly_not_dispatched: false,
+            function_kernel_candidate: false,
+            dispatch_counter_captured: true,
+            gpu_kernel_execution_delta: 1,
+            pg_accel_queries_accelerated_delta: 10,
+            pg_accel_stock_exec_delta: 0,
+            accel_output_rows_consumed: 10,
+            measured_iterations: 10,
+        };
+        assert!(
+            classify_runner_dispatch(base).gpu_kernel_dispatched,
+            "one rebuild dispatch plus ten accelerated queries is valid artifact-hit evidence"
+        );
+        assert!(
+            !classify_runner_dispatch(RunnerDispatchInput {
+                pg_accel_queries_accelerated_delta: 9,
+                ..base
+            })
+            .gpu_kernel_dispatched
+        );
+        assert!(
+            !classify_runner_dispatch(RunnerDispatchInput {
+                accel_output_rows_consumed: 0,
+                ..base
+            })
+            .gpu_kernel_dispatched
+        );
+        assert!(
+            !classify_runner_dispatch(RunnerDispatchInput {
+                plan_selected: false,
+                ..base
+            })
+            .gpu_kernel_dispatched,
+            "an unattributed same-backend kernel delta is not performance credit"
+        );
     }
 
     fn iter_at(accel_ms: f64, parallel_ms: f64, cache_state: CacheState) -> IterationResult {
@@ -4766,6 +5418,7 @@ mod tests {
             seed: 99,
             timing_mode: TimingMode::Both,
             cache_mode: CacheMode::Cold,
+            capture_planner_stages: true,
             plans_capture_path: Some(PathBuf::from("benchmarks/artifacts/repro/plans.txt")),
             guc_profile: Some(GucProfile::realistic()),
             skip_guc_verify: true,
@@ -4788,6 +5441,7 @@ mod tests {
         assert!(command.contains("--cache-mode cold"));
         assert!(command.contains("--realistic-gucs"));
         assert!(command.contains("--capture-plans"));
+        assert!(command.contains("--capture-planner-stages"));
         assert!(command.contains("--skip-guc-verify"));
         assert!(command.contains("--artifacts-dir benchmarks/artifacts/repro"));
         assert!(command.contains("--connection 'host=localhost port=28818 dbname=pg accel'"));
@@ -4852,8 +5506,26 @@ mod tests {
             )]
         );
         assert_eq!(
+            resident_pin_specs("and_range_predicate_expression_grouped_agg_int4"),
+            vec![resident_pin(
+                "bench_and_range_predicate_expression_sales_int4",
+                &["product_id", "price", "quantity"],
+            )]
+        );
+        assert_eq!(
             resident_pin_specs("hashagg_f64_aggs"),
             vec![resident_pin("bench_fp64_num", &["gk", "v_f64", "w_f64"],)]
+        );
+    }
+
+    #[test]
+    fn test_resident_pin_specs_cover_exact_raster_input() {
+        assert_eq!(
+            resident_pin_specs("raster_resident_exact_reclass"),
+            vec![resident_pin(
+                "bench_raster_resident_exact_reclass",
+                &["rast"],
+            )]
         );
     }
 
@@ -5223,6 +5895,7 @@ mod tests {
         for name in [
             "grouped_agg_int4",
             "predicate_expression_grouped_agg_int4",
+            "and_range_predicate_expression_grouped_agg_int4",
             "mixed_join_agg_int4",
             "ssbm_resident_int4_star",
         ] {
@@ -5236,6 +5909,18 @@ mod tests {
             );
             assert!(projection.contains(&workload.query_sql()), "{name}");
         }
+    }
+
+    #[test]
+    fn test_raster_exact_reclass_projection_consumes_byte_exact_materialized_output() {
+        let workload = crate::workloads::find_workload("raster_resident_exact_reclass")
+            .expect("registered exact raster workload");
+        let query = workload.query_sql();
+        let projection = correctness_projection_sql(&query, workload.name(), false);
+        assert!(projection.starts_with("WITH q AS MATERIALIZED ("));
+        assert!(projection.contains(&query));
+        assert!(projection.contains("encode(ST_AsBinary(q.rast), 'hex')"));
+        assert!(!projection.contains("to_jsonb(q)"));
     }
 
     #[test]
@@ -5814,12 +6499,18 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_counter_helpers_clamp_delta_merge_and_preserve_first_error() {
-        assert_eq!(i64_to_u64(-1), 0);
-        assert_eq!(i64_to_u64(17), 17);
+    fn dispatch_counter_helpers_accumulate_reset_iterations_and_fail_on_regression() {
+        assert!(nonnegative_dispatch_counter("fixture", -1).is_err());
+        assert_eq!(
+            nonnegative_dispatch_counter("fixture", 17)
+                .expect("a nonnegative SQL counter should convert"),
+            17
+        );
 
-        let delta = dispatch_stats_delta(
+        let first = dispatch_stats_delta(
             DispatchStatsSnapshot {
+                backend_pid: 42,
+                queries_accelerated: 10,
                 rows_dispatched: 10,
                 batches_executed: 20,
                 stock_exec_count: 30,
@@ -5827,18 +6518,74 @@ mod tests {
                 gpu_kernel_executions: 50,
             },
             DispatchStatsSnapshot {
+                backend_pid: 42,
+                queries_accelerated: 11,
                 rows_dispatched: 15,
-                batches_executed: 19,
+                batches_executed: 21,
                 stock_exec_count: 32,
                 gpu_rows_processed: 44,
                 gpu_kernel_executions: 55,
             },
-        );
+        )
+        .expect("monotonic counters produce a delta");
+        let second_after_reset = dispatch_stats_delta(
+            DispatchStatsSnapshot::default(),
+            DispatchStatsSnapshot {
+                backend_pid: 0,
+                queries_accelerated: 1,
+                rows_dispatched: 7,
+                batches_executed: 1,
+                stock_exec_count: 0,
+                gpu_rows_processed: 7,
+                gpu_kernel_executions: 1,
+            },
+        )
+        .expect("a reset between iterations is coherent when sampled per iteration");
+        let mut delta = DispatchStatsDelta::default();
+        accumulate_dispatch_stats(&mut delta, first)
+            .expect("the first bounded dispatch delta should accumulate");
+        accumulate_dispatch_stats(&mut delta, second_after_reset)
+            .expect("the reset iteration delta should accumulate");
+        assert_eq!(delta.queries_accelerated, 2);
+        assert_eq!(delta.rows_dispatched, 12);
+        assert_eq!(delta.batches_executed, 2);
+        assert_eq!(delta.stock_exec_count, 2);
+        assert_eq!(delta.gpu_rows_processed, 11);
+        assert_eq!(delta.gpu_kernel_executions, 6);
+
+        let regression = dispatch_stats_delta(
+            DispatchStatsSnapshot {
+                batches_executed: 2,
+                ..DispatchStatsSnapshot::default()
+            },
+            DispatchStatsSnapshot {
+                batches_executed: 1,
+                ..DispatchStatsSnapshot::default()
+            },
+        )
+        .expect_err("a reset inside one measured iteration must fail closed");
+        assert!(regression.contains("batches_executed"));
+
+        let backend_change = dispatch_stats_delta(
+            DispatchStatsSnapshot {
+                backend_pid: 41,
+                ..DispatchStatsSnapshot::default()
+            },
+            DispatchStatsSnapshot {
+                backend_pid: 42,
+                ..DispatchStatsSnapshot::default()
+            },
+        )
+        .expect_err("before/after snapshots from different backends must fail closed");
+        assert!(backend_change.contains("PID 41 to 42"));
+
+        let delta = first;
         assert_eq!(delta.rows_dispatched, 5);
-        assert_eq!(delta.batches_executed, 0);
+        assert_eq!(delta.batches_executed, 1);
         assert_eq!(delta.stock_exec_count, 2);
         assert_eq!(delta.gpu_rows_processed, 4);
         assert_eq!(delta.gpu_kernel_executions, 5);
+        assert_eq!(delta.queries_accelerated, 1);
 
         let mut target = dispatch_test_result();
         merge_dispatch_counter_capture(
@@ -5850,28 +6597,53 @@ mod tests {
             },
         );
         assert!(target.dispatch_counter_captured);
+        assert_eq!(target.pg_accel_queries_accelerated_delta, 1);
         assert_eq!(target.gpu_kernel_execution_delta, 5);
         assert_eq!(target.pg_accel_rows_dispatched_delta, 5);
         assert_eq!(target.pg_accel_stock_exec_delta, 2);
         assert_eq!(target.dispatch_counter_error.as_deref(), Some("first"));
 
-        let mut source = dispatch_test_result();
-        source.dispatch_counter_captured = true;
-        source.gpu_kernel_execution_delta = u64::MAX;
-        source.pg_accel_rows_dispatched_delta = u64::MAX;
-        source.pg_accel_batches_executed_delta = 8;
-        source.pg_accel_gpu_rows_processed_delta = 9;
-        source.pg_accel_stock_exec_delta = 10;
-        source.accel_output_rows_consumed = 11;
-        source.dispatch_counter_error = Some("second".to_owned());
-        merge_dispatch_counter_fields(&mut target, &source);
-        assert_eq!(target.gpu_kernel_execution_delta, u64::MAX);
-        assert_eq!(target.pg_accel_rows_dispatched_delta, u64::MAX);
-        assert_eq!(target.pg_accel_batches_executed_delta, 8);
-        assert_eq!(target.pg_accel_gpu_rows_processed_delta, 13);
-        assert_eq!(target.pg_accel_stock_exec_delta, 12);
+        let mut cold = dispatch_test_result();
+        cold.dispatch_counter_captured = true;
+        cold.pg_accel_queries_accelerated_delta = 5;
+        cold.gpu_kernel_execution_delta = 7;
+        cold.accel_output_rows_consumed = 11;
+        let mut warm = dispatch_test_result();
+        warm.dispatch_counter_captured = false;
+        warm.dispatch_counter_error = Some("warm stats missing".to_owned());
+        merge_cache_mode_dispatch_counter_fields(&mut target, &cold, &warm);
+        assert!(!target.dispatch_counter_captured);
+        assert_eq!(target.pg_accel_queries_accelerated_delta, 5);
+        assert_eq!(target.gpu_kernel_execution_delta, 7);
         assert_eq!(target.accel_output_rows_consumed, 11);
-        assert_eq!(target.dispatch_counter_error.as_deref(), Some("first"));
+        assert!(
+            target
+                .dispatch_counter_error
+                .as_deref()
+                .is_some_and(|error| error.contains("warm stats missing"))
+        );
+
+        warm.dispatch_counter_captured = true;
+        warm.dispatch_counter_error = None;
+        warm.pg_accel_queries_accelerated_delta = 6;
+        warm.gpu_kernel_execution_delta = 8;
+        warm.accel_output_rows_consumed = 12;
+        merge_cache_mode_dispatch_counter_fields(&mut target, &cold, &warm);
+        assert!(target.dispatch_counter_captured);
+        assert_eq!(target.pg_accel_queries_accelerated_delta, 11);
+        assert_eq!(target.gpu_kernel_execution_delta, 15);
+        assert_eq!(target.accel_output_rows_consumed, 23);
+        assert!(target.dispatch_counter_error.is_none());
+
+        cold.gpu_kernel_execution_delta = u64::MAX;
+        merge_cache_mode_dispatch_counter_fields(&mut target, &cold, &warm);
+        assert!(!target.dispatch_counter_captured);
+        assert!(
+            target
+                .dispatch_counter_error
+                .as_deref()
+                .is_some_and(|error| error.contains("overflowed"))
+        );
 
         let unavailable = DispatchCounterCapture::unavailable("stats missing");
         assert!(!unavailable.captured);
@@ -5908,6 +6680,7 @@ mod tests {
             seed: 99,
             timing_mode: TimingMode::Both,
             cache_mode: CacheMode::Cold,
+            capture_planner_stages: false,
             plans_capture_path: Some(dir.path().join("plans/all.txt")),
             guc_profile: Some(GucProfile::toy()),
             skip_guc_verify: true,
@@ -6496,6 +7269,14 @@ mod tests {
         emit_dispatch_classification_warning(input(true, true, false, false), &result);
 
         result.gpu_kernel_execution_delta = 2;
+        result.pg_accel_queries_accelerated_delta = 0;
+        emit_dispatch_classification_warning(input(true, false, false, false), &result);
+
+        result.pg_accel_queries_accelerated_delta = result.iterations.len() as u64;
+        result.accel_output_rows_consumed = 0;
+        emit_dispatch_classification_warning(input(true, false, false, false), &result);
+
+        result.accel_output_rows_consumed = 1;
         emit_dispatch_classification_warning(input(true, false, true, false), &result);
 
         result.gpu_kernel_execution_delta = 0;

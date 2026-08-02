@@ -73,15 +73,15 @@ class TestUnpublishedQueue {
   bool unpublished_ = true;
 };
 
-extern "C" void pgaccel_test_fail_before_ooo_queue_once(void) {
+extern "C" void pgacceltest_fail_before_ooo_queue_once(void) {
   g_test_fail_before_ooo_queue.store(true, std::memory_order_release);
 }
 
-extern "C" unsigned pgaccel_test_unpublished_queue_count(void) {
+extern "C" unsigned pgacceltest_unpublished_queue_count(void) {
   return g_test_unpublished_queues.load(std::memory_order_acquire);
 }
 
-extern "C" void pgaccel_test_seed_inherited_runtime_state(void) {
+extern "C" void pgacceltest_seed_inherited_runtime_state(void) {
   g_device_info.compute_units = 999;
   std::strncpy(g_device_info.device_name, "stale-parent-device",
                sizeof(g_device_info.device_name) - 1);
@@ -95,11 +95,11 @@ extern "C" void pgaccel_test_seed_inherited_runtime_state(void) {
   g_initialized.store(true, std::memory_order_release);
 }
 
-extern "C" void pgaccel_test_fail_after_fork_invalidation_once(void) {
+extern "C" void pgacceltest_fail_after_fork_invalidation_once(void) {
   g_test_fail_after_fork_invalidation.store(true, std::memory_order_release);
 }
 
-extern "C" void pgaccel_test_clear_seeded_runtime_state(void) {
+extern "C" void pgacceltest_clear_seeded_runtime_state(void) {
   g_queue = nullptr;
   g_ooo_queue = nullptr;
   std::memset(&g_device_info, 0, sizeof(g_device_info));

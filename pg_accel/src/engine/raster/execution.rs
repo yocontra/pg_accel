@@ -377,7 +377,12 @@ fn checked_row_layout(
                     reason: "band-one raster work metadata disagrees with exact WKB",
                 });
             }
-            let flags = exact_wkb[RASTER_WKB_HEADER_BYTES];
+            let flags = *exact_wkb.get(RASTER_WKB_HEADER_BYTES).ok_or(
+                RasterExecutionError::InvalidRow {
+                    row,
+                    reason: "band-one raster header is truncated",
+                },
+            )?;
             let source_width =
                 pixel_width_from_tag(flags & 0x0f).ok_or(RasterExecutionError::InvalidRow {
                     row,
@@ -1332,6 +1337,18 @@ mod tests {
         let mut bad_flags = raster.clone();
         bad_flags[RASTER_WKB_HEADER_BYTES] |= 0x10;
         assert!(checked_row_layout(0, base, &bad_flags, 1).is_err());
+
+        let mut header_only = raster[..RASTER_WKB_HEADER_BYTES].to_vec();
+        header_only[3..5].copy_from_slice(&1_u16.to_le_bytes());
+        work = base;
+        work.exact_wkb_bytes = RASTER_WKB_HEADER_BYTES as u64;
+        assert!(matches!(
+            checked_row_layout(0, work, &header_only, 1),
+            Err(RasterExecutionError::InvalidRow {
+                reason: "band-one raster header is truncated",
+                ..
+            })
+        ));
 
         let mut truncated = raster;
         truncated.pop();

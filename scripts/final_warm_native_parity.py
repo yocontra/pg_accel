@@ -37,6 +37,15 @@ NO_DISPATCH_TIMING_SKEW_THRESHOLD = 0.10
 NON_INFERIORITY_ALPHA = 0.05
 NON_INFERIORITY_METHOD = "exact_one_sided_paired_sign_flip"
 STATISTICALLY_RESOLVED = "resolved_exact_paired_sign_flip"
+PLANNER_STAGE_NAMES = (
+    "rel_pathlist",
+    "join_pathlist",
+    "upper_group_agg",
+    "upper_window",
+    "upper_final",
+    "upper_setop",
+    "upper_other",
+)
 
 
 class AnalysisError(Exception):
@@ -200,6 +209,90 @@ def extract_native_arms(
         ],
         "balanced": True,
     }
+
+
+def extract_planner_stage_attribution(
+    row: dict[str, Any], label: str
+) -> dict[str, Any]:
+    """Validate and aggregate off-clock stage deltas for every measured pair."""
+
+    captures = row.get("planner_stage_captures")
+    if not isinstance(captures, list) or len(captures) != EXPECTED_ITERATIONS:
+        raise AnalysisError(
+            f"{label}: expected exactly {EXPECTED_ITERATIONS} planner-stage captures"
+        )
+
+    totals = {
+        stage: {"calls": 0, "elapsed_us": 0, "fast_declines": 0}
+        for stage in PLANNER_STAGE_NAMES
+    }
+    for pair_index, capture in enumerate(captures):
+        if not isinstance(capture, dict):
+            raise AnalysisError(f"{label}: planner-stage capture {pair_index} is not an object")
+        if capture.get("pair_index") != pair_index or capture.get("cache_state") != "warm":
+            raise AnalysisError(
+                f"{label}: planner-stage capture {pair_index} identity/cache state mismatch"
+            )
+        if capture.get("error") not in (None, ""):
+            raise AnalysisError(
+                f"{label}: planner-stage capture {pair_index} is invalid: "
+                f"{capture.get('error')}"
+            )
+        stages = capture.get("stages")
+        probe = capture.get("observer_probe")
+        parsed = _parse_stage_vector(stages, label, pair_index, "target")
+        parsed_probe = _parse_stage_vector(probe, label, pair_index, "observer_probe")
+        for stage in PLANNER_STAGE_NAMES:
+            if any(parsed_probe[stage].values()):
+                raise AnalysisError(
+                    f"{label}: planner-stage observer probe changed counters in pair {pair_index}"
+                )
+            for counter in ("calls", "elapsed_us", "fast_declines"):
+                totals[stage][counter] += parsed[stage][counter]
+
+    return {
+        "capture_method": "prepared_observer_before_after_with_zero_delta_probe",
+        "measured_pair_count": len(captures),
+        "stages": [
+            {"stage": stage, **totals[stage]} for stage in PLANNER_STAGE_NAMES
+        ],
+    }
+
+
+def _parse_stage_vector(
+    value: Any, label: str, pair_index: int, vector_label: str
+) -> dict[str, dict[str, int]]:
+    if not isinstance(value, list) or len(value) != len(PLANNER_STAGE_NAMES):
+        raise AnalysisError(
+            f"{label}: {vector_label} pair {pair_index} must contain exactly seven stages"
+        )
+    parsed: dict[str, dict[str, int]] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise AnalysisError(
+                f"{label}: {vector_label} pair {pair_index} contains a malformed stage"
+            )
+        stage = item.get("stage")
+        if stage not in PLANNER_STAGE_NAMES or stage in parsed:
+            raise AnalysisError(
+                f"{label}: {vector_label} pair {pair_index} has unknown/duplicate stage"
+            )
+        counters: dict[str, int] = {}
+        for counter in ("calls", "elapsed_us", "fast_declines"):
+            counter_value = item.get(counter)
+            if (
+                isinstance(counter_value, bool)
+                or not isinstance(counter_value, int)
+                or counter_value < 0
+            ):
+                raise AnalysisError(
+                    f"{label}: {vector_label} pair {pair_index} has invalid {counter}"
+                )
+            counters[counter] = counter_value
+        parsed[stage] = counters
+    if set(parsed) != set(PLANNER_STAGE_NAMES):
+        raise AnalysisError(f"{label}: {vector_label} pair {pair_index} stage set is incomplete")
+    return parsed
 
 
 def _close(actual: Any, expected: float, label: str) -> None:
@@ -486,6 +579,7 @@ def analyze_native_cell(
     workload: str,
     rows: int,
     expected_reason: str,
+    require_planner_stages: bool = False,
 ) -> dict[str, Any]:
     label = f"{ordinal}:{workload}@{rows}"
     if row.get("name") != workload or row.get("rows") != rows:
@@ -513,6 +607,8 @@ def analyze_native_cell(
         parity["parity_verdict"] = "fail"
     parity["no_dispatch_audit"] = audit_result
     parity["arm_order"] = arm_order
+    if require_planner_stages:
+        parity["planner_stage_attribution"] = extract_planner_stage_attribution(row, label)
     parity["ordinal"] = ordinal
     parity["workload"] = workload
     parity["rows"] = rows
@@ -533,7 +629,7 @@ def _load_report_row(path: Path, label: str) -> dict[str, Any]:
     return row
 
 
-def analyze_artifact(root: Path) -> dict[str, Any]:
+def analyze_artifact(root: Path, *, require_planner_stages: bool = False) -> dict[str, Any]:
     if not root.is_dir():
         raise AnalysisError(f"artifact root is missing: {root}")
     manifest = read_manifest(root / "SHA256SUMS")
@@ -592,6 +688,7 @@ def analyze_artifact(root: Path) -> dict[str, Any]:
                 workload=workload,
                 rows=rows,
                 expected_reason=reason,
+                require_planner_stages=require_planner_stages,
             )
         )
 
@@ -621,6 +718,7 @@ def analyze_artifact(root: Path) -> dict[str, Any]:
             "non_inferiority_alpha": NON_INFERIORITY_ALPHA,
             "measured_arm_order": "exactly 5 accel-first and 5 disabled-first pairs",
             "parity_requires_comparable_no_dispatch_audit": True,
+            "planner_stage_evidence_required": require_planner_stages,
         },
         "summary": {
             "native_decline_cells": len(cells),
@@ -658,9 +756,16 @@ def main() -> int:
         required=True,
         help="completed and sealed final-warm artifact root",
     )
+    parser.add_argument(
+        "--require-planner-stages",
+        action="store_true",
+        help="diagnostic mode: require validated per-pair planner-stage evidence",
+    )
     args = parser.parse_args()
     try:
-        report = analyze_artifact(args.root.resolve())
+        report = analyze_artifact(
+            args.root.resolve(), require_planner_stages=args.require_planner_stages
+        )
     except (AnalysisError, OSError, TypeError, ValueError) as error:
         json.dump(invalid_report(error), sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")

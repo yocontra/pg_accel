@@ -394,6 +394,10 @@ pub struct BenchConfig {
     pub seed: u64,
     pub timing_mode: TimingMode,
     pub cache_mode: CacheMode,
+    /// Diagnostic-only planner-stage attribution. This enables monotonic-clock
+    /// sampling inside planner hooks and must remain false for publication
+    /// latency measurements.
+    pub capture_planner_stages: bool,
     /// If set, run `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` once per
     /// workload/scale before the timed loop and append the result to this
     /// path.
@@ -419,6 +423,7 @@ impl Default for BenchConfig {
             seed: 42,
             timing_mode: TimingMode::default(),
             cache_mode: CacheMode::default(),
+            capture_planner_stages: false,
             plans_capture_path: None,
             guc_profile: None,
             skip_guc_verify: false,

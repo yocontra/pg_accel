@@ -3,6 +3,7 @@ mod gpu_reduce_scaling;
 mod gpu_reduce_sum;
 mod reduce_variants;
 // --- GPU HashAgg ---
+mod and_range_predicate_expression_grouped_agg_int4;
 mod case_when_expression_grouped_agg;
 mod case_when_in_expression_grouped_agg;
 mod case_when_not_expression_grouped_agg;
@@ -16,6 +17,7 @@ mod gpu_hashagg_med_card;
 mod grouped_agg;
 mod grouped_agg_high_card;
 mod grouped_agg_int4;
+mod grouped_count_bool_candidate;
 mod hashagg_sweep;
 mod predicate_expression_grouped_agg_int4;
 mod predicate_filter_expression_grouped_agg;
@@ -40,6 +42,7 @@ mod spatial_filter;
 mod spatial_join;
 mod spatial_megapoly;
 mod spatial_multi_pred;
+mod spatial_resident_agg_candidate;
 mod spatial_selectivity;
 mod spatial_selectivity_sweep;
 mod spatial_shapes;
@@ -58,6 +61,7 @@ mod gpu_expr_complex;
 mod gpu_expr_filter;
 mod gpu_expr_null_heavy;
 // --- GPU Raster ---
+mod raster_resident_exact_reclass;
 mod raster_variants;
 mod registry;
 // --- GPU Window ---
@@ -98,6 +102,7 @@ mod window_reducing_decline;
 pub use aggregate_semantic_modifier_decline::{
     AggregateOrderedSetDecline, AggregateSemanticModifierDecline,
 };
+pub use and_range_predicate_expression_grouped_agg_int4::AndRangePredicateExpressionGroupedAggInt4;
 pub use avg_nonfloat_decline::AvgNonfloatDecline;
 pub use bitmap_heap_gpuexpr_decline::BitmapHeapGpuExprDecline;
 pub use case_when_expression_grouped_agg::CaseWhenExpressionGroupedAgg;
@@ -124,6 +129,7 @@ pub use gpu_sort_topk_wide::GpuSortTopkWide;
 pub use grouped_agg::GroupedAgg;
 pub use grouped_agg_high_card::GroupedAggHighCard;
 pub use grouped_agg_int4::GroupedAggInt4;
+pub use grouped_count_bool_candidate::GroupedCountBoolCandidate;
 pub use h3_bulk::H3Bulk;
 pub use h3_cell_to_parent::H3CellToParent;
 pub use h3_grid_distance::H3GridDistance;
@@ -142,6 +148,7 @@ pub use parallel_stress::{
 pub use predicate_expression_grouped_agg_int4::PredicateExpressionGroupedAggInt4;
 pub use predicate_filter_expression_grouped_agg::PredicateFilterExpressionGroupedAgg;
 pub use proximity::Proximity;
+pub use raster_resident_exact_reclass::RasterResidentExactReclass;
 pub use recursive_union_decline::RecursiveUnionDecline;
 #[cfg(test)]
 pub use registry::Phase9OperatorLane;
@@ -161,11 +168,12 @@ pub use spatial_contains::SpatialContains;
 pub use spatial_filter::SpatialFilter;
 pub use spatial_join::SpatialJoin;
 pub use spatial_multi_pred::SpatialMultiPred;
+pub use spatial_resident_agg_candidate::SpatialResidentAggCandidate;
 pub use spatial_selectivity::SpatialSelectivity;
 pub use spatial_sort::SpatialSort;
 pub use ssbm::{
     SsbmQ1_1, SsbmQ1_2, SsbmQ1_3, SsbmQ2_1, SsbmQ2_2, SsbmQ2_3, SsbmQ3_1, SsbmQ3_2, SsbmQ3_3,
-    SsbmQ3_4, SsbmQ4_1, SsbmQ4_2, SsbmQ4_3, SsbmResidentInt4Star,
+    SsbmQ3_4, SsbmQ4_1, SsbmQ4_2, SsbmQ4_3, SsbmResidentInt4Star, SsbmResidentInt8Star,
 };
 pub use timeseries_sensor_rollup::TimeseriesSensorRollup;
 pub use topk_wide::TopkWide;
@@ -307,6 +315,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         // --- GPU HashAgg (original) ---
         Box::new(GroupedAgg),
         Box::new(GroupedAggInt4),
+        Box::new(GroupedCountBoolCandidate),
         Box::new(GroupedAggHighCard),
         Box::new(GpuHashaggMedCard),
         Box::new(TimeseriesSensorRollup),
@@ -314,6 +323,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(ExpressionGroupedAgg),
         Box::new(PredicateFilterExpressionGroupedAgg),
         Box::new(PredicateExpressionGroupedAggInt4),
+        Box::new(AndRangePredicateExpressionGroupedAggInt4),
         Box::new(CaseWhenExpressionGroupedAgg),
         Box::new(CaseWhenRangeExpressionGroupedAgg),
         Box::new(CaseWhenValuePredicateExpressionGroupedAgg),
@@ -386,6 +396,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SpatialFilter),
         Box::new(SpatialComplexPoly),
         Box::new(SpatialSelectivity),
+        Box::new(SpatialResidentAggCandidate),
         // --- GPU Spatial Megapoly (action_items W7) ---
         // Collapsed from `spatial_mega_{100,250,500,1k,2k,5k}v` to one
         // representative. All six wrapped the same `point_in_ring` kernel;
@@ -512,6 +523,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(WindowReducingDecline),
         // --- SSBM (Star Schema Benchmark — PG-Strom comparison) ---
         Box::new(SsbmResidentInt4Star),
+        Box::new(SsbmResidentInt8Star),
         Box::new(SsbmQ1_1),
         Box::new(SsbmQ1_2),
         Box::new(SsbmQ1_3),
@@ -549,6 +561,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(raster_variants::RASTER_SLOPE),
         Box::new(raster_variants::RASTER_RECLASS),
         Box::new(raster_variants::RASTER_ALGEBRA_DEEP),
+        Box::new(RasterResidentExactReclass),
         // --- Regression workloads (expect ~1.00x, proving no overhead) ---
         Box::new(Proximity),
         Box::new(IndexRecheck),
@@ -874,6 +887,8 @@ pub enum ReleasedPathFamily {
     GroupedAggregate,
     StarJoin,
     H3Parent,
+    SpatialAggregate,
+    RasterTransform,
 }
 
 impl ReleasedPathFamily {
@@ -891,6 +906,8 @@ impl ReleasedPathFamily {
                 KernelClass::HashJoin | KernelClass::ResidentStarGroupAgg
             ),
             Self::H3Parent => matches!(operation, KernelClass::H3CellToParent),
+            Self::SpatialAggregate => matches!(operation, KernelClass::PointInRing),
+            Self::RasterTransform => matches!(operation, KernelClass::Raster),
         }
     }
 }
@@ -952,10 +969,28 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::StarJoin,
     },
     ReleasedEnvelopeContract {
+        workload: "ssbm_resident_int8_star",
+        min_rows: SSBM_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
         workload: "h3_cell_to_parent",
         min_rows: H3_GROUPED_WINNER_MIN_ROWS,
         max_rows: usize::MAX,
         family: ReleasedPathFamily::H3Parent,
+    },
+    ReleasedEnvelopeContract {
+        workload: "spatial_resident_agg_candidate",
+        min_rows: 1_000_000,
+        max_rows: 1_000_000,
+        family: ReleasedPathFamily::SpatialAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "raster_resident_exact_reclass",
+        min_rows: 10_000,
+        max_rows: 1_000_000,
+        family: ReleasedPathFamily::RasterTransform,
     },
 ];
 
@@ -1073,6 +1108,10 @@ pub const METAL_SHIP_GATE_CELLS: &[MetalShipGateCell] = &[
         rows: 1_000_000,
     },
     MetalShipGateCell {
+        workload: "ssbm_resident_int8_star",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
         workload: "hashjoin_10k_1m",
         rows: 1_000_000,
     },
@@ -1117,7 +1156,9 @@ fn validate_performance_envelope(entry: PerformanceEnvelope) -> PerformanceEnvel
             Some(
                 ReleasedPathFamily::GroupedAggregate
                 | ReleasedPathFamily::StarJoin
-                | ReleasedPathFamily::H3Parent,
+                | ReleasedPathFamily::H3Parent
+                | ReleasedPathFamily::SpatialAggregate
+                | ReleasedPathFamily::RasterTransform,
             ),
             Some(_),
         )
@@ -1297,6 +1338,16 @@ fn groupagg_threshold_matrix_entry(
             "dept, SUM(int4), COUNT(*)",
             "exact integer resident grouped SUM/COUNT warm winner matrix",
         ),
+        "grouped_count_bool_candidate" => (
+            "resident_dictionary_groupagg_nullable_bool_count",
+            "nullable bool group key + nullable bool COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored by COUNT",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable bool measure",
+            "bool key, COUNT(bool)",
+            "exact nullable boolean resident grouped COUNT warm winner matrix",
+        ),
         "timeseries_sensor_rollup" => (
             "resident_dense_groupagg_min_max_avg",
             "int4 sensor_id group key + float8 reading",
@@ -1346,6 +1397,16 @@ fn groupagg_threshold_matrix_entry(
             "int4 product_id + int4 price + int4 quantity + bool active",
             "product_id, SUM(price * quantity), COUNT(*)",
             "exact integer resident grouped predicate/expression SUM/COUNT warm winner matrix",
+        ),
+        "and_range_predicate_expression_grouped_agg_int4" => (
+            "native_decline_multiple_same_column_range_predicates",
+            "int4 group key + nullable int4 range input + int4 multiplication measure",
+            "256 dense product_id groups",
+            "same-column price range intersection selects about 60%, with NULL prices excluded",
+            "exactly 256 grouped product rows at release scale".to_owned(),
+            "int4 product_id + nullable int4 price + int4 quantity",
+            "product_id, SUM(price * quantity), COUNT(*)",
+            "intentional native decline after the selected path missed the 1.15x release floor",
         ),
         "case_when_expression_grouped_agg" => (
             "resident_dense_groupagg_case_when_expression_sum_count",
@@ -1449,6 +1510,10 @@ fn groupagg_threshold_matrix_entry(
         "grouped_agg_high_card" => Some("shape_unsupported_rte"),
         "expression_grouped_agg" => Some("shape_floating_expression_semantics"),
         "predicate_filter_expression_grouped_agg" => Some("shape_aggregate_modifier"),
+        "grouped_count_bool_candidate" => Some("shape_unsupported_aggregate_input"),
+        "and_range_predicate_expression_grouped_agg_int4" => {
+            Some("shape_multiple_range_predicates")
+        }
         "case_when_expression_grouped_agg"
         | "case_when_range_expression_grouped_agg"
         | "case_when_value_predicate_expression_grouped_agg"
@@ -1618,6 +1683,19 @@ fn ssbm_matrix_profile(name: &str) -> Option<SsbmMatrixProfile> {
             output_size: "d_year, p_size, exact SUM(int4), COUNT(*)",
             dispatch_evidence: "SSBM two-dimension resident GroupAgg Custom Scan; descriptor proves date+part joins, d_year+p_size keys, SUM+COUNT; kernel counter delta > 0; stock fallback counter = 0",
             threshold_basis: "runner-seeded canonical SSBM exact-int4 two-dimension star release sentinel",
+        },
+        "ssbm_resident_int8_star" => SsbmMatrixProfile {
+            lane: "ssbm_resident_int8_membership_year_size_revenue",
+            data_type: "int8 fact/date/part join keys with int4 dimension group keys and measure",
+            cardinality: "at most 350 canonical SSBM year-by-part-size groups",
+            selectivity: "100% runner-seeded lineorder rows joined through two unique scalar int8 dimensions",
+            result_count: "one row per populated year-by-part-size group (maximum 350)",
+            index_pruning_shape: "unique scalar int8 date and part dimension joins",
+            batch_count: "resident int8-key lineorder/date/part batches consumed by one exact grouped kernel",
+            row_width: "int8 orderdate/partkey plus int4 revenue fact; int8 dimension keys with int4 year/size outputs",
+            output_size: "d_year, p_size, exact SUM(int4), COUNT(*)",
+            dispatch_evidence: "distinct SSBM int8-key resident GroupAgg Custom Scan; descriptor proves type=20 date+part joins, d_year+p_size keys, SUM+COUNT; kernel counter delta > 0; stock fallback counter = 0",
+            threshold_basis: "independent runner-seeded canonical SSBM scalar-int8 membership release sentinel",
         },
         "ssbm_q1_1" => SsbmMatrixProfile {
             lane: "ssbm_q1_filtered_revenue_year",
@@ -2004,20 +2082,40 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
 fn raster_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = raster_matrix_profile(name)?;
     let pixels = raster_total_pixels(rows);
-    // Production raster admission is observation-only. The resident reclass
-    // executor can be forced by tests, but no production SQL shape may be
-    // represented as a release GPU winner until planner and cost gates select it.
-    let expectation = BenchmarkLaneExpectation::NativeDecline {
-        reason: "shape_unsupported_rte",
+    let exact_reclass = name == "raster_resident_exact_reclass";
+    let expectation = if exact_reclass && (10_000..=1_000_000).contains(&rows) {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: 1.15,
+        }
+    } else if exact_reclass {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "raster_cost_uncalibrated",
+        }
+    } else {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "shape_unsupported_rte",
+        }
     };
     Some(BenchmarkThresholdMatrixEntry {
         lane: profile.lane,
         workload: static_workload_name(name),
         rows,
-        data_type: "PostGIS raster 32BF tiles",
+        data_type: if exact_reclass {
+            "PostGIS raster 8BUI tiles with exact reconstructed WKB"
+        } else {
+            "PostGIS raster 32BF tiles"
+        },
         cardinality: profile.cardinality,
-        selectivity: "100% raster tiles consumed by summary aggregate",
-        result_count: "one aggregate digest row after raster outputs are consumed".to_owned(),
+        selectivity: if exact_reclass {
+            "all non-NULL selected-band tiles reconstructed; deterministic NULL rows preserved"
+        } else {
+            "100% raster tiles consumed by summary aggregate"
+        },
+        result_count: if exact_reclass {
+            format!("{} reconstructed raster rows", format_matrix_rows(rows))
+        } else {
+            "one aggregate digest row after raster outputs are consumed".to_owned()
+        },
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
         batch_count: format!(
@@ -2028,7 +2126,11 @@ fn raster_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
             raster_tile_size(rows)
         ),
         row_width: profile.row_width,
-        output_size: "summary digest aggregate row",
+        output_size: if exact_reclass {
+            "one exact PostGIS raster WKB result per input row"
+        } else {
+            "summary digest aggregate row"
+        },
         dispatch_evidence: match expectation {
             BenchmarkLaneExpectation::GpuWinner { .. } => {
                 "Custom Scan/FunctionScan raster counter delta > 0 and digest output consumed"
@@ -2036,7 +2138,11 @@ fn raster_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
             BenchmarkLaneExpectation::NativeDecline { .. } => GENERIC_NATIVE_DISPATCH_EVIDENCE,
         },
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
-        cache_gate: "cache-mode both test-only raster evidence; no production winner gate before release promotion",
+        cache_gate: if exact_reclass {
+            "cache-mode both; warm production promotion requires independently measured >=1.15x and a real kernel-built artifact"
+        } else {
+            "cache-mode both test-only raster evidence; no production winner gate before release promotion"
+        },
         threshold_basis: profile.threshold_basis,
         expectation,
     })
@@ -2075,6 +2181,12 @@ fn raster_matrix_profile(name: &str) -> Option<RasterMatrixProfile> {
             cardinality: "three-band deep algebra, ~50 FLOPs/pixel",
             row_width: "three 32BF bands per tile",
             threshold_basis: "raster deep map algebra threshold matrix",
+        },
+        "raster_resident_exact_reclass" => RasterMatrixProfile {
+            lane: "resident_raster_exact_reclass_candidate",
+            cardinality: "17 canonical singular integer mappings over one selected band",
+            row_width: "one 8BUI source band plus exact reconstructed raster WKB",
+            threshold_basis: "exact resident ST_Reclass promotion gate; native until warm speedup is at least 1.15x",
         },
         _ => return None,
     })
@@ -2666,7 +2778,9 @@ fn spatial_threshold_matrix_entry(
 ) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = spatial_matrix_profile(name)?;
     let work_product = (profile.vertices as u64).saturating_mul(rows as u64);
-    let current_planner_decline = if name == "spatial_filter" && rows == 100_000 {
+    let current_planner_decline = if name == "spatial_resident_agg_candidate" && rows != 1_000_000 {
+        Some("generic_descriptor_capability")
+    } else if name == "spatial_filter" && rows == 100_000 {
         Some("shape_unsupported_predicate")
     } else if phase6_spatial_generic_descriptor_cell(name, rows) {
         Some("generic_descriptor_capability")
@@ -2769,6 +2883,16 @@ fn spatial_matrix_profile(name: &str) -> Option<SpatialMatrixProfile> {
         };
 
     Some(match name {
+        "spatial_resident_agg_candidate" => {
+            let mut profile = base(
+                1_025,
+                Some(25),
+                "deterministic ~25% predicate selectivity with NULL and boundary rows",
+                "resident_point_in_ring_count_candidate",
+            );
+            profile.registered_gpu_predicate = true;
+            profile
+        }
         "spatial_filter" => base(
             15,
             None,
@@ -3098,6 +3222,7 @@ fn spatial_vertex_bucket(vertices: usize) -> &'static str {
         500 => "500 polygon vertices",
         1_000 => "~1000 polygon vertices",
         1_024 => "1024+ polygon vertices",
+        1_025 => "1025 polygon coordinates",
         10_000 => "~10000 polygon vertices",
         100_000 => "~100000 polygon vertices",
         _ => "polygon vertex-count matrix",
@@ -3132,6 +3257,7 @@ fn static_workload_name(name: &str) -> &'static str {
         "mixed_join_agg_int4" => "mixed_join_agg_int4",
         "grouped_agg" => "grouped_agg",
         "grouped_agg_int4" => "grouped_agg_int4",
+        "grouped_count_bool_candidate" => "grouped_count_bool_candidate",
         "grouped_agg_high_card" => "grouped_agg_high_card",
         "gpu_hashagg_med_card" => "gpu_hashagg_med_card",
         "timeseries_sensor_rollup" => "timeseries_sensor_rollup",
@@ -3139,6 +3265,9 @@ fn static_workload_name(name: &str) -> &'static str {
         "expression_grouped_agg" => "expression_grouped_agg",
         "predicate_filter_expression_grouped_agg" => "predicate_filter_expression_grouped_agg",
         "predicate_expression_grouped_agg_int4" => "predicate_expression_grouped_agg_int4",
+        "and_range_predicate_expression_grouped_agg_int4" => {
+            "and_range_predicate_expression_grouped_agg_int4"
+        }
         "case_when_expression_grouped_agg" => "case_when_expression_grouped_agg",
         "case_when_range_expression_grouped_agg" => "case_when_range_expression_grouped_agg",
         "case_when_value_predicate_expression_grouped_agg" => {
@@ -3164,6 +3293,7 @@ fn static_workload_name(name: &str) -> &'static str {
         "parallel_hashjoin_rebuild_decline" => "parallel_hashjoin_rebuild_decline",
         "ssbm_q1_1" => "ssbm_q1_1",
         "ssbm_resident_int4_star" => "ssbm_resident_int4_star",
+        "ssbm_resident_int8_star" => "ssbm_resident_int8_star",
         "ssbm_q1_2" => "ssbm_q1_2",
         "ssbm_q1_3" => "ssbm_q1_3",
         "ssbm_q2_1" => "ssbm_q2_1",
@@ -3184,6 +3314,7 @@ fn static_workload_name(name: &str) -> &'static str {
         "sort_int8" => "sort_int8",
         "sort_float4" => "sort_float4",
         "sort_float8" => "sort_float8",
+        "spatial_resident_agg_candidate" => "spatial_resident_agg_candidate",
         "spatial_filter" => "spatial_filter",
         "spatial_selectivity" => "spatial_selectivity",
         "spatial_mega_1kv" => "spatial_mega_1kv",
@@ -3229,6 +3360,7 @@ fn static_workload_name(name: &str) -> &'static str {
         "raster_slope" => "raster_slope",
         "raster_reclass" => "raster_reclass",
         "raster_algebra_deep" => "raster_algebra_deep",
+        "raster_resident_exact_reclass" => "raster_resident_exact_reclass",
         "aggregate_ordered_set_decline" => "aggregate_ordered_set_decline",
         "aggregate_semantic_modifier_decline" => "aggregate_semantic_modifier_decline",
         "anti_join_null_decline" => "anti_join_null_decline",
@@ -3286,6 +3418,7 @@ mod tests {
             ),
             ("mixed_join_agg_int4", FINAL_MATRIX_MIN_WARM_SPEEDUP),
             ("ssbm_resident_int4_star", FINAL_MATRIX_MIN_WARM_SPEEDUP),
+            ("ssbm_resident_int8_star", FINAL_MATRIX_MIN_WARM_SPEEDUP),
             ("hashjoin_10k_1m", FINAL_MATRIX_MIN_WARM_SPEEDUP),
             ("h3_cell_to_parent", FINAL_MATRIX_MIN_WARM_SPEEDUP),
         ];
@@ -3328,10 +3461,32 @@ mod tests {
     }
 
     #[test]
+    fn int8_star_threshold_identity_cannot_alias_int4_evidence() {
+        let int4 = benchmark_threshold_matrix_entry("ssbm_resident_int4_star", 1_000_000)
+            .expect("int4 SSBM threshold");
+        let int8 = benchmark_threshold_matrix_entry("ssbm_resident_int8_star", 1_000_000)
+            .expect("int8 SSBM threshold");
+
+        assert_eq!(int8.workload, "ssbm_resident_int8_star");
+        assert_ne!(int8.workload, int4.workload);
+        assert_ne!(int8.lane, int4.lane);
+        assert!(int8.data_type.contains("int8"));
+        assert!(int8.dispatch_evidence.contains("type=20"));
+        assert_eq!(int8.released_path(), Some(ReleasedPathFamily::StarJoin));
+        assert_eq!(
+            int8.expectation,
+            BenchmarkLaneExpectation::GpuWinner {
+                min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            }
+        );
+    }
+
+    #[test]
     fn test_exact_int4_release_fixtures_are_deterministic_and_unrounded() {
         for name in [
             "grouped_agg_int4",
             "predicate_expression_grouped_agg_int4",
+            "and_range_predicate_expression_grouped_agg_int4",
             "mixed_join_agg_int4",
         ] {
             let workload = find_workload(name).unwrap_or_else(|| panic!("registered {name}"));
@@ -3357,6 +3512,31 @@ mod tests {
         assert!(predicate.contains("sum(price * quantity)"));
         assert!(predicate.contains("where active"));
         assert!(!predicate.contains(" filter "));
+
+        let range = find_workload("and_range_predicate_expression_grouped_agg_int4")
+            .expect("AND range predicate int4 workload");
+        let range_setup = range.setup_sql(1_000_000).join(" ").to_ascii_lowercase();
+        let range_query = range.query_sql().to_ascii_lowercase();
+        assert!(range_setup.contains("price int4"));
+        assert!(range_setup.contains("then null"));
+        assert!(range_query.contains("where price >= 200 and price <= 800"));
+        assert!(range_query.contains("sum(price * quantity)"));
+        for rows in [10_000, 100_000, 1_000_000, 10_000_000] {
+            let range_threshold = benchmark_threshold_matrix_entry(
+                "and_range_predicate_expression_grouped_agg_int4",
+                rows,
+            )
+            .expect("AND range predicate threshold");
+            assert_eq!(
+                range_threshold.expectation.decline_reason(),
+                Some("shape_multiple_range_predicates")
+            );
+            assert_eq!(range_threshold.released_path(), None);
+            assert_eq!(
+                range_threshold.dispatch_evidence,
+                GENERIC_NATIVE_DISPATCH_EVIDENCE
+            );
+        }
 
         let mixed = find_workload("mixed_join_agg_int4").expect("mixed int4 workload");
         assert!(
@@ -3780,17 +3960,32 @@ mod tests {
             .into_iter()
             .filter(|w| w.category() == "gpu_raster")
             .collect();
-        assert_eq!(raster_workloads.len(), 4);
+        assert_eq!(raster_workloads.len(), 5);
         for workload in raster_workloads {
-            assert_eq!(workload.row_scales(), &[100], "{}", workload.name());
-            let entry = benchmark_threshold_matrix_entry(workload.name(), 100)
-                .expect("raster threshold matrix entry");
+            let (expected_scales, expected_reason): (&[usize], &str) =
+                if workload.name() == "raster_resident_exact_reclass" {
+                    (&[10_000, 100_000, 1_000_000], "")
+                } else {
+                    (&[100], "shape_unsupported_rte")
+                };
             assert_eq!(
-                entry.expectation.decline_reason(),
-                Some("shape_unsupported_rte"),
+                workload.row_scales(),
+                expected_scales,
                 "{}",
                 workload.name()
             );
+            let entry = benchmark_threshold_matrix_entry(workload.name(), expected_scales[0])
+                .expect("raster threshold matrix entry");
+            if expected_reason.is_empty() {
+                assert_eq!(
+                    entry.expectation,
+                    BenchmarkLaneExpectation::GpuWinner {
+                        min_warm_speedup: 1.15
+                    }
+                );
+            } else {
+                assert_eq!(entry.expectation.decline_reason(), Some(expected_reason));
+            }
         }
     }
 
@@ -3974,6 +4169,18 @@ mod tests {
                 Some("generic_fact_rows_exceed_dense_one_shot_maximum")
             );
         }
+    }
+
+    #[test]
+    fn test_threshold_matrix_records_nullable_bool_count_losing_gate() {
+        let entry = benchmark_threshold_matrix_entry("grouped_count_bool_candidate", 1_000_000)
+            .expect("nullable bool COUNT losing cell");
+        assert_eq!(
+            entry.expectation.decline_reason(),
+            Some("shape_unsupported_aggregate_input")
+        );
+        assert_eq!(entry.released_path(), None);
+        assert_eq!(entry.dispatch_evidence, GENERIC_NATIVE_DISPATCH_EVIDENCE);
     }
 
     #[test]
@@ -4259,6 +4466,22 @@ mod tests {
 
     #[test]
     fn test_threshold_matrix_marks_spatial_work_product() {
+        let resident_candidate =
+            benchmark_threshold_matrix_entry("spatial_resident_agg_candidate", 1_000_000)
+                .expect("resident spatial aggregate candidate entry");
+        assert_eq!(
+            resident_candidate.expectation,
+            BenchmarkLaneExpectation::GpuWinner {
+                min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            }
+        );
+        assert_eq!(
+            resident_candidate.lane,
+            "resident_point_in_ring_count_candidate"
+        );
+        assert_eq!(resident_candidate.cardinality, "1025 polygon coordinates");
+        assert!(resident_candidate.result_count.contains("250K matching"));
+
         let simple = benchmark_threshold_matrix_entry("spatial_filter", 1_000_000)
             .expect("spatial_filter threshold entry");
         assert_eq!(
@@ -4416,6 +4639,14 @@ mod tests {
                 "{name}/{rows}"
             );
         }
+        assert_eq!(
+            benchmark_threshold_matrix_entry("raster_resident_exact_reclass", 10_000)
+                .expect("released exact raster threshold entry")
+                .expectation,
+            BenchmarkLaneExpectation::GpuWinner {
+                min_warm_speedup: 1.15
+            }
+        );
     }
 
     #[test]
@@ -4442,6 +4673,19 @@ mod tests {
         assert!(large.correctness_evidence.contains("correctness_diffs"));
         assert!(large.cache_gate.contains("cache-mode both"));
         assert!(large.batch_count.contains("64M total pixels"));
+
+        let exact = benchmark_threshold_matrix_entry("raster_resident_exact_reclass", 100_000)
+            .expect("exact resident raster threshold entry");
+        assert_eq!(exact.lane, "resident_raster_exact_reclass_candidate");
+        assert_eq!(
+            exact.expectation,
+            BenchmarkLaneExpectation::GpuWinner {
+                min_warm_speedup: 1.15
+            }
+        );
+        assert!(exact.data_type.contains("8BUI"));
+        assert!(exact.output_size.contains("exact PostGIS raster WKB"));
+        assert!(exact.cache_gate.contains(">=1.15x"));
     }
 
     #[test]

@@ -23,11 +23,18 @@ pub use execute::AggExecState;
 #[cfg(feature = "pg_test")]
 pub(crate) use descriptor::{configure_dense_dispatch_test, dense_dispatch_test_completed_calls};
 
-pub(crate) fn validate_descriptor_capability(
+pub(crate) fn validate_normal_descriptor_capability(
     spec: &crate::engine::spec::AggQuerySpec,
     projection: &crate::engine::spec::AggOutputProjection,
 ) -> Result<(), String> {
-    descriptor::validate_runtime_capability(spec, projection)
+    descriptor::validate_normal_descriptor_capability(spec, projection)
+}
+
+pub(crate) fn validate_normal_spatial_candidate_capability(
+    spec: &crate::engine::spec::AggQuerySpec,
+    projection: &crate::engine::spec::AggOutputProjection,
+) -> Result<(), String> {
+    descriptor::validate_normal_spatial_candidate_capability(spec, projection)
 }
 
 #[cfg(any(test, feature = "pg_test"))]

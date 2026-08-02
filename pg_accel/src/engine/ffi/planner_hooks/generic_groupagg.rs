@@ -6,6 +6,7 @@ use std::num::NonZeroU32;
 
 use pgrx::pg_sys::{self, List, NodeTag, RelOptInfo};
 
+use super::decline_cache::{self, DeclineCacheKey, DeclinePolicyKey, QueryFingerprint};
 use super::shape::{
     RelationResidency, RelationResidencyRequirement, ResidencyEstimate, ShapeCostGate,
     ShapeDecline, ShapePlan, dense_atomic_fact_row_floor, dense_atomic_sum_count_cost,
@@ -14,14 +15,16 @@ use super::shape::{
 use super::{add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
-    estimate_descriptor_artifact_bytes_upper_bound, validate_descriptor_capability,
+    estimate_descriptor_artifact_bytes_upper_bound, validate_normal_descriptor_capability,
+    validate_normal_spatial_candidate_capability,
 };
 use crate::engine::ffi::custom_scan;
 use crate::engine::gucs;
 use crate::engine::residency::{
     MaterializationBoundary, ResidentBudgetSnapshot, ResidentLoadEstimate, ResidentOperatorClass,
-    ResidentOperatorStage, ResidentPipelineProof, SelectedRelation, estimate_selected_relation,
-    resident_budget_snapshot, revalidate_loaded_estimates,
+    ResidentOperatorStage, ResidentPipelineProof, ResidentPlannerDependency, SelectedRelation,
+    estimate_selected_relation, resident_budget_snapshot, resident_planner_dependency,
+    revalidate_loaded_estimates,
 };
 use crate::engine::spec::{AggOutputProjection, FilterSpec, MeasureExpr};
 use crate::engine::stats;
@@ -428,13 +431,131 @@ fn apply_exact_residency(
 }
 
 fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> {
-    validate_descriptor_capability(
-        &shape.spec,
-        &AggOutputProjection {
-            slots: shape.projections.clone(),
-        },
-    )
-    .map_err(|detail| AdmissionDecline::DescriptorCapability { detail })
+    let projection = AggOutputProjection {
+        slots: shape.projections.clone(),
+    };
+    let result = if matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. }) {
+        validate_normal_spatial_candidate_capability(&shape.spec, &projection)
+    } else {
+        validate_normal_descriptor_capability(&shape.spec, &projection)
+    };
+    result.map_err(|detail| AdmissionDecline::DescriptorCapability { detail })
+}
+
+const NORMAL_SPATIAL_PROMOTION_ROWS: u64 = 1_000_000;
+
+fn normal_spatial_promotion_rows(exact_rows: Option<u64>) -> bool {
+    exact_rows == Some(NORMAL_SPATIAL_PROMOTION_ROWS)
+}
+
+fn validate_normal_spatial_residency_envelope(
+    shape: &ShapePlan,
+    snapshot: &ExactResidencySnapshot,
+) -> Result<(), AdmissionDecline> {
+    if !matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. }) {
+        return Ok(());
+    }
+    let exact_rows = snapshot
+        .estimates
+        .iter()
+        .find(|estimate| u32::from(estimate.relid) == shape.spec.fact_rel)
+        .filter(|estimate| estimate.loaded)
+        .and_then(|estimate| estimate.resident_rows);
+    if !normal_spatial_promotion_rows(exact_rows) {
+        return Err(AdmissionDecline::DescriptorCapability {
+            detail: format!(
+                "normal spatial admission requires exactly {NORMAL_SPATIAL_PROMOTION_ROWS} resident fact rows; observed {exact_rows:?}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn stable_device_cost_gate_before_residency(
+    shape: &ShapePlan,
+    model: &TypedCostModel,
+) -> Option<ShapeCostGate> {
+    match shape.cost_gate {
+        ShapeCostGate::Eligible => None,
+        ShapeCostGate::FactRowsBelowDeviceMinimum { .. }
+            if dense_atomic_sum_count_lifecycle(
+                &shape.spec,
+                &shape.descriptor_resolution,
+                model,
+            ) =>
+        {
+            // Exact loaded-row evidence may replace the planner estimate for
+            // this lifecycle, so residency must retain the chance to refine it.
+            None
+        }
+        gate => Some(gate),
+    }
+}
+
+fn cheap_exact_dense_row_gate(
+    shape: &ShapePlan,
+    model: &TypedCostModel,
+) -> Result<Option<(ShapeCostGate, ResidentPlannerDependency)>, AdmissionDecline> {
+    if !matches!(
+        shape.cost_gate,
+        ShapeCostGate::FactRowsBelowDeviceMinimum { .. }
+    ) || !dense_atomic_sum_count_lifecycle(&shape.spec, &shape.descriptor_resolution, model)
+    {
+        return Ok(None);
+    }
+    let fact = shape
+        .required_relations
+        .iter()
+        .find(|required| required.relation_oid == shape.spec.fact_rel)
+        .ok_or(AdmissionDecline::MissingResidencyEstimate {
+            relation_oid: shape.spec.fact_rel,
+        })?;
+    let request = selected_relation(fact)?;
+    let Some(dependency) = resident_planner_dependency(&request) else {
+        return Ok(None);
+    };
+    let gate = cheap_exact_dense_row_gate_with(shape, model, |_| Some(dependency.row_count))?;
+    Ok(gate.map(|gate| (gate, dependency)))
+}
+
+fn cheap_exact_dense_row_gate_with(
+    shape: &ShapePlan,
+    model: &TypedCostModel,
+    exact_rows: impl FnOnce(&SelectedRelation) -> Option<u64>,
+) -> Result<Option<ShapeCostGate>, AdmissionDecline> {
+    if !matches!(
+        shape.cost_gate,
+        ShapeCostGate::FactRowsBelowDeviceMinimum { .. }
+    ) || !dense_atomic_sum_count_lifecycle(&shape.spec, &shape.descriptor_resolution, model)
+    {
+        return Ok(None);
+    }
+    let fact = shape
+        .required_relations
+        .iter()
+        .find(|required| required.relation_oid == shape.spec.fact_rel)
+        .ok_or(AdmissionDecline::MissingResidencyEstimate {
+            relation_oid: shape.spec.fact_rel,
+        })?;
+    let request = selected_relation(fact)?;
+    let Some(exact_rows) = exact_rows(&request) else {
+        return Ok(None);
+    };
+    let exact_rows = Rows::new(usize::try_from(exact_rows).unwrap_or(usize::MAX));
+    let required = dense_atomic_fact_row_floor(&shape.spec, model);
+    if exact_rows < required {
+        return Ok(Some(ShapeCostGate::FactRowsBelowDeviceMinimum {
+            estimated: exact_rows,
+            required,
+        }));
+    }
+    if exact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows {
+        return Ok(Some(ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+            fact_rows: exact_rows,
+            maximum: model.executor.gpu_grouped_agg_one_shot_max_rows,
+        }));
+    }
+    Ok(None)
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -1266,6 +1387,38 @@ fn record_decline(decline: &AdmissionDecline, output_rel: *mut RelOptInfo) {
     pgrx::debug1!("pg_accel: generic aggregate declined: {decline}");
 }
 
+fn record_cached_decline(reason: &'static str, output_rel: *mut RelOptInfo) {
+    let rows = rel_rows_estimate(output_rel).unwrap_or(0);
+    stats::increment_planner_rejected(reason, rows);
+    stats::record_planner_stage_fast_decline(
+        stats::PlannerHookStage::UpperGroupAgg,
+        "upper_groupagg_cached_decline",
+    );
+    pgrx::debug1!("pg_accel: generic aggregate cached decline: {reason}");
+}
+
+fn relation_rows_bits(rel: *mut RelOptInfo) -> u64 {
+    if rel.is_null() {
+        return f64::NAN.to_bits();
+    }
+    // SAFETY: callers pass planner-owned RelOptInfo pointers from this hook.
+    unsafe { (*rel).rows.to_bits() }
+}
+
+fn decline_cache_key(
+    query_fingerprint: QueryFingerprint,
+    input_rel: *mut RelOptInfo,
+    output_rel: *mut RelOptInfo,
+    policy: DeclinePolicyKey,
+) -> DeclineCacheKey {
+    DeclineCacheKey::new(
+        query_fingerprint,
+        relation_rows_bits(input_rel),
+        relation_rows_bits(output_rel),
+        policy,
+    )
+}
+
 /// Analyze and admit one generic descriptor aggregate path.
 ///
 /// # Safety
@@ -1281,15 +1434,68 @@ pub(super) unsafe fn try_inject(
     if !gucs::gpu_enabled() {
         return false;
     }
+    // SAFETY: root is the live PlannerInfo supplied to this hook.
+    let query_fingerprint = unsafe { decline_cache::query_fingerprint(root) };
+    let structural_cache_key = query_fingerprint.as_ref().map(|fingerprint| {
+        decline_cache_key(
+            fingerprint.clone(),
+            input_rel,
+            output_rel,
+            DeclinePolicyKey::Structural,
+        )
+    });
+    if let Some(reason) = structural_cache_key
+        .as_ref()
+        .and_then(decline_cache::lookup)
+    {
+        record_cached_decline(reason, output_rel);
+        return false;
+    }
     // SAFETY: root is the live PlannerInfo supplied to this upper-path callback.
     if let Err(decline) = unsafe { super::shape::preflight_base_relations(root) } {
-        record_decline(&AdmissionDecline::Shape(decline), output_rel);
+        let decline = AdmissionDecline::Shape(decline);
+        if let Some(key) = structural_cache_key {
+            decline_cache::insert(key, decline.code(), Vec::new());
+        }
+        record_decline(&decline, output_rel);
         return false;
     }
     if !cost::gpu_is_usable() {
         return false;
     }
     let model = TypedCostModel::from_limits(cost::device_limits());
+    let device_cache_key = query_fingerprint.as_ref().map(|fingerprint| {
+        decline_cache_key(
+            fingerprint.clone(),
+            input_rel,
+            output_rel,
+            DeclinePolicyKey::device(),
+        )
+    });
+    if let Some(reason) = device_cache_key.as_ref().and_then(decline_cache::lookup) {
+        record_cached_decline(reason, output_rel);
+        return false;
+    }
+    // Use the aggregate paths PostgreSQL just built as the single source of
+    // truth for both admission and the injected path's output cardinality.
+    // SAFETY: output_rel is the live planner-owned upper relation.
+    let group_estimate = unsafe { consistent_agg_group_estimate(output_rel) };
+    // Include PostgreSQL's exact native comparator in the late cost-decline
+    // identity. This retains planner-policy and parameter sensitivity while
+    // allowing a hit to skip descriptor and residency reconstruction.
+    // SAFETY: all pointers are the live upper-path hook arguments.
+    let native_cost = group_estimate.and_then(|estimate| unsafe {
+        cheapest_native_cost(root, input_rel, output_rel, extra, estimate.num_groups)
+    });
+    let cost_cache_key = device_cache_key
+        .clone()
+        .map(|key| key.with_native_cost(native_cost));
+    if let Some(reason) = cost_cache_key.as_ref().and_then(decline_cache::lookup) {
+        record_cached_decline(reason, output_rel);
+        return false;
+    }
+    let mut cache_dependencies = Vec::new();
+    let mut cache_dependencies_valid = true;
     let result = (|| {
         // Use the aggregate paths PostgreSQL just built as the single source of
         // truth for both admission and the injected path's output cardinality.
@@ -1297,8 +1503,7 @@ pub(super) unsafe fn try_inject(
         // shape extraction and resident-byte estimation.
         // SAFETY: try_inject's contract supplies the live planner-owned
         // output_rel; the helper checks null and bounds every pathlist access.
-        let group_estimate = unsafe { consistent_agg_group_estimate(output_rel) }
-            .ok_or(AdmissionDecline::GroupEstimateUnavailable)?;
+        let group_estimate = group_estimate.ok_or(AdmissionDecline::GroupEstimateUnavailable)?;
         // SAFETY: root and output_rel are the live planner-owned pointers supplied
         // together to this upper-path callback.
         let mut shape = unsafe {
@@ -1355,6 +1560,13 @@ pub(super) unsafe fn try_inject(
         }
 
         validate_shape_capability(&shape)?;
+        if let Some(gate) = stable_device_cost_gate_before_residency(&shape, &model) {
+            return Err(AdmissionDecline::DeviceCostGate(gate));
+        }
+        if let Some((gate, dependency)) = cheap_exact_dense_row_gate(&shape, &model)? {
+            cache_dependencies.push(dependency);
+            return Err(AdmissionDecline::DeviceCostGate(gate));
+        }
         let residency_snapshot = exact_residency_estimates(&shape)?;
         let selected_relids = residency_snapshot
             .estimates
@@ -1364,6 +1576,17 @@ pub(super) unsafe fn try_inject(
         let budget_snapshot = resident_budget_snapshot(&selected_relids)
             .ok_or(AdmissionDecline::ResidencyBudgetSnapshotUnavailable)?;
         require_coherent_resident_evidence(&residency_snapshot)?;
+        validate_normal_spatial_residency_envelope(&shape, &residency_snapshot)?;
+        if let Some(dependencies) = residency_snapshot
+            .requests
+            .iter()
+            .map(resident_planner_dependency)
+            .collect::<Option<Vec<_>>>()
+        {
+            cache_dependencies = dependencies;
+        } else {
+            cache_dependencies_valid = false;
+        }
         apply_exact_residency(
             &mut shape,
             &residency_snapshot.estimates,
@@ -1374,16 +1597,6 @@ pub(super) unsafe fn try_inject(
             },
             &model,
         )?;
-        // SAFETY: output_rel remains the live planner-owned upper relation.
-        let native_cost = unsafe {
-            cheapest_native_cost(
-                root,
-                input_rel,
-                output_rel,
-                extra,
-                group_estimate.num_groups,
-            )
-        };
         let effective_cost = effective_path_cost(&shape, gucs::cost_multiplier());
         gate_cost(
             &shape,
@@ -1403,6 +1616,19 @@ pub(super) unsafe fn try_inject(
     match result {
         Ok(()) => true,
         Err(decline) => {
+            let cache_key = match &decline {
+                AdmissionDecline::Shape(_) => structural_cache_key.map(|key| (key, Vec::new())),
+                AdmissionDecline::DeviceCostGate(_) if cache_dependencies_valid => {
+                    device_cache_key.map(|key| (key, cache_dependencies))
+                }
+                AdmissionDecline::CostNotCompetitive { .. } if cache_dependencies_valid => {
+                    cost_cache_key.map(|key| (key, cache_dependencies))
+                }
+                _ => None,
+            };
+            if let Some((key, dependencies)) = cache_key {
+                decline_cache::insert(key, decline.code(), dependencies);
+            }
             record_decline(&decline, output_rel);
             false
         }
@@ -1954,6 +2180,20 @@ mod tests {
         assert_eq!(advertised_output_rows(&shape), 128.0);
     }
 
+    #[test]
+    fn normal_spatial_row_envelope_requires_exact_loaded_release_evidence() {
+        assert!(normal_spatial_promotion_rows(Some(
+            NORMAL_SPATIAL_PROMOTION_ROWS
+        )));
+        assert!(!normal_spatial_promotion_rows(None));
+        assert!(!normal_spatial_promotion_rows(Some(
+            NORMAL_SPATIAL_PROMOTION_ROWS - 1
+        )));
+        assert!(!normal_spatial_promotion_rows(Some(
+            NORMAL_SPATIAL_PROMOTION_ROWS + 1
+        )));
+    }
+
     fn estimate(loaded: bool, bytes: u64) -> ResidentLoadEstimate {
         estimate_for(42, loaded, bytes, true)
     }
@@ -2328,6 +2568,71 @@ mod tests {
             true,
         );
         assert_eq!(unrelated.cost_gate, unrelated_gate);
+    }
+
+    #[test]
+    fn cheap_exact_rows_decline_below_floor_dense_and_star_before_full_estimation() {
+        let model = model();
+        for star in [false, true] {
+            let mut shape = dense_sum_count_shape(1);
+            if star {
+                add_star_dimension(&mut shape, JoinMultiplicity::Unique);
+            }
+            let floor = dense_atomic_fact_row_floor(&shape.spec, &model);
+            let below = floor.get() - 1;
+            shape.cost_gate = ShapeCostGate::FactRowsBelowDeviceMinimum {
+                estimated: Rows::new(below),
+                required: floor,
+            };
+            let gate = cheap_exact_dense_row_gate_with(&shape, &model, |request| {
+                assert_eq!(u32::from(request.relid), shape.spec.fact_rel);
+                Some(u64::try_from(below).expect("test floor fits u64"))
+            })
+            .expect("fact request is representable");
+            assert_eq!(
+                gate,
+                Some(ShapeCostGate::FactRowsBelowDeviceMinimum {
+                    estimated: Rows::new(below),
+                    required: floor,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn cheap_exact_rows_fall_through_when_missing_or_at_floor() {
+        let model = model();
+        let mut shape = dense_sum_count_shape(1);
+        let floor = dense_atomic_fact_row_floor(&shape.spec, &model);
+        shape.cost_gate = ShapeCostGate::FactRowsBelowDeviceMinimum {
+            estimated: Rows::new(floor.get() - 1),
+            required: floor,
+        };
+        assert_eq!(
+            cheap_exact_dense_row_gate_with(&shape, &model, |_| None)
+                .expect("missing evidence falls through"),
+            None
+        );
+        assert_eq!(
+            cheap_exact_dense_row_gate_with(&shape, &model, |_| {
+                Some(u64::try_from(floor.get()).expect("test floor fits u64"))
+            })
+            .expect("in-band evidence falls through"),
+            None
+        );
+
+        let mut unsupported = count_shape();
+        unsupported.cost_gate = ShapeCostGate::FactRowsBelowDeviceMinimum {
+            estimated: Rows::new(1),
+            required: Rows::new(2),
+        };
+        assert_eq!(
+            cheap_exact_dense_row_gate_with(&unsupported, &model, |_| {
+                panic!("unsupported lifecycle must not inspect residency")
+            })
+            .expect("unsupported lifecycle is unchanged"),
+            None
+        );
     }
 
     #[test]
@@ -2926,6 +3231,54 @@ mod tests {
                 .expect_err("device gate declines")
                 .code(),
             "generic_fact_rows_below_device_minimum"
+        );
+    }
+
+    #[test]
+    fn only_dense_below_floor_gate_waits_for_resident_row_refinement() {
+        let model = model();
+        let below_floor = ShapeCostGate::FactRowsBelowDeviceMinimum {
+            estimated: Rows::new(9),
+            required: Rows::new(10),
+        };
+
+        let mut count_only = count_shape();
+        count_only.cost_gate = below_floor;
+        assert_eq!(
+            stable_device_cost_gate_before_residency(&count_only, &model),
+            Some(below_floor),
+            "count-only gates cannot be changed by resident row evidence"
+        );
+
+        let mut dense = dense_sum_count_shape(9);
+        dense.cost_gate = below_floor;
+        assert_eq!(
+            stable_device_cost_gate_before_residency(&dense, &model),
+            None,
+            "dense SUM/COUNT must retain exact loaded-row refinement"
+        );
+
+        let above_maximum = ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+            fact_rows: Rows::new(11),
+            maximum: Rows::new(10),
+        };
+        dense.cost_gate = above_maximum;
+        assert_eq!(
+            stable_device_cost_gate_before_residency(&dense, &model),
+            Some(above_maximum),
+            "the dense maximum gate is never relaxed by residency"
+        );
+
+        let mut h3 = h3_parent_shape();
+        let h3_below_floor = ShapeCostGate::H3RowsBelowDeviceMinimum {
+            estimated: Rows::new(99),
+            required: Rows::new(100),
+        };
+        h3.cost_gate = h3_below_floor;
+        assert_eq!(
+            stable_device_cost_gate_before_residency(&h3, &model),
+            Some(h3_below_floor),
+            "H3 row gates do not use dense loaded-row refinement"
         );
     }
 

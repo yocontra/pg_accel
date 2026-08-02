@@ -138,6 +138,7 @@ fn failure_domain_classification_covers_every_symbol_family() {
         ("pgaccel_spatial_intersects", D::Spatial),
         ("pgaccel_bbox_intersects_bulk_f32", D::Spatial),
         ("pgaccel_h3_lat_lng_to_cell_bulk", D::H3),
+        ("pgaccel_h3_lat_lng_to_cell_resident_ex", D::H3),
         ("pgaccel_h3_cell_to_parent_resident_ex", D::H3),
         ("pgaccel_raster_reclass_resident_ex", D::Raster),
         ("pgaccel_reduce_multi_masked_i64", D::Reduce),

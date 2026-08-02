@@ -431,6 +431,7 @@ pub enum ShapeDecline {
     MultipleFiltersPerRelation {
         relation_oid: u32,
     },
+    MultipleRangePredicates,
     InvalidFilterRange,
     InvalidProjectionReference {
         aggregate_index: u32,
@@ -509,6 +510,7 @@ impl ShapeDecline {
             Self::AmbiguousFactRelation => "shape_ambiguous_fact_relation",
             Self::GroupedByNonUniqueDimension { .. } => "shape_nonunique_dimension_group",
             Self::MultipleFiltersPerRelation { .. } => "shape_multi_filter_relation",
+            Self::MultipleRangePredicates => "shape_multiple_range_predicates",
             Self::InvalidFilterRange => "shape_invalid_filter_range",
             Self::InvalidProjectionReference { .. } => "shape_projection_reference",
             Self::DescriptorArtifactsRequireResolution => {

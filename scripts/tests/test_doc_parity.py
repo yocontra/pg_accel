@@ -63,7 +63,7 @@ class GucParityTests(unittest.TestCase):
 
     def test_source_inventory_is_complete_and_excludes_test_gucs(self) -> None:
         self.assertEqual(self.source_errors, [])
-        self.assertEqual(len(self.specs), 15)
+        self.assertEqual(len(self.specs), 16)
         self.assertFalse(any(name.startswith("pg_accel.test_") for name in self.specs))
 
     def test_missing_released_guc_fails(self) -> None:
@@ -130,7 +130,7 @@ class CapabilityParityTests(unittest.TestCase):
         )
 
         self.assertEqual(errors, [])
-        self.assertEqual(capability_count, 10)
+        self.assertEqual(capability_count, 11)
         self.assertEqual(adapter_count, 3)
 
 

@@ -556,6 +556,14 @@ pub struct ResidentDependencyStamp {
     pub relfilenode: pg_sys::Oid,
 }
 
+/// Minimal exact resident evidence retained by a planner-decline cache.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentPlannerDependency {
+    pub request: SelectedRelation,
+    pub dependency: ResidentDependencyStamp,
+    pub row_count: u64,
+}
+
 impl ResidentDependencyStamp {
     fn from_relation(relation: &ResidentRelation) -> Self {
         Self {
@@ -1090,6 +1098,30 @@ fn continue_explicit_load_after_trigger_install<T>(
 ) -> T {
     if matches!(trigger, loader::TriggerInstall::New) {
         drain_invalidations();
+        #[cfg(not(test))]
+        {
+            struct LatestSnapshotGuard;
+
+            impl Drop for LatestSnapshotGuard {
+                fn drop(&mut self) {
+                    // SAFETY: this guard is created after exactly one matching
+                    // PushActiveSnapshot call on the backend main thread.
+                    unsafe { pg_sys::PopActiveSnapshot() };
+                }
+            }
+
+            // CREATE TRIGGER retains AccessExclusiveLock through commit, so a
+            // latest snapshot here sees every writer that preceded the lock
+            // and no writer can race the subsequent direct table scan.
+            let snapshot = unsafe { pg_sys::GetLatestSnapshot() };
+            if !snapshot.is_null() {
+                // SAFETY: GetLatestSnapshot returned a transaction-owned live
+                // snapshot and explicit residency loading is backend-local.
+                unsafe { pg_sys::PushActiveSnapshot(snapshot) };
+                let _snapshot = LatestSnapshotGuard;
+                return continue_load();
+            }
+        }
     }
     continue_load()
 }
@@ -1574,6 +1606,7 @@ fn revalidation_keeps_snapshot(
 fn apply_revalidation_decisions(
     store: &mut RelationStore,
     decisions: Vec<(ResidentRevalidationSnapshot, bool)>,
+    retained_scope: CommandScope,
 ) {
     for (snapshot, keep) in decisions {
         let Some(index) = store
@@ -1589,6 +1622,9 @@ fn apply_revalidation_decisions(
         }
         if keep {
             store.entries[index].relcache_suspect = false;
+            if snapshot.first_use_scope.is_some() {
+                store.entries[index].first_use_scope = Some(retained_scope);
+            }
         } else {
             store.entries.remove(index).release();
         }
@@ -1623,7 +1659,7 @@ fn prune_invalid_relations(
             (snapshot, keep)
         })
         .collect();
-    apply_revalidation_decisions(store, decisions);
+    apply_revalidation_decisions(store, decisions, command_scope);
 }
 
 #[cfg(not(test))]
@@ -1673,8 +1709,12 @@ fn process_invalidations() {
             (snapshot, keep)
         })
         .collect();
+    // Catalog fingerprint checks above may advance PostgreSQL's command
+    // counter. A first-use relation that was valid when this drain began must
+    // remain valid for the rest of the same selected executor statement.
+    let retained_scope = current_command_scope();
     STORE.with(|store| {
-        apply_revalidation_decisions(&mut store.borrow_mut(), decisions);
+        apply_revalidation_decisions(&mut store.borrow_mut(), decisions, retained_scope);
     });
 }
 
@@ -2078,6 +2118,59 @@ pub fn estimate_selected_relation(
         fixed_width,
         last_load_ms,
         amortization_queries: crate::engine::cost::device_limits().auto_load_amortization_queries,
+    })
+}
+
+/// Return exact rows for a fully covered backend-local resident relation.
+///
+/// This is the cheap planner fast path: unlike [`estimate_selected_relation`]
+/// it does not resolve catalog column metadata or estimate bytes. Selected
+/// column coverage is still required, so a partial/stale resident entry can
+/// never supply row evidence for admission.
+pub fn resident_selected_relation_rows(request: &SelectedRelation) -> Option<u64> {
+    resident_planner_dependency(request).map(|evidence| evidence.row_count)
+}
+
+/// Capture generation-stamped row evidence without catalog or byte estimation.
+pub fn resident_planner_dependency(
+    request: &SelectedRelation,
+) -> Option<ResidentPlannerDependency> {
+    process_invalidations();
+    STORE.with(|store| {
+        store
+            .borrow()
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.relid == request.relid && has_requested_columns(entry, &request.columns)
+            })
+            .map(|entry| ResidentPlannerDependency {
+                request: request.clone(),
+                dependency: ResidentDependencyStamp::from_relation(entry),
+                row_count: entry.row_count,
+            })
+    })
+}
+
+/// Revalidate cached planner evidence atomically after draining invalidations.
+#[must_use]
+pub fn revalidate_planner_dependencies(dependencies: &[ResidentPlannerDependency]) -> bool {
+    process_invalidations();
+    STORE.with(|store| {
+        let store = store.borrow();
+        dependencies.iter().all(|cached| {
+            store
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry.relid == cached.request.relid
+                        && has_requested_columns(entry, &cached.request.columns)
+                })
+                .is_some_and(|entry| {
+                    ResidentDependencyStamp::from_relation(entry) == cached.dependency
+                        && entry.row_count == cached.row_count
+                })
+        })
     })
 }
 
@@ -4217,6 +4310,29 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn successful_catalog_revalidation_rescopes_first_use_relation() {
+        let original_scope = CommandScope {
+            xid: 7,
+            command_id: 3,
+        };
+        let retained_scope = CommandScope {
+            xid: 7,
+            command_id: 5,
+        };
+        let mut store = RelationStore::default();
+        let mut relation = empty_relation(85, false, 1);
+        relation.first_use_scope = Some(original_scope);
+        relation.relcache_suspect = true;
+        let snapshot = ResidentRevalidationSnapshot::from(&relation);
+        store.entries.push(relation);
+
+        apply_revalidation_decisions(&mut store, vec![(snapshot, true)], retained_scope);
+
+        assert!(!store.entries[0].relcache_suspect);
+        assert_eq!(store.entries[0].first_use_scope, Some(retained_scope));
+    }
+
+    #[test]
     fn commit_generation_bump_evicts_snapshot_but_preserves_pin_intent() {
         let relid = pg_sys::Oid::from(95_u32);
         let mut store = RelationStore::default();
@@ -4792,6 +4908,48 @@ pub(super) mod tests {
             std::slice::from_ref(&request),
             std::slice::from_ref(&estimate)
         ));
+    }
+
+    #[test]
+    fn cheap_resident_rows_require_exact_selected_column_coverage() {
+        const RELID: u32 = 1_452;
+        install_planner_evidence_relation(RELID, 12_345);
+        let covered = SelectedRelation {
+            relid: pg_sys::Oid::from(RELID),
+            columns: vec![1],
+        };
+        assert_eq!(resident_selected_relation_rows(&covered), Some(12_345));
+
+        let partial = SelectedRelation {
+            relid: pg_sys::Oid::from(RELID),
+            columns: vec![1, 2],
+        };
+        assert_eq!(resident_selected_relation_rows(&partial), None);
+    }
+
+    #[test]
+    fn planner_dependency_revalidation_detects_generation_and_row_changes() {
+        const RELID: u32 = 1_453;
+        install_planner_evidence_relation(RELID, 40_000);
+        let request = SelectedRelation {
+            relid: pg_sys::Oid::from(RELID),
+            columns: vec![1],
+        };
+        let dependency = resident_planner_dependency(&request).expect("resident evidence");
+        assert!(revalidate_planner_dependencies(std::slice::from_ref(
+            &dependency
+        )));
+
+        STORE.with(|store| store.borrow_mut().entries[0].generation.relation += 1);
+        assert!(!revalidate_planner_dependencies(std::slice::from_ref(
+            &dependency
+        )));
+        STORE.with(|store| {
+            let mut store = store.borrow_mut();
+            store.entries[0].generation.relation -= 1;
+            store.entries[0].row_count += 1;
+        });
+        assert!(!revalidate_planner_dependencies(&[dependency]));
     }
 
     #[test]

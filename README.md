@@ -152,25 +152,25 @@ base-relation hook records the decline and leaves the PostgreSQL path intact at
 ## Capability matrix
 
 Kernel or bridge presence is not equivalent to production planner selection.
-The normal upper-path hook injects only the generic aggregate candidate at
-`pg_accel/src/engine/ffi/planner_hooks/mod.rs:205-243`. Only aggregate and raster
-Custom Scan method tables are registered. Normal production planning selects
-the aggregate path; raster admission is test-only. Base scans, row-returning
-joins, sorts, windows, and standalone function/SRF shapes remain native and
-have no registered executor.
+The normal upper-path hook injects the generic aggregate and qualified raster
+candidates at `pg_accel/src/engine/ffi/planner_hooks/mod.rs:205-243`. Only
+aggregate and raster Custom Scan method tables are registered. Base scans,
+row-returning joins, sorts, windows, and standalone function/SRF shapes remain
+native and have no registered executor.
 
 | Capability | Implementation surface | Production planner | Current boundary |
 |---|---|---|---|
 | Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. Stored generated columns are physical base attributes and remain selectable when their types and aggregate shape pass those same gates. |
+| Scalar row predicate inside a resident aggregate | Present | Selectable for one comparison | One supported scalar comparison may become a resident range filter. A second range comparison on the same column, including the analyzed form of `BETWEEN`, stays PostgreSQL-native with `shape_multiple_range_predicates`; independent 1M timing found the selected intersection path materially slower than PostgreSQL. |
 | Resident star join plus aggregate | Present | Selectable | The join is represented inside one childless aggregate descriptor; this is not a row-returning join path. |
-| H3-derived group key inside a resident aggregate | Present | Partially selectable | Production shape extraction selects fused `h3_cell_to_parent`; `h3_latlng_to_cell` descriptor support is not yet reachable from production planning. |
-| PostGIS spatial filter inside a resident aggregate | Present | Test-only | The descriptor lane is dark in normal planning and is admitted only by a test GUC. |
+| H3-derived group key inside a resident aggregate | Present | Selectable | Production shape extraction selects fused `h3_cell_to_parent`; `h3_latlng_to_cell` descriptor support is not yet reachable from production planning. |
+| PostGIS spatial filter inside a resident aggregate | Present | Selectable | Production selection is limited to resident `ST_Intersects(point_column, one_ring_polygon_constant)` inside an ungrouped `COUNT(*)`, with matching fixed nonzero SRIDs and the qualified cost envelope. |
 | Standalone PostGIS or H3 function/SRF | Aggregate primitives and adapter registry metadata remain; standalone executor removed | Not selectable | PostgreSQL executes standalone calls. Function and target-list SRF hooks record `no_gpu_resident_pipeline`. |
 | Base scan, WHERE filter, or projection | No registered Custom Scan executor; host-staged implementation retired | Not selectable | PostgreSQL executes the base path. The production hook observes and records declines but injects no scan CustomPath. |
 | Row-returning hash or inequality join | No registered row-returning executor; host-staged implementation retired | Not selectable | PostgreSQL executes the join. Resident join membership exists only inside childless `GpuAccelAgg` descriptors. |
 | Standalone sort or top-k | Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding | Not selectable | All standalone sort shapes remain PostgreSQL-native. Full-output sorts record `sort_heap_full_output`; bounded top-k records `sort_standalone_topk_no_gpu_kernel`. |
 | Window | Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding | Not selectable | Full-output and reducing window SQL remains PostgreSQL-native and records `no_gpu_resident_pipeline`. |
-| Raster | Registered childless resident executor | Test-only | Production planning is observation-only; a test GUC can force the resident raster path. |
+| Raster | Registered childless resident executor | Selectable | Production selection is limited to the qualified three-argument resident `ST_Reclass` shape, canonical singular integer rules, band one, `8BUI` output, and the released pixel-count envelope; other raster shapes remain native. |
 
 The extension adapters currently register these names for OID discovery. This
 table is registry metadata, not a standalone SQL support promise:
@@ -232,6 +232,7 @@ settings are intentionally excluded.
 | `pg_accel.log_level` | enum | `notice` | user | `debug,info,notice,warning,error` | Initial per-backend trace filter, sampled when the first Custom Scan executes. Later changes do not rebuild the subscriber; `notice` and `warning` both map to WARN. |
 | `pg_accel.assert_dispatch` | bool | `off` | user | - | Reserved no-op compatibility setting; it changes neither planning nor execution. |
 | `pg_accel.parallel_fused_count` | bool | `off` | superuser | - | Reserved no-op roadmap setting; the parallel fused-count shape remains native. |
+| `pg_accel.planner_profiling` | bool | `off` | user | - | Enables planner-hook monotonic-clock reads and elapsed-time counters; call and decline counters remain active while off. |
 | `pg_accel.otel_log_max_mb` | int | `256` | user | `1..65536` | Per-file trace cap in MiB, sampled at trace initialization. A valid `PG_ACCEL_TRACE_FILE_MAX_BYTES` environment value takes precedence. |
 | `pg_accel.otel_log_max_rotations` | int | `4` | user | `0..32` | Retained rotated trace files, sampled at trace initialization; `0` discards rotated copies. |
 | `pg_accel.fp64_enabled` | bool | `on` | user | - | Deprecated no-op compatibility flag; it does not disable fp64 planning or execution. |
@@ -261,6 +262,11 @@ SELECT * FROM pg_accel_planner_stage_stats() ORDER BY stage;
 SELECT pg_accel_last_planner_rejection_reason();
 SELECT pg_accel_planner_rejection_count('no_gpu_resident_pipeline');
 ```
+
+`pg_accel_planner_stage_stats().elapsed_us` and
+`pg_accel_planner_overhead_us()` collect elapsed samples only after
+`SET pg_accel.planner_profiling = on`. Planner-stage call and decline counters
+remain available while profiling is off.
 
 `pg_accel_reset_stats()` resets the resettable per-backend counters and planner
 rejection state. The kernel-execution counter is monotonic and should be proved
@@ -293,6 +299,8 @@ not evidence that the production planner selects it. See
   the work required beyond registration.
 - [docs/olap-abi.md](docs/olap-abi.md): grouped-aggregate kernel ABI notes.
 - [CONTRIBUTING.md](CONTRIBUTING.md): contribution workflow.
+- [SUPPORT.md](SUPPORT.md): supported environments and failure-reporting data.
+- [SECURITY.md](SECURITY.md): private vulnerability-reporting policy.
 
 ## License
 

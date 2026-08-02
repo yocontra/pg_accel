@@ -23,8 +23,63 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = 2
 FIXED_THRESHOLD = 90.0
-BASELINE_SQL_FILES = 54
-BASELINE_SQL_ASSERTIONS = 293
+BASELINE_SQL_FILES = 58
+BASELINE_SQL_ASSERTIONS = 306
+SQL_SEMANTIC_MATRIX_SCHEMA_VERSION = 1
+SQL_SEMANTIC_MATRIX_DIMENSIONS = frozenset(
+    {
+        "types",
+        "nulls",
+        "shape_limits",
+        "ddl",
+        "dml",
+        "prepared",
+        "dispatch",
+        "rejection_reason",
+    }
+)
+SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES = frozenset(
+    {
+        "selected.grouped_agg_int4",
+        "selected.predicate_expression_int4",
+        "decline.and_range_predicate_expression_int4",
+        "selected.count_join_int4",
+        "selected.star_join_int4",
+        "selected.star_join_int8_membership",
+        "selected.h3_parent_count",
+        "decline.aggregate_relation_limit",
+        "decline.aggregate_unsupported_predicate",
+        "decline.aggregate_modifier",
+        "decline.base_scan_filter_projection",
+        "decline.row_returning_hash_join",
+        "decline.row_returning_inequality_join",
+        "decline.h3_scalar",
+        "decline.h3_lateral_srf",
+        "decline.sort_full_output",
+        "decline.sort_topk",
+        "decline.window",
+        "selected.spatial_aggregate",
+        "decline.raster",
+        "selected.raster_resident_exact_reclass",
+        "decline.grouped_count_bool",
+    }
+)
+SQL_SEMANTIC_MATRIX_DECLINE_REASONS = {
+    "decline.and_range_predicate_expression_int4": "shape_multiple_range_predicates",
+    "decline.aggregate_relation_limit": "shape_too_many_relations",
+    "decline.aggregate_unsupported_predicate": "shape_unsupported_predicate",
+    "decline.aggregate_modifier": "shape_aggregate_modifier",
+    "decline.base_scan_filter_projection": "no_gpu_resident_pipeline",
+    "decline.row_returning_hash_join": "hashjoin_no_selected_gpu_kernel",
+    "decline.row_returning_inequality_join": "nlj_between_host_boundary_unsafe",
+    "decline.h3_scalar": "h3_latlng_scalar_predicate_no_gpu_pipeline",
+    "decline.h3_lateral_srf": "h3_lateral_srf_no_batched_expansion",
+    "decline.sort_full_output": "sort_heap_full_output",
+    "decline.sort_topk": "sort_standalone_topk_no_gpu_kernel",
+    "decline.window": "no_gpu_resident_pipeline",
+    "decline.raster": "raster_unsupported_shape",
+    "decline.grouped_count_bool": "shape_unsupported_aggregate_input",
+}
 BASELINE_CPP_SOURCES = 16
 BASELINE_CPP_DEVICE_OBJECTS = 15
 BASELINE_CPP_TESTS = 32
@@ -2039,6 +2094,195 @@ def validate_sql_manifest(
     ):
         errors.append("SQL manifest assertion count is below baseline or inconsistent")
     return document, declarations, errors
+
+
+def validate_sql_semantic_matrix_document(
+    document: object, declarations: dict[str, tuple[str, int]]
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(document, dict):
+        return ["SQL semantic matrix must be an object"]
+    if (
+        document.get("schema_version") != SQL_SEMANTIC_MATRIX_SCHEMA_VERSION
+        or document.get("kind") != "sql-semantic-matrix"
+    ):
+        errors.append("SQL semantic matrix schema/kind mismatch")
+    if document.get("contract") != "resident-v2":
+        errors.append("SQL semantic matrix contract must be resident-v2")
+    if document.get("evidence_scope") != "declarations_only":
+        errors.append("SQL semantic matrix must identify declaration-only evidence")
+    if document.get("execution_evidence") != "not_claimed":
+        errors.append("SQL semantic matrix must not claim executed evidence")
+
+    entries = document.get("families")
+    if not isinstance(entries, list):
+        return errors + ["SQL semantic matrix families must be an array"]
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        label = f"SQL semantic matrix family[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        identifier = entry.get("id")
+        if not isinstance(identifier, str) or not identifier:
+            errors.append(f"{label} has an invalid id")
+            continue
+        label = identifier
+        if identifier in seen:
+            errors.append(f"SQL semantic matrix duplicates family {identifier}")
+        seen.add(identifier)
+
+        disposition = entry.get("disposition")
+        if disposition not in {"selected", "declined"}:
+            errors.append(f"{label}: disposition must be selected or declined")
+        elif not identifier.startswith(
+            "selected." if disposition == "selected" else "decline."
+        ):
+            errors.append(f"{label}: id prefix disagrees with disposition")
+        if entry.get("postgresql_majors") != [18, 19]:
+            errors.append(f"{label}: PostgreSQL applicability must be [18, 19]")
+
+        semantics = entry.get("semantics")
+        if not isinstance(semantics, dict):
+            errors.append(f"{label}: semantics must be an object")
+            semantics = {}
+        for field in ("types", "null_patterns"):
+            values = semantics.get(field)
+            if (
+                not isinstance(values, list)
+                or not values
+                or any(not isinstance(value, str) or not value for value in values)
+            ):
+                errors.append(f"{label}: semantics.{field} must be a nonempty string array")
+        if not isinstance(semantics.get("shape_limits"), str) or not semantics.get(
+            "shape_limits"
+        ):
+            errors.append(f"{label}: semantics.shape_limits must be nonempty")
+        expected_dispatch = "required" if disposition == "selected" else "forbidden"
+        if semantics.get("dispatch_expectation") != expected_dispatch:
+            errors.append(
+                f"{label}: dispatch expectation must be {expected_dispatch}"
+            )
+        rejection_reason = semantics.get("rejection_reason")
+        if disposition == "selected":
+            if rejection_reason is not None:
+                errors.append(f"{label}: selected family cannot declare a rejection reason")
+        else:
+            expected_reason = SQL_SEMANTIC_MATRIX_DECLINE_REASONS.get(identifier)
+            if rejection_reason != expected_reason:
+                errors.append(
+                    f"{label}: exact rejection reason must be {expected_reason!r}"
+                )
+
+        evidence = entry.get("evidence")
+        if not isinstance(evidence, dict):
+            errors.append(f"{label}: evidence must be an object")
+            continue
+        evidence_dimensions = set(evidence)
+        if evidence_dimensions != SQL_SEMANTIC_MATRIX_DIMENSIONS:
+            errors.append(
+                f"{label}: evidence dimensions differ: "
+                f"missing={sorted(SQL_SEMANTIC_MATRIX_DIMENSIONS - evidence_dimensions)}, "
+                f"extra={sorted(evidence_dimensions - SQL_SEMANTIC_MATRIX_DIMENSIONS)}"
+            )
+        for dimension in sorted(SQL_SEMANTIC_MATRIX_DIMENSIONS & evidence_dimensions):
+            claim = evidence[dimension]
+            claim_label = f"{label}.{dimension}"
+            if not isinstance(claim, dict):
+                errors.append(f"{claim_label}: evidence claim must be an object")
+                continue
+            status = claim.get("status")
+            assertion_ids = claim.get("assertion_ids")
+            gap = claim.get("gap")
+            if status not in {"covered", "partial", "uncovered", "not_applicable"}:
+                errors.append(f"{claim_label}: invalid evidence status")
+                continue
+            if (
+                not isinstance(assertion_ids, list)
+                or any(not isinstance(value, str) for value in assertion_ids)
+                or len(assertion_ids) != len(set(assertion_ids))
+            ):
+                errors.append(f"{claim_label}: assertion_ids must be a unique string array")
+                continue
+            unknown = sorted(set(assertion_ids) - declarations.keys())
+            if unknown:
+                errors.append(f"{claim_label}: unknown assertion IDs {unknown}")
+            if status == "covered" and (not assertion_ids or gap is not None):
+                errors.append(
+                    f"{claim_label}: covered evidence requires assertions and no gap"
+                )
+            elif status == "partial" and (
+                not assertion_ids or not isinstance(gap, str) or not gap
+            ):
+                errors.append(
+                    f"{claim_label}: partial evidence requires assertions and a gap"
+                )
+            elif status == "uncovered" and (
+                assertion_ids or not isinstance(gap, str) or not gap
+            ):
+                errors.append(
+                    f"{claim_label}: uncovered evidence requires no assertions and a gap"
+                )
+            elif status == "not_applicable" and (assertion_ids or gap is not None):
+                errors.append(
+                    f"{claim_label}: not-applicable evidence cannot claim assertions or a gap"
+                )
+        rejection_claim = evidence.get("rejection_reason")
+        if isinstance(rejection_claim, dict):
+            if disposition == "selected" and rejection_claim.get("status") != "not_applicable":
+                errors.append(f"{label}: selected rejection evidence must be not_applicable")
+            if disposition == "declined" and rejection_claim.get("status") == "not_applicable":
+                errors.append(f"{label}: declined rejection evidence cannot be not_applicable")
+
+    if seen != SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES:
+        errors.append(
+            "SQL semantic matrix family inventory differs: "
+            f"missing={sorted(SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES - seen)}, "
+            f"extra={sorted(seen - SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES)}"
+        )
+    if set(SQL_SEMANTIC_MATRIX_DECLINE_REASONS) != {
+        identifier
+        for identifier in SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES
+        if identifier.startswith("decline.")
+    }:
+        errors.append("SQL semantic matrix decline-reason inventory is inconsistent")
+    return errors
+
+
+def sql_semantic_matrix_reason_source_errors(repo_root: pathlib.Path) -> list[str]:
+    sources = [
+        repo_root / "pg_accel/src/engine/ffi/planner_hooks/decision.rs",
+        repo_root / "pg_accel/src/engine/ffi/planner_hooks/generic_groupagg.rs",
+        repo_root / "pg_accel/src/engine/ffi/planner_hooks/raster.rs",
+        repo_root / "pg_accel/src/engine/ffi/planner_hooks/shape/mod.rs",
+    ]
+    production_text = "\n".join(path.read_text(encoding="utf-8") for path in sources)
+    return [
+        f"SQL semantic matrix rejection reason is absent from production sources: {reason}"
+        for reason in sorted(set(SQL_SEMANTIC_MATRIX_DECLINE_REASONS.values()))
+        if f'"{reason}"' not in production_text
+    ]
+
+
+def validate_sql_semantic_matrix(args: argparse.Namespace) -> int:
+    repo_root = pathlib.Path(args.repo_root).resolve()
+    _, declarations, manifest_errors = validate_sql_manifest(
+        repo_root / args.manifest, repo_root / "sql/tests"
+    )
+    errors = (
+        manifest_errors
+        + validate_sql_semantic_matrix_document(
+            read_json(repo_root / args.matrix), declarations
+        )
+        + sql_semantic_matrix_reason_source_errors(repo_root)
+    )
+    if errors:
+        raise CoverageError("; ".join(errors))
+    print(
+        "SQL semantic matrix audit: PASS "
+        f"({len(SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES)} families, declaration evidence only)"
+    )
+    return 0
 
 
 def cmake_registered_tests(cmake: str) -> list[str]:
@@ -5585,6 +5829,12 @@ def audit_scope(args: argparse.Namespace) -> int:
     )
     if manifest_errors:
         raise CoverageError("; ".join(manifest_errors))
+    matrix_errors = validate_sql_semantic_matrix_document(
+        read_json(repo_root / "coverage/sql-semantic-matrix.json"), declarations
+    )
+    matrix_errors.extend(sql_semantic_matrix_reason_source_errors(repo_root))
+    if matrix_errors:
+        raise CoverageError("; ".join(matrix_errors))
     if len(declarations) < BASELINE_SQL_ASSERTIONS:
         raise CoverageError("SQL assertion baseline was reduced")
     sql_files = sorted((repo_root / "sql/tests").glob("[0-9]*.sql"))
@@ -5611,7 +5861,9 @@ def audit_scope(args: argparse.Namespace) -> int:
         f"({len(baseline['rust']['owned_files'])} Rust files, "
         f"{len(pinned_cpp_sources)} C++ sources, {len(baseline['cpp']['ctest_names'])} CTests, "
         f"{len(sql_files)} SQL files, "
-        f"{len(declarations)} SQL semantic assertions, threshold {minimum:g}%)"
+        f"{len(declarations)} SQL semantic assertions, "
+        f"{len(SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES)} SQL semantic families, "
+        f"threshold {minimum:g}%)"
     )
     return 0
 
@@ -5712,6 +5964,16 @@ def parser() -> argparse.ArgumentParser:
     build_manifest.add_argument("--output", required=True)
     build_manifest.add_argument("--baseline", default="coverage/release-baseline.json")
     build_manifest.set_defaults(func=build_sql_manifest)
+
+    semantic_matrix = commands.add_parser("validate-sql-semantic-matrix")
+    semantic_matrix.add_argument("--repo-root", default=".")
+    semantic_matrix.add_argument(
+        "--manifest", default="coverage/sql-semantic-assertions.json"
+    )
+    semantic_matrix.add_argument(
+        "--matrix", default="coverage/sql-semantic-matrix.json"
+    )
+    semantic_matrix.set_defaults(func=validate_sql_semantic_matrix)
 
     baseline = commands.add_parser("update-release-baseline")
     baseline.add_argument("--repo-root", default=".")

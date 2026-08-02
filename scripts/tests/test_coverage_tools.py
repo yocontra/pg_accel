@@ -850,7 +850,7 @@ class SqlSemanticCoverageTests(unittest.TestCase):
                 REPO_ROOT / "coverage/sql-semantic-assertions.json"
             )
             self.assertEqual(generated, checked_in)
-            self.assertEqual(generated["declared_assertions"], 293)
+            self.assertEqual(generated["declared_assertions"], 306)
             matrix = next(
                 entry
                 for entry in generated["files"]
@@ -1078,10 +1078,10 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
         assertion_ids: list[str] = []
         sql_dir = repo_root / "sql/tests"
         sql_dir.mkdir(parents=True)
-        for file_index in range(54):
+        for file_index in range(58):
             stem = f"{file_index:02d}_fixture"
             name = f"{stem}.sql"
-            assertion_count = 6 if file_index < 23 else 5
+            assertion_count = 6 if file_index < 16 else 5
             source_lines: list[str] = []
             for assertion_index in range(1, assertion_count + 1):
                 identifier = f"{stem}.assert_{assertion_index:03d}"
@@ -1109,7 +1109,7 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
                     "assertions": assertions,
                 }
             )
-        self.assertEqual(len(assertion_ids), 293)
+        self.assertEqual(len(assertion_ids), 306)
 
         scope = {
             "schema_version": 2,
@@ -1139,10 +1139,10 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
             "schema_version": 2,
             "kind": "sql-semantic-assertion-manifest",
             "test_root": "sql/tests",
-            "baseline_files": 54,
-            "baseline_assertions": 293,
-            "declared_files": 54,
-            "declared_assertions": 293,
+            "baseline_files": 58,
+            "baseline_assertions": 306,
+            "declared_files": 58,
+            "declared_assertions": 306,
             "files": manifest_entries,
         }
         baseline = {
@@ -1672,7 +1672,7 @@ raise SystemExit(2)
                     "log_sha256": coverage_tools.sha256(log_path),
                 }
             )
-        self.assertEqual(len(successful_ids), 293)
+        self.assertEqual(len(successful_ids), 306)
         (root / "sql/test-run/results.tsv").write_text(
             "\n".join(result_lines) + "\n", encoding="utf-8"
         )
@@ -3435,6 +3435,97 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 1)
             write_oom_body(valid_oom_body)
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
+
+
+class SqlSemanticMatrixTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.document = json.loads(
+            (REPO_ROOT / "coverage/sql-semantic-matrix.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        manifest = json.loads(
+            (REPO_ROOT / "coverage/sql-semantic-assertions.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        cls.declarations = {
+            assertion["id"]: (entry["file"], assertion["source_line"])
+            for entry in manifest["files"]
+            for assertion in entry["assertions"]
+        }
+
+    def clone(self) -> dict[str, object]:
+        return json.loads(json.dumps(self.document))
+
+    def validate(self, document: object) -> list[str]:
+        return coverage_tools.validate_sql_semantic_matrix_document(
+            document, self.declarations
+        )
+
+    def test_checked_in_matrix_resolves_only_manifest_assertions(self) -> None:
+        self.assertEqual(self.validate(self.document), [])
+
+    def test_matrix_mutations_fail_closed(self) -> None:
+        mutations = []
+
+        missing_family = self.clone()
+        missing_family["families"].pop()
+        mutations.append((missing_family, "family inventory differs"))
+
+        unknown_assertion = self.clone()
+        unknown_assertion["families"][0]["evidence"]["types"]["assertion_ids"] = [
+            "missing.assert_999"
+        ]
+        mutations.append((unknown_assertion, "unknown assertion IDs"))
+
+        malformed_assertion = self.clone()
+        malformed_assertion["families"][0]["evidence"]["types"][
+            "assertion_ids"
+        ] = [{"not": "an ID"}]
+        mutations.append((malformed_assertion, "must be a unique string array"))
+
+        hidden_gap = self.clone()
+        uncovered_evidence = next(
+            evidence
+            for family in hidden_gap["families"]
+            for evidence in family["evidence"].values()
+            if evidence["status"] == "uncovered"
+        )
+        uncovered_evidence["gap"] = None
+        mutations.append((hidden_gap, "uncovered evidence requires no assertions and a gap"))
+
+        narrowed_pg = self.clone()
+        narrowed_pg["families"][0]["postgresql_majors"] = [18]
+        mutations.append((narrowed_pg, "PostgreSQL applicability must be [18, 19]"))
+
+        dispatch_drift = self.clone()
+        dispatch_drift["families"][0]["semantics"]["dispatch_expectation"] = (
+            "forbidden"
+        )
+        mutations.append((dispatch_drift, "dispatch expectation must be required"))
+
+        reason_drift = self.clone()
+        declined = next(
+            family
+            for family in reason_drift["families"]
+            if family["disposition"] == "declined"
+        )
+        declined["semantics"]["rejection_reason"] = "almost_the_right_reason"
+        mutations.append((reason_drift, "exact rejection reason must be"))
+
+        false_execution_claim = self.clone()
+        false_execution_claim["execution_evidence"] = "passed"
+        mutations.append((false_execution_claim, "must not claim executed evidence"))
+
+        for document, expected in mutations:
+            with self.subTest(expected=expected):
+                errors = self.validate(document)
+                self.assertTrue(
+                    any(expected in error for error in errors),
+                    f"expected {expected!r} in {errors!r}",
+                )
 
 
 if __name__ == "__main__":

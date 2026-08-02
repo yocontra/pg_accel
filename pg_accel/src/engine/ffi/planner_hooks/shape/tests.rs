@@ -102,6 +102,36 @@ fn single_table_input() -> ShapeInput {
     }
 }
 
+fn bool_grouped_count_input() -> ShapeInput {
+    let group = column(1, 100, 3, u32::from(pg_sys::BOOLOID));
+    let observed = column(1, 100, 4, u32::from(pg_sys::BOOLOID));
+    let (count, count_output) = aggregate(
+        MeasureExpr::Column(observed.column),
+        AggregateKind::Count,
+        u32::from(pg_sys::INT8OID),
+    );
+    ShapeInput {
+        relations: vec![relation(1, 100, 1_000_000)],
+        joins: Vec::new(),
+        group_keys: vec![PlannerGroupKey::Column(group)],
+        aggregates: vec![count],
+        projections: vec![
+            InputProjection::Group {
+                key: PlannerGroupKey::Column(group),
+                output: output(u32::from(pg_sys::BOOLOID), true),
+            },
+            InputProjection::Aggregate {
+                aggregate_index: 0,
+                output: count_output,
+            },
+        ],
+        relation_filters: Vec::new(),
+        estimated_output_rows: 3,
+        expected_reuses: NonZeroU32::MIN,
+        modifiers: ShapeModifiers::default(),
+    }
+}
+
 fn add_dimension(input: &mut ShapeInput, varno: pg_sys::Index, relation_oid: u32, group: bool) {
     let fact_attno = i32::try_from(varno).unwrap_or(i32::MAX).saturating_add(2);
     let fact_key = column(1, 100, fact_attno, u32::from(pg_sys::INT4OID));
@@ -535,6 +565,37 @@ fn one_dimension_uses_unique_side_as_dimension_without_names() {
 }
 
 #[test]
+fn one_dimension_accepts_exact_int8_equality() {
+    let mut input = single_table_input();
+    let fact_key = column(1, 100, 3, u32::from(pg_sys::INT8OID));
+    let dim_key = column(2, 200, 1, u32::from(pg_sys::INT8OID));
+    let mut dimension = relation(2, 200, 1_000);
+    dimension.unique_attnos.insert(1);
+    input.relations.push(dimension);
+    input.joins.push(EquiJoin {
+        left: fact_key,
+        right: dim_key,
+    });
+
+    let plan = build_shape(input, &model()).expect("exact INT8 star equality should build");
+    assert_eq!(plan.spec.fact_rel, 100);
+    assert_eq!(plan.spec.star_dims.len(), 1);
+    assert_eq!(
+        plan.spec.star_dims[0].fact_key.type_oid,
+        u32::from(pg_sys::INT8OID)
+    );
+    assert_eq!(
+        plan.spec.star_dims[0].dim_key.type_oid,
+        u32::from(pg_sys::INT8OID)
+    );
+    assert_eq!(plan.spec.star_dims[0].collation_oid, 0);
+    assert_eq!(
+        plan.spec.star_dims[0].multiplicity,
+        JoinMultiplicity::Unique
+    );
+}
+
+#[test]
 fn equal_two_relation_shape_without_unique_evidence_declines_ambiguously() {
     let mut input = single_table_input();
     let (count, count_output) = aggregate(
@@ -634,6 +695,49 @@ fn relation_filter_is_preserved_and_selected_columns_are_deduplicated() {
         })
     );
     assert_eq!(plan.descriptor_measures.derived_fact_mask, None);
+}
+
+#[test]
+fn canonical_intersected_range_preserves_sql_null_filter_semantics() {
+    let mut input = single_table_input();
+    let filter_input = ColumnRef {
+        relation_oid: 100,
+        attno: 1,
+        type_oid: u32::from(pg_sys::INT4OID),
+    };
+    input.relation_filters.push((
+        100,
+        FilterSpec::Ranges {
+            input: filter_input,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(200),
+                hi: ScalarValue::I32(800),
+            }],
+        },
+    ));
+
+    let plan = build_shape(input, &model()).expect("canonical intersected range should build");
+    assert_eq!(
+        plan.spec.fact_filter,
+        FilterSpec::Ranges {
+            input: filter_input,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(200),
+                hi: ScalarValue::I32(800),
+            }],
+        }
+    );
+    assert_eq!(
+        plan.descriptor_measures.fact_filter,
+        Some(DescriptorFilterBinding {
+            measure_index: 1,
+            source: AggregateSource::Value,
+            hidden: true,
+        })
+    );
+    assert_eq!(plan.descriptor_measures.derived_fact_mask, None);
+    plan.descriptor_spec()
+        .expect("range descriptor must retain null-aware filtering at execution");
 }
 
 #[test]
@@ -1937,6 +2041,67 @@ fn straightforward_column_aggregate_types_decline_without_performance_evidence()
 }
 
 #[test]
+fn bool_column_count_candidate_remains_native_after_losing_release_gate() {
+    let expected_decline = Err(ShapeDecline::UnsupportedAggregateInput {
+        kind: AggregateKind::Count,
+        type_oid: u32::from(pg_sys::BOOLOID),
+    });
+
+    assert_eq!(
+        build_shape(bool_grouped_count_input(), &model()),
+        expected_decline
+    );
+
+    let mut global = bool_grouped_count_input();
+    global.group_keys.clear();
+    global.projections.remove(0);
+    assert_eq!(build_shape(global, &model()), expected_decline);
+
+    let mut same_column = bool_grouped_count_input();
+    same_column.aggregates[0].expression = MeasureExpr::Column(ColumnRef {
+        relation_oid: 100,
+        attno: 3,
+        type_oid: u32::from(pg_sys::BOOLOID),
+    });
+    assert_eq!(build_shape(same_column, &model()), expected_decline);
+
+    let mut filtered = bool_grouped_count_input();
+    filtered.relation_filters.push((
+        100,
+        FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 100,
+                attno: 4,
+                type_oid: u32::from(pg_sys::BOOLOID),
+            },
+            kind: crate::engine::spec::MaskKind::Sql,
+        },
+    ));
+    assert_eq!(build_shape(filtered, &model()), expected_decline);
+
+    let mut reordered = bool_grouped_count_input();
+    reordered.projections.swap(0, 1);
+    assert_eq!(build_shape(reordered, &model()), expected_decline);
+
+    let mut joined = bool_grouped_count_input();
+    add_dimension(&mut joined, 2, 200, false);
+    assert_eq!(build_shape(joined, &model()), expected_decline);
+
+    let mut multiple = bool_grouped_count_input();
+    let (count_star, count_star_output) = aggregate(
+        MeasureExpr::CountStar,
+        AggregateKind::Count,
+        u32::from(pg_sys::INT8OID),
+    );
+    multiple.aggregates.push(count_star);
+    multiple.projections.push(InputProjection::Aggregate {
+        aggregate_index: 1,
+        output: count_star_output,
+    });
+    assert_eq!(build_shape(multiple, &model()), expected_decline);
+}
+
+#[test]
 fn structured_and_extension_measure_types_decline_in_generic_shape_analysis() {
     for type_oid in [
         114,  // json
@@ -2098,18 +2263,18 @@ fn int8_binary_sub_admits_count_min_max_but_not_sum() {
 }
 
 #[test]
-fn unsupported_join_key_width_declines_before_star_orientation() {
+fn unsupported_int2_join_key_declines_before_star_orientation() {
     let mut input = single_table_input();
     input.relations.push(relation(2, 200, 1_000));
     input.relations[1].unique_attnos.insert(1);
     input.joins.push(EquiJoin {
-        left: column(1, 100, 3, u32::from(pg_sys::INT8OID)),
-        right: column(2, 200, 1, u32::from(pg_sys::INT8OID)),
+        left: column(1, 100, 3, u32::from(pg_sys::INT2OID)),
+        right: column(2, 200, 1, u32::from(pg_sys::INT2OID)),
     });
     assert_eq!(
         build_shape(input, &model()),
         Err(ShapeDecline::UnsupportedJoinKeyType {
-            type_oid: u32::from(pg_sys::INT8OID),
+            type_oid: u32::from(pg_sys::INT2OID),
         })
     );
 }
@@ -2629,6 +2794,10 @@ fn every_shape_decline_has_a_stable_machine_code_and_display_prefix() {
         (
             ShapeDecline::MultipleFiltersPerRelation { relation_oid: 24 },
             "shape_multi_filter_relation",
+        ),
+        (
+            ShapeDecline::MultipleRangePredicates,
+            "shape_multiple_range_predicates",
         ),
         (
             ShapeDecline::InvalidFilterRange,

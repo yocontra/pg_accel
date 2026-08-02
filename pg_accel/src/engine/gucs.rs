@@ -54,6 +54,10 @@ static ASSERT_DISPATCH: GucSetting<bool> = GucSetting::<bool>::new(false);
 /// Reserved roadmap setting for the crash-gated parallel fused count path.
 static PARALLEL_FUSED_COUNT: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Whether planner hooks collect elapsed-time samples. Call and decline
+/// counters remain active regardless of this setting.
+static PLANNER_PROFILING: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 /// Per-file size cap (in MiB) for the JSONL trace artifacts that pg_accel
 /// emits to `$PGDATA` (`pg_accel_otel.jsonl` and `pg_accel_traces.jsonl`).
 ///
@@ -222,6 +226,15 @@ pub fn init_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_bool_guc(
+        c"pg_accel.planner_profiling",
+        c"Collect elapsed-time samples for pg_accel planner hooks.",
+        c"When enabled, planner hooks read the monotonic clock and update elapsed-time counters exposed by pg_accel_planner_stage_stats() and pg_accel_planner_overhead_us(). Call and decline counters remain active while it is disabled.",
+        &PLANNER_PROFILING,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c"pg_accel.otel_log_max_mb",
         c"Per-file size cap for pg_accel_otel.jsonl and pg_accel_traces.jsonl, in MiB.",
@@ -376,6 +389,13 @@ pub fn assert_dispatch() -> bool {
 #[must_use]
 pub fn parallel_fused_count_enabled() -> bool {
     PARALLEL_FUSED_COUNT.get()
+}
+
+/// Whether planner-hook elapsed-time profiling is enabled for this session.
+#[inline]
+#[must_use]
+pub fn planner_profiling() -> bool {
+    PLANNER_PROFILING.get()
 }
 
 /// Per-file size cap, in MiB, for `pg_accel_otel.jsonl` and

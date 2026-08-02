@@ -872,6 +872,104 @@ mod typed_private_tests {
     }
 
     #[test]
+    fn generated_bounded_plan_headers_roundtrip_canonically() {
+        let valid_pairs = [
+            (GpuStrategy::Scan, AccelStrategy::GpuSpatial),
+            (GpuStrategy::Scan, AccelStrategy::GpuRaster),
+            (GpuStrategy::Scan, AccelStrategy::GpuH3),
+            (GpuStrategy::Scan, AccelStrategy::GpuReduce),
+            (GpuStrategy::Scan, AccelStrategy::GpuExpr),
+            (GpuStrategy::Join, AccelStrategy::GpuHashJoin),
+            (GpuStrategy::Join, AccelStrategy::GpuNestedLoopIneq),
+            (GpuStrategy::Agg, AccelStrategy::GpuReduce),
+            (GpuStrategy::Window, AccelStrategy::GpuWindow),
+            (GpuStrategy::FunctionScan, AccelStrategy::GpuSpatial),
+            (GpuStrategy::FunctionScan, AccelStrategy::GpuRaster),
+            (GpuStrategy::FunctionScan, AccelStrategy::GpuH3),
+            (GpuStrategy::SrfTargetList, AccelStrategy::GpuSpatial),
+            (GpuStrategy::SrfTargetList, AccelStrategy::GpuRaster),
+            (GpuStrategy::SrfTargetList, AccelStrategy::GpuH3),
+            (GpuStrategy::Raster, AccelStrategy::GpuRaster),
+        ];
+        let mut state = 0xD1B5_4A32_D192_ED03_u64;
+
+        for case in 0..2_048usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let (strategy, accel) = valid_pairs[state as usize % valid_pairs.len()];
+            let batch_size = 1 + ((state >> 16) % MAX_PLAN_BATCH_SIZE as u64) as c_int;
+            let expected_threads = 1 + ((state >> 40) % MAX_EXPECTED_THREADS as u64) as c_int;
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let raw = [
+                strategy as c_int,
+                batch_size,
+                expected_threads,
+                (state >> 32) as c_int,
+                (state as u32 % i16::MAX as u32) as c_int,
+                accel as c_int,
+            ];
+
+            let decoded = PlanPrivate::decode(&raw)
+                .unwrap_or_else(|error| panic!("generated header {case} failed: {error}"));
+            assert_eq!(decoded.to_ints(), raw, "generated header {case}");
+        }
+    }
+
+    #[test]
+    fn every_plan_method_rejects_corrupted_outer_frame_fields() {
+        for (method, words) in valid_plan_frames() {
+            let footer = words.len() - PLAN_WIRE_FOOTER_INTS;
+
+            let mut bad_magic = words.clone();
+            bad_magic[footer] ^= 1;
+            assert!(matches!(
+                validate_plan_wire_slice(&bad_magic, method),
+                Err(DecodeError::InvalidValue {
+                    field: "plan-private magic",
+                    ..
+                })
+            ));
+
+            let mut bad_version = words.clone();
+            bad_version[footer + 1] += 1;
+            assert!(matches!(
+                validate_plan_wire_slice(&bad_version, method),
+                Err(DecodeError::UnsupportedVersion { .. })
+            ));
+
+            for declared in [words.len() - 1, words.len() + 1] {
+                let mut bad_length = words.clone();
+                bad_length[footer + 2] = declared as c_int;
+                assert_eq!(
+                    validate_plan_wire_slice(&bad_length, method),
+                    Err(DecodeError::LengthMismatch {
+                        declared,
+                        actual: words.len(),
+                    })
+                );
+            }
+
+            let mut bad_method = words.clone();
+            bad_method[footer + 3] = 0;
+            assert_eq!(
+                validate_plan_wire_slice(&bad_method, method),
+                Err(DecodeError::InvalidExecutionMethod { raw: 0 })
+            );
+
+            let mut bad_proof_tag = words;
+            let proof = footer - RESIDENT_PROOF_TRAILER_INTS;
+            bad_proof_tag[proof] ^= 1;
+            assert!(matches!(
+                validate_plan_wire_slice(&bad_proof_tag, method),
+                Err(DecodeError::InvalidResidentProof { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn plan_private_strict_decode_reports_missing_field() {
         let err = PlanPrivate::decode(&[GpuStrategy::Scan as c_int, 256, 1])
             .expect_err("truncated plan header should fail");

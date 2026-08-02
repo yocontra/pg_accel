@@ -181,7 +181,11 @@ The similarly named legacy workloads remain in the harness as fail-closed
 coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
 `shape_floating_accumulator_semantics`, while
 `predicate_filter_expression_grouped_agg` declines with
-`shape_aggregate_modifier`. The 13 canonical `ssbm_q*` workloads also remain
+`shape_aggregate_modifier`. The
+`and_range_predicate_expression_grouped_agg_int4` workload declines with
+`shape_multiple_range_predicates`: PostgreSQL analyzes `BETWEEN` and an
+equivalent lower-plus-upper pair as the same multi-clause shape, while one
+scalar comparison remains eligible. The 13 canonical `ssbm_q*` workloads also remain
 native: Q1.1-Q1.3 report `shape_multi_filter_relation`, Q3.3-Q3.4 report
 `shape_unsupported_predicate`, and the remaining canonical SSBM queries report
 `shape_unsupported_filter_type`. `h3_bulk` reports `shape_unsupported_rte`, and

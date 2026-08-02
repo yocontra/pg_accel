@@ -372,11 +372,11 @@ impl HostColumn {
 
     fn join_key(&self, row: usize) -> Result<Option<CanonicalKey>, String> {
         match self.type_oid() {
-            INT4OID | TEXTOID | VARCHAROID | BPCHAROID => {
+            INT4OID | INT8OID | TEXTOID | VARCHAROID | BPCHAROID => {
                 Ok(self.dictionary_value(row)?.map(|(key, _)| key))
             }
             type_oid => Err(format!(
-                "join type OID {type_oid} is not an INT4 or deterministic text-family key"
+                "join type OID {type_oid} is not an INT4, INT8, or deterministic text-family key"
             )),
         }
     }
@@ -1249,7 +1249,7 @@ mod tests {
             relation_oid: 200,
             fact_key: column(100, type_oid),
             dim_key: column(200, type_oid),
-            collation_oid: u32::from(type_oid != INT4OID),
+            collation_oid: u32::from(matches!(type_oid, TEXTOID | BPCHAROID | VARCHAROID)),
             multiplicity,
             filter: FilterSpec::None,
         }
@@ -1538,6 +1538,66 @@ mod tests {
     }
 
     #[test]
+    fn int8_join_correlation_preserves_extremes_nulls_and_counted_duplicates() {
+        let columns = host_columns(
+            HostColumn::I64 {
+                type_oid: INT8OID,
+                values: vec![i64::MIN, -7, i64::MAX, 42, 0],
+                nulls: Some(vec![0, 0, 0, 0, 1]),
+            },
+            HostColumn::I64 {
+                type_oid: INT8OID,
+                values: vec![-7, -7, i64::MAX, i64::MIN, 0],
+                nulls: Some(vec![0, 0, 0, 0, 1]),
+            },
+        );
+        let prepared = prepare_dimension(
+            &dimension(INT8OID, JoinMultiplicity::Counted),
+            &columns,
+            5,
+            false,
+        )
+        .expect("counted INT8 dimension prepares losslessly");
+
+        assert_eq!(prepared.fact_codes, vec![2, 0, 1, -1, -1]);
+        assert_eq!(
+            prepared.row_codes,
+            vec![Some(0), Some(0), Some(1), Some(2), None]
+        );
+        assert_eq!(prepared.match_by_key, vec![1, 1, 1]);
+        assert_eq!(prepared.multiplicity_by_key, Some(vec![2, 1, 1]));
+    }
+
+    #[test]
+    fn unique_int8_dimension_rejects_duplicate_nonnull_keys() {
+        let columns = host_columns(
+            HostColumn::I64 {
+                type_oid: INT8OID,
+                values: vec![-7],
+                nulls: None,
+            },
+            HostColumn::I64 {
+                type_oid: INT8OID,
+                values: vec![-7, -7],
+                nulls: None,
+            },
+        );
+        let error = match prepare_dimension(
+            &dimension(INT8OID, JoinMultiplicity::Unique),
+            &columns,
+            1,
+            false,
+        ) {
+            Ok(_) => panic!("duplicate UNIQUE INT8 dimension must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            "dimension declared UNIQUE contains a duplicate non-NULL join key"
+        );
+    }
+
+    #[test]
     fn bpchar_join_correlates_independent_dictionaries() {
         let columns = host_columns(
             HostColumn::Text {
@@ -1716,6 +1776,8 @@ mod tests {
             nullable.dictionary_value(1),
             Ok(Some((CanonicalKey::I64(8), GroupDatum::I64(8))))
         );
+        assert_eq!(nullable.join_key(0), Ok(None));
+        assert_eq!(nullable.join_key(1), Ok(Some(CanonicalKey::I64(8))));
         assert_eq!(
             nullable.is_null(2),
             Err("resident row 2 is out of bounds".to_owned())

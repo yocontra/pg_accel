@@ -166,7 +166,7 @@ assert_safe_bench_command() {
             --multipliers=*) multipliers_value="${token#*=}" ;;
             --max-size=*) max_size_value="${token#*=}" ;;
             --output-dir=*) output_dir_value="${token#*=}" ;;
-            --category | --category=*) category_seen=1 ;;
+            --category=*) category_seen=1 ;;
             --dry-run) dry_run_seen=1 ;;
             --capture-plans) capture_plans_seen=1 ;;
             --skip-guc-verify) skip_guc_verify_seen=1 ;;

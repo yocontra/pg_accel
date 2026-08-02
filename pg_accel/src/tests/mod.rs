@@ -50,6 +50,27 @@ mod tests {
         .expect("planner rejection count should not be NULL")
     }
 
+    fn planner_stage_totals() -> (u64, u64, u64) {
+        use crate::engine::stats::PlannerHookStage::{
+            JoinPathlist, RelPathlist, UpperFinal, UpperGroupAgg, UpperOther, UpperSetop,
+            UpperWindow,
+        };
+        [
+            RelPathlist,
+            JoinPathlist,
+            UpperGroupAgg,
+            UpperWindow,
+            UpperFinal,
+            UpperSetop,
+            UpperOther,
+        ]
+        .into_iter()
+        .map(crate::engine::stats::read_planner_stage)
+        .fold((0, 0, 0), |total, stage| {
+            (total.0 + stage.0, total.1 + stage.1, total.2 + stage.2)
+        })
+    }
+
     fn explain_analyze_text(query: &str) -> String {
         Spi::connect(|client| {
             let mut lines = Vec::new();
@@ -630,6 +651,188 @@ mod tests {
         let accelerated = read_results();
         assert_eq!(accelerated, native, "generic aggregate result mismatch");
         crate::gpu::assert_gpu_executed(1);
+    }
+
+    #[pg_test]
+    fn test_groupagg_decline_cache_revalidates_mutation_policy_and_prepared_plans() {
+        if !gpu_device_available() {
+            pgrx::notice!("skipping planner decline-cache test: no GPU device");
+            return;
+        }
+        serialize_gpu_tests();
+        Spi::run(
+            "SET pg_accel.enabled = on; \
+             SET pg_accel.gpu_enabled = on; \
+             SET pg_accel.auto_load = off; \
+             CREATE TEMP TABLE _decline_cache_agg AS \
+             SELECT (i % 16)::int4 AS g, i::int4 AS v \
+             FROM generate_series(1, 10000) AS rows(i); \
+             ANALYZE _decline_cache_agg; \
+             SELECT pg_accel_pin('_decline_cache_agg'::regclass, ARRAY['g', 'v'])",
+        )
+        .expect("create and pin decline-cache fixture");
+        let query = "SELECT g, sum(v), count(*) FROM _decline_cache_agg GROUP BY g";
+        let groupagg_fast_declines = || {
+            crate::engine::stats::read_planner_stage(
+                crate::engine::stats::PlannerHookStage::UpperGroupAgg,
+            )
+            .2
+        };
+        let assert_reason = || {
+            assert_eq!(
+                Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                    .expect("read planner decline reason"),
+                Some("generic_fact_rows_below_device_minimum".to_owned())
+            );
+        };
+
+        let before = groupagg_fast_declines();
+        let first_plan = explain_text(query);
+        assert!(!first_plan.contains("Custom Scan (GpuAccelAgg)"));
+        assert_reason();
+        let after_first = groupagg_fast_declines();
+        assert_eq!(
+            after_first, before,
+            "initial decision must populate, not hit, cache"
+        );
+
+        let second_plan = explain_text(query);
+        assert_eq!(
+            second_plan, first_plan,
+            "cache hit must preserve exact plan"
+        );
+        assert_reason();
+        let after_hit = groupagg_fast_declines();
+        assert_eq!(
+            after_hit,
+            after_first + 1,
+            "repeated planning must fast-decline"
+        );
+
+        Spi::run(
+            "ANALYZE _decline_cache_agg; \
+             SET pg_accel.planner_profiling = on; \
+             SELECT pg_accel_reset_stats()",
+        )
+        .expect("reset cache and enable focused planner timing");
+        let _ = explain_text(query);
+        let cold_stage = crate::engine::stats::read_planner_stage(
+            crate::engine::stats::PlannerHookStage::UpperGroupAgg,
+        );
+        Spi::run("SELECT pg_accel_reset_stats()").expect("reset stage timing after cold plan");
+        for _ in 0..32 {
+            let _ = explain_text(query);
+        }
+        let cached_stage = crate::engine::stats::read_planner_stage(
+            crate::engine::stats::PlannerHookStage::UpperGroupAgg,
+        );
+        pgrx::notice!(
+            "planner decline-cache timing: cold={}us cached_total={}us cached_mean={:.3}us",
+            cold_stage.1,
+            cached_stage.1,
+            cached_stage.1 as f64 / 32.0
+        );
+        assert_eq!(
+            cached_stage.0, 32,
+            "every repeated plan must visit groupagg"
+        );
+        assert_eq!(cached_stage.2, 32, "every repeated plan must hit the cache");
+        assert!(cold_stage.1 > 0, "cold planner stage must be measurable");
+        assert!(
+            cached_stage.1 < cold_stage.1.saturating_mul(32),
+            "cached mean planner time must beat cold planning: cold={}us, cached={}us/32",
+            cold_stage.1,
+            cached_stage.1
+        );
+        Spi::run("SET pg_accel.planner_profiling = off").expect("restore planner profiling");
+
+        Spi::run(
+            "UPDATE _decline_cache_agg SET v = v WHERE g = 0; \
+             SELECT pg_accel_pin('_decline_cache_agg'::regclass, ARRAY['g', 'v'])",
+        )
+        .expect("mutate and reload decline-cache fixture");
+        let before_mutated = groupagg_fast_declines();
+        let mutated_plan = explain_text(query);
+        assert!(
+            mutated_plan.contains("HashAggregate")
+                && !mutated_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "mutation must recompute the same native aggregate family:\n{mutated_plan}"
+        );
+        assert_reason();
+        assert_eq!(
+            groupagg_fast_declines(),
+            before_mutated,
+            "generation change must force exact decline recomputation"
+        );
+
+        Spi::run(
+            "CREATE FUNCTION pg_temp._decline_cache_nested(value int4) \
+             RETURNS int4 LANGUAGE plpgsql IMMUTABLE AS $$ \
+             BEGIN PERFORM 1; RETURN value; END $$; \
+             ANALYZE _decline_cache_agg",
+        )
+        .expect("create nested-SPI planner fixture");
+        let nested_query = "SELECT g, sum(v), count(*) FROM _decline_cache_agg \
+                            WHERE v >= pg_temp._decline_cache_nested(0) GROUP BY g";
+        let before_nested = groupagg_fast_declines();
+        let nested_first = explain_text(nested_query);
+        assert_reason();
+        assert_eq!(groupagg_fast_declines(), before_nested);
+        let nested_second = explain_text(nested_query);
+        assert_eq!(nested_second, nested_first);
+        assert_reason();
+        assert_eq!(groupagg_fast_declines(), before_nested + 1);
+        assert_eq!(
+            crate::engine::ffi::planner_hooks::active_source_depth(),
+            0,
+            "nested SPI planning must restore the outer source stack"
+        );
+
+        Spi::run(
+            "DO $$ BEGIN \
+               BEGIN EXECUTE 'SELECT missing_column FROM _decline_cache_agg'; \
+               EXCEPTION WHEN undefined_column THEN NULL; END; \
+             END $$",
+        )
+        .expect("catch nested planner error");
+        assert_eq!(
+            crate::engine::ffi::planner_hooks::active_source_depth(),
+            0,
+            "caught PostgreSQL planner ERROR must unwind the source stack"
+        );
+        let before_error_reuse = groupagg_fast_declines();
+        let nested_after_error = explain_text(nested_query);
+        assert_eq!(nested_after_error, nested_first);
+        assert_reason();
+        assert_eq!(
+            groupagg_fast_declines(),
+            before_error_reuse + 1,
+            "caught planner ERROR must not poison later cache lookup"
+        );
+
+        Spi::run(
+            "ANALYZE _decline_cache_agg; \
+             SET plan_cache_mode = force_custom_plan; \
+             PREPARE _decline_cache_prepared(int4) AS \
+             SELECT g, sum(v), count(*) FROM _decline_cache_agg \
+             WHERE v >= $1 GROUP BY g",
+        )
+        .expect("prepare forced-custom decline query");
+        let before_prepared = groupagg_fast_declines();
+        let prepared_first = explain_text("EXECUTE _decline_cache_prepared(0)");
+        assert_reason();
+        let after_prepared_first = groupagg_fast_declines();
+        assert_eq!(after_prepared_first, before_prepared);
+        let prepared_second = explain_text("EXECUTE _decline_cache_prepared(0)");
+        assert_eq!(prepared_second, prepared_first);
+        assert_reason();
+        assert_eq!(
+            groupagg_fast_declines(),
+            after_prepared_first + 1,
+            "identical forced-custom prepared planning must hit the cache"
+        );
+        Spi::run("DEALLOCATE _decline_cache_prepared; RESET plan_cache_mode")
+            .expect("clean up prepared decline query");
     }
 
     #[pg_test]
@@ -1498,6 +1701,58 @@ mod tests {
             0,
             "queries_accelerated should be 0 after reset"
         );
+    }
+
+    #[pg_test]
+    fn test_planner_profiling_only_changes_elapsed_accounting() {
+        Spi::run(
+            "CREATE TEMP TABLE _planner_profile_contract (g int4, v int4); \
+             INSERT INTO _planner_profile_contract \
+             SELECT i % 32, i FROM generate_series(1, 10000) AS rows(i); \
+             ANALYZE _planner_profile_contract; \
+             SET pg_accel.enabled = on",
+        )
+        .expect("create planner-profiling fixture");
+        let query = "SELECT g, sum(v) FROM _planner_profile_contract GROUP BY g";
+
+        let measure = |profiling: bool| {
+            Spi::run(if profiling {
+                "SET pg_accel.planner_profiling = on; SELECT pg_accel_reset_stats()"
+            } else {
+                "SET pg_accel.planner_profiling = off; SELECT pg_accel_reset_stats()"
+            })
+            .expect("configure and reset planner profiling");
+            let rejected_before = crate::engine::stats::read_planner_rejected();
+            let mut plan = String::new();
+            for _ in 0..64 {
+                let next = explain_text(query);
+                if plan.is_empty() {
+                    plan = next;
+                } else {
+                    assert_eq!(next, plan, "profiling must not change repeated plan shape");
+                }
+            }
+            let totals = planner_stage_totals();
+            let rejected = crate::engine::stats::read_planner_rejected() - rejected_before;
+            let reason = crate::engine::stats::read_last_planner_rejection_reason();
+            (plan, totals, rejected, reason)
+        };
+
+        let disabled = measure(false);
+        let enabled = measure(true);
+        Spi::run("SET pg_accel.planner_profiling = off").expect("restore profiling default");
+
+        assert_eq!(disabled.0, enabled.0, "profiling must not change the plan");
+        assert_eq!(disabled.1.0, enabled.1.0, "profiling must not change calls");
+        assert!(
+            disabled.1.0 > 0,
+            "planner hooks must record calls by default"
+        );
+        assert_eq!(disabled.1.1, 0, "profiling defaults to no elapsed samples");
+        assert!(enabled.1.1 > 0, "profiling must record elapsed samples");
+        assert_eq!(disabled.1.2, enabled.1.2, "fast declines must be unchanged");
+        assert_eq!(disabled.2, enabled.2, "rejection count must be unchanged");
+        assert_eq!(disabled.3, enabled.3, "rejection reason must be unchanged");
     }
 
     #[pg_test]

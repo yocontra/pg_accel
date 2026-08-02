@@ -909,12 +909,12 @@ struct H3ResidentSpan {
 
 static bool h3_resident_span(const void* pointer, size_t count, size_t width,
                              H3ResidentSpan* span) {
-  if (pointer == nullptr || count == 0 || width == 0 ||
+  if (pointer == nullptr || span == nullptr || count == 0 || width == 0 ||
       count > std::numeric_limits<size_t>::max() / width)
     return false;
   const size_t bytes = count * width;
   const uintptr_t begin = reinterpret_cast<uintptr_t>(pointer);
-  if (begin > std::numeric_limits<uintptr_t>::max() - bytes)
+  if (begin % width != 0 || begin > std::numeric_limits<uintptr_t>::max() - bytes)
     return false;
   *span = {begin, begin + bytes};
   return true;
@@ -1060,6 +1060,191 @@ extern "C" pgaccel_status pgaccel_h3_cell_to_parent_resident(const uint64_t* cel
                                                              uint64_t* parents) {
   int32_t detail = PGACCEL_H3_PARENT_DETAIL_NONE;
   return pgaccel_h3_cell_to_parent_resident_ex(cells, nulls, count, parent_res, parents, &detail);
+}
+
+struct H3LatLngResidentRequest {
+  const void* latitude;
+  const uint8_t* latitude_nulls;
+  const void* longitude;
+  const uint8_t* longitude_nulls;
+  int32_t resolution;
+  int32_t use_fp64;
+  int32_t strict_ranges;
+};
+
+class H3LatLngToCellResidentKernel;
+
+static constexpr uint32_t H3_LATLNG_FAILURE_CONTRACT = 1u << 0;
+static constexpr uint32_t H3_LATLNG_FAILURE_NONFINITE = 1u << 1;
+static constexpr uint32_t H3_LATLNG_FAILURE_STRICT_RANGE = 1u << 2;
+
+static inline bool h3_lat_lng_finite(const void* values, size_t row, int32_t use_fp64) {
+  if (use_fp64 != 0) {
+    uint64_t bits = 0;
+    __builtin_memcpy(&bits, static_cast<const uint8_t*>(values) + row * sizeof(double),
+                     sizeof(bits));
+    return (bits & UINT64_C(0x7ff0000000000000)) != UINT64_C(0x7ff0000000000000);
+  }
+  uint32_t bits = 0;
+  __builtin_memcpy(&bits, static_cast<const uint8_t*>(values) + row * sizeof(float), sizeof(bits));
+  return (bits & UINT32_C(0x7f800000)) != UINT32_C(0x7f800000);
+}
+
+static inline double h3_wrap_degrees(double value) {
+  if (value >= -180.0 && value <= 180.0)
+    return value;
+  double wrapped = sycl::fmod(value, 360.0);
+  if (wrapped > 180.0)
+    wrapped -= 360.0;
+  else if (wrapped < -180.0)
+    wrapped += 360.0;
+  return wrapped;
+}
+
+extern "C" pgaccel_status pgaccel_h3_lat_lng_to_cell_resident_ex(
+    const void* latitude, const uint8_t* latitude_nulls, const void* longitude,
+    const uint8_t* longitude_nulls, size_t count, int32_t resolution, int32_t use_fp64,
+    int32_t strict_ranges, uint64_t* cell_ids, uint8_t* output_nulls, int32_t* detail) try {
+  if (detail == nullptr)
+    return PGACCEL_INVALID_ARGUMENT;
+  *detail = PGACCEL_H3_LATLNG_DETAIL_NONE;
+  if (resolution < 0 || resolution > H3_MAX_RESOLUTION || (use_fp64 != 0 && use_fp64 != 1) ||
+      (strict_ranges != 0 && strict_ranges != 1)) {
+    *detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+  if (count == 0)
+    return PGACCEL_OK;
+  if (latitude == nullptr || longitude == nullptr || cell_ids == nullptr ||
+      output_nulls == nullptr) {
+    *detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+
+  size_t value_width = sizeof(float);
+  if (use_fp64 != 0)
+    value_width = sizeof(double);
+  H3ResidentSpan latitude_span{};
+  H3ResidentSpan longitude_span{};
+  H3ResidentSpan cells_span{};
+  H3ResidentSpan output_nulls_span{};
+  H3ResidentSpan latitude_nulls_span{};
+  H3ResidentSpan longitude_nulls_span{};
+  if (!h3_resident_span(latitude, count, value_width, &latitude_span) ||
+      !h3_resident_span(longitude, count, value_width, &longitude_span) ||
+      !h3_resident_span(cell_ids, count, sizeof(uint64_t), &cells_span) ||
+      !h3_resident_span(output_nulls, count, sizeof(uint8_t), &output_nulls_span) ||
+      h3_spans_overlap(cells_span, output_nulls_span) ||
+      h3_spans_overlap(cells_span, latitude_span) || h3_spans_overlap(cells_span, longitude_span) ||
+      h3_spans_overlap(output_nulls_span, latitude_span) ||
+      h3_spans_overlap(output_nulls_span, longitude_span) ||
+      (latitude_nulls != nullptr &&
+       (!h3_resident_span(latitude_nulls, count, sizeof(uint8_t), &latitude_nulls_span) ||
+        h3_spans_overlap(latitude_nulls_span, latitude_span) ||
+        h3_spans_overlap(latitude_nulls_span, longitude_span) ||
+        h3_spans_overlap(cells_span, latitude_nulls_span) ||
+        h3_spans_overlap(output_nulls_span, latitude_nulls_span))) ||
+      (longitude_nulls != nullptr &&
+       (!h3_resident_span(longitude_nulls, count, sizeof(uint8_t), &longitude_nulls_span) ||
+        h3_spans_overlap(longitude_nulls_span, latitude_span) ||
+        h3_spans_overlap(longitude_nulls_span, longitude_span) ||
+        h3_spans_overlap(cells_span, longitude_nulls_span) ||
+        h3_spans_overlap(output_nulls_span, longitude_nulls_span)))) {
+    *detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+
+  sycl::queue& queue = get_queue();
+  if (!h3_current_device_pointer(queue, latitude) || !h3_current_device_pointer(queue, longitude) ||
+      !h3_current_device_pointer(queue, cell_ids) ||
+      !h3_current_device_pointer(queue, output_nulls) ||
+      (latitude_nulls != nullptr && !h3_current_device_pointer(queue, latitude_nulls)) ||
+      (longitude_nulls != nullptr && !h3_current_device_pointer(queue, longitude_nulls))) {
+    *detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+
+  auto* request = sycl::malloc_shared<H3LatLngResidentRequest>(1, queue);
+  if (request == nullptr)
+    return PGACCEL_OOM;
+  H3UsmAllocationGuard request_owner(queue, request);
+
+  auto* failure_flags = sycl::malloc_shared<uint32_t>(1, queue);
+  if (failure_flags == nullptr)
+    return PGACCEL_OOM;
+  H3ResidentStatusOwner status_owner(queue, failure_flags);
+  *request = {latitude,   latitude_nulls, longitude,    longitude_nulls,
+              resolution, use_fp64,       strict_ranges};
+  *failure_flags = 0;
+
+  queue.parallel_for<H3LatLngToCellResidentKernel>(sycl::range<1>(count), [=](sycl::id<1> id) {
+    const size_t row = id[0];
+    const uint8_t lat_null = request->latitude_nulls == nullptr ? 0 : request->latitude_nulls[row];
+    const uint8_t lng_null =
+        request->longitude_nulls == nullptr ? 0 : request->longitude_nulls[row];
+    uint32_t row_failure = lat_null > 1 || lng_null > 1 ? H3_LATLNG_FAILURE_CONTRACT : 0;
+    if (row_failure == 0 && (lat_null != 0 || lng_null != 0)) {
+      cell_ids[row] = 0;
+      output_nulls[row] = 1;
+      return;
+    }
+
+    if (row_failure == 0 && (!h3_lat_lng_finite(request->latitude, row, request->use_fp64) ||
+                             !h3_lat_lng_finite(request->longitude, row, request->use_fp64))) {
+      row_failure = H3_LATLNG_FAILURE_NONFINITE;
+    }
+    const double lat_deg =
+        request->use_fp64 != 0
+            ? static_cast<const double*>(request->latitude)[row]
+            : static_cast<double>(static_cast<const float*>(request->latitude)[row]);
+    const double lng_deg =
+        request->use_fp64 != 0
+            ? static_cast<const double*>(request->longitude)[row]
+            : static_cast<double>(static_cast<const float*>(request->longitude)[row]);
+    if (row_failure == 0 && request->strict_ranges != 0 &&
+        !(lng_deg >= -180.0 && lng_deg <= 180.0 && lat_deg >= -90.0 && lat_deg <= 90.0)) {
+      row_failure = H3_LATLNG_FAILURE_STRICT_RANGE;
+    }
+    if (row_failure == 0) {
+      pgaccel_h3_exact::LatLng location;
+      location.lat = h3_wrap_degrees(lat_deg) * pgaccel_h3_exact::M_PI_180;
+      location.lng = h3_wrap_degrees(lng_deg) * pgaccel_h3_exact::M_PI_180;
+      const auto fijk = pgaccel_h3_exact::geo_to_face_ijk(location, request->resolution);
+      const uint64_t cell = pgaccel_h3_exact::face_ijk_to_h3(fijk, request->resolution);
+      if (cell == 0) {
+        row_failure = H3_LATLNG_FAILURE_NONFINITE;
+      } else {
+        cell_ids[row] = cell;
+        output_nulls[row] = 0;
+      }
+    }
+    if (row_failure != 0) {
+      sycl::atomic_ref<uint32_t, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                       sycl::access::address_space::global_space>
+          failure_ref(*failure_flags);
+      failure_ref.fetch_or(row_failure);
+    }
+  });
+  queue.wait_and_throw();
+  pgaccel_record_gpu_exec();
+  if (*failure_flags != 0) {
+    if ((*failure_flags & H3_LATLNG_FAILURE_CONTRACT) != 0)
+      *detail = PGACCEL_H3_LATLNG_DETAIL_CONTRACT;
+    else if ((*failure_flags & H3_LATLNG_FAILURE_NONFINITE) != 0)
+      *detail = PGACCEL_H3_LATLNG_DETAIL_NONFINITE;
+    else
+      *detail = PGACCEL_H3_LATLNG_DETAIL_STRICT_RANGE;
+    return PGACCEL_INVALID_ARGUMENT;
+  }
+  return PGACCEL_OK;
+} catch (const pgaccel_no_device_error&) {
+  return PGACCEL_ERROR_NO_DEVICE;
+} catch (const std::bad_alloc&) {
+  return PGACCEL_OOM;
+} catch (const std::exception& error) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_to_cell_resident_ex", &error);
+} catch (...) {
+  return pgaccel_kernel_failure("pgaccel_h3_lat_lng_to_cell_resident_ex", nullptr);
 }
 
 extern "C" pgaccel_status pgaccel_h3_cell_to_parent_count_bulk(const uint64_t* cells, size_t count,

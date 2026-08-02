@@ -746,6 +746,7 @@ fn scalar_max(value: ScalarValue) -> ScalarValue {
     }
 }
 
+#[cfg(test)]
 fn scalar_cmp(left: ScalarValue, right: ScalarValue) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (ScalarValue::Bool(left), ScalarValue::Bool(right)) => left.partial_cmp(&right),
@@ -1007,23 +1008,6 @@ enum PendingFilter {
     },
 }
 
-fn merge_range(left: ScalarRange, right: ScalarRange) -> Result<ScalarRange, ShapeDecline> {
-    let lo = match scalar_cmp(left.lo, right.lo) {
-        Some(std::cmp::Ordering::Less) => right.lo,
-        Some(_) => left.lo,
-        None => return Err(ShapeDecline::InvalidFilterRange),
-    };
-    let hi = match scalar_cmp(left.hi, right.hi) {
-        Some(std::cmp::Ordering::Greater) => right.hi,
-        Some(_) => left.hi,
-        None => return Err(ShapeDecline::InvalidFilterRange),
-    };
-    if scalar_cmp(lo, hi).is_none_or(|ordering| ordering.is_gt()) {
-        return Err(ShapeDecline::InvalidFilterRange);
-    }
-    Ok(ScalarRange { lo, hi })
-}
-
 fn add_filter(
     filters: &mut BTreeMap<u32, PendingFilter>,
     filter: PendingFilter,
@@ -1040,18 +1024,11 @@ fn add_filter(
     };
     match (existing, filter) {
         (
+            PendingFilter::Ranges { input, .. },
             PendingFilter::Ranges {
-                input,
-                range: existing_range,
+                input: new_input, ..
             },
-            PendingFilter::Ranges {
-                input: new_input,
-                range: new_range,
-            },
-        ) if *input == new_input => {
-            *existing_range = merge_range(*existing_range, new_range)?;
-            Ok(())
-        }
+        ) if *input == new_input => Err(ShapeDecline::MultipleRangePredicates),
         (PendingFilter::Mask(existing_column), PendingFilter::Mask(new_column))
             if *existing_column == new_column =>
         {
@@ -1784,6 +1761,74 @@ pub(super) unsafe fn extract_input(
 #[cfg(test)]
 mod pure_tests {
     use super::*;
+
+    fn test_column(attno: i32) -> PlannerColumn {
+        PlannerColumn {
+            varno: 1,
+            column: ColumnRef {
+                relation_oid: 42,
+                attno,
+                type_oid: u32::from(pg_sys::INT4OID),
+            },
+            type_modifier: -1,
+            collation_oid: 0,
+            collation_is_deterministic: true,
+        }
+    }
+
+    fn int4_range(lo: i32, hi: i32) -> ScalarRange {
+        ScalarRange {
+            lo: ScalarValue::I32(lo),
+            hi: ScalarValue::I32(hi),
+        }
+    }
+
+    #[test]
+    fn a_second_same_column_range_declines_without_intersection() {
+        let column = test_column(2);
+        let mut filters = BTreeMap::new();
+        add_filter(
+            &mut filters,
+            PendingFilter::Ranges {
+                input: column,
+                range: int4_range(200, i32::MAX),
+            },
+        )
+        .expect("one scalar comparison remains supported");
+        assert_eq!(
+            add_filter(
+                &mut filters,
+                PendingFilter::Ranges {
+                    input: column,
+                    range: int4_range(i32::MIN, 800),
+                },
+            ),
+            Err(ShapeDecline::MultipleRangePredicates)
+        );
+    }
+
+    #[test]
+    fn range_intersection_rejects_a_second_fact_column() {
+        let mut filters = BTreeMap::new();
+        add_filter(
+            &mut filters,
+            PendingFilter::Ranges {
+                input: test_column(2),
+                range: int4_range(200, i32::MAX),
+            },
+        )
+        .expect("the first fact-column range should bind");
+        assert_eq!(
+            add_filter(
+                &mut filters,
+                PendingFilter::Ranges {
+                    input: test_column(3),
+                    range: int4_range(i32::MIN, 8),
+                },
+            ),
+            Err(ShapeDecline::MultipleFiltersPerRelation { relation_oid: 42 })
+        );
+    }
 
     #[test]
     fn scalar_bounds_cover_every_supported_planner_type() {

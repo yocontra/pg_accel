@@ -34,6 +34,17 @@ def native_row(*, accel: float = 10.0, parallel: float = 10.0) -> dict[str, obje
             "cache_purge": "not_requested",
         }
 
+    def stage_vector(*, calls: int) -> list[dict[str, object]]:
+        return [
+            {
+                "stage": stage,
+                "calls": calls,
+                "elapsed_us": calls * 3,
+                "fast_declines": calls,
+            }
+            for stage in ANALYZER.PLANNER_STAGE_NAMES
+        ]
+
     return {
         "plan_selected": False,
         "planner_declined": True,
@@ -41,6 +52,15 @@ def native_row(*, accel: float = 10.0, parallel: float = 10.0) -> dict[str, obje
         "gpu_kernel_execution_delta": 0,
         "iterations": [sample(index < 5) for index in range(10)],
         "warmup_iterations": [sample(index % 2 == 0) for index in range(5)],
+        "planner_stage_captures": [
+            {
+                "pair_index": index,
+                "cache_state": "warm",
+                "stages": stage_vector(calls=1),
+                "observer_probe": stage_vector(calls=0),
+            }
+            for index in range(10)
+        ],
     }
 
 
@@ -118,6 +138,70 @@ class ArmTests(unittest.TestCase):
         del row["iterations"][0]["parallel_ms"]  # type: ignore[index]
         with self.assertRaises(ANALYZER.AnalysisError):
             ANALYZER.extract_native_arms(row, "fixture")
+
+
+class PlannerStageTests(unittest.TestCase):
+    def test_valid_capture_is_aggregated_by_stage(self) -> None:
+        attribution = ANALYZER.extract_planner_stage_attribution(native_row(), "fixture")
+        self.assertEqual(attribution["measured_pair_count"], 10)
+        self.assertEqual(len(attribution["stages"]), 7)
+        self.assertTrue(all(stage["calls"] == 10 for stage in attribution["stages"]))
+
+    def test_missing_or_duplicate_stage_evidence_is_rejected(self) -> None:
+        row = native_row()
+        del row["planner_stage_captures"][0]["stages"][-1]  # type: ignore[index]
+        with self.assertRaises(ANALYZER.AnalysisError):
+            ANALYZER.extract_planner_stage_attribution(row, "fixture")
+
+        row = native_row()
+        stages = row["planner_stage_captures"][0]["stages"]  # type: ignore[index]
+        stages[-1]["stage"] = stages[0]["stage"]
+        with self.assertRaises(ANALYZER.AnalysisError):
+            ANALYZER.extract_planner_stage_attribution(row, "fixture")
+
+    def test_observer_probe_must_remain_zero(self) -> None:
+        row = native_row()
+        row["planner_stage_captures"][0]["observer_probe"][0]["calls"] = 1  # type: ignore[index]
+        with self.assertRaises(ANALYZER.AnalysisError):
+            ANALYZER.extract_planner_stage_attribution(row, "fixture")
+
+    def test_cell_analysis_requires_stages_only_in_explicit_diagnostic_mode(self) -> None:
+        row = native_row()
+        del row["planner_stage_captures"]
+        row.update(
+            {
+                "name": "decline",
+                "rows": 1000,
+                "native_decline_evidence": {
+                    "source": "planner_reported",
+                    "reason": "expected_reason",
+                },
+                "accel_median_ms": 10.0,
+                "accel_p95_ms": 10.0,
+                "parallel_median_ms": 10.0,
+                "parallel_p95_ms": 10.0,
+                "speedup_median_vs_parallel": 1.0,
+            }
+        )
+        standard = ANALYZER.analyze_native_cell(
+            row,
+            audit(),
+            ordinal="01",
+            workload="decline",
+            rows=1000,
+            expected_reason="expected_reason",
+        )
+        self.assertNotIn("planner_stage_attribution", standard)
+        with self.assertRaises(ANALYZER.AnalysisError):
+            ANALYZER.analyze_native_cell(
+                row,
+                audit(),
+                ordinal="01",
+                workload="decline",
+                rows=1000,
+                expected_reason="expected_reason",
+                require_planner_stages=True,
+            )
 
     def test_selected_arm_is_rejected(self) -> None:
         row = native_row()

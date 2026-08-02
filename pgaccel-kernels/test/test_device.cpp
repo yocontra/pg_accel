@@ -8,20 +8,20 @@ extern sycl::queue* g_queue;
 extern sycl::queue* g_ooo_queue;
 
 #if defined(PGACCEL_TEST_HOOKS)
-extern "C" void pgaccel_test_fail_before_ooo_queue_once(void);
-extern "C" unsigned pgaccel_test_unpublished_queue_count(void);
-extern "C" bool pgaccel_test_grouped_agg_cleanup_exception_is_caught(void);
+extern "C" void pgacceltest_fail_before_ooo_queue_once(void);
+extern "C" unsigned pgacceltest_unpublished_queue_count(void);
+extern "C" bool pgacceltest_grouped_agg_cleanup_exception_is_caught(void);
 #endif
 
 int main() {
 #if defined(PGACCEL_TEST_HOOKS)
-  pgaccel_test_fail_before_ooo_queue_once();
+  pgacceltest_fail_before_ooo_queue_once();
   if (pgaccel_init() != PGACCEL_ERROR) {
     fprintf(stderr, "injected second-queue construction failure did not fail initialization\n");
     return 1;
   }
   if (g_queue != nullptr || g_ooo_queue != nullptr ||
-      pgaccel_test_unpublished_queue_count() != 0) {
+      pgacceltest_unpublished_queue_count() != 0) {
     fprintf(stderr, "failed initialization published or leaked a queue\n");
     return 1;
   }
@@ -32,7 +32,7 @@ int main() {
     fprintf(stderr, "failed initialization published device metadata\n");
     return 1;
   }
-  if (!pgaccel_test_grouped_agg_cleanup_exception_is_caught()) {
+  if (!pgacceltest_grouped_agg_cleanup_exception_is_caught()) {
     fprintf(stderr, "noexcept scratch cleanup did not catch the injected failure\n");
     return 1;
   }
@@ -110,7 +110,7 @@ int main() {
     return 1;
   }
 #if defined(PGACCEL_TEST_HOOKS)
-  if (pgaccel_test_unpublished_queue_count() != 0) {
+  if (pgacceltest_unpublished_queue_count() != 0) {
     fprintf(stderr, "shutdown left queue publication ownership outstanding\n");
     return 1;
   }

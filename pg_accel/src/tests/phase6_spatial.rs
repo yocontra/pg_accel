@@ -371,6 +371,17 @@ mod tests {
              WHERE ST_Intersects(geom, {POLYGON})"
         );
         assert_forced_agg_plan(&query);
+
+        // Warm the exact derived artifact so the injected failure exercises
+        // only the resident dispatch boundary, not artifact construction.
+        crate::gpu::reset_gpu_exec_count();
+        assert_eq!(count(&query), 2);
+        crate::gpu::assert_gpu_executed(1);
+        let live_before_failure = Spi::get_one::<i64>("SELECT pg_accel_resident_live_bytes()")
+            .expect("resident ledger should be readable")
+            .expect("resident ledger should not be NULL");
+        let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+
         Spi::run("SET pg_accel.test_inject_spatial_kernel_failure = on")
             .expect("failure injection should enable");
         crate::gpu::reset_gpu_exec_count();
@@ -390,11 +401,62 @@ mod tests {
             "selected spatial kernel failure must remain a typed hard error: {message}"
         );
 
-        Spi::run(
-            "SET pg_accel.test_inject_spatial_kernel_failure = off; \
-             SET pg_accel.enabled = off",
-        )
-        .expect("failure seam should reset");
+        let cleanup_after_failure = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        assert_eq!(
+            cleanup_after_failure.installed,
+            cleanup_before.installed + 1,
+            "the failed Custom Scan must install exactly one cleanup owner"
+        );
+        assert_eq!(
+            cleanup_after_failure.normal_end, cleanup_before.normal_end,
+            "ERROR must bypass normal EndCustomScan cleanup"
+        );
+        assert_eq!(
+            cleanup_after_failure.query_reset,
+            cleanup_before.query_reset + 1,
+            "query-context reset must release the failed executor exactly once"
+        );
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT pg_accel_resident_live_bytes()")
+                .expect("resident ledger should remain readable after failure")
+                .expect("resident ledger should not be NULL"),
+            live_before_failure,
+            "failed resident dispatch must not leak a ledger charge"
+        );
+
+        Spi::run("SET pg_accel.test_inject_spatial_kernel_failure = off")
+            .expect("failure seam should reset");
+        assert_eq!(
+            Spi::get_one::<i32>("SELECT 42").expect("backend reuse probe should succeed"),
+            Some(42),
+            "caught resident dispatch failure must leave the backend reusable"
+        );
+        crate::gpu::reset_gpu_exec_count();
+        assert_eq!(
+            count(&query),
+            2,
+            "the same accelerated query must succeed after failure cleanup"
+        );
+        crate::gpu::assert_gpu_executed(1);
+        assert_eq!(
+            Spi::get_one::<i64>("SELECT pg_accel_resident_live_bytes()")
+                .expect("resident ledger should remain readable after reuse")
+                .expect("resident ledger should not be NULL"),
+            live_before_failure,
+            "successful backend reuse must retain only the warmed artifact charge"
+        );
+        let cleanup_after_reuse = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        assert_eq!(cleanup_after_reuse.installed, cleanup_before.installed + 2);
+        assert_eq!(
+            cleanup_after_reuse.normal_end,
+            cleanup_before.normal_end + 1
+        );
+        assert_eq!(
+            cleanup_after_reuse.query_reset,
+            cleanup_before.query_reset + 1
+        );
+
+        Spi::run("SET pg_accel.enabled = off").expect("native control should be selectable");
         assert_eq!(
             count(&query),
             2,

@@ -695,6 +695,84 @@ mod tests {
 
     #[cfg(feature = "pg_test")]
     #[pg_test]
+    fn test_prepared_descriptor_revalidates_before_first_fetch_and_cleans_up_caught_error() {
+        use pgrx::prelude::PgTryBuilder;
+
+        fn fetch_all(cursor: &str) -> usize {
+            Spi::connect(|client| {
+                client
+                    .select(&format!("FETCH ALL FROM {cursor}"), None, &[])
+                    .expect("cursor fetch should succeed")
+                    .count()
+            })
+        }
+
+        if !begin_gpu_test() {
+            return;
+        }
+        let table = "phase2_v2_prepared_gap_t";
+        let device_rows = device_fixture_rows();
+        create_int4_fixture(table, device_rows, 16, 0);
+        pin_int4_fixture(table, device_rows);
+        let query = int4_grouped_query(table, "g", "v");
+        assert_descriptor_plan(&explain_text(&query));
+
+        Spi::run(&format!("DECLARE phase2_prepared_gap CURSOR FOR {query}"))
+            .expect("declare prepared-gap cursor");
+        assert!(
+            !derived_artifact_identities(table).is_empty(),
+            "BeginCustomScan must prepare the descriptor artifact before first fetch"
+        );
+        Spi::run(&format!(
+            "SELECT pg_accel_unpin('{table}'::regclass); \
+             SELECT pg_accel_evict('{table}'::regclass)"
+        ))
+        .expect("evict artifact between Begin and first fetch");
+        assert!(derived_artifact_identities(table).is_empty());
+
+        let kernels_before = kernel_executions();
+        assert_eq!(fetch_all("phase2_prepared_gap"), 16);
+        let kernels_after = kernel_executions();
+        assert!(
+            kernels_after > kernels_before,
+            "first fetch must rebuild once and dispatch after invalidation"
+        );
+        Spi::run("CLOSE phase2_prepared_gap").expect("close recovered cursor");
+        assert!(!derived_artifact_identities(table).is_empty());
+
+        let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        Spi::run(&format!("DECLARE phase2_prepared_error CURSOR FOR {query}"))
+            .expect("declare caught-error cursor");
+        Spi::run(&format!(
+            "SELECT pg_accel_unpin('{table}'::regclass); \
+             SELECT pg_accel_evict('{table}'::regclass); \
+             SET LOCAL pg_accel.auto_load = off"
+        ))
+        .expect("make prepared artifact unavailable before caught fetch");
+        let completed = PgTryBuilder::new(|| {
+            let _ = fetch_all("phase2_prepared_error");
+            true
+        })
+        .catch_others(|_| false)
+        .execute();
+        assert!(!completed, "missing prepared artifact must fail closed");
+
+        let cleanup_after = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
+        assert_eq!(cleanup_after.installed, cleanup_before.installed + 1);
+        assert_eq!(cleanup_after.normal_end, cleanup_before.normal_end);
+        assert_eq!(
+            cleanup_after.query_reset,
+            cleanup_before.query_reset + 1,
+            "caught first-fetch error must release the prepared executor through query reset"
+        );
+
+        Spi::run("SET LOCAL pg_accel.auto_load = on").expect("restore auto-load");
+        pin_int4_fixture(table, device_rows);
+        assert_eq!(result_rows(&query).len(), 16);
+    }
+
+    #[cfg(feature = "pg_test")]
+    #[pg_test]
     fn test_bounded_dense_statement_timeout_is_exact_and_recoverable() {
         use pgrx::pg_sys::panic::CaughtError;
         use pgrx::prelude::{PgSqlErrorCode, PgTryBuilder};

@@ -697,6 +697,32 @@ pgaccel_status pgaccel_h3_lat_lng_to_cell_bulk(const void* lat_array, const void
                                                size_t count, int resolution, int use_fp64,
                                                uint64_t* cell_ids, uint8_t* valid);
 
+/* Detailed validation failures returned by lat_lng_to_cell_resident_ex.
+ * CONTRACT identifies pointer, aliasing, type-selector, or NULL-sidecar
+ * faults. NONFINITE matches H3's E_LATLNG_DOMAIN. STRICT_RANGE identifies
+ * h3-pg's optional `h3.strict` longitude/latitude bounds check. */
+typedef enum {
+  PGACCEL_H3_LATLNG_DETAIL_NONE = 0,
+  PGACCEL_H3_LATLNG_DETAIL_CONTRACT = 1,
+  PGACCEL_H3_LATLNG_DETAIL_NONFINITE = 2,
+  PGACCEL_H3_LATLNG_DETAIL_STRICT_RANGE = 3,
+} pgaccel_h3_latlng_detail;
+
+/* Resident lat/lng-to-cell transform. Latitude/longitude values, optional
+ * canonical 0/1 NULL sidecars, and caller-reserved outputs are current-context
+ * DEVICE/SHARED_USM pointers. `use_fp64` and `strict_ranges` must be 0 or 1.
+ * Typed value/output pointers are naturally aligned. Writable outputs are
+ * disjoint from every input and each other; NULL sidecars are disjoint from
+ * value lanes. The two read-only value lanes may alias each other, as may the
+ * two read-only NULL sidecars.
+ * A NULL in either input writes cell=0/output_nulls=1. Non-NULL rows write an
+ * exact h3-pg-compatible cell and output_nulls=0. No row buffers are staged
+ * through or copied back to host memory. Outputs are unspecified on failure. */
+pgaccel_status pgaccel_h3_lat_lng_to_cell_resident_ex(
+    const void* latitude, const uint8_t* latitude_nulls, const void* longitude,
+    const uint8_t* longitude_nulls, size_t count, int32_t resolution, int32_t use_fp64,
+    int32_t strict_ranges, uint64_t* cell_ids, uint8_t* output_nulls, int32_t* detail);
+
 /* Grouped lat/lng -> H3 COUNT(*) paths generate keys and exact boundary
  * fixups on GPU. The f64/exact arrays feed split fp64 projection +
  * integer-finalization kernels (native fp64 where available, soft-fp64 on

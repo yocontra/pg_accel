@@ -275,6 +275,8 @@ const PHASE6_SMOKE_ROWS: &[usize] = &[10_000];
 const PHASE6_H3_PARENT_ROWS: &[usize] = &[100_000];
 const PHASE6_H3_DECLINE_ROWS: &[usize] = &[100_000, 1_000_000];
 const PHASE6_RASTER_ROWS: &[usize] = &[100];
+const PHASE6_RASTER_EXACT_RECLASS_ROWS: &[usize] = &[10_000, 100_000, 1_000_000];
+const PHASE6_SPATIAL_RESIDENT_AGG_ROWS: &[usize] = &[1_000_000];
 
 /// The old spatial unsafe-row quarantine covered this interval. The executor
 /// now dispatches in bounded 65,536-row chunks, so these are positive live
@@ -447,6 +449,12 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
         PHASE6_SMOKE_ROWS
     ),
     phase6_contract!(
+        "spatial_resident_agg_candidate",
+        WorkloadCategory::GpuSpatial,
+        Phase6DomainOracle::PostgisExactRecheck,
+        PHASE6_SPATIAL_RESIDENT_AGG_ROWS
+    ),
+    phase6_contract!(
         "raster_ndvi",
         WorkloadCategory::GpuRaster,
         Phase6DomainOracle::PostgisRaster,
@@ -469,6 +477,12 @@ pub const PHASE6_DOMAIN_CONTRACTS: &[Phase6DomainContract] = &[
         WorkloadCategory::GpuRaster,
         Phase6DomainOracle::PostgisRaster,
         PHASE6_RASTER_ROWS
+    ),
+    phase6_contract!(
+        "raster_resident_exact_reclass",
+        WorkloadCategory::GpuRaster,
+        Phase6DomainOracle::PostgisRaster,
+        PHASE6_RASTER_EXACT_RECLASS_ROWS
     ),
 ];
 
@@ -644,6 +658,10 @@ const RASTER_NATIVE_DECLINE: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::NativeDeclineOnly,
     flags: EvidenceEligibility::FUNCTION_KERNEL | EvidenceEligibility::CACHE_MODE_BOTH,
 };
+const RASTER_WINNER: EvidenceEligibility = EvidenceEligibility {
+    threshold: ThresholdEvidenceEligibility::GpuWinner,
+    flags: EvidenceEligibility::CACHE_MODE_BOTH,
+};
 const FP64_CALIBRATION: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::NotGated,
     flags: EvidenceEligibility::FP64_CALIBRATION,
@@ -675,6 +693,8 @@ const PINS_FILTERED_GROUPAGG: &[ResidentPinSpec] =
 const PINS_GROUPED_AGG: &[ResidentPinSpec] = &[pin!("bench_employees_agg", ["dept", "salary"])];
 const PINS_GROUPED_AGG_INT4: &[ResidentPinSpec] =
     &[pin!("bench_employees_agg_int4", ["dept", "salary"])];
+const PINS_GROUPED_COUNT_BOOL: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_count_bool", ["bool_key", "observed"])];
 const PINS_GROUPED_AGG_HIGH_CARD: &[ResidentPinSpec] =
     &[pin!("bench_events_agg", ["user_id", "val"])];
 const PINS_TIMESERIES: &[ResidentPinSpec] = &[pin!("sensor_data", ["sensor_id", "value"])];
@@ -691,6 +711,12 @@ const PINS_PREDICATE_EXPRESSION_INT4: &[ResidentPinSpec] = &[pin!(
     "bench_predicate_expression_sales_int4",
     ["product_id", "price", "quantity", "active"]
 )];
+const PINS_AND_RANGE_PREDICATE_EXPRESSION_INT4: &[ResidentPinSpec] = &[pin!(
+    "bench_and_range_predicate_expression_sales_int4",
+    ["product_id", "price", "quantity"]
+)];
+const PINS_RASTER_RESIDENT_EXACT_RECLASS: &[ResidentPinSpec] =
+    &[pin!("bench_raster_resident_exact_reclass", ["rast"])];
 const PINS_CASE_EXPRESSION: &[ResidentPinSpec] = &[pin!(
     "bench_case_when_expression_sales",
     ["product_id", "price", "discount", "active"]
@@ -722,6 +748,8 @@ const PINS_CASE_NOT: &[ResidentPinSpec] = &[pin!(
 const PINS_REDUCE_F64: &[ResidentPinSpec] = &[pin!("bench_fp64_num", ["v_f64"])];
 const PINS_HASHAGG_F64: &[ResidentPinSpec] = &[pin!("bench_fp64_num", ["gk", "v_f64", "w_f64"])];
 const PINS_H3_PARENT: &[ResidentPinSpec] = &[pin!("bench_h3_parent", ["cell"])];
+const PINS_SPATIAL_RESIDENT_AGG: &[ResidentPinSpec] =
+    &[pin!("bench_spatial_resident_agg", ["geom"])];
 const PINS_HASH_JOIN: &[ResidentPinSpec] = &[
     pin!("bench_orders", ["customer_id"]),
     pin!("bench_customers", ["customer_id"]),
@@ -764,6 +792,14 @@ const SSBM_Q4_FACT: &[&str] = &[
     "lo_supplycost",
 ];
 const PINS_SSBM_RESIDENT_INT4_STAR: &[ResidentPinSpec] = &[
+    pin!(
+        "ssbm_lineorder",
+        ["lo_orderdate", "lo_partkey", "lo_revenue"]
+    ),
+    pin!("ssbm_date", ["d_datekey", "d_year"]),
+    pin!("ssbm_part", ["p_partkey", "p_size"]),
+];
+const PINS_SSBM_RESIDENT_INT8_STAR: &[ResidentPinSpec] = &[
     pin!(
         "ssbm_lineorder",
         ["lo_orderdate", "lo_partkey", "lo_revenue"]
@@ -893,6 +929,9 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("grouped_agg_int4", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG_INT4)
         .evidence(WINNER),
+    workload("grouped_count_bool_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_COUNT_BOOL)
+        .evidence(NATIVE_DECLINE),
     workload("grouped_agg_high_card", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG_HIGH_CARD)
         .evidence(NATIVE_DECLINE),
@@ -922,6 +961,13 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     )
     .pins(PINS_PREDICATE_EXPRESSION_INT4)
     .evidence(WINNER),
+    workload(
+        "and_range_predicate_expression_grouped_agg_int4",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(PINS_AND_RANGE_PREDICATE_EXPRESSION_INT4)
+    .evidence(NATIVE_DECLINE),
     workload(
         "case_when_expression_grouped_agg",
         C::GpuHashAgg,
@@ -1015,6 +1061,14 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("spatial_filter", C::GpuSpatial, K::PointInRing)
         .extensions(POSTGIS)
         .evidence(NATIVE_DECLINE),
+    workload(
+        "spatial_resident_agg_candidate",
+        C::GpuSpatial,
+        K::PointInRing,
+    )
+    .pins(PINS_SPATIAL_RESIDENT_AGG)
+    .extensions(POSTGIS)
+    .evidence(WINNER),
     workload("spatial_complex_poly", C::GpuSpatial, K::PointInRing).extensions(POSTGIS),
     workload("spatial_selectivity", C::GpuSpatial, K::PointInRing)
         .extensions(POSTGIS)
@@ -1117,6 +1171,13 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     )
     .pins(PINS_SSBM_RESIDENT_INT4_STAR)
     .evidence(WINNER),
+    workload(
+        "ssbm_resident_int8_star",
+        C::StarSchemaSsbm,
+        K::ResidentStarGroupAgg,
+    )
+    .pins(PINS_SSBM_RESIDENT_INT8_STAR)
+    .evidence(WINNER),
     workload("ssbm_q1_1", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q1_1)
         .evidence(NATIVE_DECLINE),
@@ -1186,6 +1247,10 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("raster_algebra_deep", C::GpuRaster, K::Raster)
         .extensions(POSTGIS_RASTER)
         .evidence(RASTER_NATIVE_DECLINE),
+    workload("raster_resident_exact_reclass", C::GpuRaster, K::Raster)
+        .pins(PINS_RASTER_RESIDENT_EXACT_RECLASS)
+        .extensions(POSTGIS_RASTER)
+        .evidence(RASTER_WINNER),
     workload("proximity", C::Regression, K::PointInRing).extensions(POSTGIS),
     workload("index_recheck", C::Regression, K::PointInRing).extensions(POSTGIS),
     workload("spatial_join", C::Regression, K::PointInRing).extensions(POSTGIS),
@@ -1372,7 +1437,10 @@ mod tests {
                 entry.name
             );
             if entry.category == C::GpuRaster {
-                assert!(entry.evidence.function_kernel());
+                assert_eq!(
+                    entry.name != "raster_resident_exact_reclass",
+                    entry.evidence.function_kernel()
+                );
                 assert!(entry.evidence.requires_cache_mode_both());
                 assert!(
                     entry

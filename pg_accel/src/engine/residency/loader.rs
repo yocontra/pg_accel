@@ -2111,9 +2111,11 @@ pub(super) fn ensure_invalidation_trigger(relid: pg_sys::Oid) -> Result<TriggerI
         format!("ALTER TABLE {qualified} ENABLE ALWAYS TRIGGER {INVALIDATION_TRIGGER_NAME}");
     Spi::run(&enable_sql).map_err(|error| format!("cannot mark pg_accel residency invalidation trigger ENABLE ALWAYS on {qualified}: {error:?}"))?;
     // The statement snapshot that waited to install this trigger can predate
-    // DML which committed immediately before the DDL lock was acquired. Mark
-    // the first load as a one-command snapshot and advance again at xact end.
-    ledger::note_relation_change(relid);
+    // DML which committed immediately before the DDL lock was acquired. The
+    // explicit loader switches to GetLatestSnapshot while this DDL lock is
+    // still held. One immediate global bump invalidates older snapshots; a
+    // commit-time bump would incorrectly evict the fresh explicit pin.
+    ledger::note_trigger_install(relid);
     Ok(TriggerInstall::New)
 }
 

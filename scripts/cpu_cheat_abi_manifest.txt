@@ -49,6 +49,7 @@ pgaccel_h3_lat_lng_count_bulk|pgaccel_status (const double *, const double *, si
 pgaccel_h3_lat_lng_count_bulk_f32_exact|pgaccel_status (const float *, const float *, const double *, const double *, size_t, int, struct pgaccel_agg_state **)
 pgaccel_h3_lat_lng_count_resident_bulk|pgaccel_status (const double *, const double *, const float *, const float *, size_t, int, struct pgaccel_agg_state **)
 pgaccel_h3_lat_lng_to_cell_bulk|pgaccel_status (const void *, const void *, size_t, int, int, uint64_t *, uint8_t *)
+pgaccel_h3_lat_lng_to_cell_resident_ex|pgaccel_status (const void *, const uint8_t *, const void *, const uint8_t *, size_t, int32_t, int32_t, int32_t, uint64_t *, uint8_t *, int32_t *)
 pgaccel_h3_polyfill_emit|pgaccel_status (const float *, const uint32_t *, size_t, int32_t, const uint32_t *, uint64_t *)
 pgaccel_h3_polyfill_output_size|pgaccel_status (const float *, const uint32_t *, size_t, int32_t, uint32_t *)
 pgaccel_hash_count_i64_device_hash_execute_bounded|pgaccel_agg_state *(int64_t *, size_t, size_t)

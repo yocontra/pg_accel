@@ -117,6 +117,7 @@ impl BenchmarkQueryIdentity {
 }
 
 #[derive(Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct PreRiskContext<'a> {
     pub workload: &'a str,
     pub rows: usize,
@@ -128,6 +129,7 @@ pub struct PreRiskContext<'a> {
     pub realistic_gucs: bool,
     pub skip_guc_verify: bool,
     pub capture_plans: bool,
+    pub capture_planner_stages: bool,
     pub backend_pid: Option<i32>,
     pub backend_pid_error: Option<&'a str>,
     pub setup_sql: &'a [String],
@@ -1202,6 +1204,7 @@ mod tests {
             realistic_gucs: false,
             skip_guc_verify: false,
             capture_plans: false,
+            capture_planner_stages: false,
             backend_pid: None,
             backend_pid_error: None,
             setup_sql: &[],
@@ -1236,6 +1239,7 @@ mod tests {
         workload.plan_selected = true;
         workload.dispatch_counter_captured = true;
         workload.gpu_kernel_execution_delta = 1;
+        workload.pg_accel_queries_accelerated_delta = 5;
         workload.accel_output_rows_consumed = 10;
         workload.plan_snippet = Some(
             "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Kernel Dispatched: true\n  \
@@ -1665,6 +1669,7 @@ mod tests {
             realistic_gucs: false,
             skip_guc_verify: false,
             capture_plans: false,
+            capture_planner_stages: false,
             backend_pid: Some(1234),
             backend_pid_error: None,
             setup_sql: &[],

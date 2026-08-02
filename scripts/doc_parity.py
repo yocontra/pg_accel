@@ -76,9 +76,13 @@ BREW_INSTALL_RE = re.compile(r"\bbrew install(?P<formulas>(?: [A-Za-z0-9@+_.-]+)
 
 EXPECTED_CAPABILITIES = {
     "Resident reducing or grouped aggregate": ("Present", "Selectable"),
+    "Scalar row predicate inside a resident aggregate": (
+        "Present",
+        "Selectable for one comparison",
+    ),
     "Resident star join plus aggregate": ("Present", "Selectable"),
     "H3-derived group key inside a resident aggregate": ("Present", "Selectable"),
-    "PostGIS spatial filter inside a resident aggregate": ("Present", "Test-only"),
+    "PostGIS spatial filter inside a resident aggregate": ("Present", "Selectable"),
     "Standalone PostGIS or H3 function/SRF": (
         "Aggregate primitives and adapter registry metadata remain; standalone executor removed",
         "Not selectable",
@@ -99,7 +103,7 @@ EXPECTED_CAPABILITIES = {
         "Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding",
         "Not selectable",
     ),
-    "Raster": ("Registered childless resident executor", "Test-only"),
+    "Raster": ("Registered childless resident executor", "Selectable"),
 }
 
 GUC_EFFECT_MARKERS = {
@@ -132,6 +136,11 @@ GUC_EFFECT_MARKERS = {
     ),
     "pg_accel.assert_dispatch": ("reserved no-op", "neither planning nor execution"),
     "pg_accel.parallel_fused_count": ("reserved no-op", "remains native"),
+    "pg_accel.planner_profiling": (
+        "planner-hook monotonic-clock reads",
+        "elapsed-time counters",
+        "call and decline counters remain active",
+    ),
     "pg_accel.otel_log_max_mb": (
         "trace cap in mib",
         "sampled at trace initialization",
@@ -693,9 +702,9 @@ def audit_capabilities(root: Path) -> tuple[list[str], int, int]:
 
     planner_mod = (root / "pg_accel/src/engine/ffi/planner_hooks/mod.rs").read_text()
     injectors = re.findall(r"\b([a-z][a-z0-9_]*)::try_inject\s*\(", planner_mod)
-    if injectors != ["generic_groupagg"]:
+    if injectors != ["generic_groupagg", "raster"]:
         errors.append(
-            "production planner injector inventory changed; expected only generic_groupagg, "
+            "production planner injector inventory changed; expected generic_groupagg and raster, "
             f"found {injectors!r}"
         )
     source_markers = {

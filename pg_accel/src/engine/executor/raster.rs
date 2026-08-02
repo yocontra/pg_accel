@@ -4,7 +4,9 @@ use std::time::Instant;
 
 use pgrx::pg_sys;
 
-use crate::engine::ffi::syscache::{PostgisRasterCatalogIdentity, postgis_raster_datum_from_wkb};
+use crate::engine::ffi::syscache::{
+    PostgisRasterCatalogIdentity, postgis_raster_datum_from_owned_bytea, postgis_raster_wkb_bytea,
+};
 use crate::engine::raster::{
     RasterExecutionError, RasterExecutionPreflight, RasterExecutionSizing, RasterExecutionSnapshot,
     RasterQuerySpec, RasterReclassRule, RasterReconstructedOutput, RasterSpecCodecError,
@@ -284,6 +286,11 @@ struct RasterOutputMemoryContext {
     output_slot: *mut pg_sys::TupleTableSlot,
 }
 
+enum CopiedRasterOutput {
+    Null,
+    WkbBytea(pg_sys::Datum),
+}
+
 impl RasterOutputMemoryContext {
     fn new(
         parent: pg_sys::MemoryContext,
@@ -322,30 +329,53 @@ impl RasterOutputMemoryContext {
         unsafe { pg_sys::MemoryContextReset(self.context) };
     }
 
-    /// Import one exact raster Datum inside the bounded output context.
+    /// Copy one exact WKB value into the bounded output context without
+    /// performing catalog work while the residency store remains borrowed.
     ///
     /// # Safety
     /// Must run on the PostgreSQL backend main thread with a freshly proved
-    /// catalog identity and external WKB bytes live for this call.
-    unsafe fn import(
-        &mut self,
-        catalog: &PostgisRasterCatalogIdentity,
-        wkb: &[u8],
-    ) -> Result<pg_sys::Datum, String> {
+    /// external WKB bytes live for this call.
+    unsafe fn copy_wkb(&mut self, wkb: &[u8]) -> Result<pg_sys::Datum, String> {
         // SAFETY: self retains the live es_query_cxt captured at Begin and
         // this method runs only on the backend main thread.
         let context = unsafe { self.ensure_context()? };
         // SAFETY: context is our live child of the executor query context.
         let previous = unsafe { pg_sys::MemoryContextSwitchTo(context) };
         let guard = MemoryContextSwitchGuard { previous };
-        // SAFETY: the catalog and WKB contracts are upheld by the caller; the
-        // importer catches PostgreSQL ERRORs and returns them as Rust errors.
-        let result = unsafe { postgis_raster_datum_from_wkb(catalog, wkb) };
+        // SAFETY: the WKB and current-memory-context contracts are upheld by
+        // the caller; this copy performs no catalog or residency work.
+        let result = unsafe { postgis_raster_wkb_bytea(wkb) };
         drop(guard);
         if result.is_err() {
             // SAFETY: CurrentMemoryContext was restored above and no slot
             // references a value from the failed import, so the child can be
             // reset before escalating.
+            unsafe { pg_sys::MemoryContextReset(context) };
+        }
+        result
+    }
+
+    /// Consume a copied WKB bytea through the catalog-proved importer.
+    ///
+    /// # Safety
+    /// Must run on the PostgreSQL backend main thread after the residency
+    /// store borrow has ended. `bytea` must come from [`Self::copy_wkb`].
+    unsafe fn import_bytea(
+        &mut self,
+        catalog: &PostgisRasterCatalogIdentity,
+        bytea: pg_sys::Datum,
+    ) -> Result<pg_sys::Datum, String> {
+        // SAFETY: self retains the live es_query_cxt captured at Begin.
+        let context = unsafe { self.ensure_context()? };
+        // SAFETY: context is our live child of the executor query context.
+        let previous = unsafe { pg_sys::MemoryContextSwitchTo(context) };
+        let guard = MemoryContextSwitchGuard { previous };
+        // SAFETY: the copied bytea is owned by this context, the store borrow
+        // has ended, and execution readiness proved this catalog identity.
+        let result = unsafe { postgis_raster_datum_from_owned_bytea(catalog, bytea) };
+        drop(guard);
+        if result.is_err() {
+            // SAFETY: no output slot references a value from the failed import.
             unsafe { pg_sys::MemoryContextReset(context) };
         }
         result
@@ -516,7 +546,7 @@ impl RasterExecState {
             &self.plan.identity,
             std::slice::from_ref(&self.plan.column),
             |resolved| match self.cursor.next(resolved.artifact) {
-                Some(RasterOutputValue::Null) => Ok(Some((pg_sys::Datum::from(0), true))),
+                Some(RasterOutputValue::Null) => Ok(Some(CopiedRasterOutput::Null)),
                 Some(RasterOutputValue::Wkb(wkb)) => {
                     #[cfg(feature = "pg_test")]
                     let wkb = if test_raster_import_wkb_corruption_enabled() {
@@ -524,19 +554,29 @@ impl RasterExecState {
                     } else {
                         wkb
                     };
-                    // SAFETY: executor callbacks run on the backend main thread;
-                    // the WKB slice remains valid for this complete store borrow
-                    // and first execution after Begin/ReScan proved this exact
-                    // PostGIS importer.
-                    unsafe { self.output_memory.import(catalog, wkb) }
+                    // SAFETY: executor callbacks run on the backend main thread
+                    // and the artifact remains pinned for this complete copy.
+                    // Catalog invocation is deliberately deferred until after
+                    // the store borrow ends.
+                    unsafe { self.output_memory.copy_wkb(wkb) }
                         .map_err(ResidentLoadError::Loader)
-                        .map(|datum| Some((datum, false)))
+                        .map(|bytea| Some(CopiedRasterOutput::WkbBytea(bytea)))
                 }
                 None => Ok(None),
             },
         )??;
-        let Some((datum, is_null)) = value else {
+        let Some(value) = value else {
             return Ok(output_slot);
+        };
+        let (datum, is_null) = match value {
+            CopiedRasterOutput::Null => (pg_sys::Datum::from(0), true),
+            CopiedRasterOutput::WkbBytea(bytea) => {
+                // SAFETY: the residency borrow has ended and bytea was copied
+                // into the live output memory context above.
+                let datum = unsafe { self.output_memory.import_bytea(catalog, bytea) }
+                    .map_err(ResidentLoadError::Loader)?;
+                (datum, false)
+            }
         };
         // SAFETY: the exact one-column slot shape and storage pointers were
         // validated at BeginCustomScan.

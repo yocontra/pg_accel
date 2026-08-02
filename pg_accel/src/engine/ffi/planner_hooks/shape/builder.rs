@@ -364,7 +364,7 @@ fn choose_fact_varno(input: &ShapeInput) -> Result<pgrx::pg_sys::Index, ShapeDec
                 right_collation_oid: join.right.collation_oid,
             });
         }
-        if !matches!(join.left.column.type_oid, 23 | 25 | 1042 | 1043) {
+        if !matches!(join.left.column.type_oid, 20 | 23 | 25 | 1042 | 1043) {
             return Err(ShapeDecline::UnsupportedJoinKeyType {
                 type_oid: join.left.column.type_oid,
             });

@@ -14,9 +14,9 @@
 #include "pgaccel_ffi.h"
 
 #if defined(PGACCEL_TEST_HOOKS)
-extern "C" void pgaccel_test_seed_inherited_runtime_state(void);
-extern "C" void pgaccel_test_fail_after_fork_invalidation_once(void);
-extern "C" void pgaccel_test_clear_seeded_runtime_state(void);
+extern "C" void pgacceltest_seed_inherited_runtime_state(void);
+extern "C" void pgacceltest_fail_after_fork_invalidation_once(void);
+extern "C" void pgacceltest_clear_seeded_runtime_state(void);
 #endif
 
 static const size_t N = 100000;
@@ -169,14 +169,14 @@ int main() {
   // initializing AdaptiveCpp before fork. Forking a multithreaded Metal
   // runtime is unsupported and can deadlock independently of pg_accel's state
   // machine; this seam isolates the production PID/metadata transition.
-  pgaccel_test_seed_inherited_runtime_state();
+  pgacceltest_seed_inherited_runtime_state();
   const pgaccel_device_info parent_info = pgaccel_get_device_info();
   if (parent_info.compute_units != 999 ||
       std::strcmp(parent_info.device_name, "stale-parent-device") != 0) {
     fprintf(stderr, "Parent: seeded warm metadata was not visible in its owning PID\n");
     return 1;
   }
-  pgaccel_test_fail_after_fork_invalidation_once();
+  pgacceltest_fail_after_fork_invalidation_once();
 
   const pid_t failure_pid = fork();
   if (failure_pid < 0) {
@@ -228,7 +228,7 @@ int main() {
     return 1;
   }
   // The child's inherited injection and runtime state are copy-on-write.
-  pgaccel_test_clear_seeded_runtime_state();
+  pgacceltest_clear_seeded_runtime_state();
 #endif
 
   printf("\nPASS: all %d pre-fork policy GPU cycles completed.\n", FORK_CYCLES);

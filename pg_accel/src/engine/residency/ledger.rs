@@ -474,6 +474,16 @@ pub(super) fn note_relation_change(relid: pg_sys::Oid) {
     arm_xact_callbacks();
 }
 
+/// Invalidate snapshots once while an identity-trigger DDL lock excludes all
+/// concurrent relation readers and writers until commit.
+///
+/// The trigger installer performs the following load with `GetLatestSnapshot`
+/// under that lock. A second commit-time bump would only evict that proven
+/// fresh explicit pin in its own backend.
+pub(super) fn note_trigger_install(relid: pg_sys::Oid) {
+    bump_generation(relid);
+}
+
 fn current_subtransaction_id() -> pg_sys::SubTransactionId {
     #[cfg(test)]
     {

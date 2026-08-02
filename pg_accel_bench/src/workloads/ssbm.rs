@@ -303,6 +303,77 @@ impl Workload for SsbmResidentInt4Star {
     }
 }
 
+/// Exact two-dimension star sentinel with scalar `int8` join keys. Group keys
+/// and measures intentionally remain `int4` so this lane isolates resident
+/// membership-key width from aggregate arithmetic.
+pub struct SsbmResidentInt8Star;
+
+impl Workload for SsbmResidentInt8Star {
+    fn name(&self) -> &'static str {
+        "ssbm_resident_int8_star"
+    }
+
+    fn description(&self) -> &'static str {
+        "SSBM lineorder/date/part star with exact int8 membership keys, grouped int4 outputs, SUM(int4), and COUNT(*)"
+    }
+
+    fn setup_sql(&self, rows: usize) -> Vec<String> {
+        let mut setup = ssbm_setup_sql(rows);
+        setup.extend([
+            "ALTER TABLE ssbm_lineorder \
+               ALTER COLUMN lo_orderdate TYPE int8 USING lo_orderdate::int8, \
+               ALTER COLUMN lo_partkey TYPE int8 USING lo_partkey::int8"
+                .to_owned(),
+            "ALTER TABLE ssbm_date \
+               ALTER COLUMN d_datekey TYPE int8 USING d_datekey::int8"
+                .to_owned(),
+            "ALTER TABLE ssbm_part \
+               ALTER COLUMN p_partkey TYPE int8 USING p_partkey::int8"
+                .to_owned(),
+            "ANALYZE ssbm_lineorder".to_owned(),
+            "ANALYZE ssbm_date".to_owned(),
+            "ANALYZE ssbm_part".to_owned(),
+        ]);
+        setup
+    }
+
+    fn query_sql(&self) -> String {
+        "SELECT d_year, p_size, SUM(lo_revenue) AS sum, COUNT(*) AS count \
+         FROM ssbm_lineorder \
+         JOIN ssbm_date ON lo_orderdate = d_datekey \
+         JOIN ssbm_part ON lo_partkey = p_partkey \
+         GROUP BY d_year, p_size"
+            .to_owned()
+    }
+
+    fn result_oracle(&self, rows: usize) -> Option<ResultOracle> {
+        Some(ResultOracle::one_row(
+            format!(
+                "SELECT COALESCE(SUM(q.count), 0)::int8 AS input_rows, \
+                        COALESCE(SUM(q.sum), 0::numeric) = \
+                          (SELECT COALESCE(SUM(lo_revenue), 0)::numeric \
+                           FROM ssbm_lineorder) AS exact_sum, \
+                        COALESCE(bool_and(q.d_year BETWEEN 1992 AND 1998), true) AS valid_years, \
+                        COALESCE(bool_and(q.p_size BETWEEN 1 AND 50), true) AS valid_part_sizes, \
+                        COUNT(*) <= LEAST({rows}, 350)::int8 AS valid_group_count \
+                 FROM ({}) AS q",
+                self.query_sql()
+            ),
+            vec![
+                Value::I64(usize_to_i64(rows)),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        ))
+    }
+
+    fn cleanup_sql(&self) -> Vec<String> {
+        ssbm_cleanup_sql()
+    }
+}
+
 pub struct SsbmQ1_1;
 
 impl Workload for SsbmQ1_1 {
@@ -599,6 +670,33 @@ mod tests {
         assert!(oracle_query.contains("sum(q.sum)"));
         assert!(oracle_query.contains("sum(lo_revenue)"));
         assert_eq!(oracle.expected_row.len(), 5);
+    }
+
+    #[test]
+    fn int8_star_sentinel_has_distinct_identity_and_widens_only_join_keys() {
+        let int4 = SsbmResidentInt4Star;
+        let int8 = SsbmResidentInt8Star;
+        assert_ne!(int8.name(), int4.name());
+        assert_eq!(int8.query_sql(), int4.query_sql());
+
+        let setup = int8.setup_sql(1_000);
+        let widening = setup
+            .iter()
+            .filter(|sql| sql.starts_with("ALTER TABLE"))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        for column in ["lo_orderdate", "lo_partkey", "d_datekey", "p_partkey"] {
+            assert!(
+                widening.contains(&format!("alter column {column} type int8")),
+                "missing int8 widening for {column}: {widening}"
+            );
+        }
+        assert!(!widening.contains("lo_revenue"));
+        assert!(!widening.contains("d_year"));
+        assert!(!widening.contains("p_size"));
+        assert_eq!(int8.result_oracle(1_000_000), int4.result_oracle(1_000_000));
     }
 }
 

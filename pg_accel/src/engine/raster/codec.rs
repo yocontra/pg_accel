@@ -343,6 +343,113 @@ mod tests {
     }
 
     #[test]
+    fn generated_bounded_raster_specs_roundtrip_and_fail_closed_when_corrupted() {
+        let pixel_types = [
+            RasterPixelType::Bool,
+            RasterPixelType::UInt2,
+            RasterPixelType::UInt4,
+            RasterPixelType::Int8,
+            RasterPixelType::UInt8,
+            RasterPixelType::Int16,
+            RasterPixelType::UInt16,
+            RasterPixelType::Int32,
+            RasterPixelType::UInt32,
+        ];
+        let mut state = 0xA076_1D64_78BD_642F_u64;
+
+        for case in 0..512usize {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let output_pixel_type = pixel_types[state as usize % pixel_types.len()];
+            let (minimum, maximum) = output_pixel_type
+                .integer_bounds()
+                .expect("generated types are integer types");
+            let fingerprint_len = 1 + (state as usize % 64);
+            let rule_count = 1 + ((state >> 8) as usize % MAX_RASTER_RECLASS_RULES);
+            let mut catalog_fingerprint = Vec::with_capacity(fingerprint_len);
+            for _ in 0..fingerprint_len {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                catalog_fingerprint.push((state >> 32) as i32);
+            }
+            let destination_span = (maximum - minimum) as u64 + 1;
+            let rules = (0..rule_count)
+                .map(|index| RasterReclassRule {
+                    source: i64::from(i32::MIN) + index as i64,
+                    destination: minimum
+                        + (state.wrapping_add(index as u64) % destination_span) as i64,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            let nonzero = |value: u32| value.max(1);
+            let spec = RasterQuerySpec {
+                relation_oid: nonzero(state as u32),
+                raster_attno: 1 + ((state >> 32) as u32 % i16::MAX as u32) as i32,
+                raster_type_oid: nonzero(state.rotate_left(7) as u32),
+                function_oid: nonzero(state.rotate_left(13) as u32),
+                as_wkb_fn_oid: nonzero(state.rotate_left(29) as u32),
+                rast_from_wkb_fn_oid: nonzero(state.rotate_left(43) as u32),
+                catalog_fingerprint: catalog_fingerprint.into_boxed_slice(),
+                reclass: RasterReclassSpec {
+                    output_pixel_type,
+                    rules,
+                },
+            };
+            let words = spec
+                .encode_words()
+                .unwrap_or_else(|error| panic!("generated spec {case} failed: {error}"));
+            let decoded = RasterQuerySpec::decode_words(&words)
+                .unwrap_or_else(|error| panic!("generated wire {case} failed: {error}"));
+            assert_eq!(decoded, spec, "generated spec {case}");
+            assert_eq!(
+                decoded.encode_words().expect("decoded spec re-encodes"),
+                words,
+                "generated spec {case} was not canonical"
+            );
+
+            let truncation = (state as usize % (words.len() - 1)) + 1;
+            assert!(RasterQuerySpec::decode_words(&words[..truncation]).is_err());
+
+            let mut bad_length = words.clone();
+            bad_length[2] += 1;
+            assert!(matches!(
+                RasterQuerySpec::decode_words(&bad_length),
+                Err(RasterSpecCodecError::LengthMismatch { .. })
+            ));
+
+            let pixel_tag = RASTER_QUERY_SPEC_HEADER_WORDS
+                + RASTER_QUERY_SPEC_FIXED_WORDS
+                + 1
+                + spec.catalog_fingerprint.len();
+            let mut bad_tag = words;
+            bad_tag[pixel_tag] = 9;
+            assert!(matches!(
+                RasterQuerySpec::decode_words(&bad_tag),
+                Err(RasterSpecCodecError::InvalidValue {
+                    context: "output pixel tag",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn oversized_raster_wire_is_rejected_before_header_or_payload_decode() {
+        let words = vec![0; RASTER_QUERY_SPEC_MAX_WORDS + 1];
+        assert!(matches!(
+            RasterQuerySpec::decode_words(&words),
+            Err(RasterSpecCodecError::LimitExceeded {
+                index: 2,
+                context: "wire words",
+                declared,
+                maximum: RASTER_QUERY_SPEC_MAX_WORDS,
+            }) if declared == RASTER_QUERY_SPEC_MAX_WORDS + 1
+        ));
+    }
+
+    #[test]
     fn every_truncation_and_trailing_word_fails_closed() {
         let words = reclass_spec().encode_words().expect("valid encoding");
         for end in 0..words.len() {

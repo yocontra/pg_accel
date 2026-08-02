@@ -32,9 +32,10 @@ use crate::engine::residency::{
 };
 use crate::engine::spec::abi;
 use crate::engine::spec::{
-    AggOutputProjection, AggQuerySpec, AggregateKind, AggregateSource, BinaryMeasureOp, ColumnRef,
-    FilterSpec, GroupKeyEncoding, GroupKeySource, JoinMultiplicity, MaskKind, MeasureExpr,
-    ScalarValue, SpatialOperand,
+    AggOutputProjection, AggOutputSource, AggQuerySpec, AggregateKind, AggregateSource,
+    BinaryMeasureOp, ColumnRef, FilterSpec, GroupKeyEncoding, GroupKeySource, JoinMultiplicity,
+    MaskKind, MeasureExpr, ScalarValue, SpatialOperand, SpatialPredicateKind, SpatialValueKind,
+    SpatialValueMetadata,
 };
 use crate::gpu::{
     GpuError, GpuErrorDomain, GpuOperation, GpuStatusDetail, GroupedAggOutcome,
@@ -54,6 +55,7 @@ const VARCHAROID: u32 = 1043;
 const DATEOID: u32 = 1082;
 const TIMESTAMPOID: u32 = 1114;
 const TIMESTAMPTZOID: u32 = 1184;
+const NORMAL_SPATIAL_PROMOTION_COORDINATES: usize = 1_025;
 
 // Atomic SUM one-shot execution only needs the row cap. Ordered integer
 // statistics still use the bounded native partial layout mirrored here.
@@ -329,9 +331,8 @@ fn validate_runtime_capability_with_spatial(
             return Err("join inputs must have exactly the same type OID".into());
         }
         match dimension.fact_key.type_oid {
-            INT4OID if dimension.collation_oid == 0 => {}
+            INT4OID | INT8OID if dimension.collation_oid == 0 => {}
             type_oid if is_text_family(type_oid) && dimension.collation_oid != 0 => {}
-            INT8OID => return Err("INT8 star joins are not implemented by Phase 5D".into()),
             type_oid => return Err(format!("join type OID {type_oid} is unsupported")),
         }
         validate_filter(
@@ -384,11 +385,250 @@ pub(super) fn validate_runtime_capability(
     validate_runtime_capability_with_spatial(spec, projection, false)
 }
 
+/// Production admission is deliberately narrower than executor capability.
+/// INT8 membership is released only for the independently measured two-unique-
+/// dimension SSBM shape; keeping this check here prevents later executor work
+/// from silently widening planner admission.
+pub(super) fn validate_normal_descriptor_capability(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+) -> Result<(), String> {
+    validate_runtime_capability(spec, projection)?;
+    let has_int8_membership = spec
+        .star_dims
+        .iter()
+        .any(|dimension| dimension.fact_key.type_oid == INT8OID);
+    if !has_int8_membership {
+        return Ok(());
+    }
+
+    let [first_dim, second_dim] = spec.star_dims.as_slice() else {
+        return Err("normal INT8 star admission requires exactly two unique dimensions".to_owned());
+    };
+    for dimension in [first_dim, second_dim] {
+        if dimension.relation_oid == spec.fact_rel
+            || dimension.fact_key.relation_oid != spec.fact_rel
+            || dimension.dim_key.relation_oid != dimension.relation_oid
+            || dimension.fact_key.type_oid != INT8OID
+            || dimension.dim_key.type_oid != INT8OID
+            || dimension.collation_oid != 0
+            || dimension.multiplicity != JoinMultiplicity::Unique
+            || dimension.filter != FilterSpec::None
+        {
+            return Err(
+                "normal INT8 star admission requires exact unfiltered unique INT8 membership"
+                    .to_owned(),
+            );
+        }
+    }
+    if first_dim.relation_oid == second_dim.relation_oid
+        || !matches!(spec.fact_filter, FilterSpec::None)
+        || spec.having.is_some()
+    {
+        return Err("normal INT8 star admission requires the unfiltered SSBM star".to_owned());
+    }
+
+    let [first_key, second_key] = spec.group_keys.as_slice() else {
+        return Err(
+            "normal INT8 star admission requires exactly two INT4 dimension keys".to_owned(),
+        );
+    };
+    for (index, (key, dimension)) in [(first_key, first_dim), (second_key, second_dim)]
+        .into_iter()
+        .enumerate()
+    {
+        let GroupKeySource::StarDimension {
+            dim_index,
+            group_column,
+        } = key.source
+        else {
+            return Err("normal INT8 star admission groups only by dimension columns".to_owned());
+        };
+        if usize::try_from(dim_index) != Ok(index)
+            || group_column.relation_oid != dimension.relation_oid
+            || group_column.type_oid != INT4OID
+            || key.type_oid != INT4OID
+            || key.collation_oid != 0
+            || key.encoding != GroupKeyEncoding::Hash
+        {
+            return Err(
+                "normal INT8 star admission requires canonical INT4 dimension grouping".to_owned(),
+            );
+        }
+    }
+
+    let [sum, count] = spec.measures.as_slice() else {
+        return Err("normal INT8 star admission requires SUM(int4) and COUNT(*)".to_owned());
+    };
+    let MeasureExpr::Column(sum_column) = sum.expression else {
+        return Err("normal INT8 star admission requires SUM over one fact INT4 column".to_owned());
+    };
+    if sum_column.relation_oid != spec.fact_rel
+        || sum_column.type_oid != INT4OID
+        || sum.filter != FilterSpec::None
+        || sum.outputs.as_slice()
+            != [crate::engine::spec::AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Sum,
+            }]
+        || count.expression != MeasureExpr::CountStar
+        || count.filter != FilterSpec::None
+        || count.outputs.as_slice()
+            != [crate::engine::spec::AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Count,
+            }]
+    {
+        return Err("normal INT8 star admission requires canonical SUM(int4), COUNT(*)".to_owned());
+    }
+
+    let [group_zero, group_one, sum_slot, count_slot] = projection.slots.as_slice() else {
+        return Err("normal INT8 star admission requires four canonical outputs".to_owned());
+    };
+    let canonical_group = |slot: &crate::engine::spec::AggOutputSlot, key_index| {
+        slot.source == AggOutputSource::GroupKey { key_index }
+            && slot.source_type_oid == INT4OID
+            && slot.result_type_oid == INT4OID
+            && slot.result_typmod == -1
+            && slot.result_collation_oid == 0
+            && !slot.nullable
+    };
+    if !canonical_group(group_zero, 0)
+        || !canonical_group(group_one, 1)
+        || sum_slot.source
+            != (AggOutputSource::Aggregate {
+                measure_index: 0,
+                source: AggregateSource::Value,
+                kind: AggregateKind::Sum,
+            })
+        || sum_slot.source_type_oid != INT4OID
+        || sum_slot.result_type_oid != INT8OID
+        || sum_slot.result_typmod != -1
+        || sum_slot.result_collation_oid != 0
+        || !sum_slot.nullable
+        || count_slot.source
+            != (AggOutputSource::Aggregate {
+                measure_index: 1,
+                source: AggregateSource::Value,
+                kind: AggregateKind::Count,
+            })
+        || count_slot.source_type_oid != 0
+        || count_slot.result_type_oid != INT8OID
+        || count_slot.result_typmod != -1
+        || count_slot.result_collation_oid != 0
+        || count_slot.nullable
+    {
+        return Err("normal INT8 star admission output projection is not canonical".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_internal_runtime_capability(
     spec: &AggQuerySpec,
     projection: &AggOutputProjection,
 ) -> Result<(), String> {
     validate_runtime_capability_with_spatial(spec, projection, true)
+}
+
+fn geometry_typmod_shape(metadata: SpatialValueMetadata) -> Option<(u32, i32)> {
+    if metadata.kind != SpatialValueKind::Geometry
+        || metadata.typmod < 0
+        || metadata.typmod & 3 != 0
+    {
+        return None;
+    }
+    let geometry_type = u32::try_from((metadata.typmod & 0xfc) >> 2).ok()?;
+    let srid = ((metadata.typmod & 0x0fff_ff00) - (metadata.typmod & 0x1000_0000)) >> 8;
+    Some((geometry_type, srid))
+}
+
+/// Production admission for the one spatial shape with exact differential and
+/// performance evidence. Keep this separate from the broader executor-internal
+/// capability so extending exact recheck support cannot silently widen planner
+/// admission.
+pub(super) fn validate_normal_spatial_candidate_capability(
+    spec: &AggQuerySpec,
+    projection: &AggOutputProjection,
+) -> Result<(), String> {
+    let [measure] = spec.measures.as_slice() else {
+        return Err("normal spatial admission requires exactly one COUNT(*) measure".to_owned());
+    };
+    if !spec.group_keys.is_empty()
+        || !spec.star_dims.is_empty()
+        || spec.having.is_some()
+        || !matches!(measure.expression, MeasureExpr::CountStar)
+        || !matches!(measure.filter, FilterSpec::None)
+        || measure.outputs.as_slice()
+            != [crate::engine::spec::AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Count,
+            }]
+    {
+        return Err("normal spatial admission covers only ungrouped, unjoined COUNT(*)".to_owned());
+    }
+    let [slot] = projection.slots.as_slice() else {
+        return Err("normal spatial admission requires exactly one COUNT(*) output".to_owned());
+    };
+    if slot.source
+        != (AggOutputSource::Aggregate {
+            measure_index: 0,
+            source: AggregateSource::Value,
+            kind: AggregateKind::Count,
+        })
+        || slot.source_type_oid != 0
+        || slot.result_type_oid != INT8OID
+        || slot.result_typmod != -1
+        || slot.result_collation_oid != 0
+        || slot.nullable
+    {
+        return Err("normal spatial admission COUNT(*) projection is not canonical".to_owned());
+    }
+    let FilterSpec::Spatial {
+        predicate: SpatialPredicateKind::Intersects,
+        left:
+            SpatialOperand::Column {
+                column,
+                metadata: column_metadata,
+            },
+        right:
+            SpatialOperand::Constant {
+                metadata: constant_metadata,
+                bytes,
+            },
+        distance: None,
+    } = &spec.fact_filter
+    else {
+        return Err(
+            "normal spatial admission covers only ST_Intersects(point column, polygon constant)"
+                .to_owned(),
+        );
+    };
+    let limits = crate::engine::cost::device_limits();
+    let parsed = crate::engine::residency::validate_resident_geometry_value(
+        bytes,
+        limits.resident_domain_max_exact_value_bytes,
+    )?;
+    let point_type = crate::engine::residency::RESIDENT_GEOMETRY_POINT;
+    let polygon_type = crate::engine::residency::RESIDENT_GEOMETRY_POLYGON;
+    if column.relation_oid != spec.fact_rel
+        || geometry_typmod_shape(*column_metadata) != Some((point_type, parsed.srid))
+        || column_metadata.srid != Some(parsed.srid)
+        || parsed.srid == 0
+        || constant_metadata.kind != SpatialValueKind::Geometry
+        || constant_metadata.srid != Some(parsed.srid)
+        || (constant_metadata.typmod != -1
+            && geometry_typmod_shape(*constant_metadata) != Some((polygon_type, parsed.srid)))
+        || parsed.geom_type != polygon_type
+        || parsed.ring_count != 1
+        || parsed.coordinate_pairs != NORMAL_SPATIAL_PROMOTION_COORDINATES
+        || parsed.coordinate_pairs > limits.gpu_spatial_max_vertices_per_row
+    {
+        return Err(
+            "normal spatial admission requires the measured same-SRID POINT/1025-coordinate POLYGON contract"
+                .to_owned(),
+        );
+    }
+    validate_internal_runtime_capability(spec, projection)
 }
 
 #[cfg(any(test, feature = "pg_test"))]
@@ -734,6 +974,34 @@ fn verify_catalog_before<T>(
 ) -> Result<T, ResidentLoadError> {
     verify_catalog()?;
     operation()
+}
+
+fn artifact_failure_allows_single_rebuild(error: &ResidentLoadError) -> bool {
+    matches!(
+        error,
+        ResidentLoadError::MissingRelation(_)
+            | ResidentLoadError::MissingColumn { .. }
+            | ResidentLoadError::ArtifactDependencyChanged { .. }
+            | ResidentLoadError::ArtifactNotFound { .. }
+    )
+}
+
+fn execute_with_single_artifact_rebuild<T, R, E>(
+    mut execute_once: impl FnMut() -> Result<Result<T, E>, ResidentLoadError>,
+    rebuild: impl FnOnce() -> Result<R, E>,
+) -> Result<(T, Option<R>), E>
+where
+    E: From<ResidentLoadError>,
+{
+    match execute_once() {
+        Ok(result) => result.map(|result| (result, None)),
+        Err(error) if artifact_failure_allows_single_rebuild(&error) => {
+            let residency = rebuild()?;
+            let result = execute_once().map_err(E::from)??;
+            Ok((result, Some(residency)))
+        }
+        Err(error) => Err(E::from(error)),
+    }
 }
 
 pub(super) struct DescriptorAggPlan {
@@ -1189,21 +1457,25 @@ impl DescriptorAggPlan {
         }
     }
 
-    pub(super) fn execute(&self) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
-        let mut residency = self.ensure_artifact()?;
-        let mut result = match self.execute_once() {
-            Ok(result) => result?,
-            Err(
-                ResidentLoadError::ArtifactDependencyChanged { .. }
-                | ResidentLoadError::ArtifactNotFound { .. },
-            ) => {
-                residency.merge(self.ensure_artifact()?);
-                self.execute_once()
-                    .map_err(DescriptorAggExecutionError::from)??
-            }
-            Err(error) => return Err(DescriptorAggExecutionError::from(error)),
-        };
-        result.residency = Some(residency);
+    /// Execute after Begin or rescan established a current artifact.
+    ///
+    /// A generation change between preparation and first execution is still
+    /// handled fail-closed: the pinned resolver evicts the stale artifact,
+    /// this method rebuilds it, and exactly one retry receives fresh pointers.
+    pub(super) fn execute_prepared(
+        &self,
+    ) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
+        // Spatial dispatch depends on resolved PostGIS function and type OIDs in
+        // addition to resident relation generations. Revalidate that catalog
+        // identity at the execution boundary without repeating artifact ensure.
+        if let DescriptorArtifactKind::Spatial(plan) = &self.artifact_kind {
+            plan.verify_catalog()?;
+        }
+        let (mut result, residency) = execute_with_single_artifact_rebuild(
+            || self.execute_once(),
+            || self.ensure_artifact(),
+        )?;
+        result.residency = residency;
         Ok(result)
     }
 }
@@ -2645,7 +2917,8 @@ mod tests {
         (srid << 8) | i32::try_from(geometry_type).expect("geometry tag fits i32") << 2
     }
 
-    fn polygon_bytes(srid: i32) -> Box<[u8]> {
+    fn polygon_bytes(srid: i32, coordinate_pairs: u32) -> Box<[u8]> {
+        assert!(coordinate_pairs >= 4);
         let srid = u32::try_from(srid).expect("test SRID is nonnegative");
         let mut bytes = vec![
             0,
@@ -2659,12 +2932,17 @@ mod tests {
         ];
         bytes.extend_from_slice(&crate::engine::residency::RESIDENT_GEOMETRY_POLYGON.to_le_bytes());
         bytes.extend_from_slice(&1_u32.to_le_bytes());
-        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(&coordinate_pairs.to_le_bytes());
         bytes.extend_from_slice(&0_u32.to_le_bytes());
-        for (x, y) in [(0.0_f64, 0.0_f64), (4.0, 0.0), (0.0, 4.0), (0.0, 0.0)] {
+        let unique = coordinate_pairs - 1;
+        for index in 0..unique {
+            let angle = std::f64::consts::TAU * f64::from(index) / f64::from(unique);
+            let (y, x) = angle.sin_cos();
             bytes.extend_from_slice(&x.to_le_bytes());
             bytes.extend_from_slice(&y.to_le_bytes());
         }
+        bytes.extend_from_slice(&1.0_f64.to_le_bytes());
+        bytes.extend_from_slice(&0.0_f64.to_le_bytes());
         bytes.into_boxed_slice()
     }
 
@@ -2689,7 +2967,11 @@ mod tests {
                     typmod: -1,
                     srid: Some(TEST_SRID),
                 },
-                bytes: polygon_bytes(TEST_SRID),
+                bytes: polygon_bytes(
+                    TEST_SRID,
+                    u32::try_from(NORMAL_SPATIAL_PROMOTION_COORDINATES)
+                        .expect("promotion coordinate count fits u32"),
+                ),
             },
             distance: None,
         };
@@ -2720,6 +3002,62 @@ mod tests {
         assert!(validate_runtime_capability(&spec, &projection).is_err());
         validate_internal_runtime_capability(&spec, &projection)
             .expect("executor-internal spatial capability should bind");
+    }
+
+    #[test]
+    fn normal_spatial_candidate_is_only_intersects_point_column_count_star() {
+        let (spec, projection) = spatial_count_shape();
+        validate_normal_spatial_candidate_capability(&spec, &projection)
+            .expect("the evidenced normal spatial candidate should bind");
+
+        for predicate in [
+            SpatialPredicateKind::Contains,
+            SpatialPredicateKind::Within,
+            SpatialPredicateKind::DWithin,
+        ] {
+            let mut unsupported = spec.clone();
+            let FilterSpec::Spatial {
+                predicate: actual, ..
+            } = &mut unsupported.fact_filter
+            else {
+                unreachable!("spatial test shape changed")
+            };
+            *actual = predicate;
+            assert!(
+                validate_normal_spatial_candidate_capability(&unsupported, &projection).is_err(),
+                "{predicate:?} must remain outside normal admission"
+            );
+        }
+
+        let mut reversed = spec.clone();
+        let FilterSpec::Spatial { left, right, .. } = &mut reversed.fact_filter else {
+            unreachable!("spatial test shape changed")
+        };
+        std::mem::swap(left, right);
+        assert!(validate_normal_spatial_candidate_capability(&reversed, &projection).is_err());
+
+        let mut grouped = spec.clone();
+        grouped.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::FactColumn(column(INT4OID)),
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::Hash,
+        });
+        assert!(validate_normal_spatial_candidate_capability(&grouped, &projection).is_err());
+
+        let mut unmeasured_polygon = spec;
+        let FilterSpec::Spatial {
+            right: SpatialOperand::Constant { bytes, .. },
+            ..
+        } = &mut unmeasured_polygon.fact_filter
+        else {
+            unreachable!("spatial test shape changed")
+        };
+        *bytes = polygon_bytes(TEST_SRID, 1_024);
+        assert!(
+            validate_normal_spatial_candidate_capability(&unmeasured_polygon, &projection).is_err(),
+            "a nearby but unmeasured polygon size must remain outside normal admission"
+        );
     }
 
     #[test]
@@ -2781,6 +3119,97 @@ mod tests {
         .expect_err("catalog mismatch must reject before cache lookup");
         assert!(!ensure_called.get());
         assert!(error.to_string().contains("catalog changed"));
+    }
+
+    #[test]
+    fn missing_residency_rebuilds_once_and_never_loops() {
+        for missing_column in [false, true] {
+            let execute_calls = std::cell::Cell::new(0_u32);
+            let rebuild_calls = std::cell::Cell::new(0_u32);
+            let outcome = execute_with_single_artifact_rebuild(
+                || -> Result<Result<u32, DescriptorAggExecutionError>, ResidentLoadError> {
+                    execute_calls.set(execute_calls.get() + 1);
+                    if execute_calls.get() == 1 {
+                        if missing_column {
+                            Err(ResidentLoadError::MissingColumn {
+                                relid: pg_sys::Oid::from(42_u32),
+                                attno: 3,
+                            })
+                        } else {
+                            Err(ResidentLoadError::MissingRelation(pg_sys::Oid::from(
+                                42_u32,
+                            )))
+                        }
+                    } else {
+                        Ok(Ok(7))
+                    }
+                },
+                || {
+                    rebuild_calls.set(rebuild_calls.get() + 1);
+                    Ok(9)
+                },
+            )
+            .expect("one rebuild should repair missing resident input");
+            assert_eq!(outcome, (7, Some(9)));
+            assert_eq!(execute_calls.get(), 2);
+            assert_eq!(rebuild_calls.get(), 1);
+        }
+
+        let execute_calls = std::cell::Cell::new(0_u32);
+        let rebuild_calls = std::cell::Cell::new(0_u32);
+        let second_failure = execute_with_single_artifact_rebuild(
+            || -> Result<Result<(), DescriptorAggExecutionError>, ResidentLoadError> {
+                execute_calls.set(execute_calls.get() + 1);
+                Err(ResidentLoadError::MissingRelation(pg_sys::Oid::from(
+                    42_u32,
+                )))
+            },
+            || {
+                rebuild_calls.set(rebuild_calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            second_failure,
+            Err(DescriptorAggExecutionError::Failure(message))
+                if message.contains("is not resident")
+        ));
+        assert_eq!(
+            execute_calls.get(),
+            2,
+            "a second miss must not execute again"
+        );
+        assert_eq!(
+            rebuild_calls.get(),
+            1,
+            "a second miss must not rebuild again"
+        );
+    }
+
+    #[test]
+    fn auto_load_disabled_rebuild_failure_stops_before_retry() {
+        let relid = pg_sys::Oid::from(42_u32);
+        let execute_calls = std::cell::Cell::new(0_u32);
+        let rebuild_calls = std::cell::Cell::new(0_u32);
+        let outcome = execute_with_single_artifact_rebuild(
+            || -> Result<Result<(), DescriptorAggExecutionError>, ResidentLoadError> {
+                execute_calls.set(execute_calls.get() + 1);
+                Err(ResidentLoadError::MissingRelation(relid))
+            },
+            || -> Result<(), DescriptorAggExecutionError> {
+                rebuild_calls.set(rebuild_calls.get() + 1);
+                Err(DescriptorAggExecutionError::from(
+                    ResidentLoadError::AutoLoadDisabled { relid },
+                ))
+            },
+        );
+        assert!(matches!(
+            outcome,
+            Err(DescriptorAggExecutionError::Failure(message))
+                if message.contains("auto_load is off")
+        ));
+        assert_eq!(execute_calls.get(), 1);
+        assert_eq!(rebuild_calls.get(), 1);
     }
 
     #[test]
@@ -2881,6 +3310,173 @@ mod tests {
             validate_runtime_capability(&spec, &projection(AggregateKind::Count, INT8OID, INT8OID))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn runtime_backstop_accepts_single_int8_star_membership_key() {
+        let mut spec = spec(MeasureExpr::CountStar, AggregateKind::Count);
+        spec.star_dims.push(DimSpec {
+            relation_oid: 43,
+            fact_key: column(INT8OID),
+            dim_key: ColumnRef {
+                relation_oid: 43,
+                attno: 1,
+                type_oid: INT8OID,
+            },
+            collation_oid: 0,
+            multiplicity: JoinMultiplicity::Counted,
+            filter: FilterSpec::None,
+        });
+
+        validate_runtime_capability(&spec, &projection(AggregateKind::Count, 0, INT8OID))
+            .expect("single exact INT8 star membership is supported");
+        assert!(
+            validate_normal_descriptor_capability(
+                &spec,
+                &projection(AggregateKind::Count, 0, INT8OID)
+            )
+            .is_err(),
+            "executor support must not widen normal admission beyond the measured INT8 star"
+        );
+    }
+
+    fn normal_int8_star_shape() -> (AggQuerySpec, AggOutputProjection) {
+        let dimensions = [43_u32, 44_u32]
+            .into_iter()
+            .map(|relation_oid| DimSpec {
+                relation_oid,
+                fact_key: ColumnRef {
+                    relation_oid: 42,
+                    attno: i32::try_from(relation_oid - 41).expect("test attno"),
+                    type_oid: INT8OID,
+                },
+                dim_key: ColumnRef {
+                    relation_oid,
+                    attno: 1,
+                    type_oid: INT8OID,
+                },
+                collation_oid: 0,
+                multiplicity: JoinMultiplicity::Unique,
+                filter: FilterSpec::None,
+            })
+            .collect::<Vec<_>>();
+        let group_keys = dimensions
+            .iter()
+            .enumerate()
+            .map(|(index, dimension)| GroupKeyRef {
+                source: GroupKeySource::StarDimension {
+                    dim_index: u32::try_from(index).expect("test dimension index"),
+                    group_column: ColumnRef {
+                        relation_oid: dimension.relation_oid,
+                        attno: 2,
+                        type_oid: INT4OID,
+                    },
+                },
+                type_oid: INT4OID,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::Hash,
+            })
+            .collect();
+        let spec = AggQuerySpec {
+            fact_rel: 42,
+            group_keys,
+            measures: vec![
+                MeasureSpec {
+                    expression: MeasureExpr::Column(ColumnRef {
+                        relation_oid: 42,
+                        attno: 4,
+                        type_oid: INT4OID,
+                    }),
+                    outputs: vec![AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Sum,
+                    }],
+                    filter: FilterSpec::None,
+                },
+                MeasureSpec {
+                    expression: MeasureExpr::CountStar,
+                    outputs: vec![AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    }],
+                    filter: FilterSpec::None,
+                },
+            ],
+            fact_filter: FilterSpec::None,
+            star_dims: dimensions,
+            having: None,
+        };
+        let projection = AggOutputProjection {
+            slots: vec![
+                AggOutputSlot {
+                    source: AggOutputSource::GroupKey { key_index: 0 },
+                    source_type_oid: INT4OID,
+                    result_type_oid: INT4OID,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: false,
+                },
+                AggOutputSlot {
+                    source: AggOutputSource::GroupKey { key_index: 1 },
+                    source_type_oid: INT4OID,
+                    result_type_oid: INT4OID,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: false,
+                },
+                AggOutputSlot {
+                    source: AggOutputSource::Aggregate {
+                        measure_index: 0,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Sum,
+                    },
+                    source_type_oid: INT4OID,
+                    result_type_oid: INT8OID,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: true,
+                },
+                AggOutputSlot {
+                    source: AggOutputSource::Aggregate {
+                        measure_index: 1,
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    },
+                    source_type_oid: 0,
+                    result_type_oid: INT8OID,
+                    result_typmod: -1,
+                    result_collation_oid: 0,
+                    nullable: false,
+                },
+            ],
+        };
+        (spec, projection)
+    }
+
+    #[test]
+    fn normal_int8_star_admission_is_exactly_the_measured_ssbm_contract() {
+        let (spec, projection) = normal_int8_star_shape();
+        validate_normal_descriptor_capability(&spec, &projection)
+            .expect("the measured two-dimension INT8 star should bind");
+
+        let mut counted = spec.clone();
+        counted.star_dims[0].multiplicity = JoinMultiplicity::Counted;
+        assert!(validate_normal_descriptor_capability(&counted, &projection).is_err());
+
+        let mut filtered = spec.clone();
+        filtered.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 5,
+                type_oid: BOOLOID,
+            },
+            kind: MaskKind::Sql,
+        };
+        assert!(validate_normal_descriptor_capability(&filtered, &projection).is_err());
+
+        let mut noncanonical_projection = projection;
+        noncanonical_projection.slots[0].nullable = true;
+        assert!(validate_normal_descriptor_capability(&spec, &noncanonical_projection).is_err());
     }
 
     #[test]
@@ -2986,6 +3582,28 @@ mod tests {
                     });
             }
         }
+    }
+
+    #[test]
+    fn bool_column_count_runtime_contract_matches_the_physical_abi() {
+        let spec = spec(MeasureExpr::Column(column(BOOLOID)), AggregateKind::Count);
+        validate_runtime_capability(&spec, &projection(AggregateKind::Count, BOOLOID, INT8OID))
+            .expect("nullable boolean column COUNT is an exact runtime capability");
+
+        let binding = measure_column(
+            &ResidentColumnView::Empty {
+                type_oid: pg_sys::Oid::from(BOOLOID),
+            },
+            0,
+        )
+        .expect("empty boolean resident column must preserve its ABI shape");
+        assert_eq!(
+            binding.physical_type,
+            abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
+        );
+        assert_eq!(binding.element_bytes, 1);
+        assert!(binding.values.is_null());
+        assert!(binding.nulls.is_null());
     }
 
     #[test]

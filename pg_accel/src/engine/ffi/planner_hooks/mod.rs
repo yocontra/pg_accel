@@ -22,12 +22,16 @@ use crate::engine::residency::ResidentProofSnapshot;
 use crate::engine::stats;
 
 mod decision;
+mod decline_cache;
 mod gate;
 mod generic_groupagg;
 mod join_pathlist;
 mod raster;
 mod rel_pathlist;
 pub mod shape;
+
+#[cfg(feature = "pg_test")]
+pub(crate) use decline_cache::active_source_depth;
 
 pub(in crate::engine::ffi::planner_hooks) use decision::{
     DecisionFacts, PlannerDecision, PlannerDecisionRecorder, RejectionReason,
@@ -87,14 +91,13 @@ pub(in crate::engine::ffi::planner_hooks) fn planner_hooks_suspended() -> bool {
 /// (multi-dimension star joins, expression-only filters, native aggregates) stay
 /// near zero overhead.
 ///
-/// Costs ~50 ns (one `Instant::now`, one atomic add, one tracing event at
-/// `trace` level which is filtered out by the default `notice` filter
-/// per CLAUDE.md). Cheap enough to use on every hook invocation without
-/// inflating the overhead it is trying to measure.
+/// Elapsed timing is opt-in through `pg_accel.planner_profiling`, so ordinary
+/// planning does not pay for monotonic-clock reads or elapsed counter updates.
+/// Stage call counters remain active for low-cost operational visibility.
 pub(in crate::engine::ffi::planner_hooks) struct HookElapsedGuard {
     hook: &'static str,
     stage: stats::PlannerHookStage,
-    start: std::time::Instant,
+    start: Option<std::time::Instant>,
 }
 
 impl HookElapsedGuard {
@@ -109,14 +112,17 @@ impl HookElapsedGuard {
         Self {
             hook,
             stage,
-            start: std::time::Instant::now(),
+            start: gucs::planner_profiling().then(std::time::Instant::now),
         }
     }
 }
 
 impl Drop for HookElapsedGuard {
     fn drop(&mut self) {
-        let elapsed_us = u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let Some(start) = self.start else {
+            return;
+        };
+        let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
         stats::record_planner_hook_elapsed(self.hook, elapsed_us);
         stats::record_planner_stage_elapsed(self.stage, elapsed_us);
     }
@@ -144,6 +150,8 @@ pub unsafe fn install() {
 
         PREV_CREATE_UPPER_PATHS_HOOK = pg_sys::create_upper_paths_hook;
         pg_sys::create_upper_paths_hook = Some(pgaccel_create_upper_paths);
+
+        decline_cache::install();
 
         pgrx::log!("pg_accel: planner hooks installed (scan, join, upper_paths)");
     }
@@ -237,6 +245,9 @@ unsafe extern "C-unwind" fn pgaccel_create_upper_paths(
         pg_sys::UpperRelationKind::UPPERREL_FINAL => {
             #[cfg(feature = "pg_test")]
             if unsafe { raster::try_force_inject(root, output_rel) } {
+                return;
+            }
+            if gucs::gpu_enabled() && unsafe { raster::try_inject(root, output_rel) } {
                 return;
             }
             // Most final upper-rel hooks have no SRF work at all. Check the

@@ -142,5 +142,6 @@ behavioral contract, validation performed, hardware-dependent gaps, and any
 native-decline or public-capability changes.
 
 Use [GitHub issues](https://github.com/yocontra/pg_accel/issues) for ordinary
-bugs and feature requests. Security reports follow [SECURITY.md](SECURITY.md)
-and must not be posted as public issues.
+bugs and feature requests. [SUPPORT.md](SUPPORT.md) lists the diagnostic data
+needed for actionable failure reports. Security reports follow
+[SECURITY.md](SECURITY.md) and must not be posted as public issues.

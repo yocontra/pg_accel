@@ -1,10 +1,9 @@
-//! Exact RQS2 raster planner observer.
+//! Exact RQS2 resident raster planner admission.
 //!
 //! This module recognizes replacement-sensitive PostGIS Raster calls and
-//! records deterministic declines. It deliberately has no path-construction
-//! API in production: Phase 6 costing is uncalibrated and runtime selection
-//! remains dark. The `pg_test` feature exposes a scoped forced path solely for
-//! end-to-end executor proof.
+//! admits only the catalog-proved three-argument reclass subset after exact
+//! resident metadata and device work gates. The `pg_test` feature additionally
+//! exposes a scoped forced path for fault and executor boundary proof.
 
 use pgrx::FromDatum;
 use pgrx::pg_sys::{self, Node, NodeTag};
@@ -20,15 +19,13 @@ use crate::engine::raster::{
 use crate::engine::residency::{ResidentColumnView, with_resident_column};
 use crate::engine::stats;
 
-use super::{RejectionReason, find_cheapest_path};
-
-#[cfg(feature = "pg_test")]
-use super::{add_gpu_path_with_resident_proof, custom_scan};
-#[cfg(feature = "pg_test")]
+use super::{RejectionReason, add_gpu_path_with_resident_proof, custom_scan, find_cheapest_path};
 use crate::engine::executor::raster::RasterExecPlan;
 
 const RECLASS_NAME: &str = "st_reclass";
 const SUMMARY_STATS_NAME: &str = "st_summarystats";
+const NORMAL_RASTER_MIN_SELECTED_PIXELS: u64 = 10_134_528;
+const NORMAL_RASTER_MAX_SELECTED_PIXELS: u64 = 63_340_224;
 
 fn list_len(list: *mut pg_sys::List) -> usize {
     if list.is_null() {
@@ -586,6 +583,14 @@ fn exact_resident_work(spec: &crate::engine::raster::RasterQuerySpec) -> RasterW
     .unwrap_or(RasterWorkEstimate::Unavailable)
 }
 
+fn normal_raster_promotion_envelope(cost: &crate::engine::raster::RasterCost) -> bool {
+    cost.gate == RasterCostGate::UncalibratedCoefficients
+        && cost.work.is_some_and(|work| {
+            (NORMAL_RASTER_MIN_SELECTED_PIXELS..=NORMAL_RASTER_MAX_SELECTED_PIXELS)
+                .contains(&work.selected_pixels)
+        })
+}
+
 fn record(reason: RejectionReason, rows: u64) {
     stats::increment_planner_rejected(reason.stats_key(), rows);
     pgrx::debug1!(
@@ -770,21 +775,25 @@ pub(super) unsafe fn observe(
         },
         device_limits(),
     );
+    if normal_raster_promotion_envelope(&cost) {
+        return true;
+    }
     record(cost_decline_reason(cost.gate), rows);
     true
 }
 
-/// Inject the exact validated RQS2 path only while a pg_test force guard is
-/// active. This symbol and its only callsite do not exist in production.
+/// Inject the exact validated RQS2 candidate after all resident work gates.
+/// `forced` exists only for pg_test fault injection; production reaches this
+/// helper through [`try_inject`] and must clear the complete typed cost gate.
 ///
 /// # Safety
 /// Pointers must be the live objects supplied to `create_upper_paths_hook`.
-#[cfg(feature = "pg_test")]
-pub(super) unsafe fn try_force_inject(
+unsafe fn try_inject_impl(
     root: *mut pg_sys::PlannerInfo,
     output_rel: *mut pg_sys::RelOptInfo,
+    forced: bool,
 ) -> bool {
-    if !forced_raster_path_enabled() || root.is_null() || output_rel.is_null() {
+    if root.is_null() || output_rel.is_null() {
         return false;
     }
     let root_ref = unsafe { &*root };
@@ -805,26 +814,58 @@ pub(super) unsafe fn try_force_inject(
     if rel.is_null() {
         return false;
     }
-    let mut candidate = match unsafe { validated_candidate(query, &*rel, 1, &*rte, prefilter) } {
+    let candidate = match unsafe { validated_candidate(query, &*rel, 1, &*rte, prefilter) } {
         Ok(candidate) => candidate,
         Err(_) => return false,
     };
-    if !matches!(
-        exact_resident_work(&candidate.spec),
-        RasterWorkEstimate::ResidentExact(work) if work.zero_grid_present_band_rows == 0
-    ) {
+    #[cfg(feature = "pg_test")]
+    let mut candidate = candidate;
+    let base_path = unsafe { find_cheapest_path((*rel).pathlist) };
+    if base_path.is_null() {
         return false;
     }
-    if tampered_raster_catalog_enabled() {
+    if forced {
+        if !matches!(
+            exact_resident_work(&candidate.spec),
+            RasterWorkEstimate::ResidentExact(work) if work.zero_grid_present_band_rows == 0
+        ) {
+            return false;
+        }
+    } else {
+        let work = exact_resident_work(&candidate.spec);
+        let cost = estimate_raster_cost(
+            RasterCostInput {
+                work,
+                native_total_cost: PgCost::new(unsafe { (*base_path).total_cost }),
+            },
+            device_limits(),
+        );
+        // Qualified Apple Metal envelope: the deterministic exact-RQS2 lane
+        // wins only inside the measured selected-pixel band.
+        if !normal_raster_promotion_envelope(&cost) {
+            return false;
+        }
+    }
+    #[cfg(feature = "pg_test")]
+    if forced && tampered_raster_catalog_enabled() {
         candidate.spec.rast_from_wkb_fn_oid =
             candidate.spec.rast_from_wkb_fn_oid.wrapping_add(1).max(1);
     }
-    let final_target = root_ref.upper_targets[pg_sys::UpperRelationKind::UPPERREL_FINAL as usize];
+    let final_target = unsafe { pg_sys::make_pathtarget_from_tlist(query.targetList) };
     if final_target.is_null() || unsafe { list_len((*final_target).exprs) } != 1 {
         return false;
     }
+    // The measured pixel envelope is the hard admission boundary. Keep a
+    // finite nonzero cost tied to PostgreSQL's cheapest base path so EXPLAIN
+    // remains comparable and forced pg_test paths retain deterministic choice.
+    let startup_cost = 0.0;
+    let total_cost = if forced {
+        0.0
+    } else {
+        (unsafe { (*base_path).total_cost } * 0.5).max(1.0)
+    };
     let plan = RasterExecPlan::from_spec(candidate.spec)
-        .unwrap_or_else(|error| pgrx::error!("pg_accel: invalid forced raster plan: {error}"));
+        .unwrap_or_else(|error| pgrx::error!("pg_accel: invalid exact raster plan: {error}"));
     let cpath = unsafe {
         pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomPath>()).cast::<pg_sys::CustomPath>()
     };
@@ -838,8 +879,8 @@ pub(super) unsafe fn try_force_inject(
         (*cpath).path.parallel_safe = false;
         (*cpath).path.parallel_workers = 0;
         (*cpath).path.rows = candidate.estimated_rows as f64;
-        (*cpath).path.startup_cost = 0.0;
-        (*cpath).path.total_cost = 0.0;
+        (*cpath).path.startup_cost = startup_cost;
+        (*cpath).path.total_cost = total_cost;
         (*cpath).path.pathkeys = std::ptr::null_mut();
         (*cpath).flags = 0;
         (*cpath).custom_paths = std::ptr::null_mut();
@@ -850,12 +891,39 @@ pub(super) unsafe fn try_force_inject(
     unsafe {
         add_gpu_path_with_resident_proof(
             stats::PlannerHookStage::UpperFinal,
-            "pg_test_forced_raster",
+            if forced {
+                "pg_test_forced_raster"
+            } else {
+                "raster_exact_reclass_candidate"
+            },
             output_rel,
             cpath,
             custom_scan::raster_resident_proof(),
         )
     }
+}
+
+/// Try normal production admission for the exact resident RQS2 candidate.
+///
+/// # Safety
+/// Pointers must be the live objects supplied to `create_upper_paths_hook`.
+pub(super) unsafe fn try_inject(
+    root: *mut pg_sys::PlannerInfo,
+    output_rel: *mut pg_sys::RelOptInfo,
+) -> bool {
+    unsafe { try_inject_impl(root, output_rel, false) }
+}
+
+/// Force the exact path for pg_test-only fault and boundary coverage.
+///
+/// # Safety
+/// Pointers must be the live objects supplied to `create_upper_paths_hook`.
+#[cfg(feature = "pg_test")]
+pub(super) unsafe fn try_force_inject(
+    root: *mut pg_sys::PlannerInfo,
+    output_rel: *mut pg_sys::RelOptInfo,
+) -> bool {
+    forced_raster_path_enabled() && unsafe { try_inject_impl(root, output_rel, true) }
 }
 
 #[cfg(test)]
@@ -879,7 +947,7 @@ mod unit_tests {
     }
 
     #[test]
-    fn cost_gate_mapping_never_produces_an_acceptance() {
+    fn cost_gate_mapping_is_stable_before_candidate_promotion() {
         assert_eq!(
             cost_decline_reason(RasterCostGate::ExactResidentMetadataUnavailable),
             RejectionReason::RasterResidentMetadataUnavailable
@@ -903,6 +971,42 @@ mod unit_tests {
             cost_decline_reason(RasterCostGate::UncalibratedCoefficients),
             RejectionReason::RasterCostUncalibrated
         );
+    }
+
+    #[test]
+    fn normal_raster_envelope_is_inclusive_and_rejects_nearby_unmeasured_work() {
+        let limits = device_limits();
+        let cost = |selected_pixels| {
+            estimate_raster_cost(
+                RasterCostInput {
+                    work: RasterWorkEstimate::ResidentExact(RasterResidentWork {
+                        row_count: 1,
+                        non_null_rows: 1,
+                        zero_grid_present_band_rows: 0,
+                        selected_band_rows: 1,
+                        selected_pixels,
+                        input_wkb_bytes: 64,
+                        reclass_output_pixel_bytes: Some(selected_pixels),
+                        reclass_output_wkb_bytes: Some(selected_pixels.saturating_add(64)),
+                    }),
+                    native_total_cost: PgCost::new(1_000.0),
+                },
+                limits,
+            )
+        };
+
+        assert!(normal_raster_promotion_envelope(&cost(
+            NORMAL_RASTER_MIN_SELECTED_PIXELS
+        )));
+        assert!(normal_raster_promotion_envelope(&cost(
+            NORMAL_RASTER_MAX_SELECTED_PIXELS
+        )));
+        assert!(!normal_raster_promotion_envelope(&cost(
+            NORMAL_RASTER_MIN_SELECTED_PIXELS - 1
+        )));
+        assert!(!normal_raster_promotion_envelope(&cost(
+            NORMAL_RASTER_MAX_SELECTED_PIXELS + 1
+        )));
     }
 
     #[test]

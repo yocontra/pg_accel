@@ -13,7 +13,14 @@ struct DescriptorAggExecState {
     plan: DescriptorAggPlan,
     output: Option<DescriptorAggOutput>,
     explain_only: bool,
+    preparation: DescriptorPreparationState,
     residency: Option<DescriptorResidencyReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DescriptorPreparationState {
+    Unprepared,
+    Prepared,
 }
 
 fn merge_residency_report(
@@ -87,6 +94,7 @@ impl AggExecState {
                 plan,
                 output: None,
                 explain_only,
+                preparation: DescriptorPreparationState::Unprepared,
                 residency: None,
             }),
         })
@@ -96,14 +104,18 @@ impl AggExecState {
     /// abort-safe owner. This may raise a PostgreSQL ERROR or cancellation;
     /// calling it before ownership is installed would bypass Rust cleanup.
     pub(crate) fn prepare_descriptor(&mut self) {
-        if !self.descriptor.explain_only && self.descriptor.residency.is_none() {
-            self.descriptor.residency = Some(
-                self.descriptor
-                    .plan
-                    .ensure_artifact()
-                    .unwrap_or_else(|error| raise_descriptor_execution_error(error)),
-            );
+        if self.descriptor.explain_only
+            || self.descriptor.preparation == DescriptorPreparationState::Prepared
+        {
+            return;
         }
+        let residency = self
+            .descriptor
+            .plan
+            .ensure_artifact()
+            .unwrap_or_else(|error| raise_descriptor_execution_error(error));
+        self.descriptor.residency = Some(residency);
+        self.descriptor.preparation = DescriptorPreparationState::Prepared;
     }
 
     /// Borrow the neutral logical contract for generic EXPLAIN rendering.
@@ -177,12 +189,14 @@ impl AggExecState {
         self.dispatch_time_us = 0;
         self.descriptor.output = None;
         if !self.descriptor.explain_only {
+            self.descriptor.preparation = DescriptorPreparationState::Unprepared;
             let residency = self
                 .descriptor
                 .plan
                 .ensure_artifact()
                 .unwrap_or_else(|error| raise_descriptor_execution_error(error));
             merge_residency_report(&mut self.descriptor.residency, residency);
+            self.descriptor.preparation = DescriptorPreparationState::Prepared;
         }
     }
 
@@ -197,11 +211,16 @@ impl AggExecState {
         if self.descriptor.explain_only {
             return std::ptr::null_mut();
         }
+        if self.descriptor.preparation != DescriptorPreparationState::Prepared {
+            pgrx::error!(
+                "pg_accel: generic aggregate execution started without Begin-time artifact preparation"
+            );
+        }
         if self.descriptor.output.is_none() {
             let dispatch = self
                 .descriptor
                 .plan
-                .execute()
+                .execute_prepared()
                 .unwrap_or_else(|error| raise_descriptor_execution_error(error));
             self.dispatch_time_us = dispatch.dispatch_time_us;
             self.rows_dispatched = u64::try_from(dispatch.fact_rows).unwrap_or_else(|_| {

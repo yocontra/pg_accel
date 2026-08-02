@@ -12,9 +12,9 @@ mod raster;
 
 pub use postgis::{PostgisCatalogIdentity, PostgisSpatialFunction, resolve_postgis_catalog};
 pub use raster::{
-    PostgisRasterCatalogIdentity, PostgisRasterFunction, postgis_raster_datum_from_wkb,
-    postgis_raster_datum_to_wkb, resolve_postgis_raster_catalog, resolve_postgis_raster_function,
-    validate_postgis_raster_type,
+    PostgisRasterCatalogIdentity, PostgisRasterFunction, postgis_raster_datum_from_owned_bytea,
+    postgis_raster_datum_from_wkb, postgis_raster_datum_to_wkb, postgis_raster_wkb_bytea,
+    resolve_postgis_raster_catalog, resolve_postgis_raster_function, validate_postgis_raster_type,
 };
 
 pub(crate) fn postgres_error_requires_rethrow(level: PgLogLevel, code: PgSqlErrorCode) -> bool {
