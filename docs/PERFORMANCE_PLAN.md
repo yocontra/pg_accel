@@ -37,74 +37,83 @@ explicit reconciliation work rather than implied coverage by the 29 cells.
 ## Final Resident v2 matrix
 
 The final architecture candidate is
-`e7dc9f0b435929332d1f0fecafb0f62a312316ba`, tree
-`a2de0f2c1642fdb71418c8c553c1afa38dcfcd0a`. Its immutable warm matrix is
-`.codex/scratch/final-warm-benchmark-e7dc9f0b-PREPARED-20260801T233605Z`,
+`9c53d41702a10caf5fd7932251aa22b126ef8136`, tree
+`239429e220544b789141144463e441759f4a177b`. Its immutable warm matrix is
+`.codex/scratch/final-warm-benchmark-9c53d417-PREPARED-20260802T063630Z`,
 with terminal `SHA256SUMS` digest
-`9c44ec67710f0177f731df204e3bfacee8a94637ae81be1e8a4188fd0411040d`.
-The contract validator passed all 29 correctness and path-classification cells:
+`230e6bd8f43a31040c838e69dd46f3405a1ba4082c62c265b502729d53aff855`.
+The contract validator reported `PASS` (29/29 correctness and
+path-classification cells):
 14 of 14 selected cells cleared `1.15x`, all 15 declines had their expected
 visible reason and zero kernel delta, and stock fallback was zero. The minimum
-selected speedup was `2.400x`.
+selected speedup was `1.839373694x`.
 
 | Workload | Rows | pg_accel ms | PostgreSQL ms | Speedup |
 |---|---:|---:|---:|---:|
-| `grouped_agg_int4` | 1M | 2.603 | 20.500 | 7.876x |
-| `predicate_expression_grouped_agg_int4` | 1M | 3.934 | 14.281 | 3.630x |
-| `mixed_join_agg_int4` | 100K | 2.014 | 6.935 | 3.443x |
-| `mixed_join_agg_int4` | 1M | 3.387 | 28.039 | 8.278x |
-| `ssbm_resident_int4_star` | 100K | 4.476 | 10.742 | 2.400x |
-| `ssbm_resident_int4_star` | 1M | 6.554 | 55.074 | 8.403x |
-| `hash_join` | 100K | 1.785 | 6.152 | 3.447x |
-| `hash_join` | 1M | 3.904 | 18.924 | 4.847x |
-| `hash_join` | 10M | 45.353 | 141.133 | 3.112x |
-| `hashjoin_10k_1m` | 1M | 4.027 | 20.339 | 5.051x |
-| `hashjoin_10k_1m` | 10M | 46.627 | 142.667 | 3.060x |
-| `h3_cell_to_parent` | 100K | 2.246 | 11.752 | 5.231x |
-| `h3_cell_to_parent` | 1M | 4.014 | 28.778 | 7.170x |
-| `h3_cell_to_parent` | 10M | 13.473 | 173.654 | 12.889x |
+| `grouped_agg_int4` | 1M | 2.753 | 21.898 | 7.954x |
+| `predicate_expression_grouped_agg_int4` | 1M | 3.356 | 15.219 | 4.535x |
+| `mixed_join_agg_int4` | 100K | 2.468 | 7.637 | 3.095x |
+| `mixed_join_agg_int4` | 1M | 3.789 | 30.024 | 7.924x |
+| `ssbm_resident_int4_star` | 100K | 6.332 | 11.648 | 1.839x |
+| `ssbm_resident_int4_star` | 1M | 5.910 | 58.689 | 9.930x |
+| `hash_join` | 100K | 2.459 | 6.448 | 2.622x |
+| `hash_join` | 1M | 5.069 | 20.497 | 4.044x |
+| `hash_join` | 10M | 40.541 | 150.585 | 3.714x |
+| `hashjoin_10k_1m` | 1M | 4.417 | 21.527 | 4.874x |
+| `hashjoin_10k_1m` | 10M | 46.353 | 150.111 | 3.238x |
+| `h3_cell_to_parent` | 100K | 2.496 | 13.549 | 5.429x |
+| `h3_cell_to_parent` | 1M | 4.310 | 31.147 | 7.226x |
+| `h3_cell_to_parent` | 10M | 14.694 | 185.565 | 12.629x |
 
-The stricter performance analyzer intentionally exited 1, so this artifact is
-not relabeled as a complete performance-program pass. Native-decline parity
-passed 5 of 15 cells. Five cells exceeded a descriptive median or p95 bound;
-another five stayed inside those bounds but did not establish non-inferiority
-with ten pairs. The descriptive failures were `grouped_agg_int4` at 10K and
-100K, `predicate_expression_grouped_agg_int4` at 10K, `hash_join` at 10K,
-and `reduce_f64_minmax` at 100K. The non-inferiority-only failures were
-`predicate_expression_grouped_agg_int4` at 100K, `mixed_join_agg_int4` at
-10K, `ssbm_resident_int4_star` at 10K, `hashjoin_10k_1m` at 10K, and
-`h3_cell_to_parent` at 10K. The clearest fixed-cost candidates are the 100K
-grouped, 10K predicate, and 100K FP64 cells. The 10K grouped p95 and 10K
-`hash_join` arm-order results are too tail-sensitive to attribute without a
-larger instrumented run.
+The stricter performance analyzer exited 1, so this artifact is not a complete
+performance-program or release pass. Native-decline parity passed 4 of 15
+cells and failed 11. Positive deltas mean that loading pg_accel made the
+native execution slower than the disabled PostgreSQL arm. Millisecond deltas
+are exact from the analyzer; percentages are rounded to three decimals:
 
-Two same-path 10M medians triggered cross-candidate diagnostics. The
-`hash_join` median moved 12.6 percent, but its mean moved only 3.4 percent,
-p95 improved 2.9 percent, and mean PostgreSQL-normalized speedup improved
-0.85 percent, from `3.329x` to `3.357x`. The `hashjoin_10k_1m` mean moved
-17.0 percent in this run, but both SQL lanes execute `resident_groupagg`, not
-the retired row-returning hash-join path. The active
-`pgaccel-kernels/src/grouped_agg.cpp` blob is identical between the baseline
-and candidate (`01e324a0f8e7df87601641e560237b2ff30b7e11`). Candidate
-resident-load time was lower than the baseline, 485.834 versus 498.947 ms; the
-artifact does not expose device-dispatch latency. The run therefore establishes
-an observation to reproduce, not a source-code regression. PostgreSQL controls
-also changed materially across the two dates, so speedup-ratio movement alone
-is not attribution.
+| Declined workload | Rows | Median delta | p95 delta |
+|---|---:|---:|---:|
+| `grouped_agg_int4` | 10K | 0.365896 ms (7.931%) | 0.32121845 ms (6.512%) |
+| `grouped_agg_int4` | 100K | 0.124771 ms (1.973%) | 0.4037478 ms (5.975%) |
+| `predicate_expression_grouped_agg_int4` | 10K | 0.2435205 ms (5.294%) | 0.2607519 ms (5.302%) |
+| `predicate_expression_grouped_agg_int4` | 10M | 0.4116045 ms (0.457%) | 18.70354945 ms (20.159%) |
+| `mixed_join_agg_int4` | 10K | 0.319979 ms (6.638%) | 0.4949144 ms (9.724%) |
+| `mixed_join_agg_int4` | 10M | -0.0329375 ms (-0.014%) | 12.6405474 ms (5.222%) |
+| `ssbm_resident_int4_star` | 10K | 0.5467285 ms (9.241%) | 0.74331425 ms (11.668%) |
+| `hash_join` | 10K | 0.299354 ms (6.276%) | 0.2410664 ms (4.739%) |
+| `hashjoin_10k_1m` | 10K | 0.163125 ms (3.383%) | 0.3536182 ms (6.822%) |
+| `hashjoin_10k_1m` | 100K | 0.2834585 ms (4.115%) | 0.12314215 ms (1.657%) |
+| `h3_cell_to_parent` | 10K | 0.3809365 ms (3.469%) | 0.2750208 ms (2.403%) |
 
-Immediate performance work is deliberately narrow:
+The failure shape separates into two investigations. The small declines are
+consistent with fixed planner or hook overhead and must be localized with the
+existing stage counters before changing code. The two 10M decline failures are
+p95-only tail events; their medians satisfy the descriptive bound, so they need
+tail instrumentation and more pairs rather than small-query tuning.
 
-1. Repeat the native-parity failures plus one passing control with five
-   warmups and at least 20 balanced pairs. Use `hashjoin_10k_1m` at 100K as
-   the passing control, and record
-   `pg_accel_planner_overhead_us()` outside the timed query for every pair.
-2. Repeat only `hash_join` and `hashjoin_10k_1m` at 10M with ten warmups and
-   30 balanced pairs. If either lane remains more than 10 percent slower
-   in both absolute and PostgreSQL-normalized mean, compare old and current
-   exact modules in same-host ABBA blocks before changing production code.
-3. Apply P0A only where counters identify planner work. Then proceed through
-   P1-P7, retaining fail-closed admission until each optimization earns its
-   boundary with new evidence.
+Three selected cells show severe same-path candidate movement versus the
+immutable historical baseline: `ssbm_resident_int4_star` at 100K was 39.244%
+slower in median and 10.871% slower at p95, `hash_join` at 1M was 12.779%
+slower in median and 15.201% slower at p95, and `hashjoin_10k_1m` at 10M was
+13.833% slower in median and 11.855% slower at p95. All still clear `1.15x`,
+and cross-date PostgreSQL controls also moved materially, so these are
+regression signals rather than source attribution.
+
+Immediate performance work, in priority order:
+
+1. Capture planner-stage counters for the native-decline failures and a passing
+   control before changing production behavior.
+2. Use those counters to localize the fixed overhead in the small declines;
+   prepare changes only for stages that account for the measured cost.
+3. Re-run the 10M native-decline failures as a tail-only study with enough
+   balanced pairs to characterize p95; do not treat them as median regressions.
+4. Before changing code to address a selected-path regression, run same-host,
+   exact-module ABBA blocks for `ssbm_resident_int4_star` at 100K,
+   `hash_join` at 1M, and `hashjoin_10k_1m` at 10M. Instrument the winning path
+   during those blocks.
+5. Preserve every currently selected cell at `>=1.15x` through all changes.
+   Keep fail-closed admission until each changed boundary earns a new complete
+   invariant proof.
 
 ## Historical measured baseline
 
@@ -251,7 +260,7 @@ added with the same floor and boundary evidence.
 
 ### P0A: Make native declines effectively free
 
-Status: open and first priority. The final matrix passed 5 of 15 native-parity
+Status: open and first priority. The final matrix passed 4 of 15 native-parity
 cells under the predeclared statistical gate; no waiver is applied.
 
 Fail-closed admission is only a complete performance policy when queries that

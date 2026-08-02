@@ -18,11 +18,20 @@ The current local tree has passed these engineering gates:
 - Native CTest: 32/32.
 - External SQL suite: 54/54 files and 293/293 semantic assertions.
 - Production residency-ledger exactness gate: PASS.
+- Final warm-matrix validator: 29/29 correctness and path classification,
+  14/14 selected cells at or above 1.15x, minimum selected speedup 1.839373694x,
+  and zero stock fallback.
 
-These results are local engineering evidence. They do not substitute for an
-exact-candidate benchmark artifact, hosted CI, clean-machine installation, or
-release sign-off. No current source SHA or final benchmark result is asserted in
-this file.
+The final matrix is bound to commit
+`9c53d41702a10caf5fd7932251aa22b126ef8136`, tree
+`239429e220544b789141144463e441759f4a177b`, and immutable-style artifact
+`.codex/scratch/final-warm-benchmark-9c53d417-PREPARED-20260802T063630Z`.
+Its 1,014-entry terminal `SHA256SUMS` seal hashes to
+`230e6bd8f43a31040c838e69dd46f3405a1ba4082c62c265b502729d53aff855`.
+The validator passed, but the stricter performance analyzer exited 1 because
+native-decline parity passed only 4/15 cells. Performance qualification is
+therefore still open. Local results do not substitute for hosted CI,
+clean-machine installation, or release sign-off.
 
 ## Non-Negotiable Invariants
 
@@ -50,28 +59,56 @@ this file.
 
 ## P0: Final Performance Qualification
 
-- [ ] Freeze the release candidate and record its real source SHA, toolchain,
+- [x] Freeze the measured candidate and record its real source SHA, toolchain,
   PostgreSQL version, device/runtime metadata, benchmark population, settings,
-  seed, and independently selected write-once workload set. Source or population
-  changes invalidate the freeze and require a new selection.
-- [ ] Run the complete 29-cell final warm matrix on qualified Metal hardware.
-  Require 29/29 correctness and path classification, every production-selected
-  cell at least 1.15x PostgreSQL, every decline at zero dispatch with its exact
-  reason, all native-parity cells green, zero fallback, and zero crash. Preserve
-  raw paired samples, plans, counters, outputs, and environment metadata in an
-  immutable artifact.
-- [ ] Reconcile any losses measured by that exact-candidate run. A selected loss
-  must be optimized above the floor or moved behind a truthful measured decline;
-  a native-decline loss must have planner-hook overhead reduced until parity
-  passes. Do not carry historical loss labels or numbers forward without a
-  reproducible result from the frozen candidate.
+  seed, and independently selected write-once workload set. The freeze and seal
+  are recorded above; source or population changes require a new selection.
+- [x] Execute and validate the complete 29-cell final warm matrix on qualified
+  Metal hardware. The validator passed 29/29 with 14/14 selected winners, zero
+  fallback, exact decline reasons, and complete raw evidence. This closes matrix
+  execution only; the stricter native-parity analyzer remains release-blocking.
+
+The 11 exact native-parity failures are extension-enabled native minus matched
+extension-disabled PostgreSQL. All also failed the predeclared paired
+non-inferiority test.
+
+| Native lane | Scale | Median delta | p95 delta |
+|---|---:|---:|---:|
+| `grouped_agg_int4` | 10K | +0.365896 ms (+7.931%) | +0.321218 ms (+6.512%) |
+| `grouped_agg_int4` | 100K | +0.124771 ms (+1.973%) | +0.403748 ms (+5.975%) |
+| `predicate_expression_grouped_agg_int4` | 10K | +0.243520 ms (+5.294%) | +0.260752 ms (+5.302%) |
+| `predicate_expression_grouped_agg_int4` | 10M | +0.411604 ms (+0.457%) | +18.703549 ms (+20.159%) |
+| `mixed_join_agg_int4` | 10K | +0.319979 ms (+6.638%) | +0.494914 ms (+9.724%) |
+| `mixed_join_agg_int4` | 10M | -0.032937 ms (-0.014%) | +12.640547 ms (+5.222%) |
+| `ssbm_resident_int4_star` | 10K | +0.546729 ms (+9.241%) | +0.743314 ms (+11.668%) |
+| `hash_join` | 10K | +0.299354 ms (+6.276%) | +0.241066 ms (+4.739%) |
+| `hashjoin_10k_1m` | 10K | +0.163125 ms (+3.383%) | +0.353618 ms (+6.822%) |
+| `hashjoin_10k_1m` | 100K | +0.283459 ms (+4.115%) | +0.123142 ms (+1.657%) |
+| `h3_cell_to_parent` | 10K | +0.380936 ms (+3.469%) | +0.275021 ms (+2.403%) |
+
+- [ ] Capture per-query planner-stage calls and elapsed time for every failing
+  native cell, including structural recognition, catalog/syscache, statistics,
+  residency, device, cost, and final rejection, before changing admission code.
+- [ ] Eliminate fixed planner-hook overhead on the small 10K/100K declines by
+  moving immutable structural rejects ahead of catalog, residency, device, and
+  expression work where semantics permit. Repeat the exact paired parity gate.
+- [ ] Investigate only the p95 tail on the two failing 10M native cells. Their
+  medians are within 0.5%; do not redesign or retune their production path from
+  tail evidence until stage counters identify a repeatable cause.
+- [ ] Run focused same-host balanced ABBA repeats before changing selected code
+  for the three real same-path median regressions: `ssbm_resident_int4_star`
+  100K (+39.244%), `hash_join` 1M (+12.779%), and `hashjoin_10k_1m` 10M
+  (+13.833%). Separate product latency from PostgreSQL/environment movement.
+- [ ] Keep every currently selected cell above the 1.15x floor throughout
+  remediation. A selected regression may be optimized or truthfully declined,
+  but thresholds, correctness, dispatch, consumption, and fallback rules may
+  not be weakened.
 - [ ] Re-measure admission boundaries around every changed lane at neighboring
   row counts, cardinalities, selectivities, widths, output bounds, batch counts,
   and residency states. Planner admission and benchmark classification must be
   generated from the same released performance envelope.
 
-Likely optimization work is contingent on the final measurements, not currently
-claimed as a regression:
+Lower-priority optimization remains contingent on the focused repeats above:
 
 - Make structural native declines effectively constant-time before catalog,
   residency, device, expression-walk, or cost work where semantics permit.
