@@ -4,34 +4,24 @@ This file contains unfinished work only. Completed implementation history is in
 Git and [CHANGELOG.md](CHANGELOG.md). A selected pg_accel plan must dispatch
 real GPU work; unsupported or unprofitable shapes must remain PostgreSQL-native.
 
-## Local Release Gates
+## Post-Rebuild Performance Program
 
-- Complete the production GPU-only source audit and repair every real
-  host-compute violation. Do not whitelist, hide, or relabel CPU execution as a
-  pg_accel kernel path.
-- Complete the sealed Rust, C++/SYCL, and SQL coverage bundle and reach the
-  release threshold for owned executable code without synthetic inputs or
-  mutable scope.
-- Run the full Phase 9 live workload matrix against the exact release-candidate
-  binary. Every cell needs an exact result oracle plus either selected resident
-  GPU dispatch or the expected visible native-decline reason with zero kernel
-  delta.
-- Run the unprivileged default-admission warm performance matrix, including
-  automatic load, explicit pinning, randomized nearby shapes, concurrency,
-  memory pressure, and stress. Retain only selected lanes whose warm median is
-  at least `1.15x` PostgreSQL-native with full correctness, dispatch, and
-  provenance evidence.
-- Run the final PostgreSQL 18 and PostgreSQL 19 beta build, test, package, and
-  clean-install matrix with binary provenance and backend-log checks.
-- Produce fresh Metal release artifacts for correctness, fork/archive stress,
-  cancellation, invalidation, residency budget, benchmark evidence, and final
-  clean shutdown. The exact-candidate stress artifact must index fail-closed
-  before/after project-owned AdaptiveCpp JIT/archive-cache file-count and
-  byte-size snapshots, per-class cold first-dispatch latency, and warm-cache
-  sample totals/maxima for regression review. This is runtime/JIT-cache cold
-  evidence, not an OS page-cache purge claim. Do not substitute older local
-  logs or infer a timing pass from a measurement that has no approved release
-  threshold.
+- Close the native-decline parity gate in
+  [docs/PERFORMANCE_PLAN.md](docs/PERFORMANCE_PLAN.md). The final Resident v2
+  matrix proved every selected GPU cell above the `1.15x` floor, but the
+  stricter extension-enabled native comparison passed only 5 of 15 cells.
+  Capture the existing planner-overhead counter per query, remove measurable
+  hook/classification overhead, and repeat the paired gate before release.
+- Recheck only the flagged 10M `hash_join` and `hashjoin_10k_1m` resident
+  grouped-aggregate cells under an exact-SHA, interleaved run. Their active
+  kernel is unchanged and the first run does not establish a source
+  regression; optimize the grouped lifecycle only if the focused run
+  reproduces the loss.
+- Execute the remaining measured optimization sequence in
+  [docs/PERFORMANCE_PLAN.md](docs/PERFORMANCE_PLAN.md). Production admission
+  must remain fail-closed, and no new lane becomes selectable until it proves
+  correctness, real GPU dispatch, zero fallback, and at least `1.15x` warm
+  speedup over the matched PostgreSQL plan.
 
 ## Environment-Deferred Evidence
 
@@ -77,12 +67,3 @@ from the current Metal/no-GPU environments.
 - Install PG-Strom on the same PostgreSQL/CUDA host and capture like-for-like
   workload, configuration, correctness, and timing evidence.
 - Add CUDA CI and release artifacts before advertising NVIDIA as validated.
-
-## Versioned Toolchain
-
-- PostgreSQL 18 is the default target; PostgreSQL 19 beta remains a required
-  preview build/test target, not a package-availability promise.
-- AdaptiveCpp is pinned exactly by `.acpp-version`; scripts and documentation
-  must not carry a second independent pin.
-- soft-fp64 is sourced from `yocontra/soft-fp` tag `v1.3.0` through the pinned
-  AdaptiveCpp toolchain.

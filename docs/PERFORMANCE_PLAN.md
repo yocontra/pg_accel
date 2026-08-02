@@ -34,6 +34,78 @@ family becomes production-selectable, its full boundary matrix must adopt the
 same `1.15x` floor; current raster eligibility and other future envelopes remain
 explicit reconciliation work rather than implied coverage by the 29 cells.
 
+## Final Resident v2 matrix
+
+The final architecture candidate is
+`e7dc9f0b435929332d1f0fecafb0f62a312316ba`, tree
+`a2de0f2c1642fdb71418c8c553c1afa38dcfcd0a`. Its immutable warm matrix is
+`.codex/scratch/final-warm-benchmark-e7dc9f0b-PREPARED-20260801T233605Z`,
+with terminal `SHA256SUMS` digest
+`9c44ec67710f0177f731df204e3bfacee8a94637ae81be1e8a4188fd0411040d`.
+The contract validator passed all 29 correctness and path-classification cells:
+14 of 14 selected cells cleared `1.15x`, all 15 declines had their expected
+visible reason and zero kernel delta, and stock fallback was zero. The minimum
+selected speedup was `2.400x`.
+
+| Workload | Rows | pg_accel ms | PostgreSQL ms | Speedup |
+|---|---:|---:|---:|---:|
+| `grouped_agg_int4` | 1M | 2.603 | 20.500 | 7.876x |
+| `predicate_expression_grouped_agg_int4` | 1M | 3.934 | 14.281 | 3.630x |
+| `mixed_join_agg_int4` | 100K | 2.014 | 6.935 | 3.443x |
+| `mixed_join_agg_int4` | 1M | 3.387 | 28.039 | 8.278x |
+| `ssbm_resident_int4_star` | 100K | 4.476 | 10.742 | 2.400x |
+| `ssbm_resident_int4_star` | 1M | 6.554 | 55.074 | 8.403x |
+| `hash_join` | 100K | 1.785 | 6.152 | 3.447x |
+| `hash_join` | 1M | 3.904 | 18.924 | 4.847x |
+| `hash_join` | 10M | 45.353 | 141.133 | 3.112x |
+| `hashjoin_10k_1m` | 1M | 4.027 | 20.339 | 5.051x |
+| `hashjoin_10k_1m` | 10M | 46.627 | 142.667 | 3.060x |
+| `h3_cell_to_parent` | 100K | 2.246 | 11.752 | 5.231x |
+| `h3_cell_to_parent` | 1M | 4.014 | 28.778 | 7.170x |
+| `h3_cell_to_parent` | 10M | 13.473 | 173.654 | 12.889x |
+
+The stricter performance analyzer intentionally exited 1, so this artifact is
+not relabeled as a complete performance-program pass. Native-decline parity
+passed 5 of 15 cells. Five cells exceeded a descriptive median or p95 bound;
+another five stayed inside those bounds but did not establish non-inferiority
+with ten pairs. The descriptive failures were `grouped_agg_int4` at 10K and
+100K, `predicate_expression_grouped_agg_int4` at 10K, `hash_join` at 10K,
+and `reduce_f64_minmax` at 100K. The non-inferiority-only failures were
+`predicate_expression_grouped_agg_int4` at 100K, `mixed_join_agg_int4` at
+10K, `ssbm_resident_int4_star` at 10K, `hashjoin_10k_1m` at 10K, and
+`h3_cell_to_parent` at 10K. The clearest fixed-cost candidates are the 100K
+grouped, 10K predicate, and 100K FP64 cells. The 10K grouped p95 and 10K
+`hash_join` arm-order results are too tail-sensitive to attribute without a
+larger instrumented run.
+
+Two same-path 10M medians triggered cross-candidate diagnostics. The
+`hash_join` median moved 12.6 percent, but its mean moved only 3.4 percent,
+p95 improved 2.9 percent, and mean PostgreSQL-normalized speedup improved
+0.85 percent, from `3.329x` to `3.357x`. The `hashjoin_10k_1m` mean moved
+17.0 percent in this run, but both SQL lanes execute `resident_groupagg`, not
+the retired row-returning hash-join path. The active
+`pgaccel-kernels/src/grouped_agg.cpp` blob is identical between the baseline
+and candidate (`01e324a0f8e7df87601641e560237b2ff30b7e11`). Candidate
+resident-load time was lower than the baseline, 485.834 versus 498.947 ms; the
+artifact does not expose device-dispatch latency. The run therefore establishes
+an observation to reproduce, not a source-code regression. PostgreSQL controls
+also changed materially across the two dates, so speedup-ratio movement alone
+is not attribution.
+
+Immediate performance work is deliberately narrow:
+
+1. Repeat the native-parity failures plus one passing control with five
+   warmups and at least 20 balanced pairs. Use `hashjoin_10k_1m` at 100K as
+   the passing control, and record
+   `pg_accel_planner_overhead_us()` outside the timed query for every pair.
+2. Repeat only `hash_join` and `hashjoin_10k_1m` at 10M with ten warmups and
+   30 balanced pairs. If either lane remains more than 10 percent slower
+   in both absolute and PostgreSQL-normalized mean, compare old and current
+   exact modules in same-host ABBA blocks before changing production code.
+3. Apply P0A only where counters identify planner work. Then proceed through
+   P1-P7, retaining fail-closed admission until each optimization earns its
+   boundary with new evidence.
+
 ## Historical measured baseline
 
 The immutable historical comparison baseline is commit
@@ -41,8 +113,8 @@ The immutable historical comparison baseline is commit
 `9c13ffdb1b9e907904f30acc4872b51167799331`, from
 `.codex/scratch/final-warm-benchmark-68163da6-20260721T191432Z`. Times are warm
 medians in milliseconds from ten measured iterations after five warmups.
-These rows describe that historical candidate only; they are not results for
-the release candidate that is still being finalized.
+These rows describe that historical candidate only; the final-candidate results
+and their stricter diagnostic disposition are recorded above.
 
 | Workload | Rows | pg_accel | PostgreSQL | Speedup | Conclusion |
 |---|---:|---:|---:|---:|---|
@@ -67,19 +139,21 @@ reconciled before calling the small lanes supported.
 
 ### Regression interpretation
 
-- The final 1M cells all remain strong winners. Against the same-candidate
-  ten-iteration targeted-six artifact, pg_accel medians are unchanged or
-  faster while PostgreSQL is 10-28 percent faster in several cells. A smaller
-  speedup ratio in that comparison is not a pg_accel latency regression.
+- The historical baseline's 1M cells all remain strong winners. Against the
+  same-candidate ten-iteration targeted-six artifact, pg_accel medians are
+  unchanged or faster while PostgreSQL is 10-28 percent faster in several
+  cells. A smaller speedup ratio in that comparison is not a pg_accel latency
+  regression.
 - A same-commit three-iteration acceptance artifact recorded faster
   `mixed_join_agg_int4` and `ssbm_resident_int4_star` medians. The final run is
   19.9 and 27.1 percent slower respectively. Because the source is identical
   and the earlier sample is small, this is observed run-to-run loss, not a
   proven code regression. Repeated randomized runs must determine whether
   residency state, command-queue state, thermals, or sample count explains it.
-- A pre-v2 fixed hash-join artifact recorded 19.464 ms at 10M versus the current
-  40.720 ms. That older artifact did not record a source SHA, so it is useful
-  profiling evidence, not a release comparison or product claim.
+- A pre-v2 fixed hash-join artifact recorded 19.464 ms at 10M versus that
+  historical candidate's 40.720 ms. That older artifact did not record a
+  source SHA, so it is useful profiling evidence, not a release comparison or
+  product claim.
 - Historical exact scalar FP64 min/max and small exact resident lanes show that
   useful capabilities were previously reachable. Their current absence is a
   capability regression to investigate, not proof that the old implementation
@@ -148,6 +222,10 @@ can promote a forced candidate into the production envelope.
 
 ### P0: Make admission truthful
 
+Status: the selected-cell exit criterion is complete for the current 29-cell
+matrix. All 14 selected cells pass and the three known losing 10M dense lanes
+now decline visibly. The typed-envelope consolidation below remains open.
+
 The baseline artifact selected three losing 10M lanes. Current production code
 mitigates that failure by declining exact dense integer SUM/COUNT descriptors
 above the proven one-shot row maximum with
@@ -173,10 +251,13 @@ added with the same floor and boundary evidence.
 
 ### P0A: Make native declines effectively free
 
+Status: open and first priority. The final matrix passed 5 of 15 native-parity
+cells under the predeclared statistical gate; no waiver is applied.
+
 Fail-closed admission is only a complete performance policy when queries that
-remain PostgreSQL-native do not pay meaningful extension overhead. Add a third
-paired benchmark arm for every native-decline sentinel: pg_accel loaded and
-enabled, but production planning declines the query. Compare it with the
+remain PostgreSQL-native do not pay meaningful extension overhead. Retain the
+third paired benchmark arm for every native-decline sentinel: pg_accel loaded
+and enabled, but production planning declines the query. Compare it with the
 existing pg_accel-disabled PostgreSQL arm under the same randomized order,
 session settings, prepared fixture, and output-consumption path.
 
@@ -192,9 +273,9 @@ session settings, prepared fixture, and output-consumption path.
    command type, relation/path kind, supported aggregate/operator identity, and
    device availability. Preserve exact visible decline reasons in evidence even
    when the production fast path uses a compact reason code.
-4. Extend the final matrix analyzer to enforce the native-parity bounds above.
-   Report absolute median and p95 deltas as well as ratios so sub-millisecond
-   noise cannot be mistaken for a product regression.
+4. Keep final-matrix analyzer enforcement of the native-parity bounds above.
+   Continue reporting absolute median and p95 deltas as well as ratios so
+   sub-millisecond noise cannot be mistaken for a product regression.
 
 Exit criterion: every decline sentinel passes the paired extension-on versus
 extension-off parity gate, and no planner hook stage accounts for an unresolved
@@ -404,8 +485,8 @@ The performance program is complete for a candidate only when:
   dispatch, consumed output, exact provenance, and zero-fallback/crash proof;
 - every production-declined cell clears the extension-enabled native parity
   gate, with no unresolved hook or classification overhead regression;
-- the three current 10M aggregate failures either clear the invariant after the
-  lifecycle work or decline in production;
+- the three historically losing 10M aggregate lanes either clear the invariant
+  after the lifecycle work or decline in production;
 - small exact thresholds and FP64 min/max have measured select/decline outcomes;
 - fixed count-join descriptor meets its recovery target while retaining its
   current qualified win;
@@ -420,3 +501,9 @@ fixed count-join batching, persistent atomic dense execution, artifact and H3
 memory/cancellation work, threshold and FP64 reconciliation, then the full
 repeated matrix. Admission remains fail-closed throughout; optimization earns
 selection only after measurement.
+
+The Resident v2 architecture rebuild and its selected-GPU admission gate are
+complete at the candidate above. This broader performance program remains open
+until the native-parity and repeatability gates in this section pass; it is the
+next optimization program, not evidence that a losing GPU path is currently
+selected.
