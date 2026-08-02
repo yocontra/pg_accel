@@ -47,6 +47,10 @@ pgaccel-kernels/build/
 __pycache__/
 *.py[cod]
 
+# LLVM source-coverage output
+*.profraw
+*.profdata
+
 # Machine-local agent/editor permissions
 /.claude/settings.local.json
 
