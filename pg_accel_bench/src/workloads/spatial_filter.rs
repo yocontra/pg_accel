@@ -3,8 +3,9 @@ use super::Workload;
 /// Tests `GpuSpatial` with a single-table spatial filter using `ST_Intersects`.
 ///
 /// This is the canonical spatial predicate benchmark: filter a large point table
-/// against a fixed reference polygon. Exercises the GPU point-in-ring kernel on
-/// a sequential scan without join overhead.
+/// against a fixed reference polygon. It exercises the point-in-ring planner
+/// shape on a sequential scan; the current descriptor-capability gate keeps the
+/// measured aggregate lane PostgreSQL-native.
 pub struct SpatialFilter;
 
 impl Workload for SpatialFilter {
@@ -42,7 +43,8 @@ impl Workload for SpatialFilter {
 
     fn query_sql(&self) -> String {
         // Complex 15-vertex polygon covering roughly central Manhattan.
-        // Without an index, all rows must be evaluated → GPU wins on compute.
+        // Without an index, all rows must be evaluated. The release matrix
+        // verifies that the dark descriptor executor declines this lane cleanly.
         "SELECT count(*) FROM bench_spatial_pts \
          WHERE ST_Intersects(geom, \
            ST_SetSRID(ST_MakePolygon(ST_GeomFromText(\

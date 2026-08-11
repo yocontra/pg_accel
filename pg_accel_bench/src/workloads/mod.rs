@@ -2791,15 +2791,12 @@ fn spatial_threshold_matrix_entry(
 ) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = spatial_matrix_profile(name)?;
     let work_product = (profile.vertices as u64).saturating_mul(rows as u64);
-    let current_planner_decline = if name == "spatial_resident_agg_candidate" && rows != 1_000_000 {
-        Some("generic_descriptor_capability")
-    } else if name == "spatial_filter" && rows == 100_000 {
-        Some("shape_unsupported_predicate")
-    } else if phase6_spatial_generic_descriptor_cell(name, rows) {
-        Some("generic_descriptor_capability")
-    } else {
-        None
-    };
+    let descriptor_capability_decline = (name == "spatial_resident_agg_candidate"
+        && rows != 1_000_000)
+        || (name == "spatial_filter" && rows == 100_000)
+        || phase6_spatial_generic_descriptor_cell(name, rows);
+    let current_planner_decline =
+        descriptor_capability_decline.then_some("generic_descriptor_capability");
     let expectation = current_planner_decline.map_or_else(
         || {
             spatial_matrix_expectation(
@@ -4021,7 +4018,7 @@ mod tests {
                 "sort_standalone_topk_no_gpu_kernel",
             ),
             ("h3_bulk", 100_000, "shape_unsupported_rte"),
-            ("spatial_filter", 100_000, "shape_unsupported_predicate"),
+            ("spatial_filter", 100_000, "generic_descriptor_capability"),
             ("raster_reclass", 100, "shape_unsupported_rte"),
         ] {
             let entry = benchmark_threshold_matrix_entry(name, rows)
