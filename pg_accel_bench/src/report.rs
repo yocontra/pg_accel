@@ -6211,6 +6211,74 @@ mod tests {
     }
 
     #[test]
+    fn markdown_binds_settings_to_the_observed_postmaster_start() {
+        let mut report = mock_report(Vec::new());
+        report.postmaster_start_time = Some("2026-08-11 12:34:56+00".to_owned());
+
+        let markdown = report.to_markdown();
+
+        assert!(markdown.contains("Postmaster start: `2026-08-11 12:34:56+00`"));
+        assert!(markdown.contains("guaranteed to match the running postmaster"));
+    }
+
+    #[test]
+    fn report_edge_helpers_cover_zero_timings_and_unclassified_plans() {
+        let zero_iteration = IterationResult {
+            accel_ms: 0.0,
+            parallel_ms: 1.0,
+            accel_first: true,
+            cache_purge: CachePurgeState::NotRequested,
+            cache_state: CacheState::Warm,
+        };
+        let mut workload = WorkloadResult::from_iterations(
+            "edge_helpers".to_owned(),
+            "edge helpers".to_owned(),
+            "test".to_owned(),
+            "unclassified".to_owned(),
+            1,
+            vec![zero_iteration],
+            false,
+        );
+        assert!(workload.speedup_vs_parallel.is_nan());
+        assert!(workload.speedup_median_vs_parallel.is_nan());
+        let warm = workload.warm_summary.expect("warm summary");
+        assert!(warm.speedup_mean_vs_parallel.is_nan());
+        assert!(warm.speedup_median_vs_parallel.is_nan());
+
+        assert_eq!(
+            classify_gpu_resident_pipeline_status(
+                &workload, None, false, false, false, false, false,
+            ),
+            GpuResidentPipelineStatus::NotReported
+        );
+        assert!(workload_or_plan_mentions_accel_function(
+            &workload,
+            "Aggregate over h3_grid_disk(cell, 1)"
+        ));
+
+        workload.speedup_vs_parallel = 1.25;
+        workload.speedup_median_vs_parallel = f64::NAN;
+        assert!((no_dispatch_speedup(&workload) - 1.25).abs() < f64::EPSILON);
+        assert_eq!(timing_skew_fraction(f64::NAN), None);
+        assert_eq!(
+            NoDispatchAuditStatus::TimingSkewAndPlanMismatch.as_str(),
+            "timing_skew_and_plan_mismatch"
+        );
+
+        let blocks = pg_accel_custom_scan_blocks(
+            "Custom Scan (GpuAccelAgg)\n\n  GPU Resident Pipeline: true\nSeq Scan on t",
+        );
+        assert_eq!(blocks.len(), 1);
+        assert!(direct_custom_scan_property_lines(&[]).is_empty());
+
+        workload.p_value_vs_parallel = 0.0;
+        workload.cohens_d_vs_parallel = 0.1;
+        let counts = classify_significance(&[&workload], 1, 0.05);
+        assert_eq!(counts.effect_rejected, 1);
+        assert_eq!(counts.total_sig, 0);
+    }
+
+    #[test]
     fn legacy_report_json_defaults_to_allowing_headline() {
         let report = mock_report(Vec::new());
         let mut value = serde_json::to_value(report).expect("serialize report");
@@ -6343,6 +6411,39 @@ mod tests {
                 .contains("probe is missing")
         );
 
+        let mut invalid_probe = workload.clone();
+        let invalid = invalid_probe
+            .artifact_lifecycle_probe
+            .as_mut()
+            .expect("fixture has lifecycle probe");
+        invalid.phase = "steady_state".to_owned();
+        invalid.error = Some("probe failed".to_owned());
+        let detail = resident_lifecycle_evidence_error(&invalid_probe)
+            .expect("invalid lifecycle probe must fail");
+        assert!(detail.contains("phase=steady_state"));
+        assert!(detail.contains("error=probe failed"));
+
+        let mut empty_build = workload.clone();
+        let lifecycle = empty_build
+            .artifact_lifecycle_probe
+            .as_mut()
+            .expect("fixture has lifecycle probe");
+        lifecycle.artifact.builds = 0;
+        lifecycle.artifact.rebuilds = 0;
+        assert!(
+            resident_lifecycle_evidence_error(&empty_build)
+                .expect("lifecycle without a build must fail")
+                .contains("did not prove an explicit non-empty refresh")
+        );
+
+        let mut short_steady = workload.clone();
+        short_steady.artifact_steady_state_captures.pop();
+        assert!(
+            resident_lifecycle_evidence_error(&short_steady)
+                .expect("incomplete steady evidence must fail")
+                .contains("steady-state evidence covers 9 of 10 warm pairs")
+        );
+
         let mut rebuilt_steady = workload.clone();
         rebuilt_steady.artifact_steady_state_captures[0]
             .artifact
@@ -6360,6 +6461,31 @@ mod tests {
                 .expect("missing combined calibration must fail")
                 .contains("combined end-to-end")
         );
+    }
+
+    #[test]
+    fn benchmark_ship_gate_surfaces_missing_resident_lifecycle_evidence() {
+        let mut workload = with_valid_resident_lifecycle(mock_workload_result(
+            "grouped_agg_int4",
+            1_000_000,
+            10.0,
+            20.0,
+        ));
+        workload.resident_lane = true;
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 10;
+        workload.accel_output_rows_consumed = 101;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.plan_snippet = Some("Custom Scan (pg_accel)\n".to_owned());
+        workload.artifact_lifecycle_probe = None;
+
+        let failures = mock_report(vec![workload]).evaluate_benchmark_ship_gate();
+
+        assert!(failures.iter().any(|failure| {
+            failure.kind == BenchmarkShipGateFailureKind::ResidentLifecycleEvidenceMissing
+                && failure.detail.contains("lifecycle probe is missing")
+        }));
     }
 
     fn with_cache_mode(mut report: BenchReport, mode: &str) -> BenchReport {
@@ -9468,6 +9594,169 @@ mod tests {
     }
 
     #[test]
+    fn test_benchmark_failure_ledger_includes_h3_and_stock_fallback_sources() {
+        let h3 = mock_h3_native_decline(
+            "h3_cell_to_parent",
+            1_000_000,
+            "h3_parent_grouped_count_unexpected_native_decline",
+        );
+        let mut stock = mock_workload_result("stock_fallback_probe", 100_000, 10.0, 20.0);
+        stock.pg_accel_stock_exec_delta = 3;
+        let ledger = mock_report(vec![h3, stock]).benchmark_failure_ledger();
+
+        let h3_row = ledger
+            .rows
+            .iter()
+            .find(|row| row.workload == "h3_cell_to_parent")
+            .expect("H3 gate failure must enter the ledger");
+        assert!(h3_row.sources.contains(&"h3_lane_gate".to_owned()));
+        assert_eq!(h3_row.next_track, "h3_cache_evidence_and_lane_policy");
+
+        let stock_row = ledger
+            .rows
+            .iter()
+            .find(|row| row.workload == "stock_fallback_probe")
+            .expect("stock fallback must enter the ledger");
+        assert!(
+            stock_row
+                .sources
+                .contains(&"stock_executor_fallback".to_owned())
+        );
+        assert!(
+            stock_row
+                .details
+                .iter()
+                .any(|detail| detail.contains("fallback count was 3"))
+        );
+    }
+
+    #[test]
+    fn test_failure_labels_and_ledger_helper_edge_classes() {
+        let expected_labels = [
+            (BenchmarkShipGateFailureKind::Crash, "crash"),
+            (
+                BenchmarkShipGateFailureKind::SelectedPlanMissedDispatch,
+                "selected_plan_missed_dispatch",
+            ),
+            (
+                BenchmarkShipGateFailureKind::SelectedPlanNotGpuResident,
+                "selected_plan_not_gpu_resident",
+            ),
+            (
+                BenchmarkShipGateFailureKind::DispatchedBelowParity,
+                "dispatched_below_parity",
+            ),
+            (
+                BenchmarkShipGateFailureKind::ExpectedWinnerMissedSelection,
+                "expected_winner_missed_selection",
+            ),
+            (
+                BenchmarkShipGateFailureKind::ExpectedWinnerMissingEvidence,
+                "expected_winner_missing_evidence",
+            ),
+            (
+                BenchmarkShipGateFailureKind::ExpectedWinnerBelowThreshold,
+                "expected_winner_below_threshold",
+            ),
+            (
+                BenchmarkShipGateFailureKind::ExpectedWinnerMissingGroupAggLogicalSpec,
+                "expected_winner_missing_groupagg_logical_spec",
+            ),
+            (
+                BenchmarkShipGateFailureKind::ExpectedWinnerPhysicalKernelModeUnverified,
+                "expected_winner_physical_kernel_mode_unverified",
+            ),
+            (
+                BenchmarkShipGateFailureKind::ExpectedWinnerMissingCacheEvidence,
+                "expected_winner_missing_cache_evidence",
+            ),
+            (
+                BenchmarkShipGateFailureKind::ResidentLifecycleEvidenceMissing,
+                "resident_lifecycle_evidence_missing",
+            ),
+            (
+                BenchmarkShipGateFailureKind::NativeDeclineUnexpectedDispatch,
+                "native_decline_unexpected_dispatch",
+            ),
+            (
+                BenchmarkShipGateFailureKind::NativeDeclineDispatchCounterUnavailable,
+                "native_decline_dispatch_counter_unavailable",
+            ),
+            (
+                BenchmarkShipGateFailureKind::NativeDeclineReasonMissing,
+                "native_decline_reason_missing",
+            ),
+        ];
+        for (kind, expected) in expected_labels {
+            assert_eq!(kind.label(), expected);
+        }
+
+        let empty_crash = CrashedScale {
+            workload: "empty_crash".to_owned(),
+            rows: 1,
+            error: "failed".to_owned(),
+            repro_command: None,
+            plan_snippet_artifact: None,
+            correctness_diff_artifact: None,
+            log_tail_artifacts: Vec::new(),
+        };
+        assert_eq!(
+            crash_ledger_detail(&empty_crash),
+            "crash inventory has no attached artifacts"
+        );
+
+        let mut workload = mock_workload_result("classification", 1, 1.0, 1.0);
+        workload.gpu_kernel_dispatched = false;
+        workload.function_srf_kernel_dispatched = false;
+        workload.custom_scan_selected_not_dispatched = false;
+        workload.planner_declined = false;
+        workload.plan_selected = false;
+        assert_eq!(ledger_classification(&workload), "native_or_unclassified");
+        workload.plan_selected = true;
+        assert_eq!(
+            ledger_classification(&workload),
+            "custom_scan_selected_without_gpu_credit"
+        );
+        workload.plan_selected = false;
+        workload.planner_declined = true;
+        assert_eq!(ledger_classification(&workload), "planner_declined_native");
+        workload.planner_declined = false;
+        workload.gpu_kernel_dispatched = true;
+        workload.function_srf_kernel_dispatched = true;
+        assert_eq!(
+            ledger_classification(&workload),
+            "function_srf_gpu_dispatch"
+        );
+        assert_eq!(ledger_priority_rank("future_priority"), 3);
+
+        let mut rows = BTreeMap::new();
+        for (source, priority, track) in [
+            ("parity", "p3_parity_noise", "parity_track"),
+            ("gate", "p1_release_blocker", "gate_track"),
+        ] {
+            merge_ledger_item(
+                &mut rows,
+                LedgerMergeItem {
+                    workload: None,
+                    workload_name: "priority_probe",
+                    row_count: 1,
+                    source,
+                    priority,
+                    next_track: track,
+                    speedup: None,
+                    gate_floor: None,
+                    detail: source.to_owned(),
+                },
+            );
+        }
+        let merged = rows
+            .get(&("priority_probe".to_owned(), 1))
+            .expect("priority probe must be merged");
+        assert_eq!(merged.priority, "p1_release_blocker");
+        assert_eq!(merged.next_track, "gate_track");
+    }
+
+    #[test]
     fn test_benchmark_failure_ledger_preserves_crash_inventory_artifacts() {
         let mut report = mock_report(Vec::new());
         report.crashes.push(CrashedScale {
@@ -9603,6 +9892,47 @@ mod tests {
         assert!(report.gucs.is_none());
         assert_eq!(report.methodology.row_scales, vec![1_000, 1_000_000]);
         assert_eq!(report.workloads.len(), 2);
+    }
+
+    #[test]
+    fn test_generate_report_uses_observed_gucs_and_all_mode_labels() {
+        let observed = crate::config::ObservedGucs {
+            settings: vec![("work_mem".to_owned(), "64MB".to_owned())],
+            postmaster_start_time: Some("2026-08-11 12:34:56Z".to_owned()),
+        };
+        let explain_cold = generate_report(
+            Vec::new(),
+            Vec::new(),
+            None,
+            1,
+            0,
+            Some(observed.clone()),
+            crate::runner::TimingMode::ExplainAnalyze,
+            crate::runner::CacheMode::Cold,
+        );
+        assert_eq!(
+            explain_cold.gucs.as_ref().expect("observed GUCs").settings,
+            observed.settings
+        );
+        assert_eq!(explain_cold.methodology.timing_mode, "explain-analyze");
+        assert_eq!(explain_cold.methodology.cache_mode, "cold");
+        assert_eq!(
+            explain_cold.postmaster_start_time.as_deref(),
+            Some("2026-08-11 12:34:56Z")
+        );
+
+        let both = generate_report(
+            Vec::new(),
+            Vec::new(),
+            None,
+            1,
+            0,
+            Some(observed),
+            crate::runner::TimingMode::Both,
+            crate::runner::CacheMode::Both,
+        );
+        assert_eq!(both.methodology.timing_mode, "both");
+        assert_eq!(both.methodology.cache_mode, "both");
     }
 
     #[test]

@@ -712,9 +712,12 @@ run_bench fp64_native_crash_repro 0 crash-repro --workload reduce_f64_minmax --r
 
 # One exact cell per remaining resident/domain path keeps the live matrix small
 # while reaching the real loaders, descriptors, private data, executors, and
-# extension adapters. Released resident spatial/raster cells must select and
-# dispatch; neighboring unreleased spatial/raster shapes must retain an exact
-# planner-reported native decline.
+# extension adapters. Released resident cells must select and dispatch, except
+# for the raster final-output artifact lane: its lifecycle probe must dispatch
+# once to build the artifact and its measured warm query must prove an exact
+# artifact hit without being mislabeled as a fresh GPU dispatch. Neighboring
+# unreleased spatial/raster shapes must retain an exact planner-reported native
+# decline.
 run_bench mixed_resident_crash_repro any01 crash-repro \
     --workload mixed_join_agg_int4 --rows 100000 \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
@@ -739,7 +742,7 @@ run_bench spatial_resident_crash_repro any01 crash-repro \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
     --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
     --artifacts-dir "$artifact_dir/spatial-resident"
-run_bench raster_resident_crash_repro any01 crash-repro \
+run_bench raster_resident_crash_repro 1 crash-repro \
     --workload raster_resident_exact_reclass --rows 10000 \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
     --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
@@ -949,6 +952,65 @@ def require_selected_dispatch(row, expected_name):
     if row.get("pg_accel_stock_exec_delta") != 0:
         raise SystemExit(f"{expected_name}: stock executor fallback was observed")
 
+def require_resident_artifact_reuse(row, expected_name):
+    if (
+        row.get("planner_declined")
+        or not row.get("plan_selected")
+        or row.get("gpu_kernel_dispatched")
+        or not row.get("custom_scan_selected_not_dispatched")
+    ):
+        raise SystemExit(f"{expected_name}: warm final-output artifact reuse was not proven")
+    if not row.get("dispatch_counter_captured") or row.get("gpu_kernel_execution_delta") != 0:
+        raise SystemExit(f"{expected_name}: measured warm query must have an exact zero kernel delta")
+    if row.get("accel_output_rows_consumed", 0) <= 0 or row.get("pg_accel_stock_exec_delta") != 0:
+        raise SystemExit(f"{expected_name}: measured warm output/fallback evidence is invalid")
+
+    lifecycle = row.get("artifact_lifecycle_probe")
+    artifact = lifecycle.get("artifact", {}) if isinstance(lifecycle, dict) else {}
+    if (
+        not isinstance(lifecycle, dict)
+        or lifecycle.get("phase") != "lifecycle"
+        or lifecycle.get("error") is not None
+        or artifact.get("builds", 0) + artifact.get("rebuilds", 0) <= 0
+        or artifact.get("artifact_bytes_observed", 0) <= 0
+        or lifecycle.get("gpu_kernel_executions", 0) <= 0
+        or lifecycle.get("output_rows_consumed", 0) <= 0
+        or lifecycle.get("stock_exec_count") != 0
+        or not lifecycle.get("dependencies_before")
+        or not lifecycle.get("dependencies_after")
+    ):
+        raise SystemExit(f"{expected_name}: lifecycle build/dispatch evidence is incomplete")
+
+    steady = row.get("artifact_steady_state_captures")
+    iterations = row.get("iterations")
+    if (
+        not isinstance(steady, list)
+        or not steady
+        or not isinstance(iterations, list)
+        or len(steady) != len(iterations)
+    ):
+        raise SystemExit(f"{expected_name}: steady artifact-hit evidence is incomplete")
+    for capture in steady:
+        artifact = capture.get("artifact", {}) if isinstance(capture, dict) else {}
+        if (
+            not isinstance(capture, dict)
+            or capture.get("phase") != "steady_state"
+            or capture.get("error") is not None
+            or artifact.get("hits", 0) <= 0
+            or artifact.get("builds") != 0
+            or artifact.get("rebuilds") != 0
+            or artifact.get("artifact_bytes_observed", 0) <= 0
+            or capture.get("refresh_us") != 0
+            or capture.get("refreshed_relations") != 0
+            or capture.get("refreshed_rows") != 0
+            or capture.get("dependencies_before") != capture.get("dependencies_after")
+            or capture.get("queries_accelerated", 0) <= 0
+            or capture.get("gpu_kernel_executions") != 0
+            or capture.get("stock_exec_count") != 0
+            or capture.get("output_rows_consumed", 0) <= 0
+        ):
+            raise SystemExit(f"{expected_name}: steady artifact-hit capture is invalid")
+
 def require_planner_decline(row, expected_name, expected_reason=None):
     if row.get("plan_selected") or row.get("gpu_kernel_dispatched") or not row.get("planner_declined"):
         raise SystemExit(f"{expected_name}: native decline was not proven")
@@ -1009,10 +1071,15 @@ resident_selected_cells = [
     (hash_path, "hash_join", 100000),
     (h3_path, "h3_cell_to_parent", 100000),
     (spatial_resident_path, "spatial_resident_agg_candidate", 1000000),
-    (raster_resident_path, "raster_resident_exact_reclass", 10000),
 ]
 for path, name, rows in resident_selected_cells:
     require_selected_dispatch(one(path, name, rows), name)
+
+resident_artifact_reuse_cells = [
+    (raster_resident_path, "raster_resident_exact_reclass", 10000),
+]
+for path, name, rows in resident_artifact_reuse_cells:
+    require_resident_artifact_reuse(one(path, name, rows), name)
 
 for path, name, rows, reason in [
     (spatial_path, "spatial_mega_1kv", 80000, "generic_descriptor_capability"),
@@ -1113,6 +1180,9 @@ validation = {
     "performance_evidence_eligible": False,
     "selected_cell": "grouped_agg_int4@1000000",
     "resident_selected_cells": [f"{name}@{rows}" for _, name, rows in resident_selected_cells],
+    "resident_artifact_reuse_cells": [
+        f"{name}@{rows}" for _, name, rows in resident_artifact_reuse_cells
+    ],
     "native_parity_cell": "window_full_output_decline@10000",
     "planner_stage_cell": "window_full_output_decline@10000",
     "domain_decline_cells": ["spatial_mega_1kv@80000", "raster_reclass@100"],

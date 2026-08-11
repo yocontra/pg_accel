@@ -101,6 +101,7 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
         reason: str = "test_planner_decline",
         iterations: int = 1,
         native_pairing: bool = False,
+        artifact_reuse: bool = False,
     ) -> dict[str, object]:
         row: dict[str, object] = {
             "name": name,
@@ -136,6 +137,59 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
             row["planner_stage_captures"] = [
                 {"error": None, "stages": [{}], "substages": [{}]}
             ]
+        if artifact_reuse:
+            dependency = {
+                "relid": 42,
+                "generation": 1,
+                "global_generation": 1,
+                "relfilenode": 7,
+                "row_count": rows,
+                "raw_bytes": rows * 8,
+                "derived_bytes": rows * 4,
+            }
+            row.update(
+                gpu_kernel_dispatched=False,
+                custom_scan_selected_not_dispatched=True,
+                gpu_kernel_execution_delta=0,
+                artifact_lifecycle_probe={
+                    "phase": "lifecycle",
+                    "error": None,
+                    "artifact": {
+                        "hits": 0,
+                        "builds": 1,
+                        "rebuilds": 0,
+                        "artifact_bytes_observed": rows * 4,
+                    },
+                    "dependencies_before": [{**dependency, "derived_bytes": 0}],
+                    "dependencies_after": [dependency],
+                    "gpu_kernel_executions": 1,
+                    "output_rows_consumed": rows,
+                    "stock_exec_count": 0,
+                },
+                artifact_steady_state_captures=[
+                    {
+                        "phase": "steady_state",
+                        "pair_index": index,
+                        "error": None,
+                        "artifact": {
+                            "hits": 1,
+                            "builds": 0,
+                            "rebuilds": 0,
+                            "artifact_bytes_observed": rows * 4,
+                        },
+                        "refresh_us": 0,
+                        "refreshed_relations": 0,
+                        "refreshed_rows": 0,
+                        "dependencies_before": [dependency],
+                        "dependencies_after": [dependency],
+                        "queries_accelerated": 1,
+                        "gpu_kernel_executions": 0,
+                        "output_rows_consumed": rows,
+                        "stock_exec_count": 0,
+                    }
+                    for index in range(iterations)
+                ],
+            )
         return row
 
     def report(
@@ -148,6 +202,7 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
         iterations: int = 1,
         warmup: int = 0,
         native_pairing: bool = False,
+        artifact_reuse: bool = False,
     ) -> pathlib.Path:
         path = root / key / "report.json"
         row = result_row(
@@ -157,6 +212,7 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
             reason=reason,
             iterations=iterations,
             native_pairing=native_pairing,
+            artifact_reuse=artifact_reuse,
         )
         write_json(
             path.parent / str(row["correctness_diff_artifact"]),
@@ -204,6 +260,7 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
         "raster_resident_exact_reclass",
         10_000,
         selected=True,
+        artifact_reuse=True,
     )
     spatial = report(
         "spatial",
@@ -254,6 +311,7 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
     calibration = root / "calibration" / "fp64_calibration_summary.json"
     write_json(calibration, {"sizes": [100_000], "multipliers": [16.0], "candidates": [{}]})
     output = root / "evidence-validation.json"
+    paths["validation"] = output
     provenance = root / "selected" / "provenance.json"
     write_json(
         provenance,
@@ -754,9 +812,18 @@ class CoverageLiveRustTests(unittest.TestCase):
 
     def test_live_evidence_validator_accepts_exact_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            args, _ = build_live_evidence_fixture(pathlib.Path(directory))
+            args, paths = build_live_evidence_fixture(pathlib.Path(directory))
             result = run_live_evidence_validator(args)
+            validation = json.loads(paths["validation"].read_text(encoding="utf-8"))
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            validation["resident_artifact_reuse_cells"],
+            ["raster_resident_exact_reclass@10000"],
+        )
+
+    def test_raster_artifact_reuse_probe_requires_expected_gate_failure(self) -> None:
+        source = HARNESS.read_text(encoding="utf-8")
+        self.assertIn("run_bench raster_resident_crash_repro 1 crash-repro", source)
 
     def test_live_evidence_validator_rejects_false_error_and_wrong_identity_correctness(self) -> None:
         cases = (
@@ -801,6 +868,35 @@ class CoverageLiveRustTests(unittest.TestCase):
             result = run_live_evidence_validator(args)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("stock executor fallback was observed", result.stderr)
+
+    def test_live_evidence_validator_rejects_false_raster_artifact_reuse(self) -> None:
+        mutations = {
+            "fresh_dispatch": lambda row: row.update(
+                gpu_kernel_dispatched=True,
+                custom_scan_selected_not_dispatched=False,
+                gpu_kernel_execution_delta=1,
+            ),
+            "lifecycle_dispatch": lambda row: row["artifact_lifecycle_probe"].update(
+                gpu_kernel_executions=0
+            ),
+            "steady_rebuild": lambda row: row["artifact_steady_state_captures"][0][
+                "artifact"
+            ].update(builds=1),
+            "steady_dispatch": lambda row: row["artifact_steady_state_captures"][0].update(
+                gpu_kernel_executions=1
+            ),
+            "unstable_dependency": lambda row: row["artifact_steady_state_captures"][0].update(
+                dependencies_after=[]
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                args, paths = build_live_evidence_fixture(pathlib.Path(directory))
+                report = json.loads(paths["raster_resident"].read_text(encoding="utf-8"))
+                mutate(report["workloads"][0])
+                write_json(paths["raster_resident"], report)
+                result = run_live_evidence_validator(args)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
 
     def test_live_evidence_validator_rejects_unconfirmed_decline_sources(self) -> None:
         for key in ("declined", "fp64", "spatial", "raster_reclass", "raster"):

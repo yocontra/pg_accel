@@ -96,10 +96,13 @@ claim is implied by the entries below.
   change.
 - Release coverage now executes the broad system-workload contract, one exact
   same-backend ABBA/BAAB native decline with planner-stage evidence, and the
-  released resident spatial/raster paths. Coverage-only fork children flush
-  PID-isolated LLVM profiles, and declaration-only unsafe trait signatures are
-  explicitly syntax-checked instead of being mistaken for omitted executable
-  source.
+  released resident spatial/raster paths. Raster final-output artifact reuse is
+  recorded separately from fresh GPU dispatch: the lifecycle probe must build
+  it with a kernel, while the measured warm query must show an artifact hit,
+  consumed output, zero fallback, and zero new kernel executions. Coverage-only
+  fork children flush PID-isolated LLVM profiles, and declaration-only unsafe
+  trait signatures are explicitly syntax-checked instead of being mistaken for
+  omitted executable source.
 
 ### Verification
 
