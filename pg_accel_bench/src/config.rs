@@ -387,6 +387,7 @@ fn parse_pg_bytes(s: &str) -> Option<u64> {
 /// Created once by the CLI layer and threaded through the runner. Keeping
 /// this as a single struct (vs. adding more parameters to `run_all`)
 /// contains the blast radius of future additions.
+#[allow(clippy::struct_excessive_bools)] // reason: independent CLI policy flags, not coupled state
 #[derive(Clone, Debug)]
 pub struct BenchConfig {
     pub iterations: usize,
@@ -398,6 +399,15 @@ pub struct BenchConfig {
     /// sampling inside planner hooks and must remain false for publication
     /// latency measurements.
     pub capture_planner_stages: bool,
+    /// Run the accel and PostgreSQL arms of each pair on the same persistent
+    /// backend. This removes backend identity as a nuisance variable for
+    /// exact native-decline non-inferiority measurements. The runner rejects
+    /// this mode whenever PostgreSQL selects a pg_accel plan.
+    pub native_parity_pairing: bool,
+    /// Whether the rendered Markdown report may publish an aggregate speedup
+    /// headline. Broad characterization suites disable this because their
+    /// workload coverage is evidence, not a certified system score.
+    pub headline_speedup_allowed: bool,
     /// If set, run `EXPLAIN (ANALYZE, VERBOSE, BUFFERS)` once per
     /// workload/scale before the timed loop and append the result to this
     /// path.
@@ -424,6 +434,8 @@ impl Default for BenchConfig {
             timing_mode: TimingMode::default(),
             cache_mode: CacheMode::default(),
             capture_planner_stages: false,
+            native_parity_pairing: false,
+            headline_speedup_allowed: true,
             plans_capture_path: None,
             guc_profile: None,
             skip_guc_verify: false,

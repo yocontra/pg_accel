@@ -704,7 +704,7 @@ index f3202ceb..7e193c08 100644
 +  }
 +
 +  llvm::FunctionCallee ProfileCarrier =
-+      llvm::Intrinsic::getOrInsertDeclaration(&M, llvm::Intrinsic::donothing);
++      llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::donothing);
 +  for(auto &[F, FunctionState] : Accumulators) {
 +    bool HasReturn = false;
 +    for(auto &BB : *F) {

@@ -145,6 +145,7 @@ fn failure_domain_classification_covers_every_symbol_family() {
         ("pgaccel_expr_eval_predicate", D::Expr),
         ("pgaccel_grouped_agg_execute", D::GroupedAgg),
         ("pgaccel_grouped_agg_execute_ex", D::GroupedAgg),
+        ("pgaccel_grouped_agg_kernel_mode", D::GroupedAgg),
         ("pgaccel_grouped_agg_workspace_alloc", D::GroupedAgg),
         ("pgaccel_hash_join_count_device", D::HashJoin),
         (

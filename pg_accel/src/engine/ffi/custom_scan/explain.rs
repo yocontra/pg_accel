@@ -764,8 +764,66 @@ unsafe fn explain_descriptor_agg(agg_state: &AggExecState, es: *mut pg_sys::Expl
         agg_state.descriptor_artifact_outcome(),
         agg_state.descriptor_artifact_bytes(),
     );
+    // SAFETY: the mode label has static NUL-free storage and `es` is the
+    // live PostgreSQL ExplainState for this callback.
+    unsafe {
+        pg_sys::ExplainPropertyText(
+            c"GPU Physical Kernel Mode".as_ptr(),
+            CString::new(agg_state.descriptor_planned_kernel_mode().label())
+                .expect("physical mode labels never contain NUL")
+                .as_ptr(),
+            es,
+        );
+    }
+    // EXPLAIN ANALYZE carries an independently captured runtime value. A
+    // selected-but-unexecuted node is explicit rather than borrowing the
+    // planned label as dispatch evidence.
+    if unsafe { (*es).analyze } {
+        let dispatched = agg_state.descriptor_dispatched_kernel_mode();
+        let dispatched_label = dispatched.map_or("not_dispatched", |mode| mode.label());
+        let dispatched_label =
+            CString::new(dispatched_label).expect("physical mode labels never contain NUL");
+        // SAFETY: both values remain live for these synchronous calls.
+        unsafe {
+            pg_sys::ExplainPropertyText(
+                c"GPU Dispatched Physical Kernel Mode".as_ptr(),
+                dispatched_label.as_ptr(),
+                es,
+            );
+            pg_sys::ExplainPropertyBool(
+                c"GPU Physical Kernel Mode Verified".as_ptr(),
+                dispatched.is_some_and(|mode| mode == agg_state.descriptor_planned_kernel_mode()),
+                es,
+            );
+            pg_sys::ExplainPropertyInteger(
+                c"GPU Planned Lifecycle Calls".as_ptr(),
+                std::ptr::null(),
+                i64::try_from(agg_state.descriptor_planned_batches()).unwrap_or(i64::MAX),
+                es,
+            );
+            pg_sys::ExplainPropertyBool(
+                c"GPU Lifecycle Calls Verified".as_ptr(),
+                agg_state.descriptor_planned_batches() == agg_state.batches_executed,
+                es,
+            );
+        }
+    }
     for (name, value) in [
         (c"GPU Descriptor Strategy", logical.strategy.to_owned()),
+        (
+            c"GPU Descriptor Specialization",
+            agg_state.descriptor_specialization_label().to_owned(),
+        ),
+        (
+            c"GPU Descriptor Specialization Cache",
+            agg_state
+                .descriptor_specialization_cache_outcome_label()
+                .to_owned(),
+        ),
+        (
+            c"GPU Descriptor Artifact Policy",
+            agg_state.descriptor_artifact_policy_summary(),
+        ),
         (c"GPU Descriptor Group Keys", logical.group_keys),
         (c"GPU Descriptor Aggregates", logical.aggregates),
         (c"GPU Descriptor Filter", logical.filter),

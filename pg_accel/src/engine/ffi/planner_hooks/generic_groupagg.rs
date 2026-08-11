@@ -3,20 +3,21 @@
 use std::collections::BTreeMap;
 use std::ffi::{c_int, c_void};
 use std::num::NonZeroU32;
+use std::rc::Rc;
 
 use pgrx::pg_sys::{self, List, NodeTag, RelOptInfo};
 
 use super::decline_cache::{self, DeclineCacheKey, DeclinePolicyKey, QueryFingerprint};
 use super::shape::{
-    RelationResidency, RelationResidencyRequirement, ResidencyEstimate, ShapeCostGate,
-    ShapeDecline, ShapePlan, dense_atomic_fact_row_floor, dense_atomic_sum_count_cost,
-    dense_atomic_sum_count_lifecycle,
+    DescriptorGroupingMode, DescriptorResolution, RelationResidency, RelationResidencyRequirement,
+    ResidencyEstimate, ShapeCostGate, ShapeDecline, ShapePlan, dense_atomic_fact_row_floor,
+    dense_atomic_sum_count_cost, dense_atomic_sum_count_lifecycle, dense_lifecycle_call_count,
 };
-use super::{add_gpu_path_with_resident_proof, rel_rows_estimate};
+use super::{PlannerSubstageGuard, add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
-    estimate_descriptor_artifact_bytes_upper_bound, validate_normal_descriptor_capability,
-    validate_normal_spatial_candidate_capability,
+    estimate_descriptor_artifact_bytes_upper_bound, planned_descriptor_kernel_mode,
+    validate_normal_descriptor_capability, validate_normal_spatial_candidate_capability,
 };
 use crate::engine::ffi::custom_scan;
 use crate::engine::gucs;
@@ -26,8 +27,9 @@ use crate::engine::residency::{
     estimate_selected_relation, resident_budget_snapshot, resident_planner_dependency,
     revalidate_loaded_estimates,
 };
-use crate::engine::spec::{AggOutputProjection, FilterSpec, MeasureExpr};
+use crate::engine::spec::{AggOutputProjection, FilterSpec, GroupKeyEncoding, MeasureExpr};
 use crate::engine::stats;
+use crate::gpu::GroupedAggKernelMode;
 
 const GENERIC_SHAPE_PATH_CONTEXT: &str = "upper_paths_generic_groupagg";
 const AGG_QUERY_SPEC_SENTINEL: c_int = i32::from_be_bytes(*b"AQS3");
@@ -70,6 +72,9 @@ enum AdmissionDecline {
     DescriptorCapability {
         detail: String,
     },
+    SerialGenericKernelMode {
+        mode: &'static str,
+    },
     AutoLoadDisabled {
         relation_oid: u32,
         estimated_bytes: u64,
@@ -109,6 +114,7 @@ impl AdmissionDecline {
             Self::MissingResidencyEstimate { .. } => "generic_residency_estimate_missing",
             Self::UnexpectedResidencyEstimate { .. } => "generic_residency_estimate_unexpected",
             Self::DescriptorCapability { .. } => "generic_descriptor_capability",
+            Self::SerialGenericKernelMode { .. } => "generic_serial_kernel_mode_unqualified",
             Self::AutoLoadDisabled { .. } => "generic_auto_load_disabled",
             Self::ResidencyBytesOverflow => "generic_residency_bytes_overflow",
             Self::ResidencyBudgetSnapshotUnavailable => {
@@ -123,9 +129,6 @@ impl AdmissionDecline {
             Self::DeviceCostGate(ShapeCostGate::Eligible) => "generic_invalid_eligible_cost_gate",
             Self::DeviceCostGate(ShapeCostGate::FactRowsBelowDeviceMinimum { .. }) => {
                 "generic_fact_rows_below_device_minimum"
-            }
-            Self::DeviceCostGate(ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum { .. }) => {
-                "generic_fact_rows_exceed_dense_one_shot_maximum"
             }
             Self::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum { .. }) => {
                 "h3_rows_below_grouped_agg_min"
@@ -395,10 +398,22 @@ fn apply_exact_residency(
         estimated_fact_rows,
         resident_fact_rows,
         fact_columns_have_no_null_sidecars,
-        model.executor.gpu_grouped_agg_one_shot_max_rows,
         model,
     ) {
         shape.cost.replace_aggregate(aggregate);
+    }
+    let lifecycle_fact_rows = resident_fact_rows.unwrap_or(estimated_fact_rows);
+    if let Some(calls) = planned_dense_lifecycle_calls(shape, lifecycle_fact_rows, model) {
+        let additional_calls = calls.saturating_sub(1);
+        shape
+            .cost
+            .replace_additional_aggregate_launches(PgCost::new(
+                additional_calls as f64 * cost::GPU_LAUNCH_OVERHEAD,
+            ));
+    } else {
+        shape
+            .cost
+            .replace_additional_aggregate_launches(PgCost::ZERO);
     }
     if dense_atomic_sum_count_lifecycle(&shape.spec, &shape.descriptor_resolution, model)
         && matches!(
@@ -409,7 +424,6 @@ fn apply_exact_residency(
         // Exact loaded rows replace the generic estimate-derived row gate.
         // Before first load, the planner estimate remains the best available
         // evidence. Other shape gates are deliberately never overwritten.
-        let lifecycle_fact_rows = resident_fact_rows.unwrap_or(estimated_fact_rows);
         let lifecycle_fact_rows =
             Rows::new(usize::try_from(lifecycle_fact_rows).unwrap_or(usize::MAX));
         let required = dense_atomic_fact_row_floor(&shape.spec, model);
@@ -418,16 +432,52 @@ fn apply_exact_residency(
                 estimated: lifecycle_fact_rows,
                 required,
             }
-        } else if lifecycle_fact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows {
-            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
-                fact_rows: lifecycle_fact_rows,
-                maximum: model.executor.gpu_grouped_agg_one_shot_max_rows,
-            }
         } else {
             ShapeCostGate::Eligible
         };
     }
     Ok(())
+}
+
+fn shape_kernel_mode(shape: &ShapePlan) -> GroupedAggKernelMode {
+    let hash_grouping = match &shape.descriptor_resolution {
+        DescriptorResolution::BeginTimeArtifacts { grouping_mode, .. } => {
+            *grouping_mode == DescriptorGroupingMode::Hash
+        }
+        DescriptorResolution::Ready => shape
+            .spec
+            .group_keys
+            .iter()
+            .any(|key| key.encoding == GroupKeyEncoding::Hash),
+    };
+    planned_descriptor_kernel_mode(&shape.spec, hash_grouping)
+}
+
+fn planned_dense_lifecycle_calls(
+    shape: &ShapePlan,
+    fact_rows: u64,
+    model: &TypedCostModel,
+) -> Option<u64> {
+    if matches!(shape.spec.fact_filter, FilterSpec::Spatial { .. })
+        || shape.spec.group_keys.iter().any(|key| {
+            matches!(
+                key.source,
+                crate::engine::spec::GroupKeySource::H3CellToParent { .. }
+                    | crate::engine::spec::GroupKeySource::H3LatLngToCell { .. }
+            )
+        })
+        || !matches!(
+            shape_kernel_mode(shape),
+            GroupedAggKernelMode::ParallelDenseCount | GroupedAggKernelMode::ParallelDenseInteger
+        )
+    {
+        return None;
+    }
+    dense_lifecycle_call_count(
+        fact_rows,
+        model.executor.gpu_grouped_agg_one_shot_max_rows,
+        model.executor.gpu_reduce_max_chunk,
+    )
 }
 
 fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> {
@@ -439,7 +489,12 @@ fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> 
     } else {
         validate_normal_descriptor_capability(&shape.spec, &projection)
     };
-    result.map_err(|detail| AdmissionDecline::DescriptorCapability { detail })
+    result.map_err(|detail| AdmissionDecline::DescriptorCapability { detail })?;
+    let mode = shape_kernel_mode(shape);
+    if mode == GroupedAggKernelMode::SerialGeneric {
+        return Err(AdmissionDecline::SerialGenericKernelMode { mode: mode.label() });
+    }
+    Ok(())
 }
 
 const NORMAL_SPATIAL_PROMOTION_ROWS: u64 = 1_000_000;
@@ -547,12 +602,6 @@ fn cheap_exact_dense_row_gate_with(
         return Ok(Some(ShapeCostGate::FactRowsBelowDeviceMinimum {
             estimated: exact_rows,
             required,
-        }));
-    }
-    if exact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows {
-        return Ok(Some(ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
-            fact_rows: exact_rows,
-            maximum: model.executor.gpu_grouped_agg_one_shot_max_rows,
         }));
     }
     Ok(None)
@@ -1382,19 +1431,19 @@ unsafe fn cheapest_native_cost(
 }
 
 fn record_decline(decline: &AdmissionDecline, output_rel: *mut RelOptInfo) {
+    let _profile = PlannerSubstageGuard::new(stats::PlannerSubstage::RejectionRecording);
     let rows = rel_rows_estimate(output_rel).unwrap_or(0);
     stats::increment_planner_rejected(decline.code(), rows);
-    pgrx::debug1!("pg_accel: generic aggregate declined: {decline}");
 }
 
 fn record_cached_decline(reason: &'static str, output_rel: *mut RelOptInfo) {
+    let _profile = PlannerSubstageGuard::new(stats::PlannerSubstage::RejectionRecording);
     let rows = rel_rows_estimate(output_rel).unwrap_or(0);
     stats::increment_planner_rejected(reason, rows);
     stats::record_planner_stage_fast_decline(
         stats::PlannerHookStage::UpperGroupAgg,
         "upper_groupagg_cached_decline",
     );
-    pgrx::debug1!("pg_accel: generic aggregate cached decline: {reason}");
 }
 
 fn relation_rows_bits(rel: *mut RelOptInfo) -> u64 {
@@ -1406,7 +1455,7 @@ fn relation_rows_bits(rel: *mut RelOptInfo) -> u64 {
 }
 
 fn decline_cache_key(
-    query_fingerprint: QueryFingerprint,
+    query_fingerprint: Rc<QueryFingerprint>,
     input_rel: *mut RelOptInfo,
     output_rel: *mut RelOptInfo,
     policy: DeclinePolicyKey,
@@ -1438,10 +1487,10 @@ pub(super) unsafe fn try_inject(
     let query_fingerprint = unsafe { decline_cache::query_fingerprint(root) };
     let structural_cache_key = query_fingerprint.as_ref().map(|fingerprint| {
         decline_cache_key(
-            fingerprint.clone(),
+            Rc::clone(fingerprint),
             input_rel,
             output_rel,
-            DeclinePolicyKey::Structural,
+            DeclinePolicyKey::structural(),
         )
     });
     if let Some(reason) = structural_cache_key
@@ -1466,7 +1515,7 @@ pub(super) unsafe fn try_inject(
     let model = TypedCostModel::from_limits(cost::device_limits());
     let device_cache_key = query_fingerprint.as_ref().map(|fingerprint| {
         decline_cache_key(
-            fingerprint.clone(),
+            Rc::clone(fingerprint),
             input_rel,
             output_rel,
             DeclinePolicyKey::device(),
@@ -1484,9 +1533,12 @@ pub(super) unsafe fn try_inject(
     // identity. This retains planner-policy and parameter sensitivity while
     // allowing a hit to skip descriptor and residency reconstruction.
     // SAFETY: all pointers are the live upper-path hook arguments.
-    let native_cost = group_estimate.and_then(|estimate| unsafe {
-        cheapest_native_cost(root, input_rel, output_rel, extra, estimate.num_groups)
-    });
+    let native_cost = {
+        let _profile = PlannerSubstageGuard::new(stats::PlannerSubstage::NativeCostReconstruction);
+        group_estimate.and_then(|estimate| unsafe {
+            cheapest_native_cost(root, input_rel, output_rel, extra, estimate.num_groups)
+        })
+    };
     let cost_cache_key = device_cache_key
         .clone()
         .map(|key| key.with_native_cost(native_cost));
@@ -1617,7 +1669,11 @@ pub(super) unsafe fn try_inject(
         Ok(()) => true,
         Err(decline) => {
             let cache_key = match &decline {
-                AdmissionDecline::Shape(_) => structural_cache_key.map(|key| (key, Vec::new())),
+                AdmissionDecline::Shape(_)
+                | AdmissionDecline::DescriptorCapability { .. }
+                | AdmissionDecline::SerialGenericKernelMode { .. } => {
+                    structural_cache_key.map(|key| (key, Vec::new()))
+                }
                 AdmissionDecline::DeviceCostGate(_) if cache_dependencies_valid => {
                     device_cache_key.map(|key| (key, cache_dependencies))
                 }
@@ -2131,6 +2187,7 @@ mod tests {
             spatial_filter: PgCost::new(0.0),
             spatial_recheck_reserve: PgCost::new(0.0),
             aggregate: PgCost::new(5.0),
+            additional_aggregate_launches: PgCost::ZERO,
             output_materialization: PgCost::new(1.0),
             amortized_auto_load: PgCost::new(0.0),
             total: PgCost::new(16.0),
@@ -2346,7 +2403,6 @@ mod tests {
             1_000_000,
             Some(1_000_000),
             Some(true),
-            model.executor.gpu_grouped_agg_one_shot_max_rows,
             &model,
         )
         .expect("exact resident dense SUM/COUNT is atomic one-shot");
@@ -2361,7 +2417,6 @@ mod tests {
             2_000_000,
             Some(1_000_000),
             Some(true),
-            model.executor.gpu_grouped_agg_one_shot_max_rows,
             &model,
         )
         .expect("exact resident rows, not a high estimate, size atomic work");
@@ -2388,7 +2443,6 @@ mod tests {
             1_000_000,
             Some(1_000_000),
             Some(true),
-            model.executor.gpu_grouped_agg_one_shot_max_rows,
             &model,
         )
         .expect("nonnull int4 product SUM/COUNT is atomic one-shot");
@@ -2417,7 +2471,6 @@ mod tests {
                 10_000_000,
                 Some(resident_rows),
                 Some(true),
-                model.executor.gpu_grouped_agg_one_shot_max_rows,
                 &model,
             )
         };
@@ -2444,7 +2497,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_sum_count_admission_stops_at_the_device_one_shot_boundary() {
+    fn dense_sum_count_costs_bounded_session_calls_above_the_one_shot_boundary() {
         let model = model();
         let maximum = model.executor.gpu_grouped_agg_one_shot_max_rows;
         let maximum_u64 = u64::try_from(maximum.get()).expect("test row limit fits u64");
@@ -2452,27 +2505,20 @@ mod tests {
         let mut at_maximum = dense_sum_count_shape(maximum_u64);
         apply_resident_evidence(&mut at_maximum, maximum_u64, true);
         assert_eq!(at_maximum.cost_gate, ShapeCostGate::Eligible);
+        assert_eq!(at_maximum.cost.additional_aggregate_launches, PgCost::ZERO);
 
         let above_u64 = maximum_u64 + 1;
         let mut above_maximum = dense_sum_count_shape(above_u64);
         apply_resident_evidence(&mut above_maximum, above_u64, true);
+        assert_eq!(above_maximum.cost_gate, ShapeCostGate::Eligible);
         assert_eq!(
-            above_maximum.cost_gate,
-            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
-                fact_rows: Rows::new(maximum.get() + 1),
-                maximum,
-            }
+            planned_dense_lifecycle_calls(&above_maximum, above_u64, &model),
+            Some(3),
+            "two bounded accumulates plus finalize"
         );
-        let decline = gate_cost(
-            &above_maximum,
-            Some(f64::MAX),
-            model.planner.gpu_agg_cost_ratio,
-            effective_path_cost(&above_maximum, 1.0),
-        )
-        .expect_err("limit + 1 must stay on PostgreSQL");
         assert_eq!(
-            decline.code(),
-            "generic_fact_rows_exceed_dense_one_shot_maximum"
+            above_maximum.cost.additional_aggregate_launches,
+            PgCost::new(2.0 * cost::GPU_LAUNCH_OVERHEAD)
         );
 
         let mut first_use = dense_sum_count_shape(above_u64);
@@ -2487,13 +2533,18 @@ mod tests {
             &model,
         )
         .expect("first-use estimate fits the unbounded test budget");
+        assert_eq!(first_use.cost_gate, ShapeCostGate::Eligible);
         assert_eq!(
-            first_use.cost_gate,
-            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
-                fact_rows: Rows::new(maximum.get() + 1),
-                maximum,
-            },
-            "the planner estimate must fail closed before the first resident load"
+            first_use.cost.additional_aggregate_launches,
+            above_maximum.cost.additional_aggregate_launches,
+            "first-use admission costs the estimate-derived lifecycle"
+        );
+
+        let ten_million = dense_sum_count_shape(10_000_000);
+        assert_eq!(
+            planned_dense_lifecycle_calls(&ten_million, 10_000_000, &model),
+            Some(11),
+            "ten 1M accumulates plus finalize"
         );
 
         let mut star = dense_sum_count_shape(above_u64);
@@ -2646,27 +2697,12 @@ mod tests {
                 1_000_000,
                 rows,
                 no_nulls,
-                model.executor.gpu_grouped_agg_one_shot_max_rows,
                 &model,
             )
         };
         assert!(cost(&shape, None, Some(true)).is_none());
         assert!(cost(&shape, Some(1_000_000), None).is_none());
         assert!(cost(&shape, Some(1_000_001), Some(true)).is_none());
-        assert!(
-            dense_atomic_sum_count_cost(
-                &shape.spec,
-                &shape.descriptor_resolution,
-                1_000_000,
-                Some(1_000_000),
-                Some(true),
-                Rows::new(999_999),
-                &model,
-            )
-            .is_none(),
-            "planner proof must use the snapshotted executor one-shot limit"
-        );
-
         let nullable = cost(&shape, Some(1_000_000), Some(false))
             .expect("nullable direct SUM retains its nonnull atomic update");
         assert_eq!(
@@ -2764,9 +2800,17 @@ mod tests {
         );
 
         let mut over_cap = dense_sum_count_shape(1_000_001);
-        let ordinary = over_cap.cost.aggregate;
         apply_resident_evidence(&mut over_cap, 1_000_001, true);
-        assert_eq!(over_cap.cost.aggregate, ordinary);
+        assert_eq!(
+            over_cap.cost.aggregate,
+            PgCost::new(1_000_001.0 * model.coefficients.gpu_op_cost_reduce.get() * 2.0),
+            "bounded sessions retain the exact operation-count cost"
+        );
+        assert_eq!(
+            over_cap.cost.additional_aggregate_launches,
+            PgCost::new(2.0 * cost::GPU_LAUNCH_OVERHEAD),
+            "two accumulate calls plus finalize are charged beyond the base launch"
+        );
     }
 
     fn h3_parent_shape() -> ShapePlan {
@@ -3258,17 +3302,6 @@ mod tests {
             "dense SUM/COUNT must retain exact loaded-row refinement"
         );
 
-        let above_maximum = ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
-            fact_rows: Rows::new(11),
-            maximum: Rows::new(10),
-        };
-        dense.cost_gate = above_maximum;
-        assert_eq!(
-            stable_device_cost_gate_before_residency(&dense, &model),
-            Some(above_maximum),
-            "the dense maximum gate is never relaxed by residency"
-        );
-
         let mut h3 = h3_parent_shape();
         let h3_below_floor = ShapeCostGate::H3RowsBelowDeviceMinimum {
             estimated: Rows::new(99),
@@ -3403,7 +3436,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_and_executor_share_counted_dimension_sum_capability() {
+    fn planner_rejects_serial_generic_while_retaining_executor_validation() {
         let mut counted_sum = integer_measure_shape(AggregateKind::Sum);
         add_star_dimension(&mut counted_sum, JoinMultiplicity::Counted);
         let decline = validate_shape_capability(&counted_sum)
@@ -3417,14 +3450,42 @@ mod tests {
 
         let mut unique_sum = integer_measure_shape(AggregateKind::Sum);
         add_star_dimension(&mut unique_sum, JoinMultiplicity::Unique);
-        validate_shape_capability(&unique_sum).expect("unique-dimension integer SUM is supported");
+        validate_normal_descriptor_capability(
+            &unique_sum.spec,
+            &AggOutputProjection {
+                slots: unique_sum.projections.clone(),
+            },
+        )
+        .expect("the defensive executor retains unique-dimension integer SUM capability");
+        assert!(matches!(
+            validate_shape_capability(&unique_sum)
+                .expect_err("normal planning must not admit the serial generic branch"),
+            AdmissionDecline::SerialGenericKernelMode {
+                mode: "serial_generic"
+            }
+        ));
 
         for kind in [AggregateKind::Count, AggregateKind::Min, AggregateKind::Max] {
             let mut counted = integer_measure_shape(kind);
             add_star_dimension(&mut counted, JoinMultiplicity::Counted);
-            validate_shape_capability(&counted)
-                .unwrap_or_else(|error| panic!("counted-dimension {kind:?} declined: {error}"));
+            validate_normal_descriptor_capability(
+                &counted.spec,
+                &AggOutputProjection {
+                    slots: counted.projections.clone(),
+                },
+            )
+            .unwrap_or_else(|error| {
+                panic!("defensive counted-dimension {kind:?} capability declined: {error}")
+            });
+            assert!(matches!(
+                validate_shape_capability(&counted)
+                    .expect_err("counted dimensions select only the serial generic branch"),
+                AdmissionDecline::SerialGenericKernelMode { .. }
+            ));
         }
+
+        validate_shape_capability(&count_shape())
+            .expect("canonical COUNT(*) uses the parallel dense-count branch");
     }
 
     #[test]
@@ -3570,15 +3631,6 @@ mod tests {
                     required: row_pair.1,
                 }),
                 "generic_fact_rows_below_device_minimum",
-            ),
-            (
-                AdmissionDecline::DeviceCostGate(
-                    ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
-                        fact_rows: row_pair.1,
-                        maximum: row_pair.0,
-                    },
-                ),
-                "generic_fact_rows_exceed_dense_one_shot_maximum",
             ),
             (
                 AdmissionDecline::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum {

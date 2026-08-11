@@ -25,6 +25,16 @@ claim is implied by the entries below.
   results.
 - PostgreSQL 18 as the default build target and PostgreSQL 19 beta as a required
   source/build verification target.
+- Continuous pristine-versus-loaded PostgreSQL regression and isolation gates
+  for every supported major, with sealed source/build/schedule/log evidence.
+- Risk-weighted unsafe-site coverage, deterministic property/fuzz contracts,
+  historical crash-band guards, and transactional grouped-aggregate failure
+  injection across allocation, copy, wait, materialization, and publication.
+- Descriptor-identity specialization, explicit physical kernel modes,
+  hierarchical dense reductions, reusable workspace/output pools, and costed
+  cached-versus-ephemeral derived-artifact execution.
+- SSBM-, TPC-H-, and ClickBench-style system workload characterization plus an
+  eight-backend residency/concurrency proof with exact cluster-byte cleanup.
 
 ### Changed
 
@@ -43,6 +53,13 @@ claim is implied by the entries below.
 - Benchmark documentation no longer treats historical local timing logs as
   current evidence. Release conclusions require fresh artifacts from the exact
   candidate binary and environment.
+- Warm performance evidence separates lifecycle construction/rebuild probes
+  from artifact-hit steady state while retaining a combined end-to-end view.
+- Planner declines reuse exact serialized-query fingerprints and dependency
+  state without cloning full cache entries or repeating unprofiled telemetry.
+- Metal stress, native-parity, and release-verification artifacts require a
+  clean commit/tree, bind reviewed source and toolchain provenance, and seal
+  their complete evidence inventories.
 - macOS source setup uses one canonical Homebrew prerequisite set:
   `brew install llvm@20 lld@20 libomp boost postgis`. AdaptiveCpp discovery
   prefers the versioned `lld@20` formula before an unversioned `lld` fallback.
@@ -73,6 +90,10 @@ claim is implied by the entries below.
 - Planner decline evidence is sourced from planner state rather than synthetic
   benchmark text, and typed breadth fixtures preserve NULL, duplicate, peer,
   ordering, and native-decline semantics.
+- AdaptiveCpp setup uses the LLVM intrinsic API supported by both hosted and
+  current LLVM toolchains, forces macOS SDK libc++ headers to match the system
+  runtime, and invalidates cached toolchains whenever setup or tracked patches
+  change.
 
 ### Verification
 

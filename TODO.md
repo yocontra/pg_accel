@@ -14,7 +14,7 @@ published release artifact.
   509/509; live plan/integration suite passes 554/554.
 - [x] Native Metal CTest passes 32/32 executables. The focused H3 suite passes
   1,135/1,135 plus 23/23 no-device cases.
-- [x] External PostgreSQL 18 SQL passes 58/58 files and 306/306 semantic
+- [x] External PostgreSQL 18 SQL passes 59/59 files and 320/320 semantic
   assertions. The semantic matrix covers 22 families, and all released selected
   families have declared NULL, prepared-plan, DML, DDL, dispatch, and shape
   evidence.
@@ -67,15 +67,17 @@ enabled-minus-disabled results include:
 | `reduce_f64_minmax` 100K | +10.44% | -4.92% |
 | `ssbm_resident_int8_star` 10K | +11.88% | +22.78% |
 
-- [ ] Add substage timing for query fingerprint construction, decline-cache
+- [x] Add substage timing for query fingerprint construction, decline-cache
   lookup, dependency revalidation, native-cost reconstruction, and rejection
   recording. Standard benchmarks must keep profiling off.
-- [ ] Build the statement source/search-path/security fingerprint once in the
-  outer planner hook instead of recopying it in each candidate recognizer.
-- [ ] Stop cloning complete decline-cache entries on lookup and avoid repeated
+- [x] Build the statement source/search-path/security fingerprint once, lazily
+  for a top-level aggregate candidate, instead of recopying it in each
+  recognizer. Bounds-check prepared/EXECUTE source mismatches without wrapping
+  `standard_planner` or intercepting PostgreSQL error metadata.
+- [x] Stop cloning complete decline-cache entries on lookup and avoid repeated
   residency-store scans while preserving exact collision checks, catalog epoch,
   dependency stamps, policy GUCs, and error-safe nested planner cleanup.
-- [ ] Remove avoidable tracing/map/counter work from unprofiled rejection paths.
+- [x] Remove avoidable tracing/map/counter work from unprofiled rejection paths.
 - [ ] Re-run all 17 registered native-decline cells with 30 balanced pairs. Pass
   median allowance `max(0.25 ms, 2%)`, p95 allowance 5%, and exact paired
   non-inferiority at `alpha=0.05` in 17/17 cells. Target planner upper-group
@@ -88,14 +90,80 @@ In the focused repeat that first accelerated sample was 3.44x to 105.59x slower
 than the post-first median. With 30 pairs it no longer changes the winner verdict,
 but it makes a ten-sample warm p95 describe lifecycle work rather than steady state.
 
-- [ ] Keep refresh/rebuild/dispatch as a separately sealed lifecycle probe, then
+- [x] Keep refresh/rebuild/dispatch as a separately sealed lifecycle probe, then
   measure ten artifact-hit warm pairs independently. Reports and validators must
   require both; the rebuild sample must never be discarded or relabeled.
-- [ ] Record `Built`, `Rebuilt`, and `Hit` outcomes, construction bytes/time,
+- [x] Record `Built`, `Rebuilt`, and `Hit` outcomes, construction bytes/time,
   generation/dependency identity, dispatch counters, and output consumption for
   the lifecycle and steady-state series.
-- [ ] Preserve a combined end-to-end view for cost-model calibration while using
+- [x] Preserve a combined end-to-end view for cost-model calibration while using
   the steady-state series for the warm latency ratchet.
+
+## Ordered Architecture And Performance Roadmap
+
+These nine items capture the architectural follow-up from the pgrust executor
+comparison. Their order is intentional. It does not make every later item a
+Metal v1.0 release gate: the existing Definition Of Done remains authoritative,
+but any item that changes a planner-selectable lane must pass the same exact
+correctness, dispatch, fallback, lifecycle, and performance contracts before
+that lane is advertised.
+
+- [ ] **1. Close both existing P0 blockers before architecture expansion.** Pass
+  every Native-Decline Overhead gate and separate lifecycle construction from
+  steady-state measurement as specified above. New kernels or SQL surface must
+  not hide, relabel, waive, or postpone either blocker.
+- [x] **2. Make physical kernel mode part of admission and evidence.** Define a
+  stable execution classification such as `parallel_hash`,
+  `parallel_dense_count`, `parallel_dense_integer`, and `serial_generic`; carry
+  it through descriptor capability validation, costing, `EXPLAIN`, counters,
+  and benchmark artifacts. Normal planning must reject `serial_generic` unless
+  that exact shape has independent winning evidence. Tests must prove that the
+  reported mode matches the native branch that actually dispatched.
+- [ ] **3. Add descriptor-keyed specialization.** Build a cache keyed by the
+  complete semantic descriptor/spec identity and generate branch-free released
+  combinations of filter, membership, grouping, and measures. Start with
+  precompiled or build-generated template variants; attempt runtime GPU query
+  JIT only after compile latency, cache lifetime, backend duplication, archive
+  provenance, cancellation, and cold/warm behavior are measured. AdaptiveCpp
+  compiling a static generic kernel is not query-shape specialization.
+- [ ] **4. Build hierarchical reduction kernels.** For ungrouped and
+  low-cardinality aggregates, use multiple per-work-item accumulators,
+  workgroup-local reduction, and one bounded global merge instead of a
+  contended global atomic for every input row. Preserve exact PostgreSQL NULL,
+  overflow, accumulator-width, result-type, and cancellation semantics, and
+  independently qualify each reduction shape.
+- [ ] **5. Cost fused execution versus reusable derived artifacts.** Provide an
+  ephemeral path that fuses H3, spatial, and dimension transforms into their
+  consuming aggregate, plus the existing dependency-stamped cached-artifact
+  path. Admission must choose using construction bytes/time, expected reuse,
+  cache-hit state, invalidation risk, launch count, and memory budget. Report
+  the selected policy and observed artifact outcome in `EXPLAIN` and evidence.
+- [ ] **6. Remove hot-path allocation, launch, wait, and copy seams.** Complete
+  the exact-shape workspace pool and reuse compatible output storage; poison
+  and evict failed state. Reduce bounded accumulate calls, chain safe queue
+  dependencies, pack bounded output into fewer transfers, and synchronize once
+  at the final boundary where the cancellation contract permits. Keep launch
+  count, allocation bytes, output bytes, and wait time separately observable.
+- [ ] **7. Improve resident representation and cold ingestion.** Evaluate compact
+  NULL bitmaps, dictionary or bit-packed low-cardinality columns, block min/max
+  metadata, and direct encoded-domain filtering/aggregation. Batch heap-page
+  deformation and evaluate double-buffered staging into GPU-readable storage.
+  Account raw, encoded, construction, transient, and retained-exact bytes; no
+  lossy representation may weaken PostgreSQL semantics or recheck obligations.
+- [ ] **8. Quantify and address backend-local duplication.** Add N-backend tests
+  for resident bytes, repeated loads, derived artifacts, AdaptiveCpp JIT/archive
+  warmup, queue contention, throughput, latency, eviction, and invalidation.
+  Based on measured cost, evaluate a background-worker GPU owner or another
+  process-safe shared residency service without passing raw device pointers
+  across PostgreSQL processes. Preserve cluster accounting and fail-closed
+  cleanup under backend exit, fork, cancellation, and owner failure.
+- [ ] **9. Add broad end-to-end benchmark evidence.** Retain the exact selected-
+  lane ratchets, then add SSBM, TPC-H, and ClickBench-style suites that report
+  native declines as honestly as GPU selections. Compare with the best observed
+  PostgreSQL-parallel plan and keep cold load, artifact construction, warm reuse,
+  concurrency, memory footprint, and full output consumption separate. Do not
+  publish a system-level speedup headline until the query coverage, storage
+  policy, hardware, configuration, and scoring method make it reproducible.
 
 ## P1: Selected-Path Performance
 
@@ -104,19 +172,19 @@ winners improved their speedup over the broad run. The following work is still
 valuable for latency and headroom, but must not bypass correctness or lifecycle
 evidence.
 
-- [ ] Profile `DescriptorAggPlan::new`, artifact ensure/lookup, derived-input
+- [x] Profile `DescriptorAggPlan::new`, artifact ensure/lookup, derived-input
   binding, grouped-workspace allocation, output allocation, kernel execution,
   and tuple materialization separately.
-- [ ] Evaluate an exact-shape backend-local grouped workspace pool. Poisoned
+- [x] Evaluate an exact-shape backend-local grouped workspace pool. Poisoned
   workspaces must be evicted; cancellation, fork/backend exit, generation changes,
   and device accounting must remain fail-closed and leak-free.
-- [ ] Return artifact evidence and byte accounting directly from ensure/rebuild so
+- [x] Return artifact evidence and byte accounting directly from ensure/rebuild so
   the executor does not repeat a lookup solely for reporting.
-- [ ] Reduce the 10M dense hash-aggregate lifecycle from 40 accumulate calls plus
+- [x] Reduce the 10M dense hash-aggregate lifecycle from 40 accumulate calls plus
   finalize. Test a dedicated 1M-row dense-session chunk boundary (target at most
   11 calls) before considering queued multi-range submission. Preserve interrupt
   latency and exact workspace limits.
-- [ ] Add dense-session launch count to cost estimation and wire completed
+- [x] Add dense-session launch count to cost estimation and wire completed
   aggregate batches into global batch counters; EXPLAIN and counters must agree.
 - [ ] Acceptance for these changes: one kernel/query where applicable, zero
   fallback, exact results, selected floor at least 1.15x, normalized median no
@@ -163,6 +231,20 @@ redesigned and independently requalified.
 
 ## P1: Residual Safety And Coverage
 
+- [x] Run PostgreSQL's upstream regression and isolation suites for every
+  supported major against both a pristine server and the exact candidate loaded
+  in every test session. Require zero pg_accel-caused result diffs, crashes,
+  hangs, leaked hooks, or changed planner/executor semantics; archive the exact
+  PostgreSQL SHA, build flags, schedules, expected/actual diffs, server logs, and
+  platform-qualified exclusions as durable release evidence. Add the gate to CI
+  so hook compatibility is continuously tested rather than inferred from the
+  extension's own SQL tests.
+  PG18.4 and PG19beta1 both pass pristine regression, pristine isolation,
+  loaded regression, and loaded isolation. Local sealed evidence:
+  `.codex/scratch/upstream-postgresql-pg18-20260811-c` (`SHA256SUMS` SHA-256
+  `f750f7d5d95f70760504a7d981546233071d77ff1549e77cd7b1ed13013dcf66`) and
+  `.codex/scratch/upstream-postgresql-pg19-20260811-a` (`SHA256SUMS` SHA-256
+  `255614004e4e41f0e5e85c2f1b04d4c9754b8ae5daea54a534c83afe4521b452`).
 - [ ] Extend failure injection across multi-session residency/invalidation,
   executor reset/drop, planner private data, allocation/free, copy/wait,
   cancellation, output materialization, PostGIS calls, and derived-artifact
@@ -178,8 +260,11 @@ redesigned and independently requalified.
 - [ ] Close remaining declaration gaps in `coverage/sql-semantic-matrix.json`,
   prioritizing declined aggregate modifiers, base/row-returning paths, H3 scalar
   and SRF shapes, sort/top-k/window, and neighboring raster/spatial declines.
-- [ ] Add live PG19 package/install/SQL evidence. PG19 lint, check, and test
-  compilation alone do not prove a released PostgreSQL 19 package.
+- [x] Add live PG19 package/install/SQL evidence. The PostgreSQL 19beta1
+  release build installed and loaded module SHA-256
+  `4e1c8696c25004e856f8245e9f46ea70f37bed1cd5f46bf41c8f899e54d2151b`;
+  extension smoke, 59/59 external SQL files, and both loaded upstream schedules
+  pass. PG19 lint, check, and test compilation remain separate gates.
 
 ## Release And Publication Gates
 

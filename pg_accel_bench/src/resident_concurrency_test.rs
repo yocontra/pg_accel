@@ -56,6 +56,8 @@ const BACKEND_COUNT: usize = 8;
 #[cfg(feature = "integration_tests")]
 const SOAK_ITERATIONS: usize = 20;
 #[cfg(feature = "integration_tests")]
+const CALIBRATION_ITERATIONS: usize = 20;
+#[cfg(feature = "integration_tests")]
 const FIXTURE: &str = "pg_accel_resident_concurrency";
 #[cfg(feature = "integration_tests")]
 const CANCEL_FIXTURE: &str = "pg_accel_resident_user_cancel";
@@ -69,6 +71,9 @@ const QUERY: &str = "/* pg_accel_resident_soak */ \
                      FROM pg_accel_resident_concurrency \
                      GROUP BY grp \
                      ORDER BY grp";
+#[cfg(feature = "integration_tests")]
+const INVALIDATION_STATEMENT: &str =
+    "UPDATE pg_accel_resident_concurrency SET measure = measure WHERE id = 1";
 #[cfg(feature = "integration_tests")]
 const CANCEL_BASE_QUERY: &str = "SELECT grp, SUM(measure), MIN(measure), MAX(measure), COUNT(*) \
                                 FROM pg_accel_resident_user_cancel \
@@ -280,6 +285,54 @@ struct DeviceArtifactSnapshot {
 }
 
 #[cfg(feature = "integration_tests")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ResidentRepresentationSnapshot {
+    row_count: i64,
+    source_logical_bytes: i64,
+    encoded_device_bytes: i64,
+    retained_exact_bytes: i64,
+    transient_staging_bytes: i64,
+    construction_peak_bytes: i64,
+    null_sidecar_bytes: i64,
+    projected_null_bitmap_bytes: i64,
+    bool_value_bytes: i64,
+    projected_bool_bitmap_bytes: i64,
+    integer_value_bytes: i64,
+    projected_integer_bitpack_bytes: i64,
+    dictionary_code_bytes: i64,
+    projected_dictionary_bitpack_bytes: i64,
+    projected_block_minmax_bytes: i64,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct ResidentIngestionSnapshot {
+    scan_batches: i64,
+    preflight_ms: f64,
+    scan_ms: f64,
+    encode_ms: f64,
+    copy_ms: f64,
+    total_load_ms: f64,
+    scan_strategy: String,
+    staging_strategy: String,
+    publication_strategy: String,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ArtifactLifecycleSnapshot {
+    hits: i64,
+    builds: i64,
+    rebuilds: i64,
+    artifact_bytes_observed: i64,
+    construction_bytes: i64,
+    construction_us: i64,
+    preparation_us: i64,
+    raw_load_us: i64,
+    selected_policy: Option<String>,
+}
+
+#[cfg(feature = "integration_tests")]
 #[derive(Debug, Serialize)]
 struct CancellationEvidence {
     postmaster_started_at: String,
@@ -333,7 +386,12 @@ struct WorkerSnapshot {
     kernel_executions: i64,
     queries_accelerated: i64,
     stock_exec_count: i64,
+    generation: i64,
+    phase_iterations: usize,
     phase_interval: Option<MonotonicInterval>,
+    representation: ResidentRepresentationSnapshot,
+    ingestion: ResidentIngestionSnapshot,
+    artifact_lifecycle: ArtifactLifecycleSnapshot,
 }
 
 #[cfg(feature = "integration_tests")]
@@ -341,6 +399,8 @@ struct WorkerSnapshot {
 enum WorkerPhase {
     Ready,
     Soak,
+    InvalidationReload,
+    EvictionReload,
     PostRelease,
 }
 
@@ -359,7 +419,7 @@ enum WorkerCommand {
 enum WorkerReport {
     Completed {
         phase: WorkerPhase,
-        snapshot: WorkerSnapshot,
+        snapshot: Box<WorkerSnapshot>,
     },
     Failed {
         slot: usize,
@@ -402,6 +462,44 @@ struct SoakOverlapEvidence {
     barrier_wait: ServerActivityObservation,
     aggregate_active: ServerActivityObservation,
     strict_common_interval: MonotonicInterval,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Clone, Serialize)]
+struct PhasePerformanceEvidence {
+    phase: WorkerPhase,
+    backend_count: usize,
+    query_count: usize,
+    input_rows_processed: u64,
+    wall_elapsed_us: u64,
+    aggregate_backend_elapsed_us: u64,
+    mean_query_latency_ms: f64,
+    throughput_queries_per_second: f64,
+    throughput_input_rows_per_second: f64,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Serialize)]
+struct ResidentServiceDecision {
+    decision: &'static str,
+    backend_local_copy_count: usize,
+    backend_local_bytes: u64,
+    duplicated_bytes_above_one_copy: u64,
+    maximum_shared_copy_savings_bytes: u64,
+    concurrent_to_single_latency_ratio: f64,
+    concurrent_throughput_scaling: f64,
+    rationale: &'static str,
+    revisit_trigger: &'static str,
+}
+
+#[cfg(feature = "integration_tests")]
+#[derive(Debug, Serialize)]
+struct DeviceArtifactWarmupEvidence {
+    before_calibration: DeviceArtifactSnapshot,
+    after_calibration: DeviceArtifactSnapshot,
+    after_concurrent_reload: DeviceArtifactSnapshot,
+    calibration_changed_cache: bool,
+    concurrent_phases_reused_stable_cache: bool,
 }
 
 #[cfg(feature = "integration_tests")]
@@ -473,7 +571,7 @@ impl WorkerPool {
             })?;
             match report {
                 WorkerReport::Completed { phase, snapshot } if phase == expected_phase => {
-                    snapshots.push(snapshot);
+                    snapshots.push(*snapshot);
                 }
                 WorkerReport::Completed { phase, snapshot } => {
                     return Err(format!(
@@ -841,6 +939,9 @@ fn run_worker_phase(
 ) -> Result<MonotonicInterval, String> {
     let run = |client: &mut Client| {
         let start_us = clock_offset_us(spec.clock_origin)?;
+        if phase == WorkerPhase::EvictionReload {
+            evict_fixture_for_reload(client, &spec.table, spec.slot)?;
+        }
         run_exact_iterations(client, QUERY, &spec.expected, iterations, spec.slot, phase)?;
         let end_us = clock_offset_us(spec.clock_origin)?;
         if start_us >= end_us {
@@ -922,18 +1023,18 @@ fn worker_loop(
     }
     pin_fixture(&mut client, &spec.table, spec.fixture_rows)?;
     require_descriptor_plan(&mut client, QUERY)?;
-    run_exact_iterations(
-        &mut client,
-        QUERY,
-        &spec.expected,
-        1,
-        slot,
-        WorkerPhase::Ready,
-    )?;
+    let ready_interval = run_worker_phase(&mut client, spec, WorkerPhase::Ready, 1, None)?;
     reports
         .send(WorkerReport::Completed {
             phase: WorkerPhase::Ready,
-            snapshot: worker_snapshot(&mut client, slot, pid, None)?,
+            snapshot: Box::new(worker_snapshot(
+                &mut client,
+                &spec.table,
+                slot,
+                pid,
+                1,
+                Some(ready_interval),
+            )?),
         })
         .map_err(|error| format!("send ready report from worker {slot}: {error}"))?;
 
@@ -957,7 +1058,14 @@ fn worker_loop(
                 reports
                     .send(WorkerReport::Completed {
                         phase,
-                        snapshot: worker_snapshot(&mut client, slot, pid, Some(phase_interval))?,
+                        snapshot: Box::new(worker_snapshot(
+                            &mut client,
+                            &spec.table,
+                            slot,
+                            pid,
+                            iterations,
+                            Some(phase_interval),
+                        )?),
                     })
                     .map_err(|error| {
                         format!("send {phase:?} report from worker {slot}: {error}")
@@ -1066,6 +1174,28 @@ fn pin_fixture(client: &mut Client, table: &str, fixture_rows: i64) -> Result<()
     if pinned_rows != fixture_rows {
         return Err(format!(
             "pg_accel_pin loaded {pinned_rows} rows, expected {fixture_rows}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "integration_tests")]
+fn evict_fixture_for_reload(client: &mut Client, table: &str, slot: usize) -> Result<(), String> {
+    let evicted = client
+        .query_one("SELECT pg_accel_evict($1::text::regclass)", &[&table])
+        .map_err(|error| format!("evict worker {slot} resident fixture: {error}"))?
+        .try_get::<_, bool>(0)
+        .map_err(|error| format!("decode worker {slot} eviction result: {error}"))?;
+    if !evicted {
+        return Err(format!(
+            "worker {slot} could not evict its loaded resident fixture"
+        ));
+    }
+    let status = local_status(client)?;
+    if status.rows != 1 || !status.all_pinned || status.raw_bytes != 0 || status.derived_bytes != 0
+    {
+        return Err(format!(
+            "worker {slot} eviction did not retain an empty pin for auto-reload: {status:?}"
         ));
     }
     Ok(())
@@ -1495,10 +1625,141 @@ fn cluster_bytes(client: &mut Client) -> Result<i64, String> {
 }
 
 #[cfg(feature = "integration_tests")]
+fn resident_representation_snapshot(
+    client: &mut Client,
+    table: &str,
+) -> Result<ResidentRepresentationSnapshot, String> {
+    let row = client
+        .query_one(
+            "SELECT row_count, source_logical_bytes, encoded_device_bytes,
+                    retained_exact_bytes, transient_staging_bytes,
+                    construction_peak_bytes, null_sidecar_bytes,
+                    projected_null_bitmap_bytes, bool_value_bytes,
+                    projected_bool_bitmap_bytes, integer_value_bytes,
+                    projected_integer_bitpack_bytes, dictionary_code_bytes,
+                    projected_dictionary_bitpack_bytes, projected_block_minmax_bytes
+             FROM pg_accel_resident_representation_status()
+             WHERE relid = $1::text::regclass::oid",
+            &[&table],
+        )
+        .map_err(|error| format!("read resident representation for {table}: {error}"))?;
+    let integer = |index, label: &str| {
+        row.try_get::<_, i64>(index)
+            .map_err(|error| format!("decode resident representation {label}: {error}"))
+    };
+    Ok(ResidentRepresentationSnapshot {
+        row_count: integer(0, "row count")?,
+        source_logical_bytes: integer(1, "source logical bytes")?,
+        encoded_device_bytes: integer(2, "encoded device bytes")?,
+        retained_exact_bytes: integer(3, "retained exact bytes")?,
+        transient_staging_bytes: integer(4, "transient staging bytes")?,
+        construction_peak_bytes: integer(5, "construction peak bytes")?,
+        null_sidecar_bytes: integer(6, "NULL sidecar bytes")?,
+        projected_null_bitmap_bytes: integer(7, "projected NULL bitmap bytes")?,
+        bool_value_bytes: integer(8, "bool value bytes")?,
+        projected_bool_bitmap_bytes: integer(9, "projected bool bitmap bytes")?,
+        integer_value_bytes: integer(10, "integer value bytes")?,
+        projected_integer_bitpack_bytes: integer(11, "projected integer bitpack bytes")?,
+        dictionary_code_bytes: integer(12, "dictionary code bytes")?,
+        projected_dictionary_bitpack_bytes: integer(13, "projected dictionary bitpack bytes")?,
+        projected_block_minmax_bytes: integer(14, "projected block min/max bytes")?,
+    })
+}
+
+#[cfg(feature = "integration_tests")]
+fn resident_ingestion_snapshot(
+    client: &mut Client,
+    table: &str,
+) -> Result<ResidentIngestionSnapshot, String> {
+    let row = client
+        .query_one(
+            "SELECT scan_batches, preflight_ms, scan_ms, encode_ms, copy_ms,
+                    total_load_ms, scan_strategy, staging_strategy, publication_strategy
+             FROM pg_accel_resident_ingestion_status()
+             WHERE relid = $1::text::regclass::oid",
+            &[&table],
+        )
+        .map_err(|error| format!("read resident ingestion evidence for {table}: {error}"))?;
+    Ok(ResidentIngestionSnapshot {
+        scan_batches: row
+            .try_get(0)
+            .map_err(|error| format!("decode ingestion scan batches: {error}"))?,
+        preflight_ms: row
+            .try_get(1)
+            .map_err(|error| format!("decode ingestion preflight time: {error}"))?,
+        scan_ms: row
+            .try_get(2)
+            .map_err(|error| format!("decode ingestion scan time: {error}"))?,
+        encode_ms: row
+            .try_get(3)
+            .map_err(|error| format!("decode ingestion encode time: {error}"))?,
+        copy_ms: row
+            .try_get(4)
+            .map_err(|error| format!("decode ingestion copy time: {error}"))?,
+        total_load_ms: row
+            .try_get(5)
+            .map_err(|error| format!("decode ingestion total load time: {error}"))?,
+        scan_strategy: row
+            .try_get(6)
+            .map_err(|error| format!("decode ingestion scan strategy: {error}"))?,
+        staging_strategy: row
+            .try_get(7)
+            .map_err(|error| format!("decode ingestion staging strategy: {error}"))?,
+        publication_strategy: row
+            .try_get(8)
+            .map_err(|error| format!("decode ingestion publication strategy: {error}"))?,
+    })
+}
+
+#[cfg(feature = "integration_tests")]
+fn artifact_lifecycle_snapshot(client: &mut Client) -> Result<ArtifactLifecycleSnapshot, String> {
+    let row = client
+        .query_one(
+            "SELECT hits, builds, rebuilds, artifact_bytes_observed,
+                    construction_bytes, construction_us, preparation_us,
+                    raw_load_us, pg_accel_last_artifact_policy()
+             FROM pg_accel_artifact_lifecycle_stats()",
+            &[],
+        )
+        .map_err(|error| format!("read worker artifact lifecycle evidence: {error}"))?;
+    Ok(ArtifactLifecycleSnapshot {
+        hits: row
+            .try_get(0)
+            .map_err(|error| format!("decode artifact hit count: {error}"))?,
+        builds: row
+            .try_get(1)
+            .map_err(|error| format!("decode artifact build count: {error}"))?,
+        rebuilds: row
+            .try_get(2)
+            .map_err(|error| format!("decode artifact rebuild count: {error}"))?,
+        artifact_bytes_observed: row
+            .try_get(3)
+            .map_err(|error| format!("decode artifact observed bytes: {error}"))?,
+        construction_bytes: row
+            .try_get(4)
+            .map_err(|error| format!("decode artifact construction bytes: {error}"))?,
+        construction_us: row
+            .try_get(5)
+            .map_err(|error| format!("decode artifact construction time: {error}"))?,
+        preparation_us: row
+            .try_get(6)
+            .map_err(|error| format!("decode artifact preparation time: {error}"))?,
+        raw_load_us: row
+            .try_get(7)
+            .map_err(|error| format!("decode artifact raw load time: {error}"))?,
+        selected_policy: row
+            .try_get(8)
+            .map_err(|error| format!("decode selected artifact policy: {error}"))?,
+    })
+}
+
+#[cfg(feature = "integration_tests")]
 fn worker_snapshot(
     client: &mut Client,
+    table: &str,
     slot: usize,
     pid: i32,
+    phase_iterations: usize,
     phase_interval: Option<MonotonicInterval>,
 ) -> Result<WorkerSnapshot, String> {
     let status = local_status(client)?;
@@ -1514,6 +1775,26 @@ fn worker_snapshot(
             "worker {slot} PID {pid} has invalid acceleration counters: {counters:?}"
         ));
     }
+    let fingerprint = resident_fingerprint(client, table)?;
+    let representation = resident_representation_snapshot(client, table)?;
+    let ingestion = resident_ingestion_snapshot(client, table)?;
+    let artifact_lifecycle = artifact_lifecycle_snapshot(client)?;
+    if fingerprint.raw_bytes != status.raw_bytes
+        || fingerprint.derived_bytes != status.derived_bytes
+        || !fingerprint.pinned
+        || fingerprint.generation <= 0
+        || representation.row_count <= 0
+        || representation.encoded_device_bytes <= 0
+        || ingestion.scan_batches <= 0
+        || ingestion.total_load_ms < 0.0
+        || artifact_lifecycle.selected_policy.is_none()
+    {
+        return Err(format!(
+            "worker {slot} PID {pid} has incomplete representation/lifecycle evidence: \
+             fingerprint={fingerprint:?}, representation={representation:?}, \
+             ingestion={ingestion:?}, lifecycle={artifact_lifecycle:?}"
+        ));
+    }
     Ok(WorkerSnapshot {
         slot,
         pid,
@@ -1524,7 +1805,12 @@ fn worker_snapshot(
         kernel_executions: counters.kernels,
         queries_accelerated: counters.accelerated,
         stock_exec_count: counters.stock,
+        generation: fingerprint.generation,
+        phase_iterations,
         phase_interval,
+        representation,
+        ingestion,
+        artifact_lifecycle,
     })
 }
 
@@ -1799,8 +2085,150 @@ fn calibrate_backend(
         BACKEND_COUNT,
         WorkerPhase::Ready,
     )?;
-    let snapshot = worker_snapshot(&mut client, BACKEND_COUNT, pid, None)?;
+    let warm_start = Instant::now();
+    run_exact_iterations(
+        &mut client,
+        QUERY,
+        expected,
+        CALIBRATION_ITERATIONS,
+        BACKEND_COUNT,
+        WorkerPhase::Soak,
+    )?;
+    let elapsed_us = u64::try_from(warm_start.elapsed().as_micros())
+        .map_err(|error| format!("single-backend calibration time does not fit u64: {error}"))?
+        .max(1);
+    let snapshot = worker_snapshot(
+        &mut client,
+        FIXTURE,
+        BACKEND_COUNT,
+        pid,
+        CALIBRATION_ITERATIONS,
+        Some(MonotonicInterval {
+            start_us: 0,
+            end_us: elapsed_us,
+        }),
+    )?;
     Ok((snapshot, client))
+}
+
+#[cfg(feature = "integration_tests")]
+fn phase_performance(
+    phase: WorkerPhase,
+    snapshots: &[WorkerSnapshot],
+    fixture_rows: i64,
+) -> Result<PhasePerformanceEvidence, String> {
+    if snapshots.is_empty() || fixture_rows <= 0 {
+        return Err(format!(
+            "{phase:?} performance evidence needs snapshots and a positive fixture size"
+        ));
+    }
+    let intervals = snapshots
+        .iter()
+        .map(|snapshot| {
+            snapshot.phase_interval.ok_or_else(|| {
+                format!(
+                    "worker {} omitted its {phase:?} performance interval",
+                    snapshot.slot
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let start_us = intervals
+        .iter()
+        .map(|interval| interval.start_us)
+        .min()
+        .ok_or_else(|| format!("{phase:?} performance has no start timestamp"))?;
+    let end_us = intervals
+        .iter()
+        .map(|interval| interval.end_us)
+        .max()
+        .ok_or_else(|| format!("{phase:?} performance has no end timestamp"))?;
+    let wall_elapsed_us = end_us
+        .checked_sub(start_us)
+        .filter(|elapsed| *elapsed > 0)
+        .ok_or_else(|| format!("{phase:?} performance interval is not positive"))?;
+    let aggregate_backend_elapsed_us = intervals.iter().try_fold(0_u64, |total, interval| {
+        let elapsed = interval
+            .end_us
+            .checked_sub(interval.start_us)
+            .filter(|elapsed| *elapsed > 0)
+            .ok_or_else(|| format!("{phase:?} backend interval is not positive"))?;
+        total
+            .checked_add(elapsed)
+            .ok_or_else(|| format!("{phase:?} aggregate backend time overflow"))
+    })?;
+    let query_count = snapshots.iter().try_fold(0_usize, |total, snapshot| {
+        if snapshot.phase_iterations == 0 {
+            return Err(format!(
+                "worker {} recorded zero {phase:?} iterations",
+                snapshot.slot
+            ));
+        }
+        total
+            .checked_add(snapshot.phase_iterations)
+            .ok_or_else(|| format!("{phase:?} query count overflow"))
+    })?;
+    let input_rows_processed = u64::try_from(fixture_rows)
+        .map_err(|error| format!("{phase:?} fixture row count is negative: {error}"))?
+        .checked_mul(
+            u64::try_from(query_count)
+                .map_err(|error| format!("{phase:?} query count does not fit u64: {error}"))?,
+        )
+        .ok_or_else(|| format!("{phase:?} processed row count overflow"))?;
+    let query_count_f64 = query_count as f64;
+    let wall_seconds = wall_elapsed_us as f64 / 1_000_000.0;
+    Ok(PhasePerformanceEvidence {
+        phase,
+        backend_count: snapshots.len(),
+        query_count,
+        input_rows_processed,
+        wall_elapsed_us,
+        aggregate_backend_elapsed_us,
+        mean_query_latency_ms: aggregate_backend_elapsed_us as f64 / query_count_f64 / 1_000.0,
+        throughput_queries_per_second: query_count_f64 / wall_seconds,
+        throughput_input_rows_per_second: input_rows_processed as f64 / wall_seconds,
+    })
+}
+
+#[cfg(feature = "integration_tests")]
+fn resident_service_decision(
+    backend_bytes: u64,
+    single: &PhasePerformanceEvidence,
+    concurrent: &PhasePerformanceEvidence,
+) -> Result<ResidentServiceDecision, String> {
+    let duplicated_bytes_above_one_copy = backend_bytes
+        .checked_mul(
+            u64::try_from(BACKEND_COUNT - 1)
+                .map_err(|error| format!("backend duplication count does not fit u64: {error}"))?,
+        )
+        .ok_or_else(|| "backend-local duplication byte total overflow".to_owned())?;
+    if single.mean_query_latency_ms <= 0.0
+        || single.throughput_queries_per_second <= 0.0
+        || concurrent.mean_query_latency_ms <= 0.0
+        || concurrent.throughput_queries_per_second <= 0.0
+    {
+        return Err("resident service decision needs positive measured performance".to_owned());
+    }
+    Ok(ResidentServiceDecision {
+        decision: "retain_backend_local_residency",
+        backend_local_copy_count: BACKEND_COUNT,
+        backend_local_bytes: backend_bytes,
+        duplicated_bytes_above_one_copy,
+        maximum_shared_copy_savings_bytes: duplicated_bytes_above_one_copy,
+        concurrent_to_single_latency_ratio: concurrent.mean_query_latency_ms
+            / single.mean_query_latency_ms,
+        concurrent_throughput_scaling: concurrent.throughput_queries_per_second
+            / single.throughput_queries_per_second,
+        rationale: "A background owner would save duplicated bytes, but the current ABI owns \
+                    process-local USM pointers, queues, cancellation state, and PostgreSQL error \
+                    scopes. The measured gate proves bounded backend-local ownership and cleanup; \
+                    replacing it without an IPC-safe command/result protocol would weaken those \
+                    guarantees.",
+        revisit_trigger: "Revisit when measured resident duplication exceeds the configured \
+                          cluster budget on representative concurrency, or after an IPC-safe GPU \
+                          service prototype proves exact cancellation, owner-failure recovery, and \
+                          no cross-process raw device pointers.",
+    })
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1868,6 +2296,78 @@ fn validate_worker_snapshots(
             .ok_or_else(|| "sum of backend-local resident bytes overflowed".to_owned())?;
     }
     Ok(total)
+}
+
+#[cfg(feature = "integration_tests")]
+fn lifecycle_constructions(snapshot: &WorkerSnapshot) -> Result<i64, String> {
+    snapshot
+        .artifact_lifecycle
+        .builds
+        .checked_add(snapshot.artifact_lifecycle.rebuilds)
+        .ok_or_else(|| {
+            format!(
+                "worker {} lifecycle construction count overflow",
+                snapshot.slot
+            )
+        })
+}
+
+#[cfg(feature = "integration_tests")]
+fn validate_reload_transition(
+    before: &[WorkerSnapshot],
+    after: &[WorkerSnapshot],
+    generation_must_advance: bool,
+    label: &str,
+) -> Result<(), String> {
+    if before.len() != after.len() {
+        return Err(format!(
+            "{label} snapshot count changed from {} to {}",
+            before.len(),
+            after.len()
+        ));
+    }
+    for (before, after) in before.iter().zip(after) {
+        if before.slot != after.slot || before.pid != after.pid {
+            return Err(format!(
+                "{label} changed worker identity: before={}/{}, after={}/{}",
+                before.slot, before.pid, after.slot, after.pid
+            ));
+        }
+        if generation_must_advance {
+            if after.generation <= before.generation {
+                return Err(format!(
+                    "{label} worker {} generation did not advance: {} -> {}",
+                    after.slot, before.generation, after.generation
+                ));
+            }
+        } else if after.generation != before.generation {
+            return Err(format!(
+                "{label} worker {} unexpectedly changed generation: {} -> {}",
+                after.slot, before.generation, after.generation
+            ));
+        }
+        if after.representation != before.representation {
+            return Err(format!(
+                "{label} worker {} changed its lossless resident representation: \
+                 before={:?}, after={:?}",
+                after.slot, before.representation, after.representation
+            ));
+        }
+        if lifecycle_constructions(after)? <= lifecycle_constructions(before)? {
+            return Err(format!(
+                "{label} worker {} did not construct a fresh generation-stamped artifact: \
+                 before={:?}, after={:?}",
+                after.slot, before.artifact_lifecycle, after.artifact_lifecycle
+            ));
+        }
+        if after.ingestion.scan_batches <= 0 || after.ingestion.total_load_ms < 0.0 {
+            return Err(format!(
+                "{label} worker {} omitted repeated-load timing: {:?}",
+                after.slot, after.ingestion
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "integration_tests")]
@@ -1965,9 +2465,18 @@ struct ConcurrencyEvidence {
     required_bytes: u64,
     rounding_spare_bytes: u64,
     calibration: WorkerSnapshot,
+    single_backend_warm_performance: PhasePerformanceEvidence,
     ready: Vec<WorkerSnapshot>,
     soak: Vec<WorkerSnapshot>,
+    soak_performance: PhasePerformanceEvidence,
     soak_overlap: SoakOverlapEvidence,
+    invalidation_statement: &'static str,
+    invalidation_reload: Vec<WorkerSnapshot>,
+    invalidation_reload_performance: PhasePerformanceEvidence,
+    eviction_reload: Vec<WorkerSnapshot>,
+    eviction_reload_performance: PhasePerformanceEvidence,
+    device_artifact_warmup: DeviceArtifactWarmupEvidence,
+    resident_service_decision: ResidentServiceDecision,
     released_slot: usize,
     released_pid: i32,
     post_release_cluster_bytes: i64,
@@ -2018,7 +2527,14 @@ fn run_concurrency_proof(
         ));
     }
 
+    let artifacts_before_calibration = stable_device_artifact_snapshot()?;
     let (calibration, calibrator) = calibrate_backend(connection, fixture_rows, &expected)?;
+    let artifacts_after_calibration = stable_device_artifact_snapshot()?;
+    let single_backend_warm_performance = phase_performance(
+        WorkerPhase::Soak,
+        std::slice::from_ref(&calibration),
+        fixture_rows,
+    )?;
     let calibration_state = monitor_state(monitor)?;
     require_monitor_state(
         &calibration_state,
@@ -2081,6 +2597,91 @@ fn run_concurrency_proof(
         ));
     }
     require_monitor_state(&monitor_state(monitor)?, &postmaster_started_at, soak_total)?;
+    for (ready_snapshot, soak_snapshot) in ready.iter().zip(&soak) {
+        if soak_snapshot.artifact_lifecycle.hits <= ready_snapshot.artifact_lifecycle.hits {
+            return Err(format!(
+                "worker {} did not record reusable artifact hits during the warm soak: \
+                 ready={:?}, soak={:?}",
+                soak_snapshot.slot,
+                ready_snapshot.artifact_lifecycle,
+                soak_snapshot.artifact_lifecycle
+            ));
+        }
+    }
+    let soak_performance = phase_performance(WorkerPhase::Soak, &soak, fixture_rows)?;
+
+    let invalidated_rows = monitor
+        .execute(INVALIDATION_STATEMENT, &[])
+        .map_err(|error| format!("invalidate all resident worker generations: {error}"))?;
+    if invalidated_rows != 1 {
+        return Err(format!(
+            "resident invalidation statement changed {invalidated_rows} rows, expected 1"
+        ));
+    }
+    let mut invalidation_reload = pool.run_active(WorkerPhase::InvalidationReload, 1)?;
+    invalidation_reload.sort_by_key(|snapshot| snapshot.slot);
+    let invalidation_total =
+        validate_worker_snapshots(&invalidation_reload, &all_slots, &calibration)?;
+    if invalidation_total != ready_total {
+        return Err(format!(
+            "resident bytes changed after invalidation reload: ready={ready_total}, \
+             invalidation={invalidation_total}"
+        ));
+    }
+    validate_reload_transition(&soak, &invalidation_reload, true, "DML invalidation reload")?;
+    require_monitor_state(
+        &monitor_state(monitor)?,
+        &postmaster_started_at,
+        invalidation_total,
+    )?;
+    let invalidation_reload_performance = phase_performance(
+        WorkerPhase::InvalidationReload,
+        &invalidation_reload,
+        fixture_rows,
+    )?;
+
+    let mut eviction_reload = pool.run_active(WorkerPhase::EvictionReload, 1)?;
+    eviction_reload.sort_by_key(|snapshot| snapshot.slot);
+    let eviction_total = validate_worker_snapshots(&eviction_reload, &all_slots, &calibration)?;
+    if eviction_total != ready_total {
+        return Err(format!(
+            "resident bytes changed after eviction reload: ready={ready_total}, \
+             eviction={eviction_total}"
+        ));
+    }
+    validate_reload_transition(
+        &invalidation_reload,
+        &eviction_reload,
+        false,
+        "explicit eviction reload",
+    )?;
+    require_monitor_state(
+        &monitor_state(monitor)?,
+        &postmaster_started_at,
+        eviction_total,
+    )?;
+    let eviction_reload_performance =
+        phase_performance(WorkerPhase::EvictionReload, &eviction_reload, fixture_rows)?;
+    let artifacts_after_concurrent_reload = stable_device_artifact_snapshot()?;
+    if artifacts_after_concurrent_reload != artifacts_after_calibration {
+        return Err(format!(
+            "concurrent warm/reload phases changed the calibrated AdaptiveCpp artifact cache: \
+             calibrated={artifacts_after_calibration:?}, \
+             after={artifacts_after_concurrent_reload:?}"
+        ));
+    }
+    let device_artifact_warmup = DeviceArtifactWarmupEvidence {
+        calibration_changed_cache: artifacts_after_calibration != artifacts_before_calibration,
+        concurrent_phases_reused_stable_cache: true,
+        before_calibration: artifacts_before_calibration,
+        after_calibration: artifacts_after_calibration,
+        after_concurrent_reload: artifacts_after_concurrent_reload,
+    };
+    let resident_service_decision = resident_service_decision(
+        backend_bytes,
+        &single_backend_warm_performance,
+        &soak_performance,
+    )?;
 
     let released = ready
         .first()
@@ -2150,9 +2751,18 @@ fn run_concurrency_proof(
         required_bytes: budget.required_bytes,
         rounding_spare_bytes: budget.spare_bytes,
         calibration,
+        single_backend_warm_performance,
         ready,
         soak,
+        soak_performance,
         soak_overlap,
+        invalidation_statement: INVALIDATION_STATEMENT,
+        invalidation_reload,
+        invalidation_reload_performance,
+        eviction_reload,
+        eviction_reload_performance,
+        device_artifact_warmup,
+        resident_service_decision,
         released_slot: released.slot,
         released_pid: released.pid,
         post_release_cluster_bytes,

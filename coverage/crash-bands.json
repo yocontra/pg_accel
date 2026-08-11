@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "historical_lanes": [
+    {
+      "id": "retired_grouped_hash",
+      "first_unsafe_rows": 100000,
+      "limit_constant": "HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS",
+      "predicate": "hashagg_input_rows_safe",
+      "boundary_test": "historical_crash_gate_predicates_cover_adjacent_and_extreme_rows",
+      "planner_exposure": "retired",
+      "replacement_test": "test_million_row_hot_groups"
+    },
+    {
+      "id": "retired_row_returning_hash_join",
+      "first_unsafe_rows": 100000,
+      "limit_constant": "HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS",
+      "predicate": "hashjoin_cardinality_safe",
+      "boundary_test": "historical_crash_gate_predicates_cover_adjacent_and_extreme_rows",
+      "planner_exposure": "structural_false",
+      "replacement_test": "test_gpu_hashjoin_row_output_cap_records_heap_decline"
+    }
+  ],
+  "required_evidence": [
+    {
+      "path": "pg_accel/src/engine/cost/device_limits.rs",
+      "symbol": "historical_crash_bands_are_pinned_for_every_device_profile"
+    },
+    {
+      "path": "pg_accel/src/engine/cost/device_limits.rs",
+      "symbol": "validation_rejects_attempts_to_raise_historical_crash_gates"
+    },
+    {
+      "path": "pg_accel/src/engine/executor/agg/descriptor.rs",
+      "symbol": "one_shot_limit_boundary_preserves_bounded_cancellation_contract"
+    },
+    {
+      "path": "pg_accel/src/tests/phase2_cache.rs",
+      "symbol": "test_bounded_dense_statement_timeout_is_exact_and_recoverable"
+    },
+    {
+      "path": "pg_accel/src/tests/mod.rs",
+      "symbol": "test_gpu_hashjoin_partial_path_injects"
+    },
+    {
+      "path": "pg_accel/src/tests/mod.rs",
+      "symbol": "test_gpu_hashjoin_parallel_large_inner_records_rebuild_decline"
+    },
+    {
+      "path": "pgaccel-kernels/test/test_grouped_agg_hash.cpp",
+      "symbol": "test_million_row_hot_groups"
+    },
+    {
+      "path": "pgaccel-kernels/test/test_oom_invariant.cpp",
+      "symbol": "run_grouped_agg_family"
+    }
+  ],
+  "execution_commands": [
+    "cargo test -p pg_accel --lib historical_crash",
+    "cargo pgrx test --package pg_accel pg{major}",
+    "ctest --test-dir pgaccel-kernels/build --output-on-failure -R 'test_(grouped_agg_hash|oom_invariant)'",
+    "just metal-stress {major}"
+  ]
+}

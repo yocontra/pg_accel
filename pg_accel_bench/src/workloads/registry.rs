@@ -17,6 +17,10 @@ pub enum WorkloadCategory {
     GpuWindow,
     /// Star-schema workloads generated from the SSBM fixture.
     StarSchemaSsbm,
+    /// Deterministic TPC-H-shaped system workloads (not a certified TPC-H run).
+    Tpch,
+    /// Deterministic ClickBench-style high-volume event workloads.
+    ClickBench,
     Mixed,
     GpuRaster,
     Regression,
@@ -37,6 +41,8 @@ impl WorkloadCategory {
             Self::GpuExpr => "gpu_expr",
             Self::GpuWindow => "gpu_window",
             Self::StarSchemaSsbm => "ssbm",
+            Self::Tpch => "tpch",
+            Self::ClickBench => "clickbench",
             Self::Mixed => "mixed",
             Self::GpuRaster => "gpu_raster",
             Self::Regression => "regression",
@@ -912,6 +918,36 @@ const PINS_SSBM_Q4_3: &[ResidentPinSpec] = &[
     pin!("ssbm_supplier", ["s_suppkey", "s_city", "s_nation"]),
     pin!("ssbm_part", ["p_partkey", "p_brand1", "p_category"]),
 ];
+const PINS_TPCH_Q1: &[ResidentPinSpec] = &[pin!(
+    "tpch_lineitem",
+    ["l_returnflag", "l_linestatus", "l_shipdate"]
+)];
+const PINS_TPCH_Q6: &[ResidentPinSpec] = &[pin!("tpch_lineitem", ["l_shipdate"])];
+const PINS_TPCH_Q12: &[ResidentPinSpec] = &[
+    pin!("tpch_orders", ["o_orderkey", "o_orderpriority"]),
+    pin!(
+        "tpch_lineitem",
+        [
+            "l_orderkey",
+            "l_shipmode",
+            "l_commitdate",
+            "l_receiptdate",
+            "l_shipdate"
+        ]
+    ),
+];
+const PINS_CLICKBENCH_GROUPED: &[ResidentPinSpec] = &[pin!(
+    "clickbench_hits",
+    ["project_id", "event_type", "revenue"]
+)];
+const PINS_CLICKBENCH_DISTINCT: &[ResidentPinSpec] = &[pin!(
+    "clickbench_hits",
+    ["event_time", "country", "user_id", "is_mobile"]
+)];
+const PINS_CLICKBENCH_TOP_URLS: &[ResidentPinSpec] = &[pin!(
+    "clickbench_hits",
+    ["url", "duration_ms", "project_id"]
+)];
 
 /// Canonical registry. Exact workload names appear once and only once here.
 pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
@@ -1217,6 +1253,12 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("ssbm_q4_3", C::StarSchemaSsbm, K::ResidentStarGroupAgg)
         .pins(PINS_SSBM_Q4_3)
         .evidence(NATIVE_DECLINE),
+    workload("tpch_q1", C::Tpch, K::HashAgg).pins(PINS_TPCH_Q1),
+    workload("tpch_q6", C::Tpch, K::Reduce).pins(PINS_TPCH_Q6),
+    workload("tpch_q12", C::Tpch, K::HashAgg).pins(PINS_TPCH_Q12),
+    workload("clickbench_grouped_events", C::ClickBench, K::HashAgg).pins(PINS_CLICKBENCH_GROUPED),
+    workload("clickbench_distinct_users", C::ClickBench, K::HashAgg).pins(PINS_CLICKBENCH_DISTINCT),
+    workload("clickbench_top_urls", C::ClickBench, K::Sort).pins(PINS_CLICKBENCH_TOP_URLS),
     workload("parallel_stress", C::GpuReduce, K::Unclassified),
     workload("parallel_stress_grouped", C::GpuHashAgg, K::Unclassified),
     workload("parallel_stress_sort", C::GpuSort, K::Unclassified),

@@ -11,6 +11,7 @@ mod case_when_null_predicate_expression_grouped_agg;
 mod case_when_or_expression_grouped_agg;
 mod case_when_range_expression_grouped_agg;
 mod case_when_value_predicate_expression_grouped_agg;
+mod clickbench;
 mod dictionary_grouped_agg;
 mod expression_grouped_agg;
 mod gpu_hashagg_med_card;
@@ -96,6 +97,7 @@ mod semi_anti_null_decline;
 mod setop_decline;
 mod small_table;
 mod topk_wide;
+mod tpch;
 mod window_full_output_decline;
 mod window_reducing_decline;
 
@@ -112,6 +114,7 @@ pub use case_when_null_predicate_expression_grouped_agg::CaseWhenNullPredicateEx
 pub use case_when_or_expression_grouped_agg::CaseWhenOrExpressionGroupedAgg;
 pub use case_when_range_expression_grouped_agg::CaseWhenRangeExpressionGroupedAgg;
 pub use case_when_value_predicate_expression_grouped_agg::CaseWhenValuePredicateExpressionGroupedAgg;
+pub use clickbench::{ClickbenchDistinctUsers, ClickbenchGroupedEvents, ClickbenchTopUrls};
 pub use dictionary_grouped_agg::DictionaryGroupedAgg;
 pub use expression_grouped_agg::ExpressionGroupedAgg;
 pub use filtered_grouped_agg::FilteredGroupedAgg;
@@ -177,6 +180,7 @@ pub use ssbm::{
 };
 pub use timeseries_sensor_rollup::TimeseriesSensorRollup;
 pub use topk_wide::TopkWide;
+pub use tpch::{TpchQ1, TpchQ6, TpchQ12};
 pub use window_analytics::WindowAnalytics;
 pub use window_full_output_decline::WindowFullOutputDecline;
 pub use window_reducing_decline::WindowReducingDecline;
@@ -537,6 +541,14 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(SsbmQ4_1),
         Box::new(SsbmQ4_2),
         Box::new(SsbmQ4_3),
+        // --- TPC-H-shaped end-to-end system suite ---
+        Box::new(TpchQ1),
+        Box::new(TpchQ6),
+        Box::new(TpchQ12),
+        // --- ClickBench-style end-to-end event suite ---
+        Box::new(ClickbenchGroupedEvents),
+        Box::new(ClickbenchDistinctUsers),
+        Box::new(ClickbenchTopUrls),
         // --- Parallel stress (fork-safety regression, PG defaults) ---
         Box::new(ParallelStress),
         Box::new(ParallelStressGrouped),
@@ -1589,7 +1601,8 @@ fn groupagg_threshold_matrix_entry(
 fn olap_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = ssbm_matrix_profile(name)?;
     let structural_decline = match name {
-        "ssbm_q1_1" | "ssbm_q1_2" | "ssbm_q1_3" => Some("shape_multi_filter_relation"),
+        "ssbm_q1_1" | "ssbm_q1_2" => Some("shape_multiple_range_predicates"),
+        "ssbm_q1_3" => Some("shape_multi_filter_relation"),
         "ssbm_q3_3" | "ssbm_q3_4" => Some("shape_unsupported_predicate"),
         "ssbm_q2_1" | "ssbm_q2_2" | "ssbm_q2_3" | "ssbm_q3_1" | "ssbm_q3_2" | "ssbm_q4_1"
         | "ssbm_q4_2" | "ssbm_q4_3" => Some("shape_unsupported_filter_type"),
@@ -2229,7 +2242,7 @@ fn reduce_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
         };
         let structural_decline = match name {
             "reduce_f64_sum" => Some("shape_floating_accumulator_semantics"),
-            "reduce_f64_minmax" => Some("no_gpu_resident_pipeline"),
+            "reduce_f64_minmax" => Some("generic_serial_kernel_mode_unqualified"),
             "reduce_f64_stats" => Some("shape_unsupported_aggregate"),
             _ => None,
         };
@@ -2507,7 +2520,7 @@ fn hashjoin_threshold_matrix_entry(
         }
     } else if name == "hashjoin_10k_1m" && rows < 1_000_000 {
         BenchmarkLaneExpectation::NativeDecline {
-            reason: "generic_cost_not_competitive",
+            reason: "generic_serial_kernel_mode_unqualified",
         }
     } else if (min_build_rows..=HASHJOIN_MAX_BUILD_ROWS).contains(&inner_rows) {
         BenchmarkLaneExpectation::GpuWinner {
@@ -4107,7 +4120,7 @@ mod tests {
             .expect("fp64 minmax threshold");
         assert_eq!(
             entry.expectation.decline_reason(),
-            Some("no_gpu_resident_pipeline")
+            Some("generic_serial_kernel_mode_unqualified")
         );
         assert!(entry.lane.starts_with("resident_f64_reduce"));
         assert_eq!(entry.dispatch_evidence, GENERIC_NATIVE_DISPATCH_EVIDENCE);
@@ -4117,7 +4130,10 @@ mod tests {
     fn test_threshold_matrix_keeps_fp64_structural_declines_at_every_scale() {
         for (name, reason) in [
             ("reduce_f64_sum", "shape_floating_accumulator_semantics"),
-            ("reduce_f64_minmax", "no_gpu_resident_pipeline"),
+            (
+                "reduce_f64_minmax",
+                "generic_serial_kernel_mode_unqualified",
+            ),
             ("reduce_f64_stats", "shape_unsupported_aggregate"),
         ] {
             for rows in [10_000, 100_000, 1_000_000] {
@@ -4290,8 +4306,8 @@ mod tests {
         );
 
         for (name, reason) in [
-            ("ssbm_q1_1", "shape_multi_filter_relation"),
-            ("ssbm_q1_2", "shape_multi_filter_relation"),
+            ("ssbm_q1_1", "shape_multiple_range_predicates"),
+            ("ssbm_q1_2", "shape_multiple_range_predicates"),
             ("ssbm_q1_3", "shape_multi_filter_relation"),
             ("ssbm_q2_1", "shape_unsupported_filter_type"),
             ("ssbm_q2_2", "shape_unsupported_filter_type"),
@@ -4357,7 +4373,7 @@ mod tests {
                 .expect("cost-decline sweep entry")
                 .expectation
                 .decline_reason(),
-            Some("generic_cost_not_competitive")
+            Some("generic_serial_kernel_mode_unqualified")
         );
         assert_eq!(
             benchmark_threshold_matrix_entry("hashjoin_10k_1m", 10_000_000)

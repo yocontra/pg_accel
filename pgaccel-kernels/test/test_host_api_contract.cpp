@@ -465,6 +465,28 @@ void test_grouped_aggregate_host_contracts() {
   check_value("grouped workspace result",
               request.bytes > 0 && request.alignment > 0 && request.flags == 0);
 
+  int32_t kernel_mode = 0;
+  check_status("grouped count physical mode",
+               pgaccel_grouped_agg_kernel_mode(&desc, &kernel_mode), PGACCEL_OK);
+  check_value("grouped count physical mode value",
+              kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
+  check_status("grouped physical mode null output",
+               pgaccel_grouped_agg_kernel_mode(&desc, nullptr), PGACCEL_ERROR);
+
+  pgaccel_grouped_agg_desc serial = desc;
+  serial.measures[0] = {};
+  serial.measures[0].value.physical_type = PGACCEL_GROUPED_AGG_PHYSICAL_INT64;
+  serial.measures[0].value.element_bytes = sizeof(int64_t);
+  serial.measures[0].op = PGACCEL_GROUPED_AGG_MEASURE_COLUMN;
+  serial.measures[0].agg_mask = PGACCEL_GROUPED_AGG_LANE_COUNT;
+  serial.measures[0].accumulator_kind = PGACCEL_GROUPED_AGG_ACCUM_I64;
+  serial.measures[0].state_bytes = sizeof(int64_t);
+  kernel_mode = 0;
+  check_status("grouped serial physical mode",
+               pgaccel_grouped_agg_kernel_mode(&serial, &kernel_mode), PGACCEL_OK);
+  check_value("grouped serial physical mode value",
+              kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC);
+
   check_status("grouped workspace null output",
                pgaccel_grouped_agg_workspace_requirements(&desc, nullptr), PGACCEL_ERROR);
   request = empty_workspace_req();
@@ -503,6 +525,11 @@ void test_grouped_aggregate_host_contracts() {
   unsupported.measures[0].accumulator_kind = PGACCEL_GROUPED_AGG_ACCUM_NUMERIC;
   unsupported.measures[0].state_bytes = 16;
   detail = 99;
+  kernel_mode = 99;
+  check_status("grouped unsupported physical mode",
+               pgaccel_grouped_agg_kernel_mode(&unsupported, &kernel_mode),
+               PGACCEL_UNSUPPORTED);
+  check_value("grouped unsupported physical mode clears output", kernel_mode == 0);
   check_status("grouped execute reserved numeric capability",
                pgaccel_grouped_agg_execute_ex(&unsupported, nullptr, &detail), PGACCEL_UNSUPPORTED);
   check_value("grouped unsupported detail", detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);

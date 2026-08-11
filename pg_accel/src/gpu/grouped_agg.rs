@@ -1,8 +1,11 @@
 //! Safe ownership and lifecycle facade for the frozen grouped-aggregate ABI.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::marker::PhantomData;
+use std::mem::ManuallyDrop;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
@@ -16,6 +19,68 @@ use super::{
 const DESC_SIZE: u32 = std::mem::size_of::<abi::PgaccelGroupedAggDesc>() as u32;
 const OUT_SIZE: u32 = std::mem::size_of::<abi::PgaccelGroupedAggOut>() as u32;
 const WORKSPACE_REQ_SIZE: u32 = std::mem::size_of::<abi::PgaccelGroupedAggWorkspaceReq>() as u32;
+const GROUPED_WORKSPACE_POOL_CAPACITY: usize = 8;
+const GROUPED_WORKSPACE_POOL_MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
+const GROUPED_WORKSPACE_POOL_MAX_RETAINED_BYTES: usize = 128 * 1024 * 1024;
+const GROUPED_OUTPUT_POOL_CAPACITY: usize = 8;
+const GROUPED_OUTPUT_POOL_MAX_ENTRY_BYTES: usize = 32 * 1024 * 1024;
+const GROUPED_OUTPUT_POOL_MAX_RETAINED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Stable physical grouped-aggregate branch selected by the native runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum GroupedAggKernelMode {
+    ParallelHash = abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH,
+    ParallelDenseCount = abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT,
+    ParallelDenseInteger = abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_INTEGER,
+    SerialGeneric = abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC,
+}
+
+impl GroupedAggKernelMode {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ParallelHash => "parallel_hash",
+            Self::ParallelDenseCount => "parallel_dense_count",
+            Self::ParallelDenseInteger => "parallel_dense_integer",
+            Self::SerialGeneric => "serial_generic",
+        }
+    }
+
+    fn from_raw(raw: i32) -> GpuResult<Self> {
+        match raw {
+            abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH => Ok(Self::ParallelHash),
+            abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT => {
+                Ok(Self::ParallelDenseCount)
+            }
+            abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_INTEGER => {
+                Ok(Self::ParallelDenseInteger)
+            }
+            abi::PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC => Ok(Self::SerialGeneric),
+            _ => Err(descriptor_error(
+                "kernel returned an unknown grouped physical mode",
+            )),
+        }
+    }
+}
+
+fn native_kernel_mode(desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<GroupedAggKernelMode> {
+    let mut raw = 0;
+    // SAFETY: both pointers refer to live, correctly aligned values for this
+    // synchronous metadata-only native validation call.
+    let status = unsafe {
+        bridge::pgaccel_grouped_agg_kernel_mode(
+            std::ptr::from_ref(desc),
+            std::ptr::from_mut(&mut raw),
+        )
+    };
+    super::status_to_result(
+        status,
+        GpuErrorDomain::GroupedAgg,
+        GpuOperation::Kernel("kernel_mode"),
+    )?;
+    GroupedAggKernelMode::from_raw(raw)
+}
 
 fn descriptor_error(detail: &'static str) -> GpuError {
     GpuError::with_detail(
@@ -136,6 +201,13 @@ impl<'input> ResolvedGroupedAggPlan<'input> {
     #[must_use]
     pub const fn descriptor(&self) -> &abi::PgaccelGroupedAggDesc {
         &self.desc
+    }
+
+    /// Ask the native validator which physical branch a one-shot execution of
+    /// this exact descriptor will submit.
+    pub fn one_shot_kernel_mode(&self) -> GpuResult<GroupedAggKernelMode> {
+        let desc = lifecycle_call_descriptor(&self.desc, abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN);
+        native_kernel_mode(&desc)
     }
 
     /// Use the plan's current row pointers as one lifecycle chunk.
@@ -439,11 +511,289 @@ fn stable_shape_matches(
     true
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupedWorkspacePoolKey {
+    canonical_shape: Box<[u64]>,
+}
+
+fn push_column_shape(words: &mut Vec<u64>, column: &abi::PgaccelGroupedAggMeasureCol) {
+    words.extend([
+        u64::from(!column.values.is_null()),
+        u64::from(!column.nulls.is_null()),
+        column.physical_type as u64,
+        u64::from(column.element_bytes),
+        column.scale as u64,
+        u64::from(column.flags),
+    ]);
+}
+
+fn push_filter_shape(words: &mut Vec<u64>, filter: &abi::PgaccelGroupedAggFilter) {
+    words.extend([
+        filter.kind as u64,
+        filter.predicate_source as u64,
+        filter.predicate_measure_slot as u64,
+        filter.predicate_range_count as u64,
+    ]);
+    for value in filter.predicate_lo.iter().chain(&filter.predicate_hi) {
+        words.extend([value.tag as u64, value.data]);
+    }
+    words.extend([
+        u64::from(filter.value_cmp_opcode),
+        u64::from(filter.pad0),
+        u64::from(filter.flags),
+        filter.value_cmp_const.tag as u64,
+        filter.value_cmp_const.data,
+        u64::from(!filter.mask.is_null()),
+    ]);
+}
+
+fn grouped_workspace_pool_key(
+    desc: &abi::PgaccelGroupedAggDesc,
+    requirement: &abi::PgaccelGroupedAggWorkspaceReq,
+) -> GroupedWorkspacePoolKey {
+    let mut words = Vec::with_capacity(192);
+    words.extend([
+        u64::from(desc.abi_version),
+        u64::from(desc.size_bytes),
+        desc.row_count as u64,
+        desc.grouping_mode as u64,
+        desc.output_mode as u64,
+        u64::from(desc.key_count),
+        desc.group_capacity as u64,
+        u64::from(desc.measure_count),
+        u64::from(desc.execution_flags),
+        u64::from(desc.flags),
+        u64::from(desc.dim_count),
+    ]);
+    for key in &desc.keys {
+        words.extend([
+            key.values.tag as u64,
+            u64::from(!key.values.values.is_null()),
+            u64::from(!key.values.nulls.is_null()),
+            u64::from(!key.lookup_by_key.is_null()),
+            key.source as u64,
+            key.code_min as u64,
+            u64::from(key.cardinality),
+            key.null_code as u64,
+            u64::from(key.flags),
+            u64::from(key.pad0),
+        ]);
+    }
+    for measure in &desc.measures {
+        push_column_shape(&mut words, &measure.value);
+        push_column_shape(&mut words, &measure.rhs);
+        words.extend([
+            measure.op as u64,
+            u64::from(measure.agg_mask),
+            measure.accumulator_kind as u64,
+            u64::from(measure.state_bytes),
+            u64::from(measure.flags),
+        ]);
+    }
+    push_filter_shape(&mut words, &desc.where_filter);
+    for filter in &desc.measure_filters {
+        push_filter_shape(&mut words, filter);
+    }
+    for dim in &desc.dims {
+        words.extend([
+            dim.fact_key.tag as u64,
+            u64::from(!dim.fact_key.values.is_null()),
+            u64::from(!dim.fact_key.nulls.is_null()),
+            u64::from(!dim.match_by_key.is_null()),
+            u64::from(!dim.multiplicity_by_key.is_null()),
+            dim.key_min as u64,
+            u64::from(dim.key_count),
+            u64::from(dim.flags),
+        ]);
+    }
+    words.extend([
+        u64::from(requirement.abi_version),
+        u64::from(requirement.size_bytes),
+        requirement.bytes as u64,
+        requirement.alignment as u64,
+        requirement.space as u64,
+        u64::from(requirement.flags),
+    ]);
+    GroupedWorkspacePoolKey {
+        canonical_shape: words.into_boxed_slice(),
+    }
+}
+
+struct PooledGroupedWorkspace {
+    key: GroupedWorkspacePoolKey,
+    ptr: NonNull<c_void>,
+    requirement: abi::PgaccelGroupedAggWorkspaceReq,
+    owner_pid: u32,
+}
+
+impl PooledGroupedWorkspace {
+    fn into_parts(
+        self,
+    ) -> (
+        GroupedWorkspacePoolKey,
+        NonNull<c_void>,
+        abi::PgaccelGroupedAggWorkspaceReq,
+        u32,
+    ) {
+        let this = ManuallyDrop::new(self);
+        // SAFETY: `this` will not run Drop, so moving the non-Copy key out is
+        // exclusive and each remaining field is Copy.
+        let key = unsafe { std::ptr::read(&raw const this.key) };
+        (key, this.ptr, this.requirement, this.owner_pid)
+    }
+}
+
+impl Drop for PooledGroupedWorkspace {
+    fn drop(&mut self) {
+        if self.owner_pid == std::process::id() {
+            // SAFETY: this pointer came from the matching grouped allocator
+            // in the current process and the pool owns it exclusively.
+            unsafe { bridge::pgaccel_grouped_agg_workspace_free(self.ptr.as_ptr()) };
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GroupedWorkspacePoolMetrics {
+    hits: u64,
+    misses: u64,
+    fresh_allocations: u64,
+    fresh_allocation_bytes: u64,
+    returns: u64,
+    poisoned_frees: u64,
+    evictions: u64,
+}
+
+/// Backend-local grouped-workspace pool evidence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GroupedWorkspacePoolSnapshot {
+    pub hits: u64,
+    pub misses: u64,
+    pub fresh_allocations: u64,
+    pub fresh_allocation_bytes: u64,
+    pub returns: u64,
+    pub poisoned_frees: u64,
+    pub evictions: u64,
+    pub retained_workspaces: usize,
+    pub retained_bytes: usize,
+}
+
+thread_local! {
+    static GROUPED_WORKSPACE_POOL: RefCell<VecDeque<PooledGroupedWorkspace>> =
+        RefCell::new(VecDeque::with_capacity(GROUPED_WORKSPACE_POOL_CAPACITY));
+    static GROUPED_WORKSPACE_POOL_METRICS: Cell<GroupedWorkspacePoolMetrics> =
+        const { Cell::new(GroupedWorkspacePoolMetrics {
+            hits: 0,
+            misses: 0,
+            fresh_allocations: 0,
+            fresh_allocation_bytes: 0,
+            returns: 0,
+            poisoned_frees: 0,
+            evictions: 0,
+        }) };
+}
+
+fn update_grouped_workspace_pool_metrics(update: impl FnOnce(&mut GroupedWorkspacePoolMetrics)) {
+    GROUPED_WORKSPACE_POOL_METRICS.with(|metrics| {
+        let mut value = metrics.get();
+        update(&mut value);
+        metrics.set(value);
+    });
+}
+
+fn checkout_grouped_workspace(key: &GroupedWorkspacePoolKey) -> Option<PooledGroupedWorkspace> {
+    let pid = std::process::id();
+    let result = GROUPED_WORKSPACE_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        // A post-fork child must never free or reuse the parent's copied USM
+        // addresses. Their Drop implementation intentionally forgets them.
+        pool.retain(|entry| entry.owner_pid == pid);
+        let index = pool.iter().position(|entry| entry.key == *key)?;
+        pool.remove(index)
+    });
+    update_grouped_workspace_pool_metrics(|metrics| {
+        if result.is_some() {
+            metrics.hits = metrics.hits.saturating_add(1);
+        } else {
+            metrics.misses = metrics.misses.saturating_add(1);
+        }
+    });
+    result
+}
+
+fn return_grouped_workspace(entry: PooledGroupedWorkspace) {
+    if entry.requirement.bytes > GROUPED_WORKSPACE_POOL_MAX_ENTRY_BYTES {
+        update_grouped_workspace_pool_metrics(|metrics| {
+            metrics.evictions = metrics.evictions.saturating_add(1);
+        });
+        return;
+    }
+    GROUPED_WORKSPACE_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        pool.push_front(entry);
+        let mut retained_bytes = pool.iter().fold(0_usize, |total, item| {
+            total.saturating_add(item.requirement.bytes)
+        });
+        while pool.len() > GROUPED_WORKSPACE_POOL_CAPACITY
+            || retained_bytes > GROUPED_WORKSPACE_POOL_MAX_RETAINED_BYTES
+        {
+            let Some(evicted) = pool.pop_back() else {
+                break;
+            };
+            retained_bytes = retained_bytes.saturating_sub(evicted.requirement.bytes);
+            update_grouped_workspace_pool_metrics(|metrics| {
+                metrics.evictions = metrics.evictions.saturating_add(1);
+            });
+            drop(evicted);
+        }
+    });
+    update_grouped_workspace_pool_metrics(|metrics| {
+        metrics.returns = metrics.returns.saturating_add(1);
+    });
+}
+
+#[must_use]
+pub fn grouped_workspace_pool_snapshot() -> GroupedWorkspacePoolSnapshot {
+    let metrics = GROUPED_WORKSPACE_POOL_METRICS.with(Cell::get);
+    let (retained_workspaces, retained_bytes) = GROUPED_WORKSPACE_POOL.with(|pool| {
+        let pool = pool.borrow();
+        (
+            pool.len(),
+            pool.iter().fold(0_usize, |total, entry| {
+                total.saturating_add(entry.requirement.bytes)
+            }),
+        )
+    });
+    GroupedWorkspacePoolSnapshot {
+        hits: metrics.hits,
+        misses: metrics.misses,
+        fresh_allocations: metrics.fresh_allocations,
+        fresh_allocation_bytes: metrics.fresh_allocation_bytes,
+        returns: metrics.returns,
+        poisoned_frees: metrics.poisoned_frees,
+        evictions: metrics.evictions,
+        retained_workspaces,
+        retained_bytes,
+    }
+}
+
+pub fn reset_grouped_workspace_pool_metrics() {
+    GROUPED_WORKSPACE_POOL_METRICS.with(|metrics| {
+        metrics.set(GroupedWorkspacePoolMetrics::default());
+    });
+}
+
+fn cleanup_grouped_workspace_pool() {
+    let _ = GROUPED_WORKSPACE_POOL.try_with(|pool| pool.borrow_mut().clear());
+}
+
 /// Caller-owned, aligned USM workspace. The allocation and queue are
 /// backend-local, so the owner is deliberately neither `Send` nor `Sync`.
 pub struct GroupedAggWorkspace {
     ptr: Option<NonNull<c_void>>,
     requirement: abi::PgaccelGroupedAggWorkspaceReq,
+    pool_key: Option<GroupedWorkspacePoolKey>,
+    owner_pid: u32,
     poisoned: bool,
     _not_send_sync: PhantomData<Rc<()>>,
 }
@@ -504,6 +854,19 @@ impl GroupedAggWorkspace {
         let _ = u32::try_from(requirement.alignment)
             .map_err(|_| descriptor_error("workspace alignment exceeds ABI width"))?;
 
+        let pool_key = grouped_workspace_pool_key(&query_desc, &requirement);
+        if let Some(entry) = checkout_grouped_workspace(&pool_key) {
+            let (pool_key, ptr, requirement, owner_pid) = entry.into_parts();
+            return Ok(Self {
+                ptr: Some(ptr),
+                requirement,
+                pool_key: Some(pool_key),
+                owner_pid,
+                poisoned: false,
+                _not_send_sync: PhantomData,
+            });
+        }
+
         let mut raw = std::ptr::null_mut();
         // SAFETY: raw is a valid out pointer and requirements were checked.
         let status = unsafe {
@@ -530,9 +893,17 @@ impl GroupedAggWorkspace {
         }
 
         crate::note_backend_gpu_owner_acquired();
+        update_grouped_workspace_pool_metrics(|metrics| {
+            metrics.fresh_allocations = metrics.fresh_allocations.saturating_add(1);
+            metrics.fresh_allocation_bytes = metrics
+                .fresh_allocation_bytes
+                .saturating_add(u64::try_from(requirement.bytes).unwrap_or(u64::MAX));
+        });
         Ok(Self {
             ptr: Some(ptr),
             requirement,
+            pool_key: Some(pool_key),
+            owner_pid: std::process::id(),
             poisoned: false,
             _not_send_sync: PhantomData,
         })
@@ -556,11 +927,46 @@ impl GroupedAggWorkspace {
             .map_err(|_| descriptor_error("workspace alignment exceeds ABI width"))?;
         Ok(())
     }
+
+    fn validate_for_descriptor(&self, desc: &abi::PgaccelGroupedAggDesc) -> GpuResult<()> {
+        let expected =
+            grouped_workspace_pool_key(&workspace_query_descriptor(desc), &self.requirement);
+        if self.pool_key.as_ref() == Some(&expected) {
+            Ok(())
+        } else {
+            Err(descriptor_error(
+                "grouped workspace belongs to a different execution shape",
+            ))
+        }
+    }
 }
 
 impl Drop for GroupedAggWorkspace {
     fn drop(&mut self) {
-        if let Some(ptr) = self.ptr.take() {
+        let Some(ptr) = self.ptr.take() else {
+            return;
+        };
+        if self.owner_pid != std::process::id() {
+            // This is a copied post-fork address owned by the parent process.
+            return;
+        }
+        if self.poisoned {
+            update_grouped_workspace_pool_metrics(|metrics| {
+                metrics.poisoned_frees = metrics.poisoned_frees.saturating_add(1);
+            });
+            // SAFETY: pointer came from the matching grouped allocator and is
+            // released exactly once by this backend-local owner.
+            unsafe { bridge::pgaccel_grouped_agg_workspace_free(ptr.as_ptr()) };
+            return;
+        }
+        if let Some(key) = self.pool_key.take() {
+            return_grouped_workspace(PooledGroupedWorkspace {
+                key,
+                ptr,
+                requirement: self.requirement,
+                owner_pid: self.owner_pid,
+            });
+        } else {
             // SAFETY: pointer came from the matching grouped allocator and is
             // released exactly once by this backend-local owner.
             unsafe { bridge::pgaccel_grouped_agg_workspace_free(ptr.as_ptr()) };
@@ -605,6 +1011,15 @@ impl RawHostBuffer {
     fn as_bytes(&self) -> &[u8] {
         // SAFETY: the allocation is live and initialized for len_bytes bytes.
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len_bytes) }
+    }
+
+    fn clear(&mut self) {
+        // SAFETY: the allocation is live and writable for len_bytes bytes.
+        unsafe { self.ptr.as_ptr().write_bytes(0, self.len_bytes) };
+    }
+
+    const fn retained_bytes(&self) -> usize {
+        self.layout.size()
     }
 }
 
@@ -785,6 +1200,52 @@ impl MeasureOutputStorage {
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| capacity_error("aggregate state index is out of bounds"))
     }
+
+    fn clear(&mut self) {
+        for buffer in [
+            &mut self.sum,
+            &mut self.min,
+            &mut self.max,
+            &mut self.sumsq,
+            &mut self.rhs_sum,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            buffer.clear();
+        }
+        for values in [
+            &mut self.count,
+            &mut self.nonnull_count,
+            &mut self.rhs_count,
+            &mut self.rhs_nonnull_count,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            values.fill(0);
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        let raw_bytes = [&self.sum, &self.min, &self.max, &self.sumsq, &self.rhs_sum]
+            .into_iter()
+            .flatten()
+            .fold(0_usize, |total, buffer| {
+                total.saturating_add(buffer.retained_bytes())
+            });
+        [
+            &self.count,
+            &self.nonnull_count,
+            &self.rhs_count,
+            &self.rhs_nonnull_count,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(raw_bytes, |total, values| {
+            total.saturating_add(values.capacity().saturating_mul(std::mem::size_of::<u64>()))
+        })
+    }
 }
 
 fn key_width(tag: PgaccelValTag) -> Option<usize> {
@@ -806,6 +1267,289 @@ fn key_output_nullable(desc: &abi::PgaccelGroupedAggDesc, key: &abi::PgaccelGrou
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GroupedOutputPoolKey {
+    compatible_shape: Box<[u64]>,
+}
+
+fn grouped_output_pool_key(desc: &abi::PgaccelGroupedAggDesc) -> GroupedOutputPoolKey {
+    let key_count = desc.key_count as usize;
+    let measure_count = desc.measure_count as usize;
+    let dense_output = desc.output_mode == abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE;
+    let mut words = Vec::with_capacity(64);
+    words.extend([
+        desc.group_capacity as u64,
+        desc.grouping_mode as u64,
+        desc.output_mode as u64,
+        u64::from(desc.key_count),
+        u64::from(desc.measure_count),
+    ]);
+    for key in desc.keys.iter().take(key_count) {
+        let output_tag = if desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_HASH
+            && key.source == abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT
+        {
+            key.values.tag
+        } else {
+            PgaccelValTag::Int32
+        };
+        words.extend([
+            output_tag as u64,
+            u64::from(!dense_output && key_output_nullable(desc, key)),
+        ]);
+    }
+    for measure in desc.measures.iter().take(measure_count) {
+        words.extend([
+            measure.op as u64,
+            u64::from(measure.agg_mask),
+            measure.accumulator_kind as u64,
+            u64::from(measure.state_bytes),
+        ]);
+    }
+    GroupedOutputPoolKey {
+        compatible_shape: words.into_boxed_slice(),
+    }
+}
+
+struct PooledGroupedOutput {
+    key: GroupedOutputPoolKey,
+    capacity: usize,
+    dense_output: bool,
+    active_groups: Option<Vec<u8>>,
+    group_codes: Option<Vec<usize>>,
+    key_values: [Option<RawHostBuffer>; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
+    key_nulls: [Option<Vec<u8>>; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
+    key_types: [i32; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
+    measures: [MeasureOutputStorage; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES],
+    owner_pid: u32,
+}
+
+fn grouped_output_retained_bytes(
+    active_groups: Option<&Vec<u8>>,
+    group_codes: Option<&Vec<usize>>,
+    key_values: &[Option<RawHostBuffer>; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
+    key_nulls: &[Option<Vec<u8>>; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
+    measures: &[MeasureOutputStorage; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES],
+) -> usize {
+    let active_bytes = active_groups.map_or(0, Vec::capacity);
+    let group_code_bytes = group_codes.map_or(0, |values| {
+        values
+            .capacity()
+            .saturating_mul(std::mem::size_of::<usize>())
+    });
+    let key_value_bytes = key_values.iter().flatten().fold(0_usize, |total, buffer| {
+        total.saturating_add(buffer.retained_bytes())
+    });
+    let key_null_bytes = key_nulls.iter().flatten().fold(0_usize, |total, values| {
+        total.saturating_add(values.capacity())
+    });
+    measures.iter().fold(
+        active_bytes
+            .saturating_add(group_code_bytes)
+            .saturating_add(key_value_bytes)
+            .saturating_add(key_null_bytes),
+        |total, measure| total.saturating_add(measure.retained_bytes()),
+    )
+}
+
+impl PooledGroupedOutput {
+    fn clear(&mut self) {
+        if let Some(values) = &mut self.active_groups {
+            values.fill(0);
+        }
+        if let Some(values) = &mut self.group_codes {
+            values.fill(0);
+        }
+        for buffer in self.key_values.iter_mut().flatten() {
+            buffer.clear();
+        }
+        for values in self.key_nulls.iter_mut().flatten() {
+            values.fill(0);
+        }
+        for measure in &mut self.measures {
+            measure.clear();
+        }
+    }
+
+    fn retained_bytes(&self) -> usize {
+        grouped_output_retained_bytes(
+            self.active_groups.as_ref(),
+            self.group_codes.as_ref(),
+            &self.key_values,
+            &self.key_nulls,
+            &self.measures,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GroupedOutputPoolMetrics {
+    hits: u64,
+    misses: u64,
+    fresh_allocations: u64,
+    fresh_allocation_bytes: u64,
+    returns: u64,
+    evictions: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GroupedOutputPoolSnapshot {
+    pub hits: u64,
+    pub misses: u64,
+    pub fresh_allocations: u64,
+    pub fresh_allocation_bytes: u64,
+    pub returns: u64,
+    pub evictions: u64,
+    pub retained_outputs: usize,
+    pub retained_bytes: usize,
+}
+
+thread_local! {
+    static GROUPED_OUTPUT_POOL: RefCell<VecDeque<PooledGroupedOutput>> =
+        RefCell::new(VecDeque::with_capacity(GROUPED_OUTPUT_POOL_CAPACITY));
+    static GROUPED_OUTPUT_POOL_METRICS: Cell<GroupedOutputPoolMetrics> =
+        const { Cell::new(GroupedOutputPoolMetrics {
+            hits: 0,
+            misses: 0,
+            fresh_allocations: 0,
+            fresh_allocation_bytes: 0,
+            returns: 0,
+            evictions: 0,
+        }) };
+}
+
+fn update_grouped_output_pool_metrics(update: impl FnOnce(&mut GroupedOutputPoolMetrics)) {
+    GROUPED_OUTPUT_POOL_METRICS.with(|metrics| {
+        let mut value = metrics.get();
+        update(&mut value);
+        metrics.set(value);
+    });
+}
+
+fn checkout_grouped_output(key: &GroupedOutputPoolKey) -> Option<PooledGroupedOutput> {
+    let pid = std::process::id();
+    let result = GROUPED_OUTPUT_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        pool.retain(|entry| entry.owner_pid == pid);
+        let index = pool.iter().position(|entry| entry.key == *key)?;
+        pool.remove(index)
+    });
+    update_grouped_output_pool_metrics(|metrics| {
+        if result.is_some() {
+            metrics.hits = metrics.hits.saturating_add(1);
+        } else {
+            metrics.misses = metrics.misses.saturating_add(1);
+        }
+    });
+    result
+}
+
+fn return_grouped_output(entry: PooledGroupedOutput) {
+    if entry.retained_bytes() > GROUPED_OUTPUT_POOL_MAX_ENTRY_BYTES {
+        update_grouped_output_pool_metrics(|metrics| {
+            metrics.evictions = metrics.evictions.saturating_add(1);
+        });
+        return;
+    }
+    GROUPED_OUTPUT_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        pool.push_front(entry);
+        let mut retained_bytes = pool.iter().fold(0_usize, |total, item| {
+            total.saturating_add(item.retained_bytes())
+        });
+        while pool.len() > GROUPED_OUTPUT_POOL_CAPACITY
+            || retained_bytes > GROUPED_OUTPUT_POOL_MAX_RETAINED_BYTES
+        {
+            let Some(evicted) = pool.pop_back() else {
+                break;
+            };
+            retained_bytes = retained_bytes.saturating_sub(evicted.retained_bytes());
+            update_grouped_output_pool_metrics(|metrics| {
+                metrics.evictions = metrics.evictions.saturating_add(1);
+            });
+            drop(evicted);
+        }
+    });
+    update_grouped_output_pool_metrics(|metrics| {
+        metrics.returns = metrics.returns.saturating_add(1);
+    });
+}
+
+#[must_use]
+pub fn grouped_output_pool_snapshot() -> GroupedOutputPoolSnapshot {
+    let metrics = GROUPED_OUTPUT_POOL_METRICS.with(Cell::get);
+    let (retained_outputs, retained_bytes) = GROUPED_OUTPUT_POOL.with(|pool| {
+        let pool = pool.borrow();
+        (
+            pool.len(),
+            pool.iter().fold(0_usize, |total, entry| {
+                total.saturating_add(entry.retained_bytes())
+            }),
+        )
+    });
+    GroupedOutputPoolSnapshot {
+        hits: metrics.hits,
+        misses: metrics.misses,
+        fresh_allocations: metrics.fresh_allocations,
+        fresh_allocation_bytes: metrics.fresh_allocation_bytes,
+        returns: metrics.returns,
+        evictions: metrics.evictions,
+        retained_outputs,
+        retained_bytes,
+    }
+}
+
+fn reset_grouped_output_pool_metrics() {
+    GROUPED_OUTPUT_POOL_METRICS.with(|metrics| {
+        metrics.set(GroupedOutputPoolMetrics::default());
+    });
+}
+
+fn cleanup_grouped_output_pool() {
+    let _ = GROUPED_OUTPUT_POOL.try_with(|pool| pool.borrow_mut().clear());
+}
+
+pub fn cleanup_grouped_allocation_pools() {
+    cleanup_grouped_output_pool();
+    cleanup_grouped_workspace_pool();
+}
+
+pub fn reset_grouped_allocation_pool_metrics() {
+    reset_grouped_output_pool_metrics();
+    reset_grouped_workspace_pool_metrics();
+}
+
+/// Native grouped lifecycle counters for this backend thread.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GroupedAggNativeTelemetry {
+    pub transition_launches: u64,
+    pub queue_waits: u64,
+    pub queue_wait_ns: u64,
+    pub output_bytes: u64,
+    pub shared_copy_calls: u64,
+    pub device_copy_calls: u64,
+}
+
+#[must_use]
+pub fn grouped_agg_native_telemetry() -> GroupedAggNativeTelemetry {
+    // SAFETY: each getter reads one thread-local scalar and has no device or
+    // pointer preconditions.
+    unsafe {
+        GroupedAggNativeTelemetry {
+            transition_launches: bridge::pgaccel_grouped_agg_transition_launch_count(),
+            queue_waits: bridge::pgaccel_grouped_agg_queue_wait_count(),
+            queue_wait_ns: bridge::pgaccel_grouped_agg_queue_wait_ns(),
+            output_bytes: bridge::pgaccel_grouped_agg_output_bytes(),
+            shared_copy_calls: bridge::pgaccel_grouped_agg_shared_copy_calls(),
+            device_copy_calls: bridge::pgaccel_grouped_agg_device_copy_calls(),
+        }
+    }
+}
+
+pub fn reset_grouped_agg_native_telemetry() {
+    // SAFETY: reset mutates only counters owned by the current native thread.
+    unsafe { bridge::pgaccel_reset_grouped_agg_telemetry() };
+}
+
 /// Host-visible buffers owned for one grouped-aggregate result.
 pub struct GroupedAggOutputStorage {
     capacity: usize,
@@ -817,6 +1561,8 @@ pub struct GroupedAggOutputStorage {
     key_types: [i32; abi::PGACCEL_GROUPED_AGG_MAX_KEYS],
     measures: [MeasureOutputStorage; abi::PGACCEL_GROUPED_AGG_MAX_MEASURES],
     plan_identity: Rc<()>,
+    pool_key: Option<GroupedOutputPoolKey>,
+    owner_pid: u32,
 }
 
 impl GroupedAggOutputStorage {
@@ -828,6 +1574,37 @@ impl GroupedAggOutputStorage {
         let measure_count = usize::try_from(desc.measure_count)
             .map_err(|_| descriptor_error("measure count does not fit usize"))?;
         let dense_output = desc.output_mode == abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE;
+        let pool_key = grouped_output_pool_key(desc);
+        if let Some(mut pooled) = checkout_grouped_output(&pool_key) {
+            debug_assert_eq!(pooled.capacity, capacity);
+            debug_assert_eq!(pooled.dense_output, dense_output);
+            pooled.clear();
+            let PooledGroupedOutput {
+                key,
+                capacity,
+                dense_output,
+                active_groups,
+                group_codes,
+                key_values,
+                key_nulls,
+                key_types,
+                measures,
+                owner_pid,
+            } = pooled;
+            return Ok(Self {
+                capacity,
+                dense_output,
+                active_groups,
+                group_codes,
+                key_values,
+                key_nulls,
+                key_types,
+                measures,
+                plan_identity: Rc::clone(&plan.identity),
+                pool_key: Some(key),
+                owner_pid,
+            });
+        }
         let mut active_groups = dense_output.then(|| zero_vec(capacity)).transpose()?;
         let group_codes = (!dense_output
             && desc.grouping_mode == abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX)
@@ -866,7 +1643,7 @@ impl GroupedAggOutputStorage {
         if let Some(active) = &mut active_groups {
             debug_assert_eq!(active.len(), capacity);
         }
-        Ok(Self {
+        let storage = Self {
             capacity,
             dense_output,
             active_groups,
@@ -876,7 +1653,26 @@ impl GroupedAggOutputStorage {
             key_types,
             measures,
             plan_identity: Rc::clone(&plan.identity),
-        })
+            pool_key: Some(pool_key),
+            owner_pid: std::process::id(),
+        };
+        update_grouped_output_pool_metrics(|metrics| {
+            metrics.fresh_allocations = metrics.fresh_allocations.saturating_add(1);
+            metrics.fresh_allocation_bytes = metrics
+                .fresh_allocation_bytes
+                .saturating_add(u64::try_from(storage.retained_bytes()).unwrap_or(u64::MAX));
+        });
+        Ok(storage)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        grouped_output_retained_bytes(
+            self.active_groups.as_ref(),
+            self.group_codes.as_ref(),
+            &self.key_values,
+            &self.key_nulls,
+            &self.measures,
+        )
     }
 
     fn validate_for_plan(&self, plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<()> {
@@ -1051,6 +1847,36 @@ impl GroupedAggOutputStorage {
     }
 }
 
+impl Drop for GroupedAggOutputStorage {
+    fn drop(&mut self) {
+        if self.owner_pid != std::process::id() {
+            return;
+        }
+        let Some(key) = self.pool_key.take() else {
+            return;
+        };
+        let active_groups = self.active_groups.take();
+        let group_codes = self.group_codes.take();
+        let key_values = std::array::from_fn(|index| self.key_values[index].take());
+        let key_nulls = std::array::from_fn(|index| self.key_nulls[index].take());
+        let measures = std::array::from_fn(|index| {
+            std::mem::replace(&mut self.measures[index], MeasureOutputStorage::empty())
+        });
+        return_grouped_output(PooledGroupedOutput {
+            key,
+            capacity: self.capacity,
+            dense_output: self.dense_output,
+            active_groups,
+            group_codes,
+            key_values,
+            key_nulls,
+            key_types: self.key_types,
+            measures,
+            owner_pid: self.owner_pid,
+        });
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupedAggResult {
     pub group_capacity: usize,
@@ -1152,9 +1978,17 @@ fn execute_call(
     flags: u32,
     workspace: &mut GroupedAggWorkspace,
     mut output: Option<&mut GroupedAggOutputStorage>,
+    expected_data_mode: Option<GroupedAggKernelMode>,
 ) -> GpuResult<Option<GroupedAggOutcome>> {
     let mut desc = lifecycle_call_descriptor(desc, flags);
     workspace.apply_to(&mut desc)?;
+    let actual_mode = native_kernel_mode(&desc)?;
+    if expected_data_mode.is_some_and(|expected| actual_mode != expected) {
+        workspace.poisoned = true;
+        return Err(descriptor_error(
+            "grouped physical kernel mode changed between validation and dispatch",
+        ));
+    }
     let mut raw_output = output.as_deref_mut().map(GroupedAggOutputStorage::raw);
     let output_ptr = raw_output
         .as_mut()
@@ -1215,15 +2049,36 @@ pub fn execute_grouped_agg_one_shot(
     plan: &ResolvedGroupedAggPlan<'_>,
     output: &mut GroupedAggOutputStorage,
 ) -> GpuResult<GroupedAggOutcome> {
-    output.validate_for_plan(plan)?;
+    execute_grouped_agg_one_shot_with_mode(plan, output).map(|(outcome, _)| outcome)
+}
+
+/// Execute one grouped-aggregate transition and return the native physical
+/// branch that was validated immediately before dispatch.
+pub fn execute_grouped_agg_one_shot_with_mode(
+    plan: &ResolvedGroupedAggPlan<'_>,
+    output: &mut GroupedAggOutputStorage,
+) -> GpuResult<(GroupedAggOutcome, GroupedAggKernelMode)> {
     let mut workspace = GroupedAggWorkspace::allocate(plan)?;
-    execute_call(
+    execute_grouped_agg_one_shot_with_workspace_and_mode(plan, output, &mut workspace)
+}
+
+pub fn execute_grouped_agg_one_shot_with_workspace_and_mode(
+    plan: &ResolvedGroupedAggPlan<'_>,
+    output: &mut GroupedAggOutputStorage,
+    workspace: &mut GroupedAggWorkspace,
+) -> GpuResult<(GroupedAggOutcome, GroupedAggKernelMode)> {
+    output.validate_for_plan(plan)?;
+    workspace.validate_for_descriptor(&plan.desc)?;
+    let mode = plan.one_shot_kernel_mode()?;
+    let outcome = execute_call(
         &plan.desc,
         abi::PGACCEL_GROUPED_AGG_EXEC_ALL_KNOWN,
-        &mut workspace,
+        workspace,
         Some(output),
+        Some(mode),
     )?
-    .ok_or_else(|| descriptor_error("finalized grouped call returned no outcome"))
+    .ok_or_else(|| descriptor_error("finalized grouped call returned no outcome"))?;
+    Ok((outcome, mode))
 }
 
 /// Stateful multi-call facade reserved by the frozen chunk lifecycle.
@@ -1236,6 +2091,7 @@ pub struct GroupedAggSession {
     plan_shape: abi::PgaccelGroupedAggDesc,
     workspace_row_capacity: usize,
     workspace: GroupedAggWorkspace,
+    kernel_mode: GroupedAggKernelMode,
     state: LifecycleState,
     _not_send_sync: PhantomData<Rc<()>>,
 }
@@ -1248,10 +2104,12 @@ impl GroupedAggSession {
             ));
         }
         let workspace_desc = bounded_workspace_descriptor(plan, max_chunk_rows)?;
+        let kernel_mode = native_kernel_mode(&workspace_desc)?;
         Ok(Self {
             plan_shape: plan.desc,
             workspace_row_capacity: workspace_desc.row_count,
             workspace: GroupedAggWorkspace::allocate_for_descriptor(&workspace_desc)?,
+            kernel_mode,
             state: LifecycleState::Ready,
             _not_send_sync: PhantomData,
         })
@@ -1271,7 +2129,13 @@ impl GroupedAggSession {
             return Err(descriptor_error("chunk does not match session plan"));
         }
         let (flags, next) = lifecycle_flags(self.state, LifecycleAction::Accumulate)?;
-        match execute_call(&chunk.desc, flags, &mut self.workspace, None) {
+        match execute_call(
+            &chunk.desc,
+            flags,
+            &mut self.workspace,
+            None,
+            Some(self.kernel_mode),
+        ) {
             Ok(None) => {
                 self.state = next;
                 Ok(())
@@ -1293,7 +2157,18 @@ impl GroupedAggSession {
     ) -> GpuResult<GroupedAggOutcome> {
         validate_session_finalize_inputs(&self.plan_shape, plan, output)?;
         let (flags, next) = lifecycle_flags(self.state, LifecycleAction::Finalize)?;
-        match execute_call(&plan.desc, flags, &mut self.workspace, Some(output)) {
+        match execute_call(
+            &plan.desc,
+            flags,
+            &mut self.workspace,
+            Some(output),
+            // Finalize is a zero-row lifecycle transition. Dense-integer
+            // execution legitimately uses the serial control kernel here even
+            // though every data-bearing accumulate call uses the admitted
+            // parallel mode. The exact control branch is still queried
+            // immediately before submission, but it is not a query-plan mode.
+            None,
+        ) {
             Ok(Some(outcome)) => {
                 self.state = next;
                 Ok(outcome)
@@ -1311,7 +2186,14 @@ impl GroupedAggSession {
     pub fn reset(&mut self, plan: &ResolvedGroupedAggPlan<'_>) -> GpuResult<()> {
         self.validate_plan(plan)?;
         let (flags, next) = lifecycle_flags(self.state, LifecycleAction::Reset)?;
-        match execute_call(&plan.desc, flags, &mut self.workspace, None) {
+        match execute_call(
+            &plan.desc,
+            flags,
+            &mut self.workspace,
+            None,
+            // RESET is control-only for the same reason as FINALIZE above.
+            None,
+        ) {
             Ok(None) => {
                 self.state = next;
                 Ok(())
@@ -1329,6 +2211,11 @@ impl GroupedAggSession {
     #[must_use]
     pub const fn workspace(&self) -> &GroupedAggWorkspace {
         &self.workspace
+    }
+
+    #[must_use]
+    pub const fn kernel_mode(&self) -> GroupedAggKernelMode {
+        self.kernel_mode
     }
 }
 
@@ -1570,6 +2457,119 @@ mod tests {
             workspace_query_descriptor(&lifecycle).execution_flags,
             lifecycle.execution_flags
         );
+    }
+
+    #[test]
+    fn workspace_pool_key_compares_complete_structural_shape() {
+        let descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        let requirement = abi::PgaccelGroupedAggWorkspaceReq {
+            abi_version: abi::PGACCEL_OLAP_ABI_VERSION,
+            size_bytes: WORKSPACE_REQ_SIZE,
+            bytes: 4_096,
+            alignment: 64,
+            space: PgaccelMemSpace::SharedUsm as i32,
+            flags: 0,
+        };
+        let original = grouped_workspace_pool_key(&descriptor, &requirement);
+        assert_eq!(
+            original,
+            grouped_workspace_pool_key(&descriptor, &requirement)
+        );
+
+        let mut changed_rows = descriptor;
+        changed_rows.row_count = 1;
+        assert_ne!(
+            original,
+            grouped_workspace_pool_key(&changed_rows, &requirement)
+        );
+
+        let mut changed_predicate = descriptor;
+        changed_predicate.where_filter.value_cmp_const = crate::gpu::PgaccelVal::from_i32(7);
+        assert_ne!(
+            original,
+            grouped_workspace_pool_key(&changed_predicate, &requirement)
+        );
+
+        let mut changed_key_transform = descriptor;
+        changed_key_transform.keys[0].flags = abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT;
+        changed_key_transform.keys[0].pad0 = 3;
+        assert_ne!(
+            original,
+            grouped_workspace_pool_key(&changed_key_transform, &requirement)
+        );
+
+        let mut changed_requirement = requirement;
+        changed_requirement.bytes += 64;
+        assert_ne!(
+            original,
+            grouped_workspace_pool_key(&descriptor, &changed_requirement)
+        );
+    }
+
+    #[test]
+    fn output_pool_key_reuses_only_compatible_allocation_shapes() {
+        let descriptor = descriptor_fixture(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        let original = grouped_output_pool_key(&descriptor);
+
+        let mut different_semantics = descriptor;
+        different_semantics.row_count = 99;
+        different_semantics.where_filter.value_cmp_const = crate::gpu::PgaccelVal::from_i32(7);
+        assert_eq!(original, grouped_output_pool_key(&different_semantics));
+
+        let mut different_capacity = descriptor;
+        different_capacity.group_capacity += 1;
+        assert_ne!(original, grouped_output_pool_key(&different_capacity));
+
+        let mut different_lanes = descriptor;
+        different_lanes.measures[0].agg_mask = abi::PGACCEL_GROUPED_AGG_LANE_COUNT;
+        assert_ne!(original, grouped_output_pool_key(&different_lanes));
+    }
+
+    #[test]
+    fn output_pool_reuses_and_clears_compatible_storage() {
+        cleanup_grouped_output_pool();
+        reset_grouped_output_pool_metrics();
+        let first_plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        let first_pointer;
+        {
+            let mut storage =
+                GroupedAggOutputStorage::new(&first_plan).expect("first output allocates");
+            first_pointer = storage.raw().active_groups;
+            storage.active_groups.as_mut().expect("active groups")[0] = 1;
+            storage.measures[0].count.as_mut().expect("count lane")[0] = 7;
+        }
+        let returned = grouped_output_pool_snapshot();
+        assert_eq!(returned.misses, 1);
+        assert_eq!(returned.returns, 1);
+        assert_eq!(returned.retained_outputs, 1);
+
+        let second_plan = plan(abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE);
+        {
+            let mut storage =
+                GroupedAggOutputStorage::new(&second_plan).expect("pooled output checks out");
+            assert_eq!(storage.raw().active_groups, first_pointer);
+            assert!(
+                storage
+                    .active_groups()
+                    .expect("active groups")
+                    .iter()
+                    .all(|v| *v == 0)
+            );
+            assert!(
+                storage
+                    .measure_count(0)
+                    .expect("count lane")
+                    .iter()
+                    .all(|v| *v == 0)
+            );
+            let checked_out = grouped_output_pool_snapshot();
+            assert_eq!(checked_out.hits, 1);
+            assert_eq!(checked_out.retained_outputs, 0);
+        }
+        let returned_again = grouped_output_pool_snapshot();
+        assert_eq!(returned_again.returns, 2);
+        assert_eq!(returned_again.retained_outputs, 1);
+        cleanup_grouped_output_pool();
     }
 
     #[test]
@@ -1993,6 +2993,8 @@ mod tests {
                 space: PgaccelMemSpace::SharedUsm as i32,
                 flags: 0,
             },
+            pool_key: None,
+            owner_pid: std::process::id(),
             poisoned: false,
             _not_send_sync: PhantomData,
         };

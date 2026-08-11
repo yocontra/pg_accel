@@ -21,6 +21,7 @@ try:
         P95_RELATIVE_ALLOWANCE,
         _load_report_row,
         _positive_number,
+        extract_native_arms as extract_mirrored_native_arms,
         load_json,
         percentile,
         validate_no_dispatch_audit,
@@ -36,6 +37,7 @@ except ImportError:  # Direct script execution has no package context.
         P95_RELATIVE_ALLOWANCE,
         _load_report_row,
         _positive_number,
+        extract_native_arms as extract_mirrored_native_arms,
         load_json,
         percentile,
         validate_no_dispatch_audit,
@@ -43,6 +45,7 @@ except ImportError:  # Direct script execution has no package context.
     )
 
 EXPECTED_WARMUPS = 5
+EXPECTED_PAIRS = 30
 ENUMERATION_STRATEGY = "meet_in_the_middle_exact_count"
 
 
@@ -207,13 +210,21 @@ def analyze_cell(root: Path, matrix_row: dict[str, str]) -> dict[str, Any]:
     )
     if not isinstance(context, dict) or context.get("capture_planner_stages") is not False:
         raise AnalysisError(f"{label}: planner-stage profiling was not disabled")
+    if context.get("native_parity_pairing") is not True:
+        raise AnalysisError(f"{label}: pre-risk context does not prove same-backend pairing")
     if row.get("planner_stage_captures") not in (None, []):
         raise AnalysisError(f"{label}: production report contains planner-stage captures")
     decline = row.get("native_decline_evidence")
     if not isinstance(decline, dict) or decline.get("source") != "planner_reported":
         raise AnalysisError(f"{label}: typed planner decline is missing")
+    expected_reason = matrix_row.get("reason")
+    if expected_reason and decline.get("reason") != expected_reason:
+        raise AnalysisError(
+            f"{label}: decline reason {decline.get('reason')!r} does not match "
+            f"the registered reason {expected_reason!r}"
+        )
 
-    enabled, disabled, order = extract_native_arms(row, label)
+    enabled, disabled, order = extract_mirrored_native_arms(row, label)
     validate_reported_native_statistics(row, enabled, disabled, label)
     result = evaluate_native_parity(enabled, disabled)
     audit = load_json(cell / "no_dispatch_audit.json", f"{label} no-dispatch audit")
@@ -243,13 +254,18 @@ def analyze_cell(root: Path, matrix_row: dict[str, str]) -> dict[str, Any]:
 def analyze_artifact(root: Path) -> dict[str, Any]:
     with (root / "matrix.tsv").open(encoding="utf-8", newline="") as handle:
         matrix = list(csv.DictReader(handle, delimiter="\t"))
-    if not matrix or set(matrix[0]) != {"ordinal", "workload", "rows", "cohort"}:
+    required_columns = {"ordinal", "workload", "rows", "cohort"}
+    if not matrix or not required_columns.issubset(matrix[0]):
         raise AnalysisError("strengthened matrix is missing or malformed")
     cells = [analyze_cell(root, row) for row in matrix]
     sample_counts = {cell["arm_order"]["paired_sample_count"] for cell in cells}
     if len(sample_counts) != 1:
         raise AnalysisError("strengthened cells do not share one report-derived sample count")
     pair_count = sample_counts.pop()
+    if pair_count != EXPECTED_PAIRS:
+        raise AnalysisError(
+            f"strengthened cells contain {pair_count} pairs; expected {EXPECTED_PAIRS}"
+        )
     return {
         "schema_version": 1,
         "kind": "strengthened_native_parity_diagnostic",
@@ -286,7 +302,7 @@ def main() -> int:
         print(rendered, end="")
     else:
         args.output.write_text(rendered, encoding="utf-8")
-    return 0
+    return 0 if result["summary"]["parity_pass_count"] == result["summary"]["cell_count"] else 1
 
 
 if __name__ == "__main__":

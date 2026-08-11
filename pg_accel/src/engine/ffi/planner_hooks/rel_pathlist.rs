@@ -267,6 +267,63 @@ unsafe fn function_name_for_oid(fn_oid: pg_sys::Oid) -> Option<String> {
     name_cstr.to_str().ok().map(str::to_ascii_lowercase)
 }
 
+#[must_use]
+fn h3_variable_output_srf_name(name: &str) -> bool {
+    matches!(name, "h3_grid_disk" | "h3_grid_disk_distances")
+}
+
+/// Identify a correlated, extension-owned H3 set-returning function RTE.
+///
+/// `RTE_FUNCTION` stores one or more `RangeTblFunction` nodes. We deliberately
+/// require `rte.lateral`: an uncorrelated SRF is still native, but it is not the
+/// missing batched resident-expansion family described by this reason code.
+/// Catalog ownership prevents a same-name user function from manufacturing H3
+/// evidence.
+///
+/// # Safety
+///
+/// `rte` must be a live planner-owned range-table entry and catalog access must
+/// occur on the backend thread.
+unsafe fn rte_has_h3_lateral_srf(rte: &RangeTblEntry) -> bool {
+    if rte.rtekind != pg_sys::RTEKind::RTE_FUNCTION || !rte.lateral || rte.functions.is_null() {
+        return false;
+    }
+
+    // SAFETY: functions is a non-null planner-owned List for this RTE.
+    let len = unsafe { pg_sys::list_length(rte.functions) };
+    for index in 0..len {
+        // SAFETY: index is bounded by the measured List length.
+        let range_function =
+            unsafe { pg_sys::list_nth(rte.functions, index).cast::<pg_sys::RangeTblFunction>() };
+        if range_function.is_null() {
+            continue;
+        }
+        // SAFETY: the List entry is a planner-owned RangeTblFunction.
+        let expression = unsafe { (*range_function).funcexpr };
+        // SAFETY: the null check short-circuits before reading the common Node
+        // tag from the planner-owned expression.
+        if expression.is_null() || unsafe { (*expression).type_ } != NodeTag::T_FuncExpr {
+            continue;
+        }
+        let function = expression.cast::<pg_sys::FuncExpr>();
+        // SAFETY: the checked NodeTag proves FuncExpr layout.
+        let function_oid = unsafe { (*function).funcid };
+        // SAFETY: function_oid belongs to this live planner expression and the
+        // helper performs backend-local catalog inspection.
+        if !unsafe { super::super::syscache::function_is_extension_member(function_oid, "h3") } {
+            continue;
+        }
+        // SAFETY: the same valid function OID remains catalog-visible.
+        if unsafe { function_name_for_oid(function_oid) }
+            .as_deref()
+            .is_some_and(h3_variable_output_srf_name)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 unsafe fn postgis_function_name_for_oid(fn_oid: pg_sys::Oid) -> Option<String> {
     // SAFETY: this planner callback runs on PostgreSQL's backend thread, and
     // fn_oid is checked against the live extension catalogs.
@@ -621,6 +678,24 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
     // the query on PostgreSQL's native plan. When `gpu_enabled` is off,
     // pg_accel injects nothing here either.
     if gucs::gpu_enabled() {
+        // Preserve the specific H3 LATERAL expansion boundary before the
+        // generic resident-pipeline counter. The RTE observer never injects a
+        // path; it only makes the intentional native boundary externally
+        // auditable.
+        // SAFETY: rte_ref and rel_ref are live planner-owned values and this
+        // callback runs on the backend thread.
+        if unsafe { rte_has_h3_lateral_srf(rte_ref) } {
+            #[allow(clippy::cast_sign_loss)]
+            let rows = rel_ref.rows.max(0.0) as u64;
+            stats::increment_planner_rejected(
+                super::RejectionReason::H3LateralSrfNoBatchedExpansion.stats_key(),
+                rows,
+            );
+            pgrx::debug1!(
+                "pg_accel: H3 LATERAL SRF remains native because no batched resident \
+                 expansion executor exists"
+            );
+        }
         // SAFETY: all pointers are planner-owned for this hook invocation.
         let raster_observed = unsafe { super::raster::observe(root, rel, rti, rte) };
         if !raster_observed {
@@ -927,8 +1002,8 @@ unsafe fn longest_presorted_prefix(
 #[cfg(test)]
 mod tests {
     use super::{
-        NodeTag, SortShape, classify_sort_shape, min_max_rewrite_shape, plain_native_target_tag,
-        standalone_sort_has_bounded_output,
+        NodeTag, SortShape, classify_sort_shape, h3_variable_output_srf_name,
+        min_max_rewrite_shape, plain_native_target_tag, standalone_sort_has_bounded_output,
     };
 
     // -- classify_sort_shape ------------------------------------------------
@@ -1094,5 +1169,14 @@ mod tests {
         assert!(!plain_native_target_tag(NodeTag::T_Aggref));
         assert!(!plain_native_target_tag(NodeTag::T_RelabelType));
         assert!(!plain_native_target_tag(NodeTag::T_CoerceViaIO));
+    }
+
+    #[test]
+    fn h3_lateral_observer_accepts_only_variable_output_grid_srfs() {
+        assert!(h3_variable_output_srf_name("h3_grid_disk"));
+        assert!(h3_variable_output_srf_name("h3_grid_disk_distances"));
+        assert!(!h3_variable_output_srf_name("h3_latlng_to_cell"));
+        assert!(!h3_variable_output_srf_name("h3_cell_to_parent"));
+        assert!(!h3_variable_output_srf_name("h3_grid_disk_spoof"));
     }
 }

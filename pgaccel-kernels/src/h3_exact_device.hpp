@@ -326,6 +326,72 @@ static inline void h3_set_index_digit(H3Index& h, int res, Direction digit) {
   h = ((h & ~(H3_DIGIT_MASK << shift)) | (uint64_t(digit) << shift));
 }
 
+// Exact bit-domain helpers shared by the standalone H3 kernels and fused
+// consumers. These deliberately validate the complete H3 cell contract before
+// transforming a key; accepting a merely well-shaped bit pattern would differ
+// from h3-pg on pentagon deleted subsequences and malformed trailing digits.
+static constexpr uint64_t H3_HIGH_BIT = uint64_t(1) << 63;
+static constexpr uint64_t H3_PENTAGON_BASE_LOW =
+    (uint64_t(1) << 4) | (uint64_t(1) << 14) | (uint64_t(1) << 24) |
+    (uint64_t(1) << 38) | (uint64_t(1) << 49) | (uint64_t(1) << 58) |
+    (uint64_t(1) << 63);
+static constexpr uint64_t H3_PENTAGON_BASE_HIGH =
+    (uint64_t(1) << 8) | (uint64_t(1) << 19) | (uint64_t(1) << 33) |
+    (uint64_t(1) << 43) | (uint64_t(1) << 53);
+
+static inline int h3_get_base_cell(H3Index h) {
+  return int((h & H3_BC_MASK) >> H3_BC_OFFSET);
+}
+
+static inline bool h3_is_pentagon_base(int base) {
+  return base < 64 ? ((H3_PENTAGON_BASE_LOW >> base) & uint64_t(1)) != 0
+                   : ((H3_PENTAGON_BASE_HIGH >> (base - 64)) & uint64_t(1)) != 0;
+}
+
+static inline bool h3_is_valid_cell(H3Index cell) {
+  if (cell == 0 || (cell & H3_HIGH_BIT) != 0 ||
+      ((cell >> H3_RESERVED_OFFSET) & uint64_t(7)) != 0 ||
+      ((cell & H3_MODE_MASK) >> H3_MODE_OFFSET) != H3_CELL_MODE)
+    return false;
+  const int resolution = h3_get_resolution(cell);
+  const int base = h3_get_base_cell(cell);
+  if (resolution < 0 || resolution > MAX_H3_RES || base < 0 || base >= NUM_BASE_CELLS)
+    return false;
+  bool found_nonzero_digit = false;
+  const bool pentagon = h3_is_pentagon_base(base);
+  for (int r = 1; r <= resolution; ++r) {
+    const Direction digit = h3_get_index_digit(cell, r);
+    if (digit == INVALID_DIGIT ||
+        (pentagon && !found_nonzero_digit && digit == K_AXES_DIGIT))
+      return false;
+    found_nonzero_digit = found_nonzero_digit || digit != CENTER_DIGIT;
+  }
+  for (int r = resolution + 1; r <= MAX_H3_RES; ++r) {
+    if (h3_get_index_digit(cell, r) != INVALID_DIGIT)
+      return false;
+  }
+  return true;
+}
+
+static inline uint64_t h3_unused_digit_mask_after(int parent_resolution) {
+  uint64_t mask = 0;
+  for (int r = parent_resolution + 1; r <= MAX_H3_RES; ++r) {
+    const int shift = (MAX_H3_RES - r) * H3_PER_DIGIT_OFFSET;
+    mask |= uint64_t(INVALID_DIGIT) << shift;
+  }
+  return mask;
+}
+
+static inline H3Index h3_cell_to_parent(H3Index cell, int parent_resolution) {
+  const int resolution = h3_get_resolution(cell);
+  if (parent_resolution < 0 || parent_resolution > resolution)
+    return 0;
+  if (parent_resolution == resolution)
+    return cell;
+  h3_set_resolution(cell, parent_resolution);
+  return cell | h3_unused_digit_mask_after(parent_resolution);
+}
+
 static inline int round_to_int(double x) {
   return int(x >= 0.0 ? x + 0.5 : x - 0.5);
 }

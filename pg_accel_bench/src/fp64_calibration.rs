@@ -311,6 +311,8 @@ fn run_candidate(
             timing_mode: options.timing_mode,
             cache_mode: options.cache_mode,
             capture_planner_stages: false,
+            native_parity_pairing: false,
+            headline_speedup_allowed: true,
             plans_capture_path: if options.capture_plans {
                 Some(artifact_dir.join("plans.txt"))
             } else {
@@ -745,8 +747,11 @@ mod tests {
                 timing_mode: "raw-wallclock".to_owned(),
                 cache_mode: "warm".to_owned(),
                 harness_profile: "test".to_owned(),
+                native_parity_pairing: false,
+                native_parity_repetitions_per_arm: 1,
             },
             workloads,
+            headline_speedup_allowed: true,
             artifact_dir: None,
             crashes: Vec::new(),
             postmaster_start_time: None,

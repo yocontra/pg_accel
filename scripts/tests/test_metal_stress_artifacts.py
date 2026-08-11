@@ -7,6 +7,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -23,6 +24,35 @@ SPEC.loader.exec_module(artifacts)
 
 def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def candidate_provenance_fixture() -> dict[str, object]:
+    digest = hashlib.sha256(b"fixture\n").hexdigest()
+    return {
+        "artifact_type": "metal_stress_candidate_provenance",
+        "clean_worktree": True,
+        "commit": "1" * 40,
+        "git_status_sha256": hashlib.sha256(b"").hexdigest(),
+        "head_ref": "main",
+        "repository_root": "/fixture/pg_accel",
+        "schema_version": artifacts.SCHEMA_VERSION,
+        "source_inputs": [
+            {"path": path, "sha256": digest, "size_bytes": 8}
+            for path in artifacts.CANDIDATE_SOURCE_INPUTS
+        ],
+        "status": "pass",
+        "tree": "2" * 40,
+    }
+
+
+def write_core_artifacts(root: Path) -> None:
+    for relative, _role in artifacts.CORE_ARTIFACTS:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if relative == "candidate-provenance.json":
+            write_json(path, candidate_provenance_fixture())
+        else:
+            path.write_text("fixture\n", encoding="utf-8")
 
 
 def write_nested_benchmark_index(root: Path) -> None:
@@ -321,10 +351,7 @@ class ArtifactIndexTests(unittest.TestCase):
     def test_index_is_complete_and_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for relative, _role in artifacts.CORE_ARTIFACTS:
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("fixture\n", encoding="utf-8")
+            write_core_artifacts(root)
             for benchmark_dir in artifacts.BENCHMARK_DIRS:
                 write_nested_benchmark_index(root / benchmark_dir)
 
@@ -351,10 +378,7 @@ class ArtifactIndexTests(unittest.TestCase):
     def test_root_index_rejects_same_size_nested_child_tamper(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for relative, _role in artifacts.CORE_ARTIFACTS:
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("fixture\n", encoding="utf-8")
+            write_core_artifacts(root)
             for benchmark_dir in artifacts.BENCHMARK_DIRS:
                 write_nested_benchmark_index(root / benchmark_dir)
 
@@ -377,16 +401,83 @@ class ArtifactIndexTests(unittest.TestCase):
     def test_index_rejects_schema_free_nested_benchmark_index(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for relative, _role in artifacts.CORE_ARTIFACTS:
-                path = root / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("fixture\n", encoding="utf-8")
+            write_core_artifacts(root)
             for benchmark_dir in artifacts.BENCHMARK_DIRS:
                 path = root / benchmark_dir / "artifact_index.json"
                 path.parent.mkdir(parents=True)
                 path.write_text("{}\n", encoding="utf-8")
             with self.assertRaisesRegex(artifacts.ArtifactContractError, "wrong schema"):
                 artifacts.write_artifact_index(root)
+
+
+class CandidateProvenanceTests(unittest.TestCase):
+    def test_stress_gate_captures_clean_candidate_before_build(self) -> None:
+        gate = (SCRIPT.parent / "metal_stress_gate.sh").read_text(encoding="utf-8")
+        self.assertIn('run_logged "candidate-provenance"', gate)
+        self.assertIn("capture-candidate", gate)
+        self.assertIn('run_logged "acpp-provenance" capture_acpp_provenance', gate)
+        self.assertIn('grep -Fx "acpp_head=${required_sha}"', gate)
+        self.assertIn("-DCMAKE_CXX_FLAGS=-nostdinc++ -isystem", gate)
+        self.assertLess(
+            gate.index('run_logged "candidate-provenance"'),
+            gate.index("just gpu-build"),
+        )
+        self.assertLess(
+            gate.index('run_logged "acpp-provenance"'),
+            gate.index("just gpu-build"),
+        )
+
+    def _repository(self, root: Path) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "fixture@example.invalid"],
+            cwd=root,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Fixture"], cwd=root, check=True
+        )
+        for relative in artifacts.CANDIDATE_SOURCE_INPUTS:
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"fixture {relative}\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+
+    def test_clean_candidate_binds_commit_tree_and_review_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repository(root)
+            payload = artifacts.capture_candidate_provenance(root)
+            self.assertEqual(
+                payload["commit"],
+                subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+            )
+            self.assertEqual(
+                [row["path"] for row in payload["source_inputs"]],
+                list(artifacts.CANDIDATE_SOURCE_INPUTS),
+            )
+            artifacts.validate_candidate_provenance(payload)
+
+    def test_dirty_or_untracked_candidate_fails_closed(self) -> None:
+        for relative in ("Cargo.lock", "untracked.txt"):
+            with (
+                self.subTest(relative=relative),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                self._repository(root)
+                (root / relative).write_text("dirty\n", encoding="utf-8")
+                with self.assertRaisesRegex(
+                    artifacts.ArtifactContractError, "worktree is dirty"
+                ):
+                    artifacts.capture_candidate_provenance(root)
 
 
 class CrashArtifactTests(unittest.TestCase):

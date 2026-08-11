@@ -313,6 +313,7 @@
       "pg_accel_bench/src/workloads/case_when_or_expression_grouped_agg.rs",
       "pg_accel_bench/src/workloads/case_when_range_expression_grouped_agg.rs",
       "pg_accel_bench/src/workloads/case_when_value_predicate_expression_grouped_agg.rs",
+      "pg_accel_bench/src/workloads/clickbench.rs",
       "pg_accel_bench/src/workloads/dictionary_grouped_agg.rs",
       "pg_accel_bench/src/workloads/expr_math.rs",
       "pg_accel_bench/src/workloads/expr_variants.rs",
@@ -379,6 +380,7 @@
       "pg_accel_bench/src/workloads/ssbm.rs",
       "pg_accel_bench/src/workloads/timeseries_sensor_rollup.rs",
       "pg_accel_bench/src/workloads/topk_wide.rs",
+      "pg_accel_bench/src/workloads/tpch.rs",
       "pg_accel_bench/src/workloads/vertex_sweep.rs",
       "pg_accel_bench/src/workloads/window_analytics.rs",
       "pg_accel_bench/src/workloads/window_full_output_decline.rs",
@@ -517,6 +519,7 @@
       "pg_accel_bench/src/workloads/case_when_or_expression_grouped_agg.rs",
       "pg_accel_bench/src/workloads/case_when_range_expression_grouped_agg.rs",
       "pg_accel_bench/src/workloads/case_when_value_predicate_expression_grouped_agg.rs",
+      "pg_accel_bench/src/workloads/clickbench.rs",
       "pg_accel_bench/src/workloads/dictionary_grouped_agg.rs",
       "pg_accel_bench/src/workloads/expr_math.rs",
       "pg_accel_bench/src/workloads/expr_variants.rs",
@@ -583,6 +586,7 @@
       "pg_accel_bench/src/workloads/ssbm.rs",
       "pg_accel_bench/src/workloads/timeseries_sensor_rollup.rs",
       "pg_accel_bench/src/workloads/topk_wide.rs",
+      "pg_accel_bench/src/workloads/tpch.rs",
       "pg_accel_bench/src/workloads/vertex_sweep.rs",
       "pg_accel_bench/src/workloads/window_analytics.rs",
       "pg_accel_bench/src/workloads/window_full_output_decline.rs",
@@ -903,7 +907,21 @@
       "95_selected_lifecycle_contract.assert_003": "d95b8c5ea84914cb2fb4d65d23f372976960ab0affe6f2c7b72efd55b2073767",
       "95_selected_lifecycle_contract.assert_004": "59db0136cf1e391edc920decdf384ef20cda61a93211b2ae584a66dafd5cc03c",
       "95_selected_lifecycle_contract.assert_005": "84557c45d2bded653967e79792958066d8010508b41f2d6b8e21029c361ba579",
-      "95_selected_lifecycle_contract.assert_006": "83257f14eff79afa74c290efc09344866251b9660d0a2a43339e4dd95873e313"
+      "95_selected_lifecycle_contract.assert_006": "83257f14eff79afa74c290efc09344866251b9660d0a2a43339e4dd95873e313",
+      "96_declined_lifecycle_contract.assert_001": "d8a7a5e4140c69769688dc5cac4ccefff9c8f6ab5bf40bd6d559936958796001",
+      "96_declined_lifecycle_contract.assert_002": "8bc32cc87db44dfe50c13178f506220d872f485f4f72f9b01e7d1976f68f9cc8",
+      "96_declined_lifecycle_contract.assert_003": "7a9a66e895ef0c5be7a996e887f7ae9b1e28d3db36ee7eaef7f9ba38ec2bd64b",
+      "96_declined_lifecycle_contract.assert_004": "712f24f712d7adfe24d55d2b14cb4f2a917594f5deef05a5b4a77e3ad06ccf1e",
+      "96_declined_lifecycle_contract.assert_005": "f6b7c8217bbc9f5c3c2f3679af5450ddaee17d1145a920fafb55587800c5b631",
+      "96_declined_lifecycle_contract.assert_006": "0c856a600d2ffa4d200ccdfe420072878bdac167455cc75ecbc69bfbc5d1800c",
+      "96_declined_lifecycle_contract.assert_007": "a32e96309654dd869e8b0cbd9388e21b8faba7c3b5962bff74c85254fe5fa0db",
+      "96_declined_lifecycle_contract.assert_008": "36e4b231acab18031855b87865be82d8b21392e584756fdfd898f3ab6cec148a",
+      "96_declined_lifecycle_contract.assert_009": "5ae92fc80ec9c64bd4d0a178c2cd1fff97a66b79ec4eb9d0dde362306f813bc4",
+      "96_declined_lifecycle_contract.assert_010": "ebc8ca88b8cba6282195a35210b75d4006f8a9e5cc5e952693fdff5dfefd95b2",
+      "96_declined_lifecycle_contract.assert_011": "0f00921a94a84c924c33cf3db1c5a04c607a36a2bb7aee0a289803ef1f79c006",
+      "96_declined_lifecycle_contract.assert_012": "4f482fbef132aa269de8cb0609f457acef1610c343c1d40fb10242086ef46ac0",
+      "96_declined_lifecycle_contract.assert_013": "e9684fae74045c5c8dc449b2d600cce70ef662c2894ef8439316412e04024d92",
+      "96_declined_lifecycle_contract.assert_014": "03bfe28688306acf6bfda6713f2a64943bf18ac905d1820594a5da05ebab5586"
     },
     "assertion_ids": [
       "00_smoke.assert_001",
@@ -1211,7 +1229,21 @@
       "95_selected_lifecycle_contract.assert_003",
       "95_selected_lifecycle_contract.assert_004",
       "95_selected_lifecycle_contract.assert_005",
-      "95_selected_lifecycle_contract.assert_006"
+      "95_selected_lifecycle_contract.assert_006",
+      "96_declined_lifecycle_contract.assert_001",
+      "96_declined_lifecycle_contract.assert_002",
+      "96_declined_lifecycle_contract.assert_003",
+      "96_declined_lifecycle_contract.assert_004",
+      "96_declined_lifecycle_contract.assert_005",
+      "96_declined_lifecycle_contract.assert_006",
+      "96_declined_lifecycle_contract.assert_007",
+      "96_declined_lifecycle_contract.assert_008",
+      "96_declined_lifecycle_contract.assert_009",
+      "96_declined_lifecycle_contract.assert_010",
+      "96_declined_lifecycle_contract.assert_011",
+      "96_declined_lifecycle_contract.assert_012",
+      "96_declined_lifecycle_contract.assert_013",
+      "96_declined_lifecycle_contract.assert_014"
     ],
     "files": [
       "00_smoke.sql",
@@ -1271,7 +1303,8 @@
       "92_spatial_resident_agg_contract.sql",
       "93_raster_resident_reclass_contract.sql",
       "94_grouped_count_bool_contract.sql",
-      "95_selected_lifecycle_contract.sql"
+      "95_selected_lifecycle_contract.sql",
+      "96_declined_lifecycle_contract.sql"
     ]
   }
 }

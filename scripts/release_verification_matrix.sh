@@ -40,6 +40,19 @@ run_logged() {
     echo "${name}: PASS log=${log}" | tee -a "${artifact_dir}/summary.txt"
 }
 
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1"
+    else
+        shasum -a 256 "$1"
+    fi
+}
+
+run_logged "candidate-provenance" \
+    python3 scripts/metal_stress_artifacts.py capture-candidate \
+        --repo-root "$PWD" \
+        --output "${artifact_dir}/candidate-provenance.json"
+
 {
     echo "timestamp=${ts}"
     echo "pg=${pg}"
@@ -76,7 +89,7 @@ run_logged "sql-tests" \
         sql/tests/run_all.sh "$connection"
 run_logged "deferred-site-audit" \
     rg -n "planner-defer|planner-decline|unsupported|TODO|FIXME|deferred|Deferred" \
-        TODO.md docs README.md pg_accel pg_accel_bench
+        CLAUDE.md CONTRIBUTING.md docs README.md pg_accel pg_accel_bench
 run_logged "fork-stress" just gpu-stress-archive
 run_logged "benchmark-sweep" \
     env PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" \
@@ -106,3 +119,15 @@ else
 fi
 
 echo "release-verify: PASS artifact_dir=${artifact_dir}" | tee -a "${artifact_dir}/summary.txt"
+(
+    cd "$artifact_dir"
+    find . -type f ! -name SHA256SUMS | LC_ALL=C sort | while IFS= read -r path; do
+        hash_file "$path"
+    done > SHA256SUMS
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -c SHA256SUMS
+    else
+        shasum -a 256 -c SHA256SUMS
+    fi
+)
+echo "release-verify: sealed SHA256SUMS at ${artifact_dir}/SHA256SUMS"

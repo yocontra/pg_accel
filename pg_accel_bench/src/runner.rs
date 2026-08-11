@@ -38,6 +38,13 @@ const PLANNER_STAGE_NAMES: [&str; 7] = [
     "upper_setop",
     "upper_other",
 ];
+const PLANNER_SUBSTAGE_NAMES: [&str; 5] = [
+    "query_fingerprint",
+    "decline_cache_lookup",
+    "dependency_revalidation",
+    "native_cost_reconstruction",
+    "rejection_recording",
+];
 
 fn apply_benchmark_safety_settings(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
     client.batch_execute(&format!(
@@ -175,6 +182,7 @@ struct DispatchStatsSnapshot {
     stock_exec_count: u64,
     gpu_rows_processed: u64,
     gpu_kernel_executions: u64,
+    physical_kernel_modes: report::PhysicalKernelModeCounts,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -185,6 +193,7 @@ struct DispatchStatsDelta {
     stock_exec_count: u64,
     gpu_rows_processed: u64,
     gpu_kernel_executions: u64,
+    physical_kernel_modes: report::PhysicalKernelModeCounts,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +201,44 @@ struct DispatchCounterCapture {
     captured: bool,
     delta: DispatchStatsDelta,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ArtifactLifecycleSnapshot {
+    counters: report::ArtifactLifecycleDelta,
+    dependencies: Vec<report::ResidentDependencyIdentity>,
+    artifact_policy: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ArtifactExecutionEvidence {
+    artifact: report::ArtifactLifecycleDelta,
+    artifact_policy: Option<String>,
+    dependencies_before: Vec<report::ResidentDependencyIdentity>,
+    dependencies_after: Vec<report::ResidentDependencyIdentity>,
+    dispatch: DispatchStatsDelta,
+    refresh_us: u64,
+    refreshed_relations: u64,
+    refreshed_rows: u64,
+    output_rows_consumed: u64,
+    error: Option<String>,
+}
+
+impl ArtifactExecutionEvidence {
+    fn unavailable(error: impl Into<String>) -> Self {
+        Self {
+            artifact: report::ArtifactLifecycleDelta::default(),
+            artifact_policy: None,
+            dependencies_before: Vec::new(),
+            dependencies_after: Vec::new(),
+            dispatch: DispatchStatsDelta::default(),
+            refresh_us: 0,
+            refreshed_relations: 0,
+            refreshed_rows: 0,
+            output_rows_consumed: 0,
+            error: Some(error.into()),
+        }
+    }
 }
 
 impl DispatchCounterCapture {
@@ -211,16 +258,42 @@ struct MeasurementOutcome {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+struct RunExecutionOptions {
+    capture_planner_stages: bool,
+    native_parity_pairing: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LifecyclePairOptions {
+    accel_first: bool,
+    native_parity_pairing: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 struct PlannerStageStatsSnapshot {
     calls: u64,
     elapsed_us: u64,
     fast_declines: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PlannerSubstageStatsSnapshot {
+    calls: u64,
+    elapsed_us: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PlannerProfileSnapshot {
+    stages: BTreeMap<String, PlannerStageStatsSnapshot>,
+    substages: BTreeMap<String, PlannerSubstageStatsSnapshot>,
+}
+
 #[derive(Debug, Clone)]
 struct PlannerStageMeasurement {
     stages: Vec<report::PlannerStageDelta>,
     observer_probe: Vec<report::PlannerStageDelta>,
+    substages: Vec<report::PlannerSubstageDelta>,
+    substage_observer_probe: Vec<report::PlannerSubstageDelta>,
     error: Option<String>,
 }
 
@@ -229,6 +302,8 @@ impl PlannerStageMeasurement {
         Self {
             stages: Vec::new(),
             observer_probe: Vec::new(),
+            substages: Vec::new(),
+            substage_observer_probe: Vec::new(),
             error: Some(error.into()),
         }
     }
@@ -1423,9 +1498,11 @@ fn randomized_balanced_arm_order<R: Rng + ?Sized>(iterations: usize, rng: &mut R
 /// of accel-first vs baseline-first is randomized per iteration. Each mode
 /// measurement uses `DISCARD ALL` between modes so neither side benefits
 /// from the other's cached plans or buffer state. Each mode gets a
-/// persistent connection (one per mode per workload/scale) so that
-/// one-time backend init costs (tracing, GPU probe) are amortised by
-/// warmup iterations rather than paid on every measurement.
+/// persistent connection (normally one per mode per workload/scale) so that
+/// one-time backend init costs (tracing, GPU probe) are amortised by warmup
+/// iterations rather than paid on every measurement. The internal
+/// native-parity gate can deliberately map both logical arms to one backend
+/// to remove backend identity from planner-decline comparisons.
 ///
 /// # Errors
 ///
@@ -1488,7 +1565,7 @@ pub fn run_with_timing_and_cache(
         warmup,
         timing_mode,
         cache_mode,
-        false,
+        RunExecutionOptions::default(),
     )
 }
 
@@ -1499,8 +1576,12 @@ fn run_with_timing_and_cache_internal(
     warmup: usize,
     timing_mode: TimingMode,
     cache_mode: CacheMode,
-    capture_planner_stages: bool,
+    options: RunExecutionOptions,
 ) -> Result<WorkloadResult, Box<dyn std::error::Error>> {
+    let RunExecutionOptions {
+        capture_planner_stages,
+        native_parity_pairing,
+    } = options;
     // For Both we delegate twice, cold then warm, and concatenate.
     if cache_mode == CacheMode::Both {
         let cold = run_with_timing_and_cache_internal(
@@ -1510,7 +1591,7 @@ fn run_with_timing_and_cache_internal(
             0,
             timing_mode,
             CacheMode::Cold,
-            capture_planner_stages,
+            options,
         )?;
         let warm = run_with_timing_and_cache_internal(
             connection,
@@ -1519,7 +1600,7 @@ fn run_with_timing_and_cache_internal(
             warmup,
             timing_mode,
             CacheMode::Warm,
-            capture_planner_stages,
+            options,
         )?;
         let mut merged = cold.iterations.clone();
         merged.extend(warm.iterations.clone());
@@ -1554,10 +1635,34 @@ fn run_with_timing_and_cache_internal(
                         capture
                     }),
             );
+        result.native_parity_pair_captures = warm
+            .native_parity_pair_captures
+            .iter()
+            .cloned()
+            .map(|mut capture| {
+                capture.pair_index = capture.pair_index.saturating_add(cold_iteration_count);
+                capture
+            })
+            .collect();
         // Carry resident-lane evidence from the sub-runs (both measure the
         // same workload; prefer the cold sub-run's off-clock load time).
         result.resident_lane = cold.resident_lane || warm.resident_lane;
         result.resident_load_ms = cold.resident_load_ms.or(warm.resident_load_ms);
+        result
+            .artifact_lifecycle_probe
+            .clone_from(&warm.artifact_lifecycle_probe);
+        result.artifact_steady_state_captures = warm
+            .artifact_steady_state_captures
+            .iter()
+            .cloned()
+            .map(|mut capture| {
+                capture.pair_index = capture
+                    .pair_index
+                    .map(|index| index.saturating_add(cold_iteration_count));
+                capture
+            })
+            .collect();
+        result.combined_warm_summary = warm.combined_warm_summary;
         merge_cache_mode_dispatch_counter_fields(&mut result, &cold, &warm);
         return Ok(result);
     }
@@ -1607,17 +1712,15 @@ fn run_with_timing_and_cache_internal(
     // timed run, so this round does not warm the measured samples.
     if cache_mode == CacheMode::Cold {
         for &idx in &[0_usize, 1_usize] {
-            mode_clients[idx].batch_execute("DISCARD ALL")?;
-            apply_benchmark_safety_settings(&mut mode_clients[idx])?;
-            if matches!(modes[idx], BenchMode::Accel) {
-                prime_workload_accel_backend(&mut mode_clients[idx], workload)?;
-            }
+            let client_idx = if native_parity_pairing { 0 } else { idx };
+            mode_clients[client_idx].batch_execute("DISCARD ALL")?;
+            apply_benchmark_safety_settings(&mut mode_clients[client_idx])?;
             let sql_for_mode = match modes[idx] {
                 BenchMode::Accel => query.as_str(),
                 BenchMode::PgParallel => baseline_query.as_str(),
             };
             let _ = run_with_mode(
-                &mut mode_clients[idx],
+                &mut mode_clients[client_idx],
                 sql_for_mode,
                 modes[idx],
                 &pre_query,
@@ -1630,18 +1733,51 @@ fn run_with_timing_and_cache_internal(
     let mut counter_delta = DispatchStatsDelta::default();
     let mut counter_iterations_captured = 0_usize;
     let mut counter_capture_error: Option<String> = None;
+    // Native-parity mode runs both logical arms on one backend and has already
+    // proved that no pg_accel plan was selected. Capture one counter interval
+    // around the complete warmup + measured series instead of issuing an
+    // asymmetric stats query immediately before every accelerated arm.
+    let native_pairing_counter_before = if native_parity_pairing {
+        match capture_dispatch_stats(&mut mode_clients[0]) {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                counter_capture_error = Some(format!(
+                    "could not capture pg_accel dispatch counters before the native-parity series: {error}"
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut accel_output_rows_consumed = 0_u64;
     let mut planner_stage_captures = Vec::with_capacity(iterations);
+    let mut native_parity_pair_captures = Vec::with_capacity(iterations);
+    let capture_artifact_lifecycle = !native_parity_pairing
+        && cache_mode == CacheMode::Warm
+        && workload_is_resident_lane(workload.name());
+    let mut artifact_lifecycle_probe = None;
+    let mut artifact_steady_state_captures = Vec::with_capacity(iterations);
 
     for i in 0..total_runs {
         let is_warmup = i < effective_warmup;
 
-        // A resident transform may cache its complete derived output during
-        // warmup. Refresh the raw resident inputs once at the measurement
-        // boundary so at least one measured accel sample must rebuild and
-        // dispatch; subsequent samples may measure verified artifact hits.
-        if i == effective_warmup && workload_is_resident_lane(workload.name()) {
-            refresh_workload_resident_inputs(&mut mode_clients[0], workload)?;
+        // Seal refresh + construction + dispatch separately. The regular warm
+        // samples that follow must be artifact hits and never inherit this
+        // lifecycle cost in their latency distribution.
+        if i == effective_warmup && capture_artifact_lifecycle {
+            artifact_lifecycle_probe = Some(run_artifact_lifecycle_probe(
+                &mut mode_clients,
+                workload,
+                &query,
+                &baseline_query,
+                &pre_query,
+                timing_mode,
+                LifecyclePairOptions {
+                    accel_first: rng.gen_bool(0.5),
+                    native_parity_pairing,
+                },
+            )?);
         }
 
         // Warmups are randomized independently. Measured pairs use a
@@ -1652,32 +1788,58 @@ fn run_with_timing_and_cache_internal(
         } else {
             measured_accel_first[i - effective_warmup]
         };
-        let order: [usize; 2] = if accel_first { [0, 1] } else { [1, 0] };
+        let order: Vec<usize> = if native_parity_pairing && !is_warmup {
+            if accel_first {
+                vec![0, 1, 1, 0]
+            } else {
+                vec![1, 0, 0, 1]
+            }
+        } else if accel_first {
+            vec![0, 1]
+        } else {
+            vec![1, 0]
+        };
 
         let mut timings = [MeasurementOutcome {
             elapsed_ms: 0.0,
             output_rows: 0,
         }; 2];
+        let mut raw_timing_ms: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        let mut raw_sequence = Vec::with_capacity(order.len());
+        let mut planner_capture_taken = false;
         // Cold mode purges the OS page cache before EACH mode's timed run
         // (not once per accel/parallel pair) and AFTER the resident-cache
         // prime, so the resident preload cannot re-warm the heap the timed
         // query reads. Recorded per measurement.
         let mut purge_outcomes = [CachePurgeState::NotRequested; 2];
+        let mut artifact_evidence = None;
         for &idx in &order {
+            let client_idx = if native_parity_pairing { 0 } else { idx };
             // DISCARD ALL resets session state before each measurement.
-            mode_clients[idx].batch_execute("DISCARD ALL")?;
-            apply_benchmark_safety_settings(&mut mode_clients[idx])?;
-            if matches!(modes[idx], BenchMode::Accel) {
-                prime_workload_accel_backend(&mut mode_clients[idx], workload)?;
-            }
+            mode_clients[client_idx].batch_execute("DISCARD ALL")?;
+            apply_benchmark_safety_settings(&mut mode_clients[client_idx])?;
             if cache_mode == CacheMode::Cold {
                 purge_outcomes[idx] = purge_for_measurement();
             }
+            let lifecycle_before = if capture_artifact_lifecycle
+                && !is_warmup
+                && matches!(modes[idx], BenchMode::Accel)
+            {
+                Some((
+                    capture_artifact_lifecycle_snapshot(&mut mode_clients[client_idx])
+                        .map_err(|error| error.to_string()),
+                    capture_dispatch_stats(&mut mode_clients[client_idx])
+                        .map_err(|error| error.to_string()),
+                ))
+            } else {
+                None
+            };
             let dispatch_before = if !is_warmup
+                && !native_parity_pairing
                 && matches!(modes[idx], BenchMode::Accel)
                 && counter_capture_error.is_none()
             {
-                match capture_dispatch_stats(&mut mode_clients[idx]) {
+                match capture_dispatch_stats(&mut mode_clients[client_idx]) {
                     Ok(snapshot) => Some(snapshot),
                     Err(error) => {
                         counter_capture_error = Some(format!(
@@ -1693,17 +1855,45 @@ fn run_with_timing_and_cache_internal(
                 BenchMode::Accel => query.as_str(),
                 BenchMode::PgParallel => baseline_query.as_str(),
             };
+            let capture_this_planner = capture_planner_stages
+                && !is_warmup
+                && matches!(modes[idx], BenchMode::Accel)
+                && !planner_capture_taken;
+            planner_capture_taken |= capture_this_planner;
             let mode_outcome = run_with_mode(
-                &mut mode_clients[idx],
+                &mut mode_clients[client_idx],
                 sql_for_mode,
                 modes[idx],
                 &pre_query,
                 timing_mode,
-                capture_planner_stages && !is_warmup && matches!(modes[idx], BenchMode::Accel),
+                capture_this_planner,
             )?;
-            timings[idx] = mode_outcome.measurement;
+            timings[idx].elapsed_ms += mode_outcome.measurement.elapsed_ms;
+            timings[idx].output_rows = timings[idx]
+                .output_rows
+                .saturating_add(mode_outcome.measurement.output_rows);
+            raw_timing_ms[idx].push(mode_outcome.measurement.elapsed_ms);
+            raw_sequence.push(match modes[idx] {
+                BenchMode::Accel => "accel".to_owned(),
+                BenchMode::PgParallel => "disabled_postgresql".to_owned(),
+            });
+            if let Some((lifecycle_before, lifecycle_dispatch_before)) = lifecycle_before {
+                let lifecycle_after =
+                    capture_artifact_lifecycle_snapshot(&mut mode_clients[client_idx])
+                        .map_err(|error| error.to_string());
+                let lifecycle_dispatch_after =
+                    capture_dispatch_stats(&mut mode_clients[client_idx])
+                        .map_err(|error| error.to_string());
+                artifact_evidence = Some(finish_artifact_execution_evidence(
+                    lifecycle_before,
+                    lifecycle_dispatch_before,
+                    lifecycle_after,
+                    lifecycle_dispatch_after,
+                    mode_outcome.measurement.output_rows,
+                ));
+            }
             if let Some(before) = dispatch_before {
-                match capture_dispatch_stats(&mut mode_clients[idx])
+                match capture_dispatch_stats(&mut mode_clients[client_idx])
                     .map_err(|error| error.to_string())
                     .and_then(|after| dispatch_stats_delta(before, after))
                 {
@@ -1724,14 +1914,35 @@ fn run_with_timing_and_cache_internal(
                     cache_state: CacheState::from(cache_mode),
                     stages: capture.stages,
                     observer_probe: capture.observer_probe,
+                    substages: capture.substages,
+                    substage_observer_probe: capture.substage_observer_probe,
                     error: capture.error,
                 });
             }
+        }
+        for idx in 0..timings.len() {
+            let repetitions = raw_timing_ms[idx].len();
+            if repetitions == 0 {
+                return Err(format!("benchmark arm {idx} produced no timing samples").into());
+            }
+            timings[idx].elapsed_ms /= repetitions as f64;
         }
         let cache_purge = combine_purge_states(purge_outcomes[0], purge_outcomes[1]);
 
         let accel_ms = timings[0].elapsed_ms;
         let parallel_ms = timings[1].elapsed_ms;
+
+        if native_parity_pairing && !is_warmup {
+            native_parity_pair_captures.push(report::NativeParityPairCapture {
+                pair_index: i - effective_warmup,
+                accel_first,
+                sequence: raw_sequence,
+                accel_ms: raw_timing_ms[0].clone(),
+                parallel_ms: raw_timing_ms[1].clone(),
+                accel_average_ms: accel_ms,
+                parallel_average_ms: parallel_ms,
+            });
+        }
 
         let phase = if is_warmup { "warmup" } else { "bench" };
         let iter_num = if is_warmup {
@@ -1767,7 +1978,39 @@ fn run_with_timing_and_cache_internal(
         } else {
             accel_output_rows_consumed =
                 accel_output_rows_consumed.saturating_add(timings[0].output_rows);
+            if capture_artifact_lifecycle {
+                artifact_steady_state_captures.push(resident_lifecycle_capture(
+                    "steady_state",
+                    Some(i - effective_warmup),
+                    iteration_result.clone(),
+                    artifact_evidence.unwrap_or_else(|| {
+                        ArtifactExecutionEvidence::unavailable(
+                            "accelerated steady-state lifecycle capture did not run",
+                        )
+                    }),
+                ));
+            }
             results.push(iteration_result);
+        }
+    }
+
+    if native_parity_pairing
+        && counter_capture_error.is_none()
+        && let Some(before) = native_pairing_counter_before
+    {
+        match capture_dispatch_stats(&mut mode_clients[0])
+            .map_err(|error| error.to_string())
+            .and_then(|after| dispatch_stats_delta(before, after))
+        {
+            Ok(delta) => {
+                counter_delta = delta;
+                counter_iterations_captured = iterations;
+            }
+            Err(error) => {
+                counter_capture_error = Some(format!(
+                    "could not capture coherent pg_accel dispatch counters after the native-parity series: {error}"
+                ));
+            }
         }
     }
 
@@ -1805,6 +2048,21 @@ fn run_with_timing_and_cache_internal(
     result.resident_load_ms = resident_load_ms;
     result.resident_lane = workload_is_resident_lane(workload.name());
     result.planner_stage_captures = planner_stage_captures;
+    result.native_parity_pair_captures = native_parity_pair_captures;
+    result.artifact_lifecycle_probe = artifact_lifecycle_probe;
+    result.artifact_steady_state_captures = artifact_steady_state_captures;
+    if let Some(probe) = result.artifact_lifecycle_probe.as_ref() {
+        let mut combined = vec![probe.iteration.clone()];
+        combined.extend(
+            result
+                .iterations
+                .iter()
+                .filter(|iteration| iteration.cache_state == CacheState::Warm)
+                .cloned(),
+        );
+        result.combined_warm_summary =
+            report::CacheModeSummary::from_iterations(CacheState::Warm, &combined);
+    }
     merge_dispatch_counter_capture(&mut result, counter_capture);
     Ok(result)
 }
@@ -1814,7 +2072,11 @@ fn capture_dispatch_stats(
 ) -> Result<DispatchStatsSnapshot, Box<dyn std::error::Error>> {
     let row = client.query_one(
         "SELECT pg_backend_pid(), queries_accelerated, rows_dispatched, batches_executed, stock_exec_count, \
-                gpu_rows_processed, gpu_kernel_executions \
+                gpu_rows_processed, gpu_kernel_executions, \
+                (SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'parallel_hash'), \
+                (SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'parallel_dense_count'), \
+                (SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'parallel_dense_integer'), \
+                (SELECT calls FROM pg_accel_grouped_kernel_mode_stats() WHERE mode = 'serial_generic') \
            FROM pg_accel_stats()",
         &[],
     )?;
@@ -1826,7 +2088,181 @@ fn capture_dispatch_stats(
         stock_exec_count: nonnegative_dispatch_counter("stock_exec_count", row.get(4))?,
         gpu_rows_processed: nonnegative_dispatch_counter("gpu_rows_processed", row.get(5))?,
         gpu_kernel_executions: nonnegative_dispatch_counter("gpu_kernel_executions", row.get(6))?,
+        physical_kernel_modes: report::PhysicalKernelModeCounts {
+            parallel_hash: nonnegative_dispatch_counter("parallel_hash", row.get(7))?,
+            parallel_dense_count: nonnegative_dispatch_counter("parallel_dense_count", row.get(8))?,
+            parallel_dense_integer: nonnegative_dispatch_counter(
+                "parallel_dense_integer",
+                row.get(9),
+            )?,
+            serial_generic: nonnegative_dispatch_counter("serial_generic", row.get(10))?,
+        },
     })
+}
+
+fn capture_artifact_lifecycle_snapshot(
+    client: &mut Client,
+) -> Result<ArtifactLifecycleSnapshot, Box<dyn std::error::Error>> {
+    let row = client.query_one(
+        "SELECT hits, builds, rebuilds, artifact_bytes_observed, construction_bytes, \
+                construction_us, preparation_us, raw_load_us, \
+                pg_accel_last_artifact_policy() \
+           FROM pg_accel_artifact_lifecycle_stats()",
+        &[],
+    )?;
+    let counter = |name: &str, index| nonnegative_dispatch_counter(name, row.get::<_, i64>(index));
+    let counters = report::ArtifactLifecycleDelta {
+        hits: counter("artifact hits", 0)?,
+        builds: counter("artifact builds", 1)?,
+        rebuilds: counter("artifact rebuilds", 2)?,
+        artifact_bytes_observed: counter("artifact bytes observed", 3)?,
+        construction_bytes: counter("artifact construction bytes", 4)?,
+        construction_us: counter("artifact construction time", 5)?,
+        preparation_us: counter("artifact preparation time", 6)?,
+        raw_load_us: counter("artifact raw load time", 7)?,
+    };
+    let dependencies = client
+        .query(
+            "SELECT relid::bigint, generation, global_generation, relfilenode::bigint, \
+                    row_count, raw_bytes, derived_bytes \
+               FROM pg_accel_resident_dependency_status() ORDER BY relid",
+            &[],
+        )?
+        .into_iter()
+        .map(|row| {
+            let value =
+                |name: &str, index| nonnegative_dispatch_counter(name, row.get::<_, i64>(index));
+            Ok(report::ResidentDependencyIdentity {
+                relid: u32::try_from(value("resident relid", 0)?)?,
+                generation: value("resident generation", 1)?,
+                global_generation: value("resident global generation", 2)?,
+                relfilenode: u32::try_from(value("resident relfilenode", 3)?)?,
+                row_count: value("resident row count", 4)?,
+                raw_bytes: value("resident raw bytes", 5)?,
+                derived_bytes: value("resident derived bytes", 6)?,
+            })
+        })
+        .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+    Ok(ArtifactLifecycleSnapshot {
+        counters,
+        dependencies,
+        artifact_policy: row.get(8),
+    })
+}
+
+fn artifact_lifecycle_delta(
+    before: report::ArtifactLifecycleDelta,
+    after: report::ArtifactLifecycleDelta,
+) -> Result<report::ArtifactLifecycleDelta, String> {
+    let delta = |name: &str, before: u64, after: u64| {
+        after
+            .checked_sub(before)
+            .ok_or_else(|| format!("artifact lifecycle {name} counter regressed"))
+    };
+    Ok(report::ArtifactLifecycleDelta {
+        hits: delta("hits", before.hits, after.hits)?,
+        builds: delta("builds", before.builds, after.builds)?,
+        rebuilds: delta("rebuilds", before.rebuilds, after.rebuilds)?,
+        artifact_bytes_observed: delta(
+            "artifact_bytes_observed",
+            before.artifact_bytes_observed,
+            after.artifact_bytes_observed,
+        )?,
+        construction_bytes: delta(
+            "construction_bytes",
+            before.construction_bytes,
+            after.construction_bytes,
+        )?,
+        construction_us: delta(
+            "construction_us",
+            before.construction_us,
+            after.construction_us,
+        )?,
+        preparation_us: delta(
+            "preparation_us",
+            before.preparation_us,
+            after.preparation_us,
+        )?,
+        raw_load_us: delta("raw_load_us", before.raw_load_us, after.raw_load_us)?,
+    })
+}
+
+fn finish_artifact_execution_evidence(
+    before: Result<ArtifactLifecycleSnapshot, String>,
+    dispatch_before: Result<DispatchStatsSnapshot, String>,
+    after: Result<ArtifactLifecycleSnapshot, String>,
+    dispatch_after: Result<DispatchStatsSnapshot, String>,
+    output_rows_consumed: u64,
+) -> ArtifactExecutionEvidence {
+    let (before, after, dispatch_before, dispatch_after) =
+        match (before, after, dispatch_before, dispatch_after) {
+            (Ok(before), Ok(after), Ok(dispatch_before), Ok(dispatch_after)) => {
+                (before, after, dispatch_before, dispatch_after)
+            }
+            values => {
+                let errors = [
+                    values.0.err(),
+                    values.1.err(),
+                    values.2.err(),
+                    values.3.err(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; ");
+                return ArtifactExecutionEvidence::unavailable(errors);
+            }
+        };
+    let artifact = match artifact_lifecycle_delta(before.counters, after.counters) {
+        Ok(delta) => delta,
+        Err(error) => return ArtifactExecutionEvidence::unavailable(error),
+    };
+    let dispatch = match dispatch_stats_delta(dispatch_before, dispatch_after) {
+        Ok(delta) => delta,
+        Err(error) => return ArtifactExecutionEvidence::unavailable(error),
+    };
+    ArtifactExecutionEvidence {
+        artifact_policy: (artifact.ensures() != 0)
+            .then_some(after.artifact_policy)
+            .flatten(),
+        artifact,
+        dependencies_before: before.dependencies,
+        dependencies_after: after.dependencies,
+        dispatch,
+        refresh_us: 0,
+        refreshed_relations: 0,
+        refreshed_rows: 0,
+        output_rows_consumed,
+        error: None,
+    }
+}
+
+fn resident_lifecycle_capture(
+    phase: &str,
+    pair_index: Option<usize>,
+    iteration: IterationResult,
+    evidence: ArtifactExecutionEvidence,
+) -> report::ResidentLifecycleCapture {
+    report::ResidentLifecycleCapture {
+        phase: phase.to_owned(),
+        pair_index,
+        iteration,
+        artifact: evidence.artifact,
+        artifact_policy: evidence.artifact_policy,
+        refresh_us: evidence.refresh_us,
+        refreshed_relations: evidence.refreshed_relations,
+        refreshed_rows: evidence.refreshed_rows,
+        dependencies_before: evidence.dependencies_before,
+        dependencies_after: evidence.dependencies_after,
+        queries_accelerated: evidence.dispatch.queries_accelerated,
+        rows_dispatched: evidence.dispatch.rows_dispatched,
+        batches_executed: evidence.dispatch.batches_executed,
+        stock_exec_count: evidence.dispatch.stock_exec_count,
+        gpu_rows_processed: evidence.dispatch.gpu_rows_processed,
+        gpu_kernel_executions: evidence.dispatch.gpu_kernel_executions,
+        output_rows_consumed: evidence.output_rows_consumed,
+        error: evidence.error,
+    }
 }
 
 fn prime_pg_accel_backend(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
@@ -1898,24 +2334,123 @@ fn prime_workload_accel_backend(
 fn refresh_workload_resident_inputs(
     client: &mut Client,
     workload: &dyn Workload,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(u64, u64), Box<dyn std::error::Error>> {
+    let mut refreshed_relations = 0_u64;
+    let mut total_refreshed_rows = 0_u64;
     for pin in resident_pin_specs(workload.name()) {
-        let refreshed_rows: i64 = client
+        let relation_rows: i64 = client
             .query_one(
                 "SELECT pg_accel_refresh($1::text::regclass)::bigint",
                 &[&pin.table],
             )?
             .get(0);
-        if refreshed_rows <= 0 {
+        if relation_rows <= 0 {
             return Err(format!(
-                "pg_accel_refresh loaded {refreshed_rows} rows from {} before measured dispatch for {}",
+                "pg_accel_refresh loaded {relation_rows} rows from {} before measured dispatch for {}",
                 pin.table,
                 workload.name(),
             )
             .into());
         }
+        refreshed_relations = refreshed_relations.saturating_add(1);
+        total_refreshed_rows = total_refreshed_rows.saturating_add(u64::try_from(relation_rows)?);
     }
-    Ok(())
+    Ok((refreshed_relations, total_refreshed_rows))
+}
+
+fn run_artifact_lifecycle_probe(
+    mode_clients: &mut [Client; 2],
+    workload: &dyn Workload,
+    query: &str,
+    baseline_query: &str,
+    pre_query: &[String],
+    timing_mode: TimingMode,
+    options: LifecyclePairOptions,
+) -> Result<report::ResidentLifecycleCapture, Box<dyn std::error::Error>> {
+    let LifecyclePairOptions {
+        accel_first,
+        native_parity_pairing,
+    } = options;
+    let order = if accel_first {
+        [0_usize, 1]
+    } else {
+        [1_usize, 0]
+    };
+    let mut timings = [MeasurementOutcome {
+        elapsed_ms: 0.0,
+        output_rows: 0,
+    }; 2];
+    let mut lifecycle_evidence = None;
+    for idx in order {
+        let client_idx = if native_parity_pairing { 0 } else { idx };
+        mode_clients[client_idx].batch_execute("DISCARD ALL")?;
+        apply_benchmark_safety_settings(&mut mode_clients[client_idx])?;
+        if idx == 0 {
+            prime_workload_accel_backend(&mut mode_clients[client_idx], workload)?;
+            let before = capture_artifact_lifecycle_snapshot(&mut mode_clients[client_idx])
+                .map_err(|error| error.to_string());
+            let dispatch_before = capture_dispatch_stats(&mut mode_clients[client_idx])
+                .map_err(|error| error.to_string());
+            let lifecycle_started = Instant::now();
+            let refresh_started = Instant::now();
+            let (refreshed_relations, refreshed_rows) =
+                refresh_workload_resident_inputs(&mut mode_clients[client_idx], workload)?;
+            let refresh_elapsed = refresh_started.elapsed();
+            let outcome = run_with_mode(
+                &mut mode_clients[client_idx],
+                query,
+                BenchMode::Accel,
+                pre_query,
+                timing_mode,
+                false,
+            )?;
+            let lifecycle_elapsed = lifecycle_started.elapsed();
+            timings[idx] = MeasurementOutcome {
+                elapsed_ms: lifecycle_elapsed.as_secs_f64() * 1_000.0,
+                output_rows: outcome.measurement.output_rows,
+            };
+            let after = capture_artifact_lifecycle_snapshot(&mut mode_clients[client_idx])
+                .map_err(|error| error.to_string());
+            let dispatch_after = capture_dispatch_stats(&mut mode_clients[client_idx])
+                .map_err(|error| error.to_string());
+            let mut evidence = finish_artifact_execution_evidence(
+                before,
+                dispatch_before,
+                after,
+                dispatch_after,
+                outcome.measurement.output_rows,
+            );
+            evidence.refresh_us = u64::try_from(refresh_elapsed.as_micros()).unwrap_or(u64::MAX);
+            evidence.refreshed_relations = refreshed_relations;
+            evidence.refreshed_rows = refreshed_rows;
+            lifecycle_evidence = Some(evidence);
+        } else {
+            timings[idx] = run_with_mode(
+                &mut mode_clients[client_idx],
+                baseline_query,
+                BenchMode::PgParallel,
+                pre_query,
+                timing_mode,
+                false,
+            )?
+            .measurement;
+        }
+    }
+    let iteration = IterationResult {
+        accel_ms: timings[0].elapsed_ms,
+        parallel_ms: timings[1].elapsed_ms,
+        accel_first,
+        cache_purge: CachePurgeState::NotRequested,
+        cache_state: CacheState::Warm,
+    };
+    Ok(resident_lifecycle_capture(
+        "lifecycle",
+        None,
+        iteration,
+        lifecycle_evidence.unwrap_or_else(|| {
+            ArtifactExecutionEvidence::unavailable("accelerated lifecycle arm did not run")
+        }),
+    ))
 }
 
 /// Whether a workload requires a GPU-resident cache preload (any of the
@@ -1992,6 +2527,28 @@ fn dispatch_stats_delta(
             before.gpu_kernel_executions,
             after.gpu_kernel_executions,
         )?,
+        physical_kernel_modes: report::PhysicalKernelModeCounts {
+            parallel_hash: delta(
+                "parallel_hash",
+                before.physical_kernel_modes.parallel_hash,
+                after.physical_kernel_modes.parallel_hash,
+            )?,
+            parallel_dense_count: delta(
+                "parallel_dense_count",
+                before.physical_kernel_modes.parallel_dense_count,
+                after.physical_kernel_modes.parallel_dense_count,
+            )?,
+            parallel_dense_integer: delta(
+                "parallel_dense_integer",
+                before.physical_kernel_modes.parallel_dense_integer,
+                after.physical_kernel_modes.parallel_dense_integer,
+            )?,
+            serial_generic: delta(
+                "serial_generic",
+                before.physical_kernel_modes.serial_generic,
+                after.physical_kernel_modes.serial_generic,
+            )?,
+        },
     })
 }
 
@@ -2034,6 +2591,26 @@ fn accumulate_dispatch_stats(
         total.gpu_kernel_executions,
         delta.gpu_kernel_executions,
     )?;
+    total.physical_kernel_modes.parallel_hash = add(
+        "parallel_hash",
+        total.physical_kernel_modes.parallel_hash,
+        delta.physical_kernel_modes.parallel_hash,
+    )?;
+    total.physical_kernel_modes.parallel_dense_count = add(
+        "parallel_dense_count",
+        total.physical_kernel_modes.parallel_dense_count,
+        delta.physical_kernel_modes.parallel_dense_count,
+    )?;
+    total.physical_kernel_modes.parallel_dense_integer = add(
+        "parallel_dense_integer",
+        total.physical_kernel_modes.parallel_dense_integer,
+        delta.physical_kernel_modes.parallel_dense_integer,
+    )?;
+    total.physical_kernel_modes.serial_generic = add(
+        "serial_generic",
+        total.physical_kernel_modes.serial_generic,
+        delta.physical_kernel_modes.serial_generic,
+    )?;
     Ok(())
 }
 
@@ -2045,6 +2622,12 @@ fn merge_dispatch_counter_capture(target: &mut WorkloadResult, capture: Dispatch
     target.pg_accel_batches_executed_delta = capture.delta.batches_executed;
     target.pg_accel_gpu_rows_processed_delta = capture.delta.gpu_rows_processed;
     target.pg_accel_stock_exec_delta = capture.delta.stock_exec_count;
+    target.physical_kernel_mode_counts = capture.delta.physical_kernel_modes;
+    target.physical_kernel_mode = capture
+        .delta
+        .physical_kernel_modes
+        .unique_mode()
+        .map(str::to_owned);
     target.dispatch_counter_error = capture.error;
 }
 
@@ -2088,6 +2671,24 @@ fn merge_cache_mode_dispatch_counter_fields(
             warm.accel_output_rows_consumed,
         ),
     );
+    let merged_modes = (
+        add(
+            cold.physical_kernel_mode_counts.parallel_hash,
+            warm.physical_kernel_mode_counts.parallel_hash,
+        ),
+        add(
+            cold.physical_kernel_mode_counts.parallel_dense_count,
+            warm.physical_kernel_mode_counts.parallel_dense_count,
+        ),
+        add(
+            cold.physical_kernel_mode_counts.parallel_dense_integer,
+            warm.physical_kernel_mode_counts.parallel_dense_integer,
+        ),
+        add(
+            cold.physical_kernel_mode_counts.serial_generic,
+            warm.physical_kernel_mode_counts.serial_generic,
+        ),
+    );
     if let (
         Some(queries),
         Some(kernels),
@@ -2105,6 +2706,20 @@ fn merge_cache_mode_dispatch_counter_fields(
         target.pg_accel_gpu_rows_processed_delta = gpu_rows;
         target.pg_accel_stock_exec_delta = stock;
         target.accel_output_rows_consumed = output;
+    } else {
+        target.dispatch_counter_captured = false;
+    }
+    if let (Some(hash), Some(count), Some(integer), Some(serial)) = merged_modes {
+        target.physical_kernel_mode_counts = report::PhysicalKernelModeCounts {
+            parallel_hash: hash,
+            parallel_dense_count: count,
+            parallel_dense_integer: integer,
+            serial_generic: serial,
+        };
+        target.physical_kernel_mode = target
+            .physical_kernel_mode_counts
+            .unique_mode()
+            .map(str::to_owned);
     } else {
         target.dispatch_counter_captured = false;
     }
@@ -2129,6 +2744,10 @@ fn merge_cache_mode_dispatch_counter_fields(
         || merged.4.is_none()
         || merged.5.is_none()
         || merged.6.is_none()
+        || merged_modes.0.is_none()
+        || merged_modes.1.is_none()
+        || merged_modes.2.is_none()
+        || merged_modes.3.is_none()
     {
         errors.push(
             "dispatch counters overflowed while merging cold and warm cache modes".to_owned(),
@@ -2175,10 +2794,10 @@ fn run_with_mode(
     }
     let stage_statement = if capture_planner_stages {
         match client.batch_execute("SET pg_accel.planner_profiling = on") {
-            Ok(()) => match prepare_planner_stage_statement(client) {
+            Ok(()) => match prepare_planner_profile_statement(client) {
                 Ok(statement) => Some(Ok(statement)),
                 Err(error) => Some(Err(format!(
-                    "could not prepare pg_accel planner-stage capture: {error}"
+                    "could not prepare pg_accel planner-profile capture: {error}"
                 ))),
             },
             Err(error) => Some(Err(format!(
@@ -2189,10 +2808,10 @@ fn run_with_mode(
         None
     };
     let stage_before = match stage_statement.as_ref() {
-        Some(Ok(statement)) => match capture_planner_stage_stats(client, statement) {
+        Some(Ok(statement)) => match capture_planner_profile_stats(client, statement) {
             Ok(snapshot) => Some(Ok(snapshot)),
             Err(error) => Some(Err(format!(
-                "could not capture pg_accel planner stages before query: {error}"
+                "could not capture pg_accel planner profile before query: {error}"
             ))),
         },
         Some(Err(error)) => Some(Err(error.clone())),
@@ -2224,44 +2843,54 @@ fn run_with_mode(
 
     let planner_stages = match (stage_statement.as_ref(), stage_before) {
         (Some(Ok(statement)), Some(Ok(before))) => {
-            Some(match capture_planner_stage_stats(client, statement) {
-                Ok(after) => match planner_stage_stats_delta(&before, &after) {
-                    Ok(stages) => match capture_planner_stage_stats(client, statement) {
-                        Ok(probe) => match planner_stage_stats_delta(&after, &probe) {
-                            Ok(observer_probe) => {
-                                let contaminated = observer_probe.iter().any(|stage| {
-                                    stage.calls != 0
-                                        || stage.elapsed_us != 0
-                                        || stage.fast_declines != 0
-                                });
-                                PlannerStageMeasurement {
+            Some(match capture_planner_profile_stats(client, statement) {
+                Ok(after) => match planner_profile_stats_delta(&before, &after) {
+                    Ok((stages, substages)) => {
+                        match capture_planner_profile_stats(client, statement) {
+                            Ok(probe) => match planner_profile_stats_delta(&after, &probe) {
+                                Ok((observer_probe, substage_observer_probe)) => {
+                                    let contaminated = observer_probe.iter().any(|stage| {
+                                        stage.calls != 0
+                                            || stage.elapsed_us != 0
+                                            || stage.fast_declines != 0
+                                    }) || substage_observer_probe
+                                        .iter()
+                                        .any(|stage| stage.calls != 0 || stage.elapsed_us != 0);
+                                    PlannerStageMeasurement {
                                     stages,
                                     observer_probe,
+                                    substages,
+                                    substage_observer_probe,
                                     error: contaminated.then(|| {
-                                        "prepared planner-stage observer changed planner counters; \
+                                        "prepared planner-profile observer changed planner counters; \
                                          target attribution is invalid"
                                             .to_owned()
                                     }),
                                 }
-                            }
+                                }
+                                Err(error) => PlannerStageMeasurement {
+                                    stages,
+                                    observer_probe: Vec::new(),
+                                    substages,
+                                    substage_observer_probe: Vec::new(),
+                                    error: Some(error),
+                                },
+                            },
                             Err(error) => PlannerStageMeasurement {
                                 stages,
                                 observer_probe: Vec::new(),
-                                error: Some(error),
+                                substages,
+                                substage_observer_probe: Vec::new(),
+                                error: Some(format!(
+                                    "could not verify prepared planner-profile observer: {error}"
+                                )),
                             },
-                        },
-                        Err(error) => PlannerStageMeasurement {
-                            stages,
-                            observer_probe: Vec::new(),
-                            error: Some(format!(
-                                "could not verify prepared planner-stage observer: {error}"
-                            )),
-                        },
-                    },
+                        }
+                    }
                     Err(error) => PlannerStageMeasurement::unavailable(error),
                 },
                 Err(error) => PlannerStageMeasurement::unavailable(format!(
-                    "could not capture pg_accel planner stages after query: {error}"
+                    "could not capture pg_accel planner profile after query: {error}"
                 )),
             })
         }
@@ -2275,51 +2904,87 @@ fn run_with_mode(
     })
 }
 
-fn prepare_planner_stage_statement(
+fn prepare_planner_profile_statement(
     client: &mut Client,
 ) -> Result<Statement, Box<dyn std::error::Error>> {
     Ok(client.prepare(
-        "SELECT stage, calls, elapsed_us, fast_declines \
-           FROM pg_accel_planner_stage_stats() ORDER BY stage",
+        "SELECT kind, name, calls, elapsed_us, fast_declines FROM (\
+             SELECT 'stage'::text AS kind, stage AS name, calls, elapsed_us, fast_declines \
+               FROM pg_accel_planner_stage_stats() \
+             UNION ALL \
+             SELECT 'substage'::text AS kind, substage AS name, calls, elapsed_us, 0::bigint \
+               FROM pg_accel_planner_substage_stats()\
+         ) AS planner_profile ORDER BY kind, name",
     )?)
 }
 
-fn capture_planner_stage_stats(
+fn capture_planner_profile_stats(
     client: &mut Client,
     statement: &Statement,
-) -> Result<BTreeMap<String, PlannerStageStatsSnapshot>, Box<dyn std::error::Error>> {
-    let mut stages = BTreeMap::new();
+) -> Result<PlannerProfileSnapshot, Box<dyn std::error::Error>> {
+    let mut snapshot = PlannerProfileSnapshot::default();
     for row in client.query(statement, &[])? {
-        let stage = row.get::<_, String>(0);
-        if !PLANNER_STAGE_NAMES.contains(&stage.as_str()) {
-            return Err(format!("unknown planner stage `{stage}`").into());
-        }
-        let calls = nonnegative_planner_counter(&stage, "calls", row.get(1))?;
-        let elapsed_us = nonnegative_planner_counter(&stage, "elapsed_us", row.get(2))?;
-        let fast_declines = nonnegative_planner_counter(&stage, "fast_declines", row.get(3))?;
-        if stages
-            .insert(
-                stage.clone(),
-                PlannerStageStatsSnapshot {
-                    calls,
-                    elapsed_us,
-                    fast_declines,
-                },
-            )
-            .is_some()
-        {
-            return Err(format!("duplicate planner stage `{stage}`").into());
+        let kind = row.get::<_, String>(0);
+        let name = row.get::<_, String>(1);
+        let calls = nonnegative_planner_counter(&name, "calls", row.get(2))?;
+        let elapsed_us = nonnegative_planner_counter(&name, "elapsed_us", row.get(3))?;
+        match kind.as_str() {
+            "stage" => {
+                if !PLANNER_STAGE_NAMES.contains(&name.as_str()) {
+                    return Err(format!("unknown planner stage `{name}`").into());
+                }
+                let fast_declines =
+                    nonnegative_planner_counter(&name, "fast_declines", row.get(4))?;
+                if snapshot
+                    .stages
+                    .insert(
+                        name.clone(),
+                        PlannerStageStatsSnapshot {
+                            calls,
+                            elapsed_us,
+                            fast_declines,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(format!("duplicate planner stage `{name}`").into());
+                }
+            }
+            "substage" => {
+                if !PLANNER_SUBSTAGE_NAMES.contains(&name.as_str()) {
+                    return Err(format!("unknown planner substage `{name}`").into());
+                }
+                if snapshot
+                    .substages
+                    .insert(
+                        name.clone(),
+                        PlannerSubstageStatsSnapshot { calls, elapsed_us },
+                    )
+                    .is_some()
+                {
+                    return Err(format!("duplicate planner substage `{name}`").into());
+                }
+            }
+            _ => return Err(format!("unknown planner profile kind `{kind}`").into()),
         }
     }
-    if stages.len() != PLANNER_STAGE_NAMES.len() {
+    if snapshot.stages.len() != PLANNER_STAGE_NAMES.len() {
         let missing = PLANNER_STAGE_NAMES
             .iter()
-            .filter(|stage| !stages.contains_key(**stage))
+            .filter(|stage| !snapshot.stages.contains_key(**stage))
             .copied()
             .collect::<Vec<_>>();
         return Err(format!("planner-stage snapshot missing: {}", missing.join(", ")).into());
     }
-    Ok(stages)
+    if snapshot.substages.len() != PLANNER_SUBSTAGE_NAMES.len() {
+        let missing = PLANNER_SUBSTAGE_NAMES
+            .iter()
+            .filter(|stage| !snapshot.substages.contains_key(**stage))
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(format!("planner-substage snapshot missing: {}", missing.join(", ")).into());
+    }
+    Ok(snapshot)
 }
 
 fn nonnegative_planner_counter(
@@ -2367,6 +3032,51 @@ fn planner_stage_stats_delta(
             })
         })
         .collect()
+}
+
+fn planner_substage_stats_delta(
+    before: &BTreeMap<String, PlannerSubstageStatsSnapshot>,
+    after: &BTreeMap<String, PlannerSubstageStatsSnapshot>,
+) -> Result<Vec<report::PlannerSubstageDelta>, String> {
+    if before.keys().ne(after.keys()) {
+        return Err("planner-substage snapshot key sets differ".to_owned());
+    }
+    after
+        .iter()
+        .map(|(substage, after)| {
+            let before = before.get(substage).copied().ok_or_else(|| {
+                format!("planner substage `{substage}` missing from before snapshot")
+            })?;
+            Ok(report::PlannerSubstageDelta {
+                substage: substage.clone(),
+                calls: after.calls.checked_sub(before.calls).ok_or_else(|| {
+                    format!("planner substage `{substage}` calls counter regressed")
+                })?,
+                elapsed_us: after
+                    .elapsed_us
+                    .checked_sub(before.elapsed_us)
+                    .ok_or_else(|| {
+                        format!("planner substage `{substage}` elapsed_us counter regressed")
+                    })?,
+            })
+        })
+        .collect()
+}
+
+fn planner_profile_stats_delta(
+    before: &PlannerProfileSnapshot,
+    after: &PlannerProfileSnapshot,
+) -> Result<
+    (
+        Vec<report::PlannerStageDelta>,
+        Vec<report::PlannerSubstageDelta>,
+    ),
+    String,
+> {
+    Ok((
+        planner_stage_stats_delta(&before.stages, &after.stages)?,
+        planner_substage_stats_delta(&before.substages, &after.substages)?,
+    ))
 }
 
 /// Measure query wall time client-side with `Instant::now()` around a plain
@@ -2523,6 +3233,7 @@ pub fn run_all_with_config(
         config.timing_mode,
         config.cache_mode,
     );
+    apply_config_methodology(&mut report, config);
     if let Some(artifact_writer) = artifacts.as_ref() {
         finalize_report_artifacts(artifact_writer, &mut report, "run-complete")?;
     }
@@ -2612,6 +3323,7 @@ pub fn run_cells_with_config(
         config.timing_mode,
         config.cache_mode,
     );
+    apply_config_methodology(&mut report, config);
     if let Some(artifact_writer) = artifacts.as_ref() {
         finalize_report_artifacts(artifact_writer, &mut report, "resume-complete")?;
     }
@@ -2667,10 +3379,24 @@ pub fn run_one_report_with_config(
         config.timing_mode,
         config.cache_mode,
     );
+    apply_config_methodology(&mut report, config);
     if let Some(artifact_writer) = artifacts.as_ref() {
         finalize_report_artifacts(artifact_writer, &mut report, "run-complete")?;
     }
     Ok(report)
+}
+
+fn apply_config_methodology(report: &mut report::BenchReport, config: &BenchConfig) {
+    report.headline_speedup_allowed = config.headline_speedup_allowed;
+    report.methodology.native_parity_pairing = config.native_parity_pairing;
+    report.methodology.native_parity_repetitions_per_arm =
+        if config.native_parity_pairing { 2 } else { 1 };
+    let ordering = if config.native_parity_pairing {
+        "balanced randomized mirrored ABBA/BAAB crossover blocks on one PostgreSQL backend (`DISCARD ALL` before each raw execution)"
+    } else {
+        "balanced randomized AB/BA crossover on distinct persistent PostgreSQL backends (`DISCARD ALL` before each arm)"
+    };
+    ordering.clone_into(&mut report.methodology.ordering);
 }
 
 fn finalize_report_artifacts(
@@ -3099,6 +3825,11 @@ fn append_crash_config(text: &mut String, config: &BenchConfig) {
         "capture_planner_stages: {}",
         config.capture_planner_stages
     );
+    let _ = writeln!(
+        text,
+        "native_parity_pairing: {}",
+        config.native_parity_pairing
+    );
     if let Some(path) = &config.plans_capture_path {
         let _ = writeln!(text, "plans_capture_path: {}", path.display());
     }
@@ -3291,6 +4022,9 @@ fn repro_command(connection: &str, workload: &str, rows: usize, config: &BenchCo
     if config.capture_planner_stages {
         parts.push("--capture-planner-stages".to_owned());
     }
+    if config.native_parity_pairing {
+        parts.push("--native-parity-pairing".to_owned());
+    }
     if config.skip_guc_verify {
         parts.push("--skip-guc-verify".to_owned());
     }
@@ -3455,6 +4189,13 @@ fn run_workload_with_config(
         .as_ref()
         .map(|capture| capture.text.as_str())
         .is_some_and(plan_contains_custom_scan);
+    if config.native_parity_pairing && plan_selected {
+        return Err(format!(
+            "--native-parity-pairing is restricted to planner-native cells, but {} @ {rows} selected a pg_accel Custom Scan",
+            workload.name()
+        )
+        .into());
+    }
     let plan_text_dispatched = accel_plan
         .as_ref()
         .map(|capture| capture.text.as_str())
@@ -3487,7 +4228,10 @@ fn run_workload_with_config(
         config.warmup,
         config.timing_mode,
         config.cache_mode,
-        capture_planner_stages,
+        RunExecutionOptions {
+            capture_planner_stages,
+            native_parity_pairing: config.native_parity_pairing,
+        },
     )?;
     result.rows = rows;
     result.plan_selected = plan_selected;
@@ -3532,6 +4276,15 @@ fn run_workload_with_config(
             .as_ref()
             .and_then(|capture| capture.planner_rejection_reason.as_deref()),
     );
+    let explain_kernel_mode = accel_plan
+        .as_ref()
+        .and_then(|capture| plan_physical_kernel_mode(&capture.text));
+    result.physical_kernel_mode_verified = result
+        .physical_kernel_mode
+        .as_deref()
+        .zip(explain_kernel_mode)
+        .is_some_and(|(observed, planned)| observed == planned)
+        && result.physical_kernel_mode_counts.serial_generic == 0;
     result.plan_snippet = accel_plan.map(|capture| capture.text);
     result.baseline_plan_snippet = baseline_plan.map(|capture| capture.text);
     result.correctness_diff_artifact = correctness_diff_artifact;
@@ -4254,6 +5007,7 @@ fn capture_and_write_pre_risk_context(
         skip_guc_verify: config.skip_guc_verify,
         capture_plans: config.plans_capture_path.is_some(),
         capture_planner_stages: config.capture_planner_stages,
+        native_parity_pairing: config.native_parity_pairing,
         backend_pid,
         backend_pid_error: backend_pid_error.as_deref(),
         setup_sql: &setup_sql,
@@ -4288,6 +5042,14 @@ fn capture_and_write_pre_risk_context(
 struct CapturedPlanSnippet {
     text: String,
     planner_rejection_reason: Option<String>,
+}
+
+fn plan_physical_kernel_mode(plan: &str) -> Option<&str> {
+    plan.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("GPU Physical Kernel Mode: ")
+            .map(str::trim)
+    })
 }
 
 fn capture_plan_snippet(
@@ -4868,6 +5630,21 @@ mod tests {
             .collect()
     }
 
+    fn planner_substage_snapshot(
+        calls: u64,
+        elapsed_us: u64,
+    ) -> BTreeMap<String, PlannerSubstageStatsSnapshot> {
+        PLANNER_SUBSTAGE_NAMES
+            .iter()
+            .map(|substage| {
+                (
+                    (*substage).to_owned(),
+                    PlannerSubstageStatsSnapshot { calls, elapsed_us },
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn planner_stage_delta_is_exact_and_rejects_counter_regression() {
         let before = planner_stage_snapshot(10, 100, 5);
@@ -4903,6 +5680,71 @@ mod tests {
             planner_stage_stats_delta(&before, &after)
                 .expect_err("mismatched stages must invalidate capture")
                 .contains("key sets differ")
+        );
+    }
+
+    #[test]
+    fn planner_substage_delta_is_exact_and_rejects_counter_regression() {
+        let before = planner_substage_snapshot(4, 40);
+        let after = planner_substage_snapshot(7, 58);
+        let delta = planner_substage_stats_delta(&before, &after).expect("valid substage delta");
+        assert_eq!(delta.len(), PLANNER_SUBSTAGE_NAMES.len());
+        assert!(
+            delta
+                .iter()
+                .all(|substage| substage.calls == 3 && substage.elapsed_us == 18)
+        );
+
+        let regressed = planner_substage_snapshot(3, 58);
+        assert!(
+            planner_substage_stats_delta(&before, &regressed)
+                .expect_err("regressed calls must invalidate substage capture")
+                .contains("calls counter regressed")
+        );
+    }
+
+    #[test]
+    fn artifact_lifecycle_delta_is_exact_and_rejects_counter_regression() {
+        let before = report::ArtifactLifecycleDelta {
+            hits: 10,
+            builds: 2,
+            rebuilds: 3,
+            artifact_bytes_observed: 100,
+            construction_bytes: 80,
+            construction_us: 70,
+            preparation_us: 60,
+            raw_load_us: 50,
+        };
+        let after = report::ArtifactLifecycleDelta {
+            hits: 14,
+            builds: 3,
+            rebuilds: 5,
+            artifact_bytes_observed: 140,
+            construction_bytes: 110,
+            construction_us: 90,
+            preparation_us: 75,
+            raw_load_us: 55,
+        };
+        assert_eq!(
+            artifact_lifecycle_delta(before, after).expect("valid lifecycle delta"),
+            report::ArtifactLifecycleDelta {
+                hits: 4,
+                builds: 1,
+                rebuilds: 2,
+                artifact_bytes_observed: 40,
+                construction_bytes: 30,
+                construction_us: 20,
+                preparation_us: 15,
+                raw_load_us: 5,
+            }
+        );
+
+        let mut regressed = after;
+        regressed.rebuilds = 2;
+        assert!(
+            artifact_lifecycle_delta(before, regressed)
+                .expect_err("regressed lifecycle counter must invalidate evidence")
+                .contains("rebuilds counter regressed")
         );
     }
 
@@ -4984,8 +5826,11 @@ mod tests {
                 timing_mode: "raw".to_owned(),
                 cache_mode: "warm".to_owned(),
                 harness_profile: "test".to_owned(),
+                native_parity_pairing: false,
+                native_parity_repetitions_per_arm: 1,
             },
             workloads: vec![workload],
+            headline_speedup_allowed: true,
             artifact_dir: None,
             crashes: Vec::new(),
             postmaster_start_time: None,
@@ -5419,6 +6264,8 @@ mod tests {
             timing_mode: TimingMode::Both,
             cache_mode: CacheMode::Cold,
             capture_planner_stages: true,
+            native_parity_pairing: true,
+            headline_speedup_allowed: true,
             plans_capture_path: Some(PathBuf::from("benchmarks/artifacts/repro/plans.txt")),
             guc_profile: Some(GucProfile::realistic()),
             skip_guc_verify: true,
@@ -5442,6 +6289,7 @@ mod tests {
         assert!(command.contains("--realistic-gucs"));
         assert!(command.contains("--capture-plans"));
         assert!(command.contains("--capture-planner-stages"));
+        assert!(command.contains("--native-parity-pairing"));
         assert!(command.contains("--skip-guc-verify"));
         assert!(command.contains("--artifacts-dir benchmarks/artifacts/repro"));
         assert!(command.contains("--connection 'host=localhost port=28818 dbname=pg accel'"));
@@ -6516,6 +7364,10 @@ mod tests {
                 stock_exec_count: 30,
                 gpu_rows_processed: 40,
                 gpu_kernel_executions: 50,
+                physical_kernel_modes: report::PhysicalKernelModeCounts {
+                    parallel_dense_count: 3,
+                    ..report::PhysicalKernelModeCounts::default()
+                },
             },
             DispatchStatsSnapshot {
                 backend_pid: 42,
@@ -6525,6 +7377,10 @@ mod tests {
                 stock_exec_count: 32,
                 gpu_rows_processed: 44,
                 gpu_kernel_executions: 55,
+                physical_kernel_modes: report::PhysicalKernelModeCounts {
+                    parallel_dense_count: 4,
+                    ..report::PhysicalKernelModeCounts::default()
+                },
             },
         )
         .expect("monotonic counters produce a delta");
@@ -6538,6 +7394,10 @@ mod tests {
                 stock_exec_count: 0,
                 gpu_rows_processed: 7,
                 gpu_kernel_executions: 1,
+                physical_kernel_modes: report::PhysicalKernelModeCounts {
+                    parallel_dense_count: 1,
+                    ..report::PhysicalKernelModeCounts::default()
+                },
             },
         )
         .expect("a reset between iterations is coherent when sampled per iteration");
@@ -6552,6 +7412,7 @@ mod tests {
         assert_eq!(delta.stock_exec_count, 2);
         assert_eq!(delta.gpu_rows_processed, 11);
         assert_eq!(delta.gpu_kernel_executions, 6);
+        assert_eq!(delta.physical_kernel_modes.parallel_dense_count, 2);
 
         let regression = dispatch_stats_delta(
             DispatchStatsSnapshot {
@@ -6651,6 +7512,19 @@ mod tests {
     }
 
     #[test]
+    fn physical_kernel_mode_parser_reads_only_the_exact_explain_property() {
+        let plan = "Custom Scan (GpuAccelAgg)\n  GPU Physical Kernel Mode: parallel_dense_integer\n  GPU Descriptor Strategy: descriptor_grouped_aggregate";
+        assert_eq!(
+            plan_physical_kernel_mode(plan),
+            Some("parallel_dense_integer")
+        );
+        assert_eq!(
+            plan_physical_kernel_mode("GPU Dispatched Physical Kernel Mode: parallel_hash"),
+            None
+        );
+    }
+
+    #[test]
     fn workload_table_parser_handles_plain_and_if_not_exists_forms() {
         assert_eq!(
             workload_tables(&RunnerWorkload, 123),
@@ -6681,6 +7555,8 @@ mod tests {
             timing_mode: TimingMode::Both,
             cache_mode: CacheMode::Cold,
             capture_planner_stages: false,
+            native_parity_pairing: false,
+            headline_speedup_allowed: true,
             plans_capture_path: Some(dir.path().join("plans/all.txt")),
             guc_profile: Some(GucProfile::toy()),
             skip_guc_verify: true,

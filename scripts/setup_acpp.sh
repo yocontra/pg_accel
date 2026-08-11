@@ -11,6 +11,8 @@ ACPP_SRC="${ACPP_SRC:-$PG_ACCEL_TOOL_ROOT/src/AdaptiveCpp}"
 SOFT_FP64_SRC="${SOFT_FP64_SRC:-$PG_ACCEL_TOOL_ROOT/src/soft-fp64}"
 ACPP_BACKEND="${ACPP_BACKEND:-auto}"
 ACPP_AUTO_CMAKE_ARGS=()
+ACPP_REQUIRED_CMAKE_ARGS=()
+ACPP_MACOS_SDK_PATH="${ACPP_MACOS_SDK_PATH:-}"
 
 detect_backend() {
     if [ "$ACPP_BACKEND" != "auto" ]; then
@@ -115,13 +117,37 @@ configure_macos_metal_defaults() {
     select_macos_llvm
     select_macos_lld
 
+    if printf '%s\n' "${ACPP_CMAKE_FLAGS:-}" | grep -q 'CMAKE_OSX_SYSROOT' &&
+        [ -z "${CMAKE_OSX_SYSROOT:-}" ] &&
+        [ -z "$ACPP_MACOS_SDK_PATH" ]; then
+        echo "error: set CMAKE_OSX_SYSROOT or ACPP_MACOS_SDK_PATH instead of passing only -DCMAKE_OSX_SYSROOT through ACPP_CMAKE_FLAGS" >&2
+        exit 1
+    fi
+
+    if [ -z "$ACPP_MACOS_SDK_PATH" ]; then
+        if [ -n "${CMAKE_OSX_SYSROOT:-}" ]; then
+            case "$CMAKE_OSX_SYSROOT" in
+                /*) ACPP_MACOS_SDK_PATH="$CMAKE_OSX_SYSROOT" ;;
+                *) ACPP_MACOS_SDK_PATH="$(xcrun --sdk "$CMAKE_OSX_SYSROOT" --show-sdk-path)" ;;
+            esac
+        else
+            ACPP_MACOS_SDK_PATH="$(xcrun --show-sdk-path)"
+        fi
+    fi
+    if [ ! -d "$ACPP_MACOS_SDK_PATH/usr/include/c++/v1" ]; then
+        echo "error: macOS SDK libc++ headers are missing: $ACPP_MACOS_SDK_PATH/usr/include/c++/v1" >&2
+        exit 1
+    fi
+
     if [ -z "${CMAKE_OSX_SYSROOT:-}" ] &&
         ! printf '%s\n' "${ACPP_CMAKE_FLAGS:-}" | grep -q 'CMAKE_OSX_SYSROOT'; then
-        local sdk_path
-        sdk_path="$(xcrun --show-sdk-path)"
-        ACPP_AUTO_CMAKE_ARGS+=("-DCMAKE_OSX_SYSROOT=$sdk_path")
-        echo "Using CMAKE_OSX_SYSROOT=$sdk_path"
+        ACPP_AUTO_CMAKE_ARGS+=("-DCMAKE_OSX_SYSROOT=$ACPP_MACOS_SDK_PATH")
     fi
+    ACPP_REQUIRED_CMAKE_ARGS+=(
+        "-DCMAKE_CXX_FLAGS=-nostdinc++ -isystem $ACPP_MACOS_SDK_PATH/usr/include/c++/v1"
+    )
+    echo "Using CMAKE_OSX_SYSROOT=$ACPP_MACOS_SDK_PATH"
+    echo "Using matching SDK libc++ headers from $ACPP_MACOS_SDK_PATH/usr/include/c++/v1"
 }
 
 if [ "$backend" = "metal" ]; then
@@ -339,7 +365,8 @@ case "$backend" in
         ;;
 esac
 
-cmake -S "$ACPP_SRC" -B "$ACPP_BUILD_DIR" "${common_args[@]}" ${ACPP_CMAKE_FLAGS:-}
+cmake -S "$ACPP_SRC" -B "$ACPP_BUILD_DIR" \
+    "${common_args[@]}" ${ACPP_CMAKE_FLAGS:-} "${ACPP_REQUIRED_CMAKE_ARGS[@]}"
 cmake --build "$ACPP_BUILD_DIR" --target install --parallel "${ACPP_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
 provenance_file="$ACPP_PREFIX/pg_accel-acpp-provenance.txt"
@@ -355,12 +382,14 @@ provenance_file="$ACPP_PREFIX/pg_accel-acpp-provenance.txt"
     echo "soft_fp64_src=$SOFT_FP64_SRC"
     echo "llvm_prefix=${LLVM_PREFIX:-}"
     echo "acpp_lld_path=${ACPP_LLD_PATH:-}"
+    echo "macos_sdk_path=${ACPP_MACOS_SDK_PATH:-}"
     echo "metal_include_dir=${METAL_INCLUDE_DIR:-$PG_ACCEL_TOOL_ROOT/metal-cpp}"
     echo "cmake_build_dir=$ACPP_BUILD_DIR"
     echo "cmake_install_prefix=$ACPP_PREFIX"
     printf 'cmake_args='
     printf '%s ' "${common_args[@]}"
-    printf '%s\n' "${ACPP_CMAKE_FLAGS:-}"
+    printf '%s ' ${ACPP_CMAKE_FLAGS:-}
+    printf '%s\n' "${ACPP_REQUIRED_CMAKE_ARGS[@]}"
     echo "acpp_git_status_start"
     git -C "$ACPP_SRC" status --short || true
     echo "acpp_git_status_end"

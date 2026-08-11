@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "seed": "0x9e3779b97f4a7c15",
+  "execution_commands": {
+    "rust-lib": "cargo test -p pg_accel --lib",
+    "pgrx": "cargo pgrx test --package pg_accel pg{major}",
+    "ctest": "ctest --test-dir pgaccel-kernels/build --output-on-failure -R 'test_(grouped_agg|spatial_resident|raster_resident|h3|host_api_contract)'"
+  },
+  "targets": [
+    {
+      "id": "private_data_codecs",
+      "minimum_cases": 4096,
+      "fails_before_allocation_or_dereference": true,
+      "malformed_classes": ["truncation", "trailing words", "unknown tags", "oversized counts", "noncanonical re-encoding"],
+      "sources": [
+        {"path": "pg_accel/src/engine/ffi/custom_scan/private_data.rs", "contains": "MAX_PLAN_WIRE_INTS"},
+        {"path": "pg_accel/src/engine/spec/codec.rs", "contains": "AGG_QUERY_SPEC_MAX_WORDS"},
+        {"path": "pg_accel/src/engine/raster/codec.rs", "contains": "RASTER_QUERY_SPEC_MAX_WORDS"}
+      ],
+      "tests": [
+        {"runner": "rust-lib", "path": "pg_accel/src/engine/ffi/custom_scan/private_data.rs", "symbol": "deterministic_adversarial_plan_words_never_panic"},
+        {"runner": "rust-lib", "path": "pg_accel/src/engine/spec/codec.rs", "symbol": "deterministic_adversarial_words_never_panic_or_decode_noncanonically"},
+        {"runner": "rust-lib", "path": "pg_accel/src/engine/raster/codec.rs", "symbol": "arbitrary_bounded_words_never_panic_or_allocate_unboundedly"}
+      ]
+    },
+    {
+      "id": "postgres_lists",
+      "minimum_cases": 512,
+      "fails_before_allocation_or_dereference": true,
+      "malformed_classes": ["non-Integer node", "null node", "short list", "oversized declared list section"],
+      "sources": [
+        {"path": "pg_accel/src/engine/ffi/custom_scan/private_data/list_codec.rs", "contains": "tag != pg_sys::NodeTag::T_Integer"}
+      ],
+      "tests": [
+        {"runner": "pgrx", "path": "pg_accel/src/engine/ffi/custom_scan/private_data.rs", "symbol": "postgres_integer_lists_are_adversarially_bounded_and_type_checked"},
+        {"runner": "rust-lib", "path": "pg_accel/src/engine/ffi/custom_scan/private_data.rs", "symbol": "every_plan_frame_truncation_boundary_is_rejected"}
+      ]
+    },
+    {
+      "id": "descriptors",
+      "minimum_cases": 2048,
+      "fails_before_allocation_or_dereference": true,
+      "malformed_classes": ["ABI version", "size", "count/capacity", "mode", "flags", "pointer presence", "nested count"],
+      "sources": [
+        {"path": "pg_accel/src/gpu/grouped_agg.rs", "contains": "fn validate_descriptor_shell"},
+        {"path": "pgaccel-kernels/src/grouped_agg.cpp", "contains": "pgaccel_status validate_desc"}
+      ],
+      "tests": [
+        {"runner": "rust-lib", "path": "pg_accel/src/gpu/grouped_agg.rs", "symbol": "descriptor_shell_rejects_each_noncanonical_control_class"},
+        {"runner": "ctest", "path": "pgaccel-kernels/test/test_grouped_agg.cpp", "symbol": "test_workspace_and_descriptor_validation"}
+      ]
+    },
+    {
+      "id": "geometry_packed_inputs",
+      "minimum_cases": 1024,
+      "fails_before_allocation_or_dereference": true,
+      "malformed_classes": ["truncated GSERIALIZED", "dimension flags", "nonfinite coordinate", "unclosed ring", "offset/cardinality mismatch"],
+      "sources": [
+        {"path": "pg_accel/src/engine/residency/geometry.rs", "contains": "fn parse_gserialized"},
+        {"path": "pgaccel-kernels/src/spatial_dispatch.cpp", "contains": "SPATIAL_RESIDENT_FAILURE_GEOMETRY"}
+      ],
+      "tests": [
+        {"runner": "rust-lib", "path": "pg_accel/src/engine/residency/geometry.rs", "symbol": "parser_rejects_dimensions_geography_nonfinite_and_trailing_bytes"},
+        {"runner": "ctest", "path": "pgaccel-kernels/test/test_spatial_resident.cpp", "symbol": "main"}
+      ]
+    },
+    {
+      "id": "raster_packed_inputs",
+      "minimum_cases": 2048,
+      "fails_before_allocation_or_dereference": true,
+      "malformed_classes": ["truncated WKB", "bad band offsets", "unknown pixel tag", "nodata mismatch", "output-capacity mismatch"],
+      "sources": [
+        {"path": "pg_accel/src/engine/raster/execution.rs", "contains": "fn checked_row_layout"},
+        {"path": "pgaccel-kernels/src/raster_ops.cpp", "contains": "RASTER_RESIDENT_FAILURE_OFFSETS"}
+      ],
+      "tests": [
+        {"runner": "rust-lib", "path": "pg_accel/src/engine/raster/codec.rs", "symbol": "arbitrary_bounded_words_never_panic_or_allocate_unboundedly"},
+        {"runner": "ctest", "path": "pgaccel-kernels/test/test_raster_resident.cpp", "symbol": "test_contract_and_device_validation_boundaries"}
+      ]
+    },
+    {
+      "id": "h3_packed_inputs",
+      "minimum_cases": 4096,
+      "fails_before_allocation_or_dereference": true,
+      "malformed_classes": ["invalid mode", "base cell", "active digit", "unused digit", "resolution mismatch", "NULL sidecar"],
+      "sources": [
+        {"path": "pgaccel-kernels/src/h3_ops.cpp", "contains": "H3_RESIDENT_FAILURE_INVALID_CELL"},
+        {"path": "pgaccel-kernels/src/h3_exact_device.hpp", "contains": "h3_is_valid_cell"}
+      ],
+      "tests": [
+        {"runner": "ctest", "path": "pgaccel-kernels/test/test_h3.cpp", "symbol": "main"}
+      ]
+    },
+    {
+      "id": "byte_cardinality_overflow",
+      "minimum_cases": 1024,
+      "fails_before_allocation_or_dereference": true,
+      "malformed_classes": ["usize multiplication", "address span", "mixed-radix product", "row range", "output byte count"],
+      "sources": [
+        {"path": "pg_accel/src/gpu/grouped_agg.rs", "contains": "fn checked_byte_offset"},
+        {"path": "pgaccel-kernels/src/grouped_agg.cpp", "contains": "checked_mul_size"}
+      ],
+      "tests": [
+        {"runner": "rust-lib", "path": "pg_accel/src/gpu/grouped_agg.rs", "symbol": "row_chunk_rejects_overflow_and_out_of_bounds_ranges"},
+        {"runner": "ctest", "path": "pgaccel-kernels/test/test_grouped_agg.cpp", "symbol": "test_pointer_span_validation"}
+      ]
+    },
+    {
+      "id": "pointer_aliasing",
+      "minimum_cases": 512,
+      "fails_before_allocation_or_dereference": true,
+      "malformed_classes": ["input/output overlap", "workspace/output overlap", "descriptor/output overlap", "near-address-limit span"],
+      "sources": [
+        {"path": "pgaccel-kernels/src/grouped_agg.cpp", "contains": "bool validate_aliases"},
+        {"path": "pgaccel-kernels/src/spatial_dispatch.cpp", "contains": "resident_spans_overlap"}
+      ],
+      "tests": [
+        {"runner": "ctest", "path": "pgaccel-kernels/test/test_grouped_agg.cpp", "symbol": "test_pointer_span_validation"},
+        {"runner": "ctest", "path": "pgaccel-kernels/test/test_spatial_resident.cpp", "symbol": "main"}
+      ]
+    },
+    {
+      "id": "c_abi_layouts",
+      "minimum_cases": 128,
+      "fails_before_allocation_or_dereference": true,
+      "malformed_classes": ["size", "alignment", "offset", "discriminant", "reserved field", "version"],
+      "sources": [
+        {"path": "pg_accel/src/engine/spec/abi.rs", "contains": "#[repr(C)]"},
+        {"path": "pgaccel-kernels/include/pgaccel_olap.h", "contains": "PGACCEL_OLAP_ABI_VERSION"}
+      ],
+      "tests": [
+        {"runner": "rust-lib", "path": "pg_accel/src/engine/spec/abi.rs", "symbol": "grouped_agg_descriptor_layout_matches_c_header"},
+        {"runner": "ctest", "path": "pgaccel-kernels/test/test_raster_resident.cpp", "symbol": "test_abi_layout"}
+      ]
+    }
+  ]
+}

@@ -18,7 +18,7 @@ use crate::gpu::ExprDeviceBuffer;
 use super::domain::{
     RESIDENT_RASTER_BAND_HAS_NODATA, RESIDENT_RASTER_BAND_IS_NODATA, ResidentByteAccounting,
     ResidentGeometryData, ResidentRasterBand, ResidentRasterData, ResidentRasterRow,
-    RetainedExactValues,
+    ResidentRepresentationEvidence, RetainedExactValues, text_dictionary_retained_host_bytes,
 };
 use super::geometry::{
     ResidentGeometryBuilder, ResidentGeometryColumn, ResidentGeometryReferencedBytes,
@@ -29,6 +29,7 @@ use super::store::{
 };
 
 const LOAD_INTERRUPT_CHECK_ROWS: usize = 8192;
+const REPRESENTATION_BLOCK_ROWS: usize = LOAD_INTERRUPT_CHECK_ROWS;
 
 #[cfg(feature = "pg_test")]
 #[derive(Clone, Copy)]
@@ -219,6 +220,144 @@ enum StagedColumn {
     },
 }
 
+fn checked_lane_bytes(len: usize, width: usize, label: &str) -> Result<u64, String> {
+    len.checked_mul(width)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| format!("{label} byte count overflow"))
+}
+
+fn packed_bit_bytes(len: usize, bits_per_value: u32, label: &str) -> Result<u64, String> {
+    if len == 0 || bits_per_value == 0 {
+        return Ok(0);
+    }
+    let bits = u128::try_from(len)
+        .ok()
+        .and_then(|len| len.checked_mul(u128::from(bits_per_value)))
+        .ok_or_else(|| format!("{label} bit count overflow"))?;
+    let bytes = bits
+        .checked_add(7)
+        .map(|bits| bits / 8)
+        .ok_or_else(|| format!("{label} byte count overflow"))?;
+    u64::try_from(bytes).map_err(|_| format!("{label} byte count exceeds u64"))
+}
+
+fn bits_for_range(range: u128) -> u32 {
+    u128::BITS - range.leading_zeros()
+}
+
+fn is_null_at(nulls: Option<&[u8]>, index: usize) -> bool {
+    nulls.is_some_and(|nulls| nulls.get(index) == Some(&1))
+}
+
+fn projected_i32_bitpack_bytes(values: &[i32], nulls: Option<&[u8]>) -> Result<u64, String> {
+    let mut bounds = None::<(i32, i32)>;
+    for (index, value) in values.iter().copied().enumerate() {
+        if is_null_at(nulls, index) {
+            continue;
+        }
+        bounds = Some(bounds.map_or((value, value), |(min, max)| {
+            (min.min(value), max.max(value))
+        }));
+    }
+    let current = checked_lane_bytes(values.len(), std::mem::size_of::<i32>(), "int32 lane")?;
+    let Some((min, max)) = bounds else {
+        return Ok(0);
+    };
+    let range = u128::try_from(i64::from(max) - i64::from(min))
+        .map_err(|_| "int32 range became negative".to_owned())?;
+    let packed = packed_bit_bytes(values.len(), bits_for_range(range), "int32 bit-pack")?
+        .checked_add(std::mem::size_of::<i32>() as u64)
+        .ok_or_else(|| "int32 bit-pack metadata overflow".to_owned())?;
+    Ok(current.min(packed))
+}
+
+fn projected_i64_bitpack_bytes(values: &[i64], nulls: Option<&[u8]>) -> Result<u64, String> {
+    let mut bounds = None::<(i64, i64)>;
+    for (index, value) in values.iter().copied().enumerate() {
+        if is_null_at(nulls, index) {
+            continue;
+        }
+        bounds = Some(bounds.map_or((value, value), |(min, max)| {
+            (min.min(value), max.max(value))
+        }));
+    }
+    let current = checked_lane_bytes(values.len(), std::mem::size_of::<i64>(), "int64 lane")?;
+    let Some((min, max)) = bounds else {
+        return Ok(0);
+    };
+    let range = u128::try_from(i128::from(max) - i128::from(min))
+        .map_err(|_| "int64 range became negative".to_owned())?;
+    let packed = packed_bit_bytes(values.len(), bits_for_range(range), "int64 bit-pack")?
+        .checked_add(std::mem::size_of::<i64>() as u64)
+        .ok_or_else(|| "int64 bit-pack metadata overflow".to_owned())?;
+    Ok(current.min(packed))
+}
+
+fn projected_u64_bitpack_bytes(values: &[u64], nulls: Option<&[u8]>) -> Result<u64, String> {
+    let mut bounds = None::<(u64, u64)>;
+    for (index, value) in values.iter().copied().enumerate() {
+        if is_null_at(nulls, index) {
+            continue;
+        }
+        bounds = Some(bounds.map_or((value, value), |(min, max)| {
+            (min.min(value), max.max(value))
+        }));
+    }
+    let current = checked_lane_bytes(values.len(), std::mem::size_of::<u64>(), "uint64 lane")?;
+    let Some((min, max)) = bounds else {
+        return Ok(0);
+    };
+    let range = u128::from(max - min);
+    let packed = packed_bit_bytes(values.len(), bits_for_range(range), "uint64 bit-pack")?
+        .checked_add(std::mem::size_of::<u64>() as u64)
+        .ok_or_else(|| "uint64 bit-pack metadata overflow".to_owned())?;
+    Ok(current.min(packed))
+}
+
+fn projected_block_minmax_bytes(len: usize, width: usize) -> Result<u64, String> {
+    if len == 0 {
+        return Ok(0);
+    }
+    let blocks = len.div_ceil(REPRESENTATION_BLOCK_ROWS);
+    // Two exact values plus one byte each for NULL and NaN/special-value state.
+    checked_lane_bytes(
+        blocks,
+        width
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(2))
+            .ok_or_else(|| "block min/max width overflow".to_owned())?,
+        "block min/max metadata",
+    )
+}
+
+fn checked_add_representation(
+    total: &mut ResidentRepresentationEvidence,
+    column: ResidentRepresentationEvidence,
+) -> Result<(), String> {
+    macro_rules! add {
+        ($field:ident) => {
+            total.$field = total.$field.checked_add(column.$field).ok_or_else(|| {
+                concat!("resident representation ", stringify!($field), " overflow").to_owned()
+            })?;
+        };
+    }
+    add!(source_logical_bytes);
+    add!(encoded_device_bytes);
+    add!(retained_exact_bytes);
+    add!(transient_staging_bytes);
+    add!(construction_peak_bytes);
+    add!(null_sidecar_bytes);
+    add!(projected_null_bitmap_bytes);
+    add!(bool_value_bytes);
+    add!(projected_bool_bitmap_bytes);
+    add!(integer_value_bytes);
+    add!(projected_integer_bitpack_bytes);
+    add!(dictionary_code_bytes);
+    add!(projected_dictionary_bitpack_bytes);
+    add!(projected_block_minmax_bytes);
+    Ok(())
+}
+
 impl StagedColumn {
     fn device_bytes(&self) -> Result<u64, String> {
         let checked = |len: usize, width: usize, nulls: usize| {
@@ -390,11 +529,174 @@ impl StagedColumn {
             } => data
                 .accounting(*max_exact_value_bytes)
                 .map_err(|error| format!("resident raster accounting failed: {error}")),
+            Self::TextDictionary { labels, .. } => Ok(ResidentByteAccounting {
+                device_bytes: self.device_bytes()?,
+                retained_host_exact_bytes: text_dictionary_retained_host_bytes(labels).ok_or_else(
+                    || "text dictionary retained-host byte count overflow".to_owned(),
+                )?,
+            }),
             _ => Ok(ResidentByteAccounting {
                 device_bytes: self.device_bytes()?,
                 retained_host_exact_bytes: 0,
             }),
         }
+    }
+
+    fn representation_evidence(&self) -> Result<ResidentRepresentationEvidence, String> {
+        let accounting = self.accounting()?;
+        let transient_staging_bytes = accounting
+            .checked_total()
+            .map_err(|error| error.to_string())?;
+        let construction_peak_bytes = transient_staging_bytes
+            .checked_add(accounting.device_bytes)
+            .ok_or_else(|| "resident construction peak byte count overflow".to_owned())?;
+        let mut evidence = ResidentRepresentationEvidence {
+            encoded_device_bytes: accounting.device_bytes,
+            retained_exact_bytes: accounting.retained_host_exact_bytes,
+            transient_staging_bytes,
+            construction_peak_bytes,
+            ..ResidentRepresentationEvidence::default()
+        };
+        let null_projection = |nulls: Option<&[u8]>| -> Result<(u64, u64), String> {
+            let bytes = nulls.map_or(0, |nulls| nulls.len());
+            Ok((
+                u64::try_from(bytes).map_err(|_| "NULL sidecar bytes exceed u64".to_owned())?,
+                packed_bit_bytes(bytes, 1, "NULL bitmap")?,
+            ))
+        };
+        match self {
+            Self::Empty { .. } => {}
+            Self::Bool { values, nulls, .. } => {
+                evidence.source_logical_bytes = checked_lane_bytes(values.len(), 1, "bool source")?;
+                evidence.bool_value_bytes = checked_lane_bytes(values.len(), 1, "bool values")?;
+                evidence.projected_bool_bitmap_bytes =
+                    packed_bit_bytes(values.len(), 1, "bool bitmap")?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(nulls.as_deref())?;
+            }
+            Self::I32 {
+                type_oid,
+                values,
+                nulls,
+            } => {
+                let source_width = usize::from(*type_oid != pg_sys::INT2OID) * 2 + 2;
+                evidence.source_logical_bytes =
+                    checked_lane_bytes(values.len(), source_width, "int32 source")?;
+                evidence.integer_value_bytes =
+                    checked_lane_bytes(values.len(), std::mem::size_of::<i32>(), "int32 values")?;
+                evidence.projected_integer_bitpack_bytes =
+                    projected_i32_bitpack_bytes(values, nulls.as_deref())?;
+                evidence.projected_block_minmax_bytes =
+                    projected_block_minmax_bytes(values.len(), std::mem::size_of::<i32>())?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(nulls.as_deref())?;
+            }
+            Self::I64 { values, nulls, .. } => {
+                evidence.source_logical_bytes =
+                    checked_lane_bytes(values.len(), std::mem::size_of::<i64>(), "int64 source")?;
+                evidence.integer_value_bytes =
+                    checked_lane_bytes(values.len(), std::mem::size_of::<i64>(), "int64 values")?;
+                evidence.projected_integer_bitpack_bytes =
+                    projected_i64_bitpack_bytes(values, nulls.as_deref())?;
+                evidence.projected_block_minmax_bytes =
+                    projected_block_minmax_bytes(values.len(), std::mem::size_of::<i64>())?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(nulls.as_deref())?;
+            }
+            Self::H3 { values, nulls, .. } => {
+                evidence.source_logical_bytes =
+                    checked_lane_bytes(values.len(), std::mem::size_of::<u64>(), "H3 source")?;
+                evidence.integer_value_bytes =
+                    checked_lane_bytes(values.len(), std::mem::size_of::<u64>(), "H3 values")?;
+                evidence.projected_integer_bitpack_bytes =
+                    projected_u64_bitpack_bytes(values, nulls.as_deref())?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(nulls.as_deref())?;
+            }
+            Self::Geometry { data, .. } => {
+                evidence.source_logical_bytes = u64::try_from(data.exact.bytes.len())
+                    .map_err(|_| "geometry exact source bytes exceed u64".to_owned())?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(data.nulls.as_deref())?;
+            }
+            Self::Raster { data, .. } => {
+                evidence.source_logical_bytes = u64::try_from(data.exact.bytes.len())
+                    .map_err(|_| "raster exact source bytes exceed u64".to_owned())?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(data.nulls.as_deref())?;
+            }
+            Self::F32 { values, nulls, .. } => {
+                evidence.source_logical_bytes =
+                    checked_lane_bytes(values.len(), std::mem::size_of::<f32>(), "float32 source")?;
+                evidence.projected_block_minmax_bytes =
+                    projected_block_minmax_bytes(values.len(), std::mem::size_of::<f32>())?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(nulls.as_deref())?;
+            }
+            Self::F64 { values, nulls, .. } => {
+                evidence.source_logical_bytes =
+                    checked_lane_bytes(values.len(), std::mem::size_of::<f64>(), "float64 source")?;
+                evidence.projected_block_minmax_bytes =
+                    projected_block_minmax_bytes(values.len(), std::mem::size_of::<f64>())?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(nulls.as_deref())?;
+            }
+            Self::TextDictionary {
+                codes,
+                nulls,
+                labels,
+                ..
+            } => {
+                let mut source = 0_u64;
+                for (index, code) in codes.iter().copied().enumerate() {
+                    if is_null_at(nulls.as_deref(), index) {
+                        continue;
+                    }
+                    let code = usize::try_from(code)
+                        .map_err(|_| "text dictionary contains a negative code".to_owned())?;
+                    let label = labels.get(code).ok_or_else(|| {
+                        "text dictionary code exceeds label cardinality".to_owned()
+                    })?;
+                    source = source
+                        .checked_add(4)
+                        .and_then(|bytes| bytes.checked_add(u64::try_from(label.len()).ok()?))
+                        .ok_or_else(|| "text source logical byte count overflow".to_owned())?;
+                }
+                evidence.source_logical_bytes = source;
+                evidence.dictionary_code_bytes = checked_lane_bytes(
+                    codes.len(),
+                    std::mem::size_of::<i32>(),
+                    "dictionary codes",
+                )?;
+                let cardinality_range = labels.len().saturating_sub(1) as u128;
+                evidence.projected_dictionary_bitpack_bytes = packed_bit_bytes(
+                    codes.len(),
+                    bits_for_range(cardinality_range),
+                    "dictionary bit-pack",
+                )?;
+                (
+                    evidence.null_sidecar_bytes,
+                    evidence.projected_null_bitmap_bytes,
+                ) = null_projection(nulls.as_deref())?;
+            }
+        }
+        Ok(evidence)
     }
 }
 
@@ -432,6 +734,7 @@ pub(super) struct StagedRelation {
     row_count: u64,
     loaded_at_us: i64,
     load_ms: f64,
+    representation: ResidentRepresentationEvidence,
 }
 
 impl StagedRelation {
@@ -472,6 +775,8 @@ impl StagedRelation {
         charge: LedgerCharge,
         accounting: ResidentByteAccounting,
     ) -> Result<ResidentRelation, String> {
+        let copy_started = Instant::now();
+        let mut representation = self.representation;
         let mut columns = BTreeMap::new();
         for (attno, staged) in self.columns {
             let label = format!(
@@ -504,6 +809,8 @@ impl StagedRelation {
                 "resident relation accounting mismatch: staged={accounting:?}, materialized={actual_accounting:?}"
             ));
         }
+        representation.copy_ms = copy_started.elapsed().as_secs_f64() * 1000.0;
+        let load_ms = self.load_ms + representation.copy_ms;
         let now = now_us();
         Ok(ResidentRelation {
             relid: self.relid,
@@ -514,7 +821,8 @@ impl StagedRelation {
             row_count: self.row_count,
             loaded_at_us: self.loaded_at_us,
             last_used_us: now,
-            load_ms: self.load_ms,
+            load_ms,
+            representation,
             last_used_tick: 0,
             pinned: false,
             raw_charge: charge,
@@ -1771,6 +2079,7 @@ fn scan_relation_direct_inner(
     }
     let mut table = DirectTableScan::open_relation(relid, requests)?;
     table.begin()?;
+    let max_attno = requests.iter().map(|request| request.attno).max();
 
     let mut row_count = 0_u64;
     let mut batch_rows = 0_usize;
@@ -1791,12 +2100,32 @@ fn scan_relation_direct_inner(
                 builder.try_reserve(LOAD_INTERRUPT_CHECK_ROWS)?;
             }
         }
+        if let Some(max_attno) = max_attno {
+            // Deform the heap/table-AM tuple once through the highest requested
+            // attribute. Individual requested columns then read the slot's
+            // cached Datum/null arrays directly instead of re-entering
+            // slot_getattr for every column.
+            // SAFETY: the slot contains the current row; every requested attno
+            // is positive and was validated against its locked descriptor.
+            unsafe { pg_sys::slot_getsomeattrs(table.slot, i32::from(max_attno)) };
+            // SAFETY: slot_getsomeattrs populated both arrays through max_attno.
+            if unsafe { (*table.slot).tts_values.is_null() || (*table.slot).tts_isnull.is_null() } {
+                return Err("resident table scan slot has no deformed value/null arrays".to_owned());
+            }
+        }
         for (request, builder) in requests.iter().zip(builders.iter_mut()) {
-            let mut is_null = false;
-            // SAFETY: the slot contains the current row and each positive
-            // attno was validated against the relation fingerprint/catalog.
-            let datum = unsafe {
-                pg_sys::slot_getattr(table.slot, i32::from(request.attno), &raw mut is_null)
+            let index = request
+                .attno
+                .checked_sub(1)
+                .and_then(|index| usize::try_from(index).ok())
+                .ok_or_else(|| "resident request attribute number is not positive".to_owned())?;
+            // SAFETY: slot_getsomeattrs above populated arrays through the
+            // maximum requested attno and this request is within that range.
+            let (datum, is_null) = unsafe {
+                (
+                    *(*table.slot).tts_values.add(index),
+                    *(*table.slot).tts_isnull.add(index),
+                )
             };
             // SAFETY: the request and builder carry the freshly validated
             // dynamic type for this attribute; slot storage remains live.
@@ -1866,7 +2195,9 @@ pub(super) fn stage_relation(
             .iter()
             .map(|request| ColumnBuilder::for_type(request.type_oid))
             .collect::<Result<Vec<_>, _>>()?;
+        let scan_started = Instant::now();
         let row_count = scan_relation_direct(relid, requests, &mut builders)?;
+        let scan_ms = scan_started.elapsed().as_secs_f64() * 1000.0;
         let generation_after = ledger::generation_stamp(relid);
         let fingerprint_after = RelationFingerprint::capture(relid, requests);
         if generation_before != generation_after
@@ -1880,6 +2211,7 @@ pub(super) fn stage_relation(
                 u32::from(relid)
             ));
         }
+        let encode_started = Instant::now();
         let columns = if row_count == 0 {
             requests
                 .iter()
@@ -1895,6 +2227,18 @@ pub(super) fn stage_relation(
                 .map(|(attno, column)| column.map(|column| (attno, column)))
                 .collect::<Result<BTreeMap<_, _>, _>>()?
         };
+        let encode_ms = encode_started.elapsed().as_secs_f64() * 1000.0;
+        let staged_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut representation = ResidentRepresentationEvidence {
+            scan_batches: row_count.div_ceil(LOAD_INTERRUPT_CHECK_ROWS as u64),
+            preflight_ms: (staged_ms - scan_ms - encode_ms).max(0.0),
+            scan_ms,
+            encode_ms,
+            ..ResidentRepresentationEvidence::default()
+        };
+        for column in columns.values() {
+            checked_add_representation(&mut representation, column.representation_evidence()?)?;
+        }
         return Ok(StagedRelation {
             relid,
             relfilenode: relfilenode_before,
@@ -1903,7 +2247,8 @@ pub(super) fn stage_relation(
             columns,
             row_count,
             loaded_at_us: now_us(),
-            load_ms: started.elapsed().as_secs_f64() * 1000.0,
+            load_ms: staged_ms,
+            representation,
         });
     }
     Err("resident load retry loop exhausted".to_owned())
@@ -2855,6 +3200,59 @@ mod unit_tests {
         assert_eq!(codes, vec![1, 0, 0, 1]);
         assert_eq!(nulls, Some(vec![0, 1, 0, 0]));
     }
+
+    #[test]
+    fn representation_evidence_accounts_retained_text_and_lossless_projections() {
+        let boolean = StagedColumn::Bool {
+            type_oid: pg_sys::BOOLOID,
+            values: vec![0; 9],
+            nulls: Some(vec![0; 9]),
+        };
+        let boolean = boolean
+            .representation_evidence()
+            .expect("bool evidence is bounded");
+        assert_eq!(boolean.bool_value_bytes, 9);
+        assert_eq!(boolean.projected_bool_bitmap_bytes, 2);
+        assert_eq!(boolean.null_sidecar_bytes, 9);
+        assert_eq!(boolean.projected_null_bitmap_bytes, 2);
+        assert_eq!(boolean.transient_staging_bytes, 18);
+        assert_eq!(boolean.construction_peak_bytes, 36);
+
+        let integer = StagedColumn::I32 {
+            type_oid: pg_sys::INT4OID,
+            values: vec![10, 11, 12, 13],
+            nulls: None,
+        }
+        .representation_evidence()
+        .expect("integer evidence is bounded");
+        assert_eq!(integer.source_logical_bytes, 16);
+        assert_eq!(integer.integer_value_bytes, 16);
+        // Two range bits per row plus one exact int32 base value.
+        assert_eq!(integer.projected_integer_bitpack_bytes, 5);
+        // One block: exact min/max int32 values plus NULL/special flags.
+        assert_eq!(integer.projected_block_minmax_bytes, 10);
+
+        let text = StagedColumn::TextDictionary {
+            type_oid: pg_sys::TEXTOID,
+            codes: vec![1, 0, 0, 1],
+            nulls: Some(vec![0, 1, 0, 0]),
+            labels: vec!["alpha".to_owned(), "zeta".to_owned()],
+        };
+        let accounting = text.accounting().expect("text accounting is bounded");
+        assert_eq!(accounting.device_bytes, 20);
+        assert_eq!(
+            accounting.retained_host_exact_bytes,
+            u64::try_from(2 * std::mem::size_of::<String>() + 9).expect("small host charge")
+        );
+        let text = text
+            .representation_evidence()
+            .expect("text evidence is bounded");
+        assert_eq!(text.source_logical_bytes, 25);
+        assert_eq!(text.dictionary_code_bytes, 16);
+        assert_eq!(text.projected_dictionary_bitpack_bytes, 1);
+        assert_eq!(text.null_sidecar_bytes, 4);
+        assert_eq!(text.projected_null_bitmap_bytes, 1);
+    }
 }
 
 #[cfg(feature = "pg_test")]
@@ -2900,6 +3298,70 @@ mod tests {
             }
             CaughtError::RustPanic { ereport, .. } => ereport.sql_error_code(),
         }
+    }
+
+    #[pg_test]
+    fn resident_representation_and_ingestion_evidence_is_exact_and_queryable() {
+        Spi::run(
+            "CREATE TABLE pgaccel_representation_evidence(flag bool, n int4, label text); \
+             INSERT INTO pgaccel_representation_evidence \
+             SELECT CASE WHEN g = 3 THEN NULL ELSE g % 2 = 0 END, \
+                    CASE WHEN g = 4 THEN NULL ELSE 10 + g % 4 END, \
+                    CASE WHEN g = 5 THEN NULL WHEN g % 2 = 0 THEN 'alpha' ELSE 'zeta' END \
+             FROM generate_series(1, 9) AS g; \
+             SELECT pg_accel_pin('pgaccel_representation_evidence'::regclass, \
+                                 ARRAY['flag', 'n', 'label'])",
+        )
+        .expect("load representation fixture");
+
+        let exact = Spi::get_one::<bool>(
+            "SELECT r.row_count = 9 \
+                    AND r.encoded_device_bytes + r.retained_exact_bytes = s.raw_bytes \
+                    AND r.transient_staging_bytes = s.raw_bytes \
+                    AND r.construction_peak_bytes = r.transient_staging_bytes + r.encoded_device_bytes \
+                    AND r.null_sidecar_bytes = 27 \
+                    AND r.projected_null_bitmap_bytes = 6 \
+                    AND r.bool_value_bytes = 9 \
+                    AND r.projected_bool_bitmap_bytes = 2 \
+                    AND r.integer_value_bytes = 36 \
+                    AND r.projected_integer_bitpack_bytes < r.integer_value_bytes \
+                    AND r.dictionary_code_bytes = 36 \
+                    AND r.projected_dictionary_bitpack_bytes = 2 \
+                    AND r.retained_exact_bytes > 0 \
+             FROM pg_accel_resident_representation_status() AS r \
+             JOIN pg_accel_resident_status() AS s USING (relid) \
+             WHERE r.relid = 'pgaccel_representation_evidence'::regclass",
+        )
+        .expect("query representation evidence")
+        .expect("loaded relation has representation evidence");
+        assert!(exact, "representation evidence or ledger identity changed");
+
+        let ingestion = Spi::get_one::<bool>(
+            "SELECT scan_batches = 1 \
+                    AND preflight_ms >= 0 AND scan_ms >= 0 \
+                    AND encode_ms >= 0 AND copy_ms >= 0 \
+                    AND total_load_ms + 0.000001 >= preflight_ms + scan_ms + encode_ms + copy_ms \
+                    AND scan_strategy = 'table_am_single_deform_batches_8192' \
+                    AND publication_strategy = 'synchronous_exact_after_copy' \
+             FROM pg_accel_resident_ingestion_status() \
+             WHERE relid = 'pgaccel_representation_evidence'::regclass",
+        )
+        .expect("query ingestion evidence")
+        .expect("loaded relation has ingestion evidence");
+        assert!(ingestion, "ingestion phase evidence changed");
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT count(*) FROM pg_accel_resident_representation_decisions()"
+            )
+            .expect("query representation decisions"),
+            Some(5)
+        );
+
+        Spi::run(
+            "SELECT pg_accel_evict('pgaccel_representation_evidence'::regclass); \
+             DROP TABLE pgaccel_representation_evidence",
+        )
+        .expect("clean representation fixture");
     }
 
     #[pg_test]

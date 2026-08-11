@@ -323,8 +323,14 @@ pg-version-audit:
 package-extension-test:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_package_extension.py -v
 
+# Validate the PostgreSQL upstream regression/isolation compatibility harness
+# without building PostgreSQL or starting a server.
+upstream-pg-tests-audit:
+    bash -n scripts/upstream_pg_tests.sh
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_upstream_pg_tests.py -v
+
 # Pre-commit checks: fmt, lint, type-check matrix, deny, audits, doc-parity
-pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit package-extension-test audit-cpu-cheats-test metal-stress-artifact-test
+pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit package-extension-test upstream-pg-tests-audit safety-contract-audit audit-cpu-cheats-test metal-stress-artifact-test
     @echo "Pre-commit checks passed."
 
 # Run pgrx unit tests against one PG major. Defaults to the repo target PG major.
@@ -357,6 +363,46 @@ test-matrix:
 test: test-matrix
     @echo "All tests passed."
 
+# Run PostgreSQL's own regression and isolation schedules twice: once against
+# pristine PostgreSQL and once with this exact pg_accel candidate preloaded in
+# every temporary-server session. The evidence directory must not exist.
+upstream-pg-tests pg="" artifacts_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    artifact_dir="{{artifacts_dir}}"
+    if [ -z "$artifact_dir" ]; then
+        echo "error: artifacts_dir is required and must name a new directory" >&2
+        exit 2
+    fi
+    just install-pg-accel "$pg"
+    scripts/upstream_pg_tests.sh "$pg" "$artifact_dir"
+
+# Run the upstream compatibility gate for every supported PostgreSQL major.
+upstream-pg-tests-matrix artifacts_root="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    root="{{artifacts_root}}"
+    if [ -z "$root" ]; then
+        echo "error: artifacts_root is required and must not exist" >&2
+        exit 2
+    fi
+    if [ -e "$root" ]; then
+        echo "error: artifacts_root already exists: $root" >&2
+        exit 2
+    fi
+    mkdir -p "$root"
+    for pg in $(pg_accel_supported_pg_majors); do
+        just upstream-pg-tests "$pg" "$root/pg$pg"
+    done
+
 # Run the fail-closed Rust production-line, C++/SYCL host-object-line, and SQL
 # semantic-assertion gate for one PG major. This starts PostgreSQL and runs the
 # complete registered GPU CTest suite, so it requires a qualified Metal runner.
@@ -374,10 +420,54 @@ coverage pg="":
 
 # Validate fixed coverage scopes, the SQL assertion manifest, parsers, aggregate
 # negative cases, and shell syntax without starting PostgreSQL or a GPU device.
-coverage-audit:
+# Validate the fail-closed risk registry and deterministic malformed-input
+# corpus without compiling Rust or starting PostgreSQL/a GPU device.
+safety-contract-audit:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_risk_coverage_audit.py scripts/tests/test_fuzz_contract_audit.py scripts/tests/test_crash_band_audit.py -v
+    python3 scripts/risk_coverage_audit.py --repo-root .
+    python3 scripts/fuzz_contract_audit.py --repo-root .
+    python3 scripts/crash_band_audit.py --repo-root .
+
+coverage-audit: safety-contract-audit
     bash -n scripts/coverage_gate.sh scripts/residency_ledger_integration.sh sql/tests/run_all.sh
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_coverage*.py'
     python3 scripts/coverage_tools.py audit-scope --scope coverage/scope.json --repo-root .
+
+# Execute every registered deterministic fuzz/property family through its real
+# Rust-library, PostgreSQL-list, and native descriptor/packed-input boundary.
+fuzz-contracts pg="": safety-contract-audit
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    cargo test -p pg_accel --lib --no-default-features --features "pg$pg"
+    just test-unit "$pg"
+    just gpu-build
+    ctest --test-dir pgaccel-kernels/build --output-on-failure \
+        -R 'test_(grouped_agg|spatial_resident|raster_resident|h3|host_api_contract)'
+
+# Execute the adjacent/extreme legacy admission boundaries, live PostgreSQL
+# structural declines, redesigned million-row descriptor, and OOM invariant.
+crash-band-contracts pg="": safety-contract-audit
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    cargo test -p pg_accel --lib historical_crash
+    just test-unit "$pg"
+    just gpu-build
+    ctest --test-dir pgaccel-kernels/build --output-on-failure \
+        -R 'test_(grouped_agg_hash|oom_invariant)'
 
 # Run the immutable qualified-Metal performance ratchet. The Rust command fixes
 # the exact 1M-row winner cells, seed, raw timing, cache-mode-both policy,
@@ -406,6 +496,41 @@ metal-benchmark-ship-gate pg="" artifacts_dir="":
     fi
     PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run --release -p pg_accel_bench -- \
         metal-ship-gate \
+        --connection "host=localhost port=$port dbname=postgres" \
+        "${artifact_args[@]}"
+
+# Characterize every registered SSBM, TPC-H-shaped, and ClickBench-style
+# workload at the fixed 100K scale. The release harness keeps setup/resident
+# load, artifact construction, warm reuse, native plans, dispatch, correctness,
+# and output consumption distinct; it deliberately does not publish a single
+# system-level speedup headline or claim certified third-party benchmark status.
+system-workload-gate pg="" artifacts_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    just audit-cpu-cheats
+    just install-pg-accel "$pg"
+    just log-rails "$pg"
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    psql_bin="$("$pg_config" --bindir)/psql"
+    "$psql_bin" "host=localhost port=$port dbname=postgres" -v ON_ERROR_STOP=1 \
+        -c "DROP EXTENSION IF EXISTS pg_accel CASCADE;" \
+        -c "CREATE EXTENSION pg_accel;"
+    artifact_args=()
+    if [ -n "{{artifacts_dir}}" ]; then
+        artifact_args=(--artifacts-dir "{{artifacts_dir}}")
+    fi
+    PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run --release -p pg_accel_bench -- \
+        system-workload-gate \
         --connection "host=localhost port=$port dbname=postgres" \
         "${artifact_args[@]}"
 
@@ -486,6 +611,15 @@ bench-rigorous iterations="30" warmup="5" pg="":
         --connection "host=localhost port=$port dbname=postgres" \
         --format markdown \
         --realistic-gucs --capture-plans --timing raw
+
+# Run the exact 17-cell, 30-pair same-backend native-decline non-inferiority
+# gate. The artifact directory must be new; every raw pair and source/binary
+# identity is retained and sealed.
+native-parity-p0 artifacts_dir connection="postgresql://localhost:28818/postgres" pg="18":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PG_ACCEL_PG_MAJOR="{{pg}}" scripts/run_native_parity_p0.sh \
+        "{{artifacts_dir}}" "{{connection}}"
 
 # Guard against the PG log filling the disk.
 # Truncates pgrx PG log + pg_accel trace files when they exceed

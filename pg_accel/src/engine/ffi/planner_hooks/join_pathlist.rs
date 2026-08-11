@@ -73,8 +73,19 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     }
 
     // Preserve operator-specific evidence before the generic resident-pipeline
-    // decline. The benchmark runner confirms this reason from the per-reason
-    // counter, so later planner observations cannot erase the MergePath signal.
+    // decline. Per-reason counters survive later planner observations that may
+    // replace the backend's last-rejection value. A plain row-returning equi
+    // join has no selected GPU executor; aggregate queries are excluded here
+    // because their complete join->reduce shape is classified independently by
+    // the upper-path descriptor recognizer.
+    // SAFETY: `parse` and `joinrel` are live planner-owned pointers established
+    // above.
+    if jointype == pg_sys::JoinType::JOIN_INNER
+        && !unsafe { (*parse).hasAggs }
+        && !selected_row_returning_gpu_join_available()
+    {
+        unsafe { observe_hashjoin_opportunity(joinrel) };
+    }
     // SAFETY: `joinrel` is the planner-owned RelOptInfo supplied to this hook.
     unsafe { observe_mergejoin_opportunity(joinrel) };
 
@@ -137,6 +148,59 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
     }
 }
 
+/// Record when PostgreSQL has produced a viable native HashPath for a
+/// row-returning inner join.
+///
+/// This is observation-only. Resident v2 has reducing membership/count/star
+/// lanes, but it intentionally has no executor that reconstructs arbitrary
+/// joined PostgreSQL rows from a GPU hash join. The caller excludes aggregate
+/// queries so this counter describes that exact unsupported surface rather
+/// than every native join considered below a selected aggregate.
+///
+/// # Safety
+///
+/// `joinrel` must be a valid planner-owned `RelOptInfo` pointer.
+unsafe fn observe_hashjoin_opportunity(joinrel: *mut RelOptInfo) {
+    if joinrel.is_null() {
+        return;
+    }
+    // SAFETY: caller passed a planner-owned RelOptInfo pointer.
+    let joinrel_ref = unsafe { &*joinrel };
+    let pathlist = joinrel_ref.pathlist;
+    if pathlist.is_null() {
+        return;
+    }
+
+    // SAFETY: pathlist is a planner-owned List.
+    let len = unsafe { pg_sys::list_length(pathlist) };
+    let mut hash_count = 0;
+    for i in 0..len {
+        // SAFETY: i is in [0, len), and each entry is a planner Path pointer.
+        let path = unsafe { pg_sys::list_nth(pathlist, i).cast::<Path>() };
+        if path.is_null() {
+            continue;
+        }
+        // SAFETY: every non-null Path begins with PostgreSQL's Node header.
+        if unsafe { (*path.cast::<pg_sys::Node>()).type_ } == NodeTag::T_HashPath {
+            hash_count += 1;
+        }
+    }
+    if hash_count == 0 {
+        return;
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    let rows = joinrel_ref.rows.max(0.0) as u64;
+    stats::increment_planner_rejected(
+        super::RejectionReason::HashJoinNoSelectedGpuKernel.stats_key(),
+        rows,
+    );
+    pgrx::debug1!(
+        "pg_accel join: observed {hash_count} viable row-returning HashPath candidate(s); no \
+         selected GPU row-output hash-join executor exists"
+    );
+}
+
 /// Record when PostgreSQL has produced at least one viable MergePath.
 ///
 /// This is observation-only: no GPU merge-join kernel or CustomPath is
@@ -196,6 +260,17 @@ fn selected_gpu_nlj_kernel_available() -> bool {
     // release-harness correctness run (`gpu_nlj_between @ 50K`, 2026-06-09)
     // closed the backend connection before timing. Production exposure stays
     // disabled until an end-to-end resident consumer exists.
+    false
+}
+
+/// Whether any planner-selectable row-returning GPU join executor ships.
+///
+/// Reducing resident membership/count joins are descriptor stages and do not
+/// reconstruct arbitrary joined heap tuples.  Keep this as an explicit
+/// structural gate so the historical row-output crash lane cannot become
+/// reachable through a cost-limit change alone.
+#[must_use]
+const fn selected_row_returning_gpu_join_available() -> bool {
     false
 }
 
@@ -785,11 +860,28 @@ mod tests {
     }
 
     #[test]
+    fn row_returning_hashjoin_rejection_reason_matches_stats_key() {
+        use super::super::RejectionReason;
+        assert_eq!(
+            RejectionReason::HashJoinNoSelectedGpuKernel.stats_key(),
+            "hashjoin_no_selected_gpu_kernel",
+        );
+    }
+
+    #[test]
     fn selected_gpu_nlj_kernel_is_gated_until_host_boundary_is_safe() {
         assert!(
             !super::selected_gpu_nlj_kernel_available(),
             "planner must not expose GpuNestedLoopIneq until the host-boundary \
              executor path is reproven crash-free"
+        );
+    }
+
+    #[test]
+    fn every_row_returning_gpu_join_is_structurally_gated() {
+        assert!(
+            !super::selected_row_returning_gpu_join_available(),
+            "row-returning join CustomPaths must remain unavailable until a new resident executor is qualified"
         );
     }
 

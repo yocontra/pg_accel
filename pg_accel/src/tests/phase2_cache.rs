@@ -268,6 +268,39 @@ mod tests {
         );
     }
 
+    fn assert_generic_native_decline(query: &str, expected_reason: &str) {
+        Spi::run("SET LOCAL pg_accel.enabled = off").expect("disable pg_accel");
+        let native = result_rows(query);
+
+        Spi::run("SET LOCAL pg_accel.enabled = on").expect("enable pg_accel");
+        let plan = explain_text(query);
+        assert!(
+            !plan.contains("custom scan (gpuaccelagg)"),
+            "declined generic aggregate unexpectedly selected pg_accel:\n{plan}"
+        );
+        let reason = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("planner rejection reason should be readable");
+        assert_eq!(reason.as_deref(), Some(expected_reason));
+
+        let kernels_before = kernel_executions();
+        let counters_before = accelerated_and_stock_counts();
+        let enabled = result_rows(query);
+        assert_eq!(
+            enabled, native,
+            "native decline result differs with pg_accel enabled"
+        );
+        assert_eq!(
+            kernel_executions(),
+            kernels_before,
+            "native decline dispatched a kernel"
+        );
+        assert_eq!(
+            accelerated_and_stock_counts(),
+            counters_before,
+            "native decline entered a pg_accel executor"
+        );
+    }
+
     fn assert_default_cost_selects_and_matches_native(table: &str, query: &str) {
         Spi::run("SET LOCAL pg_accel.cost_multiplier = DEFAULT")
             .expect("restore production generic aggregate cost");
@@ -580,7 +613,7 @@ mod tests {
         assert_eq!(type_invalidated.derived_bytes, 0);
         assert!(type_invalidated.pinned);
         let int8_query = int8_grouped_query(renamed, "grp", "val");
-        assert_default_cost_selects_and_matches_native(renamed, &int8_query);
+        assert_generic_native_decline(&int8_query, "generic_serial_kernel_mode_unqualified");
         assert_eq!(
             Spi::get_one::<i64>(&format!("SELECT pg_accel_refresh('{renamed}'::regclass)"))
                 .expect("refresh after ALTER COLUMN TYPE should succeed")
@@ -588,9 +621,12 @@ mod tests {
             i64::from(device_rows)
         );
 
-        assert_generic_matches_native(&int8_query);
-        let type_reloaded = assert_loaded_status(renamed);
+        assert_generic_native_decline(&int8_query, "generic_serial_kernel_mode_unqualified");
+        let type_reloaded = resident_status(renamed);
+        assert_eq!(type_reloaded.column_count, 2);
         assert!(type_reloaded.raw_bytes > 0);
+        assert_eq!(type_reloaded.derived_bytes, 0);
+        assert!(type_reloaded.pinned);
     }
 
     #[pg_test]

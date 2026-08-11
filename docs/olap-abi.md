@@ -18,8 +18,10 @@ ABI v1 has these hard rules:
   and output struct.
 - `size_bytes` must equal `sizeof(the exact v1 struct)`. V1 does not accept a
   short prefix and does not infer missing fields by zero filling.
-- Every `_pad` and `flags` field must be zero. Unknown enum values, lane bits,
-  execution bits, flags, type tags, or opcodes are errors.
+- Every reserved `_pad` and `flags` field must be zero. The sole v1 exception
+  is `grouped_agg_key.flags = KEY_FLAG_H3_PARENT`, where that key's `_pad0`
+  carries the target resolution in `[0,15]`. Unknown enum values, lane bits,
+  execution bits, flags, type tags, transform arguments, or opcodes are errors.
 - Counts/capacities are validated before multiplication or addition. Runtime
   key codes, mask bytes, multiplicities, indices, and integer arithmetic are
   checked on device and surfaced as `PGACCEL_ERROR`; they are never silently
@@ -87,7 +89,9 @@ integer in `[0,15]`; parent keys require a catalog-proved h3index lane, while
 lat/lng inputs are matching FLOAT4 or FLOAT8 fact columns. A parent key's
 input and result type OIDs must be the same catalog-proved h3index type; the
 wire cannot reinterpret the raw u64 lane as bigint or another SQL type. Both
-variants remain HASH keys after their Begin-time derived lanes are resolved.
+variants remain HASH keys. `H3CellToParent` may either resolve a reusable
+Begin-time parent lane or set the exact fused-key flag so the consuming hash
+kernel validates and transforms the raw lane without an intermediate buffer.
 
 The PostgreSQL shape extractor constructs `H3CellToParent` only for the exact
 extension-owned `h3_cell_to_parent(h3index, integer)` catalog function, a direct
@@ -466,6 +470,17 @@ lane, I64 accumulation, and eight-byte state, no dimensions or filters,
 catalog-proved H3 parent grouping above. Every other HASH shape remains a
 well-formed but unsupported capability for later phases.
 
+That FACT key has two canonical forms. With `flags = 0`, `_pad0` is zero and
+the values lane already contains the materialized key (including a reusable H3
+parent artifact). With `KEY_FLAG_H3_PARENT`, values is the raw catalog-proved
+h3index u64 lane and `_pad0` is the target resolution. The latter flag is
+invalid for dense grouping, non-FACT keys, non-INT64 lanes, multiple keys, or
+resolutions above 15. Each non-NULL cell is fully validated, including H3 mode,
+reserved/high bits, base-cell range, pentagon deleted subsequences, active
+digits, trailing unused digits, and source resolution. The exact parent is
+used consistently for hashing, owner equality, and compact output. Invalid or
+too-coarse cells fail the selected query before output publication.
+
 HASH has no stable mixed-radix code, so `out.group_codes` and `active_groups`
 must be NULL and the typed key output lane is mandatory. A nullable input also
 requires its output NULL sidecar. COMPACT publication writes NULL first with a
@@ -688,6 +703,46 @@ executor decomposes the slot index with key radices and derived dictionaries.
 COMPACT dense output may request `group_codes`, which contains the stable
 composite code. HASH requires typed key outputs and forbids `group_codes`.
 
+## Physical kernel-mode contract
+
+`pgaccel_grouped_agg_kernel_mode(desc, out_mode)` validates the exact
+descriptor transition and returns the branch that `execute_ex` would submit:
+
+- `PARALLEL_HASH`,
+- `PARALLEL_DENSE_COUNT`,
+- `PARALLEL_DENSE_INTEGER`, or
+- `SERIAL_GENERIC`.
+
+The query is metadata-only: it does not initialize a device, allocate,
+submit, wait, or mutate lifecycle state. It shares the native descriptor
+validation, layout construction, row limits, and shape predicates used at the
+actual dispatch branch. Rust checks the returned mode immediately before every
+one-shot or lifecycle call. Data-bearing one-shot and accumulate transitions
+must match the mode admitted by the planner and fail before submission if they
+do not. Zero-row finalize/reset transitions are control calls: they are checked
+with their exact descriptor but are excluded from the query's data-kernel mode
+and its per-mode call count. Normal PostgreSQL planning does not admit a
+data-bearing `SERIAL_GENERIC` mode without independent winning evidence.
+EXPLAIN, per-backend data-kernel counters, and benchmark artifacts use the lowercase stable labels
+`parallel_hash`, `parallel_dense_count`, `parallel_dense_integer`, and
+`serial_generic`.
+
+The executor also classifies the complete dependency-stamped semantic identity
+into a build-generated specialization. A backend-local 128-entry LRU compares
+the full canonical identity after its digest match; digest equality alone is
+never sufficient. Released dense COUNT and integer SUM variants are precompiled
+for the exact membership, SQL-mask, and direct-column/product combinations.
+The native submission branch selects that template once on the host, so row
+kernels contain no per-row membership/mask/measure-shape branch. EXPLAIN reports
+both the specialization label and whether its identity lookup hit the cache.
+
+Low-cardinality dense COUNT and exact integer SUM/MIN/MAX use 32-work-item
+groups over 1,024-row tiles. Each work item accumulates multiple rows, the work
+group performs an ordered local reduction, and one bounded partial per group is
+committed globally. Integer summaries carry total sum, prefix extrema, extrema,
+row counts, validity counts, and failure bits, preserving PostgreSQL's ordered
+overflow behavior even when later values would cancel an overflowing prefix.
+
 ## Workspace contract
 
 `pgaccel_grouped_agg_workspace_requirements(desc, req)` validates the complete
@@ -720,27 +775,81 @@ Execute accepts exactly two scratch forms:
 The caller owns external scratch, keeps it live through execute, and may not
 reuse it concurrently. Input/output/scratch aliasing is invalid.
 
-The Rust bridge queries this requirement before every new session and uses
+The Rust bridge queries this requirement before every session and uses
 `pgaccel_grouped_agg_workspace_alloc` to obtain a pointer with the exact
 reported alignment in SHARED_USM or DEVICE space. Its RAII owner is backend
-local (`!Send`/`!Sync`), is freed with the matching grouped allocator, and is
-marked poisoned after ERROR, OOM, TIMEOUT, or NO_DEVICE. A well-formed
-UNSUPPORTED capability does not poison state. Unknown raw status integers are
-logged/counted and become the generic hard execution error; they are never
-laundered into UNSUPPORTED.
+local (`!Send`/`!Sync`). Healthy workspaces enter an eight-entry exact-shape LRU
+bounded to 64 MiB per entry and 128 MiB total; checkout compares the complete
+canonical descriptor/workspace shape. ERROR, OOM, TIMEOUT, NO_DEVICE, invalid
+success metadata, and mode drift poison and free the allocation instead of
+returning it. A well-formed UNSUPPORTED capability does not poison state.
+Backend exit drains the pool before GPU shutdown, and copied post-fork USM
+addresses are neither freed nor reused by the child. Unknown raw status
+integers are logged/counted and become the generic hard execution error; they
+are never laundered into UNSUPPORTED.
 
 `ResidentByteAccounting` covers retained relation and derived-artifact memory,
-not this statement-scoped workspace. `req.bytes` is therefore additional peak
-device memory that admission and allocation policy must reserve explicitly;
-workspace reuse must not create an uncharged backend-local pool.
+not grouped scratch. `req.bytes` is therefore additional peak device memory
+that admission must reserve explicitly. The backend-local pool exposes fresh
+allocation bytes plus current retained bytes through
+`pg_accel_grouped_workspace_pool_stats()` so it is never hidden from evidence.
+
+Every exact derived-artifact ensure path can return an owned
+`ArtifactEnsureReport` containing the `Hit`/`Built`/`Rebuilt` outcome, evidence
+for the validated dependency generations, and exact device/retained-host byte
+accounting. Hit evidence is captured after the same LRU touch that validated
+the artifact; build/rebuild evidence is captured from the publication borrow
+after the charged artifact is installed. Descriptor preparation consumes this
+report directly and does not perform a second identity lookup merely to fill
+EXPLAIN or lifecycle counters.
+
+Descriptor artifact admission first performs that exact lookup, then chooses
+`cached_reusable` or `ephemeral_fused` on a miss. Its evidence records exact or
+estimated construction bytes/time, expected reuse, cache-hit state,
+dependency-count invalidation risk, construction and consumer launch counts,
+and current resident-budget headroom. Cache hits always remain reusable.
+Query-owned ephemeral artifacts carry the same exact ledger charge and
+dependency stamps but are never published into the backend LRU; their raw
+inputs are revalidated for every consuming borrow and the artifact is dropped
+before its charge is released. H3 ephemeral execution has zero retained parent
+bytes and performs the parent transform in the aggregate kernel. Dimension
+lookups and spatial exact masks use the same consuming descriptor without
+cache publication; spatial's required PostGIS exact-recheck boundary remains
+staged and fail-closed rather than being mislabeled as a single device kernel.
+`EXPLAIN` reports the selected policy, reason, all policy inputs, and the
+observed `Hit`/`Built`/`Rebuilt` outcome separately. The backend diagnostic
+`pg_accel_last_artifact_policy()` exposes the last selected policy without
+allocating on the execution path; benchmark lifecycle captures retain that
+label alongside exact build/rebuild/hit counter deltas in JSON and Markdown.
 
 The bridge owns every output buffer and derives its pointer matrix solely from
-the descriptor lane bits. Each output owner is identity-bound to the resolved
-plan that sized it, so another plan cannot reuse narrower state/key buffers even
-when its capacity and lane mask happen to match. A successful call with
-`uncertain_count > 0` returns `NeedsRecheck`, not a publishable result. Dense
-active-group bytes and emitted capacity metadata are revalidated before any
-executor can read a lane.
+the descriptor lane bits. The active owner remains identity-bound to the exact
+resolved plan, while its detached buffers may enter an eight-entry,
+32-MiB-per-entry/64-MiB-total host pool keyed by the complete compatible
+allocation shape. Checkout clears every byte before rebinding the buffers to a
+fresh plan identity; narrower capacity, key/nullability, state-width, lane, or
+accumulator shapes cannot match. `pg_accel_grouped_output_pool_stats()` exposes
+fresh and retained bytes. A successful call with `uncertain_count > 0` returns
+`NeedsRecheck`, not a publishable result. Dense active-group bytes and emitted
+capacity metadata are revalidated before any executor can read a lane.
+
+Production requirements currently select SHARED_USM. After the completion
+kernel's single wait, the native bridge reads coherent completion/output spans
+directly instead of enqueueing a second copy graph; DEVICE scratch retains the
+queued-copy fallback. `pg_accel_grouped_runtime_stats()` separately exposes
+lifecycle transitions, wait count/time, logical published output bytes, and
+shared versus queued copy calls. Dense sessions use at most 1,000,000 rows per
+synchronous accumulate call, so a 10M-row input uses ten accumulates plus one
+finalize while preserving an interrupt boundary between calls.
+
+Admission prices that exact dense lifecycle: the common path cost contains one
+base launch, and the named `additional_aggregate_launches` component adds one
+`GPU_LAUNCH_OVERHEAD` for every remaining accumulate/finalize call. The
+one-shot boundary is therefore an execution choice, not a total-row decline
+gate. Successful execution records the pre-submission lifecycle count and
+requires it to equal completed calls; `EXPLAIN ANALYZE` reports both the planned
+count and a verification flag. The same completed count feeds backend-global
+`batches_executed`, while physical-mode counters exclude finalize-only calls.
 
 ## Chunk state machine
 

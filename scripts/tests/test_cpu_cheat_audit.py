@@ -3549,6 +3549,154 @@ class ResidentV5RegressionTests(unittest.TestCase):
         for entry in result.entrypoint_audits:
             self.assertIn("device_copyback", entry.classifications)
 
+    def test_exact_shared_device_publication_facade_is_proven_and_fail_closed(
+        self,
+    ) -> None:
+        facade = r"""
+            namespace std::chrono {
+            struct steady_clock {
+              using time_point = int;
+              static time_point now() { return 0; }
+            };
+            }
+            static uint64_t g_grouped_shared_copy_calls = 0;
+            static uint64_t g_grouped_device_copy_calls = 0;
+            static void saturating_add(uint64_t* target, uint64_t value) {
+              *target += value;
+            }
+            static void record_grouped_wait(std::chrono::steady_clock::time_point) {}
+            class PublishedCopyQueue {
+             public:
+              PublishedCopyQueue(sycl::queue& queue, const void* const workspace)
+                  : queue_(queue),
+                    shared_(sycl::get_pointer_type(workspace, queue.get_context()) ==
+                            sycl::usm::alloc::shared) {}
+
+              void memcpy(void* const destination, const void* const source, size_t bytes) {
+                if (shared_) {
+                  std::memcpy(destination, source, bytes);
+                  saturating_add(&g_grouped_shared_copy_calls, 1);
+                  return;
+                }
+                queue_.memcpy(destination, source, bytes);
+                saturating_add(&g_grouped_device_copy_calls, 1);
+              }
+
+              void wait_and_throw() {
+                if (shared_)
+                  return;
+                const auto started = std::chrono::steady_clock::now();
+                try {
+                  queue_.wait_and_throw();
+                } catch (...) {
+                  record_grouped_wait(started);
+                  throw;
+                }
+                record_grouped_wait(started);
+              }
+
+             private:
+              sycl::queue& queue_;
+              bool shared_;
+            };
+        """
+        launch = r"""
+            static void publish_value(sycl::queue& queue, int* const workspace) {
+              queue.parallel_for(sycl::range<1>(1), [=](sycl::id<1>) {
+                workspace[0] = 7;
+              });
+              queue.wait_and_throw();
+            }
+        """
+        valid_entrypoint = r"""
+            extern "C" pgaccel_status pgaccel_exact_publication_facade(
+                int* out, int* const workspace) {
+              sycl::queue queue;
+              publish_value(queue, workspace);
+              PublishedCopyQueue publication(queue, workspace);
+              publication.memcpy(out, workspace, sizeof(*out));
+              publication.wait_and_throw();
+              return PGACCEL_OK;
+            }
+        """
+        valid = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE + facade + launch + valid_entrypoint
+        )
+        self.assertFalse(valid.findings)
+        entry = valid.entrypoint_audits[0]
+        self.assertTrue(entry.ok, entry.detail)
+        self.assertIn("device_copyback", entry.classifications)
+
+        instrumented_facade = facade.replace(
+            """              void memcpy(void* const destination, const void* const source, size_t bytes) {
+                if (shared_) {""",
+            """              void memcpy(void* const destination, const void* const source, size_t bytes) {
+#if defined(PGACCEL_TEST_HOOKS)
+                test_fail_stage(kTestFailurePublishedCopy);
+#endif
+                if (shared_) {""",
+        ).replace(
+            """              void wait_and_throw() {
+                if (shared_)""",
+            """              void wait_and_throw() {
+#if defined(PGACCEL_TEST_HOOKS)
+                test_fail_stage(kTestFailurePublishedWait);
+#endif
+                if (shared_)""",
+        )
+        instrumented = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE + instrumented_facade + launch + valid_entrypoint
+        )
+        self.assertFalse(instrumented.findings)
+        instrumented_entry = instrumented.entrypoint_audits[0]
+        self.assertTrue(instrumented_entry.ok, instrumented_entry.detail)
+        self.assertIn("device_copyback", instrumented_entry.classifications)
+
+        mutants = {
+            "host_finalizer": facade.replace(
+                "std::memcpy(destination, source, bytes);",
+                "*static_cast<int*>(destination) = 42;",
+            )
+            + launch
+            + valid_entrypoint,
+            "missing_device_wait": facade.replace(
+                "queue_.wait_and_throw();", "(void)queue_;"
+            )
+            + launch
+            + valid_entrypoint,
+            "wrong_workspace": facade
+            + launch
+            + valid_entrypoint.replace(
+                "PublishedCopyQueue publication(queue, workspace);",
+                "int other = 0;\n"
+                "              PublishedCopyQueue publication(queue, &other);",
+            ),
+            "missing_final_wait": facade
+            + launch
+            + valid_entrypoint.replace(
+                "publication.wait_and_throw();", "(void)publication;"
+            ),
+            "instrumented_host_finalizer": instrumented_facade.replace(
+                "test_fail_stage(kTestFailurePublishedCopy);",
+                "test_fail_stage(kTestFailurePublishedCopy);\n"
+                "                *static_cast<int*>(destination) = 42;",
+            )
+            + launch
+            + valid_entrypoint,
+            "instrumented_wrong_stage": instrumented_facade.replace(
+                "kTestFailurePublishedWait", "kTestFailurePublishedCopy"
+            )
+            + launch
+            + valid_entrypoint,
+        }
+        for name, source in mutants.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(self.COPYBACK_PRELUDE + source)
+                self.assertTrue(result.findings)
+                mutant = result.entrypoint_audits[0]
+                self.assertFalse(mutant.ok, mutant.detail)
+                self.assertNotIn("device_copyback", mutant.classifications)
+
     def test_pointer_const_borrowed_workspace_requires_device_provenance(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE
@@ -4855,6 +5003,71 @@ class ResidentV5RegressionTests(unittest.TestCase):
         entry = compound_guard.entrypoint_audits[0]
         self.assertFalse(entry.ok, entry.detail)
         self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
+    def test_grouped_telemetry_contracts_are_exact(self) -> None:
+        definitions = r"""
+            static uint64_t g_grouped_transition_launches = 0;
+            static uint64_t g_grouped_queue_waits = 0;
+            static uint64_t g_grouped_queue_wait_ns = 0;
+            static uint64_t g_grouped_output_bytes = 0;
+            static uint64_t g_grouped_shared_copy_calls = 0;
+            static uint64_t g_grouped_device_copy_calls = 0;
+            extern "C" uint64_t pgaccel_grouped_agg_transition_launch_count() {
+              return g_grouped_transition_launches;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_queue_wait_count() {
+              return g_grouped_queue_waits;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_queue_wait_ns() {
+              return g_grouped_queue_wait_ns;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_output_bytes() {
+              return g_grouped_output_bytes;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_shared_copy_calls() {
+              return g_grouped_shared_copy_calls;
+            }
+            extern "C" uint64_t pgaccel_grouped_agg_device_copy_calls() {
+              return g_grouped_device_copy_calls;
+            }
+            extern "C" void pgaccel_reset_grouped_agg_telemetry() {
+              g_grouped_transition_launches = 0;
+              g_grouped_queue_waits = 0;
+              g_grouped_queue_wait_ns = 0;
+              g_grouped_output_bytes = 0;
+              g_grouped_shared_copy_calls = 0;
+              g_grouped_device_copy_calls = 0;
+            }
+        """
+        valid = audit_compiling_fixture(self.COPYBACK_PRELUDE + definitions)
+        self.assertFalse(valid.findings)
+        self.assertEqual(
+            {entry.classifications for entry in valid.entrypoint_audits},
+            {("lifecycle",)},
+        )
+
+        mutants = {
+            "fabricated_accessor": definitions.replace(
+                "return g_grouped_output_bytes;", "return 42;"
+            ),
+            "partial_reset": definitions.replace(
+                "g_grouped_device_copy_calls = 0;\n            }",
+                "}",
+            ),
+        }
+        expected = {
+            "fabricated_accessor": "pgaccel_grouped_agg_output_bytes",
+            "partial_reset": "pgaccel_reset_grouped_agg_telemetry",
+        }
+        for name, source in mutants.items():
+            with self.subTest(name=name):
+                result = audit_compiling_fixture(self.COPYBACK_PRELUDE + source)
+                entries = {
+                    entry.entrypoint: entry for entry in result.entrypoint_audits
+                }
+                entry = entries[expected[name]]
+                self.assertFalse(entry.ok, entry.detail)
+                self.assertIn("invalid_lifecycle_contract", entry.classifications)
 
     def test_transfer_contract_requires_exact_awaited_queue_copy(self) -> None:
         result = audit_compiling_fixture(
@@ -6441,11 +6654,11 @@ class AbiInventoryTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
         manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
-        self.assertEqual(manifest.count, 113)
-        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 113)
+        self.assertEqual(manifest.count, 121)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 121)
         self.assertEqual(
             manifest.sha256,
-            "4de83c9a21a0750616d135afbbb59c7277d65611b1ea8fe5e33a97c8200aac0f",
+            "2f0f26de09706713002e2b1c44e2f1db5159ae132b1bec860e69b64bd4f244b8",
         )
         self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
 
@@ -6568,6 +6781,15 @@ class ReleaseWiringTests(unittest.TestCase):
             matrix.index('run_logged "cpu-cheat-audit"'),
             matrix.index('run_logged "install-pg-accel"'),
         )
+        self.assertLess(
+            matrix.index('run_logged "candidate-provenance"'),
+            matrix.index('run_logged "gpu-build"'),
+        )
+        self.assertIn("capture-candidate", matrix)
+        self.assertIn("--repo-root \"$PWD\"", matrix)
+        self.assertIn("> SHA256SUMS", matrix)
+        self.assertIn("shasum -a 256 -c SHA256SUMS", matrix)
+        self.assertNotIn("        TODO.md docs README.md", matrix)
 
     def test_cli_never_implicitly_discovers_release_objects(self) -> None:
         analyzer = (REPO_ROOT / "scripts/cpu_cheat_audit.py").read_text(
@@ -6652,15 +6874,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
-        self.assertEqual(len(self.abi.definitions), 113)
-        self.assertEqual(len({item.name for item in self.abi.definitions}), 113)
-        self.assertEqual(len({item.name for item in self.abi.declarations}), 113)
+        self.assertEqual(len(self.abi.definitions), 121)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 121)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 121)
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
-        self.assertEqual(self.abi.compiler["inventory_count"], 113)
+        self.assertEqual(self.abi.compiler["inventory_count"], 121)
         status_names = sorted(
             entry.entrypoint for entry in self.by_name.values() if entry.is_status
         )[:82]

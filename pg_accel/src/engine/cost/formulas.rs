@@ -676,6 +676,39 @@ mod admission_tests {
     }
 
     #[test]
+    fn historical_crash_gate_predicates_cover_adjacent_and_extreme_rows() {
+        use super::super::device_limits::{
+            HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS, HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS,
+        };
+
+        let limits = DeviceLimits::cpu_only();
+        for (rows, expected) in [
+            (HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS - 1, true),
+            (HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS, false),
+            (HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS + 1, false),
+            (usize::MAX, false),
+        ] {
+            assert_eq!(
+                hashagg_input_rows_safe(rows, &limits),
+                expected,
+                "rows={rows}"
+            );
+        }
+        for (rows, expected) in [
+            (HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS - 1, true),
+            (HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS, false),
+            (HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS + 1, false),
+            (usize::MAX, false),
+        ] {
+            assert_eq!(
+                hashjoin_cardinality_safe(rows, 1, &limits),
+                expected,
+                "build_rows={rows}"
+            );
+        }
+    }
+
+    #[test]
     fn nlj_gates_cover_size_work_and_selectivity_boundaries() {
         let mut limits = DeviceLimits::cpu_only();
         limits.gpu_nlj_min_outer_rows = 10;

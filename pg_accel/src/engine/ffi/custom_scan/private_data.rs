@@ -3164,6 +3164,61 @@ mod functionscan_tests {
                 .expect("functionscan priv must round-trip");
             assert_eq!(decoded, original);
         }
+
+        /// Deterministically exercise the real PostgreSQL `List<Integer>`
+        /// reader with adversarial lengths and words.  The pure wire decoder
+        /// must remain total, and a non-Integer node must be rejected by the
+        /// list boundary before any payload field is read.
+        #[pg_test]
+        fn postgres_integer_lists_are_adversarially_bounded_and_type_checked() {
+            use pgrx::prelude::{PgTryBuilder, Spi};
+
+            let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+            for case in 0..512_usize {
+                let len = (case * 37) % 97;
+                let mut list: *mut pg_sys::List = std::ptr::null_mut();
+                for _ in 0..len {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    // SAFETY: pg_test supplies a live CurrentMemoryContext;
+                    // both nodes and list cells remain valid for this test.
+                    unsafe {
+                        list = pg_sys::lappend(list, pg_sys::makeInteger(state as i32).cast());
+                    }
+                }
+                // SAFETY: every element appended above is an Integer node.
+                let reader = unsafe { IntListReader::from_pg_list(list) };
+                let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    validate_plan_wire_from_reader(&reader, None)
+                }));
+                assert!(
+                    decoded.is_ok(),
+                    "decoder panicked for case {case}, len {len}"
+                );
+            }
+
+            let mut wrong_type: *mut pg_sys::List = std::ptr::null_mut();
+            // SAFETY: pg_test owns the active memory context.  The second
+            // element is deliberately a Const rather than an Integer.
+            unsafe {
+                wrong_type = pg_sys::lappend(wrong_type, pg_sys::makeInteger(1).cast());
+                wrong_type = pg_sys::lappend(wrong_type, pg_sys::makeBoolConst(true, false).cast());
+            }
+            let rejected = PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+                // SAFETY: `wrong_type` is a structurally valid PG List; the
+                // constructor itself must reject its non-Integer element.
+                let _ = unsafe { IntListReader::from_pg_list(wrong_type) };
+                false
+            }))
+            .catch_others(|_| true)
+            .execute();
+            assert!(rejected, "non-Integer custom_private node was accepted");
+            assert_eq!(
+                Spi::get_one::<i32>("SELECT 42").expect("backend reuse probe"),
+                Some(42),
+            );
+        }
     }
 }
 

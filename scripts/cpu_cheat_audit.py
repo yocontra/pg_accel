@@ -99,9 +99,9 @@ OUTPUT_ASSIGNMENTS = frozenset(
 )
 
 DEFAULT_ABI_MANIFEST = pathlib.Path(__file__).with_name("cpu_cheat_abi_manifest.txt")
-EXPECTED_ABI_MANIFEST_COUNT = 113
+EXPECTED_ABI_MANIFEST_COUNT = 121
 EXPECTED_ABI_MANIFEST_SHA256 = (
-    "4de83c9a21a0750616d135afbbb59c7277d65611b1ea8fe5e33a97c8200aac0f"
+    "2f0f26de09706713002e2b1c44e2f1db5159ae132b1bec860e69b64bd4f244b8"
 )
 INTERNAL_NON_ABI_HEADERS = frozenset({"alloc_helper.h", "pgaccel_queue.h"})
 
@@ -263,6 +263,12 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
             "pgaccel_status (const pgaccel_grouped_agg_desc *, pgaccel_grouped_agg_workspace_req *)",
             output_policy="metadata",
         ),
+        "pgaccel_grouped_agg_kernel_mode": LifecycleContract(
+            "physical kernel-mode metadata calculation",
+            (("validate_desc", "("),),
+            "pgaccel_status (const pgaccel_grouped_agg_desc *, int32_t *)",
+            output_policy="metadata",
+        ),
         "pgaccel_grouped_agg_workspace_alloc": LifecycleContract(
             "workspace USM allocation",
             (),
@@ -310,6 +316,77 @@ LIFECYCLE_CONTRACTS: Mapping[str, LifecycleContract] = MappingProxyType(
             exact_body_alternatives=(
                 ("counter", "=", "0", ";"),
                 ("tl_gpu_exec_count", "=", "0", ";"),
+            ),
+        ),
+        "pgaccel_grouped_agg_transition_launch_count": LifecycleContract(
+            "grouped-aggregate transition-launch counter accessor",
+            (),
+            "uint64_t ()",
+            exact_body_alternatives=(
+                ("return", "g_grouped_transition_launches", ";"),
+            ),
+        ),
+        "pgaccel_grouped_agg_queue_wait_count": LifecycleContract(
+            "grouped-aggregate queue-wait counter accessor",
+            (),
+            "uint64_t ()",
+            exact_body_alternatives=(("return", "g_grouped_queue_waits", ";"),),
+        ),
+        "pgaccel_grouped_agg_queue_wait_ns": LifecycleContract(
+            "grouped-aggregate queue-wait duration accessor",
+            (),
+            "uint64_t ()",
+            exact_body_alternatives=(("return", "g_grouped_queue_wait_ns", ";"),),
+        ),
+        "pgaccel_grouped_agg_output_bytes": LifecycleContract(
+            "grouped-aggregate output-byte counter accessor",
+            (),
+            "uint64_t ()",
+            exact_body_alternatives=(("return", "g_grouped_output_bytes", ";"),),
+        ),
+        "pgaccel_grouped_agg_shared_copy_calls": LifecycleContract(
+            "grouped-aggregate shared-USM copy counter accessor",
+            (),
+            "uint64_t ()",
+            exact_body_alternatives=(("return", "g_grouped_shared_copy_calls", ";"),),
+        ),
+        "pgaccel_grouped_agg_device_copy_calls": LifecycleContract(
+            "grouped-aggregate device-USM copy counter accessor",
+            (),
+            "uint64_t ()",
+            exact_body_alternatives=(("return", "g_grouped_device_copy_calls", ";"),),
+        ),
+        "pgaccel_reset_grouped_agg_telemetry": LifecycleContract(
+            "grouped-aggregate telemetry reset",
+            (),
+            "void ()",
+            exact_body_alternatives=(
+                (
+                    "g_grouped_transition_launches",
+                    "=",
+                    "0",
+                    ";",
+                    "g_grouped_queue_waits",
+                    "=",
+                    "0",
+                    ";",
+                    "g_grouped_queue_wait_ns",
+                    "=",
+                    "0",
+                    ";",
+                    "g_grouped_output_bytes",
+                    "=",
+                    "0",
+                    ";",
+                    "g_grouped_shared_copy_calls",
+                    "=",
+                    "0",
+                    ";",
+                    "g_grouped_device_copy_calls",
+                    "=",
+                    "0",
+                    ";",
+                ),
             ),
         ),
         "pgaccel_get_device_info": LifecycleContract(
@@ -4276,6 +4353,8 @@ def _queue_call_is_covered_by_wait(
     lambda_ranges: Sequence[tuple[int, int]],
     forward: dict[int, int],
     search_limit: int | None = None,
+    *,
+    allow_exact_nonqueue_receiver: bool = False,
 ) -> bool:
     """Prove a queue command is covered by a later unconditional queue wait."""
 
@@ -4288,14 +4367,17 @@ def _queue_call_is_covered_by_wait(
     if (
         method_index < 2
         or tokens[method_index - 1].value not in {".", "->"}
-        or _receiver_kind(
-            tokens,
-            function,
-            tokens[method_index - 2].value,
-            method_index,
-            forward,
+        or (
+            _receiver_kind(
+                tokens,
+                function,
+                tokens[method_index - 2].value,
+                method_index,
+                forward,
+            )
+            != "queue"
+            and not allow_exact_nonqueue_receiver
         )
-        != "queue"
     ):
         return False
     receiver = tokens[method_index - 2].value
@@ -6865,6 +6947,306 @@ def _mutable_alias_call_indices(
     return calls
 
 
+_PUBLISHED_COPY_QUEUE_CONTRACT = (
+    "class",
+    "PublishedCopyQueue",
+    "{",
+    "public",
+    ":",
+    "PublishedCopyQueue",
+    "(",
+    "sycl",
+    "::",
+    "queue",
+    "&",
+    "queue",
+    ",",
+    "const",
+    "void",
+    "*",
+    "const",
+    "workspace",
+    ")",
+    ":",
+    "queue_",
+    "(",
+    "queue",
+    ")",
+    ",",
+    "shared_",
+    "(",
+    "sycl",
+    "::",
+    "get_pointer_type",
+    "(",
+    "workspace",
+    ",",
+    "queue",
+    ".",
+    "get_context",
+    "(",
+    ")",
+    ")",
+    "==",
+    "sycl",
+    "::",
+    "usm",
+    "::",
+    "alloc",
+    "::",
+    "shared",
+    ")",
+    "{",
+    "}",
+    "void",
+    "memcpy",
+    "(",
+    "void",
+    "*",
+    "const",
+    "destination",
+    ",",
+    "const",
+    "void",
+    "*",
+    "const",
+    "source",
+    ",",
+    "size_t",
+    "bytes",
+    ")",
+    "{",
+    "if",
+    "(",
+    "shared_",
+    ")",
+    "{",
+    "std",
+    "::",
+    "memcpy",
+    "(",
+    "destination",
+    ",",
+    "source",
+    ",",
+    "bytes",
+    ")",
+    ";",
+    "saturating_add",
+    "(",
+    "&",
+    "g_grouped_shared_copy_calls",
+    ",",
+    "1",
+    ")",
+    ";",
+    "return",
+    ";",
+    "}",
+    "queue_",
+    ".",
+    "memcpy",
+    "(",
+    "destination",
+    ",",
+    "source",
+    ",",
+    "bytes",
+    ")",
+    ";",
+    "saturating_add",
+    "(",
+    "&",
+    "g_grouped_device_copy_calls",
+    ",",
+    "1",
+    ")",
+    ";",
+    "}",
+    "void",
+    "wait_and_throw",
+    "(",
+    ")",
+    "{",
+    "if",
+    "(",
+    "shared_",
+    ")",
+    "return",
+    ";",
+    "const",
+    "auto",
+    "started",
+    "=",
+    "std",
+    "::",
+    "chrono",
+    "::",
+    "steady_clock",
+    "::",
+    "now",
+    "(",
+    ")",
+    ";",
+    "try",
+    "{",
+    "queue_",
+    ".",
+    "wait_and_throw",
+    "(",
+    ")",
+    ";",
+    "}",
+    "catch",
+    "(",
+    "...",
+    ")",
+    "{",
+    "record_grouped_wait",
+    "(",
+    "started",
+    ")",
+    ";",
+    "throw",
+    ";",
+    "}",
+    "record_grouped_wait",
+    "(",
+    "started",
+    ")",
+    ";",
+    "}",
+    "private",
+    ":",
+    "sycl",
+    "::",
+    "queue",
+    "&",
+    "queue_",
+    ";",
+    "bool",
+    "shared_",
+    ";",
+    "}",
+    ";",
+)
+
+
+def _inject_exact_contract_tokens(
+    contract: tuple[str, ...],
+    injections: Sequence[tuple[tuple[str, ...], tuple[str, ...]]],
+) -> tuple[str, ...]:
+    """Build one exact instrumented contract from unique structural markers."""
+
+    result = contract
+    for marker, insertion in injections:
+        matches = [
+            index
+            for index in range(0, len(result) - len(marker) + 1)
+            if result[index : index + len(marker)] == marker
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                "published-copy contract instrumentation marker is not unique"
+            )
+        offset = matches[0] + len(marker)
+        result = result[:offset] + insertion + result[offset:]
+    return result
+
+
+_PUBLISHED_COPY_QUEUE_TEST_HOOK_CONTRACT = _inject_exact_contract_tokens(
+    _PUBLISHED_COPY_QUEUE_CONTRACT,
+    (
+        (
+            ("size_t", "bytes", ")", "{"),
+            (
+                "test_fail_stage",
+                "(",
+                "kTestFailurePublishedCopy",
+                ")",
+                ";",
+            ),
+        ),
+        (
+            ("void", "wait_and_throw", "(", ")", "{"),
+            (
+                "test_fail_stage",
+                "(",
+                "kTestFailurePublishedWait",
+                ")",
+                ";",
+            ),
+        ),
+    ),
+)
+
+_PUBLISHED_COPY_QUEUE_CONTRACTS = (
+    _PUBLISHED_COPY_QUEUE_CONTRACT,
+    _PUBLISHED_COPY_QUEUE_TEST_HOOK_CONTRACT,
+)
+
+
+def _exact_published_copy_queue_facades(
+    tokens: Sequence[Token],
+    function: Function,
+    provenance: Mapping[str, tuple[str, int, str]],
+    forward: dict[int, int],
+) -> dict[str, tuple[str, int]]:
+    """Bind the one exact shared/device publication facade to its USM root.
+
+    This is a transport primitive, never a compute helper: its complete class
+    definition is token-bound above in release-expanded and literal test-hook
+    forms.  Any alternate hook, guard, host operation, queue operation, wait
+    behavior, field, overload, or method body invalidates the contract.  Each
+    instance must also be constructed from a typed SYCL queue and one exact
+    pointer rooted in the copied kernel workspace.
+    """
+
+    values = tuple(token.value for token in tokens)
+    matches = [
+        (contract, index)
+        for contract in _PUBLISHED_COPY_QUEUE_CONTRACTS
+        for index in range(0, len(values) - len(contract) + 1)
+        if values[index : index + len(contract)] == contract
+    ]
+    if len(matches) != 1:
+        return {}
+
+    canonical = {name: item[2] for name, item in provenance.items()}
+    facades: dict[str, tuple[str, int]] = {}
+    for type_index in range(function.body_open + 1, function.body_close - 2):
+        if (
+            tokens[type_index].value != "PublishedCopyQueue"
+            or tokens[type_index + 1].kind != "identifier"
+            or tokens[type_index + 2].value not in {"(", "{"}
+            or type_index + 2 not in forward
+        ):
+            continue
+        receiver = tokens[type_index + 1].value
+        lparen = type_index + 2
+        rparen = forward[lparen]
+        if rparen + 1 >= function.body_close or tokens[rparen + 1].value != ";":
+            continue
+        arguments = _call_argument_ranges(tokens, lparen, rparen, forward)
+        if len(arguments) != 2:
+            continue
+        queue = _exact_argument_identifier(tokens, arguments[0])
+        if queue is None or _receiver_kind(
+            tokens, function, queue, type_index, forward
+        ) != "queue":
+            continue
+        workspace = _pointer_provenance_root(
+            tokens, *arguments[1], canonical, forward
+        )
+        if workspace is None:
+            continue
+        root = canonical[workspace[0]]
+        if provenance[workspace[0]][1] >= type_index:
+            continue
+        facades[receiver] = (root, type_index)
+    return facades
+
+
 def _proven_output_transfers(
     tokens: Sequence[Token],
     function: Function,
@@ -6882,6 +7264,12 @@ def _proven_output_transfers(
 
     forward, _ = _delimiter_pairs(tokens)
     provenance = _local_usm_provenance(tokens, function, lambda_ranges)
+    copy_facades = _exact_published_copy_queue_facades(
+        tokens, function, provenance, forward
+    )
+    copy_facade_constructors = {
+        declaration + 1 for _, declaration in copy_facades.values()
+    }
     evidence: list[_DispatchEvidence] = []
     proven_destination_indices: set[int] = set()
     proven_call_indices: set[int] = set()
@@ -6957,9 +7345,16 @@ def _proven_output_transfers(
         source_roots = {provenance[source[0]][2]}
         if is_member:
             receiver = tokens[method_index - 2].value
-            if _receiver_kind(
+            exact_facade = copy_facades.get(receiver)
+            receiver_is_queue = _receiver_kind(
                 tokens, function, receiver, method_index, forward
-            ) != "queue" or not _queue_call_is_covered_by_wait(
+            ) == "queue"
+            receiver_is_facade = bool(
+                exact_facade is not None
+                and exact_facade[0] in source_roots
+                and exact_facade[1] < method_index
+            )
+            if not (receiver_is_queue or receiver_is_facade) or not _queue_call_is_covered_by_wait(
                 tokens,
                 function,
                 method_index,
@@ -6967,6 +7362,7 @@ def _proven_output_transfers(
                 regions,
                 lambda_ranges,
                 forward,
+                allow_exact_nonqueue_receiver=receiver_is_facade,
             ):
                 continue
         elif any(provenance[root][0] != "shared" for root in source_roots):
@@ -7006,6 +7402,11 @@ def _proven_output_transfers(
                 # An earlier proven copyback reads its staging source and is
                 # awaited; it cannot invalidate later reads from that source.
                 if index in proven_call_indices:
+                    continue
+                # The exact facade constructor only binds a queue and inspects
+                # the workspace's SYCL allocation kind. Its complete token
+                # contract is checked before its index can enter this set.
+                if index in copy_facade_constructors:
                     continue
                 if (
                     tokens[index].value in source_roots
@@ -7122,7 +7523,10 @@ def _proven_output_transfers(
         ]
         if not producers:
             continue
-        kind = "awaited queue memcpy" if is_member else "shared-USM std::memcpy"
+        if is_member and tokens[method_index - 2].value in copy_facades:
+            kind = "exact shared/device publication facade"
+        else:
+            kind = "awaited queue memcpy" if is_member else "shared-USM std::memcpy"
         roots = ", ".join(sorted(source_roots))
         evidence.append(
             _DispatchEvidence(
@@ -9165,6 +9569,12 @@ class _PathAuditor:
             lambda_ranges,
             regions,
             not self.by_name.get("memset"),
+        )
+        safe_initializer_calls.update(
+            declaration + 1
+            for _, declaration in _exact_published_copy_queue_facades(
+                self.tokens, function, caller_provenance, self.forward
+            ).values()
         )
         for method_index in range(function.body_open + 1, function.body_close):
             if self.tokens[method_index].value != "memset" or _is_inside(

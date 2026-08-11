@@ -317,6 +317,26 @@ unsafe fn release_executor(state: &mut GpuAccelState, query_context_reset: bool)
     }
 }
 
+/// Release an executor while a PostgreSQL ERROR is caught at our callback
+/// boundary. The query context is still live at this point, so raster's
+/// post-context-reset preparation must not run; the eventual registered
+/// callback observes the cleared owner and becomes an idempotent no-op.
+unsafe fn release_executor_after_caught_error(state: &mut GpuAccelState) {
+    #[cfg(any(test, feature = "pg_test"))]
+    if !state.executor.is_null() {
+        record_executor_release(true);
+    }
+    // SAFETY: the executor and its callbacks are one installed ownership
+    // record. PostgreSQL has not deleted query-context children yet.
+    unsafe {
+        drop_installed_executor(
+            &mut state.executor,
+            &mut state.executor_drop,
+            &mut state.executor_prepare_reset,
+        );
+    }
+}
+
 unsafe extern "C-unwind" fn executor_query_context_reset(arg: *mut c_void) {
     if arg.is_null() {
         return;
@@ -927,27 +947,41 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         pgrx::error!("pg_accel: resident Custom Scan has no executor");
     }
 
-    // SAFETY: strategy and executor were installed together in Begin.
-    unsafe {
-        let strategy = GpuStrategy::decode((*state).accel.strategy);
-        let dyn_state: &mut dyn crate::engine::executor::ExecutorState = match strategy {
-            GpuStrategy::Agg => &mut *executor.cast::<AggExecState>(),
-            GpuStrategy::Raster => &mut *executor.cast::<RasterExecState>(),
-            _ => pgrx::error!("pg_accel: retired {strategy:?} strategy reached resident executor"),
-        };
-        let slot = dyn_state.exec(node);
-        (*state).accel.rows_dispatched = dyn_state.rows_dispatched();
-        (*state).accel.batches_executed = dyn_state.batches_executed();
-        (*state).accel.dispatch_time_us = dyn_state.dispatch_time_us();
-        dsm::record_parallel_agg_counters_once(
-            state,
-            strategy,
-            dyn_state.rows_dispatched(),
-            dyn_state.batches_executed(),
-            dyn_state.dispatch_time_us(),
-        );
-        slot
-    }
+    pg_sys::PgTryBuilder::new(std::panic::AssertUnwindSafe(|| {
+        // SAFETY: strategy and executor were installed together in Begin.
+        unsafe {
+            let strategy = GpuStrategy::decode((*state).accel.strategy);
+            let dyn_state: &mut dyn crate::engine::executor::ExecutorState = match strategy {
+                GpuStrategy::Agg => &mut *executor.cast::<AggExecState>(),
+                GpuStrategy::Raster => &mut *executor.cast::<RasterExecState>(),
+                _ => {
+                    pgrx::error!(
+                        "pg_accel: retired {strategy:?} strategy reached resident executor"
+                    )
+                }
+            };
+            let slot = dyn_state.exec(node);
+            (*state).accel.rows_dispatched = dyn_state.rows_dispatched();
+            (*state).accel.batches_executed = dyn_state.batches_executed();
+            (*state).accel.dispatch_time_us = dyn_state.dispatch_time_us();
+            dsm::record_parallel_agg_counters_once(
+                state,
+                strategy,
+                dyn_state.rows_dispatched(),
+                dyn_state.batches_executed(),
+                dyn_state.dispatch_time_us(),
+            );
+            slot
+        }
+    }))
+    .catch_others(|caught| {
+        // SAFETY: this callback owns the live state and catches the error before
+        // PostgreSQL resets its query context. Clear Rust ownership exactly once
+        // before preserving the original SQLSTATE and message.
+        unsafe { release_executor_after_caught_error(&mut (*state).accel) };
+        caught.rethrow()
+    })
+    .execute()
 }
 
 /// Release one concrete resident executor.

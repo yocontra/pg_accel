@@ -377,13 +377,18 @@ mod tests {
         crate::gpu::reset_gpu_exec_count();
         assert_eq!(count(&query), 2);
         crate::gpu::assert_gpu_executed(1);
+        Spi::run("SET pg_accel.test_inject_spatial_kernel_failure = on")
+            .expect("failure injection should enable");
+        Spi::run(
+            "SELECT pg_accel_unpin('_spatial_forced_failure'::regclass); \
+             SELECT pg_accel_evict('_spatial_forced_failure'::regclass); \
+             SELECT pg_accel_pin('_spatial_forced_failure'::regclass, ARRAY['geom'])",
+        )
+        .expect("failure probe must retain raw residency but rebuild the spatial artifact");
         let live_before_failure = Spi::get_one::<i64>("SELECT pg_accel_resident_live_bytes()")
             .expect("resident ledger should be readable")
             .expect("resident ledger should not be NULL");
         let cleanup_before = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
-
-        Spi::run("SET pg_accel.test_inject_spatial_kernel_failure = on")
-            .expect("failure injection should enable");
         crate::gpu::reset_gpu_exec_count();
         let result = PgTryBuilder::new(|| {
             Ok::<_, String>(
@@ -438,18 +443,30 @@ mod tests {
             "the same accelerated query must succeed after failure cleanup"
         );
         crate::gpu::assert_gpu_executed(1);
+        let live_after_reuse = Spi::get_one::<i64>("SELECT pg_accel_resident_live_bytes()")
+            .expect("resident ledger should remain readable after reuse")
+            .expect("resident ledger should not be NULL");
+        assert!(
+            live_after_reuse > live_before_failure,
+            "successful backend reuse must publish the rebuilt spatial artifact"
+        );
+        assert_eq!(
+            count(&query),
+            2,
+            "the rebuilt artifact must remain reusable"
+        );
         assert_eq!(
             Spi::get_one::<i64>("SELECT pg_accel_resident_live_bytes()")
-                .expect("resident ledger should remain readable after reuse")
+                .expect("resident ledger should remain readable after artifact hit")
                 .expect("resident ledger should not be NULL"),
-            live_before_failure,
-            "successful backend reuse must retain only the warmed artifact charge"
+            live_after_reuse,
+            "an artifact hit must not add another resident ledger charge"
         );
         let cleanup_after_reuse = crate::engine::ffi::custom_scan::test_executor_cleanup_counts();
-        assert_eq!(cleanup_after_reuse.installed, cleanup_before.installed + 2);
+        assert_eq!(cleanup_after_reuse.installed, cleanup_before.installed + 3);
         assert_eq!(
             cleanup_after_reuse.normal_end,
-            cleanup_before.normal_end + 1
+            cleanup_before.normal_end + 2
         );
         assert_eq!(
             cleanup_after_reuse.query_reset,

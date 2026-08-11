@@ -18,10 +18,11 @@ assert SPEC is not None and SPEC.loader is not None
 ANALYZER = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = ANALYZER
 SPEC.loader.exec_module(ANALYZER)
+RUNNER = SCRIPT.parent / "run_native_parity_p0.sh"
 
 
 def samples(value: float) -> list[float]:
-    return [value] * 10
+    return [value] * ANALYZER.EXPECTED_ITERATIONS
 
 
 def native_row(*, accel: float = 10.0, parallel: float = 10.0) -> dict[str, object]:
@@ -45,12 +46,51 @@ def native_row(*, accel: float = 10.0, parallel: float = 10.0) -> dict[str, obje
             for stage in ANALYZER.PLANNER_STAGE_NAMES
         ]
 
+    def substage_vector(*, calls: int) -> list[dict[str, object]]:
+        return [
+            {
+                "substage": substage,
+                "calls": calls,
+                "elapsed_us": calls * 2,
+            }
+            for substage in ANALYZER.PLANNER_SUBSTAGE_NAMES
+        ]
+
+    iterations = [
+        sample(index < ANALYZER.EXPECTED_ITERATIONS // 2)
+        for index in range(ANALYZER.EXPECTED_ITERATIONS)
+    ]
+    raw_captures = []
+    for index, iteration in enumerate(iterations):
+        accel_first = iteration["accel_first"]
+        raw_captures.append(
+            {
+                "pair_index": index,
+                "accel_first": accel_first,
+                "sequence": (
+                    ["accel", "disabled_postgresql", "disabled_postgresql", "accel"]
+                    if accel_first
+                    else [
+                        "disabled_postgresql",
+                        "accel",
+                        "accel",
+                        "disabled_postgresql",
+                    ]
+                ),
+                "accel_ms": [accel, accel],
+                "parallel_ms": [parallel, parallel],
+                "accel_average_ms": accel,
+                "parallel_average_ms": parallel,
+            }
+        )
+
     return {
         "plan_selected": False,
         "planner_declined": True,
         "gpu_kernel_dispatched": False,
         "gpu_kernel_execution_delta": 0,
-        "iterations": [sample(index < 5) for index in range(10)],
+        "iterations": iterations,
+        "native_parity_pair_captures": raw_captures,
         "warmup_iterations": [sample(index % 2 == 0) for index in range(5)],
         "planner_stage_captures": [
             {
@@ -58,8 +98,10 @@ def native_row(*, accel: float = 10.0, parallel: float = 10.0) -> dict[str, obje
                 "cache_state": "warm",
                 "stages": stage_vector(calls=1),
                 "observer_probe": stage_vector(calls=0),
+                "substages": substage_vector(calls=1),
+                "substage_observer_probe": substage_vector(calls=0),
             }
-            for index in range(10)
+            for index in range(ANALYZER.EXPECTED_ITERATIONS)
         ],
     }
 
@@ -94,6 +136,21 @@ def audit(*, workload: str = "decline", rows: int = 1000) -> dict[str, object]:
     }
 
 
+class RunnerContractTests(unittest.TestCase):
+    def test_runner_requires_clean_head_tree_before_creating_evidence(self) -> None:
+        runner = RUNNER.read_text(encoding="utf-8")
+        self.assertIn("require_exact_candidate()", runner)
+        self.assertIn(
+            "status --porcelain=v1 --untracked-files=all --ignore-submodules=none",
+            runner,
+        )
+        self.assertIn("printf 'git_head_tree=%s", runner)
+        self.assertLess(
+            runner.index("require_exact_candidate\n"),
+            runner.index('mkdir -p "$artifact_root/cells"'),
+        )
+
+
 class BoundTests(unittest.TestCase):
     def test_submillisecond_median_uses_absolute_allowance(self) -> None:
         result = ANALYZER.evaluate_native_parity(samples(1.24), samples(1.0))
@@ -101,8 +158,35 @@ class BoundTests(unittest.TestCase):
         self.assertTrue(result["median"]["bounds_pass"])
         self.assertTrue(result["non_inferiority"]["pass"])
         self.assertFalse(result["parity_pass"])
-        self.assertEqual(result["non_inferiority"]["permutation_count"], 1024)
-        self.assertAlmostEqual(result["non_inferiority"]["p_value"], 1 / 1024)
+        self.assertEqual(
+            result["non_inferiority"]["permutation_count"],
+            1 << ANALYZER.EXPECTED_ITERATIONS,
+        )
+        self.assertEqual(
+            result["non_inferiority"]["enumeration_strategy"],
+            "meet_in_the_middle_exact_count",
+        )
+        self.assertAlmostEqual(
+            result["non_inferiority"]["p_value"],
+            1 / (1 << ANALYZER.EXPECTED_ITERATIONS),
+        )
+
+    def test_direct_and_meet_in_the_middle_are_both_exact(self) -> None:
+        direct = ANALYZER.exact_paired_sign_flip_non_inferiority(
+            [9.0] * 20, [10.0] * 20, 0.25
+        )
+        meet_in_middle = ANALYZER.exact_paired_sign_flip_non_inferiority(
+            [9.0] * 30, [10.0] * 30, 0.25
+        )
+        self.assertEqual(direct["enumeration_strategy"], "direct_exact_enumeration")
+        self.assertEqual(direct["lower_tail_count"], 1)
+        self.assertEqual(direct["permutation_count"], 1 << 20)
+        self.assertEqual(
+            meet_in_middle["enumeration_strategy"],
+            "meet_in_the_middle_exact_count",
+        )
+        self.assertEqual(meet_in_middle["lower_tail_count"], 1)
+        self.assertEqual(meet_in_middle["permutation_count"], 1 << 30)
 
     def test_large_median_uses_two_percent_allowance(self) -> None:
         result = ANALYZER.evaluate_native_parity(samples(102.0), samples(100.0))
@@ -143,9 +227,23 @@ class ArmTests(unittest.TestCase):
 class PlannerStageTests(unittest.TestCase):
     def test_valid_capture_is_aggregated_by_stage(self) -> None:
         attribution = ANALYZER.extract_planner_stage_attribution(native_row(), "fixture")
-        self.assertEqual(attribution["measured_pair_count"], 10)
+        self.assertEqual(
+            attribution["measured_pair_count"], ANALYZER.EXPECTED_ITERATIONS
+        )
         self.assertEqual(len(attribution["stages"]), 7)
-        self.assertTrue(all(stage["calls"] == 10 for stage in attribution["stages"]))
+        self.assertTrue(
+            all(
+                stage["calls"] == ANALYZER.EXPECTED_ITERATIONS
+                for stage in attribution["stages"]
+            )
+        )
+        self.assertEqual(len(attribution["substages"]), 5)
+        self.assertTrue(
+            all(
+                substage["calls"] == ANALYZER.EXPECTED_ITERATIONS
+                for substage in attribution["substages"]
+            )
+        )
 
     def test_missing_or_duplicate_stage_evidence_is_rejected(self) -> None:
         row = native_row()
@@ -162,6 +260,17 @@ class PlannerStageTests(unittest.TestCase):
     def test_observer_probe_must_remain_zero(self) -> None:
         row = native_row()
         row["planner_stage_captures"][0]["observer_probe"][0]["calls"] = 1  # type: ignore[index]
+        with self.assertRaises(ANALYZER.AnalysisError):
+            ANALYZER.extract_planner_stage_attribution(row, "fixture")
+
+        row = native_row()
+        row["planner_stage_captures"][0]["substage_observer_probe"][0]["calls"] = 1  # type: ignore[index]
+        with self.assertRaises(ANALYZER.AnalysisError):
+            ANALYZER.extract_planner_stage_attribution(row, "fixture")
+
+    def test_missing_substage_evidence_is_rejected(self) -> None:
+        row = native_row()
+        del row["planner_stage_captures"][0]["substages"][-1]  # type: ignore[index]
         with self.assertRaises(ANALYZER.AnalysisError):
             ANALYZER.extract_planner_stage_attribution(row, "fixture")
 
@@ -327,7 +436,19 @@ class AuditBindingTests(unittest.TestCase):
                 }
             )
             (cell / "report.json").write_text(
-                json.dumps({"crashes": [], "workloads": [row]}), encoding="utf-8"
+                json.dumps(
+                    {
+                        "crashes": [],
+                        "methodology": {
+                            "iterations": ANALYZER.EXPECTED_ITERATIONS,
+                            "warmup": ANALYZER.EXPECTED_WARMUPS,
+                            "native_parity_pairing": True,
+                            "native_parity_repetitions_per_arm": 2,
+                        },
+                        "workloads": [row],
+                    }
+                ),
+                encoding="utf-8",
             )
             (cell / "no_dispatch_audit.json").write_text(
                 json.dumps(audit()), encoding="utf-8"

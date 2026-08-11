@@ -63,7 +63,8 @@ class GucParityTests(unittest.TestCase):
 
     def test_source_inventory_is_complete_and_excludes_test_gucs(self) -> None:
         self.assertEqual(self.source_errors, [])
-        self.assertEqual(len(self.specs), 16)
+        self.assertEqual(len(self.specs), 17)
+        self.assertIn("pg_accel.execution_profiling", self.specs)
         self.assertFalse(any(name.startswith("pg_accel.test_") for name in self.specs))
 
     def test_missing_released_guc_fails(self) -> None:
@@ -181,6 +182,52 @@ class MacosPrerequisiteParityTests(unittest.TestCase):
             self.assertIn(unversioned, setup)
             self.assertLess(setup.index(versioned), setup.index(unversioned))
         self.assertIn("install Homebrew lld@20 or set ACPP_LLD_PATH", setup)
+
+    def test_setup_forces_headers_matching_the_macos_sdk_runtime(self) -> None:
+        setup = (doc_parity.REPO_ROOT / "scripts/setup_acpp.sh").read_text()
+        self.assertIn('ACPP_MACOS_SDK_PATH="$(xcrun --show-sdk-path)"', setup)
+        self.assertIn(
+            '"-DCMAKE_CXX_FLAGS=-nostdinc++ -isystem '
+            '$ACPP_MACOS_SDK_PATH/usr/include/c++/v1"',
+            setup,
+        )
+        self.assertIn('"${ACPP_REQUIRED_CMAKE_ARGS[@]}"', setup)
+        self.assertLess(
+            setup.index('${ACPP_CMAKE_FLAGS:-} "${ACPP_REQUIRED_CMAKE_ARGS[@]}"'),
+            setup.index('cmake --build "$ACPP_BUILD_DIR"'),
+        )
+
+    def test_adaptivecpp_caches_include_local_patch_and_setup_inputs(self) -> None:
+        hash_expression = (
+            "${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', "
+            "'scripts/setup_acpp.sh') }}"
+        )
+        workflow_names = ("ci.yml", "release.yml")
+        cache_key_count = 0
+        for workflow_name in workflow_names:
+            workflow = (
+                doc_parity.REPO_ROOT / ".github/workflows" / workflow_name
+            ).read_text()
+            for line in workflow.splitlines():
+                if "key:" in line and "acpp-" in line:
+                    cache_key_count += 1
+                    self.assertIn(hash_expression, line, line)
+        self.assertEqual(cache_key_count, 5)
+
+    def test_ci_schema_artifact_runs_and_uploads_only_after_success(self) -> None:
+        workflow = (
+            doc_parity.REPO_ROOT / ".github/workflows/ci.yml"
+        ).read_text()
+        self.assertIn(
+            "      - name: Generate package schema artifact\n"
+            "        if: steps.pg-support.outputs.skip != 'true' && success()",
+            workflow,
+        )
+        self.assertIn(
+            "      - name: Upload schema artifact\n"
+            "        if: always() && steps.schema.outcome == 'success'",
+            workflow,
+        )
 
 
 if __name__ == "__main__":

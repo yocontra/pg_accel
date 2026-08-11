@@ -43,6 +43,14 @@ extern "C" {
 
 #define PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE INT32_MIN
 
+/* Optional exact key transforms performed by the consuming aggregate kernel.
+ * H3_PARENT is valid only for one FACT INT64 HASH key. In that form `_pad0`
+ * carries the target parent resolution (0..15). Keeping the argument in the
+ * formerly reserved word preserves the frozen v1 struct size while flags make
+ * the interpretation explicit and fail-closed. */
+#define PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT (1u << 0)
+#define PGACCEL_GROUPED_AGG_KEY_FLAG_ALL_KNOWN PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
+
 /* Detailed device failures returned by grouped_agg_execute_ex. These refine
  * PGACCEL_ERROR only; other pgaccel_status values leave detail as NONE. */
 typedef enum {
@@ -91,6 +99,16 @@ typedef enum {
   PGACCEL_GROUPED_AGG_OUTPUT_COMPACT = 1,
 } pgaccel_grouped_agg_output_mode;
 
+/* Stable physical execution branches. This classification is produced by
+ * the same validated layout and predicates used by grouped_agg_execute_ex;
+ * callers must not infer a branch from the logical descriptor alone. */
+typedef enum {
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH = 1,
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT = 2,
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_INTEGER = 3,
+  PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC = 4,
+} pgaccel_grouped_agg_kernel_mode_kind;
+
 /* Dedicated accumulator-state kinds. NUMERIC and INTERVAL reserve their
  * Phase-9 state shapes now; implementations may return PGACCEL_UNSUPPORTED
  * until those kernels land without changing this layout. */
@@ -129,7 +147,10 @@ typedef enum {
  * only when the producer proves the key non-null.
  * Dimension maps encode a nullable group attribute with the same null_code.
  * Keys compose in array order, key 0 most significant. Hash grouping ignores
- * code_min/cardinality but still groups NULL values together. */
+ * code_min/cardinality but still groups NULL values together. When
+ * KEY_FLAG_H3_PARENT is set, values is the raw h3index lane and `_pad0` is the
+ * exact target parent resolution; validation, transform, grouping, and output
+ * materialization all happen in the hash aggregate pipeline. */
 typedef struct {
   pgaccel_expr_usm_col values;
   const int32_t* lookup_by_key;
@@ -333,17 +354,35 @@ typedef struct {
   uint64_t uncertain_count;
 } pgaccel_grouped_agg_out;
 
-pgaccel_status pgaccel_grouped_agg_workspace_requirements(
-    const pgaccel_grouped_agg_desc* desc, pgaccel_grouped_agg_workspace_req* out);
+pgaccel_status pgaccel_grouped_agg_workspace_requirements(const pgaccel_grouped_agg_desc* desc,
+                                                          pgaccel_grouped_agg_workspace_req* out);
+
+/* Return the exact physical branch that execute_ex would submit for this
+ * descriptor transition. This is a validation-only metadata query: it does
+ * not initialize a device, allocate, submit, or mutate descriptor state. */
+pgaccel_status pgaccel_grouped_agg_kernel_mode(const pgaccel_grouped_agg_desc* desc,
+                                               int32_t* out_mode);
 
 /* Allocate/free a zero-initialized aligned workspace in the same AdaptiveCpp context used by
  * grouped aggregation. `space` accepts SHARED_USM or DEVICE, never HOST.
  * `alignment` must be a nonzero power of two. A zero-byte request succeeds
  * with `*out == NULL`; every nonzero successful result satisfies the requested
  * alignment and is released exactly once with the matching free function. */
-pgaccel_status pgaccel_grouped_agg_workspace_alloc(size_t bytes, size_t alignment,
-                                                    int32_t space, void** out);
+pgaccel_status pgaccel_grouped_agg_workspace_alloc(size_t bytes, size_t alignment, int32_t space,
+                                                   void** out);
 void pgaccel_grouped_agg_workspace_free(void* ptr);
+
+/* Per-thread grouped lifecycle telemetry. A transition launch is one
+ * synchronous RESET/ACCUMULATE/FINALIZE call, not each internal SYCL kernel.
+ * Output bytes are the device-published logical copy spans, including result
+ * metadata. Wait count/time includes every grouped queue/event wait. */
+uint64_t pgaccel_grouped_agg_transition_launch_count(void);
+uint64_t pgaccel_grouped_agg_queue_wait_count(void);
+uint64_t pgaccel_grouped_agg_queue_wait_ns(void);
+uint64_t pgaccel_grouped_agg_output_bytes(void);
+uint64_t pgaccel_grouped_agg_shared_copy_calls(void);
+uint64_t pgaccel_grouped_agg_device_copy_calls(void);
+void pgaccel_reset_grouped_agg_telemetry(void);
 
 /* Invalid descriptors, runtime codes/masks, overflow, or device execution
  * errors return ERROR and never partial success. The additive _ex entry point
@@ -367,20 +406,15 @@ PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, null_code) == 44, "key.null_co
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, flags) == 48, "key.flags");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key, _pad0) == 52, "key._pad0");
 
-PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure_col) == 32,
-                "grouped_agg_measure_col size");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, values) == 0,
-                "measure_col.values");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, nulls) == 8,
-                "measure_col.nulls");
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure_col) == 32, "grouped_agg_measure_col size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, values) == 0, "measure_col.values");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, nulls) == 8, "measure_col.nulls");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, physical_type) == 16,
                 "measure_col.physical_type");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, element_bytes) == 20,
                 "measure_col.element_bytes");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, scale) == 24,
-                "measure_col.scale");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, flags) == 28,
-                "measure_col.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, scale) == 24, "measure_col.scale");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_col, flags) == 28, "measure_col.flags");
 
 PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure) == 88, "grouped_agg_measure size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, value) == 0, "measure.value");
@@ -389,34 +423,28 @@ PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, op) == 64, "measure.op");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, agg_mask) == 68, "measure.mask");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, accumulator_kind) == 72,
                 "measure.accumulator_kind");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, state_bytes) == 76,
-                "measure.state_bytes");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, state_bytes) == 76, "measure.state_bytes");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, flags) == 80, "measure.flags");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure, _pad0) == 84, "measure._pad0");
 
 PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_filter) == 176, "grouped_agg_filter size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, kind) == 0, "filter.kind");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_source) == 4,
-                "filter.source");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_measure_slot) == 8,
-                "filter.slot");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_source) == 4, "filter.source");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_measure_slot) == 8, "filter.slot");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_range_count) == 12,
                 "filter.range_count");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_lo) == 16, "filter.lo");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, predicate_hi) == 80, "filter.hi");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, value_cmp_opcode) == 144,
-                "filter.opcode");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, value_cmp_opcode) == 144, "filter.opcode");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, _pad0) == 146, "filter._pad0");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, flags) == 148, "filter.flags");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, value_cmp_const) == 152,
-                "filter.constant");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, value_cmp_const) == 152, "filter.constant");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_filter, mask) == 168, "filter.mask");
 
 PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_dim) == 56, "grouped_agg_dim size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, fact_key) == 0, "dim.fact_key");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, match_by_key) == 24, "dim.match");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, multiplicity_by_key) == 32,
-                "dim.multiplicity");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, multiplicity_by_key) == 32, "dim.multiplicity");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, key_min) == 40, "dim.key_min");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, key_count) == 44, "dim.key_count");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_dim, flags) == 48, "dim.flags");
@@ -426,73 +454,52 @@ PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_desc) == 1712, "grouped_agg_desc size
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, abi_version) == 0, "desc.version");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, size_bytes) == 4, "desc.size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, row_count) == 8, "desc.rows");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, grouping_mode) == 16,
-                "desc.grouping_mode");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, output_mode) == 20,
-                "desc.output_mode");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, grouping_mode) == 16, "desc.grouping_mode");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, output_mode) == 20, "desc.output_mode");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, key_count) == 24, "desc.key_count");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, _pad0) == 28, "desc._pad0");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, group_capacity) == 32,
-                "desc.group_capacity");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, group_capacity) == 32, "desc.group_capacity");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, keys) == 40, "desc.keys");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measure_count) == 208,
-                "desc.measure_count");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, execution_flags) == 212,
-                "desc.execution_flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measure_count) == 208, "desc.measure_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, execution_flags) == 212, "desc.execution_flags");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, flags) == 216, "desc.flags");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, _pad1) == 220, "desc._pad1");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measures) == 224, "desc.measures");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, where_filter) == 576,
-                "desc.where_filter");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measure_filters) == 752,
-                "desc.measure_filters");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, dim_count) == 1456,
-                "desc.dim_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, where_filter) == 576, "desc.where_filter");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, measure_filters) == 752, "desc.measure_filters");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, dim_count) == 1456, "desc.dim_count");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, _pad2) == 1460, "desc._pad2");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, dims) == 1464, "desc.dims");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch) == 1688, "desc.scratch");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_bytes) == 1696,
-                "desc.scratch_bytes");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_space) == 1704,
-                "desc.scratch_space");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_bytes) == 1696, "desc.scratch_bytes");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_space) == 1704, "desc.scratch_space");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_desc, scratch_alignment) == 1708,
                 "desc.scratch_alignment");
 
-PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_workspace_req) == 32,
-                "grouped_agg_workspace_req size");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, abi_version) == 0,
-                "workspace.version");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, size_bytes) == 4,
-                "workspace.size");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, bytes) == 8,
-                "workspace.bytes");
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_workspace_req) == 32, "grouped_agg_workspace_req size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, abi_version) == 0, "workspace.version");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, size_bytes) == 4, "workspace.size");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, bytes) == 8, "workspace.bytes");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, alignment) == 16,
                 "workspace.alignment");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, space) == 24,
-                "workspace.space");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, flags) == 28,
-                "workspace.flags");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, space) == 24, "workspace.space");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_workspace_req, flags) == 28, "workspace.flags");
 
-PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure_out) == 72,
-                "grouped_agg_measure_out size");
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_measure_out) == 72, "grouped_agg_measure_out size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, sum) == 0, "measure_out.sum");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, min) == 8, "measure_out.min");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, max) == 16, "measure_out.max");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, sumsq) == 24,
-                "measure_out.sumsq");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, count) == 32,
-                "measure_out.count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, sumsq) == 24, "measure_out.sumsq");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, count) == 32, "measure_out.count");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, nonnull_count) == 40,
                 "measure_out.nonnull_count");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, rhs_sum) == 48,
-                "measure_out.rhs_sum");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, rhs_sum) == 48, "measure_out.rhs_sum");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, rhs_count) == 56,
                 "measure_out.rhs_count");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_measure_out, rhs_nonnull_count) == 64,
                 "measure_out.rhs_nonnull_count");
 
-PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_key_out) == 24,
-                "grouped_agg_key_out size");
+PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_key_out) == 24, "grouped_agg_key_out size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key_out, values) == 0, "key_out.values");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key_out, nulls) == 8, "key_out.nulls");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key_out, type) == 16, "key_out.type");
@@ -501,23 +508,17 @@ PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_key_out, flags) == 20, "key_out.fla
 PGACCEL_ABI_PIN(sizeof(pgaccel_grouped_agg_out) == 424, "grouped_agg_out size");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, abi_version) == 0, "out.version");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, size_bytes) == 4, "out.size");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, group_capacity) == 8,
-                "out.group_capacity");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, output_space) == 16,
-                "out.output_space");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, group_capacity) == 8, "out.group_capacity");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, output_space) == 16, "out.output_space");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, flags) == 20, "out.flags");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, group_codes) == 24,
-                "out.group_codes");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, active_groups) == 32,
-                "out.active_groups");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, group_codes) == 24, "out.group_codes");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, active_groups) == 32, "out.active_groups");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, keys) == 40, "out.keys");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, measures) == 112, "out.measures");
 PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, emitted_group_count) == 400,
                 "out.emitted_group_count");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, selected_count) == 408,
-                "out.selected_count");
-PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, uncertain_count) == 416,
-                "out.uncertain_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, selected_count) == 408, "out.selected_count");
+PGACCEL_ABI_PIN(offsetof(pgaccel_grouped_agg_out, uncertain_count) == 416, "out.uncertain_count");
 
 #ifdef __cplusplus
 }

@@ -18,6 +18,9 @@ const RESUME_SOURCE_JSON: &str = "resume_source.json";
 const RESUME_AUDIT_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// Keep these independent switches flat: retry validation mirrors the persisted
+// pre-risk artifact schema field-for-field so old evidence remains readable.
+#[allow(clippy::struct_excessive_bools)]
 pub struct RetryConfig {
     pub seed: u64,
     pub iterations: usize,
@@ -27,6 +30,7 @@ pub struct RetryConfig {
     pub realistic_gucs: bool,
     pub skip_guc_verify: bool,
     pub capture_plans: bool,
+    pub native_parity_pairing: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -85,6 +89,8 @@ struct ResumeArtifactInventory {
 }
 
 #[derive(Deserialize)]
+// This is an on-disk compatibility schema, not an in-memory state machine.
+#[allow(clippy::struct_excessive_bools)]
 struct SavedPreRiskContext {
     workload: String,
     rows: usize,
@@ -96,6 +102,8 @@ struct SavedPreRiskContext {
     realistic_gucs: bool,
     skip_guc_verify: bool,
     capture_plans: bool,
+    #[serde(default)]
+    native_parity_pairing: bool,
     accel_query_sql: String,
     baseline_query_sql: String,
 }
@@ -109,6 +117,8 @@ struct ResumeSourceArtifact<'a> {
 }
 
 #[derive(Serialize)]
+// Preserve the flat public artifact schema used by resume audits.
+#[allow(clippy::struct_excessive_bools)]
 struct RetryConfigArtifact {
     seed: u64,
     iterations: usize,
@@ -118,6 +128,7 @@ struct RetryConfigArtifact {
     realistic_gucs: bool,
     skip_guc_verify: bool,
     capture_plans: bool,
+    native_parity_pairing: bool,
 }
 
 impl RetryConfig {
@@ -462,6 +473,7 @@ fn retry_config_from_context(
         realistic_gucs: context.realistic_gucs,
         skip_guc_verify: context.skip_guc_verify,
         capture_plans: context.capture_plans,
+        native_parity_pairing: context.native_parity_pairing,
     })
 }
 
@@ -565,6 +577,7 @@ impl From<&RetryConfig> for RetryConfigArtifact {
             realistic_gucs: value.realistic_gucs,
             skip_guc_verify: value.skip_guc_verify,
             capture_plans: value.capture_plans,
+            native_parity_pairing: value.native_parity_pairing,
         }
     }
 }
@@ -785,6 +798,7 @@ mod tests {
                 realistic_gucs: true,
                 skip_guc_verify: true,
                 capture_plans: true,
+                native_parity_pairing: false,
             })
         );
         assert_eq!(plan.manifest_summary.crash, 4);
@@ -813,6 +827,7 @@ mod tests {
             realistic_gucs: false,
             skip_guc_verify: false,
             capture_plans: true,
+            native_parity_pairing: false,
         });
 
         let output = TestDir::new("output");

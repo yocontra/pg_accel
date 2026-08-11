@@ -207,6 +207,9 @@ resident, normally through `pg_accel_pin`.
 | `pg_accel_refresh(regclass)` | loaded row count | Reload the pinned columns, or the columns already resident for an unpinned relation. |
 | `pg_accel_evict(regclass)` | boolean | Remove this backend's resident entry. |
 | `pg_accel_resident_status()` | set of rows | Show relation OID, attribute numbers, raw/derived bytes, pin state, generation, timestamps, and load time. |
+| `pg_accel_resident_representation_status()` | set of rows | Show source, encoded, retained-exact, transient, construction-peak, and lossless compact-representation byte projections for each loaded relation. |
+| `pg_accel_resident_ingestion_status()` | set of rows | Show table-AM scan batches, preflight/scan/encode/copy timing, total load time, and the publication strategy. |
+| `pg_accel_resident_representation_decisions()` | set of rows | Show which compact encodings and ingestion changes were evaluated and why they remain enabled or deferred. |
 | `pg_accel_resident_live_bytes()` | bigint | Show the exact cluster-wide resident byte ledger at that instant. |
 
 The SQL wrappers and status tuple are defined at
@@ -233,6 +236,7 @@ settings are intentionally excluded.
 | `pg_accel.assert_dispatch` | bool | `off` | user | - | Reserved no-op compatibility setting; it changes neither planning nor execution. |
 | `pg_accel.parallel_fused_count` | bool | `off` | superuser | - | Reserved no-op roadmap setting; the parallel fused-count shape remains native. |
 | `pg_accel.planner_profiling` | bool | `off` | user | - | Enables planner-hook monotonic-clock reads and elapsed-time counters; call and decline counters remain active while off. |
+| `pg_accel.execution_profiling` | bool | `off` | user | - | Enables descriptor-stage monotonic-clock reads for plan, artifact, binding, allocation, kernel, and tuple-materialization attribution. |
 | `pg_accel.otel_log_max_mb` | int | `256` | user | `1..65536` | Per-file trace cap in MiB, sampled at trace initialization. A valid `PG_ACCEL_TRACE_FILE_MAX_BYTES` environment value takes precedence. |
 | `pg_accel.otel_log_max_rotations` | int | `4` | user | `0..32` | Retained rotated trace files, sampled at trace initialization; `0` discards rotated copies. |
 | `pg_accel.fp64_enabled` | bool | `on` | user | - | Deprecated no-op compatibility flag; it does not disable fp64 planning or execution. |
@@ -251,6 +255,9 @@ most counters and residency entries are backend-local:
 SELECT * FROM pg_accel_device_info();
 SELECT * FROM pg_accel_device_limits() ORDER BY name;
 SELECT * FROM pg_accel_resident_status();
+SELECT * FROM pg_accel_resident_representation_status();
+SELECT * FROM pg_accel_resident_ingestion_status();
+SELECT * FROM pg_accel_resident_representation_decisions();
 SELECT pg_accel_resident_live_bytes();
 
 SELECT * FROM pg_accel_stats();
@@ -259,6 +266,13 @@ SELECT pg_accel_kernel_executions();
 SELECT pg_accel_planner_overhead_us();
 SELECT pg_accel_planner_fast_decline_count();
 SELECT * FROM pg_accel_planner_stage_stats() ORDER BY stage;
+SELECT * FROM pg_accel_descriptor_stage_stats() ORDER BY stage;
+SELECT * FROM pg_accel_artifact_lifecycle_stats();
+SELECT pg_accel_last_artifact_policy();
+SELECT * FROM pg_accel_grouped_kernel_mode_stats() ORDER BY mode;
+SELECT * FROM pg_accel_grouped_workspace_pool_stats();
+SELECT * FROM pg_accel_grouped_output_pool_stats();
+SELECT * FROM pg_accel_grouped_runtime_stats();
 SELECT pg_accel_last_planner_rejection_reason();
 SELECT pg_accel_planner_rejection_count('no_gpu_resident_pipeline');
 ```
@@ -268,9 +282,37 @@ SELECT pg_accel_planner_rejection_count('no_gpu_resident_pipeline');
 `SET pg_accel.planner_profiling = on`. Planner-stage call and decline counters
 remain available while profiling is off.
 
+`pg_accel_descriptor_stage_stats().elapsed_us` and its call counters collect
+only after `SET pg_accel.execution_profiling = on`; the disabled path performs
+no clock reads or atomic updates.
+
 `pg_accel_reset_stats()` resets the resettable per-backend counters and planner
 rejection state. The kernel-execution counter is monotonic and should be proved
 by a before/after delta; see `pg_accel/src/engine/stats.rs:487-525`.
+
+## Testing against PostgreSQL itself
+
+The extension test suite is supplemented by PostgreSQL's own regression and
+isolation schedules. Run the compatibility gate for one supported major with a
+new evidence directory:
+
+```bash
+just upstream-pg-tests 18 artifacts/upstream-postgresql-pg18
+```
+
+Or run every supported major:
+
+```bash
+just upstream-pg-tests-matrix artifacts/upstream-postgresql
+```
+
+Each gate builds the configured official PostgreSQL source and runs both
+schedules twice: once pristine and once with the exact installed `pg_accel`
+module preloaded into every temporary-server backend. Any test diff, crash,
+hang, or nonzero exit fails the command. The evidence bundle retains command
+logs, server logs, expected/actual diffs and results, PostgreSQL tarball and
+configure identity, source and module hashes, Git status/diff, and a complete
+`SHA256SUMS` seal. CI runs this gate independently for PostgreSQL 18 and 19.
 
 ## Benchmarks
 

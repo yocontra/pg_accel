@@ -18,6 +18,8 @@ pub struct ShapeCost {
     pub spatial_filter: PgCost,
     pub spatial_recheck_reserve: PgCost,
     pub aggregate: PgCost,
+    /// Launch overhead beyond the one base dispatch charged by path costing.
+    pub additional_aggregate_launches: PgCost,
     pub output_materialization: PgCost,
     pub amortized_auto_load: PgCost,
     pub total: PgCost,
@@ -39,6 +41,11 @@ impl ShapeCost {
         self.recompute_total();
     }
 
+    pub(crate) fn replace_additional_aggregate_launches(&mut self, launches: PgCost) {
+        self.additional_aggregate_launches = launches;
+        self.recompute_total();
+    }
+
     fn recompute_total(&mut self) {
         self.total = PgCost::new(
             self.fact_scan.get()
@@ -47,6 +54,7 @@ impl ShapeCost {
                 + self.spatial_filter.get()
                 + self.spatial_recheck_reserve.get()
                 + self.aggregate.get()
+                + self.additional_aggregate_launches.get()
                 + self.output_materialization.get()
                 + self.amortized_auto_load.get(),
         );
@@ -165,8 +173,8 @@ pub fn dense_atomic_fact_row_floor(spec: &AggQuerySpec, model: &TypedCostModel) 
     }
 }
 
-/// Whether this descriptor has the dense integer SUM/COUNT lifecycle whose
-/// fast path is bounded by `gpu_grouped_agg_one_shot_max_rows`.
+/// Whether this descriptor has the dense integer SUM/COUNT lifecycle that may
+/// execute as one shot or as bounded accumulate calls plus finalize.
 ///
 /// This deliberately excludes count-only and H3 descriptors: their measured
 /// large-row paths use different execution strategies.
@@ -179,15 +187,15 @@ pub fn dense_atomic_sum_count_lifecycle(
         && dense_atomic_sum_count_per_row_cost(spec, true, model).is_some()
 }
 
-/// Return operation-count aggregate cost only when exact resident evidence
-/// proves that the runtime will take the dense atomic one-shot branch.
+/// Return operation-count aggregate cost when exact resident evidence proves
+/// the dense integer SUM/COUNT lifecycle. Launch overhead is accounted as a
+/// separate named cost component by the caller.
 pub fn dense_atomic_sum_count_cost(
     spec: &AggQuerySpec,
     resolution: &DescriptorResolution,
     estimated_fact_rows: u64,
     resident_fact_rows: Option<u64>,
     fact_columns_have_no_null_sidecars: Option<bool>,
-    one_shot_max_rows: Rows,
     model: &TypedCostModel,
 ) -> Option<PgCost> {
     let resident_fact_rows_u64 = resident_fact_rows?;
@@ -196,8 +204,7 @@ pub fn dense_atomic_sum_count_cost(
     }
     let resident_fact_rows = usize::try_from(resident_fact_rows_u64).ok()?;
     let exact_rows = Rows::new(resident_fact_rows);
-    if exact_rows > one_shot_max_rows
-        || exact_rows < dense_atomic_fact_row_floor(spec, model)
+    if exact_rows < dense_atomic_fact_row_floor(spec, model)
         || !dense_atomic_sum_count_lifecycle(spec, resolution, model)
     {
         return None;
@@ -215,10 +222,6 @@ pub enum ShapeCostGate {
     FactRowsBelowDeviceMinimum {
         estimated: Rows,
         required: Rows,
-    },
-    DenseOneShotRowsExceedDeviceMaximum {
-        fact_rows: Rows,
-        maximum: Rows,
     },
     H3RowsBelowDeviceMinimum {
         estimated: Rows,
@@ -311,6 +314,30 @@ fn h3_transform_chunks(fact_rows: u64, max_chunk_rows: Rows) -> u64 {
         .and_then(|rows| rows.checked_div(chunk_rows))
         .and_then(|chunks| chunks.checked_add(1))
         .unwrap_or(u64::MAX)
+}
+
+/// Number of synchronous native calls in the dense aggregate lifecycle.
+///
+/// A descriptor at or below the independently proved one-shot boundary uses
+/// one RESET|ACCUMULATE|FINALIZE call. A larger descriptor uses one ACCUMULATE
+/// call per bounded row chunk followed by one FINALIZE call. `None` is a
+/// fail-closed signal for a zero chunk limit or arithmetic overflow.
+pub fn dense_lifecycle_call_count(
+    fact_rows: u64,
+    one_shot_max_rows: Rows,
+    max_chunk_rows: Rows,
+) -> Option<u64> {
+    if fact_rows <= u64::try_from(one_shot_max_rows.get()).ok()? {
+        return Some(1);
+    }
+    let chunk_rows = u64::try_from(max_chunk_rows.get())
+        .ok()
+        .filter(|rows| *rows > 0)?;
+    fact_rows
+        .checked_sub(1)?
+        .checked_div(chunk_rows)?
+        .checked_add(1)?
+        .checked_add(1)
 }
 
 fn has_spatial_filter(spec: &AggQuerySpec) -> bool {
@@ -493,6 +520,7 @@ pub fn estimate_shape_cost(
         spatial_filter: PgCost::new(spatial_filter),
         spatial_recheck_reserve: PgCost::new(spatial_recheck_reserve),
         aggregate: PgCost::new(aggregate),
+        additional_aggregate_launches: PgCost::ZERO,
         output_materialization: PgCost::new(output_materialization),
         amortized_auto_load: PgCost::new(amortized_auto_load),
         total: PgCost::ZERO,

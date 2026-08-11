@@ -1087,6 +1087,36 @@ cpp_coverage || overall_status=1
 echo "=== SQL semantic assertion coverage ==="
 sql_coverage || overall_status=1
 
+echo "=== Risk-weighted lifecycle and unsafe-FFI coverage ==="
+if ! python3 scripts/risk_coverage_audit.py \
+    --repo-root "$repo_root" \
+    --rust-lcov "$artifact_dir/rust/raw-lcov.info" \
+    --cpp-lcov "$artifact_dir/cpp/raw-lcov.info" \
+    --minimum-unsafe-percent 90 \
+    --output "$artifact_dir/risk-coverage.json" \
+    > "$artifact_dir/risk-coverage.log" 2>&1; then
+    cat "$artifact_dir/risk-coverage.log" >&2
+    overall_status=1
+fi
+
+echo "=== Deterministic malformed-input fuzz contract ==="
+if ! python3 scripts/fuzz_contract_audit.py \
+    --repo-root "$repo_root" \
+    --output "$artifact_dir/fuzz-contracts.json" \
+    > "$artifact_dir/fuzz-contracts.log" 2>&1; then
+    cat "$artifact_dir/fuzz-contracts.log" >&2
+    overall_status=1
+fi
+
+echo "=== Historical crash-band structural contract ==="
+if ! python3 scripts/crash_band_audit.py \
+    --repo-root "$repo_root" \
+    --output "$artifact_dir/crash-bands.json" \
+    > "$artifact_dir/crash-bands.log" 2>&1; then
+    cat "$artifact_dir/crash-bands.log" >&2
+    overall_status=1
+fi
+
 if ! python3 scripts/coverage_tools.py aggregate --artifact-dir "$artifact_dir" \
     --repo-root "$repo_root"; then
     overall_status=1

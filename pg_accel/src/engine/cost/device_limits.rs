@@ -8,6 +8,15 @@ use super::platform::PlatformProfile;
 /// At this row count every accepted int4 term still fits an exact int64 SUM.
 pub(crate) const GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS: usize = 1_000_000;
 
+/// First row count at which the retired sort-based grouped-hash lane was
+/// observed to abort the backend.  The released resident descriptor kernel is
+/// a different implementation and has its own one-shot/chunk bounds above.
+pub(crate) const HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS: usize = 100_000;
+
+/// First build-side row count at which the retired row-returning hash-join
+/// lane entered its crash-prone sort/merge branch.
+pub(crate) const HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS: usize = 100_000;
+
 // ---------------------------------------------------------------------------
 // Dynamic device limits
 // ---------------------------------------------------------------------------
@@ -336,6 +345,13 @@ pub enum DeviceLimitsValidationError {
     InvalidPositiveFloat { field: &'static str, value: f64 },
     /// The software fp64 multiplier is non-finite or outside `[1, 64]`.
     InvalidSoftFp64Multiplier { value: f64 },
+    /// A configurable limit would expose a historically crash-prone retired
+    /// kernel branch.
+    HistoricalCrashBandExposed {
+        field: &'static str,
+        value: usize,
+        exclusive_upper_bound: usize,
+    },
 }
 
 impl fmt::Display for DeviceLimitsValidationError {
@@ -362,6 +378,14 @@ impl fmt::Display for DeviceLimitsValidationError {
             Self::InvalidSoftFp64Multiplier { value } => write!(
                 f,
                 "device limit soft_fp64_cost_multiplier must be finite and within [1, 64], got {value}"
+            ),
+            Self::HistoricalCrashBandExposed {
+                field,
+                value,
+                exclusive_upper_bound,
+            } => write!(
+                f,
+                "device limit {field}={value} exposes the historical crash band at {exclusive_upper_bound} rows"
             ),
         }
     }
@@ -404,7 +428,7 @@ impl DeviceLimits {
         // At 25K+ the kernel amortizes the overhead.
         let gpu_reduce_min_rows = cu_scale(25_000).clamp(5_000, 200_000);
         let gpu_hash_agg_min_rows = cu_scale(250_000).clamp(50_000, 2_000_000);
-        let gpu_hash_agg_unsafe_input_rows = 100_000;
+        let gpu_hash_agg_unsafe_input_rows = HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS;
 
         // H3 grouping stages exact/f32 coordinates, generated keys, validity,
         // and face/IJK state in one slab. Reserve at most 1/16th of a device
@@ -438,12 +462,16 @@ impl DeviceLimits {
             100_000
         };
 
-        // Max elements per reduce dispatch. All backends stage through device
-        // allocations, so chunk from the device allocation budget.
+        // Max elements per reduce / dense-session dispatch. All backends stage
+        // through device allocations, so chunk from the device allocation
+        // budget. One million rows is the independently bounded synchronous
+        // limit used by the dense one-shot path; matching it here reduces a
+        // 10M-row session to ten accumulate calls plus finalize without
+        // weakening the established cancellation boundary.
         let gpu_reduce_max_chunk = if mem > 0 {
-            (mem / 32 / 8).clamp(64_000, 256_000)
+            (mem / 32 / 8).clamp(64_000, 1_000_000)
         } else {
-            256_000
+            1_000_000
         };
 
         // The M2 Max baseline completes the resident atomic grouped sentinel
@@ -483,9 +511,12 @@ impl DeviceLimits {
         // 100K rows. Memory may lower the cap on tiny devices but never raises
         // it into the unsafe branch.
         let gpu_hash_join_build_max_rows = if mem > 0 {
-            (mem / 64 / 64).clamp(10_000, 99_999)
+            (mem / 64 / 64).clamp(
+                10_000,
+                HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS.saturating_sub(1),
+            )
         } else {
-            99_999
+            HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS - 1
         };
 
         // Batch size bounds scale with available GPU memory.
@@ -715,9 +746,9 @@ impl DeviceLimits {
             gpu_window_min_rows: 100_000,
             gpu_reduce_min_rows: 25_000,
             gpu_hash_agg_min_rows: 250_000,
-            gpu_hash_agg_unsafe_input_rows: 100_000,
+            gpu_hash_agg_unsafe_input_rows: HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS,
             gpu_hash_agg_max_groups: 10_000,
-            gpu_reduce_max_chunk: 256_000,
+            gpu_reduce_max_chunk: 1_000_000,
             gpu_grouped_agg_one_shot_max_rows: GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS,
             gpu_sort_max_elements: 2_000_000,
             gpu_sort_topk_max_limit: 128,
@@ -736,7 +767,7 @@ impl DeviceLimits {
             gpu_raster_min_pixels: 65_536,
             gpu_raster_max_chunk_pixels: 1_000_000,
             gpu_expr_min_rows: 250_000,
-            gpu_hash_join_build_max_rows: 99_999,
+            gpu_hash_join_build_max_rows: HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS - 1,
             gpu_pipeline_fusion_min_rows: 10_000,
             gpu_preagg_min_fact_rows: 50_000,
             gpu_preagg_max_dim_rows: 100_000,
@@ -885,6 +916,20 @@ impl DeviceLimits {
         );
 
         require_ordered!(gpu_sort_min_rows, gpu_sort_planner_min_rows);
+        if self.gpu_hash_agg_unsafe_input_rows > HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS {
+            return Err(DeviceLimitsValidationError::HistoricalCrashBandExposed {
+                field: "gpu_hash_agg_unsafe_input_rows",
+                value: self.gpu_hash_agg_unsafe_input_rows,
+                exclusive_upper_bound: HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS,
+            });
+        }
+        if self.gpu_hash_join_build_max_rows >= HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS {
+            return Err(DeviceLimitsValidationError::HistoricalCrashBandExposed {
+                field: "gpu_hash_join_build_max_rows",
+                value: self.gpu_hash_join_build_max_rows,
+                exclusive_upper_bound: HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS,
+            });
+        }
         if self.gpu_grouped_agg_one_shot_max_rows > GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS {
             return Err(DeviceLimitsValidationError::InvertedRange {
                 lower_field: "gpu_grouped_agg_one_shot_max_rows",
@@ -1019,6 +1064,58 @@ mod tests {
                 .validate()
                 .expect("hardware-derived device limits must satisfy the contract");
         }
+    }
+
+    #[test]
+    fn historical_crash_bands_are_pinned_for_every_device_profile() {
+        let mut candidates = vec![DeviceLimits::cpu_only()];
+        candidates.extend(
+            [
+                profile(0, 0),
+                profile(1, 1),
+                profile(8, 64 * 1024 * 1024),
+                profile(32, 256 * 1024 * 1024),
+                profile(128, 8 * 1024 * 1024 * 1024),
+            ]
+            .iter()
+            .map(DeviceLimits::from_profile),
+        );
+
+        for limits in candidates {
+            assert_eq!(
+                limits.gpu_hash_agg_unsafe_input_rows,
+                HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS,
+            );
+            assert!(limits.gpu_hash_join_build_max_rows < HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS);
+            limits
+                .validate()
+                .expect("constructor may not expose a historical crash band");
+        }
+    }
+
+    #[test]
+    fn validation_rejects_attempts_to_raise_historical_crash_gates() {
+        let mut grouped = DeviceLimits::cpu_only();
+        grouped.gpu_hash_agg_unsafe_input_rows = HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS + 1;
+        assert_eq!(
+            grouped.validate(),
+            Err(DeviceLimitsValidationError::HistoricalCrashBandExposed {
+                field: "gpu_hash_agg_unsafe_input_rows",
+                value: HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS + 1,
+                exclusive_upper_bound: HISTORICAL_UNSAFE_GROUPED_HASH_INPUT_ROWS,
+            })
+        );
+
+        let mut join = DeviceLimits::cpu_only();
+        join.gpu_hash_join_build_max_rows = HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS;
+        assert_eq!(
+            join.validate(),
+            Err(DeviceLimitsValidationError::HistoricalCrashBandExposed {
+                field: "gpu_hash_join_build_max_rows",
+                value: HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS,
+                exclusive_upper_bound: HISTORICAL_UNSAFE_ROW_JOIN_BUILD_ROWS,
+            })
+        );
     }
 
     #[test]

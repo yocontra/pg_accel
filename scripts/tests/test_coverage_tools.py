@@ -850,7 +850,7 @@ class SqlSemanticCoverageTests(unittest.TestCase):
                 REPO_ROOT / "coverage/sql-semantic-assertions.json"
             )
             self.assertEqual(generated, checked_in)
-            self.assertEqual(generated["declared_assertions"], 306)
+            self.assertEqual(generated["declared_assertions"], 320)
             matrix = next(
                 entry
                 for entry in generated["files"]
@@ -2414,6 +2414,17 @@ class ImmutableBaselineTests(unittest.TestCase):
             ),
             [],
         )
+        self.assertEqual(
+            coverage_tools.coverage_helper_test_discovery_errors(
+                canonical_justfile.replace(
+                    "coverage-audit:",
+                    "coverage-audit: safety-contract-audit",
+                ),
+                canonical_gate,
+                names,
+            ),
+            [],
+        )
 
         mutations = {
             "single_file_just_recipe": (
@@ -2432,6 +2443,11 @@ class ImmutableBaselineTests(unittest.TestCase):
                 canonical_justfile,
                 canonical_gate,
                 {"test_coverage_tools.py"},
+            ),
+            "duplicate_recipe": (
+                canonical_justfile + canonical_justfile,
+                canonical_gate,
+                names,
             ),
         }
         for label, inputs in mutations.items():
@@ -3009,6 +3025,10 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 "if (false)",
             ),
             ('"device profile overflow marker"', '"device profile warning"'),
+            (
+                "llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::donothing)",
+                "llvm::Intrinsic::getOrInsertDeclaration(&M, llvm::Intrinsic::donothing)",
+            ),
         ):
             with self.subTest(missing_invariant=original):
                 mutated = patch.replace(original, replacement)
@@ -3466,6 +3486,12 @@ class SqlSemanticMatrixTests(unittest.TestCase):
 
     def test_checked_in_matrix_resolves_only_manifest_assertions(self) -> None:
         self.assertEqual(self.validate(self.document), [])
+        statuses = {
+            evidence["status"]
+            for family in self.document["families"]
+            for evidence in family["evidence"].values()
+        }
+        self.assertEqual(statuses, {"covered", "not_applicable"})
 
     def test_matrix_mutations_fail_closed(self) -> None:
         mutations = []
@@ -3491,8 +3517,10 @@ class SqlSemanticMatrixTests(unittest.TestCase):
             evidence
             for family in hidden_gap["families"]
             for evidence in family["evidence"].values()
-            if evidence["status"] == "uncovered"
+            if evidence["status"] == "covered"
         )
+        uncovered_evidence["status"] = "uncovered"
+        uncovered_evidence["assertion_ids"] = []
         uncovered_evidence["gap"] = None
         mutations.append((hidden_gap, "uncovered evidence requires no assertions and a gap"))
 

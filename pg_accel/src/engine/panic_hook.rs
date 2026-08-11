@@ -12,9 +12,10 @@
 //! before the process aborts. It also prints a `PGACCEL PANIC:` line to
 //! stderr so it's visible in terminal runs.
 //!
-//! The hook wraps the existing hook for genuine Rust panics. Ordinary pgrx
-//! and PostgreSQL ERROR payloads are control flow: they are neither recorded
-//! nor chained, so a caught SQL error cannot contaminate release panic logs.
+//! The hook wraps the existing hook for every panic. Ordinary pgrx and
+//! PostgreSQL ERROR payloads are control flow, so pg_accel does not record
+//! them; the prior pgrx hook must still run because it preserves the error
+//! location used when the payload is converted back to a PostgreSQL ERROR.
 //!
 //! Call [`install`] exactly once at the top of `_PG_init`.
 
@@ -43,6 +44,10 @@ pub fn install() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if is_postgres_error_control_flow(info.payload()) {
+            // pgrx's hook captures the error location in thread-local state.
+            // Suppressing it strips PostgreSQL CONTEXT, QUERY, and cursor
+            // location fields when a PG error crosses a Rust FFI boundary.
+            prev(info);
             return;
         }
 

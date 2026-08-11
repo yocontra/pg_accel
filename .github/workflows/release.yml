@@ -64,6 +64,9 @@ jobs:
       - name: Build kernels before CPU-cheat release gate
         if: steps.pg-support.outputs.skip != 'true'
         run: just gpu-build
+      - name: Audit safety and deterministic fuzz contracts
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        run: just safety-contract-audit
       - name: Run CPU-cheat release gate
         if: steps.pg-support.outputs.skip != 'true'
         run: CPU_CHEAT_AUDIT_REPORT=target/cpu-cheat-audit.json just audit-cpu-cheats
@@ -148,7 +151,7 @@ jobs:
             .pgaccel/acpp
             .pgaccel/src/AdaptiveCpp
             .pgaccel/src/soft-fp64
-          key: release-acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+          key: release-acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
 
       - name: Cache source PostgreSQL
         uses: actions/cache@v4
@@ -202,6 +205,7 @@ jobs:
         run: |
           set -euo pipefail
           just gpu-build
+          just safety-contract-audit
           CPU_CHEAT_AUDIT_REPORT=target/cpu-cheat-audit-linux-pg${{ matrix.pg }}.json \
             just audit-cpu-cheats
 
@@ -339,7 +343,7 @@ jobs:
             .pgaccel/acpp
             .pgaccel/src/AdaptiveCpp
             .pgaccel/src/soft-fp64
-          key: acpp-qualified-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+          key: acpp-qualified-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
 
       - name: Build pinned AdaptiveCpp Metal toolchain
         if: steps.cache-acpp-metal-release.outputs.cache-hit != 'true'

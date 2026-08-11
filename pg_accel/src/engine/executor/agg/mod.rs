@@ -18,6 +18,7 @@ mod output;
 mod spatial;
 
 pub(crate) use artifact::estimate_descriptor_artifact_bytes_upper_bound;
+pub(crate) use descriptor::planned_descriptor_kernel_mode;
 pub use execute::AggExecState;
 
 #[cfg(feature = "pg_test")]

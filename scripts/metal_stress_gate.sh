@@ -52,6 +52,23 @@ run_logged() {
     echo "${name}: PASS log=${log}" | tee -a "${artifact_dir}/summary.txt"
 }
 
+capture_acpp_provenance() {
+    local source required_sha destination
+    source=".pgaccel/acpp/current/pg_accel-acpp-provenance.txt"
+    destination="${artifact_dir}/acpp-provenance.txt"
+    required_sha="$(cat .acpp-version)"
+    test -s "$source"
+    grep -Fx "backend=metal" "$source"
+    grep -Fx "acpp_required_sha=${required_sha}" "$source"
+    grep -Fx "acpp_head=${required_sha}" "$source"
+    grep -Fx "soft_fp64_required_tag=v1.3.0" "$source"
+    grep -Fx "soft_fp64_desc=v1.3.0" "$source"
+    grep -F -- "-DCMAKE_CXX_FLAGS=-nostdinc++ -isystem " "$source"
+    grep -F -- "/usr/include/c++/v1" "$source"
+    cp "$source" "$destination"
+    cmp "$source" "$destination"
+}
+
 assert_no_benchmark_crashes() {
     local cell_dir="$1"
     local crashes="${cell_dir}/crashes.json"
@@ -132,6 +149,12 @@ SQL
     fi
     psql "$connection" -v ON_ERROR_STOP=1 -c "RESET statement_timeout; SELECT 1;" >> "$log" 2>&1
 }
+
+run_logged "candidate-provenance" \
+    python3 scripts/metal_stress_artifacts.py capture-candidate \
+        --repo-root "$PWD" \
+        --output "${artifact_dir}/candidate-provenance.json"
+run_logged "acpp-provenance" capture_acpp_provenance
 
 just gpu-build > "${artifact_dir}/gpu-build.log" 2>&1
 

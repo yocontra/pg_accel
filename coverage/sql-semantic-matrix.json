@@ -43,14 +43,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["int4 group key", "nullable int4 range input", "int4 multiplication", "int8 SUM/COUNT result"], "null_patterns": ["NULL range input", "non-NULL values inside and outside the intersection"], "shape_limits": "one scalar comparison remains selectable; a second same-column range clause, including BETWEEN-equivalent forms, declines", "dispatch_expectation": "forbidden", "rejection_reason": "shape_multiple_range_predicates"},
       "evidence": {
-        "types": {"status": "uncovered", "assertion_ids": [], "gap": "No assertion in the external SQL manifest selects the same-column range-intersection family."},
-        "nulls": {"status": "uncovered", "assertion_ids": [], "gap": "The executed Rust pg_test covers NULL range inputs, but declaration-only external SQL evidence does not."},
-        "shape_limits": {"status": "uncovered", "assertion_ids": [], "gap": "No external SQL assertion binds the one-comparison boundary and multiple-range decline."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL invalidation is not declared for this selected family."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "Post-publication DML is not declared for this selected family."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared execution is not declared for this selected family."},
-        "dispatch": {"status": "uncovered", "assertion_ids": [], "gap": "The executed Rust pg_test proves zero dispatch, but no external SQL manifest assertion does."},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "The exact reason is covered by Rust pg_test but not the external SQL manifest."}
+        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null}
       }
     },
     {
@@ -121,16 +121,16 @@
       "id": "decline.aggregate_relation_limit",
       "disposition": "declined",
       "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 fact/dimension keys", "int8 COUNT result"], "null_patterns": ["non-NULL keys", "NULL keys remain uncovered"], "shape_limits": "five dimensions exceed the released four-dimension descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "shape_too_many_relations"},
+      "semantics": {"types": ["int4 fact/dimension keys", "int8 COUNT result"], "null_patterns": ["non-NULL and NULL fact keys"], "shape_limits": "five dimensions exceed the released four-dimension descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "shape_too_many_relations"},
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004"], "gap": null},
-        "nulls": {"status": "uncovered", "assertion_ids": [], "gap": "The boundary fixture contains no NULL keys."},
-        "shape_limits": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004"], "gap": null},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is not relevant to the current assertion and remains untested externally."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle remains untested externally."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared-plan decline stability remains untested externally."},
-        "dispatch": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004"], "gap": null}
+        "types": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004", "96_declined_lifecycle_contract.assert_009"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_009"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004", "96_declined_lifecycle_contract.assert_009"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_009"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_009"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_009"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004", "96_declined_lifecycle_contract.assert_009"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["91_selected_family_contracts.assert_004", "96_declined_lifecycle_contract.assert_009"], "gap": null}
       }
     },
     {
@@ -139,14 +139,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["float4 predicate input", "int8 COUNT result"], "null_patterns": ["NULL predicate input", "non-NULL predicate input"], "shape_limits": "standalone floating predicate outside the exact selected aggregate grammar", "dispatch_expectation": "forbidden", "rejection_reason": "shape_unsupported_predicate"},
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001"], "gap": null},
-        "nulls": {"status": "partial", "assertion_ids": ["40_gpu_expr_where.assert_006"], "gap": "NULL parity is declared separately from the exact rejection assertion."},
-        "shape_limits": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001"], "gap": null},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL decline stability is not declared."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML decline stability is not declared."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared-plan decline stability is not declared."},
-        "dispatch": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001"], "gap": null}
+        "types": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001", "96_declined_lifecycle_contract.assert_002"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_006", "96_declined_lifecycle_contract.assert_002"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001", "96_declined_lifecycle_contract.assert_002"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_002"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_002"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_002"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001", "96_declined_lifecycle_contract.assert_002"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["40_gpu_expr_where.assert_001", "96_declined_lifecycle_contract.assert_002"], "gap": null}
       }
     },
     {
@@ -155,14 +155,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["aggregate FILTER", "DISTINCT aggregate", "ordered aggregate"], "null_patterns": ["NULL aggregate input remains PostgreSQL-owned"], "shape_limits": "aggregate semantic modifiers are outside the selected descriptor grammar", "dispatch_expectation": "forbidden", "rejection_reason": "shape_aggregate_modifier"},
       "evidence": {
-        "types": {"status": "uncovered", "assertion_ids": [], "gap": "The exact modifier-decline family has no external SQL manifest assertion."},
-        "nulls": {"status": "uncovered", "assertion_ids": [], "gap": "No external SQL assertion binds modifier NULL semantics to this reason."},
-        "shape_limits": {"status": "uncovered", "assertion_ids": [], "gap": "No external SQL assertion checks the modifier shape boundary."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is uncovered."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle is uncovered."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared lifecycle is uncovered."},
-        "dispatch": {"status": "uncovered", "assertion_ids": [], "gap": "Zero dispatch is not asserted by the external SQL manifest."},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "The exact rejection code is covered only outside the external SQL manifest."}
+        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_003"], "gap": null}
       }
     },
     {
@@ -171,14 +171,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["base columns and ordinary PostgreSQL expressions"], "null_patterns": ["PostgreSQL native NULL semantics"], "shape_limits": "row-proportional base scan, filter, and projection remain native", "dispatch_expectation": "forbidden", "rejection_reason": "no_gpu_resident_pipeline"},
       "evidence": {
-        "types": {"status": "uncovered", "assertion_ids": [], "gap": "No external assertion binds the complete base-path family to one exact reason."},
-        "nulls": {"status": "uncovered", "assertion_ids": [], "gap": "Native NULL parity exists elsewhere but is not bound to this family contract."},
-        "shape_limits": {"status": "uncovered", "assertion_ids": [], "gap": "No external assertion proves the full scan/filter/projection boundary."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is uncovered for this decline."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle is uncovered for this decline."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared lifecycle is uncovered for this decline."},
-        "dispatch": {"status": "uncovered", "assertion_ids": [], "gap": "No external assertion checks the counter and plan together."},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "The README example is documentation, not SQL assertion evidence."}
+        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_004"], "gap": null}
       }
     },
     {
@@ -187,14 +187,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["ordinary equality join keys"], "null_patterns": ["NULL join keys remain PostgreSQL-owned"], "shape_limits": "row-returning hash join has no registered GPU executor", "dispatch_expectation": "forbidden", "rejection_reason": "hashjoin_no_selected_gpu_kernel"},
       "evidence": {
-        "types": {"status": "uncovered", "assertion_ids": [], "gap": "No external SQL assertion binds types to the exact hash-join decline."},
-        "nulls": {"status": "uncovered", "assertion_ids": [], "gap": "NULL join semantics are not bound to this decline in the manifest."},
-        "shape_limits": {"status": "uncovered", "assertion_ids": [], "gap": "The row-returning boundary lacks an external exact-reason assertion."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is uncovered."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle is uncovered."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared lifecycle is uncovered."},
-        "dispatch": {"status": "uncovered", "assertion_ids": [], "gap": "Zero dispatch is not asserted by the external SQL manifest."},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "The exact reason is covered only outside the external SQL manifest."}
+        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_010"], "gap": null}
       }
     },
     {
@@ -203,14 +203,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["scalar inequality join keys"], "null_patterns": ["NULL inequality operands remain PostgreSQL-owned"], "shape_limits": "row-returning nested-loop inequality output crosses an unsafe host boundary", "dispatch_expectation": "forbidden", "rejection_reason": "nlj_between_host_boundary_unsafe"},
       "evidence": {
-        "types": {"status": "uncovered", "assertion_ids": [], "gap": "No external SQL assertion binds scalar types to this exact decline."},
-        "nulls": {"status": "uncovered", "assertion_ids": [], "gap": "NULL inequality semantics are uncovered for the exact decline."},
-        "shape_limits": {"status": "uncovered", "assertion_ids": [], "gap": "The unsafe host-boundary classification is not externally asserted."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is uncovered."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle is uncovered."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared lifecycle is uncovered."},
-        "dispatch": {"status": "uncovered", "assertion_ids": [], "gap": "Zero dispatch is not externally asserted for this family."},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "The exact reason is covered only outside the external SQL manifest."}
+        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_011"], "gap": null}
       }
     },
     {
@@ -219,14 +219,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["point", "integer resolution", "h3index"], "null_patterns": ["NULL input and resolution"], "shape_limits": "standalone h3_latlng_to_cell scalar/predicate is not a fused reducing consumer", "dispatch_expectation": "forbidden", "rejection_reason": "h3_latlng_scalar_predicate_no_gpu_pipeline"},
       "evidence": {
-        "types": {"status": "partial", "assertion_ids": ["85_function_matrix.assert_021"], "gap": "Parity is declared, but the assertion does not require the exact decline reason."},
-        "nulls": {"status": "partial", "assertion_ids": ["12_h3_operations.assert_001"], "gap": "Unsafe NULL shapes decline, but the exact scalar reason is not asserted."},
-        "shape_limits": {"status": "partial", "assertion_ids": ["12_h3_operations.assert_001"], "gap": "The native boundary is asserted without the exact reason code."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is uncovered."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle is uncovered."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared lifecycle is uncovered."},
-        "dispatch": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001"], "gap": null},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "No external assertion reads the exact H3 scalar decline code."}
+        "types": {"status": "covered", "assertion_ids": ["85_function_matrix.assert_021", "96_declined_lifecycle_contract.assert_012"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_012"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_012"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_012"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_012"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_012"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_012"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_012"], "gap": null}
       }
     },
     {
@@ -235,46 +235,46 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["h3index", "integer expansion distance", "setof h3index"], "null_patterns": ["NULL SRF argument"], "shape_limits": "variable-output H3 SRF has no batched resident expansion", "dispatch_expectation": "forbidden", "rejection_reason": "h3_lateral_srf_no_batched_expansion"},
       "evidence": {
-        "types": {"status": "partial", "assertion_ids": ["12_h3_operations.assert_001"], "gap": "Multiple H3 SRF signatures decline, but the exact family code is not asserted."},
-        "nulls": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001"], "gap": null},
-        "shape_limits": {"status": "partial", "assertion_ids": ["12_h3_operations.assert_001"], "gap": "No exact rejection-code check is declared."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is uncovered."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle is uncovered."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared lifecycle is uncovered."},
-        "dispatch": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001"], "gap": null},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "No external assertion reads the exact lateral SRF decline code."}
+        "types": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_013"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_013"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_013"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_013"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_013"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_013"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["12_h3_operations.assert_001", "96_declined_lifecycle_contract.assert_013"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_013"], "gap": null}
       }
     },
     {
       "id": "decline.sort_full_output",
       "disposition": "declined",
       "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4", "float8", "text"], "null_patterns": ["non-NULL fixture", "NULL sort keys remain uncovered"], "shape_limits": "full-output standalone ORDER BY remains native", "dispatch_expectation": "forbidden", "rejection_reason": "sort_heap_full_output"},
+      "semantics": {"types": ["int4", "float8", "text"], "null_patterns": ["non-NULL values", "NULLS FIRST ordering"], "shape_limits": "full-output standalone ORDER BY remains native", "dispatch_expectation": "forbidden", "rejection_reason": "sort_heap_full_output"},
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["13_sort_orderby.assert_001"], "gap": null},
-        "nulls": {"status": "uncovered", "assertion_ids": [], "gap": "The sort-order fixture declares NOT NULL inputs."},
-        "shape_limits": {"status": "partial", "assertion_ids": ["13_sort_orderby.assert_001"], "gap": "Ordering parity is declared without an exact plan/reason assertion."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is uncovered."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle is uncovered."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared lifecycle is uncovered."},
-        "dispatch": {"status": "uncovered", "assertion_ids": [], "gap": "Zero dispatch is not declared by the external sort assertion."},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "The external sort assertion does not read sort_heap_full_output."}
+        "types": {"status": "covered", "assertion_ids": ["13_sort_orderby.assert_001", "96_declined_lifecycle_contract.assert_005"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["13_sort_orderby.assert_001", "96_declined_lifecycle_contract.assert_005"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_005"], "gap": null}
       }
     },
     {
       "id": "decline.sort_topk",
       "disposition": "declined",
       "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4", "float4"], "null_patterns": ["non-NULL fixture", "NULL ordering remains uncovered"], "shape_limits": "standalone ORDER BY LIMIT/OFFSET has no released GPU kernel", "dispatch_expectation": "forbidden", "rejection_reason": "sort_standalone_topk_no_gpu_kernel"},
+      "semantics": {"types": ["int4", "float4", "float8"], "null_patterns": ["non-NULL values", "NULLS LAST ordering"], "shape_limits": "standalone ORDER BY LIMIT/OFFSET has no released GPU kernel", "dispatch_expectation": "forbidden", "rejection_reason": "sort_standalone_topk_no_gpu_kernel"},
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["43_sort_topk.assert_002"], "gap": null},
-        "nulls": {"status": "uncovered", "assertion_ids": [], "gap": "Top-k NULL ordering is not declared."},
-        "shape_limits": {"status": "covered", "assertion_ids": ["43_sort_topk.assert_002", "43_sort_topk.assert_003", "43_sort_topk.assert_004", "43_sort_topk.assert_005", "43_sort_topk.assert_001"], "gap": null},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is uncovered."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle is uncovered."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared lifecycle is uncovered."},
-        "dispatch": {"status": "uncovered", "assertion_ids": [], "gap": "The external top-k assertions compare results but do not assert zero dispatch."},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "The exact top-k reason is not read by the external SQL assertions."}
+        "types": {"status": "covered", "assertion_ids": ["43_sort_topk.assert_002", "96_declined_lifecycle_contract.assert_006"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["43_sort_topk.assert_002", "43_sort_topk.assert_003", "43_sort_topk.assert_004", "43_sort_topk.assert_005", "43_sort_topk.assert_001", "96_declined_lifecycle_contract.assert_006"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_006"], "gap": null}
       }
     },
     {
@@ -283,14 +283,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["int4", "int8 window aggregates"], "null_patterns": ["NULL partition values", "NULL frame inputs", "empty input"], "shape_limits": "full-output and reducing window SQL remain native", "dispatch_expectation": "forbidden", "rejection_reason": "no_gpu_resident_pipeline"},
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["60_window_functions.assert_002", "60_window_functions.assert_005", "60_window_functions.assert_007"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["60_window_functions.assert_011", "61_window_edge_cases.assert_002", "61_window_edge_cases.assert_008"], "gap": null},
-        "shape_limits": {"status": "partial", "assertion_ids": ["60_window_functions.assert_012", "61_window_edge_cases.assert_010"], "gap": "Broad parity exists, but exact native plan classification is not asserted."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL lifecycle is uncovered."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "DML lifecycle is uncovered."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared lifecycle is uncovered."},
-        "dispatch": {"status": "uncovered", "assertion_ids": [], "gap": "The external window assertions do not bind the kernel counter to each case."},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "The external window assertions do not read no_gpu_resident_pipeline."}
+        "types": {"status": "covered", "assertion_ids": ["60_window_functions.assert_002", "60_window_functions.assert_005", "60_window_functions.assert_007", "96_declined_lifecycle_contract.assert_007"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["60_window_functions.assert_011", "61_window_edge_cases.assert_002", "61_window_edge_cases.assert_008", "96_declined_lifecycle_contract.assert_007"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["60_window_functions.assert_012", "61_window_edge_cases.assert_010", "96_declined_lifecycle_contract.assert_007"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_007"], "gap": null}
       }
     },
     {
@@ -315,14 +315,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["PostGIS raster", "five-argument ST_Reclass text rules"], "null_patterns": ["NULL raster remains PostgreSQL-owned", "nodata semantics"], "shape_limits": "the external five-argument ST_Reclass family is outside the exact test-only three-argument subset", "dispatch_expectation": "forbidden", "rejection_reason": "raster_unsupported_shape"},
       "evidence": {
-        "types": {"status": "partial", "assertion_ids": ["85_function_matrix.assert_037"], "gap": "ST_Reclass parity is declared without exact production plan classification."},
-        "nulls": {"status": "uncovered", "assertion_ids": [], "gap": "NULL/nodata behavior is not bound to the production decline externally."},
-        "shape_limits": {"status": "partial", "assertion_ids": ["85_function_matrix.assert_037"], "gap": "The admitted test-only subset is exercised only as native parity here."},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "Catalog replacement lifecycle is uncovered by external SQL assertions."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "Raster DML lifecycle is uncovered by external SQL assertions."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared raster lifecycle is uncovered by external SQL assertions."},
-        "dispatch": {"status": "uncovered", "assertion_ids": [], "gap": "Zero production dispatch is not declared by the external raster assertion."},
-        "rejection_reason": {"status": "uncovered", "assertion_ids": [], "gap": "The exact raster cost reason is covered outside the external SQL manifest."}
+        "types": {"status": "covered", "assertion_ids": ["85_function_matrix.assert_037", "96_declined_lifecycle_contract.assert_014"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["85_function_matrix.assert_037", "96_declined_lifecycle_contract.assert_014"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_014"], "gap": null}
       }
     },
     {
@@ -347,14 +347,14 @@
       "postgresql_majors": [18, 19],
       "semantics": {"types": ["nullable bool group key", "nullable bool COUNT input", "int8 COUNT result"], "null_patterns": ["false, true, and NULL group keys", "NULL measure rows ignored by COUNT"], "shape_limits": "grouped and global boolean column COUNT remain native after the exact 1M-row candidate measured 0.0054x against PostgreSQL", "dispatch_expectation": "forbidden", "rejection_reason": "shape_unsupported_aggregate_input"},
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002"], "gap": null},
-        "ddl": {"status": "uncovered", "assertion_ids": [], "gap": "DDL invalidation is not declared for this native-only family."},
-        "dml": {"status": "uncovered", "assertion_ids": [], "gap": "Post-publication DML is not declared for this native-only family."},
-        "prepared": {"status": "uncovered", "assertion_ids": [], "gap": "Prepared execution is not declared for this native-only family."},
-        "dispatch": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002"], "gap": null}
+        "types": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_008"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_008"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_008"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["94_grouped_count_bool_contract.assert_001", "94_grouped_count_bool_contract.assert_002", "96_declined_lifecycle_contract.assert_008"], "gap": null}
       }
     }
   ]

@@ -58,6 +58,9 @@ static PARALLEL_FUSED_COUNT: GucSetting<bool> = GucSetting::<bool>::new(false);
 /// counters remain active regardless of this setting.
 static PLANNER_PROFILING: GucSetting<bool> = GucSetting::<bool>::new(false);
 
+/// Whether descriptor execution collects fine-grained elapsed-time samples.
+static EXECUTION_PROFILING: GucSetting<bool> = GucSetting::<bool>::new(false);
+
 /// Per-file size cap (in MiB) for the JSONL trace artifacts that pg_accel
 /// emits to `$PGDATA` (`pg_accel_otel.jsonl` and `pg_accel_traces.jsonl`).
 ///
@@ -235,6 +238,15 @@ pub fn init_gucs() {
         GucFlags::default(),
     );
 
+    GucRegistry::define_bool_guc(
+        c"pg_accel.execution_profiling",
+        c"Collect fine-grained elapsed-time samples for descriptor execution.",
+        c"When enabled, selected descriptor aggregates read the monotonic clock around plan construction, artifact ensure, descriptor binding, allocation, kernel execution, and tuple materialization. Counters are exposed by pg_accel_descriptor_stage_stats(). Standard benchmarks keep this disabled.",
+        &EXECUTION_PROFILING,
+        GucContext::Userset,
+        GucFlags::default(),
+    );
+
     GucRegistry::define_int_guc(
         c"pg_accel.otel_log_max_mb",
         c"Per-file size cap for pg_accel_otel.jsonl and pg_accel_traces.jsonl, in MiB.",
@@ -396,6 +408,13 @@ pub fn parallel_fused_count_enabled() -> bool {
 #[must_use]
 pub fn planner_profiling() -> bool {
     PLANNER_PROFILING.get()
+}
+
+/// Whether fine-grained descriptor-executor profiling is enabled.
+#[inline]
+#[must_use]
+pub fn execution_profiling() -> bool {
+    EXECUTION_PROFILING.get()
 }
 
 /// Per-file size cap, in MiB, for `pg_accel_otel.jsonl` and

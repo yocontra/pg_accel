@@ -100,7 +100,7 @@ jobs:
             .pgaccel/acpp
             .pgaccel/src/AdaptiveCpp
             .pgaccel/src/soft-fp64
-          key: acpp-macos-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+          key: acpp-macos-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
 
       - name: Install macOS build dependencies
         if: steps.pg-support.outputs.skip != 'true'
@@ -150,6 +150,13 @@ jobs:
           just check ${{ matrix.pg }}
           just test-unit ${{ matrix.pg }}
 
+      - name: Audit safety and deterministic fuzz contracts
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          just safety-contract-audit
+
       - name: Run benchmark harness release-gate tests
         if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
         shell: bash
@@ -173,6 +180,23 @@ jobs:
           set -euo pipefail
           just sql-test ${{ matrix.pg }}
 
+      - name: Run pristine and pg_accel-loaded PostgreSQL upstream suites
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just upstream-pg-tests \
+            "${{ matrix.pg }}" \
+            "artifacts/upstream-postgresql-pg${{ matrix.pg }}"
+
+      - name: Upload PostgreSQL upstream-suite evidence
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-postgresql-pg${{ matrix.pg }}-macos-arm64
+          path: artifacts/upstream-postgresql-pg${{ matrix.pg }}
+          if-no-files-found: error
+
       - name: Run plan-shape + parallel-stress integration tests
         if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
         shell: bash
@@ -181,7 +205,7 @@ jobs:
           just plan-shape-tests ${{ matrix.pg }}
 
       - name: Generate package schema artifact
-        if: always() && steps.pg-support.outputs.skip != 'true'
+        if: steps.pg-support.outputs.skip != 'true' && success()
         id: schema
         shell: bash
         run: |
@@ -197,7 +221,7 @@ jobs:
           test -s "$schema_path"
 
       - name: Upload schema artifact
-        if: always() && steps.pg-support.outputs.skip != 'true'
+        if: always() && steps.schema.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: pg-accel-schema-pg${{ matrix.pg }}-macos-arm64
@@ -246,7 +270,7 @@ jobs:
             .pgaccel/acpp
             .pgaccel/src/AdaptiveCpp
             .pgaccel/src/soft-fp64
-          key: acpp-qualified-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+          key: acpp-qualified-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
 
       - name: Build pinned AdaptiveCpp Metal toolchain
         if: steps.cache-acpp-metal-gate.outputs.cache-hit != 'true'
@@ -284,6 +308,12 @@ jobs:
           set -euo pipefail
           just metal-benchmark-ship-gate 18 artifacts/benchmark-ship-gate-pg18-qualified-metal
 
+      - name: Run broad system workload characterization
+        shell: bash
+        run: |
+          set -euo pipefail
+          just system-workload-gate 18 artifacts/system-workload-gate-pg18-qualified-metal
+
       - name: Upload three-layer coverage artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -298,6 +328,14 @@ jobs:
         with:
           name: pg-accel-benchmark-ship-gate-pg18-qualified-metal
           path: artifacts/benchmark-ship-gate-pg18-qualified-metal
+          if-no-files-found: error
+
+      - name: Upload broad system workload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-system-workload-gate-pg18-qualified-metal
+          path: artifacts/system-workload-gate-pg18-qualified-metal
           if-no-files-found: error
 
   linux-x86:
@@ -366,7 +404,7 @@ jobs:
             .pgaccel/acpp
             .pgaccel/src/AdaptiveCpp
             .pgaccel/src/soft-fp64
-          key: acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}
+          key: acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
 
       - name: Cache source PostgreSQL
         if: steps.pg-support.outputs.skip != 'true'
@@ -431,6 +469,13 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --workspace --no-default-features --features pg${{ matrix.pg }} --no-run
+
+      - name: Audit safety and deterministic fuzz contracts
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          just safety-contract-audit
 
       - name: Run benchmark harness release-gate tests
         if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18

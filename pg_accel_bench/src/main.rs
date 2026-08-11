@@ -126,6 +126,12 @@ enum Command {
         #[arg(long)]
         capture_planner_stages: bool,
 
+        /// Run each accel/PostgreSQL pair on one persistent backend. This is
+        /// only valid when the pg_accel planner declines the query and is
+        /// intended for exact native-parity non-inferiority evidence.
+        #[arg(long)]
+        native_parity_pairing: bool,
+
         /// Timing mode: `raw` (client-side `Instant::now()` wall clock,
         /// no instrumentation overhead — **default**, used for
         /// publication-quality numbers), `explain` (EXPLAIN ANALYZE,
@@ -201,6 +207,12 @@ enum Command {
         /// enables in-hook elapsed profiling and is not publication timing.
         #[arg(long)]
         capture_planner_stages: bool,
+
+        /// Run each accel/PostgreSQL pair on one persistent backend. This is
+        /// only valid when the pg_accel planner declines the query and is
+        /// intended for exact native-parity non-inferiority evidence.
+        #[arg(long)]
+        native_parity_pairing: bool,
 
         /// Timing mode: `raw`, `explain`, or `both`.
         #[arg(long, default_value = "raw")]
@@ -310,6 +322,24 @@ enum Command {
 
         /// Directory for the aggregate Phase 9 evidence bundle. If omitted, a
         /// fresh `benchmarks/artifacts/phase9-gate-<timestamp>` directory is used.
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
+    },
+
+    /// Run the fixed broad-system characterization across SSBM,
+    /// TPC-H-shaped, and ClickBench-style workloads.
+    ///
+    /// This gate records every selection and native decline honestly at one
+    /// reproducible scale. It is not a certified TPC-H/ClickBench score and
+    /// does not emit a system-level speedup headline.
+    SystemWorkloadGate {
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+
+        /// Directory for the immutable broad-workload evidence bundle. If
+        /// omitted, a fresh `benchmarks/artifacts/system-workload-gate-*`
+        /// directory is used.
         #[arg(long)]
         artifacts_dir: Option<PathBuf>,
     },
@@ -547,6 +577,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             realistic_gucs,
             capture_plans,
             capture_planner_stages,
+            native_parity_pairing,
             timing,
             cache_mode,
             skip_guc_verify,
@@ -566,6 +597,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     realistic_gucs,
                     capture_plans,
                     capture_planner_stages,
+                    native_parity_pairing,
                     &timing,
                     &cache_mode,
                     skip_guc_verify,
@@ -584,6 +616,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             realistic_gucs,
             capture_plans,
             capture_planner_stages,
+            native_parity_pairing,
             timing,
             cache_mode,
             skip_guc_verify,
@@ -599,6 +632,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             realistic_gucs,
             capture_plans,
             capture_planner_stages,
+            native_parity_pairing,
             &timing,
             &cache_mode,
             skip_guc_verify,
@@ -626,6 +660,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             connection,
             artifacts_dir,
         } => cmd_phase9_gate(&connection, artifacts_dir),
+        Command::SystemWorkloadGate {
+            connection,
+            artifacts_dir,
+        } => cmd_system_workload_gate(&connection, artifacts_dir),
         Command::MetalShipGate {
             connection,
             artifacts_dir,
@@ -864,6 +902,8 @@ fn cmd_phase6_gate(
         timing_mode: runner::TimingMode::RawWallClock,
         cache_mode: runner::CacheMode::Both,
         capture_planner_stages: false,
+        native_parity_pairing: false,
+        headline_speedup_allowed: true,
         plans_capture_path: Some(artifact_root.join("plans.txt")),
         guc_profile: None,
         skip_guc_verify: false,
@@ -957,6 +997,8 @@ fn cmd_phase9_gate(
         timing_mode: runner::TimingMode::RawWallClock,
         cache_mode: runner::CacheMode::Warm,
         capture_planner_stages: false,
+        native_parity_pairing: false,
+        headline_speedup_allowed: true,
         plans_capture_path: Some(artifact_root.join("plans.txt")),
         guc_profile: None,
         skip_guc_verify: false,
@@ -971,6 +1013,304 @@ fn cmd_phase9_gate(
         "[phase9-gate] PASS: all {} operator lanes produced exact-oracle and planner/dispatch evidence at {} rows",
         workloads::PHASE9_OPERATOR_DECLINES.len(),
         PHASE9_VERIFICATION_ROWS
+    );
+    Ok(())
+}
+
+const SYSTEM_WORKLOAD_GATE_ROWS: usize = 100_000;
+const SYSTEM_WORKLOAD_GATE_ITERATIONS: usize = 10;
+const SYSTEM_WORKLOAD_GATE_WARMUP: usize = 5;
+const SYSTEM_WORKLOAD_GATE_SEED: u64 = 42;
+const SYSTEM_WORKLOAD_GATE_CONTRACT_FILE: &str = "system_workload_gate_contract.json";
+
+fn system_workload_gate_workloads()
+-> Result<Vec<Box<dyn workloads::Workload>>, Box<dyn std::error::Error>> {
+    let allowed = [
+        workloads::WorkloadCategory::StarSchemaSsbm,
+        workloads::WorkloadCategory::Tpch,
+        workloads::WorkloadCategory::ClickBench,
+    ];
+    let selected = workloads::all_workloads()
+        .into_iter()
+        .filter(|workload| {
+            workloads::workload_metadata(workload.name())
+                .is_some_and(|metadata| allowed.contains(&metadata.category))
+        })
+        .collect::<Vec<_>>();
+    for category in allowed {
+        if !selected.iter().any(|workload| {
+            workloads::workload_metadata(workload.name())
+                .is_some_and(|metadata| metadata.category == category)
+        }) {
+            return Err(format!(
+                "system workload gate has no registered `{}` workloads",
+                category.as_str()
+            )
+            .into());
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for workload in &selected {
+        if !seen.insert(workload.name()) {
+            return Err(format!(
+                "system workload gate resolved duplicate `{}` workloads",
+                workload.name()
+            )
+            .into());
+        }
+        if !workload.row_scales().contains(&SYSTEM_WORKLOAD_GATE_ROWS) {
+            return Err(format!(
+                "system workload `{}` does not register the fixed {}-row scale",
+                workload.name(),
+                SYSTEM_WORKLOAD_GATE_ROWS
+            )
+            .into());
+        }
+    }
+    Ok(selected)
+}
+
+fn write_system_workload_gate_contract(
+    root: &Path,
+    selected: &[Box<dyn workloads::Workload>],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if root.exists() {
+        if !root.is_dir() {
+            return Err(format!(
+                "system workload artifact path `{}` exists and is not a directory",
+                root.display()
+            )
+            .into());
+        }
+        if fs::read_dir(root)?.next().transpose()?.is_some() {
+            return Err(format!(
+                "system workload artifact directory `{}` is not empty; evidence bundles are immutable",
+                root.display()
+            )
+            .into());
+        }
+    }
+    let cells = selected
+        .iter()
+        .map(|workload| {
+            let metadata = workloads::workload_metadata(workload.name())
+                .expect("system workload selection came from the typed registry");
+            serde_json::json!({
+                "workload": workload.name(),
+                "category": metadata.category.as_str(),
+                "rows": SYSTEM_WORKLOAD_GATE_ROWS,
+                "result_policy": "selected_gpu_or_planner_reported_native_decline",
+            })
+        })
+        .collect::<Vec<_>>();
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "gate": "broad_system_workload_characterization",
+        "certified_external_benchmark": false,
+        "headline_speedup_allowed": false,
+        "comparison": "best_costed_postgresql_plan_with_parallelism_enabled",
+        "iterations": SYSTEM_WORKLOAD_GATE_ITERATIONS,
+        "warmup": SYSTEM_WORKLOAD_GATE_WARMUP,
+        "seed": SYSTEM_WORKLOAD_GATE_SEED,
+        "timing_mode": "raw-wallclock",
+        "cache_mode": "warm",
+        "required_harness_profile": "release",
+        "cold_load_policy": "fixture_setup_and_resident_load_are_separate_from_warm_timing; privileged OS page-cache certification is separate",
+        "concurrency_evidence": "resident_eight_backend_grouped_soak_enforces_budget_and_ownership",
+        "cells": cells,
+    });
+    fs::create_dir_all(root)?;
+    let mut contents = serde_json::to_vec_pretty(&manifest)?;
+    contents.push(b'\n');
+    fs::write(root.join(SYSTEM_WORKLOAD_GATE_CONTRACT_FILE), contents)?;
+    Ok(())
+}
+
+fn enforce_system_workload_gate(
+    report: &BenchReport,
+    selected: &[Box<dyn workloads::Workload>],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let expected = selected
+        .iter()
+        .map(|workload| workload.name())
+        .collect::<BTreeSet<_>>();
+    let mut failures = Vec::new();
+    for expected_name in &expected {
+        let matches = report
+            .workloads
+            .iter()
+            .filter(|result| {
+                result.name == *expected_name && result.rows == SYSTEM_WORKLOAD_GATE_ROWS
+            })
+            .count();
+        if matches != 1 {
+            failures.push(format!(
+                "`{expected_name}`: expected one {SYSTEM_WORKLOAD_GATE_ROWS}-row result, found {matches}"
+            ));
+        }
+    }
+    for result in &report.workloads {
+        if !expected.contains(result.name.as_str()) || result.rows != SYSTEM_WORKLOAD_GATE_ROWS {
+            failures.push(format!(
+                "unexpected system workload result `{}` @ {}",
+                result.name, result.rows
+            ));
+            continue;
+        }
+        if result.plan_snippet.is_none() || result.baseline_plan_snippet.is_none() {
+            failures.push(format!(
+                "{} is missing accelerated or PostgreSQL plan evidence",
+                result.name
+            ));
+        }
+        if result.correctness_diff_artifact.is_none() {
+            failures.push(format!(
+                "{} is missing exact correctness evidence",
+                result.name
+            ));
+        }
+        if !result.dispatch_counter_captured {
+            failures.push(format!("{} is missing dispatch counters", result.name));
+        }
+        if result.pg_accel_stock_exec_delta != 0 {
+            failures.push(format!(
+                "{} used {} stock-executor fallback(s)",
+                result.name, result.pg_accel_stock_exec_delta
+            ));
+        }
+        if !result.resident_lane || result.resident_load_ms.is_none() {
+            failures.push(format!(
+                "{} did not separate its resident load from warm query timing",
+                result.name
+            ));
+        }
+        if result.rows_returned_to_cpu == 0 {
+            failures.push(format!("{} did not consume query output", result.name));
+        }
+        if result.warm_summary.as_ref().map(|summary| summary.n)
+            != Some(SYSTEM_WORKLOAD_GATE_ITERATIONS)
+        {
+            failures.push(format!(
+                "{} does not contain {} warm measured pairs",
+                result.name, SYSTEM_WORKLOAD_GATE_ITERATIONS
+            ));
+        }
+
+        if result.plan_selected {
+            if !result.gpu_kernel_dispatched
+                || result.gpu_kernel_execution_delta == 0
+                || result.gpu_resident_pipeline != report::GpuResidentPipelineStatus::Reported
+            {
+                failures.push(format!(
+                    "{} selected pg_accel without a reported resident GPU dispatch",
+                    result.name
+                ));
+            }
+            if result.artifact_lifecycle_probe.is_none()
+                || result.artifact_steady_state_captures.len() < SYSTEM_WORKLOAD_GATE_ITERATIONS
+            {
+                failures.push(format!(
+                    "{} selected pg_accel without separate artifact construction and warm-hit evidence",
+                    result.name
+                ));
+            }
+        } else {
+            if result.gpu_kernel_dispatched || result.gpu_kernel_execution_delta != 0 {
+                failures.push(format!(
+                    "{} stayed native but dispatched GPU work",
+                    result.name
+                ));
+            }
+            if !matches!(
+                result.native_decline_evidence.as_ref(),
+                Some(report::NativeDeclineEvidence {
+                    source: report::DeclineReasonSource::PlannerReported,
+                    ..
+                })
+            ) {
+                failures.push(format!(
+                    "{} stayed native without a planner-reported decline reason",
+                    result.name
+                ));
+            }
+        }
+    }
+    for crash in &report.crashes {
+        failures.push(format!(
+            "{} @ {} crashed: {}",
+            crash.workload, crash.rows, crash.error
+        ));
+    }
+    if report.methodology.iterations != SYSTEM_WORKLOAD_GATE_ITERATIONS
+        || report.methodology.warmup != SYSTEM_WORKLOAD_GATE_WARMUP
+        || report.methodology.row_scales != [SYSTEM_WORKLOAD_GATE_ROWS]
+        || report.methodology.timing_mode != "raw-wallclock"
+        || report.methodology.cache_mode != "warm"
+        || report.methodology.harness_profile != "release"
+    {
+        failures.push(format!(
+            "system methodology drifted: iterations={}, warmup={}, rows={:?}, timing={}, cache={}, profile={}",
+            report.methodology.iterations,
+            report.methodology.warmup,
+            report.methodology.row_scales,
+            report.methodology.timing_mode,
+            report.methodology.cache_mode,
+            report.methodology.harness_profile
+        ));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "broad system workload gate failed:\n{}",
+            failures.join("\n")
+        )
+        .into())
+    }
+}
+
+fn cmd_system_workload_gate(
+    connection: &str,
+    artifacts_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(debug_assertions) {
+        return Err(
+            "system workload gate requires a release harness; run with `cargo run --release`"
+                .into(),
+        );
+    }
+    let selected = system_workload_gate_workloads()?;
+    let artifact_root =
+        artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir("system-workload-gate"));
+    write_system_workload_gate_contract(&artifact_root, &selected)?;
+    let cells = selected
+        .iter()
+        .map(|workload| runner::WorkloadRunCell {
+            workload: workload.as_ref(),
+            rows: SYSTEM_WORKLOAD_GATE_ROWS,
+        })
+        .collect::<Vec<_>>();
+    let config = runner::BenchConfig {
+        iterations: SYSTEM_WORKLOAD_GATE_ITERATIONS,
+        warmup: SYSTEM_WORKLOAD_GATE_WARMUP,
+        seed: SYSTEM_WORKLOAD_GATE_SEED,
+        timing_mode: runner::TimingMode::RawWallClock,
+        cache_mode: runner::CacheMode::Warm,
+        capture_planner_stages: false,
+        native_parity_pairing: false,
+        headline_speedup_allowed: false,
+        plans_capture_path: Some(artifact_root.join("plans.txt")),
+        guc_profile: None,
+        skip_guc_verify: false,
+        artifacts_dir: Some(artifact_root),
+    };
+    let report = runner::run_cells_with_config(connection, &cells, &config)?;
+    print_report(&report, &ReportFormat::Markdown)?;
+    enforce_system_workload_gate(&report, &selected)?;
+    enforce_benchmark_ship_gate(&report)?;
+    eprintln!(
+        "[system-workload-gate] PASS: {} SSBM/TPC-H-shaped/ClickBench-style cells retained exact output, honest plan/dispatch classification, and separate load/lifecycle evidence",
+        cells.len()
     );
     Ok(())
 }
@@ -1235,6 +1575,8 @@ fn cmd_metal_ship_gate(
         timing_mode: runner::TimingMode::RawWallClock,
         cache_mode: runner::CacheMode::Both,
         capture_planner_stages: false,
+        native_parity_pairing: false,
+        headline_speedup_allowed: true,
         plans_capture_path: Some(artifact_root.join("plans.txt")),
         guc_profile: None,
         skip_guc_verify: false,
@@ -1332,6 +1674,7 @@ fn cmd_run(
     realistic_gucs: bool,
     capture_plans: bool,
     capture_planner_stages: bool,
+    native_parity_pairing: bool,
     timing: &TimingArg,
     cache_mode: &CacheModeArg,
     skip_guc_verify: bool,
@@ -1346,6 +1689,8 @@ fn cmd_run(
         timing_mode: runner::TimingMode::from(timing),
         cache_mode: runner::CacheMode::from(cache_mode),
         capture_planner_stages,
+        native_parity_pairing,
+        headline_speedup_allowed: true,
         plans_capture_path: if capture_plans {
             Some(run_artifacts.join("plans.txt"))
         } else {
@@ -1378,6 +1723,7 @@ fn cmd_crash_repro(
     realistic_gucs: bool,
     capture_plans: bool,
     capture_planner_stages: bool,
+    native_parity_pairing: bool,
     timing: &TimingArg,
     cache_mode: &CacheModeArg,
     skip_guc_verify: bool,
@@ -1397,6 +1743,8 @@ fn cmd_crash_repro(
         timing_mode: runner::TimingMode::from(timing),
         cache_mode: runner::CacheMode::from(cache_mode),
         capture_planner_stages,
+        native_parity_pairing,
+        headline_speedup_allowed: true,
         plans_capture_path: if capture_plans {
             Some(repro_artifacts.join("plans.txt"))
         } else {
@@ -1474,6 +1822,8 @@ fn cmd_resume(
         timing_mode: retry_config.timing_mode,
         cache_mode: retry_config.cache_mode,
         capture_planner_stages: false,
+        native_parity_pairing: retry_config.native_parity_pairing,
+        headline_speedup_allowed: true,
         plans_capture_path: if retry_config.capture_plans {
             Some(retry_artifacts.join("plans.txt"))
         } else {
@@ -1883,8 +2233,11 @@ mod tests {
                 timing_mode: "raw-wallclock".to_owned(),
                 cache_mode: "warm".to_owned(),
                 harness_profile: "debug".to_owned(),
+                native_parity_pairing: false,
+                native_parity_repetitions_per_arm: 1,
             },
             workloads,
+            headline_speedup_allowed: true,
             artifact_dir: None,
             crashes: Vec::new(),
             postmaster_start_time: None,
@@ -2552,6 +2905,7 @@ mod tests {
                 realistic_gucs: true,
                 skip_guc_verify: false,
                 capture_plans: true,
+                native_parity_pairing: false,
             }),
         };
 
@@ -2607,6 +2961,7 @@ mod tests {
                 realistic_gucs: false,
                 capture_plans: false,
                 capture_planner_stages: false,
+                native_parity_pairing: false,
                 timing: TimingArg::Raw,
                 cache_mode: CacheModeArg::Warm,
                 skip_guc_verify: false,
@@ -2627,6 +2982,7 @@ mod tests {
             realistic_gucs: true,
             capture_plans: true,
             capture_planner_stages: false,
+            native_parity_pairing: false,
             timing: TimingArg::Both,
             cache_mode: CacheModeArg::Both,
             skip_guc_verify: true,
@@ -2645,6 +3001,7 @@ mod tests {
             realistic_gucs: false,
             capture_plans: false,
             capture_planner_stages: false,
+            native_parity_pairing: false,
             timing: TimingArg::Explain,
             cache_mode: CacheModeArg::Cold,
             skip_guc_verify: false,

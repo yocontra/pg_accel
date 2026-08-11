@@ -92,6 +92,8 @@ mod tests {
 
     fn assert_planner_decline(query: &str, expected_reason: &str) {
         Spi::run("SET LOCAL pg_accel.enabled = on").expect("acceleration should be enabled");
+        Spi::run("SET LOCAL pg_accel.execution_profiling = on")
+            .expect("descriptor execution profiling should be enabled for evidence");
         let plan = explain_text(query, false);
         let reason = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
             .expect("planner rejection reason should be readable");
@@ -146,9 +148,26 @@ mod tests {
         assert!(
             plan.contains("custom scan (gpuaccelagg)")
                 && plan.contains("gpu resident pipeline: true")
-                && plan.contains("gpu descriptor strategy: descriptor_grouped_aggregate"),
+                && plan.contains("gpu descriptor strategy: descriptor_grouped_aggregate")
+                && plan.contains("gpu physical kernel mode:"),
             "query must select the childless descriptor aggregate; rejection={rejection:?}:\n{plan}"
         );
+        let planned_mode = plan
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("gpu physical kernel mode: ")
+                    .map(str::to_owned)
+            })
+            .expect("selected descriptor must report its planned physical mode");
+        assert_ne!(
+            planned_mode, "serial_generic",
+            "normal planning must never select the serial generic mode"
+        );
+        Spi::run("SET LOCAL pg_accel.execution_profiling = on")
+            .expect("descriptor execution profiling should be enabled for selected evidence");
+        Spi::run("SELECT pg_accel_reset_stats()")
+            .expect("physical-mode counters should reset before selected execution");
         let before = kernel_executions();
         let accelerated = result_rows(query);
         let after = kernel_executions();
@@ -160,7 +179,141 @@ mod tests {
             accelerated, native,
             "descriptor result differs from PostgreSQL"
         );
+        let physical_modes = Spi::connect(|client| {
+            client
+                .select(
+                    "SELECT mode, calls FROM pg_accel_grouped_kernel_mode_stats() \
+                     WHERE calls > 0 ORDER BY mode",
+                    None,
+                    &[],
+                )
+                .expect("physical-mode counters should be readable")
+                .map(|row| {
+                    (
+                        row.get::<String>(1)
+                            .expect("mode should decode")
+                            .expect("mode should not be NULL"),
+                        row.get::<i64>(2)
+                            .expect("calls should decode")
+                            .expect("calls should not be NULL"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            physical_modes.len(),
+            1,
+            "selected execution must use exactly one physical mode: {physical_modes:?}"
+        );
+        assert_eq!(physical_modes[0].0, planned_mode);
+        assert!(physical_modes[0].1 > 0);
+        assert_grouped_runtime_seam_evidence();
+        let missing_stages = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_accel_descriptor_stage_stats() WHERE calls = 0",
+        )
+        .expect("descriptor stage counters should be readable")
+        .expect("descriptor stage count should not be NULL");
+        assert_eq!(
+            missing_stages, 0,
+            "selected execution must exercise every profiled descriptor stage"
+        );
         accelerated
+    }
+
+    fn required_counter(query: &str, label: &str) -> i64 {
+        Spi::get_one::<i64>(query)
+            .unwrap_or_else(|error| panic!("{label} should be readable: {error}"))
+            .unwrap_or_else(|| panic!("{label} should not be NULL"))
+    }
+
+    fn assert_grouped_runtime_seam_evidence() {
+        let launches = required_counter(
+            "SELECT transition_launches FROM pg_accel_grouped_runtime_stats()",
+            "grouped transition launches",
+        );
+        let global_batches = required_counter(
+            "SELECT batches_executed FROM pg_accel_stats()",
+            "global completed aggregate batches",
+        );
+        let waits = required_counter(
+            "SELECT queue_waits FROM pg_accel_grouped_runtime_stats()",
+            "grouped queue waits",
+        );
+        assert!(
+            launches > 0,
+            "selected grouped execution launched no transitions"
+        );
+        assert_eq!(
+            global_batches, launches,
+            "global batch accounting must equal the completed native lifecycle calls used by EXPLAIN"
+        );
+        assert_eq!(
+            waits, launches,
+            "shared-USM grouped execution must synchronize once per lifecycle transition"
+        );
+        assert!(
+            required_counter(
+                "SELECT queue_wait_ns FROM pg_accel_grouped_runtime_stats()",
+                "grouped queue wait time",
+            ) > 0
+        );
+        assert!(
+            required_counter(
+                "SELECT output_bytes FROM pg_accel_grouped_runtime_stats()",
+                "grouped output bytes",
+            ) > 0
+        );
+        assert!(
+            required_counter(
+                "SELECT shared_copy_calls FROM pg_accel_grouped_runtime_stats()",
+                "grouped shared copy calls",
+            ) > 0
+        );
+        assert_eq!(
+            required_counter(
+                "SELECT device_copy_calls FROM pg_accel_grouped_runtime_stats()",
+                "grouped device copy calls",
+            ),
+            0,
+            "production shared-USM grouped output must not submit copy commands"
+        );
+
+        for (function, retained_field, label) in [
+            (
+                "pg_accel_grouped_workspace_pool_stats",
+                "retained_workspaces",
+                "workspace",
+            ),
+            (
+                "pg_accel_grouped_output_pool_stats",
+                "retained_outputs",
+                "output",
+            ),
+        ] {
+            assert_eq!(
+                required_counter(
+                    &format!("SELECT hits + fresh_allocations FROM {function}()"),
+                    &format!("grouped {label} checkout count"),
+                ),
+                1,
+                "one selected grouped query must check out exactly one {label} allocation"
+            );
+            assert_eq!(
+                required_counter(
+                    &format!("SELECT returns FROM {function}()"),
+                    &format!("grouped {label} return count"),
+                ),
+                1,
+                "selected grouped query must return its {label} allocation"
+            );
+            assert!(
+                required_counter(
+                    &format!("SELECT {retained_field} FROM {function}()"),
+                    &format!("grouped retained {label} count"),
+                ) >= 1,
+                "selected grouped query must retain a reusable {label} allocation"
+            );
+        }
     }
 
     fn pin(table: &str, columns: &[&str], expected_rows: i64) {
@@ -178,7 +331,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn selected_descriptor_types_binary_empty_and_lifecycle() {
+    fn serial_generic_descriptor_types_decline_with_binary_empty_and_lifecycle_parity() {
         if !begin_gpu_test() {
             return;
         }
@@ -261,14 +414,14 @@ mod tests {
             float_key_query,
         ];
         for query in queries {
-            assert!(!assert_selected_matches_native(query).is_empty());
+            assert_native_decline_matches_native(query, "generic_serial_kernel_mode_unqualified");
         }
 
         Spi::run("DELETE FROM pgaccel_active_descriptor_types")
             .expect("deleting the typed fixture should succeed");
         pin("pgaccel_active_descriptor_types", &columns, 0);
         for query in queries {
-            assert!(assert_selected_matches_native(query).is_empty());
+            assert_native_decline_matches_native(query, "generic_serial_kernel_mode_unqualified");
         }
 
         assert_eq!(
@@ -304,7 +457,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn selected_int8_star_membership_preserves_nulls_and_multiplicity() {
+    fn unreleased_counted_int8_star_membership_declines_with_native_parity() {
         if !begin_gpu_test() {
             return;
         }
@@ -347,29 +500,32 @@ mod tests {
             .expect("INT8 membership acceleration should be enabled");
         let plan = explain_text(query, false);
         assert!(
-            plan.contains("custom scan (gpuaccelagg)")
-                && plan.contains("gpu descriptor star dimensions:")
-                && plan.contains("type=20")
-                && plan.contains("multiplicity=counted"),
-            "single exact INT8 join must select counted resident membership:\n{plan}"
-        );
-        let before = kernel_executions();
-        let accelerated = Spi::get_one::<i64>(query)
-            .expect("selected INT8 membership query should succeed")
-            .expect("selected INT8 membership count should not be NULL");
-        let after = kernel_executions();
-        assert!(
-            after > before,
-            "selected INT8 membership did not dispatch: before={before}, after={after}"
+            !plan.contains("custom scan (gpuaccelagg)"),
+            "unqualified counted INT8 membership must remain native:\n{plan}"
         );
         assert_eq!(
-            accelerated, native,
-            "selected INT8 membership result differs from PostgreSQL"
+            Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                .expect("planner rejection reason should be readable")
+                .as_deref(),
+            Some("generic_descriptor_capability")
+        );
+        let before = kernel_executions();
+        let enabled = Spi::get_one::<i64>(query)
+            .expect("enabled native INT8 membership query should succeed")
+            .expect("enabled native INT8 membership count should not be NULL");
+        let after = kernel_executions();
+        assert_eq!(
+            after, before,
+            "unqualified counted INT8 membership dispatched unexpectedly"
+        );
+        assert_eq!(
+            enabled, native,
+            "native-decline INT8 membership result differs with pg_accel enabled"
         );
     }
 
     #[pg_test]
-    fn one_scalar_range_selects_while_multiple_ranges_decline_with_native_parity() {
+    fn unfiltered_integer_selects_while_serial_and_structural_ranges_decline() {
         if !begin_gpu_test() {
             return;
         }
@@ -393,14 +549,35 @@ mod tests {
 
         let selected_query = "SELECT product_id, sum(price * quantity) AS sum, count(*) AS count \
              FROM pgaccel_active_and_ranges \
-             WHERE price <= 800 \
              GROUP BY product_id ORDER BY product_id";
         let fallback_before = stock_exec_count();
         assert_eq!(assert_selected_matches_native(selected_query).len(), 256);
         assert_eq!(
             stock_exec_count(),
             fallback_before,
-            "selected single range execution must not enter the stock executor"
+            "selected unfiltered execution must not enter the stock executor"
+        );
+
+        let count_query = "SELECT product_id, count(*) AS count \
+             FROM pgaccel_active_and_ranges \
+             GROUP BY product_id ORDER BY product_id";
+        assert_eq!(assert_selected_matches_native(count_query).len(), 256);
+        assert!(
+            Spi::get_one::<i64>(
+                "SELECT calls FROM pg_accel_grouped_kernel_mode_stats() \
+                 WHERE mode = 'parallel_dense_count'"
+            )
+            .expect("parallel dense-count mode counter should be readable")
+            .is_some_and(|calls| calls > 0),
+            "selected COUNT(*) grouping must execute the native parallel dense-count branch"
+        );
+
+        assert_native_decline_matches_native(
+            "SELECT product_id, sum(price * quantity) AS sum, count(*) AS count \
+             FROM pgaccel_active_and_ranges \
+             WHERE price <= 800 \
+             GROUP BY product_id ORDER BY product_id",
+            "generic_serial_kernel_mode_unqualified",
         );
 
         assert_native_decline_matches_native(

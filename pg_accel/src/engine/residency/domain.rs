@@ -45,6 +45,53 @@ pub struct ResidentByteAccounting {
     pub retained_host_exact_bytes: u64,
 }
 
+/// Exact measurements and lossless representation projections captured while
+/// constructing one backend-local resident relation.
+///
+/// The `projected_*` fields are diagnostics only. They deliberately do not
+/// change the resident ABI: a compact representation is not selectable until
+/// every consuming kernel understands it and has independent correctness and
+/// performance evidence. `transient_staging_bytes` is the logical size of the
+/// host-owned encoded buffers live immediately before publication;
+/// `construction_peak_bytes` adds the final GPU-readable allocation that is
+/// simultaneously live while those buffers are copied.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ResidentRepresentationEvidence {
+    pub source_logical_bytes: u64,
+    pub encoded_device_bytes: u64,
+    pub retained_exact_bytes: u64,
+    pub transient_staging_bytes: u64,
+    pub construction_peak_bytes: u64,
+    pub null_sidecar_bytes: u64,
+    pub projected_null_bitmap_bytes: u64,
+    pub bool_value_bytes: u64,
+    pub projected_bool_bitmap_bytes: u64,
+    pub integer_value_bytes: u64,
+    pub projected_integer_bitpack_bytes: u64,
+    pub dictionary_code_bytes: u64,
+    pub projected_dictionary_bitpack_bytes: u64,
+    pub projected_block_minmax_bytes: u64,
+    pub scan_batches: u64,
+    pub preflight_ms: f64,
+    pub scan_ms: f64,
+    pub encode_ms: f64,
+    pub copy_ms: f64,
+}
+
+/// Host bytes retained by a text dictionary so an int32 code can be decoded
+/// back to its exact PostgreSQL value. This includes each `String` header and
+/// its allocated byte storage; the outer slice itself has no additional owned
+/// allocation beyond those headers.
+pub(super) fn text_dictionary_retained_host_bytes(labels: &[String]) -> Option<u64> {
+    let headers = labels.len().checked_mul(std::mem::size_of::<String>())?;
+    let payload = labels
+        .iter()
+        .try_fold(0_usize, |total, label| total.checked_add(label.capacity()))?;
+    headers
+        .checked_add(payload)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+}
+
 impl ResidentByteAccounting {
     pub fn checked_total(self) -> Result<u64, DomainContractError> {
         self.device_bytes

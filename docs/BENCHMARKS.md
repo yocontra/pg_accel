@@ -187,9 +187,10 @@ coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
 `shape_multiple_range_predicates`: PostgreSQL analyzes `BETWEEN` and an
 equivalent lower-plus-upper pair as the same multi-clause shape, while one
 scalar comparison remains eligible. The 13 canonical `ssbm_q*` workloads also remain
-native: Q1.1-Q1.3 report `shape_multi_filter_relation`, Q3.3-Q3.4 report
-`shape_unsupported_predicate`, and the remaining canonical SSBM queries report
-`shape_unsupported_filter_type`. `h3_bulk` reports `shape_unsupported_rte`, and
+native: Q1.1-Q1.2 report `shape_multiple_range_predicates`, Q1.3 reports
+`shape_multi_filter_relation`, Q3.3-Q3.4 report `shape_unsupported_predicate`,
+and the remaining canonical SSBM queries report `shape_unsupported_filter_type`.
+`h3_bulk` reports `shape_unsupported_rte`, and
 `h3_resolution_sweep` plus `h3_latlng_res15` report
 `shape_group_expression`. Historical timing artifacts for those workloads do
 not make them eligible for the current ship gate.

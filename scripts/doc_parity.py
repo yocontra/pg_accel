@@ -141,6 +141,10 @@ GUC_EFFECT_MARKERS = {
         "elapsed-time counters",
         "call and decline counters remain active",
     ),
+    "pg_accel.execution_profiling": (
+        "descriptor-stage monotonic-clock reads",
+        "plan, artifact, binding, allocation, kernel, and tuple-materialization",
+    ),
     "pg_accel.otel_log_max_mb": (
         "trace cap in mib",
         "sampled at trace initialization",

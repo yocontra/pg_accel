@@ -650,6 +650,13 @@ bridge_status_fns! {
         out: *mut crate::engine::spec::abi::PgaccelGroupedAggWorkspaceReq,
     ) -> PgaccelStatus;
 
+    /// Return the physical branch selected by native grouped-aggregate
+    /// validation for this exact descriptor transition.
+    pub fn pgaccel_grouped_agg_kernel_mode(
+        desc: *const crate::engine::spec::abi::PgaccelGroupedAggDesc,
+        out_mode: *mut i32,
+    ) -> PgaccelStatus;
+
     /// Allocate an aligned grouped-aggregate workspace in shared/device USM.
     pub fn pgaccel_grouped_agg_workspace_alloc(
         bytes: usize,
@@ -862,6 +869,21 @@ unsafe extern "C" {
 
     /// Free a pointer returned by `pgaccel_grouped_agg_workspace_alloc`.
     pub fn pgaccel_grouped_agg_workspace_free(ptr: *mut std::ffi::c_void);
+
+    /// Per-thread grouped lifecycle transition count.
+    pub fn pgaccel_grouped_agg_transition_launch_count() -> u64;
+    /// Per-thread grouped queue/event wait count.
+    pub fn pgaccel_grouped_agg_queue_wait_count() -> u64;
+    /// Per-thread grouped queue/event wait duration in nanoseconds.
+    pub fn pgaccel_grouped_agg_queue_wait_ns() -> u64;
+    /// Per-thread logical bytes published by grouped completion records.
+    pub fn pgaccel_grouped_agg_output_bytes() -> u64;
+    /// Per-thread direct shared-USM publication copy calls.
+    pub fn pgaccel_grouped_agg_shared_copy_calls() -> u64;
+    /// Per-thread queued device publication copy calls.
+    pub fn pgaccel_grouped_agg_device_copy_calls() -> u64;
+    /// Reset every per-thread grouped lifecycle telemetry counter.
+    pub fn pgaccel_reset_grouped_agg_telemetry();
 
     // -- Resident grouped COUNT kernel --
 

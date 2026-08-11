@@ -5413,6 +5413,7 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         '"acpp.metal.device.profile.records"',
         '"acpp.metal.device.profile.batch"',
         "llvm::Intrinsic::donothing",
+        "llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::donothing)",
         "EntryBuilder.CreateAlloca(",
         "Builder.CreateZExtOrTrunc(Step, I64)",
         "Builder.CreateICmpULT(Sum, Old)",
@@ -5533,6 +5534,7 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         '"acpp.metal.device.profile.step"',
         "DeviceProfileProbeGuid",
         "llvm::Intrinsic::pseudoprobe",
+        "llvm::Intrinsic::getOrInsertDeclaration",
     ):
         if forbidden in text:
             errors.append(
@@ -5555,11 +5557,20 @@ def coverage_helper_test_discovery_errors(
     errors: list[str] = []
     recipe_lines: list[str] = []
     lines = justfile.splitlines()
-    try:
-        recipe_start = lines.index("coverage-audit:") + 1
-    except ValueError:
+    recipe_headers = [
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(
+            r"coverage-audit:\s*(?:[A-Za-z0-9_.-]+(?:\s+[A-Za-z0-9_.-]+)*)?",
+            line,
+        )
+    ]
+    if not recipe_headers:
         errors.append("justfile coverage-audit recipe is absent")
+    elif len(recipe_headers) != 1:
+        errors.append("justfile must define coverage-audit exactly once")
     else:
+        recipe_start = recipe_headers[0] + 1
         for line in lines[recipe_start:]:
             if not line or not line[0].isspace():
                 break

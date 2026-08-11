@@ -30,9 +30,6 @@ mod raster;
 mod rel_pathlist;
 pub mod shape;
 
-#[cfg(feature = "pg_test")]
-pub(crate) use decline_cache::active_source_depth;
-
 pub(in crate::engine::ffi::planner_hooks) use decision::{
     DecisionFacts, PlannerDecision, PlannerDecisionRecorder, RejectionReason,
 };
@@ -125,6 +122,36 @@ impl Drop for HookElapsedGuard {
         let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
         stats::record_planner_hook_elapsed(self.hook, elapsed_us);
         stats::record_planner_stage_elapsed(self.stage, elapsed_us);
+    }
+}
+
+/// Opt-in elapsed timer for one aggregate-decline decision substage.
+///
+/// Construction and drop are clock- and counter-free while planner profiling
+/// is disabled, which is the production and benchmark default.
+pub(in crate::engine::ffi::planner_hooks) struct PlannerSubstageGuard {
+    stage: stats::PlannerSubstage,
+    start: Option<std::time::Instant>,
+}
+
+impl PlannerSubstageGuard {
+    #[must_use]
+    pub(in crate::engine::ffi::planner_hooks) fn new(stage: stats::PlannerSubstage) -> Self {
+        #[cfg(test)]
+        let start = None;
+        #[cfg(not(test))]
+        let start = gucs::planner_profiling().then(std::time::Instant::now);
+        Self { stage, start }
+    }
+}
+
+impl Drop for PlannerSubstageGuard {
+    fn drop(&mut self) {
+        let Some(start) = self.start else {
+            return;
+        };
+        let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        stats::record_planner_substage(self.stage, elapsed_us);
     }
 }
 

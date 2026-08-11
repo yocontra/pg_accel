@@ -1,0 +1,225 @@
+{
+  "schema_version": 1,
+  "minimum_unsafe_percent": 90.0,
+  "domains": [
+    {
+      "id": "multi_session_residency",
+      "description": "Backend-local stores, cluster ledger accounting, concurrent loads, invalidation, eviction, and backend exit remain balanced across sessions.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/residency/store.rs", "contains": "fn process_invalidations"},
+        {"glob": "pg_accel/src/engine/residency/ledger.rs", "contains": "pub(super) fn cleanup_backend"},
+        {"glob": "pg_accel_bench/src/resident_concurrency_test.rs", "contains": "fn run_concurrency_proof"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/engine/residency/store.rs", "symbol": "planner_loaded_evidence_revalidation_drains_pending_invalidation_once_for_batch"},
+        {"path": "pg_accel_bench/src/resident_concurrency_test.rs", "symbol": "resident_real_user_cancel_is_bounded_exact_and_recoverable"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/engine/residency/store.rs", "regex": "fn process_invalidations\\("}
+      ]
+    },
+    {
+      "id": "executor_reset_drop",
+      "description": "Custom Scan executor ownership is released once across normal End, rescan, PostgreSQL ERROR, and query-memory-context reset.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/ffi/custom_scan/mod.rs", "contains": "unsafe fn release_executor"},
+        {"glob": "pg_accel/src/engine/executor/agg/execute.rs", "contains": "pub fn reset_for_rescan"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/engine/ffi/custom_scan/tests.rs", "symbol": "executor_owner_drops_exactly_once_across_end_and_context_reset"},
+        {"path": "pg_accel/src/tests/phase2_cache.rs", "symbol": "test_prepared_descriptor_revalidates_before_first_fetch_and_cleans_up_caught_error"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/engine/ffi/custom_scan/mod.rs", "regex": "unsafe fn release_executor\\("}
+      ]
+    },
+    {
+      "id": "planner_private_data",
+      "description": "Planner/executor private-data frames and PostgreSQL integer lists are length-, tag-, type-, and canonical-encoding checked before allocation or field access.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/ffi/custom_scan/private_data.rs", "contains": "fn validate_plan_wire_from_reader"},
+        {"glob": "pg_accel/src/engine/ffi/custom_scan/private_data/list_codec.rs", "contains": "unsafe fn from_pg_list"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/engine/ffi/custom_scan/private_data.rs", "symbol": "deterministic_adversarial_plan_words_never_panic"},
+        {"path": "pg_accel/src/engine/ffi/custom_scan/private_data.rs", "symbol": "postgres_integer_lists_are_adversarially_bounded_and_type_checked"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/engine/ffi/custom_scan/private_data.rs", "regex": "fn validate_plan_wire_from_reader\\("}
+      ]
+    },
+    {
+      "id": "allocation_free",
+      "description": "Device, shared-USM, workspace, output, and ledger allocation failures release every acquired owner exactly once and permit a later successful dispatch.",
+      "sources": [
+        {"glob": "pgaccel-kernels/src/grouped_agg.cpp", "contains": "kTestFailureOwnedAllocation"},
+        {"glob": "pg_accel/src/engine/residency/store.rs", "contains": "staged_device_lifecycle"}
+      ],
+      "tests": [
+        {"path": "pgaccel-kernels/test/test_grouped_agg.cpp", "symbol": "test_injected_lifecycle_failures_are_transactional_and_reusable"},
+        {"path": "pg_accel/src/engine/residency/store.rs", "symbol": "staged_device_lifecycle_failures_release_charge_without_publication"}
+      ],
+      "coverage_anchors": [
+        {"layer": "cpp", "path": "pgaccel-kernels/src/grouped_agg.cpp", "regex": "test_fail_stage\\(kTestFailureOwnedAllocation\\)"}
+      ]
+    },
+    {
+      "id": "copy_wait",
+      "description": "Synchronous parameter, completion, and output transfers surface copy/wait failures as hard errors without partial publication or poisoned-state reuse.",
+      "sources": [
+        {"glob": "pgaccel-kernels/src/grouped_agg.cpp", "contains": "class PublishedCopyQueue"},
+        {"glob": "pg_accel/src/gpu/expr.rs", "contains": "copy_to_slice"}
+      ],
+      "tests": [
+        {"path": "pgaccel-kernels/test/test_grouped_agg.cpp", "symbol": "test_injected_lifecycle_failures_are_transactional_and_reusable"},
+        {"path": "pgaccel-kernels/test/test_kernel_failure_status.cpp", "symbol": "main"}
+      ],
+      "coverage_anchors": [
+        {"layer": "cpp", "path": "pgaccel-kernels/src/grouped_agg.cpp", "regex": "test_fail_stage\\(kTestFailurePublishedCopy\\)"},
+        {"layer": "cpp", "path": "pgaccel-kernels/src/grouped_agg.cpp", "regex": "test_fail_stage\\(kTestFailurePublishedWait\\)"}
+      ]
+    },
+    {
+      "id": "cancellation",
+      "description": "PostgreSQL cancellation remains a typed 57014 boundary, drops bounded device state once, preserves accounting, and leaves the backend reusable.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/executor/agg/descriptor.rs", "contains": "fn capture_postgres_interrupt"},
+        {"glob": "pg_accel/src/engine/executor/bounded.rs", "contains": "cleanup_before_rethrow"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/tests/phase2_cache.rs", "symbol": "test_bounded_dense_statement_timeout_is_exact_and_recoverable"},
+        {"path": "pg_accel/src/tests/phase6_spatial.rs", "symbol": "exact_recheck_preserves_cancellation_but_types_ordinary_errors"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/engine/executor/agg/descriptor.rs", "regex": "fn capture_postgres_interrupt\\("}
+      ]
+    },
+    {
+      "id": "output_materialization",
+      "description": "Device completion metadata and SQL datums are validated before caller-visible rows are published; failed materialization cannot look like a valid partial result.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/executor/agg/output.rs", "contains": "fn raise_materialize_error"},
+        {"glob": "pgaccel-kernels/src/grouped_agg.cpp", "contains": "kTestFailureOutputMaterialization"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/engine/executor/agg/output.rs", "symbol": "nontext_group_materialization_enforces_type_null_and_domain_contracts"},
+        {"path": "pgaccel-kernels/test/test_grouped_agg.cpp", "symbol": "test_injected_lifecycle_failures_are_transactional_and_reusable"}
+      ],
+      "coverage_anchors": [
+        {"layer": "cpp", "path": "pgaccel-kernels/src/grouped_agg.cpp", "regex": "test_fail_stage\\(kTestFailureOutputMaterialization\\)"}
+      ]
+    },
+    {
+      "id": "postgis_calls",
+      "description": "PostGIS catalog identity and exact-recheck calls are protected by PostgreSQL error boundaries that distinguish ordinary errors from cancellation and retain backend reuse.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/ffi/syscache/postgis.rs", "contains": "pub unsafe fn resolve_postgis_catalog"},
+        {"glob": "pg_accel/src/engine/executor/agg/spatial.rs", "contains": "PgTryBuilder"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/tests/phase6_spatial.rs", "symbol": "exact_recheck_preserves_cancellation_but_types_ordinary_errors"},
+        {"path": "pg_accel/src/engine/ffi/syscache/postgis.rs", "symbol": "spatial_function_contract_rejects_semantic_replacements"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/engine/ffi/syscache/postgis.rs", "regex": "fn validate_postgis_function_shape\\("}
+      ]
+    },
+    {
+      "id": "derived_publication",
+      "description": "Derived artifacts reserve exact category bytes before construction and publish only after dependency/generation revalidation; every staged failure releases both charges.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/residency/store.rs", "contains": "fn publish_derived_artifact"},
+        {"glob": "pg_accel/src/engine/residency/store.rs", "contains": "ensure_staged_device_transform_artifact_with_report"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/engine/residency/store.rs", "symbol": "staged_transform_failures_release_both_charges_without_publication"},
+        {"path": "pg_accel/src/engine/residency/store.rs", "symbol": "dependency_change_during_finalize_prevents_reserved_publication"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/engine/residency/store.rs", "regex": "fn publish_derived_artifact<"}
+      ]
+    },
+    {
+      "id": "unsafe_ffi",
+      "description": "Every Rust unsafe/extern boundary is assigned to this register, raw C status values fail closed, and ABI drift cannot be interpreted as successful GPU execution.",
+      "sources": [
+        {"glob": "pg_accel/src/gpu/bridge.rs", "contains": "pub fn convert_status"},
+        {"glob": "pg_accel/src/engine/ffi/**/*.rs", "contains": "SAFETY:"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/gpu/bridge.rs", "symbol": "bridge_status_conversion_preserves_known_failures_and_fails_unknown_closed"},
+        {"path": "pgaccel-kernels/test/test_host_api_contract.cpp", "symbol": "main"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/gpu/bridge.rs", "regex": "pub fn convert_status\\("}
+      ]
+    },
+    {
+      "id": "lifetime_ownership",
+      "description": "Planner-owned nodes, PostgreSQL memory contexts, device buffers, syscache pins, and backend-local pool entries cannot outlive their owning context or PID.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/ffi/custom_scan/mod.rs", "contains": "register_executor_cleanup"},
+        {"glob": "pg_accel/src/gpu/grouped_agg.rs", "contains": "owner_pid"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/engine/ffi/custom_scan/tests.rs", "symbol": "executor_pre_reset_callback_is_type_bound_and_cleared_with_owner"},
+        {"path": "pg_accel/src/gpu/grouped_agg.rs", "symbol": "invalid_success_metadata_poisons_reusable_workspace"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/engine/ffi/custom_scan/mod.rs", "regex": "unsafe fn register_executor_cleanup\\("}
+      ]
+    },
+    {
+      "id": "cleanup",
+      "description": "Normal completion, failure, cancellation, fork, and backend exit use idempotent RAII or registered owners with exact release accounting.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/residency/ledger.rs", "contains": "impl Drop for LedgerCharge"},
+        {"glob": "pgaccel-kernels/src/grouped_agg.cpp", "contains": "class ScratchOwner"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/engine/residency/ledger.rs", "symbol": "charge_tracks_exact_bytes_and_releases_on_drop"},
+        {"path": "pgaccel-kernels/test/test_grouped_agg.cpp", "symbol": "test_injected_lifecycle_failures_are_transactional_and_reusable"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/engine/residency/ledger.rs", "regex": "impl Drop for LedgerCharge"},
+        {"layer": "cpp", "path": "pgaccel-kernels/src/grouped_agg.cpp", "regex": "~ScratchOwner\\(\\) noexcept"}
+      ]
+    },
+    {
+      "id": "invalidation",
+      "description": "DML, DDL, relcache, relfilenode, trigger, catalog, generation, and prepared-plan changes are revalidated before resident or derived reuse.",
+      "sources": [
+        {"glob": "pg_accel/src/engine/residency/store.rs", "contains": "invalidation_prunes_pending_generation_relfilenode_and_scope_changes"},
+        {"glob": "pg_accel/src/engine/ffi/planner_hooks/decline_cache.rs", "contains": "dependencies"}
+      ],
+      "tests": [
+        {"path": "pg_accel/src/tests/phase2_cache.rs", "symbol": "test_residency_v2_dml_freshness_and_auto_reload"},
+        {"path": "pg_accel/src/tests/phase2_cache.rs", "symbol": "test_residency_v2_ddl_rename_alter_and_type_freshness"}
+      ],
+      "coverage_anchors": [
+        {"layer": "rust", "path": "pg_accel/src/engine/residency/store.rs", "regex": "fn process_invalidations\\("}
+      ]
+    }
+  ],
+  "unsafe_rules": [
+    {"glob": "pg_accel/src/adapters/**", "domain": "unsafe_ffi"},
+    {"glob": "pg_accel/src/engine/columnar.rs", "domain": "lifetime_ownership"},
+    {"glob": "pg_accel/src/engine/executor/**", "domain": "executor_reset_drop"},
+    {"glob": "pg_accel/src/engine/ffi/custom_scan/private_data*", "domain": "planner_private_data"},
+    {"glob": "pg_accel/src/engine/ffi/custom_scan/**", "domain": "lifetime_ownership"},
+    {"glob": "pg_accel/src/engine/ffi/planner_hooks/**", "domain": "lifetime_ownership"},
+    {"glob": "pg_accel/src/engine/ffi/syscache*", "domain": "unsafe_ffi"},
+    {"glob": "pg_accel/src/engine/otel.rs", "domain": "unsafe_ffi"},
+    {"glob": "pg_accel/src/engine/panic_hook.rs", "domain": "cleanup"},
+    {"glob": "pg_accel/src/engine/pg_compat.rs", "domain": "unsafe_ffi"},
+    {"glob": "pg_accel/src/engine/raster/catalog.rs", "domain": "postgis_calls"},
+    {"glob": "pg_accel/src/engine/residency/**", "domain": "multi_session_residency"},
+    {"glob": "pg_accel/src/engine/thread_budget.rs", "domain": "cleanup"},
+    {"glob": "pg_accel/src/engine/type_extractor.rs", "domain": "unsafe_ffi"},
+    {"glob": "pg_accel/src/gpu/**", "domain": "unsafe_ffi"},
+    {"glob": "pg_accel/src/lib.rs", "domain": "lifetime_ownership"},
+    {"glob": "pg_accel/src/pg_stubs.rs", "domain": "unsafe_ffi"},
+    {"glob": "pg_accel_bench/src/runner.rs", "domain": "lifetime_ownership"},
+    {"glob": "pg_accel_bench/src/workloads/fp64_matrix.rs", "domain": "unsafe_ffi"}
+  ]
+}

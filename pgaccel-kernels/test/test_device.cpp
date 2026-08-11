@@ -11,6 +11,7 @@ extern sycl::queue* g_ooo_queue;
 extern "C" void pgacceltest_fail_before_ooo_queue_once(void);
 extern "C" unsigned pgacceltest_unpublished_queue_count(void);
 extern "C" bool pgacceltest_grouped_agg_cleanup_exception_is_caught(void);
+extern "C" bool pgacceltest_grouped_agg_partial_merge_semantics(void);
 #endif
 
 int main() {
@@ -20,8 +21,7 @@ int main() {
     fprintf(stderr, "injected second-queue construction failure did not fail initialization\n");
     return 1;
   }
-  if (g_queue != nullptr || g_ooo_queue != nullptr ||
-      pgacceltest_unpublished_queue_count() != 0) {
+  if (g_queue != nullptr || g_ooo_queue != nullptr || pgacceltest_unpublished_queue_count() != 0) {
     fprintf(stderr, "failed initialization published or leaked a queue\n");
     return 1;
   }
@@ -34,6 +34,10 @@ int main() {
   }
   if (!pgacceltest_grouped_agg_cleanup_exception_is_caught()) {
     fprintf(stderr, "noexcept scratch cleanup did not catch the injected failure\n");
+    return 1;
+  }
+  if (!pgacceltest_grouped_agg_partial_merge_semantics()) {
+    fprintf(stderr, "ordered hierarchical partial merge broke prefix-overflow semantics\n");
     return 1;
   }
 #endif

@@ -21,6 +21,7 @@ use crate::engine::residency::{
     StagedTransformWorkspace, ensure_selected_relations, ensure_staged_device_transform_artifact,
     with_derived_artifact_inputs,
 };
+use crate::engine::stats;
 #[cfg(feature = "pg_test")]
 use crate::gpu::injected_raster_resident_failure;
 use crate::gpu::{
@@ -504,8 +505,25 @@ impl RasterExecState {
         // SAFETY: this method inherits the backend-thread requirement, and the
         // plan remains owned by this live executor state for the call.
         let ready = unsafe { self.plan.ensure_ready() }?;
+        let elapsed = started.elapsed();
         let (rows_dispatched, batches_executed, dispatch_time_us) =
-            execution_counters(&ready, started.elapsed());
+            execution_counters(&ready, elapsed);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let raw_load_us =
+            if ready.selected.raw_load_ms.is_finite() && ready.selected.raw_load_ms > 0.0 {
+                (ready.selected.raw_load_ms * 1_000.0).min(u64::MAX as f64) as u64
+            } else {
+                0
+            };
+        stats::record_artifact_lifecycle(
+            ready.artifact,
+            ready
+                .accounting
+                .device_bytes
+                .saturating_add(ready.accounting.retained_host_exact_bytes),
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            raw_load_us,
+        );
         self.ready = Some(ready);
         self.rows_dispatched = rows_dispatched;
         self.batches_executed = batches_executed;

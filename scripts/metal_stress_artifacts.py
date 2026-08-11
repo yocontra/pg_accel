@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, TextIO
@@ -54,6 +55,10 @@ LATENCY_KEYS = {
     "wall_us",
 }
 CORE_ARTIFACTS = (
+    ("candidate-provenance.json", "exact_candidate_provenance"),
+    ("candidate-provenance.log", "exact_candidate_provenance_log"),
+    ("acpp-provenance.txt", "adaptivecpp_toolchain_provenance"),
+    ("acpp-provenance.log", "adaptivecpp_toolchain_provenance_log"),
     ("metadata.txt", "environment_metadata"),
     ("summary.txt", "gate_summary"),
     ("gpu-build.log", "build_log"),
@@ -87,6 +92,17 @@ CORE_ARTIFACTS = (
     ("postgres-log-audit.json", "postgres_log_audit"),
     ("postgres-log-tail.txt", "postgres_log_audit_excerpt"),
 )
+CANDIDATE_SOURCE_INPUTS = (
+    ".acpp-version",
+    ".tool-versions",
+    "Cargo.lock",
+    "patches/adaptivecpp/default-targets-json.patch",
+    "patches/adaptivecpp/sleef-helper-address-space-specialization.patch",
+    "patches/adaptivecpp/sscp-host-coverage.patch",
+    "scripts/metal_stress_artifacts.py",
+    "scripts/metal_stress_gate.sh",
+)
+GIT_OBJECT_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 BENCHMARK_DIRS = (
     "bench-gpu_reduce_sum-100000",
     "bench-gpu_nlj_between-50000",
@@ -99,6 +115,152 @@ BENCHMARK_DIRS = (
 
 class ArtifactContractError(ValueError):
     """The stress evidence is incomplete, malformed, or contradictory."""
+
+
+def _git(repo_root: Path, *arguments: str, allow_failure: bool = False) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ArtifactContractError(
+            f"cannot inspect exact candidate Git state: {error}"
+        ) from error
+    if completed.returncode != 0:
+        if allow_failure:
+            return ""
+        detail = (
+            completed.stderr.strip()
+            or completed.stdout.strip()
+            or "unknown Git error"
+        )
+        raise ArtifactContractError(f"cannot inspect exact candidate Git state: {detail}")
+    return completed.stdout.strip()
+
+
+def _candidate_source_input(repo_root: Path, relative: str) -> dict[str, Any]:
+    path = repo_root / relative
+    if path.is_symlink() or not path.is_file():
+        raise ArtifactContractError(
+            f"exact candidate source input is missing: {relative}"
+        )
+    if not _git(repo_root, "ls-files", "--error-unmatch", "--", relative):
+        raise ArtifactContractError(
+            f"exact candidate source input is not tracked: {relative}"
+        )
+    raw = path.read_bytes()
+    return {
+        "path": relative,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size_bytes": len(raw),
+    }
+
+
+def validate_candidate_provenance(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ArtifactContractError("exact candidate provenance is not a JSON object")
+    if (
+        payload.get("artifact_type") != "metal_stress_candidate_provenance"
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or payload.get("status") != "pass"
+        or payload.get("clean_worktree") is not True
+    ):
+        raise ArtifactContractError(
+            "exact candidate provenance has the wrong schema or status"
+        )
+    for field in ("commit", "tree"):
+        value = payload.get(field)
+        if not isinstance(value, str) or GIT_OBJECT_RE.fullmatch(value) is None:
+            raise ArtifactContractError(
+                f"exact candidate provenance has an invalid {field}"
+            )
+    if payload.get("git_status_sha256") != hashlib.sha256(b"").hexdigest():
+        raise ArtifactContractError("exact candidate provenance does not bind an empty Git status")
+    if (
+        not isinstance(payload.get("repository_root"), str)
+        or not payload["repository_root"]
+    ):
+        raise ArtifactContractError("exact candidate provenance is missing its repository root")
+    if payload.get("head_ref") is not None and not isinstance(
+        payload.get("head_ref"), str
+    ):
+        raise ArtifactContractError("exact candidate provenance has an invalid head ref")
+    inputs = payload.get("source_inputs")
+    if not isinstance(inputs, list) or [
+        row.get("path") for row in inputs if isinstance(row, dict)
+    ] != list(CANDIDATE_SOURCE_INPUTS):
+        raise ArtifactContractError(
+            "exact candidate provenance source inputs are incomplete or reordered"
+        )
+    for row in inputs:
+        if (
+            not isinstance(row, dict)
+            or set(row) != {"path", "sha256", "size_bytes"}
+            or not isinstance(row["size_bytes"], int)
+            or row["size_bytes"] < 0
+            or not isinstance(row["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is None
+        ):
+            raise ArtifactContractError("exact candidate provenance has a malformed source input")
+    return payload
+
+
+def capture_candidate_provenance(repo_root: Path) -> dict[str, Any]:
+    repo_root = repo_root.expanduser().resolve()
+    discovered_root = Path(_git(repo_root, "rev-parse", "--show-toplevel")).resolve()
+    if discovered_root != repo_root:
+        raise ArtifactContractError(
+            f"exact candidate repo root mismatch: requested={repo_root} actual={discovered_root}"
+        )
+    status = _git(
+        repo_root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
+    if status:
+        preview = " | ".join(status.splitlines()[:8])
+        raise ArtifactContractError(f"exact candidate worktree is dirty: {preview}")
+    commit = _git(repo_root, "rev-parse", "--verify", "HEAD^{commit}")
+    tree = _git(repo_root, "rev-parse", "--verify", "HEAD^{tree}")
+    head_ref = _git(
+        repo_root,
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "HEAD",
+        allow_failure=True,
+    )
+    payload = {
+        "artifact_type": "metal_stress_candidate_provenance",
+        "clean_worktree": True,
+        "commit": commit,
+        "git_status_sha256": hashlib.sha256(status.encode("utf-8")).hexdigest(),
+        "head_ref": head_ref or None,
+        "repository_root": str(repo_root),
+        "schema_version": SCHEMA_VERSION,
+        "source_inputs": [
+            _candidate_source_input(repo_root, relative)
+            for relative in CANDIDATE_SOURCE_INPUTS
+        ],
+        "status": "pass",
+        "tree": tree,
+    }
+    return validate_candidate_provenance(payload)
+
+
+def load_candidate_provenance(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ArtifactContractError(f"cannot read exact candidate provenance: {error}") from error
+    return validate_candidate_provenance(payload)
 
 
 def load_crash_count(path: Path) -> int:
@@ -1122,6 +1284,7 @@ def _collect_root_artifacts(artifact_dir: Path) -> list[dict[str, Any]]:
                 artifact_dir, relative, role, require_nonempty=True
             )
         )
+    load_candidate_provenance(artifact_dir / "candidate-provenance.json")
     for benchmark_dir in BENCHMARK_DIRS:
         artifacts.extend(_benchmark_artifact_evidence(artifact_dir, benchmark_dir))
     return artifacts
@@ -1268,6 +1431,13 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--output", required=True, type=Path)
     snapshot.add_argument("--cache-dir")
 
+    candidate = subparsers.add_parser(
+        "capture-candidate",
+        help="require and capture an exact clean candidate checkout",
+    )
+    candidate.add_argument("--repo-root", required=True, type=Path)
+    candidate.add_argument("--output", required=True, type=Path)
+
     crash_count = subparsers.add_parser(
         "crash-count", help="validate and count a benchmark crash artifact"
     )
@@ -1318,6 +1488,11 @@ def main(argv: list[str] | None = None, stderr: TextIO = sys.stderr) -> int:
         if args.command == "snapshot":
             cache_dir = resolve_cache_dir(args.cache_dir)
             _write_json(args.output, measure_cache(cache_dir, args.point))
+        elif args.command == "capture-candidate":
+            payload = capture_candidate_provenance(args.repo_root)
+            _write_json(args.output, payload)
+            print(f"commit={payload['commit']}")
+            print(f"tree={payload['tree']}")
         elif args.command == "crash-count":
             print(load_crash_count(args.path))
         elif args.command == "log-snapshot":

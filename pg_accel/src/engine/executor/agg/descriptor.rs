@@ -1,6 +1,8 @@
 //! Runtime capability checks and frozen-ABI binding for neutral aggregates.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::any::Any;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -12,7 +14,7 @@ use pgrx::pg_sys;
 
 use super::artifact::{
     ArtifactKeyInput, DescriptorAggArtifact, H3ParentArtifact, artifact_column_refs,
-    prepare_agg_artifact,
+    estimate_descriptor_artifact_bytes_upper_bound, prepare_agg_artifact,
 };
 use super::output::{DescriptorAggOutput, validate_h3_compact_key_buffers};
 use super::spatial::{SpatialAggArtifact, SpatialTransformPlan, SpatialWorkspace};
@@ -24,23 +26,29 @@ use crate::engine::executor::bounded::{
 use crate::engine::ffi::syscache::{PostgisCatalogIdentity, resolve_postgis_catalog};
 use crate::engine::gucs;
 use crate::engine::residency::{
-    ArtifactEnsureOutcome, DerivedArtifactIdentity, ResidentByteAccounting, ResidentColumnRef,
+    ArtifactEnsureOutcome, ArtifactProbeOutcome, DerivedArtifact, DerivedArtifactIdentity,
+    EphemeralDerivedArtifact, PreparedDerived, ResidentByteAccounting, ResidentColumnRef,
     ResidentColumnView, ResidentLoadError, ResidentRelationEvidence, ResolvedDerivedInputs,
-    SelectedRelation, ensure_derived_artifact, ensure_device_derived_artifact,
-    ensure_selected_relations, ensure_staged_device_transform_artifact,
-    with_derived_artifact_inputs,
+    SelectedRelation, build_ephemeral_derived_artifact_with_report,
+    build_ephemeral_staged_device_transform_artifact_with_report,
+    ensure_derived_artifact_with_report, ensure_device_derived_artifact_with_report,
+    ensure_selected_relations, ensure_staged_device_transform_artifact_with_report,
+    probe_derived_artifact, resident_live_bytes, with_derived_artifact_inputs,
+    with_ephemeral_artifact_inputs,
 };
 use crate::engine::spec::abi;
 use crate::engine::spec::{
     AggOutputProjection, AggOutputSource, AggQuerySpec, AggregateKind, AggregateSource,
     BinaryMeasureOp, ColumnRef, FilterSpec, GroupKeyEncoding, GroupKeySource, JoinMultiplicity,
-    MaskKind, MeasureExpr, ScalarValue, SpatialOperand, SpatialPredicateKind, SpatialValueKind,
-    SpatialValueMetadata,
+    MaskKind, MeasureExpr, ScalarRange, ScalarValue, SpatialOperand, SpatialPredicateKind,
+    SpatialValueKind, SpatialValueMetadata,
 };
+use crate::engine::stats;
 use crate::gpu::{
-    GpuError, GpuErrorDomain, GpuOperation, GpuStatusDetail, GroupedAggOutcome,
-    GroupedAggOutputStorage, GroupedAggSession, PgaccelExprUsmCol, PgaccelVal, PgaccelValTag,
-    ResolvedGroupedAggPlan, execute_grouped_agg_one_shot,
+    GpuError, GpuErrorDomain, GpuOperation, GpuStatusDetail, GroupedAggKernelMode,
+    GroupedAggOutcome, GroupedAggOutputStorage, GroupedAggSession, GroupedAggWorkspace,
+    PgaccelExprUsmCol, PgaccelVal, PgaccelValTag, ResolvedGroupedAggPlan,
+    execute_grouped_agg_one_shot_with_workspace_and_mode,
 };
 
 const BOOLOID: u32 = 16;
@@ -56,12 +64,273 @@ const DATEOID: u32 = 1082;
 const TIMESTAMPOID: u32 = 1114;
 const TIMESTAMPTZOID: u32 = 1184;
 const NORMAL_SPATIAL_PROMOTION_COORDINATES: usize = 1_025;
+const DESCRIPTOR_SPECIALIZATION_CACHE_CAPACITY: usize = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DescriptorSpecializationFamily {
+    HashCount,
+    DenseCount,
+    DenseIntegerColumn,
+    DenseIntegerMultiply,
+    SerialGeneric,
+}
+
+/// One build-generated kernel class selected for an exact semantic descriptor.
+///
+/// The family fixes grouping and measure evaluation. The two booleans select
+/// precompiled membership and SQL-mask variants, so released parallel kernels
+/// do not rediscover those shape branches for every input row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DescriptorSpecialization {
+    family: DescriptorSpecializationFamily,
+    membership: bool,
+    sql_mask: bool,
+}
+
+impl DescriptorSpecialization {
+    #[must_use]
+    pub(super) const fn label(self) -> &'static str {
+        match (self.family, self.membership, self.sql_mask) {
+            (DescriptorSpecializationFamily::HashCount, false, false) => "hash_count",
+            (DescriptorSpecializationFamily::DenseCount, false, false) => "dense_count_plain",
+            (DescriptorSpecializationFamily::DenseCount, false, true) => "dense_count_sql_mask",
+            (DescriptorSpecializationFamily::DenseCount, true, false) => "dense_count_membership",
+            (DescriptorSpecializationFamily::DenseCount, true, true) => {
+                "dense_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerColumn, false, false) => {
+                "dense_integer_column_plain"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerColumn, false, true) => {
+                "dense_integer_column_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerColumn, true, false) => {
+                "dense_integer_column_membership"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerColumn, true, true) => {
+                "dense_integer_column_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerMultiply, false, false) => {
+                "dense_integer_multiply_plain"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerMultiply, false, true) => {
+                "dense_integer_multiply_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerMultiply, true, false) => {
+                "dense_integer_multiply_membership"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerMultiply, true, true) => {
+                "dense_integer_multiply_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::SerialGeneric, _, _) => "serial_generic",
+            // Hash descriptors are admitted only without a separate dimension
+            // or fact-mask stage. Keep impossible combinations fail-closed.
+            (DescriptorSpecializationFamily::HashCount, _, _) => "invalid_hash_specialization",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DescriptorSpecializationCacheOutcome {
+    Hit,
+    Miss,
+}
+
+impl DescriptorSpecializationCacheOutcome {
+    #[must_use]
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedDescriptorSpecialization {
+    identity: DerivedArtifactIdentity,
+    specialization: DescriptorSpecialization,
+}
+
+thread_local! {
+    static DESCRIPTOR_SPECIALIZATION_CACHE: RefCell<VecDeque<CachedDescriptorSpecialization>> =
+        RefCell::new(VecDeque::with_capacity(DESCRIPTOR_SPECIALIZATION_CACHE_CAPACITY));
+}
 
 // Atomic SUM one-shot execution only needs the row cap. Ordered integer
 // statistics still use the bounded native partial layout mirrored here.
 const DENSE_INTEGER_CHUNK_ROWS: usize = 1_024;
 const DENSE_INTEGER_PARTIAL_BYTES: usize = 56;
 const DENSE_INTEGER_MAX_PARTIAL_BYTES: usize = 32 * 1_024 * 1_024;
+
+fn unique_dimension_inputs(spec: &AggQuerySpec) -> bool {
+    spec.star_dims
+        .iter()
+        .all(|dimension| dimension.multiplicity == JoinMultiplicity::Unique)
+}
+
+fn parallel_dense_fact_filter(filter: &FilterSpec) -> bool {
+    matches!(
+        filter,
+        FilterSpec::None
+            | FilterSpec::Mask {
+                kind: MaskKind::Sql,
+                ..
+            }
+            | FilterSpec::Spatial { .. }
+    )
+}
+
+fn canonical_count_measure(measure: &crate::engine::spec::MeasureSpec) -> bool {
+    measure.expression == MeasureExpr::CountStar
+        && measure.filter == FilterSpec::None
+        && measure.outputs.as_slice()
+            == [crate::engine::spec::AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Count,
+            }]
+}
+
+fn canonical_dense_integer_value_measure(measure: &crate::engine::spec::MeasureSpec) -> bool {
+    if measure.filter != FilterSpec::None {
+        return false;
+    }
+    let outputs = measure.outputs.as_slice();
+    match &measure.expression {
+        MeasureExpr::Column(column) if column.type_oid == INT4OID => {
+            outputs
+                == [crate::engine::spec::AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Sum,
+                }]
+                || outputs
+                    == [
+                        crate::engine::spec::AggregateOutput {
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::Sum,
+                        },
+                        crate::engine::spec::AggregateOutput {
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::Min,
+                        },
+                        crate::engine::spec::AggregateOutput {
+                            source: AggregateSource::Value,
+                            kind: AggregateKind::Max,
+                        },
+                    ]
+        }
+        MeasureExpr::Binary {
+            op: BinaryMeasureOp::Mul,
+            lhs,
+            rhs,
+        } if lhs.type_oid == INT4OID && rhs.type_oid == INT4OID => {
+            outputs
+                == [crate::engine::spec::AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Sum,
+                }]
+        }
+        _ => false,
+    }
+}
+
+/// Classify the only physical branch that normal planning may advertise for
+/// this logical descriptor shape.
+#[must_use]
+pub fn planned_descriptor_kernel_mode(
+    spec: &AggQuerySpec,
+    hash_grouping: bool,
+) -> GroupedAggKernelMode {
+    if hash_grouping {
+        return GroupedAggKernelMode::ParallelHash;
+    }
+    if !unique_dimension_inputs(spec) || !parallel_dense_fact_filter(&spec.fact_filter) {
+        return GroupedAggKernelMode::SerialGeneric;
+    }
+    match spec.measures.as_slice() {
+        [count] if canonical_count_measure(count) => GroupedAggKernelMode::ParallelDenseCount,
+        [value, count]
+            if canonical_dense_integer_value_measure(value) && canonical_count_measure(count) =>
+        {
+            GroupedAggKernelMode::ParallelDenseInteger
+        }
+        _ => GroupedAggKernelMode::SerialGeneric,
+    }
+}
+
+fn classify_descriptor_specialization(
+    spec: &AggQuerySpec,
+    mode: GroupedAggKernelMode,
+) -> DescriptorSpecialization {
+    let membership = !spec.star_dims.is_empty();
+    let sql_mask = !matches!(spec.fact_filter, FilterSpec::None);
+    let family = match mode {
+        GroupedAggKernelMode::ParallelHash => DescriptorSpecializationFamily::HashCount,
+        GroupedAggKernelMode::ParallelDenseCount => DescriptorSpecializationFamily::DenseCount,
+        GroupedAggKernelMode::ParallelDenseInteger => match spec.measures.first() {
+            Some(measure) if matches!(&measure.expression, MeasureExpr::Column(_)) => {
+                DescriptorSpecializationFamily::DenseIntegerColumn
+            }
+            Some(measure)
+                if matches!(
+                    &measure.expression,
+                    MeasureExpr::Binary {
+                        op: BinaryMeasureOp::Mul,
+                        ..
+                    }
+                ) =>
+            {
+                DescriptorSpecializationFamily::DenseIntegerMultiply
+            }
+            _ => DescriptorSpecializationFamily::SerialGeneric,
+        },
+        GroupedAggKernelMode::SerialGeneric => DescriptorSpecializationFamily::SerialGeneric,
+    };
+    if family == DescriptorSpecializationFamily::HashCount {
+        DescriptorSpecialization {
+            family,
+            membership: false,
+            sql_mask: false,
+        }
+    } else {
+        DescriptorSpecialization {
+            family,
+            membership,
+            sql_mask,
+        }
+    }
+}
+
+fn cached_descriptor_specialization(
+    identity: &DerivedArtifactIdentity,
+    spec: &AggQuerySpec,
+    mode: GroupedAggKernelMode,
+) -> (
+    DescriptorSpecialization,
+    DescriptorSpecializationCacheOutcome,
+) {
+    DESCRIPTOR_SPECIALIZATION_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(index) = cache.iter().position(|entry| {
+            entry.identity.digest() == identity.digest() && entry.identity == *identity
+        }) {
+            let entry = cache
+                .remove(index)
+                .expect("specialization cache index came from the same deque");
+            let specialization = entry.specialization;
+            cache.push_front(entry);
+            return (specialization, DescriptorSpecializationCacheOutcome::Hit);
+        }
+
+        let specialization = classify_descriptor_specialization(spec, mode);
+        cache.push_front(CachedDescriptorSpecialization {
+            identity: identity.clone(),
+            specialization,
+        });
+        cache.truncate(DESCRIPTOR_SPECIALIZATION_CACHE_CAPACITY);
+        (specialization, DescriptorSpecializationCacheOutcome::Miss)
+    })
+}
 
 fn is_text_family(type_oid: u32) -> bool {
     matches!(type_oid, TEXTOID | VARCHAROID | BPCHAROID)
@@ -939,6 +1208,195 @@ enum DescriptorArtifactKind {
     Spatial(SpatialTransformPlan),
 }
 
+/// Physical ownership policy for descriptor-derived state. `EphemeralFused`
+/// is query-owned and never enters the backend LRU; H3 additionally performs
+/// its exact parent transform inside the consuming hash kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DescriptorArtifactPolicy {
+    CachedReusable,
+    EphemeralFused,
+}
+
+impl DescriptorArtifactPolicy {
+    #[must_use]
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::CachedReusable => "cached_reusable",
+            Self::EphemeralFused => "ephemeral_fused",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactPolicyReason {
+    CacheHit,
+    EmptyArtifact,
+    MemoryBudget,
+    LowerExpectedCost,
+}
+
+impl ArtifactPolicyReason {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::CacheHit => "exact_cache_hit",
+            Self::EmptyArtifact => "zero_retained_bytes",
+            Self::MemoryBudget => "retained_memory_budget",
+            Self::LowerExpectedCost => "lower_expected_total_cost",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArtifactPolicyInput {
+    construction_bytes: u64,
+    ephemeral_bytes: u64,
+    construction_time_us: u64,
+    expected_reuses: u32,
+    cache_hit: bool,
+    invalidation_risk_ppm: u32,
+    cached_build_launches: u64,
+    ephemeral_build_launches: u64,
+    consumer_launches: u64,
+    budget_headroom_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ArtifactPolicyEvidence {
+    policy: DescriptorArtifactPolicy,
+    reason: ArtifactPolicyReason,
+    input: ArtifactPolicyInput,
+}
+
+impl ArtifactPolicyEvidence {
+    pub(super) const fn policy_label(self) -> &'static str {
+        self.policy.label()
+    }
+
+    pub(super) fn summary(self) -> String {
+        format!(
+            "{} reason={} construction_bytes={} ephemeral_bytes={} construction_time_us={} expected_reuses={} cache_hit={} invalidation_risk_ppm={} cached_build_launches={} ephemeral_build_launches={} consumer_launches={} budget_headroom_bytes={}",
+            self.policy.label(),
+            self.reason.label(),
+            self.input.construction_bytes,
+            self.input.ephemeral_bytes,
+            self.input.construction_time_us,
+            self.input.expected_reuses,
+            self.input.cache_hit,
+            self.input.invalidation_risk_ppm,
+            self.input.cached_build_launches,
+            self.input.ephemeral_build_launches,
+            self.input.consumer_launches,
+            self.input.budget_headroom_bytes,
+        )
+    }
+}
+
+fn choose_artifact_policy(input: ArtifactPolicyInput) -> ArtifactPolicyEvidence {
+    if input.cache_hit {
+        return ArtifactPolicyEvidence {
+            policy: DescriptorArtifactPolicy::CachedReusable,
+            reason: ArtifactPolicyReason::CacheHit,
+            input,
+        };
+    }
+    if input.construction_bytes == 0 {
+        return ArtifactPolicyEvidence {
+            policy: DescriptorArtifactPolicy::EphemeralFused,
+            reason: ArtifactPolicyReason::EmptyArtifact,
+            input,
+        };
+    }
+    if input.construction_bytes > input.budget_headroom_bytes
+        && input.ephemeral_bytes < input.construction_bytes
+        && input.ephemeral_bytes <= input.budget_headroom_bytes
+    {
+        return ArtifactPolicyEvidence {
+            policy: DescriptorArtifactPolicy::EphemeralFused,
+            reason: ArtifactPolicyReason::MemoryBudget,
+            input,
+        };
+    }
+
+    const LAUNCH_US: u128 = 50;
+    let reuses = u128::from(input.expected_reuses.max(1));
+    let risk = u128::from(input.invalidation_risk_ppm.min(1_000_000));
+    let rebuilds_ppm = 1_000_000_u128.saturating_add(reuses.saturating_sub(1).saturating_mul(risk));
+    let construction = u128::from(input.construction_time_us)
+        .saturating_add(u128::from(input.cached_build_launches).saturating_mul(LAUNCH_US));
+    let cached_cost = construction
+        .saturating_mul(rebuilds_ppm)
+        .saturating_div(1_000_000)
+        .saturating_add(
+            reuses
+                .saturating_mul(u128::from(input.consumer_launches))
+                .saturating_mul(LAUNCH_US),
+        )
+        // Retained bytes carry a bounded pressure penalty as headroom shrinks.
+        .saturating_add(
+            u128::from(input.construction_bytes)
+                .saturating_mul(50)
+                .saturating_div(u128::from(input.budget_headroom_bytes.max(1))),
+        );
+    let fused_compute = u128::from(input.construction_time_us);
+    let ephemeral_cost = reuses.saturating_mul(
+        fused_compute
+            .saturating_add(u128::from(input.ephemeral_build_launches).saturating_mul(LAUNCH_US))
+            .saturating_add(u128::from(input.consumer_launches).saturating_mul(LAUNCH_US)),
+    );
+    ArtifactPolicyEvidence {
+        policy: if ephemeral_cost <= cached_cost {
+            DescriptorArtifactPolicy::EphemeralFused
+        } else {
+            DescriptorArtifactPolicy::CachedReusable
+        },
+        reason: ArtifactPolicyReason::LowerExpectedCost,
+        input,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_artifact_policy_evidence() -> ArtifactPolicyEvidence {
+    choose_artifact_policy(ArtifactPolicyInput {
+        construction_bytes: 1,
+        ephemeral_bytes: 1,
+        construction_time_us: 1,
+        expected_reuses: 2,
+        cache_hit: true,
+        invalidation_risk_ppm: 0,
+        cached_build_launches: 0,
+        ephemeral_build_launches: 0,
+        consumer_launches: 1,
+        budget_headroom_bytes: 1_024,
+    })
+}
+
+enum EphemeralDescriptorArtifact {
+    Dense(EphemeralDerivedArtifact<DescriptorAggArtifact>),
+    H3(EphemeralDerivedArtifact<FusedH3Artifact>),
+    Spatial(EphemeralDerivedArtifact<SpatialAggArtifact>),
+}
+
+struct FusedH3Artifact {
+    resolved_spec: AggQuerySpec,
+    fact_rows: usize,
+    group_capacity: usize,
+    resolution: i32,
+}
+
+impl DerivedArtifact for FusedH3Artifact {
+    fn device_bytes(&self) -> u64 {
+        0
+    }
+
+    fn retained_host_exact_bytes(&self) -> u64 {
+        0
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 fn descriptor_artifact_identity(
     spec: &AggQuerySpec,
     projection: &AggOutputProjection,
@@ -1007,6 +1465,9 @@ where
 pub(super) struct DescriptorAggPlan {
     spec: AggQuerySpec,
     projection: AggOutputProjection,
+    planned_kernel_mode: GroupedAggKernelMode,
+    specialization: DescriptorSpecialization,
+    specialization_cache_outcome: DescriptorSpecializationCacheOutcome,
     identity: DerivedArtifactIdentity,
     selected: Vec<SelectedRelation>,
     dependencies: Vec<pg_sys::Oid>,
@@ -1016,10 +1477,14 @@ pub(super) struct DescriptorAggPlan {
     dispatch_chunk_rows: usize,
     grouped_agg_one_shot_max_rows: Rows,
     artifact_kind: DescriptorArtifactKind,
+    artifact_policy: Cell<DescriptorArtifactPolicy>,
+    artifact_policy_evidence: Cell<Option<ArtifactPolicyEvidence>>,
+    ephemeral_artifact: RefCell<Option<EphemeralDescriptorArtifact>>,
 }
 
 pub(super) struct DescriptorResidencyReport {
     pub(super) artifact_outcome: ArtifactEnsureOutcome,
+    pub(super) artifact_policy: ArtifactPolicyEvidence,
     pub(super) relations: Vec<ResidentRelationEvidence>,
     pub(super) loaded_relations: Vec<pg_sys::Oid>,
     pub(super) artifact_bytes: u64,
@@ -1083,6 +1548,7 @@ impl DescriptorResidencyReport {
             self.artifact_outcome = latest.artifact_outcome;
         }
         self.relations = latest.relations;
+        self.artifact_policy = latest.artifact_policy;
         for relid in latest.loaded_relations {
             if !self.loaded_relations.contains(&relid) {
                 self.loaded_relations.push(relid);
@@ -1133,10 +1599,95 @@ fn selected_fact_rows(
     usize::try_from(rows).map_err(|_| format!("fact row count {rows} exceeds usize"))
 }
 
+fn descriptor_artifact_policy_input(
+    plan: &DescriptorAggPlan,
+    selected: &[ResidentRelationEvidence],
+    cache_hit: bool,
+) -> Result<ArtifactPolicyInput, String> {
+    let fact_rows = selected_fact_rows(selected, plan.spec.fact_rel)?;
+    let relation_rows = selected
+        .iter()
+        .map(|relation| (u32::from(relation.relid), relation.row_count))
+        .collect::<BTreeMap<_, _>>();
+    let construction_bytes = match &plan.artifact_kind {
+        DescriptorArtifactKind::H3Parent { .. } => u64::try_from(fact_rows)
+            .ok()
+            .and_then(|rows| rows.checked_mul(std::mem::size_of::<u64>() as u64))
+            .ok_or_else(|| "H3 construction-byte estimate overflow".to_owned())?,
+        DescriptorArtifactKind::Dense | DescriptorArtifactKind::Spatial(_) => {
+            estimate_descriptor_artifact_bytes_upper_bound(&plan.spec, &relation_rows)
+                .ok_or_else(|| "descriptor construction-byte estimate is unavailable".to_owned())?
+        }
+    };
+    let cached_build_launches = match &plan.artifact_kind {
+        DescriptorArtifactKind::H3Parent { max_chunk_rows, .. } => {
+            if *max_chunk_rows == 0 {
+                return Err("H3 construction chunk limit is zero".to_owned());
+            }
+            u64::try_from(fact_rows.div_ceil(*max_chunk_rows)).unwrap_or(u64::MAX)
+        }
+        DescriptorArtifactKind::Spatial(_) => {
+            let chunks = fact_rows.div_ceil(crate::gpu::PGACCEL_SPATIAL_MAX_CHUNK_ROWS);
+            // Candidate evaluation, uncertainty compaction, and the possible
+            // exact-result patch are distinct observable submissions.
+            u64::try_from(chunks.saturating_mul(3)).unwrap_or(u64::MAX)
+        }
+        DescriptorArtifactKind::Dense => 0,
+    };
+    let ephemeral_build_launches = match &plan.artifact_kind {
+        DescriptorArtifactKind::H3Parent { .. } => 0,
+        DescriptorArtifactKind::Dense | DescriptorArtifactKind::Spatial(_) => cached_build_launches,
+    };
+    let ephemeral_bytes = match &plan.artifact_kind {
+        DescriptorArtifactKind::H3Parent { .. } => 0,
+        DescriptorArtifactKind::Dense | DescriptorArtifactKind::Spatial(_) => construction_bytes,
+    };
+    let consumer_launches = match &plan.artifact_kind {
+        DescriptorArtifactKind::H3Parent { .. } | DescriptorArtifactKind::Spatial(_) => 1,
+        DescriptorArtifactKind::Dense if fact_rows <= plan.grouped_agg_one_shot_max_rows.get() => 1,
+        DescriptorArtifactKind::Dense => {
+            bounded_dispatch_call_count(fact_rows, plan.dispatch_chunk_rows)
+                .and_then(|calls| u64::try_from(calls).ok())
+                .ok_or_else(|| "dense lifecycle-call estimate overflow".to_owned())?
+        }
+    };
+    // Twelve GB/s is deliberately conservative for a transform that reads and
+    // writes fixed-width resident lanes. Spatial exact recheck also receives a
+    // bounded host-call allowance so its construction-time input is never
+    // represented as a byte-copy-only estimate.
+    let mut construction_time_us = construction_bytes.div_ceil(12_000).max(1);
+    if matches!(&plan.artifact_kind, DescriptorArtifactKind::Spatial(_)) {
+        construction_time_us = construction_time_us
+            .saturating_add(u64::try_from(fact_rows.div_ceil(1_000)).unwrap_or(u64::MAX));
+    }
+    let invalidation_risk_ppm = u32::try_from(plan.dependencies.len())
+        .unwrap_or(u32::MAX)
+        .saturating_mul(50_000)
+        .min(750_000);
+    let budget_headroom_bytes =
+        gucs::resident_memory_budget_bytes().saturating_sub(resident_live_bytes());
+    Ok(ArtifactPolicyInput {
+        construction_bytes,
+        ephemeral_bytes,
+        construction_time_us,
+        expected_reuses: crate::engine::cost::device_limits()
+            .auto_load_amortization_queries
+            .max(1),
+        cache_hit,
+        invalidation_risk_ppm,
+        cached_build_launches,
+        ephemeral_build_launches,
+        consumer_launches,
+        budget_headroom_bytes,
+    })
+}
+
 impl DescriptorAggPlan {
     pub(super) fn new(spec: AggQuerySpec, projection: AggOutputProjection) -> Result<Self, String> {
         validate_internal_runtime_capability(&spec, &projection)?;
         validate_catalog_contract(&spec, &projection)?;
+        let planned_kernel_mode =
+            planned_descriptor_kernel_mode(&spec, h3_parent_group(&spec).is_some());
         let limits = crate::engine::cost::device_limits();
         let executor_limits = ExecutorLimits::from(limits);
         let (artifact_kind, catalog_fingerprint) =
@@ -1165,6 +1716,8 @@ impl DescriptorAggPlan {
                 (DescriptorArtifactKind::Dense, Vec::new())
             };
         let identity = descriptor_artifact_identity(&spec, &projection, &catalog_fingerprint)?;
+        let (specialization, specialization_cache_outcome) =
+            cached_descriptor_specialization(&identity, &spec, planned_kernel_mode);
         let selected = selected_relations(&spec)?;
         let dependencies = dependency_relids(&spec);
         let artifact_columns = artifact_column_refs(&spec)?;
@@ -1182,6 +1735,9 @@ impl DescriptorAggPlan {
         Ok(Self {
             spec,
             projection,
+            planned_kernel_mode,
+            specialization,
+            specialization_cache_outcome,
             identity,
             selected,
             dependencies,
@@ -1191,6 +1747,9 @@ impl DescriptorAggPlan {
             dispatch_chunk_rows,
             grouped_agg_one_shot_max_rows: executor_limits.gpu_grouped_agg_one_shot_max_rows,
             artifact_kind,
+            artifact_policy: Cell::new(DescriptorArtifactPolicy::CachedReusable),
+            artifact_policy_evidence: Cell::new(None),
+            ephemeral_artifact: RefCell::new(None),
         })
     }
 
@@ -1200,6 +1759,24 @@ impl DescriptorAggPlan {
 
     pub(super) fn projection(&self) -> &AggOutputProjection {
         &self.projection
+    }
+
+    pub(super) const fn planned_kernel_mode(&self) -> GroupedAggKernelMode {
+        self.planned_kernel_mode
+    }
+
+    pub(super) const fn specialization(&self) -> DescriptorSpecialization {
+        self.specialization
+    }
+
+    pub(super) const fn specialization_cache_outcome(
+        &self,
+    ) -> DescriptorSpecializationCacheOutcome {
+        self.specialization_cache_outcome
+    }
+
+    pub(super) fn artifact_policy_evidence(&self) -> Option<ArtifactPolicyEvidence> {
+        self.artifact_policy_evidence.get()
     }
 
     pub(super) fn ensure_artifact(
@@ -1216,9 +1793,169 @@ impl DescriptorAggPlan {
             }
         };
         let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
-        let (artifact_outcome, relations, artifact_bytes) = match &self.artifact_kind {
-            DescriptorArtifactKind::Dense => {
-                let outcome = ensure_derived_artifact(
+        let fact_rows = selected_fact_rows(&selected.evidence, self.spec.fact_rel)?;
+        if matches!(&self.artifact_kind, DescriptorArtifactKind::H3Parent { .. })
+            && fact_rows > u32::MAX as usize
+        {
+            return Err(format!(
+                "H3 grouped aggregation row count {fact_rows} exceeds the kernel u32 domain"
+            )
+            .into());
+        }
+        let h3_accounting = ResidentByteAccounting {
+            device_bytes: u64::try_from(fact_rows)
+                .ok()
+                .and_then(|rows| rows.checked_mul(std::mem::size_of::<u64>() as u64))
+                .ok_or_else(|| "derived H3 parent byte count overflow".to_owned())?,
+            retained_host_exact_bytes: 0,
+        };
+        let probe = match &self.artifact_kind {
+            DescriptorArtifactKind::Dense => probe_derived_artifact::<DescriptorAggArtifact>(
+                owner_relid,
+                &self.identity,
+                &self.dependencies,
+                &self.artifact_columns,
+                None,
+            )?,
+            DescriptorArtifactKind::H3Parent { .. } => probe_derived_artifact::<H3ParentArtifact>(
+                owner_relid,
+                &self.identity,
+                &self.dependencies,
+                &self.artifact_columns,
+                Some(h3_accounting),
+            )?,
+            DescriptorArtifactKind::Spatial(_) => probe_derived_artifact::<SpatialAggArtifact>(
+                owner_relid,
+                &self.identity,
+                &self.dependencies,
+                &self.artifact_columns,
+                None,
+            )?,
+        };
+        let stale = matches!(probe, ArtifactProbeOutcome::Stale);
+        let hit_report = match probe {
+            ArtifactProbeOutcome::Hit(report) => Some(report),
+            ArtifactProbeOutcome::Miss | ArtifactProbeOutcome::Stale => None,
+        };
+        let policy = choose_artifact_policy(descriptor_artifact_policy_input(
+            self,
+            &selected.evidence,
+            hit_report.is_some(),
+        )?);
+        self.artifact_policy.set(policy.policy);
+        self.artifact_policy_evidence.set(Some(policy));
+        self.ephemeral_artifact.borrow_mut().take();
+
+        let (artifact_outcome, relations, artifact_bytes) = if let Some(report) = hit_report {
+            (
+                report.outcome,
+                report.evidence,
+                report.accounting.device_bytes,
+            )
+        } else if policy.policy == DescriptorArtifactPolicy::EphemeralFused {
+            match &self.artifact_kind {
+                DescriptorArtifactKind::Dense => {
+                    let report = build_ephemeral_derived_artifact_with_report(
+                        owner_relid,
+                        &self.dependencies,
+                        &self.artifact_columns,
+                        |bundle| {
+                            prepare_agg_artifact(
+                                &self.spec,
+                                &self.artifact_columns,
+                                bundle,
+                                self.max_groups,
+                            )
+                        },
+                        DescriptorAggArtifact::build,
+                    )?;
+                    let outcome = if stale {
+                        ArtifactEnsureOutcome::Rebuilt
+                    } else {
+                        ArtifactEnsureOutcome::Built
+                    };
+                    let bytes = report.accounting.device_bytes;
+                    let evidence = report.evidence;
+                    self.ephemeral_artifact
+                        .borrow_mut()
+                        .replace(EphemeralDescriptorArtifact::Dense(report.artifact));
+                    (outcome, evidence, bytes)
+                }
+                DescriptorArtifactKind::H3Parent { resolution, .. } => {
+                    let group_capacity =
+                        h3_group_capacity(fact_rows, *resolution, self.max_groups)?;
+                    let report = build_ephemeral_derived_artifact_with_report(
+                        owner_relid,
+                        &self.dependencies,
+                        &self.artifact_columns,
+                        |_bundle| {
+                            Ok(PreparedDerived {
+                                prepared: FusedH3Artifact {
+                                    resolved_spec: self.spec.clone(),
+                                    fact_rows,
+                                    group_capacity,
+                                    resolution: *resolution,
+                                },
+                                device_bytes: 0,
+                            })
+                        },
+                        Ok,
+                    )?;
+                    self.ephemeral_artifact
+                        .borrow_mut()
+                        .replace(EphemeralDescriptorArtifact::H3(report.artifact));
+                    (
+                        if stale {
+                            ArtifactEnsureOutcome::Rebuilt
+                        } else {
+                            ArtifactEnsureOutcome::Built
+                        },
+                        report.evidence,
+                        report.accounting.device_bytes,
+                    )
+                }
+                DescriptorArtifactKind::Spatial(plan) => {
+                    let report = verify_catalog_before(
+                        || plan.verify_catalog(),
+                        || {
+                            build_ephemeral_staged_device_transform_artifact_with_report(
+                                owner_relid,
+                                &self.dependencies,
+                                &self.artifact_columns,
+                                |bundle| plan.preflight(&self.spec, &self.artifact_columns, bundle),
+                                |preflight, bundle| {
+                                    plan.snapshot_prepare(
+                                        &self.spec,
+                                        &self.artifact_columns,
+                                        preflight,
+                                        bundle,
+                                    )
+                                },
+                                |snapshot| SpatialWorkspace::build(plan, &self.spec, snapshot),
+                                |workspace, bundle| {
+                                    workspace.launch(plan, bundle);
+                                    Ok(())
+                                },
+                                |workspace| workspace.finalize(plan, &self.spec),
+                            )
+                        },
+                    )?;
+                    let outcome = if stale {
+                        ArtifactEnsureOutcome::Rebuilt
+                    } else {
+                        ArtifactEnsureOutcome::Built
+                    };
+                    let bytes = report.accounting.device_bytes;
+                    let evidence = report.evidence;
+                    self.ephemeral_artifact
+                        .borrow_mut()
+                        .replace(EphemeralDescriptorArtifact::Spatial(report.artifact));
+                    (outcome, evidence, bytes)
+                }
+            }
+        } else {
+            let report = match &self.artifact_kind {
+                DescriptorArtifactKind::Dense => ensure_derived_artifact_with_report(
                     owner_relid,
                     &self.identity,
                     &self.dependencies,
@@ -1232,135 +1969,102 @@ impl DescriptorAggPlan {
                         )
                     },
                     DescriptorAggArtifact::build,
-                )?;
-                let (relations, bytes) = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
-                    owner_relid,
-                    &self.identity,
-                    &[],
-                    |inputs| (inputs.evidence, inputs.device_bytes),
-                )?;
-                (outcome, relations, bytes)
-            }
-            DescriptorArtifactKind::H3Parent {
-                cell,
-                resolution,
-                max_chunk_rows,
-            } => {
-                let fact_rows = selected_fact_rows(&selected.evidence, self.spec.fact_rel)?;
-                if fact_rows > u32::MAX as usize {
-                    return Err(format!(
-                        "H3 grouped aggregation row count {fact_rows} exceeds the kernel u32 domain"
-                    )
-                    .into());
-                }
-                let device_bytes = fact_rows
-                    .checked_mul(std::mem::size_of::<u64>())
-                    .and_then(|bytes| u64::try_from(bytes).ok())
-                    .ok_or_else(|| "derived H3 parent byte count overflow".to_owned())?;
-                let group_capacity = h3_group_capacity(fact_rows, *resolution, self.max_groups)?;
-                let declared = ResidentByteAccounting {
-                    device_bytes,
-                    retained_host_exact_bytes: 0,
-                };
-                let outcome = ensure_device_derived_artifact(
-                    owner_relid,
-                    &self.identity,
-                    &self.dependencies,
-                    &self.artifact_columns,
-                    declared,
-                    |bundle| {
-                        let view = find_view(&self.artifact_columns, &bundle.columns, *cell)?;
-                        let (cells, nulls) = match view {
-                            ResidentColumnView::Empty { type_oid }
-                                if fact_rows == 0 && u32::from(*type_oid) == cell.type_oid =>
-                            {
-                                (std::ptr::null(), std::ptr::null())
-                            }
-                            ResidentColumnView::H3 {
-                                type_oid,
-                                values,
-                                nulls,
-                            } if u32::from(*type_oid) == cell.type_oid
-                                && values.len() == fact_rows =>
-                            {
-                                (values.as_ptr(), null_ptr(*nulls))
-                            }
-                            _ => {
-                                return Err(ResidentLoadError::Loader(
-                                    "resident H3 source does not match the planned raw lane"
-                                        .to_owned(),
-                                ));
-                            }
-                        };
-                        let parents = if fact_rows == 0 {
-                            None
-                        } else {
-                            Some(
-                                crate::gpu::ExprDeviceBuffer::<u64>::new(fact_rows).ok_or_else(
-                                    || {
-                                        "could not allocate derived H3 parent device lane"
-                                            .to_owned()
-                                    },
-                                )?,
-                            )
-                        };
-                        if fact_rows != 0 {
-                            if *max_chunk_rows == 0 {
-                                return Err(ResidentLoadError::Loader(
-                                    "H3 device chunk limit is zero".to_owned(),
-                                ));
-                            }
-                            let output = parents.as_ref().ok_or_else(|| {
-                                "nonempty H3 parent artifact has no output".to_owned()
-                            })?;
-                            for offset in (0..fact_rows).step_by(*max_chunk_rows) {
-                                let count = (fact_rows - offset).min(*max_chunk_rows);
-                                // SAFETY: the matched resident/output buffers each have
-                                // `fact_rows` elements and this chunk stays in bounds.
-                                let chunk_cells = unsafe { cells.add(offset) };
-                                let chunk_nulls = if nulls.is_null() {
-                                    std::ptr::null()
-                                } else {
-                                    // SAFETY: the resident NULL sidecar has one byte per row.
-                                    unsafe { nulls.add(offset) }
-                                };
-                                // SAFETY: output has `fact_rows` u64 elements.
-                                let chunk_parents = unsafe { output.as_mut_ptr().add(offset) };
-                                // SAFETY: all pointers/counts were bounded above and the
-                                // synchronous call cannot outlive the residency borrow.
-                                unsafe {
-                                    crate::gpu::h3_cell_to_parent_resident(
-                                        chunk_cells,
-                                        chunk_nulls,
-                                        count,
-                                        *resolution,
-                                        chunk_parents,
-                                    )
+                )?,
+                DescriptorArtifactKind::H3Parent {
+                    cell,
+                    resolution,
+                    max_chunk_rows,
+                } => {
+                    let group_capacity =
+                        h3_group_capacity(fact_rows, *resolution, self.max_groups)?;
+                    ensure_device_derived_artifact_with_report(
+                        owner_relid,
+                        &self.identity,
+                        &self.dependencies,
+                        &self.artifact_columns,
+                        h3_accounting,
+                        |bundle| {
+                            let view = find_view(&self.artifact_columns, &bundle.columns, *cell)?;
+                            let (cells, nulls) = match view {
+                                ResidentColumnView::Empty { type_oid }
+                                    if fact_rows == 0 && u32::from(*type_oid) == cell.type_oid =>
+                                {
+                                    (std::ptr::null(), std::ptr::null())
                                 }
-                                .map_err(ResidentLoadError::Gpu)?;
+                                ResidentColumnView::H3 {
+                                    type_oid,
+                                    values,
+                                    nulls,
+                                } if u32::from(*type_oid) == cell.type_oid
+                                    && values.len() == fact_rows =>
+                                {
+                                    (values.as_ptr(), null_ptr(*nulls))
+                                }
+                                _ => {
+                                    return Err(ResidentLoadError::Loader(
+                                        "resident H3 source does not match the planned raw lane"
+                                            .to_owned(),
+                                    ));
+                                }
+                            };
+                            let parents = if fact_rows == 0 {
+                                None
+                            } else {
+                                Some(
+                                    crate::gpu::ExprDeviceBuffer::<u64>::new(fact_rows)
+                                        .ok_or_else(|| {
+                                            "could not allocate derived H3 parent device lane"
+                                                .to_owned()
+                                        })?,
+                                )
+                            };
+                            if fact_rows != 0 {
+                                if *max_chunk_rows == 0 {
+                                    return Err(ResidentLoadError::Loader(
+                                        "H3 device chunk limit is zero".to_owned(),
+                                    ));
+                                }
+                                let output = parents.as_ref().ok_or_else(|| {
+                                    "nonempty H3 parent artifact has no output".to_owned()
+                                })?;
+                                for offset in (0..fact_rows).step_by(*max_chunk_rows) {
+                                    let count = (fact_rows - offset).min(*max_chunk_rows);
+                                    // SAFETY: matched buffers span fact_rows and this chunk.
+                                    let chunk_cells = unsafe { cells.add(offset) };
+                                    let chunk_nulls = if nulls.is_null() {
+                                        std::ptr::null()
+                                    } else {
+                                        // SAFETY: one NULL byte exists for every source row.
+                                        unsafe { nulls.add(offset) }
+                                    };
+                                    // SAFETY: output has fact_rows elements.
+                                    let chunk_parents = unsafe { output.as_mut_ptr().add(offset) };
+                                    // SAFETY: pointers remain pinned for this synchronous call.
+                                    unsafe {
+                                        crate::gpu::h3_cell_to_parent_resident(
+                                            chunk_cells,
+                                            chunk_nulls,
+                                            count,
+                                            *resolution,
+                                            chunk_parents,
+                                        )
+                                    }
+                                    .map_err(ResidentLoadError::Gpu)?;
+                                }
                             }
-                        }
-                        Ok(H3ParentArtifact::new(
-                            self.spec.clone(),
-                            fact_rows,
-                            group_capacity,
-                            parents,
-                        )?)
-                    },
-                )?;
-                let (relations, bytes) = with_derived_artifact_inputs::<H3ParentArtifact, _>(
-                    owner_relid,
-                    &self.identity,
-                    &[],
-                    |inputs| (inputs.evidence, inputs.device_bytes),
-                )?;
-                (outcome, relations, bytes)
-            }
-            DescriptorArtifactKind::Spatial(plan) => {
-                let outcome = verify_catalog_before(
+                            Ok(H3ParentArtifact::new(
+                                self.spec.clone(),
+                                fact_rows,
+                                group_capacity,
+                                parents,
+                            )?)
+                        },
+                    )?
+                }
+                DescriptorArtifactKind::Spatial(plan) => verify_catalog_before(
                     || plan.verify_catalog(),
                     || {
-                        ensure_staged_device_transform_artifact(
+                        ensure_staged_device_transform_artifact_with_report(
                             owner_relid,
                             &self.identity,
                             &self.dependencies,
@@ -1382,18 +2086,21 @@ impl DescriptorAggPlan {
                             |workspace| workspace.finalize(plan, &self.spec),
                         )
                     },
-                )?;
-                let (relations, bytes) = with_derived_artifact_inputs::<SpatialAggArtifact, _>(
-                    owner_relid,
-                    &self.identity,
-                    &[],
-                    |inputs| (inputs.evidence, inputs.device_bytes),
-                )?;
-                (outcome, relations, bytes)
-            }
+                )?,
+            };
+            (
+                if stale {
+                    ArtifactEnsureOutcome::Rebuilt
+                } else {
+                    report.outcome
+                },
+                report.evidence,
+                report.accounting.device_bytes,
+            )
         };
         Ok(DescriptorResidencyReport {
             artifact_outcome,
+            artifact_policy: policy,
             relations,
             loaded_relations: selected.loaded_relations,
             artifact_bytes,
@@ -1407,49 +2114,118 @@ impl DescriptorAggPlan {
         &self,
     ) -> Result<Result<DescriptorAggDispatch, DescriptorAggExecutionError>, ResidentLoadError> {
         let owner_relid = pg_sys::Oid::from(self.spec.fact_rel);
-        let result: Result<DescriptorAggDispatch, DescriptorDispatchFailure> = match &self
-            .artifact_kind
-        {
-            DescriptorArtifactKind::Dense => execute_bounded_dense_artifact(
-                owner_relid,
-                &self.identity,
-                &self.dispatch_columns,
-                &self.projection,
-                self.dispatch_chunk_rows,
-                self.grouped_agg_one_shot_max_rows.get(),
-            ),
-            DescriptorArtifactKind::H3Parent { cell, .. } => {
-                match with_derived_artifact_inputs::<H3ParentArtifact, _>(
-                    owner_relid,
-                    &self.identity,
-                    &self.dispatch_columns,
-                    |inputs| {
-                        build_and_execute_h3_one_shot(
-                            inputs,
+        let result: Result<DescriptorAggDispatch, DescriptorDispatchFailure> =
+            if self.artifact_policy.get() == DescriptorArtifactPolicy::CachedReusable {
+                match &self.artifact_kind {
+                    DescriptorArtifactKind::Dense => execute_bounded_dense_artifact(
+                        owner_relid,
+                        &self.identity,
+                        &self.dispatch_columns,
+                        &self.projection,
+                        self.dispatch_chunk_rows,
+                        self.grouped_agg_one_shot_max_rows.get(),
+                        self.planned_kernel_mode,
+                    ),
+                    DescriptorArtifactKind::H3Parent { cell, .. } => {
+                        match with_derived_artifact_inputs::<H3ParentArtifact, _>(
+                            owner_relid,
+                            &self.identity,
                             &self.dispatch_columns,
-                            *cell,
-                            &self.projection,
-                        )
-                    },
-                ) {
-                    Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
-                    Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
+                            |inputs| {
+                                build_and_execute_h3_one_shot(
+                                    inputs,
+                                    &self.dispatch_columns,
+                                    *cell,
+                                    &self.projection,
+                                    self.planned_kernel_mode,
+                                )
+                            },
+                        ) {
+                            Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
+                            Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
+                        }
+                    }
+                    DescriptorArtifactKind::Spatial(_) => {
+                        match with_derived_artifact_inputs::<SpatialAggArtifact, _>(
+                            owner_relid,
+                            &self.identity,
+                            &self.dispatch_columns,
+                            |inputs| {
+                                build_and_execute_spatial(
+                                    inputs,
+                                    &self.dispatch_columns,
+                                    &self.projection,
+                                    self.planned_kernel_mode,
+                                )
+                            },
+                        ) {
+                            Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
+                            Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
+                        }
+                    }
                 }
-            }
-            DescriptorArtifactKind::Spatial(_) => {
-                match with_derived_artifact_inputs::<SpatialAggArtifact, _>(
-                    owner_relid,
-                    &self.identity,
-                    &self.dispatch_columns,
-                    |inputs| {
-                        build_and_execute_spatial(inputs, &self.dispatch_columns, &self.projection)
+            } else {
+                let ephemeral = self.ephemeral_artifact.borrow();
+                match (&self.artifact_kind, ephemeral.as_ref()) {
+                    (
+                        DescriptorArtifactKind::Dense,
+                        Some(EphemeralDescriptorArtifact::Dense(artifact)),
+                    ) => execute_bounded_dense_ephemeral(
+                        owner_relid,
+                        artifact,
+                        &self.dispatch_columns,
+                        &self.projection,
+                        self.dispatch_chunk_rows,
+                        self.grouped_agg_one_shot_max_rows.get(),
+                        self.planned_kernel_mode,
+                    ),
+                    (
+                        DescriptorArtifactKind::H3Parent { cell, .. },
+                        Some(EphemeralDescriptorArtifact::H3(artifact)),
+                    ) => match with_ephemeral_artifact_inputs(
+                        owner_relid,
+                        artifact,
+                        &self.dispatch_columns,
+                        |inputs| {
+                            build_and_execute_fused_h3_one_shot(
+                                inputs,
+                                &self.dispatch_columns,
+                                *cell,
+                                &self.projection,
+                                self.planned_kernel_mode,
+                            )
+                        },
+                    ) {
+                        Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
+                        Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
                     },
-                ) {
-                    Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
-                    Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
+                    (
+                        DescriptorArtifactKind::Spatial(_),
+                        Some(EphemeralDescriptorArtifact::Spatial(artifact)),
+                    ) => match with_ephemeral_artifact_inputs(
+                        owner_relid,
+                        artifact,
+                        &self.dispatch_columns,
+                        |inputs| {
+                            build_and_execute_spatial(
+                                inputs,
+                                &self.dispatch_columns,
+                                &self.projection,
+                                self.planned_kernel_mode,
+                            )
+                        },
+                    ) {
+                        Ok(dispatch) => dispatch.map_err(DescriptorDispatchFailure::Execution),
+                        Err(error) => Err(DescriptorDispatchFailure::Residency(error)),
+                    },
+                    _ => Err(DescriptorDispatchFailure::Execution(
+                        DescriptorAggExecutionError::Failure(
+                            "ephemeral descriptor artifact is missing or has the wrong kind"
+                                .to_owned(),
+                        ),
+                    )),
                 }
-            }
-        };
+            };
         match result {
             Ok(dispatch) => Ok(Ok(dispatch)),
             Err(DescriptorDispatchFailure::Residency(error)) => Err(error),
@@ -1475,6 +2251,13 @@ impl DescriptorAggPlan {
             || self.execute_once(),
             || self.ensure_artifact(),
         )?;
+        if result.kernel_mode != self.planned_kernel_mode {
+            return Err(DescriptorAggExecutionError::Failure(format!(
+                "planned grouped physical mode {} does not match native dispatched mode {}",
+                self.planned_kernel_mode.label(),
+                result.kernel_mode.label()
+            )));
+        }
         result.residency = residency;
         Ok(result)
     }
@@ -1483,8 +2266,15 @@ impl DescriptorAggPlan {
 pub(super) struct DescriptorAggDispatch {
     pub output: DescriptorAggOutput,
     pub fact_rows: usize,
+    /// Lifecycle calls predicted from the exact execution branch before its
+    /// first submission. Successful execution must complete this many calls.
+    pub planned_batches: u64,
     pub batches_executed: u64,
+    /// Data-bearing calls that used `kernel_mode`; lifecycle-only finalize or
+    /// reset calls are deliberately excluded.
+    pub physical_mode_calls: u64,
     pub dispatch_time_us: u64,
+    pub kernel_mode: GroupedAggKernelMode,
     pub residency: Option<DescriptorResidencyReport>,
 }
 
@@ -1976,6 +2766,57 @@ fn spatial_final_mask_binding(
     }
 }
 
+fn h3_count_descriptor(
+    fact_rows: usize,
+    group_capacity: usize,
+    values: *const c_void,
+    nulls: *const u8,
+    flags: u32,
+    transform_arg: u32,
+) -> abi::PgaccelGroupedAggDesc {
+    // SAFETY: all-zero is canonical for every inactive ABI slot.
+    let mut desc: abi::PgaccelGroupedAggDesc = unsafe { std::mem::zeroed() };
+    desc.abi_version = abi::PGACCEL_OLAP_ABI_VERSION;
+    desc.size_bytes = std::mem::size_of::<abi::PgaccelGroupedAggDesc>() as u32;
+    desc.row_count = fact_rows;
+    desc.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
+    desc.output_mode = abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
+    desc.key_count = 1;
+    desc.group_capacity = group_capacity;
+    desc.keys[0] = abi::PgaccelGroupedAggKey {
+        values: PgaccelExprUsmCol {
+            values,
+            nulls,
+            tag: PgaccelValTag::Int64,
+        },
+        lookup_by_key: std::ptr::null(),
+        source: abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT,
+        code_min: 0,
+        cardinality: 0,
+        null_code: abi::PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE,
+        flags,
+        pad0: transform_arg,
+    };
+    desc.measure_count = 1;
+    desc.measures[0] = abi::PgaccelGroupedAggMeasure {
+        // SAFETY: COUNT(*) has no input columns.
+        value: unsafe { std::mem::zeroed() },
+        // SAFETY: COUNT(*) has no right-hand input column.
+        rhs: unsafe { std::mem::zeroed() },
+        op: abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR,
+        agg_mask: abi::PGACCEL_GROUPED_AGG_LANE_COUNT,
+        accumulator_kind: abi::PGACCEL_GROUPED_AGG_ACCUM_I64,
+        state_bytes: 8,
+        flags: 0,
+        pad0: 0,
+    };
+    desc.where_filter = disabled_filter();
+    for filter in &mut desc.measure_filters {
+        *filter = disabled_filter();
+    }
+    desc
+}
+
 fn build_h3_descriptor(
     artifact: &H3ParentArtifact,
     requests: &[ResidentColumnRef],
@@ -2009,71 +2850,115 @@ fn build_h3_descriptor(
         return Err("H3 parent artifact length changed before dispatch".to_owned());
     }
 
-    // SAFETY: all-zero is canonical for every inactive ABI slot.
-    let mut desc: abi::PgaccelGroupedAggDesc = unsafe { std::mem::zeroed() };
-    desc.abi_version = abi::PGACCEL_OLAP_ABI_VERSION;
-    desc.size_bytes = std::mem::size_of::<abi::PgaccelGroupedAggDesc>() as u32;
-    desc.row_count = artifact.fact_rows;
-    desc.grouping_mode = abi::PGACCEL_GROUPED_AGG_GROUPING_HASH;
-    desc.output_mode = abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT;
-    desc.key_count = 1;
-    desc.group_capacity = artifact.group_capacity;
-    desc.keys[0] = abi::PgaccelGroupedAggKey {
-        values: PgaccelExprUsmCol {
-            values: artifact
-                .parents
-                .as_ref()
-                .map_or(std::ptr::null(), |parents| {
-                    parents.as_ptr().cast::<c_void>()
-                }),
-            nulls: source_nulls,
-            tag: PgaccelValTag::Int64,
-        },
-        lookup_by_key: std::ptr::null(),
-        source: abi::PGACCEL_GROUPED_AGG_KEY_SOURCE_FACT,
-        code_min: 0,
-        cardinality: 0,
-        null_code: abi::PGACCEL_GROUPED_AGG_KEY_NO_NULL_CODE,
-        flags: 0,
-        pad0: 0,
+    Ok(h3_count_descriptor(
+        artifact.fact_rows,
+        artifact.group_capacity,
+        artifact
+            .parents
+            .as_ref()
+            .map_or(std::ptr::null(), |parents| {
+                parents.as_ptr().cast::<c_void>()
+            }),
+        source_nulls,
+        0,
+        0,
+    ))
+}
+
+fn build_fused_h3_descriptor(
+    artifact: &FusedH3Artifact,
+    requests: &[ResidentColumnRef],
+    views: &[ResidentColumnView<'_>],
+    cell: ColumnRef,
+) -> Result<abi::PgaccelGroupedAggDesc, String> {
+    let source = find_view(requests, views, cell)?;
+    let (values, nulls) = match source {
+        ResidentColumnView::Empty { type_oid }
+            if artifact.fact_rows == 0 && u32::from(*type_oid) == cell.type_oid =>
+        {
+            (std::ptr::null(), std::ptr::null())
+        }
+        ResidentColumnView::H3 {
+            type_oid,
+            values,
+            nulls,
+        } if u32::from(*type_oid) == cell.type_oid && values.len() == artifact.fact_rows => {
+            (values.as_ptr().cast::<c_void>(), null_ptr(*nulls))
+        }
+        _ => {
+            return Err("fused H3 source is not the planned resident h3index lane".to_owned());
+        }
     };
-    desc.measure_count = 1;
-    desc.measures[0] = abi::PgaccelGroupedAggMeasure {
-        // SAFETY: COUNT(*) has no input columns.
-        value: unsafe { std::mem::zeroed() },
-        // SAFETY: COUNT(*) has no right-hand input column, so its inactive ABI
-        // descriptor must be represented by the all-zero value.
-        rhs: unsafe { std::mem::zeroed() },
-        op: abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR,
-        agg_mask: abi::PGACCEL_GROUPED_AGG_LANE_COUNT,
-        accumulator_kind: abi::PGACCEL_GROUPED_AGG_ACCUM_I64,
-        state_bytes: 8,
-        flags: 0,
-        pad0: 0,
-    };
-    desc.where_filter = disabled_filter();
-    for filter in &mut desc.measure_filters {
-        *filter = disabled_filter();
+    let resolution = u32::try_from(artifact.resolution)
+        .ok()
+        .filter(|resolution| *resolution <= 15)
+        .ok_or_else(|| "fused H3 parent resolution is outside 0..=15".to_owned())?;
+    Ok(h3_count_descriptor(
+        artifact.fact_rows,
+        artifact.group_capacity,
+        values,
+        nulls,
+        abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT,
+        resolution,
+    ))
+}
+
+fn verify_native_one_shot_mode(
+    plan: &ResolvedGroupedAggPlan<'_>,
+    expected: GroupedAggKernelMode,
+) -> Result<(), DescriptorAggExecutionError> {
+    let native = plan
+        .one_shot_kernel_mode()
+        .map_err(|error| gpu_execution_error("grouped physical-mode validation failed", error))?;
+    if native != expected {
+        return Err(DescriptorAggExecutionError::Failure(format!(
+            "planned grouped physical mode {} does not match native one-shot mode {}",
+            expected.label(),
+            native.label(),
+        )));
     }
-    Ok(desc)
+    Ok(())
 }
 
 fn build_and_execute_spatial(
     inputs: ResolvedDerivedInputs<'_, SpatialAggArtifact>,
     requests: &[ResidentColumnRef],
     projection: &AggOutputProjection,
+    expected_kernel_mode: GroupedAggKernelMode,
 ) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
-    let desc = build_spatial_descriptor(inputs.artifact, requests, &inputs.columns)
+    let desc =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::DerivedInputBinding, || {
+            build_spatial_descriptor(inputs.artifact, requests, &inputs.columns)
+        })
         .map_err(DescriptorAggExecutionError::Failure)?;
     // SAFETY: the composite artifact owns the base descriptor lanes and final
     // SQL mask for the duration of this synchronous residency callback.
     let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
         .map_err(|error| gpu_execution_error("spatial aggregate descriptor rejected", error))?;
-    let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
-        gpu_execution_error("spatial aggregate output allocation failed", error)
-    })?;
+    verify_native_one_shot_mode(&plan, expected_kernel_mode)?;
+    let mut storage =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::OutputAllocation, || {
+            GroupedAggOutputStorage::new(&plan)
+        })
+        .map_err(|error| {
+            gpu_execution_error("spatial aggregate output allocation failed", error)
+        })?;
+    let mut workspace =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::WorkspaceAllocation, || {
+            GroupedAggWorkspace::allocate(&plan)
+        })
+        .map_err(|error| {
+            gpu_execution_error("spatial aggregate workspace allocation failed", error)
+        })?;
     let dispatch_started = Instant::now();
-    let outcome = execute_grouped_agg_one_shot(&plan, &mut storage)
+    let (outcome, kernel_mode) =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::KernelExecution, || {
+            execute_grouped_agg_one_shot_with_workspace_and_mode(
+                &plan,
+                &mut storage,
+                &mut workspace,
+            )
+        })
         .map_err(|error| gpu_execution_error("spatial aggregate kernel failed", error))?;
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -2088,8 +2973,11 @@ fn build_and_execute_spatial(
     Ok(DescriptorAggDispatch {
         output,
         fact_rows: inputs.artifact.base.fact_rows,
+        planned_batches: 1,
         batches_executed: 1,
+        physical_mode_calls: 1,
         dispatch_time_us,
+        kernel_mode,
         residency: None,
     })
 }
@@ -2099,18 +2987,38 @@ fn build_and_execute_h3_one_shot(
     requests: &[ResidentColumnRef],
     cell: ColumnRef,
     projection: &AggOutputProjection,
+    expected_kernel_mode: GroupedAggKernelMode,
 ) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
-    let desc = build_h3_descriptor(inputs.artifact, requests, &inputs.columns, cell)
+    let desc =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::DerivedInputBinding, || {
+            build_h3_descriptor(inputs.artifact, requests, &inputs.columns, cell)
+        })
         .map_err(DescriptorAggExecutionError::Failure)?;
     // SAFETY: hash/H3 is deliberately one-shot because its native owner
     // indexes are relative to this exact row pointer range. Every pointer is
     // pinned by the active residency callback through the synchronous call.
     let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
         .map_err(|error| gpu_execution_error("H3 grouped descriptor rejected", error))?;
-    let mut storage = GroupedAggOutputStorage::new(&plan)
+    verify_native_one_shot_mode(&plan, expected_kernel_mode)?;
+    let mut storage =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::OutputAllocation, || {
+            GroupedAggOutputStorage::new(&plan)
+        })
         .map_err(|error| gpu_execution_error("H3 grouped output allocation failed", error))?;
+    let mut workspace =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::WorkspaceAllocation, || {
+            GroupedAggWorkspace::allocate(&plan)
+        })
+        .map_err(|error| gpu_execution_error("H3 grouped workspace allocation failed", error))?;
     let dispatch_started = Instant::now();
-    let outcome = execute_grouped_agg_one_shot(&plan, &mut storage)
+    let (outcome, kernel_mode) =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::KernelExecution, || {
+            execute_grouped_agg_one_shot_with_workspace_and_mode(
+                &plan,
+                &mut storage,
+                &mut workspace,
+            )
+        })
         .map_err(|error| gpu_execution_error("H3 grouped kernel failed", error))?;
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -2127,8 +3035,81 @@ fn build_and_execute_h3_one_shot(
     Ok(DescriptorAggDispatch {
         output,
         fact_rows: inputs.artifact.fact_rows,
+        planned_batches: 1,
         batches_executed: 1,
+        physical_mode_calls: 1,
         dispatch_time_us,
+        kernel_mode,
+        residency: None,
+    })
+}
+
+fn build_and_execute_fused_h3_one_shot(
+    inputs: ResolvedDerivedInputs<'_, FusedH3Artifact>,
+    requests: &[ResidentColumnRef],
+    cell: ColumnRef,
+    projection: &AggOutputProjection,
+    expected_kernel_mode: GroupedAggKernelMode,
+) -> Result<DescriptorAggDispatch, DescriptorAggExecutionError> {
+    let desc =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::DerivedInputBinding, || {
+            build_fused_h3_descriptor(inputs.artifact, requests, &inputs.columns, cell)
+        })
+        .map_err(DescriptorAggExecutionError::Failure)?;
+    // SAFETY: raw H3 inputs and query-owned metadata are pinned through this
+    // synchronous callback. The native hash row loader validates and converts
+    // each non-NULL cell before it can become an owner or output key.
+    let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }
+        .map_err(|error| gpu_execution_error("fused H3 grouped descriptor rejected", error))?;
+    verify_native_one_shot_mode(&plan, expected_kernel_mode)?;
+    let mut storage =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::OutputAllocation, || {
+            GroupedAggOutputStorage::new(&plan)
+        })
+        .map_err(|error| gpu_execution_error("fused H3 output allocation failed", error))?;
+    let mut workspace =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::WorkspaceAllocation, || {
+            GroupedAggWorkspace::allocate(&plan)
+        })
+        .map_err(|error| gpu_execution_error("fused H3 workspace allocation failed", error))?;
+    let dispatch_started = Instant::now();
+    let (outcome, kernel_mode) =
+        stats::profile_descriptor_stage(stats::DescriptorExecStage::KernelExecution, || {
+            execute_grouped_agg_one_shot_with_workspace_and_mode(
+                &plan,
+                &mut storage,
+                &mut workspace,
+            )
+        })
+        .map_err(|error| {
+            if error.status == GpuStatusDetail::NumericOverflow {
+                DescriptorAggExecutionError::NumericOverflow
+            } else {
+                DescriptorAggExecutionError::ExternalRoutineException(format!(
+                    "fused h3_cell_to_parent aggregate rejected an input: {error}"
+                ))
+            }
+        })?;
+    let dispatch_time_us =
+        u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    validate_h3_compact_outcome(outcome, &storage, inputs.artifact.fact_rows)
+        .map_err(DescriptorAggExecutionError::Failure)?;
+    let output = DescriptorAggOutput::new(
+        storage,
+        outcome,
+        std::rc::Rc::from(Vec::<super::artifact::GroupDomain>::new()),
+        inputs.artifact.resolved_spec.clone(),
+        projection.clone(),
+    )
+    .map_err(DescriptorAggExecutionError::Failure)?;
+    Ok(DescriptorAggDispatch {
+        output,
+        fact_rows: inputs.artifact.fact_rows,
+        planned_batches: 1,
+        batches_executed: 1,
+        physical_mode_calls: 1,
+        dispatch_time_us,
+        kernel_mode,
         residency: None,
     })
 }
@@ -2396,6 +3377,43 @@ fn warn_if_grouped_dispatch_slow(phase: &str, elapsed: Duration) {
     );
 }
 
+trait DenseArtifactInputResolver {
+    fn resolve<R>(
+        &self,
+        callback: impl FnOnce(ResolvedDerivedInputs<'_, DescriptorAggArtifact>) -> R,
+    ) -> Result<R, ResidentLoadError>;
+}
+
+struct CachedDenseArtifactResolver<'a> {
+    owner_relid: pg_sys::Oid,
+    identity: &'a DerivedArtifactIdentity,
+    requests: &'a [ResidentColumnRef],
+}
+
+impl DenseArtifactInputResolver for CachedDenseArtifactResolver<'_> {
+    fn resolve<R>(
+        &self,
+        callback: impl FnOnce(ResolvedDerivedInputs<'_, DescriptorAggArtifact>) -> R,
+    ) -> Result<R, ResidentLoadError> {
+        with_derived_artifact_inputs(self.owner_relid, self.identity, self.requests, callback)
+    }
+}
+
+struct EphemeralDenseArtifactResolver<'a> {
+    owner_relid: pg_sys::Oid,
+    artifact: &'a EphemeralDerivedArtifact<DescriptorAggArtifact>,
+    requests: &'a [ResidentColumnRef],
+}
+
+impl DenseArtifactInputResolver for EphemeralDenseArtifactResolver<'_> {
+    fn resolve<R>(
+        &self,
+        callback: impl FnOnce(ResolvedDerivedInputs<'_, DescriptorAggArtifact>) -> R,
+    ) -> Result<R, ResidentLoadError> {
+        with_ephemeral_artifact_inputs(self.owner_relid, self.artifact, self.requests, callback)
+    }
+}
+
 fn execute_bounded_dense_artifact(
     owner_relid: pg_sys::Oid,
     identity: &DerivedArtifactIdentity,
@@ -2403,6 +3421,54 @@ fn execute_bounded_dense_artifact(
     projection: &AggOutputProjection,
     max_chunk_rows: usize,
     one_shot_max_rows: usize,
+    expected_kernel_mode: GroupedAggKernelMode,
+) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
+    let resolver = CachedDenseArtifactResolver {
+        owner_relid,
+        identity,
+        requests,
+    };
+    execute_bounded_dense_with_resolver(
+        &resolver,
+        requests,
+        projection,
+        max_chunk_rows,
+        one_shot_max_rows,
+        expected_kernel_mode,
+    )
+}
+
+fn execute_bounded_dense_ephemeral(
+    owner_relid: pg_sys::Oid,
+    artifact: &EphemeralDerivedArtifact<DescriptorAggArtifact>,
+    requests: &[ResidentColumnRef],
+    projection: &AggOutputProjection,
+    max_chunk_rows: usize,
+    one_shot_max_rows: usize,
+    expected_kernel_mode: GroupedAggKernelMode,
+) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
+    let resolver = EphemeralDenseArtifactResolver {
+        owner_relid,
+        artifact,
+        requests,
+    };
+    execute_bounded_dense_with_resolver(
+        &resolver,
+        requests,
+        projection,
+        max_chunk_rows,
+        one_shot_max_rows,
+        expected_kernel_mode,
+    )
+}
+
+fn execute_bounded_dense_with_resolver(
+    resolver: &impl DenseArtifactInputResolver,
+    requests: &[ResidentColumnRef],
+    projection: &AggOutputProjection,
+    max_chunk_rows: usize,
+    one_shot_max_rows: usize,
+    expected_kernel_mode: GroupedAggKernelMode,
 ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
     let bounded_chunk_rows = effective_dense_chunk_rows(max_chunk_rows);
     if bounded_chunk_rows == 0 {
@@ -2416,13 +3482,13 @@ fn execute_bounded_dense_artifact(
         caught.rethrow();
     }
 
-    let initialized = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
-        owner_relid,
-        identity,
-        requests,
-        |inputs| {
-            let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
-                .map_err(DescriptorAggExecutionError::Failure)?;
+    let initialized = resolver
+        .resolve(|inputs| {
+            let desc = stats::profile_descriptor_stage(
+                stats::DescriptorExecStage::DerivedInputBinding,
+                || build_descriptor(inputs.artifact, requests, &inputs.columns),
+            )
+            .map_err(DescriptorAggExecutionError::Failure)?;
             // SAFETY: every active pointer is pinned by this exact residency
             // callback. The session copies only shape identity; it never
             // submits or dereferences those pointer values after return.
@@ -2430,14 +3496,33 @@ fn execute_bounded_dense_artifact(
                 .map_err(|error| gpu_execution_error("grouped descriptor rejected", error))?;
             if dense_one_shot_eligible(plan.descriptor(), dense_one_shot_row_cap(one_shot_max_rows))
             {
-                let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
+                verify_native_one_shot_mode(&plan, expected_kernel_mode)?;
+                let mut storage = stats::profile_descriptor_stage(
+                    stats::DescriptorExecStage::OutputAllocation,
+                    || GroupedAggOutputStorage::new(&plan),
+                )
+                .map_err(|error| {
                     gpu_execution_error("grouped one-shot output allocation failed", error)
                 })?;
+                let mut workspace = stats::profile_descriptor_stage(
+                    stats::DescriptorExecStage::WorkspaceAllocation,
+                    || GroupedAggWorkspace::allocate(&plan),
+                )
+                .map_err(|error| {
+                    gpu_execution_error("grouped one-shot workspace allocation failed", error)
+                })?;
                 let dispatch_started = Instant::now();
-                let outcome =
-                    execute_grouped_agg_one_shot(&plan, &mut storage).map_err(|error| {
-                        gpu_execution_error("grouped one-shot kernel failed", error)
-                    })?;
+                let (outcome, kernel_mode) = stats::profile_descriptor_stage(
+                    stats::DescriptorExecStage::KernelExecution,
+                    || {
+                        execute_grouped_agg_one_shot_with_workspace_and_mode(
+                            &plan,
+                            &mut storage,
+                            &mut workspace,
+                        )
+                    },
+                )
+                .map_err(|error| gpu_execution_error("grouped one-shot kernel failed", error))?;
                 let elapsed = dispatch_started.elapsed();
                 let output = DescriptorAggOutput::new(
                     storage,
@@ -2451,15 +3536,28 @@ fn execute_bounded_dense_artifact(
                     dispatch: Box::new(DescriptorAggDispatch {
                         output,
                         fact_rows: inputs.artifact.fact_rows,
+                        planned_batches: 1,
                         batches_executed: 1,
+                        physical_mode_calls: 1,
                         dispatch_time_us: u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+                        kernel_mode,
                         residency: None,
                     }),
                     elapsed,
                 });
             }
-            let session = GroupedAggSession::start(&plan, bounded_chunk_rows)
-                .map_err(|error| gpu_execution_error("grouped session setup failed", error))?;
+            let session = stats::profile_descriptor_stage(
+                stats::DescriptorExecStage::WorkspaceAllocation,
+                || GroupedAggSession::start(&plan, bounded_chunk_rows),
+            )
+            .map_err(|error| gpu_execution_error("grouped session setup failed", error))?;
+            if session.kernel_mode() != expected_kernel_mode {
+                return Err(DescriptorAggExecutionError::Failure(format!(
+                    "planned grouped physical mode {} does not match native bounded data mode {}",
+                    expected_kernel_mode.label(),
+                    session.kernel_mode().label(),
+                )));
+            }
             let metadata = DescriptorExecutionMetadata {
                 fact_rows: inputs.artifact.fact_rows,
                 domains: inputs.artifact.domains.clone(),
@@ -2469,10 +3567,9 @@ fn execute_bounded_dense_artifact(
                 session: Box::new(session),
                 metadata: Box::new(metadata),
             })
-        },
-    )
-    .map_err(DescriptorDispatchFailure::Residency)?
-    .map_err(DescriptorDispatchFailure::Execution)?;
+        })
+        .map_err(DescriptorDispatchFailure::Residency)?
+        .map_err(DescriptorDispatchFailure::Execution)?;
     let (mut session, metadata) = match initialized {
         DenseExecutionSetup::OneShot { dispatch, elapsed } => {
             note_dense_test_call_and_maybe_arm_timeout();
@@ -2489,19 +3586,26 @@ fn execute_bounded_dense_artifact(
         domains,
         resolved_spec,
     } = *metadata;
+    let kernel_mode = session.kernel_mode();
+    let planned_calls =
+        bounded_dispatch_call_count(fact_rows, bounded_chunk_rows).ok_or_else(|| {
+            DescriptorDispatchFailure::Execution(DescriptorAggExecutionError::Failure(
+                "grouped aggregate bounded dispatch call count overflowed".to_owned(),
+            ))
+        })?;
 
     let dispatch_started = Instant::now();
     let dispatch = run_bounded_dispatch(
         fact_rows,
         bounded_chunk_rows,
         |range| {
-            let elapsed = with_derived_artifact_inputs::<DescriptorAggArtifact, _>(
-                owner_relid,
-                identity,
-                requests,
-                |inputs| {
-                    let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
-                        .map_err(DescriptorAggExecutionError::Failure)?;
+            let elapsed = resolver
+                .resolve(|inputs| {
+                    let desc = stats::profile_descriptor_stage(
+                        stats::DescriptorExecStage::DerivedInputBinding,
+                        || build_descriptor(inputs.artifact, requests, &inputs.columns),
+                    )
+                    .map_err(DescriptorAggExecutionError::Failure)?;
                     // SAFETY: the descriptor is used only during this synchronous
                     // callback while all row pointers remain pinned.
                     let plan =
@@ -2514,15 +3618,16 @@ fn execute_bounded_dense_artifact(
                                 gpu_execution_error("grouped chunk descriptor rejected", error)
                             })?;
                     let chunk_started = Instant::now();
-                    session.accumulate(&chunk).map_err(|error| {
-                        gpu_execution_error("grouped chunk kernel failed", error)
-                    })?;
+                    stats::profile_descriptor_stage(
+                        stats::DescriptorExecStage::KernelExecution,
+                        || session.accumulate(&chunk),
+                    )
+                    .map_err(|error| gpu_execution_error("grouped chunk kernel failed", error))?;
                     Ok::<_, DescriptorAggExecutionError>(chunk_started.elapsed())
-                },
-            )
-            .map_err(DescriptorDispatchFailure::Residency)
-            .and_then(|result| result.map_err(DescriptorDispatchFailure::Execution))
-            .map_err(DenseBoundedFailure::Dispatch)?;
+                })
+                .map_err(DescriptorDispatchFailure::Residency)
+                .and_then(|result| result.map_err(DescriptorDispatchFailure::Execution))
+                .map_err(DenseBoundedFailure::Dispatch)?;
             warn_if_grouped_dispatch_slow("accumulate chunk", elapsed);
             note_dense_test_call_and_maybe_arm_timeout();
             Ok(())
@@ -2548,31 +3653,38 @@ fn execute_bounded_dense_artifact(
         },
     };
 
-    let (outcome, storage, finalize_elapsed) = with_derived_artifact_inputs::<
-        DescriptorAggArtifact,
-        _,
-    >(owner_relid, identity, requests, |inputs| {
-        let desc = build_descriptor(inputs.artifact, requests, &inputs.columns)
+    let (outcome, storage, finalize_elapsed) = resolver
+        .resolve(|inputs| {
+            let desc = stats::profile_descriptor_stage(
+                stats::DescriptorExecStage::DerivedInputBinding,
+                || build_descriptor(inputs.artifact, requests, &inputs.columns),
+            )
             .map_err(DescriptorAggExecutionError::Failure)?;
-        // SAFETY: finalization is synchronous and this fresh plan remains
-        // pinned until the callback returns.
-        let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.map_err(|error| {
-            gpu_execution_error("grouped descriptor changed before finalize", error)
-        })?;
-        // Output buffers carry an exact resolved-plan identity. Allocate
-        // them from this final pinned plan, not the temporary setup plan
-        // that was dropped before the bounded residency borrows began.
-        let mut storage = GroupedAggOutputStorage::new(&plan).map_err(|error| {
-            gpu_execution_error("grouped final output allocation failed", error)
-        })?;
-        let finalize_started = Instant::now();
-        let outcome = session
-            .finalize(&plan, &mut storage)
+            // SAFETY: finalization is synchronous and this fresh plan remains
+            // pinned until the callback returns.
+            let plan = unsafe { ResolvedGroupedAggPlan::from_abi(desc) }.map_err(|error| {
+                gpu_execution_error("grouped descriptor changed before finalize", error)
+            })?;
+            // Output buffers carry an exact resolved-plan identity. Allocate
+            // them from this final pinned plan, not the temporary setup plan
+            // that was dropped before the bounded residency borrows began.
+            let mut storage = stats::profile_descriptor_stage(
+                stats::DescriptorExecStage::OutputAllocation,
+                || GroupedAggOutputStorage::new(&plan),
+            )
+            .map_err(|error| {
+                gpu_execution_error("grouped final output allocation failed", error)
+            })?;
+            let finalize_started = Instant::now();
+            let outcome = stats::profile_descriptor_stage(
+                stats::DescriptorExecStage::KernelExecution,
+                || session.finalize(&plan, &mut storage),
+            )
             .map_err(|error| gpu_execution_error("grouped finalization failed", error))?;
-        Ok::<_, DescriptorAggExecutionError>((outcome, storage, finalize_started.elapsed()))
-    })
-    .map_err(DescriptorDispatchFailure::Residency)?
-    .map_err(DescriptorDispatchFailure::Execution)?;
+            Ok::<_, DescriptorAggExecutionError>((outcome, storage, finalize_started.elapsed()))
+        })
+        .map_err(DescriptorDispatchFailure::Residency)?
+        .map_err(DescriptorDispatchFailure::Execution)?;
     note_dense_test_call_and_maybe_arm_timeout();
     warn_if_grouped_dispatch_slow("finalize", finalize_elapsed);
     // Finalize is another synchronous native call. Capture only after its
@@ -2584,13 +3696,8 @@ fn execute_bounded_dense_artifact(
 
     let dispatch_time_us =
         u64::try_from(dispatch_started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    let completed_calls =
-        bounded_dispatch_call_count(fact_rows, bounded_chunk_rows).ok_or_else(|| {
-            DescriptorDispatchFailure::Execution(DescriptorAggExecutionError::Failure(
-                "grouped aggregate bounded dispatch call count overflowed".to_owned(),
-            ))
-        })?;
-    debug_assert_eq!(completed_calls, launches.saturating_add(1));
+    let completed_calls = launches.saturating_add(1);
+    debug_assert_eq!(completed_calls, planned_calls);
     let output =
         DescriptorAggOutput::new(storage, outcome, domains, resolved_spec, projection.clone())
             .map_err(DescriptorAggExecutionError::Failure)
@@ -2598,8 +3705,11 @@ fn execute_bounded_dense_artifact(
     Ok(DescriptorAggDispatch {
         output,
         fact_rows,
+        planned_batches: u64::try_from(planned_calls).unwrap_or(u64::MAX),
         batches_executed: u64::try_from(completed_calls).unwrap_or(u64::MAX),
+        physical_mode_calls: u64::try_from(launches).unwrap_or(u64::MAX),
         dispatch_time_us,
+        kernel_mode,
         residency: None,
     })
 }
@@ -2702,6 +3812,93 @@ mod tests {
 
     const TEST_GEOMETRY_OID: u32 = 60_001;
     const TEST_SRID: i32 = 4_326;
+
+    fn policy_input() -> ArtifactPolicyInput {
+        ArtifactPolicyInput {
+            construction_bytes: 1_000_000,
+            ephemeral_bytes: 1_000_000,
+            construction_time_us: 100,
+            expected_reuses: 8,
+            cache_hit: false,
+            invalidation_risk_ppm: 0,
+            cached_build_launches: 2,
+            ephemeral_build_launches: 2,
+            consumer_launches: 1,
+            budget_headroom_bytes: 100_000_000,
+        }
+    }
+
+    #[test]
+    fn artifact_policy_accounts_for_every_admission_factor() {
+        let baseline = policy_input();
+        assert_eq!(
+            choose_artifact_policy(baseline).policy,
+            DescriptorArtifactPolicy::CachedReusable
+        );
+
+        let hit = choose_artifact_policy(ArtifactPolicyInput {
+            cache_hit: true,
+            expected_reuses: 1,
+            ..baseline
+        });
+        assert_eq!(hit.policy, DescriptorArtifactPolicy::CachedReusable);
+        assert_eq!(hit.reason, ArtifactPolicyReason::CacheHit);
+
+        let one_use = choose_artifact_policy(ArtifactPolicyInput {
+            expected_reuses: 1,
+            ..baseline
+        });
+        assert_eq!(one_use.policy, DescriptorArtifactPolicy::EphemeralFused);
+
+        let invalidation = choose_artifact_policy(ArtifactPolicyInput {
+            invalidation_risk_ppm: 1_000_000,
+            ..baseline
+        });
+        assert_eq!(
+            invalidation.policy,
+            DescriptorArtifactPolicy::EphemeralFused
+        );
+
+        let memory = choose_artifact_policy(ArtifactPolicyInput {
+            ephemeral_bytes: 0,
+            budget_headroom_bytes: 999_999,
+            ..baseline
+        });
+        assert_eq!(memory.policy, DescriptorArtifactPolicy::EphemeralFused);
+        assert_eq!(memory.reason, ArtifactPolicyReason::MemoryBudget);
+
+        let launch_heavy_cache = choose_artifact_policy(ArtifactPolicyInput {
+            expected_reuses: 2,
+            cached_build_launches: 10,
+            ephemeral_build_launches: 0,
+            ..baseline
+        });
+        assert_eq!(
+            launch_heavy_cache.policy,
+            DescriptorArtifactPolicy::EphemeralFused
+        );
+
+        let empty = choose_artifact_policy(ArtifactPolicyInput {
+            construction_bytes: 0,
+            ephemeral_bytes: 0,
+            ..baseline
+        });
+        assert_eq!(empty.reason, ArtifactPolicyReason::EmptyArtifact);
+        let summary = baseline;
+        let summary = choose_artifact_policy(summary).summary();
+        for field in [
+            "construction_bytes=",
+            "construction_time_us=",
+            "expected_reuses=",
+            "cache_hit=",
+            "invalidation_risk_ppm=",
+            "cached_build_launches=",
+            "consumer_launches=",
+            "budget_headroom_bytes=",
+        ] {
+            assert!(summary.contains(field), "missing policy field {field}");
+        }
+    }
 
     fn parallel_dense_integer_desc(
         row_count: usize,
@@ -2835,6 +4032,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn release_dense_session_uses_at_most_eleven_synchronous_calls_at_ten_million_rows() {
+        let chunk_rows = crate::engine::cost::DeviceLimits::cpu_only().gpu_reduce_max_chunk;
+        assert_eq!(chunk_rows, 1_000_000);
+        assert_eq!(
+            bounded_dispatch_call_count(10_000_000, chunk_rows),
+            Some(11)
+        );
+    }
+
     fn projection(
         kind: AggregateKind,
         source_type_oid: u32,
@@ -2872,6 +4079,147 @@ mod tests {
             star_dims: Vec::new(),
             having: None,
         }
+    }
+
+    #[test]
+    fn planned_kernel_mode_is_stable_and_rejects_serial_shapes() {
+        let count = spec(MeasureExpr::CountStar, AggregateKind::Count);
+        assert_eq!(
+            planned_descriptor_kernel_mode(&count, false),
+            GroupedAggKernelMode::ParallelDenseCount
+        );
+        assert_eq!(
+            planned_descriptor_kernel_mode(&count, true),
+            GroupedAggKernelMode::ParallelHash
+        );
+
+        let mut integer = spec(
+            MeasureExpr::Column(ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: INT4OID,
+            }),
+            AggregateKind::Sum,
+        );
+        integer.measures.push(MeasureSpec {
+            expression: MeasureExpr::CountStar,
+            outputs: vec![AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Count,
+            }],
+            filter: FilterSpec::None,
+        });
+        assert_eq!(
+            planned_descriptor_kernel_mode(&integer, false),
+            GroupedAggKernelMode::ParallelDenseInteger
+        );
+
+        integer.fact_filter = FilterSpec::Ranges {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: INT4OID,
+            },
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(i32::MIN),
+                hi: ScalarValue::I32(800),
+            }],
+        };
+        assert_eq!(
+            planned_descriptor_kernel_mode(&integer, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "predicate-range descriptors route to the serial native data kernel"
+        );
+        integer.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 3,
+                type_oid: BOOLOID,
+            },
+            kind: MaskKind::Sql,
+        };
+        assert_eq!(
+            planned_descriptor_kernel_mode(&integer, false),
+            GroupedAggKernelMode::ParallelDenseInteger,
+            "a derived SQL mask is supported by the parallel dense branch"
+        );
+
+        let float_min = spec(
+            MeasureExpr::Column(ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: FLOAT8OID,
+            }),
+            AggregateKind::Min,
+        );
+        assert_eq!(
+            planned_descriptor_kernel_mode(&float_min, false),
+            GroupedAggKernelMode::SerialGeneric
+        );
+
+        integer.fact_filter = FilterSpec::None;
+        integer.star_dims.push(DimSpec {
+            relation_oid: 99,
+            fact_key: column(INT4OID),
+            dim_key: ColumnRef {
+                relation_oid: 99,
+                attno: 1,
+                type_oid: INT4OID,
+            },
+            collation_oid: 0,
+            multiplicity: JoinMultiplicity::Counted,
+            filter: FilterSpec::None,
+        });
+        assert_eq!(
+            planned_descriptor_kernel_mode(&integer, false),
+            GroupedAggKernelMode::SerialGeneric
+        );
+    }
+
+    #[test]
+    fn specialization_cache_uses_complete_identity_and_stable_variants() {
+        DESCRIPTOR_SPECIALIZATION_CACHE.with(|cache| cache.borrow_mut().clear());
+        let identity = DerivedArtifactIdentity::from_canonical_words(vec![1, 2, 3, 4]);
+        let changed = DerivedArtifactIdentity::from_canonical_words(vec![1, 2, 3, 5]);
+        let count = spec(MeasureExpr::CountStar, AggregateKind::Count);
+
+        let (plain, first) = cached_descriptor_specialization(
+            &identity,
+            &count,
+            GroupedAggKernelMode::ParallelDenseCount,
+        );
+        assert_eq!(plain.label(), "dense_count_plain");
+        assert_eq!(first, DescriptorSpecializationCacheOutcome::Miss);
+
+        let (cached, second) = cached_descriptor_specialization(
+            &identity,
+            &count,
+            GroupedAggKernelMode::ParallelDenseCount,
+        );
+        assert_eq!(cached, plain);
+        assert_eq!(second, DescriptorSpecializationCacheOutcome::Hit);
+
+        let mut masked = count;
+        masked.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 3,
+                type_oid: BOOLOID,
+            },
+            kind: MaskKind::Sql,
+        };
+        let (masked_variant, changed_outcome) = cached_descriptor_specialization(
+            &changed,
+            &masked,
+            GroupedAggKernelMode::ParallelDenseCount,
+        );
+        assert_eq!(masked_variant.label(), "dense_count_sql_mask");
+        assert_eq!(changed_outcome, DescriptorSpecializationCacheOutcome::Miss);
+        assert_eq!(
+            DESCRIPTOR_SPECIALIZATION_CACHE.with(|cache| cache.borrow().len()),
+            2,
+            "a digest lookup never aliases a different complete canonical identity"
+        );
     }
 
     fn h3_count_shape() -> (AggQuerySpec, AggOutputProjection) {
@@ -3697,6 +5045,7 @@ mod tests {
 
         let mut report = DescriptorResidencyReport {
             artifact_outcome: ArtifactEnsureOutcome::Hit,
+            artifact_policy: test_artifact_policy_evidence(),
             relations: Vec::new(),
             loaded_relations: vec![pg_sys::Oid::from(10_u32)],
             artifact_bytes: 10,
@@ -3705,6 +5054,7 @@ mod tests {
         };
         report.merge(DescriptorResidencyReport {
             artifact_outcome: ArtifactEnsureOutcome::Built,
+            artifact_policy: test_artifact_policy_evidence(),
             relations: Vec::new(),
             loaded_relations: vec![pg_sys::Oid::from(10_u32), pg_sys::Oid::from(20_u32)],
             artifact_bytes: 20,
@@ -3722,6 +5072,7 @@ mod tests {
 
         report.merge(DescriptorResidencyReport {
             artifact_outcome: ArtifactEnsureOutcome::Hit,
+            artifact_policy: test_artifact_policy_evidence(),
             relations: Vec::new(),
             loaded_relations: Vec::new(),
             artifact_bytes: 21,
@@ -4225,12 +5576,43 @@ mod tests {
         let view = ResidentColumnView::Empty {
             type_oid: pg_sys::Oid::from(cell.type_oid),
         };
-        let desc = build_h3_descriptor(&artifact, &[request], &[view], cell)
+        let desc = build_h3_descriptor(&artifact, &[request], std::slice::from_ref(&view), cell)
             .expect("empty H3 descriptor binds");
         assert_eq!(desc.grouping_mode, abi::PGACCEL_GROUPED_AGG_GROUPING_HASH);
         assert_eq!(desc.output_mode, abi::PGACCEL_GROUPED_AGG_OUTPUT_COMPACT);
         assert_eq!(desc.group_capacity, 1);
         assert!(desc.keys[0].values.values.is_null());
+
+        let fused = FusedH3Artifact {
+            resolved_spec: artifact.resolved_spec,
+            fact_rows: 0,
+            group_capacity: 1,
+            resolution: 3,
+        };
+        let fused_desc =
+            build_fused_h3_descriptor(&fused, &[request], std::slice::from_ref(&view), cell)
+                .expect("empty fused H3 descriptor binds");
+        assert_eq!(
+            fused_desc.keys[0].flags,
+            abi::PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT
+        );
+        assert_eq!(fused_desc.keys[0].pad0, 3);
+        assert!(fused_desc.keys[0].values.values.is_null());
+        assert_eq!(fused_desc.group_capacity, desc.group_capacity);
+
+        let invalid_fused = FusedH3Artifact {
+            resolution: 16,
+            ..fused
+        };
+        assert!(
+            build_fused_h3_descriptor(
+                &invalid_fused,
+                &[request],
+                std::slice::from_ref(&view),
+                cell,
+            )
+            .is_err()
+        );
 
         assert!(find_view(&[], &[], cell).is_err());
         assert!(find_view(&[request], &[], cell).is_err());

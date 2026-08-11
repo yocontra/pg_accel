@@ -18,6 +18,7 @@ measured arm order, and a comparable sealed no-dispatch audit.
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import hashlib
 import json
@@ -27,8 +28,9 @@ from pathlib import Path
 from typing import Any
 
 
-EXPECTED_ITERATIONS = 10
+EXPECTED_ITERATIONS = 30
 EXPECTED_WARMUPS = 5
+EXPECTED_REPETITIONS_PER_ARM = 2
 SELECTED_SPEEDUP_FLOOR = 1.15
 MEDIAN_ABSOLUTE_ALLOWANCE_MS = 0.25
 MEDIAN_RELATIVE_ALLOWANCE = 0.02
@@ -45,6 +47,13 @@ PLANNER_STAGE_NAMES = (
     "upper_final",
     "upper_setop",
     "upper_other",
+)
+PLANNER_SUBSTAGE_NAMES = (
+    "query_fingerprint",
+    "decline_cache_lookup",
+    "dependency_revalidation",
+    "native_cost_reconstruction",
+    "rejection_recording",
 )
 
 
@@ -160,6 +169,11 @@ def extract_native_arms(
     warmups = row.get("warmup_iterations")
     if not isinstance(warmups, list) or len(warmups) != EXPECTED_WARMUPS:
         raise AnalysisError(f"{label}: expected exactly {EXPECTED_WARMUPS} warmups")
+    raw_captures = row.get("native_parity_pair_captures")
+    if not isinstance(raw_captures, list) or len(raw_captures) != EXPECTED_ITERATIONS:
+        raise AnalysisError(
+            f"{label}: expected {EXPECTED_ITERATIONS} retained native-parity crossover blocks"
+        )
 
     enabled: list[float] = []
     disabled: list[float] = []
@@ -199,8 +213,78 @@ def extract_native_arms(
             f"{label}: measured arm order is not exactly balanced "
             f"({accel_first_count} accel-first, {disabled_first_count} disabled-first)"
         )
+    for index, (capture, iteration) in enumerate(
+        zip(raw_captures, iterations, strict=True)
+    ):
+        if not isinstance(capture, dict) or capture.get("pair_index") != index:
+            raise AnalysisError(f"{label}: raw crossover block {index} is malformed")
+        accel_first = iteration["accel_first"]
+        if capture.get("accel_first") is not accel_first:
+            raise AnalysisError(f"{label}: raw crossover block {index} order disagrees")
+        expected_sequence = (
+            ["accel", "disabled_postgresql", "disabled_postgresql", "accel"]
+            if accel_first
+            else ["disabled_postgresql", "accel", "accel", "disabled_postgresql"]
+        )
+        if capture.get("sequence") != expected_sequence:
+            raise AnalysisError(
+                f"{label}: raw crossover block {index} is not mirrored ABBA/BAAB"
+            )
+        raw_accel = capture.get("accel_ms")
+        raw_disabled = capture.get("parallel_ms")
+        if (
+            not isinstance(raw_accel, list)
+            or len(raw_accel) != EXPECTED_REPETITIONS_PER_ARM
+            or not isinstance(raw_disabled, list)
+            or len(raw_disabled) != EXPECTED_REPETITIONS_PER_ARM
+        ):
+            raise AnalysisError(
+                f"{label}: raw crossover block {index} does not retain two executions per arm"
+            )
+        raw_accel = [
+            _positive_number(value, f"{label}: raw accel[{index}]")
+            for value in raw_accel
+        ]
+        raw_disabled = [
+            _positive_number(value, f"{label}: raw disabled[{index}]")
+            for value in raw_disabled
+        ]
+        accel_average = sum(raw_accel) / EXPECTED_REPETITIONS_PER_ARM
+        disabled_average = sum(raw_disabled) / EXPECTED_REPETITIONS_PER_ARM
+        if not math.isclose(accel_average, enabled[index], rel_tol=1e-12, abs_tol=1e-9):
+            raise AnalysisError(
+                f"{label}: retained accel executions do not reproduce pair {index}"
+            )
+        if not math.isclose(
+            disabled_average, disabled[index], rel_tol=1e-12, abs_tol=1e-9
+        ):
+            raise AnalysisError(
+                f"{label}: retained disabled executions do not reproduce pair {index}"
+            )
+        if not math.isclose(
+            _positive_number(
+                capture.get("accel_average_ms"),
+                f"{label}: retained accel average[{index}]",
+            ),
+            enabled[index],
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        ) or not math.isclose(
+            _positive_number(
+                capture.get("parallel_average_ms"),
+                f"{label}: retained disabled average[{index}]",
+            ),
+            disabled[index],
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        ):
+            raise AnalysisError(
+                f"{label}: stored crossover averages do not reproduce pair {index}"
+            )
     return enabled, disabled, {
         "contract": "balanced_randomized_measured_pairs",
+        "paired_sample_count": len(measured_order),
+        "raw_executions_per_arm_pair": EXPECTED_REPETITIONS_PER_ARM,
         "accel_first_count": accel_first_count,
         "disabled_first_count": disabled_first_count,
         "sequence": [
@@ -226,6 +310,10 @@ def extract_planner_stage_attribution(
         stage: {"calls": 0, "elapsed_us": 0, "fast_declines": 0}
         for stage in PLANNER_STAGE_NAMES
     }
+    substage_totals = {
+        substage: {"calls": 0, "elapsed_us": 0}
+        for substage in PLANNER_SUBSTAGE_NAMES
+    }
     for pair_index, capture in enumerate(captures):
         if not isinstance(capture, dict):
             raise AnalysisError(f"{label}: planner-stage capture {pair_index} is not an object")
@@ -242,6 +330,15 @@ def extract_planner_stage_attribution(
         probe = capture.get("observer_probe")
         parsed = _parse_stage_vector(stages, label, pair_index, "target")
         parsed_probe = _parse_stage_vector(probe, label, pair_index, "observer_probe")
+        parsed_substages = _parse_substage_vector(
+            capture.get("substages"), label, pair_index, "target"
+        )
+        parsed_substage_probe = _parse_substage_vector(
+            capture.get("substage_observer_probe"),
+            label,
+            pair_index,
+            "observer_probe",
+        )
         for stage in PLANNER_STAGE_NAMES:
             if any(parsed_probe[stage].values()):
                 raise AnalysisError(
@@ -249,12 +346,33 @@ def extract_planner_stage_attribution(
                 )
             for counter in ("calls", "elapsed_us", "fast_declines"):
                 totals[stage][counter] += parsed[stage][counter]
+        for substage in PLANNER_SUBSTAGE_NAMES:
+            if any(parsed_substage_probe[substage].values()):
+                raise AnalysisError(
+                    f"{label}: planner-substage observer probe changed counters "
+                    f"in pair {pair_index}"
+                )
+            for counter in ("calls", "elapsed_us"):
+                substage_totals[substage][counter] += parsed_substages[substage][counter]
 
     return {
         "capture_method": "prepared_observer_before_after_with_zero_delta_probe",
         "measured_pair_count": len(captures),
         "stages": [
             {"stage": stage, **totals[stage]} for stage in PLANNER_STAGE_NAMES
+        ],
+        "substages": [
+            {
+                "substage": substage,
+                **substage_totals[substage],
+                "mean_us": (
+                    substage_totals[substage]["elapsed_us"]
+                    / substage_totals[substage]["calls"]
+                    if substage_totals[substage]["calls"]
+                    else 0.0
+                ),
+            }
+            for substage in PLANNER_SUBSTAGE_NAMES
         ],
     }
 
@@ -292,6 +410,40 @@ def _parse_stage_vector(
         parsed[stage] = counters
     if set(parsed) != set(PLANNER_STAGE_NAMES):
         raise AnalysisError(f"{label}: {vector_label} pair {pair_index} stage set is incomplete")
+    return parsed
+
+
+def _parse_substage_vector(
+    value: Any, label: str, pair_index: int, vector_label: str
+) -> dict[str, dict[str, int]]:
+    if not isinstance(value, list) or len(value) != len(PLANNER_SUBSTAGE_NAMES):
+        raise AnalysisError(
+            f"{label}: planner-substage {vector_label} pair {pair_index} must contain "
+            f"exactly {len(PLANNER_SUBSTAGE_NAMES)} substages"
+        )
+    parsed: dict[str, dict[str, int]] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise AnalysisError(
+                f"{label}: planner-substage {vector_label} pair {pair_index} "
+                "contains a malformed substage"
+            )
+        substage = item.get("substage")
+        if substage not in PLANNER_SUBSTAGE_NAMES or substage in parsed:
+            raise AnalysisError(
+                f"{label}: planner-substage {vector_label} pair {pair_index} "
+                "has unknown/duplicate substage"
+            )
+        counters: dict[str, int] = {}
+        for counter in ("calls", "elapsed_us"):
+            raw = item.get(counter)
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                raise AnalysisError(
+                    f"{label}: planner-substage {vector_label} pair {pair_index} "
+                    f"has invalid {counter}"
+                )
+            counters[counter] = raw
+        parsed[substage] = counters
     return parsed
 
 
@@ -459,8 +611,8 @@ def exact_paired_sign_flip_non_inferiority(
         raise AnalysisError("native-parity arms are not paired")
     if not enabled_native_ms:
         raise AnalysisError("native-parity arms are empty")
-    if len(enabled_native_ms) > 20:
-        raise AnalysisError("exact sign-flip test is limited to 20 paired samples")
+    if len(enabled_native_ms) > 40:
+        raise AnalysisError("exact sign-flip test is limited to 40 paired samples")
 
     adjusted = [
         enabled - disabled - margin_ms
@@ -471,14 +623,39 @@ def exact_paired_sign_flip_non_inferiority(
     observed_sum = sum(adjusted)
     permutation_count = 1 << len(adjusted)
     tolerance = max(1.0, abs(observed_sum), *(abs(value) for value in adjusted)) * 1e-12
-    lower_tail_count = 0
-    for assignment in range(permutation_count):
-        permuted_sum = sum(
-            value if assignment & (1 << index) else -value
-            for index, value in enumerate(adjusted)
+    if len(adjusted) <= 20:
+        enumeration_strategy = "direct_exact_enumeration"
+        lower_tail_count = 0
+        for assignment in range(permutation_count):
+            permuted_sum = sum(
+                value if assignment & (1 << index) else -value
+                for index, value in enumerate(adjusted)
+            )
+            if permuted_sum <= observed_sum + tolerance:
+                lower_tail_count += 1
+    else:
+        # Enumerate the two halves independently and count all exact Cartesian
+        # sign assignments with a binary search. At 30 pairs this retains the
+        # full 2^30 null distribution while materializing only 2^15 sums per
+        # half.
+        enumeration_strategy = "meet_in_the_middle_exact_count"
+
+        def signed_sums(values: list[float]) -> list[float]:
+            sums = [0.0]
+            for value in values:
+                sums = [partial - value for partial in sums] + [
+                    partial + value for partial in sums
+                ]
+            return sums
+
+        midpoint = len(adjusted) // 2
+        left_sums = signed_sums(adjusted[:midpoint])
+        right_sums = sorted(signed_sums(adjusted[midpoint:]))
+        threshold = observed_sum + tolerance
+        lower_tail_count = sum(
+            bisect.bisect_right(right_sums, threshold - left)
+            for left in left_sums
         )
-        if permuted_sum <= observed_sum + tolerance:
-            lower_tail_count += 1
     p_value = lower_tail_count / permutation_count
     return {
         "method": NON_INFERIORITY_METHOD,
@@ -489,6 +666,7 @@ def exact_paired_sign_flip_non_inferiority(
         "observed_adjusted_mean_ms": observed_sum / len(adjusted),
         "permutation_count": permutation_count,
         "lower_tail_count": lower_tail_count,
+        "enumeration_strategy": enumeration_strategy,
         "p_value": p_value,
         "pass": p_value <= NON_INFERIORITY_ALPHA,
     }
@@ -620,6 +798,28 @@ def _load_report_row(path: Path, label: str) -> dict[str, Any]:
     report = load_json(path, f"{label} report")
     if not isinstance(report, dict) or report.get("crashes") != []:
         raise AnalysisError(f"{label}: report is malformed or contains crashes")
+    methodology = report.get("methodology")
+    if not isinstance(methodology, dict):
+        raise AnalysisError(f"{label}: report methodology is missing")
+    if methodology.get("native_parity_pairing") is not True:
+        raise AnalysisError(
+            f"{label}: report does not prove same-backend native-parity pairing"
+        )
+    if (
+        methodology.get("native_parity_repetitions_per_arm")
+        != EXPECTED_REPETITIONS_PER_ARM
+    ):
+        raise AnalysisError(
+            f"{label}: methodology does not declare two raw executions per arm/pair"
+        )
+    if methodology.get("iterations") != EXPECTED_ITERATIONS:
+        raise AnalysisError(
+            f"{label}: methodology does not declare {EXPECTED_ITERATIONS} measured pairs"
+        )
+    if methodology.get("warmup") != EXPECTED_WARMUPS:
+        raise AnalysisError(
+            f"{label}: methodology does not declare {EXPECTED_WARMUPS} warmups"
+        )
     workloads = report.get("workloads")
     if not isinstance(workloads, list) or len(workloads) != 1:
         raise AnalysisError(f"{label}: report must contain exactly one workload")
@@ -716,7 +916,9 @@ def analyze_artifact(root: Path, *, require_planner_stages: bool = False) -> dic
             "selected_speedup_floor_preserved": SELECTED_SPEEDUP_FLOOR,
             "non_inferiority_method": NON_INFERIORITY_METHOD,
             "non_inferiority_alpha": NON_INFERIORITY_ALPHA,
-            "measured_arm_order": "exactly 5 accel-first and 5 disabled-first pairs",
+            "measured_arm_order": "exactly 15 ABBA and 15 BAAB crossover blocks",
+            "backend_pairing": "same persistent PostgreSQL backend for both arms",
+            "raw_executions_per_arm_pair": EXPECTED_REPETITIONS_PER_ARM,
             "parity_requires_comparable_no_dispatch_audit": True,
             "planner_stage_evidence_required": require_planner_stages,
         },

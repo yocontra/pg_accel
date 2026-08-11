@@ -121,6 +121,24 @@ pgaccel_grouped_agg_desc hash_desc(const uint64_t* keys, const uint8_t* nulls, s
   return desc;
 }
 
+uint64_t make_h3_cell(int base_cell, int resolution, const int* digits) {
+  uint64_t cell = UINT64_C(1) << 59;
+  cell |= static_cast<uint64_t>(resolution & 0xf) << 52;
+  cell |= static_cast<uint64_t>(base_cell & 0x7f) << 45;
+  for (int r = 1; r <= 15; ++r) {
+    const int shift = (15 - r) * 3;
+    cell |= static_cast<uint64_t>(r <= resolution ? digits[r - 1] & 7 : 7) << shift;
+  }
+  return cell;
+}
+
+uint64_t h3_parent_for_test(uint64_t cell, int resolution) {
+  cell = (cell & ~(UINT64_C(0xf) << 52)) | (static_cast<uint64_t>(resolution) << 52);
+  for (int r = resolution + 1; r <= 15; ++r)
+    cell |= UINT64_C(7) << ((15 - r) * 3);
+  return cell;
+}
+
 pgaccel_grouped_agg_workspace_req query_workspace(const pgaccel_grouped_agg_desc& desc,
                                                   pgaccel_status* status = nullptr) {
   pgaccel_grouped_agg_workspace_req req = {};
@@ -422,6 +440,74 @@ void test_million_row_hot_groups() {
   check_success(output, oracle(host_keys, &host_nulls), rows);
 }
 
+void test_fused_h3_parent_exactness_and_validation() {
+  std::printf("--- fused H3 parent hash exactness/validation ---\n");
+  const int a[15] = {2, 3, 4, 5, 6};
+  const int b[15] = {2, 3, 1, 1, 1};
+  const int c[15] = {2, 4, 1, 2, 3};
+  const int d[15] = {5, 1, 2, 3, 4};
+  std::vector<uint64_t> host_cells = {
+      make_h3_cell(10, 5, a), make_h3_cell(10, 5, b), make_h3_cell(10, 5, c),
+      make_h3_cell(10, 5, d), make_h3_cell(10, 5, a), UINT64_MAX,
+  };
+  std::vector<uint8_t> host_nulls = {0, 0, 0, 0, 0, 1};
+  std::vector<uint64_t> expected_keys(host_cells.size());
+  for (size_t row = 0; row < host_cells.size(); ++row)
+    expected_keys[row] = host_nulls[row] == 0 ? h3_parent_for_test(host_cells[row], 2) : 0;
+
+  SharedArray<uint64_t> cells(host_cells);
+  SharedArray<uint8_t> nulls(host_nulls);
+  pgaccel_grouped_agg_desc desc = hash_desc(cells.data(), nulls.data(), cells.size(), 8);
+  desc.keys[0].flags = PGACCEL_GROUPED_AGG_KEY_FLAG_H3_PARENT;
+  desc.keys[0]._pad0 = 2;
+  pgaccel_status status = PGACCEL_ERROR;
+  const pgaccel_grouped_agg_workspace_req req = query_workspace(desc, &status);
+  CHECK_STATUS(status, PGACCEL_OK);
+  SharedWorkspace workspace(req.bytes, req.alignment);
+  HashOutput output(desc.group_capacity, true);
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  CHECK_STATUS(execute_with_workspace(desc, req, workspace, &output.out, &detail), PGACCEL_OK);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+  check_success(output, oracle(expected_keys, &host_nulls), host_cells.size());
+  CHECK(std::equal(host_cells.begin(), host_cells.end(), cells.data()));
+  CHECK(std::equal(host_nulls.begin(), host_nulls.end(), nulls.data()));
+
+  cells[0] = 0;
+  HashOutput malformed(desc.group_capacity, true);
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_with_workspace(desc, req, workspace, &malformed.out, &detail),
+               PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  CHECK(malformed.untouched());
+  cells[0] = host_cells[0];
+
+  const int coarse_digits[15] = {2};
+  cells[0] = make_h3_cell(10, 1, coarse_digits);
+  HashOutput coarse(desc.group_capacity, true);
+  detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_with_workspace(desc, req, workspace, &coarse.out, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  CHECK(coarse.untouched());
+  cells[0] = host_cells[0];
+
+  pgaccel_grouped_agg_desc invalid = desc;
+  invalid.keys[0].flags = UINT32_C(1) << 31;
+  query_workspace(invalid, &status);
+  CHECK_STATUS(status, PGACCEL_ERROR);
+  invalid = desc;
+  invalid.keys[0]._pad0 = 16;
+  query_workspace(invalid, &status);
+  CHECK_STATUS(status, PGACCEL_ERROR);
+  invalid = desc;
+  invalid.keys[0].flags = 0;
+  query_workspace(invalid, &status);
+  CHECK_STATUS(status, PGACCEL_ERROR);
+  invalid = desc;
+  invalid.keys[0].values.type = PGACCEL_VAL_INT32;
+  query_workspace(invalid, &status);
+  CHECK_STATUS(status, PGACCEL_ERROR);
+}
+
 void test_hard_failure_and_unsupported_shapes() {
   std::printf("--- hash hard failure and unsupported shapes ---\n");
   std::vector<uint64_t> host_keys = {1, 2, 1, 3};
@@ -474,6 +560,7 @@ int main() {
     test_empty_all_null_and_capacity_boundaries();
     test_fixed_seed_differential();
     test_million_row_hot_groups();
+    test_fused_h3_parent_exactness_and_validation();
     test_hard_failure_and_unsupported_shapes();
     CHECK_STATUS(pgaccel_shutdown(), PGACCEL_OK);
   } catch (const std::exception& error) {

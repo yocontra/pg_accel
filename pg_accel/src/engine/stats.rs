@@ -8,10 +8,13 @@
 //! borrow of the thread-local.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use pgrx::prelude::*;
+
+use crate::engine::residency::ArtifactEnsureOutcome;
+use crate::gpu::GroupedAggKernelMode;
 
 /// Cumulative counters for a single backend's pg_accel activity.
 #[derive(Debug, Default, Clone)]
@@ -39,10 +42,50 @@ pub struct AccelStats {
     // always-zero counter.
 }
 
+#[derive(Debug, Default)]
+struct PlannerRejectionStats {
+    last_reason: Option<&'static str>,
+    counts: Vec<(&'static str, u64)>,
+    hot_index: Option<usize>,
+}
+
+impl PlannerRejectionStats {
+    fn increment(&mut self, reason: &'static str) {
+        self.last_reason = Some(reason);
+        if let Some(index) = self.hot_index
+            && self
+                .counts
+                .get(index)
+                .is_some_and(|(candidate, _)| *candidate == reason)
+        {
+            self.counts[index].1 = self.counts[index].1.saturating_add(1);
+            return;
+        }
+        if let Some(index) = self
+            .counts
+            .iter()
+            .position(|(candidate, _)| *candidate == reason)
+        {
+            self.counts[index].1 = self.counts[index].1.saturating_add(1);
+            self.hot_index = Some(index);
+            return;
+        }
+        self.counts.push((reason, 1));
+        self.hot_index = Some(self.counts.len() - 1);
+    }
+
+    fn count(&self, reason: &str) -> u64 {
+        self.counts
+            .iter()
+            .find_map(|(candidate, count)| (*candidate == reason).then_some(*count))
+            .unwrap_or(0)
+    }
+}
+
 thread_local! {
     static STATS: RefCell<AccelStats> = RefCell::new(AccelStats::default());
-    static LAST_PLANNER_REJECTION_REASON: RefCell<Option<&'static str>> = const { RefCell::new(None) };
-    static PLANNER_REJECTION_REASON_COUNTS: RefCell<BTreeMap<&'static str, u64>> = const { RefCell::new(BTreeMap::new()) };
+    static PLANNER_REJECTIONS: RefCell<PlannerRejectionStats> = RefCell::new(PlannerRejectionStats::default());
+    static LAST_ARTIFACT_POLICY: RefCell<Option<&'static str>> = const { RefCell::new(None) };
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +185,124 @@ static PLANNER_STAGE_TOTAL_US: [AtomicU64; PlannerHookStage::COUNT] =
 static PLANNER_STAGE_FAST_DECLINES: [AtomicU64; PlannerHookStage::COUNT] =
     [const { AtomicU64::new(0) }; PlannerHookStage::COUNT];
 
+/// Opt-in timings for the expensive parts of an aggregate decline decision.
+///
+/// These counters remain completely idle unless `pg_accel.planner_profiling`
+/// is enabled. Ordinary planning therefore pays neither clock reads nor atomic
+/// updates for this finer attribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum PlannerSubstage {
+    QueryFingerprint = 0,
+    DeclineCacheLookup = 1,
+    DependencyRevalidation = 2,
+    NativeCostReconstruction = 3,
+    RejectionRecording = 4,
+}
+
+impl PlannerSubstage {
+    const COUNT: usize = 5;
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::QueryFingerprint => "query_fingerprint",
+            Self::DeclineCacheLookup => "decline_cache_lookup",
+            Self::DependencyRevalidation => "dependency_revalidation",
+            Self::NativeCostReconstruction => "native_cost_reconstruction",
+            Self::RejectionRecording => "rejection_recording",
+        }
+    }
+
+    const ALL: [Self; Self::COUNT] = [
+        Self::QueryFingerprint,
+        Self::DeclineCacheLookup,
+        Self::DependencyRevalidation,
+        Self::NativeCostReconstruction,
+        Self::RejectionRecording,
+    ];
+}
+
+static PLANNER_SUBSTAGE_CALLS: [AtomicU64; PlannerSubstage::COUNT] =
+    [const { AtomicU64::new(0) }; PlannerSubstage::COUNT];
+static PLANNER_SUBSTAGE_TOTAL_US: [AtomicU64; PlannerSubstage::COUNT] =
+    [const { AtomicU64::new(0) }; PlannerSubstage::COUNT];
+
+/// Opt-in descriptor executor stage timings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum DescriptorExecStage {
+    PlanBuild = 0,
+    ArtifactEnsure = 1,
+    DerivedInputBinding = 2,
+    WorkspaceAllocation = 3,
+    OutputAllocation = 4,
+    KernelExecution = 5,
+    TupleMaterialization = 6,
+}
+
+impl DescriptorExecStage {
+    const COUNT: usize = 7;
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PlanBuild => "plan_build",
+            Self::ArtifactEnsure => "artifact_ensure",
+            Self::DerivedInputBinding => "derived_input_binding",
+            Self::WorkspaceAllocation => "workspace_allocation",
+            Self::OutputAllocation => "output_allocation",
+            Self::KernelExecution => "kernel_execution",
+            Self::TupleMaterialization => "tuple_materialization",
+        }
+    }
+
+    const ALL: [Self; Self::COUNT] = [
+        Self::PlanBuild,
+        Self::ArtifactEnsure,
+        Self::DerivedInputBinding,
+        Self::WorkspaceAllocation,
+        Self::OutputAllocation,
+        Self::KernelExecution,
+        Self::TupleMaterialization,
+    ];
+}
+
+static DESCRIPTOR_STAGE_CALLS: [AtomicU64; DescriptorExecStage::COUNT] =
+    [const { AtomicU64::new(0) }; DescriptorExecStage::COUNT];
+static DESCRIPTOR_STAGE_TOTAL_US: [AtomicU64; DescriptorExecStage::COUNT] =
+    [const { AtomicU64::new(0) }; DescriptorExecStage::COUNT];
+
+/// Backend-local descriptor/raster artifact lifecycle totals. The benchmark
+/// snapshots these around one query, so normal execution only pays relaxed
+/// integer increments and never allocates lifecycle evidence on the hot path.
+static ARTIFACT_HITS: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_BUILDS: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_REBUILDS: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_BYTES_OBSERVED: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_CONSTRUCTION_BYTES: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_CONSTRUCTION_US: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_PREPARATION_US: AtomicU64 = AtomicU64::new(0);
+static ARTIFACT_RAW_LOAD_US: AtomicU64 = AtomicU64::new(0);
+
+static GROUPED_KERNEL_MODE_CALLS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+const fn grouped_kernel_mode_index(mode: GroupedAggKernelMode) -> usize {
+    match mode {
+        GroupedAggKernelMode::ParallelHash => 0,
+        GroupedAggKernelMode::ParallelDenseCount => 1,
+        GroupedAggKernelMode::ParallelDenseInteger => 2,
+        GroupedAggKernelMode::SerialGeneric => 3,
+    }
+}
+
+const GROUPED_KERNEL_MODES: [GroupedAggKernelMode; 4] = [
+    GroupedAggKernelMode::ParallelHash,
+    GroupedAggKernelMode::ParallelDenseCount,
+    GroupedAggKernelMode::ParallelDenseInteger,
+    GroupedAggKernelMode::SerialGeneric,
+];
+
 // ---------------------------------------------------------------------------
 // Helpers to increment counters
 // ---------------------------------------------------------------------------
@@ -177,6 +338,28 @@ pub fn record_gpu_batch(rows: u64, uncertain: u64) {
         st.gpu_rows_processed += rows;
         st.gpu_uncertain_count += uncertain;
     });
+}
+
+/// Record one successfully completed descriptor dispatch using the exact
+/// native data-kernel classification checked immediately before submission.
+/// `batches` includes lifecycle-only calls for the existing execution metric;
+/// `physical_mode_calls` counts only data-bearing one-shot/accumulate calls.
+pub fn record_grouped_dispatch(
+    mode: GroupedAggKernelMode,
+    batches: u64,
+    physical_mode_calls: u64,
+    rows: u64,
+    dispatch_us: u64,
+) {
+    STATS.with(|s| {
+        let mut stats = s.borrow_mut();
+        stats.batches_executed = stats.batches_executed.saturating_add(batches);
+        stats.rows_dispatched = stats.rows_dispatched.saturating_add(rows);
+        stats.total_dispatch_us = stats.total_dispatch_us.saturating_add(dispatch_us);
+        stats.gpu_rows_processed = stats.gpu_rows_processed.saturating_add(rows);
+    });
+    GROUPED_KERNEL_MODE_CALLS[grouped_kernel_mode_index(mode)]
+        .fetch_add(physical_mode_calls, Ordering::Relaxed);
 }
 
 /// Record that the thread budget was exhausted and work had to be serialised.
@@ -217,41 +400,23 @@ pub fn record_window_gpu_failure() {
 
 /// Increment the count of planner paths considered for GPU injection.
 ///
-/// Emits a `stats.planner_considered` tracing event with the reason and
-/// estimated row count.
 #[inline]
-pub fn increment_planner_considered(reason: &'static str, n_rows_estimate: u64) {
+pub fn increment_planner_considered(_reason: &'static str, _n_rows_estimate: u64) {
     PLANNER_CONSIDERED.fetch_add(1, Ordering::Relaxed);
-    tracing::trace!(
-        target: "pg_accel::stats",
-        reason,
-        n_rows_estimate,
-        "stats.planner_considered"
-    );
 }
 
 /// Increment the count of planner paths that were declined.
 ///
-/// Emits a `stats.planner_rejected` tracing event. The `reason` string
-/// should identify the gate that rejected (e.g. `"rows_below_min_batch"`,
-/// `"spatial_index_cheaper"`, `"command_type_skip"`) so reviewers reading
-/// `pg_accel_traces.jsonl` can aggregate by reason code.
+/// The `reason` string should identify the gate that rejected (e.g.
+/// `"rows_below_min_batch"`, `"spatial_index_cheaper"`,
+/// `"command_type_skip"`). Per-reason counters retain this evidence without
+/// invoking the tracing stack on the planner hot path.
 #[inline]
-pub fn increment_planner_rejected(reason: &'static str, n_rows_estimate: u64) {
+pub fn increment_planner_rejected(reason: &'static str, _n_rows_estimate: u64) {
     PLANNER_REJECTED.fetch_add(1, Ordering::Relaxed);
-    LAST_PLANNER_REJECTION_REASON.with(|slot| {
-        *slot.borrow_mut() = Some(reason);
+    PLANNER_REJECTIONS.with(|stats| {
+        stats.borrow_mut().increment(reason);
     });
-    PLANNER_REJECTION_REASON_COUNTS.with(|counts| {
-        let mut counts = counts.borrow_mut();
-        *counts.entry(reason).or_insert(0) += 1;
-    });
-    tracing::info!(
-        target: "pg_accel::stats",
-        reason,
-        n_rows_estimate,
-        "stats.planner_rejected"
-    );
 }
 
 /// Snapshot of the planner-considered counter.
@@ -272,14 +437,14 @@ pub fn read_planner_rejected() -> u64 {
 #[inline]
 #[must_use]
 pub fn read_last_planner_rejection_reason() -> Option<&'static str> {
-    LAST_PLANNER_REJECTION_REASON.with(|slot| *slot.borrow())
+    PLANNER_REJECTIONS.with(|stats| stats.borrow().last_reason)
 }
 
 /// Count of planner rejections with a specific reason observed by this backend.
 #[inline]
 #[must_use]
 pub fn read_planner_rejection_reason_count(reason: &str) -> u64 {
-    PLANNER_REJECTION_REASON_COUNTS.with(|counts| counts.borrow().get(reason).copied().unwrap_or(0))
+    PLANNER_REJECTIONS.with(|stats| stats.borrow().count(reason))
 }
 
 /// Increment the degenerate-guard trigger counter.
@@ -339,18 +504,9 @@ pub fn read_gpu_cache_misses() -> u64 {
 /// the elapsed `std::time::Instant` duration, converted to microseconds
 /// by the caller.
 ///
-/// Emits a `stats.planner_hook_elapsed` tracing event for debug visibility;
-/// keep this at `trace` level so it does not flood the JSONL trace file
-/// during normal operation (filter is `notice` by default per CLAUDE.md).
 #[inline]
-pub fn record_planner_hook_elapsed(hook: &'static str, elapsed_us: u64) {
+pub fn record_planner_hook_elapsed(_hook: &'static str, elapsed_us: u64) {
     PLANNER_HOOK_TOTAL_US.fetch_add(elapsed_us, Ordering::Relaxed);
-    tracing::trace!(
-        target: "pg_accel::stats",
-        hook,
-        elapsed_us,
-        "stats.planner_hook_elapsed"
-    );
 }
 
 /// Record entry into one concrete planner stage.
@@ -372,13 +528,8 @@ pub fn record_planner_stage_elapsed(stage: PlannerHookStage, elapsed_us: u64) {
 /// reading the trace file. The `reason` string identifies which fast
 /// gate fired; keep it static so aggregation by reason works.
 #[inline]
-pub fn record_planner_fast_decline(reason: &'static str) {
+pub fn record_planner_fast_decline(_reason: &'static str) {
     PLANNER_FAST_DECLINE.fetch_add(1, Ordering::Relaxed);
-    tracing::trace!(
-        target: "pg_accel::stats",
-        reason,
-        "stats.planner_fast_decline"
-    );
 }
 
 /// Record an immutable fast decline and attribute it to its planner stage.
@@ -400,12 +551,139 @@ pub fn read_planner_stage(stage: PlannerHookStage) -> (u64, u64, u64) {
     )
 }
 
+/// Record one opt-in planner substage sample.
+#[inline]
+pub fn record_planner_substage(stage: PlannerSubstage, elapsed_us: u64) {
+    let index = stage as usize;
+    PLANNER_SUBSTAGE_CALLS[index].fetch_add(1, Ordering::Relaxed);
+    PLANNER_SUBSTAGE_TOTAL_US[index].fetch_add(elapsed_us, Ordering::Relaxed);
+}
+
+/// Run one descriptor-executor stage with optional elapsed-time attribution.
+/// When profiling is disabled this performs no clock read or atomic update.
+#[inline]
+pub fn profile_descriptor_stage<T>(stage: DescriptorExecStage, operation: impl FnOnce() -> T) -> T {
+    if !crate::engine::gucs::execution_profiling() {
+        return operation();
+    }
+    let started = Instant::now();
+    let result = operation();
+    let elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let index = stage as usize;
+    DESCRIPTOR_STAGE_CALLS[index].fetch_add(1, Ordering::Relaxed);
+    DESCRIPTOR_STAGE_TOTAL_US[index].fetch_add(elapsed_us, Ordering::Relaxed);
+    result
+}
+
+#[inline]
+#[must_use]
+pub fn read_descriptor_stage(stage: DescriptorExecStage) -> (u64, u64) {
+    let index = stage as usize;
+    (
+        DESCRIPTOR_STAGE_CALLS[index].load(Ordering::Relaxed),
+        DESCRIPTOR_STAGE_TOTAL_US[index].load(Ordering::Relaxed),
+    )
+}
+
+/// Record one dependency-stamped artifact ensure completed by an executor.
+#[inline]
+pub fn record_artifact_lifecycle(
+    outcome: ArtifactEnsureOutcome,
+    artifact_bytes: u64,
+    preparation_us: u64,
+    raw_load_us: u64,
+) {
+    ARTIFACT_BYTES_OBSERVED.fetch_add(artifact_bytes, Ordering::Relaxed);
+    ARTIFACT_PREPARATION_US.fetch_add(preparation_us, Ordering::Relaxed);
+    ARTIFACT_RAW_LOAD_US.fetch_add(raw_load_us, Ordering::Relaxed);
+    match outcome {
+        ArtifactEnsureOutcome::Hit => {
+            ARTIFACT_HITS.fetch_add(1, Ordering::Relaxed);
+        }
+        ArtifactEnsureOutcome::Built => {
+            ARTIFACT_BUILDS.fetch_add(1, Ordering::Relaxed);
+            ARTIFACT_CONSTRUCTION_BYTES.fetch_add(artifact_bytes, Ordering::Relaxed);
+            ARTIFACT_CONSTRUCTION_US.fetch_add(preparation_us, Ordering::Relaxed);
+        }
+        ArtifactEnsureOutcome::Rebuilt => {
+            ARTIFACT_REBUILDS.fetch_add(1, Ordering::Relaxed);
+            ARTIFACT_CONSTRUCTION_BYTES.fetch_add(artifact_bytes, Ordering::Relaxed);
+            ARTIFACT_CONSTRUCTION_US.fetch_add(preparation_us, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Record the ownership policy selected by the most recent descriptor
+/// artifact ensure. The label is static and backend-local, so this adds no
+/// allocation to selected execution.
+pub fn record_artifact_policy(policy: &'static str) {
+    LAST_ARTIFACT_POLICY.with(|last| *last.borrow_mut() = Some(policy));
+}
+
+#[must_use]
+pub fn read_last_artifact_policy() -> Option<&'static str> {
+    LAST_ARTIFACT_POLICY.with(|last| *last.borrow())
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArtifactLifecycleStats {
+    pub hits: u64,
+    pub builds: u64,
+    pub rebuilds: u64,
+    pub artifact_bytes_observed: u64,
+    pub construction_bytes: u64,
+    pub construction_us: u64,
+    pub preparation_us: u64,
+    pub raw_load_us: u64,
+}
+
+#[must_use]
+pub fn read_artifact_lifecycle() -> ArtifactLifecycleStats {
+    ArtifactLifecycleStats {
+        hits: ARTIFACT_HITS.load(Ordering::Relaxed),
+        builds: ARTIFACT_BUILDS.load(Ordering::Relaxed),
+        rebuilds: ARTIFACT_REBUILDS.load(Ordering::Relaxed),
+        artifact_bytes_observed: ARTIFACT_BYTES_OBSERVED.load(Ordering::Relaxed),
+        construction_bytes: ARTIFACT_CONSTRUCTION_BYTES.load(Ordering::Relaxed),
+        construction_us: ARTIFACT_CONSTRUCTION_US.load(Ordering::Relaxed),
+        preparation_us: ARTIFACT_PREPARATION_US.load(Ordering::Relaxed),
+        raw_load_us: ARTIFACT_RAW_LOAD_US.load(Ordering::Relaxed),
+    }
+}
+
+/// Snapshot one planner substage's call and elapsed counters.
+#[inline]
+#[must_use]
+pub fn read_planner_substage(stage: PlannerSubstage) -> (u64, u64) {
+    let index = stage as usize;
+    (
+        PLANNER_SUBSTAGE_CALLS[index].load(Ordering::Relaxed),
+        PLANNER_SUBSTAGE_TOTAL_US[index].load(Ordering::Relaxed),
+    )
+}
+
+fn reset_planner_substage_stats() {
+    for stage in PlannerSubstage::ALL {
+        let index = stage as usize;
+        PLANNER_SUBSTAGE_CALLS[index].store(0, Ordering::Relaxed);
+        PLANNER_SUBSTAGE_TOTAL_US[index].store(0, Ordering::Relaxed);
+    }
+}
+
 fn reset_planner_stage_stats() {
     for stage in PlannerHookStage::ALL {
         let index = stage as usize;
         PLANNER_STAGE_CALLS[index].store(0, Ordering::Relaxed);
         PLANNER_STAGE_TOTAL_US[index].store(0, Ordering::Relaxed);
         PLANNER_STAGE_FAST_DECLINES[index].store(0, Ordering::Relaxed);
+    }
+}
+
+fn reset_descriptor_stage_stats() {
+    for stage in DescriptorExecStage::ALL {
+        let index = stage as usize;
+        DESCRIPTOR_STAGE_CALLS[index].store(0, Ordering::Relaxed);
+        DESCRIPTOR_STAGE_TOTAL_US[index].store(0, Ordering::Relaxed);
     }
 }
 
@@ -594,6 +872,166 @@ fn pg_accel_planner_stage_stats() -> TableIterator<
     }))
 }
 
+/// Returns opt-in timings for the aggregate-decline decision substages.
+#[pg_extern]
+fn pg_accel_planner_substage_stats() -> TableIterator<
+    'static,
+    (
+        name!(substage, &'static str),
+        name!(calls, i64),
+        name!(elapsed_us, i64),
+    ),
+> {
+    TableIterator::new(PlannerSubstage::ALL.into_iter().map(|stage| {
+        let (calls, elapsed_us) = read_planner_substage(stage);
+        (stage.name(), calls as i64, elapsed_us as i64)
+    }))
+}
+
+/// Returns opt-in timings for descriptor executor stages.
+#[pg_extern]
+fn pg_accel_descriptor_stage_stats() -> TableIterator<
+    'static,
+    (
+        name!(stage, &'static str),
+        name!(calls, i64),
+        name!(elapsed_us, i64),
+    ),
+> {
+    TableIterator::new(DescriptorExecStage::ALL.into_iter().map(|stage| {
+        let (calls, elapsed_us) = read_descriptor_stage(stage);
+        (stage.name(), calls as i64, elapsed_us as i64)
+    }))
+}
+
+/// Returns cumulative artifact lifecycle counters for this backend.
+#[pg_extern]
+#[allow(clippy::type_complexity)]
+fn pg_accel_artifact_lifecycle_stats() -> TableIterator<
+    'static,
+    (
+        name!(hits, i64),
+        name!(builds, i64),
+        name!(rebuilds, i64),
+        name!(artifact_bytes_observed, i64),
+        name!(construction_bytes, i64),
+        name!(construction_us, i64),
+        name!(preparation_us, i64),
+        name!(raw_load_us, i64),
+    ),
+> {
+    let snapshot = read_artifact_lifecycle();
+    TableIterator::new(std::iter::once((
+        snapshot.hits as i64,
+        snapshot.builds as i64,
+        snapshot.rebuilds as i64,
+        snapshot.artifact_bytes_observed as i64,
+        snapshot.construction_bytes as i64,
+        snapshot.construction_us as i64,
+        snapshot.preparation_us as i64,
+        snapshot.raw_load_us as i64,
+    )))
+}
+
+/// Returns successful data-bearing native grouped-aggregate calls by physical
+/// branch. Zero-row RESET/FINALIZE control calls are intentionally excluded.
+#[pg_extern]
+fn pg_accel_grouped_kernel_mode_stats()
+-> TableIterator<'static, (name!(mode, &'static str), name!(calls, i64))> {
+    TableIterator::new(GROUPED_KERNEL_MODES.into_iter().map(|mode| {
+        let calls =
+            GROUPED_KERNEL_MODE_CALLS[grouped_kernel_mode_index(mode)].load(Ordering::Relaxed);
+        (mode.label(), calls as i64)
+    }))
+}
+
+/// Returns exact-shape grouped-workspace allocation-pool counters and current
+/// retained capacity for this backend.
+#[pg_extern]
+#[allow(clippy::type_complexity)]
+fn pg_accel_grouped_workspace_pool_stats() -> TableIterator<
+    'static,
+    (
+        name!(hits, i64),
+        name!(misses, i64),
+        name!(fresh_allocations, i64),
+        name!(fresh_allocation_bytes, i64),
+        name!(returns, i64),
+        name!(poisoned_frees, i64),
+        name!(evictions, i64),
+        name!(retained_workspaces, i64),
+        name!(retained_bytes, i64),
+    ),
+> {
+    let snapshot = crate::gpu::grouped_workspace_pool_snapshot();
+    TableIterator::new(std::iter::once((
+        snapshot.hits as i64,
+        snapshot.misses as i64,
+        snapshot.fresh_allocations as i64,
+        snapshot.fresh_allocation_bytes as i64,
+        snapshot.returns as i64,
+        snapshot.poisoned_frees as i64,
+        snapshot.evictions as i64,
+        snapshot.retained_workspaces as i64,
+        snapshot.retained_bytes as i64,
+    )))
+}
+
+/// Returns compatible-shape grouped-output allocation-pool counters and
+/// current retained host capacity for this backend.
+#[pg_extern]
+#[allow(clippy::type_complexity)]
+fn pg_accel_grouped_output_pool_stats() -> TableIterator<
+    'static,
+    (
+        name!(hits, i64),
+        name!(misses, i64),
+        name!(fresh_allocations, i64),
+        name!(fresh_allocation_bytes, i64),
+        name!(returns, i64),
+        name!(evictions, i64),
+        name!(retained_outputs, i64),
+        name!(retained_bytes, i64),
+    ),
+> {
+    let snapshot = crate::gpu::grouped_output_pool_snapshot();
+    TableIterator::new(std::iter::once((
+        snapshot.hits as i64,
+        snapshot.misses as i64,
+        snapshot.fresh_allocations as i64,
+        snapshot.fresh_allocation_bytes as i64,
+        snapshot.returns as i64,
+        snapshot.evictions as i64,
+        snapshot.retained_outputs as i64,
+        snapshot.retained_bytes as i64,
+    )))
+}
+
+/// Returns native grouped transition, synchronization, and output-publication
+/// counters for this backend thread.
+#[pg_extern]
+fn pg_accel_grouped_runtime_stats() -> TableIterator<
+    'static,
+    (
+        name!(transition_launches, i64),
+        name!(queue_waits, i64),
+        name!(queue_wait_ns, i64),
+        name!(output_bytes, i64),
+        name!(shared_copy_calls, i64),
+        name!(device_copy_calls, i64),
+    ),
+> {
+    let snapshot = crate::gpu::grouped_agg_native_telemetry();
+    TableIterator::new(std::iter::once((
+        snapshot.transition_launches as i64,
+        snapshot.queue_waits as i64,
+        snapshot.queue_wait_ns as i64,
+        snapshot.output_bytes as i64,
+        snapshot.shared_copy_calls as i64,
+        snapshot.device_copy_calls as i64,
+    )))
+}
+
 /// Returns the monotonic count of GPU kernel executions since this backend
 /// started. Cheap read (single atomic load via the C++ thread-local
 /// counter). The benchmark harness calls this before and after each timed
@@ -610,11 +1048,8 @@ fn pg_accel_reset_stats() {
     STATS.with(|s| {
         *s.borrow_mut() = AccelStats::default();
     });
-    LAST_PLANNER_REJECTION_REASON.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
-    PLANNER_REJECTION_REASON_COUNTS.with(|counts| {
-        counts.borrow_mut().clear();
+    PLANNER_REJECTIONS.with(|stats| {
+        *stats.borrow_mut() = PlannerRejectionStats::default();
     });
     // Reset the process-wide atomic counters too. Each PG backend is a
     // separate process, so these atomics are effectively per-backend and the
@@ -630,6 +1065,22 @@ fn pg_accel_reset_stats() {
     PLANNER_HOOK_TOTAL_US.store(0, Ordering::Relaxed);
     PLANNER_FAST_DECLINE.store(0, Ordering::Relaxed);
     reset_planner_stage_stats();
+    reset_planner_substage_stats();
+    reset_descriptor_stage_stats();
+    ARTIFACT_HITS.store(0, Ordering::Relaxed);
+    ARTIFACT_BUILDS.store(0, Ordering::Relaxed);
+    ARTIFACT_REBUILDS.store(0, Ordering::Relaxed);
+    ARTIFACT_BYTES_OBSERVED.store(0, Ordering::Relaxed);
+    ARTIFACT_CONSTRUCTION_BYTES.store(0, Ordering::Relaxed);
+    ARTIFACT_CONSTRUCTION_US.store(0, Ordering::Relaxed);
+    ARTIFACT_PREPARATION_US.store(0, Ordering::Relaxed);
+    ARTIFACT_RAW_LOAD_US.store(0, Ordering::Relaxed);
+    LAST_ARTIFACT_POLICY.with(|last| *last.borrow_mut() = None);
+    crate::gpu::reset_grouped_allocation_pool_metrics();
+    crate::gpu::reset_grouped_agg_native_telemetry();
+    for counter in &GROUPED_KERNEL_MODE_CALLS {
+        counter.store(0, Ordering::Relaxed);
+    }
     // `gpu_kernel_executions` is intentionally NOT reset here: it is a
     // monotonic counter owned by the C++ runtime (`crate::gpu::gpu_exec_count`)
     // that the harness reads by *delta* (before/after subtraction), not by
@@ -644,6 +1095,13 @@ fn pg_accel_reset_stats() {
 #[pg_extern]
 fn pg_accel_last_planner_rejection_reason() -> Option<String> {
     read_last_planner_rejection_reason().map(str::to_owned)
+}
+
+/// Returns the ownership policy used by the most recent descriptor artifact
+/// ensure in this backend. Resetting stats clears the value.
+#[pg_extern]
+fn pg_accel_last_artifact_policy() -> Option<String> {
+    read_last_artifact_policy().map(str::to_owned)
 }
 
 /// Returns the number of times this backend has observed a planner rejection
@@ -993,8 +1451,9 @@ mod tests {
     /// Reset thread-local stats before each test so ordering does not matter.
     fn reset() {
         STATS.with(|s| *s.borrow_mut() = AccelStats::default());
-        LAST_PLANNER_REJECTION_REASON.with(|slot| *slot.borrow_mut() = None);
-        PLANNER_REJECTION_REASON_COUNTS.with(|counts| counts.borrow_mut().clear());
+        PLANNER_REJECTIONS.with(|stats| {
+            *stats.borrow_mut() = PlannerRejectionStats::default();
+        });
     }
 
     fn snapshot() -> AccelStats {
@@ -1275,6 +1734,78 @@ mod tests {
         assert_eq!(PlannerHookStage::UpperGroupAgg.name(), "upper_group_agg");
     }
 
+    #[test]
+    fn planner_substage_counters_are_attributed_and_reset() {
+        let stage = PlannerSubstage::DependencyRevalidation;
+        reset_planner_substage_stats();
+        record_planner_substage(stage, 11);
+        record_planner_substage(stage, 7);
+        assert_eq!(read_planner_substage(stage), (2, 18));
+
+        pg_accel_reset_stats();
+        assert_eq!(read_planner_substage(stage), (0, 0));
+        assert_eq!(stage.name(), "dependency_revalidation");
+    }
+
+    #[test]
+    fn artifact_lifecycle_counters_distinguish_build_rebuild_and_hit() {
+        pg_accel_reset_stats();
+        assert_eq!(read_last_artifact_policy(), None);
+        record_artifact_lifecycle(ArtifactEnsureOutcome::Built, 100, 11, 3);
+        record_artifact_policy("cached_reusable");
+        record_artifact_lifecycle(ArtifactEnsureOutcome::Hit, 100, 2, 0);
+        record_artifact_lifecycle(ArtifactEnsureOutcome::Rebuilt, 120, 13, 4);
+
+        assert_eq!(
+            read_artifact_lifecycle(),
+            ArtifactLifecycleStats {
+                hits: 1,
+                builds: 1,
+                rebuilds: 1,
+                artifact_bytes_observed: 320,
+                construction_bytes: 220,
+                construction_us: 24,
+                preparation_us: 26,
+                raw_load_us: 7,
+            }
+        );
+        assert_eq!(read_last_artifact_policy(), Some("cached_reusable"));
+        pg_accel_reset_stats();
+        assert_eq!(read_artifact_lifecycle(), ArtifactLifecycleStats::default());
+        assert_eq!(read_last_artifact_policy(), None);
+    }
+
+    #[test]
+    fn grouped_physical_mode_counters_track_batches_and_reset() {
+        pg_accel_reset_stats();
+        record_grouped_dispatch(GroupedAggKernelMode::ParallelDenseInteger, 4, 3, 10_000, 77);
+        record_grouped_dispatch(GroupedAggKernelMode::ParallelHash, 1, 1, 500, 11);
+        assert_eq!(
+            GROUPED_KERNEL_MODE_CALLS
+                [grouped_kernel_mode_index(GroupedAggKernelMode::ParallelDenseInteger)]
+            .load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            GROUPED_KERNEL_MODE_CALLS
+                [grouped_kernel_mode_index(GroupedAggKernelMode::ParallelHash)]
+            .load(Ordering::Relaxed),
+            1
+        );
+        let stats = snapshot();
+        assert_eq!(stats.batches_executed, 5);
+        assert_eq!(stats.rows_dispatched, 10_500);
+        assert_eq!(stats.gpu_rows_processed, 10_500);
+        assert_eq!(stats.total_dispatch_us, 88);
+
+        pg_accel_reset_stats();
+        assert!(
+            GROUPED_KERNEL_MODE_CALLS
+                .iter()
+                .all(|counter| counter.load(Ordering::Relaxed) == 0)
+        );
+    }
+
     #[pg_test]
     fn planner_stage_stats_exposes_every_fixed_stage() {
         let rows = Spi::get_one::<i64>("SELECT count(*) FROM pg_accel_planner_stage_stats()")
@@ -1290,6 +1821,38 @@ mod tests {
         .expect("rel_pathlist stage lookup should succeed")
         .expect("rel_pathlist stage lookup should be non-NULL");
         assert_eq!(rel_rows, 1);
+    }
+
+    #[pg_test]
+    fn planner_substage_stats_exposes_every_fixed_substage() {
+        let rows = Spi::get_one::<i64>("SELECT count(*) FROM pg_accel_planner_substage_stats()")
+            .expect("planner substage stats query should succeed")
+            .expect("planner substage stats count should be non-NULL");
+        assert_eq!(rows, PlannerSubstage::COUNT as i64);
+
+        let fingerprint_rows = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_accel_planner_substage_stats() \
+             WHERE substage = 'query_fingerprint' AND calls >= 0 AND elapsed_us >= 0",
+        )
+        .expect("query-fingerprint substage lookup should succeed")
+        .expect("query-fingerprint substage lookup should be non-NULL");
+        assert_eq!(fingerprint_rows, 1);
+    }
+
+    #[pg_test]
+    fn descriptor_stage_stats_exposes_every_fixed_stage() {
+        let rows = Spi::get_one::<i64>("SELECT count(*) FROM pg_accel_descriptor_stage_stats()")
+            .expect("descriptor stage stats query should succeed")
+            .expect("descriptor stage stats count should be non-NULL");
+        assert_eq!(rows, DescriptorExecStage::COUNT as i64);
+
+        let allocation_rows = Spi::get_one::<i64>(
+            "SELECT count(*) FROM pg_accel_descriptor_stage_stats() \
+             WHERE stage = 'workspace_allocation' AND calls >= 0 AND elapsed_us >= 0",
+        )
+        .expect("workspace-allocation stage lookup should succeed")
+        .expect("workspace-allocation stage lookup should be non-NULL");
+        assert_eq!(allocation_rows, 1);
     }
 
     // -- pg_accel_device_limits SRF -----------------------------------------

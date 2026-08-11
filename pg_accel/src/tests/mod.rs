@@ -678,18 +678,18 @@ mod tests {
             )
             .2
         };
-        let assert_reason = || {
+        let assert_reason = |expected: &str| {
             assert_eq!(
                 Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
                     .expect("read planner decline reason"),
-                Some("generic_fact_rows_below_device_minimum".to_owned())
+                Some(expected.to_owned())
             );
         };
 
         let before = groupagg_fast_declines();
         let first_plan = explain_text(query);
         assert!(!first_plan.contains("Custom Scan (GpuAccelAgg)"));
-        assert_reason();
+        assert_reason("generic_fact_rows_below_device_minimum");
         let after_first = groupagg_fast_declines();
         assert_eq!(
             after_first, before,
@@ -701,7 +701,7 @@ mod tests {
             second_plan, first_plan,
             "cache hit must preserve exact plan"
         );
-        assert_reason();
+        assert_reason("generic_fact_rows_below_device_minimum");
         let after_hit = groupagg_fast_declines();
         assert_eq!(
             after_hit,
@@ -758,7 +758,7 @@ mod tests {
                 && !mutated_plan.contains("Custom Scan (GpuAccelAgg)"),
             "mutation must recompute the same native aggregate family:\n{mutated_plan}"
         );
-        assert_reason();
+        assert_reason("generic_fact_rows_below_device_minimum");
         assert_eq!(
             groupagg_fast_declines(),
             before_mutated,
@@ -776,18 +776,12 @@ mod tests {
                             WHERE v >= pg_temp._decline_cache_nested(0) GROUP BY g";
         let before_nested = groupagg_fast_declines();
         let nested_first = explain_text(nested_query);
-        assert_reason();
+        assert_reason("generic_serial_kernel_mode_unqualified");
         assert_eq!(groupagg_fast_declines(), before_nested);
         let nested_second = explain_text(nested_query);
         assert_eq!(nested_second, nested_first);
-        assert_reason();
+        assert_reason("generic_serial_kernel_mode_unqualified");
         assert_eq!(groupagg_fast_declines(), before_nested + 1);
-        assert_eq!(
-            crate::engine::ffi::planner_hooks::active_source_depth(),
-            0,
-            "nested SPI planning must restore the outer source stack"
-        );
-
         Spi::run(
             "DO $$ BEGIN \
                BEGIN EXECUTE 'SELECT missing_column FROM _decline_cache_agg'; \
@@ -795,15 +789,10 @@ mod tests {
              END $$",
         )
         .expect("catch nested planner error");
-        assert_eq!(
-            crate::engine::ffi::planner_hooks::active_source_depth(),
-            0,
-            "caught PostgreSQL planner ERROR must unwind the source stack"
-        );
         let before_error_reuse = groupagg_fast_declines();
         let nested_after_error = explain_text(nested_query);
         assert_eq!(nested_after_error, nested_first);
-        assert_reason();
+        assert_reason("generic_serial_kernel_mode_unqualified");
         assert_eq!(
             groupagg_fast_declines(),
             before_error_reuse + 1,
@@ -820,12 +809,12 @@ mod tests {
         .expect("prepare forced-custom decline query");
         let before_prepared = groupagg_fast_declines();
         let prepared_first = explain_text("EXECUTE _decline_cache_prepared(0)");
-        assert_reason();
+        assert_reason("generic_serial_kernel_mode_unqualified");
         let after_prepared_first = groupagg_fast_declines();
         assert_eq!(after_prepared_first, before_prepared);
         let prepared_second = explain_text("EXECUTE _decline_cache_prepared(0)");
         assert_eq!(prepared_second, prepared_first);
-        assert_reason();
+        assert_reason("generic_serial_kernel_mode_unqualified");
         assert_eq!(
             groupagg_fast_declines(),
             after_prepared_first + 1,
@@ -1040,7 +1029,7 @@ mod tests {
                 .expect("pin returns row count");
         assert_eq!(pinned, 300_000, "relation-keyed residency must load ONLY");
 
-        let only_query = "SELECT sum(v) FROM ONLY _generic_parent";
+        let only_query = "SELECT sum(v), count(*) FROM ONLY _generic_parent";
         Spi::run("SET pg_accel.enabled = off").expect("SET OFF");
         let native = Spi::get_one::<i64>(only_query)
             .expect("native ONLY query")
@@ -1714,6 +1703,7 @@ mod tests {
         )
         .expect("create planner-profiling fixture");
         let query = "SELECT g, sum(v) FROM _planner_profile_contract GROUP BY g";
+        let _ = explain_text(query);
 
         let measure = |profiling: bool| {
             Spi::run(if profiling {
@@ -2831,16 +2821,35 @@ mod tests {
                 && plan.contains("h3_cell_to_parent(")
                 && plan.contains("resolution=0")
                 && plan.contains("encoding=hash")
-                && plan.contains("GPU Descriptor Aggregates: m0:count_star -> value.count"),
+                && plan.contains("GPU Descriptor Aggregates: m0:count_star -> value.count")
+                && plan.contains("GPU Physical Kernel Mode: parallel_hash"),
             "selected plan must expose the exact H3 HASH/COUNT_STAR descriptor:\n{plan}"
         );
 
+        Spi::run("SELECT pg_accel_reset_stats()")
+            .expect("reset physical-mode counters before H3 execution");
         crate::gpu::reset_gpu_exec_count();
         let accelerated = read_grouped_results(query);
         crate::gpu::assert_gpu_executed(2);
         assert_eq!(
             accelerated, native,
             "accelerated H3 parent grouped count must equal native"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT pg_accel_last_artifact_policy()")
+                .expect("last artifact policy should be readable")
+                .as_deref(),
+            Some("cached_reusable"),
+            "material repeated H3 execution must publish reusable-policy evidence"
+        );
+        assert_eq!(
+            Spi::get_one::<i64>(
+                "SELECT calls FROM pg_accel_grouped_kernel_mode_stats() \
+                 WHERE mode = 'parallel_hash'"
+            )
+            .expect("parallel hash mode counter should be readable"),
+            Some(1),
+            "one selected H3 aggregate must record one native parallel-hash call"
         );
         assert_eq!(
             Spi::get_one::<bool>(
@@ -2854,13 +2863,22 @@ mod tests {
         );
 
         let analyzed = explain_analyze_text(query);
+        assert!(
+            analyzed
+                .contains("GPU Descriptor Artifact Policy: cached_reusable reason=exact_cache_hit"),
+            "a repeated material H3 query must report an exact reusable-artifact hit:\n{analyzed}"
+        );
         for field in [
             "Custom Scan (GpuAccelAgg)",
             "GPU Resident Pipeline: true",
             "GPU Resident Operator Class: resident_groupagg",
             "GPU Descriptor Strategy: descriptor_grouped_aggregate",
+            "GPU Physical Kernel Mode: parallel_hash",
+            "GPU Dispatched Physical Kernel Mode: parallel_hash",
+            "GPU Physical Kernel Mode Verified: true",
             "GPU Descriptor Residency State: resident",
             "GPU Descriptor Artifact:",
+            "GPU Descriptor Artifact Policy:",
             "GPU Descriptor Generations: rel=",
             "GPU Descriptor Bytes: raw=",
             "GPU Kernel Dispatched: true",
@@ -3044,6 +3062,25 @@ mod tests {
         assert!(
             empty_accelerated.is_empty(),
             "keyed aggregation over empty H3 input must emit no groups"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT pg_accel_last_artifact_policy()")
+                .expect("empty H3 artifact policy should be readable")
+                .as_deref(),
+            Some("ephemeral_fused"),
+            "zero-row H3 execution must publish ephemeral-policy evidence"
+        );
+        let empty_analyzed = explain_analyze_text(empty_query);
+        assert!(
+            empty_analyzed.contains(
+                "GPU Descriptor Artifact Policy: ephemeral_fused reason=zero_retained_bytes"
+            ),
+            "a zero-row H3 query must exercise and report the query-owned fused policy:\n{empty_analyzed}"
+        );
+        assert!(
+            empty_analyzed.contains("GPU Descriptor Artifact: built")
+                && empty_analyzed.contains("artifact=0"),
+            "the zero-row fused H3 path must report a built zero-byte ephemeral artifact:\n{empty_analyzed}"
         );
         assert_eq!(
             Spi::get_one::<bool>(

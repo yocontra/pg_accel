@@ -85,6 +85,14 @@ pub struct PlannerStageDelta {
     pub fast_declines: u64,
 }
 
+/// Planner work attributed to one opt-in aggregate-decline substage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannerSubstageDelta {
+    pub substage: String,
+    pub calls: u64,
+    pub elapsed_us: u64,
+}
+
 /// Off-clock planner-stage evidence for one measured accel/baseline pair.
 ///
 /// `pair_index` indexes [`WorkloadResult::iterations`]. The snapshot query is
@@ -100,6 +108,101 @@ pub struct PlannerStageCapture {
     /// contaminated the target interval and make the capture invalid.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observer_probe: Vec<PlannerStageDelta>,
+    /// Fine-grained aggregate-decline timing captured over the same target
+    /// interval. These counters are active only while planner profiling is on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substages: Vec<PlannerSubstageDelta>,
+    /// Immediate prepared-observer probe for the substage counters. Every
+    /// delta must be zero for valid attribution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substage_observer_probe: Vec<PlannerSubstageDelta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Raw executions retained for one mirrored native-parity crossover block.
+/// The corresponding [`IterationResult`] contains the arithmetic mean for
+/// each arm; these vectors prove that no component sample was discarded.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeParityPairCapture {
+    pub pair_index: usize,
+    pub accel_first: bool,
+    pub sequence: Vec<String>,
+    pub accel_ms: Vec<f64>,
+    pub parallel_ms: Vec<f64>,
+    pub accel_average_ms: f64,
+    pub parallel_average_ms: f64,
+}
+
+/// Exact counter delta for dependency-stamped artifact preparation during one
+/// accelerated query execution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactLifecycleDelta {
+    pub hits: u64,
+    pub builds: u64,
+    pub rebuilds: u64,
+    pub artifact_bytes_observed: u64,
+    pub construction_bytes: u64,
+    pub construction_us: u64,
+    pub preparation_us: u64,
+    pub raw_load_us: u64,
+}
+
+impl ArtifactLifecycleDelta {
+    #[must_use]
+    pub const fn ensures(self) -> u64 {
+        self.hits
+            .saturating_add(self.builds)
+            .saturating_add(self.rebuilds)
+    }
+}
+
+/// Generation identity that the resident store used to validate a derived
+/// artifact before and after one query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResidentDependencyIdentity {
+    pub relid: u32,
+    pub generation: u64,
+    pub global_generation: u64,
+    pub relfilenode: u32,
+    pub row_count: u64,
+    pub raw_bytes: u64,
+    pub derived_bytes: u64,
+}
+
+/// Separately sealed lifecycle or steady-state artifact evidence. The timing
+/// pair is never mixed into the regular warm sample vector unless explicitly
+/// summarized by `combined_warm_summary`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResidentLifecycleCapture {
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair_index: Option<usize>,
+    pub iteration: IterationResult,
+    pub artifact: ArtifactLifecycleDelta,
+    /// Ownership policy observed after this exact artifact ensure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_policy: Option<String>,
+    /// Explicit raw-relation refresh cost included in lifecycle `accel_ms`.
+    /// Always zero for steady-state captures.
+    pub refresh_us: u64,
+    /// Number of resident relations explicitly refreshed before this query.
+    /// Always zero for steady-state captures.
+    #[serde(default)]
+    pub refreshed_relations: u64,
+    /// Total source rows reloaded by the explicit refresh operation.
+    /// Always zero for steady-state captures.
+    #[serde(default)]
+    pub refreshed_rows: u64,
+    pub dependencies_before: Vec<ResidentDependencyIdentity>,
+    pub dependencies_after: Vec<ResidentDependencyIdentity>,
+    pub queries_accelerated: u64,
+    pub rows_dispatched: u64,
+    pub batches_executed: u64,
+    pub stock_exec_count: u64,
+    pub gpu_rows_processed: u64,
+    pub gpu_kernel_executions: u64,
+    pub output_rows_consumed: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -148,7 +251,10 @@ pub struct CacheModeSummary {
 impl CacheModeSummary {
     /// Build a summary from a homogeneous slice of iterations (all one cache
     /// state). Returns `None` for an empty slice.
-    fn from_iterations(cache_state: CacheState, iterations: &[IterationResult]) -> Option<Self> {
+    pub(crate) fn from_iterations(
+        cache_state: CacheState,
+        iterations: &[IterationResult],
+    ) -> Option<Self> {
         if iterations.is_empty() {
             return None;
         }
@@ -215,6 +321,31 @@ pub struct IterationResult {
     pub cache_state: CacheState,
 }
 
+/// Successful grouped-aggregate native calls by stable physical branch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhysicalKernelModeCounts {
+    pub parallel_hash: u64,
+    pub parallel_dense_count: u64,
+    pub parallel_dense_integer: u64,
+    pub serial_generic: u64,
+}
+
+impl PhysicalKernelModeCounts {
+    #[must_use]
+    pub fn unique_mode(self) -> Option<&'static str> {
+        let mut nonzero = [
+            ("parallel_hash", self.parallel_hash),
+            ("parallel_dense_count", self.parallel_dense_count),
+            ("parallel_dense_integer", self.parallel_dense_integer),
+            ("serial_generic", self.serial_generic),
+        ]
+        .into_iter()
+        .filter_map(|(mode, calls)| (calls != 0).then_some(mode));
+        let mode = nonzero.next()?;
+        nonzero.next().is_none().then_some(mode)
+    }
+}
+
 /// Aggregated results for one workload at one row scale (two-way: accel vs PG parallel).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
@@ -236,6 +367,16 @@ pub struct WorkloadResult {
     /// cells. Entries index `iterations`; absent for non-native cells.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub planner_stage_captures: Vec<PlannerStageCapture>,
+    /// Mirrored ABBA/BAAB raw components for same-backend native-parity runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_parity_pair_captures: Vec<NativeParityPairCapture>,
+    /// One explicit refresh/build/dispatch pair, excluded from steady-state
+    /// warm ratchets and retained as lifecycle evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_lifecycle_probe: Option<ResidentLifecycleCapture>,
+    /// Per-pair proof that regular warm samples used existing artifacts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_steady_state_captures: Vec<ResidentLifecycleCapture>,
     /// Whether PostgreSQL selected a pg_accel Custom Scan plan node.
     ///
     /// This is intentionally separate from runtime GPU dispatch: aggregate
@@ -319,6 +460,17 @@ pub struct WorkloadResult {
     /// red flag for CPU-backed pg_accel plans.
     #[serde(default)]
     pub pg_accel_stock_exec_delta: u64,
+    /// Successful native grouped-aggregate calls split by the physical branch
+    /// that the C++ validator selected immediately before dispatch.
+    #[serde(default)]
+    pub physical_kernel_mode_counts: PhysicalKernelModeCounts,
+    /// The unique physical mode observed for this benchmark row, when exactly
+    /// one grouped branch dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physical_kernel_mode: Option<String>,
+    /// Whether the native counter mode matches the planned EXPLAIN mode.
+    #[serde(default)]
+    pub physical_kernel_mode_verified: bool,
     /// Rows returned to the client or reported by EXPLAIN ANALYZE for the
     /// accel-side measured executions. Function/SRF kernel wins require this
     /// to be non-zero so a launched kernel is not counted without output
@@ -438,6 +590,11 @@ pub struct WorkloadResult {
     /// subsample only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warm_summary: Option<CacheModeSummary>,
+    /// End-to-end warm view with the lifecycle probe prepended to the regular
+    /// steady-state samples. Cost calibration may use this; latency gates use
+    /// `warm_summary` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combined_warm_summary: Option<CacheModeSummary>,
     /// Cold-only summary statistics, populated when the run measured any cold
     /// iterations. In `CacheMode::Both` this is computed over the cold
     /// subsample only.
@@ -493,6 +650,10 @@ pub struct BenchReport {
     pub gucs: Option<GucSettings>,
     pub methodology: Methodology,
     pub workloads: Vec<WorkloadResult>,
+    /// False for broad characterization runs that intentionally publish only
+    /// per-cell evidence, not an aggregate system-level speedup claim.
+    #[serde(default = "default_true")]
+    pub headline_speedup_allowed: bool,
     /// Directory where report JSON/Markdown/CSV, crash lists, log tails,
     /// plan snippets, and GUC snapshots were persisted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,6 +666,10 @@ pub struct BenchReport {
     /// postmaster (action_items C4).
     #[serde(default)]
     pub postmaster_start_time: Option<String>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// Machine-readable audit for selected pg_accel Custom Scan resident-pipeline
@@ -882,6 +1047,13 @@ pub struct Methodology {
     /// materially inflate timings for high-output workloads.
     #[serde(default)]
     pub harness_profile: String,
+    /// Whether each logical accel/baseline pair used one PostgreSQL backend.
+    /// This is restricted to planner-native non-inferiority measurements.
+    #[serde(default)]
+    pub native_parity_pairing: bool,
+    /// Raw executions of each arm contributing to one native-parity pair.
+    #[serde(default)]
+    pub native_parity_repetitions_per_arm: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1066,6 +1238,9 @@ impl WorkloadResult {
             pg_accel_batches_executed_delta: 0,
             pg_accel_gpu_rows_processed_delta: 0,
             pg_accel_stock_exec_delta: 0,
+            physical_kernel_mode_counts: PhysicalKernelModeCounts::default(),
+            physical_kernel_mode: None,
+            physical_kernel_mode_verified: false,
             accel_output_rows_consumed: 0,
             dispatch_counter_error: None,
             accel_mean_ms: accel_mean,
@@ -1106,10 +1281,14 @@ impl WorkloadResult {
             resident_lane: false,
             native_decline_evidence: None,
             warm_summary,
+            combined_warm_summary: warm_summary,
             cold_summary,
             cold_shared_buffers_resident: None,
             iterations,
             planner_stage_captures: Vec::new(),
+            native_parity_pair_captures: Vec::new(),
+            artifact_lifecycle_probe: None,
+            artifact_steady_state_captures: Vec::new(),
         }
     }
 
@@ -2500,6 +2679,20 @@ fn truncate_plan_for_display(plan: &str) -> String {
 fn render_workload_evidence_notes(w: &WorkloadResult, scale_label: &str, out: &mut String) {
     let mut notes: Vec<String> = Vec::new();
 
+    if w.physical_kernel_mode.is_some()
+        || w.physical_kernel_mode_counts != PhysicalKernelModeCounts::default()
+    {
+        notes.push(format!(
+            "Physical grouped kernel: mode={}, EXPLAIN/native verified={}; calls hash={}, dense-count={}, dense-integer={}, serial-generic={}.",
+            w.physical_kernel_mode.as_deref().unwrap_or("ambiguous"),
+            w.physical_kernel_mode_verified,
+            w.physical_kernel_mode_counts.parallel_hash,
+            w.physical_kernel_mode_counts.parallel_dense_count,
+            w.physical_kernel_mode_counts.parallel_dense_integer,
+            w.physical_kernel_mode_counts.serial_generic,
+        ));
+    }
+
     if let (Some(warm), Some(cold)) = (&w.warm_summary, &w.cold_summary) {
         notes.push(format!(
             "Warm (n={}): accel median {:.2}ms, PG parallel median {:.2}ms, speedup {:.2}x.",
@@ -2524,6 +2717,65 @@ fn render_workload_evidence_notes(w: &WorkloadResult, scale_label: &str, out: &m
                 )
             },
         ));
+        if let Some(probe) = &w.artifact_lifecycle_probe {
+            notes.push(format!(
+                "Artifact lifecycle probe: refreshed {} relation(s) / {} rows in {:.3}ms; accel \
+                 end-to-end {:.2}ms; PG parallel \
+                 {:.2}ms; policy={}; outcomes built={} rebuilt={} hit={}; construction bytes={}; \
+                 construction {:.3}ms; preparation {:.3}ms; dependency identities {}→{}; \
+                 kernels={}; batches={}; output rows={}; fallback={}; error={}.",
+                probe.refreshed_relations,
+                probe.refreshed_rows,
+                probe.refresh_us as f64 / 1_000.0,
+                probe.iteration.accel_ms,
+                probe.iteration.parallel_ms,
+                probe.artifact_policy.as_deref().unwrap_or("unavailable"),
+                probe.artifact.builds,
+                probe.artifact.rebuilds,
+                probe.artifact.hits,
+                probe.artifact.construction_bytes,
+                probe.artifact.construction_us as f64 / 1_000.0,
+                probe.artifact.preparation_us as f64 / 1_000.0,
+                probe.dependencies_before.len(),
+                probe.dependencies_after.len(),
+                probe.gpu_kernel_executions,
+                probe.batches_executed,
+                probe.output_rows_consumed,
+                probe.stock_exec_count,
+                probe.error.as_deref().unwrap_or("none"),
+            ));
+        } else {
+            notes.push("Artifact lifecycle probe: missing.".to_owned());
+        }
+        if !w.artifact_steady_state_captures.is_empty() {
+            let hits = w
+                .artifact_steady_state_captures
+                .iter()
+                .fold(0_u64, |total, capture| {
+                    total.saturating_add(capture.artifact.hits)
+                });
+            notes.push(format!(
+                "Artifact steady state: {} independently captured warm pairs, {hits} hits, \
+                 {} build/rebuild outcomes.",
+                w.artifact_steady_state_captures.len(),
+                w.artifact_steady_state_captures
+                    .iter()
+                    .fold(0_u64, |total, capture| total
+                        .saturating_add(capture.artifact.builds)
+                        .saturating_add(capture.artifact.rebuilds)),
+            ));
+        }
+        if let Some(combined) = &w.combined_warm_summary {
+            notes.push(format!(
+                "Combined lifecycle + steady calibration (n={}): accel median {:.2}ms, PG \
+                 parallel median {:.2}ms, speedup {:.2}x; warm latency ratchets remain bound to \
+                 the separate steady-state summary.",
+                combined.n,
+                combined.accel_median_ms,
+                combined.parallel_median_ms,
+                combined.speedup_median_vs_parallel,
+            ));
+        }
     }
 
     if w.cold_shared_buffers_resident == Some(true) {
@@ -3232,7 +3484,17 @@ impl BenchReport {
         // sub-1.0x runs as "net regression" and sub-1.0x categories as
         // losers. The non-h3 geomean is printed in its own row so the reader
         // can see the trig-kernel artifact (Reviewer 1 Sin #9) isolated.
-        self.render_geomean_headline(&mut out);
+        if self.headline_speedup_allowed {
+            self.render_geomean_headline(&mut out);
+        } else {
+            out.push_str("## Characterization Scope\n\n");
+            out.push_str(
+                "This broad-system artifact intentionally does not calculate or publish an \
+                 aggregate speedup headline. Per-cell timings below are diagnostic evidence \
+                 for correctness, planner selection, dispatch, and lifecycle behavior; they \
+                 are not a certified TPC-H, ClickBench, or whole-system score.\n\n",
+            );
+        }
         self.render_dispatch_classification(&mut out);
         self.render_dispatch_evidence(&mut out);
         self.render_planner_threshold_matrix(&mut out);
@@ -3323,12 +3585,30 @@ impl BenchReport {
             "| Measurement ordering | {} |",
             self.methodology.ordering
         );
+        let _ = writeln!(
+            out,
+            "| Native-parity same-backend crossover | {} |",
+            self.methodology.native_parity_pairing
+        );
+        let _ = writeln!(
+            out,
+            "| Native-parity raw executions per arm/pair | {} |",
+            self.methodology.native_parity_repetitions_per_arm
+        );
         for test in &self.methodology.statistical_tests {
             let _ = writeln!(out, "| Statistical test | {test} |");
         }
         out.push_str("\n**Ordering note:** Measurement order (accel-first vs baseline-first) ");
-        out.push_str("is randomized per iteration to eliminate cache-warming bias. ");
-        out.push_str("Each mode uses a fresh connection with `DISCARD ALL` on close.\n");
+        out.push_str("uses an exactly balanced randomized AB/BA schedule. ");
+        if self.methodology.native_parity_pairing {
+            out.push_str(
+                "Each measured pair is a mirrored ABBA/BAAB block on one persistent PostgreSQL backend; all four raw executions are retained, and `DISCARD ALL` runs before each execution.\n",
+            );
+        } else {
+            out.push_str(
+                "The arms use distinct persistent PostgreSQL backends, with `DISCARD ALL` before every arm.\n",
+            );
+        }
         if !self.crashes.is_empty() {
             let _ = writeln!(
                 out,
@@ -4810,6 +5090,23 @@ impl BenchReport {
                 continue;
             }
 
+            if w.resident_lane
+                && w.plan_selected
+                && w.gpu_kernel_dispatched
+                && w.warm_summary.is_some()
+                && let Some(detail) = resident_lifecycle_evidence_error(w)
+            {
+                failures.push(BenchmarkShipGateFailure {
+                    workload: w.name.clone(),
+                    rows: w.rows,
+                    kind: BenchmarkShipGateFailureKind::ResidentLifecycleEvidenceMissing,
+                    speedup_median: w.speedup_median_vs_parallel,
+                    gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
+                    detail,
+                });
+                continue;
+            }
+
             if let Some(entry) = threshold_entry {
                 match entry.expectation {
                     crate::workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
@@ -4862,6 +5159,27 @@ impl BenchReport {
                                     "resident grouped winner in lane `{}` did not prove the shared \
                                      ResidentGroupAgg logical spec in EXPLAIN",
                                     entry.lane
+                                ),
+                            });
+                            continue;
+                        }
+                        if threshold_lane_requires_resident_groupagg_logical_spec(entry.lane)
+                            && (!w.physical_kernel_mode_verified
+                                || w.physical_kernel_mode.is_none()
+                                || w.physical_kernel_mode_counts.serial_generic != 0)
+                        {
+                            failures.push(BenchmarkShipGateFailure {
+                                workload: w.name.clone(),
+                                rows: w.rows,
+                                kind: BenchmarkShipGateFailureKind::ExpectedWinnerPhysicalKernelModeUnverified,
+                                speedup_median: w.speedup_median_vs_parallel,
+                                gate_floor: min_warm_speedup.max(BENCHMARK_SHIP_GATE_MIN_SPEEDUP),
+                                detail: format!(
+                                    "resident grouped winner in lane `{}` did not prove one non-serial native physical mode matching EXPLAIN (mode={}, verified={}, serial_calls={})",
+                                    entry.lane,
+                                    w.physical_kernel_mode.as_deref().unwrap_or("-"),
+                                    w.physical_kernel_mode_verified,
+                                    w.physical_kernel_mode_counts.serial_generic,
                                 ),
                             });
                             continue;
@@ -5113,6 +5431,90 @@ pub const H3_LANE_GATE_MIN_WARM_SPEEDUP: f64 = 1.0;
 /// decline evidence instead.
 pub const BENCHMARK_SHIP_GATE_MIN_SPEEDUP: f64 = 1.0;
 
+fn resident_lifecycle_evidence_error(workload: &WorkloadResult) -> Option<String> {
+    let Some(probe) = workload.artifact_lifecycle_probe.as_ref() else {
+        return Some("resident lifecycle probe is missing".to_owned());
+    };
+    if probe.phase != "lifecycle" || probe.error.is_some() {
+        return Some(format!(
+            "resident lifecycle probe is invalid (phase={}, error={})",
+            probe.phase,
+            probe.error.as_deref().unwrap_or("-")
+        ));
+    }
+    if probe
+        .artifact
+        .builds
+        .saturating_add(probe.artifact.rebuilds)
+        == 0
+        || probe.artifact.ensures() == 0
+        || probe.refresh_us == 0
+        || probe.refreshed_relations == 0
+        || probe.refreshed_rows == 0
+        || probe.queries_accelerated == 0
+        || probe.gpu_kernel_executions == 0
+        || probe.stock_exec_count != 0
+        || probe.output_rows_consumed == 0
+        || probe.dependencies_before.is_empty()
+        || probe.dependencies_after.is_empty()
+    {
+        return Some(
+            "resident lifecycle probe did not prove an explicit non-empty refresh, \
+             build/rebuild, recorded dependency identity, GPU dispatch, consumed output, and \
+             zero fallback"
+                .to_owned(),
+        );
+    }
+
+    let expected = workload
+        .iterations
+        .iter()
+        .filter(|iteration| iteration.cache_state == CacheState::Warm)
+        .count();
+    if workload.artifact_steady_state_captures.len() != expected {
+        return Some(format!(
+            "resident steady-state evidence covers {} of {expected} warm pairs",
+            workload.artifact_steady_state_captures.len()
+        ));
+    }
+    for capture in &workload.artifact_steady_state_captures {
+        if capture.phase != "steady_state"
+            || capture.error.is_some()
+            || capture.artifact.ensures() == 0
+            || capture.artifact.hits != capture.artifact.ensures()
+            || capture.artifact.builds != 0
+            || capture.artifact.rebuilds != 0
+            || capture.refresh_us != 0
+            || capture.refreshed_relations != 0
+            || capture.refreshed_rows != 0
+            || capture.dependencies_before != capture.dependencies_after
+            || capture.queries_accelerated == 0
+            || capture.gpu_kernel_executions == 0
+            || capture.stock_exec_count != 0
+            || capture.output_rows_consumed == 0
+        {
+            return Some(format!(
+                "resident steady-state pair {} did not prove artifact hit, stable dependency \
+                 identity, GPU dispatch, consumed output, and zero fallback (error={})",
+                capture
+                    .pair_index
+                    .map_or_else(|| "?".to_owned(), |index| index.to_string()),
+                capture.error.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+    if workload
+        .combined_warm_summary
+        .is_none_or(|summary| summary.n != expected.saturating_add(1))
+    {
+        return Some(
+            "resident lifecycle evidence has no combined end-to-end warm calibration summary"
+                .to_owned(),
+        );
+    }
+    None
+}
+
 /// Kind of failure observed by [`BenchReport::evaluate_benchmark_ship_gate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchmarkShipGateFailureKind {
@@ -5138,9 +5540,15 @@ pub enum BenchmarkShipGateFailureKind {
     /// A resident grouped-aggregate winner did not prove the shared logical
     /// groupagg spec in its plan artifact.
     ExpectedWinnerMissingGroupAggLogicalSpec,
+    /// A resident grouped winner did not prove that its EXPLAIN mode matched
+    /// the successful native physical branch counter.
+    ExpectedWinnerPhysicalKernelModeUnverified,
     /// A benchmark matrix cell declared as an H3/raster GPU winner did not use
     /// a cache mode that proves bounded cold-start cost.
     ExpectedWinnerMissingCacheEvidence,
+    /// A selected resident winner did not provide separate construction and
+    /// artifact-hit evidence plus the combined calibration view.
+    ResidentLifecycleEvidenceMissing,
     /// A benchmark matrix cell declared as native-decline dispatched GPU work.
     NativeDeclineUnexpectedDispatch,
     /// A native-decline matrix cell did not capture the dispatch counter, so
@@ -5164,7 +5572,11 @@ impl BenchmarkShipGateFailureKind {
             Self::ExpectedWinnerMissingGroupAggLogicalSpec => {
                 "expected_winner_missing_groupagg_logical_spec"
             }
+            Self::ExpectedWinnerPhysicalKernelModeUnverified => {
+                "expected_winner_physical_kernel_mode_unverified"
+            }
             Self::ExpectedWinnerMissingCacheEvidence => "expected_winner_missing_cache_evidence",
+            Self::ResidentLifecycleEvidenceMissing => "resident_lifecycle_evidence_missing",
             Self::NativeDeclineUnexpectedDispatch => "native_decline_unexpected_dispatch",
             Self::NativeDeclineDispatchCounterUnavailable => {
                 "native_decline_dispatch_counter_unavailable"
@@ -5539,12 +5951,15 @@ pub fn generate_report(
         timing_mode: timing_label.to_owned(),
         cache_mode: cache_label.to_owned(),
         harness_profile: harness_profile.to_owned(),
+        native_parity_pairing: false,
+        native_parity_repetitions_per_arm: 1,
     };
     let report = BenchReport {
         hardware,
         gucs,
         methodology,
         workloads,
+        headline_speedup_allowed: true,
         artifact_dir: None,
         crashes,
         postmaster_start_time,
@@ -5694,6 +6109,9 @@ mod tests {
             true,
         );
         result.pg_accel_queries_accelerated_delta = 10;
+        result.physical_kernel_mode_counts.parallel_dense_integer = 10;
+        result.physical_kernel_mode = Some("parallel_dense_integer".to_owned());
+        result.physical_kernel_mode_verified = true;
         result
     }
 
@@ -5770,11 +6188,178 @@ mod tests {
                 timing_mode: "raw".to_owned(),
                 cache_mode: "warm".to_owned(),
                 harness_profile: "test".to_owned(),
+                native_parity_pairing: false,
+                native_parity_repetitions_per_arm: 1,
             },
             workloads,
+            headline_speedup_allowed: true,
             artifact_dir: None,
             crashes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn characterization_report_suppresses_aggregate_speedup_headline() {
+        let mut report = mock_report(Vec::new());
+        report.headline_speedup_allowed = false;
+
+        let markdown = report.to_markdown();
+        assert!(markdown.contains("## Characterization Scope"));
+        assert!(!markdown.contains("## Headline"));
+        assert!(!markdown.contains("**NET SPEEDUP**"));
+        assert!(!markdown.contains("**NET REGRESSION**"));
+    }
+
+    #[test]
+    fn legacy_report_json_defaults_to_allowing_headline() {
+        let report = mock_report(Vec::new());
+        let mut value = serde_json::to_value(report).expect("serialize report");
+        value
+            .as_object_mut()
+            .expect("report object")
+            .remove("headline_speedup_allowed");
+
+        let decoded: BenchReport = serde_json::from_value(value).expect("deserialize report");
+        assert!(decoded.headline_speedup_allowed);
+    }
+
+    fn with_valid_resident_lifecycle(mut workload: WorkloadResult) -> WorkloadResult {
+        let before = ResidentDependencyIdentity {
+            relid: 42,
+            generation: 1,
+            global_generation: 1,
+            relfilenode: 7,
+            row_count: 1_000_000,
+            raw_bytes: 8_000_000,
+            derived_bytes: 0,
+        };
+        let after = ResidentDependencyIdentity {
+            generation: 2,
+            global_generation: 2,
+            derived_bytes: 64_000,
+            ..before
+        };
+        let lifecycle_iteration = IterationResult {
+            accel_ms: 25.0,
+            parallel_ms: 20.0,
+            accel_first: true,
+            cache_purge: CachePurgeState::NotRequested,
+            cache_state: CacheState::Warm,
+        };
+        workload.artifact_lifecycle_probe = Some(ResidentLifecycleCapture {
+            phase: "lifecycle".to_owned(),
+            pair_index: None,
+            iteration: lifecycle_iteration.clone(),
+            artifact: ArtifactLifecycleDelta {
+                builds: 1,
+                artifact_bytes_observed: 64_000,
+                construction_bytes: 64_000,
+                construction_us: 500,
+                preparation_us: 700,
+                raw_load_us: 200,
+                ..ArtifactLifecycleDelta::default()
+            },
+            artifact_policy: Some("cached_reusable".to_owned()),
+            refresh_us: 250,
+            refreshed_relations: 1,
+            refreshed_rows: 1_000_000,
+            dependencies_before: vec![before],
+            dependencies_after: vec![after.clone()],
+            queries_accelerated: 1,
+            rows_dispatched: 1_000_000,
+            batches_executed: 1,
+            stock_exec_count: 0,
+            gpu_rows_processed: 1_000_000,
+            gpu_kernel_executions: 1,
+            output_rows_consumed: 1,
+            error: None,
+        });
+        workload.artifact_steady_state_captures = workload
+            .iterations
+            .iter()
+            .enumerate()
+            .filter(|(_, iteration)| iteration.cache_state == CacheState::Warm)
+            .map(|(pair_index, iteration)| ResidentLifecycleCapture {
+                phase: "steady_state".to_owned(),
+                pair_index: Some(pair_index),
+                iteration: iteration.clone(),
+                artifact: ArtifactLifecycleDelta {
+                    hits: 1,
+                    artifact_bytes_observed: 64_000,
+                    preparation_us: 5,
+                    ..ArtifactLifecycleDelta::default()
+                },
+                artifact_policy: Some("cached_reusable".to_owned()),
+                refresh_us: 0,
+                refreshed_relations: 0,
+                refreshed_rows: 0,
+                dependencies_before: vec![after.clone()],
+                dependencies_after: vec![after.clone()],
+                queries_accelerated: 1,
+                rows_dispatched: 1_000_000,
+                batches_executed: 1,
+                stock_exec_count: 0,
+                gpu_rows_processed: 1_000_000,
+                gpu_kernel_executions: 1,
+                output_rows_consumed: 1,
+                error: None,
+            })
+            .collect();
+        let mut combined = Vec::with_capacity(workload.iterations.len() + 1);
+        combined.push(lifecycle_iteration);
+        combined.extend(workload.iterations.iter().cloned());
+        workload.combined_warm_summary =
+            CacheModeSummary::from_iterations(CacheState::Warm, &combined);
+        workload
+    }
+
+    #[test]
+    fn resident_lifecycle_gate_requires_separate_build_and_hit_series() {
+        let workload = with_valid_resident_lifecycle(mock_workload_result(
+            "resident_lifecycle_contract",
+            1_000_000,
+            10.0,
+            20.0,
+        ));
+        assert_eq!(resident_lifecycle_evidence_error(&workload), None);
+        assert_eq!(
+            workload
+                .artifact_lifecycle_probe
+                .as_ref()
+                .and_then(|capture| capture.artifact_policy.as_deref()),
+            Some("cached_reusable")
+        );
+        assert!(
+            serde_json::to_string(&workload)
+                .expect("lifecycle workload serializes")
+                .contains("\"artifact_policy\":\"cached_reusable\"")
+        );
+
+        let mut missing_probe = workload.clone();
+        missing_probe.artifact_lifecycle_probe = None;
+        assert!(
+            resident_lifecycle_evidence_error(&missing_probe)
+                .expect("missing probe must fail")
+                .contains("probe is missing")
+        );
+
+        let mut rebuilt_steady = workload.clone();
+        rebuilt_steady.artifact_steady_state_captures[0]
+            .artifact
+            .rebuilds = 1;
+        assert!(
+            resident_lifecycle_evidence_error(&rebuilt_steady)
+                .expect("steady-state rebuild must fail")
+                .contains("did not prove artifact hit")
+        );
+
+        let mut missing_combined = workload;
+        missing_combined.combined_warm_summary = None;
+        assert!(
+            resident_lifecycle_evidence_error(&missing_combined)
+                .expect("missing combined calibration must fail")
+                .contains("combined end-to-end")
+        );
     }
 
     fn with_cache_mode(mut report: BenchReport, mode: &str) -> BenchReport {
@@ -6836,6 +7421,57 @@ mod tests {
         let report = mock_report(vec![workload]);
 
         assert!(report.evaluate_benchmark_ship_gate().is_empty());
+    }
+
+    #[test]
+    fn test_benchmark_ship_gate_requires_verified_nonserial_physical_mode_for_groupagg_winner() {
+        let base = || {
+            let mut workload = mock_workload_result("grouped_agg_int4", 1_000_000, 10.0, 20.0);
+            workload.dispatch_counter_captured = true;
+            workload.gpu_kernel_execution_delta = 1;
+            workload.accel_output_rows_consumed = 10;
+            workload.pg_accel_stock_exec_delta = 0;
+            workload.plan_snippet = Some(
+                "Custom Scan (GpuAccelAgg)\n  Strategy: GpuAgg\n  GPU Dispatched: true\n  \
+                 GPU Resident Pipeline: true\n  \
+                 GPU Resident Proof Version: 2\n  \
+                 GPU Resident Operator Class: resident_groupagg\n  \
+                 GPU Resident GroupAgg Key: resident_i32\n  \
+                 GPU Resident GroupAgg Measure: direct_column\n  \
+                 GPU Resident GroupAgg Filter: none\n  \
+                 GPU Resident GroupAgg Predicate Guard: none\n  \
+                 GPU Resident GroupAgg Value Predicate: none\n  \
+                 GPU Resident GroupAgg Predicate IR: guard=none;value=none\n  \
+                 GPU Resident GroupAgg Aggregate Mask: 3\n  \
+                 GPU Resident Stage Mask: 5\n  \
+                 GPU Resident Device Columns: 2\n  \
+                 GPU Physical Kernel Mode: parallel_dense_integer"
+                    .to_owned(),
+            );
+            workload
+        };
+
+        let mut missing = base();
+        missing.physical_kernel_mode = None;
+        missing.physical_kernel_mode_verified = false;
+        let failures = mock_report(vec![missing]).evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::ExpectedWinnerPhysicalKernelModeUnverified
+        );
+
+        let mut serial = base();
+        serial.physical_kernel_mode_counts.parallel_dense_integer = 0;
+        serial.physical_kernel_mode_counts.serial_generic = 1;
+        serial.physical_kernel_mode = Some("serial_generic".to_owned());
+        serial.physical_kernel_mode_verified = true;
+        let failures = mock_report(vec![serial]).evaluate_benchmark_ship_gate();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(
+            failures[0].kind,
+            BenchmarkShipGateFailureKind::ExpectedWinnerPhysicalKernelModeUnverified
+        );
     }
 
     #[test]

@@ -192,9 +192,9 @@ SET pg_accel.gpu_enabled = on;
 SET pg_accel.auto_load = off;
 SELECT pg_accel_pin('ledger_probe', ARRAY['g', 'v']);
 PREPARE resident_probe AS
-SELECT sum(group_total)::bigint AS total
+SELECT (sum(group_total) + sum(group_count))::bigint AS total
 FROM (
-    SELECT g, sum(v)::bigint AS group_total
+    SELECT g, sum(v)::bigint AS group_total, count(*)::bigint AS group_count
     FROM ledger_probe
     GROUP BY g
 ) AS grouped;
@@ -242,17 +242,20 @@ wait_for_live_bytes "$db_a" "$expected_both"
 initial_plan_contract="$(run_db "$db_a" "
 SELECT
     count(*) FILTER (WHERE line LIKE '%Custom Scan (GpuAccelAgg)%') || '|' ||
-    count(*) FILTER (WHERE line LIKE '%GPU Resident Operator Class: resident_groupagg%')
+    count(*) FILTER (WHERE line LIKE '%GPU Resident Operator Class: resident_groupagg%') || '|' ||
+    count(*) FILTER (WHERE line LIKE '%GPU Physical Kernel Mode: parallel_dense_integer%')
 FROM ledger_plans
 WHERE phase = 'before_trigger_repair'")"
 initial_counter_contract="$(run_db "$db_a" "
 SELECT kernels_before || '|' || kernels_after
 FROM ledger_counters
 WHERE phase = 'before_trigger_repair'")"
-IFS='|' read -r initial_custom_scan initial_resident_groupagg <<<"$initial_plan_contract"
+IFS='|' read -r initial_custom_scan initial_resident_groupagg initial_parallel_mode \
+    <<<"$initial_plan_contract"
 IFS='|' read -r initial_kernels_before initial_kernels_after <<<"$initial_counter_contract"
-if [ "$initial_custom_scan" -lt 1 ] || [ "$initial_resident_groupagg" -lt 1 ]; then
-    echo "error: prepared query did not select Custom Scan resident_groupagg" >&2
+if [ "$initial_custom_scan" -lt 1 ] || [ "$initial_resident_groupagg" -lt 1 ] ||
+   [ "$initial_parallel_mode" -lt 1 ]; then
+    echo "error: prepared query did not select parallel_dense_integer resident_groupagg" >&2
     exit 1
 fi
 if [ "$initial_kernels_after" -le "$initial_kernels_before" ]; then
@@ -308,14 +311,16 @@ prepared_after="$(run_db "$db_a" \
 repaired_plan_contract="$(run_db "$db_a" "
 SELECT
     count(*) FILTER (WHERE line LIKE '%Custom Scan (GpuAccelAgg)%') || '|' ||
-    count(*) FILTER (WHERE line LIKE '%GPU Resident Operator Class: resident_groupagg%')
+    count(*) FILTER (WHERE line LIKE '%GPU Resident Operator Class: resident_groupagg%') || '|' ||
+    count(*) FILTER (WHERE line LIKE '%GPU Physical Kernel Mode: parallel_dense_integer%')
 FROM ledger_plans
 WHERE phase = 'after_trigger_repair'")"
 repaired_counter_contract="$(run_db "$db_a" "
 SELECT kernels_before || '|' || kernels_after
 FROM ledger_counters
 WHERE phase = 'after_trigger_repair'")"
-IFS='|' read -r repaired_custom_scan repaired_resident_groupagg <<<"$repaired_plan_contract"
+IFS='|' read -r repaired_custom_scan repaired_resident_groupagg repaired_parallel_mode \
+    <<<"$repaired_plan_contract"
 IFS='|' read -r repaired_kernels_before repaired_kernels_after <<<"$repaired_counter_contract"
 if [ "$trigger_invalidated_bytes" -ne 0 ]; then
     echo "error: restored trigger identity allowed backend A to retain stale residency" >&2
@@ -326,8 +331,9 @@ if [ "$trigger_refreshed_bytes" -le 0 ] || [ "$prepared_after" -ne $((prepared_b
     exit 1
 fi
 if [ "$repaired_custom_scan" -lt 1 ] || [ "$repaired_resident_groupagg" -lt 1 ] ||
+   [ "$repaired_parallel_mode" -lt 1 ] ||
    [ "$repaired_kernels_after" -le "$repaired_kernels_before" ]; then
-    echo "error: repaired prepared query did not select and dispatch resident_groupagg" >&2
+    echo "error: repaired prepared query did not select and dispatch parallel_dense_integer resident_groupagg" >&2
     exit 1
 fi
 

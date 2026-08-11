@@ -42,8 +42,11 @@ Sort
         GPU Descriptor Output: <AOP2 slot description>
         GPU Descriptor Residency State: <resident state>
         GPU Descriptor Artifact: <hit, built, or rebuilt>
+        GPU Descriptor Artifact Policy: <cached_reusable or ephemeral_fused plus cost inputs>
         GPU Descriptor Generations: <dependency generations>
         GPU Descriptor Bytes: <raw, derived, artifact, and total bytes>
+        GPU Planned Lifecycle Calls: <pre-submission call count>
+        GPU Lifecycle Calls Verified: true
         GPU Resident Stage Mask: <proof stage mask>
         GPU Resident Device Columns: <device column count>
         GPU Kernel Dispatched: true
@@ -80,6 +83,7 @@ Because execution did not initialize residency, descriptor fields may report:
 ```text
 GPU Descriptor Residency State: not initialized (EXPLAIN ONLY)
 GPU Descriptor Artifact: not initialized
+GPU Descriptor Artifact Policy: not initialized (EXPLAIN ONLY)
 GPU Descriptor Generations: not inspected
 GPU Descriptor Bytes: not inspected
 ```
@@ -130,10 +134,13 @@ device kernels submitted inside each execution.
 | `GPU Descriptor Strategy` | `descriptor_grouped_aggregate` when keys exist, otherwise `descriptor_ungrouped_aggregate`. |
 | `GPU Descriptor Output` | Ordered AOP2 mapping from logical key/aggregate results to PostgreSQL result slots. |
 | `GPU Descriptor Artifact` | Whether the dependency-stamped derived artifact was reused, built, or rebuilt during this execution. |
+| `GPU Descriptor Artifact Policy` | Whether the query used a reusable dependency-stamped cache entry or query-owned ephemeral fusion, followed by the construction bytes/time, expected reuse, hit state, invalidation-risk, launch-count, and memory-headroom inputs used by admission. |
 | `GPU Descriptor Generations` | Relation/global/relfilenode evidence used to identify the resident inputs. |
 | `Rows Returned To CPU` | Bounded final rows materialized for PostgreSQL. This is not a CPU executor fallback. |
 | `Rows Dispatched` | Fact rows presented to resident aggregate dispatch. |
 | `Batches` | Completed synchronous aggregate lifecycle calls. One call may submit several queue commands and wait more than once. |
+| `GPU Planned Lifecycle Calls` | Exact call count fixed by the selected one-shot or bounded-session branch before its first submission. |
+| `GPU Lifecycle Calls Verified` | Whether the planned and successfully completed lifecycle-call counts agree. |
 | `GPU Kernel Dispatched` | Execution-time dispatch proof from this node. |
 
 ## Native decline example
