@@ -98,7 +98,9 @@ CANDIDATE_SOURCE_INPUTS = (
     "Cargo.lock",
     "patches/adaptivecpp/default-targets-json.patch",
     "patches/adaptivecpp/sleef-helper-address-space-specialization.patch",
+    "patches/adaptivecpp/soft-fp-2-package-integration.patch",
     "patches/adaptivecpp/sscp-host-coverage.patch",
+    "patches/soft-fp/metal-constexpr-bitcast.patch",
     "scripts/metal_stress_artifacts.py",
     "scripts/metal_stress_gate.sh",
 )

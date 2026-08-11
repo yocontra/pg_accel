@@ -15,7 +15,7 @@ jobs:
       # ACPP_REQUIRED_SHA is loaded from the repo-root .acpp-version file (single
       # source of truth shared with scripts/setup_acpp.sh and ci.yml) by the
       # "Load pinned AdaptiveCpp SHA" step below; do not hardcode it here.
-      SOFT_FP64_REQUIRED_TAG: v1.3.0
+      SOFT_FP64_REQUIRED_TAG: v2.0.0
     strategy:
       fail-fast: false
       matrix:
@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      SOFT_FP64_REQUIRED_TAG: v1.3.0
+      SOFT_FP64_REQUIRED_TAG: v2.0.0
     strategy:
       fail-fast: false
       matrix:
@@ -151,7 +151,7 @@ jobs:
             .pgaccel/acpp
             .pgaccel/src/AdaptiveCpp
             .pgaccel/src/soft-fp64
-          key: release-acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
+          key: release-acpp-linux-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'patches/soft-fp/*.patch', 'scripts/setup_acpp.sh') }}
 
       - name: Cache source PostgreSQL
         uses: actions/cache@v4
@@ -307,7 +307,7 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, metal, pg-accel-coverage]
     timeout-minutes: 360
     env:
-      SOFT_FP64_REQUIRED_TAG: v1.3.0
+      SOFT_FP64_REQUIRED_TAG: v2.0.0
     steps:
       - uses: actions/checkout@v4
 
@@ -343,7 +343,7 @@ jobs:
             .pgaccel/acpp
             .pgaccel/src/AdaptiveCpp
             .pgaccel/src/soft-fp64
-          key: acpp-qualified-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
+          key: acpp-qualified-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'patches/soft-fp/*.patch', 'scripts/setup_acpp.sh') }}
 
       - name: Build pinned AdaptiveCpp Metal toolchain
         if: steps.cache-acpp-metal-release.outputs.cache-hit != 'true'

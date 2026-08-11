@@ -50,6 +50,15 @@ claim is implied by the entries below.
 - AdaptiveCpp provenance has one source of truth: the exact commit recorded in
   `.acpp-version`. Setup scripts, CI, documentation, notices, and package
   metadata must derive or reproduce that value.
+- Metal fp64 emulation now pins soft-fp `v2.0.0`, discovers its unified package,
+  and consumes the configured binary64 contract: generated feature metadata,
+  semantic compile definitions, and the deterministic source manifest. The
+  build retains the subnormal-preserving OpenCL/native ABI surface and disabled
+  device fenv while
+  excluding binary128/binary256, which have no PostgreSQL `float8` ABI path.
+  A tracked Metal-only constexpr-bitcast patch prevents v2's shared infinity
+  constant from emitting unsupported host C++ global constructors into device
+  bitcode, and setup now rejects any resulting constructor list.
 - Benchmark documentation no longer treats historical local timing logs as
   current evidence. Release conclusions require fresh artifacts from the exact
   candidate binary and environment.
@@ -154,7 +163,8 @@ claim is implied by the entries below.
 
   Release builds clone and compile this fork rather than consuming an upstream
   binary package. Metal additionally requires Apple `metal-cpp`, LLVM/lld,
-  Boost, the OpenMP runtime, and soft-fp64 tag `v1.3.0`;
+  Boost, the OpenMP runtime, and soft-fp tag `v2.0.0` (configured for its
+  binary64 compatibility surface);
   `scripts/setup_acpp.sh` applies the tracked
   AdaptiveCpp patches and writes `pg_accel-acpp-provenance.txt`. A fresh
   exact-candidate provenance artifact remains required before release.

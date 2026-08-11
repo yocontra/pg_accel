@@ -1,0 +1,23 @@
+diff --git a/src/sleef/sleef_internal.h b/src/sleef/sleef_internal.h
+index dfe2e79..5ae2cda 100644
+--- a/src/sleef/sleef_internal.h
++++ b/src/sleef/sleef_internal.h
+@@ -44,6 +44,17 @@ inline constexpr double kR_LN2 =
+     1.442695040888963407359924681001892137426645954152985934135449406931;
+ 
+-inline const double kInf = from_bits(0x7FF0000000000000ULL);
++// AdaptiveCpp links this translation unit into device bitcode after rewriting
++// global address spaces. A dynamically initialized inline variable would emit
++// llvm.global_ctors plus a host C++ guard, neither of which is valid in that
++// device-link pipeline. Clang supports constexpr __builtin_bit_cast in C++17,
++// so Metal consumers can retain the integer-derived IEEE bit pattern without
++// introducing global initialization. Other consumers keep the v2.0.0 path.
++#if defined(SF64_DEVICE_CONSTEXPR_BITCAST) && defined(__clang__)
++inline constexpr double kInf =
++    __builtin_bit_cast(double, uint64_t{0x7FF0000000000000ULL});
++#else
++inline const double kInf = from_bits(0x7FF0000000000000ULL);
++#endif
+ 
+ // ---- canonical quiet NaN -----------------------------------------------
+ 

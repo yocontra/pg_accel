@@ -1,0 +1,195 @@
+diff --git a/src/libkernel/sscp/metal/CMakeLists.txt b/src/libkernel/sscp/metal/CMakeLists.txt
+index 221d4d2c..6d326381 100644
+--- a/src/libkernel/sscp/metal/CMakeLists.txt
++++ b/src/libkernel/sscp/metal/CMakeLists.txt
+@@ -40,12 +40,12 @@ if(WITH_LLVM_TO_METAL)
+   #   2. ENV{ACPP_SOFT_FP64_SRC_DIR}              (CI / multi-checkout)
+   #   3. $ENV{HOME}/Projects/soft-fp64            (common local checkout)
+   #
+-  # Whatever path resolves must point at the *root* of a soft-fp64 checkout
+-  # (the dir containing `include/`, `src/`, `src/sleef/`). soft-fp64's
+-  # `.cpp` files are compiled in-place from that tree - no copying, no
+-  # rewriting of `#include "../../include/..."` lines, no flattening. The
+-  # required tag is `v1.3.0`; soft-fp64 maintains semver, so newer
+-  # `v1.x` tags are also accepted.
++  # Whatever path resolves must point at the *root* of the pinned soft-fp
++  # 2.0 checkout (the dir containing `include/`, `src/`, `src/sleef/`). The
++  # matching configured compatibility package supplies the generated feature
++  # contract, semantic compile definitions, and deterministic source manifest.
++  # Sources are mapped from that manifest back to the checkout so their stable
++  # source-relative includes remain intact during device-bitcode compilation.
+   # ============================================================================
+   set(_ACPP_SOFT_FP64_DEFAULT "")
+   if(DEFINED ENV{ACPP_SOFT_FP64_SRC_DIR})
+@@ -56,11 +56,13 @@ if(WITH_LLVM_TO_METAL)
+ 
+   set(ACPP_SOFT_FP64_SRC_DIR "${_ACPP_SOFT_FP64_DEFAULT}" CACHE PATH
+       "Path to the soft-fp64 source tree (dir containing include/, src/, src/sleef/). Required when WITH_LLVM_TO_METAL=ON.")
++  set(ACPP_SOFT_FP64_PACKAGE_DIR "" CACHE PATH
++      "Path to soft-fp 2's configured soft_fp64 package directory. Required when WITH_LLVM_TO_METAL=ON.")
+ 
+   if(NOT ACPP_SOFT_FP64_SRC_DIR)
+     message(FATAL_ERROR
+       "WITH_LLVM_TO_METAL requires ACPP_SOFT_FP64_SRC_DIR to point at a "
+-      "soft-fp64 checkout (tag >=v1.3.0). Set "
++      "soft-fp checkout (tag v2.0.0). Set "
+       "-DACPP_SOFT_FP64_SRC_DIR=<abs path> or env ACPP_SOFT_FP64_SRC_DIR. "
+       "AdaptiveCpp's Metal libkernel cannot link without an fp64 "
+       "implementation - Apple GPUs lack hardware fp64.")
+@@ -74,33 +76,72 @@ if(WITH_LLVM_TO_METAL)
+       "ACPP_SOFT_FP64_SRC_DIR='${ACPP_SOFT_FP64_SRC_DIR}' does not look like "
+       "a soft-fp64 checkout (missing include/soft_fp64/soft_f64.h).")
+   endif()
++  if(NOT ACPP_SOFT_FP64_PACKAGE_DIR)
++    message(FATAL_ERROR
++      "WITH_LLVM_TO_METAL requires ACPP_SOFT_FP64_PACKAGE_DIR to point at "
++      "soft-fp 2's configured soft_fp64 package directory.")
++  endif()
++  if(NOT EXISTS "${ACPP_SOFT_FP64_PACKAGE_DIR}/soft_fp64Config.cmake")
++    message(FATAL_ERROR
++      "ACPP_SOFT_FP64_PACKAGE_DIR='${ACPP_SOFT_FP64_PACKAGE_DIR}' does not "
++      "contain soft_fp64Config.cmake.")
++  endif()
++  get_filename_component(_SOFT_FP_CMAKE_ROOT
++      "${ACPP_SOFT_FP64_PACKAGE_DIR}" DIRECTORY)
++  set(_SOFT_FP_PACKAGE_DIR "${_SOFT_FP_CMAKE_ROOT}/soft_fp")
++  if(NOT EXISTS "${_SOFT_FP_PACKAGE_DIR}/soft_fpConfig.cmake")
++    message(FATAL_ERROR
++      "The configured soft-fp 2 package is missing its unified discovery "
++      "surface: ${_SOFT_FP_PACKAGE_DIR}/soft_fpConfig.cmake.")
++  endif()
+ 
+-  # soft-fp64 source files compiled into the Metal libkernel bitcode.
+-  # The list is fixed (matches soft-fp64 v1.3.0 / target_sources in its
+-  # top-level CMakeLists.txt for the `soft_fp64` target with SOFT_FP64_OCL=on).
+-  # The fenv TU is included even though SOFT_FP64_FENV_MODE=0 below makes its
+-  # bodies collapse to no-ops - keeps the symbol surface complete.
+-  set(_SOFT_FP64_CORE_SOURCES
+-    src/arithmetic.cpp
+-    src/classify.cpp
+-    src/compare.cpp
+-    src/convert.cpp
+-    src/fenv.cpp
+-    src/ocl.cpp
+-    src/rounding.cpp
+-    src/sqrt_fma.cpp
+-    src/sleef/sleef_exp_log.cpp
+-    src/sleef/sleef_inv_hyp_pow.cpp
+-    src/sleef/sleef_stubs.cpp
+-    src/sleef/sleef_trig.cpp)
++  # Discover through soft-fp 2's unified package while consuming the binary64
++  # compatibility package's exact device source and semantic contract. Keep
++  # both discoveries pinned to the pg_accel stage instead of accepting a
++  # machine-global installation.
++  set(soft_fp64_DIR "${ACPP_SOFT_FP64_PACKAGE_DIR}" CACHE PATH
++      "Resolved soft-fp64 compatibility package" FORCE)
++  set(soft_fp_DIR "${_SOFT_FP_PACKAGE_DIR}" CACHE PATH
++      "Resolved unified soft-fp package" FORCE)
++  find_package(soft_fp 2 CONFIG REQUIRED NO_DEFAULT_PATH)
++  if(NOT soft_fp_VERSION VERSION_EQUAL "2.0.0" OR
++      NOT soft_fp64_VERSION VERSION_EQUAL "2.0.0")
++    message(FATAL_ERROR
++      "AdaptiveCpp Metal requires unified and binary64 soft-fp package "
++      "version 2.0.0; found '${soft_fp_VERSION}' and "
++      "'${soft_fp64_VERSION}'.")
++  endif()
++  if(NOT TARGET soft_fp::fp64)
++    message(FATAL_ERROR
++      "soft-fp 2's unified package did not define soft_fp::fp64.")
++  endif()
++  foreach(_required_var IN ITEMS
++      soft_fp64_SOURCE_DIR
++      soft_fp64_INCLUDE_DIR
++      soft_fp64_SOURCES
++      soft_fp64_COMPILE_DEFINITIONS)
++    if(NOT DEFINED ${_required_var} OR "${${_required_var}}" STREQUAL "")
++      message(FATAL_ERROR
++        "soft-fp64 package is missing required source-consumer variable "
++        "${_required_var}.")
++    endif()
++  endforeach()
+ 
++  # Compile the deterministic v2 manifest in source-tree layout. This picks up
++  # source renames/additions without a second hand-maintained list here while
++  # retaining the relative include layout expected by the SLEEF-derived files.
+   set(_SOFT_FP64_ABS_SOURCES "")
+-  foreach(_src ${_SOFT_FP64_CORE_SOURCES})
+-    set(_abs "${ACPP_SOFT_FP64_SRC_DIR}/${_src}")
++  foreach(_installed_src IN LISTS soft_fp64_SOURCES)
++    file(RELATIVE_PATH _src "${soft_fp64_SOURCE_DIR}" "${_installed_src}")
++    if(_src MATCHES "^\\.\\.")
++      message(FATAL_ERROR
++        "soft-fp64 source manifest escaped its source root: ${_installed_src}")
++    endif()
++    set(_abs "${ACPP_SOFT_FP64_SRC_DIR}/src/${_src}")
+     if(NOT EXISTS "${_abs}")
+       message(FATAL_ERROR
+         "soft-fp64 source missing: ${_abs}. Is your soft-fp64 checkout "
+-        "at the expected tag (>=v1.3.0)?")
++        "at the expected tag (v2.0.0)?")
+     endif()
+     list(APPEND _SOFT_FP64_ABS_SOURCES "${_abs}")
+   endforeach()
+@@ -122,28 +163,29 @@ if(WITH_LLVM_TO_METAL)
+   # vectors to MSL, so keeping every TU scalar avoids surprise vectorised
+   # code paths leaking into MSL via libkernel inlining. The cost is small
+   # - these are mostly cold thunks.
+-  list(APPEND METAL_LIBKERNEL_EXTRA_ARGS -fno-vectorize -fno-slp-vectorize -fno-unroll-loops)
++  list(APPEND METAL_LIBKERNEL_EXTRA_ARGS
++       -fno-vectorize
++       -fno-slp-vectorize
++       -fno-unroll-loops
++       -ffp-contract=off
++       -fno-math-errno
++       -fno-trapping-math)
++
++  # Import soft-fp's configured device semantics (disabled fenv, quiet sNaN,
++  # subnormal-preserving OpenCL ABI) instead of duplicating those values.
++  foreach(_definition IN LISTS soft_fp64_COMPILE_DEFINITIONS)
++    list(APPEND METAL_LIBKERNEL_EXTRA_ARGS "-D${_definition}")
++  endforeach()
+ 
+-  # soft-fp64's `tls` fenv mode uses `thread_local` for IEEE flag
+-  # accumulation. MSL has no TLS - the resulting TLS wrapper is
+-  # unresolvable. Mode 0 ("disabled") compiles SF64_FE_RAISE to a no-op
+-  # and removes the thread_local variable. Host-side fenv observability
+-  # is unaffected (it's surfaced from outside the kernel anyway).
+   # `SF64_DISABLE_SLEEF_INLINE` keeps SLEEF polynomial/DD helpers outlined
+   # so the Metal source emitter can compile them as specialized helper
+   # functions instead of dumping massive fp64 bodies into each kernel.
+-  list(APPEND METAL_LIBKERNEL_EXTRA_ARGS
+-       -DSOFT_FP64_FENV_MODE=0
+-       -DSOFT_FP64_SNAN_PROPAGATE=0
+-       -DSF64_DISABLE_SLEEF_INLINE)
+-
+-  # Build soft-fp64's OpenCL compatibility surface as well. The strict
+-  # `sf64_*` ABI remains subnormal-preserving; FTZ is disabled for Metal so
+-  # the additive `sf64_ocl_*` / `sf64_native_*` symbols behave the same way
+-  # unless AdaptiveCpp explicitly chooses OpenCL FTZ semantics later.
+-  list(APPEND METAL_LIBKERNEL_EXTRA_ARGS
+-       -DSOFT_FP64_OCL_ENABLED=1
+-       -DSOFT_FP64_FTZ_MODE=0)
++  # `SF64_DEVICE_CONSTEXPR_BITCAST` selects pg_accel's tracked soft-fp
++  # compatibility patch, keeping kInf integer-derived without emitting host
++  # C++ global constructors into device bitcode.
++  list(APPEND METAL_LIBKERNEL_EXTRA_ARGS
++       -DSF64_DISABLE_SLEEF_INLINE
++       -DSF64_DEVICE_CONSTEXPR_BITCAST)
+ 
+   # Include paths for soft-fp64's relative #includes:
+   #   - src/*.cpp              -> "internal*.h"               (sibling, src/)
+@@ -155,10 +197,13 @@ if(WITH_LLVM_TO_METAL)
+   #                                from src/sleef/ - soft-fp64 root has include/)
+   list(APPEND METAL_LIBKERNEL_EXTRA_ARGS
+        -I "${ACPP_SOFT_FP64_SRC_DIR}/include"
++       -I "${soft_fp64_INCLUDE_DIR}"
+        -I "${ACPP_SOFT_FP64_SRC_DIR}/src"
+        -I "${ACPP_SOFT_FP64_SRC_DIR}/src/sleef")
+ 
+-  message(STATUS "Metal libkernel: linking soft-fp64 from ${ACPP_SOFT_FP64_SRC_DIR}")
++  message(STATUS
++    "Metal libkernel: compiling soft-fp64 ${soft_fp64_VERSION} from "
++    "${ACPP_SOFT_FP64_SRC_DIR} using its configured source manifest")
+ 
+   libkernel_generate_bitcode_target(
+       TARGETNAME metal

@@ -6,12 +6,16 @@ set -euo pipefail
 PG_ACCEL_REPO_ROOT="${PG_ACCEL_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PG_ACCEL_TOOL_ROOT="${PG_ACCEL_TOOL_ROOT:-$PG_ACCEL_REPO_ROOT/.pgaccel}"
 ACPP_REQUIRED_SHA="${ACPP_REQUIRED_SHA:-$(cat "$PG_ACCEL_REPO_ROOT/.acpp-version")}"
-SOFT_FP64_REQUIRED_TAG="${SOFT_FP64_REQUIRED_TAG:-v1.3.0}"
+SOFT_FP64_REQUIRED_TAG="${SOFT_FP64_REQUIRED_TAG:-v2.0.0}"
 ACPP_SRC="${ACPP_SRC:-$PG_ACCEL_TOOL_ROOT/src/AdaptiveCpp}"
 SOFT_FP64_SRC="${SOFT_FP64_SRC:-$PG_ACCEL_TOOL_ROOT/src/soft-fp64}"
+SOFT_FP64_DEVICE_PATCH_RELATIVE="patches/soft-fp/metal-constexpr-bitcast.patch"
+SOFT_FP64_DEVICE_PATCH="$PG_ACCEL_REPO_ROOT/$SOFT_FP64_DEVICE_PATCH_RELATIVE"
+SOFT_FP64_APPLIED_PATCH=""
 ACPP_BACKEND="${ACPP_BACKEND:-auto}"
 ACPP_AUTO_CMAKE_ARGS=()
 ACPP_REQUIRED_CMAKE_ARGS=()
+SOFT_FP64_CMAKE_ARGS=()
 ACPP_MACOS_SDK_PATH="${ACPP_MACOS_SDK_PATH:-}"
 
 detect_backend() {
@@ -162,6 +166,11 @@ if [ -z "${ACPP_BUILD_DIR:-}" ]; then
         ACPP_BUILD_DIR="$ACPP_SRC/build-$backend"
     fi
 fi
+SOFT_FP64_BUILD_DIR="${SOFT_FP64_BUILD_DIR:-$SOFT_FP64_SRC/build-pgaccel-$backend}"
+SOFT_FP64_PREFIX="${SOFT_FP64_PREFIX:-$SOFT_FP64_BUILD_DIR/install}"
+SOFT_FP64_PACKAGE_DIR=""
+SOFT_FP_PACKAGE_DIR=""
+SOFT_FP64_PACKAGE_VERSION="${SOFT_FP64_REQUIRED_TAG#v}"
 
 if [ ! -d "$ACPP_SRC/.git" ]; then
     git clone --branch fork-safe-metal https://github.com/yocontra/AdaptiveCpp.git "$ACPP_SRC"
@@ -234,6 +243,39 @@ apply_sleef_helper_address_space_patch() {
     fi
 }
 
+apply_soft_fp_2_package_patch() {
+    local patch cmake_file marker
+    patch="$PG_ACCEL_REPO_ROOT/patches/adaptivecpp/soft-fp-2-package-integration.patch"
+    cmake_file="$ACPP_SRC/src/libkernel/sscp/metal/CMakeLists.txt"
+    marker="ACPP_SOFT_FP64_PACKAGE_DIR"
+
+    if [ ! -s "$patch" ]; then
+        echo "error: required AdaptiveCpp soft-fp 2 integration patch is missing" >&2
+        exit 1
+    fi
+    if [ ! -f "$cmake_file" ]; then
+        echo "error: AdaptiveCpp soft-fp integration target is missing: $cmake_file" >&2
+        exit 1
+    fi
+    if grep -q "$marker" "$cmake_file"; then
+        if ! git -C "$ACPP_SRC" apply --reverse --check "$patch"; then
+            echo "error: applied AdaptiveCpp soft-fp 2 integration patch has drifted" >&2
+            exit 1
+        fi
+        return 0
+    fi
+    if ! git -C "$ACPP_SRC" apply --check "$patch"; then
+        echo "error: AdaptiveCpp soft-fp 2 integration patch does not apply to pinned source" >&2
+        exit 1
+    fi
+    echo "Applying AdaptiveCpp soft-fp 2 package integration patch"
+    git -C "$ACPP_SRC" apply "$patch"
+    if ! git -C "$ACPP_SRC" apply --reverse --check "$patch"; then
+        echo "error: AdaptiveCpp soft-fp 2 integration patch verification failed" >&2
+        exit 1
+    fi
+}
+
 apply_sscp_host_coverage_patch() {
     local patch marker target
     local targets=(
@@ -288,18 +330,127 @@ apply_sscp_host_coverage_patch() {
 apply_metal_cpp_compat_patch
 apply_default_targets_json_patch
 apply_sleef_helper_address_space_patch
+apply_soft_fp_2_package_patch
 apply_sscp_host_coverage_patch
+
+unapply_soft_fp64_device_patch() {
+    [ -d "$SOFT_FP64_SRC/.git" ] || return 0
+
+    local header
+    header="$SOFT_FP64_SRC/src/sleef/sleef_internal.h"
+    if [ -f "$header" ] && grep -q 'SF64_DEVICE_CONSTEXPR_BITCAST' "$header"; then
+        if [ ! -s "$SOFT_FP64_DEVICE_PATCH" ] ||
+            ! git -C "$SOFT_FP64_SRC" apply --reverse --check "$SOFT_FP64_DEVICE_PATCH"; then
+            echo "error: applied soft-fp Metal compatibility patch has drifted" >&2
+            exit 1
+        fi
+        git -C "$SOFT_FP64_SRC" apply --reverse "$SOFT_FP64_DEVICE_PATCH"
+    fi
+}
+
+apply_soft_fp64_device_patch() {
+    [ "$backend" = "metal" ] || return 0
+
+    if [ ! -s "$SOFT_FP64_DEVICE_PATCH" ]; then
+        echo "error: required soft-fp Metal compatibility patch is missing" >&2
+        exit 1
+    fi
+    if ! git -C "$SOFT_FP64_SRC" apply --check "$SOFT_FP64_DEVICE_PATCH"; then
+        echo "error: soft-fp Metal compatibility patch does not apply to $SOFT_FP64_REQUIRED_TAG" >&2
+        exit 1
+    fi
+    echo "Applying soft-fp Metal constexpr-bitcast compatibility patch"
+    git -C "$SOFT_FP64_SRC" apply "$SOFT_FP64_DEVICE_PATCH"
+    if ! git -C "$SOFT_FP64_SRC" apply --reverse --check "$SOFT_FP64_DEVICE_PATCH"; then
+        echo "error: soft-fp Metal compatibility patch verification failed" >&2
+        exit 1
+    fi
+    SOFT_FP64_APPLIED_PATCH="$SOFT_FP64_DEVICE_PATCH_RELATIVE"
+}
 
 if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
     git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" https://github.com/yocontra/soft-fp.git "$SOFT_FP64_SRC"
+else
+    unapply_soft_fp64_device_patch
+    if ! git -C "$SOFT_FP64_SRC" diff --quiet ||
+        ! git -C "$SOFT_FP64_SRC" diff --cached --quiet; then
+        echo "error: soft-fp checkout has tracked local changes: $SOFT_FP64_SRC" >&2
+        exit 1
+    fi
+    git -C "$SOFT_FP64_SRC" fetch --depth 1 origin \
+        "refs/tags/$SOFT_FP64_REQUIRED_TAG:refs/tags/$SOFT_FP64_REQUIRED_TAG"
+    git -C "$SOFT_FP64_SRC" -c advice.detachedHead=false checkout --detach \
+        "$SOFT_FP64_REQUIRED_TAG^{commit}"
 fi
-soft_fp64_desc="$(git -C "$SOFT_FP64_SRC" describe --tags --always)"
+soft_fp64_desc="$(git -C "$SOFT_FP64_SRC" describe --tags --exact-match HEAD)"
 if [ "$soft_fp64_desc" != "$SOFT_FP64_REQUIRED_TAG" ]; then
     echo "error: soft-fp64 at $soft_fp64_desc, expected $SOFT_FP64_REQUIRED_TAG" >&2
     exit 1
 fi
 SOFT_FP64_HEAD="$(git -C "$SOFT_FP64_SRC" rev-parse HEAD)"
 echo "Using soft-fp64 $soft_fp64_desc ($SOFT_FP64_HEAD)"
+apply_soft_fp64_device_patch
+
+if [ "$backend" = "metal" ]; then
+    SOFT_FP64_CMAKE_ARGS=(
+        -DCMAKE_BUILD_TYPE=Release
+        -DCMAKE_INSTALL_PREFIX="$SOFT_FP64_PREFIX"
+        -DSOFT_FP_BUILD_FP128=OFF
+        -DSOFT_FP_BUILD_FP256=OFF
+        -DSOFT_FP64_BUILD_TESTS=OFF
+        -DSOFT_FP64_BUILD_EXHAUSTIVE=OFF
+        -DSOFT_FP64_BUILD_FUZZ=OFF
+        -DSOFT_FP64_BUILD_BENCH=OFF
+        -DSOFT_FP64_WERROR=ON
+        -DSOFT_FP64_INSTALL=ON
+        -DSOFT_FP64_OCL=on
+        -DSOFT_FP64_FTZ=off
+        -DSOFT_FP64_FENV=disabled
+        -DSOFT_FP64_SNAN=quiet
+        "${ACPP_AUTO_CMAKE_ARGS[@]}"
+    )
+    if [ -n "${LLVM_PREFIX:-}" ]; then
+        SOFT_FP64_CMAKE_ARGS+=(
+            -DCMAKE_C_COMPILER="$LLVM_PREFIX/bin/clang"
+            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++"
+        )
+    fi
+    cmake -S "$SOFT_FP64_SRC" -B "$SOFT_FP64_BUILD_DIR" \
+        "${SOFT_FP64_CMAKE_ARGS[@]}" "${ACPP_REQUIRED_CMAKE_ARGS[@]}"
+    cmake --build "$SOFT_FP64_BUILD_DIR" --target install --parallel \
+        "${SOFT_FP64_BUILD_JOBS:-${ACPP_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}}"
+    SOFT_FP64_PACKAGE_DIR="$SOFT_FP64_PREFIX/lib/cmake/soft_fp64"
+    SOFT_FP_PACKAGE_DIR="$SOFT_FP64_PREFIX/lib/cmake/soft_fp"
+    soft_fp64_config="$SOFT_FP64_PREFIX/include/soft_fp64/config.h"
+    if [ ! -f "$SOFT_FP64_PACKAGE_DIR/soft_fp64Config.cmake" ] ||
+        [ ! -f "$SOFT_FP_PACKAGE_DIR/soft_fpConfig.cmake" ] ||
+        [ ! -f "$soft_fp64_config" ]; then
+        echo "error: configured soft-fp 2 package is incomplete: $SOFT_FP64_PREFIX" >&2
+        exit 1
+    fi
+    for expected_contract in \
+        '#define SOFT_FP64_VERSION_MAJOR 2' \
+        '#define SOFT_FP64_VERSION_MINOR 0' \
+        '#define SOFT_FP64_VERSION_PATCH 0' \
+        '#define SOFT_FP_BUILD_FP128 0' \
+        '#define SOFT_FP_BUILD_FP256 0' \
+        '#define SOFT_FP64_HAS_OCL_ABI 1' \
+        '#define SOFT_FP64_FENV_MODE 0' \
+        '#define SOFT_FP64_SNAN_PROPAGATE 0' \
+        '#define SOFT_FP64_FTZ_MODE 0'; do
+        if ! grep -Fqx "$expected_contract" "$soft_fp64_config"; then
+            echo "error: configured soft-fp64 contract is missing: $expected_contract" >&2
+            exit 1
+        fi
+    done
+    if ! grep -Fq 'sleef_special.cpp' \
+        "$SOFT_FP64_PACKAGE_DIR/soft_fp64Config.cmake" ||
+        grep -Fq 'sleef_stubs.cpp' \
+            "$SOFT_FP64_PACKAGE_DIR/soft_fp64Config.cmake"; then
+        echo "error: configured soft-fp64 source manifest does not match v2" >&2
+        exit 1
+    fi
+fi
 
 common_args=(
     -DCMAKE_BUILD_TYPE=Release
@@ -309,6 +460,12 @@ common_args=(
     -DACPP_SOFT_FP64_SRC_DIR="$SOFT_FP64_SRC"
     "${ACPP_AUTO_CMAKE_ARGS[@]}"
 )
+
+if [ "$backend" = "metal" ]; then
+    common_args+=(
+        -DACPP_SOFT_FP64_PACKAGE_DIR="$SOFT_FP64_PACKAGE_DIR"
+    )
+fi
 
 if [ -n "${LLVM_PREFIX:-}" ]; then
     common_args+=(
@@ -365,9 +522,24 @@ case "$backend" in
         ;;
 esac
 
+# ACPP_CMAKE_FLAGS is intentionally a caller-provided shell-style flag list.
+# shellcheck disable=SC2086
 cmake -S "$ACPP_SRC" -B "$ACPP_BUILD_DIR" \
     "${common_args[@]}" ${ACPP_CMAKE_FLAGS:-} "${ACPP_REQUIRED_CMAKE_ARGS[@]}"
 cmake --build "$ACPP_BUILD_DIR" --target install --parallel "${ACPP_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+
+if [ "$backend" = "metal" ]; then
+    metal_bitcode="$ACPP_PREFIX/lib/hipSYCL/bitcode/libkernel-sscp-metal-full.bc"
+    if [ ! -f "$metal_bitcode" ]; then
+        echo "error: installed AdaptiveCpp Metal libkernel bitcode is missing" >&2
+        exit 1
+    fi
+    if "$LLVM_PREFIX/bin/llvm-dis" "$metal_bitcode" -o - |
+        awk '/^@llvm\.global_ctors = appending/ { found = 1 } END { exit(found ? 0 : 1) }'; then
+        echo "error: soft-fp introduced unsupported global constructors into Metal device bitcode" >&2
+        exit 1
+    fi
+fi
 
 provenance_file="$ACPP_PREFIX/pg_accel-acpp-provenance.txt"
 {
@@ -379,7 +551,19 @@ provenance_file="$ACPP_PREFIX/pg_accel-acpp-provenance.txt"
     echo "soft_fp64_required_tag=$SOFT_FP64_REQUIRED_TAG"
     echo "soft_fp64_desc=$soft_fp64_desc"
     echo "soft_fp64_head=$SOFT_FP64_HEAD"
+    echo "soft_fp64_package_version=$SOFT_FP64_PACKAGE_VERSION"
+    echo "soft_fp64_device_patch=$SOFT_FP64_APPLIED_PATCH"
     echo "soft_fp64_src=$SOFT_FP64_SRC"
+    echo "soft_fp64_build_dir=$SOFT_FP64_BUILD_DIR"
+    echo "soft_fp64_install_prefix=$SOFT_FP64_PREFIX"
+    echo "soft_fp_package_dir=$SOFT_FP_PACKAGE_DIR"
+    echo "soft_fp64_package_dir=$SOFT_FP64_PACKAGE_DIR"
+    printf 'soft_fp64_cmake_args='
+    printf '%s ' "${SOFT_FP64_CMAKE_ARGS[@]}"
+    printf '%s\n' "${ACPP_REQUIRED_CMAKE_ARGS[@]}"
+    echo "soft_fp64_git_status_start"
+    git -C "$SOFT_FP64_SRC" status --short || true
+    echo "soft_fp64_git_status_end"
     echo "llvm_prefix=${LLVM_PREFIX:-}"
     echo "acpp_lld_path=${ACPP_LLD_PATH:-}"
     echo "macos_sdk_path=${ACPP_MACOS_SDK_PATH:-}"
@@ -388,6 +572,8 @@ provenance_file="$ACPP_PREFIX/pg_accel-acpp-provenance.txt"
     echo "cmake_install_prefix=$ACPP_PREFIX"
     printf 'cmake_args='
     printf '%s ' "${common_args[@]}"
+    # Preserve the same intentional flag-list splitting in provenance.
+    # shellcheck disable=SC2086
     printf '%s ' ${ACPP_CMAKE_FLAGS:-}
     printf '%s\n' "${ACPP_REQUIRED_CMAKE_ARGS[@]}"
     echo "acpp_git_status_start"

@@ -58,12 +58,22 @@ On Apple Silicon, source setup requires Xcode command-line tools, Apple
 `lld@20`, `libomp`, `boost`, and `postgis`. The release package retains only
 LLVM 20 and `libomp` as explicit host runtime prerequisites; its installer
 fails before writing files when either runtime is absent. Setup also clones
-`yocontra/soft-fp` tag
-`v1.3.0` and applies the tracked patches under `patches/adaptivecpp/` plus a
-conditional `metal-cpp` compatibility edit. The result is therefore the exact
-fork commit plus reviewed repository patches, not a claim that a pristine
-upstream checkout is sufficient. `scripts/setup_acpp.sh` records the resolved
-commit, backend, compiler paths, CMake arguments, soft-fp64 revision, and
+`yocontra/soft-fp` tag `v2.0.0`, discovers its new unified `soft_fp` package
+with the binary64 compatibility target, and feeds AdaptiveCpp the generated
+feature contract, semantic definitions, and deterministic source manifest. The
+Metal configuration
+retains soft-fp's subnormal-preserving compatibility/native ABI surface and
+zero-cost disabled exception environment; binary128 and binary256 are
+deliberately omitted because pg_accel's PostgreSQL `float8` ABI has no
+wider-format carrier. The setup then applies the tracked patches under
+`patches/adaptivecpp/` and `patches/soft-fp/` plus a conditional `metal-cpp`
+compatibility edit. The soft-fp patch makes its integer-derived infinity a
+Clang constexpr for device compilation, avoiding unsupported C++ global
+constructors in Metal bitcode without changing host-package behavior. The
+result is therefore the exact fork commit plus reviewed repository patches,
+not a claim that a pristine upstream checkout is sufficient.
+`scripts/setup_acpp.sh` records the resolved commit, backend, compiler paths,
+CMake arguments, configured soft-fp package contract, soft-fp64 revision, and
 post-patch Git status in
 `${ACPP_PREFIX}/pg_accel-acpp-provenance.txt`. That file from the exact release
 candidate is required evidence; these instructions alone do not close a
