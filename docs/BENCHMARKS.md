@@ -174,6 +174,7 @@ than the unprivileged local warm gate:
 | `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.15x |
 | `mixed_join_agg_int4` | exact resident hash join plus grouped SUM(int4)/COUNT | 1.15x |
 | `ssbm_resident_int4_star` | exact two-dimension date+part star grouped by year and part size, SUM(int4)/COUNT | 1.15x |
+| `ssbm_resident_int8_star` | exact two-dimension INT8 membership star grouped by year and part size, SUM(int4)/COUNT | 1.15x |
 | `hashjoin_10k_1m` | resident equality hash join COUNT | 1.15x |
 | `h3_cell_to_parent` | fused H3 parent grouped count | 1.15x |
 
@@ -195,7 +196,7 @@ not make them eligible for the current ship gate.
 
 Any change to a workload SQL contract, fixture, threshold, or candidate tree
 invalidates the predecessor population freeze and random selection for the new
-candidate. Freeze the replacement SHA/tree and six-cell population, then make a
+candidate. Freeze the replacement SHA/tree and seven-cell population, then make a
 fresh independent write-once random selection before executing release gates;
 retained predecessor evidence is transition history only.
 

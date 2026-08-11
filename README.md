@@ -3,9 +3,9 @@
 `pg_accel` is a PostgreSQL Custom Scan extension for GPU-resident query
 execution. The current production planner surface is intentionally narrower
 than the kernel library: it can select a childless resident aggregate plan for
-covered reducing, grouped-aggregate, and star-aggregate SQL shapes. Other
-kernel families remain unavailable to normal planning until they have a
-complete resident pipeline.
+covered reducing, grouped-aggregate, and star-aggregate SQL shapes, plus the
+qualified childless resident raster transform. Other kernel families remain
+unavailable to normal planning until they have a complete resident pipeline.
 
 [![License: PostgreSQL](https://img.shields.io/badge/license-PostgreSQL-blue.svg)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/yocontra/pg_accel/ci.yml?label=CI)](https://github.com/yocontra/pg_accel/actions)
@@ -92,7 +92,7 @@ CREATE EXTENSION pg_accel;
 
 This example uses the same resident grouped-aggregate shape asserted by the
 extension test suite at
-`pg_accel/src/tests/mod.rs:569-626`.
+`pg_accel/src/tests/mod.rs:599-654`.
 
 ```sql
 CREATE TABLE pg_accel_quickstart AS
@@ -129,9 +129,9 @@ Custom Scan (GpuAccelAgg)
 
 `GPU Kernel Dispatched` is present only under `EXPLAIN ANALYZE`. The property
 names are emitted by
-`pg_accel/src/engine/ffi/custom_scan/explain.rs:44-150`; the aggregate and raster
+`pg_accel/src/engine/ffi/custom_scan/explain.rs:44-151`; the aggregate and raster
 method tables are defined and registered at
-`pg_accel/src/engine/ffi/custom_scan/mod.rs:251-309`.
+`pg_accel/src/engine/ffi/custom_scan/mod.rs:377-448`.
 
 To prove the native decline boundary with the same table:
 
@@ -147,13 +147,13 @@ SELECT pg_accel_last_planner_rejection_reason();
 
 A base scan/filter plan does not contain a pg_accel Custom Scan. The production
 base-relation hook records the decline and leaves the PostgreSQL path intact at
-`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:607-627`.
+`pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:594-639`.
 
 ## Capability matrix
 
 Kernel or bridge presence is not equivalent to production planner selection.
 The normal upper-path hook injects the generic aggregate and qualified raster
-candidates at `pg_accel/src/engine/ffi/planner_hooks/mod.rs:205-243`. Only
+candidates at `pg_accel/src/engine/ffi/planner_hooks/mod.rs:221-251`. Only
 aggregate and raster Custom Scan method tables are registered. Base scans,
 row-returning joins, sorts, windows, and standalone function/SRF shapes remain
 native and have no registered executor.
@@ -210,7 +210,7 @@ resident, normally through `pg_accel_pin`.
 | `pg_accel_resident_live_bytes()` | bigint | Show the exact cluster-wide resident byte ledger at that instant. |
 
 The SQL wrappers and status tuple are defined at
-`pg_accel/src/engine/residency/store.rs:3352-3427`. Pins do not bypass
+`pg_accel/src/engine/residency/store.rs:3595-3715`. Pins do not bypass
 `pg_accel.resident_memory_budget_mb`.
 
 ## Configuration

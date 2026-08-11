@@ -1,7 +1,8 @@
 # Contributing to pg_accel
 
 The current production surface is a GPU-resident reducing/grouped aggregate
-Custom Scan. Read [README.md](README.md#capability-matrix) and
+Custom Scan plus the qualified resident raster transform. Read
+[README.md](README.md#capability-matrix) and
 [ARCHITECTURE.md](ARCHITECTURE.md) before changing planner or execution claims.
 A kernel, bridge, executor, adapter, or benchmark workload alone is not
 production planner support.
@@ -72,8 +73,9 @@ For planner or execution work:
 6. Add EXPLAIN selection/dispatch evidence and native-equivalence coverage.
 7. Test failure, invalidation, rescan, cleanup, and budget behavior as relevant.
 
-Normal production path injection currently occurs only through
-`pg_accel/src/engine/ffi/planner_hooks/mod.rs:204-208`. Changing the public
+Normal production path injection currently occurs through the qualified
+aggregate and raster arms at
+`pg_accel/src/engine/ffi/planner_hooks/mod.rs:221-251`. Changing the public
 capability matrix requires normal-GUC selection and dispatch evidence, not a
 test-only force path.
 

@@ -1,10 +1,11 @@
 # pg_accel Developer Guide
 
 `pg_accel` is a PostgreSQL extension written in Rust/pgrx with an
-AdaptiveCpp/SYCL kernel library. The current production planner selects only
-covered resident reducing/grouped aggregate shapes as
-`Custom Scan (GpuAccelAgg)`. Kernel, bridge, executor, adapter, and benchmark
-code for other families is not evidence of planner selection.
+AdaptiveCpp/SYCL kernel library. The current production planner selects covered
+resident reducing/grouped aggregate shapes as `Custom Scan (GpuAccelAgg)` and
+the qualified resident raster transform as `Custom Scan (GpuAccelRaster)`.
+Kernel, bridge, executor, adapter, and benchmark code for other families is not
+evidence of planner selection.
 
 The validated GPU development target is Metal on Apple Silicon. CUDA/NVIDIA validation is owner-deferred
 in `TODO.md`; do not present it as supported or
@@ -39,7 +40,8 @@ Do not delete the cache with an ad hoc recursive command.
 ## Architecture
 
 1. **Planner hooks**: `pg_accel/src/engine/ffi/planner_hooks/` observes paths;
-   only `generic_groupagg` injects a normal production candidate.
+   `generic_groupagg` and the qualified raster planner inject normal production
+   candidates.
 2. **Shape model**: `planner_hooks/shape/` extracts a reducing query into a
    `ShapePlan` or returns a stable decline code.
 3. **Neutral contract**: `pg_accel/src/engine/spec/` owns AQS3 logical semantics
@@ -56,18 +58,20 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing a cross-layer contract.
 
 ## Production planner rules
 
-- Normal path injection occurs only from `UPPERREL_GROUP_AGG` through
-  `generic_groupagg::try_inject` at
-  `pg_accel/src/engine/ffi/planner_hooks/mod.rs:204-208`.
+- Normal path injection occurs through `generic_groupagg::try_inject` at
+  `UPPERREL_GROUP_AGG` and qualified `raster::try_inject` at `UPPERREL_FINAL` in
+  `pg_accel/src/engine/ffi/planner_hooks/mod.rs:221-251`.
 - Base scans, filters, sorts, and function scans remain native at
-  `pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:483-502`.
+  `pg_accel/src/engine/ffi/planner_hooks/rel_pathlist.rs:594-639`.
 - Row-returning joins remain native at
-  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:123-131`. A star join
+  `pg_accel/src/engine/ffi/planner_hooks/join_pathlist.rs:128-137`. A star join
   consumed inside one aggregate descriptor is a different, childless shape.
 - Windows and target-list SRFs remain native at
-  `pg_accel/src/engine/ffi/planner_hooks/mod.rs:209-234`.
-- Production raster planning is observation-only. Forced raster and spatial
-  descriptor admissions are test-only.
+  `pg_accel/src/engine/ffi/planner_hooks/mod.rs:228-268`.
+- Production raster planning selects only the exact qualified resident RQS2
+  candidate; forced raster and broader spatial descriptor admissions remain
+  test-only. The normal raster entry point is at
+  `pg_accel/src/engine/ffi/planner_hooks/raster.rs:906-926`.
 - Adapter registration discovers an OID and operation contract. It does not add
   a PostgreSQL path.
 - A new selected path requires complete shape extraction, runtime descriptor
@@ -156,7 +160,7 @@ SELECT pg_accel_evict('table_name');
 `pg_accel.auto_load=off` still permits an explicit pin and reload of an
 existing pin. It prevents an ordinary selected plan from synchronously loading
 missing unpinned data. The authorization check is at
-`pg_accel/src/engine/residency/store.rs:1827-1865`.
+`pg_accel/src/engine/residency/store.rs:1942-1995`.
 
 ## EXPLAIN and diagnostics
 

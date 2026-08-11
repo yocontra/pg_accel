@@ -1,234 +1,224 @@
 # Remaining Work
 
-This is the unfinished-work register for pg_accel after the Resident v2 rebuild.
-Completed implementation history belongs in Git and `CHANGELOG.md`; it is not
-repeated here. Items are ordered by release risk and expected performance value.
+This file records unfinished work after the Resident v2 rebuild. Completed
+implementation history belongs in Git and `CHANGELOG.md`. A checked item below
+is local evidence, not a substitute for hosted CI, independent hardware, or a
+published release artifact.
 
-## Current Reconciled State
+## Current Candidate
 
-The focused correctness, crash-safety, resource-lifetime, planner-contract, and
-anti-cheat audits found no remaining known critical or high-severity safety defect.
-That statement records the present audit result, not a claim that unsafe code is
-exhaustively proved or that future fuzzing cannot find a defect.
-
-The current local tree has passed these engineering gates:
-
-- Rust/benchmark test layers: 1,469 + 55 + 493 tests.
-- Strict workspace Clippy with warnings denied for PG18 and PG19.
-- Native CTest: 32/32.
-- External SQL suite: 54/54 files and 293/293 semantic assertions.
-- Production residency-ledger exactness gate: PASS.
-- Final warm-matrix validator: 29/29 correctness and path classification,
-  14/14 selected cells at or above 1.15x, minimum selected speedup 1.839373694x,
-  and zero stock fallback.
-
-The final matrix is bound to commit
-`9c53d41702a10caf5fd7932251aa22b126ef8136`, tree
-`239429e220544b789141144463e441759f4a177b`, and immutable-style artifact
-`.codex/scratch/final-warm-benchmark-9c53d417-PREPARED-20260802T063630Z`.
-Its 1,014-entry terminal `SHA256SUMS` seal hashes to
-`230e6bd8f43a31040c838e69dd46f3405a1ba4082c62c265b502729d53aff855`.
-The validator passed, but the stricter performance analyzer exited 1 because
-native-decline parity passed only 4/15 cells. Performance qualification is
-therefore still open. Local results do not substitute for hosted CI,
-clean-machine installation, or release sign-off.
+- [x] Candidate commit: `3a0bcd737f23a28acad55874b17fde9a31bb4f59`.
+  Candidate tree: `2d48d0568629009d2a7aafe0127322d53caca684`.
+- [x] PostgreSQL 18 and 19 strict workspace Clippy/check gates pass.
+- [x] Rust extension library passes 817/817 tests; benchmark harness passes
+  509/509; live plan/integration suite passes 554/554.
+- [x] Native Metal CTest passes 32/32 executables. The focused H3 suite passes
+  1,135/1,135 plus 23/23 no-device cases.
+- [x] External PostgreSQL 18 SQL passes 58/58 files and 306/306 semantic
+  assertions. The semantic matrix covers 22 families, and all released selected
+  families have declared NULL, prepared-plan, DML, DDL, dispatch, and shape
+  evidence.
+- [x] Production residency-ledger integration, packaging tests, dependency
+  policy/RustSec audit, documentation parity, coverage-scope audit, Metal stress
+  artifact tests, and the object-bound CPU-cheat audit pass.
+- [x] The sealed warm matrix at
+  `.codex/scratch/final-warm-benchmark-3a0bcd73-PREPARED-20260811T072357Z`
+  passes correctness and path validation for 37/37 cells: 20/20 GPU winners at
+  or above 1.15x, 17/17 exact native declines, and zero stock fallback. Its
+  1,362-entry `SHA256SUMS` seal hashes to
+  `5c9f50243bbe0141fa23e8bd0dd5a84a577f95a1646bcc927553fb77c1ced70c`.
+- [x] The focused 30-pair artifact at
+  `.codex/scratch/supplemental-warm-diagnostics-3a0bcd73-PREPARED-20260811T074540Z`
+  passes 11/11 selected winner diagnostics in both full and post-first views.
+  Full median speedups range from 3.758x to 21.171x; every paired test has
+  `p < 0.003` and Cohen's `d > 0.865`. Its 781-entry seal hashes to
+  `4a838b7c3dae5f393ef648c2b47d0f47ae88e8b60779dc1b039ea26565b92d58`.
+- [ ] Native-decline parity is still release-blocking. The 30-pair diagnostic
+  failed 10/10 tested native cells; eight exceeded a descriptive median or p95
+  bound and all ten failed exact paired non-inferiority. Selected execution is
+  green, but extension-enabled native queries are not yet consistently as fast
+  as matched PostgreSQL.
 
 ## Non-Negotiable Invariants
 
-- A selected plan must run a real GPU-resident pipeline. Registration, kernel
-  presence, test-only forcing, labels, or planner selection without device work
-  do not count as support.
-- Every selected benchmark cell must prove exact PostgreSQL result parity, real
-  dispatch, consumed device output, zero stock/CPU fallback, no crash, and at
-  least 1.15x warm speedup over its matched PostgreSQL plan.
-- Every declined cell must retain the PostgreSQL plan, report an exact structural
-  or cost reason, perform zero GPU dispatch, and pass extension-enabled versus
-  extension-disabled native-parity bounds.
-- A GPU failure after production selection is an error. The only permitted CPU
-  work inside a selected path is the documented exact PostGIS recheck of a
-  kernel-success `UNCERTAIN` result; it must be visible, bounded, and included in
-  end-to-end cost and timing.
-- Performance evidence must bind an exact source SHA and environment, use paired
-  interleaved runs, retain raw samples, prove correctness and path classification,
-  and produce an immutable artifact. Never tune against a single median, weaken a
-  threshold, relabel an older artifact, or count a prospective/test-only lane as
-  released support.
-- Unsupported row-proportional work remains PostgreSQL-native unless it is fused
-  into a bounded or cardinality-reducing resident consumer and independently
-  clears the same correctness and performance gates.
+- A selected plan must execute a real GPU-resident pipeline, return an exact
+  PostgreSQL result, consume device-produced output, record coherent same-backend
+  counters, use zero stock fallback, and clear its registered 1.15x warm floor.
+- A declined plan must remain PostgreSQL-native, expose its exact structural or
+  cost reason, dispatch zero GPU work, and pass the paired native-parity contract.
+- GPU failure after production selection is an error. No benchmark label, test
+  GUC, cached output, registration entry, or planner choice alone proves GPU work.
+- Evidence must bind an exact clean source/tree and binary, retain raw paired
+  samples, record first-use work, and use immutable-style manifests and seals.
+  Never weaken a threshold or omit a slow sample to make a gate pass.
 
-## P0: Final Performance Qualification
+## P0: Native-Decline Overhead
 
-- [x] Freeze the measured candidate and record its real source SHA, toolchain,
-  PostgreSQL version, device/runtime metadata, benchmark population, settings,
-  seed, and independently selected write-once workload set. The freeze and seal
-  are recorded above; source or population changes require a new selection.
-- [x] Execute and validate the complete 29-cell final warm matrix on qualified
-  Metal hardware. The validator passed 29/29 with 14/14 selected winners, zero
-  fallback, exact decline reasons, and complete raw evidence. This closes matrix
-  execution only; the stricter native-parity analyzer remains release-blocking.
+The focused native artifact reproduced real overhead. Representative full-series
+enabled-minus-disabled results include:
 
-The 11 exact native-parity failures are extension-enabled native minus matched
-extension-disabled PostgreSQL. All also failed the predeclared paired
-non-inferiority test.
+| Cell | Median delta | p95 delta |
+|---|---:|---:|
+| `grouped_agg_int4` 10K | +5.49% | +28.79% |
+| `ssbm_resident_int4_star` 10M | +9.38% | -12.72% |
+| `hash_join` 10K | +10.98% | -8.49% |
+| `hashjoin_10k_1m` 10K | +22.42% | -2.45% |
+| `hashjoin_10k_1m` 100K | +14.65% | +11.04% |
+| `reduce_f64_minmax` 100K | +10.44% | -4.92% |
+| `ssbm_resident_int8_star` 10K | +11.88% | +22.78% |
 
-| Native lane | Scale | Median delta | p95 delta |
-|---|---:|---:|---:|
-| `grouped_agg_int4` | 10K | +0.365896 ms (+7.931%) | +0.321218 ms (+6.512%) |
-| `grouped_agg_int4` | 100K | +0.124771 ms (+1.973%) | +0.403748 ms (+5.975%) |
-| `predicate_expression_grouped_agg_int4` | 10K | +0.243520 ms (+5.294%) | +0.260752 ms (+5.302%) |
-| `predicate_expression_grouped_agg_int4` | 10M | +0.411604 ms (+0.457%) | +18.703549 ms (+20.159%) |
-| `mixed_join_agg_int4` | 10K | +0.319979 ms (+6.638%) | +0.494914 ms (+9.724%) |
-| `mixed_join_agg_int4` | 10M | -0.032937 ms (-0.014%) | +12.640547 ms (+5.222%) |
-| `ssbm_resident_int4_star` | 10K | +0.546729 ms (+9.241%) | +0.743314 ms (+11.668%) |
-| `hash_join` | 10K | +0.299354 ms (+6.276%) | +0.241066 ms (+4.739%) |
-| `hashjoin_10k_1m` | 10K | +0.163125 ms (+3.383%) | +0.353618 ms (+6.822%) |
-| `hashjoin_10k_1m` | 100K | +0.283459 ms (+4.115%) | +0.123142 ms (+1.657%) |
-| `h3_cell_to_parent` | 10K | +0.380936 ms (+3.469%) | +0.275021 ms (+2.403%) |
+- [ ] Add substage timing for query fingerprint construction, decline-cache
+  lookup, dependency revalidation, native-cost reconstruction, and rejection
+  recording. Standard benchmarks must keep profiling off.
+- [ ] Build the statement source/search-path/security fingerprint once in the
+  outer planner hook instead of recopying it in each candidate recognizer.
+- [ ] Stop cloning complete decline-cache entries on lookup and avoid repeated
+  residency-store scans while preserving exact collision checks, catalog epoch,
+  dependency stamps, policy GUCs, and error-safe nested planner cleanup.
+- [ ] Remove avoidable tracing/map/counter work from unprofiled rejection paths.
+- [ ] Re-run all 17 registered native-decline cells with 30 balanced pairs. Pass
+  median allowance `max(0.25 ms, 2%)`, p95 allowance 5%, and exact paired
+  non-inferiority at `alpha=0.05` in 17/17 cells. Target planner upper-group
+  means are at most 25 us for simple declines and 75 us for join/reduce declines.
 
-- [ ] Capture per-query planner-stage calls and elapsed time for every failing
-  native cell, including structural recognition, catalog/syscache, statistics,
-  residency, device, cost, and final rejection, before changing admission code.
-- [ ] Eliminate fixed planner-hook overhead on the small 10K/100K declines by
-  moving immutable structural rejects ahead of catalog, residency, device, and
-  expression work where semantics permit. Repeat the exact paired parity gate.
-- [ ] Investigate only the p95 tail on the two failing 10M native cells. Their
-  medians are within 0.5%; do not redesign or retune their production path from
-  tail evidence until stage counters identify a repeatable cause.
-- [ ] Run focused same-host balanced ABBA repeats before changing selected code
-  for the three real same-path median regressions: `ssbm_resident_int4_star`
-  100K (+39.244%), `hash_join` 1M (+12.779%), and `hashjoin_10k_1m` 10M
-  (+13.833%). Separate product latency from PostgreSQL/environment movement.
-- [ ] Keep every currently selected cell above the 1.15x floor throughout
-  remediation. A selected regression may be optimized or truthfully declined,
-  but thresholds, correctness, dispatch, consumption, and fallback rules may
-  not be weakened.
-- [ ] Re-measure admission boundaries around every changed lane at neighboring
-  row counts, cardinalities, selectivities, widths, output bounds, batch counts,
-  and residency states. Planner admission and benchmark classification must be
-  generated from the same released performance envelope.
+## P0: Benchmark Lifecycle Accounting
 
-Lower-priority optimization remains contingent on the focused repeats above:
+The broad ten-pair run placed a forced artifact rebuild in measured sample one.
+In the focused repeat that first accelerated sample was 3.44x to 105.59x slower
+than the post-first median. With 30 pairs it no longer changes the winner verdict,
+but it makes a ten-sample warm p95 describe lifecycle work rather than steady state.
 
-- Make structural native declines effectively constant-time before catalog,
-  residency, device, expression-walk, or cost work where semantics permit.
-- Remove redundant artifact validation, wrapper, queue-command, wait, and output
-  materialization costs while preserving generation checks and cancellation.
-- Tune shape-specific chunk caps and reusable membership/H3 artifacts for large
-  fixed-count joins and other bounded reducing paths.
-- Reconsider the currently native large dense aggregate boundary only with a
-  persistent reset/accumulate/finalize lifecycle and proved integer-prefix,
-  workspace, cancellation, and output bounds.
-- Charge cold load and derived-artifact construction honestly. Nominal reuse may
-  not hide first-use cost, eviction, or invalidation rebuilds.
+- [ ] Keep refresh/rebuild/dispatch as a separately sealed lifecycle probe, then
+  measure ten artifact-hit warm pairs independently. Reports and validators must
+  require both; the rebuild sample must never be discarded or relabeled.
+- [ ] Record `Built`, `Rebuilt`, and `Hit` outcomes, construction bytes/time,
+  generation/dependency identity, dispatch counters, and output consumption for
+  the lifecycle and steady-state series.
+- [ ] Preserve a combined end-to-end view for cost-model calibration while using
+  the steady-state series for the warm latency ratchet.
 
-## P1: Profitable Operator Gaps
+## P1: Selected-Path Performance
 
-Expand one bounded resident lane at a time. Keep each lane native until exact
-differential semantics and the full 1.15x gate pass.
+No selected regression reproduced under the focused repeat: all 11 repeated
+winners improved their speedup over the broad run. The following work is still
+valuable for latency and headroom, but must not bypass correctness or lifecycle
+evidence.
 
-- [ ] Add expression predicates, measures, and group keys, starting with common
-  arithmetic, `CASE`, multiple `AND` ranges, `IN`, `IS NULL`, and bounded
-  `FILTER`/`HAVING` shapes. Prove PostgreSQL NULL, overflow, divide-by-zero, cast,
-  NaN, and collation behavior.
-- [ ] Extend exact aggregate/type reachability where profitable: bool/int2/int8,
-  float4/float8, date/time, integer `AVG`, and safe `SUM` combinations. PostgreSQL
-  accumulator/result types and overflow rules are mandatory; never approximate
-  `NUMERIC` with f64. `DISTINCT`, ordered-set, and unbounded state remain native
-  until a bounded winning design exists.
-- [ ] Broaden resident star membership to useful int8 and composite keys, then
-  catalog-proved collation-safe text cases. Consider semi/anti membership only
-  inside reducing consumers with exact NULL, `NOT IN`, duplicate, and
-  multiplicity semantics.
-- [ ] Make `h3_latlng_to_cell` reachable as a fused resident group producer and
-  compose it with parent rollup, filters, measures, and joins. Standalone H3
-  scalars and variable-output SRFs remain native unless fused into a bounded
-  reducing pipeline.
-- [ ] Promote a production spatial aggregate only after the existing point/simple
-  polygon work clears exact PostGIS differential tests, uncertain-row recheck
-  accounting, cancellation/crash-band stress, calibrated cost, and end-to-end
-  performance. Extend `Contains`/`Within` and point-point `DWithin` only afterward.
-- [ ] Promote one exact resident raster `ST_Reclass` subset before considering
-  NDVI, slope, clip, summaries, or map algebra. Include reconstruction/output
-  bytes, NULL/nodata/malformed cases, dispatch proof, and a matching winning
-  benchmark.
-- [ ] Evaluate only reducing window/sort shapes such as top-N per partition,
-  rank-filter pushdown, or window-to-aggregate. Full-output sort, window, base
-  scan, projection, and row-returning joins remain intentionally native.
+- [ ] Profile `DescriptorAggPlan::new`, artifact ensure/lookup, derived-input
+  binding, grouped-workspace allocation, output allocation, kernel execution,
+  and tuple materialization separately.
+- [ ] Evaluate an exact-shape backend-local grouped workspace pool. Poisoned
+  workspaces must be evicted; cancellation, fork/backend exit, generation changes,
+  and device accounting must remain fail-closed and leak-free.
+- [ ] Return artifact evidence and byte accounting directly from ensure/rebuild so
+  the executor does not repeat a lookup solely for reporting.
+- [ ] Reduce the 10M dense hash-aggregate lifecycle from 40 accumulate calls plus
+  finalize. Test a dedicated 1M-row dense-session chunk boundary (target at most
+  11 calls) before considering queued multi-range submission. Preserve interrupt
+  latency and exact workspace limits.
+- [ ] Add dense-session launch count to cost estimation and wire completed
+  aggregate batches into global batch counters; EXPLAIN and counters must agree.
+- [ ] Acceptance for these changes: one kernel/query where applicable, zero
+  fallback, exact results, selected floor at least 1.15x, normalized median no
+  worse than 5%, bounded cancellation, and clean fork/resource tests.
 
-## P1: Risk-Weighted Safety And Coverage
+## P1: Measured Losing Lanes
 
-- [ ] Extend production-built stress and failure injection beyond the completed
-  focused audit to unsafe resource boundaries still identified as weak by the
-  exact-candidate coverage report. Prioritize multi-session residency/invalidation,
+These implementations remain internal or explicit native declines until they are
+redesigned and independently requalified.
+
+- [ ] Multiple same-column range intersection: the 1M candidate measured
+  10,100.35 ms versus PostgreSQL 19.31 ms (0.00191x, about 523x slower). Keep
+  `shape_multiple_range_predicates`; redesign as one fused bounded device filter
+  without repeated expression/materialization work.
+- [ ] Grouped `COUNT(bool_column)`: the 1M candidate measured 3,508.11 ms versus
+  PostgreSQL 18.87 ms (0.0054x, about 186x slower). Keep
+  `shape_unsupported_aggregate_input`; investigate bool-specialized direct
+  counters or a reusable prepared artifact before rerunning SQL94 and its gate.
+
+## P1: Profitable Unqualified Surface
+
+- [ ] Expressions and predicates: arithmetic, `CASE`, multiple `AND` ranges,
+  `IN`, `IS NULL`, and bounded `FILTER`/`HAVING`, with exact NULL, overflow,
+  divide-by-zero, cast, NaN, and collation behavior.
+- [ ] Types and aggregates: bool/int2/general int8, float4/float8, date/time,
+  integer `AVG`, and safe `SUM` combinations. Preserve PostgreSQL accumulator,
+  result, and overflow semantics; never approximate `NUMERIC` with f64.
+- [ ] Membership and joins: composite keys, broader exact int8 shapes,
+  catalog-proved collation-safe text, and reducing semi/anti membership with exact
+  NULL, `NOT IN`, duplicate, and multiplicity semantics. Row-returning joins stay
+  native until a bounded winning design exists.
+- [ ] H3: expose resident `h3_latlng_to_cell` only as a fused reducing group
+  producer, then compose it with parent rollup, filters, measures, and joins.
+- [ ] Spatial: expand beyond the released 1M-row, 1,025-coordinate
+  `ST_Intersects(point, one-ring polygon)` count only after differential recheck,
+  cancellation, crash-band, and performance qualification. Next candidates are
+  `Contains`, `Within`, and point-point `DWithin`.
+- [ ] Raster: expand beyond the released resident three-argument integer
+  `ST_Reclass` pixel envelope. NDVI, slope, clip, summaries, and map algebra need
+  reconstruction-byte accounting, malformed/NULL/nodata tests, and winning evidence.
+- [ ] Sort/window: evaluate only cardinality-reducing top-N, rank-filter, or
+  window-to-aggregate forms. Full-output scans, projections, sorts, windows, and
+  row-returning joins remain intentionally native.
+
+## P1: Residual Safety And Coverage
+
+- [ ] Extend failure injection across multi-session residency/invalidation,
   executor reset/drop, planner private data, allocation/free, copy/wait,
   cancellation, output materialization, PostGIS calls, and derived-artifact
-  publication. Assert exactly-once cleanup, ledger balance, and backend reuse
-  after caught failures.
-- [ ] Add property and fuzz coverage for private-data codecs, aggregate
-  descriptors, planner-list validation, geometry/raster/H3 packed inputs,
-  byte-count and cardinality overflow, aliasing, and C ABI size/offset/value
-  contracts. Malformed data must fail before allocation or dereference.
-- [ ] Produce risk-weighted coverage gates in addition to global percentages.
-  Every unsafe FFI, lifetime, cleanup, invalidation, and cancellation branch
-  needs normal, malformed-input, injected-failure, and cancellation coverage
-  where applicable. Keep Rust, C++/SYCL, and SQL semantic coverage at or above
-  the release threshold on the exact candidate.
-- [ ] Maintain a versioned SQL semantic matrix for every selected and intentional
-  decline family across PostgreSQL versions, types, NULL patterns, shape limits,
-  DDL/DML/prepared-plan lifecycles, dispatch expectations, and exact rejection
-  reasons.
+  publication. Require exactly-once cleanup, balanced ledger, and backend reuse.
+- [ ] Property/fuzz private-data codecs, descriptors and PostgreSQL lists,
+  geometry/raster/H3 packed inputs, byte/cardinality overflow, pointer aliasing,
+  and C ABI layouts. Malformed input must fail before allocation or dereference.
+- [ ] Add risk-weighted coverage for every unsafe FFI, lifetime, cleanup,
+  invalidation, and cancellation branch in addition to global percentage gates.
+- [ ] Keep historical crash-prone grouped/hash-join cardinalities structurally
+  gated until redesigned kernels pass exact crash-band, cancellation, and memory
+  stress. Do not present guarded code as reachable support.
+- [ ] Close remaining declaration gaps in `coverage/sql-semantic-matrix.json`,
+  prioritizing declined aggregate modifiers, base/row-returning paths, H3 scalar
+  and SRF shapes, sort/top-k/window, and neighboring raster/spatial declines.
+- [ ] Add live PG19 package/install/SQL evidence. PG19 lint, check, and test
+  compilation alone do not prove a released PostgreSQL 19 package.
 
 ## Release And Publication Gates
 
-- [ ] Produce a fresh exact-candidate coverage and Metal stress bundle covering
-  correctness, mixed workloads, fork, cancellation, concurrency, memory
-  pressure, JIT/archive state, per-kernel cold/warm first dispatch, clean logs,
-  and resource balance.
-- [ ] Pass hosted release CI for macOS arm64 Metal and Linux x86_64 no-GPU on the
-  frozen candidate, publishing durable logs and artifacts rather than workflow
-  configuration alone.
-- [ ] Verify the public source-build, package, install, and `CREATE EXTENSION`
-  instructions from a clean checkout on a fresh Apple Silicon machine with no
-  undocumented fixes. Record exact toolchain, extension, runtime, PostgreSQL,
-  and binary provenance.
-- [ ] Run the exact 1B-row scale gate when sufficient storage is available. A
-  smaller fixture cannot substitute for it, and no 1B correctness or performance
-  claim may be made before it passes.
-- [ ] Finish public-repository readiness: licenses, security policy,
-  contribution/support guidance, issue templates, supported-hardware and
-  limitation docs, reproducible benchmark evidence, and failure-reporting docs.
-- [ ] Replace every placeholder in `docs/release-checklist-1.0.md` with a durable
-  SHA, CI URL, artifact, explicit accepted deferral, or named sign-off. Both
-  `just release-checklist-audit` and `just release-verify` must pass honestly.
-- [ ] Cut `v1.0.0-rc1` only after all non-deferred gates pass, monitor that exact
-  candidate for one week, then publish `v1.0.0` with source/package artifacts,
-  checksums, release notes, benchmark evidence, install docs, limitations, and
-  final owner/reviewer sign-off.
+- [ ] Produce a fresh exact-candidate coverage and enriched Metal stress bundle
+  covering mixed workloads, fork, cancellation, concurrency, memory pressure,
+  per-kernel JIT/archive cold/warm evidence, clean logs, and resource balance.
+- [ ] Pass hosted release CI on macOS arm64 Metal and Linux x86_64 no-GPU, with
+  durable artifacts from the exact candidate.
+- [ ] Verify public source-build, package, install, and `CREATE EXTENSION`
+  instructions from a clean checkout on a fresh Apple Silicon machine.
+- [ ] Run the 1B-row scale gate when sufficient storage is available. No smaller
+  fixture may be represented as 1B evidence.
+- [ ] Finish the public release checklist: replace placeholders with durable
+  SHAs, CI URLs, artifacts, explicit accepted deferrals, or named sign-off; pass
+  `just release-checklist-audit` and `just release-verify` honestly.
+- [ ] Publish `v1.0.0-rc1`, monitor that exact candidate for one week, then
+  publish `v1.0.0` with checksums, release notes, packages, benchmark evidence,
+  limitations, and owner/reviewer sign-off.
+- [ ] Optional privileged OS page-cache certification may be run later, but it is
+  not a local functional gate and must not be inferred from warm-only evidence.
 
 ## OWNER-DEFERRED: CUDA, NVIDIA, And PG-Strom
 
-The owner explicitly deferred this work until an NVIDIA CUDA device is available.
-It does not block the Metal-only release, but no CUDA/NVIDIA/PG-Strom support or
-performance claim may be made before it is completed.
+The owner deferred this work until a CUDA device is available. It does not block
+the Metal-only build, but no CUDA/NVIDIA/PG-Strom claim is permitted beforehand.
 
-- [ ] Build the pinned AdaptiveCpp revision from `.acpp-version` with its CUDA
-  backend and verify the Rust/C/C++ ABI on that host.
+- [ ] Build the pinned AdaptiveCpp revision with CUDA and verify the Rust/C/C++ ABI.
 - [ ] Run CUDA correctness, FP64, cold/warm, fork, cancellation, memory-pressure,
   crash-band, packaging, and `just cuda-stress` gates with durable artifacts.
-- [ ] Add a CUDA device-counter lowering/runtime path equivalent to the sealed
-  Metal coverage evidence, then run the C++/SYCL coverage gate on NVIDIA.
-- [ ] Calibrate CUDA admission independently per lane. Losing or unstable cells
-  remain native; Metal thresholds may not be copied to CUDA.
+- [ ] Add CUDA device-counter lowering and coverage equivalent to Metal evidence.
+- [ ] Calibrate every CUDA admission lane independently; do not copy Metal limits.
 - [ ] Install PG-Strom on the same PostgreSQL/CUDA host and publish like-for-like
-  workload, configuration, correctness, plan, and timing evidence.
+  configuration, correctness, plan, and timing evidence.
 - [ ] Add CUDA CI and release artifacts before advertising NVIDIA support.
 
 ## Definition Of Done
 
-The Metal release is ready when the frozen candidate passes the complete 29-cell
-selected/native performance gate, exact-candidate safety and coverage artifacts,
-hosted CI, fresh-machine installability, the required 1B scale gate, and the
-fully evidenced release checklist, with no known critical/high defect. Future
-operator expansion and the explicitly owner-deferred CUDA block may remain open,
-but neither may be represented as shipped support.
+The Metal release is ready only when the exact candidate passes all selected and
+native performance contracts, fresh safety/coverage/stress gates, hosted CI,
+fresh-machine installability, non-deferred release-checklist rows, and named
+sign-off with no known critical/high defect. Operator expansion and CUDA may
+remain open, but neither may be represented as shipped support.
