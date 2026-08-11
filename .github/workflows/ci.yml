@@ -31,7 +31,7 @@ env:
 jobs:
   mac-arm64:
     name: macOS arm64 PG ${{ matrix.pg }}
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -230,7 +230,7 @@ jobs:
 
   metal-release-gates:
     name: Qualified Metal release gates (PG 18)
-    runs-on: [self-hosted, macOS, ARM64, metal, pg-accel-coverage]
+    runs-on: macos-26
     timeout-minutes: 360
     env:
       SOFT_FP64_REQUIRED_TAG: v2.0.0
@@ -302,6 +302,12 @@ jobs:
           set -euo pipefail
           CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18
 
+      - name: Remove coverage build intermediates
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf target/coverage
+
       - name: Run live Metal benchmark ship gate
         shell: bash
         run: |
@@ -313,6 +319,22 @@ jobs:
         run: |
           set -euo pipefail
           just system-workload-gate 18 artifacts/system-workload-gate-pg18-qualified-metal
+
+      - name: Run live Metal stress gate
+        shell: bash
+        env:
+          METAL_STRESS_ARTIFACT_DIR: artifacts/metal-stress-pg18-qualified-metal
+        run: |
+          set -euo pipefail
+          just metal-stress 18
+
+      - name: Run native-decline parity gate
+        shell: bash
+        env:
+          NATIVE_PARITY_ARTIFACT_DIR: artifacts/native-parity-p0-pg18-qualified-metal
+        run: |
+          set -euo pipefail
+          just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18
 
       - name: Upload three-layer coverage artifacts
         if: always()
@@ -338,6 +360,22 @@ jobs:
           path: artifacts/system-workload-gate-pg18-qualified-metal
           if-no-files-found: error
 
+      - name: Upload Metal stress artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-metal-stress-pg18-qualified-metal
+          path: artifacts/metal-stress-pg18-qualified-metal
+          if-no-files-found: error
+
+      - name: Upload native-decline parity artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-native-parity-p0-pg18-qualified-metal
+          path: artifacts/native-parity-p0-pg18-qualified-metal
+          if-no-files-found: error
+
   linux-x86:
     name: Linux x86_64 PG ${{ matrix.pg }} check/test
     runs-on: ubuntu-latest
@@ -350,14 +388,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Run CPU-cheat analyzer and ABI integrity gate
-        if: matrix.pg == 18
-        shell: bash
-        run: |
-          set -euo pipefail
-          PYTHONDONTWRITEBYTECODE=1 \
-            python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
 
       - name: Load pinned AdaptiveCpp SHA
         shell: bash
@@ -455,6 +485,14 @@ jobs:
         run: |
           set -euo pipefail
           ACPP_BACKEND=generic ./scripts/setup_acpp.sh
+
+      - name: Run CPU-cheat analyzer and ABI integrity gate
+        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
 
       - name: Check without GPU devices
         if: steps.pg-support.outputs.skip != 'true'

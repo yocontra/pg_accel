@@ -304,7 +304,7 @@ jobs:
 
   metal-coverage:
     name: Qualified Metal release gates (PG 18)
-    runs-on: [self-hosted, macOS, ARM64, metal, pg-accel-coverage]
+    runs-on: macos-26
     timeout-minutes: 360
     env:
       SOFT_FP64_REQUIRED_TAG: v2.0.0
@@ -375,11 +375,23 @@ jobs:
           set -euo pipefail
           CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18
 
+      - name: Remove coverage build intermediates
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf target/coverage
+
       - name: Run live Metal benchmark ship gate
         shell: bash
         run: |
           set -euo pipefail
           just metal-benchmark-ship-gate 18 artifacts/benchmark-ship-gate-pg18-qualified-metal
+
+      - name: Run broad system workload characterization
+        shell: bash
+        run: |
+          set -euo pipefail
+          just system-workload-gate 18 artifacts/system-workload-gate-pg18-qualified-metal
 
       - name: Run live Metal stress gate
         shell: bash
@@ -388,6 +400,14 @@ jobs:
         run: |
           set -euo pipefail
           just metal-stress 18
+
+      - name: Run native-decline parity gate
+        shell: bash
+        env:
+          NATIVE_PARITY_ARTIFACT_DIR: artifacts/native-parity-p0-pg18-qualified-metal
+        run: |
+          set -euo pipefail
+          just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18
 
       - name: Upload release coverage artifacts
         if: always()
@@ -405,12 +425,28 @@ jobs:
           path: artifacts/benchmark-ship-gate-pg18-qualified-metal
           if-no-files-found: error
 
+      - name: Upload release broad system workload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-release-system-workload-gate-pg18-qualified-metal
+          path: artifacts/system-workload-gate-pg18-qualified-metal
+          if-no-files-found: error
+
       - name: Upload release Metal stress artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pg-accel-release-metal-stress-pg18-qualified-metal
           path: artifacts/metal-stress-pg18-qualified-metal
+          if-no-files-found: error
+
+      - name: Upload release native-decline parity artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-release-native-parity-p0-pg18-qualified-metal
+          path: artifacts/native-parity-p0-pg18-qualified-metal
           if-no-files-found: error
 
   release:

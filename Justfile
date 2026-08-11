@@ -828,7 +828,8 @@ gpu-stress-archive workers="8" iters="20":
 metal-stress-artifact-test:
     bash -n scripts/metal_stress_gate.sh
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_metal_stress_artifacts.py -v
-    python3 scripts/metal_stress_artifacts.py workflow-audit --path .github/workflows/release.yml
+    python3 scripts/metal_stress_artifacts.py workflow-audit --kind ci --path .github/workflows/ci.yml
+    python3 scripts/metal_stress_artifacts.py workflow-audit --kind release --path .github/workflows/release.yml
 
 # Run the M-series Metal release stress gate with durable artifacts.
 metal-stress pg="":

@@ -576,10 +576,31 @@ class ReleaseWorkflowTests(unittest.TestCase):
         artifacts.validate_release_workflow_contract(workflow)
 
         mutants = (
+            workflow.replace(
+                "    runs-on: macos-26",
+                "    runs-on: [self-hosted, macOS, ARM64, metal]",
+                1,
+            ),
             workflow.replace("          just metal-stress 18", "          # just metal-stress 18"),
+            workflow.replace(
+                "          just system-workload-gate 18 artifacts/system-workload-gate-pg18-qualified-metal",
+                "          # just system-workload-gate 18 artifacts/system-workload-gate-pg18-qualified-metal",
+            ),
+            workflow.replace(
+                '          just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
+                '          # just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
+            ),
+            workflow.replace(
+                "          rm -rf target/coverage",
+                "          rm -rf target",
+            ),
             workflow.replace(
                 "          path: artifacts/metal-stress-pg18-qualified-metal",
                 "          # path: artifacts/metal-stress-pg18-qualified-metal",
+            ),
+            workflow.replace(
+                "          path: artifacts/native-parity-p0-pg18-qualified-metal",
+                "          # path: artifacts/native-parity-p0-pg18-qualified-metal",
             ),
             workflow.replace(
                 "needs: [build, linux-package, metal-coverage]",
@@ -631,6 +652,65 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 )
                 with self.assertRaises(artifacts.ArtifactContractError):
                     artifacts.validate_release_workflow_contract(mutant)
+
+    def test_ci_workflow_requires_hosted_gates_and_toolchain_order(self) -> None:
+        workflow_path = SCRIPT.parents[1] / ".github/workflows/ci.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+        artifacts.validate_ci_workflow_contract(workflow)
+
+        build_name = "      - name: Build pinned AdaptiveCpp generic toolchain"
+        audit_name = "      - name: Run CPU-cheat analyzer and ABI integrity gate"
+        swapped_linux_steps = (
+            workflow.replace(build_name, "      - name: TEMP toolchain step", 1)
+            .replace(audit_name, build_name, 1)
+            .replace("      - name: TEMP toolchain step", audit_name, 1)
+        )
+        qualified_header = (
+            "  metal-release-gates:\n"
+            "    name: Qualified Metal release gates (PG 18)\n"
+            "    runs-on: macos-26"
+        )
+        mutants = (
+            workflow.replace("    runs-on: macos-26", "    runs-on: macos-14", 1),
+            workflow.replace(
+                qualified_header,
+                qualified_header.replace(
+                    "runs-on: macos-26",
+                    "runs-on: [self-hosted, macOS, ARM64, metal]",
+                ),
+                1,
+            ),
+            workflow.replace(
+                "          just metal-stress 18",
+                "          # just metal-stress 18",
+                1,
+            ),
+            workflow.replace(
+                '          just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
+                '          # just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
+                1,
+            ),
+            workflow.replace(
+                "          path: artifacts/native-parity-p0-pg18-qualified-metal",
+                "          # path: artifacts/native-parity-p0-pg18-qualified-metal",
+                1,
+            ),
+            workflow.replace(
+                "          rm -rf target/coverage",
+                "          rm -rf target",
+                1,
+            ),
+            swapped_linux_steps,
+        )
+        for index, mutant in enumerate(mutants):
+            with self.subTest(mutant=index):
+                self.assertNotEqual(
+                    mutant,
+                    workflow,
+                    "workflow adversarial mutation must change the baseline",
+                )
+                with self.assertRaises(artifacts.ArtifactContractError):
+                    artifacts.validate_ci_workflow_contract(mutant)
 
 
 if __name__ == "__main__":

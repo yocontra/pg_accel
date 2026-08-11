@@ -1330,7 +1330,7 @@ def _workflow_job_block(workflow: str, job: str) -> str:
         re.MULTILINE,
     )
     if match is None:
-        raise ArtifactContractError(f"release workflow is missing the `{job}` job")
+        raise ArtifactContractError(f"workflow is missing the `{job}` job")
     return match.group(0)
 
 
@@ -1339,7 +1339,7 @@ def _workflow_step(job_block: str, name: str) -> str:
     marker = f"      - name: {name}"
     indexes = [index for index, line in enumerate(lines) if line == marker]
     if len(indexes) != 1:
-        raise ArtifactContractError(f"release workflow requires exactly one `{name}` step")
+        raise ArtifactContractError(f"workflow requires exactly one `{name}` step")
     start = indexes[0]
     end = next(
         (index for index in range(start + 1, len(lines)) if lines[index].startswith("      - ")),
@@ -1348,46 +1348,59 @@ def _workflow_step(job_block: str, name: str) -> str:
     return "\n".join(lines[start:end])
 
 
-def validate_release_workflow_contract(workflow: str) -> None:
-    metal = _workflow_job_block(workflow, "metal-coverage")
-    release = _workflow_job_block(workflow, "release")
-    artifact_dir = "artifacts/metal-stress-pg18-qualified-metal"
-    gate = _workflow_step(metal, "Run live Metal stress gate")
-    upload = _workflow_step(metal, "Upload release Metal stress artifacts")
-    gate_lines = {line.strip() for line in gate.splitlines() if not line.lstrip().startswith("#")}
-    upload_lines = {line.strip() for line in upload.splitlines() if not line.lstrip().startswith("#")}
-    for required in (
-        "env:",
-        f"METAL_STRESS_ARTIFACT_DIR: {artifact_dir}",
-        "run: |",
-        "set -euo pipefail",
-        "just metal-stress 18",
-    ):
-        if required not in gate_lines:
-            raise ArtifactContractError(f"Metal stress workflow step is missing `{required}`")
-    if any(
-        line.startswith(("if:", "continue-on-error:")) for line in gate_lines
-    ):
-        raise ArtifactContractError(
-            "Metal stress workflow step cannot be conditional or continue on error"
-        )
-    if re.search(r"^    continue-on-error\s*:", metal, re.MULTILINE):
-        raise ArtifactContractError(
-            "qualified Metal workflow job cannot continue on error"
-        )
-    raw_gate_lines = gate.splitlines()
-    run_index = next(
-        index for index, line in enumerate(raw_gate_lines) if line.strip() == "run: |"
-    )
-    commands = [
+def _workflow_step_lines(step: str) -> set[str]:
+    return {
         line.strip()
-        for line in raw_gate_lines[run_index + 1 :]
+        for line in step.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+
+def _workflow_step_commands(step: str, label: str) -> list[str]:
+    lines = step.splitlines()
+    run_indexes = [
+        index for index, line in enumerate(lines) if line.strip() == "run: |"
+    ]
+    if len(run_indexes) != 1:
+        raise ArtifactContractError(
+            f"{label} workflow step requires exactly one literal run block"
+        )
+    return [
+        line.strip()
+        for line in lines[run_indexes[0] + 1 :]
         if line.strip() and not line.lstrip().startswith("#")
     ]
-    if commands != ["set -euo pipefail", "just metal-stress 18"]:
+
+
+def _validate_terminal_workflow_step(
+    job: str,
+    name: str,
+    expected_commands: list[str],
+    required_lines: tuple[str, ...] = (),
+) -> None:
+    step = _workflow_step(job, name)
+    lines = _workflow_step_lines(step)
+    for required in ("shell: bash", "run: |", *required_lines):
+        if required not in lines:
+            raise ArtifactContractError(
+                f"{name} workflow step is missing `{required}`"
+            )
+    if any(line.startswith(("if:", "continue-on-error:")) for line in lines):
         raise ArtifactContractError(
-            "Metal stress workflow run block must contain only the strict shell prelude and terminal gate command"
+            f"{name} workflow step cannot be conditional or continue on error"
         )
+    commands = _workflow_step_commands(step, name)
+    if commands != expected_commands:
+        raise ArtifactContractError(
+            f"{name} workflow run block must contain only its strict terminal commands"
+        )
+
+
+def _validate_workflow_upload(
+    job: str, name: str, artifact_dir: str
+) -> None:
+    upload = _workflow_step(job, name)
+    lines = _workflow_step_lines(upload)
     for required in (
         "if: always()",
         "uses: actions/upload-artifact@v4",
@@ -1395,18 +1408,162 @@ def validate_release_workflow_contract(workflow: str) -> None:
         f"path: {artifact_dir}",
         "if-no-files-found: error",
     ):
-        if required not in upload_lines:
-            raise ArtifactContractError(f"Metal stress upload step is missing `{required}`")
-    if any(line.startswith("continue-on-error:") for line in upload_lines):
+        if required not in lines:
+            raise ArtifactContractError(
+                f"{name} workflow upload is missing `{required}`"
+            )
+    if any(line.startswith("continue-on-error:") for line in lines):
         raise ArtifactContractError(
-            "Metal stress artifact upload cannot continue on error"
+            f"{name} workflow upload cannot continue on error"
         )
-    if metal.index("      - name: Run live Metal stress gate") > metal.index(
-        "      - name: Upload release Metal stress artifacts"
-    ):
+
+
+def _validate_qualified_metal_job(
+    workflow: str,
+    job_name: str,
+    coverage_step: str,
+    upload_steps: tuple[str, str, str, str, str],
+) -> str:
+    metal = _workflow_job_block(workflow, job_name)
+    runs_on = re.findall(r"^    runs-on:\s*(.+?)\s*$", metal, re.MULTILINE)
+    if runs_on != ["macos-26"]:
         raise ArtifactContractError(
-            "release workflow uploads Metal stress evidence before running the gate"
+            f"qualified Metal job must run on the hosted Apple Silicon `macos-26` label, found {runs_on!r}"
         )
+    if re.search(r"^    (?:if|continue-on-error)\s*:", metal, re.MULTILINE):
+        raise ArtifactContractError(
+            "qualified Metal workflow job cannot be conditional or continue on error"
+        )
+    if not re.search(r"^    timeout-minutes:\s*360\s*$", metal, re.MULTILINE):
+        raise ArtifactContractError(
+            "qualified Metal workflow job requires the hosted-runner 360-minute timeout"
+        )
+
+    coverage_dir = "artifacts/coverage-pg18-qualified-metal"
+    benchmark_dir = "artifacts/benchmark-ship-gate-pg18-qualified-metal"
+    system_dir = "artifacts/system-workload-gate-pg18-qualified-metal"
+    stress_dir = "artifacts/metal-stress-pg18-qualified-metal"
+    parity_dir = "artifacts/native-parity-p0-pg18-qualified-metal"
+    gate_specs = (
+        (
+            coverage_step,
+            [
+                "set -euo pipefail",
+                'CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
+            ],
+            (
+                "env:",
+                f"COVERAGE_ARTIFACT_DIR: {coverage_dir}",
+                "COVERAGE_MIN_RUST_LINES: 90",
+                "COVERAGE_MIN_CPP_LINES: 90",
+                "COVERAGE_MIN_SQL_ASSERTIONS: 90",
+            ),
+        ),
+        (
+            "Remove coverage build intermediates",
+            ["set -euo pipefail", "rm -rf target/coverage"],
+            (),
+        ),
+        (
+            "Run live Metal benchmark ship gate",
+            [
+                "set -euo pipefail",
+                f"just metal-benchmark-ship-gate 18 {benchmark_dir}",
+            ],
+            (),
+        ),
+        (
+            "Run broad system workload characterization",
+            [
+                "set -euo pipefail",
+                f"just system-workload-gate 18 {system_dir}",
+            ],
+            (),
+        ),
+        (
+            "Run live Metal stress gate",
+            ["set -euo pipefail", "just metal-stress 18"],
+            ("env:", f"METAL_STRESS_ARTIFACT_DIR: {stress_dir}"),
+        ),
+        (
+            "Run native-decline parity gate",
+            [
+                "set -euo pipefail",
+                'just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
+            ],
+            ("env:", f"NATIVE_PARITY_ARTIFACT_DIR: {parity_dir}"),
+        ),
+    )
+    for name, commands, required_lines in gate_specs:
+        _validate_terminal_workflow_step(
+            metal, name, commands, required_lines
+        )
+
+    artifact_dirs = (
+        coverage_dir,
+        benchmark_dir,
+        system_dir,
+        stress_dir,
+        parity_dir,
+    )
+    for upload_name, artifact_dir in zip(upload_steps, artifact_dirs, strict=True):
+        _validate_workflow_upload(metal, upload_name, artifact_dir)
+
+    gate_markers = [f"      - name: {spec[0]}" for spec in gate_specs]
+    upload_markers = [f"      - name: {name}" for name in upload_steps]
+    indexes = [metal.index(marker) for marker in (*gate_markers, *upload_markers)]
+    if indexes != sorted(indexes):
+        raise ArtifactContractError(
+            "qualified Metal gates and durable uploads are not in the required order"
+        )
+    return metal
+
+
+def validate_ci_workflow_contract(workflow: str) -> None:
+    mac = _workflow_job_block(workflow, "mac-arm64")
+    if not re.search(r"^    runs-on:\s*macos-26\s*$", mac, re.MULTILINE):
+        raise ArtifactContractError(
+            "macOS arm64 compatibility jobs must use the Apple Silicon `macos-26` label"
+        )
+    _validate_qualified_metal_job(
+        workflow,
+        "metal-release-gates",
+        "Run three-layer release coverage gate",
+        (
+            "Upload three-layer coverage artifacts",
+            "Upload Metal benchmark ship-gate artifacts",
+            "Upload broad system workload artifacts",
+            "Upload Metal stress artifacts",
+            "Upload native-decline parity artifacts",
+        ),
+    )
+    linux = _workflow_job_block(workflow, "linux-x86")
+    build_marker = "      - name: Build pinned AdaptiveCpp generic toolchain"
+    audit_marker = "      - name: Run CPU-cheat analyzer and ABI integrity gate"
+    if build_marker not in linux or audit_marker not in linux:
+        raise ArtifactContractError(
+            "Linux workflow requires both AdaptiveCpp setup and the CPU-cheat analyzer"
+        )
+    if linux.index(audit_marker) < linux.index(build_marker):
+        raise ArtifactContractError(
+            "Linux CPU-cheat analysis must run after AdaptiveCpp headers are available"
+        )
+
+
+def validate_release_workflow_contract(workflow: str) -> None:
+    _validate_qualified_metal_job(
+        workflow,
+        "metal-coverage",
+        "Run release coverage gate",
+        (
+            "Upload release coverage artifacts",
+            "Upload release Metal benchmark ship-gate artifacts",
+            "Upload release broad system workload artifacts",
+            "Upload release Metal stress artifacts",
+            "Upload release native-decline parity artifacts",
+        ),
+    )
+    release = _workflow_job_block(workflow, "release")
     needs = re.search(r"^    needs:\s*\[([^]]+)\]\s*$", release, re.MULTILINE)
     if needs is None or "metal-coverage" not in {
         dependency.strip() for dependency in needs.group(1).split(",")
@@ -1478,9 +1635,12 @@ def build_parser() -> argparse.ArgumentParser:
     verify_index.add_argument("--artifact-dir", required=True, type=Path)
 
     workflow = subparsers.add_parser(
-        "workflow-audit", help="validate release workflow Metal stress wiring"
+        "workflow-audit", help="validate qualified Metal workflow wiring"
     )
     workflow.add_argument("--path", required=True, type=Path)
+    workflow.add_argument(
+        "--kind", choices=("release", "ci"), default="release"
+    )
     return parser
 
 
@@ -1513,7 +1673,11 @@ def main(argv: list[str] | None = None, stderr: TextIO = sys.stderr) -> int:
         elif args.command == "verify-index":
             verify_artifact_index(args.artifact_dir)
         else:
-            validate_release_workflow_contract(args.path.read_text(encoding="utf-8"))
+            workflow = args.path.read_text(encoding="utf-8")
+            if args.kind == "ci":
+                validate_ci_workflow_contract(workflow)
+            else:
+                validate_release_workflow_contract(workflow)
     except ArtifactContractError as error:
         print(f"error: {error}", file=stderr)
         return 1

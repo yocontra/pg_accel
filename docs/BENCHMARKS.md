@@ -209,8 +209,8 @@ stock-executor fallback, missed GPU selection or dispatch, absent dispatch
 counters or consumed output, missing resident-plan evidence, a per-lane
 threshold regression, or missing H3 cold/warm evidence.
 
-The qualified self-hosted Metal jobs in both `ci.yml` and `release.yml` run the
-same recipe and upload the deterministic
+The qualified GitHub-hosted Apple Silicon jobs in both `ci.yml` and
+`release.yml` run the same recipe and upload the deterministic
 `artifacts/benchmark-ship-gate-pg18-qualified-metal` bundle. That bundle is
 OS-cold certification evidence, not a prerequisite for the unprivileged warm
 matrix. Checked-in workflow wiring is not run evidence: the corresponding
