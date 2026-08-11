@@ -239,6 +239,54 @@ def _validate_unsafe_mapping(sites: list[tuple[str, int]], rules: list[dict[str,
         raise AuditError(f"unregistered production unsafe sites: {preview}{suffix}")
 
 
+def _validate_declaration_only_unsafe_sites(
+    repo: Path,
+    registry: dict[str, Any],
+    sites: list[tuple[str, int]],
+) -> set[tuple[str, int]]:
+    entries = registry.get("declaration_only_unsafe_sites", [])
+    if not isinstance(entries, list):
+        raise AuditError("risk register declaration_only_unsafe_sites must be a list")
+    registered: set[tuple[str, int]] = set()
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("regex"), str)
+            or not isinstance(entry.get("reason"), str)
+            or not entry["reason"].strip()
+        ):
+            raise AuditError(
+                "every declaration-only unsafe site needs path, regex, and reason strings"
+            )
+        path = entry["path"]
+        try:
+            expression = re.compile(entry["regex"])
+        except re.error as error:
+            raise AuditError(f"invalid declaration-only unsafe regex for {path}: {error}") from error
+        source = _source_lines(repo, path)
+        matches = [
+            (path, line)
+            for candidate_path, line in sites
+            if candidate_path == path and expression.search(source[line - 1])
+        ]
+        if len(matches) != 1:
+            raise AuditError(
+                f"declaration-only unsafe registration must match exactly one unsafe site: "
+                f"path={path} matches={matches}"
+            )
+        site = matches[0]
+        declaration = source[site[1] - 1].strip()
+        if "unsafe fn" not in declaration or not declaration.endswith(";"):
+            raise AuditError(
+                f"registered declaration-only unsafe site has an executable body: {path}:{site[1]}"
+            )
+        if site in registered:
+            raise AuditError(f"duplicate declaration-only unsafe registration: {path}:{site[1]}")
+        registered.add(site)
+    return registered
+
+
 def _validate_anchor_coverage(
     repo: Path,
     by_id: dict[str, Any],
@@ -285,15 +333,29 @@ def _validate_anchor_coverage(
 
 
 def _validate_unsafe_coverage(
-    sites: list[tuple[str, int]], rust_lcov: dict[str, dict[int, int]], minimum: float
-) -> tuple[int, int, float]:
+    sites: list[tuple[str, int]],
+    rust_lcov: dict[str, dict[int, int]],
+    minimum: float,
+    declaration_only_sites: set[tuple[str, int]] | None = None,
+) -> tuple[int, int, float, int]:
+    declaration_only_sites = declaration_only_sites or set()
     files = {path for path, _ in sites}
-    missing_files = sorted(path for path in files if path not in rust_lcov)
+    missing_files = sorted(
+        path
+        for path in files
+        if path not in rust_lcov
+        and any(
+            site_path == path and (site_path, line) not in declaration_only_sites
+            for site_path, line in sites
+        )
+    )
     if missing_files:
         raise AuditError(f"Rust LCOV omits unsafe production files: {missing_files}")
     executable = 0
     covered = 0
     for path, line in sites:
+        if (path, line) in declaration_only_sites:
+            continue
         record = rust_lcov[path]
         nearby = [
             record[candidate]
@@ -315,7 +377,7 @@ def _validate_unsafe_coverage(
         raise AuditError(
             f"unsafe-adjacent coverage {percent:.3f}% is below {minimum:.3f}% ({covered}/{executable})"
         )
-    return covered, executable, percent
+    return covered, executable, percent, len(declaration_only_sites)
 
 
 def audit(args: argparse.Namespace) -> dict[str, Any]:
@@ -325,6 +387,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     by_id, rules = _validate_registry(repo, registry)
     sites = _unsafe_sites(repo, baseline)
     _validate_unsafe_mapping(sites, rules)
+    declaration_only_sites = _validate_declaration_only_unsafe_sites(repo, registry, sites)
 
     lcov: dict[str, dict[str, dict[int, int]]] = {}
     if args.rust_lcov is not None:
@@ -339,19 +402,24 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         "domain_count": len(by_id),
         "unsafe_site_count": len(sites),
         "unsafe_file_count": len({path for path, _ in sites}),
+        "declaration_only_unsafe_site_count": len(declaration_only_sites),
         "lcov_checked": bool(lcov),
     }
     if lcov:
         result["covered_anchors"] = _validate_anchor_coverage(repo, by_id, lcov)
         if "rust" not in lcov:
             raise AuditError("risk-weighted coverage requires Rust LCOV")
-        covered, executable, percent = _validate_unsafe_coverage(
-            sites, lcov["rust"], args.minimum_unsafe_percent
+        covered, executable, percent, declaration_only = _validate_unsafe_coverage(
+            sites,
+            lcov["rust"],
+            args.minimum_unsafe_percent,
+            declaration_only_sites,
         )
         result["unsafe_executable_sites"] = executable
         result["unsafe_covered_sites"] = covered
         result["unsafe_coverage_percent"] = round(percent, 6)
         result["minimum_unsafe_percent"] = args.minimum_unsafe_percent
+        result["declaration_only_unsafe_sites"] = declaration_only
     return result
 
 

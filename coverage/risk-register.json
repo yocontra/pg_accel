@@ -201,6 +201,13 @@
       ]
     }
   ],
+  "declaration_only_unsafe_sites": [
+    {
+      "path": "pg_accel/src/engine/executor/state.rs",
+      "regex": "^\\s*unsafe fn exec\\(",
+      "reason": "ExecutorState declares the caller-side unsafe contract but has no method body; concrete executor implementations and FFI call sites carry the executable coverage."
+    }
+  ],
   "unsafe_rules": [
     {"glob": "pg_accel/src/adapters/**", "domain": "unsafe_ffi"},
     {"glob": "pg_accel/src/engine/columnar.rs", "domain": "lifetime_ownership"},

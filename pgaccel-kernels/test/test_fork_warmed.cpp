@@ -178,6 +178,10 @@ int main() {
   }
   pgacceltest_fail_after_fork_invalidation_once();
 
+  // A coverage child returns normally so LLVM can flush its PID-isolated
+  // profile. Flush inherited stdio first so that return cannot duplicate the
+  // parent's buffered CTest output.
+  std::fflush(nullptr);
   const pid_t failure_pid = fork();
   if (failure_pid < 0) {
     perror("fork");
@@ -218,7 +222,11 @@ int main() {
       _exit(24);
     }
     pgaccel_shutdown();
+#if defined(PGACCEL_COVERAGE_CHILD_FLUSH)
+    return 0;
+#else
     _exit(0);
+#endif
   }
 
   int failure_status = 0;

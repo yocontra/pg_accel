@@ -94,6 +94,12 @@ claim is implied by the entries below.
   current LLVM toolchains, forces macOS SDK libc++ headers to match the system
   runtime, and invalidates cached toolchains whenever setup or tracked patches
   change.
+- Release coverage now executes the broad system-workload contract, one exact
+  same-backend ABBA/BAAB native decline with planner-stage evidence, and the
+  released resident spatial/raster paths. Coverage-only fork children flush
+  PID-isolated LLVM profiles, and declaration-only unsafe trait signatures are
+  explicitly syntax-checked instead of being mistaken for omitted executable
+  source.
 
 ### Verification
 

@@ -101,6 +101,8 @@ assert_safe_bench_command() {
     local dry_run_seen=0
     local capture_plans_seen=0
     local skip_guc_verify_seen=0
+    local capture_planner_stages_seen=0
+    local native_parity_pairing_seen=0
     for ((index = 1; index < ${#argv[@]}; index++)); do
         token="${argv[index]}"
         case "$token" in
@@ -170,9 +172,17 @@ assert_safe_bench_command() {
             --dry-run) dry_run_seen=1 ;;
             --capture-plans) capture_plans_seen=1 ;;
             --skip-guc-verify) skip_guc_verify_seen=1 ;;
+            --capture-planner-stages) capture_planner_stages_seen=1 ;;
+            --native-parity-pairing) native_parity_pairing_seen=1 ;;
             *) die "unrecognized benchmark option or positional token: $token" ;;
         esac
     done
+
+    if [ "$command" != "crash-repro" ] && \
+        { [ "$capture_planner_stages_seen" -ne 0 ] || \
+          [ "$native_parity_pairing_seen" -ne 0 ]; }; then
+        die "planner-stage and native-parity coverage options are restricted to the exact crash-repro contract"
+    fi
 
     # Setup and non-dry-run `run` are deliberately narrower than the general
     # CLI allowlist. Pinning the one tiny raster lane and its exact sampling
@@ -234,7 +244,8 @@ assert_safe_bench_command() {
             [ "$connection_value" = "$coverage_live_expected_connection" ] || \
                 die "live coverage crash-repro must use the harness target connection"
             local expected_crash_artifact=""
-            case "${workload_value}@${rows_value}" in
+            local crash_cell="${workload_value}@${rows_value}"
+            case "$crash_cell" in
                 grouped_agg_int4@1000000) expected_crash_artifact="selected" ;;
                 window_full_output_decline@10000) expected_crash_artifact="declined" ;;
                 reduce_f64_minmax@100000) expected_crash_artifact="fp64-native" ;;
@@ -242,6 +253,8 @@ assert_safe_bench_command() {
                 ssbm_resident_int4_star@100000) expected_crash_artifact="ssbm-resident" ;;
                 hash_join@100000) expected_crash_artifact="hash-join" ;;
                 h3_cell_to_parent@100000) expected_crash_artifact="h3-parent" ;;
+                spatial_resident_agg_candidate@1000000) expected_crash_artifact="spatial-resident" ;;
+                raster_resident_exact_reclass@10000) expected_crash_artifact="raster-resident" ;;
                 spatial_mega_1kv@80000) expected_crash_artifact="spatial-mega" ;;
                 raster_reclass@100) expected_crash_artifact="raster-reclass" ;;
                 *) die "live coverage crash-repro cell is outside the bounded matrix" ;;
@@ -269,6 +282,20 @@ assert_safe_bench_command() {
                 die "live coverage crash-repro cannot use a category sweep"
             [ "$dry_run_seen" -eq 0 ] || \
                 die "live coverage crash-repro cannot be a dry run"
+            case "$crash_cell" in
+                window_full_output_decline@10000)
+                    [ "$capture_planner_stages_seen" -eq 1 ] || \
+                        die "live coverage crash-repro exact native decline requires planner-stage capture"
+                    [ "$native_parity_pairing_seen" -eq 1 ] || \
+                        die "live coverage crash-repro exact native decline requires same-backend native-parity pairing"
+                    ;;
+                *)
+                    [ "$capture_planner_stages_seen" -eq 0 ] || \
+                        die "live coverage crash-repro planner-stage capture is restricted to the exact native decline"
+                    [ "$native_parity_pairing_seen" -eq 0 ] || \
+                        die "live coverage crash-repro native-parity pairing is restricted to the exact native decline"
+                    ;;
+            esac
             ;;
         phase9-gate)
             [ -n "$coverage_live_expected_connection" ] || \
@@ -455,7 +482,7 @@ case "$profile_dir" in
     *) die "profile directory must be beneath the artifact or build directory" ;;
 esac
 
-mkdir -p "$artifact_dir"/{logs,selected,declined,fp64-native,mixed-resident,ssbm-resident,hash-join,h3-parent,spatial-mega,raster-reclass,phase9,fp64-calibration,resume-output,resume-missing}
+mkdir -p "$artifact_dir"/{logs,selected,declined,fp64-native,mixed-resident,ssbm-resident,hash-join,h3-parent,spatial-resident,raster-resident,spatial-mega,raster-reclass,phase9,fp64-calibration,resume-output,resume-missing}
 ledger="$artifact_dir/command-ledger.tsv"
 external_ledger="$artifact_dir/external-command-ledger.tsv"
 printf 'label\texpected_exit\tactual_exit\tprofile_files\tlog\tcommand\n' > "$ledger"
@@ -676,6 +703,7 @@ run_bench selected_crash_repro any01 crash-repro --workload grouped_agg_int4 --r
 run_bench declined_crash_repro 0 crash-repro --workload window_full_output_decline --rows 10000 \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
     --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --capture-planner-stages --native-parity-pairing \
     --artifacts-dir "$artifact_dir/declined"
 run_bench fp64_native_crash_repro 0 crash-repro --workload reduce_f64_minmax --rows 100000 \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
@@ -684,8 +712,9 @@ run_bench fp64_native_crash_repro 0 crash-repro --workload reduce_f64_minmax --r
 
 # One exact cell per remaining resident/domain path keeps the live matrix small
 # while reaching the real loaders, descriptors, private data, executors, and
-# extension adapters. The spatial and raster contracts are positive bounded
-# execution probes whose current expected result is a proven native decline.
+# extension adapters. Released resident spatial/raster cells must select and
+# dispatch; neighboring unreleased spatial/raster shapes must retain an exact
+# planner-reported native decline.
 run_bench mixed_resident_crash_repro any01 crash-repro \
     --workload mixed_join_agg_int4 --rows 100000 \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
@@ -705,6 +734,16 @@ run_bench h3_parent_crash_repro any01 crash-repro \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
     --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
     --artifacts-dir "$artifact_dir/h3-parent"
+run_bench spatial_resident_crash_repro any01 crash-repro \
+    --workload spatial_resident_agg_candidate --rows 1000000 \
+    --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
+    --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --artifacts-dir "$artifact_dir/spatial-resident"
+run_bench raster_resident_crash_repro any01 crash-repro \
+    --workload raster_resident_exact_reclass --rows 10000 \
+    --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
+    --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
+    --artifacts-dir "$artifact_dir/raster-resident"
 run_bench spatial_mega_decline 0 crash-repro --workload spatial_mega_1kv --rows 80000 \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
     --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
@@ -718,6 +757,8 @@ for domain_report in \
     "$artifact_dir/ssbm-resident/report.json" \
     "$artifact_dir/hash-join/report.json" \
     "$artifact_dir/h3-parent/report.json" \
+    "$artifact_dir/spatial-resident/report.json" \
+    "$artifact_dir/raster-resident/report.json" \
     "$artifact_dir/spatial-mega/report.json" \
     "$artifact_dir/raster-reclass/report.json"; do
     require_nonempty_file "$domain_report"
@@ -791,6 +832,8 @@ python3 - \
     "$artifact_dir/ssbm-resident/report.json" \
     "$artifact_dir/hash-join/report.json" \
     "$artifact_dir/h3-parent/report.json" \
+    "$artifact_dir/spatial-resident/report.json" \
+    "$artifact_dir/raster-resident/report.json" \
     "$artifact_dir/spatial-mega/report.json" \
     "$artifact_dir/raster-reclass/report.json" \
     "$artifact_dir/phase9/report.json" \
@@ -811,15 +854,17 @@ import sys
     ssbm_path,
     hash_path,
     h3_path,
+    spatial_resident_path,
+    raster_resident_path,
     spatial_path,
     raster_reclass_path,
     phase9_path,
     raster_path,
     calibration_path,
     output_path,
-) = map(pathlib.Path, sys.argv[1:14])
-extension_provenance_path = pathlib.Path(sys.argv[14])
-expected_extension_sha = sys.argv[15]
+) = map(pathlib.Path, sys.argv[1:16])
+extension_provenance_path = pathlib.Path(sys.argv[16])
+expected_extension_sha = sys.argv[17]
 
 def load(path):
     if not path.is_file() or path.stat().st_size == 0:
@@ -920,18 +965,51 @@ def require_planner_decline(row, expected_name, expected_reason=None):
 selected = one(selected_path, "grouped_agg_int4", 1000000)
 require_selected_dispatch(selected, "grouped_agg_int4")
 
-for path, name, rows in [
-    (declined_path, "window_full_output_decline", 10000),
-    (fp64_path, "reduce_f64_minmax", 100000),
-]:
-    row = one(path, name, rows)
-    require_planner_decline(row, name)
+declined_report = load(declined_path)
+declined = one(declined_path, "window_full_output_decline", 10000)
+require_planner_decline(declined, "window_full_output_decline")
+declined_methodology = declined_report.get("methodology", {})
+if (
+    declined_methodology.get("native_parity_pairing") is not True
+    or declined_methodology.get("native_parity_repetitions_per_arm") != 2
+):
+    raise SystemExit("window_full_output_decline: native-parity methodology is missing")
+pair_captures = declined.get("native_parity_pair_captures")
+if not isinstance(pair_captures, list) or len(pair_captures) != 1:
+    raise SystemExit("window_full_output_decline: exact native-parity pair was not retained")
+pair_capture = pair_captures[0]
+sequence = pair_capture.get("sequence") if isinstance(pair_capture, dict) else None
+if (
+    not isinstance(sequence, list)
+    or len(sequence) != 4
+    or sequence.count("accel") != 2
+    or sequence.count("disabled_postgresql") != 2
+    or len(pair_capture.get("accel_ms", [])) != 2
+    or len(pair_capture.get("parallel_ms", [])) != 2
+):
+    raise SystemExit("window_full_output_decline: ABBA/BAAB raw components are incomplete")
+planner_captures = declined.get("planner_stage_captures")
+if not isinstance(planner_captures, list) or len(planner_captures) != 1:
+    raise SystemExit("window_full_output_decline: planner-stage capture was not retained")
+planner_capture = planner_captures[0]
+if (
+    not isinstance(planner_capture, dict)
+    or planner_capture.get("error") is not None
+    or not planner_capture.get("stages")
+    or not planner_capture.get("substages")
+):
+    raise SystemExit("window_full_output_decline: planner-stage evidence is incomplete")
+
+fp64 = one(fp64_path, "reduce_f64_minmax", 100000)
+require_planner_decline(fp64, "reduce_f64_minmax")
 
 resident_selected_cells = [
     (mixed_path, "mixed_join_agg_int4", 100000),
     (ssbm_path, "ssbm_resident_int4_star", 100000),
     (hash_path, "hash_join", 100000),
     (h3_path, "h3_cell_to_parent", 100000),
+    (spatial_resident_path, "spatial_resident_agg_candidate", 1000000),
+    (raster_resident_path, "raster_resident_exact_reclass", 10000),
 ]
 for path, name, rows in resident_selected_cells:
     require_selected_dispatch(one(path, name, rows), name)
@@ -1035,6 +1113,8 @@ validation = {
     "performance_evidence_eligible": False,
     "selected_cell": "grouped_agg_int4@1000000",
     "resident_selected_cells": [f"{name}@{rows}" for _, name, rows in resident_selected_cells],
+    "native_parity_cell": "window_full_output_decline@10000",
+    "planner_stage_cell": "window_full_output_decline@10000",
     "domain_decline_cells": ["spatial_mega_1kv@80000", "raster_reclass@100"],
     "native_decline_cells": ["window_full_output_decline@10000", "reduce_f64_minmax@100000"],
     "phase9_cells": len(phase9_workloads),

@@ -30,6 +30,7 @@ class RiskCoverageAuditTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass")
         self.assertEqual(result["domain_count"], len(risk.REQUIRED_DOMAINS))
         self.assertGreater(result["unsafe_site_count"], 0)
+        self.assertEqual(result["declaration_only_unsafe_site_count"], 1)
 
     def test_unmapped_unsafe_site_fails_closed(self) -> None:
         with self.assertRaisesRegex(risk.AuditError, "unregistered production unsafe"):
@@ -43,6 +44,50 @@ class RiskCoverageAuditTests(unittest.TestCase):
         lcov = {"pg_accel/src/example.rs": {10: 1, 20: 0}}
         with self.assertRaisesRegex(risk.AuditError, "below 90.000%"):
             risk._validate_unsafe_coverage(sites, lcov, 90.0)
+
+    def test_missing_executable_unsafe_file_still_fails_closed(self) -> None:
+        with self.assertRaisesRegex(risk.AuditError, "omits unsafe production files"):
+            risk._validate_unsafe_coverage(
+                [("pg_accel/src/executable.rs", 10)],
+                {},
+                90.0,
+                set(),
+            )
+
+    def test_registered_declaration_only_site_may_be_absent_from_lcov(self) -> None:
+        sites = [
+            ("pg_accel/src/trait.rs", 10),
+            ("pg_accel/src/executable.rs", 20),
+        ]
+        covered, executable, percent, declarations = risk._validate_unsafe_coverage(
+            sites,
+            {"pg_accel/src/executable.rs": {20: 1}},
+            90.0,
+            {("pg_accel/src/trait.rs", 10)},
+        )
+        self.assertEqual((covered, executable, percent, declarations), (1, 1, 100.0, 1))
+
+    def test_declaration_only_registry_rejects_unsafe_method_bodies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            source = repo / "pg_accel/src/body.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("unsafe fn body() {}\n", encoding="utf-8")
+            registry = {
+                "declaration_only_unsafe_sites": [
+                    {
+                        "path": "pg_accel/src/body.rs",
+                        "regex": "unsafe fn body",
+                        "reason": "test fixture",
+                    }
+                ]
+            }
+            with self.assertRaisesRegex(risk.AuditError, "executable body"):
+                risk._validate_declaration_only_unsafe_sites(
+                    repo,
+                    registry,
+                    [("pg_accel/src/body.rs", 1)],
+                )
 
     def test_candidate_worktree_paths_normalize_to_repository_paths(self) -> None:
         raw = "/tmp/candidate/worktree/pg_accel/src/engine/residency/store.rs"

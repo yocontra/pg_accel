@@ -2300,6 +2300,125 @@ mod tests {
         report
     }
 
+    fn complete_system_workload_report(selected: &[Box<dyn workloads::Workload>]) -> BenchReport {
+        let mut results = selected
+            .iter()
+            .map(|workload| {
+                let metadata = workloads::workload_metadata(workload.name())
+                    .expect("system workload must have typed metadata");
+                let iterations = (0..SYSTEM_WORKLOAD_GATE_ITERATIONS)
+                    .map(|index| report::IterationResult {
+                        accel_ms: 5.0,
+                        parallel_ms: 10.0,
+                        accel_first: index % 2 == 0,
+                        cache_purge: bench_model::CachePurgeState::NotRequested,
+                        cache_state: bench_model::CacheState::Warm,
+                    })
+                    .collect();
+                let mut result = report::WorkloadResult::from_iterations(
+                    workload.name().to_owned(),
+                    workload.description().to_owned(),
+                    metadata.category.as_str().to_owned(),
+                    report::classify_kernel(workload.name()),
+                    SYSTEM_WORKLOAD_GATE_ROWS,
+                    iterations,
+                    false,
+                );
+                result.plan_snippet = Some("Seq Scan on benchmark_input".to_owned());
+                result.baseline_plan_snippet = Some("Seq Scan on benchmark_input".to_owned());
+                result.correctness_diff_artifact = Some("correctness.json".to_owned());
+                result.dispatch_counter_captured = true;
+                result.rows_returned_to_cpu = 1;
+                result.accel_output_rows_consumed = 1;
+                result.resident_lane = true;
+                result.resident_load_ms = Some(1.0);
+                result.planner_declined = true;
+                result.gpu_resident_pipeline = report::GpuResidentPipelineStatus::PlannerDeclined;
+                result.native_decline_evidence = Some(report::NativeDeclineEvidence {
+                    reason: "test_planner_decline".to_owned(),
+                    source: report::DeclineReasonSource::PlannerReported,
+                });
+                result
+            })
+            .collect::<Vec<_>>();
+
+        let selected_result = results
+            .first_mut()
+            .expect("system workload registry must not be empty");
+        selected_result.plan_selected = true;
+        selected_result.planner_declined = false;
+        selected_result.gpu_kernel_dispatched = true;
+        selected_result.gpu_kernel_execution_delta = SYSTEM_WORKLOAD_GATE_ITERATIONS as u64;
+        selected_result.gpu_resident_pipeline = report::GpuResidentPipelineStatus::Reported;
+        selected_result.native_decline_evidence = None;
+        let capture = |phase: &str,
+                       pair_index: Option<usize>,
+                       iteration: report::IterationResult,
+                       artifact: report::ArtifactLifecycleDelta| {
+            report::ResidentLifecycleCapture {
+                phase: phase.to_owned(),
+                pair_index,
+                iteration,
+                artifact,
+                artifact_policy: Some("cached_reusable".to_owned()),
+                refresh_us: 0,
+                refreshed_relations: 0,
+                refreshed_rows: 0,
+                dependencies_before: Vec::new(),
+                dependencies_after: Vec::new(),
+                queries_accelerated: 1,
+                rows_dispatched: SYSTEM_WORKLOAD_GATE_ROWS as u64,
+                batches_executed: 1,
+                stock_exec_count: 0,
+                gpu_rows_processed: SYSTEM_WORKLOAD_GATE_ROWS as u64,
+                gpu_kernel_executions: 1,
+                output_rows_consumed: 1,
+                error: None,
+            }
+        };
+        selected_result.artifact_lifecycle_probe = Some(capture(
+            "lifecycle",
+            None,
+            selected_result.iterations[0].clone(),
+            report::ArtifactLifecycleDelta {
+                builds: 1,
+                artifact_bytes_observed: 4_096,
+                construction_bytes: 4_096,
+                construction_us: 100,
+                preparation_us: 125,
+                raw_load_us: 25,
+                ..report::ArtifactLifecycleDelta::default()
+            },
+        ));
+        selected_result.artifact_steady_state_captures = selected_result
+            .iterations
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(pair_index, iteration)| {
+                capture(
+                    "steady_state",
+                    Some(pair_index),
+                    iteration,
+                    report::ArtifactLifecycleDelta {
+                        hits: 1,
+                        artifact_bytes_observed: 4_096,
+                        preparation_us: 1,
+                        ..report::ArtifactLifecycleDelta::default()
+                    },
+                )
+            })
+            .collect();
+
+        let mut report = bench_report(results);
+        report.methodology.iterations = SYSTEM_WORKLOAD_GATE_ITERATIONS;
+        report.methodology.warmup = SYSTEM_WORKLOAD_GATE_WARMUP;
+        report.methodology.row_scales = vec![SYSTEM_WORKLOAD_GATE_ROWS];
+        report.methodology.harness_profile = "release".to_owned();
+        report.headline_speedup_allowed = false;
+        report
+    }
+
     fn gate_error(result: Result<(), Box<dyn std::error::Error>>) -> String {
         result.expect_err("gate should fail").to_string()
     }
@@ -2559,6 +2678,179 @@ mod tests {
     fn metal_ship_gate_accepts_complete_release_evidence() {
         enforce_metal_ship_gate_complete(&complete_metal_report())
             .expect("complete Metal ship-gate evidence");
+    }
+
+    #[test]
+    fn system_workload_gate_resolves_categories_and_accepts_complete_evidence() {
+        let selected = system_workload_gate_workloads().expect("typed system workload registry");
+        assert!(!selected.is_empty());
+        for category in [
+            workloads::WorkloadCategory::StarSchemaSsbm,
+            workloads::WorkloadCategory::Tpch,
+            workloads::WorkloadCategory::ClickBench,
+        ] {
+            assert!(selected.iter().any(|workload| {
+                workloads::workload_metadata(workload.name())
+                    .is_some_and(|metadata| metadata.category == category)
+            }));
+        }
+        assert!(
+            selected
+                .iter()
+                .all(|workload| { workload.row_scales().contains(&SYSTEM_WORKLOAD_GATE_ROWS) })
+        );
+
+        let report = complete_system_workload_report(&selected);
+        assert!(!report.headline_speedup_allowed);
+        enforce_system_workload_gate(&report, &selected)
+            .expect("complete broad system workload evidence");
+    }
+
+    #[test]
+    fn system_workload_gate_aggregates_matrix_evidence_and_methodology_failures() {
+        let selected = system_workload_gate_workloads().expect("typed system workload registry");
+        let mut report = complete_system_workload_report(&selected);
+        let missing = report.workloads.pop().expect("system workload to remove");
+        let duplicate = report.workloads[1].clone();
+        let duplicate_name = duplicate.name.clone();
+        report.workloads.push(duplicate);
+        report.workloads.push(evidenced_result(
+            "unexpected_system_workload",
+            SYSTEM_WORKLOAD_GATE_ROWS,
+        ));
+
+        let selected_without_evidence = &mut report.workloads[0];
+        selected_without_evidence.plan_snippet = None;
+        selected_without_evidence.baseline_plan_snippet = None;
+        selected_without_evidence.correctness_diff_artifact = None;
+        selected_without_evidence.dispatch_counter_captured = false;
+        selected_without_evidence.pg_accel_stock_exec_delta = 3;
+        selected_without_evidence.resident_lane = false;
+        selected_without_evidence.resident_load_ms = None;
+        selected_without_evidence.rows_returned_to_cpu = 0;
+        selected_without_evidence.warm_summary = None;
+        selected_without_evidence.gpu_kernel_dispatched = false;
+        selected_without_evidence.gpu_kernel_execution_delta = 0;
+        selected_without_evidence.gpu_resident_pipeline =
+            report::GpuResidentPipelineStatus::NotReported;
+        selected_without_evidence.artifact_lifecycle_probe = None;
+        selected_without_evidence
+            .artifact_steady_state_captures
+            .clear();
+
+        let native_with_dispatch = &mut report.workloads[1];
+        native_with_dispatch.gpu_kernel_dispatched = true;
+        native_with_dispatch.gpu_kernel_execution_delta = 1;
+        native_with_dispatch.native_decline_evidence = Some(report::NativeDeclineEvidence {
+            reason: "unconfirmed".to_owned(),
+            source: report::DeclineReasonSource::ExpectedUnconfirmed,
+        });
+
+        report.crashes.push(crashed_scale(
+            "crashed_system_workload",
+            SYSTEM_WORKLOAD_GATE_ROWS,
+            "backend exited",
+        ));
+        report.methodology.iterations = 3;
+        report.methodology.warmup = 1;
+        report.methodology.row_scales = vec![10_000, SYSTEM_WORKLOAD_GATE_ROWS];
+        report.methodology.timing_mode = "explain-analyze".to_owned();
+        report.methodology.cache_mode = "both".to_owned();
+        report.methodology.harness_profile = "debug".to_owned();
+
+        let error = gate_error(enforce_system_workload_gate(&report, &selected));
+        assert!(error.starts_with("broad system workload gate failed:"));
+        assert!(error.contains(&format!("`{}`: expected one", missing.name)));
+        assert!(error.contains("found 0"));
+        assert!(error.contains(&format!("`{duplicate_name}`: expected one")));
+        assert!(error.contains("found 2"));
+        assert!(error.contains("unexpected system workload result `unexpected_system_workload`"));
+        assert!(error.contains("is missing accelerated or PostgreSQL plan evidence"));
+        assert!(error.contains("is missing exact correctness evidence"));
+        assert!(error.contains("is missing dispatch counters"));
+        assert!(error.contains("used 3 stock-executor fallback(s)"));
+        assert!(error.contains("did not separate its resident load"));
+        assert!(error.contains("did not consume query output"));
+        assert!(error.contains("does not contain 10 warm measured pairs"));
+        assert!(error.contains("selected pg_accel without a reported resident GPU dispatch"));
+        assert!(error.contains("without separate artifact construction and warm-hit evidence"));
+        assert!(error.contains("stayed native but dispatched GPU work"));
+        assert!(error.contains("stayed native without a planner-reported decline reason"));
+        assert!(error.contains("crashed_system_workload @ 100000 crashed: backend exited"));
+        assert!(error.contains("system methodology drifted:"));
+    }
+
+    #[test]
+    fn system_workload_manifest_is_deterministic_immutable_and_path_safe() {
+        let selected = system_workload_gate_workloads().expect("typed system workload registry");
+        let base = unique_temp_path("system-workload-contract");
+        let left = base.join("left");
+        let right = base.join("right");
+
+        write_system_workload_gate_contract(&left, &selected).expect("first system contract");
+        write_system_workload_gate_contract(&right, &selected).expect("second system contract");
+        let left_bytes =
+            fs::read(left.join(SYSTEM_WORKLOAD_GATE_CONTRACT_FILE)).expect("left contract");
+        let right_bytes =
+            fs::read(right.join(SYSTEM_WORKLOAD_GATE_CONTRACT_FILE)).expect("right contract");
+        assert_eq!(left_bytes, right_bytes);
+
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&left_bytes).expect("valid system contract JSON");
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(manifest["gate"], "broad_system_workload_characterization");
+        assert_eq!(manifest["certified_external_benchmark"], false);
+        assert_eq!(manifest["headline_speedup_allowed"], false);
+        assert_eq!(manifest["iterations"], SYSTEM_WORKLOAD_GATE_ITERATIONS);
+        assert_eq!(manifest["warmup"], SYSTEM_WORKLOAD_GATE_WARMUP);
+        assert_eq!(manifest["seed"], SYSTEM_WORKLOAD_GATE_SEED);
+        assert_eq!(manifest["timing_mode"], "raw-wallclock");
+        assert_eq!(manifest["cache_mode"], "warm");
+        assert_eq!(manifest["required_harness_profile"], "release");
+        let cells = manifest["cells"].as_array().expect("system contract cells");
+        assert_eq!(cells.len(), selected.len());
+        for (cell, workload) in cells.iter().zip(&selected) {
+            let metadata =
+                workloads::workload_metadata(workload.name()).expect("system workload metadata");
+            assert_eq!(cell["workload"], workload.name());
+            assert_eq!(cell["category"], metadata.category.as_str());
+            assert_eq!(cell["rows"], SYSTEM_WORKLOAD_GATE_ROWS);
+            assert_eq!(
+                cell["result_policy"],
+                "selected_gpu_or_planner_reported_native_decline"
+            );
+        }
+        assert!(
+            write_system_workload_gate_contract(&left, &selected)
+                .expect_err("nonempty system evidence directory must fail")
+                .to_string()
+                .contains("evidence bundles are immutable")
+        );
+
+        fs::create_dir_all(&base).expect("create system contract test root");
+        let occupied_file = base.join("occupied");
+        fs::write(&occupied_file, b"not a directory").expect("create occupied file");
+        assert!(
+            write_system_workload_gate_contract(&occupied_file, &selected)
+                .expect_err("existing file path must fail")
+                .to_string()
+                .contains("exists and is not a directory")
+        );
+        let empty_dir = base.join("empty");
+        fs::create_dir(&empty_dir).expect("create empty system evidence directory");
+        write_system_workload_gate_contract(&empty_dir, &selected)
+            .expect("existing empty system evidence directory should be writable");
+        assert!(empty_dir.join(SYSTEM_WORKLOAD_GATE_CONTRACT_FILE).is_file());
+
+        fs::remove_dir_all(base).expect("remove system contract test directories");
+    }
+
+    #[test]
+    fn system_workload_command_refuses_debug_harness_before_database_access() {
+        let error = cmd_system_workload_gate("host=/definitely/not/used", None)
+            .expect_err("debug system gate must fail before connecting")
+            .to_string();
+        assert!(error.contains("requires a release harness"));
     }
 
     #[test]

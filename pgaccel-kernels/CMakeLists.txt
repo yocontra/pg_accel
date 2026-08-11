@@ -172,6 +172,13 @@ target_link_libraries(test_fork_cold PRIVATE pgaccel_kernels_shared)
 add_executable(test_fork_warmed test/test_fork_warmed.cpp)
 target_link_libraries(test_fork_warmed PRIVATE pgaccel_kernels_shared)
 target_compile_definitions(test_fork_warmed PRIVATE PGACCEL_TEST_HOOKS)
+if(PGACCEL_ENABLE_COVERAGE)
+    # The successful injected-fork child normally uses _exit(), which correctly
+    # avoids inherited process teardown but also suppresses LLVM's atexit profile
+    # flush. Coverage filenames contain %p, so a normal return is safe and gives
+    # the child a distinct raw profile without changing production behavior.
+    target_compile_definitions(test_fork_warmed PRIVATE PGACCEL_COVERAGE_CHILD_FLUSH)
+endif()
 
 add_executable(test_fork_archive_stress test/test_fork_archive_stress.cpp)
 target_link_libraries(test_fork_archive_stress PRIVATE pgaccel_kernels_shared)

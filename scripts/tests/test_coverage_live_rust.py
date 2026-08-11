@@ -100,8 +100,9 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
         selected: bool = False,
         reason: str = "test_planner_decline",
         iterations: int = 1,
+        native_pairing: bool = False,
     ) -> dict[str, object]:
-        return {
+        row: dict[str, object] = {
             "name": name,
             "rows": rows,
             "iterations": [{} for _ in range(iterations)],
@@ -119,6 +120,23 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
             if selected
             else {"reason": reason, "source": "planner_reported"},
         }
+        if native_pairing:
+            row["native_parity_pair_captures"] = [
+                {
+                    "sequence": [
+                        "accel",
+                        "disabled_postgresql",
+                        "disabled_postgresql",
+                        "accel",
+                    ],
+                    "accel_ms": [1.0, 1.0],
+                    "parallel_ms": [1.0, 1.0],
+                }
+            ]
+            row["planner_stage_captures"] = [
+                {"error": None, "stages": [{}], "substages": [{}]}
+            ]
+        return row
 
     def report(
         key: str,
@@ -129,6 +147,7 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
         reason: str = "test_planner_decline",
         iterations: int = 1,
         warmup: int = 0,
+        native_pairing: bool = False,
     ) -> pathlib.Path:
         path = root / key / "report.json"
         row = result_row(
@@ -137,6 +156,7 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
             selected=selected,
             reason=reason,
             iterations=iterations,
+            native_pairing=native_pairing,
         )
         write_json(
             path.parent / str(row["correctness_diff_artifact"]),
@@ -152,6 +172,8 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
                     "timing_mode": "raw-wallclock",
                     "iterations": iterations,
                     "warmup": warmup,
+                    "native_parity_pairing": native_pairing,
+                    "native_parity_repetitions_per_arm": 2 if native_pairing else 1,
                 },
                 "workloads": [row],
             },
@@ -160,12 +182,29 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
         return path
 
     selected = report("selected", "grouped_agg_int4", 1_000_000, selected=True)
-    declined = report("declined", "window_full_output_decline", 10_000)
+    declined = report(
+        "declined",
+        "window_full_output_decline",
+        10_000,
+        native_pairing=True,
+    )
     fp64 = report("fp64", "reduce_f64_minmax", 100_000)
     mixed = report("mixed", "mixed_join_agg_int4", 100_000, selected=True)
     ssbm = report("ssbm", "ssbm_resident_int4_star", 100_000, selected=True)
     hash_join = report("hash", "hash_join", 100_000, selected=True)
     h3 = report("h3", "h3_cell_to_parent", 100_000, selected=True)
+    spatial_resident = report(
+        "spatial_resident",
+        "spatial_resident_agg_candidate",
+        1_000_000,
+        selected=True,
+    )
+    raster_resident = report(
+        "raster_resident",
+        "raster_resident_exact_reclass",
+        10_000,
+        selected=True,
+    )
     spatial = report(
         "spatial",
         "spatial_mega_1kv",
@@ -235,6 +274,8 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
         ssbm,
         hash_join,
         h3,
+        spatial_resident,
+        raster_resident,
         spatial,
         raster_reclass,
         phase9,
@@ -343,26 +384,68 @@ class CoverageLiveRustTests(unittest.TestCase):
 
     def test_warm_raw_command_is_allowed(self) -> None:
         cells = (
-            ("grouped_agg_int4", 1_000_000, "selected"),
-            ("window_full_output_decline", 10_000, "declined"),
-            ("reduce_f64_minmax", 100_000, "fp64-native"),
-            ("mixed_join_agg_int4", 100_000, "mixed-resident"),
-            ("ssbm_resident_int4_star", 100_000, "ssbm-resident"),
-            ("hash_join", 100_000, "hash-join"),
-            ("h3_cell_to_parent", 100_000, "h3-parent"),
-            ("spatial_mega_1kv", 80_000, "spatial-mega"),
-            ("raster_reclass", 100, "raster-reclass"),
+            ("grouped_agg_int4", 1_000_000, "selected", ""),
+            (
+                "window_full_output_decline",
+                10_000,
+                "declined",
+                "--capture-planner-stages --native-parity-pairing",
+            ),
+            ("reduce_f64_minmax", 100_000, "fp64-native", ""),
+            ("mixed_join_agg_int4", 100_000, "mixed-resident", ""),
+            ("ssbm_resident_int4_star", 100_000, "ssbm-resident", ""),
+            ("hash_join", 100_000, "hash-join", ""),
+            ("h3_cell_to_parent", 100_000, "h3-parent", ""),
+            (
+                "spatial_resident_agg_candidate",
+                1_000_000,
+                "spatial-resident",
+                "",
+            ),
+            (
+                "raster_resident_exact_reclass",
+                10_000,
+                "raster-resident",
+                "",
+            ),
+            ("spatial_mega_1kv", 80_000, "spatial-mega", ""),
+            ("raster_reclass", 100, "raster-reclass", ""),
         )
-        for workload, rows, artifact_name in cells:
+        for workload, rows, artifact_name, exact_options in cells:
             with self.subTest(workload=workload, rows=rows):
                 result = call_library(
                     f"assert_safe_bench_command crash-repro --workload {workload} "
                     f"--rows {rows} --iterations 1 --warmup 0 --seed 42 "
                     f"--connection {TEST_CONNECTION} --format json --capture-plans "
-                    "--cache-mode warm --timing raw --skip-guc-verify "
+                    f"--cache-mode warm --timing raw --skip-guc-verify {exact_options} "
                     f"--artifacts-dir {TEST_ARTIFACT_ROOT}/{artifact_name}"
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_native_pairing_and_planner_capture_are_bound_to_one_exact_cell(self) -> None:
+        exact = (
+            "assert_safe_bench_command crash-repro "
+            "--workload window_full_output_decline --rows 10000 "
+            "--iterations 1 --warmup 0 --seed 42 "
+            f"--connection {TEST_CONNECTION} --format json --capture-plans "
+            "--cache-mode warm --timing raw --skip-guc-verify "
+            "--capture-planner-stages --native-parity-pairing "
+            f"--artifacts-dir {TEST_ARTIFACT_ROOT}/declined"
+        )
+        self.assertEqual(call_library(exact).returncode, 0)
+        for command in (
+            exact.replace("--capture-planner-stages ", ""),
+            exact.replace("--native-parity-pairing ", ""),
+            exact.replace(
+                "window_full_output_decline --rows 10000",
+                "grouped_agg_int4 --rows 1000000",
+            ).replace("/declined", "/selected"),
+            "assert_safe_bench_command run --dry-run --native-parity-pairing",
+            "assert_safe_bench_command validate --capture-planner-stages",
+        ):
+            with self.subTest(command=command):
+                result = call_library(command)
+                self.assertNotEqual(result.returncode, 0)
 
     def test_crash_repro_budget_cannot_expand(self) -> None:
         base = (
@@ -387,6 +470,8 @@ class CoverageLiveRustTests(unittest.TestCase):
             base.replace("--skip-guc-verify ", ""),
             base + " --category mixed",
             base + " --dry-run",
+            base + " --capture-planner-stages",
+            base + " --native-parity-pairing",
         )
         for command in commands:
             with self.subTest(command=command):
@@ -782,6 +867,8 @@ class CoverageLiveRustTests(unittest.TestCase):
             ("run_bench", "ssbm_resident_crash_repro"),
             ("run_bench", "hash_join_crash_repro"),
             ("run_bench", "h3_parent_crash_repro"),
+            ("run_bench", "spatial_resident_crash_repro"),
+            ("run_bench", "raster_resident_crash_repro"),
             ("run_bench", "spatial_mega_decline"),
             ("run_bench", "raster_reclass_decline"),
             ("run_bench", "phase9_bounded"),
