@@ -2607,7 +2607,7 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "sort_heap_full_output",
         ),
         "gpu_sort_topk_wide" => (
-            "float4 single key",
+            "float4 + int4 deterministic tie-break key",
             "LIMIT 1000 bounded standalone sort",
             "~120-byte heap row",
             "1000 heap rows",
@@ -4353,6 +4353,9 @@ mod tests {
                 Some("sort_standalone_topk_no_gpu_kernel"),
                 "{name}"
             );
+            if name == "gpu_sort_topk_wide" {
+                assert_eq!(entry.data_type, "float4 + int4 deterministic tie-break key");
+            }
         }
     }
 

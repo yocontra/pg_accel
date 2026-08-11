@@ -4864,23 +4864,27 @@ mod tests {
 
         Spi::run(&format!(
             "CREATE TEMP TABLE _gpu_sort_t AS \
-             SELECT (random() * 1e6)::float4 AS v \
-             FROM generate_series(1, {})",
+             SELECT g AS id, (random() * 1e6)::float4 AS v \
+             FROM generate_series(1, {}) AS g",
             200_000
         ))
         .expect("create temp table");
         Spi::run("ANALYZE _gpu_sort_t").expect("analyze sort table");
         Spi::run("SELECT pg_accel_reset_stats()").expect("reset planner evidence");
 
-        let plan = explain_text("SELECT v FROM _gpu_sort_t ORDER BY v LIMIT 128");
+        let plan = explain_text("SELECT v FROM _gpu_sort_t ORDER BY v, id LIMIT 128");
         assert!(
             !plan.contains("Strategy: GpuSort") && !plan.contains("Custom Scan (GpuAccelSort)"),
             "standalone top-k must stay PostgreSQL-native:\n{plan}"
         );
+        let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+            .expect("last rejection query should succeed")
+            .expect("standalone top-k should record a decline");
+        assert_eq!(rejection, "sort_standalone_topk_no_gpu_kernel");
 
         crate::gpu::reset_gpu_exec_count();
         let count = Spi::get_one::<i64>(
-            "SELECT count(*) FROM (SELECT v FROM _gpu_sort_t ORDER BY v LIMIT 128) q",
+            "SELECT count(*) FROM (SELECT v FROM _gpu_sort_t ORDER BY v, id LIMIT 128) q",
         )
         .expect("top-k query ok")
         .expect("top-k count returned");
@@ -4924,8 +4928,8 @@ mod tests {
             .expect("last rejection query should succeed")
             .expect("full-output sort should record a reason");
         assert_eq!(
-            rejection, RESIDENT_ONLY_REJECTION,
-            "full-output sort should expose the resident-only gate before legacy heap-output lanes; plan:\n{plan}"
+            rejection, "sort_heap_full_output",
+            "full-output sort should preserve its specific structural decline; plan:\n{plan}"
         );
     }
 
@@ -5016,7 +5020,7 @@ mod tests {
         let rejection = Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
             .expect("last rejection query should succeed")
             .expect("default-planned full sort should record a decline");
-        assert_eq!(rejection, RESIDENT_ONLY_REJECTION);
+        assert_eq!(rejection, "sort_heap_full_output");
         assert!(
             planner_rejection_count("sort_heap_full_output") > 0,
             "full-output sort must retain its typed shape decline before the resident-only observer"

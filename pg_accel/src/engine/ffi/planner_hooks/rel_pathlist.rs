@@ -684,7 +684,7 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
         // auditable.
         // SAFETY: rte_ref and rel_ref are live planner-owned values and this
         // callback runs on the backend thread.
-        if unsafe { rte_has_h3_lateral_srf(rte_ref) } {
+        let mut specific_decline_recorded = if unsafe { rte_has_h3_lateral_srf(rte_ref) } {
             #[allow(clippy::cast_sign_loss)]
             let rows = rel_ref.rows.max(0.0) as u64;
             stats::increment_planner_rejected(
@@ -695,15 +695,22 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_rel_pathlist(
                 "pg_accel: H3 LATERAL SRF remains native because no batched resident \
                  expansion executor exists"
             );
-        }
+            true
+        } else {
+            false
+        };
         // SAFETY: all pointers are planner-owned for this hook invocation.
         let raster_observed = unsafe { super::raster::observe(root, rel, rti, rte) };
         if !raster_observed {
             // SAFETY: all pointers are planner-owned for this hook invocation.
-            unsafe {
-                observe_resident_only_rel_declines(root, rel, rte, has_sort, has_restrictions);
-            }
-            if rte_ref.rtekind == pg_sys::RTEKind::RTE_FUNCTION || has_sort || has_restrictions {
+            specific_decline_recorded |= unsafe {
+                observe_resident_only_rel_declines(root, rel, rte, has_sort, has_restrictions)
+            };
+            if !specific_decline_recorded
+                && (rte_ref.rtekind == pg_sys::RTEKind::RTE_FUNCTION
+                    || has_sort
+                    || has_restrictions)
+            {
                 super::record_no_gpu_resident_pipeline_decline(
                     stats::PlannerHookStage::RelPathlist,
                     "rel_pathlist_no_resident_pipeline",
@@ -747,19 +754,20 @@ unsafe fn observe_resident_only_rel_declines(
     rte: *mut RangeTblEntry,
     has_sort: bool,
     has_restrictions: bool,
-) {
+) -> bool {
     if root.is_null() || rel.is_null() || rte.is_null() {
-        return;
+        return false;
     }
     // SAFETY: caller passed planner-owned pointers from set_rel_pathlist.
     let rel_ref = unsafe { &*rel };
     // SAFETY: rte was checked non-null and remains planner-owned for this callback.
     let rte_ref = unsafe { &*rte };
 
+    let mut specific_decline_recorded = false;
     if has_sort {
         // SAFETY: root and rel are non-null planner pointers supplied by the
         // enclosing set_rel_pathlist callback.
-        unsafe { observe_resident_only_sort_declines(root, rel) };
+        specific_decline_recorded |= unsafe { observe_resident_only_sort_declines(root, rel) };
     }
 
     if !has_restrictions
@@ -769,7 +777,7 @@ unsafe fn observe_resident_only_rel_declines(
             pg_sys::RelOptKind::RELOPT_BASEREL | pg_sys::RelOptKind::RELOPT_OTHER_MEMBER_REL
         )
     {
-        return;
+        return specific_decline_recorded;
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -783,6 +791,7 @@ unsafe fn observe_resident_only_rel_declines(
              declined ({:?}) before the generic resident-pipeline gate",
             h3_decline
         );
+        specific_decline_recorded = true;
     }
     // SAFETY: baserestrictinfo is the same live planner-owned restriction List.
     if unsafe { restrictinfo_contains_wrapped_postgis_intersects(rel_ref.baserestrictinfo) } {
@@ -794,12 +803,17 @@ unsafe fn observe_resident_only_rel_declines(
             "pg_accel: set_rel_pathlist resident-only observer: ST_Intersects shape declined \
              before the generic resident-pipeline gate"
         );
+        specific_decline_recorded = true;
     }
+    specific_decline_recorded
 }
 
-unsafe fn observe_resident_only_sort_declines(root: *mut PlannerInfo, rel: *mut RelOptInfo) {
+unsafe fn observe_resident_only_sort_declines(
+    root: *mut PlannerInfo,
+    rel: *mut RelOptInfo,
+) -> bool {
     if root.is_null() || rel.is_null() {
-        return;
+        return false;
     }
     // SAFETY: caller passed planner-owned pointers from set_rel_pathlist.
     let root_ref = unsafe { &*root };
@@ -807,12 +821,12 @@ unsafe fn observe_resident_only_sort_declines(root: *mut PlannerInfo, rel: *mut 
     let rel_ref = unsafe { &*rel };
     let sort_pathkeys = root_ref.sort_pathkeys;
     if sort_pathkeys.is_null() {
-        return;
+        return false;
     }
     // SAFETY: sort_pathkeys is a valid planner List.
     let num_pathkeys = unsafe { pg_sys::list_length(sort_pathkeys) };
     if num_pathkeys < 1 {
-        return;
+        return false;
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -822,40 +836,46 @@ unsafe fn observe_resident_only_sort_declines(root: *mut PlannerInfo, rel: *mut 
     let presorted =
         unsafe { longest_presorted_prefix(rel_ref.pathlist, sort_pathkeys, num_pathkeys) };
     match classify_sort_shape(presorted, num_pathkeys) {
-        SortShape::AlreadySorted { .. } => return,
+        SortShape::AlreadySorted { .. } => return false,
         SortShape::IncrementalOpportunity { .. } => {
             stats::increment_planner_rejected(
                 super::RejectionReason::SortIncrementalOpportunity.stats_key(),
                 rejected_rows,
             );
-            return;
+            return true;
         }
         SortShape::FullSort { .. } => {}
     }
 
-    if num_pathkeys > 1 {
-        stats::increment_planner_rejected(
-            super::RejectionReason::SortMultiKeyNoGpuKernel.stats_key(),
-            rejected_rows,
-        );
-        return;
-    }
-
-    if min_max_rewrite_shape(root_ref.limit_tuples, num_pathkeys) {
-        stats::increment_planner_rejected(
-            super::RejectionReason::MinMaxRewriteNotASort.stats_key(),
-            rejected_rows,
-        );
-        return;
-    }
     #[allow(clippy::cast_sign_loss)]
     let rows = rel_ref.rows.max(0.0) as usize;
-    let reason = if standalone_sort_has_bounded_output(root_ref.limit_tuples, rows) {
+    let reason = standalone_full_sort_rejection_reason(root_ref.limit_tuples, rows, num_pathkeys);
+    stats::increment_planner_rejected(reason.stats_key(), rejected_rows);
+    true
+}
+
+/// Pick one stable diagnostic for overlapping standalone-sort limitations.
+///
+/// A bounded multi-key sort is primarily a top-k lane: the same missing
+/// standalone top-k executor blocks it whether PostgreSQL adds a deterministic
+/// tie-break key or not. Unbounded multi-key sorts retain their more specific
+/// multi-key reason. Keep the MIN/MAX rewrite ahead of both classifications.
+#[must_use]
+#[inline]
+fn standalone_full_sort_rejection_reason(
+    limit_tuples: f64,
+    rows: usize,
+    num_pathkeys: i32,
+) -> super::RejectionReason {
+    if min_max_rewrite_shape(limit_tuples, num_pathkeys) {
+        super::RejectionReason::MinMaxRewriteNotASort
+    } else if standalone_sort_has_bounded_output(limit_tuples, rows) {
         super::RejectionReason::SortStandaloneTopKNoGpuKernel
+    } else if num_pathkeys > 1 {
+        super::RejectionReason::SortMultiKeyNoGpuKernel
     } else {
         super::RejectionReason::SortHeapFullOutput
-    };
-    stats::increment_planner_rejected(reason.stats_key(), rejected_rows);
+    }
 }
 
 /// Whether a native standalone sort has a positive LIMIT smaller than its
@@ -1003,8 +1023,10 @@ unsafe fn longest_presorted_prefix(
 mod tests {
     use super::{
         NodeTag, SortShape, classify_sort_shape, h3_variable_output_srf_name,
-        min_max_rewrite_shape, plain_native_target_tag, standalone_sort_has_bounded_output,
+        min_max_rewrite_shape, plain_native_target_tag, standalone_full_sort_rejection_reason,
+        standalone_sort_has_bounded_output,
     };
+    use crate::engine::ffi::planner_hooks::RejectionReason;
 
     // -- classify_sort_shape ------------------------------------------------
     //
@@ -1099,6 +1121,18 @@ mod tests {
     fn bounded_output_classifier_identifies_topk_without_admitting_it() {
         assert!(standalone_sort_has_bounded_output(1.0, 1_000_000));
         assert!(standalone_sort_has_bounded_output(128.0, 1_000_000));
+    }
+
+    #[test]
+    fn bounded_multikey_sort_preserves_topk_as_primary_decline() {
+        assert_eq!(
+            standalone_full_sort_rejection_reason(1_000.0, 100_000, 2),
+            RejectionReason::SortStandaloneTopKNoGpuKernel
+        );
+        assert_eq!(
+            standalone_full_sort_rejection_reason(-1.0, 100_000, 2),
+            RejectionReason::SortMultiKeyNoGpuKernel
+        );
     }
 
     // -- min_max_rewrite_shape --------------------------------------------
