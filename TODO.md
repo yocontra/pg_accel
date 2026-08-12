@@ -7,10 +7,11 @@ published release artifact.
 
 ## Current Implementation Baseline
 
-- [x] Code and workflow implementation is complete through
-  `0177120df7e265160e18f00cccba448f9d0208bf`. Exact release evidence must bind
-  the clean candidate created by this final TODO reconciliation, not this
-  predecessor SHA.
+- [x] Code and workflow implementation is complete through predecessor
+  `c10e0e9ffeaa70c61c72fe6febbee17b5a9bbfb2`. The clean candidate created by
+  this TODO reconciliation must receive fresh local, hosted, and
+  independent-machine release evidence; the retained `a374102` artifacts
+  predate the bool-count, bounded-range, and soft-fp 2.0.1 updates.
 - [x] PostgreSQL 18 and 19 strict workspace Clippy/check gates pass.
 - [x] The current Rust extension and benchmark harness unit suites pass, along
   with the live plan/integration suite.
@@ -197,14 +198,40 @@ evidence.
 These implementations remain internal or explicit native declines until they are
 redesigned and independently requalified.
 
-- [ ] Multiple same-column range intersection: the 1M candidate measured
-  10,100.35 ms versus PostgreSQL 19.31 ms (0.00191x, about 523x slower). Keep
-  `shape_multiple_range_predicates`; redesign as one fused bounded device filter
-  without repeated expression/materialization work.
-- [ ] Grouped `COUNT(bool_column)`: the 1M candidate measured 3,508.11 ms versus
-  PostgreSQL 18.87 ms (0.0054x, about 186x slower). Keep
-  `shape_unsupported_aggregate_input`; investigate bool-specialized direct
-  counters or a reusable prepared artifact before rerunning SQL94 and its gate.
+- [x] Multiple same-column range intersection: replace the former serial generic
+  path (10,100.35 ms versus PostgreSQL 19.31 ms at 1M) with an exact
+  `dense_integer_multiply_range` specialization. The planner now fuses exactly
+  two int4 bounds over the product lhs, and the parallel dense-integer row
+  kernel tests the inclusive interval from the same lhs load used by
+  multiplication without a derived mask. Nullable predicate, RHS, and group
+  semantics, both hierarchical and 256-group atomic execution, int4 expression
+  overflow with untouched output, malformed sidecars, physical-mode reporting,
+  prepared DML/DDL, and adjacent native declines are covered by Rust, native
+  C++, PG18 SQL95-SQL97, and the semantic matrix. A
+  5-warmup/10-pair-per-scale characterization measured 2.32 ms versus
+  PostgreSQL 10.12 ms (4.36x) at 250K and 3.50 ms versus 28.12 ms (8.05x) at
+  1M, with 20/20 artifact hits, verified `parallel_dense_integer`, and zero
+  fallback in
+  `.codex/scratch/range-intersection-fastpath-envelope-characterization`
+  (`artifact_index.json` SHA-256
+  `4324d14e7dfbc7af12d85fc0e7e6c7a71513b213cca2290518023b06465d7918`).
+  Preserve `shape_multiple_range_predicates` for a third bound and broader
+  SSBM shapes. The characterization ran while unrelated CPU-heavy processes
+  were active and has provenance warnings, so rerun clean exact-candidate
+  release evidence before publication.
+- [x] Grouped `COUNT(bool_column)`: replace the former serial generic path
+  (3,508.11 ms versus PostgreSQL 18.87 ms) with a hierarchical dense bool-count
+  specialization that tracks selected and non-NULL rows independently. The
+  exact 1M-row distinct-key/measure shape now reports verified
+  `parallel_dense_count`, preserves all-NULL group activity, and keeps global,
+  same-column, filtered, joined, and multi-measure variants native. PG18 SQL94,
+  SQL95 DML/DDL/prepared lifecycle, SQL96 adjacent decline, native C++, and Rust
+  contracts pass. A 5-warmup/10-pair-per-scale characterization measured 1.66
+  ms versus PostgreSQL 9.59 ms (5.77x) at 250K and 2.92 ms versus 21.13 ms
+  (7.23x) at 1M, with 20/20 artifact hits and zero fallback in
+  `.codex/scratch/bool-count-fastpath-envelope-characterization`; rerun the
+  clean exact release artifact after the unrelated CPU-saturating process is
+  removed.
 
 ## P1: Profitable Unqualified Surface
 
@@ -240,13 +267,21 @@ redesigned and independently requalified.
   PostgreSQL SHA, build flags, schedules, expected/actual diffs, server logs, and
   platform-qualified exclusions as durable release evidence. Add the gate to CI
   so hook compatibility is continuously tested rather than inferred from the
-  extension's own SQL tests.
+  extension's own SQL tests. Context:
+  <https://malisper.me/pgrust-passes-100-of-postgresqls-regression-tests/>.
   PG18.4 and PG19beta1 both pass pristine regression, pristine isolation,
   loaded regression, and loaded isolation. Local sealed evidence:
   `.codex/scratch/upstream-postgresql-pg18-20260811-c` (`SHA256SUMS` SHA-256
   `f750f7d5d95f70760504a7d981546233071d77ff1549e77cd7b1ed13013dcf66`) and
   `.codex/scratch/upstream-postgresql-pg19-20260811-a` (`SHA256SUMS` SHA-256
   `255614004e4e41f0e5e85c2f1b04d4c9754b8ae5daea54a534c83afe4521b452`).
+  The clean `0177af623a3cb77eef1b56f8453f4b9c677ca345` follow-up also passes all
+  eight schedules with exact-tree/module provenance in
+  `.codex/scratch/upstream-postgresql-exact-0177af6-20260811-a`: PG18
+  `SHA256SUMS` SHA-256
+  `522c5ca900e27b8c7f07e38fac524e472c23fa58316d198dd825a9125a621aaa`
+  and PG19 `SHA256SUMS` SHA-256
+  `8ce70a824cbc775a3de490c62046cefe50a6a740de90f2b0cfbaccdeeaa043f2`.
 - [x] Extend failure injection across multi-session residency/invalidation,
   executor reset/drop, planner private data, allocation/free, copy/wait,
   cancellation, output materialization, PostGIS calls, and derived-artifact
@@ -273,8 +308,27 @@ redesigned and independently requalified.
 - [ ] Produce a fresh exact-candidate coverage and enriched Metal stress bundle
   covering mixed workloads, fork, cancellation, concurrency, memory pressure,
   per-kernel JIT/archive cold/warm evidence, clean logs, and resource balance.
+  The retained predecessor candidate
+  `a374102e65d26c0485aa6279752d6f3fe046077d` passed the
+  three-layer PG18 gate at 90.08% Rust source coverage (47,958/53,240), 90.04%
+  C++/SYCL source coverage (16,527/18,355), and 100% SQL semantic coverage
+  (320/320 assertions across 59/59 files). The gate summary SHA-256 is
+  `e73298aebad6920eee1a03be17479d404070ecf969d6cad8a6ff24b9cbe8f9f2`.
+  `.codex/scratch/metal-stress-exact-a374102-pg18` passes 32/32 native Metal
+  tests, OOM, cancellation, archive cold/warm and 8-by-20 fork stress, six
+  characterization cells, log audit, and artifact-index verification. Its
+  `artifact_index.json` SHA-256 is
+  `e3b526aefc08499087697901fe5fc21a38a5ecb01e957ba3e24d87ce353d5c85`.
+  Those artifacts remain historical evidence only: the current source scope is
+  323 assertions across 60 files and includes the bool-count, bounded-range,
+  and soft-fp 2.0.1 changes, so this gate is open until that clean candidate is
+  rerun and sealed.
 - [ ] Pass hosted release CI on macOS arm64 Metal and Linux x86_64 no-GPU, with
-  durable artifacts from the exact candidate.
+  durable artifacts from the exact candidate. Exact-candidate run
+  `31550632369` reached GitHub Actions, but every hosted job was rejected before
+  its first step because the account has a failed payment or exceeded spending
+  limit. Restore Actions billing, then rerun that SHA; the zero-step failure is
+  not project execution evidence.
 - [ ] Verify public source-build, package, install, and `CREATE EXTENSION`
   instructions from a clean checkout on a fresh Apple Silicon machine.
 - [ ] Run the 1B-row scale gate when sufficient storage is available. No smaller
