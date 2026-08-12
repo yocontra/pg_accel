@@ -173,6 +173,7 @@ than the unprivileged local warm gate:
 | `grouped_agg_int4` | exact resident grouped SUM(int4)/COUNT | 1.15x |
 | `grouped_count_bool_candidate` | nullable bool-key / distinct nullable bool COUNT(column) | 1.15x |
 | `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.15x |
+| `and_range_predicate_expression_grouped_agg_int4` | exact int4 product SUM/COUNT with a fused nullable bounded range | 1.15x |
 | `mixed_join_agg_int4` | exact resident hash join plus grouped SUM(int4)/COUNT | 1.15x |
 | `ssbm_resident_int4_star` | exact two-dimension date+part star grouped by year and part size, SUM(int4)/COUNT | 1.15x |
 | `ssbm_resident_int8_star` | exact two-dimension INT8 membership star grouped by year and part size, SUM(int4)/COUNT | 1.15x |
@@ -183,12 +184,13 @@ The similarly named legacy workloads remain in the harness as fail-closed
 coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
 `shape_floating_accumulator_semantics`, while
 `predicate_filter_expression_grouped_agg` declines with
-`shape_aggregate_modifier`. The
-`and_range_predicate_expression_grouped_agg_int4` workload declines with
-`shape_multiple_range_predicates`: PostgreSQL analyzes `BETWEEN` and an
-equivalent lower-plus-upper pair as the same multi-clause shape, while one
-scalar comparison remains eligible. The 13 canonical `ssbm_q*` workloads also remain
-native: Q1.1-Q1.2 report `shape_multiple_range_predicates`, Q1.3 reports
+`shape_aggregate_modifier`. The released
+`and_range_predicate_expression_grouped_agg_int4` lane is deliberately narrow:
+exactly two int4 bounds fuse into one inclusive predicate over the product lhs.
+One-sided, RHS-input, joined, degenerate, and third-bound variants remain
+native; a third same-column bound reports `shape_multiple_range_predicates`.
+The 13 canonical `ssbm_q*` workloads also remain native: Q1.1-Q1.2 report
+`shape_multiple_range_predicates`, Q1.3 reports
 `shape_multi_filter_relation`, Q3.3-Q3.4 report `shape_unsupported_predicate`,
 and the remaining canonical SSBM queries report `shape_unsupported_filter_type`.
 `h3_bulk` reports `shape_unsupported_rte`, and
@@ -198,7 +200,7 @@ not make them eligible for the current ship gate.
 
 Any change to a workload SQL contract, fixture, threshold, or candidate tree
 invalidates the predecessor population freeze and random selection for the new
-candidate. Freeze the replacement SHA/tree and eight-cell population, then make a
+candidate. Freeze the replacement SHA/tree and nine-cell population, then make a
 fresh independent write-once random selection before executing release gates;
 retained predecessor evidence is transition history only.
 

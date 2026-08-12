@@ -78,7 +78,7 @@ EXPECTED_CAPABILITIES = {
     "Resident reducing or grouped aggregate": ("Present", "Selectable"),
     "Scalar row predicate inside a resident aggregate": (
         "Present",
-        "Selectable for one comparison",
+        "Selectable for exact qualified shapes",
     ),
     "Resident star join plus aggregate": ("Present", "Selectable"),
     "H3-derived group key inside a resident aggregate": ("Present", "Selectable"),

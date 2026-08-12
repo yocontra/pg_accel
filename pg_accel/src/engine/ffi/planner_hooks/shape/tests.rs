@@ -134,6 +134,59 @@ fn bool_grouped_count_input() -> ShapeInput {
     }
 }
 
+fn range_intersection_grouped_input() -> ShapeInput {
+    let group = column(1, 100, 1, u32::from(pg_sys::INT4OID));
+    let price = column(1, 100, 2, u32::from(pg_sys::INT4OID));
+    let quantity = column(1, 100, 3, u32::from(pg_sys::INT4OID));
+    let (sum, sum_output) = aggregate(
+        MeasureExpr::Binary {
+            op: BinaryMeasureOp::Mul,
+            lhs: price.column,
+            rhs: quantity.column,
+        },
+        AggregateKind::Sum,
+        u32::from(pg_sys::INT8OID),
+    );
+    let (count, count_output) = aggregate(
+        MeasureExpr::CountStar,
+        AggregateKind::Count,
+        u32::from(pg_sys::INT8OID),
+    );
+    ShapeInput {
+        relations: vec![relation(1, 100, 1_000_000)],
+        joins: Vec::new(),
+        group_keys: vec![PlannerGroupKey::Column(group)],
+        aggregates: vec![sum, count],
+        projections: vec![
+            InputProjection::Group {
+                key: PlannerGroupKey::Column(group),
+                output: output(u32::from(pg_sys::INT4OID), true),
+            },
+            InputProjection::Aggregate {
+                aggregate_index: 0,
+                output: sum_output,
+            },
+            InputProjection::Aggregate {
+                aggregate_index: 1,
+                output: count_output,
+            },
+        ],
+        relation_filters: vec![(
+            100,
+            FilterSpec::Ranges {
+                input: price.column,
+                ranges: vec![ScalarRange {
+                    lo: ScalarValue::I32(200),
+                    hi: ScalarValue::I32(800),
+                }],
+            },
+        )],
+        estimated_output_rows: 256,
+        expected_reuses: NonZeroU32::MIN,
+        modifiers: ShapeModifiers::default(),
+    }
+}
+
 fn add_dimension(input: &mut ShapeInput, varno: pg_sys::Index, relation_oid: u32, group: bool) {
     let fact_attno = i32::try_from(varno).unwrap_or(i32::MAX).saturating_add(2);
     let fact_key = column(1, 100, fact_attno, u32::from(pg_sys::INT4OID));
@@ -2107,6 +2160,53 @@ fn bool_column_count_candidate_admits_only_the_qualified_physical_shape() {
         output: count_star_output,
     });
     assert_eq!(planned_mode(multiple), GroupedAggKernelMode::SerialGeneric);
+}
+
+#[test]
+fn bounded_int4_range_intersection_admits_only_the_fused_product_shape() {
+    let planned_mode = |input| {
+        let shape = build_shape(input, &model()).expect("range shape should be representable");
+        planned_descriptor_kernel_mode(&shape.spec, false)
+    };
+
+    let shape = build_shape(range_intersection_grouped_input(), &model())
+        .expect("qualified range intersection should build");
+    assert_eq!(
+        planned_descriptor_kernel_mode(&shape.spec, false),
+        GroupedAggKernelMode::ParallelDenseInteger
+    );
+    assert_eq!(shape.required_relations[0].attnos, vec![1, 2, 3]);
+    assert!(matches!(
+        shape.spec.fact_filter,
+        FilterSpec::Ranges {
+            input: ColumnRef { attno: 2, .. },
+            ref ranges,
+        } if ranges.as_slice() == [ScalarRange {
+            lo: ScalarValue::I32(200),
+            hi: ScalarValue::I32(800),
+        }]
+    ));
+
+    let mut one_sided = range_intersection_grouped_input();
+    let FilterSpec::Ranges { ranges, .. } = &mut one_sided.relation_filters[0].1 else {
+        unreachable!("range fixture")
+    };
+    ranges[0].lo = ScalarValue::I32(i32::MIN);
+    assert_eq!(planned_mode(one_sided), GroupedAggKernelMode::SerialGeneric);
+
+    let mut rhs_filter = range_intersection_grouped_input();
+    let FilterSpec::Ranges { input, .. } = &mut rhs_filter.relation_filters[0].1 else {
+        unreachable!("range fixture")
+    };
+    input.attno = 3;
+    assert_eq!(
+        planned_mode(rhs_filter),
+        GroupedAggKernelMode::SerialGeneric
+    );
+
+    let mut joined = range_intersection_grouped_input();
+    add_dimension(&mut joined, 2, 200, false);
+    assert_eq!(planned_mode(joined), GroupedAggKernelMode::SerialGeneric);
 }
 
 #[test]

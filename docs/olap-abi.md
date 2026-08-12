@@ -732,6 +732,15 @@ into a build-generated specialization. A backend-local 128-entry LRU compares
 the full canonical identity after its digest match; digest equality alone is
 never sufficient. Released dense COUNT and integer SUM variants are precompiled
 for the exact membership, SQL-mask, and direct-column/product combinations.
+The `dense_integer_multiply_range` variant is narrower still: one proper
+non-sentinel inclusive INT32 range must target measure zero's product VALUE
+(lhs), the descriptor must contain that one SUM plus COUNT(*), and dimensions
+and HAVING are absent. The parallel row kernel evaluates the bounds from the
+same lhs load used by multiplication; it does not materialize a predicate mask.
+NULL lhs rows are rejected by the WHERE predicate, while accepted rows with a
+NULL rhs still increment COUNT(*) and do not contribute to SUM. Any malformed
+sidecar fails before output publication. One-sided, degenerate, RHS-input,
+joined, and additional-bound shapes do not use this specialization.
 The native submission branch selects that template once on the host, so row
 kernels contain no per-row membership/mask/measure-shape branch. EXPLAIN reports
 both the specialization label and whether its identity lookup hit the cache.

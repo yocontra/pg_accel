@@ -746,7 +746,6 @@ fn scalar_max(value: ScalarValue) -> ScalarValue {
     }
 }
 
-#[cfg(test)]
 fn scalar_cmp(left: ScalarValue, right: ScalarValue) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (ScalarValue::Bool(left), ScalarValue::Bool(right)) => left.partial_cmp(&right),
@@ -1000,12 +999,30 @@ enum PendingFilter {
     Ranges {
         input: PlannerColumn,
         range: ScalarRange,
+        conjunct_count: u8,
     },
     Mask(PlannerColumn),
     Spatial {
         relation_oid: u32,
         filter: FilterSpec,
     },
+}
+
+fn intersect_ranges(left: ScalarRange, right: ScalarRange) -> Result<ScalarRange, ShapeDecline> {
+    let lo = match scalar_cmp(left.lo, right.lo) {
+        Some(std::cmp::Ordering::Less) => right.lo,
+        Some(_) => left.lo,
+        None => return Err(ShapeDecline::InvalidFilterRange),
+    };
+    let hi = match scalar_cmp(left.hi, right.hi) {
+        Some(std::cmp::Ordering::Greater) => right.hi,
+        Some(_) => left.hi,
+        None => return Err(ShapeDecline::InvalidFilterRange),
+    };
+    if scalar_cmp(lo, hi).is_none_or(std::cmp::Ordering::is_gt) {
+        return Err(ShapeDecline::InvalidFilterRange);
+    }
+    Ok(ScalarRange { lo, hi })
 }
 
 fn add_filter(
@@ -1024,11 +1041,35 @@ fn add_filter(
     };
     match (existing, filter) {
         (
+            PendingFilter::Ranges {
+                input,
+                range: existing_range,
+                conjunct_count,
+            },
+            PendingFilter::Ranges {
+                input: new_input,
+                range: new_range,
+                ..
+            },
+        ) if *input == new_input && input.column.type_oid == u32::from(pg_sys::INT4OID) => {
+            if *conjunct_count != 1 {
+                return Err(ShapeDecline::MultipleRangePredicates);
+            }
+            *existing_range = intersect_ranges(*existing_range, new_range)?;
+            *conjunct_count = 2;
+            Ok(())
+        }
+        (
             PendingFilter::Ranges { input, .. },
             PendingFilter::Ranges {
                 input: new_input, ..
             },
         ) if *input == new_input => Err(ShapeDecline::MultipleRangePredicates),
+        (PendingFilter::Ranges { conjunct_count, .. }, PendingFilter::Ranges { .. })
+            if *conjunct_count > 1 =>
+        {
+            Err(ShapeDecline::MultipleRangePredicates)
+        }
         (PendingFilter::Mask(existing_column), PendingFilter::Mask(new_column))
             if *existing_column == new_column =>
         {
@@ -1146,6 +1187,7 @@ unsafe fn parse_operator_predicate(
         PendingFilter::Ranges {
             input: column,
             range,
+            conjunct_count: 1,
         },
     )
 }
@@ -1370,7 +1412,7 @@ unsafe fn joins_and_filters(
         .into_iter()
         .map(|(relation_oid, filter)| {
             let filter = match filter {
-                PendingFilter::Ranges { input, range } => FilterSpec::Ranges {
+                PendingFilter::Ranges { input, range, .. } => FilterSpec::Ranges {
                     input: input.column,
                     ranges: vec![range],
                 },
@@ -1784,7 +1826,7 @@ mod pure_tests {
     }
 
     #[test]
-    fn a_second_same_column_range_declines_without_intersection() {
+    fn two_same_column_ranges_merge_to_one_bounded_interval() {
         let column = test_column(2);
         let mut filters = BTreeMap::new();
         add_filter(
@@ -1792,18 +1834,39 @@ mod pure_tests {
             PendingFilter::Ranges {
                 input: column,
                 range: int4_range(200, i32::MAX),
+                conjunct_count: 1,
             },
         )
         .expect("one scalar comparison remains supported");
+        add_filter(
+            &mut filters,
+            PendingFilter::Ranges {
+                input: column,
+                range: int4_range(i32::MIN, 800),
+                conjunct_count: 1,
+            },
+        )
+        .expect("a second same-column bound should fuse into the interval");
+        assert!(matches!(
+            filters.get(&42),
+            Some(PendingFilter::Ranges {
+                input,
+                range,
+                conjunct_count: 2,
+            }) if *input == column && *range == int4_range(200, 800)
+        ));
+
         assert_eq!(
             add_filter(
                 &mut filters,
                 PendingFilter::Ranges {
                     input: column,
-                    range: int4_range(i32::MIN, 800),
+                    range: int4_range(250, i32::MAX),
+                    conjunct_count: 1,
                 },
             ),
-            Err(ShapeDecline::MultipleRangePredicates)
+            Err(ShapeDecline::MultipleRangePredicates),
+            "the qualified fused shape is exactly two analyzed conjuncts"
         );
     }
 
@@ -1815,6 +1878,7 @@ mod pure_tests {
             PendingFilter::Ranges {
                 input: test_column(2),
                 range: int4_range(200, i32::MAX),
+                conjunct_count: 1,
             },
         )
         .expect("the first fact-column range should bind");
@@ -1824,9 +1888,94 @@ mod pure_tests {
                 PendingFilter::Ranges {
                     input: test_column(3),
                     range: int4_range(i32::MIN, 8),
+                    conjunct_count: 1,
                 },
             ),
             Err(ShapeDecline::MultipleFiltersPerRelation { relation_oid: 42 })
+        );
+    }
+
+    #[test]
+    fn range_intersection_does_not_expand_other_scalar_types() {
+        let mut column = test_column(2);
+        column.column.type_oid = u32::from(pg_sys::FLOAT8OID);
+        let mut filters = BTreeMap::new();
+        add_filter(
+            &mut filters,
+            PendingFilter::Ranges {
+                input: column,
+                range: ScalarRange {
+                    lo: ScalarValue::F64(200.0),
+                    hi: ScalarValue::F64(f64::INFINITY),
+                },
+                conjunct_count: 1,
+            },
+        )
+        .expect("the first float range remains representable");
+        assert_eq!(
+            add_filter(
+                &mut filters,
+                PendingFilter::Ranges {
+                    input: column,
+                    range: ScalarRange {
+                        lo: ScalarValue::F64(f64::NEG_INFINITY),
+                        hi: ScalarValue::F64(800.0),
+                    },
+                    conjunct_count: 1,
+                },
+            ),
+            Err(ShapeDecline::MultipleRangePredicates)
+        );
+    }
+
+    #[test]
+    fn range_intersection_rejects_empty_and_preserves_multi_range_reason() {
+        let column = test_column(2);
+        let mut empty = BTreeMap::new();
+        add_filter(
+            &mut empty,
+            PendingFilter::Ranges {
+                input: column,
+                range: int4_range(900, i32::MAX),
+                conjunct_count: 1,
+            },
+        )
+        .expect("first bound");
+        assert_eq!(
+            add_filter(
+                &mut empty,
+                PendingFilter::Ranges {
+                    input: column,
+                    range: int4_range(i32::MIN, 800),
+                    conjunct_count: 1,
+                },
+            ),
+            Err(ShapeDecline::InvalidFilterRange)
+        );
+
+        let mut bounded = BTreeMap::new();
+        for range in [int4_range(200, i32::MAX), int4_range(i32::MIN, 800)] {
+            add_filter(
+                &mut bounded,
+                PendingFilter::Ranges {
+                    input: column,
+                    range,
+                    conjunct_count: 1,
+                },
+            )
+            .expect("two same-column bounds fuse");
+        }
+        assert_eq!(
+            add_filter(
+                &mut bounded,
+                PendingFilter::Ranges {
+                    input: test_column(3),
+                    range: int4_range(i32::MIN, 8),
+                    conjunct_count: 1,
+                },
+            ),
+            Err(ShapeDecline::MultipleRangePredicates),
+            "canonical SSBM range families retain their stable decline reason"
         );
     }
 

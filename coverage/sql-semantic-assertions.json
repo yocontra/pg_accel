@@ -1,8 +1,8 @@
 {
   "baseline_assertions": 306,
   "baseline_files": 58,
-  "declared_assertions": 321,
-  "declared_files": 59,
+  "declared_assertions": 323,
+  "declared_files": 60,
   "files": [
     {
       "assertions": [
@@ -2807,11 +2807,11 @@
       "assertions": [
         {
           "emission": "echo",
-          "guard_count": 13,
-          "guard_sha256": "4bf4466a05981411087dba8a66a1a4e5d9f3e919fdce730a5f724f178e6f0518",
-          "guard_token_count": 27,
+          "guard_count": 14,
+          "guard_sha256": "625ec54ff699ab48e95cfef9d33e7731ca98afb71582c10890f18ff72b254671",
+          "guard_token_count": 31,
           "id": "95_selected_lifecycle_contract.assert_001",
-          "source_line": 382
+          "source_line": 420
         },
         {
           "emission": "echo",
@@ -2819,7 +2819,7 @@
           "guard_sha256": "ccaf2d026a91a7257458545b6f24ebe8f665ade2b04bd682b9b3c24db5cfef84",
           "guard_token_count": 5,
           "id": "95_selected_lifecycle_contract.assert_002",
-          "source_line": 527
+          "source_line": 565
         },
         {
           "emission": "echo",
@@ -2827,7 +2827,7 @@
           "guard_sha256": "d95b8c5ea84914cb2fb4d65d23f372976960ab0affe6f2c7b72efd55b2073767",
           "guard_token_count": 3,
           "id": "95_selected_lifecycle_contract.assert_003",
-          "source_line": 627
+          "source_line": 665
         },
         {
           "emission": "echo",
@@ -2835,7 +2835,7 @@
           "guard_sha256": "59db0136cf1e391edc920decdf384ef20cda61a93211b2ae584a66dafd5cc03c",
           "guard_token_count": 3,
           "id": "95_selected_lifecycle_contract.assert_004",
-          "source_line": 727
+          "source_line": 765
         },
         {
           "emission": "echo",
@@ -2843,7 +2843,7 @@
           "guard_sha256": "84557c45d2bded653967e79792958066d8010508b41f2d6b8e21029c361ba579",
           "guard_token_count": 4,
           "id": "95_selected_lifecycle_contract.assert_005",
-          "source_line": 826
+          "source_line": 864
         },
         {
           "emission": "echo",
@@ -2851,7 +2851,7 @@
           "guard_sha256": "83257f14eff79afa74c290efc09344866251b9660d0a2a43339e4dd95873e313",
           "guard_token_count": 7,
           "id": "95_selected_lifecycle_contract.assert_006",
-          "source_line": 935
+          "source_line": 973
         },
         {
           "emission": "echo",
@@ -2859,12 +2859,12 @@
           "guard_sha256": "08a26365a3423a06f57efcbc63835de0b6620aebffc7be3981198003f9233a3d",
           "guard_token_count": 8,
           "id": "95_selected_lifecycle_contract.assert_007",
-          "source_line": 1046
+          "source_line": 1084
         }
       ],
       "completion_id": "95_selected_lifecycle_contract",
       "file": "95_selected_lifecycle_contract.sql",
-      "sha256": "e03bb14be63b10606611dc6811ca9228128dd9ec07235357d764b4d20a37f12b"
+      "sha256": "7ccc61c862f3cb83286f26f98cc4fbfec5f78d961b4a24e09bdaec4a427fff18"
     },
     {
       "assertions": [
@@ -2983,7 +2983,30 @@
       ],
       "completion_id": "96_declined_lifecycle_contract",
       "file": "96_declined_lifecycle_contract.sql",
-      "sha256": "cdab3212b5fdbdb399d9fdbecdf40940e1755ebd282daa3d1357ae46ff183a81"
+      "sha256": "9b752266801a0bcc64ce38815492a2127ac784ba06b578ded6be17b34ce5c93e"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 8,
+          "guard_sha256": "d98801c85acaf88b9d0eecebfdde7d60c7a915b336c9ce49b1815497a2ef787a",
+          "guard_token_count": 19,
+          "id": "97_range_intersection_contract.assert_001",
+          "source_line": 144
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "6a64e839aa402ac35c6bed278b37e0a1956d9afc09189c4b2a1a32dd196683ff",
+          "guard_token_count": 8,
+          "id": "97_range_intersection_contract.assert_002",
+          "source_line": 208
+        }
+      ],
+      "completion_id": "97_range_intersection_contract",
+      "file": "97_range_intersection_contract.sql",
+      "sha256": "eb6420c2009a0968c4af49058b97e430c8d1cefe90e3313dec4cfcef137d9fc7"
     }
   ],
   "kind": "sql-semantic-assertion-manifest",

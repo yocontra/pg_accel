@@ -38,19 +38,35 @@
       }
     },
     {
-      "id": "decline.and_range_predicate_expression_int4",
+      "id": "selected.range_intersection_expression_int4",
+      "disposition": "selected",
+      "postgresql_majors": [18, 19],
+      "semantics": {"types": ["int4 group key", "nullable int4 range input", "nullable int4 multiplication", "int8 SUM/COUNT result"], "null_patterns": ["NULL range input rejected as SQL UNKNOWN", "NULL product RHS omitted from SUM but retained by COUNT(*)", "NULL group key", "inclusive lower and upper endpoints"], "shape_limits": "exactly two same-column bounds fused into one proper bounded interval over the left operand of one int4 product SUM plus COUNT; no joins or HAVING", "dispatch_expectation": "required", "rejection_reason": null},
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_001", "97_range_intersection_contract.assert_002"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["95_selected_lifecycle_contract.assert_001"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_001", "95_selected_lifecycle_contract.assert_001"], "gap": null},
+        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+      }
+    },
+    {
+      "id": "decline.range_intersection_adjacent",
       "disposition": "declined",
       "postgresql_majors": [18, 19],
-      "semantics": {"types": ["int4 group key", "nullable int4 range input", "int4 multiplication", "int8 SUM/COUNT result"], "null_patterns": ["NULL range input", "non-NULL values inside and outside the intersection"], "shape_limits": "one scalar comparison remains selectable; a second same-column range clause, including BETWEEN-equivalent forms, declines", "dispatch_expectation": "forbidden", "rejection_reason": "shape_multiple_range_predicates"},
+      "semantics": {"types": ["int4 group key", "nullable int4 range input", "int4 multiplication", "int8 SUM/COUNT result"], "null_patterns": ["NULL predicate input", "non-NULL values inside and outside each interval"], "shape_limits": "one-sided, degenerate, RHS-input, joined, or third-bound variants remain native; a third same-column bound preserves shape_multiple_range_predicates", "dispatch_expectation": "forbidden", "rejection_reason": "shape_multiple_range_predicates"},
       "evidence": {
-        "types": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "nulls": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "shape_limits": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "types": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null},
         "ddl": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
         "dml": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
         "prepared": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "dispatch": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null},
-        "rejection_reason": {"status": "covered", "assertion_ids": ["96_declined_lifecycle_contract.assert_001"], "gap": null}
+        "dispatch": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["97_range_intersection_contract.assert_002", "96_declined_lifecycle_contract.assert_001"], "gap": null}
       }
     },
     {

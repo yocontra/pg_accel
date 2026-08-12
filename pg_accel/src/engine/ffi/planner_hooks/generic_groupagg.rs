@@ -1703,7 +1703,7 @@ mod tests {
     use crate::engine::spec::{
         AggOutputSlot, AggOutputSource, AggQuerySpec, AggregateKind, AggregateOutput,
         AggregateSource, BinaryMeasureOp, ColumnRef, DimSpec, GroupKeyEncoding, GroupKeyRef,
-        GroupKeySource, JoinMultiplicity, MaskKind, MeasureSpec,
+        GroupKeySource, JoinMultiplicity, MaskKind, MeasureSpec, ScalarRange, ScalarValue,
     };
 
     fn test_leaf() -> pg_sys::Path {
@@ -3486,6 +3486,66 @@ mod tests {
 
         validate_shape_capability(&count_shape())
             .expect("canonical COUNT(*) uses the parallel dense-count branch");
+
+        let mut range = dense_sum_count_shape(1_000_000);
+        let lhs = ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: u32::from(pg_sys::INT4OID),
+        };
+        let rhs = ColumnRef {
+            relation_oid: 42,
+            attno: 3,
+            type_oid: u32::from(pg_sys::INT4OID),
+        };
+        range.spec.measures[0].expression = MeasureExpr::Binary {
+            op: BinaryMeasureOp::Mul,
+            lhs,
+            rhs,
+        };
+        range.projections = vec![
+            AggOutputSlot {
+                source: AggOutputSource::Aggregate {
+                    measure_index: 0,
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Sum,
+                },
+                source_type_oid: u32::from(pg_sys::INT4OID),
+                result_type_oid: u32::from(pg_sys::INT8OID),
+                result_typmod: -1,
+                result_collation_oid: 0,
+                nullable: true,
+            },
+            AggOutputSlot {
+                source: AggOutputSource::Aggregate {
+                    measure_index: 1,
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                },
+                source_type_oid: 0,
+                result_type_oid: u32::from(pg_sys::INT8OID),
+                result_typmod: -1,
+                result_collation_oid: 0,
+                nullable: false,
+            },
+        ];
+        range.spec.fact_filter = FilterSpec::Ranges {
+            input: lhs,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(200),
+                hi: ScalarValue::I32(800),
+            }],
+        };
+        validate_shape_capability(&range)
+            .expect("the exact fused range product uses the parallel dense-integer branch");
+        let FilterSpec::Ranges { ranges, .. } = &mut range.spec.fact_filter else {
+            unreachable!("range fixture")
+        };
+        ranges[0].lo = ScalarValue::I32(i32::MIN);
+        assert!(matches!(
+            validate_shape_capability(&range).expect_err("one-sided range must remain native"),
+            AdmissionDecline::SerialGenericKernelMode { .. }
+        ));
     }
 
     #[test]

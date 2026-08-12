@@ -42,7 +42,8 @@ SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES = frozenset(
     {
         "selected.grouped_agg_int4",
         "selected.predicate_expression_int4",
-        "decline.and_range_predicate_expression_int4",
+        "selected.range_intersection_expression_int4",
+        "decline.range_intersection_adjacent",
         "selected.count_join_int4",
         "selected.star_join_int4",
         "selected.star_join_int8_membership",
@@ -66,7 +67,7 @@ SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES = frozenset(
     }
 )
 SQL_SEMANTIC_MATRIX_DECLINE_REASONS = {
-    "decline.and_range_predicate_expression_int4": "shape_multiple_range_predicates",
+    "decline.range_intersection_adjacent": "shape_multiple_range_predicates",
     "decline.aggregate_relation_limit": "shape_too_many_relations",
     "decline.aggregate_unsupported_predicate": "shape_unsupported_predicate",
     "decline.aggregate_modifier": "shape_aggregate_modifier",

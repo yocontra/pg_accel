@@ -902,7 +902,7 @@
       "93_raster_resident_reclass_contract.assert_004": "bc92ec649699a23a251f937c0eab0545570bd1dc7d9b92f79a9a194b19913ead",
       "94_grouped_count_bool_contract.assert_001": "b4fbe131f7d6970ac6779346a6defaba1e4e0cbc7350cd2248aa241d143bd1f4",
       "94_grouped_count_bool_contract.assert_002": "7aaf900cad09fdc4857d30f510d571f3dc9d270eaefe3e37590051a8485ff5de",
-      "95_selected_lifecycle_contract.assert_001": "4bf4466a05981411087dba8a66a1a4e5d9f3e919fdce730a5f724f178e6f0518",
+      "95_selected_lifecycle_contract.assert_001": "625ec54ff699ab48e95cfef9d33e7731ca98afb71582c10890f18ff72b254671",
       "95_selected_lifecycle_contract.assert_002": "ccaf2d026a91a7257458545b6f24ebe8f665ade2b04bd682b9b3c24db5cfef84",
       "95_selected_lifecycle_contract.assert_003": "d95b8c5ea84914cb2fb4d65d23f372976960ab0affe6f2c7b72efd55b2073767",
       "95_selected_lifecycle_contract.assert_004": "59db0136cf1e391edc920decdf384ef20cda61a93211b2ae584a66dafd5cc03c",
@@ -922,7 +922,9 @@
       "96_declined_lifecycle_contract.assert_011": "0f00921a94a84c924c33cf3db1c5a04c607a36a2bb7aee0a289803ef1f79c006",
       "96_declined_lifecycle_contract.assert_012": "4f482fbef132aa269de8cb0609f457acef1610c343c1d40fb10242086ef46ac0",
       "96_declined_lifecycle_contract.assert_013": "e9684fae74045c5c8dc449b2d600cce70ef662c2894ef8439316412e04024d92",
-      "96_declined_lifecycle_contract.assert_014": "03bfe28688306acf6bfda6713f2a64943bf18ac905d1820594a5da05ebab5586"
+      "96_declined_lifecycle_contract.assert_014": "03bfe28688306acf6bfda6713f2a64943bf18ac905d1820594a5da05ebab5586",
+      "97_range_intersection_contract.assert_001": "d98801c85acaf88b9d0eecebfdde7d60c7a915b336c9ce49b1815497a2ef787a",
+      "97_range_intersection_contract.assert_002": "6a64e839aa402ac35c6bed278b37e0a1956d9afc09189c4b2a1a32dd196683ff"
     },
     "assertion_ids": [
       "00_smoke.assert_001",
@@ -1245,7 +1247,9 @@
       "96_declined_lifecycle_contract.assert_011",
       "96_declined_lifecycle_contract.assert_012",
       "96_declined_lifecycle_contract.assert_013",
-      "96_declined_lifecycle_contract.assert_014"
+      "96_declined_lifecycle_contract.assert_014",
+      "97_range_intersection_contract.assert_001",
+      "97_range_intersection_contract.assert_002"
     ],
     "files": [
       "00_smoke.sql",
@@ -1306,7 +1310,8 @@
       "93_raster_resident_reclass_contract.sql",
       "94_grouped_count_bool_contract.sql",
       "95_selected_lifecycle_contract.sql",
-      "96_declined_lifecycle_contract.sql"
+      "96_declined_lifecycle_contract.sql",
+      "97_range_intersection_contract.sql"
     ]
   }
 }

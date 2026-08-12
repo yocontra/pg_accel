@@ -145,7 +145,7 @@ ANALYZE _decline_scalar;
 PREPARE _decline_range_q AS
 SELECT g, sum(price * quantity) AS total, count(*) AS rows
 FROM _decline_scalar
-WHERE price >= 200 AND price <= 800
+WHERE price >= 200 AND price <= 800 AND price >= 250
 GROUP BY g;
 PREPARE _decline_predicate_q AS
 SELECT count(*) AS rows
@@ -195,7 +195,7 @@ SET pg_accel.enabled = off;
 CREATE TEMP TABLE _decline_range_native AS
 SELECT g, sum(price * quantity) AS total, count(*) AS rows
 FROM _decline_scalar
-WHERE price >= 200 AND price <= 800
+WHERE price >= 200 AND price <= 800 AND price >= 250
 GROUP BY g;
 SET pg_accel.enabled = on;
 SELECT pg_accel_reset_stats();

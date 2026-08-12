@@ -957,6 +957,12 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::GroupedAggregate,
     },
     ReleasedEnvelopeContract {
+        workload: "and_range_predicate_expression_grouped_agg_int4",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
         workload: "hash_join",
         min_rows: PREAGG_WINNER_MIN_ROWS,
         max_rows: usize::MAX,
@@ -1119,6 +1125,10 @@ pub const METAL_SHIP_GATE_CELLS: &[MetalShipGateCell] = &[
     },
     MetalShipGateCell {
         workload: "predicate_expression_grouped_agg_int4",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "and_range_predicate_expression_grouped_agg_int4",
         rows: 1_000_000,
     },
     MetalShipGateCell {
@@ -1421,14 +1431,14 @@ fn groupagg_threshold_matrix_entry(
             "exact integer resident grouped predicate/expression SUM/COUNT warm winner matrix",
         ),
         "and_range_predicate_expression_grouped_agg_int4" => (
-            "native_decline_multiple_same_column_range_predicates",
+            "resident_dense_groupagg_fused_range_expression_sum_count",
             "int4 group key + nullable int4 range input + int4 multiplication measure",
             "256 dense product_id groups",
             "same-column price range intersection selects about 60%, with NULL prices excluded",
             "exactly 256 grouped product rows at release scale".to_owned(),
             "int4 product_id + nullable int4 price + int4 quantity",
             "product_id, SUM(price * quantity), COUNT(*)",
-            "intentional native decline after the selected path missed the 1.15x release floor",
+            "fused bounded range and exact integer product SUM/COUNT warm winner matrix",
         ),
         "case_when_expression_grouped_agg" => (
             "resident_dense_groupagg_case_when_expression_sum_count",
@@ -1532,9 +1542,6 @@ fn groupagg_threshold_matrix_entry(
         "grouped_agg_high_card" => Some("shape_unsupported_rte"),
         "expression_grouped_agg" => Some("shape_floating_expression_semantics"),
         "predicate_filter_expression_grouped_agg" => Some("shape_aggregate_modifier"),
-        "and_range_predicate_expression_grouped_agg_int4" => {
-            Some("shape_multiple_range_predicates")
-        }
         "case_when_expression_grouped_agg"
         | "case_when_range_expression_grouped_agg"
         | "case_when_value_predicate_expression_grouped_agg"
@@ -3410,11 +3417,13 @@ mod tests {
     fn supported_default_suite_probe(name: &str, rows: usize) -> bool {
         matches!(
             (name, rows),
-            ("grouped_count_bool_candidate", GROUPAGG_WINNER_MIN_ROWS)
-                | (
-                    "raster_ndvi" | "raster_slope" | "raster_reclass" | "raster_algebra_deep",
-                    100
-                )
+            (
+                "grouped_count_bool_candidate" | "and_range_predicate_expression_grouped_agg_int4",
+                GROUPAGG_WINNER_MIN_ROWS
+            ) | (
+                "raster_ndvi" | "raster_slope" | "raster_reclass" | "raster_algebra_deep",
+                100
+            )
         )
     }
 
@@ -3438,6 +3447,10 @@ mod tests {
             ),
             (
                 "predicate_expression_grouped_agg_int4",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "and_range_predicate_expression_grouped_agg_int4",
                 FINAL_MATRIX_MIN_WARM_SPEEDUP,
             ),
             ("mixed_join_agg_int4", FINAL_MATRIX_MIN_WARM_SPEEDUP),
@@ -3545,7 +3558,16 @@ mod tests {
         assert!(range_setup.contains("then null"));
         assert!(range_query.contains("where price >= 200 and price <= 800"));
         assert!(range_query.contains("sum(price * quantity)"));
-        for rows in [10_000, 100_000, 1_000_000, 10_000_000] {
+        for (rows, expected_reason) in [
+            (10_000, Some("generic_fact_rows_below_device_minimum")),
+            (100_000, Some("generic_fact_rows_below_device_minimum")),
+            (250_000, None),
+            (1_000_000, None),
+            (
+                10_000_000,
+                Some("generic_fact_rows_exceed_dense_one_shot_maximum"),
+            ),
+        ] {
             let range_threshold = benchmark_threshold_matrix_entry(
                 "and_range_predicate_expression_grouped_agg_int4",
                 rows,
@@ -3553,13 +3575,26 @@ mod tests {
             .expect("AND range predicate threshold");
             assert_eq!(
                 range_threshold.expectation.decline_reason(),
-                Some("shape_multiple_range_predicates")
+                expected_reason
             );
-            assert_eq!(range_threshold.released_path(), None);
-            assert_eq!(
-                range_threshold.dispatch_evidence,
-                GENERIC_NATIVE_DISPATCH_EVIDENCE
-            );
+            if expected_reason.is_some() {
+                assert_eq!(range_threshold.released_path(), None);
+                assert_eq!(
+                    range_threshold.dispatch_evidence,
+                    GENERIC_NATIVE_DISPATCH_EVIDENCE
+                );
+            } else {
+                assert_eq!(
+                    range_threshold.expectation,
+                    BenchmarkLaneExpectation::GpuWinner {
+                        min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+                    }
+                );
+                assert_eq!(
+                    range_threshold.released_path(),
+                    Some(ReleasedPathFamily::GroupedAggregate)
+                );
+            }
         }
 
         let mixed = find_workload("mixed_join_agg_int4").expect("mixed int4 workload");
@@ -3655,6 +3690,10 @@ mod tests {
     fn test_nonstandard_default_suite_probes_are_exact() {
         assert!(supported_default_suite_probe(
             "grouped_count_bool_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "and_range_predicate_expression_grouped_agg_int4",
             GROUPAGG_WINNER_MIN_ROWS
         ));
         assert!(!supported_default_suite_probe(

@@ -1003,7 +1003,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         K::HashAgg,
     )
     .pins(PINS_AND_RANGE_PREDICATE_EXPRESSION_INT4)
-    .evidence(NATIVE_DECLINE),
+    .evidence(WINNER),
     workload(
         "case_when_expression_grouped_agg",
         C::GpuHashAgg,

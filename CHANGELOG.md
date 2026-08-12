@@ -33,6 +33,10 @@ claim is implied by the entries below.
 - Descriptor-identity specialization, explicit physical kernel modes,
   hierarchical dense reductions, reusable workspace/output pools, and costed
   cached-versus-ephemeral derived-artifact execution.
+- A qualified dense-integer specialization for grouped
+  `SUM(int4_lhs * int4_rhs), COUNT(*)` fuses exactly two same-column bounds on
+  the nullable product lhs into one inclusive device range without a derived
+  predicate mask; adjacent range shapes remain PostgreSQL-native.
 - SSBM-, TPC-H-, and ClickBench-style system workload characterization plus an
   eight-backend residency/concurrency proof with exact cluster-byte cleanup.
 

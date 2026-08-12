@@ -275,6 +275,11 @@ FROM _lifecycle_grouped GROUP BY g;
 PREPARE _lifecycle_predicate_q AS
 SELECT g, sum(price * quantity) AS total, count(*) AS rows
 FROM _lifecycle_grouped WHERE active GROUP BY g;
+PREPARE _lifecycle_range_q AS
+SELECT g, sum(price * quantity) AS total, count(*) AS rows
+FROM _lifecycle_grouped
+WHERE price >= 200 AND price <= 800
+GROUP BY g;
 
 DO $$
 DECLARE
@@ -323,6 +328,12 @@ BEGIN
     PERFORM pg_temp.lifecycle_assert_dispatch(
         'predicate_expression', 'prepared_after_dml', kernels_before
     );
+    PERFORM pg_temp.lifecycle_explain(
+        'range_intersection', 'prepared_after_dml', '_lifecycle_range_q'
+    );
+    PERFORM pg_temp.lifecycle_assert_dispatch(
+        'range_intersection', 'prepared_after_dml', kernels_before
+    );
 
     ALTER TABLE _lifecycle_grouped ADD COLUMN lifecycle_tag int4 DEFAULT 0;
     IF has_gpu THEN
@@ -340,6 +351,11 @@ FROM _lifecycle_grouped GROUP BY g;
 CREATE TEMP TABLE _lifecycle_predicate_native AS
 SELECT g, sum(price * quantity) AS total, count(*) AS rows
 FROM _lifecycle_grouped WHERE active GROUP BY g;
+CREATE TEMP TABLE _lifecycle_range_native AS
+SELECT g, sum(price * quantity) AS total, count(*) AS rows
+FROM _lifecycle_grouped
+WHERE price >= 200 AND price <= 800
+GROUP BY g;
 
 SET pg_accel.enabled = on;
 SELECT pg_accel_reset_stats();
@@ -351,6 +367,9 @@ SELECT pg_temp.lifecycle_explain('grouped_int4', 'prepared_after_ddl', '_lifecyc
 CREATE TEMP TABLE _lifecycle_predicate_accel AS EXECUTE _lifecycle_predicate_q;
 SELECT pg_temp.lifecycle_refresh_if_gpu('_lifecycle_grouped', 504096);
 SELECT pg_temp.lifecycle_explain('predicate_expression', 'prepared_after_ddl', '_lifecycle_predicate_q');
+CREATE TEMP TABLE _lifecycle_range_accel AS EXECUTE _lifecycle_range_q;
+SELECT pg_temp.lifecycle_refresh_if_gpu('_lifecycle_grouped', 504096);
+SELECT pg_temp.lifecycle_explain('range_intersection', 'prepared_after_ddl', '_lifecycle_range_q');
 
 DO $$
 DECLARE
@@ -368,8 +387,14 @@ BEGIN
         UNION ALL
         (SELECT * FROM _lifecycle_predicate_accel
          EXCEPT ALL SELECT * FROM _lifecycle_predicate_native)
+    ) OR EXISTS (
+        (SELECT * FROM _lifecycle_range_native
+         EXCEPT ALL SELECT * FROM _lifecycle_range_accel)
+        UNION ALL
+        (SELECT * FROM _lifecycle_range_accel
+         EXCEPT ALL SELECT * FROM _lifecycle_range_native)
     ) THEN
-        RAISE EXCEPTION '95 grouped/predicate lifecycle FAILED: native results differ';
+        RAISE EXCEPTION '95 grouped/predicate/range lifecycle FAILED: native results differ';
     END IF;
     SELECT kernels INTO STRICT kernels_before FROM _lifecycle_grouped_before;
     PERFORM pg_temp.lifecycle_assert_dispatch(
@@ -378,6 +403,19 @@ BEGIN
     PERFORM pg_temp.lifecycle_assert_dispatch(
         'predicate_expression', 'prepared_after_ddl', kernels_before, false
     );
+    PERFORM pg_temp.lifecycle_assert_dispatch(
+        'range_intersection', 'prepared_after_ddl', kernels_before, false
+    );
+    IF (SELECT env.has_gpu FROM _lifecycle_environment AS env)
+       AND NOT EXISTS (
+           SELECT 1 FROM _lifecycle_plan
+           WHERE family = 'range_intersection'
+             AND stage IN ('prepared_after_dml', 'prepared_after_ddl')
+             AND line LIKE '%GPU Physical Kernel Mode: parallel_dense_integer%'
+       ) THEN
+        RAISE EXCEPTION
+            '95 range lifecycle FAILED: physical fast path not reported';
+    END IF;
 END $$;
 \echo 'PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_001'
 
@@ -1047,6 +1085,7 @@ END $$;
 
 DEALLOCATE _lifecycle_grouped_q;
 DEALLOCATE _lifecycle_predicate_q;
+DEALLOCATE _lifecycle_range_q;
 DEALLOCATE _lifecycle_count4_q;
 DEALLOCATE _lifecycle_star4_q;
 DEALLOCATE _lifecycle_star8_q;
