@@ -3410,10 +3410,11 @@ mod tests {
     fn supported_default_suite_probe(name: &str, rows: usize) -> bool {
         matches!(
             (name, rows),
-            (
-                "raster_ndvi" | "raster_slope" | "raster_reclass" | "raster_algebra_deep",
-                100
-            )
+            ("grouped_count_bool_candidate", GROUPAGG_WINNER_MIN_ROWS)
+                | (
+                    "raster_ndvi" | "raster_slope" | "raster_reclass" | "raster_algebra_deep",
+                    100
+                )
         )
     }
 
@@ -3648,6 +3649,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_nonstandard_default_suite_probes_are_exact() {
+        assert!(supported_default_suite_probe(
+            "grouped_count_bool_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_bool_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(supported_default_suite_probe("raster_reclass", 100));
+        assert!(!supported_default_suite_probe("raster_reclass", 101));
     }
 
     #[test]
