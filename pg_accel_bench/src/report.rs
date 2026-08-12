@@ -3601,8 +3601,13 @@ impl BenchReport {
         out.push_str("\n**Ordering note:** Measurement order (accel-first vs baseline-first) ");
         out.push_str("uses an exactly balanced randomized AB/BA schedule. ");
         if self.methodology.native_parity_pairing {
-            out.push_str(
-                "Each measured pair is a mirrored ABBA/BAAB block on one persistent PostgreSQL backend; all four raw executions are retained, and `DISCARD ALL` runs before each execution.\n",
+            let total_raw = self
+                .methodology
+                .native_parity_repetitions_per_arm
+                .saturating_mul(2);
+            let _ = writeln!(
+                out,
+                "Each measured pair contains replicated mirrored ABBA/BAAB motifs on one persistent PostgreSQL backend; all {total_raw} raw executions are retained, and `DISCARD ALL` runs before each execution."
             );
         } else {
             out.push_str(
@@ -6208,6 +6213,18 @@ mod tests {
         assert!(!markdown.contains("## Headline"));
         assert!(!markdown.contains("**NET SPEEDUP**"));
         assert!(!markdown.contains("**NET REGRESSION**"));
+    }
+
+    #[test]
+    fn native_parity_report_declares_every_retained_raw_execution() {
+        let mut report = mock_report(Vec::new());
+        report.methodology.native_parity_pairing = true;
+        report.methodology.native_parity_repetitions_per_arm = 4;
+
+        let markdown = report.to_markdown();
+
+        assert!(markdown.contains("all 8 raw executions are retained"));
+        assert!(markdown.contains("replicated mirrored ABBA/BAAB motifs"));
     }
 
     #[test]

@@ -129,9 +129,10 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
                         "disabled_postgresql",
                         "disabled_postgresql",
                         "accel",
-                    ],
-                    "accel_ms": [1.0, 1.0],
-                    "parallel_ms": [1.0, 1.0],
+                    ]
+                    * 2,
+                    "accel_ms": [1.0] * 4,
+                    "parallel_ms": [1.0] * 4,
                 }
             ]
             row["planner_stage_captures"] = [
@@ -229,7 +230,7 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
                     "iterations": iterations,
                     "warmup": warmup,
                     "native_parity_pairing": native_pairing,
-                    "native_parity_repetitions_per_arm": 2 if native_pairing else 1,
+                    "native_parity_repetitions_per_arm": 4 if native_pairing else 1,
                 },
                 "workloads": [row],
             },

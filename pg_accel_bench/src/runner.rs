@@ -1789,11 +1789,7 @@ fn run_with_timing_and_cache_internal(
             measured_accel_first[i - effective_warmup]
         };
         let order: Vec<usize> = if native_parity_pairing && !is_warmup {
-            if accel_first {
-                vec![0, 1, 1, 0]
-            } else {
-                vec![1, 0, 0, 1]
-            }
+            native_parity_execution_order(accel_first)
         } else if accel_first {
             vec![0, 1]
         } else {
@@ -2765,6 +2761,27 @@ enum BenchMode {
     PgParallel,
 }
 
+/// Raw executions retained for each logical arm in one native-parity pair.
+///
+/// Four observations (two mirrored ABBA/BAAB motifs) materially reduce
+/// sub-millisecond scheduler noise while preserving 30 independent balanced
+/// pair blocks. Every raw execution remains in the evidence artifact.
+const NATIVE_PARITY_REPETITIONS_PER_ARM: usize = 4;
+
+fn native_parity_execution_order(accel_first: bool) -> Vec<usize> {
+    debug_assert_eq!(NATIVE_PARITY_REPETITIONS_PER_ARM % 2, 0);
+    let motif = if accel_first {
+        [0, 1, 1, 0]
+    } else {
+        [1, 0, 0, 1]
+    };
+    motif
+        .into_iter()
+        .cycle()
+        .take(NATIVE_PARITY_REPETITIONS_PER_ARM * 2)
+        .collect()
+}
+
 /// Run a single measurement with the given mode and timing strategy.
 fn run_with_mode(
     client: &mut Client,
@@ -3389,10 +3406,13 @@ pub fn run_one_report_with_config(
 fn apply_config_methodology(report: &mut report::BenchReport, config: &BenchConfig) {
     report.headline_speedup_allowed = config.headline_speedup_allowed;
     report.methodology.native_parity_pairing = config.native_parity_pairing;
-    report.methodology.native_parity_repetitions_per_arm =
-        if config.native_parity_pairing { 2 } else { 1 };
+    report.methodology.native_parity_repetitions_per_arm = if config.native_parity_pairing {
+        NATIVE_PARITY_REPETITIONS_PER_ARM
+    } else {
+        1
+    };
     let ordering = if config.native_parity_pairing {
-        "balanced randomized mirrored ABBA/BAAB crossover blocks on one PostgreSQL backend (`DISCARD ALL` before each raw execution)"
+        "balanced randomized replicated mirrored ABBA/BAAB crossover blocks on one PostgreSQL backend (`DISCARD ALL` before each raw execution)"
     } else {
         "balanced randomized AB/BA crossover on distinct persistent PostgreSQL backends (`DISCARD ALL` before each arm)"
     };
@@ -5608,6 +5628,19 @@ mod tests {
         let odd = randomized_balanced_arm_order(9, &mut rng);
         let accel_first = odd.iter().filter(|&&value| value).count();
         assert!(matches!(accel_first, 4 | 5));
+    }
+
+    #[test]
+    fn native_parity_order_replicates_mirrored_blocks_without_dropping_samples() {
+        let accel_first = native_parity_execution_order(true);
+        let disabled_first = native_parity_execution_order(false);
+        assert_eq!(accel_first, [0, 1, 1, 0, 0, 1, 1, 0]);
+        assert_eq!(disabled_first, [1, 0, 0, 1, 1, 0, 0, 1]);
+        for order in [&accel_first, &disabled_first] {
+            assert_eq!(order.len(), NATIVE_PARITY_REPETITIONS_PER_ARM * 2);
+            assert_eq!(order.iter().filter(|&&arm| arm == 0).count(), 4);
+            assert_eq!(order.iter().filter(|&&arm| arm == 1).count(), 4);
+        }
     }
 
     fn planner_stage_snapshot(

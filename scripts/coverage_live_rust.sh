@@ -1033,7 +1033,7 @@ require_planner_decline(declined, "window_full_output_decline")
 declined_methodology = declined_report.get("methodology", {})
 if (
     declined_methodology.get("native_parity_pairing") is not True
-    or declined_methodology.get("native_parity_repetitions_per_arm") != 2
+    or declined_methodology.get("native_parity_repetitions_per_arm") != 4
 ):
     raise SystemExit("window_full_output_decline: native-parity methodology is missing")
 pair_captures = declined.get("native_parity_pair_captures")
@@ -1043,11 +1043,11 @@ pair_capture = pair_captures[0]
 sequence = pair_capture.get("sequence") if isinstance(pair_capture, dict) else None
 if (
     not isinstance(sequence, list)
-    or len(sequence) != 4
-    or sequence.count("accel") != 2
-    or sequence.count("disabled_postgresql") != 2
-    or len(pair_capture.get("accel_ms", [])) != 2
-    or len(pair_capture.get("parallel_ms", [])) != 2
+    or len(sequence) != 8
+    or sequence.count("accel") != 4
+    or sequence.count("disabled_postgresql") != 4
+    or len(pair_capture.get("accel_ms", [])) != 4
+    or len(pair_capture.get("parallel_ms", [])) != 4
 ):
     raise SystemExit("window_full_output_decline: ABBA/BAAB raw components are incomplete")
 planner_captures = declined.get("planner_stage_captures")
