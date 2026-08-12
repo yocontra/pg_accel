@@ -131,7 +131,8 @@ CREATE TEMP TABLE _decline_scalar (
     sort_key float8,
     flag boolean,
     short_value int2,
-    wide_value int8
+    wide_value int8,
+    date_value date
 );
 INSERT INTO _decline_scalar
 SELECT i,
@@ -145,7 +146,10 @@ SELECT i,
             ELSE ((i % 65536) - 32768)::int2 END,
        CASE WHEN i % 83 = 0 THEN NULL
             WHEN i % 2 = 0 THEN '9223372036854775807'::int8
-            ELSE '-9223372036854775808'::int8 END
+            ELSE '-9223372036854775808'::int8 END,
+       CASE WHEN i % 79 = 0 THEN NULL
+            WHEN i % 2 = 0 THEN 'infinity'::date
+            ELSE '-infinity'::date END
 FROM generate_series(1, 200000) AS rows(i);
 ANALYZE _decline_scalar;
 
@@ -191,6 +195,9 @@ FROM _decline_scalar GROUP BY g;
 PREPARE _decline_int8_q AS
 SELECT g, count(wide_value) AS observed_rows
 FROM _decline_scalar GROUP BY g;
+PREPARE _decline_date_q AS
+SELECT g, count(date_value) AS observed_rows
+FROM _decline_scalar GROUP BY g;
 
 INSERT INTO _decline_scalar
 SELECT i,
@@ -204,7 +211,10 @@ SELECT i,
             ELSE ((i % 65536) - 32768)::int2 END,
        CASE WHEN i % 29 = 0 THEN NULL
             WHEN i % 2 = 0 THEN '9223372036854775807'::int8
-            ELSE '-9223372036854775808'::int8 END
+            ELSE '-9223372036854775808'::int8 END,
+       CASE WHEN i % 31 = 0 THEN NULL
+            WHEN i % 2 = 0 THEN 'infinity'::date
+            ELSE '-infinity'::date END
 FROM generate_series(200001, 201024) AS rows(i);
 ALTER TABLE _decline_scalar ADD COLUMN lifecycle_tag int4 DEFAULT 0;
 ANALYZE _decline_scalar;
@@ -790,6 +800,28 @@ BEGIN
     END IF;
 END $$;
 \echo 'PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_016'
+
+SET pg_accel.enabled = off;
+CREATE TEMP TABLE _decline_date_native AS
+SELECT g, count(date_value) AS observed_rows
+FROM _decline_scalar GROUP BY g;
+SET pg_accel.enabled = on;
+SELECT pg_accel_reset_stats();
+CREATE TEMP TABLE _decline_date_before AS
+SELECT pg_accel_kernel_executions() AS kernels;
+CREATE TEMP TABLE _decline_date_enabled AS EXECUTE _decline_date_q;
+SELECT pg_temp.decline_explain('grouped_count_date_adjacent', '_decline_date_q');
+DO $$
+BEGIN
+    IF NOT pg_temp.decline_contract_ok(
+        'grouped_count_date_adjacent', 'generic_serial_kernel_mode_unqualified',
+        '_decline_date_native', '_decline_date_enabled',
+        (SELECT kernels FROM _decline_date_before)
+    ) THEN
+        RAISE EXCEPTION '96 adjacent DATE COUNT contract returned false';
+    END IF;
+END $$;
+\echo 'PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_017'
 
 DEALLOCATE ALL;
 DROP TABLE _decline_scalar CASCADE;

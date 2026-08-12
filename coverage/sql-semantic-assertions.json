@@ -1,8 +1,8 @@
 {
   "baseline_assertions": 306,
   "baseline_files": 58,
-  "declared_assertions": 337,
-  "declared_files": 63,
+  "declared_assertions": 343,
+  "declared_files": 64,
   "files": [
     {
       "assertions": [
@@ -200,6 +200,53 @@
       "completion_id": "100_grouped_count_int8_contract",
       "file": "100_grouped_count_int8_contract.sql",
       "sha256": "8fe41094d7308ed95f532d74712285583368e6a1518d91a91eb3c218dacf4915"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "68bd86f24d01284821eb90e313d8c7867af40f6f0108100654d249c0f723bd33",
+          "guard_token_count": 2,
+          "id": "101_grouped_count_date_contract.assert_001",
+          "source_line": 42
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "ecea4b2cd807a2948b9a7594f8d95a4df19823484b627aeff0bf22b970ec7a6b",
+          "guard_token_count": 6,
+          "id": "101_grouped_count_date_contract.assert_002",
+          "source_line": 77
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "456ebfff8e8ddad59079f40be28c8f9d63716ac5430d720cdd791fe12c0faa29",
+          "guard_token_count": 6,
+          "id": "101_grouped_count_date_contract.assert_003",
+          "source_line": 89
+        },
+        {
+          "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "3274bfc7dc0aef44a058b009eef4367e5effe9a86fd46246c2cc17aeddd4fd3c",
+          "guard_token_count": 11,
+          "id": "101_grouped_count_date_contract.assert_004",
+          "source_line": 179
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "e91346f98db3958d6b1283c33bbef6397c64dea8e9e10c12c06cc5a1e27066ff",
+          "guard_token_count": 7,
+          "id": "101_grouped_count_date_contract.assert_005",
+          "source_line": 235
+        }
+      ],
+      "completion_id": "101_grouped_count_date_contract",
+      "file": "101_grouped_count_date_contract.sql",
+      "sha256": "c2cea7df41331f3c0a5a987f7610c9656d10e5772897858a9af2ddcd2648c8ca"
     },
     {
       "assertions": [
@@ -2854,11 +2901,11 @@
       "assertions": [
         {
           "emission": "echo",
-          "guard_count": 17,
-          "guard_sha256": "751173f77a29d37415229885c5aee12d536f59985fdd80737f35b8c39f96ac45",
-          "guard_token_count": 37,
+          "guard_count": 18,
+          "guard_sha256": "d848e5b46998fffe873c4f9d9866c8c874929560b44bb0c3c4cf264f2edcde6a",
+          "guard_token_count": 39,
           "id": "95_selected_lifecycle_contract.assert_001",
-          "source_line": 547
+          "source_line": 590
         },
         {
           "emission": "echo",
@@ -2866,7 +2913,7 @@
           "guard_sha256": "ccaf2d026a91a7257458545b6f24ebe8f665ade2b04bd682b9b3c24db5cfef84",
           "guard_token_count": 5,
           "id": "95_selected_lifecycle_contract.assert_002",
-          "source_line": 692
+          "source_line": 735
         },
         {
           "emission": "echo",
@@ -2874,7 +2921,7 @@
           "guard_sha256": "d95b8c5ea84914cb2fb4d65d23f372976960ab0affe6f2c7b72efd55b2073767",
           "guard_token_count": 3,
           "id": "95_selected_lifecycle_contract.assert_003",
-          "source_line": 792
+          "source_line": 835
         },
         {
           "emission": "echo",
@@ -2882,7 +2929,7 @@
           "guard_sha256": "59db0136cf1e391edc920decdf384ef20cda61a93211b2ae584a66dafd5cc03c",
           "guard_token_count": 3,
           "id": "95_selected_lifecycle_contract.assert_004",
-          "source_line": 892
+          "source_line": 935
         },
         {
           "emission": "echo",
@@ -2890,7 +2937,7 @@
           "guard_sha256": "84557c45d2bded653967e79792958066d8010508b41f2d6b8e21029c361ba579",
           "guard_token_count": 4,
           "id": "95_selected_lifecycle_contract.assert_005",
-          "source_line": 991
+          "source_line": 1034
         },
         {
           "emission": "echo",
@@ -2898,7 +2945,7 @@
           "guard_sha256": "83257f14eff79afa74c290efc09344866251b9660d0a2a43339e4dd95873e313",
           "guard_token_count": 7,
           "id": "95_selected_lifecycle_contract.assert_006",
-          "source_line": 1100
+          "source_line": 1143
         },
         {
           "emission": "echo",
@@ -2906,12 +2953,12 @@
           "guard_sha256": "08a26365a3423a06f57efcbc63835de0b6620aebffc7be3981198003f9233a3d",
           "guard_token_count": 8,
           "id": "95_selected_lifecycle_contract.assert_007",
-          "source_line": 1211
+          "source_line": 1254
         }
       ],
       "completion_id": "95_selected_lifecycle_contract",
       "file": "95_selected_lifecycle_contract.sql",
-      "sha256": "33d6ccebe72f2e35d0ffd0eb12074c46e3d7528b17f184015aa2257b6e0baac3"
+      "sha256": "63be8a07c42dac54d760afbeb209ee342f6c2a8fef547a7bb9123dc75ab74a7b"
     },
     {
       "assertions": [
@@ -2921,7 +2968,7 @@
           "guard_sha256": "d8a7a5e4140c69769688dc5cac4ccefff9c8f6ab5bf40bd6d559936958796001",
           "guard_token_count": 19,
           "id": "96_declined_lifecycle_contract.assert_001",
-          "source_line": 234
+          "source_line": 244
         },
         {
           "emission": "echo",
@@ -2929,7 +2976,7 @@
           "guard_sha256": "8bc32cc87db44dfe50c13178f506220d872f485f4f72f9b01e7d1976f68f9cc8",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_002",
-          "source_line": 254
+          "source_line": 264
         },
         {
           "emission": "echo",
@@ -2937,7 +2984,7 @@
           "guard_sha256": "7a9a66e895ef0c5be7a996e887f7ae9b1e28d3db36ee7eaef7f9ba38ec2bd64b",
           "guard_token_count": 6,
           "id": "96_declined_lifecycle_contract.assert_003",
-          "source_line": 312
+          "source_line": 322
         },
         {
           "emission": "echo",
@@ -2945,7 +2992,7 @@
           "guard_sha256": "712f24f712d7adfe24d55d2b14cb4f2a917594f5deef05a5b4a77e3ad06ccf1e",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_004",
-          "source_line": 333
+          "source_line": 343
         },
         {
           "emission": "echo",
@@ -2953,7 +3000,7 @@
           "guard_sha256": "f6b7c8217bbc9f5c3c2f3679af5450ddaee17d1145a920fafb55587800c5b631",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_005",
-          "source_line": 353
+          "source_line": 363
         },
         {
           "emission": "echo",
@@ -2961,7 +3008,7 @@
           "guard_sha256": "0c856a600d2ffa4d200ccdfe420072878bdac167455cc75ecbc69bfbc5d1800c",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_006",
-          "source_line": 373
+          "source_line": 383
         },
         {
           "emission": "echo",
@@ -2969,7 +3016,7 @@
           "guard_sha256": "a32e96309654dd869e8b0cbd9388e21b8faba7c3b5962bff74c85254fe5fa0db",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_007",
-          "source_line": 398
+          "source_line": 408
         },
         {
           "emission": "echo",
@@ -2977,7 +3024,7 @@
           "guard_sha256": "36e4b231acab18031855b87865be82d8b21392e584756fdfd898f3ab6cec148a",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_008",
-          "source_line": 418
+          "source_line": 428
         },
         {
           "emission": "echo",
@@ -2985,7 +3032,7 @@
           "guard_sha256": "5ae92fc80ec9c64bd4d0a178c2cd1fff97a66b79ec4eb9d0dde362306f813bc4",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_009",
-          "source_line": 482
+          "source_line": 492
         },
         {
           "emission": "echo",
@@ -2993,7 +3040,7 @@
           "guard_sha256": "ebc8ca88b8cba6282195a35210b75d4006f8a9e5cc5e952693fdff5dfefd95b2",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_010",
-          "source_line": 557
+          "source_line": 567
         },
         {
           "emission": "echo",
@@ -3001,7 +3048,7 @@
           "guard_sha256": "0f00921a94a84c924c33cf3db1c5a04c607a36a2bb7aee0a289803ef1f79c006",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_011",
-          "source_line": 584
+          "source_line": 594
         },
         {
           "emission": "echo",
@@ -3009,7 +3056,7 @@
           "guard_sha256": "4f482fbef132aa269de8cb0609f457acef1610c343c1d40fb10242086ef46ac0",
           "guard_token_count": 5,
           "id": "96_declined_lifecycle_contract.assert_012",
-          "source_line": 670
+          "source_line": 680
         },
         {
           "emission": "echo",
@@ -3017,7 +3064,7 @@
           "guard_sha256": "e9684fae74045c5c8dc449b2d600cce70ef662c2894ef8439316412e04024d92",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_013",
-          "source_line": 693
+          "source_line": 703
         },
         {
           "emission": "echo",
@@ -3025,7 +3072,7 @@
           "guard_sha256": "03bfe28688306acf6bfda6713f2a64943bf18ac905d1820594a5da05ebab5586",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_014",
-          "source_line": 748
+          "source_line": 758
         },
         {
           "emission": "echo",
@@ -3033,7 +3080,7 @@
           "guard_sha256": "4161308dcf955a4c2b36d6e107c0f0d83bcd4fbb7a62b2469a70fb493562f894",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_015",
-          "source_line": 770
+          "source_line": 780
         },
         {
           "emission": "echo",
@@ -3041,12 +3088,20 @@
           "guard_sha256": "13a2e7207ae86ae19764324131c5bb84e63379fadb0d726cfe966d4ff1bb6bc5",
           "guard_token_count": 4,
           "id": "96_declined_lifecycle_contract.assert_016",
-          "source_line": 792
+          "source_line": 802
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "3b706ed9fed2e8ae906b343037642e4f57f6b1d76f483858724a544fe372b469",
+          "guard_token_count": 4,
+          "id": "96_declined_lifecycle_contract.assert_017",
+          "source_line": 824
         }
       ],
       "completion_id": "96_declined_lifecycle_contract",
       "file": "96_declined_lifecycle_contract.sql",
-      "sha256": "c61e10cc13d94398b29d58618f88d25d9c8c9cc6a4eda0d6a95a349e935ac73a"
+      "sha256": "1b5fd1835eb2efa4b5d68681caf317e386f6e44263ce8eba321592a40551b9a7"
     },
     {
       "assertions": [

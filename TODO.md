@@ -319,6 +319,30 @@ redesigned and independently requalified.
     The unrelated CPU-saturating process and installed/local module-provenance
     mismatch make these functional measurements non-publishable; rerun the
     clean exact ship-gate cell before release.
+  - [x] Release the first exact `date` aggregate lane: one nullable boolean
+    fact-column group key and `COUNT` over one distinct nullable PostgreSQL
+    `date` fact column, with no filter, join, HAVING, or additional measure.
+    The planner, specialization cache, Rust physical-mode backstop, C++
+    descriptor gate, and host ABI contract admit only the exact `DATE`/4-byte
+    count shape. The kernel reads only the validated null sidecar, so finite
+    dates plus PostgreSQL `-infinity` and `infinity` sentinels never enter
+    device interpretation or arithmetic, while all-NULL groups retain count
+    zero. Infinity fixtures, invalid null bytes, adjacent native shapes,
+    PG18/PG19 SQL101 plus prepared DML/DDL lifecycle, and the
+    31-family/343-assertion semantic matrix pass. The complete PG18 and PG19
+    validation matrices pass: 1,541 core plus 55 correctness unit tests, 64 SQL
+    contracts, and 584 planner-shape/stress tests on each version; all 32 native
+    GPU CTests and 137 fail-closed coverage/safety tests pass as well. A
+    diagnostic 5-warmup/10-pair characterization measured 1.56 ms versus
+    PostgreSQL 8.73 ms (5.58x) at 250K and 2.60 ms versus 19.86 ms (7.64x) at
+    1M, with 20/20 artifact hits, verified `parallel_dense_count`, exact diffs,
+    and zero fallback in
+    `.codex/scratch/grouped-count-date-functional-pg18-20260811-b`;
+    `artifact_index.json` SHA-256 is
+    `814d9ebd05cb6881a0e5b0d3dd88a3c40659c030fab83aff17c7af22b659e3d4`.
+    The unrelated CPU-saturating process and installed/local module-provenance
+    mismatch make these functional measurements non-publishable; rerun the
+    clean exact ship-gate cell before release.
 - [ ] Membership and joins: composite keys, broader exact int8 shapes,
   catalog-proved collation-safe text, and reducing semi/anti membership with exact
   NULL, `NOT IN`, duplicate, and multiplicity semantics. Row-returning joins stay

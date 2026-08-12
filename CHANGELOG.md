@@ -43,8 +43,8 @@ claim is implied by the entries below.
   every group and unfiltered COUNT row; broader aggregate modifiers remain
   PostgreSQL-native.
 - Qualified dense-count specializations group one nullable boolean fact column
-  and count one distinct nullable `int2` or `int8` fact column. They use the
-  resident int32/int64 representations only for null-sidecar COUNT semantics,
+  and count one distinct nullable `int2`, `int8`, or `date` fact column. They use
+  the resident int32/int64/date representations only for null-sidecar COUNT semantics,
   preserve active all-NULL groups with count zero, and leave global, filtered,
   joined, non-boolean-grouped, and broader typed COUNT shapes native.
 - SSBM-, TPC-H-, and ClickBench-style system workload characterization plus an

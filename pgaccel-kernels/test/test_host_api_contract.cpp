@@ -487,9 +487,18 @@ void test_grouped_aggregate_host_contracts() {
   check_value("grouped int8 count physical mode value",
               kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
 
+  pgaccel_grouped_agg_desc date_count = int8_count;
+  date_count.measures[0].value.physical_type = PGACCEL_GROUPED_AGG_PHYSICAL_DATE;
+  date_count.measures[0].value.element_bytes = sizeof(int32_t);
+  kernel_mode = 0;
+  check_status("grouped date count physical mode",
+               pgaccel_grouped_agg_kernel_mode(&date_count, &kernel_mode), PGACCEL_OK);
+  check_value("grouped date count physical mode value",
+              kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
+
   pgaccel_grouped_agg_desc serial = int8_count;
-  serial.measures[0].value.physical_type = PGACCEL_GROUPED_AGG_PHYSICAL_DATE;
-  serial.measures[0].value.element_bytes = sizeof(int32_t);
+  serial.measure_count = 2;
+  serial.measures[1] = desc.measures[0];
   kernel_mode = 0;
   check_status("grouped serial physical mode",
                pgaccel_grouped_agg_kernel_mode(&serial, &kernel_mode), PGACCEL_OK);

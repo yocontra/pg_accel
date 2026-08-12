@@ -73,6 +73,7 @@ enum DescriptorSpecializationFamily {
     DenseBoolCount,
     DenseInt2Count,
     DenseInt8Count,
+    DenseDateCount,
     DenseIntegerColumn,
     DenseIntegerColumnMeasureRange,
     DenseIntegerMultiply,
@@ -138,6 +139,18 @@ impl DescriptorSpecialization {
             }
             (DescriptorSpecializationFamily::DenseInt8Count, true, true) => {
                 "dense_int8_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseDateCount, false, false) => {
+                "dense_date_count_plain"
+            }
+            (DescriptorSpecializationFamily::DenseDateCount, false, true) => {
+                "dense_date_count_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseDateCount, true, false) => {
+                "dense_date_count_membership"
+            }
+            (DescriptorSpecializationFamily::DenseDateCount, true, true) => {
+                "dense_date_count_membership_sql_mask"
             }
             (DescriptorSpecializationFamily::DenseIntegerColumn, false, false) => {
                 "dense_integer_column_plain"
@@ -297,6 +310,13 @@ fn canonical_dense_int8_count_measure(
     canonical_dense_typed_count_measure(spec, measure, INT8OID)
 }
 
+fn canonical_dense_date_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_typed_count_measure(spec, measure, DATEOID)
+}
+
 fn canonical_dense_integer_value_measure(measure: &crate::engine::spec::MeasureSpec) -> bool {
     if measure.filter != FilterSpec::None {
         return false;
@@ -454,7 +474,8 @@ pub fn planned_descriptor_kernel_mode(
             if parallel_dense_fact_filter(&spec.fact_filter)
                 && (canonical_dense_bool_count_measure(spec, count)
                     || canonical_dense_int2_count_measure(spec, count)
-                    || canonical_dense_int8_count_measure(spec, count)) =>
+                    || canonical_dense_int8_count_measure(spec, count)
+                    || canonical_dense_date_count_measure(spec, count)) =>
         {
             GroupedAggKernelMode::ParallelDenseCount
         }
@@ -494,6 +515,9 @@ fn classify_descriptor_specialization(
             }
             Some(measure) if canonical_dense_int8_count_measure(spec, measure) => {
                 DescriptorSpecializationFamily::DenseInt8Count
+            }
+            Some(measure) if canonical_dense_date_count_measure(spec, measure) => {
+                DescriptorSpecializationFamily::DenseDateCount
             }
             _ => DescriptorSpecializationFamily::DenseCount,
         },
@@ -3563,7 +3587,9 @@ fn parallel_dense_count_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
             || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
                 && count.value.element_bytes == 4)
             || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64
-                && count.value.element_bytes == 8));
+                && count.value.element_bytes == 8)
+            || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE
+                && count.value.element_bytes == 4));
     (count_star || count_typed_column)
         && count.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
         && count.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
@@ -4369,6 +4395,10 @@ mod tests {
         desc.measures[0].value.element_bytes = 8;
         assert!(parallel_dense_count_shape(&desc));
 
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE;
+        desc.measures[0].value.element_bytes = 4;
+        assert!(parallel_dense_count_shape(&desc));
+
         desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64;
         desc.measures[0].value.element_bytes = 8;
         assert!(!parallel_dense_count_shape(&desc));
@@ -4497,6 +4527,16 @@ mod tests {
             relation_oid: 42,
             attno: 2,
             type_oid: INT8OID,
+        });
+        count
+    }
+
+    fn dense_date_count_spec() -> AggQuerySpec {
+        let mut count = dense_bool_count_spec();
+        count.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: DATEOID,
         });
         count
     }
@@ -4678,6 +4718,16 @@ mod tests {
             planned_descriptor_kernel_mode(&int8_count, true),
             GroupedAggKernelMode::SerialGeneric,
             "an INT8 column count is not silently routed through COUNT(*) hash semantics"
+        );
+        let date_count = dense_date_count_spec();
+        assert_eq!(
+            planned_descriptor_kernel_mode(&date_count, false),
+            GroupedAggKernelMode::ParallelDenseCount
+        );
+        assert_eq!(
+            planned_descriptor_kernel_mode(&date_count, true),
+            GroupedAggKernelMode::SerialGeneric,
+            "a DATE column count is not silently routed through COUNT(*) hash semantics"
         );
         let mut same_column = bool_count.clone();
         same_column.measures[0].expression = MeasureExpr::Column(ColumnRef {
@@ -4876,6 +4926,16 @@ mod tests {
         assert_eq!(int8_specialization.label(), "dense_int8_count_plain");
         assert_eq!(int8_outcome, DescriptorSpecializationCacheOutcome::Miss);
 
+        let date_count = dense_date_count_spec();
+        let date_identity = DerivedArtifactIdentity::from_canonical_words(vec![25, 26, 27, 28]);
+        let (date_specialization, date_outcome) = cached_descriptor_specialization(
+            &date_identity,
+            &date_count,
+            GroupedAggKernelMode::ParallelDenseCount,
+        );
+        assert_eq!(date_specialization.label(), "dense_date_count_plain");
+        assert_eq!(date_outcome, DescriptorSpecializationCacheOutcome::Miss);
+
         let (cached, second) = cached_descriptor_specialization(
             &identity,
             &count,
@@ -4928,7 +4988,7 @@ mod tests {
         );
         assert_eq!(
             DESCRIPTOR_SPECIALIZATION_CACHE.with(|cache| cache.borrow().len()),
-            7,
+            8,
             "a digest lookup never aliases a different complete canonical identity"
         );
     }
