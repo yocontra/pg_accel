@@ -200,7 +200,7 @@ class MacosPrerequisiteParityTests(unittest.TestCase):
     def test_soft_fp_2_pin_and_metal_contract_are_consistent(self) -> None:
         setup = (doc_parity.REPO_ROOT / "scripts/setup_acpp.sh").read_text()
         self.assertIn(
-            'SOFT_FP64_REQUIRED_TAG="${SOFT_FP64_REQUIRED_TAG:-v2.0.0}"',
+            'SOFT_FP64_REQUIRED_TAG="${SOFT_FP64_REQUIRED_TAG:-v2.0.1}"',
             setup,
         )
         for option in (
@@ -213,8 +213,12 @@ class MacosPrerequisiteParityTests(unittest.TestCase):
         ):
             self.assertIn(option, setup)
         self.assertIn("apply_soft_fp_2_package_patch", setup)
-        self.assertIn("apply_soft_fp64_device_patch", setup)
-        self.assertIn("SF64_DEVICE_CONSTEXPR_BITCAST", setup)
+        self.assertNotIn("apply_soft_fp64_device_patch", setup)
+        self.assertNotIn("SF64_DEVICE_CONSTEXPR_BITCAST", setup)
+        self.assertNotIn("soft_fp64_device_patch=", setup)
+        self.assertFalse(
+            any((doc_parity.REPO_ROOT / "patches/soft-fp").glob("*.patch"))
+        )
         self.assertIn("soft_fp_package_dir=$SOFT_FP_PACKAGE_DIR", setup)
         self.assertIn("soft_fp64_package_version=$SOFT_FP64_PACKAGE_VERSION", setup)
 
@@ -226,12 +230,12 @@ class MacosPrerequisiteParityTests(unittest.TestCase):
             "scripts/metal_stress_gate.sh",
         ):
             text = (doc_parity.REPO_ROOT / relative).read_text()
-            self.assertIn("v2.0.0", text, relative)
+            self.assertIn("v2.0.1", text, relative)
 
-    def test_adaptivecpp_caches_include_local_patch_and_setup_inputs(self) -> None:
+    def test_adaptivecpp_caches_include_integration_patch_and_setup_inputs(self) -> None:
         hash_expression = (
             "${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', "
-            "'patches/soft-fp/*.patch', 'scripts/setup_acpp.sh') }}"
+            "'scripts/setup_acpp.sh') }}"
         )
         workflow_names = ("ci.yml", "release.yml")
         cache_key_count = 0

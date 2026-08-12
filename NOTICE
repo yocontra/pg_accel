@@ -33,7 +33,7 @@ Role:    Software fp64 emulation. Function bodies are linked into the
 Source:  https://github.com/yocontra/AdaptiveCpp/tree/fork-safe-metal
          (AdaptiveCpp Metal consumes soft-fp64 via
          `ACPP_SOFT_FP64_SRC_DIR`.)
-         https://github.com/yocontra/soft-fp.git (tag v2.0.0; binary64
+         https://github.com/yocontra/soft-fp.git (tag v2.0.1; binary64
          compatibility package and source manifest only — binary128 and
          binary256 are not compiled into pg_accel's Metal libkernel)
 
@@ -106,7 +106,7 @@ Role:    Transcendental math function bodies (sin, cos, exp, log, etc.)
          Metal .metallib cache at install time.
 Source:  https://github.com/shibatch/sleef — mirrored inside the
          soft-fp source tree used for the build; see `src/sleef/NOTICE`
-         (installed as `SLEEF-NOTICE`) in soft-fp tag v2.0.0.
+         (installed as `SLEEF-NOTICE`) in soft-fp tag v2.0.1.
 
 License text (Boost Software License 1.0):
 

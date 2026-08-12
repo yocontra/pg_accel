@@ -61,10 +61,15 @@ capture_acpp_provenance() {
     grep -Fx "backend=metal" "$source"
     grep -Fx "acpp_required_sha=${required_sha}" "$source"
     grep -Fx "acpp_head=${required_sha}" "$source"
-    grep -Fx "soft_fp64_required_tag=v2.0.0" "$source"
-    grep -Fx "soft_fp64_desc=v2.0.0" "$source"
-    grep -Fx "soft_fp64_package_version=2.0.0" "$source"
-    grep -Fx "soft_fp64_device_patch=patches/soft-fp/metal-constexpr-bitcast.patch" "$source"
+    grep -Fx "soft_fp64_required_tag=v2.0.1" "$source"
+    grep -Fx "soft_fp64_desc=v2.0.1" "$source"
+    grep -Fx "soft_fp64_package_version=2.0.1" "$source"
+    awk '
+        $0 == "soft_fp64_git_status_start" { inside = 1; start = 1; next }
+        $0 == "soft_fp64_git_status_end" { inside = 0; finish = 1; next }
+        inside { dirty = 1 }
+        END { exit(start && finish && !dirty ? 0 : 1) }
+    ' "$source"
     grep -F -- "-DSOFT_FP_BUILD_FP128=OFF" "$source"
     grep -F -- "-DSOFT_FP_BUILD_FP256=OFF" "$source"
     grep -F -- "-DSOFT_FP64_OCL=on" "$source"

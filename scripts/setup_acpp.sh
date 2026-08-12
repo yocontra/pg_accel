@@ -6,12 +6,9 @@ set -euo pipefail
 PG_ACCEL_REPO_ROOT="${PG_ACCEL_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 PG_ACCEL_TOOL_ROOT="${PG_ACCEL_TOOL_ROOT:-$PG_ACCEL_REPO_ROOT/.pgaccel}"
 ACPP_REQUIRED_SHA="${ACPP_REQUIRED_SHA:-$(cat "$PG_ACCEL_REPO_ROOT/.acpp-version")}"
-SOFT_FP64_REQUIRED_TAG="${SOFT_FP64_REQUIRED_TAG:-v2.0.0}"
+SOFT_FP64_REQUIRED_TAG="${SOFT_FP64_REQUIRED_TAG:-v2.0.1}"
 ACPP_SRC="${ACPP_SRC:-$PG_ACCEL_TOOL_ROOT/src/AdaptiveCpp}"
 SOFT_FP64_SRC="${SOFT_FP64_SRC:-$PG_ACCEL_TOOL_ROOT/src/soft-fp64}"
-SOFT_FP64_DEVICE_PATCH_RELATIVE="patches/soft-fp/metal-constexpr-bitcast.patch"
-SOFT_FP64_DEVICE_PATCH="$PG_ACCEL_REPO_ROOT/$SOFT_FP64_DEVICE_PATCH_RELATIVE"
-SOFT_FP64_APPLIED_PATCH=""
 ACPP_BACKEND="${ACPP_BACKEND:-auto}"
 ACPP_AUTO_CMAKE_ARGS=()
 ACPP_REQUIRED_CMAKE_ARGS=()
@@ -333,45 +330,9 @@ apply_sleef_helper_address_space_patch
 apply_soft_fp_2_package_patch
 apply_sscp_host_coverage_patch
 
-unapply_soft_fp64_device_patch() {
-    [ -d "$SOFT_FP64_SRC/.git" ] || return 0
-
-    local header
-    header="$SOFT_FP64_SRC/src/sleef/sleef_internal.h"
-    if [ -f "$header" ] && grep -q 'SF64_DEVICE_CONSTEXPR_BITCAST' "$header"; then
-        if [ ! -s "$SOFT_FP64_DEVICE_PATCH" ] ||
-            ! git -C "$SOFT_FP64_SRC" apply --reverse --check "$SOFT_FP64_DEVICE_PATCH"; then
-            echo "error: applied soft-fp Metal compatibility patch has drifted" >&2
-            exit 1
-        fi
-        git -C "$SOFT_FP64_SRC" apply --reverse "$SOFT_FP64_DEVICE_PATCH"
-    fi
-}
-
-apply_soft_fp64_device_patch() {
-    [ "$backend" = "metal" ] || return 0
-
-    if [ ! -s "$SOFT_FP64_DEVICE_PATCH" ]; then
-        echo "error: required soft-fp Metal compatibility patch is missing" >&2
-        exit 1
-    fi
-    if ! git -C "$SOFT_FP64_SRC" apply --check "$SOFT_FP64_DEVICE_PATCH"; then
-        echo "error: soft-fp Metal compatibility patch does not apply to $SOFT_FP64_REQUIRED_TAG" >&2
-        exit 1
-    fi
-    echo "Applying soft-fp Metal constexpr-bitcast compatibility patch"
-    git -C "$SOFT_FP64_SRC" apply "$SOFT_FP64_DEVICE_PATCH"
-    if ! git -C "$SOFT_FP64_SRC" apply --reverse --check "$SOFT_FP64_DEVICE_PATCH"; then
-        echo "error: soft-fp Metal compatibility patch verification failed" >&2
-        exit 1
-    fi
-    SOFT_FP64_APPLIED_PATCH="$SOFT_FP64_DEVICE_PATCH_RELATIVE"
-}
-
 if [ ! -d "$SOFT_FP64_SRC/.git" ]; then
     git clone --depth 1 --branch "$SOFT_FP64_REQUIRED_TAG" https://github.com/yocontra/soft-fp.git "$SOFT_FP64_SRC"
 else
-    unapply_soft_fp64_device_patch
     if ! git -C "$SOFT_FP64_SRC" diff --quiet ||
         ! git -C "$SOFT_FP64_SRC" diff --cached --quiet; then
         echo "error: soft-fp checkout has tracked local changes: $SOFT_FP64_SRC" >&2
@@ -389,7 +350,6 @@ if [ "$soft_fp64_desc" != "$SOFT_FP64_REQUIRED_TAG" ]; then
 fi
 SOFT_FP64_HEAD="$(git -C "$SOFT_FP64_SRC" rev-parse HEAD)"
 echo "Using soft-fp64 $soft_fp64_desc ($SOFT_FP64_HEAD)"
-apply_soft_fp64_device_patch
 
 if [ "$backend" = "metal" ]; then
     SOFT_FP64_CMAKE_ARGS=(
@@ -431,7 +391,7 @@ if [ "$backend" = "metal" ]; then
     for expected_contract in \
         '#define SOFT_FP64_VERSION_MAJOR 2' \
         '#define SOFT_FP64_VERSION_MINOR 0' \
-        '#define SOFT_FP64_VERSION_PATCH 0' \
+        '#define SOFT_FP64_VERSION_PATCH 1' \
         '#define SOFT_FP_BUILD_FP128 0' \
         '#define SOFT_FP_BUILD_FP256 0' \
         '#define SOFT_FP64_HAS_OCL_ABI 1' \
@@ -552,7 +512,6 @@ provenance_file="$ACPP_PREFIX/pg_accel-acpp-provenance.txt"
     echo "soft_fp64_desc=$soft_fp64_desc"
     echo "soft_fp64_head=$SOFT_FP64_HEAD"
     echo "soft_fp64_package_version=$SOFT_FP64_PACKAGE_VERSION"
-    echo "soft_fp64_device_patch=$SOFT_FP64_APPLIED_PATCH"
     echo "soft_fp64_src=$SOFT_FP64_SRC"
     echo "soft_fp64_build_dir=$SOFT_FP64_BUILD_DIR"
     echo "soft_fp64_install_prefix=$SOFT_FP64_PREFIX"

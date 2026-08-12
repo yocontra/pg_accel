@@ -517,7 +517,6 @@ def copy_sanitized_provenance(
         "soft_fp64_desc=",
         "soft_fp64_head=",
         "soft_fp64_package_version=",
-        "soft_fp64_device_patch=",
         "soft_fp64_cmake_args=",
         "soft_fp_package_dir=",
         "soft_fp64_git_status_start",

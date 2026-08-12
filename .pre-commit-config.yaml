@@ -22,7 +22,10 @@ repos:
     hooks:
       - id: trailing-whitespace
         args: [--markdown-linebreak-ext=md]
-        exclude: '\.(ipynb|snap)$'
+        # Unified-diff context lines contain a required single prefix space.
+        # Trimming it rewrites tracked integration patches and can corrupt
+        # stricter patch consumers.
+        exclude: '\.(ipynb|snap|patch)$'
       - id: end-of-file-fixer
         exclude: '\.(snap|patch)$'
       - id: check-yaml

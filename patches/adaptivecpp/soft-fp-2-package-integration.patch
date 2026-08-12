@@ -32,7 +32,7 @@ index 221d4d2c..6d326381 100644
      message(FATAL_ERROR
        "WITH_LLVM_TO_METAL requires ACPP_SOFT_FP64_SRC_DIR to point at a "
 -      "soft-fp64 checkout (tag >=v1.3.0). Set "
-+      "soft-fp checkout (tag v2.0.0). Set "
++      "soft-fp checkout (tag v2.0.1). Set "
        "-DACPP_SOFT_FP64_SRC_DIR=<abs path> or env ACPP_SOFT_FP64_SRC_DIR. "
        "AdaptiveCpp's Metal libkernel cannot link without an fp64 "
        "implementation - Apple GPUs lack hardware fp64.")
@@ -86,11 +86,11 @@ index 221d4d2c..6d326381 100644
 +  set(soft_fp_DIR "${_SOFT_FP_PACKAGE_DIR}" CACHE PATH
 +      "Resolved unified soft-fp package" FORCE)
 +  find_package(soft_fp 2 CONFIG REQUIRED NO_DEFAULT_PATH)
-+  if(NOT soft_fp_VERSION VERSION_EQUAL "2.0.0" OR
-+      NOT soft_fp64_VERSION VERSION_EQUAL "2.0.0")
++  if(NOT soft_fp_VERSION VERSION_EQUAL "2.0.1" OR
++      NOT soft_fp64_VERSION VERSION_EQUAL "2.0.1")
 +    message(FATAL_ERROR
 +      "AdaptiveCpp Metal requires unified and binary64 soft-fp package "
-+      "version 2.0.0; found '${soft_fp_VERSION}' and "
++      "version 2.0.1; found '${soft_fp_VERSION}' and "
 +      "'${soft_fp64_VERSION}'.")
 +  endif()
 +  if(NOT TARGET soft_fp::fp64)
@@ -126,11 +126,11 @@ index 221d4d2c..6d326381 100644
        message(FATAL_ERROR
          "soft-fp64 source missing: ${_abs}. Is your soft-fp64 checkout "
 -        "at the expected tag (>=v1.3.0)?")
-+        "at the expected tag (v2.0.0)?")
++        "at the expected tag (v2.0.1)?")
      endif()
      list(APPEND _SOFT_FP64_ABS_SOURCES "${_abs}")
    endforeach()
-@@ -122,28 +163,29 @@ if(WITH_LLVM_TO_METAL)
+@@ -122,28 +163,25 @@ if(WITH_LLVM_TO_METAL)
    # vectors to MSL, so keeping every TU scalar avoids surprise vectorised
    # code paths leaking into MSL via libkernel inlining. The cost is small
    # - these are mostly cold thunks.
@@ -169,16 +169,12 @@ index 221d4d2c..6d326381 100644
 -  list(APPEND METAL_LIBKERNEL_EXTRA_ARGS
 -       -DSOFT_FP64_OCL_ENABLED=1
 -       -DSOFT_FP64_FTZ_MODE=0)
-+  # `SF64_DEVICE_CONSTEXPR_BITCAST` selects pg_accel's tracked soft-fp
-+  # compatibility patch, keeping kInf integer-derived without emitting host
-+  # C++ global constructors into device bitcode.
 +  list(APPEND METAL_LIBKERNEL_EXTRA_ARGS
-+       -DSF64_DISABLE_SLEEF_INLINE
-+       -DSF64_DEVICE_CONSTEXPR_BITCAST)
++       -DSF64_DISABLE_SLEEF_INLINE)
  
    # Include paths for soft-fp64's relative #includes:
    #   - src/*.cpp              -> "internal*.h"               (sibling, src/)
-@@ -155,10 +197,13 @@ if(WITH_LLVM_TO_METAL)
+@@ -155,10 +193,13 @@ if(WITH_LLVM_TO_METAL)
    #                                from src/sleef/ - soft-fp64 root has include/)
    list(APPEND METAL_LIBKERNEL_EXTRA_ARGS
         -I "${ACPP_SOFT_FP64_SRC_DIR}/include"
