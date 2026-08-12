@@ -271,6 +271,7 @@ build_postgis_from_source() {
         export PATH="$bindir:$path_value"
         export PKG_CONFIG_PATH="$pkg_config_value"
         "$src/configure" \
+            --prefix="$prefix" \
             --with-pgconfig="$pg_config" \
             --without-topology \
             --without-address-standardizer \

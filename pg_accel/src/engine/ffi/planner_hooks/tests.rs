@@ -922,16 +922,15 @@ mod incremental_sort_detect {
              SELECT g % 10, g FROM generate_series(1, 2000) g",
             )
             .expect("seed");
+            Spi::run("CREATE INDEX ON pgaccel_incsort_smoke (a)")
+                .expect("create presorted-prefix index");
             Spi::run("ANALYZE pgaccel_incsort_smoke").expect("analyze");
             Spi::run("SET pg_accel.enabled = on").expect("enable pg_accel");
 
-            // EXPLAIN a 2-key ORDER BY: this hits the IncrementalSort
-            // classifier branch in the resident-only observer. We only assert
-            // the planner returns something non-empty; we intentionally do
-            // NOT assert "IncrementalSort" appears because selectivity may
-            // give PG a plain Sort here and that is still a valid plan — the
-            // test is about "planner did not crash", not "PG picked a
-            // particular strategy".
+            // The first-key index gives the observer a native path with an
+            // exact one-key prefix of the two-key ORDER BY. This exercises
+            // pathkeys_count_contained_in deterministically without asserting
+            // that PostgreSQL must choose IncrementalSort as its final plan.
             Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
             let before = crate::engine::stats::read_planner_rejected();
             let row_count = Spi::get_one::<i64>(
@@ -951,14 +950,14 @@ mod incremental_sort_detect {
                 "multi-key ORDER BY should record an explicit planner rejection \
                  (before={before}, after={after})"
             );
-            let multikey_declines = Spi::get_one::<i64>(
-                "SELECT pg_accel_planner_rejection_count('no_gpu_resident_pipeline')",
+            let incremental_declines = Spi::get_one::<i64>(
+                "SELECT pg_accel_planner_rejection_count('sort_incremental_opportunity')",
             )
             .expect("rejection count query should succeed")
             .expect("rejection count should not be NULL");
             assert!(
-                multikey_declines > 0,
-                "multi-key ORDER BY should expose the resident-only gate"
+                incremental_declines > 0,
+                "multi-key ORDER BY should expose the incremental-sort opportunity"
             );
 
             Spi::run("DROP TABLE pgaccel_incsort_smoke").expect("drop");

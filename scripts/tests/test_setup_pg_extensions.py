@@ -27,6 +27,7 @@ class SetupPgExtensionsTests(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         start = source.index("build_postgis_from_source()")
         postgis = source[start : source.index("\ncollect_packaged_dirs\n", start)]
+        self.assertIn('--prefix="$prefix"', postgis)
         self.assertIn("--without-topology", postgis)
         self.assertIn("make -j 1", postgis)
         self.assertNotIn('make -j "$jobs"', postgis)
