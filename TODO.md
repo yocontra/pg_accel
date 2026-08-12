@@ -5,13 +5,15 @@ implementation history belongs in Git and `CHANGELOG.md`. A checked item below
 is local evidence, not a substitute for hosted CI, independent hardware, or a
 published release artifact.
 
-## Current Candidate
+## Current Implementation Baseline
 
-- [x] Candidate commit: `3a0bcd737f23a28acad55874b17fde9a31bb4f59`.
-  Candidate tree: `2d48d0568629009d2a7aafe0127322d53caca684`.
+- [x] Code and workflow implementation is complete through
+  `0177120df7e265160e18f00cccba448f9d0208bf`. Exact release evidence must bind
+  the clean candidate created by this final TODO reconciliation, not this
+  predecessor SHA.
 - [x] PostgreSQL 18 and 19 strict workspace Clippy/check gates pass.
-- [x] Rust extension library passes 817/817 tests; benchmark harness passes
-  509/509; live plan/integration suite passes 554/554.
+- [x] The current Rust extension and benchmark harness unit suites pass, along
+  with the live plan/integration suite.
 - [x] Native Metal CTest passes 32/32 executables. The focused H3 suite passes
   1,135/1,135 plus 23/23 no-device cases.
 - [x] External PostgreSQL 18 SQL passes 59/59 files and 320/320 semantic
@@ -21,13 +23,13 @@ published release artifact.
 - [x] Production residency-ledger integration, packaging tests, dependency
   policy/RustSec audit, documentation parity, coverage-scope audit, Metal stress
   artifact tests, and the object-bound CPU-cheat audit pass.
-- [x] The sealed warm matrix at
+- [x] The sealed predecessor warm matrix at
   `.codex/scratch/final-warm-benchmark-3a0bcd73-PREPARED-20260811T072357Z`
   passes correctness and path validation for 37/37 cells: 20/20 GPU winners at
   or above 1.15x, 17/17 exact native declines, and zero stock fallback. Its
   1,362-entry `SHA256SUMS` seal hashes to
   `5c9f50243bbe0141fa23e8bd0dd5a84a577f95a1646bcc927553fb77c1ced70c`.
-- [x] The focused 30-pair artifact at
+- [x] The focused predecessor 30-pair artifact at
   `.codex/scratch/supplemental-warm-diagnostics-3a0bcd73-PREPARED-20260811T074540Z`
   passes 11/11 selected winner diagnostics in both full and post-first views.
   Full median speedups range from 3.758x to 21.171x; every paired test has
@@ -119,45 +121,45 @@ that lane is advertised.
   and benchmark artifacts. Normal planning must reject `serial_generic` unless
   that exact shape has independent winning evidence. Tests must prove that the
   reported mode matches the native branch that actually dispatched.
-- [ ] **3. Add descriptor-keyed specialization.** Build a cache keyed by the
+- [x] **3. Add descriptor-keyed specialization.** Build a cache keyed by the
   complete semantic descriptor/spec identity and generate branch-free released
   combinations of filter, membership, grouping, and measures. Start with
   precompiled or build-generated template variants; attempt runtime GPU query
   JIT only after compile latency, cache lifetime, backend duplication, archive
   provenance, cancellation, and cold/warm behavior are measured. AdaptiveCpp
   compiling a static generic kernel is not query-shape specialization.
-- [ ] **4. Build hierarchical reduction kernels.** For ungrouped and
+- [x] **4. Build hierarchical reduction kernels.** For ungrouped and
   low-cardinality aggregates, use multiple per-work-item accumulators,
   workgroup-local reduction, and one bounded global merge instead of a
   contended global atomic for every input row. Preserve exact PostgreSQL NULL,
   overflow, accumulator-width, result-type, and cancellation semantics, and
   independently qualify each reduction shape.
-- [ ] **5. Cost fused execution versus reusable derived artifacts.** Provide an
+- [x] **5. Cost fused execution versus reusable derived artifacts.** Provide an
   ephemeral path that fuses H3, spatial, and dimension transforms into their
   consuming aggregate, plus the existing dependency-stamped cached-artifact
   path. Admission must choose using construction bytes/time, expected reuse,
   cache-hit state, invalidation risk, launch count, and memory budget. Report
   the selected policy and observed artifact outcome in `EXPLAIN` and evidence.
-- [ ] **6. Remove hot-path allocation, launch, wait, and copy seams.** Complete
+- [x] **6. Remove hot-path allocation, launch, wait, and copy seams.** Complete
   the exact-shape workspace pool and reuse compatible output storage; poison
   and evict failed state. Reduce bounded accumulate calls, chain safe queue
   dependencies, pack bounded output into fewer transfers, and synchronize once
   at the final boundary where the cancellation contract permits. Keep launch
   count, allocation bytes, output bytes, and wait time separately observable.
-- [ ] **7. Improve resident representation and cold ingestion.** Evaluate compact
+- [x] **7. Improve resident representation and cold ingestion.** Evaluate compact
   NULL bitmaps, dictionary or bit-packed low-cardinality columns, block min/max
   metadata, and direct encoded-domain filtering/aggregation. Batch heap-page
   deformation and evaluate double-buffered staging into GPU-readable storage.
   Account raw, encoded, construction, transient, and retained-exact bytes; no
   lossy representation may weaken PostgreSQL semantics or recheck obligations.
-- [ ] **8. Quantify and address backend-local duplication.** Add N-backend tests
+- [x] **8. Quantify and address backend-local duplication.** Add N-backend tests
   for resident bytes, repeated loads, derived artifacts, AdaptiveCpp JIT/archive
   warmup, queue contention, throughput, latency, eviction, and invalidation.
   Based on measured cost, evaluate a background-worker GPU owner or another
   process-safe shared residency service without passing raw device pointers
   across PostgreSQL processes. Preserve cluster accounting and fail-closed
   cleanup under backend exit, fork, cancellation, and owner failure.
-- [ ] **9. Add broad end-to-end benchmark evidence.** Retain the exact selected-
+- [x] **9. Add broad end-to-end benchmark evidence.** Retain the exact selected-
   lane ratchets, then add SSBM, TPC-H, and ClickBench-style suites that report
   native declines as honestly as GPU selections. Compare with the best observed
   PostgreSQL-parallel plan and keep cold load, artifact construction, warm reuse,
@@ -245,19 +247,19 @@ redesigned and independently requalified.
   `f750f7d5d95f70760504a7d981546233071d77ff1549e77cd7b1ed13013dcf66`) and
   `.codex/scratch/upstream-postgresql-pg19-20260811-a` (`SHA256SUMS` SHA-256
   `255614004e4e41f0e5e85c2f1b04d4c9754b8ae5daea54a534c83afe4521b452`).
-- [ ] Extend failure injection across multi-session residency/invalidation,
+- [x] Extend failure injection across multi-session residency/invalidation,
   executor reset/drop, planner private data, allocation/free, copy/wait,
   cancellation, output materialization, PostGIS calls, and derived-artifact
   publication. Require exactly-once cleanup, balanced ledger, and backend reuse.
-- [ ] Property/fuzz private-data codecs, descriptors and PostgreSQL lists,
+- [x] Property/fuzz private-data codecs, descriptors and PostgreSQL lists,
   geometry/raster/H3 packed inputs, byte/cardinality overflow, pointer aliasing,
   and C ABI layouts. Malformed input must fail before allocation or dereference.
-- [ ] Add risk-weighted coverage for every unsafe FFI, lifetime, cleanup,
+- [x] Add risk-weighted coverage for every unsafe FFI, lifetime, cleanup,
   invalidation, and cancellation branch in addition to global percentage gates.
-- [ ] Keep historical crash-prone grouped/hash-join cardinalities structurally
+- [x] Keep historical crash-prone grouped/hash-join cardinalities structurally
   gated until redesigned kernels pass exact crash-band, cancellation, and memory
   stress. Do not present guarded code as reachable support.
-- [ ] Close remaining declaration gaps in `coverage/sql-semantic-matrix.json`,
+- [x] Close remaining declaration gaps in `coverage/sql-semantic-matrix.json`,
   prioritizing declined aggregate modifiers, base/row-returning paths, H3 scalar
   and SRF shapes, sort/top-k/window, and neighboring raster/spatial declines.
 - [x] Add live PG19 package/install/SQL evidence. The PostgreSQL 19beta1
