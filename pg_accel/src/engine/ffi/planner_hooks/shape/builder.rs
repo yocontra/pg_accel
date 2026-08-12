@@ -153,9 +153,9 @@ fn validate_measure_descriptor_capability(
     }
     let validate_column =
         |column: &crate::engine::spec::ColumnRef| match (column.type_oid, aggregate.output.kind) {
-            (BOOLOID, AggregateKind::Count) => Ok(()),
+            (BOOLOID | INT2OID, AggregateKind::Count) => Ok(()),
             (
-                BOOLOID | INT2OID | FLOAT4OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID,
+                BOOLOID | FLOAT4OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID,
                 AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
             ) => Err(ShapeDecline::UnsupportedAggregateInput {
                 kind: aggregate.output.kind,
@@ -1338,6 +1338,7 @@ mod tests {
         let float8 = column(100, 3, 701);
         let text = column(100, 4, 25);
         let boolean = column(100, 5, 16);
+        let int2 = column(100, 6, 21);
 
         assert_eq!(
             validate_measure_descriptor_capability(&aggregate(
@@ -1367,6 +1368,13 @@ mod tests {
         assert_eq!(
             validate_measure_descriptor_capability(&aggregate(
                 MeasureExpr::Column(boolean),
+                AggregateKind::Count
+            )),
+            Ok(())
+        );
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Column(int2),
                 AggregateKind::Count
             )),
             Ok(())

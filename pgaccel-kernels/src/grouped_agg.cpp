@@ -466,8 +466,10 @@ bool parallel_dense_count_column_shape(const pgaccel_grouped_agg_desc& desc) {
          count.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT &&
          count.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64 &&
          count.state_bytes == sizeof(int64_t) &&
-         count.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_BOOL &&
-         count.value.element_bytes == sizeof(uint8_t);
+         ((count.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_BOOL &&
+           count.value.element_bytes == sizeof(uint8_t)) ||
+          (count.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 &&
+           count.value.element_bytes == sizeof(int32_t)));
 }
 
 bool parallel_dense_count_shape(const pgaccel_grouped_agg_desc& desc) {

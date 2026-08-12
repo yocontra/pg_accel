@@ -701,6 +701,8 @@ const PINS_GROUPED_AGG_INT4: &[ResidentPinSpec] =
     &[pin!("bench_employees_agg_int4", ["dept", "salary"])];
 const PINS_GROUPED_COUNT_BOOL: &[ResidentPinSpec] =
     &[pin!("bench_grouped_count_bool", ["bool_key", "observed"])];
+const PINS_GROUPED_COUNT_INT2: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_count_int2", ["bool_key", "observed"])];
 const PINS_GROUPED_AGG_HIGH_CARD: &[ResidentPinSpec] =
     &[pin!("bench_events_agg", ["user_id", "val"])];
 const PINS_TIMESERIES: &[ResidentPinSpec] = &[pin!("sensor_data", ["sensor_id", "value"])];
@@ -971,6 +973,9 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .evidence(WINNER),
     workload("grouped_count_bool_candidate", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_COUNT_BOOL)
+        .evidence(WINNER),
+    workload("grouped_count_int2_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_COUNT_INT2)
         .evidence(WINNER),
     workload("grouped_agg_high_card", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG_HIGH_CARD)

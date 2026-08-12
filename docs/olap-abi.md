@@ -745,15 +745,18 @@ The native submission branch selects that template once on the host, so row
 kernels contain no per-row membership/mask/measure-shape branch. EXPLAIN reports
 both the specialization label and whether its identity lookup hit the cache.
 
-`PARALLEL_DENSE_COUNT` accepts canonical `COUNT_STAR` plus a canonical
-COUNT-only BOOL column descriptor. The BOOL specialization maintains separate
-u32 partials for selected rows and non-NULL measure rows: selected rows activate
-the group and update `selected_count`, while non-NULL rows update both COUNT and
-`nonnull_count`. Consequently an all-NULL measure group remains active with a
-zero COUNT. A malformed null sidecar fails before either partial is changed.
-Normal planning exposes this branch only for one nullable boolean fact key and
-one distinct nullable boolean measure, without joins, filters, `HAVING`, or
-additional measures.
+`PARALLEL_DENSE_COUNT` accepts canonical `COUNT_STAR` plus canonical COUNT-only
+BOOL/1-byte and INT32/4-byte column descriptors. The typed-column
+specializations maintain separate u32 partials for selected rows and non-NULL
+measure rows: selected rows activate the group and update `selected_count`,
+while non-NULL rows update both COUNT and `nonnull_count`. Consequently an
+all-NULL measure group remains active with a zero COUNT. A malformed null
+sidecar fails before either partial is changed. Normal planning exposes these
+branches only for one nullable boolean fact key and one distinct nullable bool
+or PostgreSQL `int2` measure, without joins, filters, `HAVING`, or additional
+measures. Although resident `int2` is widened to the INT32 physical ABI, normal
+planning does not use this count-only lane for `int4`; EXPLAIN identifies the
+released variants as `dense_bool_count_plain` and `dense_int2_count_plain`.
 
 Low-cardinality dense COUNT and exact integer SUM/MIN/MAX use 32-work-item
 groups over 1,024-row tiles. Each work item accumulates multiple rows, the work

@@ -42,6 +42,11 @@ claim is implied by the entries below.
   applies the bounded aggregate-local predicate only to SUM while retaining
   every group and unfiltered COUNT row; broader aggregate modifiers remain
   PostgreSQL-native.
+- A qualified dense-count specialization groups one nullable boolean fact
+  column and counts one distinct nullable `int2` fact column. It uses the
+  resident widened-int32 representation only for null-sidecar COUNT semantics,
+  preserves active all-NULL groups with count zero, and leaves global,
+  filtered, joined, non-boolean-grouped, and broader typed COUNT shapes native.
 - SSBM-, TPC-H-, and ClickBench-style system workload characterization plus an
   eight-backend residency/concurrency proof with exact cluster-byte cleanup.
 

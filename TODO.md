@@ -274,6 +274,28 @@ redesigned and independently requalified.
 - [ ] Types and aggregates: bool/int2/general int8, float4/float8, date/time,
   integer `AVG`, and safe `SUM` combinations. Preserve PostgreSQL accumulator,
   result, and overflow semantics; never approximate `NUMERIC` with f64.
+  - [x] Release the first exact `int2` aggregate lane: one nullable boolean
+    fact-column group key and `COUNT` over one distinct nullable `int2` fact
+    column, with no filter, join, HAVING, or additional measure. The planner,
+    specialization cache, Rust physical-mode backstop, and C++ descriptor gate
+    admit only the widened resident `int32` representation used for PostgreSQL
+    `int2`; the kernel reads only the null sidecar and retains all-NULL groups
+    with count zero. Full-domain endpoints, invalid null bytes, adjacent native
+    shapes, PG18/PG19 SQL99 plus prepared DML/DDL lifecycle, and the
+    27-family/331-assertion semantic matrix pass. The complete PG18 and PG19
+    validation matrices pass: 1,539 core plus 55 correctness unit tests, 62 SQL
+    contracts, and 580 planner-shape/stress tests on each version; all 32 native
+    GPU CTests and the fail-closed safety audits pass as well. A diagnostic
+    5-warmup/10-pair characterization measured 1.58 ms versus PostgreSQL 8.26
+    ms (5.23x) at 250K and 2.29 ms versus 19.26 ms (8.42x) at 1M, with 20/20
+    artifact hits, verified `parallel_dense_count`, exact diffs, and zero
+    fallback in
+    `.codex/scratch/grouped-count-int2-functional-pg18-20260811`;
+    `artifact_index.json` SHA-256 is
+    `6ca9987bb3ae1c6a5b1e69989a4f3db2f0e81d93ee2e14a42c3a9aa621f57844`.
+    The unrelated CPU-saturating process and diagnostic provenance warnings
+    make these functional measurements non-publishable; rerun the clean exact
+    ship-gate cell before release.
 - [ ] Membership and joins: composite keys, broader exact int8 shapes,
   catalog-proved collation-safe text, and reducing semi/anti membership with exact
   NULL, `NOT IN`, duplicate, and multiplicity semantics. Row-returning joins stay

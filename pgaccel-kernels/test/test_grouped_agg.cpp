@@ -1087,6 +1087,62 @@ void test_parallel_dense_count_star_lifecycle() {
   CHECK(invalid_code.measures[0].count[0] == OutputStorage::kSentinel);
 }
 
+void test_parallel_dense_int2_count_column() {
+  std::printf("--- parallel dense nullable INT2 column COUNT ---\n");
+  constexpr size_t rows = 262144;
+  constexpr size_t groups = 3;
+  std::vector<int32_t> host_keys(rows);
+  std::vector<uint8_t> host_key_nulls(rows);
+  std::vector<int32_t> host_values(rows);
+  std::vector<uint8_t> host_value_nulls(rows);
+  std::array<uint64_t, groups> expected_selected{};
+  std::array<uint64_t, groups> expected_count{};
+  for (size_t row = 0; row < rows; ++row) {
+    const bool null_key = row % 19 == 0;
+    const size_t group = null_key ? 2 : row % 2;
+    host_keys[row] = null_key ? INT32_MAX : static_cast<int32_t>(group);
+    host_key_nulls[row] = null_key ? 1 : 0;
+    host_values[row] = row % 2 == 0 ? INT16_MIN : INT16_MAX;
+    const bool null_value = row % 11 == 0 || group == 2;
+    host_value_nulls[row] = null_value ? 1 : 0;
+    ++expected_selected[group];
+    if (!null_value)
+      ++expected_count[group];
+  }
+
+  SharedArray<int32_t> keys(host_keys);
+  SharedArray<uint8_t> key_nulls(host_key_nulls);
+  SharedArray<int32_t> values(host_values);
+  SharedArray<uint8_t> value_nulls(host_value_nulls);
+  pgaccel_grouped_agg_desc desc = base_desc(rows);
+  set_fact_key(desc, 0, keys.data(), key_nulls.data(), 0, groups, 2);
+  set_count_only_view(desc, 0, values.data(), value_nulls.data(),
+                      PGACCEL_GROUPED_AGG_PHYSICAL_INT32, sizeof(int32_t),
+                      PGACCEL_GROUPED_AGG_ACCUM_I64);
+
+  int32_t kernel_mode = 0;
+  CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&desc, &kernel_mode), PGACCEL_OK);
+  CHECK(kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
+  OutputStorage output(desc, true, true);
+  CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+  CHECK(output.out.selected_count == rows);
+  CHECK(output.out.uncertain_count == 0);
+  CHECK(output.out.emitted_group_count == groups);
+  for (size_t group = 0; group < groups; ++group) {
+    CHECK(output.active[group] == 1);
+    CHECK(output.measures[0].count[group] == expected_count[group]);
+    CHECK(output.measures[0].nonnull[group] == expected_count[group]);
+    CHECK(expected_selected[group] != 0);
+  }
+  CHECK(output.measures[0].count[2] == 0);
+
+  value_nulls[31] = 2;
+  OutputStorage invalid(desc);
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+  CHECK_STATUS(execute_external_ex(desc, &invalid.out, &detail), PGACCEL_ERROR);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+}
+
 void test_parallel_dense_integer_phase2_shape() {
   std::printf("--- parallel dense Phase2 integer lanes ---\n");
   constexpr size_t rows = 262144;
@@ -4139,6 +4195,7 @@ int main() {
     test_dense_chunk_lifecycle_fail_closed();
     test_empty_ungrouped_active();
     test_parallel_dense_count_star_lifecycle();
+    test_parallel_dense_int2_count_column();
     test_parallel_dense_integer_phase2_shape();
     test_parallel_dense_integer_product_sum_shape();
     test_parallel_dense_integer_measure_range_filter();

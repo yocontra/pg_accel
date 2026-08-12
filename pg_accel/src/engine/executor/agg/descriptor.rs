@@ -71,6 +71,7 @@ enum DescriptorSpecializationFamily {
     HashCount,
     DenseCount,
     DenseBoolCount,
+    DenseInt2Count,
     DenseIntegerColumn,
     DenseIntegerColumnMeasureRange,
     DenseIntegerMultiply,
@@ -112,6 +113,18 @@ impl DescriptorSpecialization {
             }
             (DescriptorSpecializationFamily::DenseBoolCount, true, true) => {
                 "dense_bool_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseInt2Count, false, false) => {
+                "dense_int2_count_plain"
+            }
+            (DescriptorSpecializationFamily::DenseInt2Count, false, true) => {
+                "dense_int2_count_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseInt2Count, true, false) => {
+                "dense_int2_count_membership"
+            }
+            (DescriptorSpecializationFamily::DenseInt2Count, true, true) => {
+                "dense_int2_count_membership_sql_mask"
             }
             (DescriptorSpecializationFamily::DenseIntegerColumn, false, false) => {
                 "dense_integer_column_plain"
@@ -218,9 +231,10 @@ fn canonical_count_measure(measure: &crate::engine::spec::MeasureSpec) -> bool {
             }]
 }
 
-fn canonical_dense_bool_count_measure(
+fn canonical_dense_narrow_count_measure(
     spec: &AggQuerySpec,
     measure: &crate::engine::spec::MeasureSpec,
+    measure_type_oid: u32,
 ) -> bool {
     let [group_key] = spec.group_keys.as_slice() else {
         return false;
@@ -233,7 +247,7 @@ fn canonical_dense_bool_count_measure(
     };
     group_key.type_oid == BOOLOID
         && group_column.type_oid == BOOLOID
-        && measure_column.type_oid == BOOLOID
+        && measure_column.type_oid == measure_type_oid
         && group_column.relation_oid == spec.fact_rel
         && measure_column.relation_oid == spec.fact_rel
         && (group_column.relation_oid, group_column.attno)
@@ -247,6 +261,20 @@ fn canonical_dense_bool_count_measure(
                 source: AggregateSource::Value,
                 kind: AggregateKind::Count,
             }]
+}
+
+fn canonical_dense_bool_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_narrow_count_measure(spec, measure, BOOLOID)
+}
+
+fn canonical_dense_int2_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_narrow_count_measure(spec, measure, INT2OID)
 }
 
 fn canonical_dense_integer_value_measure(measure: &crate::engine::spec::MeasureSpec) -> bool {
@@ -404,7 +432,8 @@ pub fn planned_descriptor_kernel_mode(
         }
         [count]
             if parallel_dense_fact_filter(&spec.fact_filter)
-                && canonical_dense_bool_count_measure(spec, count) =>
+                && (canonical_dense_bool_count_measure(spec, count)
+                    || canonical_dense_int2_count_measure(spec, count)) =>
         {
             GroupedAggKernelMode::ParallelDenseCount
         }
@@ -438,6 +467,9 @@ fn classify_descriptor_specialization(
         GroupedAggKernelMode::ParallelDenseCount => match spec.measures.first() {
             Some(measure) if canonical_dense_bool_count_measure(spec, measure) => {
                 DescriptorSpecializationFamily::DenseBoolCount
+            }
+            Some(measure) if canonical_dense_int2_count_measure(spec, measure) => {
+                DescriptorSpecializationFamily::DenseInt2Count
             }
             _ => DescriptorSpecializationFamily::DenseCount,
         },
@@ -3501,10 +3533,12 @@ fn parallel_dense_count_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
     }
     let count = &desc.measures[0];
     let count_star = count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR;
-    let count_bool_column = count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
-        && count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
-        && count.value.element_bytes == 1;
-    (count_star || count_bool_column)
+    let count_narrow_column = count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
+        && ((count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
+            && count.value.element_bytes == 1)
+            || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+                && count.value.element_bytes == 4));
+    (count_star || count_narrow_column)
         && count.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
         && count.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
         && count.state_bytes == 8
@@ -4303,6 +4337,10 @@ mod tests {
 
         desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
         desc.measures[0].value.element_bytes = 4;
+        assert!(parallel_dense_count_shape(&desc));
+
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64;
+        desc.measures[0].value.element_bytes = 8;
         assert!(!parallel_dense_count_shape(&desc));
     }
 
@@ -4409,6 +4447,16 @@ mod tests {
                 cardinality: 3,
                 null_code: Some(2),
             },
+        });
+        count
+    }
+
+    fn dense_int2_count_spec() -> AggQuerySpec {
+        let mut count = dense_bool_count_spec();
+        count.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: INT2OID,
         });
         count
     }
@@ -4570,6 +4618,16 @@ mod tests {
             planned_descriptor_kernel_mode(&bool_count, true),
             GroupedAggKernelMode::SerialGeneric,
             "a bool column count is not silently routed through COUNT(*) hash semantics"
+        );
+        let int2_count = dense_int2_count_spec();
+        assert_eq!(
+            planned_descriptor_kernel_mode(&int2_count, false),
+            GroupedAggKernelMode::ParallelDenseCount
+        );
+        assert_eq!(
+            planned_descriptor_kernel_mode(&int2_count, true),
+            GroupedAggKernelMode::SerialGeneric,
+            "an INT2 column count is not silently routed through COUNT(*) hash semantics"
         );
         let mut same_column = bool_count.clone();
         same_column.measures[0].expression = MeasureExpr::Column(ColumnRef {
@@ -4748,6 +4806,16 @@ mod tests {
         assert_eq!(bool_specialization.label(), "dense_bool_count_plain");
         assert_eq!(bool_outcome, DescriptorSpecializationCacheOutcome::Miss);
 
+        let int2_count = dense_int2_count_spec();
+        let int2_identity = DerivedArtifactIdentity::from_canonical_words(vec![17, 18, 19, 20]);
+        let (int2_specialization, int2_outcome) = cached_descriptor_specialization(
+            &int2_identity,
+            &int2_count,
+            GroupedAggKernelMode::ParallelDenseCount,
+        );
+        assert_eq!(int2_specialization.label(), "dense_int2_count_plain");
+        assert_eq!(int2_outcome, DescriptorSpecializationCacheOutcome::Miss);
+
         let (cached, second) = cached_descriptor_specialization(
             &identity,
             &count,
@@ -4800,7 +4868,7 @@ mod tests {
         );
         assert_eq!(
             DESCRIPTOR_SPECIALIZATION_CACHE.with(|cache| cache.borrow().len()),
-            5,
+            6,
             "a digest lookup never aliases a different complete canonical identity"
         );
     }
