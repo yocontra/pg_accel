@@ -7,25 +7,28 @@ published release artifact.
 
 ## Current Implementation Baseline
 
-- [x] Code and workflow implementation is complete through predecessor
-  `c10e0e9ffeaa70c61c72fe6febbee17b5a9bbfb2`. The clean candidate created by
-  this TODO reconciliation must receive fresh local, hosted, and
-  independent-machine release evidence; the retained `a374102` artifacts
-  predate the bool-count, bounded-range, and soft-fp 2.0.1 updates.
+- [x] Code and workflow implementation is complete through exact implementation
+  candidate `e465a242f66114f9207cca8fe3e05372485a943b` (tree
+  `d79304ee2d2a1530ab889622ef0f27c781e13f78`). Fresh local SQL, coverage,
+  Metal stress, and upstream-PostgreSQL evidence is sealed below. Hosted CI,
+  an independent fresh-machine install, native-parity timing, and publication
+  evidence remain separate release gates.
 - [x] PostgreSQL 18 and 19 strict workspace Clippy/check gates pass.
 - [x] The current Rust extension and benchmark harness unit suites pass, along
   with the live plan/integration suite.
 - [x] Native Metal CTest passes 32/32 executables. The focused H3 suite passes
   1,135/1,135 plus 23/23 no-device cases.
 - [x] Installed-extension PostgreSQL 18 and 19 SQL each pass 60/60 files and
-  the fixed 323/323 semantic assertion inventory on clean candidate `655fb60`.
-  The loaded module SHA-256 values are
-  `b26f4553d6782e6cc02c2af67252342d417f35f408d88dff9690b73d9e4f2a5e`
+  the fixed 323/323 semantic assertion inventory on clean candidate `e465a24`.
+  The release module SHA-256 values are
+  `0eb0eaec2830de31b13ec4bc964dd6aab93cce9daad7e374cb4ceef4d0b189e5`
   for PG18 and
-  `d654eda4920c394eb2ec51df61d8e86f8188cbbcedee8e3e1a614720da7cb78e`
-  for PG19. The semantic matrix covers 22 families, and all released selected
-  families have declared NULL, prepared-plan, DML, DDL, dispatch, and shape
-  evidence.
+  `58efe8b92266eda727df8d5baf1d300d6978c63778616bc36bb3ec39d3db9d08`
+  for PG19. Strict per-file evidence is retained in
+  `.codex/scratch/sql-exact-e465a24-pg18-20260812-a` and
+  `.codex/scratch/sql-exact-e465a24-pg19-20260812-a`. The semantic matrix
+  covers 22 families, and all released selected families have declared NULL,
+  prepared-plan, DML, DDL, dispatch, and shape evidence.
 - [x] Production residency-ledger integration, packaging tests, dependency
   policy/RustSec audit, documentation parity, coverage-scope audit, Metal stress
   artifact tests, and the object-bound CPU-cheat audit pass.
@@ -45,7 +48,14 @@ published release artifact.
   failed 10/10 tested native cells; eight exceeded a descriptive median or p95
   bound and all ten failed exact paired non-inferiority. Selected execution is
   green, but extension-enabled native queries are not yet consistently as fast
-  as matched PostgreSQL.
+  as matched PostgreSQL. Candidate `e465a24` now defers redundant aggregate
+  base/join observers to the exact upper aggregate hook while preserving the
+  public MergeJoin, H3, PostGIS, sort, and generic decline counters. It also
+  retains four raw executions per arm (eight per measured pair) as two mirrored
+  ABBA/BAAB motifs across each of 30 balanced pairs; analyzer, coverage, and
+  report contracts fail closed on any incomplete sequence. Full planner-shape
+  validation passes 576/576, but the current host remains performance-ineligible
+  while unrelated CPU-saturating processes trip the foreign-load guard.
 
 ## Non-Negotiable Invariants
 
@@ -274,19 +284,14 @@ redesigned and independently requalified.
   so hook compatibility is continuously tested rather than inferred from the
   extension's own SQL tests. Context:
   <https://malisper.me/pgrust-passes-100-of-postgresqls-regression-tests/>.
-  PG18.4 and PG19beta1 both pass pristine regression, pristine isolation,
-  loaded regression, and loaded isolation. Local sealed evidence:
-  `.codex/scratch/upstream-postgresql-pg18-20260811-c` (`SHA256SUMS` SHA-256
-  `f750f7d5d95f70760504a7d981546233071d77ff1549e77cd7b1ed13013dcf66`) and
-  `.codex/scratch/upstream-postgresql-pg19-20260811-a` (`SHA256SUMS` SHA-256
-  `255614004e4e41f0e5e85c2f1b04d4c9754b8ae5daea54a534c83afe4521b452`).
-  The clean `0177af623a3cb77eef1b56f8453f4b9c677ca345` follow-up also passes all
-  eight schedules with exact-tree/module provenance in
-  `.codex/scratch/upstream-postgresql-exact-0177af6-20260811-a`: PG18
-  `SHA256SUMS` SHA-256
-  `522c5ca900e27b8c7f07e38fac524e472c23fa58316d198dd825a9125a621aaa`
-  and PG19 `SHA256SUMS` SHA-256
-  `8ce70a824cbc775a3de490c62046cefe50a6a740de90f2b0cfbaccdeeaa043f2`.
+  Exact candidate `e465a24` passes pristine regression, pristine isolation,
+  loaded regression, and loaded isolation on both PG18.4 and PG19beta1. The
+  clean-tree/module-bound evidence is retained in
+  `.codex/scratch/exact-e465a24/.codex/scratch/upstream-postgresql-exact-e465a24-20260812-a`.
+  The PG18 `SHA256SUMS` SHA-256 is
+  `74056ff475e324af922a9dc67b54ee7e9e4fceb70cd76c4aefb9f7242e87044a`;
+  the PG19 value is
+  `4bfcd67d5bd55061896bcf0b6d890a965d62773a6df06d9e18287e14a85c7170`.
 - [x] Extend failure injection across multi-session residency/invalidation,
   executor reset/drop, planner private data, allocation/free, copy/wait,
   cancellation, output materialization, PostGIS calls, and derived-artifact
@@ -304,30 +309,35 @@ redesigned and independently requalified.
   and SRF shapes, sort/top-k/window, and neighboring raster/spatial declines.
 - [x] Add live PG19 package/install/SQL evidence. The PostgreSQL 19beta1
   release build installed and loaded module SHA-256
-  `d654eda4920c394eb2ec51df61d8e86f8188cbbcedee8e3e1a614720da7cb78e`;
+  `58efe8b92266eda727df8d5baf1d300d6978c63778616bc36bb3ec39d3db9d08`;
   extension smoke, 60/60 external SQL files, and both loaded upstream schedules
   pass. PG19 lint, check, and test compilation also pass as separate gates.
 
 ## Release And Publication Gates
 
-- [ ] Produce a fresh exact-candidate coverage and enriched Metal stress bundle
+- [x] Produce a fresh exact-candidate coverage and enriched Metal stress bundle
   covering mixed workloads, fork, cancellation, concurrency, memory pressure,
   per-kernel JIT/archive cold/warm evidence, clean logs, and resource balance.
-  The retained predecessor candidate
-  `a374102e65d26c0485aa6279752d6f3fe046077d` passed the
-  three-layer PG18 gate at 90.08% Rust source coverage (47,958/53,240), 90.04%
-  C++/SYCL source coverage (16,527/18,355), and 100% SQL semantic coverage
-  (320/320 assertions across 59/59 files). The gate summary SHA-256 is
-  `e73298aebad6920eee1a03be17479d404070ecf969d6cad8a6ff24b9cbe8f9f2`.
-  `.codex/scratch/metal-stress-exact-a374102-pg18` passes 32/32 native Metal
-  tests, OOM, cancellation, archive cold/warm and 8-by-20 fork stress, six
-  characterization cells, log audit, and artifact-index verification. Its
-  `artifact_index.json` SHA-256 is
-  `e3b526aefc08499087697901fe5fc21a38a5ecb01e957ba3e24d87ce353d5c85`.
-  Those artifacts remain historical evidence only: the current source scope is
-  323 assertions across 60 files and includes the bool-count, bounded-range,
-  and soft-fp 2.0.1 changes, so this gate is open until that clean candidate is
-  rerun and sealed.
+  Clean candidate `e465a24` passes the three-layer PG18 gate at 90.07% Rust
+  source coverage (48,168/53,478; 203/203 required files), 90.01% C++/SYCL
+  source coverage (16,658/18,507; 32/32 native Metal tests), and 100% SQL
+  semantic coverage (323/323 assertions across 60/60 files). Evidence is in
+  `.codex/scratch/exact-e465a24/.codex/scratch/coverage-exact-e465a24-pg18-20260812-b`;
+  `gate-summary.json` SHA-256 is
+  `8147ad711f903d26e7eeb67b393f1957b1b0a2127a2ac65674b259c95bfd9671`
+  and `provenance.json` SHA-256 is
+  `004ad35d5257f581c3454e82d8bde4124f7629987e26d8951c70e9b98925d0ef`.
+  The matching Metal bundle at
+  `.codex/scratch/exact-e465a24/.codex/scratch/metal-stress-exact-e465a24-pg18-20260812-a`
+  passes strict SQL, 32/32 native tests, OOM, cancellation, archive cold/warm,
+  8-by-20 fork stress, six crash probes, resource/log audit, and artifact-index
+  verification. Its `artifact_index.json` SHA-256 is
+  `7e8661da819a55321fe6f064ee453b06772836e0a8fcab40bae24adea56767b0`;
+  candidate-provenance SHA-256 is
+  `a85758f963b266fdd838dd1a1f2551e2a21025239a96bd6ed8d492cb980842ff`.
+  Benchmark timings inside the stress bundle are correctness/stability
+  characterization only because unrelated CPU load made the host ineligible
+  for performance claims.
 - [ ] Pass hosted release CI on macOS arm64 Metal and Linux x86_64 no-GPU, with
   durable artifacts from the exact candidate. Exact-candidate run
   `31550632369` reached GitHub Actions, but every hosted job was rejected before
