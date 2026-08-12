@@ -191,6 +191,30 @@ fn date_grouped_count_input() -> ShapeInput {
     input
 }
 
+fn timestamp_grouped_count_input(type_oid: u32) -> ShapeInput {
+    assert!(matches!(
+        type_oid,
+        oid if oid == u32::from(pg_sys::TIMESTAMPOID)
+            || oid == u32::from(pg_sys::TIMESTAMPTZOID)
+    ));
+    let mut input = bool_grouped_count_input();
+    let (count, count_output) = aggregate(
+        MeasureExpr::Column(ColumnRef {
+            relation_oid: 100,
+            attno: 4,
+            type_oid,
+        }),
+        AggregateKind::Count,
+        u32::from(pg_sys::INT8OID),
+    );
+    input.aggregates[0] = count;
+    input.projections[1] = InputProjection::Aggregate {
+        aggregate_index: 0,
+        output: count_output,
+    };
+    input
+}
+
 fn range_intersection_grouped_input() -> ShapeInput {
     let group = column(1, 100, 1, u32::from(pg_sys::INT4OID));
     let price = column(1, 100, 2, u32::from(pg_sys::INT4OID));
@@ -2136,10 +2160,8 @@ fn straightforward_column_aggregate_types_decline_without_performance_evidence()
         (u32::from(pg_sys::FLOAT4OID), AggregateKind::Max),
         (u32::from(pg_sys::DATEOID), AggregateKind::Min),
         (u32::from(pg_sys::DATEOID), AggregateKind::Max),
-        (u32::from(pg_sys::TIMESTAMPOID), AggregateKind::Count),
         (u32::from(pg_sys::TIMESTAMPOID), AggregateKind::Min),
         (u32::from(pg_sys::TIMESTAMPOID), AggregateKind::Max),
-        (u32::from(pg_sys::TIMESTAMPTZOID), AggregateKind::Count),
         (u32::from(pg_sys::TIMESTAMPTZOID), AggregateKind::Min),
         (u32::from(pg_sys::TIMESTAMPTZOID), AggregateKind::Max),
     ];
@@ -2473,6 +2495,91 @@ fn date_column_count_candidate_admits_only_the_qualified_physical_shape() {
     assert_eq!(planned_mode(filtered), GroupedAggKernelMode::SerialGeneric);
 
     let mut joined = date_grouped_count_input();
+    add_dimension(&mut joined, 2, 200, false);
+    assert_eq!(planned_mode(joined), GroupedAggKernelMode::SerialGeneric);
+}
+
+#[test]
+fn timestamp_column_count_candidates_admit_only_the_qualified_physical_shape() {
+    let planned_mode = |input| {
+        let shape =
+            build_shape(input, &model()).expect("timestamp COUNT shape should be representable");
+        planned_descriptor_kernel_mode(&shape.spec, false)
+    };
+
+    for type_oid in [
+        u32::from(pg_sys::TIMESTAMPOID),
+        u32::from(pg_sys::TIMESTAMPTZOID),
+    ] {
+        assert_eq!(
+            planned_mode(timestamp_grouped_count_input(type_oid)),
+            GroupedAggKernelMode::ParallelDenseCount
+        );
+
+        let mut global = single_table_input();
+        let (count, count_output) = aggregate(
+            MeasureExpr::Column(ColumnRef {
+                relation_oid: 100,
+                attno: 4,
+                type_oid,
+            }),
+            AggregateKind::Count,
+            u32::from(pg_sys::INT8OID),
+        );
+        global.aggregates = vec![count];
+        global.projections = vec![InputProjection::Aggregate {
+            aggregate_index: 0,
+            output: count_output,
+        }];
+        assert_eq!(planned_mode(global), GroupedAggKernelMode::SerialGeneric);
+    }
+
+    let mut int4_measure = timestamp_grouped_count_input(u32::from(pg_sys::TIMESTAMPOID));
+    int4_measure.aggregates[0].expression = MeasureExpr::Column(ColumnRef {
+        relation_oid: 100,
+        attno: 4,
+        type_oid: u32::from(pg_sys::INT4OID),
+    });
+    let InputProjection::Aggregate {
+        output: projection_output,
+        ..
+    } = &mut int4_measure.projections[1]
+    else {
+        unreachable!("COUNT projection fixture")
+    };
+    projection_output.source_type_oid = u32::from(pg_sys::INT4OID);
+    assert_eq!(
+        planned_mode(int4_measure),
+        GroupedAggKernelMode::SerialGeneric
+    );
+
+    let mut timestamp_group = timestamp_grouped_count_input(u32::from(pg_sys::TIMESTAMPOID));
+    let group = column(1, 100, 3, u32::from(pg_sys::TIMESTAMPOID));
+    timestamp_group.group_keys[0] = PlannerGroupKey::Column(group);
+    timestamp_group.projections[0] = InputProjection::Group {
+        key: PlannerGroupKey::Column(group),
+        output: output(u32::from(pg_sys::TIMESTAMPOID), true),
+    };
+    assert_eq!(
+        planned_mode(timestamp_group),
+        GroupedAggKernelMode::SerialGeneric
+    );
+
+    let mut filtered = timestamp_grouped_count_input(u32::from(pg_sys::TIMESTAMPTZOID));
+    filtered.relation_filters.push((
+        100,
+        FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 100,
+                attno: 5,
+                type_oid: u32::from(pg_sys::BOOLOID),
+            },
+            kind: crate::engine::spec::MaskKind::Sql,
+        },
+    ));
+    assert_eq!(planned_mode(filtered), GroupedAggKernelMode::SerialGeneric);
+
+    let mut joined = timestamp_grouped_count_input(u32::from(pg_sys::TIMESTAMPTZOID));
     add_dimension(&mut joined, 2, 200, false);
     assert_eq!(planned_mode(joined), GroupedAggKernelMode::SerialGeneric);
 }

@@ -500,6 +500,38 @@
         "dispatch": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_005", "96_declined_lifecycle_contract.assert_017"], "gap": null},
         "rejection_reason": {"status": "covered", "assertion_ids": ["101_grouped_count_date_contract.assert_005", "96_declined_lifecycle_contract.assert_017"], "gap": null}
       }
+    },
+    {
+      "id": "selected.grouped_count_timestamp",
+      "disposition": "selected",
+      "postgresql_majors": [18, 19],
+      "semantics": {"types": ["nullable bool fact group key", "distinct nullable timestamp COUNT input", "distinct nullable timestamptz COUNT input", "PostgreSQL temporal infinities", "int8 COUNT result"], "null_patterns": ["false, true, and NULL group keys", "NULL measure rows ignored by COUNT", "all-NULL measure group remains active with count zero"], "shape_limits": "exactly one boolean fact-column group key and one COUNT over a distinct timestamp or timestamptz fact column, with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows", "dispatch_expectation": "required", "rejection_reason": null},
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_003", "102_grouped_count_timestamp_contract.assert_004"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_002", "102_grouped_count_timestamp_contract.assert_004"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_004", "102_grouped_count_timestamp_contract.assert_006"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_005"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_005"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_005"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_004", "102_grouped_count_timestamp_contract.assert_005"], "gap": null},
+        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+      }
+    },
+    {
+      "id": "decline.grouped_count_timestamp_adjacent",
+      "disposition": "declined",
+      "postgresql_majors": [18, 19],
+      "semantics": {"types": ["global nullable timestamp/timestamptz COUNT", "int4-grouped nullable timestamp COUNT", "timestamp-grouped nullable timestamp COUNT", "bool-grouped nullable int4 COUNT"], "null_patterns": ["NULL measure rows ignored by COUNT", "NULL groups remain PostgreSQL-native"], "shape_limits": "global, non-boolean-grouped, filtered, broader-measure, joined, HAVING, and multi-measure temporal COUNT shapes remain native outside the exact released descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "generic_serial_kernel_mode_unqualified"},
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["102_grouped_count_timestamp_contract.assert_006"], "gap": null}
+      }
     }
   ]
 }

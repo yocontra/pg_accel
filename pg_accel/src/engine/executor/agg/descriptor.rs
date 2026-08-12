@@ -74,6 +74,7 @@ enum DescriptorSpecializationFamily {
     DenseInt2Count,
     DenseInt8Count,
     DenseDateCount,
+    DenseTimestampCount,
     DenseIntegerColumn,
     DenseIntegerColumnMeasureRange,
     DenseIntegerMultiply,
@@ -151,6 +152,18 @@ impl DescriptorSpecialization {
             }
             (DescriptorSpecializationFamily::DenseDateCount, true, true) => {
                 "dense_date_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseTimestampCount, false, false) => {
+                "dense_timestamp_count_plain"
+            }
+            (DescriptorSpecializationFamily::DenseTimestampCount, false, true) => {
+                "dense_timestamp_count_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseTimestampCount, true, false) => {
+                "dense_timestamp_count_membership"
+            }
+            (DescriptorSpecializationFamily::DenseTimestampCount, true, true) => {
+                "dense_timestamp_count_membership_sql_mask"
             }
             (DescriptorSpecializationFamily::DenseIntegerColumn, false, false) => {
                 "dense_integer_column_plain"
@@ -317,6 +330,14 @@ fn canonical_dense_date_count_measure(
     canonical_dense_typed_count_measure(spec, measure, DATEOID)
 }
 
+fn canonical_dense_timestamp_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_typed_count_measure(spec, measure, TIMESTAMPOID)
+        || canonical_dense_typed_count_measure(spec, measure, TIMESTAMPTZOID)
+}
+
 fn canonical_dense_integer_value_measure(measure: &crate::engine::spec::MeasureSpec) -> bool {
     if measure.filter != FilterSpec::None {
         return false;
@@ -475,7 +496,8 @@ pub fn planned_descriptor_kernel_mode(
                 && (canonical_dense_bool_count_measure(spec, count)
                     || canonical_dense_int2_count_measure(spec, count)
                     || canonical_dense_int8_count_measure(spec, count)
-                    || canonical_dense_date_count_measure(spec, count)) =>
+                    || canonical_dense_date_count_measure(spec, count)
+                    || canonical_dense_timestamp_count_measure(spec, count)) =>
         {
             GroupedAggKernelMode::ParallelDenseCount
         }
@@ -518,6 +540,9 @@ fn classify_descriptor_specialization(
             }
             Some(measure) if canonical_dense_date_count_measure(spec, measure) => {
                 DescriptorSpecializationFamily::DenseDateCount
+            }
+            Some(measure) if canonical_dense_timestamp_count_measure(spec, measure) => {
+                DescriptorSpecializationFamily::DenseTimestampCount
             }
             _ => DescriptorSpecializationFamily::DenseCount,
         },
@@ -3589,7 +3614,9 @@ fn parallel_dense_count_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
             || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64
                 && count.value.element_bytes == 8)
             || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE
-                && count.value.element_bytes == 4));
+                && count.value.element_bytes == 4)
+            || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP
+                && count.value.element_bytes == 8));
     (count_star || count_typed_column)
         && count.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
         && count.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
@@ -4399,6 +4426,10 @@ mod tests {
         desc.measures[0].value.element_bytes = 4;
         assert!(parallel_dense_count_shape(&desc));
 
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP;
+        desc.measures[0].value.element_bytes = 8;
+        assert!(parallel_dense_count_shape(&desc));
+
         desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64;
         desc.measures[0].value.element_bytes = 8;
         assert!(!parallel_dense_count_shape(&desc));
@@ -4537,6 +4568,17 @@ mod tests {
             relation_oid: 42,
             attno: 2,
             type_oid: DATEOID,
+        });
+        count
+    }
+
+    fn dense_timestamp_count_spec(type_oid: u32) -> AggQuerySpec {
+        assert!(matches!(type_oid, TIMESTAMPOID | TIMESTAMPTZOID));
+        let mut count = dense_bool_count_spec();
+        count.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid,
         });
         count
     }
@@ -4729,6 +4771,19 @@ mod tests {
             GroupedAggKernelMode::SerialGeneric,
             "a DATE column count is not silently routed through COUNT(*) hash semantics"
         );
+        for (type_oid, type_name) in [(TIMESTAMPOID, "TIMESTAMP"), (TIMESTAMPTZOID, "TIMESTAMPTZ")]
+        {
+            let timestamp_count = dense_timestamp_count_spec(type_oid);
+            assert_eq!(
+                planned_descriptor_kernel_mode(&timestamp_count, false),
+                GroupedAggKernelMode::ParallelDenseCount
+            );
+            assert_eq!(
+                planned_descriptor_kernel_mode(&timestamp_count, true),
+                GroupedAggKernelMode::SerialGeneric,
+                "a {type_name} column count is not silently routed through COUNT(*) hash semantics"
+            );
+        }
         let mut same_column = bool_count.clone();
         same_column.measures[0].expression = MeasureExpr::Column(ColumnRef {
             relation_oid: 42,
@@ -4936,6 +4991,30 @@ mod tests {
         assert_eq!(date_specialization.label(), "dense_date_count_plain");
         assert_eq!(date_outcome, DescriptorSpecializationCacheOutcome::Miss);
 
+        for (offset, type_oid) in [TIMESTAMPOID, TIMESTAMPTZOID].into_iter().enumerate() {
+            let timestamp_count = dense_timestamp_count_spec(type_oid);
+            let first_word = 29 + i32::try_from(offset).expect("bounded timestamp index") * 4;
+            let timestamp_identity = DerivedArtifactIdentity::from_canonical_words(vec![
+                first_word,
+                first_word + 1,
+                first_word + 2,
+                first_word + 3,
+            ]);
+            let (timestamp_specialization, timestamp_outcome) = cached_descriptor_specialization(
+                &timestamp_identity,
+                &timestamp_count,
+                GroupedAggKernelMode::ParallelDenseCount,
+            );
+            assert_eq!(
+                timestamp_specialization.label(),
+                "dense_timestamp_count_plain"
+            );
+            assert_eq!(
+                timestamp_outcome,
+                DescriptorSpecializationCacheOutcome::Miss
+            );
+        }
+
         let (cached, second) = cached_descriptor_specialization(
             &identity,
             &count,
@@ -4988,7 +5067,7 @@ mod tests {
         );
         assert_eq!(
             DESCRIPTOR_SPECIALIZATION_CACHE.with(|cache| cache.borrow().len()),
-            8,
+            10,
             "a digest lookup never aliases a different complete canonical identity"
         );
     }
@@ -5704,25 +5783,42 @@ mod tests {
     }
 
     #[test]
-    fn bool_column_count_runtime_contract_matches_the_physical_abi() {
-        let spec = spec(MeasureExpr::Column(column(BOOLOID)), AggregateKind::Count);
-        validate_runtime_capability(&spec, &projection(AggregateKind::Count, BOOLOID, INT8OID))
-            .expect("nullable boolean column COUNT is an exact runtime capability");
+    fn typed_column_count_runtime_contract_matches_the_physical_abi() {
+        for (type_oid, physical_type, element_bytes) in [
+            (BOOLOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, 1),
+            (INT2OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32, 4),
+            (INT8OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64, 8),
+            (DATEOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE, 4),
+            (TIMESTAMPOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP, 8),
+            (
+                TIMESTAMPTZOID,
+                abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP,
+                8,
+            ),
+        ] {
+            let spec = spec(MeasureExpr::Column(column(type_oid)), AggregateKind::Count);
+            validate_runtime_capability(
+                &spec,
+                &projection(AggregateKind::Count, type_oid, INT8OID),
+            )
+            .unwrap_or_else(|error| {
+                panic!("nullable typed column COUNT OID {type_oid} should bind: {error}")
+            });
 
-        let binding = measure_column(
-            &ResidentColumnView::Empty {
-                type_oid: pg_sys::Oid::from(BOOLOID),
-            },
-            0,
-        )
-        .expect("empty boolean resident column must preserve its ABI shape");
-        assert_eq!(
-            binding.physical_type,
-            abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
-        );
-        assert_eq!(binding.element_bytes, 1);
-        assert!(binding.values.is_null());
-        assert!(binding.nulls.is_null());
+            let binding = measure_column(
+                &ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(type_oid),
+                },
+                0,
+            )
+            .unwrap_or_else(|error| {
+                panic!("empty resident column OID {type_oid} should preserve its ABI: {error}")
+            });
+            assert_eq!(binding.physical_type, physical_type);
+            assert_eq!(binding.element_bytes, element_bytes);
+            assert!(binding.values.is_null());
+            assert!(binding.nulls.is_null());
+        }
     }
 
     #[test]

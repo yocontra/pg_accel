@@ -1,8 +1,8 @@
 {
   "baseline_assertions": 306,
   "baseline_files": 58,
-  "declared_assertions": 343,
-  "declared_files": 64,
+  "declared_assertions": 349,
+  "declared_files": 65,
   "files": [
     {
       "assertions": [
@@ -247,6 +247,61 @@
       "completion_id": "101_grouped_count_date_contract",
       "file": "101_grouped_count_date_contract.sql",
       "sha256": "c2cea7df41331f3c0a5a987f7610c9656d10e5772897858a9af2ddcd2648c8ca"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "0d3c5868cc8ac90143e752fcd9db9807dc920785c115b1a3aae2153577532a7c",
+          "guard_token_count": 3,
+          "id": "102_grouped_count_timestamp_contract.assert_001",
+          "source_line": 53
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "b59e3b2a1513a79d2e604dbad138793603c6d95bedc0d4b8ac55eb3dd216aa52",
+          "guard_token_count": 8,
+          "id": "102_grouped_count_timestamp_contract.assert_002",
+          "source_line": 90
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "461b73d4ac8b66d6e100bf2be9b15055308dd01c38eb3dde93c4bc0a7e8d6412",
+          "guard_token_count": 8,
+          "id": "102_grouped_count_timestamp_contract.assert_003",
+          "source_line": 106
+        },
+        {
+          "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "af51792d62b112c7cd53016110bdb87d9e84d3499b5bc232e75763265777f7e6",
+          "guard_token_count": 17,
+          "id": "102_grouped_count_timestamp_contract.assert_004",
+          "source_line": 231
+        },
+        {
+          "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "2f049a5945ac66b05b71e890f3a415e20fd57135e98ce3408961e0e792f9a49f",
+          "guard_token_count": 17,
+          "id": "102_grouped_count_timestamp_contract.assert_005",
+          "source_line": 347
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "d1adfd940c5a0562f20076e9aff99deea5ce946c2f5466fd2dd4929c8ebc3715",
+          "guard_token_count": 7,
+          "id": "102_grouped_count_timestamp_contract.assert_006",
+          "source_line": 384
+        }
+      ],
+      "completion_id": "102_grouped_count_timestamp_contract",
+      "file": "102_grouped_count_timestamp_contract.sql",
+      "sha256": "11606741f0a55923678a0d0caba28991462f12b67370a37e88f273f7488bce4a"
     },
     {
       "assertions": [

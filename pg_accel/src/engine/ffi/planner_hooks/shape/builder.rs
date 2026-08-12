@@ -153,7 +153,9 @@ fn validate_measure_descriptor_capability(
     }
     let validate_column =
         |column: &crate::engine::spec::ColumnRef| match (column.type_oid, aggregate.output.kind) {
-            (BOOLOID | INT2OID | DATEOID, AggregateKind::Count) => Ok(()),
+            (BOOLOID | INT2OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID, AggregateKind::Count) => {
+                Ok(())
+            }
             (
                 BOOLOID | FLOAT4OID | TIMESTAMPOID | TIMESTAMPTZOID,
                 AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,

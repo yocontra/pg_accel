@@ -703,6 +703,14 @@ const PINS_GROUPED_COUNT_BOOL: &[ResidentPinSpec] =
     &[pin!("bench_grouped_count_bool", ["bool_key", "observed"])];
 const PINS_GROUPED_COUNT_DATE: &[ResidentPinSpec] =
     &[pin!("bench_grouped_count_date", ["bool_key", "observed"])];
+const PINS_GROUPED_COUNT_TIMESTAMP: &[ResidentPinSpec] = &[pin!(
+    "bench_grouped_count_timestamp",
+    ["bool_key", "observed"]
+)];
+const PINS_GROUPED_COUNT_TIMESTAMPTZ: &[ResidentPinSpec] = &[pin!(
+    "bench_grouped_count_timestamptz",
+    ["bool_key", "observed"]
+)];
 const PINS_GROUPED_COUNT_INT2: &[ResidentPinSpec] =
     &[pin!("bench_grouped_count_int2", ["bool_key", "observed"])];
 const PINS_GROUPED_COUNT_INT8: &[ResidentPinSpec] =
@@ -981,6 +989,20 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("grouped_count_date_candidate", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_COUNT_DATE)
         .evidence(WINNER),
+    workload(
+        "grouped_count_timestamp_candidate",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(PINS_GROUPED_COUNT_TIMESTAMP)
+    .evidence(WINNER),
+    workload(
+        "grouped_count_timestamptz_candidate",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(PINS_GROUPED_COUNT_TIMESTAMPTZ)
+    .evidence(WINNER),
     workload("grouped_count_int2_candidate", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_COUNT_INT2)
         .evidence(WINNER),

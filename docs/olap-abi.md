@@ -746,18 +746,22 @@ kernels contain no per-row membership/mask/measure-shape branch. EXPLAIN reports
 both the specialization label and whether its identity lookup hit the cache.
 
 `PARALLEL_DENSE_COUNT` accepts canonical `COUNT_STAR` plus canonical COUNT-only
-BOOL/1-byte, INT32/4-byte, INT64/8-byte, and DATE/4-byte column descriptors. The typed-column
+BOOL/1-byte, INT32/4-byte, INT64/8-byte, DATE/4-byte, and TIMESTAMP/8-byte
+column descriptors. The typed-column
 specializations maintain separate u32 partials for selected rows and non-NULL
 measure rows: selected rows activate the group and update `selected_count`,
 while non-NULL rows update both COUNT and `nonnull_count`. Consequently an
 all-NULL measure group remains active with a zero COUNT. A malformed null
 sidecar fails before either partial is changed. Normal planning exposes these
 branches only for one nullable boolean fact key and one distinct nullable bool,
-PostgreSQL `int2`, PostgreSQL `int8`, or PostgreSQL `date` measure, without joins, filters,
-`HAVING`, or additional measures. Although resident `int2` is widened to the
-INT32 physical ABI, normal planning does not use this count-only lane for
-`int4`; EXPLAIN identifies the released variants as `dense_bool_count_plain`,
-`dense_int2_count_plain`, `dense_int8_count_plain`, and `dense_date_count_plain`.
+PostgreSQL `int2`, PostgreSQL `int8`, PostgreSQL `date`, PostgreSQL `timestamp`,
+or PostgreSQL `timestamptz` measure, without joins, filters, `HAVING`, or
+additional measures. Although resident `int2` is widened to the INT32 physical
+ABI, normal planning does not use this count-only lane for `int4`; EXPLAIN
+identifies the released variants as `dense_bool_count_plain`,
+`dense_int2_count_plain`, `dense_int8_count_plain`, `dense_date_count_plain`,
+and `dense_timestamp_count_plain`. The two timestamp OIDs retain distinct
+logical identities while sharing the validated TIMESTAMP physical ABI.
 
 Low-cardinality dense COUNT and exact integer SUM/MIN/MAX use 32-work-item
 groups over 1,024-row tiles. Each work item accumulates multiple rows, the work

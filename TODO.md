@@ -343,6 +343,34 @@ redesigned and independently requalified.
     The unrelated CPU-saturating process and installed/local module-provenance
     mismatch make these functional measurements non-publishable; rerun the
     clean exact ship-gate cell before release.
+  - [x] Release the first exact timestamp aggregate lanes: one nullable boolean
+    fact-column group key and `COUNT` over one distinct nullable PostgreSQL
+    `timestamp` or `timestamptz` fact column, with no filter, join, HAVING, or
+    additional measure. The two logical OIDs retain distinct descriptor/cache
+    identities while sharing the validated `TIMESTAMP`/8-byte physical count
+    ABI. The kernel reads only the validated null sidecar, so finite values,
+    timezone interpretation, and PostgreSQL `-infinity`/`infinity` sentinels
+    never enter device interpretation or arithmetic, while all-NULL groups
+    retain count zero. Temporal infinity fixtures, invalid null bytes, adjacent
+    native shapes, PG18/PG19 SQL102 prepared DML/DDL lifecycle, and the
+    33-family/349-assertion semantic matrix pass. The complete PG18 and PG19
+    validation matrices pass: 1,542 core plus 55 correctness unit tests, 65 SQL
+    contracts, and 586 planner-shape/stress tests on each version; all 32 native
+    GPU CTests and 137 fail-closed coverage/safety tests pass as well. Diagnostic
+    5-warmup/10-pair characterizations measured 1.48 ms versus PostgreSQL 8.28
+    ms (5.60x) at 250K and 2.68 ms versus 18.82 ms (7.03x) at 1M for
+    `timestamp`, and 1.58 ms versus 8.72 ms (5.51x) at 250K and 2.36 ms versus
+    18.95 ms (8.02x) at 1M for `timestamptz`. Both retained 20/20 artifact hits,
+    verified `parallel_dense_count`, exact diffs, and zero fallback in
+    `.codex/scratch/grouped-count-timestamp-functional-pg18-20260811` and
+    `.codex/scratch/grouped-count-timestamptz-functional-pg18-20260811`;
+    their `artifact_index.json` SHA-256 values are
+    `266a033d69a69948437ae0e80633a4aab89844320b16f54e3ef02c6f885179ec`
+    and
+    `6b5fd6caf26a41ed65b1f9f4e7520685ba72f77ef4dd9aa22375a146bc49893a`.
+    The unrelated CPU-saturating process and installed/local module-provenance
+    mismatch make these functional measurements non-publishable; rerun both
+    clean exact ship-gate cells before release.
 - [ ] Membership and joins: composite keys, broader exact int8 shapes,
   catalog-proved collation-safe text, and reducing semi/anti membership with exact
   NULL, `NOT IN`, duplicate, and multiplicity semantics. Row-returning joins stay
