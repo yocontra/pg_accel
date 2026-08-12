@@ -1,7 +1,7 @@
 {
   "baseline_assertions": 306,
   "baseline_files": 58,
-  "declared_assertions": 320,
+  "declared_assertions": 321,
   "declared_files": 59,
   "files": [
     {
@@ -2784,11 +2784,11 @@
       "assertions": [
         {
           "emission": "echo",
-          "guard_count": 6,
-          "guard_sha256": "d0807c1be0759275499ad340117a7bf2706156bc3f31888872147493e03ed9e3",
-          "guard_token_count": 18,
+          "guard_count": 8,
+          "guard_sha256": "b4fbe131f7d6970ac6779346a6defaba1e4e0cbc7350cd2248aa241d143bd1f4",
+          "guard_token_count": 17,
           "id": "94_grouped_count_bool_contract.assert_001",
-          "source_line": 122
+          "source_line": 138
         },
         {
           "emission": "echo",
@@ -2796,12 +2796,12 @@
           "guard_sha256": "7aaf900cad09fdc4857d30f510d571f3dc9d270eaefe3e37590051a8485ff5de",
           "guard_token_count": 10,
           "id": "94_grouped_count_bool_contract.assert_002",
-          "source_line": 172
+          "source_line": 188
         }
       ],
       "completion_id": "94_grouped_count_bool_contract",
       "file": "94_grouped_count_bool_contract.sql",
-      "sha256": "b3858b93418701ec552f6f1075293d7f45a9f8039ff90f3c2ce39a659350f4e3"
+      "sha256": "3987fdb2428b565357850a24fb9b264b293a80d9a0aa6f23fe9789f6b84e14fe"
     },
     {
       "assertions": [
@@ -2852,11 +2852,19 @@
           "guard_token_count": 7,
           "id": "95_selected_lifecycle_contract.assert_006",
           "source_line": 935
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "08a26365a3423a06f57efcbc63835de0b6620aebffc7be3981198003f9233a3d",
+          "guard_token_count": 8,
+          "id": "95_selected_lifecycle_contract.assert_007",
+          "source_line": 1046
         }
       ],
       "completion_id": "95_selected_lifecycle_contract",
       "file": "95_selected_lifecycle_contract.sql",
-      "sha256": "9726d4b65496a528f1635f3ec1290470ecd76897d8e63526cee5cbc5d9314fd3"
+      "sha256": "e03bb14be63b10606611dc6811ca9228128dd9ec07235357d764b4d20a37f12b"
     },
     {
       "assertions": [
@@ -2975,7 +2983,7 @@
       ],
       "completion_id": "96_declined_lifecycle_contract",
       "file": "96_declined_lifecycle_contract.sql",
-      "sha256": "002c8180bf48181fa20b923a9b4f0acd7ec9d196fbff1c425e03edf75d054be8"
+      "sha256": "cdab3212b5fdbdb399d9fdbecdf40940e1755ebd282daa3d1357ae46ff183a81"
     }
   ],
   "kind": "sql-semantic-assertion-manifest",

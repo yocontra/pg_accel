@@ -934,6 +934,117 @@ BEGIN
 END $$;
 \echo 'PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_006'
 
+-- Nullable boolean COUNT uses a distinct nullable boolean fact key and
+-- measure. The all-NULL measure case remains an active SQL group whose COUNT
+-- is zero; prepared execution must rebuild after DML and safe DDL.
+DROP TABLE IF EXISTS _lifecycle_bool_count;
+CREATE UNLOGGED TABLE _lifecycle_bool_count (
+    id int4 PRIMARY KEY,
+    bool_key boolean,
+    observed boolean
+);
+INSERT INTO _lifecycle_bool_count
+SELECT i,
+       CASE WHEN i % 19 = 0 THEN NULL ELSE i % 2 = 0 END,
+       CASE WHEN i % 19 = 0 OR i % 11 = 0 THEN NULL ELSE i % 3 = 0 END
+FROM generate_series(1, 995904) AS rows(i);
+ANALYZE _lifecycle_bool_count;
+
+PREPARE _lifecycle_bool_count_q AS
+SELECT bool_key, count(observed) AS observed_rows
+FROM _lifecycle_bool_count GROUP BY bool_key;
+
+DO $$
+DECLARE
+    has_gpu boolean;
+    generation_before bigint;
+    kernels_before bigint;
+BEGIN
+    SELECT env.has_gpu INTO STRICT has_gpu FROM _lifecycle_environment AS env;
+    IF has_gpu THEN
+        PERFORM pg_accel_pin(
+            '_lifecycle_bool_count'::regclass,
+            ARRAY['bool_key', 'observed']
+        );
+        generation_before := pg_temp.lifecycle_generation('_lifecycle_bool_count');
+    END IF;
+
+    INSERT INTO _lifecycle_bool_count
+    SELECT i,
+           CASE WHEN i % 19 = 0 THEN NULL ELSE i % 2 = 0 END,
+           CASE WHEN i % 19 = 0 OR i % 11 = 0 THEN NULL ELSE i % 3 = 0 END
+    FROM generate_series(995905, 1000000) AS rows(i);
+    ANALYZE _lifecycle_bool_count;
+    IF has_gpu THEN
+        PERFORM pg_temp.lifecycle_assert_invalidated(
+            '_lifecycle_bool_count', generation_before
+        );
+        PERFORM pg_temp.lifecycle_refresh('_lifecycle_bool_count', 1000000);
+        generation_before := pg_temp.lifecycle_generation('_lifecycle_bool_count');
+    END IF;
+
+    PERFORM set_config('pg_accel.enabled', 'on', false);
+    PERFORM pg_accel_reset_stats();
+    SELECT pg_accel_kernel_executions() INTO STRICT kernels_before;
+    PERFORM pg_temp.lifecycle_explain(
+        'grouped_bool_count', 'prepared_after_dml', '_lifecycle_bool_count_q'
+    );
+    PERFORM pg_temp.lifecycle_assert_dispatch(
+        'grouped_bool_count', 'prepared_after_dml', kernels_before
+    );
+
+    ALTER TABLE _lifecycle_bool_count ADD COLUMN lifecycle_tag int4 DEFAULT 0;
+    IF has_gpu THEN
+        PERFORM pg_temp.lifecycle_assert_invalidated(
+            '_lifecycle_bool_count', generation_before, false
+        );
+        PERFORM pg_temp.lifecycle_refresh('_lifecycle_bool_count', 1000000);
+    END IF;
+END $$;
+
+SET pg_accel.enabled = off;
+CREATE TEMP TABLE _lifecycle_bool_count_native AS EXECUTE _lifecycle_bool_count_q;
+SET pg_accel.enabled = on;
+SELECT pg_accel_reset_stats();
+CREATE TEMP TABLE _lifecycle_bool_count_before AS
+SELECT pg_accel_kernel_executions() AS kernels;
+CREATE TEMP TABLE _lifecycle_bool_count_accel AS EXECUTE _lifecycle_bool_count_q;
+SELECT pg_temp.lifecycle_refresh_if_gpu('_lifecycle_bool_count', 1000000);
+SELECT pg_temp.lifecycle_explain(
+    'grouped_bool_count', 'prepared_after_ddl', '_lifecycle_bool_count_q'
+);
+
+DO $$
+DECLARE
+    has_gpu boolean;
+    kernels_before bigint;
+BEGIN
+    SELECT env.has_gpu INTO STRICT has_gpu FROM _lifecycle_environment AS env;
+    IF EXISTS (
+        (SELECT * FROM _lifecycle_bool_count_native
+         EXCEPT ALL SELECT * FROM _lifecycle_bool_count_accel)
+        UNION ALL
+        (SELECT * FROM _lifecycle_bool_count_accel
+         EXCEPT ALL SELECT * FROM _lifecycle_bool_count_native)
+    ) THEN
+        RAISE EXCEPTION '95 grouped bool COUNT lifecycle FAILED: native results differ';
+    END IF;
+    SELECT kernels INTO STRICT kernels_before FROM _lifecycle_bool_count_before;
+    PERFORM pg_temp.lifecycle_assert_dispatch(
+        'grouped_bool_count', 'prepared_after_ddl', kernels_before, false
+    );
+    IF has_gpu AND NOT EXISTS (
+        SELECT 1 FROM _lifecycle_plan
+        WHERE family = 'grouped_bool_count'
+          AND stage IN ('prepared_after_dml', 'prepared_after_ddl')
+          AND line LIKE '%GPU Physical Kernel Mode: parallel_dense_count%'
+    ) THEN
+        RAISE EXCEPTION
+            '95 grouped bool COUNT lifecycle FAILED: physical fast path not reported';
+    END IF;
+END $$;
+\echo 'PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_007'
+
 DEALLOCATE _lifecycle_grouped_q;
 DEALLOCATE _lifecycle_predicate_q;
 DEALLOCATE _lifecycle_count4_q;
@@ -946,6 +1057,7 @@ DO $$ BEGIN
 END $$;
 DEALLOCATE _lifecycle_spatial_q;
 DEALLOCATE _lifecycle_raster_q;
+DEALLOCATE _lifecycle_bool_count_q;
 RESET plan_cache_mode;
 
 DROP TABLE IF EXISTS _lifecycle_h3;
@@ -960,5 +1072,6 @@ DROP TABLE _lifecycle_dim4b;
 DROP TABLE _lifecycle_dim4c;
 DROP TABLE _lifecycle_dim4d;
 DROP TABLE _lifecycle_grouped;
+DROP TABLE _lifecycle_bool_count;
 
 \echo 'PGACCEL_FILE_OK:95_selected_lifecycle_contract'

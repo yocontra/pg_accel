@@ -171,6 +171,7 @@ than the unprivileged local warm gate:
 | Workload | Protected lane | Minimum warm median vs PostgreSQL parallel |
 |---|---|---:|
 | `grouped_agg_int4` | exact resident grouped SUM(int4)/COUNT | 1.15x |
+| `grouped_count_bool_candidate` | nullable bool-key / distinct nullable bool COUNT(column) | 1.15x |
 | `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.15x |
 | `mixed_join_agg_int4` | exact resident hash join plus grouped SUM(int4)/COUNT | 1.15x |
 | `ssbm_resident_int4_star` | exact two-dimension date+part star grouped by year and part size, SUM(int4)/COUNT | 1.15x |
@@ -197,7 +198,7 @@ not make them eligible for the current ship gate.
 
 Any change to a workload SQL contract, fixture, threshold, or candidate tree
 invalidates the predecessor population freeze and random selection for the new
-candidate. Freeze the replacement SHA/tree and seven-cell population, then make a
+candidate. Freeze the replacement SHA/tree and eight-cell population, then make a
 fresh independent write-once random selection before executing release gates;
 retained predecessor evidence is transition history only.
 

@@ -386,15 +386,15 @@ SET pg_accel.enabled = on;
 SELECT pg_accel_reset_stats();
 CREATE TEMP TABLE _decline_bool_before AS SELECT pg_accel_kernel_executions() AS kernels;
 CREATE TEMP TABLE _decline_bool_enabled AS EXECUTE _decline_bool_q;
-SELECT pg_temp.decline_explain('grouped_count_bool', '_decline_bool_q');
+SELECT pg_temp.decline_explain('grouped_count_bool_adjacent', '_decline_bool_q');
 DO $$
 BEGIN
     IF NOT pg_temp.decline_contract_ok(
-        'grouped_count_bool', 'shape_unsupported_aggregate_input',
+        'grouped_count_bool_adjacent', 'generic_serial_kernel_mode_unqualified',
         '_decline_bool_native', '_decline_bool_enabled',
         (SELECT kernels FROM _decline_bool_before)
     ) THEN
-        RAISE EXCEPTION '96 boolean COUNT contract returned false';
+        RAISE EXCEPTION '96 same-column boolean COUNT contract returned false';
     END IF;
 END $$;
 \echo 'PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_008'

@@ -967,7 +967,7 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .evidence(WINNER),
     workload("grouped_count_bool_candidate", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_COUNT_BOOL)
-        .evidence(NATIVE_DECLINE),
+        .evidence(WINNER),
     workload("grouped_agg_high_card", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG_HIGH_CARD)
         .evidence(NATIVE_DECLINE),

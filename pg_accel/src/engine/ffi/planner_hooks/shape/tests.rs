@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 use pgrx::pg_sys;
 
 use crate::engine::cost::{DeviceLimits, TypedCostModel};
+use crate::engine::executor::agg::planned_descriptor_kernel_mode;
 use crate::engine::spec::{
     AggOutputProjection, AggregateKind, AggregateOutput, AggregateSource, BinaryMeasureOp,
     ColumnRef, FilterSpec, GroupKeySource, JoinMultiplicity, MeasureExpr, ScalarRange, ScalarValue,
@@ -11,6 +12,7 @@ use crate::engine::spec::{
 };
 
 use super::*;
+use crate::gpu::GroupedAggKernelMode;
 
 fn model() -> TypedCostModel {
     TypedCostModel::from_limits(&DeviceLimits::cpu_only())
@@ -1960,7 +1962,6 @@ fn aggregate_filter_waits_for_the_phase9_filter_contract() {
 #[test]
 fn straightforward_column_aggregate_types_decline_without_performance_evidence() {
     let declined = [
-        (u32::from(pg_sys::BOOLOID), AggregateKind::Count),
         (u32::from(pg_sys::INT2OID), AggregateKind::Count),
         (u32::from(pg_sys::INT2OID), AggregateKind::Min),
         (u32::from(pg_sys::INT2OID), AggregateKind::Max),
@@ -2041,21 +2042,21 @@ fn straightforward_column_aggregate_types_decline_without_performance_evidence()
 }
 
 #[test]
-fn bool_column_count_candidate_remains_native_after_losing_release_gate() {
-    let expected_decline = Err(ShapeDecline::UnsupportedAggregateInput {
-        kind: AggregateKind::Count,
-        type_oid: u32::from(pg_sys::BOOLOID),
-    });
+fn bool_column_count_candidate_admits_only_the_qualified_physical_shape() {
+    let planned_mode = |input| {
+        let shape = build_shape(input, &model()).expect("bool COUNT shape should be representable");
+        planned_descriptor_kernel_mode(&shape.spec, false)
+    };
 
     assert_eq!(
-        build_shape(bool_grouped_count_input(), &model()),
-        expected_decline
+        planned_mode(bool_grouped_count_input()),
+        GroupedAggKernelMode::ParallelDenseCount
     );
 
     let mut global = bool_grouped_count_input();
     global.group_keys.clear();
     global.projections.remove(0);
-    assert_eq!(build_shape(global, &model()), expected_decline);
+    assert_eq!(planned_mode(global), GroupedAggKernelMode::SerialGeneric);
 
     let mut same_column = bool_grouped_count_input();
     same_column.aggregates[0].expression = MeasureExpr::Column(ColumnRef {
@@ -2063,7 +2064,10 @@ fn bool_column_count_candidate_remains_native_after_losing_release_gate() {
         attno: 3,
         type_oid: u32::from(pg_sys::BOOLOID),
     });
-    assert_eq!(build_shape(same_column, &model()), expected_decline);
+    assert_eq!(
+        planned_mode(same_column),
+        GroupedAggKernelMode::SerialGeneric
+    );
 
     let mut filtered = bool_grouped_count_input();
     filtered.relation_filters.push((
@@ -2077,15 +2081,19 @@ fn bool_column_count_candidate_remains_native_after_losing_release_gate() {
             kind: crate::engine::spec::MaskKind::Sql,
         },
     ));
-    assert_eq!(build_shape(filtered, &model()), expected_decline);
+    assert_eq!(planned_mode(filtered), GroupedAggKernelMode::SerialGeneric);
 
     let mut reordered = bool_grouped_count_input();
     reordered.projections.swap(0, 1);
-    assert_eq!(build_shape(reordered, &model()), expected_decline);
+    assert_eq!(
+        planned_mode(reordered),
+        GroupedAggKernelMode::ParallelDenseCount,
+        "projection order does not change the physical descriptor"
+    );
 
     let mut joined = bool_grouped_count_input();
     add_dimension(&mut joined, 2, 200, false);
-    assert_eq!(build_shape(joined, &model()), expected_decline);
+    assert_eq!(planned_mode(joined), GroupedAggKernelMode::SerialGeneric);
 
     let mut multiple = bool_grouped_count_input();
     let (count_star, count_star_output) = aggregate(
@@ -2098,7 +2106,7 @@ fn bool_column_count_candidate_remains_native_after_losing_release_gate() {
         aggregate_index: 1,
         output: count_star_output,
     });
-    assert_eq!(build_shape(multiple, &model()), expected_decline);
+    assert_eq!(planned_mode(multiple), GroupedAggKernelMode::SerialGeneric);
 }
 
 #[test]

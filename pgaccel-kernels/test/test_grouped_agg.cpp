@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -2514,6 +2515,8 @@ void test_specialized_dense_branch_matrix() {
                                            PGACCEL_EXPR_TRUE});
   SharedArray<int32_t> specialization_values({1, 2, 3, 4, 5, 6});
   SharedArray<int32_t> specialization_rhs({2, 2, 2, 2, 2, 2});
+  SharedArray<uint8_t> specialization_bools({0, 1, 0, 1, 0, 1});
+  SharedArray<uint8_t> specialization_bool_nulls({0, 1, 0, 0, 1, 0});
 
   for (const bool membership : {false, true}) {
     for (const bool sql_mask : {false, true}) {
@@ -2533,6 +2536,55 @@ void test_specialized_dense_branch_matrix() {
       CHECK(output.out.selected_count == expected);
       CHECK(output.measures[0].count[0] == expected);
     }
+  }
+
+  for (const bool membership : {false, true}) {
+    for (const bool sql_mask : {false, true}) {
+      pgaccel_grouped_agg_desc desc = base_desc(6);
+      if (membership) {
+        set_dim(desc, 0, specialization_dim_fact.data(), nullptr, 0,
+                specialization_dim_match.size(), specialization_dim_match.data());
+      }
+      if (sql_mask) {
+        desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+        desc.where_filter.mask = specialization_mask.data();
+      }
+      set_count_only_view(desc, 0, specialization_bools.data(), specialization_bool_nulls.data(),
+                          PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, sizeof(uint8_t),
+                          PGACCEL_GROUPED_AGG_ACCUM_I64);
+      int32_t kernel_mode = 0;
+      CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&desc, &kernel_mode), PGACCEL_OK);
+      CHECK(kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
+      OutputStorage output(desc);
+      CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+      const uint64_t expected_selected = membership ? 4 : (sql_mask ? 5 : 6);
+      const uint64_t expected_count = 4;
+      CHECK(output.out.selected_count == expected_selected);
+      CHECK(output.measures[0].count[0] == expected_count);
+      CHECK(output.measures[0].nonnull[0] == expected_count);
+      CHECK(output.active[0] == 1);
+    }
+  }
+
+  {
+    SharedArray<int32_t> keys({0, 0, 1, 1});
+    SharedArray<uint8_t> values({0, 1, 0, 1});
+    SharedArray<uint8_t> nulls({1, 1, 0, 1});
+    pgaccel_grouped_agg_desc desc = base_desc(4);
+    set_fact_key(desc, 0, keys.data(), nullptr, 0, 3);
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, sizeof(uint8_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    OutputStorage output(desc);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.out.selected_count == 4);
+    CHECK(output.active[0] == 1);
+    CHECK(output.measures[0].count[0] == 0);
+    CHECK(output.measures[0].nonnull[0] == 0);
+    CHECK(output.active[1] == 1);
+    CHECK(output.measures[0].count[1] == 1);
+    CHECK(output.measures[0].nonnull[1] == 1);
+    CHECK(output.active[2] == 0);
   }
 
   for (const bool membership : {false, true}) {
@@ -2574,21 +2626,30 @@ void test_specialized_dense_branch_matrix() {
     std::vector<int32_t> host_keys(rows);
     std::vector<int32_t> host_values(rows);
     std::vector<int8_t> host_mask(rows);
+    std::vector<uint8_t> host_bool_values(rows);
+    std::vector<uint8_t> host_bool_nulls(rows);
     std::array<int64_t, groups> expected_sum{};
     std::array<uint64_t, groups> expected_count{};
+    std::array<uint64_t, groups> expected_bool_count{};
     for (size_t row = 0; row < rows; ++row) {
       const size_t group = row % groups;
       host_keys[row] = static_cast<int32_t>(group);
       host_values[row] = static_cast<int32_t>(row % 101) - 50;
+      host_bool_values[row] = static_cast<uint8_t>(row % 2);
+      host_bool_nulls[row] = row % 5 == 0 ? 1 : 0;
       host_mask[row] = row % 7 == 0 ? PGACCEL_EXPR_FALSE : PGACCEL_EXPR_TRUE;
       if (host_mask[row] == PGACCEL_EXPR_TRUE) {
         expected_sum[group] += host_values[row];
         ++expected_count[group];
+        if (host_bool_nulls[row] == 0)
+          ++expected_bool_count[group];
       }
     }
     SharedArray<int32_t> keys(host_keys);
     SharedArray<int32_t> values(host_values);
     SharedArray<int8_t> mask(host_mask);
+    SharedArray<uint8_t> bool_values(host_bool_values);
+    SharedArray<uint8_t> bool_nulls(host_bool_nulls);
 
     pgaccel_grouped_agg_desc count_desc = base_desc(rows);
     set_fact_key(count_desc, 0, keys.data(), nullptr, 0, groups);
@@ -2599,6 +2660,26 @@ void test_specialized_dense_branch_matrix() {
     CHECK_STATUS(execute_external(count_desc, &count_output.out), PGACCEL_OK);
     for (size_t group = 0; group < groups; ++group)
       CHECK(count_output.measures[0].count[group] == expected_count[group]);
+
+    pgaccel_grouped_agg_desc bool_count_desc = base_desc(rows);
+    set_fact_key(bool_count_desc, 0, keys.data(), nullptr, 0, groups);
+    set_count_only_view(bool_count_desc, 0, bool_values.data(), bool_nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, sizeof(uint8_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    bool_count_desc.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+    bool_count_desc.where_filter.mask = mask.data();
+    int32_t bool_kernel_mode = 0;
+    CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&bool_count_desc, &bool_kernel_mode), PGACCEL_OK);
+    CHECK(bool_kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
+    OutputStorage bool_count_output(bool_count_desc);
+    CHECK_STATUS(execute_external(bool_count_desc, &bool_count_output.out), PGACCEL_OK);
+    CHECK(bool_count_output.out.selected_count ==
+          std::accumulate(expected_count.begin(), expected_count.end(), uint64_t{0}));
+    for (size_t group = 0; group < groups; ++group) {
+      CHECK(bool_count_output.measures[0].count[group] == expected_bool_count[group]);
+      CHECK(bool_count_output.measures[0].nonnull[group] == expected_bool_count[group]);
+      CHECK(bool_count_output.active[group] == (expected_count[group] != 0 ? 1 : 0));
+    }
 
     pgaccel_grouped_agg_desc integer_desc = base_desc(rows);
     set_fact_key(integer_desc, 0, keys.data(), nullptr, 0, groups);
@@ -2614,6 +2695,20 @@ void test_specialized_dense_branch_matrix() {
       CHECK(integer_output.i64(integer_output.measures[0].sum, group) == expected_sum[group]);
       CHECK(integer_output.measures[1].count[group] == expected_count[group]);
     }
+  }
+
+  {
+    constexpr size_t rows = 2048;
+    std::vector<uint8_t> host_values(rows, 1);
+    std::vector<uint8_t> host_nulls(rows, 0);
+    host_nulls[1024] = 2;
+    SharedArray<uint8_t> values(host_values);
+    SharedArray<uint8_t> nulls(host_nulls);
+    pgaccel_grouped_agg_desc desc = base_desc(rows);
+    set_count_only_view(desc, 0, values.data(), nulls.data(),
+                        PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, sizeof(uint8_t),
+                        PGACCEL_GROUPED_AGG_ACCUM_I64);
+    check_device_invalid(desc);
   }
 
   {

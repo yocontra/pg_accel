@@ -945,6 +945,12 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::GroupedAggregate,
     },
     ReleasedEnvelopeContract {
+        workload: "grouped_count_bool_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
         workload: "predicate_expression_grouped_agg_int4",
         min_rows: GROUPAGG_WINNER_MIN_ROWS,
         max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
@@ -1105,6 +1111,10 @@ pub struct MetalShipGateCell {
 pub const METAL_SHIP_GATE_CELLS: &[MetalShipGateCell] = &[
     MetalShipGateCell {
         workload: "grouped_agg_int4",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_count_bool_candidate",
         rows: 1_000_000,
     },
     MetalShipGateCell {
@@ -1522,7 +1532,6 @@ fn groupagg_threshold_matrix_entry(
         "grouped_agg_high_card" => Some("shape_unsupported_rte"),
         "expression_grouped_agg" => Some("shape_floating_expression_semantics"),
         "predicate_filter_expression_grouped_agg" => Some("shape_aggregate_modifier"),
-        "grouped_count_bool_candidate" => Some("shape_unsupported_aggregate_input"),
         "and_range_predicate_expression_grouped_agg_int4" => {
             Some("shape_multiple_range_predicates")
         }
@@ -3423,6 +3432,10 @@ mod tests {
         let expected = [
             ("grouped_agg_int4", FINAL_MATRIX_MIN_WARM_SPEEDUP),
             (
+                "grouped_count_bool_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
                 "predicate_expression_grouped_agg_int4",
                 FINAL_MATRIX_MIN_WARM_SPEEDUP,
             ),
@@ -4185,15 +4198,43 @@ mod tests {
     }
 
     #[test]
-    fn test_threshold_matrix_records_nullable_bool_count_losing_gate() {
-        let entry = benchmark_threshold_matrix_entry("grouped_count_bool_candidate", 1_000_000)
-            .expect("nullable bool COUNT losing cell");
-        assert_eq!(
-            entry.expectation.decline_reason(),
-            Some("shape_unsupported_aggregate_input")
-        );
-        assert_eq!(entry.released_path(), None);
-        assert_eq!(entry.dispatch_evidence, GENERIC_NATIVE_DISPATCH_EVIDENCE);
+    fn test_threshold_matrix_records_nullable_bool_count_winner_gate() {
+        for rows in [GROUPAGG_WINNER_MIN_ROWS, DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS] {
+            let entry = benchmark_threshold_matrix_entry("grouped_count_bool_candidate", rows)
+                .expect("nullable bool COUNT winner cell");
+            assert_eq!(
+                entry.expectation,
+                BenchmarkLaneExpectation::GpuWinner {
+                    min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+                }
+            );
+            assert_eq!(
+                entry.released_path(),
+                Some(ReleasedPathFamily::GroupedAggregate)
+            );
+            assert!(entry.dispatch_evidence.contains("kernel counter delta > 0"));
+            assert!(
+                entry
+                    .dispatch_evidence
+                    .contains("stock fallback counter = 0")
+            );
+        }
+
+        for (rows, expected_reason) in [
+            (
+                GROUPAGG_WINNER_MIN_ROWS - 1,
+                "generic_fact_rows_below_device_minimum",
+            ),
+            (
+                DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS + 1,
+                "generic_fact_rows_exceed_dense_one_shot_maximum",
+            ),
+        ] {
+            let entry = benchmark_threshold_matrix_entry("grouped_count_bool_candidate", rows)
+                .expect("nullable bool COUNT native-decline boundary");
+            assert_eq!(entry.expectation.decline_reason(), Some(expected_reason));
+            assert_eq!(entry.released_path(), None);
+        }
     }
 
     #[test]

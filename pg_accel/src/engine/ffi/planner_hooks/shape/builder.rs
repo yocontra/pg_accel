@@ -128,6 +128,7 @@ fn validate_measure_descriptor_capability(
     }
     let validate_column =
         |column: &crate::engine::spec::ColumnRef| match (column.type_oid, aggregate.output.kind) {
+            (BOOLOID, AggregateKind::Count) => Ok(()),
             (
                 BOOLOID | INT2OID | FLOAT4OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID,
                 AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
@@ -1311,6 +1312,7 @@ mod tests {
         let int8 = column(100, 2, 20);
         let float8 = column(100, 3, 701);
         let text = column(100, 4, 25);
+        let boolean = column(100, 5, 16);
 
         assert_eq!(
             validate_measure_descriptor_capability(&aggregate(
@@ -1337,6 +1339,13 @@ mod tests {
                 Ok(())
             );
         }
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Column(boolean),
+                AggregateKind::Count
+            )),
+            Ok(())
+        );
         assert!(matches!(
             validate_measure_descriptor_capability(&aggregate(
                 MeasureExpr::Column(int8),

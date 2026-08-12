@@ -61,7 +61,8 @@ SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES = frozenset(
         "selected.spatial_aggregate",
         "decline.raster",
         "selected.raster_resident_exact_reclass",
-        "decline.grouped_count_bool",
+        "selected.grouped_count_bool",
+        "decline.grouped_count_bool_adjacent",
     }
 )
 SQL_SEMANTIC_MATRIX_DECLINE_REASONS = {
@@ -78,7 +79,7 @@ SQL_SEMANTIC_MATRIX_DECLINE_REASONS = {
     "decline.sort_topk": "sort_standalone_topk_no_gpu_kernel",
     "decline.window": "no_gpu_resident_pipeline",
     "decline.raster": "raster_unsupported_shape",
-    "decline.grouped_count_bool": "shape_unsupported_aggregate_input",
+    "decline.grouped_count_bool_adjacent": "generic_serial_kernel_mode_unqualified",
 }
 BASELINE_CPP_SOURCES = 16
 BASELINE_CPP_DEVICE_OBJECTS = 15

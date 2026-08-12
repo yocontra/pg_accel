@@ -353,6 +353,7 @@ struct KernelParams {
   uint32_t* hash_counts;
   uint32_t* hash_group_count;
   uint32_t* dense_chunk_counts;
+  uint32_t* dense_selected_counts;
   size_t dense_count_chunk_count;
   AtomicU64Words* dense_integer_atomic_sum;
   AtomicU64Words* dense_integer_atomic_nonnull;
@@ -387,6 +388,7 @@ struct WorkspaceLayout {
   size_t hash_counts = kNoOffset;
   size_t hash_group_count = kNoOffset;
   size_t dense_chunk_counts = kNoOffset;
+  size_t dense_selected_counts = kNoOffset;
   size_t dense_count_chunk_count = 0;
   size_t dense_count_partial_count = 0;
   bool dense_count_hierarchical = false;
@@ -434,13 +436,28 @@ bool key_nullable(const pgaccel_grouped_agg_desc& desc, const pgaccel_grouped_ag
   return key.values.nulls != nullptr;
 }
 
-bool parallel_dense_count_star_shape(const pgaccel_grouped_agg_desc& desc) {
+bool parallel_dense_count_column_shape(const pgaccel_grouped_agg_desc& desc) {
+  const pgaccel_grouped_agg_measure& count = desc.measures[0];
+  return count.op == PGACCEL_GROUPED_AGG_MEASURE_COLUMN &&
+         count.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT &&
+         count.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64 &&
+         count.state_bytes == sizeof(int64_t) &&
+         count.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_BOOL &&
+         count.value.element_bytes == sizeof(uint8_t);
+}
+
+bool parallel_dense_count_shape(const pgaccel_grouped_agg_desc& desc) {
   if (desc.grouping_mode != PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX ||
       desc.output_mode != PGACCEL_GROUPED_AGG_OUTPUT_DENSE || desc.measure_count != 1 ||
-      desc.measures[0].op != PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR ||
-      desc.measures[0].agg_mask != PGACCEL_GROUPED_AGG_LANE_COUNT ||
       !parallel_dense_where_filter(desc.where_filter) ||
       !canonical_disabled_filter(desc.measure_filters[0]))
+    return false;
+  const pgaccel_grouped_agg_measure& count = desc.measures[0];
+  const bool count_star = count.op == PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR &&
+                          count.agg_mask == PGACCEL_GROUPED_AGG_LANE_COUNT &&
+                          count.accumulator_kind == PGACCEL_GROUPED_AGG_ACCUM_I64 &&
+                          count.state_bytes == sizeof(int64_t);
+  if (!count_star && !parallel_dense_count_column_shape(desc))
     return false;
   for (size_t dim = 0; dim < desc.dim_count; ++dim) {
     if (desc.dims[dim].multiplicity_by_key != nullptr)
@@ -595,7 +612,7 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
 
   if (!arena.add<size_t>(desc.group_capacity, &layout->staged_group_codes))
     return false;
-  if (parallel_dense_count_star_shape(desc)) {
+  if (parallel_dense_count_shape(desc)) {
     layout->dense_count_chunk_count = desc.row_count / kDenseIntegerChunkRows +
                                       (desc.row_count % kDenseIntegerChunkRows != 0 ? 1 : 0);
     layout->dense_count_hierarchical =
@@ -603,9 +620,14 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
     if (layout->dense_count_hierarchical) {
       if (!checked_mul_size(desc.group_capacity, layout->dense_count_chunk_count,
                             &layout->dense_count_partial_count) ||
-          !arena.add<uint32_t>(layout->dense_count_partial_count, &layout->dense_chunk_counts))
+          !arena.add<uint32_t>(layout->dense_count_partial_count, &layout->dense_chunk_counts) ||
+          (parallel_dense_count_column_shape(desc) &&
+           !arena.add<uint32_t>(layout->dense_count_partial_count,
+                                &layout->dense_selected_counts)))
         return false;
-    } else if (!arena.add<uint32_t>(desc.group_capacity, &layout->dense_chunk_counts)) {
+    } else if (!arena.add<uint32_t>(desc.group_capacity, &layout->dense_chunk_counts) ||
+               (parallel_dense_count_column_shape(desc) &&
+                !arena.add<uint32_t>(desc.group_capacity, &layout->dense_selected_counts))) {
       return false;
     }
   }
@@ -1938,6 +1960,8 @@ inline void run_dense_count_prepare_kernel(KernelParams* params_ptr) {
     for (size_t group = 0; group < params.group_capacity; ++group) {
       params.active[group] = 0;
       params.buffers[0].count[group] = 0;
+      if (params.buffers[0].nonnull != nullptr)
+        params.buffers[0].nonnull[group] = 0;
     }
     if (params.key_count == 0)
       params.active[0] = 1;
@@ -1952,7 +1976,7 @@ inline void run_dense_count_prepare_kernel(KernelParams* params_ptr) {
   }
 }
 
-template <bool HasMembership, bool HasSqlMask>
+template <bool HasMembership, bool HasSqlMask, bool CountNonNull>
 inline void run_dense_count_row(KernelParams* params_ptr, size_t row) {
   KernelParams& params = *params_ptr;
   size_t group = 0;
@@ -1973,20 +1997,37 @@ inline void run_dense_count_row(KernelParams* params_ptr, size_t row) {
   if (filter == FilterResult::Reject)
     return;
 
+  bool is_null = false;
+  if constexpr (CountNonNull) {
+    if (!null_at(params.measures[0].value.nulls, row, &is_null)) {
+      record_failure(*params.meta, kFailureInvalid);
+      return;
+    }
+    DeviceAtomic<uint32_t> selected(params.dense_selected_counts[group]);
+    if (selected.fetch_add(1) == UINT32_MAX)
+      record_failure(*params.meta, kFailureNumericOverflow);
+    if (is_null)
+      return;
+  }
   DeviceAtomic<uint32_t> count(params.dense_chunk_counts[group]);
   if (count.fetch_add(1) == UINT32_MAX)
     record_failure(*params.meta, kFailureNumericOverflow);
 }
 
-template <bool HasMembership, bool HasSqlMask>
+template <bool HasMembership, bool HasSqlMask, bool CountNonNull>
 inline void run_dense_count_workgroup(KernelParams* params_ptr, sycl::nd_item<1> item,
                                       const sycl::local_accessor<uint32_t, 1>& local_counts) {
   KernelParams& params = *params_ptr;
   const size_t local_id = item.get_local_linear_id();
   const size_t workgroup = item.get_group_linear_id();
   const size_t local_base = local_id * params.group_capacity;
-  for (size_t group = 0; group < params.group_capacity; ++group)
+  const size_t selected_base =
+      kDenseReductionWorkgroupSize * params.group_capacity + local_base;
+  for (size_t group = 0; group < params.group_capacity; ++group) {
     local_counts[local_base + group] = 0;
+    if constexpr (CountNonNull)
+      local_counts[selected_base + group] = 0;
+  }
 
   const size_t first_row =
       workgroup * kDenseIntegerChunkRows + local_id * kDenseReductionItemsPerWorkItem;
@@ -2006,16 +2047,32 @@ inline void run_dense_count_workgroup(KernelParams* params_ptr, sycl::nd_item<1>
       record_failure(*params.meta, kFailureInvalid);
       continue;
     }
-    if (filter == FilterResult::Accept)
-      ++local_counts[local_base + group];
+    if (filter != FilterResult::Accept)
+      continue;
+    if constexpr (CountNonNull) {
+      bool is_null = false;
+      if (!null_at(params.measures[0].value.nulls, row, &is_null)) {
+        record_failure(*params.meta, kFailureInvalid);
+        continue;
+      }
+      ++local_counts[selected_base + group];
+      if (is_null)
+        continue;
+    }
+    ++local_counts[local_base + group];
   }
 
   item.barrier(sycl::access::fence_space::local_space);
   for (size_t stride = 1; stride < kDenseReductionWorkgroupSize; stride *= 2) {
     if (local_id % (stride * 2) == 0) {
       const size_t rhs_base = (local_id + stride) * params.group_capacity;
-      for (size_t group = 0; group < params.group_capacity; ++group)
+      const size_t rhs_selected_base =
+          kDenseReductionWorkgroupSize * params.group_capacity + rhs_base;
+      for (size_t group = 0; group < params.group_capacity; ++group) {
         local_counts[local_base + group] += local_counts[rhs_base + group];
+        if constexpr (CountNonNull)
+          local_counts[selected_base + group] += local_counts[rhs_selected_base + group];
+      }
     }
     item.barrier(sycl::access::fence_space::local_space);
   }
@@ -2023,6 +2080,10 @@ inline void run_dense_count_workgroup(KernelParams* params_ptr, sycl::nd_item<1>
     for (size_t group = 0; group < params.group_capacity; ++group) {
       params.dense_chunk_counts[group * params.dense_count_chunk_count + workgroup] =
           local_counts[group];
+      if constexpr (CountNonNull) {
+        params.dense_selected_counts[group * params.dense_count_chunk_count + workgroup] =
+            local_counts[kDenseReductionWorkgroupSize * params.group_capacity + group];
+      }
     }
   }
 }
@@ -2041,19 +2102,27 @@ inline void run_dense_count_commit_kernel(KernelParams* params_ptr) {
     uint64_t selected = 0;
     for (size_t group = 0; group < params.group_capacity; ++group) {
       uint64_t chunk_count = 0;
+      uint64_t chunk_selected = 0;
       if (params.dense_count_chunk_count == 0) {
         chunk_count = params.dense_chunk_counts[group];
+        chunk_selected = params.dense_selected_counts == nullptr
+                             ? chunk_count
+                             : params.dense_selected_counts[group];
       } else {
         const size_t first = group * params.dense_count_chunk_count;
-        for (size_t chunk = 0; chunk < params.dense_count_chunk_count; ++chunk)
+        for (size_t chunk = 0; chunk < params.dense_count_chunk_count; ++chunk) {
           chunk_count += params.dense_chunk_counts[first + chunk];
+          chunk_selected += params.dense_selected_counts == nullptr
+                                ? params.dense_chunk_counts[first + chunk]
+                                : params.dense_selected_counts[first + chunk];
+        }
       }
-      if (!add_u64(selected, chunk_count, &selected)) {
+      if (!add_u64(selected, chunk_selected, &selected)) {
         meta.failure_flags = kFailureNumericOverflow;
         meta.lifecycle_state = kLifecycleFailed;
         return;
       }
-      if (chunk_count == 0)
+      if (chunk_selected == 0)
         continue;
       uint64_t next = 0;
       if (!add_u64(params.buffers[0].count[group], chunk_count, &next)) {
@@ -2062,6 +2131,14 @@ inline void run_dense_count_commit_kernel(KernelParams* params_ptr) {
         return;
       }
       params.buffers[0].count[group] = next;
+      if (params.buffers[0].nonnull != nullptr) {
+        if (!add_u64(params.buffers[0].nonnull[group], chunk_count, &next)) {
+          meta.failure_flags = kFailureNumericOverflow;
+          meta.lifecycle_state = kLifecycleFailed;
+          return;
+        }
+        params.buffers[0].nonnull[group] = next;
+      }
       params.active[group] = 1;
     }
     if (!add_u64(meta.selected, selected, &meta.selected)) {
@@ -2862,6 +2939,8 @@ void bind_params(const pgaccel_grouped_agg_desc& desc, const WorkspaceLayout& la
   params->hash_counts = arena_ptr<uint32_t>(scratch, layout.hash_counts);
   params->hash_group_count = arena_ptr<uint32_t>(scratch, layout.hash_group_count);
   params->dense_chunk_counts = arena_ptr<uint32_t>(scratch, layout.dense_chunk_counts);
+  params->dense_selected_counts =
+      arena_ptr<uint32_t>(scratch, layout.dense_selected_counts);
   params->dense_count_chunk_count =
       layout.dense_count_hierarchical ? layout.dense_count_chunk_count : 0;
   params->dense_integer_atomic_sum =
@@ -3268,9 +3347,9 @@ bool validate_scratch_usm(sycl::queue& queue, const pgaccel_grouped_agg_desc& de
 
 class GroupedAggDenseKernel;
 class GroupedAggDenseCountPrepareKernel;
-template <bool HasMembership, bool HasSqlMask>
+template <bool HasMembership, bool HasSqlMask, bool CountNonNull>
 class GroupedAggDenseCountRowsKernel;
-template <bool HasMembership, bool HasSqlMask>
+template <bool HasMembership, bool HasSqlMask, bool CountNonNull>
 class GroupedAggDenseCountWorkgroupKernel;
 class GroupedAggDenseCountCommitKernel;
 class GroupedAggDenseIntegerPrepareKernel;
@@ -3362,26 +3441,29 @@ class ScratchOwner {
 
 static_assert(std::is_nothrow_destructible_v<ScratchOwner>);
 
-template <bool HasMembership, bool HasSqlMask>
+template <bool HasMembership, bool HasSqlMask, bool CountNonNull>
 void submit_dense_count_rows(sycl::queue& queue, size_t row_count,
                              KernelParams* const device_params) {
-  queue.parallel_for<GroupedAggDenseCountRowsKernel<HasMembership, HasSqlMask>>(
+  queue.parallel_for<GroupedAggDenseCountRowsKernel<HasMembership, HasSqlMask, CountNonNull>>(
       sycl::range<1>(row_count), [=](sycl::id<1> id) {
-        run_dense_count_row<HasMembership, HasSqlMask>(device_params, id[0]);
+        run_dense_count_row<HasMembership, HasSqlMask, CountNonNull>(device_params, id[0]);
       });
 }
 
-template <bool HasMembership, bool HasSqlMask>
+template <bool HasMembership, bool HasSqlMask, bool CountNonNull>
 void submit_dense_count_workgroups(sycl::queue& queue, size_t group_capacity,
                                    size_t workgroup_count, KernelParams* const device_params) {
   queue.submit([&](sycl::handler& handler) {
     sycl::local_accessor<uint32_t, 1> local_counts(
-        sycl::range<1>(kDenseReductionWorkgroupSize * group_capacity), handler);
-    handler.parallel_for<GroupedAggDenseCountWorkgroupKernel<HasMembership, HasSqlMask>>(
+        sycl::range<1>((CountNonNull ? 2 : 1) * kDenseReductionWorkgroupSize * group_capacity),
+        handler);
+    handler.parallel_for<
+        GroupedAggDenseCountWorkgroupKernel<HasMembership, HasSqlMask, CountNonNull>>(
         sycl::nd_range<1>(sycl::range<1>(workgroup_count * kDenseReductionWorkgroupSize),
                           sycl::range<1>(kDenseReductionWorkgroupSize)),
         [=](sycl::nd_item<1> item) {
-          run_dense_count_workgroup<HasMembership, HasSqlMask>(device_params, item, local_counts);
+          run_dense_count_workgroup<HasMembership, HasSqlMask, CountNonNull>(device_params, item,
+                                                                             local_counts);
         });
   });
 }
@@ -3391,22 +3473,32 @@ void submit_dense_count_specialization(sycl::queue& queue, const pgaccel_grouped
                                        KernelParams* const device_params) {
   const bool membership = desc.dim_count != 0;
   const bool sql_mask = desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL;
-#define PGACCEL_SUBMIT_DENSE_COUNT(MEMBERSHIP, MASK)                                   \
-  do {                                                                                 \
-    if (layout.dense_count_hierarchical)                                               \
-      submit_dense_count_workgroups<MEMBERSHIP, MASK>(                                 \
-          queue, desc.group_capacity, layout.dense_count_chunk_count, device_params);  \
-    else                                                                               \
-      submit_dense_count_rows<MEMBERSHIP, MASK>(queue, desc.row_count, device_params); \
+#define PGACCEL_SUBMIT_DENSE_COUNT(MEMBERSHIP, MASK, NONNULL)                              \
+  do {                                                                                     \
+    if (layout.dense_count_hierarchical)                                                   \
+      submit_dense_count_workgroups<MEMBERSHIP, MASK, NONNULL>(                            \
+          queue, desc.group_capacity, layout.dense_count_chunk_count, device_params);      \
+    else                                                                                   \
+      submit_dense_count_rows<MEMBERSHIP, MASK, NONNULL>(queue, desc.row_count,             \
+                                                          device_params);                   \
   } while (false)
-  if (membership && sql_mask)
-    PGACCEL_SUBMIT_DENSE_COUNT(true, true);
+  const bool count_nonnull = parallel_dense_count_column_shape(desc);
+  if (membership && sql_mask && count_nonnull)
+    PGACCEL_SUBMIT_DENSE_COUNT(true, true, true);
+  else if (membership && sql_mask)
+    PGACCEL_SUBMIT_DENSE_COUNT(true, true, false);
+  else if (membership && count_nonnull)
+    PGACCEL_SUBMIT_DENSE_COUNT(true, false, true);
   else if (membership)
-    PGACCEL_SUBMIT_DENSE_COUNT(true, false);
+    PGACCEL_SUBMIT_DENSE_COUNT(true, false, false);
+  else if (sql_mask && count_nonnull)
+    PGACCEL_SUBMIT_DENSE_COUNT(false, true, true);
   else if (sql_mask)
-    PGACCEL_SUBMIT_DENSE_COUNT(false, true);
+    PGACCEL_SUBMIT_DENSE_COUNT(false, true, false);
+  else if (count_nonnull)
+    PGACCEL_SUBMIT_DENSE_COUNT(false, false, true);
   else
-    PGACCEL_SUBMIT_DENSE_COUNT(false, false);
+    PGACCEL_SUBMIT_DENSE_COUNT(false, false, false);
 #undef PGACCEL_SUBMIT_DENSE_COUNT
 }
 
@@ -3487,7 +3579,7 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
                              const WorkspaceLayout& layout, const KernelParams& host_params,
                              KernelParams* const device_params) {
   const bool parallel_dense_count =
-      parallel_dense_count_star_shape(desc) && desc.row_count <= UINT32_MAX;
+      parallel_dense_count_shape(desc) && desc.row_count <= UINT32_MAX;
   const bool parallel_dense_integer = layout.dense_integer_parallel;
   const bool atomic_dense_integer_one_shot = layout.dense_integer_atomic_one_shot;
   if (desc.grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH) {
@@ -3509,6 +3601,8 @@ void submit_grouped_agg_mode(sycl::queue& queue, const pgaccel_grouped_agg_desc&
       const size_t partial_count =
           layout.dense_count_hierarchical ? layout.dense_count_partial_count : desc.group_capacity;
       queue.fill(host_params.dense_chunk_counts, uint32_t{0}, partial_count);
+      if (host_params.dense_selected_counts != nullptr)
+        queue.fill(host_params.dense_selected_counts, uint32_t{0}, partial_count);
       if (desc.row_count != 0) {
         submit_dense_count_specialization(queue, desc, layout, device_params);
       }
@@ -3547,7 +3641,7 @@ int32_t grouped_agg_kernel_mode(const pgaccel_grouped_agg_desc& desc,
                                 const WorkspaceLayout& layout) {
   if (desc.grouping_mode == PGACCEL_GROUPED_AGG_GROUPING_HASH)
     return PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_HASH;
-  if (parallel_dense_count_star_shape(desc) && desc.row_count <= UINT32_MAX)
+  if (parallel_dense_count_shape(desc) && desc.row_count <= UINT32_MAX)
     return PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT;
   if (layout.dense_integer_atomic_one_shot || layout.dense_integer_parallel)
     return PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_INTEGER;

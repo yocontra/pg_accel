@@ -684,7 +684,7 @@ Accumulator states are explicit:
 
 | Kind | V1 physical input | `state_bytes` | Status |
 |---|---|---:|---|
-| I64 | INT32/INT64 | 8 | Phase 4B exact checked path |
+| I64 | BOOL (COUNT-only), INT32/INT64 | 8 | exact checked path |
 | F64 | FLOAT64 | 8 | Phase 4B path |
 | NUMERIC | fixed-point limbs with view scale | fixed width | represented; Phase 9 implementation |
 | INTERVAL | interval state with view precision | fixed width | represented; Phase 9 implementation |
@@ -735,6 +735,16 @@ for the exact membership, SQL-mask, and direct-column/product combinations.
 The native submission branch selects that template once on the host, so row
 kernels contain no per-row membership/mask/measure-shape branch. EXPLAIN reports
 both the specialization label and whether its identity lookup hit the cache.
+
+`PARALLEL_DENSE_COUNT` accepts canonical `COUNT_STAR` plus a canonical
+COUNT-only BOOL column descriptor. The BOOL specialization maintains separate
+u32 partials for selected rows and non-NULL measure rows: selected rows activate
+the group and update `selected_count`, while non-NULL rows update both COUNT and
+`nonnull_count`. Consequently an all-NULL measure group remains active with a
+zero COUNT. A malformed null sidecar fails before either partial is changed.
+Normal planning exposes this branch only for one nullable boolean fact key and
+one distinct nullable boolean measure, without joins, filters, `HAVING`, or
+additional measures.
 
 Low-cardinality dense COUNT and exact integer SUM/MIN/MAX use 32-work-item
 groups over 1,024-row tiles. Each work item accumulates multiple rows, the work

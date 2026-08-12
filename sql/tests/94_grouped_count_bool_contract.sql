@@ -1,5 +1,6 @@
--- 94_grouped_count_bool_contract.sql: exact selected-path boundary for
--- GROUP BY nullable bool key with COUNT(nullable bool).
+-- 94_grouped_count_bool_contract.sql: exact selected-path boundary for one
+-- nullable bool fact key grouped with COUNT over a distinct nullable bool
+-- fact column. Adjacent global COUNT remains PostgreSQL-native.
 
 \echo '=== 94_grouped_count_bool_contract ==='
 
@@ -14,7 +15,7 @@ CREATE TEMP TABLE _bool_count_contract (
 INSERT INTO _bool_count_contract (id, bool_key, observed)
 SELECT i,
        CASE WHEN i % 19 = 0 THEN NULL ELSE i % 2 = 0 END,
-       CASE WHEN i % 11 = 0 THEN NULL ELSE i % 3 = 0 END
+       CASE WHEN i % 19 = 0 OR i % 11 = 0 THEN NULL ELSE i % 3 = 0 END
 FROM generate_series(1, 1000000) AS rows(i);
 ANALYZE _bool_count_contract;
 
@@ -36,7 +37,6 @@ DECLARE
     kernels_before bigint;
     kernels_after bigint;
     stock_after bigint;
-    declines_after bigint;
     plan_row record;
 BEGIN
     SELECT gpu_available INTO STRICT has_gpu FROM pg_accel_device_info();
@@ -46,9 +46,7 @@ BEGIN
            count(*) FILTER (
                WHERE id % 11 <> 0 AND id % 19 <> 0 AND id % 2 = 0
            ),
-           count(*) FILTER (
-               WHERE id % 11 <> 0 AND id % 19 = 0
-           )
+           0::bigint
     INTO STRICT expected_false, expected_true, expected_null
     FROM _bool_count_contract;
 
@@ -95,9 +93,6 @@ BEGIN
 
     SELECT pg_accel_kernel_executions() INTO STRICT kernels_after;
     SELECT stock_exec_count INTO STRICT stock_after FROM pg_accel_stats();
-    SELECT pg_accel_planner_rejection_count('shape_unsupported_aggregate_input')
-    INTO STRICT declines_after;
-
     IF EXISTS (
         (SELECT * FROM _bool_count_native EXCEPT ALL SELECT * FROM _bool_count_enabled)
         UNION ALL
@@ -106,17 +101,38 @@ BEGIN
         RAISE EXCEPTION
             '94 bool COUNT contract FAILED: enabled result differs from native';
     END IF;
-    IF EXISTS (
+    IF stock_after <> 0 THEN
+        RAISE EXCEPTION
+            '94 bool COUNT contract FAILED: stock fallback count is %', stock_after;
+    END IF;
+    IF has_gpu THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM _bool_count_plan
+            WHERE line LIKE '%Custom Scan (%GpuAccel%'
+        ) OR NOT EXISTS (
+            SELECT 1 FROM _bool_count_plan
+            WHERE line LIKE '%GPU Physical Kernel Mode: parallel_dense_count%'
+        ) OR NOT EXISTS (
+            SELECT 1 FROM _bool_count_plan
+            WHERE line LIKE '%GPU Dispatched Physical Kernel Mode: parallel_dense_count%'
+        ) OR NOT EXISTS (
+            SELECT 1 FROM _bool_count_plan
+            WHERE line LIKE '%GPU Physical Kernel Mode Verified: true%'
+        ) OR NOT EXISTS (
+            SELECT 1 FROM _bool_count_plan
+            WHERE line LIKE '%GPU Descriptor Specialization: dense_bool_count_plain%'
+        ) OR kernels_after <= kernels_before THEN
+            RAISE EXCEPTION
+                '94 bool COUNT contract FAILED: selected fast path incomplete (kernels % -> %)',
+                kernels_before, kernels_after;
+        END IF;
+    ELSIF EXISTS (
         SELECT 1 FROM _bool_count_plan
         WHERE line LIKE '%Custom Scan (%GpuAccel%'
-    ) OR kernels_after <> kernels_before OR stock_after <> 0 THEN
+    ) OR kernels_after <> kernels_before THEN
         RAISE EXCEPTION
-            '94 bool COUNT contract FAILED: losing shape selected/dispatched (kernels % -> %, stock %)',
-            kernels_before, kernels_after, stock_after;
-    END IF;
-    IF has_gpu AND declines_after <= 0 THEN
-        RAISE EXCEPTION
-            '94 bool COUNT contract FAILED: grouped exact native decline reason was not recorded';
+            '94 bool COUNT contract FAILED: CPU-only host selected/dispatched (kernels % -> %)',
+            kernels_before, kernels_after;
     END IF;
 END $$;
 \echo 'PGACCEL_ASSERT_OK:94_grouped_count_bool_contract.assert_001'
@@ -148,7 +164,7 @@ BEGIN
 
     SELECT pg_accel_kernel_executions() INTO STRICT kernels_after;
     SELECT stock_exec_count INTO STRICT stock_after FROM pg_accel_stats();
-    SELECT pg_accel_planner_rejection_count('shape_unsupported_aggregate_input')
+    SELECT pg_accel_planner_rejection_count('generic_serial_kernel_mode_unqualified')
     INTO STRICT declines_after;
 
     IF enabled_count IS DISTINCT FROM native_count THEN

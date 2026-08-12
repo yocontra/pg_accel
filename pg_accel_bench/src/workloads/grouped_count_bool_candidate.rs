@@ -1,13 +1,11 @@
 use super::{ExpectedResultValue, ResultOracle, Workload};
 
-const GROUPED_COUNT_BOOL_ROWS: &[usize] = &[1_000_000];
+const GROUPED_COUNT_BOOL_ROWS: &[usize] = &[250_000, 1_000_000];
 
-/// Candidate for exact nullable boolean column COUNT grouped by boolean.
+/// Released exact nullable boolean column COUNT grouped by boolean.
 ///
-/// The narrow planner experiment lost its release benchmark and remains
-/// native. The fixture and oracle are retained for future optimization work;
-/// they cover true, false, NULL keys and NULL measure values without sharing
-/// the grouped SQL implementation.
+/// The fixture and independent oracle cover true, false, NULL keys and NULL
+/// measure values without sharing the grouped SQL implementation.
 pub struct GroupedCountBoolCandidate;
 
 fn expected_counts(rows: usize) -> [i64; 3] {
@@ -107,8 +105,8 @@ mod tests {
     }
 
     #[test]
-    fn candidate_is_fixed_to_the_release_scale() {
-        assert_eq!(GroupedCountBoolCandidate.row_scales(), [1_000_000]);
+    fn candidate_covers_the_released_floor_and_sentinel_scales() {
+        assert_eq!(GroupedCountBoolCandidate.row_scales(), [250_000, 1_000_000]);
         assert!(
             GroupedCountBoolCandidate
                 .query_sql()
