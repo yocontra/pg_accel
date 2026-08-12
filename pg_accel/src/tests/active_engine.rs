@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[pg_test]
-    fn unfiltered_integer_selects_while_serial_and_structural_ranges_decline() {
+    fn unfiltered_and_bounded_integer_ranges_select_while_other_ranges_decline() {
         if !begin_gpu_test() {
             return;
         }
@@ -580,12 +580,13 @@ mod tests {
             "generic_serial_kernel_mode_unqualified",
         );
 
-        assert_native_decline_matches_native(
-            "SELECT product_id, sum(price * quantity) AS sum, count(*) AS count \
+        let bounded_range_query = "SELECT product_id, sum(price * quantity) AS sum, count(*) AS count \
              FROM pgaccel_active_and_ranges \
              WHERE price >= 200 AND price <= 800 \
-             GROUP BY product_id ORDER BY product_id",
-            "shape_multiple_range_predicates",
+             GROUP BY product_id ORDER BY product_id";
+        assert_eq!(
+            assert_selected_matches_native(bounded_range_query).len(),
+            256
         );
 
         assert_planner_decline(
@@ -604,7 +605,7 @@ mod tests {
             "SELECT product_id, sum(price * quantity), count(*) \
              FROM pgaccel_active_and_ranges \
              WHERE price >= 900 AND price <= 100 GROUP BY product_id",
-            "shape_multiple_range_predicates",
+            "shape_invalid_filter_range",
         );
     }
 }
