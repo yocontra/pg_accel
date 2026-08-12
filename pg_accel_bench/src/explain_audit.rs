@@ -232,9 +232,10 @@ fn build_matrix() -> Vec<AuditRow> {
             // and the planner now intentionally gates it back to PostgreSQL
             // until the GPU full-sort algorithm/materialization path is fixed.
             name: "parallel_orderby",
-            description: "ORDER BY v — full sort",
+            description: "ORDER BY v — full-output sort with parallel-safe projection",
             setup: vec![],
-            query: "SELECT * FROM bench_f32_10m ORDER BY v",
+            query: "SELECT id, v, dim, md5(id::text) AS digest \
+                    FROM bench_f32_10m ORDER BY v",
             expectation: RatchetExpectation::RequiredAfterPhase("full-sort GPU algorithm/costing"),
         },
         AuditRow {
@@ -819,8 +820,14 @@ mod tests {
             .iter()
             .find(|row| row.name == "parallel_orderby")
             .expect("parallel_orderby row missing");
-        assert_eq!(row.description, "ORDER BY v — full sort");
-        assert_eq!(row.query, "SELECT * FROM bench_f32_10m ORDER BY v");
+        assert_eq!(
+            row.description,
+            "ORDER BY v — full-output sort with parallel-safe projection"
+        );
+        assert_eq!(
+            row.query,
+            "SELECT id, v, dim, md5(id::text) AS digest FROM bench_f32_10m ORDER BY v"
+        );
         assert!(matches!(
             row.expectation,
             RatchetExpectation::RequiredAfterPhase("full-sort GPU algorithm/costing")

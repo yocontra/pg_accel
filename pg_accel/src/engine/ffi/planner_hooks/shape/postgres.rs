@@ -545,7 +545,6 @@ unsafe fn parse_aggregate(
         || !aggregate.aggdirectargs.is_null()
         || !aggregate.aggorder.is_null()
         || !aggregate.aggdistinct.is_null()
-        || !aggregate.aggfilter.is_null()
     {
         return Err(ShapeDecline::UnsupportedAggregateModifier);
     }
@@ -557,13 +556,16 @@ unsafe fn parse_aggregate(
         .ok_or(ShapeDecline::UnsupportedAggregate { aggregate_oid })?;
     // SAFETY: aggregate and query are from the same active planner tree.
     let expression = unsafe { measure_expression(aggregate, query, kind) }?;
+    // SAFETY: aggfilter, when present, belongs to this analyzed Aggref and
+    // shares the active Query's planner lifetime.
+    let filter = unsafe { aggregate_filter(aggregate.aggfilter.cast::<Node>(), query) }?;
     Ok(AggregateExpr {
         expression,
         output: AggregateOutput {
             source: AggregateSource::Value,
             kind,
         },
-        filter: FilterSpec::None,
+        filter,
     })
 }
 
@@ -1006,6 +1008,46 @@ enum PendingFilter {
         relation_oid: u32,
         filter: FilterSpec,
     },
+}
+
+/// Extract the first released aggregate-local predicate shape.
+///
+/// A bounded INT4 interval over one column is losslessly representable by the
+/// frozen descriptor ABI and has a dedicated parallel dense implementation.
+/// Everything else retains the aggregate-modifier decline instead of falling
+/// through to the generic serial descriptor path.
+unsafe fn aggregate_filter(
+    node: *mut Node,
+    query: &pg_sys::Query,
+) -> Result<FilterSpec, ShapeDecline> {
+    if node.is_null() {
+        return Ok(FilterSpec::None);
+    }
+    let mut joins = Vec::new();
+    let mut filters = BTreeMap::new();
+    // SAFETY: node is the planner-owned Aggref filter for this active Query.
+    unsafe { parse_qual(node, query, &mut joins, &mut filters) }
+        .map_err(|_| ShapeDecline::UnsupportedAggregateModifier)?;
+    if !joins.is_empty() || filters.len() != 1 {
+        return Err(ShapeDecline::UnsupportedAggregateModifier);
+    }
+    let Some(PendingFilter::Ranges { input, range, .. }) = filters.into_values().next() else {
+        return Err(ShapeDecline::UnsupportedAggregateModifier);
+    };
+    let (ScalarValue::I32(lo), ScalarValue::I32(hi)) = (range.lo, range.hi) else {
+        return Err(ShapeDecline::UnsupportedAggregateModifier);
+    };
+    if input.column.type_oid != u32::from(pg_sys::INT4OID)
+        || lo == i32::MIN
+        || hi == i32::MAX
+        || lo >= hi
+    {
+        return Err(ShapeDecline::UnsupportedAggregateModifier);
+    }
+    Ok(FilterSpec::Ranges {
+        input: input.column,
+        ranges: vec![range],
+    })
 }
 
 fn intersect_ranges(left: ScalarRange, right: ScalarRange) -> Result<ScalarRange, ShapeDecline> {

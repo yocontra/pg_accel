@@ -37,6 +37,11 @@ claim is implied by the entries below.
   `SUM(int4_lhs * int4_rhs), COUNT(*)` fuses exactly two same-column bounds on
   the nullable product lhs into one inclusive device range without a derived
   predicate mask; adjacent range shapes remain PostgreSQL-native.
+- A qualified dense-integer specialization for grouped
+  `SUM(int4_value) FILTER (WHERE int4_value BETWEEN lo AND hi), COUNT(*)`
+  applies the bounded aggregate-local predicate only to SUM while retaining
+  every group and unfiltered COUNT row; broader aggregate modifiers remain
+  PostgreSQL-native.
 - SSBM-, TPC-H-, and ClickBench-style system workload characterization plus an
   eight-backend residency/concurrency proof with exact cluster-byte cleanup.
 

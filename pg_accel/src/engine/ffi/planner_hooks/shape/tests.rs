@@ -187,6 +187,52 @@ fn range_intersection_grouped_input() -> ShapeInput {
     }
 }
 
+fn aggregate_filter_grouped_input() -> ShapeInput {
+    let group = column(1, 100, 1, u32::from(pg_sys::INT4OID));
+    let value = column(1, 100, 2, u32::from(pg_sys::INT4OID));
+    let (mut sum, sum_output) = aggregate(
+        MeasureExpr::Column(value.column),
+        AggregateKind::Sum,
+        u32::from(pg_sys::INT8OID),
+    );
+    sum.filter = FilterSpec::Ranges {
+        input: value.column,
+        ranges: vec![ScalarRange {
+            lo: ScalarValue::I32(200),
+            hi: ScalarValue::I32(800),
+        }],
+    };
+    let (count, count_output) = aggregate(
+        MeasureExpr::CountStar,
+        AggregateKind::Count,
+        u32::from(pg_sys::INT8OID),
+    );
+    ShapeInput {
+        relations: vec![relation(1, 100, 1_000_000)],
+        joins: Vec::new(),
+        group_keys: vec![PlannerGroupKey::Column(group)],
+        aggregates: vec![sum, count],
+        projections: vec![
+            InputProjection::Group {
+                key: PlannerGroupKey::Column(group),
+                output: output(u32::from(pg_sys::INT4OID), true),
+            },
+            InputProjection::Aggregate {
+                aggregate_index: 0,
+                output: sum_output,
+            },
+            InputProjection::Aggregate {
+                aggregate_index: 1,
+                output: count_output,
+            },
+        ],
+        relation_filters: Vec::new(),
+        estimated_output_rows: 256,
+        expected_reuses: NonZeroU32::MIN,
+        modifiers: ShapeModifiers::default(),
+    }
+}
+
 fn add_dimension(input: &mut ShapeInput, varno: pg_sys::Index, relation_oid: u32, group: bool) {
     let fact_attno = i32::try_from(varno).unwrap_or(i32::MAX).saturating_add(2);
     let fact_key = column(1, 100, fact_attno, u32::from(pg_sys::INT4OID));
@@ -1993,7 +2039,18 @@ fn float_binary_expression_declines_before_aggregate_projection() {
 }
 
 #[test]
-fn aggregate_filter_waits_for_the_phase9_filter_contract() {
+fn aggregate_filter_admits_only_the_exact_bounded_int4_release_shape() {
+    let plan = build_shape(aggregate_filter_grouped_input(), &model())
+        .expect("bounded INT4 aggregate FILTER should build");
+    assert_eq!(
+        planned_descriptor_kernel_mode(&plan.spec, false),
+        GroupedAggKernelMode::ParallelDenseInteger
+    );
+    assert!(matches!(
+        plan.spec.measures[0].filter,
+        FilterSpec::Ranges { .. }
+    ));
+
     let mut input = single_table_input();
     input.aggregates[0].filter = FilterSpec::Ranges {
         input: ColumnRef {

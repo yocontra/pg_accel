@@ -6387,6 +6387,13 @@ mod tests {
             )]
         );
         assert_eq!(
+            resident_pin_specs("aggregate_filter_grouped_agg_int4"),
+            vec![resident_pin(
+                "bench_aggregate_filter_sales_int4",
+                &["product_id", "price"],
+            )]
+        );
+        assert_eq!(
             resident_pin_specs("and_range_predicate_expression_grouped_agg_int4"),
             vec![resident_pin(
                 "bench_and_range_predicate_expression_sales_int4",
@@ -6776,6 +6783,7 @@ mod tests {
         for name in [
             "grouped_agg_int4",
             "predicate_expression_grouped_agg_int4",
+            "aggregate_filter_grouped_agg_int4",
             "and_range_predicate_expression_grouped_agg_int4",
             "mixed_join_agg_int4",
             "ssbm_resident_int4_star",

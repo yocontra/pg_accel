@@ -72,6 +72,7 @@ enum DescriptorSpecializationFamily {
     DenseCount,
     DenseBoolCount,
     DenseIntegerColumn,
+    DenseIntegerColumnMeasureRange,
     DenseIntegerMultiply,
     DenseIntegerMultiplyRange,
     SerialGeneric,
@@ -124,6 +125,9 @@ impl DescriptorSpecialization {
             (DescriptorSpecializationFamily::DenseIntegerColumn, true, true) => {
                 "dense_integer_column_membership_sql_mask"
             }
+            (DescriptorSpecializationFamily::DenseIntegerColumnMeasureRange, false, false) => {
+                "dense_integer_column_measure_range"
+            }
             (DescriptorSpecializationFamily::DenseIntegerMultiply, false, false) => {
                 "dense_integer_multiply_plain"
             }
@@ -145,6 +149,9 @@ impl DescriptorSpecialization {
             (DescriptorSpecializationFamily::HashCount, _, _) => "invalid_hash_specialization",
             (DescriptorSpecializationFamily::DenseIntegerMultiplyRange, _, _) => {
                 "invalid_dense_integer_range_specialization"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerColumnMeasureRange, _, _) => {
+                "invalid_dense_integer_measure_range_specialization"
             }
         }
     }
@@ -285,6 +292,48 @@ fn canonical_dense_integer_value_measure(measure: &crate::engine::spec::MeasureS
     }
 }
 
+fn canonical_dense_integer_measure_range(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    let MeasureExpr::Column(value) = &measure.expression else {
+        return false;
+    };
+    let FilterSpec::Ranges { input, ranges } = &measure.filter else {
+        return false;
+    };
+    let [range] = ranges.as_slice() else {
+        return false;
+    };
+    let (ScalarValue::I32(lo), ScalarValue::I32(hi)) = (range.lo, range.hi) else {
+        return false;
+    };
+    let [group_key] = spec.group_keys.as_slice() else {
+        return false;
+    };
+    let GroupKeySource::FactColumn(group_column) = &group_key.source else {
+        return false;
+    };
+    value.type_oid == INT4OID
+        && input == value
+        && lo != i32::MIN
+        && hi != i32::MAX
+        && lo < hi
+        && value.relation_oid == spec.fact_rel
+        && group_key.type_oid == INT4OID
+        && group_column.type_oid == INT4OID
+        && group_column.relation_oid == spec.fact_rel
+        && group_column != value
+        && spec.star_dims.is_empty()
+        && spec.fact_filter == FilterSpec::None
+        && spec.having.is_none()
+        && measure.outputs.as_slice()
+            == [crate::engine::spec::AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Sum,
+            }]
+}
+
 fn canonical_dense_integer_range_intersection(
     spec: &AggQuerySpec,
     value_measure: &crate::engine::spec::MeasureSpec,
@@ -360,7 +409,8 @@ pub fn planned_descriptor_kernel_mode(
             GroupedAggKernelMode::ParallelDenseCount
         }
         [value, count]
-            if canonical_dense_integer_value_measure(value)
+            if (canonical_dense_integer_value_measure(value)
+                || canonical_dense_integer_measure_range(spec, value))
                 && canonical_count_measure(count)
                 && (parallel_dense_fact_filter(&spec.fact_filter)
                     || canonical_dense_integer_range_intersection(spec, value)) =>
@@ -392,6 +442,9 @@ fn classify_descriptor_specialization(
             _ => DescriptorSpecializationFamily::DenseCount,
         },
         GroupedAggKernelMode::ParallelDenseInteger => match spec.measures.first() {
+            Some(measure) if canonical_dense_integer_measure_range(spec, measure) => {
+                DescriptorSpecializationFamily::DenseIntegerColumnMeasureRange
+            }
             Some(measure) if canonical_dense_integer_range_intersection(spec, measure) => {
                 DescriptorSpecializationFamily::DenseIntegerMultiplyRange
             }
@@ -745,7 +798,9 @@ fn validate_runtime_capability_with_spatial(
         allow_internal_spatial,
     )?;
     for measure in &spec.measures {
-        if !matches!(measure.filter, FilterSpec::None) {
+        if !matches!(measure.filter, FilterSpec::None)
+            && !canonical_dense_integer_measure_range(spec, measure)
+        {
             return Err("aggregate FILTER is not implemented by Phase 5D".into());
         }
         validate_measure_outputs(&measure.expression, &measure.outputs)?;
@@ -2664,6 +2719,9 @@ fn build_filter(
         }
         | FilterSpec::Spatial { .. } => build_sql_mask_filter(fact_rows, fact_mask),
         FilterSpec::Ranges { input, ranges } => {
+            if ranges.len() > abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES {
+                return Err("fact filter range count exceeds descriptor capacity".to_owned());
+            }
             let mut filter = disabled_filter();
             filter.predicate_measure_slot = i32::try_from(filter_measure_binding(spec, *input)?)
                 .map_err(|_| "filter measure index exceeds i32".to_owned())?;
@@ -2677,6 +2735,32 @@ fn build_filter(
             Ok(filter)
         }
         _ => Err("fact filter escaped the Phase 5D capability backstop".into()),
+    }
+}
+
+fn build_measure_filter(
+    spec: &AggQuerySpec,
+    filter: &FilterSpec,
+) -> Result<abi::PgaccelGroupedAggFilter, String> {
+    match filter {
+        FilterSpec::None => Ok(disabled_filter()),
+        FilterSpec::Ranges { input, ranges } => {
+            if ranges.len() > abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES {
+                return Err("measure filter range count exceeds descriptor capacity".to_owned());
+            }
+            let mut filter = disabled_filter();
+            filter.predicate_measure_slot = i32::try_from(filter_measure_binding(spec, *input)?)
+                .map_err(|_| "measure filter input index exceeds i32".to_owned())?;
+            filter.predicate_source = abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+            filter.predicate_range_count = i32::try_from(ranges.len())
+                .map_err(|_| "measure filter range count exceeds i32".to_owned())?;
+            for (index, range) in ranges.iter().enumerate() {
+                filter.predicate_lo[index] = scalar_value(range.lo);
+                filter.predicate_hi[index] = scalar_value(range.hi);
+            }
+            Ok(filter)
+        }
+        _ => Err("measure filter escaped the Phase 5D capability backstop".into()),
     }
 }
 
@@ -2814,8 +2898,12 @@ fn build_descriptor_with_fact_mask(
         };
     }
     desc.where_filter = build_filter(spec, artifact.fact_rows, fact_mask)?;
-    for filter in &mut desc.measure_filters {
-        *filter = disabled_filter();
+    for (index, filter) in desc.measure_filters.iter_mut().enumerate() {
+        *filter = if let Some(measure) = spec.measures.get(index) {
+            build_measure_filter(spec, &measure.filter)?
+        } else {
+            disabled_filter()
+        };
     }
     desc.dim_count = u32::try_from(artifact.dimensions.len())
         .map_err(|_| "dimension count exceeds u32".to_owned())?;
@@ -3423,15 +3511,15 @@ fn parallel_dense_count_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
 }
 
 fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
+    let measure_range = canonical_dense_integer_range_filter(&desc.measure_filters[0]);
     if desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX
         || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
         || desc.group_capacity == 0
         || desc.measure_count != 2
         || !parallel_dense_integer_filter_kind(&desc.where_filter)
         || !parallel_dense_unique_dimensions(desc)
-        || desc.measure_filters[..2]
-            .iter()
-            .any(|filter| !canonical_disabled_filter(filter))
+        || (!canonical_disabled_filter(&desc.measure_filters[0]) && !measure_range)
+        || !canonical_disabled_filter(&desc.measure_filters[1])
     {
         return false;
     }
@@ -3450,6 +3538,12 @@ fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
     (direct_sum || product_sum)
         && (!canonical_dense_integer_range_filter(&desc.where_filter)
             || (product_sum && desc.key_count == 1 && desc.dim_count == 0))
+        && (!measure_range
+            || (direct_sum
+                && value.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                && canonical_disabled_filter(&desc.where_filter)
+                && desc.key_count == 1
+                && desc.dim_count == 0))
         && value.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
         && value.value.element_bytes == 4
         && value.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
@@ -4174,6 +4268,23 @@ mod tests {
         range.where_filter.predicate_lo[1] = scalar_value(ScalarValue::I32(300));
         range.where_filter.predicate_hi[1] = scalar_value(ScalarValue::I32(700));
         assert!(!parallel_dense_integer_shape(&range));
+
+        let mut measure_range = release_shape;
+        measure_range.key_count = 1;
+        measure_range.measure_filters[0].predicate_source =
+            abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+        measure_range.measure_filters[0].predicate_measure_slot = 0;
+        measure_range.measure_filters[0].predicate_range_count = 1;
+        measure_range.measure_filters[0].predicate_lo[0] = scalar_value(ScalarValue::I32(200));
+        measure_range.measure_filters[0].predicate_hi[0] = scalar_value(ScalarValue::I32(800));
+        assert!(parallel_dense_integer_shape(&measure_range));
+        assert!(dense_one_shot_eligible(
+            &measure_range,
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
+        ));
+        measure_range.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        measure_range.where_filter.mask = mask.as_ptr();
+        assert!(!parallel_dense_integer_shape(&measure_range));
     }
 
     #[test]
@@ -4363,6 +4474,81 @@ mod tests {
         }
     }
 
+    fn dense_integer_measure_range_spec() -> AggQuerySpec {
+        let group = ColumnRef {
+            relation_oid: 42,
+            attno: 1,
+            type_oid: INT4OID,
+        };
+        let value = ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: INT4OID,
+        };
+        AggQuerySpec {
+            fact_rel: 42,
+            group_keys: vec![GroupKeyRef {
+                source: GroupKeySource::FactColumn(group),
+                type_oid: INT4OID,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::DictionaryI32 {
+                    cardinality: 256,
+                    null_code: None,
+                },
+            }],
+            measures: vec![
+                MeasureSpec {
+                    expression: MeasureExpr::Column(value),
+                    outputs: vec![AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Sum,
+                    }],
+                    filter: FilterSpec::Ranges {
+                        input: value,
+                        ranges: vec![ScalarRange {
+                            lo: ScalarValue::I32(200),
+                            hi: ScalarValue::I32(800),
+                        }],
+                    },
+                },
+                MeasureSpec {
+                    expression: MeasureExpr::CountStar,
+                    outputs: vec![AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    }],
+                    filter: FilterSpec::None,
+                },
+            ],
+            fact_filter: FilterSpec::None,
+            star_dims: Vec::new(),
+            having: None,
+        }
+    }
+
+    #[test]
+    fn measure_filter_builder_rejects_ranges_beyond_the_frozen_abi_capacity() {
+        let spec = dense_integer_measure_range_spec();
+        let value = match spec.measures[0].expression {
+            MeasureExpr::Column(value) => value,
+            ref expression => panic!("expected direct column measure, got {expression:?}"),
+        };
+        let filter = FilterSpec::Ranges {
+            input: value,
+            ranges: vec![
+                ScalarRange {
+                    lo: ScalarValue::I32(1),
+                    hi: ScalarValue::I32(2),
+                };
+                abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES + 1
+            ],
+        };
+        assert!(matches!(
+            build_measure_filter(&spec, &filter),
+            Err(error) if error == "measure filter range count exceeds descriptor capacity"
+        ));
+    }
+
     #[test]
     fn planned_kernel_mode_is_stable_and_rejects_serial_shapes() {
         let count = spec(MeasureExpr::CountStar, AggregateKind::Count);
@@ -4413,6 +4599,21 @@ mod tests {
         assert_eq!(
             planned_descriptor_kernel_mode(&range_integer, false),
             GroupedAggKernelMode::ParallelDenseInteger
+        );
+        let measure_range = dense_integer_measure_range_spec();
+        assert_eq!(
+            planned_descriptor_kernel_mode(&measure_range, false),
+            GroupedAggKernelMode::ParallelDenseInteger
+        );
+        let mut one_sided_measure_range = measure_range;
+        let FilterSpec::Ranges { ranges, .. } = &mut one_sided_measure_range.measures[0].filter
+        else {
+            unreachable!("measure range fixture")
+        };
+        ranges[0].hi = ScalarValue::I32(i32::MAX);
+        assert_eq!(
+            planned_descriptor_kernel_mode(&one_sided_measure_range, false),
+            GroupedAggKernelMode::SerialGeneric
         );
         let mut one_sided_range = range_integer.clone();
         let FilterSpec::Ranges { ranges, .. } = &mut one_sided_range.fact_filter else {
@@ -4581,9 +4782,25 @@ mod tests {
         );
         assert_eq!(range_variant.label(), "dense_integer_multiply_range");
         assert_eq!(range_outcome, DescriptorSpecializationCacheOutcome::Miss);
+        let measure_range = dense_integer_measure_range_spec();
+        let measure_range_identity =
+            DerivedArtifactIdentity::from_canonical_words(vec![13, 14, 15, 16]);
+        let (measure_range_variant, measure_range_outcome) = cached_descriptor_specialization(
+            &measure_range_identity,
+            &measure_range,
+            GroupedAggKernelMode::ParallelDenseInteger,
+        );
+        assert_eq!(
+            measure_range_variant.label(),
+            "dense_integer_column_measure_range"
+        );
+        assert_eq!(
+            measure_range_outcome,
+            DescriptorSpecializationCacheOutcome::Miss
+        );
         assert_eq!(
             DESCRIPTOR_SPECIALIZATION_CACHE.with(|cache| cache.borrow().len()),
-            4,
+            5,
             "a digest lookup never aliases a different complete canonical identity"
         );
     }
@@ -5871,6 +6088,12 @@ mod tests {
         let desc = zero_descriptor(&ranged, &[], &[INT4OID]);
         assert_eq!(desc.where_filter.predicate_range_count, 1);
         assert_eq!(desc.where_filter.predicate_measure_slot, 0);
+
+        let measure_filtered = dense_integer_measure_range_spec();
+        let desc = zero_descriptor(&measure_filtered, &[INT4OID], &[INT4OID]);
+        assert_eq!(desc.measure_filters[0].predicate_range_count, 1);
+        assert_eq!(desc.measure_filters[0].predicate_measure_slot, 0);
+        assert!(canonical_disabled_filter(&desc.measure_filters[1]));
 
         let mut masked = global.clone();
         masked.fact_filter = FilterSpec::Mask {

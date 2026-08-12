@@ -491,10 +491,11 @@ bool parallel_dense_count_shape(const pgaccel_grouped_agg_desc& desc) {
 }
 
 bool parallel_dense_integer_structure(const pgaccel_grouped_agg_desc& desc) {
+  const bool measure_range = exact_dense_integer_range_filter(desc.measure_filters[0]);
   if (desc.grouping_mode != PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX ||
       desc.output_mode != PGACCEL_GROUPED_AGG_OUTPUT_DENSE || desc.group_capacity == 0 ||
       desc.measure_count != 2 || !parallel_dense_integer_where_filter(desc.where_filter) ||
-      !canonical_disabled_filter(desc.measure_filters[0]) ||
+      (!canonical_disabled_filter(desc.measure_filters[0]) && !measure_range) ||
       !canonical_disabled_filter(desc.measure_filters[1]))
     return false;
   const pgaccel_grouped_agg_measure& value = desc.measures[0];
@@ -511,6 +512,9 @@ bool parallel_dense_integer_structure(const pgaccel_grouped_agg_desc& desc) {
   if ((!direct_integer_stats && !integer_product_sum) ||
       (exact_dense_integer_range_filter(desc.where_filter) &&
        (!integer_product_sum || desc.key_count != 1 || desc.dim_count != 0)) ||
+      (measure_range && (!direct_integer_stats || value.agg_mask != PGACCEL_GROUPED_AGG_LANE_SUM ||
+                         !canonical_disabled_filter(desc.where_filter) || desc.key_count != 1 ||
+                         desc.dim_count != 0)) ||
       value.accumulator_kind != PGACCEL_GROUPED_AGG_ACCUM_I64 ||
       value.state_bytes != sizeof(int64_t) ||
       value.value.physical_type != PGACCEL_GROUPED_AGG_PHYSICAL_INT32 ||
@@ -691,7 +695,8 @@ bool make_layout(const pgaccel_grouped_agg_desc& desc, WorkspaceLayout* layout) 
       const pgaccel_grouped_agg_measure& measure = desc.measures[0];
       const bool statically_nonnull =
           measure.value.nulls == nullptr &&
-          (measure.op != PGACCEL_GROUPED_AGG_MEASURE_MUL || measure.rhs.nulls == nullptr);
+          (measure.op != PGACCEL_GROUPED_AGG_MEASURE_MUL || measure.rhs.nulls == nullptr) &&
+          !exact_dense_integer_range_filter(desc.measure_filters[0]);
       if (!arena.add<AtomicU64Words>(desc.group_capacity, &layout->dense_integer_atomic_sum) ||
           (!statically_nonnull &&
            !arena.add<AtomicU64Words>(desc.group_capacity,
@@ -1806,6 +1811,27 @@ inline FilterResult specialized_dense_integer_where_filter(const KernelParams& p
   }
 }
 
+template <bool HasMeasureRange>
+inline FilterResult specialized_dense_integer_measure_filter(const KernelParams& params, size_t row,
+                                                             int32_t* range_value) {
+  if constexpr (!HasMeasureRange) {
+    return FilterResult::Accept;
+  } else {
+    const pgaccel_grouped_agg_measure_col& col = params.measures[0].value;
+    bool is_null = false;
+    if (!null_at(col.nulls, row, &is_null))
+      return FilterResult::Error;
+    if (is_null)
+      return FilterResult::Reject;
+    const int32_t value = static_cast<const int32_t*>(col.values)[row];
+    *range_value = value;
+    const pgaccel_grouped_agg_filter& filter = params.measure_filters[0];
+    return value >= filter.predicate_lo[0].data.i32 && value <= filter.predicate_hi[0].data.i32
+               ? FilterResult::Accept
+               : FilterResult::Reject;
+  }
+}
+
 inline bool atomic_increment_u32(uint32_t* value) {
   DeviceAtomic<uint32_t> count(*value);
   // Hash validation caps row_count at UINT32_MAX, and each row increments
@@ -2266,7 +2292,8 @@ inline uint64_t atomic_u64_value(const AtomicU64Words& value) {
   return static_cast<uint64_t>(value.low) | (static_cast<uint64_t>(value.high) << 32);
 }
 
-template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply>
+template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
+          bool HasMeasureRange>
 inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
   KernelParams& params = *params_ptr;
   size_t group = 0;
@@ -2291,9 +2318,19 @@ inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
 
   atomic_add_u64(params.dense_integer_atomic_count[group], 1);
 
+  int32_t measure_range_value = 0;
+  const FilterResult measure_filter =
+      specialized_dense_integer_measure_filter<HasMeasureRange>(params, row, &measure_range_value);
+  if (measure_filter == FilterResult::Error || measure_filter == FilterResult::Uncertain) {
+    record_failure(*params.meta, kFailureInvalid);
+    return;
+  }
+  if (measure_filter == FilterResult::Reject)
+    return;
+
   const pgaccel_grouped_agg_measure& measure = params.measures[0];
   bool lhs_null = false;
-  if constexpr (!HasScalarRange) {
+  if constexpr (!HasScalarRange && !HasMeasureRange) {
     if (!null_at(measure.value.nulls, row, &lhs_null)) {
       record_failure(*params.meta, kFailureInvalid);
       return;
@@ -2309,8 +2346,9 @@ inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
   if (lhs_null || rhs_null)
     return;
 
-  int64_t value =
-      HasScalarRange ? range_value : static_cast<const int32_t*>(measure.value.values)[row];
+  int64_t value = HasScalarRange    ? range_value
+                  : HasMeasureRange ? measure_range_value
+                                    : static_cast<const int32_t*>(measure.value.values)[row];
   if constexpr (Multiply) {
     const int64_t rhs = static_cast<const int32_t*>(measure.rhs.values)[row];
     value *= rhs;
@@ -2324,8 +2362,8 @@ inline void run_dense_integer_atomic_row(KernelParams* params_ptr, size_t row) {
   // This path is capped at one million rows. Every accepted term is int4, so
   // its absolute SUM is below INT64_MAX and modular atomic addition is exact.
   atomic_add_u64(params.dense_integer_atomic_sum[group], sycl::bit_cast<uint64_t>(value));
-  const bool statically_nonnull =
-      measure.value.nulls == nullptr && (!Multiply || measure.rhs.nulls == nullptr);
+  const bool statically_nonnull = !HasMeasureRange && measure.value.nulls == nullptr &&
+                                  (!Multiply || measure.rhs.nulls == nullptr);
   if (!statically_nonnull)
     atomic_add_u64(params.dense_integer_atomic_nonnull[group], 1);
 }
@@ -2341,7 +2379,8 @@ inline void run_dense_integer_atomic_commit_kernel(KernelParams* params_ptr) {
   const pgaccel_grouped_agg_measure& measure = params.measures[0];
   const bool statically_nonnull =
       measure.value.nulls == nullptr &&
-      (measure.op != PGACCEL_GROUPED_AGG_MEASURE_MUL || measure.rhs.nulls == nullptr);
+      (measure.op != PGACCEL_GROUPED_AGG_MEASURE_MUL || measure.rhs.nulls == nullptr) &&
+      params.measure_filters[0].predicate_range_count == 0;
   uint64_t selected = 0;
   for (size_t group = 0; group < params.group_capacity; ++group) {
     const uint64_t count = atomic_u64_value(params.dense_integer_atomic_count[group]);
@@ -2372,7 +2411,8 @@ inline void run_dense_integer_atomic_commit_kernel(KernelParams* params_ptr) {
   meta.lifecycle_state = kLifecycleFinalized;
 }
 
-template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply>
+template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
+          bool HasMeasureRange>
 inline void run_dense_integer_chunk(KernelParams* params_ptr, size_t chunk) {
   KernelParams& params = *params_ptr;
   const size_t chunk_count = params.dense_integer_chunk_count;
@@ -2404,9 +2444,19 @@ inline void run_dense_integer_chunk(KernelParams* params_ptr, size_t chunk) {
     DenseIntegerPartial& partial = params.dense_integer_partials[row_group * chunk_count + chunk];
     ++partial.rows;
 
+    int32_t measure_range_value = 0;
+    const FilterResult measure_filter = specialized_dense_integer_measure_filter<HasMeasureRange>(
+        params, row, &measure_range_value);
+    if (measure_filter == FilterResult::Error || measure_filter == FilterResult::Uncertain) {
+      record_failure(*params.meta, kFailureInvalid);
+      return;
+    }
+    if (measure_filter == FilterResult::Reject)
+      continue;
+
     const pgaccel_grouped_agg_measure& measure = params.measures[0];
     bool lhs_null = false;
-    if constexpr (!HasScalarRange) {
+    if constexpr (!HasScalarRange && !HasMeasureRange) {
       if (!null_at(measure.value.nulls, row, &lhs_null)) {
         record_failure(*params.meta, kFailureInvalid);
         return;
@@ -2421,8 +2471,9 @@ inline void run_dense_integer_chunk(KernelParams* params_ptr, size_t chunk) {
     }
     if (lhs_null || rhs_null)
       continue;
-    int64_t value =
-        HasScalarRange ? range_value : static_cast<const int32_t*>(measure.value.values)[row];
+    int64_t value = HasScalarRange    ? range_value
+                    : HasMeasureRange ? measure_range_value
+                                      : static_cast<const int32_t*>(measure.value.values)[row];
     if constexpr (Multiply) {
       const int64_t rhs = static_cast<const int32_t*>(measure.rhs.values)[row];
       value *= rhs;
@@ -2482,7 +2533,8 @@ inline void merge_ordered_dense_integer_partial(DenseIntegerPartial* left,
   left->nonnull += right.nonnull;
 }
 
-template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply>
+template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
+          bool HasMeasureRange>
 inline void
 run_dense_integer_workgroup(KernelParams* params_ptr, sycl::nd_item<1> item,
                             const sycl::local_accessor<DenseIntegerPartial, 1>& local_partials) {
@@ -2518,9 +2570,18 @@ run_dense_integer_workgroup(KernelParams* params_ptr, sycl::nd_item<1> item,
 
     DenseIntegerPartial& partial = local_partials[local_base + group];
     ++partial.rows;
+    int32_t measure_range_value = 0;
+    const FilterResult measure_filter = specialized_dense_integer_measure_filter<HasMeasureRange>(
+        params, row, &measure_range_value);
+    if (measure_filter == FilterResult::Error || measure_filter == FilterResult::Uncertain) {
+      partial.failure_flags |= kFailureInvalid;
+      continue;
+    }
+    if (measure_filter == FilterResult::Reject)
+      continue;
     const pgaccel_grouped_agg_measure& measure = params.measures[0];
     bool lhs_null = false;
-    if constexpr (!HasScalarRange) {
+    if constexpr (!HasScalarRange && !HasMeasureRange) {
       if (!null_at(measure.value.nulls, row, &lhs_null)) {
         partial.failure_flags |= kFailureInvalid;
         continue;
@@ -2536,8 +2597,9 @@ run_dense_integer_workgroup(KernelParams* params_ptr, sycl::nd_item<1> item,
     if (lhs_null || rhs_null)
       continue;
 
-    int64_t value =
-        HasScalarRange ? range_value : static_cast<const int32_t*>(measure.value.values)[row];
+    int64_t value = HasScalarRange    ? range_value
+                    : HasMeasureRange ? measure_range_value
+                                      : static_cast<const int32_t*>(measure.value.values)[row];
     if constexpr (Multiply) {
       const int64_t rhs = static_cast<const int32_t*>(measure.rhs.values)[row];
       value *= rhs;
@@ -3413,12 +3475,15 @@ template <bool HasMembership, bool HasSqlMask, bool CountNonNull>
 class GroupedAggDenseCountWorkgroupKernel;
 class GroupedAggDenseCountCommitKernel;
 class GroupedAggDenseIntegerPrepareKernel;
-template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply>
+template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
+          bool HasMeasureRange>
 class GroupedAggDenseIntegerAtomicRowsKernel;
 class GroupedAggDenseIntegerAtomicCommitKernel;
-template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply>
+template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
+          bool HasMeasureRange>
 class GroupedAggDenseIntegerChunksKernel;
-template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply>
+template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
+          bool HasMeasureRange>
 class GroupedAggDenseIntegerWorkgroupKernel;
 class GroupedAggDenseIntegerReduceKernel;
 class GroupedAggDenseIntegerCommitKernel;
@@ -3561,41 +3626,44 @@ void submit_dense_count_specialization(sycl::queue& queue, const pgaccel_grouped
 #undef PGACCEL_SUBMIT_DENSE_COUNT
 }
 
-template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply>
+template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
+          bool HasMeasureRange>
 void submit_dense_integer_atomic_rows(sycl::queue& queue, size_t row_count,
                                       KernelParams* const device_params) {
-  queue.parallel_for<
-      GroupedAggDenseIntegerAtomicRowsKernel<HasMembership, HasSqlMask, HasScalarRange, Multiply>>(
+  queue.parallel_for<GroupedAggDenseIntegerAtomicRowsKernel<
+      HasMembership, HasSqlMask, HasScalarRange, Multiply, HasMeasureRange>>(
       sycl::range<1>(row_count), [=](sycl::id<1> id) {
-        run_dense_integer_atomic_row<HasMembership, HasSqlMask, HasScalarRange, Multiply>(
-            device_params, id[0]);
+        run_dense_integer_atomic_row<HasMembership, HasSqlMask, HasScalarRange, Multiply,
+                                     HasMeasureRange>(device_params, id[0]);
       });
 }
 
-template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply>
+template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
+          bool HasMeasureRange>
 void submit_dense_integer_chunks(sycl::queue& queue, size_t chunk_count,
                                  KernelParams* const device_params) {
-  queue.parallel_for<
-      GroupedAggDenseIntegerChunksKernel<HasMembership, HasSqlMask, HasScalarRange, Multiply>>(
+  queue.parallel_for<GroupedAggDenseIntegerChunksKernel<HasMembership, HasSqlMask, HasScalarRange,
+                                                        Multiply, HasMeasureRange>>(
       sycl::range<1>(chunk_count), [=](sycl::id<1> id) {
-        run_dense_integer_chunk<HasMembership, HasSqlMask, HasScalarRange, Multiply>(device_params,
-                                                                                     id[0]);
+        run_dense_integer_chunk<HasMembership, HasSqlMask, HasScalarRange, Multiply,
+                                HasMeasureRange>(device_params, id[0]);
       });
 }
 
-template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply>
+template <bool HasMembership, bool HasSqlMask, bool HasScalarRange, bool Multiply,
+          bool HasMeasureRange>
 void submit_dense_integer_workgroups(sycl::queue& queue, size_t group_capacity,
                                      size_t workgroup_count, KernelParams* const device_params) {
   queue.submit([&](sycl::handler& handler) {
     sycl::local_accessor<DenseIntegerPartial, 1> local_partials(
         sycl::range<1>(kDenseReductionWorkgroupSize * group_capacity), handler);
-    handler.parallel_for<
-        GroupedAggDenseIntegerWorkgroupKernel<HasMembership, HasSqlMask, HasScalarRange, Multiply>>(
+    handler.parallel_for<GroupedAggDenseIntegerWorkgroupKernel<
+        HasMembership, HasSqlMask, HasScalarRange, Multiply, HasMeasureRange>>(
         sycl::nd_range<1>(sycl::range<1>(workgroup_count * kDenseReductionWorkgroupSize),
                           sycl::range<1>(kDenseReductionWorkgroupSize)),
         [=](sycl::nd_item<1> item) {
-          run_dense_integer_workgroup<HasMembership, HasSqlMask, HasScalarRange, Multiply>(
-              device_params, item, local_partials);
+          run_dense_integer_workgroup<HasMembership, HasSqlMask, HasScalarRange, Multiply,
+                                      HasMeasureRange>(device_params, item, local_partials);
         });
   });
 }
@@ -3607,38 +3675,41 @@ void submit_dense_integer_specialization(sycl::queue& queue, const pgaccel_group
   const bool membership = desc.dim_count != 0;
   const bool sql_mask = desc.where_filter.kind == PGACCEL_GROUPED_AGG_FILTER_SQL;
   const bool scalar_range = exact_dense_integer_range_filter(desc.where_filter);
+  const bool measure_range = exact_dense_integer_range_filter(desc.measure_filters[0]);
   const bool multiply = desc.measures[0].op == PGACCEL_GROUPED_AGG_MEASURE_MUL;
-#define PGACCEL_SUBMIT_DENSE_INTEGER(MEMBERSHIP, MASK, RANGE, MULTIPLY)                        \
-  do {                                                                                         \
-    if constexpr (Atomic) {                                                                    \
-      submit_dense_integer_atomic_rows<MEMBERSHIP, MASK, RANGE, MULTIPLY>(queue, launch_count, \
-                                                                          device_params);      \
-    } else if (hierarchical) {                                                                 \
-      submit_dense_integer_workgroups<MEMBERSHIP, MASK, RANGE, MULTIPLY>(                      \
-          queue, desc.group_capacity, launch_count, device_params);                            \
-    } else {                                                                                   \
-      submit_dense_integer_chunks<MEMBERSHIP, MASK, RANGE, MULTIPLY>(queue, launch_count,      \
-                                                                     device_params);           \
-    }                                                                                          \
+#define PGACCEL_SUBMIT_DENSE_INTEGER(MEMBERSHIP, MASK, RANGE, MULTIPLY, MEASURE_RANGE)    \
+  do {                                                                                    \
+    if constexpr (Atomic) {                                                               \
+      submit_dense_integer_atomic_rows<MEMBERSHIP, MASK, RANGE, MULTIPLY, MEASURE_RANGE>( \
+          queue, launch_count, device_params);                                            \
+    } else if (hierarchical) {                                                            \
+      submit_dense_integer_workgroups<MEMBERSHIP, MASK, RANGE, MULTIPLY, MEASURE_RANGE>(  \
+          queue, desc.group_capacity, launch_count, device_params);                       \
+    } else {                                                                              \
+      submit_dense_integer_chunks<MEMBERSHIP, MASK, RANGE, MULTIPLY, MEASURE_RANGE>(      \
+          queue, launch_count, device_params);                                            \
+    }                                                                                     \
   } while (false)
-  if (scalar_range)
-    PGACCEL_SUBMIT_DENSE_INTEGER(false, false, true, true);
+  if (measure_range)
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, false, false, false, true);
+  else if (scalar_range)
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, false, true, true, false);
   else if (membership && sql_mask && multiply)
-    PGACCEL_SUBMIT_DENSE_INTEGER(true, true, false, true);
+    PGACCEL_SUBMIT_DENSE_INTEGER(true, true, false, true, false);
   else if (membership && sql_mask)
-    PGACCEL_SUBMIT_DENSE_INTEGER(true, true, false, false);
+    PGACCEL_SUBMIT_DENSE_INTEGER(true, true, false, false, false);
   else if (membership && multiply)
-    PGACCEL_SUBMIT_DENSE_INTEGER(true, false, false, true);
+    PGACCEL_SUBMIT_DENSE_INTEGER(true, false, false, true, false);
   else if (membership)
-    PGACCEL_SUBMIT_DENSE_INTEGER(true, false, false, false);
+    PGACCEL_SUBMIT_DENSE_INTEGER(true, false, false, false, false);
   else if (sql_mask && multiply)
-    PGACCEL_SUBMIT_DENSE_INTEGER(false, true, false, true);
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, true, false, true, false);
   else if (sql_mask)
-    PGACCEL_SUBMIT_DENSE_INTEGER(false, true, false, false);
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, true, false, false, false);
   else if (multiply)
-    PGACCEL_SUBMIT_DENSE_INTEGER(false, false, false, true);
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, false, false, true, false);
   else
-    PGACCEL_SUBMIT_DENSE_INTEGER(false, false, false, false);
+    PGACCEL_SUBMIT_DENSE_INTEGER(false, false, false, false, false);
 #undef PGACCEL_SUBMIT_DENSE_INTEGER
 }
 

@@ -302,6 +302,7 @@
       "pg_accel_bench/src/resume.rs",
       "pg_accel_bench/src/runner.rs",
       "pg_accel_bench/src/stats.rs",
+      "pg_accel_bench/src/workloads/aggregate_filter_grouped_agg_int4.rs",
       "pg_accel_bench/src/workloads/aggregate_semantic_modifier_decline.rs",
       "pg_accel_bench/src/workloads/and_range_predicate_expression_grouped_agg_int4.rs",
       "pg_accel_bench/src/workloads/avg_nonfloat_decline.rs",
@@ -508,6 +509,7 @@
       "pg_accel_bench/src/resume.rs",
       "pg_accel_bench/src/runner.rs",
       "pg_accel_bench/src/stats.rs",
+      "pg_accel_bench/src/workloads/aggregate_filter_grouped_agg_int4.rs",
       "pg_accel_bench/src/workloads/aggregate_semantic_modifier_decline.rs",
       "pg_accel_bench/src/workloads/and_range_predicate_expression_grouped_agg_int4.rs",
       "pg_accel_bench/src/workloads/avg_nonfloat_decline.rs",
@@ -902,7 +904,7 @@
       "93_raster_resident_reclass_contract.assert_004": "bc92ec649699a23a251f937c0eab0545570bd1dc7d9b92f79a9a194b19913ead",
       "94_grouped_count_bool_contract.assert_001": "b4fbe131f7d6970ac6779346a6defaba1e4e0cbc7350cd2248aa241d143bd1f4",
       "94_grouped_count_bool_contract.assert_002": "7aaf900cad09fdc4857d30f510d571f3dc9d270eaefe3e37590051a8485ff5de",
-      "95_selected_lifecycle_contract.assert_001": "625ec54ff699ab48e95cfef9d33e7731ca98afb71582c10890f18ff72b254671",
+      "95_selected_lifecycle_contract.assert_001": "9611bf6b2bd1f363349b9a23decd5804015bb6e7605cbbb86d7247d692ef78f5",
       "95_selected_lifecycle_contract.assert_002": "ccaf2d026a91a7257458545b6f24ebe8f665ade2b04bd682b9b3c24db5cfef84",
       "95_selected_lifecycle_contract.assert_003": "d95b8c5ea84914cb2fb4d65d23f372976960ab0affe6f2c7b72efd55b2073767",
       "95_selected_lifecycle_contract.assert_004": "59db0136cf1e391edc920decdf384ef20cda61a93211b2ae584a66dafd5cc03c",
@@ -924,7 +926,9 @@
       "96_declined_lifecycle_contract.assert_013": "e9684fae74045c5c8dc449b2d600cce70ef662c2894ef8439316412e04024d92",
       "96_declined_lifecycle_contract.assert_014": "03bfe28688306acf6bfda6713f2a64943bf18ac905d1820594a5da05ebab5586",
       "97_range_intersection_contract.assert_001": "d98801c85acaf88b9d0eecebfdde7d60c7a915b336c9ce49b1815497a2ef787a",
-      "97_range_intersection_contract.assert_002": "6a64e839aa402ac35c6bed278b37e0a1956d9afc09189c4b2a1a32dd196683ff"
+      "97_range_intersection_contract.assert_002": "6a64e839aa402ac35c6bed278b37e0a1956d9afc09189c4b2a1a32dd196683ff",
+      "98_aggregate_filter_contract.assert_001": "49c94cf516186ab97ceab9239a32bf53f5cbea6facb8c54e22094930be7e6533",
+      "98_aggregate_filter_contract.assert_002": "7e8f1638eac47a86becaf3d6f8f29fa11a7d301b99635567748505da63950059"
     },
     "assertion_ids": [
       "00_smoke.assert_001",
@@ -1249,7 +1253,9 @@
       "96_declined_lifecycle_contract.assert_013",
       "96_declined_lifecycle_contract.assert_014",
       "97_range_intersection_contract.assert_001",
-      "97_range_intersection_contract.assert_002"
+      "97_range_intersection_contract.assert_002",
+      "98_aggregate_filter_contract.assert_001",
+      "98_aggregate_filter_contract.assert_002"
     ],
     "files": [
       "00_smoke.sql",
@@ -1311,7 +1317,8 @@
       "94_grouped_count_bool_contract.sql",
       "95_selected_lifecycle_contract.sql",
       "96_declined_lifecycle_contract.sql",
-      "97_range_intersection_contract.sql"
+      "97_range_intersection_contract.sql",
+      "98_aggregate_filter_contract.sql"
     ]
   }
 }

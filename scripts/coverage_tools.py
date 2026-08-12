@@ -42,6 +42,7 @@ SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES = frozenset(
     {
         "selected.grouped_agg_int4",
         "selected.predicate_expression_int4",
+        "selected.aggregate_filter_int4",
         "selected.range_intersection_expression_int4",
         "decline.range_intersection_adjacent",
         "selected.count_join_int4",

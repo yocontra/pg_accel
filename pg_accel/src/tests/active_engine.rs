@@ -589,6 +589,37 @@ mod tests {
             256
         );
 
+        let aggregate_filter_query = "SELECT product_id, \
+             sum(price) FILTER (WHERE price >= 200 AND price <= 800) AS filtered_sum, \
+             count(*) AS count \
+             FROM pgaccel_active_and_ranges \
+             GROUP BY product_id ORDER BY product_id";
+        assert_eq!(
+            assert_selected_matches_native(aggregate_filter_query).len(),
+            256
+        );
+        assert!(
+            Spi::get_one::<i64>(
+                "SELECT calls FROM pg_accel_grouped_kernel_mode_stats() \
+                 WHERE mode = 'parallel_dense_integer'"
+            )
+            .expect("parallel dense-integer mode counter should be readable")
+            .is_some_and(|calls| calls > 0),
+            "bounded aggregate FILTER must execute the parallel dense-integer branch"
+        );
+
+        assert_native_decline_matches_native(
+            "SELECT product_id, sum(price) FILTER (WHERE price <= 800), count(*) \
+             FROM pgaccel_active_and_ranges GROUP BY product_id ORDER BY product_id",
+            "shape_aggregate_modifier",
+        );
+        assert_native_decline_matches_native(
+            "SELECT product_id, sum(price) FILTER \
+                    (WHERE quantity >= 2 AND quantity <= 8), count(*) \
+             FROM pgaccel_active_and_ranges GROUP BY product_id ORDER BY product_id",
+            "shape_aggregate_modifier",
+        );
+
         assert_planner_decline(
             "SELECT product_id, sum(price * quantity), count(*) \
              FROM pgaccel_active_and_ranges \

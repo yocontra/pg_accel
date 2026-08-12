@@ -1,8 +1,8 @@
 {
   "baseline_assertions": 306,
   "baseline_files": 58,
-  "declared_assertions": 323,
-  "declared_files": 60,
+  "declared_assertions": 325,
+  "declared_files": 61,
   "files": [
     {
       "assertions": [
@@ -2807,11 +2807,11 @@
       "assertions": [
         {
           "emission": "echo",
-          "guard_count": 14,
-          "guard_sha256": "625ec54ff699ab48e95cfef9d33e7731ca98afb71582c10890f18ff72b254671",
-          "guard_token_count": 31,
+          "guard_count": 15,
+          "guard_sha256": "9611bf6b2bd1f363349b9a23decd5804015bb6e7605cbbb86d7247d692ef78f5",
+          "guard_token_count": 33,
           "id": "95_selected_lifecycle_contract.assert_001",
-          "source_line": 420
+          "source_line": 460
         },
         {
           "emission": "echo",
@@ -2819,7 +2819,7 @@
           "guard_sha256": "ccaf2d026a91a7257458545b6f24ebe8f665ade2b04bd682b9b3c24db5cfef84",
           "guard_token_count": 5,
           "id": "95_selected_lifecycle_contract.assert_002",
-          "source_line": 565
+          "source_line": 605
         },
         {
           "emission": "echo",
@@ -2827,7 +2827,7 @@
           "guard_sha256": "d95b8c5ea84914cb2fb4d65d23f372976960ab0affe6f2c7b72efd55b2073767",
           "guard_token_count": 3,
           "id": "95_selected_lifecycle_contract.assert_003",
-          "source_line": 665
+          "source_line": 705
         },
         {
           "emission": "echo",
@@ -2835,7 +2835,7 @@
           "guard_sha256": "59db0136cf1e391edc920decdf384ef20cda61a93211b2ae584a66dafd5cc03c",
           "guard_token_count": 3,
           "id": "95_selected_lifecycle_contract.assert_004",
-          "source_line": 765
+          "source_line": 805
         },
         {
           "emission": "echo",
@@ -2843,7 +2843,7 @@
           "guard_sha256": "84557c45d2bded653967e79792958066d8010508b41f2d6b8e21029c361ba579",
           "guard_token_count": 4,
           "id": "95_selected_lifecycle_contract.assert_005",
-          "source_line": 864
+          "source_line": 904
         },
         {
           "emission": "echo",
@@ -2851,7 +2851,7 @@
           "guard_sha256": "83257f14eff79afa74c290efc09344866251b9660d0a2a43339e4dd95873e313",
           "guard_token_count": 7,
           "id": "95_selected_lifecycle_contract.assert_006",
-          "source_line": 973
+          "source_line": 1013
         },
         {
           "emission": "echo",
@@ -2859,12 +2859,12 @@
           "guard_sha256": "08a26365a3423a06f57efcbc63835de0b6620aebffc7be3981198003f9233a3d",
           "guard_token_count": 8,
           "id": "95_selected_lifecycle_contract.assert_007",
-          "source_line": 1084
+          "source_line": 1124
         }
       ],
       "completion_id": "95_selected_lifecycle_contract",
       "file": "95_selected_lifecycle_contract.sql",
-      "sha256": "7ccc61c862f3cb83286f26f98cc4fbfec5f78d961b4a24e09bdaec4a427fff18"
+      "sha256": "255ea85de684407e19888116a05b6b5b47320c1b0648261889b020b1cb440da3"
     },
     {
       "assertions": [
@@ -3007,6 +3007,29 @@
       "completion_id": "97_range_intersection_contract",
       "file": "97_range_intersection_contract.sql",
       "sha256": "eb6420c2009a0968c4af49058b97e430c8d1cefe90e3313dec4cfcef137d9fc7"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 8,
+          "guard_sha256": "49c94cf516186ab97ceab9239a32bf53f5cbea6facb8c54e22094930be7e6533",
+          "guard_token_count": 17,
+          "id": "98_aggregate_filter_contract.assert_001",
+          "source_line": 151
+        },
+        {
+          "emission": "echo",
+          "guard_count": 2,
+          "guard_sha256": "7e8f1638eac47a86becaf3d6f8f29fa11a7d301b99635567748505da63950059",
+          "guard_token_count": 7,
+          "id": "98_aggregate_filter_contract.assert_002",
+          "source_line": 210
+        }
+      ],
+      "completion_id": "98_aggregate_filter_contract",
+      "file": "98_aggregate_filter_contract.sql",
+      "sha256": "17d83c0623711d7b3f6f50f517beecee599ce3b695e3dbc6db1454044dfd3c1c"
     }
   ],
   "kind": "sql-semantic-assertion-manifest",

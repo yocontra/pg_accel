@@ -2456,6 +2456,59 @@ mod tests {
     }
 
     #[test]
+    fn dense_atomic_measure_filter_costs_two_comparisons_and_independent_sum_state() {
+        let model = model();
+        let mut shape = dense_sum_count_shape(1_000_000);
+        let value = match shape.spec.measures[0].expression {
+            MeasureExpr::Column(value) => value,
+            ref expression => panic!("expected direct column measure, got {expression:?}"),
+        };
+        shape.spec.measures[0].filter = FilterSpec::Ranges {
+            input: value,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(200),
+                hi: ScalarValue::I32(800),
+            }],
+        };
+
+        let filtered = dense_atomic_sum_count_cost(
+            &shape.spec,
+            &shape.descriptor_resolution,
+            1_000_000,
+            Some(1_000_000),
+            Some(false),
+            &model,
+        )
+        .expect("exact bounded int4 aggregate FILTER has a dense atomic cost");
+        let expected_per_row = model
+            .coefficients
+            .gpu_op_cost_reduce
+            .get()
+            .mul_add(3.0, model.coefficients.gpu_op_cost_filter.get() * 2.0);
+        assert_eq!(filtered, PgCost::new(1_000_000.0 * expected_per_row));
+
+        shape.spec.measures[0].filter = FilterSpec::Ranges {
+            input: value,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(i32::MIN),
+                hi: ScalarValue::I32(800),
+            }],
+        };
+        assert!(
+            dense_atomic_sum_count_cost(
+                &shape.spec,
+                &shape.descriptor_resolution,
+                1_000_000,
+                Some(1_000_000),
+                Some(false),
+                &model,
+            )
+            .is_none(),
+            "one-sided ranges must not inherit the released filtered cost"
+        );
+    }
+
+    #[test]
     fn dense_atomic_exact_rows_must_clear_the_applicable_shape_floor() {
         let model = model();
         let shape = dense_sum_count_shape(10_000_000);

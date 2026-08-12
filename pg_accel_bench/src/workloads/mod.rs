@@ -3,6 +3,7 @@ mod gpu_reduce_scaling;
 mod gpu_reduce_sum;
 mod reduce_variants;
 // --- GPU HashAgg ---
+mod aggregate_filter_grouped_agg_int4;
 mod and_range_predicate_expression_grouped_agg_int4;
 mod case_when_expression_grouped_agg;
 mod case_when_in_expression_grouped_agg;
@@ -101,6 +102,7 @@ mod tpch;
 mod window_full_output_decline;
 mod window_reducing_decline;
 
+pub use aggregate_filter_grouped_agg_int4::AggregateFilterGroupedAggInt4;
 pub use aggregate_semantic_modifier_decline::{
     AggregateOrderedSetDecline, AggregateSemanticModifierDecline,
 };
@@ -327,6 +329,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(ExpressionGroupedAgg),
         Box::new(PredicateFilterExpressionGroupedAgg),
         Box::new(PredicateExpressionGroupedAggInt4),
+        Box::new(AggregateFilterGroupedAggInt4),
         Box::new(AndRangePredicateExpressionGroupedAggInt4),
         Box::new(CaseWhenExpressionGroupedAgg),
         Box::new(CaseWhenRangeExpressionGroupedAgg),
@@ -963,6 +966,12 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::GroupedAggregate,
     },
     ReleasedEnvelopeContract {
+        workload: "aggregate_filter_grouped_agg_int4",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
         workload: "hash_join",
         min_rows: PREAGG_WINNER_MIN_ROWS,
         max_rows: usize::MAX,
@@ -1129,6 +1138,10 @@ pub const METAL_SHIP_GATE_CELLS: &[MetalShipGateCell] = &[
     },
     MetalShipGateCell {
         workload: "and_range_predicate_expression_grouped_agg_int4",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "aggregate_filter_grouped_agg_int4",
         rows: 1_000_000,
     },
     MetalShipGateCell {
@@ -1439,6 +1452,16 @@ fn groupagg_threshold_matrix_entry(
             "int4 product_id + nullable int4 price + int4 quantity",
             "product_id, SUM(price * quantity), COUNT(*)",
             "fused bounded range and exact integer product SUM/COUNT warm winner matrix",
+        ),
+        "aggregate_filter_grouped_agg_int4" => (
+            "resident_dense_groupagg_bounded_aggregate_filter_sum_count",
+            "int4 group key + nullable int4 filtered SUM input",
+            "256 dense product_id groups",
+            "same-column bounded FILTER selects about 60% for SUM; COUNT(*) covers every row",
+            "exactly 256 grouped product rows at release scale".to_owned(),
+            "int4 product_id + nullable int4 price",
+            "product_id, SUM(price) FILTER, COUNT(*)",
+            "exact integer resident grouped bounded aggregate FILTER warm winner matrix",
         ),
         "case_when_expression_grouped_agg" => (
             "resident_dense_groupagg_case_when_expression_sum_count",
@@ -3294,6 +3317,7 @@ fn static_workload_name(name: &str) -> &'static str {
         "and_range_predicate_expression_grouped_agg_int4" => {
             "and_range_predicate_expression_grouped_agg_int4"
         }
+        "aggregate_filter_grouped_agg_int4" => "aggregate_filter_grouped_agg_int4",
         "case_when_expression_grouped_agg" => "case_when_expression_grouped_agg",
         "case_when_range_expression_grouped_agg" => "case_when_range_expression_grouped_agg",
         "case_when_value_predicate_expression_grouped_agg" => {
@@ -3418,7 +3442,9 @@ mod tests {
         matches!(
             (name, rows),
             (
-                "grouped_count_bool_candidate" | "and_range_predicate_expression_grouped_agg_int4",
+                "grouped_count_bool_candidate"
+                    | "aggregate_filter_grouped_agg_int4"
+                    | "and_range_predicate_expression_grouped_agg_int4",
                 GROUPAGG_WINNER_MIN_ROWS
             ) | (
                 "raster_ndvi" | "raster_slope" | "raster_reclass" | "raster_algebra_deep",
@@ -3451,6 +3477,10 @@ mod tests {
             ),
             (
                 "and_range_predicate_expression_grouped_agg_int4",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "aggregate_filter_grouped_agg_int4",
                 FINAL_MATRIX_MIN_WARM_SPEEDUP,
             ),
             ("mixed_join_agg_int4", FINAL_MATRIX_MIN_WARM_SPEEDUP),
@@ -3523,6 +3553,7 @@ mod tests {
         for name in [
             "grouped_agg_int4",
             "predicate_expression_grouped_agg_int4",
+            "aggregate_filter_grouped_agg_int4",
             "and_range_predicate_expression_grouped_agg_int4",
             "mixed_join_agg_int4",
         ] {
@@ -3549,6 +3580,22 @@ mod tests {
         assert!(predicate.contains("sum(price * quantity)"));
         assert!(predicate.contains("where active"));
         assert!(!predicate.contains(" filter "));
+
+        let aggregate_filter = find_workload("aggregate_filter_grouped_agg_int4")
+            .expect("aggregate FILTER int4 workload");
+        let aggregate_filter_query = aggregate_filter.query_sql().to_ascii_lowercase();
+        assert!(
+            aggregate_filter_query
+                .contains("sum(price) filter (where price >= 200 and price <= 800)")
+        );
+        assert!(aggregate_filter_query.contains("count(*)"));
+        assert_eq!(
+            workload_metadata("aggregate_filter_grouped_agg_int4")
+                .expect("aggregate FILTER metadata")
+                .evidence
+                .threshold,
+            ThresholdEvidenceEligibility::GpuWinner
+        );
 
         let range = find_workload("and_range_predicate_expression_grouped_agg_int4")
             .expect("AND range predicate int4 workload");
@@ -3690,6 +3737,10 @@ mod tests {
     fn test_nonstandard_default_suite_probes_are_exact() {
         assert!(supported_default_suite_probe(
             "grouped_count_bool_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "aggregate_filter_grouped_agg_int4",
             GROUPAGG_WINNER_MIN_ROWS
         ));
         assert!(supported_default_suite_probe(

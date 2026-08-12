@@ -108,6 +108,21 @@ fn validate_group_key_type(type_oid: u32) -> Result<(), ShapeDecline> {
     }
 }
 
+fn exact_bounded_int4_filter(filter: &FilterSpec, value: &crate::engine::spec::ColumnRef) -> bool {
+    let FilterSpec::Ranges { input, ranges } = filter else {
+        return false;
+    };
+    let [range] = ranges.as_slice() else {
+        return false;
+    };
+    let (crate::engine::spec::ScalarValue::I32(lo), crate::engine::spec::ScalarValue::I32(hi)) =
+        (range.lo, range.hi)
+    else {
+        return false;
+    };
+    input == value && value.type_oid == 23 && lo != i32::MIN && hi != i32::MAX && lo < hi
+}
+
 fn validate_measure_descriptor_capability(
     aggregate: &super::AggregateExpr,
 ) -> Result<(), ShapeDecline> {
@@ -123,7 +138,17 @@ fn validate_measure_descriptor_capability(
     if matches!(aggregate.filter, FilterSpec::Spatial { .. }) {
         return Err(ShapeDecline::SpatialFilterOutsideFactRelation);
     }
-    if aggregate.filter != FilterSpec::None || aggregate.output.source != AggregateSource::Value {
+    if aggregate.output.source != AggregateSource::Value {
+        return Err(ShapeDecline::UnsupportedAggregateModifier);
+    }
+    if aggregate.filter != FilterSpec::None
+        && !matches!(
+            &aggregate.expression,
+            MeasureExpr::Column(column)
+                if aggregate.output.kind == AggregateKind::Sum
+                    && exact_bounded_int4_filter(&aggregate.filter, column)
+        )
+    {
         return Err(ShapeDecline::UnsupportedAggregateModifier);
     }
     let validate_column =
@@ -1435,6 +1460,29 @@ mod tests {
             input: int4,
             ranges: Vec::new(),
         };
+        assert_eq!(
+            validate_measure_descriptor_capability(&filtered),
+            Err(ShapeDecline::UnsupportedAggregateModifier)
+        );
+        filtered = aggregate(MeasureExpr::Column(int4), AggregateKind::Sum);
+        filtered.filter = FilterSpec::Ranges {
+            input: int4,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(200),
+                hi: ScalarValue::I32(800),
+            }],
+        };
+        assert_eq!(validate_measure_descriptor_capability(&filtered), Ok(()));
+        filtered.output.kind = AggregateKind::Count;
+        assert_eq!(
+            validate_measure_descriptor_capability(&filtered),
+            Err(ShapeDecline::UnsupportedAggregateModifier)
+        );
+        filtered.output.kind = AggregateKind::Sum;
+        let FilterSpec::Ranges { ranges, .. } = &mut filtered.filter else {
+            unreachable!("bounded filter fixture")
+        };
+        ranges[0].lo = ScalarValue::I32(i32::MIN);
         assert_eq!(
             validate_measure_descriptor_capability(&filtered),
             Err(ShapeDecline::UnsupportedAggregateModifier)

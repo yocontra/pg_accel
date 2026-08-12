@@ -253,6 +253,24 @@ redesigned and independently requalified.
 - [ ] Expressions and predicates: arithmetic, `CASE`, multiple `AND` ranges,
   `IN`, `IS NULL`, and bounded `FILTER`/`HAVING`, with exact NULL, overflow,
   divide-by-zero, cast, NaN, and collation behavior.
+  - [x] Release the first bounded aggregate-local `FILTER` lane: one direct
+    nullable int4 `SUM(value) FILTER (WHERE value >= lo AND value <= hi)` plus
+    one unfiltered `COUNT(*)`, grouped by one distinct int4 fact column. The
+    descriptor, cost model, specialization cache, Rust physical-mode backstop,
+    and hierarchical/atomic Metal kernels keep group activity and COUNT
+    independent from filtered SUM state. One-sided, wrong-column, filtered
+    COUNT, joined, fact-filtered, HAVING, and broader measure variants remain
+    native. Rust, native C++, PG18 SQL95/SQL98 DML/DDL/prepared lifecycle, and
+    the 25-family/325-assertion semantic declaration matrix pass. A
+    5-warmup/10-pair-per-scale characterization measured 3.11 ms versus
+    PostgreSQL 9.28 ms (2.98x) at 250K and 3.35 ms versus 21.53 ms (6.42x) at
+    1M, with 20/20 artifact hits, verified `parallel_dense_integer`, exact
+    diffs, and zero fallback in
+    `.codex/scratch/aggregate-filter-functional-pg18-20260811`;
+    `artifact_index.json` SHA-256 is
+    `c15a88f297e663204036d8d857b800dbbbac9e4bbd5dc4877a6c024e4e1802ee`.
+    The host still had the unrelated CPU-saturating process, so rerun a clean
+    exact-candidate ship-gate cell before publication.
 - [ ] Types and aggregates: bool/int2/general int8, float4/float8, date/time,
   integer `AVG`, and safe `SUM` combinations. Preserve PostgreSQL accumulator,
   result, and overflow semantics; never approximate `NUMERIC` with f64.

@@ -283,6 +283,16 @@ void set_i32_value_range(pgaccel_grouped_agg_desc& desc, uint32_t measure_slot, 
   desc.where_filter.predicate_hi[0] = val_i32(hi);
 }
 
+void set_i32_measure_value_range(pgaccel_grouped_agg_desc& desc, uint32_t filter_slot,
+                                 uint32_t measure_slot, int32_t lo, int32_t hi) {
+  desc.measure_filters[filter_slot] = disabled_filter();
+  desc.measure_filters[filter_slot].predicate_source = PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+  desc.measure_filters[filter_slot].predicate_measure_slot = static_cast<int32_t>(measure_slot);
+  desc.measure_filters[filter_slot].predicate_range_count = 1;
+  desc.measure_filters[filter_slot].predicate_lo[0] = val_i32(lo);
+  desc.measure_filters[filter_slot].predicate_hi[0] = val_i32(hi);
+}
+
 pgaccel_val val_bool(bool value) {
   pgaccel_val result = {};
   result.tag = PGACCEL_VAL_BOOL;
@@ -1371,6 +1381,63 @@ void test_parallel_dense_integer_product_sum_shape() {
   pgaccel_grouped_agg_desc wide_one_shot = row_slice(wide_allocation, 0, 100'000);
   CHECK_STATUS(execute_external(wide_one_shot, &wide_expected.out), PGACCEL_OK);
   check_outputs_equal(wide_output, wide_expected, wide_allocation.measure_count);
+}
+
+void test_parallel_dense_integer_measure_range_filter() {
+  std::printf("--- parallel dense aggregate-local INT4 range FILTER ---\n");
+  constexpr size_t rows = 4097;
+  for (const size_t groups : {size_t{4}, size_t{256}}) {
+    std::vector<int32_t> host_keys(rows);
+    std::vector<int32_t> host_values(rows);
+    std::vector<uint8_t> host_nulls(rows);
+    std::vector<int64_t> expected_sum(groups, 0);
+    std::vector<uint64_t> expected_nonnull(groups, 0);
+    std::vector<uint64_t> expected_count(groups, 0);
+    for (size_t row = 0; row < rows; ++row) {
+      const size_t group = row % groups;
+      host_keys[row] = static_cast<int32_t>(group);
+      host_values[row] = group + 1 == groups ? 900 : static_cast<int32_t>(row % 1001);
+      host_nulls[row] = row % 29 == 0 ? 1 : 0;
+      ++expected_count[group];
+      if (host_nulls[row] == 0 && host_values[row] >= 200 && host_values[row] <= 800) {
+        expected_sum[group] += host_values[row];
+        ++expected_nonnull[group];
+      }
+    }
+
+    SharedArray<int32_t> keys(host_keys);
+    SharedArray<int32_t> values(host_values);
+    SharedArray<uint8_t> nulls(host_nulls);
+    pgaccel_grouped_agg_desc desc = base_desc(rows);
+    set_fact_key(desc, 0, keys.data(), nullptr, 0, groups);
+    set_i32_view(desc.measures[0].value, values.data(), nulls.data());
+    finish_i64_measure(desc, 0, PGACCEL_GROUPED_AGG_MEASURE_COLUMN, PGACCEL_GROUPED_AGG_LANE_SUM);
+    set_count_star(desc, 1);
+    set_i32_measure_value_range(desc, 0, 0, 200, 800);
+
+    int32_t kernel_mode = 0;
+    CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&desc, &kernel_mode), PGACCEL_OK);
+    CHECK(kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_INTEGER);
+    OutputStorage output(desc, true, true);
+    CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
+    CHECK(output.out.selected_count == rows);
+    CHECK(output.out.uncertain_count == 0);
+    CHECK(output.out.emitted_group_count == groups);
+    for (size_t group = 0; group < groups; ++group) {
+      CHECK(output.active[group] == 1);
+      CHECK(output.i64(output.measures[0].sum, group) == expected_sum[group]);
+      CHECK(output.measures[0].nonnull[group] == expected_nonnull[group]);
+      CHECK(output.measures[1].count[group] == expected_count[group]);
+    }
+    CHECK(expected_count[groups - 1] != 0);
+    CHECK(output.measures[0].nonnull[groups - 1] == 0);
+
+    nulls[31] = 2;
+    OutputStorage invalid(desc);
+    int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+    CHECK_STATUS(execute_external_ex(desc, &invalid.out, &detail), PGACCEL_ERROR);
+    CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+  }
 }
 
 void test_parallel_dense_sum_mask_unique_dimension_shape() {
@@ -4074,6 +4141,7 @@ int main() {
     test_parallel_dense_count_star_lifecycle();
     test_parallel_dense_integer_phase2_shape();
     test_parallel_dense_integer_product_sum_shape();
+    test_parallel_dense_integer_measure_range_filter();
     test_parallel_dense_sum_mask_unique_dimension_shape();
     test_parallel_dense_count_unique_dimension_shape();
     test_parallel_dense_sum_atomic_low_word_carry();

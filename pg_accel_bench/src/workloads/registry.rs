@@ -717,6 +717,10 @@ const PINS_PREDICATE_EXPRESSION_INT4: &[ResidentPinSpec] = &[pin!(
     "bench_predicate_expression_sales_int4",
     ["product_id", "price", "quantity", "active"]
 )];
+const PINS_AGGREGATE_FILTER_INT4: &[ResidentPinSpec] = &[pin!(
+    "bench_aggregate_filter_sales_int4",
+    ["product_id", "price"]
+)];
 const PINS_AND_RANGE_PREDICATE_EXPRESSION_INT4: &[ResidentPinSpec] = &[pin!(
     "bench_and_range_predicate_expression_sales_int4",
     ["product_id", "price", "quantity"]
@@ -996,6 +1000,13 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         K::HashAgg,
     )
     .pins(PINS_PREDICATE_EXPRESSION_INT4)
+    .evidence(WINNER),
+    workload(
+        "aggregate_filter_grouped_agg_int4",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(PINS_AGGREGATE_FILTER_INT4)
     .evidence(WINNER),
     workload(
         "and_range_predicate_expression_grouped_agg_int4",
