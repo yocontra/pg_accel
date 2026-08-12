@@ -475,7 +475,11 @@ bool parallel_dense_count_column_shape(const pgaccel_grouped_agg_desc& desc) {
           (count.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_DATE &&
            count.value.element_bytes == sizeof(int32_t)) ||
           (count.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP &&
-           count.value.element_bytes == sizeof(int64_t)));
+           count.value.element_bytes == sizeof(int64_t)) ||
+          (count.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32 &&
+           count.value.element_bytes == sizeof(float)) ||
+          (count.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64 &&
+           count.value.element_bytes == sizeof(double)));
 }
 
 bool parallel_dense_count_shape(const pgaccel_grouped_agg_desc& desc) {
@@ -855,7 +859,10 @@ bool validate_measure(const pgaccel_grouped_agg_measure& measure, size_t row_cou
              measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT64 ||
              measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_BOOL ||
              measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_DATE ||
-             measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP) &&
+             measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP ||
+             (count_only_column &&
+              (measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32 ||
+               measure.value.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64))) &&
             (!rhs_required || measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT32 ||
              measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_INT64 ||
              measure.rhs.physical_type == PGACCEL_GROUPED_AGG_PHYSICAL_BOOL ||

@@ -371,6 +371,42 @@ redesigned and independently requalified.
     The unrelated CPU-saturating process and installed/local module-provenance
     mismatch make these functional measurements non-publishable; rerun both
     clean exact ship-gate cells before release.
+  - [x] Release the first exact floating-point aggregate lanes: one nullable
+    boolean fact-column group key and `COUNT` over one distinct nullable
+    PostgreSQL `float4` or `float8` fact column, with no filter, join, `HAVING`,
+    or additional measure. The two logical/physical widths retain distinct
+    descriptor/cache specializations, `dense_float4_count_plain` and
+    `dense_float8_count_plain`, while sharing the validated null-sidecar-only
+    `parallel_dense_count` kernel. Count-only floating descriptors use an exact
+    int64 count state and do not pay the FP64-arithmetic cost multiplier. The
+    kernel never interprets the measure payload, so PostgreSQL `NaN`, positive
+    and negative infinity, and both signed zero representations affect COUNT
+    only through their NULL status; all-NULL groups retain count zero. Special-
+    value fixtures, invalid null bytes, adjacent native shapes, PG18/PG19 SQL103
+    prepared DML/DDL lifecycle, and the 35-family/355-assertion semantic matrix
+    pass. The complete PG18 and PG19 validation matrices pass: 1,545 core plus
+    55 correctness unit tests, 66 SQL contracts, and 588 planner-shape/stress
+    tests on each version; all 32 native GPU CTests and 137 fail-closed
+    coverage/safety tests pass as well. The C++ source-tree build dependency
+    contract now emits every kernel source/header path, preventing Cargo from
+    linking a stale static kernel archive after an in-place native edit.
+    Diagnostic 5-warmup/10-pair characterizations measured 1.52 ms versus
+    PostgreSQL 8.10 ms (5.32x) at 250K and 2.21 ms versus 18.56 ms (8.41x) at
+    1M for `float4`, and 1.56 ms versus 8.53 ms (5.46x) at 250K and 2.36 ms
+    versus 18.76 ms (7.94x) at 1M for `float8`. Both retained 20/20 artifact
+    hits, verified `parallel_dense_count`, exact diffs, zero fallback, and an
+    exact installed/expected module SHA-256 of
+    `2d6574990fe06be6e9e1a4be32bc3672a9d080d4a933b71a3c3d0e87ebc7337d`
+    in
+    `.codex/scratch/grouped-count-float4-functional-pg18-20260811` and
+    `.codex/scratch/grouped-count-float8-functional-pg18-20260811`;
+    their `artifact_index.json` SHA-256 values are
+    `96cfe549d9e63465c146263ca3a74706b784c60c11e7a87876f618bf26d5422f`
+    and
+    `4250552126d2e0eb3150adfe6095fc46d344aee317fc99d09fbbfb26a144a999`.
+    The unrelated Bun process remained at roughly 99% CPU throughout, so these
+    functional measurements are non-publishable; rerun both clean exact
+    ship-gate cells on an eligible host before release.
 - [ ] Membership and joins: composite keys, broader exact int8 shapes,
   catalog-proved collation-safe text, and reducing semi/anti membership with exact
   NULL, `NOT IN`, duplicate, and multiplicity semantics. Row-returning joins stay

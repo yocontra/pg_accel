@@ -505,6 +505,24 @@ void test_grouped_aggregate_host_contracts() {
   check_value("grouped timestamp count physical mode value",
               kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
 
+  pgaccel_grouped_agg_desc float4_count = int8_count;
+  float4_count.measures[0].value.physical_type = PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32;
+  float4_count.measures[0].value.element_bytes = sizeof(float);
+  kernel_mode = 0;
+  check_status("grouped float4 count physical mode",
+               pgaccel_grouped_agg_kernel_mode(&float4_count, &kernel_mode), PGACCEL_OK);
+  check_value("grouped float4 count physical mode value",
+              kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
+
+  pgaccel_grouped_agg_desc float8_count = int8_count;
+  float8_count.measures[0].value.physical_type = PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64;
+  float8_count.measures[0].value.element_bytes = sizeof(double);
+  kernel_mode = 0;
+  check_status("grouped float8 count physical mode",
+               pgaccel_grouped_agg_kernel_mode(&float8_count, &kernel_mode), PGACCEL_OK);
+  check_value("grouped float8 count physical mode value",
+              kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
+
   pgaccel_grouped_agg_desc serial = int8_count;
   serial.measure_count = 2;
   serial.measures[1] = desc.measures[0];

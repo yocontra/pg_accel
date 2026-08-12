@@ -215,6 +215,29 @@ fn timestamp_grouped_count_input(type_oid: u32) -> ShapeInput {
     input
 }
 
+fn float_grouped_count_input(type_oid: u32) -> ShapeInput {
+    assert!(matches!(
+        type_oid,
+        oid if oid == u32::from(pg_sys::FLOAT4OID) || oid == u32::from(pg_sys::FLOAT8OID)
+    ));
+    let mut input = bool_grouped_count_input();
+    let (count, count_output) = aggregate(
+        MeasureExpr::Column(ColumnRef {
+            relation_oid: 100,
+            attno: 4,
+            type_oid,
+        }),
+        AggregateKind::Count,
+        u32::from(pg_sys::INT8OID),
+    );
+    input.aggregates[0] = count;
+    input.projections[1] = InputProjection::Aggregate {
+        aggregate_index: 0,
+        output: count_output,
+    };
+    input
+}
+
 fn range_intersection_grouped_input() -> ShapeInput {
     let group = column(1, 100, 1, u32::from(pg_sys::INT4OID));
     let price = column(1, 100, 2, u32::from(pg_sys::INT4OID));
@@ -1911,6 +1934,21 @@ fn fp64_cost_uses_typed_device_multiplier() {
 }
 
 #[test]
+fn float8_count_cost_does_not_charge_for_arithmetic_the_kernel_never_performs() {
+    let input = float_grouped_count_input(u32::from(pg_sys::FLOAT8OID));
+    let mut limits = DeviceLimits::cpu_only();
+    limits.has_native_fp64 = false;
+    limits.soft_fp64_cost_multiplier = 7.0;
+    let soft = build_shape(input.clone(), &TypedCostModel::from_limits(&limits))
+        .expect("nullable float8 COUNT shape should build without fp64 arithmetic");
+    limits.has_native_fp64 = true;
+    let native = build_shape(input, &TypedCostModel::from_limits(&limits))
+        .expect("native-fp64 nullable float8 COUNT shape should build");
+    assert_eq!(soft.cost.aggregate, native.cost.aggregate);
+    assert_eq!(soft.cost.total, native.cost.total);
+}
+
+#[test]
 fn projection_typing_participates_in_shape_digest() {
     let input = single_table_input();
     let baseline = build_shape(input.clone(), &model()).expect("baseline should build");
@@ -2155,7 +2193,6 @@ fn straightforward_column_aggregate_types_decline_without_performance_evidence()
     let declined = [
         (u32::from(pg_sys::INT2OID), AggregateKind::Min),
         (u32::from(pg_sys::INT2OID), AggregateKind::Max),
-        (u32::from(pg_sys::FLOAT4OID), AggregateKind::Count),
         (u32::from(pg_sys::FLOAT4OID), AggregateKind::Min),
         (u32::from(pg_sys::FLOAT4OID), AggregateKind::Max),
         (u32::from(pg_sys::DATEOID), AggregateKind::Min),
@@ -2580,6 +2617,88 @@ fn timestamp_column_count_candidates_admit_only_the_qualified_physical_shape() {
     assert_eq!(planned_mode(filtered), GroupedAggKernelMode::SerialGeneric);
 
     let mut joined = timestamp_grouped_count_input(u32::from(pg_sys::TIMESTAMPTZOID));
+    add_dimension(&mut joined, 2, 200, false);
+    assert_eq!(planned_mode(joined), GroupedAggKernelMode::SerialGeneric);
+}
+
+#[test]
+fn float_column_count_candidates_admit_only_the_qualified_physical_shape() {
+    let planned_mode = |input| {
+        let shape =
+            build_shape(input, &model()).expect("float COUNT shape should be representable");
+        planned_descriptor_kernel_mode(&shape.spec, false)
+    };
+
+    for type_oid in [u32::from(pg_sys::FLOAT4OID), u32::from(pg_sys::FLOAT8OID)] {
+        assert_eq!(
+            planned_mode(float_grouped_count_input(type_oid)),
+            GroupedAggKernelMode::ParallelDenseCount
+        );
+
+        let mut global = single_table_input();
+        let (count, count_output) = aggregate(
+            MeasureExpr::Column(ColumnRef {
+                relation_oid: 100,
+                attno: 4,
+                type_oid,
+            }),
+            AggregateKind::Count,
+            u32::from(pg_sys::INT8OID),
+        );
+        global.aggregates = vec![count];
+        global.projections = vec![InputProjection::Aggregate {
+            aggregate_index: 0,
+            output: count_output,
+        }];
+        assert_eq!(planned_mode(global), GroupedAggKernelMode::SerialGeneric);
+    }
+
+    let mut int4_measure = float_grouped_count_input(u32::from(pg_sys::FLOAT4OID));
+    int4_measure.aggregates[0].expression = MeasureExpr::Column(ColumnRef {
+        relation_oid: 100,
+        attno: 4,
+        type_oid: u32::from(pg_sys::INT4OID),
+    });
+    let InputProjection::Aggregate {
+        output: projection_output,
+        ..
+    } = &mut int4_measure.projections[1]
+    else {
+        unreachable!("COUNT projection fixture")
+    };
+    projection_output.source_type_oid = u32::from(pg_sys::INT4OID);
+    assert_eq!(
+        planned_mode(int4_measure),
+        GroupedAggKernelMode::SerialGeneric
+    );
+
+    let mut float_group = float_grouped_count_input(u32::from(pg_sys::FLOAT8OID));
+    let group = column(1, 100, 3, u32::from(pg_sys::FLOAT8OID));
+    float_group.group_keys[0] = PlannerGroupKey::Column(group);
+    float_group.projections[0] = InputProjection::Group {
+        key: PlannerGroupKey::Column(group),
+        output: output(u32::from(pg_sys::FLOAT8OID), true),
+    };
+    assert_eq!(
+        planned_mode(float_group),
+        GroupedAggKernelMode::SerialGeneric
+    );
+
+    let mut filtered = float_grouped_count_input(u32::from(pg_sys::FLOAT4OID));
+    filtered.relation_filters.push((
+        100,
+        FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 100,
+                attno: 5,
+                type_oid: u32::from(pg_sys::BOOLOID),
+            },
+            kind: crate::engine::spec::MaskKind::Sql,
+        },
+    ));
+    assert_eq!(planned_mode(filtered), GroupedAggKernelMode::SerialGeneric);
+
+    let mut joined = float_grouped_count_input(u32::from(pg_sys::FLOAT8OID));
     add_dimension(&mut joined, 2, 200, false);
     assert_eq!(planned_mode(joined), GroupedAggKernelMode::SerialGeneric);
 }

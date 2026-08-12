@@ -318,10 +318,15 @@ fn mul_cost(count: u64, coefficient: PgCost) -> f64 {
     count as f64 * coefficient.get()
 }
 
-fn expression_uses_fp64(expression: &MeasureExpr) -> bool {
+fn measure_uses_fp64_arithmetic(measure: &crate::engine::spec::MeasureSpec) -> bool {
+    if measure.outputs.as_slice() == [COUNT_OUTPUT]
+        && matches!(measure.expression, MeasureExpr::Column(_))
+    {
+        return false;
+    }
     const FLOAT8OID: u32 = 701;
     let is_fp64 = |column: &ColumnRef| column.type_oid == FLOAT8OID;
-    match expression {
+    match &measure.expression {
         MeasureExpr::CountStar => false,
         MeasureExpr::Column(column) => is_fp64(column),
         MeasureExpr::Binary { lhs, rhs, .. } | MeasureExpr::StatsPair { value: lhs, rhs } => {
@@ -495,10 +500,7 @@ pub fn estimate_shape_cost(
         .fold(0_u64, u64::saturating_add);
 
     let fp64_multiplier = if !model.hardware.has_native_fp64
-        && spec
-            .measures
-            .iter()
-            .any(|measure| expression_uses_fp64(&measure.expression))
+        && spec.measures.iter().any(measure_uses_fp64_arithmetic)
     {
         model.coefficients.soft_fp64_cost_multiplier
     } else {

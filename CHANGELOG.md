@@ -43,11 +43,12 @@ claim is implied by the entries below.
   every group and unfiltered COUNT row; broader aggregate modifiers remain
   PostgreSQL-native.
 - Qualified dense-count specializations group one nullable boolean fact column
-  and count one distinct nullable `int2`, `int8`, `date`, `timestamp`, or
-  `timestamptz` fact column. They use the resident int32/int64/date/timestamp
+  and count one distinct nullable `int2`, `int8`, `float4`, `float8`, `date`,
+  `timestamp`, or `timestamptz` fact column. They use the resident physical
   representations only for null-sidecar COUNT semantics, preserve active
-  all-NULL groups with count zero, and leave global, filtered, joined,
-  non-boolean-grouped, and broader typed COUNT shapes native.
+  all-NULL groups with count zero, never interpret floating NaN/infinity/signed-
+  zero payloads, and leave global, filtered, joined, non-boolean-grouped, and
+  broader typed COUNT shapes native.
 - SSBM-, TPC-H-, and ClickBench-style system workload characterization plus an
   eight-backend residency/concurrency proof with exact cluster-byte cleanup.
 

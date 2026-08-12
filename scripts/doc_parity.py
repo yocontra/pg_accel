@@ -76,7 +76,7 @@ BREW_INSTALL_RE = re.compile(r"\bbrew install(?P<formulas>(?: [A-Za-z0-9@+_.-]+)
 
 EXPECTED_CAPABILITIES = {
     "Resident reducing or grouped aggregate": ("Present", "Selectable"),
-    "Scalar row predicate inside a resident aggregate": (
+    "Scalar row or aggregate-local predicate inside a resident aggregate": (
         "Present",
         "Selectable for exact qualified shapes",
     ),

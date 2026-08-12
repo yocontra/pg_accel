@@ -272,14 +272,8 @@ mod gpu_build {
             "cargo::rerun-if-changed={}",
             kernels_src.join("CMakeLists.txt").display()
         );
-        println!(
-            "cargo::rerun-if-changed={}",
-            kernels_src.join("src").display()
-        );
-        println!(
-            "cargo::rerun-if-changed={}",
-            kernels_src.join("include").display()
-        );
+        emit_rerun_if_changed_tree(&kernels_src.join("src"));
+        emit_rerun_if_changed_tree(&kernels_src.join("include"));
 
         let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
         let build_dir = out_dir.join("pgaccel-kernels-build");
@@ -290,6 +284,52 @@ mod gpu_build {
 
         // The built shared library lives in the build directory.
         emit_link_directives(&build_dir);
+    }
+
+    fn emit_rerun_if_changed_tree(root: &Path) {
+        // Retain the directory watch so additions and removals invalidate the
+        // build, then enumerate files because Cargo does not reliably notice
+        // in-place edits when only a directory path is registered.
+        println!("cargo::rerun-if-changed={}", root.display());
+        let mut pending = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(directory) = pending.pop() {
+            let mut entries = std::fs::read_dir(&directory)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to enumerate kernel dependency directory {}: {error}",
+                        directory.display()
+                    )
+                })
+                .map(|entry| {
+                    entry.unwrap_or_else(|error| {
+                        panic!(
+                            "failed to inspect kernel dependency under {}: {error}",
+                            directory.display()
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            entries.sort_unstable_by_key(std::fs::DirEntry::path);
+            for entry in entries {
+                let path = entry.path();
+                let file_type = entry.file_type().unwrap_or_else(|error| {
+                    panic!(
+                        "failed to identify kernel dependency {}: {error}",
+                        path.display()
+                    )
+                });
+                if file_type.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort_unstable();
+        for file in files {
+            println!("cargo::rerun-if-changed={}", file.display());
+        }
     }
 
     fn cmake_configure(source_dir: &Path, build_dir: &Path) {

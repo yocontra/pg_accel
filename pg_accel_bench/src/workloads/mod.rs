@@ -21,6 +21,7 @@ mod grouped_agg_high_card;
 mod grouped_agg_int4;
 mod grouped_count_bool_candidate;
 mod grouped_count_date_candidate;
+mod grouped_count_float_candidate;
 mod grouped_count_int2_candidate;
 mod grouped_count_int8_candidate;
 mod grouped_count_timestamp_candidate;
@@ -140,6 +141,7 @@ pub use grouped_agg_high_card::GroupedAggHighCard;
 pub use grouped_agg_int4::GroupedAggInt4;
 pub use grouped_count_bool_candidate::GroupedCountBoolCandidate;
 pub use grouped_count_date_candidate::GroupedCountDateCandidate;
+pub use grouped_count_float_candidate::{GroupedCountFloat4Candidate, GroupedCountFloat8Candidate};
 pub use grouped_count_int2_candidate::GroupedCountInt2Candidate;
 pub use grouped_count_int8_candidate::GroupedCountInt8Candidate;
 pub use grouped_count_timestamp_candidate::{
@@ -333,6 +335,8 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(GroupedAggInt4),
         Box::new(GroupedCountBoolCandidate),
         Box::new(GroupedCountDateCandidate),
+        Box::new(GroupedCountFloat4Candidate),
+        Box::new(GroupedCountFloat8Candidate),
         Box::new(GroupedCountInt2Candidate),
         Box::new(GroupedCountInt8Candidate),
         Box::new(GroupedCountTimestampCandidate),
@@ -975,6 +979,18 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::GroupedAggregate,
     },
     ReleasedEnvelopeContract {
+        workload: "grouped_count_float4_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
+        workload: "grouped_count_float8_candidate",
+        min_rows: GROUPAGG_WINNER_MIN_ROWS,
+        max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
+        family: ReleasedPathFamily::GroupedAggregate,
+    },
+    ReleasedEnvelopeContract {
         workload: "grouped_count_timestamp_candidate",
         min_rows: GROUPAGG_WINNER_MIN_ROWS,
         max_rows: DENSE_GROUPAGG_ONE_SHOT_MAX_ROWS,
@@ -1179,6 +1195,14 @@ pub const METAL_SHIP_GATE_CELLS: &[MetalShipGateCell] = &[
     },
     MetalShipGateCell {
         workload: "grouped_count_date_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_count_float4_candidate",
+        rows: 1_000_000,
+    },
+    MetalShipGateCell {
+        workload: "grouped_count_float8_candidate",
         rows: 1_000_000,
     },
     MetalShipGateCell {
@@ -1487,6 +1511,26 @@ fn groupagg_threshold_matrix_entry(
             "nullable bool key + nullable date measure",
             "bool key, COUNT(date)",
             "exact nullable DATE resident grouped COUNT warm winner matrix",
+        ),
+        "grouped_count_float4_candidate" => (
+            "resident_dictionary_groupagg_nullable_float4_count",
+            "nullable bool group key + nullable float4 COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable float4 measure",
+            "bool key, COUNT(float4)",
+            "exact nullable FLOAT4 resident grouped COUNT warm winner matrix",
+        ),
+        "grouped_count_float8_candidate" => (
+            "resident_dictionary_groupagg_nullable_float8_count",
+            "nullable bool group key + nullable float8 COUNT input",
+            "three boolean SQL groups: false, true, and NULL",
+            "100% input rows grouped; NULL measures ignored and the NULL-key group is all-NULL",
+            "exactly three grouped rows at release scale".to_owned(),
+            "nullable bool key + nullable float8 measure",
+            "bool key, COUNT(float8)",
+            "exact nullable FLOAT8 resident grouped COUNT warm winner matrix",
         ),
         "grouped_count_timestamp_candidate" => (
             "resident_dictionary_groupagg_nullable_timestamp_count",
@@ -3423,6 +3467,8 @@ fn static_workload_name(name: &str) -> &'static str {
         "grouped_agg_int4" => "grouped_agg_int4",
         "grouped_count_bool_candidate" => "grouped_count_bool_candidate",
         "grouped_count_date_candidate" => "grouped_count_date_candidate",
+        "grouped_count_float4_candidate" => "grouped_count_float4_candidate",
+        "grouped_count_float8_candidate" => "grouped_count_float8_candidate",
         "grouped_count_int2_candidate" => "grouped_count_int2_candidate",
         "grouped_count_int8_candidate" => "grouped_count_int8_candidate",
         "grouped_count_timestamp_candidate" => "grouped_count_timestamp_candidate",
@@ -3564,6 +3610,8 @@ mod tests {
             (
                 "grouped_count_bool_candidate"
                     | "grouped_count_date_candidate"
+                    | "grouped_count_float4_candidate"
+                    | "grouped_count_float8_candidate"
                     | "grouped_count_int2_candidate"
                     | "grouped_count_int8_candidate"
                     | "grouped_count_timestamp_candidate"
@@ -3598,6 +3646,14 @@ mod tests {
             ),
             (
                 "grouped_count_date_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_count_float4_candidate",
+                FINAL_MATRIX_MIN_WARM_SPEEDUP,
+            ),
+            (
+                "grouped_count_float8_candidate",
                 FINAL_MATRIX_MIN_WARM_SPEEDUP,
             ),
             (
@@ -3889,6 +3945,14 @@ mod tests {
             GROUPAGG_WINNER_MIN_ROWS
         ));
         assert!(supported_default_suite_probe(
+            "grouped_count_float4_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
+            "grouped_count_float8_candidate",
+            GROUPAGG_WINNER_MIN_ROWS
+        ));
+        assert!(supported_default_suite_probe(
             "grouped_count_timestamp_candidate",
             GROUPAGG_WINNER_MIN_ROWS
         ));
@@ -3918,6 +3982,14 @@ mod tests {
         ));
         assert!(!supported_default_suite_probe(
             "grouped_count_date_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_float4_candidate",
+            GROUPAGG_WINNER_MIN_ROWS - 1
+        ));
+        assert!(!supported_default_suite_probe(
+            "grouped_count_float8_candidate",
             GROUPAGG_WINNER_MIN_ROWS - 1
         ));
         assert!(!supported_default_suite_probe(
@@ -4492,6 +4564,8 @@ mod tests {
         for name in [
             "grouped_count_bool_candidate",
             "grouped_count_date_candidate",
+            "grouped_count_float4_candidate",
+            "grouped_count_float8_candidate",
             "grouped_count_int2_candidate",
             "grouped_count_int8_candidate",
             "grouped_count_timestamp_candidate",

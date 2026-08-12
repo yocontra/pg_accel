@@ -153,12 +153,13 @@ fn validate_measure_descriptor_capability(
     }
     let validate_column =
         |column: &crate::engine::spec::ColumnRef| match (column.type_oid, aggregate.output.kind) {
-            (BOOLOID | INT2OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID, AggregateKind::Count) => {
-                Ok(())
-            }
+            (
+                BOOLOID | INT2OID | FLOAT4OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID,
+                AggregateKind::Count,
+            ) => Ok(()),
             (
                 BOOLOID | FLOAT4OID | TIMESTAMPOID | TIMESTAMPTZOID,
-                AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
+                AggregateKind::Min | AggregateKind::Max,
             ) => Err(ShapeDecline::UnsupportedAggregateInput {
                 kind: aggregate.output.kind,
                 type_oid: column.type_oid,

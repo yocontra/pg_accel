@@ -173,6 +173,8 @@ than the unprivileged local warm gate:
 | `grouped_agg_int4` | exact resident grouped SUM(int4)/COUNT | 1.15x |
 | `grouped_count_bool_candidate` | nullable bool-key / distinct nullable bool COUNT(column) | 1.15x |
 | `grouped_count_date_candidate` | nullable bool-key / distinct nullable date COUNT(column) | 1.15x |
+| `grouped_count_float4_candidate` | nullable bool-key / distinct nullable float4 COUNT(column) | 1.15x |
+| `grouped_count_float8_candidate` | nullable bool-key / distinct nullable float8 COUNT(column) | 1.15x |
 | `grouped_count_int2_candidate` | nullable bool-key / distinct nullable int2 COUNT(column) | 1.15x |
 | `grouped_count_int8_candidate` | nullable bool-key / distinct nullable int8 COUNT(column) | 1.15x |
 | `grouped_count_timestamp_candidate` | nullable bool-key / distinct nullable timestamp COUNT(column) | 1.15x |
@@ -195,8 +197,9 @@ coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
 exactly two int4 bounds fuse into one inclusive predicate over the product lhs.
 One-sided, RHS-input, joined, degenerate, and third-bound variants remain
 native; a third same-column bound reports `shape_multiple_range_predicates`.
-The six typed column-count lanes require one nullable boolean fact key and one
-distinct nullable bool, int2, int8, date, timestamp, or timestamptz input;
+The eight typed column-count lanes require one nullable boolean fact key and one
+distinct nullable bool, int2, int8, float4, float8, date, timestamp, or
+timestamptz input;
 global, filtered, joined, non-boolean-grouped, same-column, and broader typed
 COUNT shapes remain native.
 The aggregate-local FILTER lane accepts only one proper bounded same-column
@@ -212,7 +215,7 @@ not make them eligible for the current ship gate.
 
 Any change to a workload SQL contract, fixture, threshold, or candidate tree
 invalidates the predecessor population freeze and random selection for the new
-candidate. Freeze the replacement SHA/tree and fifteen-cell population, then make a
+candidate. Freeze the replacement SHA/tree and seventeen-cell population, then make a
 fresh independent write-once random selection before executing release gates;
 retained predecessor evidence is transition history only.
 
