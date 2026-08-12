@@ -175,6 +175,7 @@ jobs:
             curl \
             flex \
             git \
+            libclang-dev \
             libreadline-dev \
             libssl-dev \
             lld \

@@ -32,7 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang cmake git lld llvm-dev ninja-build
+            build-essential clang cmake git libclang-dev lld llvm-dev ninja-build
           cargo install just --locked --version "$(awk '/^just / { print $2 }' .tool-versions)"
       - name: Build pinned AdaptiveCpp generic toolchain
         if: steps.cache-acpp.outputs.cache-hit != 'true'

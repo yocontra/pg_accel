@@ -243,6 +243,7 @@ class PackageExtensionTests(unittest.TestCase):
         for required in (
             "runs-on: ubuntu-latest",
             "pg: [18, 19]",
+            "libclang-dev",
             "ACPP_BACKEND=generic ./scripts/setup_acpp.sh",
             "just audit-cpu-cheats",
             "python3 scripts/package_extension.py",

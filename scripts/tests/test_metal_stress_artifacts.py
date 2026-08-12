@@ -700,6 +700,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "          rm -rf target",
                 1,
             ),
+            workflow.replace("            libclang-dev \\\n", "", 1),
             swapped_linux_steps,
         )
         for index, mutant in enumerate(mutants):

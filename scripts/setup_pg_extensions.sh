@@ -214,7 +214,7 @@ sha256_file() {
 }
 
 build_postgis_from_source() {
-    local version url expected_sha archive src build jobs actual_sha tmp
+    local version url expected_sha archive src build actual_sha tmp
     local path_value pkg_config_value dependency dependency_prefix directory
     version="${PG_ACCEL_POSTGIS_VERSION:-3.6.4}"
     url="${PG_ACCEL_POSTGIS_URL:-https://download.osgeo.org/postgis/source/postgis-${version}.tar.gz}"
@@ -222,7 +222,6 @@ build_postgis_from_source() {
     archive="$PG_ACCEL_REPO_ROOT/.pgaccel/distfiles/postgis-${version}.tar.gz"
     src="$PG_ACCEL_REPO_ROOT/.pgaccel/build/postgis-${version}-src"
     build="$PG_ACCEL_REPO_ROOT/.pgaccel/build/postgis-${version}-pg${pg_version}"
-    jobs="${PG_ACCEL_EXT_MAKE_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
     mkdir -p "$(dirname "$archive")" "$(dirname "$src")"
     if [ ! -f "$archive" ]; then
@@ -277,7 +276,10 @@ build_postgis_from_source() {
             --without-address-standardizer \
             --without-protobuf \
             --without-sfcgal
-        make -j "$jobs"
+        # PostGIS 3.6 has overlapping generated-SQL targets that race through
+        # topology.sql.tmp under parallel Make, even with topology disabled.
+        # This source fallback is uncommon; deterministic release setup wins.
+        make -j 1
         make install
     )
 }

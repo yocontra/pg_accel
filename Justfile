@@ -317,7 +317,7 @@ doc-parity:
 # Validate that default PG-version plumbing is centralized.
 pg-version-audit:
     ./scripts/pg_version_audit.sh
-    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_pg_source.py
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_pg_source.py scripts/tests/test_setup_pg_extensions.py
 
 # Validate relocatable package layout, loader metadata, and archive preservation.
 package-extension-test:

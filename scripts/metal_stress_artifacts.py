@@ -1548,6 +1548,10 @@ def validate_ci_workflow_contract(workflow: str) -> None:
         raise ArtifactContractError(
             "Linux CPU-cheat analysis must run after AdaptiveCpp headers are available"
         )
+    if "libclang-dev" not in linux:
+        raise ArtifactContractError(
+            "Linux AdaptiveCpp setup requires the Clang development headers"
+        )
 
 
 def validate_release_workflow_contract(workflow: str) -> None:
