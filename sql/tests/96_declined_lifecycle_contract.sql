@@ -130,7 +130,8 @@ CREATE TEMP TABLE _decline_scalar (
     score float4,
     sort_key float8,
     flag boolean,
-    short_value int2
+    short_value int2,
+    wide_value int8
 );
 INSERT INTO _decline_scalar
 SELECT i,
@@ -141,7 +142,10 @@ SELECT i,
        CASE WHEN i = 113 THEN NULL ELSE i::float8 END,
        CASE WHEN i % 97 = 0 THEN NULL ELSE i % 2 = 0 END,
        CASE WHEN i % 89 = 0 THEN NULL
-            ELSE ((i % 65536) - 32768)::int2 END
+            ELSE ((i % 65536) - 32768)::int2 END,
+       CASE WHEN i % 83 = 0 THEN NULL
+            WHEN i % 2 = 0 THEN '9223372036854775807'::int8
+            ELSE '-9223372036854775808'::int8 END
 FROM generate_series(1, 200000) AS rows(i);
 ANALYZE _decline_scalar;
 
@@ -184,6 +188,9 @@ FROM _decline_scalar GROUP BY flag;
 PREPARE _decline_int2_q AS
 SELECT g, count(short_value) AS observed_rows
 FROM _decline_scalar GROUP BY g;
+PREPARE _decline_int8_q AS
+SELECT g, count(wide_value) AS observed_rows
+FROM _decline_scalar GROUP BY g;
 
 INSERT INTO _decline_scalar
 SELECT i,
@@ -194,7 +201,10 @@ SELECT i,
        i::float8,
        CASE WHEN i % 19 = 0 THEN NULL ELSE i % 2 = 0 END,
        CASE WHEN i % 23 = 0 THEN NULL
-            ELSE ((i % 65536) - 32768)::int2 END
+            ELSE ((i % 65536) - 32768)::int2 END,
+       CASE WHEN i % 29 = 0 THEN NULL
+            WHEN i % 2 = 0 THEN '9223372036854775807'::int8
+            ELSE '-9223372036854775808'::int8 END
 FROM generate_series(200001, 201024) AS rows(i);
 ALTER TABLE _decline_scalar ADD COLUMN lifecycle_tag int4 DEFAULT 0;
 ANALYZE _decline_scalar;
@@ -758,6 +768,28 @@ BEGIN
     END IF;
 END $$;
 \echo 'PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_015'
+
+SET pg_accel.enabled = off;
+CREATE TEMP TABLE _decline_int8_native AS
+SELECT g, count(wide_value) AS observed_rows
+FROM _decline_scalar GROUP BY g;
+SET pg_accel.enabled = on;
+SELECT pg_accel_reset_stats();
+CREATE TEMP TABLE _decline_int8_before AS
+SELECT pg_accel_kernel_executions() AS kernels;
+CREATE TEMP TABLE _decline_int8_enabled AS EXECUTE _decline_int8_q;
+SELECT pg_temp.decline_explain('grouped_count_int8_adjacent', '_decline_int8_q');
+DO $$
+BEGIN
+    IF NOT pg_temp.decline_contract_ok(
+        'grouped_count_int8_adjacent', 'generic_serial_kernel_mode_unqualified',
+        '_decline_int8_native', '_decline_int8_enabled',
+        (SELECT kernels FROM _decline_int8_before)
+    ) THEN
+        RAISE EXCEPTION '96 adjacent INT8 COUNT contract returned false';
+    END IF;
+END $$;
+\echo 'PGACCEL_ASSERT_OK:96_declined_lifecycle_contract.assert_016'
 
 DEALLOCATE ALL;
 DROP TABLE _decline_scalar CASCADE;

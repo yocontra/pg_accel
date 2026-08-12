@@ -259,7 +259,8 @@ CREATE UNLOGGED TABLE _lifecycle_grouped (
     quantity int4,
     active boolean,
     bg boolean,
-    s int2
+    s int2,
+    wide_value int8
 );
 INSERT INTO _lifecycle_grouped
 SELECT i,
@@ -270,7 +271,10 @@ SELECT i,
        CASE WHEN i % 79 = 0 THEN NULL ELSE (i % 10 = 0) END,
        CASE WHEN i % 19 = 0 THEN NULL ELSE i % 2 = 0 END,
        CASE WHEN i % 19 = 0 OR i % 11 = 0 THEN NULL
-            ELSE ((i % 65536) - 32768)::int2 END
+            ELSE ((i % 65536) - 32768)::int2 END,
+       CASE WHEN i % 19 = 0 OR i % 11 = 0 THEN NULL
+            WHEN i % 2 = 0 THEN '9223372036854775807'::int8
+            ELSE '-9223372036854775808'::int8 END
 FROM generate_series(1, 500000) AS rows(i);
 ANALYZE _lifecycle_grouped;
 
@@ -295,6 +299,10 @@ PREPARE _lifecycle_int2_count_q AS
 SELECT bg, count(s) AS observed_rows
 FROM _lifecycle_grouped
 GROUP BY bg;
+PREPARE _lifecycle_int8_count_q AS
+SELECT bg, count(wide_value) AS observed_rows
+FROM _lifecycle_grouped
+GROUP BY bg;
 
 DO $$
 DECLARE
@@ -306,7 +314,7 @@ BEGIN
     IF has_gpu THEN
         PERFORM pg_accel_pin(
             '_lifecycle_grouped'::regclass,
-            ARRAY['g', 'v', 'price', 'quantity', 'active', 'bg', 's']
+            ARRAY['g', 'v', 'price', 'quantity', 'active', 'bg', 's', 'wide_value']
         );
         generation_before := pg_temp.lifecycle_generation('_lifecycle_grouped');
     END IF;
@@ -320,7 +328,10 @@ BEGIN
            CASE WHEN i % 31 = 0 THEN NULL ELSE true END,
            CASE WHEN i % 19 = 0 THEN NULL ELSE i % 2 = 0 END,
            CASE WHEN i % 19 = 0 OR i % 11 = 0 THEN NULL
-                ELSE ((i % 65536) - 32768)::int2 END
+                ELSE ((i % 65536) - 32768)::int2 END,
+           CASE WHEN i % 19 = 0 OR i % 11 = 0 THEN NULL
+                WHEN i % 2 = 0 THEN '9223372036854775807'::int8
+                ELSE '-9223372036854775808'::int8 END
     FROM generate_series(500001, 504096) AS rows(i);
     ANALYZE _lifecycle_grouped;
     IF has_gpu THEN
@@ -364,6 +375,12 @@ BEGIN
     PERFORM pg_temp.lifecycle_assert_dispatch(
         'int2_count', 'prepared_after_dml', kernels_before
     );
+    PERFORM pg_temp.lifecycle_explain(
+        'int8_count', 'prepared_after_dml', '_lifecycle_int8_count_q'
+    );
+    PERFORM pg_temp.lifecycle_assert_dispatch(
+        'int8_count', 'prepared_after_dml', kernels_before
+    );
 
     ALTER TABLE _lifecycle_grouped ADD COLUMN lifecycle_tag int4 DEFAULT 0;
     IF has_gpu THEN
@@ -396,6 +413,10 @@ CREATE TEMP TABLE _lifecycle_int2_count_native AS
 SELECT bg, count(s) AS observed_rows
 FROM _lifecycle_grouped
 GROUP BY bg;
+CREATE TEMP TABLE _lifecycle_int8_count_native AS
+SELECT bg, count(wide_value) AS observed_rows
+FROM _lifecycle_grouped
+GROUP BY bg;
 
 SET pg_accel.enabled = on;
 SELECT pg_accel_reset_stats();
@@ -416,6 +437,9 @@ SELECT pg_temp.lifecycle_explain('aggregate_filter', 'prepared_after_ddl', '_lif
 CREATE TEMP TABLE _lifecycle_int2_count_accel AS EXECUTE _lifecycle_int2_count_q;
 SELECT pg_temp.lifecycle_refresh_if_gpu('_lifecycle_grouped', 504096);
 SELECT pg_temp.lifecycle_explain('int2_count', 'prepared_after_ddl', '_lifecycle_int2_count_q');
+CREATE TEMP TABLE _lifecycle_int8_count_accel AS EXECUTE _lifecycle_int8_count_q;
+SELECT pg_temp.lifecycle_refresh_if_gpu('_lifecycle_grouped', 504096);
+SELECT pg_temp.lifecycle_explain('int8_count', 'prepared_after_ddl', '_lifecycle_int8_count_q');
 
 DO $$
 DECLARE
@@ -451,6 +475,12 @@ BEGIN
         UNION ALL
         (SELECT * FROM _lifecycle_int2_count_accel
          EXCEPT ALL SELECT * FROM _lifecycle_int2_count_native)
+    ) OR EXISTS (
+        (SELECT * FROM _lifecycle_int8_count_native
+         EXCEPT ALL SELECT * FROM _lifecycle_int8_count_accel)
+        UNION ALL
+        (SELECT * FROM _lifecycle_int8_count_accel
+         EXCEPT ALL SELECT * FROM _lifecycle_int8_count_native)
     ) THEN
         RAISE EXCEPTION '95 grouped/predicate/range/FILTER lifecycle FAILED: native results differ';
     END IF;
@@ -469,6 +499,9 @@ BEGIN
     );
     PERFORM pg_temp.lifecycle_assert_dispatch(
         'int2_count', 'prepared_after_ddl', kernels_before, false
+    );
+    PERFORM pg_temp.lifecycle_assert_dispatch(
+        'int8_count', 'prepared_after_ddl', kernels_before, false
     );
     IF (SELECT env.has_gpu FROM _lifecycle_environment AS env)
        AND NOT EXISTS (
@@ -499,6 +532,16 @@ BEGIN
        ) THEN
         RAISE EXCEPTION
             '95 int2 COUNT lifecycle FAILED: specialization not reported';
+    END IF;
+    IF (SELECT env.has_gpu FROM _lifecycle_environment AS env)
+       AND NOT EXISTS (
+           SELECT 1 FROM _lifecycle_plan
+           WHERE family = 'int8_count'
+             AND stage IN ('prepared_after_dml', 'prepared_after_ddl')
+             AND line LIKE '%GPU Descriptor Specialization: dense_int8_count_plain%'
+       ) THEN
+        RAISE EXCEPTION
+            '95 int8 COUNT lifecycle FAILED: specialization not reported';
     END IF;
 END $$;
 \echo 'PGACCEL_ASSERT_OK:95_selected_lifecycle_contract.assert_001'
@@ -1172,6 +1215,7 @@ DEALLOCATE _lifecycle_predicate_q;
 DEALLOCATE _lifecycle_range_q;
 DEALLOCATE _lifecycle_aggregate_filter_q;
 DEALLOCATE _lifecycle_int2_count_q;
+DEALLOCATE _lifecycle_int8_count_q;
 DEALLOCATE _lifecycle_count4_q;
 DEALLOCATE _lifecycle_star4_q;
 DEALLOCATE _lifecycle_star8_q;

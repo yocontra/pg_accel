@@ -850,7 +850,7 @@ class SqlSemanticCoverageTests(unittest.TestCase):
                 REPO_ROOT / "coverage/sql-semantic-assertions.json"
             )
             self.assertEqual(generated, checked_in)
-            self.assertEqual(generated["declared_assertions"], 331)
+            self.assertEqual(generated["declared_assertions"], 337)
             matrix = next(
                 entry
                 for entry in generated["files"]

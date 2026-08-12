@@ -173,6 +173,7 @@ than the unprivileged local warm gate:
 | `grouped_agg_int4` | exact resident grouped SUM(int4)/COUNT | 1.15x |
 | `grouped_count_bool_candidate` | nullable bool-key / distinct nullable bool COUNT(column) | 1.15x |
 | `grouped_count_int2_candidate` | nullable bool-key / distinct nullable int2 COUNT(column) | 1.15x |
+| `grouped_count_int8_candidate` | nullable bool-key / distinct nullable int8 COUNT(column) | 1.15x |
 | `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.15x |
 | `and_range_predicate_expression_grouped_agg_int4` | exact int4 product SUM/COUNT with a fused nullable bounded range | 1.15x |
 | `aggregate_filter_grouped_agg_int4` | exact bounded aggregate-local SUM(int4) FILTER plus unfiltered COUNT | 1.15x |
@@ -191,8 +192,8 @@ coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
 exactly two int4 bounds fuse into one inclusive predicate over the product lhs.
 One-sided, RHS-input, joined, degenerate, and third-bound variants remain
 native; a third same-column bound reports `shape_multiple_range_predicates`.
-The two narrow column-count lanes require one nullable boolean fact key and one
-distinct nullable bool or int2 input; global, filtered, joined,
+The three typed column-count lanes require one nullable boolean fact key and one
+distinct nullable bool, int2, or int8 input; global, filtered, joined,
 non-boolean-grouped, same-column, and broader typed COUNT shapes remain native.
 The aggregate-local FILTER lane accepts only one proper bounded same-column
 int4 interval on SUM paired with one unfiltered COUNT(*).
@@ -207,7 +208,7 @@ not make them eligible for the current ship gate.
 
 Any change to a workload SQL contract, fixture, threshold, or candidate tree
 invalidates the predecessor population freeze and random selection for the new
-candidate. Freeze the replacement SHA/tree and eleven-cell population, then make a
+candidate. Freeze the replacement SHA/tree and twelve-cell population, then make a
 fresh independent write-once random selection before executing release gates;
 retained predecessor evidence is transition history only.
 
