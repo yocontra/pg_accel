@@ -17,8 +17,13 @@ published release artifact.
   with the live plan/integration suite.
 - [x] Native Metal CTest passes 32/32 executables. The focused H3 suite passes
   1,135/1,135 plus 23/23 no-device cases.
-- [x] External PostgreSQL 18 SQL passes 59/59 files and 320/320 semantic
-  assertions. The semantic matrix covers 22 families, and all released selected
+- [x] Installed-extension PostgreSQL 18 and 19 SQL each pass 60/60 files and
+  the fixed 323/323 semantic assertion inventory on clean candidate `655fb60`.
+  The loaded module SHA-256 values are
+  `b26f4553d6782e6cc02c2af67252342d417f35f408d88dff9690b73d9e4f2a5e`
+  for PG18 and
+  `d654eda4920c394eb2ec51df61d8e86f8188cbbcedee8e3e1a614720da7cb78e`
+  for PG19. The semantic matrix covers 22 families, and all released selected
   families have declared NULL, prepared-plan, DML, DDL, dispatch, and shape
   evidence.
 - [x] Production residency-ledger integration, packaging tests, dependency
@@ -299,9 +304,9 @@ redesigned and independently requalified.
   and SRF shapes, sort/top-k/window, and neighboring raster/spatial declines.
 - [x] Add live PG19 package/install/SQL evidence. The PostgreSQL 19beta1
   release build installed and loaded module SHA-256
-  `4e1c8696c25004e856f8245e9f46ea70f37bed1cd5f46bf41c8f899e54d2151b`;
-  extension smoke, 59/59 external SQL files, and both loaded upstream schedules
-  pass. PG19 lint, check, and test compilation remain separate gates.
+  `d654eda4920c394eb2ec51df61d8e86f8188cbbcedee8e3e1a614720da7cb78e`;
+  extension smoke, 60/60 external SQL files, and both loaded upstream schedules
+  pass. PG19 lint, check, and test compilation also pass as separate gates.
 
 ## Release And Publication Gates
 
