@@ -165,14 +165,11 @@ fn validate_measure_descriptor_capability(
                 type_oid: column.type_oid,
             }),
             (
-                INT4OID,
-                AggregateKind::Sum | AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
-            )
-            | (
-                INT8OID | FLOAT8OID,
+                INT4OID | INT8OID | FLOAT8OID,
                 AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
-            ) => Ok(()),
-            (INT4OID | INT8OID, AggregateKind::Avg) | (INT8OID, AggregateKind::Sum) => {
+            )
+            | (INT2OID | INT4OID, AggregateKind::Sum | AggregateKind::Avg) => Ok(()),
+            (INT8OID, AggregateKind::Avg | AggregateKind::Sum) => {
                 Err(ShapeDecline::NumericAccumulatorTypeUnavailable {
                     type_oid: column.type_oid,
                 })
@@ -262,13 +259,15 @@ fn expected_aggregate_result_type(source_type_oid: u32, kind: AggregateKind) -> 
     const DATEOID: u32 = 1082;
     const TIMESTAMPOID: u32 = 1114;
     const TIMESTAMPTZOID: u32 = 1184;
+    const NUMERICOID: u32 = 1700;
     match (source_type_oid, kind) {
         (
             0 | BOOLOID | INT2OID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID
             | TIMESTAMPOID | TIMESTAMPTZOID,
             AggregateKind::Count,
         )
-        | (INT4OID, AggregateKind::Sum) => Some(INT8OID),
+        | (INT2OID | INT4OID, AggregateKind::Sum) => Some(INT8OID),
+        (INT2OID | INT4OID, AggregateKind::Avg) => Some(NUMERICOID),
         (
             source @ (INT2OID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID | TIMESTAMPOID
             | TIMESTAMPTZOID),
@@ -1382,6 +1381,19 @@ mod tests {
             )),
             Ok(())
         );
+        for (input, kind) in [
+            (int2, AggregateKind::Sum),
+            (int2, AggregateKind::Avg),
+            (int4, AggregateKind::Avg),
+        ] {
+            assert_eq!(
+                validate_measure_descriptor_capability(&aggregate(
+                    MeasureExpr::Column(input),
+                    kind
+                )),
+                Ok(())
+            );
+        }
         assert!(matches!(
             validate_measure_descriptor_capability(&aggregate(
                 MeasureExpr::Column(int8),

@@ -1143,12 +1143,27 @@ mod tests {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
 
-        for query in [
-            "SELECT avg(i2) FROM t_avg_variants",
-            "SELECT avg(i4) FROM t_avg_variants",
-            "SELECT avg(i8) FROM t_avg_variants",
-            "SELECT avg(n) FROM t_avg_variants",
-            "SELECT avg(d) FROM t_avg_variants",
+        for (query, expected_reason) in [
+            (
+                "SELECT avg(i2) FROM t_avg_variants",
+                "generic_serial_kernel_mode_unqualified",
+            ),
+            (
+                "SELECT avg(i4) FROM t_avg_variants",
+                "generic_serial_kernel_mode_unqualified",
+            ),
+            (
+                "SELECT avg(i8) FROM t_avg_variants",
+                "shape_numeric_accumulator_unavailable",
+            ),
+            (
+                "SELECT avg(n) FROM t_avg_variants",
+                "shape_numeric_accumulator_unavailable",
+            ),
+            (
+                "SELECT avg(d) FROM t_avg_variants",
+                "shape_numeric_accumulator_unavailable",
+            ),
         ] {
             Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
             let plan_text = explain_text(query);
@@ -1163,7 +1178,7 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .unwrap_or_else(|| panic!("non-float AVG should record a decline for {query}"));
             assert_eq!(
-                rejection, "shape_numeric_accumulator_unavailable",
+                rejection, expected_reason,
                 "non-float AVG should expose the exact generic accumulator decline; plan:\n{plan_text}"
             );
         }

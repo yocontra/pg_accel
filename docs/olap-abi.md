@@ -167,13 +167,18 @@ word/byte boundary, oversized counts, and trailing data are rejected before
 allocation.
 
 The canonical aggregate type mappings represented by AOP2 are `COUNT(*) ->
-int8`; `COUNT(int4|int8|float8) -> int8`; `SUM(int4) -> int8`; `SUM(float8) ->
-float8`; `MIN/MAX(T) -> T` for int4, int8, and float8; and `AVG(float8)` or sample
-`STDDEV_SAMP(float8) -> float8`. AOP2 records PostgreSQL result semantics; it does
-not assert that the current planner, resident producer, or runtime can execute
-every representable mapping. Population stddev and variance are not
-representable because `AggQuerySpec` exposes no corresponding kind, so those
-operations cannot be encoded as the `STDDEV_SAMP` lane.
+int8`; `COUNT(bool|int2|int4|int8|float4|float8|date|timestamp|timestamptz) ->
+int8`; `SUM(int2|int4) -> int8`; `AVG(int2|int4) -> numeric`; `SUM(float8) ->
+float8`; `MIN/MAX(T) -> T` for int2, int4, int8, float4, float8, date,
+timestamp, and timestamptz; and `AVG(float8)` or sample
+`STDDEV_SAMP(float8) -> float8`. The exact released integer AVG lane
+shares an int64 SUM/non-NULL-count device state and performs PostgreSQL NUMERIC
+division during backend-thread output materialization. AOP2 records PostgreSQL
+result semantics; it does not assert that the current planner, resident
+producer, or runtime can execute every representable mapping. Population
+stddev and variance are not representable because `AggQuerySpec` exposes no
+corresponding kind, so those operations cannot be encoded as the
+`STDDEV_SAMP` lane.
 
 The projection's result metadata is expected metadata, not authority. Plan
 creation compares slot count/order and `(type_oid, typmod, collation)` against

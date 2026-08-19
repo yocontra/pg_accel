@@ -75,6 +75,8 @@ SQL_SEMANTIC_MATRIX_REQUIRED_FAMILIES = frozenset(
         "decline.grouped_count_timestamp_adjacent",
         "selected.grouped_count_float",
         "decline.grouped_count_float_adjacent",
+        "selected.grouped_integer_sum_avg",
+        "decline.grouped_integer_sum_avg_adjacent",
     }
 )
 SQL_SEMANTIC_MATRIX_DECLINE_REASONS = {
@@ -97,6 +99,7 @@ SQL_SEMANTIC_MATRIX_DECLINE_REASONS = {
     "decline.grouped_count_date_adjacent": "generic_serial_kernel_mode_unqualified",
     "decline.grouped_count_timestamp_adjacent": "generic_serial_kernel_mode_unqualified",
     "decline.grouped_count_float_adjacent": "generic_serial_kernel_mode_unqualified",
+    "decline.grouped_integer_sum_avg_adjacent": "generic_serial_kernel_mode_unqualified",
 }
 BASELINE_CPP_SOURCES = 16
 BASELINE_CPP_DEVICE_OBJECTS = 15

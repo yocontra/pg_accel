@@ -1,8 +1,8 @@
 {
   "baseline_assertions": 306,
   "baseline_files": 58,
-  "declared_assertions": 355,
-  "declared_files": 66,
+  "declared_assertions": 361,
+  "declared_files": 67,
   "files": [
     {
       "assertions": [
@@ -357,6 +357,61 @@
       "completion_id": "103_grouped_count_float_contract",
       "file": "103_grouped_count_float_contract.sql",
       "sha256": "38a38923ee1039997b6faabdadf04957cd5fb7549f67389ef8431450de230fa8"
+    },
+    {
+      "assertions": [
+        {
+          "emission": "echo",
+          "guard_count": 3,
+          "guard_sha256": "aae943c3ea5b98e71fb59235cef2f1a9d7230b2186fa98c893671433fa9fd08f",
+          "guard_token_count": 10,
+          "id": "104_grouped_integer_sum_avg_contract.assert_001",
+          "source_line": 71
+        },
+        {
+          "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "7e90595c2e86ded46b58dc413c149f912d71dcbf076229b3d2de5316730edd20",
+          "guard_token_count": 12,
+          "id": "104_grouped_integer_sum_avg_contract.assert_002",
+          "source_line": 151
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "95f2f19330313c2aad66f3035ca545071e2d6b7016cfd4904149c38e241e84cd",
+          "guard_token_count": 5,
+          "id": "104_grouped_integer_sum_avg_contract.assert_003",
+          "source_line": 172
+        },
+        {
+          "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "ad355759227499137a7c2b3333a1e8559bcccad7b782300d662df37465f79017",
+          "guard_token_count": 17,
+          "id": "104_grouped_integer_sum_avg_contract.assert_004",
+          "source_line": 295
+        },
+        {
+          "emission": "echo",
+          "guard_count": 7,
+          "guard_sha256": "916614f6a393ead73e23bbf273847f1076d4106e7d76c24444ef2053fe5b6939",
+          "guard_token_count": 17,
+          "id": "104_grouped_integer_sum_avg_contract.assert_005",
+          "source_line": 409
+        },
+        {
+          "emission": "echo",
+          "guard_count": 1,
+          "guard_sha256": "af1b42e750ee2704fb1045c213d41c55ca8f493d642a312e0a6b33c1fe0f5a7f",
+          "guard_token_count": 7,
+          "id": "104_grouped_integer_sum_avg_contract.assert_006",
+          "source_line": 456
+        }
+      ],
+      "completion_id": "104_grouped_integer_sum_avg_contract",
+      "file": "104_grouped_integer_sum_avg_contract.sql",
+      "sha256": "4d9ab85f89bd2afcd316b9ee8460632f935be2cd96b26a756aee57d028f28ca9"
     },
     {
       "assertions": [

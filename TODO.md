@@ -407,6 +407,36 @@ redesigned and independently requalified.
     The unrelated Bun process remained at roughly 99% CPU throughout, so these
     functional measurements are non-publishable; rerun both clean exact
     ship-gate cells on an eligible host before release.
+  - [x] Release the first exact widened-integer SUM/AVG lanes: one nullable
+    boolean fact-column group key, one distinct nullable `int2` or `int4` fact
+    measure projected as `SUM(value)` and `AVG(value)`, and one `COUNT(*)`, with
+    no filter, join, `HAVING`, or additional measure. Both specializations use
+    the exact int64 SUM and non-NULL-count state produced by
+    `parallel_dense_integer`; SUM materializes as PostgreSQL `int8`, while AVG
+    performs PostgreSQL NUMERIC division on the backend thread. No integer AVG
+    is approximated through floating point. Full-domain endpoints, all-NULL
+    groups, independent arithmetic oracles, result OIDs, zero fallback,
+    descriptor specialization, prepared DML/DDL lifecycle, and AVG-only /
+    missing-COUNT native declines are covered by PG18/PG19 SQL104 and the
+    37-family/361-assertion semantic matrix. The complete PG18 and PG19
+    validation matrices pass: 1,547 core plus 55 correctness unit tests, 67 SQL
+    contracts, and 591 planner-shape/stress tests on each version; all 32 native
+    GPU CTests, 137 coverage-audit tests, and 171 adversarial CPU-cheat tests
+    pass as well. Diagnostic 5-warmup/10-pair characterizations measured 3.40
+    ms versus PostgreSQL 11.32 ms (3.33x) at 250K and 10.03 ms versus 23.82 ms
+    (2.37x) at 1M for `int2`, and 3.58 ms versus 10.68 ms (2.98x) at 250K and
+    10.69 ms versus 30.58 ms (2.86x) at 1M for `int4`. Both retained 20/20
+    artifact hits, verified `parallel_dense_integer`, exact diffs, and zero
+    fallback in
+    `.codex/scratch/grouped-int2-sum-avg-functional-pg18-20260818` and
+    `.codex/scratch/grouped-int4-sum-avg-functional-pg18-20260818`; their
+    `artifact_index.json` SHA-256 values are
+    `b71cdecdb858507c929fac8b76d1f37aa9acb45aab2a40a4e6e03b8d09973225`
+    and
+    `315761bc38945ab9041410f7f12d411e6eec9d3d0b66bb8fe14235c275d697f1`.
+    The measurements ran while an unrelated long-lived Bun process saturated a
+    CPU, so they are functional evidence only; rerun both exact 1M ship-gate
+    cells on an eligible host before publication.
 - [ ] Membership and joins: composite keys, broader exact int8 shapes,
   catalog-proved collation-safe text, and reducing semi/anti membership with exact
   NULL, `NOT IN`, duplicate, and multiplicity semantics. Row-returning joins stay
@@ -443,6 +473,9 @@ redesigned and independently requalified.
   `74056ff475e324af922a9dc67b54ee7e9e4fceb70cd76c4aefb9f7242e87044a`;
   the PG19 value is
   `4bfcd67d5bd55061896bcf0b6d890a965d62773a6df06d9e18287e14a85c7170`.
+  Any later source or module change does not inherit those results: the next
+  frozen release candidate must rerun all four schedules on both supported
+  majors before publication.
 - [x] Extend failure injection across multi-session residency/invalidation,
   executor reset/drop, planner private data, allocation/free, copy/wait,
   cancellation, output materialization, PostGIS calls, and derived-artifact

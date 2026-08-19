@@ -419,7 +419,9 @@ pub(super) fn classify_aggregate(aggregate_oid: u32) -> Option<AggregateKind> {
         | pg_sys::F_MAX_TIMETZ
         | pg_sys::F_MAX_TIMESTAMP
         | pg_sys::F_MAX_TIMESTAMPTZ => Some(AggregateKind::Max),
-        pg_sys::F_AVG_FLOAT4 | pg_sys::F_AVG_FLOAT8 => Some(AggregateKind::Avg),
+        pg_sys::F_AVG_INT2 | pg_sys::F_AVG_INT4 | pg_sys::F_AVG_FLOAT4 | pg_sys::F_AVG_FLOAT8 => {
+            Some(AggregateKind::Avg)
+        }
         pg_sys::F_STDDEV_FLOAT8 | pg_sys::F_STDDEV_SAMP_FLOAT8 => Some(AggregateKind::StddevSamp),
         _ => None,
     }
@@ -430,8 +432,6 @@ pub(super) fn needs_numeric_accumulator(aggregate_oid: u32) -> bool {
         aggregate_oid,
         pg_sys::F_SUM_INT8
             | pg_sys::F_SUM_NUMERIC
-            | pg_sys::F_AVG_INT2
-            | pg_sys::F_AVG_INT4
             | pg_sys::F_AVG_INT8
             | pg_sys::F_AVG_NUMERIC
             | pg_sys::F_AVG_INTERVAL

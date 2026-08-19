@@ -179,6 +179,8 @@ than the unprivileged local warm gate:
 | `grouped_count_int8_candidate` | nullable bool-key / distinct nullable int8 COUNT(column) | 1.15x |
 | `grouped_count_timestamp_candidate` | nullable bool-key / distinct nullable timestamp COUNT(column) | 1.15x |
 | `grouped_count_timestamptz_candidate` | nullable bool-key / distinct nullable timestamptz COUNT(column) | 1.15x |
+| `grouped_int2_sum_avg_candidate` | exact nullable bool-keyed SUM(int2)/NUMERIC AVG(int2)/COUNT(*) | 1.15x |
+| `grouped_int4_sum_avg_candidate` | exact nullable bool-keyed SUM(int4)/NUMERIC AVG(int4)/COUNT(*) | 1.15x |
 | `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.15x |
 | `and_range_predicate_expression_grouped_agg_int4` | exact int4 product SUM/COUNT with a fused nullable bounded range | 1.15x |
 | `aggregate_filter_grouped_agg_int4` | exact bounded aggregate-local SUM(int4) FILTER plus unfiltered COUNT | 1.15x |
@@ -202,6 +204,10 @@ distinct nullable bool, int2, int8, float4, float8, date, timestamp, or
 timestamptz input;
 global, filtered, joined, non-boolean-grouped, same-column, and broader typed
 COUNT shapes remain native.
+The two widened-integer SUM/AVG lanes require one nullable boolean fact key,
+one distinct nullable int2 or int4 fact measure projected as both SUM and AVG,
+and one COUNT(*). AVG-only, missing-COUNT, filtered, joined, `HAVING`, int8,
+numeric, interval, and additional-measure shapes remain native.
 The aggregate-local FILTER lane accepts only one proper bounded same-column
 int4 interval on SUM paired with one unfiltered COUNT(*).
 The 13 canonical `ssbm_q*` workloads also remain native: Q1.1-Q1.2 report
@@ -215,7 +221,7 @@ not make them eligible for the current ship gate.
 
 Any change to a workload SQL contract, fixture, threshold, or candidate tree
 invalidates the predecessor population freeze and random selection for the new
-candidate. Freeze the replacement SHA/tree and seventeen-cell population, then make a
+candidate. Freeze the replacement SHA/tree and nineteen-cell population, then make a
 fresh independent write-once random selection before executing release gates;
 retained predecessor evidence is transition history only.
 

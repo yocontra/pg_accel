@@ -564,6 +564,38 @@
         "dispatch": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null},
         "rejection_reason": {"status": "covered", "assertion_ids": ["103_grouped_count_float_contract.assert_006"], "gap": null}
       }
+    },
+    {
+      "id": "selected.grouped_integer_sum_avg",
+      "disposition": "selected",
+      "postgresql_majors": [18, 19],
+      "semantics": {"types": ["nullable bool fact group key", "nullable int2 SUM and AVG input", "nullable int4 SUM and AVG input", "widened int8 SUM result", "exact numeric AVG result"], "null_patterns": ["false, true, and NULL group keys", "NULL measures excluded independently from SUM and AVG", "all-NULL measure group retains COUNT(*) with NULL SUM/AVG"], "shape_limits": "exactly one boolean fact-column group key, one distinct int2 or int4 fact measure projected as SUM and AVG, and one COUNT(*), with no filter, join, HAVING, or additional measure; qualified from 250K through 1M rows", "dispatch_expectation": "required", "rejection_reason": null},
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_001", "104_grouped_integer_sum_avg_contract.assert_003", "104_grouped_integer_sum_avg_contract.assert_004"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_002", "104_grouped_integer_sum_avg_contract.assert_004"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_004", "104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_005"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_005"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_005"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_004", "104_grouped_integer_sum_avg_contract.assert_005"], "gap": null},
+        "rejection_reason": {"status": "not_applicable", "assertion_ids": [], "gap": null}
+      }
+    },
+    {
+      "id": "decline.grouped_integer_sum_avg_adjacent",
+      "disposition": "declined",
+      "postgresql_majors": [18, 19],
+      "semantics": {"types": ["int2 AVG without SUM", "int4 SUM and AVG without COUNT(*)"], "null_patterns": ["NULL measures retain PostgreSQL SUM/AVG semantics", "all-NULL group remains PostgreSQL-native"], "shape_limits": "the asserted adjacent boundary covers int2 AVG-only and int4 SUM+AVG without COUNT(*); both remain native outside the exact released descriptor", "dispatch_expectation": "forbidden", "rejection_reason": "generic_serial_kernel_mode_unqualified"},
+      "evidence": {
+        "types": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
+        "nulls": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
+        "shape_limits": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
+        "ddl": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
+        "dml": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
+        "prepared": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
+        "dispatch": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null},
+        "rejection_reason": {"status": "covered", "assertion_ids": ["104_grouped_integer_sum_avg_contract.assert_006"], "gap": null}
+      }
     }
   ]
 }

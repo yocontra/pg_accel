@@ -719,6 +719,10 @@ const PINS_GROUPED_COUNT_INT2: &[ResidentPinSpec] =
     &[pin!("bench_grouped_count_int2", ["bool_key", "observed"])];
 const PINS_GROUPED_COUNT_INT8: &[ResidentPinSpec] =
     &[pin!("bench_grouped_count_int8", ["bool_key", "observed"])];
+const PINS_GROUPED_INT2_SUM_AVG: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_int2_sum_avg", ["bool_key", "observed"])];
+const PINS_GROUPED_INT4_SUM_AVG: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_int4_sum_avg", ["bool_key", "observed"])];
 const PINS_GROUPED_AGG_HIGH_CARD: &[ResidentPinSpec] =
     &[pin!("bench_events_agg", ["user_id", "val"])];
 const PINS_TIMESERIES: &[ResidentPinSpec] = &[pin!("sensor_data", ["sensor_id", "value"])];
@@ -1018,6 +1022,12 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         .evidence(WINNER),
     workload("grouped_count_int8_candidate", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_COUNT_INT8)
+        .evidence(WINNER),
+    workload("grouped_int2_sum_avg_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_INT2_SUM_AVG)
+        .evidence(WINNER),
+    workload("grouped_int4_sum_avg_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_INT4_SUM_AVG)
         .evidence(WINNER),
     workload("grouped_agg_high_card", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG_HIGH_CARD)

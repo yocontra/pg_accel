@@ -49,6 +49,13 @@ claim is implied by the entries below.
   all-NULL groups with count zero, never interpret floating NaN/infinity/signed-
   zero payloads, and leave global, filtered, joined, non-boolean-grouped, and
   broader typed COUNT shapes native.
+- Qualified dense-integer specializations group one nullable boolean fact
+  column and compute exact `SUM(value), AVG(value), COUNT(*)` over one distinct
+  nullable `int2` or `int4` fact column. SUM uses the widened int64 device
+  state and PostgreSQL int8 result; AVG divides that state by its exact
+  non-NULL count through PostgreSQL NUMERIC arithmetic on the backend thread.
+  AVG-only, missing-COUNT, filtered, joined, `HAVING`, int8, numeric, interval,
+  and additional-measure shapes remain PostgreSQL-native.
 - SSBM-, TPC-H-, and ClickBench-style system workload characterization plus an
   eight-backend residency/concurrency proof with exact cluster-byte cleanup.
 
