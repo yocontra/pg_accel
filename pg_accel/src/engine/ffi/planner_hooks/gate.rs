@@ -16,6 +16,10 @@ use crate::engine::{cost, gucs, stats};
 /// explicit without changing the existing stats surface or planner behavior.
 #[derive(Debug)]
 pub(super) struct HookContext {
+    // The structured recorder is decision-scaffolding exercised by the pure
+    // Rust tests; no production caller reads it. Production therefore uses a
+    // zero-capacity recorder so upper planner-hook invocation remains
+    // allocation-free while this incremental scaffold stays testable.
     facts: DecisionFacts,
     recorder: PlannerDecisionRecorder,
 }
@@ -51,9 +55,14 @@ impl HookContext {
 
     #[must_use]
     pub(super) fn new(hook: &'static str, candidate: &'static str) -> Self {
+        #[cfg(test)]
+        let recorder = PlannerDecisionRecorder::default();
+        #[cfg(not(test))]
+        let recorder = PlannerDecisionRecorder::with_capacity(0);
+
         Self {
             facts: DecisionFacts::new(hook, candidate),
-            recorder: PlannerDecisionRecorder::default(),
+            recorder,
         }
     }
 
