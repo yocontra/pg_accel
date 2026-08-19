@@ -472,18 +472,18 @@ redesigned and independently requalified.
   so hook compatibility is continuously tested rather than inferred from the
   extension's own SQL tests. Context:
   <https://malisper.me/pgrust-passes-100-of-postgresqls-regression-tests/>.
-  Current clean candidate `7c79241` (tree `4aadc4a`) passes pristine
+  Current clean candidate `805af71` (tree `1ba18b9`) passes pristine
   regression, pristine isolation, loaded regression, and loaded isolation on
   both PG18.4 and PG19beta1. The loaded module SHA-256 values are
-  `015041acc1f9b84f63045c77431314bf4ece04b4fb2ead0d7490e8ff9034e70b`
+  `40280920752d3ab8f40a5b352984a5393916792a219082b3747d8be1c36a09c1`
   for PG18 and
-  `14a0b236f7e1d03b89e78c4464df4a0d1fd45a3b4601ae2670a43fef9aac9a2d`
+  `1a796034b273b752893b4b12cfe7ab4170b02dedcfecaa466d93538fce94d0f9`
   for PG19. Clean-tree/module-bound evidence is retained in
-  `.codex/scratch/upstream-postgresql-exact-7c79241-20260819-a`; the PG18 and
+  `.codex/scratch/upstream-postgresql-exact-805af71-20260819-a`; the PG18 and
   PG19 `SHA256SUMS` SHA-256 values are
-  `9efce286194a130b9b6b785bdd26dfb112c65f293aefcb0fecdff99a42b5e7fd`
+  `0052d5ee896386b3cd8524906eac08b89a2fe8ffed927d723fbb364d98b26a85`
   and
-  `cd2a6754699de92a00a7dda174e3697bab64ae62abf67c79ea2f173532aab2f5`.
+  `e78b99c8de67964bf7c8a496178fb4c204d6c8570a57d09d5964dcd6106f04da`.
   Any later source or module change does not inherit those results: the next
   frozen release candidate must rerun all four schedules on both supported
   majors before publication.
