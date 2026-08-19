@@ -162,16 +162,18 @@ const COMMON_FIXTURES: &[&str] = &[
      SELECT g, random()::real, (g % 16)::int \
      FROM generate_series(1, 1000000) g",
     "ANALYZE bench_isort",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part \
+    // PostgreSQL rejects UNLOGGED partitioned tables. Keep the parent and its
+    // partitions permanent so this audit works on every supported major.
+    "CREATE TABLE IF NOT EXISTS bench_part \
        (id bigint, v real, dim int) \
        PARTITION BY HASH(id)",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part_p0 \
+    "CREATE TABLE IF NOT EXISTS bench_part_p0 \
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 0)",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part_p1 \
+    "CREATE TABLE IF NOT EXISTS bench_part_p1 \
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 1)",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part_p2 \
+    "CREATE TABLE IF NOT EXISTS bench_part_p2 \
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 2)",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part_p3 \
+    "CREATE TABLE IF NOT EXISTS bench_part_p3 \
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 3)",
     "TRUNCATE bench_part",
     "INSERT INTO bench_part (id, v, dim) \
@@ -811,6 +813,27 @@ mod tests {
     fn matrix_covers_expected_rows() {
         // Ship-gate matrix size: Phase 9 rows plus visible spatial crash gates.
         assert_eq!(build_matrix().len(), 11);
+    }
+
+    #[test]
+    fn partition_fixtures_use_postgresql_supported_persistence() {
+        let partition_statements: Vec<_> = COMMON_FIXTURES
+            .iter()
+            .copied()
+            .filter(|statement| statement.starts_with("CREATE") && statement.contains("bench_part"))
+            .collect();
+
+        assert_eq!(partition_statements.len(), 5);
+        assert!(
+            partition_statements
+                .iter()
+                .all(|statement| statement.starts_with("CREATE TABLE"))
+        );
+        assert!(
+            partition_statements
+                .iter()
+                .all(|statement| !statement.starts_with("CREATE UNLOGGED TABLE"))
+        );
     }
 
     #[test]

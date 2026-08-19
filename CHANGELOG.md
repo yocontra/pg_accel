@@ -102,6 +102,8 @@ claim is implied by the entries below.
 
 ### Fixed
 
+- The release EXPLAIN audit now creates PostgreSQL-supported permanent
+  partitioned fixtures instead of using the rejected `UNLOGGED` form.
 - Dense exact aggregate planning now keeps inputs above the independently
   qualified one-shot row limit PostgreSQL-native. The bounded multi-call
   executor remains available for future qualification, while a matrix contract
