@@ -130,6 +130,9 @@ impl AdmissionDecline {
             Self::DeviceCostGate(ShapeCostGate::FactRowsBelowDeviceMinimum { .. }) => {
                 "generic_fact_rows_below_device_minimum"
             }
+            Self::DeviceCostGate(ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum { .. }) => {
+                "generic_fact_rows_exceed_dense_one_shot_maximum"
+            }
             Self::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum { .. }) => {
                 "h3_rows_below_grouped_agg_min"
             }
@@ -431,6 +434,11 @@ fn apply_exact_residency(
             ShapeCostGate::FactRowsBelowDeviceMinimum {
                 estimated: lifecycle_fact_rows,
                 required,
+            }
+        } else if lifecycle_fact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows {
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: lifecycle_fact_rows,
+                maximum: model.executor.gpu_grouped_agg_one_shot_max_rows,
             }
         } else {
             ShapeCostGate::Eligible
@@ -2550,7 +2558,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_sum_count_costs_bounded_session_calls_above_the_one_shot_boundary() {
+    fn dense_sum_count_caps_admission_but_costs_bounded_calls_above_one_shot() {
         let model = model();
         let maximum = model.executor.gpu_grouped_agg_one_shot_max_rows;
         let maximum_u64 = u64::try_from(maximum.get()).expect("test row limit fits u64");
@@ -2563,7 +2571,13 @@ mod tests {
         let above_u64 = maximum_u64 + 1;
         let mut above_maximum = dense_sum_count_shape(above_u64);
         apply_resident_evidence(&mut above_maximum, above_u64, true);
-        assert_eq!(above_maximum.cost_gate, ShapeCostGate::Eligible);
+        assert_eq!(
+            above_maximum.cost_gate,
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: Rows::new(maximum.get() + 1),
+                maximum,
+            }
+        );
         assert_eq!(
             planned_dense_lifecycle_calls(&above_maximum, above_u64, &model),
             Some(3),
@@ -2586,7 +2600,13 @@ mod tests {
             &model,
         )
         .expect("first-use estimate fits the unbounded test budget");
-        assert_eq!(first_use.cost_gate, ShapeCostGate::Eligible);
+        assert_eq!(
+            first_use.cost_gate,
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: Rows::new(maximum.get() + 1),
+                maximum,
+            }
+        );
         assert_eq!(
             first_use.cost.additional_aggregate_launches,
             above_maximum.cost.additional_aggregate_launches,
@@ -3744,6 +3764,15 @@ mod tests {
                     required: row_pair.1,
                 }),
                 "generic_fact_rows_below_device_minimum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(
+                    ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                        fact_rows: row_pair.1,
+                        maximum: row_pair.0,
+                    },
+                ),
+                "generic_fact_rows_exceed_dense_one_shot_maximum",
             ),
             (
                 AdmissionDecline::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum {

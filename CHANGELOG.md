@@ -102,6 +102,11 @@ claim is implied by the entries below.
 
 ### Fixed
 
+- Dense exact aggregate planning now keeps inputs above the independently
+  qualified one-shot row limit PostgreSQL-native. The bounded multi-call
+  executor remains available for future qualification, while a matrix contract
+  test prevents the 17-cell native-parity gate from silently registering a
+  selected or mismatched workload.
 - macOS postmasters set the fork-safe Objective-C and unified-logging
   environment defaults before creating backends, avoiding the reproduced
   CoreAnalytics crash during lazy Metal initialization while preserving

@@ -3787,6 +3787,50 @@ mod tests {
     }
 
     #[test]
+    fn native_parity_p0_matrix_contains_only_exact_registered_declines() {
+        let source = include_str!("../../../benchmarks/native-parity-p0.tsv");
+        let mut lines = source.lines();
+        assert_eq!(
+            lines.next(),
+            Some("ordinal\tworkload\trows\tcohort\treason")
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cell_count = 0_usize;
+        for (index, line) in lines.enumerate() {
+            let columns = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(columns.len(), 5, "malformed native-parity row: {line}");
+            let expected_ordinal = format!("{:02}", index + 1);
+            assert_eq!(columns[0], expected_ordinal);
+            assert!(matches!(
+                columns[3],
+                "simple_decline" | "join_decline" | "reduce_decline"
+            ));
+
+            let workload = columns[1];
+            let rows = columns[2]
+                .parse::<usize>()
+                .unwrap_or_else(|error| panic!("invalid row scale in `{line}`: {error}"));
+            assert!(
+                seen.insert((workload, rows)),
+                "duplicate native-parity cell: {workload} @ {rows}"
+            );
+            let registered = find_workload(workload)
+                .unwrap_or_else(|| panic!("unregistered native-parity workload: {workload}"));
+            assert!(
+                registered.row_scales().contains(&rows),
+                "native-parity row scale is not registered: {workload} @ {rows}"
+            );
+            let entry = benchmark_threshold_matrix_entry(workload, rows)
+                .unwrap_or_else(|| panic!("missing native-parity threshold: {workload} @ {rows}"));
+            assert_eq!(entry.expectation.label(), "native_decline");
+            assert_eq!(entry.expectation.decline_reason(), Some(columns[4]));
+            cell_count += 1;
+        }
+        assert_eq!(cell_count, 17, "the P0 gate must retain all 17 sentinels");
+    }
+
+    #[test]
     fn int8_star_threshold_identity_cannot_alias_int4_evidence() {
         let int4 = benchmark_threshold_matrix_entry("ssbm_resident_int4_star", 1_000_000)
             .expect("int4 SSBM threshold");

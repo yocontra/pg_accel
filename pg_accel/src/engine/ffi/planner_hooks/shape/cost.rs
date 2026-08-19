@@ -276,6 +276,10 @@ pub enum ShapeCostGate {
         estimated: Rows,
         required: Rows,
     },
+    DenseOneShotRowsExceedDeviceMaximum {
+        fact_rows: Rows,
+        maximum: Rows,
+    },
     H3RowsBelowDeviceMinimum {
         estimated: Rows,
         required: Rows,
