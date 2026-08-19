@@ -88,7 +88,9 @@ claim is implied by the entries below.
 - Warm performance evidence separates lifecycle construction/rebuild probes
   from artifact-hit steady state while retaining a combined end-to-end view.
 - Planner declines reuse exact serialized-query fingerprints and dependency
-  state without cloning full cache entries or repeating unprofiled telemetry.
+  state without cloning full cache entries or repeating unprofiled telemetry;
+  production upper-path hooks also avoid allocating the test-only structured
+  decision recorder.
 - Metal stress, native-parity, and release-verification artifacts require a
   clean commit/tree, bind reviewed source and toolchain provenance, and seal
   their complete evidence inventories.
