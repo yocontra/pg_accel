@@ -100,6 +100,13 @@ enabled-minus-disabled results include:
   median allowance `max(0.25 ms, 2%)`, p95 allowance 5%, and exact paired
   non-inferiority at `alpha=0.05` in 17/17 cells. Target planner upper-group
   means are at most 25 us for simple declines and 75 us for join/reduce declines.
+  A clean candidate `8265dde` attempt retained the complete first cell at
+  `.codex/scratch/native-parity-p0-8265dde-pg18-20260819-a`: native
+  `grouped_agg_int4` at 10K passed its median bound (-0.013 ms), p95 bound
+  (+0.037 ms), and exact paired non-inferiority (`p=5.59e-9`) across 30 mirrored
+  pairs. The host-load guard then aborted before cell 2 when an unrelated
+  `tsserver` exceeded 50% CPU. This directory is partial diagnostic evidence,
+  not a 17/17 release artifact; it must not be resumed, sealed, or relabeled.
 
 ## P0: Benchmark Lifecycle Accounting
 
