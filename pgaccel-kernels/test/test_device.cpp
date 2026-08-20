@@ -11,7 +11,7 @@ extern sycl::queue* g_ooo_queue;
 extern "C" void pgacceltest_fail_before_ooo_queue_once(void);
 extern "C" unsigned pgacceltest_unpublished_queue_count(void);
 extern "C" bool pgacceltest_grouped_agg_cleanup_exception_is_caught(void);
-extern "C" bool pgacceltest_grouped_agg_partial_merge_semantics(void);
+extern "C" bool pgacceltest_grouped_agg_helper_semantics(void);
 #endif
 
 int main() {
@@ -36,8 +36,8 @@ int main() {
     fprintf(stderr, "noexcept scratch cleanup did not catch the injected failure\n");
     return 1;
   }
-  if (!pgacceltest_grouped_agg_partial_merge_semantics()) {
-    fprintf(stderr, "ordered hierarchical partial merge broke prefix-overflow semantics\n");
+  if (!pgacceltest_grouped_agg_helper_semantics()) {
+    fprintf(stderr, "grouped aggregate host helper semantics regressed\n");
     return 1;
   }
 #endif

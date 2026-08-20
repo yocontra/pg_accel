@@ -104,7 +104,8 @@ claim is implied by the entries below.
 
 - Dense aggregate-filter kernel tests now cover one-shot atomic,
   hierarchical, and lifecycle chunked execution, including invalid measure
-  null sidecars, out-of-range dense keys, and reset recovery.
+  null sidecars, out-of-range dense keys, reset recovery, and the defensive
+  host-helper semantics for reserved value and predicate tags.
 - The release EXPLAIN audit now creates PostgreSQL-supported permanent
   partitioned fixtures instead of using the rejected `UNLOGGED` form.
 - Dense exact aggregate planning now keeps inputs above the independently

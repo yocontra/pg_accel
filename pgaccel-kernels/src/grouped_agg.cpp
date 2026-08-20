@@ -4400,7 +4400,21 @@ extern "C" bool pgacceltest_grouped_agg_cleanup_exception_is_caught(void) {
          g_test_caught_scratch_cleanup.load(std::memory_order_relaxed) == caught_before + 1;
 }
 
-extern "C" bool pgacceltest_grouped_agg_partial_merge_semantics(void) {
+extern "C" bool pgacceltest_grouped_agg_helper_semantics(void) {
+  pgaccel_grouped_agg_measure_col invalid_col{};
+  invalid_col.physical_type = std::numeric_limits<int32_t>::max();
+  pgaccel_val invalid_value{};
+  invalid_value.tag = static_cast<pgaccel_val_tag>(std::numeric_limits<int32_t>::max());
+  pgaccel_val loaded{};
+  bool is_null = false;
+  const bool helper_edges =
+      val_tag_width(PGACCEL_VAL_BOOL) == sizeof(uint8_t) &&
+      val_tag_width(invalid_value.tag) == 0 &&
+      host_compare_val(invalid_value, invalid_value) == 0 &&
+      pg_compare<int32_t>(1, kOpAlways, 2, false, false) &&
+      !load_predicate_value(invalid_col, 0, &loaded, &is_null) &&
+      !compare_val(invalid_value, kOpEq, invalid_value);
+
   const int64_t near_max = std::numeric_limits<int64_t>::max() - 5;
   DenseIntegerPartial left{};
   left.sum = near_max;
@@ -4429,7 +4443,7 @@ extern "C" bool pgacceltest_grouped_agg_partial_merge_semantics(void) {
   overflowing_suffix.prefix_max = 10;
   DenseIntegerPartial overflow = left;
   merge_ordered_dense_integer_partial(&overflow, overflowing_suffix);
-  return (overflow.failure_flags & kFailureNumericOverflow) != 0;
+  return helper_edges && (overflow.failure_flags & kFailureNumericOverflow) != 0;
 }
 #endif
 
