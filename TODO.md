@@ -7,14 +7,17 @@ published release artifact.
 
 ## Current Implementation Baseline
 
-- [x] The current exact implementation candidate is
-  `bfa756f8a21071ef45c54684ab0fadc594520724` (tree
-  `e6c5e9afce5a13b222e5c8278d8392b26cc43994`). Its PG18 three-layer coverage
-  and 17-cell native-parity evidence are sealed below. The latest Metal stress,
-  PG19, and upstream-PostgreSQL results remain valid historical evidence for
-  their exact candidates, not inherited results for `bfa756f`. Hosted CI, an
-  independent fresh-machine install, final exact-candidate reruns, and
-  publication evidence remain separate release gates.
+- [x] The latest frozen implementation candidate is
+  `07c50129aa22984209b7cd070a6b5227e43abb3d` (tree
+  `d7109076727f7804660b193a8614a462ff19d764`). Its PG18 three-layer coverage,
+  enriched Metal stress, 17-cell native parity, PG18/PG19 upstream PostgreSQL
+  suites, and same-host selected-path control are sealed below. The guarded
+  nineteen-cell Metal run also proves all warm floors, but remains a failed
+  release gate because this unprivileged host could not complete the required
+  H3 cold-cache purges. Hosted CI, privileged cold-cache evidence, an
+  independent fresh-machine install, and publication evidence remain separate
+  gates. Later documentation-only commits do not change which implementation
+  tree these artifacts validate.
 - [x] PostgreSQL 18 and 19 strict workspace Clippy/check gates pass.
 - [x] The current Rust extension and benchmark harness unit suites pass, along
   with the live plan/integration suite.
@@ -46,18 +49,18 @@ published release artifact.
   Full median speedups range from 3.758x to 21.171x; every paired test has
   `p < 0.003` and Cohen's `d > 0.865`. Its 781-entry seal hashes to
   `4a838b7c3dae5f393ef648c2b47d0f47ae88e8b60779dc1b039ea26565b92d58`.
-- [x] Native-decline parity passes on exact candidate `bfa756f`. The sealed
+- [x] Native-decline parity passes on exact candidate `07c5012`. The sealed
   artifact at
-  `.codex/scratch/native-parity-p0-bfa756f-pg18-20260819-b` retains 30 exactly
+  `.codex/scratch/native-parity-p0-07c5012-pg18-20260820-c` retains 30 exactly
   balanced pairs and four raw executions per arm for each of all 17 registered
   cells. All 17 pass the median and p95 bounds plus exact one-sided paired
   non-inferiority; all 17 preserve comparable PostgreSQL-native plans and zero
-  device dispatch. The largest median regression was 1.629%, the largest p95
-  regression was 4.213%, and the largest exact non-inferiority p-value was
-  0.000147. Expected and installed module SHA-256 values both equal
-  `2c415921f038d772d9d636f861ca62cbb3e2af6cc2087ed983a581f383547693`.
+  device dispatch. The largest median regression was 1.268%, the largest p95
+  regression was 2.214%, and the largest exact non-inferiority p-value was
+  0.000022. Expected and installed module SHA-256 values both equal
+  `21cc218f68789bdf54c9cc6bce82417f13228798837b810bf356bb9158a335a3`.
   The terminal `SHA256SUMS` file hashes to
-  `14382bbec844aff957cb153092ee83b64f8106635696c7789a20068ef8c99c92`;
+  `1b69e3a48a279979ad718d379d62ed9efb4501c8e447520dd1d6facae60fc1c4`;
   its complete manifest verifies without error.
 
 ## Non-Negotiable Invariants
@@ -216,9 +219,40 @@ evidence.
   latency and exact workspace limits.
 - [x] Add dense-session launch count to cost estimation and wire completed
   aggregate batches into global batch counters; EXPLAIN and counters must agree.
-- [ ] Acceptance for these changes: one kernel/query where applicable, zero
+- [x] Acceptance for these changes: one kernel/query where applicable, zero
   fallback, exact results, selected floor at least 1.15x, normalized median no
-  worse than 5%, bounded cancellation, and clean fork/resource tests.
+  worse than 5%, bounded cancellation, and clean fork/resource tests. The
+  contamination-free same-host predecessor/current/current/predecessor control
+  retains 60 samples per module per cell and passes all 11 comparisons: current
+  speedups range from 2.624x to 13.944x and the worst PostgreSQL-normalized
+  current/predecessor median factor is 0.9426. The immutable source artifact is
+  `.codex/scratch/same-host-selected-abba-07c5012-vs-3a0bcd7-pg18-20260820-e`
+  (`result.json` SHA-256
+  `4fa5ced51307af60dd732e01e7efeea754d74d1a7c0b9c8292aaf4ee0c754163`,
+  `SHA256SUMS` SHA-256
+  `410e2c7032d580f56fd77e108d2b99d514bb205cf20731ef36c8adfb2dba3fbb`).
+  Its frozen validator correctly remains failed on 44 numeric row/batch
+  telemetry checks unavailable in the exact predecessor. The separately sealed
+  compatibility addendum reproduces that output byte-for-byte, accepts only
+  those legacy counters after proving selection, captured dispatch, nonzero
+  GPU-kernel execution, 30 accelerated queries, exact diffs, and zero fallback
+  in all 22 predecessor arm-cells, while retaining strict numeric telemetry for
+  all 22 current arm-cells. The addendum `result.json` SHA-256 is
+  `3998bac5f76fc36c6588153649a17b09e561af18bf143f0d16a166a57b0a79c7`;
+  its manifest hashes to
+  `db1e85f53a293f6908ac6318b2ab38e35161a8034b377b673ac7fec65b4df35e`.
+  Exact Metal stress separately passes bounded cancellation, 8-by-20 fork
+  stress, resource balance, and clean-log audit.
+- [ ] Add a dedicated release benchmark for the newly selected counted-dimension
+  global `COUNT(*)` lane. The current Rust, native C++, and live PG18/PG19 tests
+  prove duplicate fanout, missing keys, selection, `parallel_dense_count`, exact
+  results, lifecycle behavior, and adjacent native declines, but the immutable
+  nineteen-cell ship matrix has no workload matching an ungrouped one-dimension
+  `JoinMultiplicity::Counted` query. Freeze a benchmark fixture with duplicate
+  dimension keys and unmatched fact keys; require real dispatch, exact count,
+  zero fallback, artifact-hit steady state, a 1.15x floor, and same-host
+  predecessor-normalized non-regression before treating this lane as fully
+  performance-qualified.
 
 ## P1: Measured Losing Lanes
 
@@ -477,18 +511,18 @@ redesigned and independently requalified.
   so hook compatibility is continuously tested rather than inferred from the
   extension's own SQL tests. Context:
   <https://malisper.me/pgrust-passes-100-of-postgresqls-regression-tests/>.
-  Current clean candidate `805af71` (tree `1ba18b9`) passes pristine
+  Current clean candidate `07c5012` (tree `d710907`) passes pristine
   regression, pristine isolation, loaded regression, and loaded isolation on
   both PG18.4 and PG19beta1. The loaded module SHA-256 values are
-  `40280920752d3ab8f40a5b352984a5393916792a219082b3747d8be1c36a09c1`
+  `21cc218f68789bdf54c9cc6bce82417f13228798837b810bf356bb9158a335a3`
   for PG18 and
-  `1a796034b273b752893b4b12cfe7ab4170b02dedcfecaa466d93538fce94d0f9`
+  `d92d34067aa6454187186bc9d7ebff08242e2fd4253f1862739b2cba38c42157`
   for PG19. Clean-tree/module-bound evidence is retained in
-  `.codex/scratch/upstream-postgresql-exact-805af71-20260819-a`; the PG18 and
+  `.codex/scratch/upstream-postgresql-exact-07c5012-20260820-a`; the PG18 and
   PG19 `SHA256SUMS` SHA-256 values are
-  `0052d5ee896386b3cd8524906eac08b89a2fe8ffed927d723fbb364d98b26a85`
+  `a13614e9a00f942b630b1dede249c107c26e0d9ec03f39ae145d79105ce18390`
   and
-  `e78b99c8de67964bf7c8a496178fb4c204d6c8570a57d09d5964dcd6106f04da`.
+  `bc4bcbd5887f00c17fdce8d425d365a6e0b013cfc3a54ef27dd19bcf27dba2a6`.
   Any later source or module change does not inherit those results: the next
   frozen release candidate must rerun all four schedules on both supported
   majors before publication.
@@ -518,23 +552,23 @@ redesigned and independently requalified.
 - [x] Produce a fresh exact-candidate coverage and enriched Metal stress bundle
   covering mixed workloads, fork, cancellation, concurrency, memory pressure,
   per-kernel JIT/archive cold/warm evidence, clean logs, and resource balance.
-  Current clean candidate `bfa756f` passes the three-layer PG18 gate at 90.15%
-  Rust source coverage (49,120/54,486; 210/210 required mappings), 90.04%
-  C++/SYCL source coverage (16,738/18,590; 32/32 native Metal tests), and 100%
+  Current clean candidate `07c5012` passes the three-layer PG18 gate at 90.17%
+  Rust source coverage (49,166/54,528; 210/210 required mappings), 90.01%
+  C++/SYCL source coverage (16,827/18,695; 32/32 native Metal tests), and 100%
   SQL semantic coverage (361/361 assertions across 67/67 files). Evidence is in
-  `.codex/scratch/coverage-exact-bfa756f-pg18-20260819-a`;
+  `.codex/scratch/coverage-exact-07c5012-pg18-20260820-a`;
   `gate-summary.json` SHA-256 is
-  `b2431cd5bf62638b68db283703e64fcc8d60a026c0fbc16319e97fa8d0b82fda`
+  `7e88beb53b2904937faaffc96f61788b7cbb52713acc1b7cceaf459053580dff`
   and `provenance.json` SHA-256 is
-  `96754a17e875d67063f924ce32420c8f14f2742cd48761ff548651673c2aea3e`.
-  The latest full exact Metal stress bundle remains the predecessor candidate at
-  `.codex/scratch/exact-e465a24/.codex/scratch/metal-stress-exact-e465a24-pg18-20260812-a`.
+  `0fad7357d5a6985c6296012f30b63e08bc0c85cb137fc95fec89aaa42883081f`.
+  The same exact candidate's full Metal stress bundle is at
+  `.codex/scratch/metal-stress-exact-07c5012-pg18-20260820-a`.
   It passes strict SQL, 32/32 native tests, OOM, cancellation, archive cold/warm,
   8-by-20 fork stress, six crash probes, resource/log audit, and artifact-index
-  verification. Its `artifact_index.json` SHA-256 is
-  `7e8661da819a55321fe6f064ee453b06772836e0a8fcab40bae24adea56767b0`;
+  verification across 222 indexed files. Its `artifact_index.json` SHA-256 is
+  `1f91fcd4d9bfbc23d2b413e2398c43ebee61e94109335ce5d2bfd35b1c97a0ee`;
   candidate-provenance SHA-256 is
-  `a85758f963b266fdd838dd1a1f2551e2a21025239a96bd6ed8d492cb980842ff`.
+  `c731b42fbacb015fdcd1de6fc107d2c5f2c0446bbba45c0c7d56bc459d9e9e30`.
   Benchmark timings inside the stress bundle are correctness/stability
   characterization only because unrelated CPU load made the host ineligible
   for performance claims.
@@ -554,8 +588,21 @@ redesigned and independently requalified.
 - [ ] Publish `v1.0.0-rc1`, monitor that exact candidate for one week, then
   publish `v1.0.0` with checksums, release notes, packages, benchmark evidence,
   limitations, and owner/reviewer sign-off.
-- [ ] Optional privileged OS page-cache certification may be run later, but it is
-  not a local functional gate and must not be inferred from warm-only evidence.
+- [ ] Rerun the exact nineteen-cell Metal ship gate where the required OS
+  page-cache purge can complete for every H3 cold iteration. The clean,
+  continuously guarded current-candidate run at
+  `.codex/scratch/metal-ship-gate-exact-07c5012-pg18-20260820-b` has no crashes,
+  exact correctness, real dispatch, zero fallback, and all 19 warm speedups
+  above their 1.15x floors (minimum 3.174x), but the built-in gate correctly
+  fails `h3_cell_to_parent` with `expected_winner_missing_cache_evidence`
+  because `/usr/sbin/purge` returned `Operation not permitted` for every cold
+  sample. Its 104-entry terminal manifest hashes to
+  `38668111af0cb7a8f42523ca4b48dec83b7ff17e714a2869dc873245c094d731`;
+  `report.json` hashes to
+  `59fadfab58213e54a3d80f21fad50ea32e51777b9a242592e0fcaba05e14556c`.
+  Preserve the failed result; rerun on a privileged or otherwise qualified host
+  without weakening the completed-purge requirement or inferring cold evidence
+  from warm-only timings.
 
 ## OWNER-DEFERRED: CUDA, NVIDIA, And PG-Strom
 
