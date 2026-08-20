@@ -3560,6 +3560,25 @@ mod tests {
         validate_shape_capability(&count_shape())
             .expect("canonical COUNT(*) uses the parallel dense-count branch");
 
+        let mut weighted_count = count_shape();
+        add_star_dimension(&mut weighted_count, JoinMultiplicity::Counted);
+        validate_shape_capability(&weighted_count)
+            .expect("unfiltered global COUNT(*) uses the weighted parallel dense-count branch");
+
+        weighted_count.spec.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: u32::from(pg_sys::BOOLOID),
+            },
+            kind: crate::engine::spec::MaskKind::Sql,
+        };
+        assert!(matches!(
+            validate_shape_capability(&weighted_count)
+                .expect_err("filtered counted COUNT(*) must remain native"),
+            AdmissionDecline::SerialGenericKernelMode { .. }
+        ));
+
         let mut range = dense_sum_count_shape(1_000_000);
         let lhs = ColumnRef {
             relation_oid: 42,

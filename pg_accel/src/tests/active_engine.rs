@@ -137,7 +137,10 @@ mod tests {
         );
     }
 
-    fn assert_selected_matches_native(query: &str) -> Vec<String> {
+    fn assert_selected_matches_native_with_strategy(
+        query: &str,
+        expected_strategy: &str,
+    ) -> Vec<String> {
         Spi::run("SET LOCAL pg_accel.enabled = off").expect("native baseline should be selectable");
         let native = result_rows(query);
 
@@ -148,7 +151,7 @@ mod tests {
         assert!(
             plan.contains("custom scan (gpuaccelagg)")
                 && plan.contains("gpu resident pipeline: true")
-                && plan.contains("gpu descriptor strategy: descriptor_grouped_aggregate")
+                && plan.contains(&format!("gpu descriptor strategy: {expected_strategy}"))
                 && plan.contains("gpu physical kernel mode:"),
             "query must select the childless descriptor aggregate; rejection={rejection:?}:\n{plan}"
         );
@@ -218,6 +221,10 @@ mod tests {
             "selected execution must exercise every profiled descriptor stage"
         );
         accelerated
+    }
+
+    fn assert_selected_matches_native(query: &str) -> Vec<String> {
+        assert_selected_matches_native_with_strategy(query, "descriptor_grouped_aggregate")
     }
 
     fn required_counter(query: &str, label: &str) -> i64 {
@@ -453,6 +460,63 @@ mod tests {
             )
             .expect("evicted status should be readable"),
             Some(0)
+        );
+    }
+
+    #[pg_test]
+    fn counted_int4_global_count_selects_weighted_parallel_lane() {
+        if !begin_gpu_test() {
+            return;
+        }
+        let rows = device_rows();
+        Spi::run(&format!(
+            "CREATE UNLOGGED TABLE pgaccel_active_counted_fact (k int4 NOT NULL); \
+             CREATE UNLOGGED TABLE pgaccel_active_counted_dim (k int4); \
+             INSERT INTO pgaccel_active_counted_fact \
+             SELECT (g % 4)::int4 FROM generate_series(1, {rows}) AS g; \
+             INSERT INTO pgaccel_active_counted_dim VALUES \
+               (0), (0), (1), (2), (2), (2), (NULL); \
+             ANALYZE pgaccel_active_counted_fact; \
+             ANALYZE pgaccel_active_counted_dim"
+        ))
+        .expect("counted INT4 fixture should be created");
+
+        pin("pgaccel_active_counted_fact", &["k"], rows);
+        pin("pgaccel_active_counted_dim", &["k"], 7);
+
+        let query = "SELECT count(*) AS matched_rows \
+                     FROM pgaccel_active_counted_fact AS f \
+                     JOIN pgaccel_active_counted_dim AS d ON f.k = d.k";
+        Spi::run("SET LOCAL pg_accel.enabled = off")
+            .expect("native counted baseline should be selectable");
+        let native = Spi::get_one::<i64>(query)
+            .expect("native counted query should succeed")
+            .expect("native counted query should not be NULL");
+        assert!(
+            native > rows,
+            "fixture must exercise duplicate fanout as well as a missing key"
+        );
+
+        assert_eq!(
+            assert_selected_matches_native_with_strategy(query, "descriptor_ungrouped_aggregate")
+                .len(),
+            1
+        );
+        assert!(
+            Spi::get_one::<i64>(
+                "SELECT calls FROM pg_accel_grouped_kernel_mode_stats() \
+                 WHERE mode = 'parallel_dense_count'"
+            )
+            .expect("parallel weighted-count mode counter should be readable")
+            .is_some_and(|calls| calls > 0),
+            "counted global COUNT(*) must execute the parallel dense-count branch"
+        );
+
+        assert_native_decline_matches_native(
+            "SELECT count(f.k) AS matched_rows \
+             FROM pgaccel_active_counted_fact AS f \
+             JOIN pgaccel_active_counted_dim AS d ON f.k = d.k",
+            "generic_serial_kernel_mode_unqualified",
         );
     }
 

@@ -300,6 +300,20 @@ fn unique_dimension_inputs(spec: &AggQuerySpec) -> bool {
         .all(|dimension| dimension.multiplicity == JoinMultiplicity::Unique)
 }
 
+fn weighted_global_count_inputs(spec: &AggQuerySpec) -> bool {
+    let [dimension] = spec.star_dims.as_slice() else {
+        return false;
+    };
+    dimension.multiplicity == JoinMultiplicity::Counted
+        && dimension.fact_key.type_oid == INT4OID
+        && dimension.dim_key.type_oid == INT4OID
+        && dimension.collation_oid == 0
+        && dimension.filter == FilterSpec::None
+        && spec.group_keys.is_empty()
+        && spec.fact_filter == FilterSpec::None
+        && spec.having.is_none()
+}
+
 fn parallel_dense_fact_filter(filter: &FilterSpec) -> bool {
     matches!(
         filter,
@@ -586,15 +600,16 @@ pub fn planned_descriptor_kernel_mode(
             GroupedAggKernelMode::SerialGeneric
         };
     }
+    if matches!(spec.measures.as_slice(), [count] if canonical_count_measure(count))
+        && ((unique_dimension_inputs(spec) && parallel_dense_fact_filter(&spec.fact_filter))
+            || weighted_global_count_inputs(spec))
+    {
+        return GroupedAggKernelMode::ParallelDenseCount;
+    }
     if !unique_dimension_inputs(spec) {
         return GroupedAggKernelMode::SerialGeneric;
     }
     match spec.measures.as_slice() {
-        [count]
-            if parallel_dense_fact_filter(&spec.fact_filter) && canonical_count_measure(count) =>
-        {
-            GroupedAggKernelMode::ParallelDenseCount
-        }
         [count]
             if parallel_dense_fact_filter(&spec.fact_filter)
                 && (canonical_dense_bool_count_measure(spec, count)
@@ -3729,7 +3744,6 @@ fn parallel_dense_count_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
         || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
         || desc.measure_count != 1
         || !parallel_dense_filter_kind(&desc.where_filter)
-        || !parallel_dense_unique_dimensions(desc)
         || !canonical_disabled_filter(&desc.measure_filters[0])
     {
         return false;
@@ -3751,10 +3765,21 @@ fn parallel_dense_count_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
                 && count.value.element_bytes == 4)
             || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64
                 && count.value.element_bytes == 8));
-    (count_star || count_typed_column)
+    let canonical_count = (count_star || count_typed_column)
         && count.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
         && count.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
-        && count.state_bytes == 8
+        && count.state_bytes == 8;
+    if !canonical_count {
+        return false;
+    }
+    if parallel_dense_unique_dimensions(desc) {
+        return true;
+    }
+    count_star
+        && desc.key_count == 0
+        && desc.group_capacity == 1
+        && desc.dim_count != 0
+        && canonical_disabled_filter(&desc.where_filter)
 }
 
 fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
@@ -4543,6 +4568,21 @@ mod tests {
         assert!(dense_one_shot_eligible(&desc, 10));
         assert!(!dense_one_shot_eligible(&desc, 4));
 
+        let multiplicity = [2_u64];
+        let mut weighted = desc;
+        weighted.dim_count = 1;
+        weighted.dims[0].multiplicity_by_key = multiplicity.as_ptr();
+        assert!(parallel_dense_count_shape(&weighted));
+        assert!(dense_one_shot_eligible(&weighted, 10));
+
+        weighted.key_count = 1;
+        assert!(!parallel_dense_count_shape(&weighted));
+        weighted.key_count = 0;
+        let mask = [1_i8];
+        weighted.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        weighted.where_filter.mask = mask.as_ptr();
+        assert!(!parallel_dense_count_shape(&weighted));
+
         desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN;
         desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL;
         desc.measures[0].value.element_bytes = 1;
@@ -4916,6 +4956,100 @@ mod tests {
         assert_eq!(
             planned_descriptor_kernel_mode(&count, true),
             GroupedAggKernelMode::ParallelHash
+        );
+
+        let counted_dimension = DimSpec {
+            relation_oid: 99,
+            fact_key: ColumnRef {
+                relation_oid: 42,
+                attno: 1,
+                type_oid: INT4OID,
+            },
+            dim_key: ColumnRef {
+                relation_oid: 99,
+                attno: 1,
+                type_oid: INT4OID,
+            },
+            collation_oid: 0,
+            multiplicity: JoinMultiplicity::Counted,
+            filter: FilterSpec::None,
+        };
+        let mut weighted_count = count;
+        weighted_count.star_dims.push(counted_dimension.clone());
+        assert_eq!(
+            planned_descriptor_kernel_mode(&weighted_count, false),
+            GroupedAggKernelMode::ParallelDenseCount,
+            "an exact unfiltered global COUNT(*) uses the weighted parallel lane"
+        );
+
+        let mut grouped_weighted_count = weighted_count.clone();
+        grouped_weighted_count.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::FactColumn(ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: INT4OID,
+            }),
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::DictionaryI32 {
+                cardinality: 2,
+                null_code: None,
+            },
+        });
+        assert_eq!(
+            planned_descriptor_kernel_mode(&grouped_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "grouped fanout has no released weighted kernel"
+        );
+
+        let mut filtered_weighted_count = weighted_count.clone();
+        filtered_weighted_count.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 3,
+                type_oid: BOOLOID,
+            },
+            kind: MaskKind::Sql,
+        };
+        assert_eq!(
+            planned_descriptor_kernel_mode(&filtered_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "filtered fanout has no released weighted kernel"
+        );
+
+        let mut multiple_weighted_count = weighted_count.clone();
+        let mut second_dimension = counted_dimension.clone();
+        second_dimension.relation_oid = 100;
+        second_dimension.dim_key.relation_oid = 100;
+        multiple_weighted_count.star_dims.push(second_dimension);
+        assert_eq!(
+            planned_descriptor_kernel_mode(&multiple_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "multi-dimension fanout has no independently qualified planner lane"
+        );
+
+        let mut int8_weighted_count = weighted_count.clone();
+        int8_weighted_count.star_dims[0].fact_key.type_oid = INT8OID;
+        int8_weighted_count.star_dims[0].dim_key.type_oid = INT8OID;
+        assert_eq!(
+            planned_descriptor_kernel_mode(&int8_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "counted INT8 membership has no independently qualified planner lane"
+        );
+
+        let mut typed_weighted_count = spec(
+            MeasureExpr::Column(ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: INT4OID,
+            }),
+            AggregateKind::Count,
+        );
+        typed_weighted_count.star_dims.push(counted_dimension);
+        assert_eq!(
+            planned_descriptor_kernel_mode(&typed_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "COUNT(column) fanout has no released weighted kernel"
         );
 
         let bool_count = dense_bool_count_spec();

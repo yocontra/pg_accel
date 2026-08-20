@@ -1996,10 +1996,14 @@ void test_parallel_dense_count_unique_dimension_shape() {
   set_count_star(desc, 0);
 
   const pgaccel_grouped_agg_workspace_req parallel_req = workspace_req(desc);
-  pgaccel_grouped_agg_desc serial_desc = desc;
-  serial_desc.dims[0].multiplicity_by_key = multiplicity.data();
-  const pgaccel_grouped_agg_workspace_req serial_req = workspace_req(serial_desc);
-  CHECK(parallel_req.bytes > serial_req.bytes);
+  pgaccel_grouped_agg_desc weighted_desc = desc;
+  weighted_desc.dims[0].multiplicity_by_key = multiplicity.data();
+  const pgaccel_grouped_agg_workspace_req weighted_req = workspace_req(weighted_desc);
+  CHECK(weighted_req.bytes > parallel_req.bytes);
+
+  int32_t weighted_mode = 0;
+  CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&weighted_desc, &weighted_mode), PGACCEL_OK);
+  CHECK(weighted_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
 
   OutputStorage output(desc, true, true);
   CHECK_STATUS(execute_external(desc, &output.out), PGACCEL_OK);
@@ -2007,6 +2011,102 @@ void test_parallel_dense_count_unique_dimension_shape() {
   CHECK(output.out.emitted_group_count == 1);
   CHECK(output.measures[0].count[0] == expected);
   CHECK(output.active[0] == 1);
+
+  OutputStorage weighted(weighted_desc, true, true);
+  CHECK_STATUS(execute_external(weighted_desc, &weighted.out), PGACCEL_OK);
+  check_outputs_equal(weighted, output, desc.measure_count);
+}
+
+void test_parallel_dense_weighted_global_count_shape() {
+  std::printf("--- parallel dense weighted global COUNT(*) ---\n");
+  constexpr size_t rows = 4097;
+  std::vector<int32_t> host_dim0_keys(rows);
+  std::vector<uint8_t> host_dim0_nulls(rows, 0);
+  std::vector<int32_t> host_dim1_keys(rows);
+  std::vector<int32_t> host_group_keys(rows);
+  std::vector<int32_t> host_values(rows, 1);
+  const std::vector<uint8_t> host_dim0_matches = {1, 1, 0, 1};
+  const std::vector<uint64_t> host_dim0_multiplicity = {2, 3, 5, 1};
+  const std::vector<uint64_t> host_dim1_multiplicity = {4, 0, 2};
+  uint64_t expected = 0;
+  for (size_t row = 0; row < rows; ++row) {
+    host_dim0_keys[row] = static_cast<int32_t>(row % 5);
+    host_dim0_nulls[row] = row % 97 == 0 ? 1 : 0;
+    host_dim1_keys[row] = 10 + static_cast<int32_t>(row % 3);
+    host_group_keys[row] = static_cast<int32_t>(row % 2);
+    if (host_dim0_nulls[row] != 0 || host_dim0_keys[row] >= 4 ||
+        host_dim0_matches[host_dim0_keys[row]] == 0)
+      continue;
+    const uint64_t weight = host_dim0_multiplicity[host_dim0_keys[row]] *
+                            host_dim1_multiplicity[host_dim1_keys[row] - 10];
+    expected += weight;
+  }
+
+  SharedArray<int32_t> dim0_keys(host_dim0_keys);
+  SharedArray<uint8_t> dim0_nulls(host_dim0_nulls);
+  SharedArray<int32_t> dim1_keys(host_dim1_keys);
+  SharedArray<int32_t> group_keys(host_group_keys);
+  SharedArray<int32_t> values(host_values);
+  SharedArray<uint8_t> dim0_matches(host_dim0_matches);
+  SharedArray<uint64_t> dim0_multiplicity(host_dim0_multiplicity);
+  SharedArray<uint64_t> dim1_multiplicity(host_dim1_multiplicity);
+
+  pgaccel_grouped_agg_desc desc = base_desc(rows);
+  set_dim(desc, 0, dim0_keys.data(), dim0_nulls.data(), 0, 4, dim0_matches.data(),
+          dim0_multiplicity.data());
+  set_dim(desc, 1, dim1_keys.data(), nullptr, 10, 3, nullptr, dim1_multiplicity.data());
+  set_count_star(desc, 0);
+
+  int32_t kernel_mode = 0;
+  CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&desc, &kernel_mode), PGACCEL_OK);
+  CHECK(kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
+
+  OutputStorage one_shot(desc, true, true);
+  CHECK_STATUS(execute_external(desc, &one_shot.out), PGACCEL_OK);
+  CHECK(one_shot.out.selected_count == expected);
+  CHECK(one_shot.out.uncertain_count == 0);
+  CHECK(one_shot.out.emitted_group_count == 1);
+  CHECK(one_shot.measures[0].count[0] == expected);
+  CHECK(one_shot.active[0] == 1);
+
+  const pgaccel_grouped_agg_workspace_req request = workspace_req(desc);
+  SharedWorkspace workspace(request.bytes, request.alignment);
+  constexpr size_t first_rows = 2048;
+  pgaccel_grouped_agg_desc first = row_slice(desc, 0, first_rows);
+  first.execution_flags = PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+  CHECK_STATUS(execute_in_workspace(first, request, workspace, nullptr, &detail), PGACCEL_OK);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+  pgaccel_grouped_agg_desc second = row_slice(desc, first_rows, rows - first_rows);
+  second.execution_flags = PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+  CHECK_STATUS(execute_in_workspace(second, request, workspace, nullptr, &detail), PGACCEL_OK);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+  pgaccel_grouped_agg_desc finalize = row_slice(desc, 0, 0);
+  finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+  OutputStorage chunked(desc, true, true);
+  CHECK_STATUS(execute_in_workspace(finalize, request, workspace, &chunked.out, &detail),
+               PGACCEL_OK);
+  CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+  check_outputs_equal(chunked, one_shot, desc.measure_count);
+
+  pgaccel_grouped_agg_desc grouped = desc;
+  set_fact_key(grouped, 0, group_keys.data(), nullptr, 0, 2);
+  CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&grouped, &kernel_mode), PGACCEL_OK);
+  CHECK(kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC);
+
+  pgaccel_grouped_agg_desc typed_count = desc;
+  set_count_only_view(typed_count, 0, values.data(), nullptr,
+                      PGACCEL_GROUPED_AGG_PHYSICAL_INT32, sizeof(int32_t),
+                      PGACCEL_GROUPED_AGG_ACCUM_I64);
+  CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&typed_count, &kernel_mode), PGACCEL_OK);
+  CHECK(kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC);
+
+  SharedArray<int8_t> sql_mask(std::vector<int8_t>(rows, PGACCEL_EXPR_TRUE));
+  pgaccel_grouped_agg_desc filtered = desc;
+  filtered.where_filter.kind = PGACCEL_GROUPED_AGG_FILTER_SQL;
+  filtered.where_filter.mask = sql_mask.data();
+  CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&filtered, &kernel_mode), PGACCEL_OK);
+  CHECK(kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_SERIAL_GENERIC);
 }
 
 void test_parallel_dense_sum_atomic_low_word_carry() {
@@ -3435,6 +3535,9 @@ void test_weighted_overflow_branch_matrix() {
     pgaccel_grouped_agg_desc desc = base_desc(2);
     set_dim(desc, 0, dim_fact.data(), nullptr, 0, 1, nullptr, multiplicity.data());
     set_count_star(desc, 0);
+    int32_t kernel_mode = 0;
+    CHECK_STATUS(pgaccel_grouped_agg_kernel_mode(&desc, &kernel_mode), PGACCEL_OK);
+    CHECK(kernel_mode == PGACCEL_GROUPED_AGG_KERNEL_MODE_PARALLEL_DENSE_COUNT);
     OutputStorage output(desc);
     int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
     CHECK_STATUS(execute_external_ex(desc, &output.out, &detail), PGACCEL_ERROR);
@@ -4497,6 +4600,7 @@ int main() {
     test_parallel_dense_integer_measure_range_filter();
     test_parallel_dense_sum_mask_unique_dimension_shape();
     test_parallel_dense_count_unique_dimension_shape();
+    test_parallel_dense_weighted_global_count_shape();
     test_parallel_dense_sum_atomic_low_word_carry();
     test_parallel_dense_sum_atomic_negative_nullable_publication();
     test_i64_four_measure_lanes();
