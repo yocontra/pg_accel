@@ -468,7 +468,7 @@ mod tests {
         if !begin_gpu_test() {
             return;
         }
-        let rows = device_rows();
+        let rows = device_rows().max(1_000_000);
         Spi::run(&format!(
             "CREATE UNLOGGED TABLE pgaccel_active_counted_fact (k int4 NOT NULL); \
              CREATE UNLOGGED TABLE pgaccel_active_counted_dim (k int4); \

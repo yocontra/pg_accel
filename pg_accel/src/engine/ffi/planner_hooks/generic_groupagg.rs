@@ -16,8 +16,9 @@ use super::shape::{
 use super::{PlannerSubstageGuard, add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
-    estimate_descriptor_artifact_bytes_upper_bound, planned_descriptor_kernel_mode,
-    validate_normal_descriptor_capability, validate_normal_spatial_candidate_capability,
+    estimate_descriptor_artifact_bytes_upper_bound, is_weighted_global_count_descriptor,
+    planned_descriptor_kernel_mode, validate_normal_descriptor_capability,
+    validate_normal_spatial_candidate_capability,
 };
 use crate::engine::ffi::custom_scan;
 use crate::engine::gucs;
@@ -34,6 +35,7 @@ use crate::gpu::GroupedAggKernelMode;
 const GENERIC_SHAPE_PATH_CONTEXT: &str = "upper_paths_generic_groupagg";
 const AGG_QUERY_SPEC_SENTINEL: c_int = i32::from_be_bytes(*b"AQS3");
 const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = i32::from_be_bytes(*b"AOP2");
+const WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS: u64 = 1_000_000;
 
 unsafe extern "C" {
     // PostgreSQL declares this in optimizer/prep.h and exports it from the
@@ -498,6 +500,24 @@ fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> 
         validate_normal_descriptor_capability(&shape.spec, &projection)
     };
     result.map_err(|detail| AdmissionDecline::DescriptorCapability { detail })?;
+    if is_weighted_global_count_descriptor(&shape.spec) {
+        let estimated_fact_rows = shape
+            .residency
+            .relations
+            .iter()
+            .find(|relation| relation.relation_oid == shape.spec.fact_rel)
+            .map_or(0, |relation| relation.estimated_rows);
+        if estimated_fact_rows < WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS {
+            // The physical kernel is exact at every scale, but normal planning
+            // releases this counted-join lane only where it has independent
+            // winning evidence. Preserve the historical structural decline
+            // below that envelope instead of letting a later cost comparison
+            // silently change the registered native-parity reason.
+            return Err(AdmissionDecline::SerialGenericKernelMode {
+                mode: GroupedAggKernelMode::SerialGeneric.label(),
+            });
+        }
+    }
     let mode = shape_kernel_mode(shape);
     if mode == GroupedAggKernelMode::SerialGeneric {
         return Err(AdmissionDecline::SerialGenericKernelMode { mode: mode.label() });
@@ -3562,6 +3582,16 @@ mod tests {
 
         let mut weighted_count = count_shape();
         add_star_dimension(&mut weighted_count, JoinMultiplicity::Counted);
+        weighted_count.residency.relations[0].estimated_rows =
+            WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS - 1;
+        assert!(matches!(
+            validate_shape_capability(&weighted_count)
+                .expect_err("weighted COUNT(*) below its release floor must remain native"),
+            AdmissionDecline::SerialGenericKernelMode {
+                mode: "serial_generic"
+            }
+        ));
+        weighted_count.residency.relations[0].estimated_rows = WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS;
         validate_shape_capability(&weighted_count)
             .expect("unfiltered global COUNT(*) uses the weighted parallel dense-count branch");
 

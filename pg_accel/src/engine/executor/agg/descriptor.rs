@@ -300,7 +300,7 @@ fn unique_dimension_inputs(spec: &AggQuerySpec) -> bool {
         .all(|dimension| dimension.multiplicity == JoinMultiplicity::Unique)
 }
 
-fn weighted_global_count_inputs(spec: &AggQuerySpec) -> bool {
+pub(super) fn weighted_global_count_inputs(spec: &AggQuerySpec) -> bool {
     let [dimension] = spec.star_dims.as_slice() else {
         return false;
     };
