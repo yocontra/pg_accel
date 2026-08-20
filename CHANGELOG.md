@@ -151,6 +151,17 @@ claim is implied by the entries below.
 
 ### Verification
 
+- Exact clean candidate `bfa756f` passes the PG18 three-layer coverage gate:
+  Rust 49,120/54,486 lines (90.15%, 210/210 required mappings), C++/SYCL
+  16,738/18,590 lines (90.04%, 32/32 native Metal tests), and SQL 361/361
+  semantic assertions across 67/67 files. The sealed artifact is
+  `.codex/scratch/coverage-exact-bfa756f-pg18-20260819-a`.
+- The same candidate passes all 17 registered native-decline cells with five
+  warmups and 30 exactly balanced pairs per cell. Every cell stays on a
+  comparable PostgreSQL-native plan with zero device dispatch and passes the
+  frozen median, p95, and exact paired non-inferiority gates. The terminal seal
+  for `.codex/scratch/native-parity-p0-bfa756f-pg18-20260819-b` is
+  `14382bbec844aff957cb153092ee83b64f8106635696c7789a20068ef8c99c92`.
 - AdaptiveCpp release provenance is the `fork-safe-metal` commit
   `456ae6910720810f5fe59f160e6707d46bb8e5f0` named by `.acpp-version`. Its
   locally available history incorporates upstream `develop` snapshot

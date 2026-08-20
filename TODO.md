@@ -7,12 +7,14 @@ published release artifact.
 
 ## Current Implementation Baseline
 
-- [x] Code and workflow implementation is complete through exact implementation
-  candidate `e465a242f66114f9207cca8fe3e05372485a943b` (tree
-  `d79304ee2d2a1530ab889622ef0f27c781e13f78`). Fresh local SQL, coverage,
-  Metal stress, and upstream-PostgreSQL evidence is sealed below. Hosted CI,
-  an independent fresh-machine install, native-parity timing, and publication
-  evidence remain separate release gates.
+- [x] The current exact implementation candidate is
+  `bfa756f8a21071ef45c54684ab0fadc594520724` (tree
+  `e6c5e9afce5a13b222e5c8278d8392b26cc43994`). Its PG18 three-layer coverage
+  and 17-cell native-parity evidence are sealed below. The latest Metal stress,
+  PG19, and upstream-PostgreSQL results remain valid historical evidence for
+  their exact candidates, not inherited results for `bfa756f`. Hosted CI, an
+  independent fresh-machine install, final exact-candidate reruns, and
+  publication evidence remain separate release gates.
 - [x] PostgreSQL 18 and 19 strict workspace Clippy/check gates pass.
 - [x] The current Rust extension and benchmark harness unit suites pass, along
   with the live plan/integration suite.
@@ -44,18 +46,19 @@ published release artifact.
   Full median speedups range from 3.758x to 21.171x; every paired test has
   `p < 0.003` and Cohen's `d > 0.865`. Its 781-entry seal hashes to
   `4a838b7c3dae5f393ef648c2b47d0f47ae88e8b60779dc1b039ea26565b92d58`.
-- [ ] Native-decline parity is still release-blocking. The 30-pair diagnostic
-  failed 10/10 tested native cells; eight exceeded a descriptive median or p95
-  bound and all ten failed exact paired non-inferiority. Selected execution is
-  green, but extension-enabled native queries are not yet consistently as fast
-  as matched PostgreSQL. Candidate `e465a24` now defers redundant aggregate
-  base/join observers to the exact upper aggregate hook while preserving the
-  public MergeJoin, H3, PostGIS, sort, and generic decline counters. It also
-  retains four raw executions per arm (eight per measured pair) as two mirrored
-  ABBA/BAAB motifs across each of 30 balanced pairs; analyzer, coverage, and
-  report contracts fail closed on any incomplete sequence. Full planner-shape
-  validation passes 576/576, but the current host remains performance-ineligible
-  while unrelated CPU-saturating processes trip the foreign-load guard.
+- [x] Native-decline parity passes on exact candidate `bfa756f`. The sealed
+  artifact at
+  `.codex/scratch/native-parity-p0-bfa756f-pg18-20260819-b` retains 30 exactly
+  balanced pairs and four raw executions per arm for each of all 17 registered
+  cells. All 17 pass the median and p95 bounds plus exact one-sided paired
+  non-inferiority; all 17 preserve comparable PostgreSQL-native plans and zero
+  device dispatch. The largest median regression was 1.629%, the largest p95
+  regression was 4.213%, and the largest exact non-inferiority p-value was
+  0.000147. Expected and installed module SHA-256 values both equal
+  `2c415921f038d772d9d636f861ca62cbb3e2af6cc2087ed983a581f383547693`.
+  The terminal `SHA256SUMS` file hashes to
+  `14382bbec844aff957cb153092ee83b64f8106635696c7789a20068ef8c99c92`;
+  its complete manifest verifies without error.
 
 ## Non-Negotiable Invariants
 
@@ -96,17 +99,19 @@ enabled-minus-disabled results include:
   residency-store scans while preserving exact collision checks, catalog epoch,
   dependency stamps, policy GUCs, and error-safe nested planner cleanup.
 - [x] Remove avoidable tracing/map/counter work from unprofiled rejection paths.
-- [ ] Re-run all 17 registered native-decline cells with 30 balanced pairs. Pass
+- [x] Re-run all 17 registered native-decline cells with 30 balanced pairs. Pass
   median allowance `max(0.25 ms, 2%)`, p95 allowance 5%, and exact paired
   non-inferiority at `alpha=0.05` in 17/17 cells. Target planner upper-group
   means are at most 25 us for simple declines and 75 us for join/reduce declines.
-  A clean candidate `8265dde` attempt retained the complete first cell at
-  `.codex/scratch/native-parity-p0-8265dde-pg18-20260819-a`: native
-  `grouped_agg_int4` at 10K passed its median bound (-0.013 ms), p95 bound
-  (+0.037 ms), and exact paired non-inferiority (`p=5.59e-9`) across 30 mirrored
-  pairs. The host-load guard then aborted before cell 2 when an unrelated
-  `tsserver` exceeded 50% CPU. This directory is partial diagnostic evidence,
-  not a 17/17 release artifact; it must not be resumed, sealed, or relabeled.
+  The profiling-off release measurement passes all formal gates in
+  `.codex/scratch/native-parity-p0-bfa756f-pg18-20260819-b`: 17/17 descriptive
+  bounds, 17/17 exact non-inferiority tests, and 17/17 final parity verdicts.
+  `native_parity.json` hashes to
+  `a395450a097949e23aeb477a0a9d871c0b2d09802a39815c04870494f6d9e9ac`.
+  The preceding `-a` attempt contains only cells 1-6 and stopped before cell 7
+  when unrelated `corespotlightd` exceeded the 50% foreign-CPU guard. It remains
+  partial diagnostic evidence and must not be resumed, combined, sealed, or
+  relabeled as the complete `-b` result.
 
 ## P0: Benchmark Lifecycle Accounting
 
@@ -133,7 +138,7 @@ but any item that changes a planner-selectable lane must pass the same exact
 correctness, dispatch, fallback, lifecycle, and performance contracts before
 that lane is advertised.
 
-- [ ] **1. Close both existing P0 blockers before architecture expansion.** Pass
+- [x] **1. Close both existing P0 blockers before architecture expansion.** Pass
   every Native-Decline Overhead gate and separate lifecycle construction from
   steady-state measurement as specified above. New kernels or SQL surface must
   not hide, relabel, waive, or postpone either blocker.
@@ -513,18 +518,18 @@ redesigned and independently requalified.
 - [x] Produce a fresh exact-candidate coverage and enriched Metal stress bundle
   covering mixed workloads, fork, cancellation, concurrency, memory pressure,
   per-kernel JIT/archive cold/warm evidence, clean logs, and resource balance.
-  Clean candidate `e465a24` passes the three-layer PG18 gate at 90.07% Rust
-  source coverage (48,168/53,478; 203/203 required files), 90.01% C++/SYCL
-  source coverage (16,658/18,507; 32/32 native Metal tests), and 100% SQL
-  semantic coverage (323/323 assertions across 60/60 files). Evidence is in
-  `.codex/scratch/exact-e465a24/.codex/scratch/coverage-exact-e465a24-pg18-20260812-b`;
+  Current clean candidate `bfa756f` passes the three-layer PG18 gate at 90.15%
+  Rust source coverage (49,120/54,486; 210/210 required mappings), 90.04%
+  C++/SYCL source coverage (16,738/18,590; 32/32 native Metal tests), and 100%
+  SQL semantic coverage (361/361 assertions across 67/67 files). Evidence is in
+  `.codex/scratch/coverage-exact-bfa756f-pg18-20260819-a`;
   `gate-summary.json` SHA-256 is
-  `8147ad711f903d26e7eeb67b393f1957b1b0a2127a2ac65674b259c95bfd9671`
+  `b2431cd5bf62638b68db283703e64fcc8d60a026c0fbc16319e97fa8d0b82fda`
   and `provenance.json` SHA-256 is
-  `004ad35d5257f581c3454e82d8bde4124f7629987e26d8951c70e9b98925d0ef`.
-  The matching Metal bundle at
-  `.codex/scratch/exact-e465a24/.codex/scratch/metal-stress-exact-e465a24-pg18-20260812-a`
-  passes strict SQL, 32/32 native tests, OOM, cancellation, archive cold/warm,
+  `96754a17e875d67063f924ce32420c8f14f2742cd48761ff548651673c2aea3e`.
+  The latest full exact Metal stress bundle remains the predecessor candidate at
+  `.codex/scratch/exact-e465a24/.codex/scratch/metal-stress-exact-e465a24-pg18-20260812-a`.
+  It passes strict SQL, 32/32 native tests, OOM, cancellation, archive cold/warm,
   8-by-20 fork stress, six crash probes, resource/log audit, and artifact-index
   verification. Its `artifact_index.json` SHA-256 is
   `7e8661da819a55321fe6f064ee453b06772836e0a8fcab40bae24adea56767b0`;
