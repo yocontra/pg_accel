@@ -470,10 +470,13 @@ mod tests {
         }
         let rows = device_rows().max(1_000_000);
         Spi::run(&format!(
-            "CREATE UNLOGGED TABLE pgaccel_active_counted_fact (k int4 NOT NULL); \
+            "CREATE UNLOGGED TABLE pgaccel_active_counted_fact (\
+               k int4 NOT NULL, payload int4); \
              CREATE UNLOGGED TABLE pgaccel_active_counted_dim (k int4); \
              INSERT INTO pgaccel_active_counted_fact \
-             SELECT (g % 4)::int4 FROM generate_series(1, {rows}) AS g; \
+             SELECT (g % 4)::int4, \
+                    CASE WHEN g % 7 = 0 THEN NULL ELSE (g % 1024)::int4 END \
+             FROM generate_series(1, {rows}) AS g; \
              INSERT INTO pgaccel_active_counted_dim VALUES \
                (0), (0), (1), (2), (2), (2), (NULL); \
              ANALYZE pgaccel_active_counted_fact; \
@@ -481,7 +484,7 @@ mod tests {
         ))
         .expect("counted INT4 fixture should be created");
 
-        pin("pgaccel_active_counted_fact", &["k"], rows);
+        pin("pgaccel_active_counted_fact", &["k", "payload"], rows);
         pin("pgaccel_active_counted_dim", &["k"], 7);
 
         let query = "SELECT count(*) AS matched_rows \
@@ -513,7 +516,7 @@ mod tests {
         );
 
         assert_native_decline_matches_native(
-            "SELECT count(f.k) AS matched_rows \
+            "SELECT count(f.payload) AS matched_rows \
              FROM pgaccel_active_counted_fact AS f \
              JOIN pgaccel_active_counted_dim AS d ON f.k = d.k",
             "generic_serial_kernel_mode_unqualified",
