@@ -1733,11 +1733,58 @@ void test_parallel_dense_integer_measure_range_filter() {
     CHECK(expected_count[groups - 1] != 0);
     CHECK(output.measures[0].nonnull[groups - 1] == 0);
 
+    if (groups == 256) {
+      // A lifecycle call cannot use the one-shot atomic path. Exercise the
+      // chunked specialization as well, including aggregate-filter rejection,
+      // invalid-null fail-closed behavior, and reset recovery.
+      pgaccel_grouped_agg_desc session = desc;
+      session.execution_flags =
+          PGACCEL_GROUPED_AGG_EXEC_RESET | PGACCEL_GROUPED_AGG_EXEC_ACCUMULATE;
+      const pgaccel_grouped_agg_workspace_req req = workspace_req(session);
+      SharedWorkspace workspace(req.bytes, req.alignment);
+      int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID;
+      CHECK_STATUS(execute_in_workspace(session, req, workspace, nullptr, &detail), PGACCEL_OK);
+      CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+
+      pgaccel_grouped_agg_desc finalize = row_slice(desc, 0, 0);
+      finalize.execution_flags = PGACCEL_GROUPED_AGG_EXEC_FINALIZE;
+      OutputStorage chunked(desc, true, true);
+      CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &chunked.out, &detail),
+                   PGACCEL_OK);
+      CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+      check_outputs_equal(chunked, output, desc.measure_count);
+
+      nulls[31] = 2;
+      detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+      CHECK_STATUS(execute_in_workspace(session, req, workspace, nullptr, &detail), PGACCEL_ERROR);
+      CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+      nulls[31] = host_nulls[31];
+
+      CHECK_STATUS(execute_in_workspace(session, req, workspace, nullptr, &detail), PGACCEL_OK);
+      CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+      OutputStorage recovered(desc, true, true);
+      CHECK_STATUS(execute_in_workspace(finalize, req, workspace, &recovered.out, &detail),
+                   PGACCEL_OK);
+      CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE);
+      check_outputs_equal(recovered, output, desc.measure_count);
+
+      // The one-shot atomic specialization must also fail closed when a fact
+      // key maps outside the declared dense radix.
+      const int32_t saved_key = keys[31];
+      keys[31] = static_cast<int32_t>(groups);
+      OutputStorage invalid_key(desc);
+      detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
+      CHECK_STATUS(execute_external_ex(desc, &invalid_key.out, &detail), PGACCEL_ERROR);
+      CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+      keys[31] = saved_key;
+    }
+
     nulls[31] = 2;
     OutputStorage invalid(desc);
     int32_t detail = PGACCEL_GROUPED_AGG_DEVICE_ERROR_NONE;
     CHECK_STATUS(execute_external_ex(desc, &invalid.out, &detail), PGACCEL_ERROR);
     CHECK(detail == PGACCEL_GROUPED_AGG_DEVICE_ERROR_INVALID);
+    nulls[31] = host_nulls[31];
   }
 }
 
