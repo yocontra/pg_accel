@@ -2,8 +2,8 @@
   "schema_version": 1,
   "seed": "0x9e3779b97f4a7c15",
   "execution_commands": {
-    "rust-lib": "cargo test -p pg_accel --lib",
-    "pgrx": "cargo pgrx test --package pg_accel pg{major}",
+    "rust-lib": "just test-standalone {major}",
+    "pgrx": "just test-unit {major}",
     "ctest": "ctest --test-dir pgaccel-kernels/build --output-on-failure -R 'test_(grouped_agg|spatial_resident|raster_resident|h3|host_api_contract)'"
   },
   "targets": [

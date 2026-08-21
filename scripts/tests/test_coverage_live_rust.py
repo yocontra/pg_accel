@@ -1001,6 +1001,23 @@ class CoverageLiveRustTests(unittest.TestCase):
         self.assertIn("record_stage rust live_cli 0", source[live_run:profile_copy])
         self.assertIn("record_stage rust live_cli 1", source[live_run:profile_copy])
 
+    def test_gate_binds_every_rust_coverage_build_to_exact_pg_config(self) -> None:
+        source = COVERAGE_GATE.read_text(encoding="utf-8")
+        function_start = source.index("rust_coverage()")
+        function_end = source.index("\ncpp_coverage()", function_start)
+        function = source[function_start:function_end]
+
+        resolution = 'pg_config="$(pg_accel_pg_config_for_pg "$pg")"'
+        pg_export = 'export PG_CONFIG="$pg_config"'
+        pgrx_export = 'export PGRX_PG_CONFIG_PATH="$pg_config"'
+        first_cargo = function.index("cargo llvm-cov show-env")
+
+        self.assertIn(resolution, function)
+        self.assertIn(pg_export, function)
+        self.assertIn(pgrx_export, function)
+        self.assertLess(function.index(pg_export), first_cargo)
+        self.assertLess(function.index(pgrx_export), first_cargo)
+
     def test_gate_binds_live_cli_to_exact_instrumented_candidate(self) -> None:
         source = COVERAGE_GATE.read_text(encoding="utf-8")
         invocation = "run_live_rust_coverage_harness \\\n"

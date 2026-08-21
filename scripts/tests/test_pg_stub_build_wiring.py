@@ -15,6 +15,13 @@ class PgStubBuildWiringTests(unittest.TestCase):
         self.assertIn("cargo::rerun-if-env-changed=PGRX_PG_CONFIG_PATH", source)
         self.assertIn("write fallback pg_stubs_generated.rs", source)
         self.assertLess(source.index(env_marker), source.index(discovery_marker))
+        selection = source[
+            source.index("let pg_config_path"):source.index(discovery_marker)
+        ]
+        self.assertLess(
+            selection.index('std::env::var("PG_CONFIG")'),
+            selection.index('std::env::var("PGRX_PG_CONFIG_PATH")'),
+        )
 
     def test_stubs_cover_macos_and_linux_symbol_rules(self) -> None:
         build_source = (REPO_ROOT / "pg_accel" / "build.rs").read_text(
@@ -41,8 +48,9 @@ class PgStubBuildWiringTests(unittest.TestCase):
 
         self.assertIn('test-standalone pg="":', justfile)
         self.assertIn(
-            'PG_CONFIG="$pg_config" cargo test -p pg_accel --locked --lib', justfile
+            'PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config"', justfile
         )
+        self.assertIn("cargo test -p pg_accel --locked --lib", justfile)
         self.assertIn("check-matrix test-standalone deny", justfile)
         self.assertIn("just test-standalone ${{ matrix.pg }}", workflow)
         self.assertNotIn("cargo test --workspace --no-default-features", workflow)
@@ -53,14 +61,24 @@ class PgStubBuildWiringTests(unittest.TestCase):
         self.assertGreaterEqual(
             justfile.count('pg_config="$(pg_accel_pg_config_for_pg "$pg")"'), 4
         )
-        self.assertIn('PG_CONFIG="$pg_config" cargo clippy --workspace', justfile)
+        exact_env = 'PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config"'
+        self.assertGreaterEqual(justfile.count(exact_env), 7)
+        self.assertIn("cargo clippy --workspace", justfile)
         self.assertGreaterEqual(
-            justfile.count('PG_CONFIG="$pg_config" cargo check --workspace'), 2
+            justfile.count("cargo check --workspace"), 2
         )
-        self.assertIn(
-            'PG_CONFIG="$pg_config" RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"',
-            justfile,
-        )
+        self.assertIn('RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"', justfile)
+
+    def test_auxiliary_test_and_hook_paths_keep_exact_postgres_selection(self) -> None:
+        justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
+        hooks = (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+
+        self.assertIn('just test-standalone "$pg"', justfile)
+        self.assertIn('--features "pg$pg" historical_crash', justfile)
+        self.assertNotIn("entry: cargo check --workspace", hooks)
+        self.assertNotIn("entry: cargo clippy --workspace", hooks)
+        self.assertIn("entry: just check 18", hooks)
+        self.assertIn("entry: just lint 18", hooks)
 
     def test_no_gpu_runner_skips_only_an_explicit_no_device_prerequisite(self) -> None:
         source = (

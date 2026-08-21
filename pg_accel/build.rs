@@ -69,8 +69,11 @@ mod pg_stub {
         )
         .expect("write fallback pg_stubs_generated.rs");
 
-        let pg_config_path = std::env::var("PGRX_PG_CONFIG_PATH")
-            .or_else(|_| std::env::var("PG_CONFIG"))
+        // Project recipes bind PG_CONFIG to the exact requested major. Keep
+        // that explicit selection authoritative over any ambient pgrx
+        // override left behind by an enclosing shell.
+        let pg_config_path = std::env::var("PG_CONFIG")
+            .or_else(|_| std::env::var("PGRX_PG_CONFIG_PATH"))
             .unwrap_or_else(|_| "pg_config".to_string());
 
         let Some(bindir) = Command::new(&pg_config_path)

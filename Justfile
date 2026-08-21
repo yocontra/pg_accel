@@ -248,7 +248,8 @@ lint pg="":
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
-    PG_CONFIG="$pg_config" cargo clippy --workspace --no-default-features --features "pg$pg" --all-targets -- -D warnings
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo clippy --workspace --no-default-features --features "pg$pg" --all-targets -- -D warnings
 
 # Type check one PG major. Defaults to the active supported PostgreSQL major.
 check pg="":
@@ -264,7 +265,8 @@ check pg="":
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
-    PG_CONFIG="$pg_config" cargo check --workspace --no-default-features --features "pg$pg" --all-targets
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo check --workspace --no-default-features --features "pg$pg" --all-targets
 
 # Type check every supported PostgreSQL major.
 check-matrix:
@@ -275,7 +277,8 @@ check-matrix:
         pg_accel_require_pgrx_support "$pg"
         pg_accel_require_pgrx_pg_config "$pg"
         pg_config="$(pg_accel_pg_config_for_pg "$pg")"
-        PG_CONFIG="$pg_config" cargo check --workspace --no-default-features --features "pg$pg" --all-targets
+        PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+            cargo check --workspace --no-default-features --features "pg$pg" --all-targets
     done
 
 # Run cargo-deny checks (licenses + advisories)
@@ -351,7 +354,8 @@ test-unit pg="":
     pg_accel_require_pgrx_pg_config "$pg"
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
     scripts/setup_pg_extensions.sh "$pg"
-    PG_CONFIG="$pg_config" RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" \
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" \
         cargo pgrx test --package pg_accel "pg$pg"
 
 # Run the pure Rust library tests as a standalone executable. pgrx references
@@ -370,7 +374,8 @@ test-standalone pg="":
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
     pg_config="$(pg_accel_pg_config_for_pg "$pg")"
-    PG_CONFIG="$pg_config" cargo test -p pg_accel --locked --lib \
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo test -p pg_accel --locked --lib \
         --no-default-features --features "pg$pg"
 
 # Run pgrx unit tests against every supported PG major.
@@ -469,7 +474,7 @@ fuzz-contracts pg="": safety-contract-audit
     else
         pg="${requested#pg}"
     fi
-    cargo test -p pg_accel --lib --no-default-features --features "pg$pg"
+    just test-standalone "$pg"
     just test-unit "$pg"
     just gpu-build
     ctest --test-dir pgaccel-kernels/build --output-on-failure \
@@ -487,7 +492,12 @@ crash-band-contracts pg="": safety-contract-audit
     else
         pg="${requested#pg}"
     fi
-    cargo test -p pg_accel --lib historical_crash
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo test -p pg_accel --locked --lib --no-default-features \
+            --features "pg$pg" historical_crash
     just test-unit "$pg"
     just gpu-build
     ctest --test-dir pgaccel-kernels/build --output-on-failure \
@@ -1216,7 +1226,9 @@ install-pg-accel pg="":
         printf 'unavailable\n'
     }
     cargo pgrx stop --package pg_accel "pg$pg" >/dev/null 2>&1 || true
-    PG_CONFIG="$pg_config" cargo pgrx install --package pg_accel --release --no-default-features --features "pg$pg" --pg-config "$pg_config"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo pgrx install --package pg_accel --release --no-default-features \
+            --features "pg$pg" --pg-config "$pg_config"
     module_file=""
     for candidate in "$pkglibdir/pg_accel.so" "$pkglibdir/pg_accel.dylib" "$pkglibdir/pg_accel.bundle"; do
         if [ -f "$candidate" ]; then

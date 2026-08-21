@@ -485,6 +485,19 @@ rust_coverage() (
         return 1
     fi
 
+    # Every Rust build in this layer must inventory and compile against the
+    # exact PostgreSQL major selected by the gate. In particular, standalone
+    # and cargo-pgrx test binaries need the matching exported-symbol set on
+    # both Mach-O and ELF hosts.
+    local pg_config
+    if ! pg_config="$(pg_accel_pg_config_for_pg "$pg")"; then
+        mark_layer_error rust "$rust_minimum" postgres_config \
+            "could not resolve the exact pg${pg} pg_config" 1
+        return 1
+    fi
+    export PG_CONFIG="$pg_config"
+    export PGRX_PG_CONFIG_PATH="$pg_config"
+
     local coverage_env
     if ! coverage_env="$(CARGO_TARGET_DIR="$build_dir" cargo llvm-cov show-env --sh \
         --include-build-script \
