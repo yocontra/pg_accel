@@ -6787,6 +6787,13 @@ class ReleaseWiringTests(unittest.TestCase):
         )
         self.assertIn("capture-candidate", matrix)
         self.assertIn("--repo-root \"$PWD\"", matrix)
+        benchmark_sweep = matrix[
+            matrix.index('run_logged "benchmark-sweep"') : matrix.index(
+                'if [ "$(uname -s)"', matrix.index('run_logged "benchmark-sweep"')
+            )
+        ]
+        self.assertIn("--cache-mode warm", benchmark_sweep)
+        self.assertNotIn("--cache-mode both", benchmark_sweep)
         self.assertIn("> SHA256SUMS", matrix)
         self.assertIn("shasum -a 256 -c SHA256SUMS", matrix)
         self.assertNotIn("        TODO.md docs README.md", matrix)

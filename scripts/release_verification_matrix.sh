@@ -101,7 +101,7 @@ run_logged "benchmark-sweep" \
         --realistic-gucs \
         --capture-plans \
         --timing raw \
-        --cache-mode both \
+        --cache-mode warm \
         --artifacts-dir "${artifact_dir}/benchmark-sweep"
 
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
