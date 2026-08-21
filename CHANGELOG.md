@@ -1,10 +1,10 @@
 # Changelog
 
 All notable changes will be documented in this file. The project is currently
-an unreleased `0.1.0` prerelease; no public release or package-availability
+an unreleased `1.0.0-rc1` candidate; no public release or package-availability
 claim is implied by the entries below.
 
-## [Unreleased]
+## [1.0.0-rc1] - 2026-08-20
 
 ### Added
 
@@ -260,5 +260,6 @@ claim is implied by the entries below.
 - Generated LLVM IR and raw machine-local benchmark logs from the tracked
   source tree. Deliberate verification artifacts belong in ignored artifact
   directories or an external release artifact store.
-- The benchmark crate's premature `1.0.0` changelog entry. The workspace remains
-  version `0.1.0` until release gates are complete.
+- The benchmark crate's premature final `1.0.0` changelog entry. The workspace
+  now carries the explicit `1.0.0-rc1` candidate version; final `1.0.0` remains
+  gated on the one-week candidate observation and final sign-off.
