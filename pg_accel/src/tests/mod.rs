@@ -2933,8 +2933,15 @@ mod tests {
 
         let mismatch_plan = explain_text(mismatch_query);
         assert!(
-            mismatch_plan.contains("Custom Scan (GpuAccelAgg)"),
-            "resolution mismatch must reach the selected GPU path before failing:\n{mismatch_plan}"
+            !mismatch_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "a nonzero H3 parent resolution lacks 1.0 winning evidence and must stay native:\n{mismatch_plan}"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                .expect("H3 release-envelope rejection should be readable")
+                .as_deref(),
+            Some("h3_parent_resolution_unqualified"),
+            "the nonzero H3 parent lane must expose its precise release-envelope decline"
         );
         crate::gpu::reset_gpu_exec_count();
         Spi::run(&format!(
@@ -2951,7 +2958,11 @@ mod tests {
              $h3_error$"
         ))
         .expect("capture accelerated H3 resolution-mismatch SQLSTATE");
-        crate::gpu::assert_gpu_executed(1);
+        assert_eq!(
+            crate::gpu::gpu_exec_count(),
+            0,
+            "the nonzero H3 parent release-envelope decline must not dispatch a GPU kernel"
+        );
         let native_sqlstate = Spi::get_one::<String>(
             "SELECT sqlstate FROM _h3_parent_error_state WHERE mode = 'native'",
         )
@@ -2968,11 +2979,11 @@ mod tests {
         );
         assert_ne!(
             accelerated_sqlstate, "no_error",
-            "selected H3 resolution mismatch must be a hard error, not a zero/NULL result"
+            "native H3 resolution mismatch must remain a hard error, not a zero/NULL result"
         );
         assert_eq!(
             accelerated_sqlstate, native_sqlstate,
-            "selected H3 resolution mismatch must preserve native SQLSTATE"
+            "the release-envelope decline must preserve native H3 SQLSTATE"
         );
 
         Spi::run(

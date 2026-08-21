@@ -877,9 +877,24 @@ fn equal_two_relation_shape_without_unique_evidence_declines_ambiguously() {
         right: dim_key,
     });
     assert_eq!(
-        build_shape(input, &model()),
+        build_shape(input.clone(), &model()),
         Err(ShapeDecline::AmbiguousFactRelation)
     );
+
+    let mut analyze_noise = input.clone();
+    analyze_noise.relations[1].estimated_rows = 1_005_000;
+    assert_eq!(
+        build_shape(analyze_noise, &model()),
+        Err(ShapeDecline::AmbiguousFactRelation),
+        "sub-percent ANALYZE noise must not invent a semantic fact side"
+    );
+
+    let mut distinct_scale = input;
+    distinct_scale.relations[1].estimated_rows = 1_020_000;
+    let oriented = build_shape(distinct_scale, &model())
+        .expect("a greater-than-one-percent row difference can orient a count-only join");
+    assert_eq!(oriented.spec.fact_rel, 200);
+    assert_eq!(oriented.spec.star_dims[0].relation_oid, 100);
 }
 
 #[test]

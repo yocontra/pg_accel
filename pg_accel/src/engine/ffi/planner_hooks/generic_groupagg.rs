@@ -74,6 +74,9 @@ enum AdmissionDecline {
     DescriptorCapability {
         detail: String,
     },
+    H3ParentResolutionUnqualified {
+        resolution: i32,
+    },
     SerialGenericKernelMode {
         mode: &'static str,
     },
@@ -116,6 +119,7 @@ impl AdmissionDecline {
             Self::MissingResidencyEstimate { .. } => "generic_residency_estimate_missing",
             Self::UnexpectedResidencyEstimate { .. } => "generic_residency_estimate_unexpected",
             Self::DescriptorCapability { .. } => "generic_descriptor_capability",
+            Self::H3ParentResolutionUnqualified { .. } => "h3_parent_resolution_unqualified",
             Self::SerialGenericKernelMode { .. } => "generic_serial_kernel_mode_unqualified",
             Self::AutoLoadDisabled { .. } => "generic_auto_load_disabled",
             Self::ResidencyBytesOverflow => "generic_residency_bytes_overflow",
@@ -523,6 +527,29 @@ fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> 
         return Err(AdmissionDecline::SerialGenericKernelMode { mode: mode.label() });
     }
     Ok(())
+}
+
+fn validate_released_h3_parent_envelope(shape: &ShapePlan) -> Result<(), AdmissionDecline> {
+    let resolution = shape
+        .spec
+        .group_keys
+        .iter()
+        .find_map(|key| match key.source {
+            crate::engine::spec::GroupKeySource::H3CellToParent { resolution, .. } => {
+                Some(resolution)
+            }
+            _ => None,
+        });
+    match resolution {
+        // The 1.0 release evidence qualifies only the exact res7-to-res0
+        // grouped COUNT lane. Preserve the broader wire/runtime implementation
+        // for differential and backstop tests, but do not select another
+        // resolution until that exact cell has independent winning evidence.
+        Some(resolution) if resolution != 0 => {
+            Err(AdmissionDecline::H3ParentResolutionUnqualified { resolution })
+        }
+        Some(_) | None => Ok(()),
+    }
 }
 
 const NORMAL_SPATIAL_PROMOTION_ROWS: u64 = 1_000_000;
@@ -1643,6 +1670,7 @@ pub(super) unsafe fn try_inject(
         if let Some(gate) = stable_device_cost_gate_before_residency(&shape, &model) {
             return Err(AdmissionDecline::DeviceCostGate(gate));
         }
+        validate_released_h3_parent_envelope(&shape)?;
         if let Some((gate, dependency)) = cheap_exact_dense_row_gate(&shape, &model)? {
             cache_dependencies.push(dependency);
             return Err(AdmissionDecline::DeviceCostGate(gate));
@@ -1699,6 +1727,7 @@ pub(super) unsafe fn try_inject(
             let cache_key = match &decline {
                 AdmissionDecline::Shape(_)
                 | AdmissionDecline::DescriptorCapability { .. }
+                | AdmissionDecline::H3ParentResolutionUnqualified { .. }
                 | AdmissionDecline::SerialGenericKernelMode { .. } => {
                     structural_cache_key.map(|key| (key, Vec::new()))
                 }
@@ -3481,6 +3510,29 @@ mod tests {
     }
 
     #[test]
+    fn released_h3_parent_envelope_admits_only_resolution_zero() {
+        let nonzero = h3_parent_shape();
+        assert_eq!(
+            validate_released_h3_parent_envelope(&nonzero),
+            Err(AdmissionDecline::H3ParentResolutionUnqualified { resolution: 4 })
+        );
+
+        let mut released = nonzero;
+        let GroupKeySource::H3CellToParent { resolution, .. } =
+            &mut released.spec.group_keys[0].source
+        else {
+            panic!("H3 parent fixture must retain its semantic group key");
+        };
+        *resolution = 0;
+        assert_eq!(validate_released_h3_parent_envelope(&released), Ok(()));
+        assert_eq!(
+            validate_released_h3_parent_envelope(&count_shape()),
+            Ok(()),
+            "the H3 release guard must not affect non-H3 descriptors"
+        );
+    }
+
+    #[test]
     fn global_cost_multiplier_controls_gate_and_scales_auto_load() {
         let mut shape = count_shape();
         shape.cost.amortized_auto_load = PgCost::new(100.0);
@@ -3761,6 +3813,10 @@ mod tests {
                     detail: "unsupported".to_owned(),
                 },
                 "generic_descriptor_capability",
+            ),
+            (
+                AdmissionDecline::H3ParentResolutionUnqualified { resolution: 3 },
+                "h3_parent_resolution_unqualified",
             ),
             (
                 AdmissionDecline::AutoLoadDisabled {

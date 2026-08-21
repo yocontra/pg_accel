@@ -1066,14 +1066,26 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::StarJoin,
     },
     ReleasedEnvelopeContract {
-        workload: "gpu_hashjoin_large_build",
-        min_rows: HASHJOIN_MIN_BUILD_ROWS,
-        max_rows: HASHJOIN_MAX_BUILD_ROWS,
+        workload: "hashjoin_10k_1m",
+        min_rows: 1_000_000,
+        max_rows: usize::MAX,
         family: ReleasedPathFamily::StarJoin,
     },
     ReleasedEnvelopeContract {
-        workload: "hashjoin_10k_1m",
+        workload: "hashjoin_100_1m",
         min_rows: 1_000_000,
+        max_rows: usize::MAX,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "hashjoin_1k_1m",
+        min_rows: 1_000_000,
+        max_rows: usize::MAX,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
+        workload: "hashjoin_100k_1m",
+        min_rows: 10_000_000,
         max_rows: usize::MAX,
         family: ReleasedPathFamily::StarJoin,
     },
@@ -1371,11 +1383,7 @@ pub fn benchmark_native_decline_names() -> Vec<&'static str> {
         .collect()
 }
 
-const REDUCE_F32_BREAK_EVEN_ROWS: usize = 25_000;
 const REDUCE_F64_BREAK_EVEN_ROWS: usize = 50_000;
-const REDUCE_I64_BREAK_EVEN_ROWS: usize = 75_000;
-const HASHJOIN_MIN_BUILD_ROWS: usize = 5_000;
-const HASHJOIN_MAX_BUILD_ROWS: usize = 99_999;
 const SPATIAL_MIN_VERTICES: usize = 100;
 const SPATIAL_BREAK_EVEN_VERTS_X_ROWS: u64 = 500_000_000;
 const SPATIAL_MAX_VERTS_X_ROWS: u64 = 50_000_000_000;
@@ -2299,7 +2307,7 @@ fn h3_matrix_profile(name: &str) -> Option<H3MatrixProfile> {
             row_width: "16-byte coordinate pair + 8-byte h3index output",
             output_size: "one count row",
             threshold_basis: "fp64 calibration H3 expression row; native until expression aggregate dispatch exists",
-            decline_reason: "h3_fp64_expression_aggregate_no_dispatch_path",
+            decline_reason: "shape_measure_expression",
         },
         "h3_cell_to_parent" => H3MatrixProfile {
             lane: "h3_cell_to_parent_grouped_count_res7_to_res0",
@@ -2551,40 +2559,19 @@ fn reduce_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThr
         });
     }
 
-    let (data_type, row_width, floor) = match name {
-        "gpu_reduce_sum" => (
-            "float8/float4/int4 mixed",
-            "16 bytes of aggregate inputs",
-            REDUCE_F64_BREAK_EVEN_ROWS,
-        ),
-        "reduce_sum_f32" => ("float4", "4 bytes", REDUCE_F32_BREAK_EVEN_ROWS),
-        "reduce_sum_f64" | "reduce_min_f64" | "reduce_max_f64" => {
-            ("float8", "8 bytes", REDUCE_F64_BREAK_EVEN_ROWS)
-        }
-        "reduce_sum_i64" => ("int8", "8 bytes", REDUCE_I64_BREAK_EVEN_ROWS),
-        "reduce_multi" => (
-            "float8 + count",
-            "8 bytes plus counter",
-            REDUCE_F64_BREAK_EVEN_ROWS,
-        ),
+    let (data_type, row_width) = match name {
+        "gpu_reduce_sum" => ("float8/float4/int4 mixed", "16 bytes of aggregate inputs"),
+        "reduce_sum_f32" => ("float4", "4 bytes"),
+        "reduce_sum_f64" | "reduce_min_f64" | "reduce_max_f64" => ("float8", "8 bytes"),
+        "reduce_sum_i64" => ("int8", "8 bytes"),
+        "reduce_multi" => ("float8 + count", "8 bytes plus counter"),
         _ => return None,
     };
-    let (expectation, threshold_basis) =
-        if rows < floor && matches!(name, "reduce_min_f64" | "reduce_max_f64") {
-            (
-                BenchmarkLaneExpectation::NativeDecline {
-                    reason: "generic_fact_rows_below_device_minimum",
-                },
-                "generic descriptor device-minimum row gate",
-            )
-        } else {
-            let reason = typed_reduce_structural_decline_reason(name)
-                .expect("recognized typed reduce workload has a structural or cost decline");
-            (
-                BenchmarkLaneExpectation::NativeDecline { reason },
-                "generic descriptor preflight or cost gate keeps the workload native",
-            )
-        };
+    let reason = typed_reduce_structural_decline_reason(name)
+        .expect("recognized typed reduce workload has a structural or mode decline");
+    let expectation = BenchmarkLaneExpectation::NativeDecline { reason };
+    let threshold_basis =
+        "generic descriptor preflight or physical-mode gate keeps the workload native";
     Some(BenchmarkThresholdMatrixEntry {
         lane: "typed_reduce",
         workload: static_workload_name(name),
@@ -2614,9 +2601,9 @@ fn typed_reduce_structural_decline_reason(name: &str) -> Option<&'static str> {
         "gpu_reduce_sum" | "reduce_sum_f64" | "reduce_multi" => {
             Some("shape_floating_accumulator_semantics")
         }
-        "reduce_sum_f32" => Some("shape_unsupported_measure_type"),
+        "reduce_sum_f32" => Some("shape_unsupported_aggregate_input"),
         "reduce_sum_i64" => Some("shape_numeric_accumulator_unavailable"),
-        "reduce_min_f64" | "reduce_max_f64" => Some("generic_cost_not_competitive"),
+        "reduce_min_f64" | "reduce_max_f64" => Some("generic_serial_kernel_mode_unqualified"),
         _ => None,
     }
 }
@@ -2625,23 +2612,17 @@ fn hashjoin_threshold_matrix_entry(
     name: &str,
     rows: usize,
 ) -> Option<BenchmarkThresholdMatrixEntry> {
-    let (lane, inner_rows, data_type, cardinality, selectivity, row_width, output_size) = match name
-    {
-        "hash_join" => {
-            let inner = (rows / 100).clamp(100, 100_000);
-            (
-                "hashjoin_count",
-                inner,
-                "int4 equality key",
-                "inner = outer/100, count-only output",
-                "key domain sized to inner table",
-                "12-byte probe row + build payload",
-                "one count row",
-            )
-        }
+    let (lane, data_type, cardinality, selectivity, row_width, output_size) = match name {
+        "hash_join" => (
+            "hashjoin_count",
+            "int4 equality key",
+            "inner = outer/100, count-only output",
+            "key domain sized to inner table",
+            "12-byte probe row + build payload",
+            "one count row",
+        ),
         "weighted_global_count_int4" => (
             "weighted_global_count_int4",
-            7,
             "int4 equality key",
             "1M deterministic fact rows x 7-row counted dimension",
             "duplicate weights {0:2, 1:1, 2:3}; key 3 unmatched; NULL never matches",
@@ -2650,28 +2631,22 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "gpu_hashjoin_large_build" => (
             "hashjoin_large_build_decline_guard",
-            rows,
             "int4 equality key",
             "build side scales with requested rows",
             "key domain sized to half the build/probe tables",
             "16-byte probe row + 16-byte build row",
             "one count row",
         ),
-        "gpu_hashjoin_filter" => {
-            let inner = (rows / 100).max(100);
-            (
-                "hashjoin_filter_groupagg",
-                inner,
-                "int4 equality key + float8 payload",
-                "dimension table = max(rows/100, 100)",
-                "fact filter amount > 5000 and dimension category < 50",
-                "fact row + dim text payload",
-                "grouped dimension-name rows",
-            )
-        }
+        "gpu_hashjoin_filter" => (
+            "hashjoin_filter_groupagg",
+            "int4 equality key + float8 payload",
+            "dimension table = max(rows/100, 100)",
+            "fact filter amount > 5000 and dimension category < 50",
+            "fact row + dim text payload",
+            "grouped dimension-name rows",
+        ),
         "mixed_join_agg" => (
             "hashjoin_filter_groupagg",
-            1_000,
             "int4 equality key + float8 payload",
             "fixed 1K-row dimension table",
             "all joined fact rows; no fact or dimension filters",
@@ -2680,7 +2655,6 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "mixed_join_agg_int4" => (
             "hashjoin_groupagg_exact_sum_count",
-            1_000,
             "int4 equality key + int4 payload",
             "fixed deterministic 1K-row dimension table",
             "all joined fact rows; no fact or dimension filters",
@@ -2689,7 +2663,6 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "hashjoin_100_1m" => (
             "hashjoin_build_sweep",
-            100,
             "int4 equality key",
             "fixed 100-row build side",
             "high fanout probe over 1M-style outer",
@@ -2698,7 +2671,6 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "hashjoin_1k_1m" => (
             "hashjoin_build_sweep",
-            1_000,
             "int4 equality key",
             "fixed 1K-row build side",
             "high fanout probe over 1M-style outer",
@@ -2707,7 +2679,6 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "hashjoin_10k_1m" => (
             "hashjoin_build_sweep",
-            10_000,
             "int4 equality key",
             "fixed 10K-row build side",
             "probe side dominates build cost",
@@ -2716,10 +2687,9 @@ fn hashjoin_threshold_matrix_entry(
         ),
         "hashjoin_100k_1m" => (
             "hashjoin_build_sweep",
-            100_000,
             "int4 equality key",
             "fixed 100K-row build side",
-            "build side reaches unsafe GPU hash table branch",
+            "build side reaches the inclusive resident counted-dimension maximum",
             "16-byte probe row + 8-byte build row",
             "one count row",
         ),
@@ -2740,24 +2710,13 @@ fn hashjoin_threshold_matrix_entry(
                 dispatch_evidence: GENERIC_NATIVE_DISPATCH_EVIDENCE,
                 correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
                 cache_gate: GENERIC_CACHE_GATE,
-                threshold_basis: "partial private rebuild row cap until shared GPU inner state",
+                threshold_basis: "descriptor remains in the unqualified serial generic mode",
                 expectation: BenchmarkLaneExpectation::NativeDecline {
-                    reason: "hashjoin_parallel_inner_rebuild_too_large",
+                    reason: "generic_serial_kernel_mode_unqualified",
                 },
             });
         }
         _ => return None,
-    };
-    let min_build_rows = if matches!(
-        name,
-        "gpu_hashjoin_filter"
-            | "mixed_join_agg"
-            | "mixed_join_agg_int4"
-            | "weighted_global_count_int4"
-    ) {
-        100
-    } else {
-        HASHJOIN_MIN_BUILD_ROWS
     };
     let expectation = if name == "weighted_global_count_int4" && rows != 1_000_000 {
         BenchmarkLaneExpectation::NativeDecline {
@@ -2795,6 +2754,34 @@ fn hashjoin_threshold_matrix_entry(
         BenchmarkLaneExpectation::GpuWinner {
             min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
         }
+    } else if name == "gpu_hashjoin_large_build" {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "shape_ambiguous_fact_relation",
+        }
+    } else if matches!(name, "hashjoin_100_1m" | "hashjoin_1k_1m") && rows < 1_000_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_serial_kernel_mode_unqualified",
+        }
+    } else if matches!(name, "hashjoin_100_1m" | "hashjoin_1k_1m") {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        }
+    } else if name == "hashjoin_100k_1m" && rows < 100_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_serial_kernel_mode_unqualified",
+        }
+    } else if name == "hashjoin_100k_1m" && rows == 100_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "shape_ambiguous_fact_relation",
+        }
+    } else if name == "hashjoin_100k_1m" && rows < 10_000_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_cost_not_competitive",
+        }
+    } else if name == "hashjoin_100k_1m" {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        }
     } else if name == "hashjoin_10k_1m" && rows < 100_000 {
         BenchmarkLaneExpectation::NativeDecline {
             reason: "shape_ambiguous_fact_relation",
@@ -2803,17 +2790,9 @@ fn hashjoin_threshold_matrix_entry(
         BenchmarkLaneExpectation::NativeDecline {
             reason: "generic_serial_kernel_mode_unqualified",
         }
-    } else if (min_build_rows..=HASHJOIN_MAX_BUILD_ROWS).contains(&inner_rows) {
+    } else {
         BenchmarkLaneExpectation::GpuWinner {
             min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
-        }
-    } else if inner_rows < min_build_rows {
-        BenchmarkLaneExpectation::NativeDecline {
-            reason: "hashjoin_build_below_break_even",
-        }
-    } else {
-        BenchmarkLaneExpectation::NativeDecline {
-            reason: "hashjoin_build_side_too_large",
         }
     };
     Some(BenchmarkThresholdMatrixEntry {
@@ -2842,8 +2821,10 @@ fn hashjoin_threshold_matrix_entry(
         cache_gate: GENERIC_CACHE_GATE,
         threshold_basis: if name == "weighted_global_count_int4" {
             "independently qualified exact 1M-row weighted global COUNT(*) release floor"
+        } else if name == "gpu_hashjoin_large_build" {
+            "count-only equal-size relations have no catalog-proved fact-side orientation"
         } else {
-            "DeviceLimits hashjoin_min_build_rows/gpu_hash_join_build_max_rows"
+            "resident counted-dimension capability, physical-mode, and native-cost admission"
         },
         expectation,
     })
@@ -2894,7 +2875,7 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "full ORDER BY without LIMIT",
             "~120-byte heap row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "gpu_sort_topk_wide" => (
             "float4 + int4 deterministic tie-break key",
@@ -2915,28 +2896,28 @@ fn sort_threshold_matrix_entry(name: &str, rows: usize) -> Option<BenchmarkThres
             "full ORDER BY without LIMIT",
             "4-byte projected row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "sort_int8" => (
             "int8 single key",
             "full ORDER BY without LIMIT",
             "8-byte projected row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "sort_float4" => (
             "float4 single key",
             "full ORDER BY without LIMIT",
             "4-byte projected row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         "sort_float8" => (
             "float8 single key",
             "full ORDER BY without LIMIT",
             "8-byte projected row",
             "full sorted relation",
-            "sort_heap_full_output",
+            "sort_standalone_topk_no_gpu_kernel",
         ),
         _ => return None,
     };
@@ -3081,10 +3062,8 @@ fn spatial_threshold_matrix_entry(
 ) -> Option<BenchmarkThresholdMatrixEntry> {
     let profile = spatial_matrix_profile(name)?;
     let work_product = (profile.vertices as u64).saturating_mul(rows as u64);
-    let descriptor_capability_decline = (name == "spatial_resident_agg_candidate"
-        && rows != 1_000_000)
-        || (name == "spatial_filter" && rows == 100_000)
-        || phase6_spatial_generic_descriptor_cell(name, rows);
+    let descriptor_capability_decline =
+        name != "spatial_resident_agg_candidate" || rows != 1_000_000;
     let current_planner_decline =
         descriptor_capability_decline.then_some("generic_descriptor_capability");
     let expectation = current_planner_decline.map_or_else(
@@ -3126,24 +3105,6 @@ fn spatial_threshold_matrix_entry(
         },
         expectation,
     })
-}
-
-fn phase6_spatial_generic_descriptor_cell(name: &str, rows: usize) -> bool {
-    match name {
-        "spatial_mega_1kv" | "spatial_sel_10pct" => {
-            matches!(rows, 80_000 | 100_000 | 150_000)
-        }
-        "spatial_filter"
-        | "spatial_selectivity"
-        | "vsweep_low"
-        | "vsweep_mid"
-        | "vsweep_high"
-        | "vsweep_pathological"
-        | "spatial_sel_1pct"
-        | "spatial_sel_50pct"
-        | "spatial_sel_90pct" => rows == 10_000,
-        _ => false,
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -4575,11 +4536,11 @@ mod tests {
     fn test_threshold_matrix_pins_generic_reduce_preflight_reasons() {
         for (name, reason) in [
             ("gpu_reduce_sum", "shape_floating_accumulator_semantics"),
-            ("reduce_sum_f32", "shape_unsupported_measure_type"),
+            ("reduce_sum_f32", "shape_unsupported_aggregate_input"),
             ("reduce_sum_f64", "shape_floating_accumulator_semantics"),
             ("reduce_sum_i64", "shape_numeric_accumulator_unavailable"),
-            ("reduce_min_f64", "generic_cost_not_competitive"),
-            ("reduce_max_f64", "generic_cost_not_competitive"),
+            ("reduce_min_f64", "generic_serial_kernel_mode_unqualified"),
+            ("reduce_max_f64", "generic_serial_kernel_mode_unqualified"),
             ("reduce_multi", "shape_floating_accumulator_semantics"),
         ] {
             let entry = benchmark_threshold_matrix_entry(name, 100_000)
@@ -4629,22 +4590,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} threshold entry"));
             assert_eq!(
                 entry.expectation.decline_reason(),
-                Some("generic_fact_rows_below_device_minimum"),
+                Some("generic_serial_kernel_mode_unqualified"),
                 "{name}"
             );
-            assert!(entry.threshold_basis.contains("device-minimum"), "{name}");
+            assert!(entry.threshold_basis.contains("physical-mode"), "{name}");
         }
     }
 
     #[test]
-    fn test_threshold_matrix_keeps_minmax_cost_decline_at_registered_large_scales() {
+    fn test_threshold_matrix_keeps_minmax_mode_decline_at_registered_large_scales() {
         for name in ["reduce_min_f64", "reduce_max_f64"] {
             for rows in [100_000, 1_000_000, 10_000_000] {
                 let entry = benchmark_threshold_matrix_entry(name, rows)
                     .unwrap_or_else(|| panic!("{name}/{rows} threshold entry"));
                 assert_eq!(
                     entry.expectation.decline_reason(),
-                    Some("generic_cost_not_competitive"),
+                    Some("generic_serial_kernel_mode_unqualified"),
                     "{name}/{rows}"
                 );
             }
@@ -5037,18 +4998,37 @@ mod tests {
             Some("generic_fact_rows_below_device_minimum")
         );
 
-        let too_small = benchmark_threshold_matrix_entry("hashjoin_1k_1m", 1_000_000)
+        let tiny_build_winner = benchmark_threshold_matrix_entry("hashjoin_1k_1m", 1_000_000)
             .expect("hashjoin_1k_1m threshold entry");
+        assert_eq!(tiny_build_winner.expectation.label(), "gpu_winner");
         assert_eq!(
-            too_small.expectation.decline_reason(),
-            Some("hashjoin_build_below_break_even")
+            benchmark_threshold_matrix_entry("hashjoin_1k_1m", 100_000)
+                .expect("small-probe hashjoin_1k_1m threshold entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_serial_kernel_mode_unqualified")
         );
 
-        let too_large = benchmark_threshold_matrix_entry("hashjoin_100k_1m", 1_000_000)
-            .expect("hashjoin_100k_1m threshold entry");
+        let large_build_cost_decline =
+            benchmark_threshold_matrix_entry("hashjoin_100k_1m", 1_000_000)
+                .expect("hashjoin_100k_1m threshold entry");
         assert_eq!(
-            too_large.expectation.decline_reason(),
-            Some("hashjoin_build_side_too_large")
+            large_build_cost_decline.expectation.decline_reason(),
+            Some("generic_cost_not_competitive")
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("hashjoin_100k_1m", 10_000_000)
+                .expect("large-probe hashjoin_100k_1m threshold entry")
+                .expectation
+                .label(),
+            "gpu_winner"
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("gpu_hashjoin_large_build", 10_000)
+                .expect("symmetric hashjoin threshold entry")
+                .expectation
+                .decline_reason(),
+            Some("shape_ambiguous_fact_relation")
         );
     }
 
@@ -5139,7 +5119,7 @@ mod tests {
             .expect("spatial_filter threshold entry");
         assert_eq!(
             simple.expectation.decline_reason(),
-            Some("spatial_vertices_below_break_even")
+            Some("generic_descriptor_capability")
         );
 
         let small = benchmark_threshold_matrix_entry("vsweep_mid", 10_000)
@@ -5153,21 +5133,21 @@ mod tests {
             .expect("vsweep_mid threshold entry");
         assert_eq!(
             former_crash_band.expectation.decline_reason(),
-            Some("spatial_work_below_break_even")
+            Some("generic_descriptor_capability")
         );
 
         let unregistered = benchmark_threshold_matrix_entry("vsweep_mid", 1_000_000)
             .expect("vsweep_mid threshold entry");
         assert_eq!(
             unregistered.expectation.decline_reason(),
-            Some("spatial_no_registered_gpu_predicate")
+            Some("generic_descriptor_capability")
         );
 
         let high_output = benchmark_threshold_matrix_entry("spatial_sel_90pct", 1_000_000)
             .expect("spatial_sel_90pct threshold entry");
         assert_eq!(
             high_output.expectation.decline_reason(),
-            Some("spatial_high_output_fraction")
+            Some("generic_descriptor_capability")
         );
         assert!(high_output.result_count.contains("900K matching heap rows"));
 
@@ -5178,7 +5158,7 @@ mod tests {
         .expect("spatial selectivity repro threshold entry");
         assert_eq!(
             repro.expectation.decline_reason(),
-            Some("spatial_no_registered_gpu_predicate")
+            Some("generic_descriptor_capability")
         );
         assert_eq!(repro.cardinality, "1024+ polygon vertices");
         assert!(repro.batch_count.contains("16 batches"));

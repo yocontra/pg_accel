@@ -98,7 +98,10 @@ extension-owned `h3_cell_to_parent(h3index, integer)` catalog function, a direct
 base-table h3index `Var`, and a direct non-NULL int4 constant in `[0,15]`. The
 one-argument overload, Params, nonconstant/NULL/out-of-range resolutions, and
 same-signature functions in earlier `search_path` schemas are structural
-declines. The admitted runtime shape is exactly that one group key plus one
+declines. The 1.0 production envelope additionally admits only target resolution
+zero; other valid constant resolutions retain their exact wire/runtime support
+but decline with `h3_parent_resolution_unqualified` until independently proven
+as winners. The admitted runtime shape is exactly that one group key plus one
 unfiltered `COUNT(*)`, with no joins, fact filter, HAVING, or extra projection.
 `H3LatLngToCell` remains a wire-level producer variant and is not admitted by
 this route.

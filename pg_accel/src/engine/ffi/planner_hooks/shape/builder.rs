@@ -454,11 +454,28 @@ fn choose_fact_varno(input: &ShapeInput) -> Result<pgrx::pg_sys::Index, ShapeDec
     let right = relation_by_varno(input, join.right.varno)?;
     let left_unique = left.unique_attnos.contains(&join.left.column.attno);
     let right_unique = right.unique_attnos.contains(&join.right.column.attno);
+    let row_estimates_distinguishable = |left_rows: u64, right_rows: u64| {
+        let high = left_rows.max(right_rows);
+        let low = left_rows.min(right_rows);
+        // ANALYZE may produce slightly different estimates for two freshly
+        // populated, equal-size relations. Count-only joins have no measure
+        // relation with which to orient the descriptor, so a one-percent-or-
+        // smaller sampling difference is not semantic evidence of a fact side.
+        high.saturating_sub(low) > high / 100
+    };
     match (left_unique, right_unique) {
         (false, true) => Ok(left.varno),
         (true, false) => Ok(right.varno),
-        _ if left.estimated_rows > right.estimated_rows => Ok(left.varno),
-        _ if right.estimated_rows > left.estimated_rows => Ok(right.varno),
+        _ if left.estimated_rows > right.estimated_rows
+            && row_estimates_distinguishable(left.estimated_rows, right.estimated_rows) =>
+        {
+            Ok(left.varno)
+        }
+        _ if right.estimated_rows > left.estimated_rows
+            && row_estimates_distinguishable(left.estimated_rows, right.estimated_rows) =>
+        {
+            Ok(right.varno)
+        }
         _ => Err(ShapeDecline::AmbiguousFactRelation),
     }
 }

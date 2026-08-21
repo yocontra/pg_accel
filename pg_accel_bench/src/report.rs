@@ -8572,11 +8572,11 @@ mod tests {
         let mut with_reason = mark_no_dispatch(
             mock_workload_result("spatial_sel_10pct", 1_000_000, 10.0, 10.0),
             "Finalize Aggregate\n  ->  Gather\n        ->  Parallel Seq Scan\n\
-             pg_accel planner rejection reason: spatial_no_registered_gpu_predicate",
+             pg_accel planner rejection reason: generic_descriptor_capability",
             "Finalize Aggregate\n  ->  Gather\n        ->  Parallel Seq Scan",
         );
         with_reason.native_decline_evidence = Some(NativeDeclineEvidence {
-            reason: "spatial_no_registered_gpu_predicate".to_owned(),
+            reason: "generic_descriptor_capability".to_owned(),
             source: DeclineReasonSource::PlannerReported,
         });
         let report = mock_report(vec![with_reason]);
