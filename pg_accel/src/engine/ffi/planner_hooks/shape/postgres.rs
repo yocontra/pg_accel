@@ -1617,7 +1617,7 @@ unsafe fn relation_shapes(
                 kind: preflight_kind(rte_ref.rtekind),
                 eligible_base_relation: rte_ref.relid != pg_sys::InvalidOid
                     && !rte_ref.inh
-                    && rte_ref.relkind == pg_sys::RELKIND_RELATION as i8,
+                    && rte_ref.relkind as u8 == pg_sys::RELKIND_RELATION,
                 has_table_sample: !rte_ref.tablesample.is_null(),
             },
         )? {
@@ -1764,7 +1764,7 @@ pub(super) unsafe fn preflight_base_relations(
                 kind: preflight_kind(rte.rtekind),
                 eligible_base_relation: rte.relid != pg_sys::InvalidOid
                     && !rte.inh
-                    && rte.relkind == pg_sys::RELKIND_RELATION as i8,
+                    && rte.relkind as u8 == pg_sys::RELKIND_RELATION,
                 has_table_sample: !rte.tablesample.is_null(),
             },
         )?;

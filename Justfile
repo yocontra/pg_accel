@@ -333,7 +333,7 @@ upstream-pg-tests-audit:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_upstream_pg_tests.py -v
 
 # Pre-commit checks: fmt, lint, type-check matrix, deny, audits, doc-parity
-pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit package-extension-test upstream-pg-tests-audit safety-contract-audit audit-cpu-cheats-test metal-stress-artifact-test
+pre-commit: fmt-check lint check-matrix test-standalone deny audit doc-parity pg-version-audit package-extension-test upstream-pg-tests-audit safety-contract-audit audit-cpu-cheats-test metal-stress-artifact-test
     @echo "Pre-commit checks passed."
 
 # Run pgrx unit tests against one PG major. Defaults to the repo target PG major.
@@ -349,8 +349,29 @@ test-unit pg="":
     fi
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
     scripts/setup_pg_extensions.sh "$pg"
-    RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" cargo pgrx test --package pg_accel "pg$pg"
+    PG_CONFIG="$pg_config" RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" \
+        cargo pgrx test --package pg_accel "pg$pg"
+
+# Run the pure Rust library tests as a standalone executable. pgrx references
+# PostgreSQL symbols even when a test never calls PostgreSQL, so the build
+# script generates test-only stubs from this exact selected pg_config.
+test-standalone pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" cargo test -p pg_accel --locked --lib \
+        --no-default-features --features "pg$pg"
 
 # Run pgrx unit tests against every supported PG major.
 test-matrix:

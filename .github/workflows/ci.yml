@@ -515,14 +515,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo check --workspace --no-default-features --features pg${{ matrix.pg }} --all-targets
+          just check ${{ matrix.pg }}
 
-      - name: Run Rust tests without GPU device tests
+      - name: Run standalone Rust tests without GPU devices
         if: steps.pg-support.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --workspace --no-default-features --features pg${{ matrix.pg }} --no-run
+          just test-standalone ${{ matrix.pg }}
 
       - name: Audit safety and deterministic fuzz contracts
         if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18

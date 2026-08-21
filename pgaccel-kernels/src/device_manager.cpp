@@ -275,12 +275,16 @@ extern "C" pgaccel_status pgaccel_init(void) {
     sigaction(k_fault_signals[i], &sa, &old_handlers[i]);
   }
 
-  bool init_ok = false;
+  // Preserve the distinction between an expected no-GPU host and a real
+  // runtime/queue-construction failure. Callers use NO_DEVICE to decline GPU
+  // work without hiding genuine initialization errors.
+  pgaccel_status init_status = PGACCEL_ERROR;
   try {
     auto devices = sycl::device::get_devices();
 
     if (devices.empty()) {
-      fprintf(stderr, "pgaccel: FATAL: no SYCL devices found\n");
+      fprintf(stderr, "pgaccel: no SYCL devices found; GPU acceleration unavailable\n");
+      init_status = PGACCEL_ERROR_NO_DEVICE;
     } else {
       sycl::device best = devices[0];
       int best_score = score_device(best);
@@ -293,7 +297,8 @@ extern "C" pgaccel_status pgaccel_init(void) {
       }
 
       if (best_score < 0 || !best.is_gpu()) {
-        fprintf(stderr, "pgaccel: FATAL: no SYCL GPU device found\n");
+        fprintf(stderr, "pgaccel: no SYCL GPU device found; GPU acceleration unavailable\n");
+        init_status = PGACCEL_ERROR_NO_DEVICE;
       } else {
         std::string backend = detect_backend_name(best);
         pgaccel_platform_caps caps = make_caps(best, backend);
@@ -356,7 +361,7 @@ extern "C" pgaccel_status pgaccel_init(void) {
         // Silent success: backend init fires per-forked-backend, so
         // logging here produces O(queries) log lines. See Justfile
         // `log-rails` recipe for how PG's own log is rotated.
-        init_ok = true;
+        init_status = PGACCEL_OK;
       }
     }
   } catch (const sycl::exception& e) {
@@ -377,9 +382,8 @@ extern "C" pgaccel_status pgaccel_init(void) {
   }
   sigprocmask(SIG_SETMASK, &old_mask, nullptr);
 
-  if (!init_ok) {
-    return PGACCEL_ERROR;
-  }
+  if (init_status != PGACCEL_OK)
+    return init_status;
 
   g_init_pid = current_pid;
   g_initialized.store(true, std::memory_order_release);
