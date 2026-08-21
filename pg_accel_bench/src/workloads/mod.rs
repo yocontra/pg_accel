@@ -41,6 +41,7 @@ mod gpu_hashjoin_large_build;
 mod gpu_nlj_between;
 mod hash_join;
 mod hashjoin_sweep;
+mod weighted_global_count_int4;
 // --- GPU Spatial ---
 mod index_recheck;
 mod proximity;
@@ -199,6 +200,7 @@ pub use ssbm::{
 pub use timeseries_sensor_rollup::TimeseriesSensorRollup;
 pub use topk_wide::TopkWide;
 pub use tpch::{TpchQ1, TpchQ6, TpchQ12};
+pub use weighted_global_count_int4::WeightedGlobalCountInt4;
 pub use window_analytics::WindowAnalytics;
 pub use window_full_output_decline::WindowFullOutputDecline;
 pub use window_reducing_decline::WindowReducingDecline;
@@ -400,6 +402,7 @@ pub fn all_workloads() -> Vec<Box<dyn Workload>> {
         Box::new(sort_variants::SORT_FLOAT8),
         // --- GPU HashJoin (original) ---
         Box::new(HashJoin),
+        Box::new(WeightedGlobalCountInt4),
         Box::new(GpuHashjoinLargeBuild),
         Box::new(GpuHashjoinFilter),
         Box::new(GpuNljBetween),
@@ -1057,6 +1060,12 @@ const RELEASED_ENVELOPE_CONTRACTS: &[ReleasedEnvelopeContract] = &[
         family: ReleasedPathFamily::StarJoin,
     },
     ReleasedEnvelopeContract {
+        workload: "weighted_global_count_int4",
+        min_rows: 1_000_000,
+        max_rows: 1_000_000,
+        family: ReleasedPathFamily::StarJoin,
+    },
+    ReleasedEnvelopeContract {
         workload: "gpu_hashjoin_large_build",
         min_rows: HASHJOIN_MIN_BUILD_ROWS,
         max_rows: HASHJOIN_MAX_BUILD_ROWS,
@@ -1280,6 +1289,14 @@ pub const METAL_SHIP_GATE_CELLS: &[MetalShipGateCell] = &[
         rows: 1_000_000,
     },
 ];
+
+/// Separately versioned release cell for the counted-dimension global COUNT(*)
+/// path. It is intentionally not appended to [`METAL_SHIP_GATE_CELLS`]: that
+/// nineteen-cell contract already has independently sealed candidate evidence.
+pub const WEIGHTED_COUNT_SHIP_GATE_CELL: MetalShipGateCell = MetalShipGateCell {
+    workload: "weighted_global_count_int4",
+    rows: 1_000_000,
+};
 
 #[must_use]
 pub fn benchmark_threshold_matrix_entry(
@@ -2622,6 +2639,15 @@ fn hashjoin_threshold_matrix_entry(
                 "one count row",
             )
         }
+        "weighted_global_count_int4" => (
+            "weighted_global_count_int4",
+            7,
+            "int4 equality key",
+            "1M deterministic fact rows x 7-row counted dimension",
+            "duplicate weights {0:2, 1:1, 2:3}; key 3 unmatched; NULL never matches",
+            "12-byte fact row + nullable 4-byte dimension key",
+            "one exact int8 count row",
+        ),
         "gpu_hashjoin_large_build" => (
             "hashjoin_large_build_decline_guard",
             rows,
@@ -2724,13 +2750,24 @@ fn hashjoin_threshold_matrix_entry(
     };
     let min_build_rows = if matches!(
         name,
-        "gpu_hashjoin_filter" | "mixed_join_agg" | "mixed_join_agg_int4"
+        "gpu_hashjoin_filter"
+            | "mixed_join_agg"
+            | "mixed_join_agg_int4"
+            | "weighted_global_count_int4"
     ) {
         100
     } else {
         HASHJOIN_MIN_BUILD_ROWS
     };
-    let expectation = if name == "gpu_hashjoin_filter" {
+    let expectation = if name == "weighted_global_count_int4" && rows != 1_000_000 {
+        BenchmarkLaneExpectation::NativeDecline {
+            reason: "generic_serial_kernel_mode_unqualified",
+        }
+    } else if name == "weighted_global_count_int4" {
+        BenchmarkLaneExpectation::GpuWinner {
+            min_warm_speedup: FINAL_MATRIX_MIN_WARM_SPEEDUP,
+        }
+    } else if name == "gpu_hashjoin_filter" {
         BenchmarkLaneExpectation::NativeDecline {
             reason: "shape_unsupported_predicate",
         }
@@ -2789,7 +2826,12 @@ fn hashjoin_threshold_matrix_entry(
         result_count: output_size.to_owned(),
         index_pruning_shape: "n/a",
         prepared_geometry: "n/a",
-        batch_count: "hash build/probe batches by executor".to_owned(),
+        batch_count: if name == "weighted_global_count_int4" {
+            "one resident counted-dimension artifact reused by the parallel dense-count lifecycle"
+                .to_owned()
+        } else {
+            "hash build/probe batches by executor".to_owned()
+        },
         row_width,
         output_size,
         dispatch_evidence: match expectation {
@@ -2798,7 +2840,11 @@ fn hashjoin_threshold_matrix_entry(
         },
         correctness_evidence: CORRECTNESS_DIFF_EVIDENCE,
         cache_gate: GENERIC_CACHE_GATE,
-        threshold_basis: "DeviceLimits hashjoin_min_build_rows/gpu_hash_join_build_max_rows",
+        threshold_basis: if name == "weighted_global_count_int4" {
+            "independently qualified exact 1M-row weighted global COUNT(*) release floor"
+        } else {
+            "DeviceLimits hashjoin_min_build_rows/gpu_hash_join_build_max_rows"
+        },
         expectation,
     })
 }
@@ -3509,6 +3555,7 @@ fn static_workload_name(name: &str) -> &'static str {
         "gpu_hashjoin_filter" => "gpu_hashjoin_filter",
         "mixed_join_agg" => "mixed_join_agg",
         "mixed_join_agg_int4" => "mixed_join_agg_int4",
+        "weighted_global_count_int4" => "weighted_global_count_int4",
         "grouped_agg" => "grouped_agg",
         "grouped_agg_int4" => "grouped_agg_int4",
         "grouped_count_bool_candidate" => "grouped_count_bool_candidate",
@@ -4930,6 +4977,24 @@ mod tests {
 
     #[test]
     fn test_threshold_matrix_marks_hashjoin_build_band() {
+        let weighted = benchmark_threshold_matrix_entry("weighted_global_count_int4", 1_000_000)
+            .expect("weighted global count threshold entry");
+        assert_eq!(weighted.lane, "weighted_global_count_int4");
+        assert_eq!(weighted.expectation.label(), "gpu_winner");
+        assert_eq!(weighted.released_path(), Some(ReleasedPathFamily::StarJoin));
+        assert!(
+            weighted
+                .threshold_basis
+                .contains("weighted global COUNT(*)")
+        );
+        assert_eq!(
+            benchmark_threshold_matrix_entry("weighted_global_count_int4", 999_999)
+                .expect("weighted global count below-floor entry")
+                .expectation
+                .decline_reason(),
+            Some("generic_serial_kernel_mode_unqualified")
+        );
+
         let winner = benchmark_threshold_matrix_entry("hashjoin_10k_1m", 1_000_000)
             .expect("hashjoin_10k_1m threshold entry");
         assert_eq!(winner.expectation.label(), "gpu_winner");

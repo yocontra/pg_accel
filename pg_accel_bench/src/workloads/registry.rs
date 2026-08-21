@@ -786,6 +786,10 @@ const PINS_HASH_JOIN: &[ResidentPinSpec] = &[
     pin!("bench_orders", ["customer_id"]),
     pin!("bench_customers", ["customer_id"]),
 ];
+const PINS_WEIGHTED_GLOBAL_COUNT_INT4: &[ResidentPinSpec] = &[
+    pin!("bench_weighted_count_fact", ["k"]),
+    pin!("bench_weighted_count_dim", ["k"]),
+];
 const PINS_HASHJOIN_SWEEP: &[ResidentPinSpec] = &[
     pin!("bench_hj_outer", ["key"]),
     pin!("bench_hj_inner", ["key"]),
@@ -1146,6 +1150,13 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("hash_join", C::GpuHashJoin, K::HashJoin)
         .pins(PINS_HASH_JOIN)
         .evidence(WINNER),
+    workload(
+        "weighted_global_count_int4",
+        C::GpuHashJoin,
+        K::ResidentStarGroupAgg,
+    )
+    .pins(PINS_WEIGHTED_GLOBAL_COUNT_INT4)
+    .evidence(WINNER),
     workload("gpu_hashjoin_large_build", C::GpuHashJoin, K::HashJoin)
         .pins(PINS_HASHJOIN_LARGE_BUILD),
     workload(

@@ -361,6 +361,22 @@ enum Command {
         artifacts_dir: Option<PathBuf>,
     },
 
+    /// Run the fixed counted-dimension global COUNT(*) performance ratchet.
+    ///
+    /// This is a separate immutable release lane so adding it cannot rewrite
+    /// the already-sealed nineteen-cell Metal candidate contract.
+    WeightedCountShipGate {
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+
+        /// Directory for the weighted-count evidence bundle. If omitted, a
+        /// fresh `benchmarks/artifacts/weighted-count-ship-gate-<timestamp>`
+        /// directory is used.
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
+    },
+
     /// Run the pg_accel install/provenance gate without benchmarks.
     ///
     /// Checks that the live backend is loading the expected extension SQL,
@@ -668,6 +684,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             connection,
             artifacts_dir,
         } => cmd_metal_ship_gate(&connection, artifacts_dir),
+        Command::WeightedCountShipGate {
+            connection,
+            artifacts_dir,
+        } => cmd_weighted_count_ship_gate(&connection, artifacts_dir),
         Command::Provenance { connection } => cmd_provenance(&connection),
         Command::Fp64Calibrate {
             connection,
@@ -1595,6 +1615,312 @@ fn cmd_metal_ship_gate(
     Ok(())
 }
 
+const WEIGHTED_COUNT_SHIP_GATE_ITERATIONS: usize = 10;
+const WEIGHTED_COUNT_SHIP_GATE_WARMUP: usize = 5;
+const WEIGHTED_COUNT_SHIP_GATE_SEED: u64 = 42;
+const WEIGHTED_COUNT_SHIP_GATE_CONTRACT_FILE: &str = "weighted_count_ship_gate_contract.json";
+
+fn weighted_count_ship_gate_workload()
+-> Result<Box<dyn workloads::Workload>, Box<dyn std::error::Error>> {
+    let contract = workloads::WEIGHTED_COUNT_SHIP_GATE_CELL;
+    let workload = workloads::find_workload(contract.workload).ok_or_else(|| {
+        format!(
+            "weighted-count ship-gate contract references missing workload `{}`",
+            contract.workload
+        )
+    })?;
+    if workload.row_scales() != [contract.rows] {
+        return Err(format!(
+            "weighted-count ship-gate workload `{}` must register only the fixed {}-row scale; observed {:?}",
+            contract.workload,
+            contract.rows,
+            workload.row_scales()
+        )
+        .into());
+    }
+    if workload.result_oracle(contract.rows).is_none() {
+        return Err("weighted-count ship-gate workload has no independent result oracle".into());
+    }
+    let entry = workloads::benchmark_threshold_matrix_entry(contract.workload, contract.rows)
+        .ok_or_else(|| "weighted-count ship-gate cell has no threshold-matrix entry".to_owned())?;
+    let workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } = entry.expectation
+    else {
+        return Err("weighted-count ship-gate cell is not classified as a GPU winner".into());
+    };
+    if !min_warm_speedup.is_finite() || min_warm_speedup < report::BENCHMARK_SHIP_GATE_MIN_SPEEDUP {
+        return Err(format!(
+            "weighted-count ship-gate cell has invalid warm-speedup floor {min_warm_speedup}"
+        )
+        .into());
+    }
+    Ok(workload)
+}
+
+fn write_weighted_count_ship_gate_contract(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if root.exists() {
+        if !root.is_dir() {
+            return Err(format!(
+                "weighted-count ship-gate artifact path `{}` exists and is not a directory",
+                root.display()
+            )
+            .into());
+        }
+        if fs::read_dir(root)?.next().transpose()?.is_some() {
+            return Err(format!(
+                "weighted-count ship-gate artifact directory `{}` is not empty; evidence bundles are immutable",
+                root.display()
+            )
+            .into());
+        }
+    }
+
+    let contract = workloads::WEIGHTED_COUNT_SHIP_GATE_CELL;
+    let entry = workloads::benchmark_threshold_matrix_entry(contract.workload, contract.rows)
+        .ok_or_else(|| "weighted-count ship-gate cell has no threshold-matrix entry".to_owned())?;
+    let workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } = entry.expectation
+    else {
+        return Err("weighted-count ship-gate cell is not classified as a GPU winner".into());
+    };
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "gate": "weighted_count_benchmark_ship_gate",
+        "comparison": "postgresql_parallel",
+        "iterations": WEIGHTED_COUNT_SHIP_GATE_ITERATIONS,
+        "warmup": WEIGHTED_COUNT_SHIP_GATE_WARMUP,
+        "seed": WEIGHTED_COUNT_SHIP_GATE_SEED,
+        "timing_mode": "raw-wallclock",
+        "cache_mode": "warm",
+        "required_harness_profile": "release",
+        "workload": contract.workload,
+        "rows": contract.rows,
+        "lane": entry.lane,
+        "fixture": "counted int4 dimension weights {0:2,1:1,2:3}, unmatched key 3, NULL never matches",
+        "oracle": "closed-form 2*n(k=0)+n(k=1)+3*n(k=2), independent of the join",
+        "required_descriptor_strategy": "descriptor_ungrouped_aggregate",
+        "required_physical_kernel_mode": "parallel_dense_count",
+        "min_warm_speedup_vs_postgresql_parallel": min_warm_speedup,
+        "requires_zero_stock_fallback": true,
+        "requires_artifact_hit_steady_state": true,
+        "same_host_predecessor_normalization": "required as a separately sealed ABBA comparison",
+    });
+    fs::create_dir_all(root)?;
+    let mut contents = serde_json::to_vec_pretty(&manifest)?;
+    contents.push(b'\n');
+    fs::write(root.join(WEIGHTED_COUNT_SHIP_GATE_CONTRACT_FILE), contents)?;
+    Ok(())
+}
+
+fn enforce_weighted_count_ship_gate_complete(
+    report: &BenchReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let contract = workloads::WEIGHTED_COUNT_SHIP_GATE_CELL;
+    let mut gaps = Vec::new();
+    let matches = report
+        .workloads
+        .iter()
+        .filter(|result| (result.name.as_str(), result.rows) == (contract.workload, contract.rows))
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        gaps.push(format!(
+            "`{}` @ {}: expected one result, found {}",
+            contract.workload,
+            contract.rows,
+            matches.len()
+        ));
+    }
+    for result in &report.workloads {
+        if (result.name.as_str(), result.rows) != (contract.workload, contract.rows) {
+            gaps.push(format!(
+                "unexpected result `{}` @ {}",
+                result.name, result.rows
+            ));
+        }
+    }
+    if let [result] = matches.as_slice() {
+        let plan = result.plan_snippet.as_deref().unwrap_or_default();
+        if result.plan_snippet.is_none() || result.baseline_plan_snippet.is_none() {
+            gaps.push("missing accelerated or PostgreSQL plan evidence".to_owned());
+        }
+        if !plan.contains("GPU Descriptor Strategy: descriptor_ungrouped_aggregate") {
+            gaps.push(
+                "accelerated plan did not prove descriptor_ungrouped_aggregate strategy".to_owned(),
+            );
+        }
+        if !plan.contains("GPU Physical Kernel Mode: parallel_dense_count") {
+            gaps.push(
+                "accelerated plan did not prove parallel_dense_count physical mode".to_owned(),
+            );
+        }
+        if result.physical_kernel_mode.as_deref() != Some("parallel_dense_count")
+            || !result.physical_kernel_mode_verified
+            || result.physical_kernel_mode_counts.parallel_dense_count == 0
+            || result.physical_kernel_mode_counts.parallel_hash != 0
+            || result.physical_kernel_mode_counts.parallel_dense_integer != 0
+            || result.physical_kernel_mode_counts.serial_generic != 0
+        {
+            gaps.push(format!(
+                "runtime telemetry did not prove only parallel_dense_count (mode={}, verified={}, counts={:?})",
+                result.physical_kernel_mode.as_deref().unwrap_or("-"),
+                result.physical_kernel_mode_verified,
+                result.physical_kernel_mode_counts
+            ));
+        }
+        if result.correctness_diff_artifact.is_none() {
+            gaps.push("missing exact correctness/oracle artifact".to_owned());
+        }
+        if !result.plan_selected
+            || !result.gpu_kernel_dispatched
+            || result.gpu_resident_pipeline != report::GpuResidentPipelineStatus::Reported
+            || !result.dispatch_counter_captured
+            || result.gpu_kernel_execution_delta == 0
+            || result.rows_returned_to_cpu == 0
+        {
+            gaps.push(
+                "did not prove selected resident GPU dispatch and consumed output".to_owned(),
+            );
+        }
+        if result.pg_accel_stock_exec_delta != 0 {
+            gaps.push(format!(
+                "used {} stock-executor fallback(s)",
+                result.pg_accel_stock_exec_delta
+            ));
+        }
+        if result.artifact_lifecycle_probe.is_none() {
+            gaps.push("missing separate artifact construction probe".to_owned());
+        }
+        if result.artifact_steady_state_captures.len() != WEIGHTED_COUNT_SHIP_GATE_ITERATIONS
+            || result.artifact_steady_state_captures.iter().any(|capture| {
+                capture.phase != "steady_state"
+                    || capture.error.is_some()
+                    || capture.artifact.ensures() == 0
+                    || capture.artifact.hits != capture.artifact.ensures()
+                    || capture.artifact.builds != 0
+                    || capture.artifact.rebuilds != 0
+                    || capture.stock_exec_count != 0
+                    || capture.gpu_kernel_executions == 0
+                    || capture.output_rows_consumed == 0
+            })
+        {
+            gaps.push(format!(
+                "artifact-hit steady state did not cover all {WEIGHTED_COUNT_SHIP_GATE_ITERATIONS} measured pairs"
+            ));
+        }
+        let floor = workloads::benchmark_threshold_matrix_entry(contract.workload, contract.rows)
+            .and_then(|entry| match entry.expectation {
+                workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
+                    Some(min_warm_speedup)
+                }
+                workloads::BenchmarkLaneExpectation::NativeDecline { .. } => None,
+            })
+            .unwrap_or(report::BENCHMARK_SHIP_GATE_MIN_SPEEDUP);
+        if !result.speedup_median_vs_parallel.is_finite()
+            || result.speedup_median_vs_parallel < floor
+        {
+            gaps.push(format!(
+                "warm median speedup {:.4}x did not clear the {:.2}x floor",
+                result.speedup_median_vs_parallel, floor
+            ));
+        }
+    }
+    for crash in &report.crashes {
+        gaps.push(format!(
+            "{} @ {} crashed: {}",
+            crash.workload, crash.rows, crash.error
+        ));
+    }
+    if report.methodology.iterations != WEIGHTED_COUNT_SHIP_GATE_ITERATIONS {
+        gaps.push(format!(
+            "expected {} measured iterations, report recorded {}",
+            WEIGHTED_COUNT_SHIP_GATE_ITERATIONS, report.methodology.iterations
+        ));
+    }
+    if report.methodology.warmup != WEIGHTED_COUNT_SHIP_GATE_WARMUP {
+        gaps.push(format!(
+            "expected {} warmups, report recorded {}",
+            WEIGHTED_COUNT_SHIP_GATE_WARMUP, report.methodology.warmup
+        ));
+    }
+    if report.methodology.row_scales != [contract.rows] {
+        gaps.push(format!(
+            "expected only the {}-row scale, report recorded {:?}",
+            contract.rows, report.methodology.row_scales
+        ));
+    }
+    if report.methodology.timing_mode != "raw-wallclock" {
+        gaps.push(format!(
+            "expected raw-wallclock timing, report recorded `{}`",
+            report.methodology.timing_mode
+        ));
+    }
+    if report.methodology.cache_mode != "warm" {
+        gaps.push(format!(
+            "expected cache mode warm, report recorded `{}`",
+            report.methodology.cache_mode
+        ));
+    }
+    if report.methodology.harness_profile != "release" {
+        gaps.push(format!(
+            "expected a release benchmark harness, report recorded `{}`",
+            report.methodology.harness_profile
+        ));
+    }
+
+    if gaps.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "weighted-count benchmark ship-gate evidence is incomplete:\n{}",
+            gaps.join("\n")
+        )
+        .into())
+    }
+}
+
+fn cmd_weighted_count_ship_gate(
+    connection: &str,
+    artifacts_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(debug_assertions) {
+        return Err(
+            "weighted-count benchmark ship gate requires a release harness; run with `cargo run --release`"
+                .into(),
+        );
+    }
+
+    let workload = weighted_count_ship_gate_workload()?;
+    let contract = workloads::WEIGHTED_COUNT_SHIP_GATE_CELL;
+    let artifact_root =
+        artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir("weighted-count-ship-gate"));
+    write_weighted_count_ship_gate_contract(&artifact_root)?;
+    let cells = [runner::WorkloadRunCell {
+        workload: workload.as_ref(),
+        rows: contract.rows,
+    }];
+    let config = runner::BenchConfig {
+        iterations: WEIGHTED_COUNT_SHIP_GATE_ITERATIONS,
+        warmup: WEIGHTED_COUNT_SHIP_GATE_WARMUP,
+        seed: WEIGHTED_COUNT_SHIP_GATE_SEED,
+        timing_mode: runner::TimingMode::RawWallClock,
+        cache_mode: runner::CacheMode::Warm,
+        capture_planner_stages: false,
+        native_parity_pairing: false,
+        headline_speedup_allowed: true,
+        plans_capture_path: Some(artifact_root.join("plans.txt")),
+        guc_profile: None,
+        skip_guc_verify: false,
+        artifacts_dir: Some(artifact_root),
+    };
+
+    let report = runner::run_cells_with_config(connection, &cells, &config)?;
+    print_report(&report, &ReportFormat::Markdown)?;
+    enforce_weighted_count_ship_gate_complete(&report)?;
+    enforce_benchmark_ship_gate(&report)?;
+    eprintln!(
+        "[weighted-count-ship-gate] PASS: exact counted-dimension COUNT(*) selected descriptor_ungrouped_aggregate/parallel_dense_count, reused its resident artifact, and cleared the PostgreSQL-parallel warm floor"
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_fp64_calibrate(
     connection: &str,
@@ -2300,6 +2626,106 @@ mod tests {
         report
     }
 
+    fn complete_weighted_count_report() -> BenchReport {
+        let contract = workloads::WEIGHTED_COUNT_SHIP_GATE_CELL;
+        let iterations = (0..WEIGHTED_COUNT_SHIP_GATE_ITERATIONS)
+            .map(|index| report::IterationResult {
+                accel_ms: 5.0,
+                parallel_ms: 10.0,
+                accel_first: index % 2 == 0,
+                cache_purge: bench_model::CachePurgeState::NotRequested,
+                cache_state: bench_model::CacheState::Warm,
+            })
+            .collect::<Vec<_>>();
+        let mut result = report::WorkloadResult::from_iterations(
+            contract.workload.to_owned(),
+            "weighted count test workload".to_owned(),
+            workloads::WorkloadCategory::GpuHashJoin.as_str().to_owned(),
+            report::classify_kernel(contract.workload),
+            contract.rows,
+            iterations.clone(),
+            false,
+        );
+        result.plan_snippet = Some(
+            "Custom Scan (GpuAccelAgg)\n  GPU Resident Pipeline: true\n  \
+             GPU Descriptor Strategy: descriptor_ungrouped_aggregate\n  \
+             GPU Physical Kernel Mode: parallel_dense_count"
+                .to_owned(),
+        );
+        result.baseline_plan_snippet = Some("Finalize Aggregate\n  Gather".to_owned());
+        result.correctness_diff_artifact = Some("correctness.json".to_owned());
+        result.plan_selected = true;
+        result.gpu_kernel_dispatched = true;
+        result.planner_declined = false;
+        result.gpu_resident_pipeline = report::GpuResidentPipelineStatus::Reported;
+        result.dispatch_counter_captured = true;
+        result.gpu_kernel_execution_delta = WEIGHTED_COUNT_SHIP_GATE_ITERATIONS as u64;
+        result.pg_accel_queries_accelerated_delta = WEIGHTED_COUNT_SHIP_GATE_ITERATIONS as u64;
+        result.accel_output_rows_consumed = WEIGHTED_COUNT_SHIP_GATE_ITERATIONS as u64;
+        result.rows_returned_to_cpu = WEIGHTED_COUNT_SHIP_GATE_ITERATIONS as u64;
+        result.physical_kernel_mode_counts.parallel_dense_count =
+            WEIGHTED_COUNT_SHIP_GATE_ITERATIONS as u64;
+        result.physical_kernel_mode = Some("parallel_dense_count".to_owned());
+        result.physical_kernel_mode_verified = true;
+        let capture = |phase: &str,
+                       pair_index: Option<usize>,
+                       iteration: report::IterationResult,
+                       artifact: report::ArtifactLifecycleDelta| {
+            report::ResidentLifecycleCapture {
+                phase: phase.to_owned(),
+                pair_index,
+                iteration,
+                artifact,
+                artifact_policy: Some("cached_reusable".to_owned()),
+                refresh_us: 0,
+                refreshed_relations: 0,
+                refreshed_rows: 0,
+                dependencies_before: Vec::new(),
+                dependencies_after: Vec::new(),
+                queries_accelerated: 1,
+                rows_dispatched: contract.rows as u64,
+                batches_executed: 1,
+                stock_exec_count: 0,
+                gpu_rows_processed: contract.rows as u64,
+                gpu_kernel_executions: 1,
+                output_rows_consumed: 1,
+                error: None,
+            }
+        };
+        result.artifact_lifecycle_probe = Some(capture(
+            "lifecycle",
+            None,
+            iterations[0].clone(),
+            report::ArtifactLifecycleDelta {
+                builds: 1,
+                ..report::ArtifactLifecycleDelta::default()
+            },
+        ));
+        result.artifact_steady_state_captures = iterations
+            .into_iter()
+            .enumerate()
+            .map(|(pair_index, iteration)| {
+                capture(
+                    "steady_state",
+                    Some(pair_index),
+                    iteration,
+                    report::ArtifactLifecycleDelta {
+                        hits: 1,
+                        ..report::ArtifactLifecycleDelta::default()
+                    },
+                )
+            })
+            .collect();
+
+        let mut report = bench_report(vec![result]);
+        report.methodology.iterations = WEIGHTED_COUNT_SHIP_GATE_ITERATIONS;
+        report.methodology.warmup = WEIGHTED_COUNT_SHIP_GATE_WARMUP;
+        report.methodology.row_scales = vec![contract.rows];
+        report.methodology.cache_mode = "warm".to_owned();
+        report.methodology.harness_profile = "release".to_owned();
+        report
+    }
+
     fn complete_system_workload_report(selected: &[Box<dyn workloads::Workload>]) -> BenchReport {
         let mut results = selected
             .iter()
@@ -2678,6 +3104,95 @@ mod tests {
     fn metal_ship_gate_accepts_complete_release_evidence() {
         enforce_metal_ship_gate_complete(&complete_metal_report())
             .expect("complete Metal ship-gate evidence");
+    }
+
+    #[test]
+    fn weighted_count_ship_gate_accepts_only_exact_release_evidence() {
+        enforce_weighted_count_ship_gate_complete(&complete_weighted_count_report())
+            .expect("complete weighted-count ship-gate evidence");
+
+        let mut report = complete_weighted_count_report();
+        let result = &mut report.workloads[0];
+        result.plan_snippet = Some("Custom Scan (GpuAccelAgg)".to_owned());
+        result.physical_kernel_mode = Some("serial_generic".to_owned());
+        result.physical_kernel_mode_counts.parallel_dense_count = 0;
+        result.physical_kernel_mode_counts.serial_generic = 1;
+        result.correctness_diff_artifact = None;
+        result.gpu_kernel_dispatched = false;
+        result.pg_accel_stock_exec_delta = 2;
+        result.artifact_lifecycle_probe = None;
+        result.artifact_steady_state_captures.pop();
+        result.speedup_median_vs_parallel = 1.0;
+        report.methodology.harness_profile = "debug".to_owned();
+        let error = gate_error(enforce_weighted_count_ship_gate_complete(&report));
+        for expected in [
+            "descriptor_ungrouped_aggregate",
+            "parallel_dense_count physical mode",
+            "runtime telemetry did not prove only parallel_dense_count",
+            "missing exact correctness/oracle artifact",
+            "selected resident GPU dispatch and consumed output",
+            "used 2 stock-executor fallback(s)",
+            "missing separate artifact construction probe",
+            "artifact-hit steady state did not cover all 10 measured pairs",
+            "did not clear the 1.15x floor",
+            "expected a release benchmark harness",
+        ] {
+            assert!(error.contains(expected), "missing {expected:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn weighted_count_ship_gate_contract_is_resolvable_deterministic_and_immutable() {
+        let workload = weighted_count_ship_gate_workload().expect("weighted-count workload");
+        let contract = workloads::WEIGHTED_COUNT_SHIP_GATE_CELL;
+        assert_eq!(workload.name(), contract.workload);
+        assert_eq!(workload.row_scales(), [contract.rows]);
+        assert!(workload.result_oracle(contract.rows).is_some());
+        assert!(
+            !workloads::METAL_SHIP_GATE_CELLS
+                .iter()
+                .any(|cell| cell == &contract),
+            "the separately sealed lane must not mutate the nineteen-cell contract"
+        );
+
+        let base = unique_temp_path("weighted-count-contract");
+        let left = base.join("left");
+        let right = base.join("right");
+        write_weighted_count_ship_gate_contract(&left).expect("first weighted contract");
+        write_weighted_count_ship_gate_contract(&right).expect("second weighted contract");
+        let left_bytes = fs::read(left.join(WEIGHTED_COUNT_SHIP_GATE_CONTRACT_FILE))
+            .expect("left weighted contract");
+        let right_bytes = fs::read(right.join(WEIGHTED_COUNT_SHIP_GATE_CONTRACT_FILE))
+            .expect("right weighted contract");
+        assert_eq!(left_bytes, right_bytes);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&left_bytes).expect("valid weighted contract JSON");
+        assert_eq!(manifest["gate"], "weighted_count_benchmark_ship_gate");
+        assert_eq!(manifest["workload"], contract.workload);
+        assert_eq!(manifest["rows"], contract.rows);
+        assert_eq!(manifest["iterations"], WEIGHTED_COUNT_SHIP_GATE_ITERATIONS);
+        assert_eq!(manifest["warmup"], WEIGHTED_COUNT_SHIP_GATE_WARMUP);
+        assert_eq!(manifest["seed"], WEIGHTED_COUNT_SHIP_GATE_SEED);
+        assert_eq!(manifest["cache_mode"], "warm");
+        assert_eq!(
+            manifest["required_descriptor_strategy"],
+            "descriptor_ungrouped_aggregate"
+        );
+        assert_eq!(
+            manifest["required_physical_kernel_mode"],
+            "parallel_dense_count"
+        );
+        assert_eq!(
+            manifest["min_warm_speedup_vs_postgresql_parallel"].as_f64(),
+            Some(1.15)
+        );
+        assert!(
+            write_weighted_count_ship_gate_contract(&left)
+                .expect_err("nonempty weighted evidence directory must fail")
+                .to_string()
+                .contains("evidence bundles are immutable")
+        );
+        fs::remove_dir_all(base).expect("remove weighted contract test directories");
     }
 
     #[test]
@@ -3363,6 +3878,15 @@ mod tests {
                 artifacts_dir: None,
             });
             assert!(metal.contains("requires a release harness"), "{metal}");
+
+            let weighted = dispatch_failure(Command::WeightedCountShipGate {
+                connection: "unused".to_owned(),
+                artifacts_dir: None,
+            });
+            assert!(
+                weighted.contains("requires a release harness"),
+                "{weighted}"
+            );
         }
     }
 }

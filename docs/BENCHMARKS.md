@@ -190,6 +190,26 @@ than the unprivileged local warm gate:
 | `hashjoin_10k_1m` | resident equality hash join COUNT | 1.15x |
 | `h3_cell_to_parent` | fused H3 parent grouped count | 1.15x |
 
+### Counted-dimension global COUNT release lane
+
+The weighted global-count path has its own immutable warm release ratchet:
+
+```bash
+just weighted-count-benchmark-ship-gate 18
+```
+
+This separate command does not mutate the sealed nineteen-cell matrix above.
+It fixes a deterministic 1M-row INT4 fact table and a seven-row counted
+dimension with weights `{0:2, 1:1, 2:3}`, an unmatched key `3`, and a NULL
+key. Its oracle computes `2*n(k=0) + n(k=1) + 3*n(k=2)` without executing the
+join. Success requires the `descriptor_ungrouped_aggregate` planner strategy,
+the `parallel_dense_count` runtime counter and matching EXPLAIN mode, real
+resident GPU dispatch with consumed output, exact correctness, zero stock
+fallback, ten artifact-hit steady-state pairs, and a warm median of at least
+1.15x PostgreSQL parallel. A separately sealed same-host ABBA comparison must
+also show predecessor-normalized non-regression before the lane is considered
+fully performance-qualified.
+
 The similarly named legacy workloads remain in the harness as fail-closed
 coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
 `shape_floating_accumulator_semantics`, while

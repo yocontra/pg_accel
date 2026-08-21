@@ -499,6 +499,36 @@ metal-benchmark-ship-gate pg="" artifacts_dir="":
         --connection "host=localhost port=$port dbname=postgres" \
         "${artifact_args[@]}"
 
+# Run the separately versioned one-cell release ratchet for the counted INT4
+# dimension global COUNT(*) path. The command fixes the deterministic fanout
+# fixture, independent oracle, exact 1M scale, physical kernel, sampling, and
+# warm-speedup floor without changing the sealed nineteen-cell Metal contract.
+weighted-count-benchmark-ship-gate pg="" artifacts_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    just audit-cpu-cheats
+    just install-pg-accel "$pg"
+    just log-rails "$pg"
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    artifact_args=()
+    if [ -n "{{artifacts_dir}}" ]; then
+        artifact_args=(--artifacts-dir "{{artifacts_dir}}")
+    fi
+    PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run --release -p pg_accel_bench -- \
+        weighted-count-ship-gate \
+        --connection "host=localhost port=$port dbname=postgres" \
+        "${artifact_args[@]}"
+
 # Characterize every registered SSBM, TPC-H-shaped, and ClickBench-style
 # workload at the fixed 100K scale. The release harness keeps setup/resident
 # load, artifact construction, warm reuse, native plans, dispatch, correctness,
