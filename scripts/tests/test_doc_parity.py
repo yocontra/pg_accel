@@ -265,5 +265,31 @@ class MacosPrerequisiteParityTests(unittest.TestCase):
         )
 
 
+class LinuxPrerequisiteParityTests(unittest.TestCase):
+    def test_setup_selects_one_complete_llvm_clang_prefix(self) -> None:
+        setup = (doc_parity.REPO_ROOT / "scripts/setup_acpp.sh").read_text()
+
+        for required in (
+            '"$candidate/bin/clang"',
+            '"$candidate/bin/clang++"',
+            '"$candidate/bin/llvm-config"',
+            '"$candidate/lib/cmake/llvm"',
+            '"$candidate/include/llvm/Passes/PassPlugin.h"',
+            '"$candidate/include/clang/AST/ASTContext.h"',
+        ):
+            self.assertIn(required, setup)
+
+        versioned = "        llvm-config-18 \\\n"
+        unversioned = "        llvm-config; do\n"
+        self.assertIn(versioned, setup)
+        self.assertIn(unversioned, setup)
+        self.assertLess(setup.index(versioned), setup.index(unversioned))
+        self.assertIn("generic|cpu) select_linux_llvm ;;", setup)
+        self.assertIn(
+            "install matching llvm-dev, clang, and libclang-dev packages",
+            setup,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

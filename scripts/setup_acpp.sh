@@ -49,6 +49,78 @@ llvm_major() {
     "$1/bin/llvm-config" --version | sed -E 's/^([0-9]+).*/\1/'
 }
 
+is_complete_llvm_prefix() {
+    local candidate="$1" major
+
+    [ -x "$candidate/bin/clang" ] || return 1
+    [ -x "$candidate/bin/clang++" ] || return 1
+    [ -x "$candidate/bin/llvm-config" ] || return 1
+    [ -d "$candidate/lib/cmake/llvm" ] || return 1
+    [ -f "$candidate/include/llvm/Passes/PassPlugin.h" ] || return 1
+    # AdaptiveCpp builds a Clang frontend plugin.  A runner can have several
+    # LLVM CMake packages installed while only one matching libclang-dev
+    # package provides these headers, so LLVM-only validation is insufficient.
+    [ -f "$candidate/include/clang/AST/ASTContext.h" ] || return 1
+
+    major="$(llvm_major "$candidate")"
+    [[ "$major" =~ ^[0-9]+$ ]] || return 1
+    [ "$major" -le 21 ]
+}
+
+select_linux_llvm() {
+    [ "$(uname -s)" = "Linux" ] || return 0
+
+    if [ -n "${LLVM_PREFIX:-}" ]; then
+        if ! is_complete_llvm_prefix "$LLVM_PREFIX"; then
+            echo "error: LLVM_PREFIX is not a complete matching LLVM/Clang development prefix: $LLVM_PREFIX" >&2
+            echo "       install matching llvm-dev and libclang-dev packages or correct LLVM_PREFIX" >&2
+            exit 1
+        fi
+        return 0
+    fi
+
+    local config candidate
+    # Prefer a versioned llvm-config over the runner's unversioned/preinstalled
+    # default, then require the matching Clang AST headers in the same prefix.
+    # GitHub's Ubuntu image can expose LLVM 17 first while apt installs the
+    # LLVM/Clang 18 development packages; allowing CMake to mix those trees
+    # fails late while compiling AdaptiveCpp's frontend plugin.
+    for config in \
+        llvm-config-21 \
+        llvm-config-20 \
+        llvm-config-19 \
+        llvm-config-18 \
+        llvm-config-17 \
+        llvm-config; do
+        command -v "$config" >/dev/null 2>&1 || continue
+        candidate="$("$config" --prefix 2>/dev/null)" || continue
+        if is_complete_llvm_prefix "$candidate"; then
+            LLVM_PREFIX="$candidate"
+            export LLVM_PREFIX
+            echo "Using LLVM_PREFIX=$LLVM_PREFIX"
+            return 0
+        fi
+    done
+
+    for candidate in \
+        /usr/lib/llvm-21 \
+        /usr/lib/llvm-20 \
+        /usr/lib/llvm-19 \
+        /usr/lib/llvm-18 \
+        /usr/lib/llvm-17; do
+        if is_complete_llvm_prefix "$candidate"; then
+            LLVM_PREFIX="$candidate"
+            export LLVM_PREFIX
+            echo "Using LLVM_PREFIX=$LLVM_PREFIX"
+            return 0
+        fi
+    done
+
+    echo "error: no complete supported LLVM/Clang development prefix found for AdaptiveCpp" >&2
+    echo "       install matching llvm-dev, clang, and libclang-dev packages or set LLVM_PREFIX" >&2
+    exit 1
+}
+
 select_macos_llvm() {
     if [ -n "${LLVM_PREFIX:-}" ]; then
         return 0
@@ -151,9 +223,10 @@ configure_macos_metal_defaults() {
     echo "Using matching SDK libc++ headers from $ACPP_MACOS_SDK_PATH/usr/include/c++/v1"
 }
 
-if [ "$backend" = "metal" ]; then
-    configure_macos_metal_defaults
-fi
+case "$backend" in
+    metal) configure_macos_metal_defaults ;;
+    generic|cpu) select_linux_llvm ;;
+esac
 
 ACPP_PREFIX="${ACPP_PREFIX:-$PG_ACCEL_TOOL_ROOT/acpp/$backend}"
 if [ -z "${ACPP_BUILD_DIR:-}" ]; then
