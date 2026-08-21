@@ -243,16 +243,39 @@ evidence.
   `db1e85f53a293f6908ac6318b2ab38e35161a8034b377b673ac7fec65b4df35e`.
   Exact Metal stress separately passes bounded cancellation, 8-by-20 fork
   stress, resource balance, and clean-log audit.
-- [ ] Add a dedicated release benchmark for the newly selected counted-dimension
-  global `COUNT(*)` lane. The current Rust, native C++, and live PG18/PG19 tests
-  prove duplicate fanout, missing keys, selection, `parallel_dense_count`, exact
-  results, lifecycle behavior, and adjacent native declines, but the immutable
-  nineteen-cell ship matrix has no workload matching an ungrouped one-dimension
-  `JoinMultiplicity::Counted` query. Freeze a benchmark fixture with duplicate
-  dimension keys and unmatched fact keys; require real dispatch, exact count,
-  zero fallback, artifact-hit steady state, a 1.15x floor, and same-host
-  predecessor-normalized non-regression before treating this lane as fully
-  performance-qualified.
+- [x] Add a dedicated release benchmark for the newly selected counted-dimension
+  global `COUNT(*)` lane. `weighted_global_count_int4@1000000` freezes duplicate
+  dimension keys, an unmatched fact key, and NULL with an independent no-join
+  oracle. Its exact current-only gate returns 1,500,000, selects
+  `descriptor_ungrouped_aggregate` / `dense_count_membership` /
+  `parallel_dense_count`, executes one kernel/query with 10,000,000 dispatched
+  and processed rows, zero fallback, a separately measured construction, and
+  10/10 steady artifact hits with no build/rebuild. It measures 4.26x versus
+  PostgreSQL parallel in
+  `.codex/scratch/weighted-count-ship-gate-exact-1ba0b28-pg18-20260820-a`
+  (`report.json` SHA-256
+  `b7523353e0892b89840858ea1235bc7e8ad8cbfa9c0a305a5b06abaa8f0edee5`,
+  seal SHA-256
+  `0b8ae8bffc8691d84a9f305631f4939cfadbed0e3eb202c355267b6fc27f2a13`).
+  The contamination-qualified A/B/B/A control retains 30 measured pairs per
+  arm and 60 samples per module: current is 3.872 ms versus PostgreSQL 21.196 ms
+  (5.473x), predecessor is 2328.532 ms versus PostgreSQL 21.216 ms (0.00911x),
+  and the PostgreSQL-normalized factor is 0.001665 (600.75x improvement). The
+  sealed source control is
+  `.codex/scratch/weighted-count-same-host-abba-1ba0b28-vs-3a0bcd7-pg18-20260820-b`
+  (manifest SHA-256
+  `5847faaf0810a5ca1a8c788621930bdd09cf501d5c82defbc80dddc50396bcbf`).
+  Its frozen validator intentionally remains failed only because supplementary
+  exact queries ran after harness fixture cleanup. The separately sealed
+  addendum reproduces that result byte-for-byte, accepts exactly those 24
+  missing-table checks, and replaces them with fresh predecessor/current live
+  proofs: accelerated, PostgreSQL, and independent-oracle results are all
+  1,500,000; current dispatches one kernel, one batch, and 1,000,000 rows with
+  zero fallback, while predecessor proves its five-kernel legacy path. Addendum
+  `result.json` SHA-256 is
+  `776575566a05c5b41f6644b625d4b201e5006d8c829b10f4fbe54a798f34eba3`;
+  its seal hashes to
+  `100126dc6d21b144dc7d1563670c9989672edb9cd35ca886a89ad46ff4451325`.
 
 ## P1: Measured Losing Lanes
 
