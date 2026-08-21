@@ -970,7 +970,7 @@ printf 'PGACCEL_FILE_OK:%s\n' "$stem"
         env = os.environ.copy()
         env.update(
             {
-                "PATH": f"{bin_dir}:{env['PATH']}",
+                "PG_ACCEL_PSQL": str(bin_dir / "psql"),
                 "PGOPTIONS": "-c pg_accel.kernel_timeout_ms=60000",
                 "PGACCEL_FAKE_PSQL_LOG": str(log),
                 "PG_ACCEL_SQL_TEST_ARTIFACT_DIR": str(artifact_dir),
@@ -1013,6 +1013,31 @@ printf 'PGACCEL_FILE_OK:%s\n' "$stem"
                 "pg_accel.kernel_timeout_ms\t60000\tms\tclient\n",
             )
 
+    def test_invalid_explicit_psql_fails_closed_without_path_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir, _ = self.write_fake_psql(root)
+            env = os.environ.copy()
+            env.update(
+                {
+                    "PATH": f"{bin_dir}:{env['PATH']}",
+                    "PG_ACCEL_PSQL": str(root / "missing-psql"),
+                    "PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION": "1",
+                }
+            )
+            result = subprocess.run(
+                [str(REPO_ROOT / "sql/tests/run_all.sh"), "dbname=synthetic"],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 127, result.stdout + result.stderr)
+            self.assertIn("PG_ACCEL_PSQL is not executable", result.stderr)
+
     def test_strict_warning_is_not_suppressed_by_allowlist_environment(self) -> None:
         first_test = sorted((REPO_ROOT / "sql/tests").glob("[0-9]*.sql"))[0]
         with tempfile.TemporaryDirectory() as directory:
@@ -1046,9 +1071,10 @@ class AggregateNegativeMatrixTests(unittest.TestCase):
         ]
         ctest_names = [
             "test_device",
+            "test_expr_vm_matrix",
             *(
                 f"test_{index:02d}"
-                for index in range(1, coverage_tools.BASELINE_CPP_TESTS - 1)
+                for index in range(1, coverage_tools.BASELINE_CPP_TESTS - 2)
             ),
             "test_oom_invariant",
         ]
@@ -1614,9 +1640,11 @@ raise SystemExit(2)
         ctest_log = root / "cpp/ctest.log"
         ctest_log.write_text(ctest_pass_log(ctest_names), encoding="utf-8")
         (root / "cpp/ooo-overlap-diagnostic.log").write_text(
+            "span_ms reduce=1 resident=1 final=2 spans_overlap=no improved=no\n"
             "test_ooo_overlap: resident/reduce GPU spans did not overlap\n"
             "manual OOO overlap coverage: PASS "
-            "(expected no-overlap structural failure)\n",
+            "(expected no-overlap structural result; "
+            "host_profiles=1 device_profiles=1)\n",
             encoding="utf-8",
         )
         self.assertEqual(
@@ -1787,8 +1815,32 @@ raise SystemExit(2)
         coverage_tools.write_json(
             live_cli / "evidence-validation.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "performance_evidence_eligible": False,
+                "device_adaptive_cells": {
+                    cell: "selected_dispatch"
+                    for cell in coverage_tools.LIVE_RUST_DEVICE_ADAPTIVE_CELLS
+                },
+                "mandatory_selected_cells": [
+                    "spatial_resident_agg_candidate@1000000"
+                ],
+                "resident_artifact_reuse_cells": [
+                    "raster_resident_exact_reclass@10000"
+                ],
+                "native_parity_cell": "window_full_output_decline@10000",
+                "planner_stage_cell": "window_full_output_decline@10000",
+                "domain_decline_cells": [
+                    "spatial_mega_1kv@80000",
+                    "raster_reclass@100",
+                ],
+                "native_decline_cells": [
+                    "window_full_output_decline@10000",
+                    "reduce_f64_minmax@100000",
+                ],
+                "phase9_cells": 20,
+                "bounded_normal_run": "raster_ndvi@100",
+                "bounded_normal_run_iterations": 10,
+                "fp64_candidates": 1,
                 "all_outputs_consumed": True,
                 "loaded_extension_hash_bound": True,
                 "extension_object_sha256": extension_sha,
@@ -1803,6 +1855,15 @@ raise SystemExit(2)
                 "expected_binary": file_probe,
                 "installed_binary": file_probe,
                 "loaded_binaries": [file_probe],
+            },
+        )
+        coverage_tools.write_json(
+            root / "cpp/metal-execution-mode.json",
+            {
+                "schema_version": 1,
+                "mode": "full_device",
+                "host_reference_common_extended": False,
+                "performance_evidence_eligible": False,
             },
         )
         coverage_tools.write_json(
@@ -1934,6 +1995,23 @@ raise SystemExit(2)
                 ),
                 1,
             )
+            self.assertEqual(self.aggregate(root), 1)
+
+    def test_contradictory_ooo_overlap_log_fails_after_reseal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            log = root / "cpp/ooo-overlap-diagnostic.log"
+            log.write_text(
+                "span_ms reduce=1 resident=1 final=1 "
+                "spans_overlap=yes improved=yes\n"
+                "test_ooo_overlap: resident/reduce GPU spans did not overlap\n"
+                "manual OOO overlap coverage: PASS "
+                "(expected no-overlap structural result; "
+                "host_profiles=1 device_profiles=1)\n",
+                encoding="utf-8",
+            )
+            self.reseal(root, "cpp")
             self.assertEqual(self.aggregate(root), 1)
 
     def test_script_llvm_tools_are_rejected_as_untrusted(self) -> None:
@@ -2087,6 +2165,30 @@ raise SystemExit(2)
             document["loaded_binaries"][0]["sha256"] = "d" * 64
             coverage_tools.write_json(path, document)
             self.reseal(root, "rust")
+            self.assertEqual(self.aggregate(root), 1)
+
+    def test_live_device_adaptive_disposition_is_rejected_after_reseal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            path = root / "rust/live-cli/evidence-validation.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["device_adaptive_cells"]["grouped_agg_int4@1000000"] = (
+                "unverified"
+            )
+            coverage_tools.write_json(path, document)
+            self.reseal(root, "rust")
+            self.assertEqual(self.aggregate(root), 1)
+
+    def test_metal_execution_mode_claim_is_rejected_after_reseal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.initialize_valid_gate(root)
+            path = root / "cpp/metal-execution-mode.json"
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["performance_evidence_eligible"] = True
+            coverage_tools.write_json(path, document)
+            self.reseal(root, "cpp")
             self.assertEqual(self.aggregate(root), 1)
 
     def test_invalid_mapping_is_rejected(self) -> None:
@@ -2407,7 +2509,7 @@ class ImmutableBaselineTests(unittest.TestCase):
             "    exit 1\n"
             "fi\n"
         )
-        names = {"test_coverage_tools.py", "test_coverage_live_rust.py"}
+        names = set(coverage_tools.REQUIRED_COVERAGE_HELPER_TESTS)
         self.assertEqual(
             coverage_tools.coverage_helper_test_discovery_errors(
                 canonical_justfile, canonical_gate, names
@@ -2806,6 +2908,39 @@ class RustCompilerMappingTests(unittest.TestCase):
 
 
 class ArtifactAndToolchainTests(unittest.TestCase):
+    def test_hosted_metal_mode_requires_runtime_compatibility_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            logs = root / "cpp/per-test-logs"
+            logs.mkdir(parents=True)
+            expression_log = logs / "test_expr_vm_matrix-fixture.log"
+            marker = (
+                "PGACCEL_HOSTED_METAL_COMPATIBILITY "
+                "gpu_basic_tier=1 host_reference_common_extended=1\n"
+            )
+            expression_log.write_text(marker, encoding="utf-8")
+            coverage_tools.write_json(
+                root / "cpp/metal-execution-mode.json",
+                {
+                    "schema_version": 1,
+                    "mode": "hosted_virtual_m1_compatibility",
+                    "cpu_brand": "Apple M1 (Virtual)",
+                    "logical_cpus": 3,
+                    "memory_bytes": 7_516_192_768,
+                    "gpu_device": "Apple Paravirtual device",
+                    "gpu_basic_tier": True,
+                    "host_reference_common_extended": True,
+                    "reason": (
+                        "common_extended_metallib_exceeds_900_kib_"
+                        "archive_oom_guard"
+                    ),
+                    "performance_evidence_eligible": False,
+                },
+            )
+            self.assertEqual(coverage_tools.validate_metal_execution_mode(root), [])
+            expression_log.write_text("marker missing\n", encoding="utf-8")
+            self.assertTrue(coverage_tools.validate_metal_execution_mode(root))
+
     def test_initial_artifacts_are_schema_valid_and_red(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -3131,9 +3266,15 @@ class ArtifactAndToolchainTests(unittest.TestCase):
         self.assertIn("record_stage cpp device_profile_overflow_only 1", gate)
         self.assertIn("record_stage cpp ooo_overlap_diagnostic 0", gate)
         self.assertIn("record_stage cpp ooo_overlap_diagnostic 1", gate)
-        self.assertIn('if [ "$status" -ne 1 ]', gate)
+        self.assertIn("scripts/coverage_ooo_overlap.sh", gate)
+        overlap_runner = (
+            REPO_ROOT / "scripts/coverage_ooo_overlap.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("test_ooo_overlap: OK", overlap_runner)
+        self.assertIn("spans_overlap=yes improved=yes", overlap_runner)
         self.assertIn(
-            "test_ooo_overlap: resident/reduce GPU spans did not overlap", gate
+            "test_ooo_overlap: resident/reduce GPU spans did not overlap",
+            overlap_runner,
         )
         self.assertIn('--object "$build_dir/test_ooo_overlap"', gate)
         self.assertIn("execution_status=1", gate)

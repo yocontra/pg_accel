@@ -823,9 +823,75 @@ class CoverageLiveRustTests(unittest.TestCase):
             validation = json.loads(paths["validation"].read_text(encoding="utf-8"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
+            validation["device_adaptive_cells"],
+            {
+                "grouped_agg_int4@1000000": "selected_dispatch",
+                "h3_cell_to_parent@100000": "selected_dispatch",
+                "hash_join@100000": "selected_dispatch",
+                "mixed_join_agg_int4@100000": "selected_dispatch",
+                "ssbm_resident_int4_star@100000": "selected_dispatch",
+            },
+        )
+        self.assertEqual(
+            validation["mandatory_selected_cells"],
+            ["spatial_resident_agg_candidate@1000000"],
+        )
+        self.assertEqual(
             validation["resident_artifact_reuse_cells"],
             ["raster_resident_exact_reclass@10000"],
         )
+
+    def test_live_evidence_validator_accepts_exact_device_relative_declines(self) -> None:
+        decline_reasons = {
+            "selected": "generic_fact_rows_below_device_minimum",
+            "mixed": "generic_fact_rows_below_device_minimum",
+            "ssbm": "generic_fact_rows_below_device_minimum",
+            "hash": "generic_fact_rows_below_device_minimum",
+            "h3": "h3_rows_below_grouped_agg_min",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            args, paths = build_live_evidence_fixture(pathlib.Path(directory))
+            for key, reason in decline_reasons.items():
+                report = json.loads(paths[key].read_text(encoding="utf-8"))
+                row = report["workloads"][0]
+                row.update(
+                    planner_declined=True,
+                    plan_selected=False,
+                    gpu_kernel_dispatched=False,
+                    gpu_kernel_execution_delta=0,
+                    native_decline_evidence={
+                        "reason": reason,
+                        "source": "planner_reported",
+                    },
+                )
+                write_json(paths[key], report)
+            result = run_live_evidence_validator(args)
+            validation = json.loads(paths["validation"].read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            set(validation["device_adaptive_cells"].values()),
+            {"device_relative_decline"},
+        )
+
+    def test_live_evidence_validator_rejects_wrong_device_relative_decline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            args, paths = build_live_evidence_fixture(pathlib.Path(directory))
+            report = json.loads(paths["selected"].read_text(encoding="utf-8"))
+            row = report["workloads"][0]
+            row.update(
+                planner_declined=True,
+                plan_selected=False,
+                gpu_kernel_dispatched=False,
+                gpu_kernel_execution_delta=0,
+                native_decline_evidence={
+                    "reason": "fabricated_device_reason",
+                    "source": "planner_reported",
+                },
+            )
+            write_json(paths["selected"], report)
+            result = run_live_evidence_validator(args)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected decline reason", result.stderr)
 
     def test_raster_artifact_reuse_probe_requires_expected_gate_failure(self) -> None:
         source = HARNESS.read_text(encoding="utf-8")

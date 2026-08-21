@@ -691,11 +691,13 @@ grep -q '\[setup\] raster_ndvi -- seed 42 .* 100 rows' \
     "$artifact_dir/logs/bounded_setup.log" || \
     die "bounded setup did not retain its workload/row proof"
 
-# Selected aggregate and resident-domain lanes, intentional native declines,
-# and the fixed bounded Phase 9 matrix cover runner/config/stats/artifact/report
-# paths. Selected winners may return 1 because their release ship gates demand
-# performance evidence that instrumented warm-only coverage cannot provide. The
-# durable reports are consumed below and must still prove selection and dispatch.
+# Aggregate and resident-domain lanes, intentional native declines, and the
+# fixed bounded Phase 9 matrix cover runner/config/stats/artifact/report paths.
+# Cells whose eligibility is derived from the detected device must either prove
+# selection/dispatch or the exact device-relative planner decline. Selected
+# winners may return 1 because their release ship gates demand performance
+# evidence that instrumented warm-only coverage cannot provide. This harness is
+# functional coverage evidence, never release-performance evidence.
 run_bench selected_crash_repro any01 crash-repro --workload grouped_agg_int4 --rows 1000000 \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
     --capture-plans --timing raw --cache-mode warm --skip-guc-verify \
@@ -712,12 +714,13 @@ run_bench fp64_native_crash_repro 0 crash-repro --workload reduce_f64_minmax --r
 
 # One exact cell per remaining resident/domain path keeps the live matrix small
 # while reaching the real loaders, descriptors, private data, executors, and
-# extension adapters. Released resident cells must select and dispatch, except
-# for the raster final-output artifact lane: its lifecycle probe must dispatch
-# once to build the artifact and its measured warm query must prove an exact
-# artifact hit without being mislabeled as a fresh GPU dispatch. Neighboring
-# unreleased spatial/raster shapes must retain an exact planner-reported native
-# decline.
+# extension adapters. Device-relative cells must select/dispatch on qualifying
+# hardware or retain their exact hardware-derived decline. The spatial resident
+# lane remains an unconditional live-dispatch proof. The raster final-output
+# artifact lane must dispatch once to build the artifact and its measured warm
+# query must prove an exact artifact hit without being mislabeled as a fresh GPU
+# dispatch. Neighboring unreleased spatial/raster shapes must retain an exact
+# planner-reported native decline.
 run_bench mixed_resident_crash_repro any01 crash-repro \
     --workload mixed_join_agg_int4 --rows 100000 \
     --iterations 1 --warmup 0 --seed 42 --connection "$connection" --format json \
@@ -1024,8 +1027,50 @@ def require_planner_decline(row, expected_name, expected_reason=None):
             f"{expected_name}: expected decline reason {expected_reason!r}, got {evidence!r}"
         )
 
-selected = one(selected_path, "grouped_agg_int4", 1000000)
-require_selected_dispatch(selected, "grouped_agg_int4")
+def require_selected_or_device_decline(row, expected_name, expected_reason):
+    if row.get("plan_selected") or row.get("gpu_kernel_dispatched"):
+        require_selected_dispatch(row, expected_name)
+        return "selected_dispatch"
+    require_planner_decline(row, expected_name, expected_reason)
+    return "device_relative_decline"
+
+device_adaptive_cells = [
+    (
+        selected_path,
+        "grouped_agg_int4",
+        1000000,
+        "generic_fact_rows_below_device_minimum",
+    ),
+    (
+        mixed_path,
+        "mixed_join_agg_int4",
+        100000,
+        "generic_fact_rows_below_device_minimum",
+    ),
+    (
+        ssbm_path,
+        "ssbm_resident_int4_star",
+        100000,
+        "generic_fact_rows_below_device_minimum",
+    ),
+    (
+        hash_path,
+        "hash_join",
+        100000,
+        "generic_fact_rows_below_device_minimum",
+    ),
+    (
+        h3_path,
+        "h3_cell_to_parent",
+        100000,
+        "h3_rows_below_grouped_agg_min",
+    ),
+]
+device_adaptive_dispositions = {}
+for path, name, rows, reason in device_adaptive_cells:
+    device_adaptive_dispositions[f"{name}@{rows}"] = require_selected_or_device_decline(
+        one(path, name, rows), name, reason
+    )
 
 declined_report = load(declined_path)
 declined = one(declined_path, "window_full_output_decline", 10000)
@@ -1065,14 +1110,10 @@ if (
 fp64 = one(fp64_path, "reduce_f64_minmax", 100000)
 require_planner_decline(fp64, "reduce_f64_minmax")
 
-resident_selected_cells = [
-    (mixed_path, "mixed_join_agg_int4", 100000),
-    (ssbm_path, "ssbm_resident_int4_star", 100000),
-    (hash_path, "hash_join", 100000),
-    (h3_path, "h3_cell_to_parent", 100000),
+mandatory_selected_cells = [
     (spatial_resident_path, "spatial_resident_agg_candidate", 1000000),
 ]
-for path, name, rows in resident_selected_cells:
+for path, name, rows in mandatory_selected_cells:
     require_selected_dispatch(one(path, name, rows), name)
 
 resident_artifact_reuse_cells = [
@@ -1176,10 +1217,10 @@ if any(not isinstance(probe, dict) or probe.get("sha256") != expected_extension_
     raise SystemExit("live backend mapped an extension other than the instrumented object")
 
 validation = {
-    "schema_version": 1,
+    "schema_version": 2,
     "performance_evidence_eligible": False,
-    "selected_cell": "grouped_agg_int4@1000000",
-    "resident_selected_cells": [f"{name}@{rows}" for _, name, rows in resident_selected_cells],
+    "device_adaptive_cells": device_adaptive_dispositions,
+    "mandatory_selected_cells": [f"{name}@{rows}" for _, name, rows in mandatory_selected_cells],
     "resident_artifact_reuse_cells": [
         f"{name}@{rows}" for _, name, rows in resident_artifact_reuse_cells
     ],

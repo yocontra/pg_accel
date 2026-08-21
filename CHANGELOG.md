@@ -95,9 +95,9 @@ evidence attached to that GitHub release are package-availability claims.
   from artifact-hit steady state while retaining a combined end-to-end view.
 - The immutable nineteen-cell qualified-Metal release ratchet now has a
   mandatory unprivileged warm gate and a distinct optional privileged OS
-  page-cache certification. Hosted release jobs run the warm gate and cannot
-  mislabel unavailable purge evidence as a required release failure or a cold
-  result.
+  page-cache certification. It runs on qualified physical M-series hardware;
+  hosted virtual-M1 jobs are explicitly compatibility/coverage-only and cannot
+  be mislabeled as performance or cold-cache evidence.
 - Release packaging and its standalone installer accept strict SemVer
   prerelease/build identifiers in PostgreSQL extension SQL filenames, including
   the `1.0.0-rc1` candidate, while continuing to reject ambiguous separators
@@ -105,9 +105,10 @@ evidence attached to that GitHub release are package-availability claims.
 - macOS arm64 and Linux x86_64 release jobs verify each extracted PG18/PG19
   archive through outer and inner checksums, staged installation, an isolated
   preloaded cluster, `CREATE EXTENSION`, version/statistics queries, and fatal
-  log auditing. The hosted qualified-Metal jobs also run and upload the separate
-  weighted global-count ratchet, and GitHub releases retain the six sealed
-  coverage/performance/stress evidence bundles as durable assets.
+  log auditing. Hosted virtual-M1 jobs retain sealed compatibility coverage and
+  runner provenance, and the tag workflow creates a draft release so the six
+  separately qualified physical-M-series coverage/performance/stress bundles
+  can be attached before publication.
 - Planner declines reuse exact serialized-query fingerprints and dependency
   state without cloning full cache entries or repeating unprofiled telemetry;
   production upper-path hooks also avoid allocating the test-only structured

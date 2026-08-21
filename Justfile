@@ -458,7 +458,9 @@ safety-contract-audit:
     python3 scripts/crash_band_audit.py --repo-root .
 
 coverage-audit: safety-contract-audit
-    bash -n scripts/coverage_gate.sh scripts/residency_ledger_integration.sh sql/tests/run_all.sh
+    bash -n scripts/coverage_gate.sh scripts/coverage_metal_mode.sh \
+        scripts/coverage_ooo_overlap.sh \
+        scripts/residency_ledger_integration.sh sql/tests/run_all.sh
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_coverage*.py'
     python3 scripts/coverage_tools.py audit-scope --scope coverage/scope.json --repo-root .
 
@@ -1045,7 +1047,9 @@ sql-test pg="":
     port="$(pg_accel_pgrx_port_for_pg "$pg")"
     connection="host=localhost port=$port dbname=postgres"
     "$psql_bin" "$connection" -v ON_ERROR_STOP=1 -f sql/init/01-create-extensions.sql
-    PG_ACCEL_PG_MAJOR="$pg" PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 sql/tests/run_all.sh "$connection"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        PG_ACCEL_PSQL="$psql_bin" PG_ACCEL_PG_MAJOR="$pg" \
+        PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 sql/tests/run_all.sh "$connection"
 
 # Exercise the production shared-memory residency ledger across real backend
 # processes and cloned databases. Unlike cargo-pgrx tests, this uses the

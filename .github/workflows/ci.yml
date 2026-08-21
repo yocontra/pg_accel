@@ -41,6 +41,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Load pinned AdaptiveCpp SHA
         shell: bash
@@ -228,15 +231,19 @@ jobs:
           path: ${{ steps.schema.outputs.path }}
           if-no-files-found: error
 
-  metal-release-gates:
-    name: Qualified Metal release gates (PG 18)
+  metal-compatibility:
+    name: Hosted Metal compatibility and coverage (PG 18)
     runs-on: macos-26
     timeout-minutes: 360
     env:
       SOFT_FP64_REQUIRED_TAG: v2.0.1
+      PUBLIC_INSTALL_ARTIFACT_DIR: artifacts/public-install-pg18-hosted-apple-silicon
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Load pinned AdaptiveCpp SHA
         shell: bash
@@ -255,25 +262,25 @@ jobs:
           cargo install cargo-pgrx --version "$PG_ACCEL_PGRX_VERSION" --locked
           cargo install cargo-llvm-cov --locked
 
-      - name: Install qualified Metal dependencies
+      - name: Install hosted Metal dependencies
         shell: bash
         run: |
           set -euo pipefail
           brew update
           brew install just cmake llvm@20 lld@20 boost libomp postgis
 
-      - name: Cache qualified Metal toolchain
-        id: cache-acpp-metal-gate
+      - name: Cache hosted Metal toolchain
+        id: cache-acpp-metal-compatibility
         uses: actions/cache@v4
         with:
           path: |
             .pgaccel/acpp
             .pgaccel/src/AdaptiveCpp
             .pgaccel/src/soft-fp64
-          key: acpp-qualified-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
+          key: acpp-hosted-metal-${{ runner.arch }}-${{ env.ACPP_REQUIRED_SHA }}-${{ env.SOFT_FP64_REQUIRED_TAG }}-${{ hashFiles('.acpp-version', 'patches/adaptivecpp/*.patch', 'scripts/setup_acpp.sh') }}
 
       - name: Build pinned AdaptiveCpp Metal toolchain
-        if: steps.cache-acpp-metal-gate.outputs.cache-hit != 'true'
+        if: steps.cache-acpp-metal-compatibility.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -291,109 +298,139 @@ jobs:
           just setup-pg-extensions 18
           just setup-pgrx 18
 
-      - name: Run three-layer release coverage gate
+      - name: Capture hosted runner and exact-candidate provenance
         shell: bash
         env:
-          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18-qualified-metal
+          EXPECTED_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          artifact_dir="artifacts/hosted-metal-runner-pg18"
+          mkdir -p "$artifact_dir"
+          python3 scripts/metal_stress_artifacts.py capture-candidate \
+            --repo-root "$PWD" \
+            --expected-commit "$EXPECTED_CANDIDATE_SHA" \
+            --output "$artifact_dir/candidate-provenance.json"
+          {
+            uname -a
+            sysctl -n machdep.cpu.brand_string
+            sysctl -n hw.logicalcpu
+            system_profiler SPDisplaysDataType
+          } > "$artifact_dir/runner-metadata.txt"
+
+      - name: Verify public source build, install, and CREATE EXTENSION
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PUBLIC_INSTALL_ARTIFACT_DIR"
+          just extension-smoke 18 2>&1 | \
+            tee "$PUBLIC_INSTALL_ARTIFACT_DIR/source-build-create-extension.log"
+
+      - name: Build and verify the public release package
+        shell: bash
+        run: |
+          set -euo pipefail
+          pg_config="$(scripts/pg_source.sh pg-config 18)"
+          python3 scripts/package_extension.py \
+            --pg 18 \
+            --pg-config "$pg_config" \
+            --acpp-prefix "$PWD/.pgaccel/acpp/current" 2>&1 | \
+            tee "$PUBLIC_INSTALL_ARTIFACT_DIR/package-build.log"
+          just package-smoke 18 2>&1 | \
+            tee "$PUBLIC_INSTALL_ARTIFACT_DIR/package-install-create-extension.log"
+          for pattern in \
+            'pg_accel-pg18-*.tar.gz' \
+            'pg_accel-pg18-*.tar.gz.sha256' \
+            'pg_accel-pg18-*.smoke.txt'; do
+            count="$(find target/release -maxdepth 1 -type f \
+              -name "$pattern" -print | wc -l | tr -d ' ')"
+            if [ "$count" -ne 1 ]; then
+              echo "error: expected one public package artifact for $pattern; found $count" >&2
+              exit 1
+            fi
+          done
+          find target/release -maxdepth 1 -type f \
+            \( -name 'pg_accel-pg18-*.tar.gz' \
+              -o -name 'pg_accel-pg18-*.tar.gz.sha256' \
+              -o -name 'pg_accel-pg18-*.smoke.txt' \) \
+            -exec cp {} "$PUBLIC_INSTALL_ARTIFACT_DIR/" \;
+          cp artifacts/hosted-metal-runner-pg18/candidate-provenance.json \
+            "$PUBLIC_INSTALL_ARTIFACT_DIR/"
+          cp artifacts/hosted-metal-runner-pg18/runner-metadata.txt \
+            "$PUBLIC_INSTALL_ARTIFACT_DIR/"
+
+      - name: Seal public Apple Silicon install evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/public-install-pg18.SHA256SUMS"
+          (
+            cd "$PUBLIC_INSTALL_ARTIFACT_DIR"
+            find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | while IFS= read -r path; do
+              shasum -a 256 "$path"
+            done > "$manifest"
+            mv "$manifest" SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
+
+      - name: Run three-layer hosted Metal compatibility gate
+        shell: bash
+        env:
+          COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18-hosted-metal
           COVERAGE_MIN_RUST_LINES: 90
           COVERAGE_MIN_CPP_LINES: 90
           COVERAGE_MIN_SQL_ASSERTIONS: 90
+          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"
         run: |
           set -euo pipefail
           CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18
 
-      - name: Remove coverage build intermediates
+      - name: Seal hosted runner provenance
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf target/coverage
+          artifact_dir="artifacts/hosted-metal-runner-pg18"
+          manifest="$RUNNER_TEMP/hosted-metal-runner-pg18.SHA256SUMS"
+          test -d "$artifact_dir"
+          (
+            cd "$artifact_dir"
+            find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | while IFS= read -r path; do
+              shasum -a 256 "$path"
+            done > "$manifest"
+            mv "$manifest" SHA256SUMS
+            shasum -a 256 -c SHA256SUMS
+          )
 
-      - name: Run mandatory warm Metal benchmark ship gate
-        shell: bash
-        run: |
-          set -euo pipefail
-          just metal-warm-benchmark-ship-gate 18 artifacts/warm-benchmark-ship-gate-pg18-qualified-metal
-
-      - name: Run weighted global-count benchmark ship gate
-        shell: bash
-        run: |
-          set -euo pipefail
-          just weighted-count-benchmark-ship-gate 18 artifacts/weighted-count-ship-gate-pg18-qualified-metal
-
-      - name: Run broad system workload characterization
-        shell: bash
-        run: |
-          set -euo pipefail
-          just system-workload-gate 18 artifacts/system-workload-gate-pg18-qualified-metal
-
-      - name: Run live Metal stress gate
-        shell: bash
-        env:
-          METAL_STRESS_ARTIFACT_DIR: artifacts/metal-stress-pg18-qualified-metal
-        run: |
-          set -euo pipefail
-          just metal-stress 18
-
-      - name: Run native-decline parity gate
-        shell: bash
-        env:
-          NATIVE_PARITY_ARTIFACT_DIR: artifacts/native-parity-p0-pg18-qualified-metal
-        run: |
-          set -euo pipefail
-          just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18
-
-      - name: Upload three-layer coverage artifacts
+      - name: Upload hosted Metal coverage artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pg-accel-three-layer-coverage-pg18-qualified-metal
-          path: artifacts/coverage-pg18-qualified-metal
+          name: pg-accel-three-layer-coverage-pg18-hosted-metal
+          path: artifacts/coverage-pg18-hosted-metal
           if-no-files-found: error
 
-      - name: Upload warm Metal benchmark ship-gate artifacts
+      - name: Upload hosted Metal runner provenance
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pg-accel-warm-benchmark-ship-gate-pg18-qualified-metal
-          path: artifacts/warm-benchmark-ship-gate-pg18-qualified-metal
+          name: pg-accel-hosted-metal-runner-pg18
+          path: artifacts/hosted-metal-runner-pg18
           if-no-files-found: error
 
-      - name: Upload weighted global-count ship-gate artifacts
+      - name: Upload public Apple Silicon install evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pg-accel-weighted-count-ship-gate-pg18-qualified-metal
-          path: artifacts/weighted-count-ship-gate-pg18-qualified-metal
-          if-no-files-found: error
-
-      - name: Upload broad system workload artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pg-accel-system-workload-gate-pg18-qualified-metal
-          path: artifacts/system-workload-gate-pg18-qualified-metal
-          if-no-files-found: error
-
-      - name: Upload Metal stress artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pg-accel-metal-stress-pg18-qualified-metal
-          path: artifacts/metal-stress-pg18-qualified-metal
-          if-no-files-found: error
-
-      - name: Upload native-decline parity artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pg-accel-native-parity-p0-pg18-qualified-metal
-          path: artifacts/native-parity-p0-pg18-qualified-metal
+          name: pg-accel-public-install-pg18-hosted-apple-silicon
+          path: artifacts/public-install-pg18-hosted-apple-silicon
           if-no-files-found: error
 
   linux-x86:
     name: Linux x86_64 PG ${{ matrix.pg }} check/test
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      LINUX_NO_GPU_ARTIFACT_DIR: artifacts/linux-no-gpu-pg${{ matrix.pg }}
     strategy:
       fail-fast: false
       matrix:
@@ -402,6 +439,21 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Capture exact-candidate provenance
+        shell: bash
+        env:
+          EXPECTED_CANDIDATE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$LINUX_NO_GPU_ARTIFACT_DIR"
+          python3 scripts/metal_stress_artifacts.py capture-candidate \
+            --repo-root "$PWD" \
+            --expected-commit "$EXPECTED_CANDIDATE_SHA" \
+            --output "$LINUX_NO_GPU_ARTIFACT_DIR/candidate-provenance.json"
 
       - name: Load pinned AdaptiveCpp SHA
         shell: bash
@@ -508,35 +560,87 @@ jobs:
         run: |
           set -euo pipefail
           PYTHONDONTWRITEBYTECODE=1 \
-            python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v
+            python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v \
+            2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/cpu-cheat-analyzer-tests.log"
+
+      - name: Prove the hosted runner has no GPU device
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            uname -a
+            lscpu
+            find /dev -maxdepth 2 \
+              \( -name 'nvidia*' -o -name 'dri' -o -name 'renderD*' \
+                 -o -name 'card*' -o -name 'kfd' -o -name 'dxg' \
+                 -o -name 'mali*' \) -print
+          } > "$LINUX_NO_GPU_ARTIFACT_DIR/runner-metadata.txt"
+          if compgen -G '/dev/nvidia*' > /dev/null || \
+             compgen -G '/dev/mali*' > /dev/null || \
+             [ -e /dev/dri ] || [ -e /dev/kfd ] || [ -e /dev/dxg ]; then
+            echo "error: Linux no-GPU gate unexpectedly found a GPU device" >&2
+            exit 1
+          fi
+          if command -v nvidia-smi > /dev/null && nvidia-smi -L > /dev/null 2>&1; then
+            echo "error: Linux no-GPU gate unexpectedly reached an NVIDIA GPU" >&2
+            exit 1
+          fi
 
       - name: Check without GPU devices
         if: steps.pg-support.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          just check ${{ matrix.pg }}
+          just check ${{ matrix.pg }} 2>&1 | \
+            tee "$LINUX_NO_GPU_ARTIFACT_DIR/check.log"
 
       - name: Run standalone Rust tests without GPU devices
         if: steps.pg-support.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          just test-standalone ${{ matrix.pg }}
+          just test-standalone ${{ matrix.pg }} 2>&1 | \
+            tee "$LINUX_NO_GPU_ARTIFACT_DIR/test-standalone.log"
 
       - name: Audit safety and deterministic fuzz contracts
         if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
         shell: bash
         run: |
           set -euo pipefail
-          just safety-contract-audit
+          just safety-contract-audit 2>&1 | \
+            tee "$LINUX_NO_GPU_ARTIFACT_DIR/safety-contract-audit.log"
 
       - name: Run benchmark harness release-gate tests
         if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
         shell: bash
         run: |
           set -euo pipefail
-          cargo test -p pg_accel_bench --locked
+          cargo test -p pg_accel_bench --locked 2>&1 | \
+            tee "$LINUX_NO_GPU_ARTIFACT_DIR/benchmark-harness-tests.log"
+
+      - name: Seal Linux no-GPU evidence
+        if: steps.pg-support.outputs.skip != 'true' && success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/linux-no-gpu-pg${{ matrix.pg }}.SHA256SUMS"
+          (
+            cd "$LINUX_NO_GPU_ARTIFACT_DIR"
+            find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | while IFS= read -r path; do
+              sha256sum "$path"
+            done > "$manifest"
+            mv "$manifest" SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Upload Linux no-GPU evidence
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-linux-no-gpu-pg${{ matrix.pg }}-${{ runner.arch }}
+          path: ${{ env.LINUX_NO_GPU_ARTIFACT_DIR }}
+          if-no-files-found: error
 
   cuda-smoke:
     name: CUDA smoke
@@ -549,6 +653,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Verify CUDA AdaptiveCpp runner
         shell: bash

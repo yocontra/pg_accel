@@ -312,7 +312,9 @@ class PackageExtensionTests(unittest.TestCase):
             workflow.index("  build:") : workflow.index("  linux-package:")
         ]
         linux_job = workflow[
-            workflow.index("  linux-package:") : workflow.index("  metal-coverage:")
+            workflow.index("  linux-package:") : workflow.index(
+                "  metal-compatibility:"
+            )
         ]
         release_job = workflow[workflow.index("  release:") :]
         justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
@@ -366,13 +368,16 @@ class PackageExtensionTests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, verifier)
-        self.assertIn("needs: [build, linux-package, metal-coverage]", release_job)
+        self.assertIn(
+            "needs: [build, linux-package, metal-compatibility]", release_job
+        )
+        self.assertIn("draft: true", release_job)
         self.assertIn('prerelease: ${{ contains(github.ref_name, \'-\') }}', release_job)
         self.assertIn(
             "release-artifacts/pg_accel-pg*/pg_accel-pg*.smoke.txt", release_job
         )
         self.assertIn(
-            "Package qualified Metal evidence for durable release assets", release_job
+            "Package hosted Metal evidence for durable release assets", release_job
         )
         self.assertIn("release-evidence/*.tar.gz", release_job)
         self.assertIn("release-evidence/*.tar.gz.sha256", release_job)

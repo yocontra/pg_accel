@@ -107,7 +107,21 @@ BASELINE_CPP_TESTS = 32
 SQL_COVERAGE_KERNEL_TIMEOUT_MS = 60_000
 COVERAGE_HELPER_TEST_PATTERN = "test_coverage*.py"
 REQUIRED_COVERAGE_HELPER_TESTS = frozenset(
-    {"test_coverage_tools.py", "test_coverage_live_rust.py"}
+    {
+        "test_coverage_tools.py",
+        "test_coverage_live_rust.py",
+        "test_coverage_metal_mode.py",
+        "test_coverage_ooo_overlap.py",
+    }
+)
+LIVE_RUST_DEVICE_ADAPTIVE_CELLS = frozenset(
+    {
+        "grouped_agg_int4@1000000",
+        "mixed_join_agg_int4@100000",
+        "ssbm_resident_int4_star@100000",
+        "hash_join@100000",
+        "h3_cell_to_parent@100000",
+    }
 )
 DEVICE_PROFILE_INTRINSIC_MARKER = b"llvm.instrprof."
 UINT32_MAX = (1 << 32) - 1
@@ -929,6 +943,7 @@ def seal_layer_evidence(args: argparse.Namespace) -> int:
             "cpp/toolchain.json",
             "cpp/ctest.log",
             "cpp/ooo-overlap-diagnostic.log",
+            "cpp/metal-execution-mode.json",
             "cpp/gpu-correctness-evidence.json",
             "cpp/device-profile-audit.json",
         },
@@ -3940,6 +3955,7 @@ def validate_raw_evidence_manifest(
             "cpp/toolchain.json",
             "cpp/ctest.log",
             "cpp/ooo-overlap-diagnostic.log",
+            "cpp/metal-execution-mode.json",
             "cpp/gpu-correctness-evidence.json",
             "cpp/device-profile-audit.json",
         },
@@ -4056,6 +4072,114 @@ def validate_device_profile_audit(
         ):
             errors.append(f"cpp: host profiling intrinsic leaked into device IR: {relative}")
     return errors
+
+
+def validate_metal_execution_mode(artifact_dir: pathlib.Path) -> list[str]:
+    try:
+        document = read_json(artifact_dir / "cpp/metal-execution-mode.json")
+    except CoverageError as exc:
+        return [f"cpp: Metal execution mode evidence cannot be read: {exc}"]
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        return ["cpp: Metal execution mode evidence is invalid"]
+    mode = document.get("mode")
+    common = {
+        "schema_version",
+        "mode",
+        "host_reference_common_extended",
+        "performance_evidence_eligible",
+    }
+    if document.get("performance_evidence_eligible") is not False:
+        return ["cpp: coverage cannot claim release-performance eligibility"]
+    expression_logs = sorted(
+        (artifact_dir / "cpp/per-test-logs").glob("test_expr_vm_matrix-*.log")
+    )
+    if len(expression_logs) != 1:
+        return ["cpp: expression-VM execution log is missing or ambiguous"]
+    try:
+        expression_log = expression_logs[0].read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cpp: expression-VM execution log cannot be read: {exc}"]
+    compatibility_marker = (
+        "PGACCEL_HOSTED_METAL_COMPATIBILITY "
+        "gpu_basic_tier=1 host_reference_common_extended=1"
+    )
+    if mode == "full_device":
+        if (
+            set(document) != common
+            or document.get("host_reference_common_extended") is not False
+            or compatibility_marker in expression_log
+        ):
+            return ["cpp: full-device Metal execution evidence is invalid"]
+        return []
+    if mode != "hosted_virtual_m1_compatibility":
+        return [f"cpp: unknown Metal execution mode: {mode!r}"]
+    expected_keys = common | {
+        "cpu_brand",
+        "logical_cpus",
+        "memory_bytes",
+        "gpu_device",
+        "gpu_basic_tier",
+        "reason",
+    }
+    memory_bytes = document.get("memory_bytes")
+    if (
+        set(document) != expected_keys
+        or document.get("cpu_brand") != "Apple M1 (Virtual)"
+        or document.get("logical_cpus") != 3
+        or not _is_int(memory_bytes)
+        or memory_bytes < 7_000_000_000
+        or memory_bytes > 8_589_934_592
+        or document.get("gpu_device") != "Apple Paravirtual device"
+        or document.get("gpu_basic_tier") is not True
+        or document.get("host_reference_common_extended") is not True
+        or document.get("reason")
+        != "common_extended_metallib_exceeds_900_kib_archive_oom_guard"
+        or expression_log.count(compatibility_marker) != 1
+    ):
+        return ["cpp: hosted virtual-M1 compatibility evidence is invalid"]
+    return []
+
+
+def validate_ooo_overlap_evidence(artifact_dir: pathlib.Path) -> list[str]:
+    path = artifact_dir / "cpp/ooo-overlap-diagnostic.log"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        return [f"cpp: OOO overlap evidence cannot be read: {exc}"]
+    success = (
+        text.count("test_ooo_overlap: OK\n") == 1
+        and len(
+            re.findall(
+                r"^span_ms .*spans_overlap=yes improved=yes$", text, re.MULTILINE
+            )
+        )
+        == 1
+        and "resident/reduce GPU spans did not overlap" not in text
+        and "manual OOO overlap coverage: PASS (real-overlap success;" in text
+    )
+    expected_serial = (
+        text.count(
+            "test_ooo_overlap: resident/reduce GPU spans did not overlap\n"
+        )
+        == 1
+        and len(
+            re.findall(
+                r"^span_ms .*spans_overlap=no improved=(?:yes|no)$",
+                text,
+                re.MULTILINE,
+            )
+        )
+        == 1
+        and "test_ooo_overlap: OK" not in text
+        and "manual OOO overlap coverage: PASS "
+        "(expected no-overlap structural result;" in text
+    )
+    if success == expected_serial:
+        return [
+            "cpp: OOO overlap evidence proves neither one real-overlap result "
+            "nor one exact known serialization result"
+        ]
+    return []
 
 
 def recompute_raw_line_layer(
@@ -4495,9 +4619,51 @@ def validate_retained_live_rust_evidence(
     ):
         errors.append("rust: live CLI provenance identity/policy is invalid")
 
+    expected_validation_keys = {
+        "schema_version",
+        "performance_evidence_eligible",
+        "device_adaptive_cells",
+        "mandatory_selected_cells",
+        "resident_artifact_reuse_cells",
+        "native_parity_cell",
+        "planner_stage_cell",
+        "domain_decline_cells",
+        "native_decline_cells",
+        "phase9_cells",
+        "bounded_normal_run",
+        "bounded_normal_run_iterations",
+        "fp64_candidates",
+        "all_outputs_consumed",
+        "extension_object_sha256",
+        "loaded_extension_hash_bound",
+    }
+    adaptive = validation.get("device_adaptive_cells")
     if (
-        validation.get("schema_version") != 1
+        set(validation) != expected_validation_keys
+        or validation.get("schema_version") != 2
         or validation.get("performance_evidence_eligible") is not False
+        or not isinstance(adaptive, dict)
+        or set(adaptive) != LIVE_RUST_DEVICE_ADAPTIVE_CELLS
+        or any(
+            disposition not in {"selected_dispatch", "device_relative_decline"}
+            for disposition in adaptive.values()
+        )
+        or validation.get("mandatory_selected_cells")
+        != ["spatial_resident_agg_candidate@1000000"]
+        or validation.get("resident_artifact_reuse_cells")
+        != ["raster_resident_exact_reclass@10000"]
+        or validation.get("native_parity_cell")
+        != "window_full_output_decline@10000"
+        or validation.get("planner_stage_cell")
+        != "window_full_output_decline@10000"
+        or validation.get("domain_decline_cells")
+        != ["spatial_mega_1kv@80000", "raster_reclass@100"]
+        or validation.get("native_decline_cells")
+        != ["window_full_output_decline@10000", "reduce_f64_minmax@100000"]
+        or validation.get("phase9_cells") != 20
+        or validation.get("bounded_normal_run") != "raster_ndvi@100"
+        or validation.get("bounded_normal_run_iterations") != 10
+        or validation.get("fp64_candidates") != 1
         or validation.get("all_outputs_consumed") is not True
         or validation.get("loaded_extension_hash_bound") is not True
         or validation.get("extension_object_sha256") != extension_sha
@@ -4727,6 +4893,8 @@ def aggregate(args: argparse.Namespace) -> int:
         errors.extend(validate_raw_evidence_manifest(artifact_dir, layer, provenance))
         if layer == "cpp":
             errors.extend(validate_device_profile_audit(artifact_dir, copied_baseline))
+            errors.extend(validate_metal_execution_mode(artifact_dir))
+            errors.extend(validate_ooo_overlap_evidence(artifact_dir))
         if layer == "rust":
             errors.extend(validate_retained_live_rust_evidence(artifact_dir, provenance))
         if layer in LINE_LAYERS:
@@ -5712,12 +5880,10 @@ def audit_scope(args: argparse.Namespace) -> int:
         'cmake -E remove_directory "$build_dir"',
         'ACPP_METAL_DEVICE_PROFILE_DIR="$profile_dir"',
         "run_acpp_device_profile_overflow_only.sh",
+        "scripts/coverage_ooo_overlap.sh",
         "record_stage cpp device_profile_overflow_only",
         "record_stage cpp ooo_overlap_diagnostic",
         '"$build_dir/test_ooo_overlap"',
-        'if [ "$status" -ne 1 ]',
-        "test_ooo_overlap: resident/reduce GPU spans did not overlap",
-        "pgaccel-ooo-%p-%m.profraw",
         '--object "$build_dir/test_ooo_overlap"',
         '--per-test-log-dir "$per_test_log_dir"',
         '--baseline "$baseline_file"',
@@ -5726,6 +5892,8 @@ def audit_scope(args: argparse.Namespace) -> int:
         "record_stage rust live_cli",
         "record_stage rust live_extension_install",
         "scripts/coverage_live_rust.sh",
+        "scripts/coverage_metal_mode.sh",
+        '"$output_dir/metal-execution-mode.json"',
         'just install-pg-accel "$pg"',
         'cargo pgrx stop --package pg_accel "pg$pg"',
         'PG_ACCEL_EXPECTED_DYLIB="$built_extension"',
@@ -5737,12 +5905,30 @@ def audit_scope(args: argparse.Namespace) -> int:
         '--object-sha256 "$production_object_sha"',
         "sql_coverage_kernel_timeout_ms=60000",
         'PGOPTIONS="-c pg_accel.kernel_timeout_ms=${sql_coverage_kernel_timeout_ms}"',
+        'PG_ACCEL_PSQL="$psql_bin"',
         'PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS="$sql_coverage_kernel_timeout_ms"',
         'aggregate --artifact-dir "$artifact_dir"',
     ):
         if required_text not in coverage_gate:
             raise CoverageError(
                 f"Rust compiler-derived production coverage invariant is absent: {required_text}"
+            )
+    ooo_runner = (repo_root / "scripts/coverage_ooo_overlap.sh").read_text(
+        encoding="utf-8"
+    )
+    for required_text in (
+        'case "$status" in',
+        "test_ooo_overlap: OK",
+        "spans_overlap=yes improved=yes",
+        "test_ooo_overlap: resident/reduce GPU spans did not overlap",
+        "pgaccel-ooo-%p-%m.profraw",
+        "manual OOO overlap diagnostic overflowed a device profile",
+        "host_profiles=",
+        "device_profiles=",
+    ):
+        if required_text not in ooo_runner:
+            raise CoverageError(
+                f"manual OOO overlap coverage invariant is absent: {required_text}"
             )
     gpu_filter = (repo_root / "scripts/filter_gpu_output.py").read_text(
         encoding="utf-8"
@@ -5765,6 +5951,8 @@ def audit_scope(args: argparse.Namespace) -> int:
         "PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS" not in sql_runner
         or "session-profile.tsv" not in sql_runner
         or "has_forbidden_release_evidence" not in sql_runner
+        or "PG_ACCEL_PSQL" not in sql_runner
+        or sql_runner.count('"$PSQL_BIN"') != 3
         or "PG_ACCEL_SQL_TEST_ALLOWED_WARNING" in sql_runner
     ):
         raise CoverageError(

@@ -223,12 +223,15 @@ fallback, ten artifact-hit steady-state pairs, and a warm median of at least
 also show predecessor-normalized non-regression before the lane is considered
 fully performance-qualified.
 
-Both qualified-Metal hosted workflows run this ratchet independently of the
-nineteen-cell warm matrix and upload its write-once artifact directory. Tagged
-release workflows additionally archive the coverage, warm matrix, weighted
-count, system-workload, Metal-stress, and native-parity bundles with adjacent
-SHA-256 files so performance evidence does not depend on expiring workflow
-artifacts.
+The weighted-count ratchet runs on the same exact candidate and qualified
+physical M-series hardware as the nineteen-cell warm matrix. GitHub's hosted
+virtual M1 is a compatibility/coverage runner, not qualified performance
+hardware: it cannot safely compile the Common/Extended expression metallibs
+within the fixed 900 KiB archive guard. Tagged workflows therefore create a
+draft release and retain hosted compatibility evidence; the qualified warm,
+weighted-count, system-workload, Metal-stress, native-parity, and full-device
+coverage bundles must be attached with adjacent SHA-256 files before that draft
+is published.
 
 The similarly named legacy workloads remain in the harness as fail-closed
 coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
@@ -274,13 +277,15 @@ counters or consumed output, missing resident-plan evidence, a per-lane
 threshold regression, or—only for the privileged certification—missing required
 cold/warm purge evidence.
 
-The qualified GitHub-hosted Apple Silicon jobs in both `ci.yml` and
-`release.yml` run the mandatory warm recipe and upload the deterministic
-`artifacts/warm-benchmark-ship-gate-pg18-qualified-metal` bundle. They do not
-claim privileged OS-cold certification. Checked-in workflow wiring is not run
-evidence: the corresponding
-release-checklist row remains open until the exact candidate has a successful
-CI artifact URL.
+The GitHub-hosted Apple Silicon jobs in both `ci.yml` and `release.yml` run the
+three-layer compatibility/coverage gate on the exact virtual-M1 candidate and
+upload its execution-mode and runner-provenance records. They deliberately do
+not run or claim the warm performance ratchet, weighted-count ratchet,
+system-workload characterization, Metal stress, native parity, or privileged
+OS-cold certification. Those gates remain bound to qualified physical M-series
+hardware. Checked-in workflow wiring is not run evidence: the corresponding
+release-checklist row remains open until the exact candidate has successful CI
+artifact URLs and the separate qualified-hardware bundles are durable.
 
 ## Timing and ordering
 
