@@ -344,12 +344,30 @@ enum Command {
         artifacts_dir: Option<PathBuf>,
     },
 
-    /// Run the fixed qualified-Metal benchmark performance ratchet.
+    /// Run the mandatory fixed qualified-Metal warm benchmark ratchet.
     ///
     /// The exact winner cells, row scale, sampling counts, seed, timing mode,
-    /// cache policy, and per-lane speedup floors are immutable repository
+    /// warm-cache policy, and per-lane speedup floors are immutable repository
     /// policy. The command requires a release build and writes a complete
     /// benchmark evidence bundle before returning success.
+    MetalWarmShipGate {
+        /// PostgreSQL connection string.
+        #[arg(long, default_value = DEFAULT_CONNECTION)]
+        connection: String,
+
+        /// Directory for the warm Metal ship-gate evidence bundle. If omitted,
+        /// a fresh `benchmarks/artifacts/metal-warm-ship-gate-<timestamp>`
+        /// directory is used.
+        #[arg(long)]
+        artifacts_dir: Option<PathBuf>,
+    },
+
+    /// Run the optional privileged qualified-Metal OS-cold certification.
+    ///
+    /// The exact winner cells, row scale, sampling counts, seed, timing mode,
+    /// cache-mode-both policy, and per-lane speedup floors are immutable. This
+    /// command requires permission to purge the OS page cache; it supplements
+    /// rather than replaces the mandatory warm ship gate.
     MetalShipGate {
         /// PostgreSQL connection string.
         #[arg(long, default_value = DEFAULT_CONNECTION)]
@@ -680,6 +698,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             connection,
             artifacts_dir,
         } => cmd_system_workload_gate(&connection, artifacts_dir),
+        Command::MetalWarmShipGate {
+            connection,
+            artifacts_dir,
+        } => cmd_metal_warm_ship_gate(&connection, artifacts_dir),
         Command::MetalShipGate {
             connection,
             artifacts_dir,
@@ -1339,6 +1361,71 @@ const METAL_SHIP_GATE_ITERATIONS: usize = 10;
 const METAL_SHIP_GATE_WARMUP: usize = 5;
 const METAL_SHIP_GATE_SEED: u64 = 42;
 const METAL_SHIP_GATE_CONTRACT_FILE: &str = "metal_ship_gate_contract.json";
+const METAL_WARM_SHIP_GATE_CONTRACT_FILE: &str = "metal_warm_ship_gate_contract.json";
+
+#[derive(Clone, Copy)]
+enum MetalShipGateMode {
+    MandatoryWarm,
+    OptionalOsColdCertification,
+}
+
+impl MetalShipGateMode {
+    const fn cache_mode(self) -> runner::CacheMode {
+        match self {
+            Self::MandatoryWarm => runner::CacheMode::Warm,
+            Self::OptionalOsColdCertification => runner::CacheMode::Both,
+        }
+    }
+
+    const fn cache_mode_label(self) -> &'static str {
+        match self {
+            Self::MandatoryWarm => "warm",
+            Self::OptionalOsColdCertification => "both",
+        }
+    }
+
+    const fn contract_file(self) -> &'static str {
+        match self {
+            Self::MandatoryWarm => METAL_WARM_SHIP_GATE_CONTRACT_FILE,
+            Self::OptionalOsColdCertification => METAL_SHIP_GATE_CONTRACT_FILE,
+        }
+    }
+
+    const fn contract_name(self) -> &'static str {
+        match self {
+            Self::MandatoryWarm => "qualified_metal_warm_benchmark_ship_gate",
+            Self::OptionalOsColdCertification => "qualified_metal_benchmark_ship_gate",
+        }
+    }
+
+    const fn release_requirement(self) -> &'static str {
+        match self {
+            Self::MandatoryWarm => "mandatory",
+            Self::OptionalOsColdCertification => "optional_privileged_certification",
+        }
+    }
+
+    const fn artifact_prefix(self) -> &'static str {
+        match self {
+            Self::MandatoryWarm => "metal-warm-ship-gate",
+            Self::OptionalOsColdCertification => "metal-ship-gate",
+        }
+    }
+
+    const fn evidence_label(self) -> &'static str {
+        match self {
+            Self::MandatoryWarm => "Metal warm benchmark ship-gate",
+            Self::OptionalOsColdCertification => "Metal benchmark ship-gate",
+        }
+    }
+
+    const fn log_label(self) -> &'static str {
+        match self {
+            Self::MandatoryWarm => "metal-warm-ship-gate",
+            Self::OptionalOsColdCertification => "metal-ship-gate",
+        }
+    }
+}
 
 fn metal_ship_gate_workloads()
 -> Result<Vec<Box<dyn workloads::Workload>>, Box<dyn std::error::Error>> {
@@ -1394,7 +1481,10 @@ fn metal_ship_gate_workloads()
     Ok(resolved)
 }
 
-fn write_metal_ship_gate_contract(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn write_metal_ship_gate_contract_for(
+    root: &Path,
+    mode: MetalShipGateMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     if root.exists() {
         if !root.is_dir() {
             return Err(format!(
@@ -1439,13 +1529,14 @@ fn write_metal_ship_gate_contract(root: &Path) -> Result<(), Box<dyn std::error:
 
     let manifest = serde_json::json!({
         "schema_version": 1,
-        "gate": "qualified_metal_benchmark_ship_gate",
+        "gate": mode.contract_name(),
+        "release_requirement": mode.release_requirement(),
         "comparison": "postgresql_parallel",
         "iterations": METAL_SHIP_GATE_ITERATIONS,
         "warmup": METAL_SHIP_GATE_WARMUP,
         "seed": METAL_SHIP_GATE_SEED,
         "timing_mode": "raw-wallclock",
-        "cache_mode": "both",
+        "cache_mode": mode.cache_mode_label(),
         "required_harness_profile": "release",
         "generic_min_speedup": report::BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
         "threshold_source": "benchmark_threshold_matrix_entry",
@@ -1454,12 +1545,21 @@ fn write_metal_ship_gate_contract(root: &Path) -> Result<(), Box<dyn std::error:
     fs::create_dir_all(root)?;
     let mut contents = serde_json::to_vec_pretty(&manifest)?;
     contents.push(b'\n');
-    fs::write(root.join(METAL_SHIP_GATE_CONTRACT_FILE), contents)?;
+    fs::write(root.join(mode.contract_file()), contents)?;
     Ok(())
 }
 
-fn enforce_metal_ship_gate_complete(
+fn write_metal_ship_gate_contract(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    write_metal_ship_gate_contract_for(root, MetalShipGateMode::OptionalOsColdCertification)
+}
+
+fn write_metal_warm_ship_gate_contract(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    write_metal_ship_gate_contract_for(root, MetalShipGateMode::MandatoryWarm)
+}
+
+fn enforce_metal_ship_gate_complete_for(
     report: &BenchReport,
+    mode: MetalShipGateMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let expected = workloads::METAL_SHIP_GATE_CELLS
         .iter()
@@ -1541,9 +1641,10 @@ fn enforce_metal_ship_gate_complete(
             report.methodology.timing_mode
         ));
     }
-    if report.methodology.cache_mode != "both" {
+    if report.methodology.cache_mode != mode.cache_mode_label() {
         gaps.push(format!(
-            "expected cache mode both, report recorded `{}`",
+            "expected cache mode {}, report recorded `{}`",
+            mode.cache_mode_label(),
             report.methodology.cache_mode
         ));
     }
@@ -1558,28 +1659,50 @@ fn enforce_metal_ship_gate_complete(
         Ok(())
     } else {
         Err(format!(
-            "Metal benchmark ship-gate evidence is incomplete:\n{}",
+            "{} evidence is incomplete:\n{}",
+            mode.evidence_label(),
             gaps.join("\n")
         )
         .into())
     }
 }
 
-fn cmd_metal_ship_gate(
+fn enforce_metal_ship_gate_complete(
+    report: &BenchReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    enforce_metal_ship_gate_complete_for(report, MetalShipGateMode::OptionalOsColdCertification)
+}
+
+fn enforce_metal_warm_ship_gate_complete(
+    report: &BenchReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    enforce_metal_ship_gate_complete_for(report, MetalShipGateMode::MandatoryWarm)
+}
+
+fn cmd_metal_ship_gate_for_mode(
     connection: &str,
     artifacts_dir: Option<PathBuf>,
+    mode: MetalShipGateMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if cfg!(debug_assertions) {
-        return Err(
-            "Metal benchmark ship gate requires a release harness; run with `cargo run --release`"
-                .into(),
-        );
+        return Err(format!(
+            "{} requires a release harness; run with `cargo run --release`",
+            mode.evidence_label()
+        )
+        .into());
     }
 
     let workloads = metal_ship_gate_workloads()?;
     let artifact_root =
-        artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir("metal-ship-gate"));
-    write_metal_ship_gate_contract(&artifact_root)?;
+        artifacts_dir.unwrap_or_else(|| artifacts::default_run_dir(mode.artifact_prefix()));
+    match mode {
+        MetalShipGateMode::MandatoryWarm => {
+            write_metal_warm_ship_gate_contract(&artifact_root)?;
+        }
+        MetalShipGateMode::OptionalOsColdCertification => {
+            write_metal_ship_gate_contract(&artifact_root)?;
+        }
+    }
     let cells = workloads::METAL_SHIP_GATE_CELLS
         .iter()
         .zip(&workloads)
@@ -1593,7 +1716,7 @@ fn cmd_metal_ship_gate(
         warmup: METAL_SHIP_GATE_WARMUP,
         seed: METAL_SHIP_GATE_SEED,
         timing_mode: runner::TimingMode::RawWallClock,
-        cache_mode: runner::CacheMode::Both,
+        cache_mode: mode.cache_mode(),
         capture_planner_stages: false,
         native_parity_pairing: false,
         headline_speedup_allowed: true,
@@ -1605,14 +1728,42 @@ fn cmd_metal_ship_gate(
 
     let report = runner::run_cells_with_config(connection, &cells, &config)?;
     print_report(&report, &ReportFormat::Markdown)?;
-    enforce_metal_ship_gate_complete(&report)?;
+    match mode {
+        MetalShipGateMode::MandatoryWarm => enforce_metal_warm_ship_gate_complete(&report)?,
+        MetalShipGateMode::OptionalOsColdCertification => {
+            enforce_metal_ship_gate_complete(&report)?;
+        }
+    }
     enforce_benchmark_ship_gate(&report)?;
+    if matches!(mode, MetalShipGateMode::OptionalOsColdCertification) {
+        enforce_operation_cache_gate(&report)?;
+    }
     enforce_h3_lane_gate(&report)?;
     eprintln!(
-        "[metal-ship-gate] PASS: all {} fixed winner cells selected, dispatched, met their warm-speedup floors, and produced complete evidence",
-        cells.len()
+        "[{}] PASS: all {} fixed winner cells selected, dispatched, met their warm-speedup floors, and produced complete {} evidence",
+        mode.log_label(),
+        cells.len(),
+        mode.cache_mode_label(),
     );
     Ok(())
+}
+
+fn cmd_metal_warm_ship_gate(
+    connection: &str,
+    artifacts_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_metal_ship_gate_for_mode(connection, artifacts_dir, MetalShipGateMode::MandatoryWarm)
+}
+
+fn cmd_metal_ship_gate(
+    connection: &str,
+    artifacts_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_metal_ship_gate_for_mode(
+        connection,
+        artifacts_dir,
+        MetalShipGateMode::OptionalOsColdCertification,
+    )
 }
 
 const WEIGHTED_COUNT_SHIP_GATE_ITERATIONS: usize = 10;
@@ -2218,6 +2369,30 @@ fn enforce_benchmark_ship_gate(report: &BenchReport) -> Result<(), Box<dyn std::
     .into())
 }
 
+/// Hard-fail the optional privileged certification when operation-specific
+/// warm/cold evidence or a requested OS page-cache purge is incomplete.
+fn enforce_operation_cache_gate(report: &BenchReport) -> Result<(), Box<dyn std::error::Error>> {
+    let failures = report.evaluate_operation_cache_gate();
+    if failures.is_empty() {
+        return Ok(());
+    }
+    eprintln!(
+        "[operation-cache-gate] FAIL: {} operation cache certification failure(s)",
+        failures.len(),
+    );
+    for failure in &failures {
+        eprintln!(
+            "[operation-cache-gate]   {} @ {} rows — {}",
+            failure.workload, failure.rows, failure.detail,
+        );
+    }
+    Err(format!(
+        "operation cache certification gate: {} failure(s)",
+        failures.len()
+    )
+    .into())
+}
+
 /// Hard-fail the bench process when the H3 lane gate produces any failure.
 ///
 /// The markdown renderer already appended an `### H3 Lane Gate Failures`
@@ -2623,6 +2798,12 @@ mod tests {
         report.methodology.row_scales = vec![1_000_000];
         report.methodology.cache_mode = "both".to_owned();
         report.methodology.harness_profile = "release".to_owned();
+        report
+    }
+
+    fn complete_metal_warm_report() -> BenchReport {
+        let mut report = complete_metal_report();
+        report.methodology.cache_mode = "warm".to_owned();
         report
     }
 
@@ -3104,6 +3285,17 @@ mod tests {
     fn metal_ship_gate_accepts_complete_release_evidence() {
         enforce_metal_ship_gate_complete(&complete_metal_report())
             .expect("complete Metal ship-gate evidence");
+        enforce_metal_warm_ship_gate_complete(&complete_metal_warm_report())
+            .expect("complete warm Metal ship-gate evidence");
+
+        let warm_error = gate_error(enforce_metal_warm_ship_gate_complete(
+            &complete_metal_report(),
+        ));
+        assert!(warm_error.contains("expected cache mode warm, report recorded `both`"));
+        let cold_error = gate_error(enforce_metal_ship_gate_complete(
+            &complete_metal_warm_report(),
+        ));
+        assert!(cold_error.contains("expected cache mode both, report recorded `warm`"));
     }
 
     #[test]
@@ -3505,6 +3697,10 @@ mod tests {
             serde_json::from_slice(&left_bytes).expect("valid contract JSON");
         assert_eq!(manifest["schema_version"], 1);
         assert_eq!(manifest["gate"], "qualified_metal_benchmark_ship_gate");
+        assert_eq!(
+            manifest["release_requirement"],
+            "optional_privileged_certification"
+        );
         assert_eq!(manifest["comparison"], "postgresql_parallel");
         assert_eq!(manifest["iterations"], METAL_SHIP_GATE_ITERATIONS);
         assert_eq!(manifest["warmup"], METAL_SHIP_GATE_WARMUP);
@@ -3547,6 +3743,45 @@ mod tests {
         );
 
         fs::remove_dir_all(base).expect("remove manifest test directories");
+    }
+
+    #[test]
+    fn metal_warm_ship_gate_manifest_is_deterministic_mandatory_and_immutable() {
+        let base = unique_temp_path("metal-warm-contract");
+        let left = base.join("left");
+        let right = base.join("right");
+
+        write_metal_warm_ship_gate_contract(&left).expect("first warm contract manifest");
+        write_metal_warm_ship_gate_contract(&right).expect("second warm contract manifest");
+        let left_bytes =
+            fs::read(left.join(METAL_WARM_SHIP_GATE_CONTRACT_FILE)).expect("left warm manifest");
+        let right_bytes =
+            fs::read(right.join(METAL_WARM_SHIP_GATE_CONTRACT_FILE)).expect("right warm manifest");
+        assert_eq!(left_bytes, right_bytes);
+
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&left_bytes).expect("valid warm contract JSON");
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(manifest["gate"], "qualified_metal_warm_benchmark_ship_gate");
+        assert_eq!(manifest["release_requirement"], "mandatory");
+        assert_eq!(manifest["iterations"], METAL_SHIP_GATE_ITERATIONS);
+        assert_eq!(manifest["warmup"], METAL_SHIP_GATE_WARMUP);
+        assert_eq!(manifest["seed"], METAL_SHIP_GATE_SEED);
+        assert_eq!(manifest["timing_mode"], "raw-wallclock");
+        assert_eq!(manifest["cache_mode"], "warm");
+        assert_eq!(manifest["required_harness_profile"], "release");
+        assert_eq!(
+            manifest["cells"].as_array().map(Vec::len),
+            Some(workloads::METAL_SHIP_GATE_CELLS.len())
+        );
+        assert!(
+            write_metal_warm_ship_gate_contract(&left)
+                .expect_err("non-empty warm evidence directory must fail")
+                .to_string()
+                .contains("evidence bundles are immutable")
+        );
+
+        fs::remove_dir_all(base).expect("remove warm manifest test directories");
     }
 
     #[test]
@@ -3873,6 +4108,15 @@ mod tests {
         assert!(size.contains("invalid fp64 max-size token"), "{size}");
 
         if cfg!(debug_assertions) {
+            let warm_metal = dispatch_failure(Command::MetalWarmShipGate {
+                connection: "unused".to_owned(),
+                artifacts_dir: None,
+            });
+            assert!(
+                warm_metal.contains("requires a release harness"),
+                "{warm_metal}"
+            );
+
             let metal = dispatch_failure(Command::MetalShipGate {
                 connection: "unused".to_owned(),
                 artifacts_dir: None,

@@ -1439,7 +1439,7 @@ def _validate_qualified_metal_job(
         )
 
     coverage_dir = "artifacts/coverage-pg18-qualified-metal"
-    benchmark_dir = "artifacts/benchmark-ship-gate-pg18-qualified-metal"
+    benchmark_dir = "artifacts/warm-benchmark-ship-gate-pg18-qualified-metal"
     system_dir = "artifacts/system-workload-gate-pg18-qualified-metal"
     stress_dir = "artifacts/metal-stress-pg18-qualified-metal"
     parity_dir = "artifacts/native-parity-p0-pg18-qualified-metal"
@@ -1464,10 +1464,10 @@ def _validate_qualified_metal_job(
             (),
         ),
         (
-            "Run live Metal benchmark ship gate",
+            "Run mandatory warm Metal benchmark ship gate",
             [
                 "set -euo pipefail",
-                f"just metal-benchmark-ship-gate 18 {benchmark_dir}",
+                f"just metal-warm-benchmark-ship-gate 18 {benchmark_dir}",
             ],
             (),
         ),
@@ -1530,7 +1530,7 @@ def validate_ci_workflow_contract(workflow: str) -> None:
         "Run three-layer release coverage gate",
         (
             "Upload three-layer coverage artifacts",
-            "Upload Metal benchmark ship-gate artifacts",
+            "Upload warm Metal benchmark ship-gate artifacts",
             "Upload broad system workload artifacts",
             "Upload Metal stress artifacts",
             "Upload native-decline parity artifacts",
@@ -1560,7 +1560,7 @@ def validate_release_workflow_contract(workflow: str) -> None:
         "Run release coverage gate",
         (
             "Upload release coverage artifacts",
-            "Upload release Metal benchmark ship-gate artifacts",
+            "Upload release warm Metal benchmark ship-gate artifacts",
             "Upload release broad system workload artifacts",
             "Upload release Metal stress artifacts",
             "Upload release native-decline parity artifacts",

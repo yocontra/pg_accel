@@ -382,11 +382,11 @@ jobs:
           set -euo pipefail
           rm -rf target/coverage
 
-      - name: Run live Metal benchmark ship gate
+      - name: Run mandatory warm Metal benchmark ship gate
         shell: bash
         run: |
           set -euo pipefail
-          just metal-benchmark-ship-gate 18 artifacts/benchmark-ship-gate-pg18-qualified-metal
+          just metal-warm-benchmark-ship-gate 18 artifacts/warm-benchmark-ship-gate-pg18-qualified-metal
 
       - name: Run broad system workload characterization
         shell: bash
@@ -418,12 +418,12 @@ jobs:
           path: artifacts/coverage-pg18-qualified-metal
           if-no-files-found: error
 
-      - name: Upload release Metal benchmark ship-gate artifacts
+      - name: Upload release warm Metal benchmark ship-gate artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pg-accel-release-benchmark-ship-gate-pg18-qualified-metal
-          path: artifacts/benchmark-ship-gate-pg18-qualified-metal
+          name: pg-accel-release-warm-benchmark-ship-gate-pg18-qualified-metal
+          path: artifacts/warm-benchmark-ship-gate-pg18-qualified-metal
           if-no-files-found: error
 
       - name: Upload release broad system workload artifacts

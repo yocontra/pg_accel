@@ -152,21 +152,19 @@ local performance gate uses `--cache-mode warm`. Project-owned AdaptiveCpp
 JIT/archive-cache cold-start evidence is captured separately by the Metal
 stress gate and must not be represented as an OS page-cache purge.
 
-## Qualified Metal cold-cache certification
+## Qualified Metal warm ship gate
 
-The full warm-plus-OS-cold certification ratchet is:
+The mandatory unprivileged release ratchet is:
 
 ```bash
-just metal-benchmark-ship-gate 18
+just metal-warm-benchmark-ship-gate 18
 ```
 
 The recipe installs the current release build, runs the CPU-cheat audit and
-provenance checks, and invokes `pg_accel_bench metal-ship-gate`. The command
+provenance checks, and invokes `pg_accel_bench metal-warm-ship-gate`. The command
 does not accept sampling or workload overrides. It fixes seed 42, ten measured
-iterations, five warmups, raw wall-clock timing, cache mode `both`, plan
-capture, and the following exact 1M-row winner cells. Because its cold arm
-purges the OS page cache, this recipe is optional manual certification rather
-than the unprivileged local warm gate:
+iterations, five warmups, raw wall-clock timing, cache mode `warm`, plan
+capture, and the following exact 1M-row winner cells:
 
 | Workload | Protected lane | Minimum warm median vs PostgreSQL parallel |
 |---|---|---:|
@@ -189,6 +187,21 @@ than the unprivileged local warm gate:
 | `ssbm_resident_int8_star` | exact two-dimension INT8 membership star grouped by year and part size, SUM(int4)/COUNT | 1.15x |
 | `hashjoin_10k_1m` | resident equality hash join COUNT | 1.15x |
 | `h3_cell_to_parent` | fused H3 parent grouped count | 1.15x |
+
+### Optional privileged OS-cold certification
+
+The separate warm-plus-OS-cold certification uses the same immutable cells and
+thresholds:
+
+```bash
+just metal-benchmark-ship-gate 18
+```
+
+It invokes `pg_accel_bench metal-ship-gate` with cache mode `both` and requires
+successful per-iteration OS page-cache purges for operation families whose
+metadata requires bounded cold-start evidence. It is optional manual
+certification: it supplements the mandatory warm artifact and never substitutes
+for it. A host without purge authority must not relabel warm samples as cold.
 
 ### Counted-dimension global COUNT release lane
 
@@ -245,19 +258,20 @@ candidate. Freeze the replacement SHA/tree and nineteen-cell population, then ma
 fresh independent write-once random selection before executing release gates;
 retained predecessor evidence is transition history only.
 
-The threshold matrix is the executable source of truth. Before timing, the
-command rejects missing, duplicate, unregistered, non-winner, or below-floor
+The threshold matrix is the executable source of truth. Before timing, both
+commands reject missing, duplicate, unregistered, non-winner, or below-floor
 contract entries. After timing, it fails on an incomplete matrix, a debug
 harness, a crash, missing accelerated/native plans or correctness artifacts,
 stock-executor fallback, missed GPU selection or dispatch, absent dispatch
 counters or consumed output, missing resident-plan evidence, a per-lane
-threshold regression, or missing H3 cold/warm evidence.
+threshold regression, or—only for the privileged certification—missing required
+cold/warm purge evidence.
 
 The qualified GitHub-hosted Apple Silicon jobs in both `ci.yml` and
-`release.yml` run the same recipe and upload the deterministic
-`artifacts/benchmark-ship-gate-pg18-qualified-metal` bundle. That bundle is
-OS-cold certification evidence, not a prerequisite for the unprivileged warm
-matrix. Checked-in workflow wiring is not run evidence: the corresponding
+`release.yml` run the mandatory warm recipe and upload the deterministic
+`artifacts/warm-benchmark-ship-gate-pg18-qualified-metal` bundle. They do not
+claim privileged OS-cold certification. Checked-in workflow wiring is not run
+evidence: the corresponding
 release-checklist row remains open until the exact candidate has a successful
 CI artifact URL.
 

@@ -765,7 +765,12 @@ class CoverageLiveRustTests(unittest.TestCase):
                     self.assertIn("forbidden", result.stderr)
 
     def test_unbounded_or_cold_internal_gates_are_not_allowlisted(self) -> None:
-        for command in ("metal-ship-gate", "phase6-gate", "explain-audit"):
+        for command in (
+            "metal-warm-ship-gate",
+            "metal-ship-gate",
+            "phase6-gate",
+            "explain-audit",
+        ):
             with self.subTest(command=command):
                 result = call_library(f"assert_safe_bench_command {command}")
                 self.assertNotEqual(result.returncode, 0)

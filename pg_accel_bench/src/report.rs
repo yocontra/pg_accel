@@ -2881,18 +2881,10 @@ fn threshold_matrix_status(
     w: &WorkloadResult,
     lane: &str,
     expectation: crate::workloads::BenchmarkLaneExpectation,
-    cache_mode: &str,
-    expected_iterations: usize,
 ) -> &'static str {
     match expectation {
         crate::workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } => {
-            if gpu_winner_evidence_verified(
-                w,
-                lane,
-                min_warm_speedup,
-                cache_mode,
-                expected_iterations,
-            ) {
+            if gpu_winner_evidence_verified(w, lane, min_warm_speedup) {
                 "pass"
             } else {
                 "FAIL"
@@ -2946,13 +2938,7 @@ fn warm_speedup_for_gate(w: &WorkloadResult) -> f64 {
         })
 }
 
-fn gpu_winner_evidence_verified(
-    w: &WorkloadResult,
-    lane: &str,
-    min_warm_speedup: f64,
-    cache_mode: &str,
-    expected_iterations: usize,
-) -> bool {
+fn gpu_winner_evidence_verified(w: &WorkloadResult, lane: &str, min_warm_speedup: f64) -> bool {
     let classification = w.dispatch_classification();
     let threshold = min_warm_speedup.max(BENCHMARK_SHIP_GATE_MIN_SPEEDUP);
     let warm_speedup = warm_speedup_for_gate(w);
@@ -2962,7 +2948,6 @@ fn gpu_winner_evidence_verified(
         && classification.rows_returned_to_cpu > 0
         && warm_speedup.is_finite()
         && warm_speedup >= threshold
-        && operation_cache_gate_verified(w, cache_mode, expected_iterations)
         && (!threshold_lane_requires_resident_groupagg_logical_spec(lane)
             || w.plan_snippet
                 .as_deref()
@@ -4438,10 +4423,11 @@ impl BenchReport {
             "Each row ties planner admission to a concrete release-lane matrix cell: \
              row count, type, cardinality, selectivity, result count, index/pruning \
              shape, retained prepared geometry, batch count, row width, output size, \
-             dispatch/output proof, correctness proof, cache/warm-run proof, and \
+             dispatch/output proof, correctness proof, cache policy, warm-run proof, and \
              measured break-even basis. Expected GPU winners must dispatch, consume \
              output, and meet their warm-run threshold; native-decline cells must not \
-             select pg_accel.\n\n",
+             select pg_accel. Privileged OS-cold certification is evaluated by \
+             the separate operation-cache gate.\n\n",
         );
         let _ = writeln!(
             out,
@@ -4455,13 +4441,7 @@ impl BenchReport {
             "|---|---|---:|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---:|---|"
         );
         for (workload, entry) in rows {
-            let status = threshold_matrix_status(
-                workload,
-                entry.lane,
-                entry.expectation,
-                &self.methodology.cache_mode,
-                self.methodology.iterations,
-            );
+            let status = threshold_matrix_status(workload, entry.lane, entry.expectation);
             let expected = threshold_matrix_expectation_label(entry.expectation);
             let observed = dispatch_evidence_label(workload);
             let decline_evidence = native_decline_evidence_label(workload);
@@ -5051,6 +5031,56 @@ impl BenchReport {
         failures
     }
 
+    /// Evaluate the optional privileged OS page-cache certification gate.
+    ///
+    /// The mandatory benchmark ship gate is intentionally warm-only. This
+    /// separate evaluator verifies the additional warm/cold evidence required
+    /// by operation families whose metadata calls for `cache-mode both`.
+    /// Keeping the checks separate prevents an unprivileged warm release run
+    /// from masquerading as cold-cache evidence or being blocked by a purge it
+    /// cannot perform.
+    #[must_use]
+    pub fn evaluate_operation_cache_gate(&self) -> Vec<BenchmarkShipGateFailure> {
+        let report = self.with_normalized_dispatch();
+        let mut failures = Vec::new();
+
+        for w in &report.workloads {
+            let Some(entry) = crate::workloads::benchmark_threshold_matrix_entry(&w.name, w.rows)
+            else {
+                continue;
+            };
+            let crate::workloads::BenchmarkLaneExpectation::GpuWinner { min_warm_speedup } =
+                entry.expectation
+            else {
+                continue;
+            };
+            if !operation_cache_gate_required(&w.name)
+                || operation_cache_gate_verified(
+                    w,
+                    &report.methodology.cache_mode,
+                    report.methodology.iterations,
+                )
+            {
+                continue;
+            }
+
+            failures.push(BenchmarkShipGateFailure {
+                workload: w.name.clone(),
+                rows: w.rows,
+                kind: BenchmarkShipGateFailureKind::ExpectedWinnerMissingCacheEvidence,
+                speedup_median: warm_speedup_for_gate(w),
+                gate_floor: min_warm_speedup.max(BENCHMARK_SHIP_GATE_MIN_SPEEDUP),
+                detail: format!(
+                    "expected GPU winner in lane `{}` requires cache-mode both evidence for \
+                     bounded cold-start cost ({})",
+                    entry.lane, entry.cache_gate
+                ),
+            });
+        }
+
+        failures
+    }
+
     /// Evaluate the benchmark-wide ship gate.
     ///
     /// This is the generic selected-row ratchet: any selected pg_accel row that
@@ -5208,25 +5238,6 @@ impl BenchReport {
                             });
                             continue;
                         }
-                        if !operation_cache_gate_verified(
-                            w,
-                            &report.methodology.cache_mode,
-                            report.methodology.iterations,
-                        ) {
-                            failures.push(BenchmarkShipGateFailure {
-                                workload: w.name.clone(),
-                                rows: w.rows,
-                                kind: BenchmarkShipGateFailureKind::ExpectedWinnerMissingCacheEvidence,
-                                speedup_median: w.speedup_median_vs_parallel,
-                                gate_floor: winner_threshold,
-                                detail: format!(
-                                    "expected GPU winner in lane `{}` requires cache-mode both \
-                                     evidence for bounded cold-start cost ({})",
-                                    entry.lane, entry.cache_gate
-                                ),
-                            });
-                            continue;
-                        }
                     }
                     crate::workloads::BenchmarkLaneExpectation::NativeDecline { reason } => {
                         if !w.dispatch_counter_captured {
@@ -5335,7 +5346,7 @@ impl BenchReport {
             "Hard release gate for selected pg_accel benchmark rows. Any crash, \
              selected Custom Scan without credited GPU dispatch, expected GPU \
              winner that stays native, expected winner missing dispatch/output \
-             evidence, threshold evidence, or required cache-mode evidence, \
+             evidence or threshold evidence, \
              native-decline lane that dispatches, selected GPU-dispatched Custom \
              Scan without `GPU Resident Pipeline: true`, or credited GPU dispatch \
              below PostgreSQL-parallel parity exits non-zero in the CLI.\n\n",
@@ -5520,7 +5531,7 @@ fn resident_lifecycle_evidence_error(workload: &WorkloadResult) -> Option<String
     None
 }
 
-/// Kind of failure observed by [`BenchReport::evaluate_benchmark_ship_gate`].
+/// Kind of failure observed by the benchmark and operation-cache ship gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchmarkShipGateFailureKind {
     /// The benchmark harness recorded a crash for this workload/scale.
@@ -5548,8 +5559,8 @@ pub enum BenchmarkShipGateFailureKind {
     /// A resident grouped winner did not prove that its EXPLAIN mode matched
     /// the successful native physical branch counter.
     ExpectedWinnerPhysicalKernelModeUnverified,
-    /// A benchmark matrix cell declared as an H3/raster GPU winner did not use
-    /// a cache mode that proves bounded cold-start cost.
+    /// An operation-cache certification row did not prove bounded cold-start
+    /// cost with complete warm/cold samples and successful OS page-cache purge.
     ExpectedWinnerMissingCacheEvidence,
     /// A selected resident winner did not provide separate construction and
     /// artifact-hit evidence plus the combined calibration view.
@@ -6653,24 +6664,12 @@ mod tests {
         // ...but the warm-subsample evidence clears it, and the gate must
         // follow the warm-subsample evidence.
         w.warm_summary = Some(mock_cache_mode_summary(CacheState::Warm, 2.0));
-        assert!(gpu_winner_evidence_verified(
-            &w,
-            "unrelated_lane",
-            1.5,
-            "warm",
-            10,
-        ));
+        assert!(gpu_winner_evidence_verified(&w, "unrelated_lane", 1.5));
 
         // With no warm_summary at all, the flat field (0.5x) governs and the
         // gate correctly fails.
         w.warm_summary = None;
-        assert!(!gpu_winner_evidence_verified(
-            &w,
-            "unrelated_lane",
-            1.5,
-            "warm",
-            10,
-        ));
+        assert!(!gpu_winner_evidence_verified(&w, "unrelated_lane", 1.5));
     }
 
     /// The h3_/raster_ cache-mode-both gate must require populated warm/cold
@@ -7909,7 +7908,7 @@ mod tests {
     }
 
     #[test]
-    fn test_benchmark_ship_gate_requires_h3_raster_cache_mode_both_for_winners() {
+    fn test_operation_cache_gate_is_separate_from_mandatory_warm_ship_gate() {
         let mut workload = mock_workload_result("h3_cell_to_parent", 1_000_000, 10.0, 50.0);
         workload.category = "gpu_h3".to_owned();
         workload.kernel_class = "h3_latlng".to_owned();
@@ -7936,7 +7935,8 @@ mod tests {
         );
 
         let warm_report = mock_report(vec![workload.clone()]);
-        let failures = warm_report.evaluate_benchmark_ship_gate();
+        assert!(warm_report.evaluate_benchmark_ship_gate().is_empty());
+        let failures = warm_report.evaluate_operation_cache_gate();
         assert_eq!(failures.len(), 1);
         assert_eq!(
             failures[0].kind,
@@ -7949,11 +7949,13 @@ mod tests {
         let mut cache_both_report = with_cache_mode(mock_report(vec![verified_workload]), "both");
         cache_both_report.methodology.iterations = 10;
         assert!(cache_both_report.evaluate_benchmark_ship_gate().is_empty());
+        assert!(cache_both_report.evaluate_operation_cache_gate().is_empty());
 
         let unproven = with_cold_cache_evidence(workload, CachePurgeState::Failed);
         let mut unproven_report = with_cache_mode(mock_report(vec![unproven]), "both");
         unproven_report.methodology.iterations = 10;
-        let failures = unproven_report.evaluate_benchmark_ship_gate();
+        assert!(unproven_report.evaluate_benchmark_ship_gate().is_empty());
+        let failures = unproven_report.evaluate_operation_cache_gate();
         assert!(failures.iter().any(|failure| {
             failure.kind == BenchmarkShipGateFailureKind::ExpectedWinnerMissingCacheEvidence
         }));

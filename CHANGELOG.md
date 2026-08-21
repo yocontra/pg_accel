@@ -87,6 +87,11 @@ claim is implied by the entries below.
   candidate binary and environment.
 - Warm performance evidence separates lifecycle construction/rebuild probes
   from artifact-hit steady state while retaining a combined end-to-end view.
+- The immutable nineteen-cell qualified-Metal release ratchet now has a
+  mandatory unprivileged warm gate and a distinct optional privileged OS
+  page-cache certification. Hosted release jobs run the warm gate and cannot
+  mislabel unavailable purge evidence as a required release failure or a cold
+  result.
 - Planner declines reuse exact serialized-query fingerprints and dependency
   state without cloning full cache entries or repeating unprofiled telemetry;
   production upper-path hooks also avoid allocating the test-only structured
