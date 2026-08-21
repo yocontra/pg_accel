@@ -1271,7 +1271,7 @@ pub fn purge_os_page_cache() -> Result<bool, Box<dyn std::error::Error>> {
 #[allow(unsafe_code, dead_code)]
 unsafe fn libc_geteuid() -> u32 {
     // Avoid pulling in the `libc` crate just for this check.
-    extern "C" {
+    unsafe extern "C" {
         fn geteuid() -> u32;
     }
     unsafe { geteuid() }
