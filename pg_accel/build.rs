@@ -18,6 +18,8 @@ fn main() {
     println!("cargo::rerun-if-env-changed=LLVM_PREFIX");
     println!("cargo::rerun-if-env-changed=LIBOMP_PREFIX");
     println!("cargo::rerun-if-env-changed=PGACCEL_PACKAGE_RELOCATABLE");
+    println!("cargo::rerun-if-env-changed=PG_CONFIG");
+    println!("cargo::rerun-if-env-changed=PGRX_PG_CONFIG_PATH");
 
     gpu_build::build_kernels();
 
@@ -52,6 +54,21 @@ mod pg_stub {
     /// postgres dlopens. Real implementations always come from postgres
     /// itself at runtime; the stubs exist purely to satisfy the loader.
     pub fn build_stub() {
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
+        let stub_rs = out_dir.join("pg_stubs_generated.rs");
+
+        // `cargo clippy/check --all-targets` compiles the test-only module even
+        // when no unversioned `pg_config` exists on PATH. Always publish a
+        // valid include target before attempting PostgreSQL discovery. The
+        // selected pgrx `pg_config` is supplied by project recipes for linked
+        // tests, where the complete symbol inventory is generated below.
+        println!("cargo::rustc-env=PG_STUBS_GENERATED={}", stub_rs.display());
+        std::fs::write(
+            &stub_rs,
+            "// No PostgreSQL binary was discoverable for this compile-only target.\n",
+        )
+        .expect("write fallback pg_stubs_generated.rs");
+
         let pg_config_path = std::env::var("PGRX_PG_CONFIG_PATH")
             .or_else(|_| std::env::var("PG_CONFIG"))
             .unwrap_or_else(|_| "pg_config".to_string());
@@ -72,12 +89,6 @@ mod pg_stub {
         }
 
         println!("cargo::rerun-if-changed={}", postgres_bin.display());
-
-        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
-        let stub_rs = out_dir.join("pg_stubs_generated.rs");
-
-        // Always emit the path so `include!` resolves even if we bail.
-        println!("cargo::rustc-env=PG_STUBS_GENERATED={}", stub_rs.display());
 
         // Extract all global T (text/function), D (data), and S (other)
         // symbols. Skip U (undefined), compiler-internal (leading double
@@ -158,10 +169,7 @@ mod pg_stub {
             rs.push_str(": [u64; 16] = [0; 16];\n");
         }
 
-        let needs_write = std::fs::read_to_string(&stub_rs).map_or(true, |e| e != rs);
-        if needs_write {
-            std::fs::write(&stub_rs, &rs).expect("write pg_stubs_generated.rs");
-        }
+        std::fs::write(&stub_rs, &rs).expect("write pg_stubs_generated.rs");
     }
 
     /// True if `s` is a valid Rust identifier (ASCII-only, per PG conventions).

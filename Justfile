@@ -247,7 +247,8 @@ lint pg="":
     fi
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
-    cargo clippy --workspace --no-default-features --features "pg$pg" --all-targets -- -D warnings
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" cargo clippy --workspace --no-default-features --features "pg$pg" --all-targets -- -D warnings
 
 # Type check one PG major. Defaults to the active supported PostgreSQL major.
 check pg="":
@@ -262,7 +263,8 @@ check pg="":
     fi
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
-    cargo check --workspace --no-default-features --features "pg$pg" --all-targets
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" cargo check --workspace --no-default-features --features "pg$pg" --all-targets
 
 # Type check every supported PostgreSQL major.
 check-matrix:
@@ -272,7 +274,8 @@ check-matrix:
     for pg in $(pg_accel_supported_pg_majors); do
         pg_accel_require_pgrx_support "$pg"
         pg_accel_require_pgrx_pg_config "$pg"
-        cargo check --workspace --no-default-features --features "pg$pg" --all-targets
+        pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+        PG_CONFIG="$pg_config" cargo check --workspace --no-default-features --features "pg$pg" --all-targets
     done
 
 # Run cargo-deny checks (licenses + advisories)
@@ -317,7 +320,7 @@ doc-parity:
 # Validate that default PG-version plumbing is centralized.
 pg-version-audit:
     ./scripts/pg_version_audit.sh
-    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_pg_source.py scripts/tests/test_setup_pg_extensions.py
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_pg_source.py scripts/tests/test_setup_pg_extensions.py scripts/tests/test_pg_stub_build_wiring.py
 
 # Validate relocatable package layout, loader metadata, and archive preservation.
 package-extension-test:
