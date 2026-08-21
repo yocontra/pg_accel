@@ -475,6 +475,7 @@ jobs:
             flex \
             git \
             libclang-dev \
+            libomp-dev \
             libreadline-dev \
             libssl-dev \
             lld \

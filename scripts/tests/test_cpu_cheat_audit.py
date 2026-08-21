@@ -6844,6 +6844,7 @@ class ReleaseWiringTests(unittest.TestCase):
         self.assertNotIn("Run real CPU-cheat audit", ci)
         for workflow in (ci, release, release_plz):
             self.assertIn("libclang-dev", workflow)
+            self.assertIn("libomp-dev", workflow)
         self.assertLess(
             release.index("Build kernels before CPU-cheat release gate"),
             release.index("Run CPU-cheat release gate"),

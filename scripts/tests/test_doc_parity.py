@@ -284,11 +284,37 @@ class LinuxPrerequisiteParityTests(unittest.TestCase):
         self.assertIn(versioned, setup)
         self.assertIn(unversioned, setup)
         self.assertLess(setup.index(versioned), setup.index(unversioned))
-        self.assertIn("generic|cpu) select_linux_llvm ;;", setup)
+        self.assertIn(
+            "generic|cpu)\n        select_linux_llvm\n"
+            "        validate_linux_openmp",
+            setup,
+        )
         self.assertIn(
             "install matching llvm-dev, clang, and libclang-dev packages",
             setup,
         )
+
+    def test_linux_openmp_runtime_is_installed_and_validated(self) -> None:
+        setup = (doc_parity.REPO_ROOT / "scripts/setup_acpp.sh").read_text()
+        justfile = (doc_parity.REPO_ROOT / "Justfile").read_text()
+
+        self.assertIn("validate_linux_openmp", setup)
+        self.assertIn('"$LLVM_PREFIX/bin/clang" -fopenmp -x c -', setup)
+        self.assertIn("install the matching libomp-dev package", setup)
+        self.assertLess(
+            setup.index("select_linux_llvm\n        validate_linux_openmp"),
+            setup.index('ACPP_PREFIX="${ACPP_PREFIX:-'),
+        )
+        self.assertIn("libomp-dev", justfile)
+
+        for relative in (
+            ".github/workflows/ci.yml",
+            ".github/workflows/release.yml",
+            ".github/workflows/release-plz.yml",
+        ):
+            workflow = (doc_parity.REPO_ROOT / relative).read_text()
+            self.assertIn("ACPP_BACKEND=generic ./scripts/setup_acpp.sh", workflow)
+            self.assertIn("libomp-dev", workflow)
 
 
 if __name__ == "__main__":

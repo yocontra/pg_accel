@@ -51,7 +51,7 @@ setup-system-deps:
         Linux)
             printf '%s\n' \
                 "Install build prerequisites with your distro package manager. For Ubuntu/Debian:" \
-                "  sudo apt-get install -y build-essential ca-certificates clang cmake curl git libreadline-dev zlib1g-dev flex bison pkg-config postgis" \
+                "  sudo apt-get install -y build-essential ca-certificates clang cmake curl git libclang-dev libomp-dev llvm-dev lld ninja-build libreadline-dev zlib1g-dev flex bison pkg-config postgis" \
                 "" \
                 "For CUDA runs, install the NVIDIA driver + CUDA toolkit, then run:" \
                 "  ACPP_BACKEND=cuda just setup-gpu"

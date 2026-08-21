@@ -121,6 +121,27 @@ select_linux_llvm() {
     exit 1
 }
 
+validate_linux_openmp() {
+    [ "$(uname -s)" = "Linux" ] || return 0
+
+    # AdaptiveCpp's generic runtime requires Clang's OpenMP headers and
+    # runtime.  Merely finding LLVM and libclang is not enough: minimal Ubuntu
+    # images install those packages without libomp, and CMake otherwise fails
+    # much later with a generic FindOpenMP error after cloning and patching the
+    # toolchain sources.  Compile and link through the selected prefix so a
+    # mismatched system OpenMP installation cannot satisfy this check.
+    if ! printf '%s\n' \
+        '#include <omp.h>' \
+        'int main(void) { return omp_get_max_threads() < 1; }' |
+        "$LLVM_PREFIX/bin/clang" -fopenmp -x c - -o /dev/null \
+            >/dev/null 2>&1; then
+        echo "error: OpenMP is unavailable for the selected LLVM/Clang prefix: $LLVM_PREFIX" >&2
+        echo "       install the matching libomp-dev package or correct LLVM_PREFIX" >&2
+        exit 1
+    fi
+    echo "Validated OpenMP for LLVM_PREFIX=$LLVM_PREFIX"
+}
+
 select_macos_llvm() {
     if [ -n "${LLVM_PREFIX:-}" ]; then
         return 0
@@ -225,7 +246,10 @@ configure_macos_metal_defaults() {
 
 case "$backend" in
     metal) configure_macos_metal_defaults ;;
-    generic|cpu) select_linux_llvm ;;
+    generic|cpu)
+        select_linux_llvm
+        validate_linux_openmp
+        ;;
 esac
 
 ACPP_PREFIX="${ACPP_PREFIX:-$PG_ACCEL_TOOL_ROOT/acpp/$backend}"
