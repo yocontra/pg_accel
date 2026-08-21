@@ -24,6 +24,15 @@ DARWIN_RUNTIME_PREREQUISITES = (
     pathlib.Path("/opt/homebrew/opt/llvm@20/lib/libLLVM.dylib"),
     pathlib.Path("/opt/homebrew/opt/libomp/lib/libomp.dylib"),
 )
+EXTENSION_VERSION_PATTERN = (
+    r"\d+\.\d+\.\d+"
+    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+    r"(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+)
+EXTENSION_SQL_NAME = re.compile(
+    rf"pg_accel--{EXTENSION_VERSION_PATTERN}"
+    rf"(?:--{EXTENSION_VERSION_PATTERN})?\.sql"
+)
 
 
 def validate_runtime_prerequisites(system: str) -> None:
@@ -253,15 +262,14 @@ def install(
 
     source_extension_dir = package_root / "share" / "extension"
     control = source_extension_dir / "pg_accel.control"
-    sql_name = re.compile(
-        r"pg_accel--\d+\.\d+\.\d+(?:--\d+\.\d+\.\d+)?\.sql"
-    )
     if source_extension_dir.is_symlink() or not source_extension_dir.is_dir():
         raise InstallError("package share/extension must be a real directory")
     sql_files = sorted(
         path
         for path in source_extension_dir.iterdir()
-        if sql_name.fullmatch(path.name) and path.is_file() and not path.is_symlink()
+        if EXTENSION_SQL_NAME.fullmatch(path.name)
+        and path.is_file()
+        and not path.is_symlink()
     )
     if control.is_symlink() or not control.is_file() or not sql_files:
         raise InstallError("package share/extension payload is incomplete")

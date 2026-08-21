@@ -29,6 +29,32 @@ INSTALLER_SPEC.loader.exec_module(install_package)
 
 
 class PackageExtensionTests(unittest.TestCase):
+    def test_extension_sql_names_accept_semver_prereleases_without_path_ambiguity(
+        self,
+    ) -> None:
+        valid = (
+            "pg_accel--1.0.0.sql",
+            "pg_accel--1.0.0-rc1.sql",
+            "pg_accel--1.0.0-rc.1+metal.arm64.sql",
+            "pg_accel--0.9.0-beta1--1.0.0-rc1.sql",
+        )
+        invalid = (
+            "pg_accel--1.0.sql",
+            "pg_accel--1.0.0-.sql",
+            "pg_accel--1.0.0--rc1.sql",
+            "pg_accel--1.0.0-rc_1.sql",
+            "pg_accel--1.0.0/rc1.sql",
+            "pg_accel--1.0.0-rc1--1.0.0--final.sql",
+        )
+        for name in valid:
+            with self.subTest(name=name):
+                self.assertIsNotNone(package_extension.EXTENSION_SQL_NAME.fullmatch(name))
+                self.assertIsNotNone(install_package.EXTENSION_SQL_NAME.fullmatch(name))
+        for name in invalid:
+            with self.subTest(name=name):
+                self.assertIsNone(package_extension.EXTENSION_SQL_NAME.fullmatch(name))
+                self.assertIsNone(install_package.EXTENSION_SQL_NAME.fullmatch(name))
+
     def test_discovers_extension_under_arbitrary_pg_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

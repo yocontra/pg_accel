@@ -92,6 +92,10 @@ claim is implied by the entries below.
   page-cache certification. Hosted release jobs run the warm gate and cannot
   mislabel unavailable purge evidence as a required release failure or a cold
   result.
+- Release packaging and its standalone installer accept strict SemVer
+  prerelease/build identifiers in PostgreSQL extension SQL filenames, including
+  the `1.0.0-rc1` candidate, while continuing to reject ambiguous separators
+  and unexpected payload names.
 - Planner declines reuse exact serialized-query fingerprints and dependency
   state without cloning full cache entries or repeating unprofiled telemetry;
   production upper-path hooks also avoid allocating the test-only structured
