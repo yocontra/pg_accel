@@ -4273,7 +4273,11 @@ fn run_workload_with_config(
         measured_iterations: result.iterations.len(),
     });
     result.function_srf_kernel_dispatched = dispatch_classification.function_srf_kernel_dispatched;
-    result.gpu_kernel_dispatched = dispatch_classification.gpu_kernel_dispatched;
+    let lifecycle_artifact_reuse_credited = plan_selected
+        && !plan_explicitly_not_dispatched
+        && report::derived_output_artifact_reuse_evidence_verified(&result);
+    result.gpu_kernel_dispatched =
+        dispatch_classification.gpu_kernel_dispatched || lifecycle_artifact_reuse_credited;
     emit_dispatch_classification_warning(
         DispatchWarningInput {
             workload: workload.name(),
@@ -5307,7 +5311,12 @@ fn emit_dispatch_classification_warning(input: DispatchWarningInput<'_>, result:
         );
         return;
     }
-    if input.plan_selected && result.gpu_kernel_execution_delta == 0 {
+    let lifecycle_artifact_reuse_credited =
+        report::derived_output_artifact_reuse_evidence_verified(result);
+    if input.plan_selected
+        && result.gpu_kernel_execution_delta == 0
+        && !lifecycle_artifact_reuse_credited
+    {
         eprintln!(
             "[dispatch] WARNING: {} @ {}: pg_accel plan selected but runtime \
              kernel counter delta is zero; counting as plan-selected only",
@@ -5345,7 +5354,10 @@ fn emit_dispatch_classification_warning(input: DispatchWarningInput<'_>, result:
             input.workload, input.rows, result.gpu_kernel_execution_delta
         );
     }
-    if input.plan_text_dispatched && result.gpu_kernel_execution_delta == 0 {
+    if input.plan_text_dispatched
+        && result.gpu_kernel_execution_delta == 0
+        && !lifecycle_artifact_reuse_credited
+    {
         eprintln!(
             "[dispatch] WARNING: {} @ {}: plan text claimed GPU dispatch but \
              runtime kernel counter delta is zero",

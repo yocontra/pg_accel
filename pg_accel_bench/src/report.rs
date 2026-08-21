@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
@@ -12,7 +12,7 @@ const NO_DISPATCH_TIMING_SKEW_THRESHOLD: f64 = 0.10;
 const WARMUP_JIT_POST_FIRST_WARN_MS: f64 = 1_000.0;
 const WARMUP_JIT_RELATIVE_WARN_RATIO: f64 = 8.0;
 pub const NO_DISPATCH_AUDIT_SCHEMA_VERSION: u32 = 1;
-pub const RESIDENT_BOUNDARY_AUDIT_SCHEMA_VERSION: u32 = 1;
+pub const RESIDENT_BOUNDARY_AUDIT_SCHEMA_VERSION: u32 = 2;
 pub const BENCHMARK_FAILURE_LEDGER_SCHEMA_VERSION: u32 = 1;
 const FUNCTION_SRF_GPU_FUNCTIONS: &[&str] = &[
     "h3_latlng_to_cell",
@@ -386,7 +386,10 @@ pub struct WorkloadResult {
     /// Whether a GPU kernel is credited as dispatched for this benchmark row.
     ///
     /// This is true for Custom Scan runtime dispatch and for recognized
-    /// function/SRF GPU kernels such as H3 bulk operations.
+    /// function/SRF GPU kernels such as H3 bulk operations. A typed
+    /// derived-output lane can also receive credit when a separate sealed
+    /// lifecycle probe proves GPU construction and every measured execution
+    /// proves exact artifact reuse without fresh kernel work.
     #[serde(default)]
     pub gpu_kernel_dispatched: bool,
     /// Whether the dispatch came from a function/SRF GPU kernel rather than a
@@ -438,8 +441,10 @@ pub struct WorkloadResult {
     #[serde(default)]
     pub dispatch_counter_captured: bool,
     /// Delta of `pg_accel_kernel_executions()`/`pg_accel_stats()` for the
-    /// accel backend across the measured workload. This is the source of
-    /// truth for GPU-dispatched wins.
+    /// accel backend across the measured workload. This is the ordinary
+    /// source of truth for GPU-dispatched wins; the strictly typed
+    /// derived-output exception keeps its construction kernel in
+    /// `artifact_lifecycle_probe` instead of mixing it into this delta.
     #[serde(default)]
     pub gpu_kernel_execution_delta: u64,
     /// Delta of `pg_accel_stats().queries_accelerated` captured on the same
@@ -700,18 +705,23 @@ pub struct ResidentBoundaryAuditRow {
 #[serde(rename_all = "snake_case")]
 pub enum ResidentBoundaryAuditStatus {
     ReportedResidentPipeline,
+    LifecycleProducedArtifactReuse,
     NonResidentPipeline,
     MissingResidentPipelineEvidence,
 }
 
 impl ResidentBoundaryAuditStatus {
     const fn is_failure(self) -> bool {
-        !matches!(self, Self::ReportedResidentPipeline)
+        !matches!(
+            self,
+            Self::ReportedResidentPipeline | Self::LifecycleProducedArtifactReuse
+        )
     }
 
     const fn as_str(self) -> &'static str {
         match self {
             Self::ReportedResidentPipeline => "reported_resident_pipeline",
+            Self::LifecycleProducedArtifactReuse => "lifecycle_produced_artifact_reuse",
             Self::NonResidentPipeline => "non_resident_pipeline",
             Self::MissingResidentPipelineEvidence => "missing_resident_pipeline_evidence",
         }
@@ -744,8 +754,11 @@ impl ResidentBoundaryAudit {
         out.push('\n');
         out.push_str(
             "Every selected pg_accel Custom Scan must carry explicit \
-             `GPU Resident Pipeline: true` proof. CPU/PostgreSQL boundary reasons are \
-             preserved as diagnostics, but they are failures for SQL-plan admission.\n\n",
+             `GPU Resident Pipeline: true` proof. A typed derived-output lane may also \
+             prove that one sealed lifecycle GPU kernel constructed the exact final \
+             artifact and that every measured warm query consumed a dependency-stable \
+             hit without fresh GPU work. CPU/PostgreSQL boundary reasons are preserved \
+             as diagnostics, but they are failures for SQL-plan admission.\n\n",
         );
         let _ = writeln!(
             out,
@@ -1479,6 +1492,10 @@ fn infer_dispatch_classification(
     let output_consumed = w.accel_output_rows_consumed > 0;
     let selected_queries_consumed = usize::try_from(w.pg_accel_queries_accelerated_delta)
         .is_ok_and(|queries| queries >= w.iterations.len());
+    let lifecycle_artifact_reuse_credited = plan_selected
+        && !explicit_gpu_dispatch_disabled
+        && !counter_proves_kernel
+        && derived_output_artifact_reuse_evidence_error(w).is_none();
     let function_srf_kernel_dispatched = function_candidate
         && !explicit_gpu_dispatch_disabled
         && !plan_selected
@@ -1495,7 +1512,9 @@ fn infer_dispatch_classification(
         && output_consumed
         && w.pg_accel_stock_exec_delta == 0;
 
-    let gpu_kernel_dispatched = custom_scan_gpu_dispatched || function_srf_kernel_dispatched;
+    let gpu_kernel_dispatched = custom_scan_gpu_dispatched
+        || function_srf_kernel_dispatched
+        || lifecycle_artifact_reuse_credited;
     let custom_scan_selected_not_dispatched = plan_selected && !gpu_kernel_dispatched;
     let planner_declined = !plan_selected && !function_srf_kernel_dispatched;
     let function_kernel_count = if function_srf_kernel_dispatched {
@@ -2852,6 +2871,8 @@ fn format_iteration_indexes(indexes: &[usize]) -> String {
 fn dispatch_evidence_label(w: &WorkloadResult) -> &'static str {
     if w.function_srf_kernel_dispatched {
         "function_srf_dispatch"
+    } else if derived_output_artifact_reuse_evidence_verified(w) {
+        "custom_scan_lifecycle_artifact_reuse"
     } else if w.custom_scan_selected_not_dispatched {
         "custom_scan_selected_not_dispatched"
     } else if w.planner_declined {
@@ -2942,9 +2963,11 @@ fn gpu_winner_evidence_verified(w: &WorkloadResult, lane: &str, min_warm_speedup
     let classification = w.dispatch_classification();
     let threshold = min_warm_speedup.max(BENCHMARK_SHIP_GATE_MIN_SPEEDUP);
     let warm_speedup = warm_speedup_for_gate(w);
+    let dispatch_proven =
+        w.gpu_kernel_execution_delta > 0 || derived_output_artifact_reuse_evidence_verified(w);
     classification.gpu_kernel_dispatched
         && w.dispatch_counter_captured
-        && w.gpu_kernel_execution_delta > 0
+        && dispatch_proven
         && classification.rows_returned_to_cpu > 0
         && warm_speedup.is_finite()
         && warm_speedup >= threshold
@@ -3103,21 +3126,31 @@ fn no_dispatch_audit_row(w: &WorkloadResult) -> Option<NoDispatchAuditRow> {
 }
 
 fn resident_boundary_audit_row(w: &WorkloadResult) -> ResidentBoundaryAuditRow {
-    let (status, detail) = match w.gpu_resident_pipeline {
-        GpuResidentPipelineStatus::Reported => (
+    let lifecycle_artifact_reuse = derived_output_artifact_reuse_evidence_error(w).is_none();
+    let (status, detail) = if lifecycle_artifact_reuse
+        && w.gpu_resident_pipeline == GpuResidentPipelineStatus::Reported
+    {
+        (
+            ResidentBoundaryAuditStatus::LifecycleProducedArtifactReuse,
+            "sealed lifecycle evidence proves GPU construction of the exact final artifact and complete dependency-stable warm-hit reuse"
+                .to_owned(),
+        )
+    } else if w.gpu_resident_pipeline == GpuResidentPipelineStatus::Reported {
+        (
             ResidentBoundaryAuditStatus::ReportedResidentPipeline,
             "selected Custom Scan reported a GPU-resident pipeline".to_owned(),
-        ),
-        _ if w.gpu_resident_boundary_reason.is_some() => (
+        )
+    } else if w.gpu_resident_boundary_reason.is_some() {
+        (
             ResidentBoundaryAuditStatus::NonResidentPipeline,
             "selected Custom Scan recorded a CPU/PostgreSQL boundary; the hard GPU-only gate should have declined it"
                 .to_owned(),
-        ),
-        _ => (
+        )
+    } else {
+        (
             ResidentBoundaryAuditStatus::MissingResidentPipelineEvidence,
-            "selected Custom Scan lacks `GPU Resident Pipeline: true` proof"
-                .to_owned(),
-        ),
+            "selected Custom Scan lacks `GPU Resident Pipeline: true` proof".to_owned(),
+        )
     };
     ResidentBoundaryAuditRow {
         workload: w.name.clone(),
@@ -4615,6 +4648,11 @@ impl BenchReport {
             .iter()
             .filter(|w| w.function_srf_kernel_dispatched)
             .count();
+        let lifecycle_artifact_reuse_credited = report
+            .workloads
+            .iter()
+            .filter(|w| derived_output_artifact_reuse_evidence_verified(w))
+            .count();
         let counter_capture = report
             .workloads
             .iter()
@@ -4678,9 +4716,11 @@ impl BenchReport {
         out.push_str("## Dispatch Classification\n\n");
         out.push_str(
             "Plan selection and runtime GPU work are counted separately. Runtime counter deltas \
-             are the source of truth for GPU-dispatched geomeans; plan-only pg_accel rows and \
-             rows with stock executor fallback are excluded. Release-gate fields in this section \
-             are derived from the existing workload counters and captured plan text.\n\n",
+             are the source of truth for ordinary GPU-dispatched geomeans. A typed \
+             derived-output lane may instead use a sealed lifecycle kernel plus complete \
+             dependency-stable artifact-hit evidence; plan-only pg_accel rows and rows with \
+             stock executor fallback are excluded. Release-gate fields in this section are \
+             derived from workload counters, lifecycle captures, and captured plan text.\n\n",
         );
         let _ = writeln!(out, "| Classification | Workloads |");
         let _ = writeln!(out, "|---|---:|");
@@ -4690,6 +4730,10 @@ impl BenchReport {
             "| pg_accel Custom Scan plan selected | {plan_selected} |"
         );
         let _ = writeln!(out, "| GPU kernel dispatched | {gpu_kernel_dispatched} |");
+        let _ = writeln!(
+            out,
+            "| Lifecycle-produced artifact reuse credited | {lifecycle_artifact_reuse_credited} |"
+        );
         let _ = writeln!(
             out,
             "| Function/SRF kernel dispatched | {function_srf_kernel_dispatched} |"
@@ -4750,7 +4794,9 @@ impl BenchReport {
         out.push_str(
             "Each measured row is assigned one explicit release-gate classification. \
              `rows_returned_to_cpu` is the accel-side output consumption count; \
-             `function_kernel_count` is populated only for credited function/SRF dispatch.\n\n",
+             `function_kernel_count` is populated only for credited function/SRF dispatch, \
+             and `custom_scan_lifecycle_artifact_reuse` means the fresh kernel is retained in \
+             the separate lifecycle evidence rather than the warm timing series.\n\n",
         );
         let _ = writeln!(
             out,
@@ -5113,14 +5159,26 @@ impl BenchReport {
                         == crate::workloads::ThresholdEvidenceEligibility::NativeDeclineOnly
                 });
             if w.custom_scan_selected_not_dispatched && !is_native_decline {
+                let detail = if crate::workloads::workload_metadata(&w.name)
+                    .is_some_and(|metadata| metadata.evidence.derived_output_artifact_reuse())
+                {
+                    let evidence_error = derived_output_artifact_reuse_evidence_error(w);
+                    format!(
+                        "typed derived-output Custom Scan lacked admissible lifecycle artifact reuse evidence: {}",
+                        evidence_error
+                            .as_deref()
+                            .unwrap_or("evidence classifier mismatch")
+                    )
+                } else {
+                    "pg_accel Custom Scan selected without credited GPU kernel dispatch".to_owned()
+                };
                 failures.push(BenchmarkShipGateFailure {
                     workload: w.name.clone(),
                     rows: w.rows,
                     kind: BenchmarkShipGateFailureKind::SelectedPlanMissedDispatch,
                     speedup_median: w.speedup_median_vs_parallel,
                     gate_floor: BENCHMARK_SHIP_GATE_MIN_SPEEDUP,
-                    detail: "pg_accel Custom Scan selected without credited GPU kernel dispatch"
-                        .to_owned(),
+                    detail,
                 });
                 continue;
             }
@@ -5129,7 +5187,7 @@ impl BenchReport {
                 && w.plan_selected
                 && w.gpu_kernel_dispatched
                 && w.warm_summary.is_some()
-                && let Some(detail) = resident_lifecycle_evidence_error(w)
+                && let Some(detail) = selected_resident_lifecycle_evidence_error(w)
             {
                 failures.push(BenchmarkShipGateFailure {
                     workload: w.name.clone(),
@@ -5162,7 +5220,8 @@ impl BenchReport {
                             continue;
                         }
                         if !w.dispatch_counter_captured
-                            || w.gpu_kernel_execution_delta == 0
+                            || (w.gpu_kernel_execution_delta == 0
+                                && !derived_output_artifact_reuse_evidence_verified(w))
                             || classification.rows_returned_to_cpu == 0
                         {
                             failures.push(BenchmarkShipGateFailure {
@@ -5446,6 +5505,174 @@ pub const H3_LANE_GATE_MIN_WARM_SPEEDUP: f64 = 1.0;
 /// because they do not dispatch a GPU kernel and are handled by planner
 /// decline evidence instead.
 pub const BENCHMARK_SHIP_GATE_MIN_SPEEDUP: f64 = 1.0;
+
+/// Whether this row carries the complete alternate dispatch proof used by a
+/// typed derived-output lane. The lifecycle probe must build the exact final
+/// output with GPU work; every measured warm execution must then prove a
+/// dependency-stable artifact hit with no fresh kernel or stock fallback.
+///
+/// This is deliberately stricter than the general resident lifecycle gate.
+/// It is the only evidence allowed to credit a selected Custom Scan whose
+/// measured kernel delta is zero.
+#[must_use]
+pub fn derived_output_artifact_reuse_evidence_verified(workload: &WorkloadResult) -> bool {
+    derived_output_artifact_reuse_evidence_error(workload).is_none()
+}
+
+fn derived_output_artifact_reuse_evidence_error(workload: &WorkloadResult) -> Option<String> {
+    let eligible = crate::workloads::workload_metadata(&workload.name)
+        .is_some_and(|metadata| metadata.evidence.derived_output_artifact_reuse());
+    if !eligible {
+        return Some(
+            "workload metadata does not authorize derived-output artifact reuse".to_owned(),
+        );
+    }
+    if !workload.resident_lane
+        || workload
+            .resident_load_ms
+            .is_none_or(|milliseconds| !milliseconds.is_finite() || milliseconds <= 0.0)
+    {
+        return Some("derived-output reuse lacks a positive off-clock resident load".to_owned());
+    }
+
+    let rows = u64::try_from(workload.rows).unwrap_or(u64::MAX);
+    let Some(probe) = workload.artifact_lifecycle_probe.as_ref() else {
+        return Some("derived-output lifecycle probe is missing".to_owned());
+    };
+    if probe.phase != "lifecycle"
+        || probe.pair_index.is_some()
+        || probe.error.is_some()
+        || probe.artifact.hits != 0
+        || probe
+            .artifact
+            .builds
+            .saturating_add(probe.artifact.rebuilds)
+            != 1
+        || probe.artifact.ensures() != 1
+        || probe.artifact.artifact_bytes_observed == 0
+        || probe.artifact.construction_bytes != probe.artifact.artifact_bytes_observed
+        || probe.artifact.construction_us == 0
+        || probe.artifact.preparation_us < probe.artifact.construction_us
+        || probe.refresh_us == 0
+        || probe.refreshed_relations != 1
+        || probe.refreshed_rows != rows
+        || probe.queries_accelerated != 1
+        || probe.gpu_kernel_executions == 0
+        || probe.stock_exec_count != 0
+        || probe.output_rows_consumed != rows
+        || probe.rows_dispatched != 0
+        || probe.batches_executed != 0
+        || probe.gpu_rows_processed != 0
+    {
+        return Some(
+            "derived-output lifecycle probe did not prove one exact GPU-built final artifact, full output consumption, and zero fallback"
+                .to_owned(),
+        );
+    }
+    if probe.dependencies_before.len() != 1
+        || probe.dependencies_before != probe.dependencies_after
+        || probe.dependencies_after[0].row_count != rows
+        || probe.dependencies_after[0].raw_bytes == 0
+        || probe.dependencies_after[0].derived_bytes != probe.artifact.artifact_bytes_observed
+    {
+        return Some(
+            "derived-output lifecycle dependency identity or retained-byte accounting is invalid"
+                .to_owned(),
+        );
+    }
+
+    let warm_count = workload
+        .iterations
+        .iter()
+        .filter(|iteration| iteration.cache_state == CacheState::Warm)
+        .count();
+    if warm_count == 0 || workload.artifact_steady_state_captures.len() != warm_count {
+        return Some(format!(
+            "derived-output steady-state evidence covers {} of {warm_count} warm pairs",
+            workload.artifact_steady_state_captures.len()
+        ));
+    }
+
+    let mut pair_indexes = BTreeSet::new();
+    for capture in &workload.artifact_steady_state_captures {
+        let pair_index_valid = capture.pair_index.is_some_and(|index| {
+            pair_indexes.insert(index)
+                && workload
+                    .iterations
+                    .get(index)
+                    .is_some_and(|iteration| iteration.cache_state == CacheState::Warm)
+        });
+        if capture.phase != "steady_state"
+            || !pair_index_valid
+            || capture.iteration.cache_state != CacheState::Warm
+            || capture.error.is_some()
+            || capture.artifact.hits != 1
+            || capture.artifact.builds != 0
+            || capture.artifact.rebuilds != 0
+            || capture.artifact.ensures() != 1
+            || capture.artifact.artifact_bytes_observed != probe.artifact.artifact_bytes_observed
+            || capture.artifact.construction_bytes != 0
+            || capture.artifact.construction_us != 0
+            || capture.artifact.preparation_us == 0
+            || capture.artifact_policy != probe.artifact_policy
+            || capture.refresh_us != 0
+            || capture.refreshed_relations != 0
+            || capture.refreshed_rows != 0
+            || capture.dependencies_before != probe.dependencies_after
+            || capture.dependencies_after != probe.dependencies_after
+            || capture.queries_accelerated != 1
+            || capture.gpu_kernel_executions != 0
+            || capture.stock_exec_count != 0
+            || capture.output_rows_consumed != rows
+            || capture.rows_dispatched != 0
+            || capture.batches_executed != 0
+            || capture.gpu_rows_processed != 0
+        {
+            return Some(format!(
+                "derived-output steady-state pair {} did not prove one exact dependency-stable artifact hit with zero fresh GPU work and zero fallback",
+                capture
+                    .pair_index
+                    .map_or_else(|| "?".to_owned(), |index| index.to_string())
+            ));
+        }
+    }
+
+    if workload
+        .combined_warm_summary
+        .as_ref()
+        .is_none_or(|summary| summary.n != warm_count.saturating_add(1))
+    {
+        return Some(
+            "derived-output evidence has no combined lifecycle plus warm-hit calibration summary"
+                .to_owned(),
+        );
+    }
+
+    let measured_pairs = u64::try_from(workload.iterations.len()).unwrap_or(u64::MAX);
+    let expected_output_rows = rows.saturating_mul(measured_pairs);
+    if !workload.dispatch_counter_captured
+        || workload.dispatch_counter_error.is_some()
+        || workload.pg_accel_queries_accelerated_delta != measured_pairs
+        || workload.pg_accel_stock_exec_delta != 0
+        || workload.accel_output_rows_consumed != expected_output_rows
+    {
+        return Some(
+            "aggregate counters do not cover every measured derived-output query and output row"
+                .to_owned(),
+        );
+    }
+    None
+}
+
+fn selected_resident_lifecycle_evidence_error(workload: &WorkloadResult) -> Option<String> {
+    if crate::workloads::workload_metadata(&workload.name)
+        .is_some_and(|metadata| metadata.evidence.derived_output_artifact_reuse())
+    {
+        derived_output_artifact_reuse_evidence_error(workload)
+    } else {
+        resident_lifecycle_evidence_error(workload)
+    }
+}
 
 fn resident_lifecycle_evidence_error(workload: &WorkloadResult) -> Option<String> {
     let Some(probe) = workload.artifact_lifecycle_probe.as_ref() else {
@@ -6407,6 +6634,210 @@ mod tests {
         workload.combined_warm_summary =
             CacheModeSummary::from_iterations(CacheState::Warm, &combined);
         workload
+    }
+
+    fn valid_derived_output_artifact_reuse() -> WorkloadResult {
+        let mut workload =
+            mock_workload_result("raster_resident_exact_reclass", 10_000, 10.0, 20.0);
+        workload.category = "gpu_raster".to_owned();
+        workload.kernel_class = "raster".to_owned();
+        workload.plan_selected = true;
+        workload.dispatch_counter_captured = true;
+        workload.gpu_kernel_execution_delta = 0;
+        workload.pg_accel_queries_accelerated_delta = 10;
+        workload.pg_accel_rows_dispatched_delta = 0;
+        workload.pg_accel_batches_executed_delta = 0;
+        workload.pg_accel_gpu_rows_processed_delta = 0;
+        workload.pg_accel_stock_exec_delta = 0;
+        workload.accel_output_rows_consumed = 100_000;
+        workload.resident_lane = true;
+        workload.resident_load_ms = Some(25.0);
+        workload.plan_snippet = Some(
+            "Custom Scan (GpuAccelRaster)\n  Strategy: GpuRaster\n  \
+             GPU Resident Pipeline: true\n  GPU Resident Proof Version: 2\n  \
+             GPU Resident Operator Class: resident_expression\n  \
+             GPU Resident Stage Mask: 28673\n  GPU Resident Device Columns: 1\n  \
+             GPU Resident Boundary: none: no CPU boundary\n"
+                .to_owned(),
+        );
+
+        let dependency = ResidentDependencyIdentity {
+            relid: 42,
+            generation: 2,
+            global_generation: 2,
+            relfilenode: 7,
+            row_count: 10_000,
+            raw_bytes: 2_000_000,
+            derived_bytes: 1_000_000,
+        };
+        let lifecycle_iteration = workload.iterations[0].clone();
+        workload.artifact_lifecycle_probe = Some(ResidentLifecycleCapture {
+            phase: "lifecycle".to_owned(),
+            pair_index: None,
+            iteration: lifecycle_iteration.clone(),
+            artifact: ArtifactLifecycleDelta {
+                builds: 1,
+                artifact_bytes_observed: 1_000_000,
+                construction_bytes: 1_000_000,
+                construction_us: 500,
+                preparation_us: 700,
+                ..ArtifactLifecycleDelta::default()
+            },
+            artifact_policy: None,
+            refresh_us: 250,
+            refreshed_relations: 1,
+            refreshed_rows: 10_000,
+            dependencies_before: vec![dependency.clone()],
+            dependencies_after: vec![dependency.clone()],
+            queries_accelerated: 1,
+            rows_dispatched: 0,
+            batches_executed: 0,
+            stock_exec_count: 0,
+            gpu_rows_processed: 0,
+            gpu_kernel_executions: 1,
+            output_rows_consumed: 10_000,
+            error: None,
+        });
+        workload.artifact_steady_state_captures = workload
+            .iterations
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(pair_index, iteration)| ResidentLifecycleCapture {
+                phase: "steady_state".to_owned(),
+                pair_index: Some(pair_index),
+                iteration,
+                artifact: ArtifactLifecycleDelta {
+                    hits: 1,
+                    artifact_bytes_observed: 1_000_000,
+                    preparation_us: 5,
+                    ..ArtifactLifecycleDelta::default()
+                },
+                artifact_policy: None,
+                refresh_us: 0,
+                refreshed_relations: 0,
+                refreshed_rows: 0,
+                dependencies_before: vec![dependency.clone()],
+                dependencies_after: vec![dependency.clone()],
+                queries_accelerated: 1,
+                rows_dispatched: 0,
+                batches_executed: 0,
+                stock_exec_count: 0,
+                gpu_rows_processed: 0,
+                gpu_kernel_executions: 0,
+                output_rows_consumed: 10_000,
+                error: None,
+            })
+            .collect();
+        let mut combined = vec![lifecycle_iteration];
+        combined.extend(workload.iterations.iter().cloned());
+        workload.combined_warm_summary =
+            CacheModeSummary::from_iterations(CacheState::Warm, &combined);
+        workload
+    }
+
+    #[test]
+    fn derived_output_artifact_reuse_is_strict_alternate_dispatch_evidence() {
+        let workload = valid_derived_output_artifact_reuse();
+        assert!(derived_output_artifact_reuse_evidence_verified(&workload));
+
+        let classification = workload.dispatch_classification();
+        assert!(classification.plan_selected);
+        assert!(classification.gpu_kernel_dispatched);
+        assert!(!classification.custom_scan_selected_not_dispatched);
+        assert_eq!(
+            classification.gpu_resident_pipeline,
+            GpuResidentPipelineStatus::Reported
+        );
+        let report = mock_report(vec![workload]);
+        assert!(report.evaluate_benchmark_ship_gate().is_empty());
+        let markdown = report.to_markdown();
+        assert!(markdown.contains("| Lifecycle-produced artifact reuse credited | 1 |"));
+        assert!(markdown.contains("custom_scan_lifecycle_artifact_reuse"));
+    }
+
+    #[test]
+    fn derived_output_artifact_reuse_rejects_every_incomplete_evidence_layer() {
+        let valid = valid_derived_output_artifact_reuse();
+
+        let mut wrong_workload = valid.clone();
+        wrong_workload.name = "generic_gpu_dispatch".to_owned();
+        assert!(
+            derived_output_artifact_reuse_evidence_error(&wrong_workload)
+                .is_some_and(|error| error.contains("metadata does not authorize"))
+        );
+
+        let mut missing_load = valid.clone();
+        missing_load.resident_load_ms = None;
+        assert!(
+            derived_output_artifact_reuse_evidence_error(&missing_load)
+                .is_some_and(|error| error.contains("resident load"))
+        );
+
+        let mut missing_probe = valid.clone();
+        missing_probe.artifact_lifecycle_probe = None;
+        assert!(
+            derived_output_artifact_reuse_evidence_error(&missing_probe)
+                .is_some_and(|error| error.contains("probe is missing"))
+        );
+
+        let mut missing_lifecycle_kernel = valid.clone();
+        missing_lifecycle_kernel
+            .artifact_lifecycle_probe
+            .as_mut()
+            .expect("valid probe")
+            .gpu_kernel_executions = 0;
+        assert!(
+            derived_output_artifact_reuse_evidence_error(&missing_lifecycle_kernel)
+                .is_some_and(|error| error.contains("one exact GPU-built"))
+        );
+        let failures = mock_report(vec![missing_lifecycle_kernel]).evaluate_benchmark_ship_gate();
+        assert!(failures.iter().any(|failure| {
+            failure.kind == BenchmarkShipGateFailureKind::SelectedPlanMissedDispatch
+                && failure
+                    .detail
+                    .contains("lacked admissible lifecycle artifact reuse")
+        }));
+
+        let mut invalid_dependency = valid.clone();
+        invalid_dependency
+            .artifact_lifecycle_probe
+            .as_mut()
+            .expect("valid probe")
+            .dependencies_after[0]
+            .derived_bytes = 1;
+        assert!(
+            derived_output_artifact_reuse_evidence_error(&invalid_dependency)
+                .is_some_and(|error| error.contains("dependency identity"))
+        );
+
+        let mut incomplete_hits = valid.clone();
+        incomplete_hits.artifact_steady_state_captures.pop();
+        assert!(
+            derived_output_artifact_reuse_evidence_error(&incomplete_hits)
+                .is_some_and(|error| error.contains("covers 9 of 10"))
+        );
+
+        let mut fresh_steady_kernel = valid.clone();
+        fresh_steady_kernel.artifact_steady_state_captures[0].gpu_kernel_executions = 1;
+        assert!(
+            derived_output_artifact_reuse_evidence_error(&fresh_steady_kernel)
+                .is_some_and(|error| error.contains("zero fresh GPU work"))
+        );
+
+        let mut missing_combined = valid.clone();
+        missing_combined.combined_warm_summary = None;
+        assert!(
+            derived_output_artifact_reuse_evidence_error(&missing_combined)
+                .is_some_and(|error| error.contains("combined lifecycle"))
+        );
+
+        let mut incomplete_aggregate_counters = valid;
+        incomplete_aggregate_counters.accel_output_rows_consumed -= 1;
+        assert!(
+            derived_output_artifact_reuse_evidence_error(&incomplete_aggregate_counters)
+                .is_some_and(|error| error.contains("aggregate counters"))
+        );
     }
 
     #[test]
@@ -9200,6 +9631,48 @@ mod tests {
             audit
                 .to_markdown()
                 .contains("missing_resident_pipeline_evidence")
+        );
+    }
+
+    #[test]
+    fn resident_boundary_audit_accepts_lifecycle_produced_artifact_reuse() {
+        let audit =
+            mock_report(vec![valid_derived_output_artifact_reuse()]).resident_boundary_audit();
+
+        assert_eq!(audit.selected_custom_scan_rows, 1);
+        assert_eq!(audit.passed_rows, 1);
+        assert_eq!(audit.failed_rows, 0);
+        assert!(!audit.has_failures());
+        assert_eq!(
+            audit.rows[0].status,
+            ResidentBoundaryAuditStatus::LifecycleProducedArtifactReuse
+        );
+        assert!(audit.rows[0].gpu_kernel_dispatched);
+        assert_eq!(audit.rows[0].gpu_resident_pipeline, "reported");
+        assert!(audit.rows[0].boundary_reason.is_none());
+        assert!(
+            audit
+                .to_markdown()
+                .contains("lifecycle_produced_artifact_reuse")
+        );
+    }
+
+    #[test]
+    fn resident_boundary_audit_rejects_unbuilt_artifact_reuse() {
+        let mut workload = valid_derived_output_artifact_reuse();
+        workload
+            .artifact_lifecycle_probe
+            .as_mut()
+            .expect("valid probe")
+            .gpu_kernel_executions = 0;
+        let audit = mock_report(vec![workload]).resident_boundary_audit();
+
+        assert_eq!(audit.passed_rows, 0);
+        assert_eq!(audit.failed_rows, 1);
+        assert!(audit.has_failures());
+        assert_ne!(
+            audit.rows[0].status,
+            ResidentBoundaryAuditStatus::LifecycleProducedArtifactReuse
         );
     }
 

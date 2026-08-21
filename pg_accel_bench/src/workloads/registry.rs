@@ -154,6 +154,7 @@ impl EvidenceEligibility {
     const CACHE_MODE_BOTH: u8 = 1 << 1;
     const FP64_CALIBRATION: u8 = 1 << 2;
     const H3_RESIDENT_ROLLUP: u8 = 1 << 3;
+    const DERIVED_OUTPUT_ARTIFACT_REUSE: u8 = 1 << 4;
 
     const NONE: Self = Self {
         threshold: ThresholdEvidenceEligibility::NotGated,
@@ -178,6 +179,14 @@ impl EvidenceEligibility {
     #[must_use]
     pub const fn h3_resident_rollup(self) -> bool {
         self.flags & Self::H3_RESIDENT_ROLLUP != 0
+    }
+
+    /// The selected path constructs the exact final output with a GPU kernel
+    /// in a sealed lifecycle probe, then serves measured warm queries from a
+    /// dependency-stamped derived artifact without launching a fresh kernel.
+    #[must_use]
+    pub const fn derived_output_artifact_reuse(self) -> bool {
+        self.flags & Self::DERIVED_OUTPUT_ARTIFACT_REUSE != 0
     }
 }
 
@@ -666,7 +675,8 @@ const RASTER_NATIVE_DECLINE: EvidenceEligibility = EvidenceEligibility {
 };
 const RASTER_WINNER: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::GpuWinner,
-    flags: EvidenceEligibility::CACHE_MODE_BOTH,
+    flags: EvidenceEligibility::CACHE_MODE_BOTH
+        | EvidenceEligibility::DERIVED_OUTPUT_ARTIFACT_REUSE,
 };
 const FP64_CALIBRATION: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::NotGated,
@@ -1567,6 +1577,18 @@ mod tests {
                     entry
                         .required_extensions
                         .contains(&RequiredExtension::PostgisRaster)
+                );
+                assert_eq!(
+                    entry.name == "raster_resident_exact_reclass",
+                    entry.evidence.derived_output_artifact_reuse(),
+                    "{} derived-output artifact policy",
+                    entry.name
+                );
+            } else {
+                assert!(
+                    !entry.evidence.derived_output_artifact_reuse(),
+                    "{} unexpectedly credits derived-output artifact reuse",
+                    entry.name
                 );
             }
         }

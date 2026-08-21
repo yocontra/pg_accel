@@ -151,7 +151,7 @@ pub const WINDOW_LAG: WindowVariant = WindowVariant {
               FROM bench_win_var\
             ) t WHERE delta > 0",
     category_expr: "((g - 1) % 100) + 1",
-    value_expr: "(g * 104729) % 1000",
+    value_expr: "(g::int8 * 104729) % 1000",
 };
 
 pub const WINDOW_LEAD: WindowVariant = WindowVariant {
@@ -162,7 +162,7 @@ pub const WINDOW_LEAD: WindowVariant = WindowVariant {
               FROM bench_win_var\
             ) t WHERE delta > 0",
     category_expr: "((g - 1) % 100) + 1",
-    value_expr: "(g * 104729) % 1000",
+    value_expr: "(g::int8 * 104729) % 1000",
 };
 
 #[cfg(test)]
@@ -219,5 +219,14 @@ mod tests {
         assert_eq!(WINDOW_RANK.value_expr, "(g - 1) / 10");
         assert_eq!(WINDOW_DENSE_RANK.value_expr, "(g - 1) / 200");
         assert!(WINDOW_RUNNING_SUM.value_expr.contains("g % 8 = 0"));
+
+        for workload in [&WINDOW_LAG, &WINDOW_LEAD] {
+            let setup = workload.setup_sql(10_000_000).join("\n");
+            assert!(
+                setup.contains("g::int8 * 104729"),
+                "{} must widen generate_series values before multiplication",
+                workload.name()
+            );
+        }
     }
 }
