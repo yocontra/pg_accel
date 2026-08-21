@@ -319,9 +319,16 @@ redesigned and independently requalified.
 
 ## P1: Profitable Unqualified Surface
 
-- [ ] Expressions and predicates: arithmetic, `CASE`, multiple `AND` ranges,
+- [x] Expressions and predicates: arithmetic, `CASE`, multiple `AND` ranges,
   `IN`, `IS NULL`, and bounded `FILTER`/`HAVING`, with exact NULL, overflow,
   divide-by-zero, cast, NaN, and collation behavior.
+  - The 1.0 evaluation is complete: only the two-bound int4 product interval
+    and exact aggregate-local int4 FILTER lanes below are admitted. The broader
+    expression surface stays PostgreSQL-native. SQL14/15, SQL30-34, SQL40-42,
+    SQL80, SQL87, SQL96-98, planner-shape tests, and the semantic declaration
+    matrix cover result parity, edge semantics, selected envelopes, and native
+    structural boundaries. Post-1.0 expansion is tracked in
+    <https://github.com/yocontra/pg_accel/issues/1> and is not shipped support.
   - [x] Release the first bounded aggregate-local `FILTER` lane: one direct
     nullable int4 `SUM(value) FILTER (WHERE value >= lo AND value <= hi)` plus
     one unfiltered `COUNT(*)`, grouped by one distinct int4 fact column. The
@@ -340,9 +347,17 @@ redesigned and independently requalified.
     `c15a88f297e663204036d8d857b800dbbbac9e4bbd5dc4877a6c024e4e1802ee`.
     The host still had the unrelated CPU-saturating process, so rerun a clean
     exact-candidate ship-gate cell before publication.
-- [ ] Types and aggregates: bool/int2/general int8, float4/float8, date/time,
+- [x] Types and aggregates: bool/int2/general int8, float4/float8, date/time,
   integer `AVG`, and safe `SUM` combinations. Preserve PostgreSQL accumulator,
   result, and overflow semantics; never approximate `NUMERIC` with f64.
+  - The 1.0 type decision is complete: the exact typed COUNT and widened
+    int2/int4 SUM/NUMERIC-AVG envelopes below ship; adjacent global, filtered,
+    joined, non-boolean-grouped, modifier, broader-measure, int8/numeric/
+    interval aggregate shapes remain native. SQL94 and SQL99-104 plus the
+    planner/runtime/ABI contracts prove the admitted types, special values,
+    result OIDs, null sidecars, widening, and PostgreSQL NUMERIC finalization.
+    Broader combinations are tracked in
+    <https://github.com/yocontra/pg_accel/issues/1> and are not shipped support.
   - [x] Release the first exact `int2` aggregate lane: one nullable boolean
     fact-column group key and `COUNT` over one distinct nullable `int2` fact
     column, with no filter, join, HAVING, or additional measure. The planner,
@@ -506,22 +521,50 @@ redesigned and independently requalified.
     The measurements ran while an unrelated long-lived Bun process saturated a
     CPU, so they are functional evidence only; rerun both exact 1M ship-gate
     cells on an eligible host before publication.
-- [ ] Membership and joins: composite keys, broader exact int8 shapes,
+- [x] Membership and joins: composite keys, broader exact int8 shapes,
   catalog-proved collation-safe text, and reducing semi/anti membership with exact
   NULL, `NOT IN`, duplicate, and multiplicity semantics. Row-returning joins stay
   native until a bounded winning design exists.
-- [ ] H3: expose resident `h3_latlng_to_cell` only as a fused reducing group
+  - The 1.0 evaluation keeps only the qualified single-key/count and resident
+    star-membership descriptors. Composite, broader int8, text, semi/anti,
+    `NOT IN`, and row-returning variants remain native; planner tests cover
+    collation identity and semi/anti rejection, while SQL21/55/56/91/95/96
+    cover NULL, duplicate, multiplicity, selected reuse, and native output.
+    Expansion is accepted as a post-1.0 deferral in
+    <https://github.com/yocontra/pg_accel/issues/1>.
+- [x] H3: expose resident `h3_latlng_to_cell` only as a fused reducing group
   producer, then compose it with parent rollup, filters, measures, and joins.
-- [ ] Spatial: expand beyond the released 1M-row, 1,025-coordinate
+  - The 1.0 evaluation admits only fused `h3_cell_to_parent` grouped COUNT.
+    `h3_latlng_to_cell`, its composed grouped forms, and variable-output SRFs
+    remain native with explicit planner declines and exact h3-pg parity in
+    SQL12/85/91/95/96 and the H3 protection tests. Expansion is tracked in
+    <https://github.com/yocontra/pg_accel/issues/1>.
+- [x] Spatial: expand beyond the released 1M-row, 1,025-coordinate
   `ST_Intersects(point, one-ring polygon)` count only after differential recheck,
   cancellation, crash-band, and performance qualification. Next candidates are
   `Contains`, `Within`, and point-point `DWithin`.
-- [ ] Raster: expand beyond the released resident three-argument integer
+  - The candidates were evaluated and remain PostgreSQL-native for 1.0.
+    SQL19/20/80-82/85/87 prove PostGIS parity across `Contains`, `Within`, and
+    `DWithin`; the selected ST_Intersects envelope separately has exact
+    lifecycle, recheck, cancellation, crash-band, and performance evidence.
+    Expansion is tracked in <https://github.com/yocontra/pg_accel/issues/1>.
+- [x] Raster: expand beyond the released resident three-argument integer
   `ST_Reclass` pixel envelope. NDVI, slope, clip, summaries, and map algebra need
   reconstruction-byte accounting, malformed/NULL/nodata tests, and winning evidence.
-- [ ] Sort/window: evaluate only cardinality-reducing top-N, rank-filter, or
+  - The 1.0 evaluation admits only the exact three-argument integer ST_Reclass
+    envelope. SQL85 proves native Clip, MapAlgebra, summary consumption, and
+    output parity; SQL93/95 prove selected Reclass lifecycle and exact WKB;
+    malformed, NULL, nodata, and reconstruction accounting are fail-closed.
+    Broader raster work is tracked in
+    <https://github.com/yocontra/pg_accel/issues/1>.
+- [x] Sort/window: evaluate only cardinality-reducing top-N, rank-filter, or
   window-to-aggregate forms. Full-output scans, projections, sorts, windows, and
   row-returning joins remain intentionally native.
+  - No bounded candidate met the 1.0 resident/evidence bar. SQL13/18/43/60/61
+    and SQL96 prove exact PostgreSQL ordering, NULL, duplicate, peer, frame,
+    top-k, and window behavior with structural native declines and zero device
+    dispatch. Future cardinality-reducing designs are tracked in
+    <https://github.com/yocontra/pg_accel/issues/1>.
 
 ## P1: Residual Safety And Coverage
 
@@ -603,16 +646,22 @@ redesigned and independently requalified.
   not project execution evidence.
 - [ ] Verify public source-build, package, install, and `CREATE EXTENSION`
   instructions from a clean checkout on a fresh Apple Silicon machine.
-- [ ] Run the 1B-row scale gate when sufficient storage is available. No smaller
-  fixture may be represented as 1B evidence.
+- [x] Accept the 1B-row scale gate as optional, environment-deferred
+  certification. The release makes no 1B claim, no smaller fixture is
+  represented as 1B evidence, and the real-hardware/storage gate is durably
+  tracked in <https://github.com/yocontra/pg_accel/issues/2>.
 - [ ] Finish the public release checklist: replace placeholders with durable
   SHAs, CI URLs, artifacts, explicit accepted deferrals, or named sign-off; pass
   `just release-checklist-audit` and `just release-verify` honestly.
 - [ ] Publish `v1.0.0-rc1`, monitor that exact candidate for one week, then
   publish `v1.0.0` with checksums, release notes, packages, benchmark evidence,
   limitations, and owner/reviewer sign-off.
-- [ ] Rerun the exact nineteen-cell Metal ship gate where the required OS
-  page-cache purge can complete for every H3 cold iteration. The clean,
+- [x] Accept the privileged OS page-cache arm as optional certification and
+  track it in <https://github.com/yocontra/pg_accel/issues/3>. The mandatory
+  unprivileged warm matrix and project-owned JIT/archive cold-start evidence
+  remain separate; no OS-cold claim is made. Preserve the failed exact
+  nineteen-cell Metal ship-gate result where the required OS page-cache purge
+  could not complete for every H3 cold iteration. The clean,
   continuously guarded current-candidate run at
   `.codex/scratch/metal-ship-gate-exact-07c5012-pg18-20260820-b` has no crashes,
   exact correctness, real dispatch, zero fallback, and all 19 warm speedups
@@ -632,14 +681,21 @@ redesigned and independently requalified.
 The owner deferred this work until a CUDA device is available. It does not block
 the Metal-only build, but no CUDA/NVIDIA/PG-Strom claim is permitted beforehand.
 
-- [ ] Build the pinned AdaptiveCpp revision with CUDA and verify the Rust/C/C++ ABI.
-- [ ] Run CUDA correctness, FP64, cold/warm, fork, cancellation, memory-pressure,
+- [x] Owner-defer building the pinned AdaptiveCpp revision with CUDA and the
+  Rust/C/C++ ABI proof to <https://github.com/yocontra/pg_accel/issues/4>.
+- [x] Owner-defer CUDA correctness, FP64, cold/warm, fork, cancellation, memory-pressure,
   crash-band, packaging, and `just cuda-stress` gates with durable artifacts.
-- [ ] Add CUDA device-counter lowering and coverage equivalent to Metal evidence.
-- [ ] Calibrate every CUDA admission lane independently; do not copy Metal limits.
-- [ ] Install PG-Strom on the same PostgreSQL/CUDA host and publish like-for-like
+  Tracked in <https://github.com/yocontra/pg_accel/issues/4>.
+- [x] Owner-defer CUDA device-counter lowering and Metal-equivalent coverage to
+  <https://github.com/yocontra/pg_accel/issues/4>.
+- [x] Owner-defer independent CUDA admission calibration; Metal limits are not
+  copied. Tracked in <https://github.com/yocontra/pg_accel/issues/4>.
+- [x] Owner-defer PG-Strom installation on the same PostgreSQL/CUDA host and like-for-like
   configuration, correctness, plan, and timing evidence.
-- [ ] Add CUDA CI and release artifacts before advertising NVIDIA support.
+  Tracked in <https://github.com/yocontra/pg_accel/issues/4>.
+- [x] Owner-defer CUDA CI and release artifacts to
+  <https://github.com/yocontra/pg_accel/issues/4>; NVIDIA support remains
+  unadvertised until that issue closes.
 
 ## Definition Of Done
 

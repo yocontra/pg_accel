@@ -20,18 +20,21 @@ check. They require hosted CI, an independent clean-machine run, public-reposito
 or release artifacts, publication evidence, or named human sign-off as stated.
 
 CUDA, NVIDIA, and PG-Strom are owner-deferred until a CUDA device is available.
-They remain tracked in [TODO.md](../TODO.md), are excluded from this Metal
-release gate, and must not be presented as validated or supported by this
-release. Adding any CUDA/NVIDIA support claim requires completing that deferred
-gate with real hardware evidence first.
+They remain tracked in
+[issue #4](https://github.com/yocontra/pg_accel/issues/4), are excluded from
+this Metal release gate, and must not be presented as validated or supported by
+this release. Adding any CUDA/NVIDIA support claim requires completing that
+deferred gate with real hardware evidence first.
 
 The unprivileged local gate proves warm performance and separately clears only
 the project-owned AdaptiveCpp JIT/archive cache for cold first-dispatch
 evidence. It does not prove an OS page-cache purge. Privileged OS page-cache
-certification is optional manual evidence whose absence must remain explicit.
+certification is optional manual evidence whose absence must remain explicit;
+it is tracked in [issue #3](https://github.com/yocontra/pg_accel/issues/3).
 The full 1B-row gate is likewise environment-deferred until sufficient storage
 is available; no smaller fixture can substitute for it and no 1B-scale claim
-is permitted without it. Both items remain tracked in [TODO.md](../TODO.md).
+is permitted without it. That certification is tracked in
+[issue #2](https://github.com/yocontra/pg_accel/issues/2).
 
 ### Local Evidence Ledger (Not Gate Completion)
 

@@ -100,6 +100,24 @@ claim is implied by the entries below.
 - CUDA/NVIDIA and PG-Strom validation is explicitly owner-deferred until an
   NVIDIA device is available. No CUDA support or performance claim is made.
 
+### Deferred from 1.0
+
+- Broader expression, aggregate/type, membership, H3, spatial, raster, and
+  cardinality-reducing sort/window lanes are explicitly outside the 1.0
+  support claim and tracked in
+  [issue #1](https://github.com/yocontra/pg_accel/issues/1). PostgreSQL remains
+  the executor for every adjacent shape until that exact lane passes semantic,
+  failure, dispatch, and matched-performance qualification.
+- A true 1,000,000,000-row artifact is optional scale certification tracked in
+  [issue #2](https://github.com/yocontra/pg_accel/issues/2). No smaller fixture
+  substitutes for it and this release makes no 1B-scale claim.
+- Privileged OS page-cache-purge evidence is optional certification tracked in
+  [issue #3](https://github.com/yocontra/pg_accel/issues/3). It is distinct from
+  the mandatory warm matrix and project-owned JIT/archive cold-start evidence.
+- CUDA/NVIDIA and PG-Strom qualification is owner-deferred in
+  [issue #4](https://github.com/yocontra/pg_accel/issues/4). Metal evidence is
+  not portable support evidence for another backend.
+
 ### Fixed
 
 - Dense aggregate-filter kernel tests now cover one-shot atomic,

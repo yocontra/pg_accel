@@ -33,8 +33,9 @@ cargo pgrx install --no-default-features --features pg18
 PostgreSQL 18 is the default extension target. PostgreSQL 19 beta is also a
 build/test target, not a package-availability claim. A build without a usable
 GPU can load the extension, but the planner keeps queries on PostgreSQL-native
-plans. CUDA/NVIDIA validation is owner-deferred in [TODO.md](TODO.md); this
-document makes no support claim for it.
+plans. CUDA/NVIDIA validation is owner-deferred in
+[issue #4](https://github.com/yocontra/pg_accel/issues/4); this document makes
+no support claim for it.
 
 ### AdaptiveCpp provenance and installation burden
 
@@ -179,6 +180,24 @@ native and have no registered executor.
 | Standalone sort or top-k | Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding | Not selectable | All standalone sort shapes remain PostgreSQL-native. Full-output sorts record `sort_heap_full_output`; bounded top-k records `sort_standalone_topk_no_gpu_kernel`. |
 | Window | Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding | Not selectable | Full-output and reducing window SQL remains PostgreSQL-native and records `no_gpu_resident_pipeline`. |
 | Raster | Registered childless resident executor | Selectable | Production selection is limited to the qualified three-argument resident `ST_Reclass` shape, canonical singular integer rules, band one, `8BUI` output, and the released pixel-count envelope; other raster shapes remain native. |
+
+### 1.0 scope and explicit deferrals
+
+The capability matrix above is the complete 1.0 planner-support claim. General
+expression, aggregate/type, membership, H3, spatial, raster, and
+cardinality-reducing sort/window expansion is tracked in
+[issue #1](https://github.com/yocontra/pg_accel/issues/1). Those adjacent shapes
+remain PostgreSQL-native until each exact lane has correctness, failure,
+dispatch, and matched-performance evidence; the presence of adapter metadata,
+wire tags, test scaffolding, or a kernel is not support.
+
+The release also makes no 1B-row scale claim; that optional certification is
+tracked in [issue #2](https://github.com/yocontra/pg_accel/issues/2). A
+privileged OS page-cache-purge certification is separately tracked in
+[issue #3](https://github.com/yocontra/pg_accel/issues/3) and is not inferred
+from the mandatory warm matrix or project-owned JIT/archive cold-start proof.
+CUDA/NVIDIA and PG-Strom remain owner-deferred and unvalidated as described in
+[issue #4](https://github.com/yocontra/pg_accel/issues/4).
 
 The extension adapters currently register these names for OID discovery. This
 table is registry metadata, not a standalone SQL support promise:
