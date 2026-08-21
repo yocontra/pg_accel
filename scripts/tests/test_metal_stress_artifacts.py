@@ -587,6 +587,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "          # just system-workload-gate 18 artifacts/system-workload-gate-pg18-qualified-metal",
             ),
             workflow.replace(
+                "          just weighted-count-benchmark-ship-gate 18 artifacts/weighted-count-ship-gate-pg18-qualified-metal",
+                "          # just weighted-count-benchmark-ship-gate 18 artifacts/weighted-count-ship-gate-pg18-qualified-metal",
+            ),
+            workflow.replace(
                 '          just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
                 '          # just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
             ),
@@ -602,6 +606,27 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "          path: artifacts/native-parity-p0-pg18-qualified-metal",
                 "          # path: artifacts/native-parity-p0-pg18-qualified-metal",
             ),
+            workflow.replace(
+                "          path: artifacts/weighted-count-ship-gate-pg18-qualified-metal",
+                "          # path: artifacts/weighted-count-ship-gate-pg18-qualified-metal",
+            ),
+            workflow.replace(
+                '          if [ "$evidence_count" -ne 6 ]; then',
+                '          if [ "$evidence_count" -ne 5 ]; then',
+            ),
+            workflow.replace(
+                "            release-evidence/*.tar.gz.sha256",
+                "            # release-evidence/*.tar.gz.sha256",
+            ),
+            workflow.replace(
+                '          prerelease: ${{ contains(github.ref_name, \'-\') }}',
+                "          prerelease: false",
+            ),
+            workflow.replace(
+                '          if [ "$GITHUB_REF_NAME" != "v${extension_version}" ]; then',
+                '          if [ "$GITHUB_REF_NAME" = "v${extension_version}" ]; then',
+            ),
+            workflow.replace("    needs: validate-tag\n", "", 1),
             workflow.replace(
                 "needs: [build, linux-package, metal-coverage]",
                 "needs: [build, linux-package]",
@@ -686,6 +711,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 1,
             ),
             workflow.replace(
+                "          just weighted-count-benchmark-ship-gate 18 artifacts/weighted-count-ship-gate-pg18-qualified-metal",
+                "          # just weighted-count-benchmark-ship-gate 18 artifacts/weighted-count-ship-gate-pg18-qualified-metal",
+                1,
+            ),
+            workflow.replace(
                 '          just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
                 '          # just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
                 1,
@@ -693,6 +723,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
             workflow.replace(
                 "          path: artifacts/native-parity-p0-pg18-qualified-metal",
                 "          # path: artifacts/native-parity-p0-pg18-qualified-metal",
+                1,
+            ),
+            workflow.replace(
+                "          path: artifacts/weighted-count-ship-gate-pg18-qualified-metal",
+                "          # path: artifacts/weighted-count-ship-gate-pg18-qualified-metal",
                 1,
             ),
             workflow.replace(

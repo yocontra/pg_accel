@@ -1106,6 +1106,56 @@ package-matrix:
             --pg "$pg" --pg-config "$pg_config" --acpp-prefix "$acpp_prefix"
     done
 
+# Verify one already-built release archive through checksum validation, staged
+# installation, an isolated PostgreSQL cluster, preload, CREATE EXTENSION,
+# version/stats queries, and a fatal-log audit. The archive selection fails
+# closed when the target directory contains zero or multiple candidates.
+package-smoke pg="" archive="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    archive="{{archive}}"
+    if [ -z "$archive" ]; then
+        archive_count=0
+        while IFS= read -r candidate; do
+            [ -n "$candidate" ] || continue
+            archive="$candidate"
+            archive_count=$((archive_count + 1))
+        done < <(find target/release -maxdepth 1 -type f \
+            -name "pg_accel-pg${pg}-*.tar.gz" -print | LC_ALL=C sort)
+        if [ "$archive_count" -ne 1 ]; then
+            echo "error: expected one PG${pg} release archive, found $archive_count" >&2
+            exit 1
+        fi
+    fi
+    case "$archive" in
+        *.tar.gz) smoke_evidence="${archive%.tar.gz}.smoke.txt" ;;
+        *)
+            echo "error: release archive must end in .tar.gz: $archive" >&2
+            exit 2
+            ;;
+    esac
+    scripts/verify_release_package.sh \
+        "$pg_config" "$archive" "$smoke_evidence"
+
+# Verify already-built release archives for every supported PostgreSQL major.
+package-smoke-matrix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    for pg in $(pg_accel_supported_pg_majors); do
+        just package-smoke "$pg"
+    done
+
 # Install the current pg_accel release build into the pgrx-managed cluster and
 # restart the cluster so shared_preload_libraries maps the same binary.
 install-pg-accel pg="":

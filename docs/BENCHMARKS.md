@@ -223,6 +223,13 @@ fallback, ten artifact-hit steady-state pairs, and a warm median of at least
 also show predecessor-normalized non-regression before the lane is considered
 fully performance-qualified.
 
+Both qualified-Metal hosted workflows run this ratchet independently of the
+nineteen-cell warm matrix and upload its write-once artifact directory. Tagged
+release workflows additionally archive the coverage, warm matrix, weighted
+count, system-workload, Metal-stress, and native-parity bundles with adjacent
+SHA-256 files so performance evidence does not depend on expiring workflow
+artifacts.
+
 The similarly named legacy workloads remain in the harness as fail-closed
 coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
 `shape_floating_accumulator_semantics`, while

@@ -1421,7 +1421,7 @@ def _validate_qualified_metal_job(
     workflow: str,
     job_name: str,
     coverage_step: str,
-    upload_steps: tuple[str, str, str, str, str],
+    upload_steps: tuple[str, ...],
 ) -> str:
     metal = _workflow_job_block(workflow, job_name)
     runs_on = re.findall(r"^    runs-on:\s*(.+?)\s*$", metal, re.MULTILINE)
@@ -1440,6 +1440,7 @@ def _validate_qualified_metal_job(
 
     coverage_dir = "artifacts/coverage-pg18-qualified-metal"
     benchmark_dir = "artifacts/warm-benchmark-ship-gate-pg18-qualified-metal"
+    weighted_count_dir = "artifacts/weighted-count-ship-gate-pg18-qualified-metal"
     system_dir = "artifacts/system-workload-gate-pg18-qualified-metal"
     stress_dir = "artifacts/metal-stress-pg18-qualified-metal"
     parity_dir = "artifacts/native-parity-p0-pg18-qualified-metal"
@@ -1468,6 +1469,14 @@ def _validate_qualified_metal_job(
             [
                 "set -euo pipefail",
                 f"just metal-warm-benchmark-ship-gate 18 {benchmark_dir}",
+            ],
+            (),
+        ),
+        (
+            "Run weighted global-count benchmark ship gate",
+            [
+                "set -euo pipefail",
+                f"just weighted-count-benchmark-ship-gate 18 {weighted_count_dir}",
             ],
             (),
         ),
@@ -1501,6 +1510,7 @@ def _validate_qualified_metal_job(
     artifact_dirs = (
         coverage_dir,
         benchmark_dir,
+        weighted_count_dir,
         system_dir,
         stress_dir,
         parity_dir,
@@ -1531,6 +1541,7 @@ def validate_ci_workflow_contract(workflow: str) -> None:
         (
             "Upload three-layer coverage artifacts",
             "Upload warm Metal benchmark ship-gate artifacts",
+            "Upload weighted global-count ship-gate artifacts",
             "Upload broad system workload artifacts",
             "Upload Metal stress artifacts",
             "Upload native-decline parity artifacts",
@@ -1554,6 +1565,29 @@ def validate_ci_workflow_contract(workflow: str) -> None:
 
 
 def validate_release_workflow_contract(workflow: str) -> None:
+    tag_validation = _workflow_job_block(workflow, "validate-tag")
+    tag_lines = _workflow_step_lines(tag_validation)
+    for required in (
+        "runs-on: ubuntu-latest",
+        "- uses: actions/checkout@v4",
+        "set -euo pipefail",
+        'if [ "$GITHUB_REF_NAME" != "v${extension_version}" ]; then',
+        'pg_accel/pg_accel.control)"',
+    ):
+        if required not in tag_lines:
+            raise ArtifactContractError(
+                f"release tag validation is missing `{required}`"
+            )
+
+    for gated_job in ("build", "linux-package", "metal-coverage"):
+        gated_lines = _workflow_step_lines(
+            _workflow_job_block(workflow, gated_job)
+        )
+        if "needs: validate-tag" not in gated_lines:
+            raise ArtifactContractError(
+                f"release job `{gated_job}` must depend on validate-tag"
+            )
+
     _validate_qualified_metal_job(
         workflow,
         "metal-coverage",
@@ -1561,6 +1595,7 @@ def validate_release_workflow_contract(workflow: str) -> None:
         (
             "Upload release coverage artifacts",
             "Upload release warm Metal benchmark ship-gate artifacts",
+            "Upload release weighted global-count ship-gate artifacts",
             "Upload release broad system workload artifacts",
             "Upload release Metal stress artifacts",
             "Upload release native-decline parity artifacts",
@@ -1580,6 +1615,52 @@ def validate_release_workflow_contract(workflow: str) -> None:
         )
     if re.search(r"^    continue-on-error\s*:", release, re.MULTILINE):
         raise ArtifactContractError("release publication cannot continue on error")
+
+    evidence_step = _workflow_step(
+        release, "Package qualified Metal evidence for durable release assets"
+    )
+    evidence_lines = _workflow_step_lines(evidence_step)
+    for required in (
+        "shell: bash",
+        "run: |",
+        "set -euo pipefail",
+        "mkdir -p release-evidence",
+        "if [ \"$evidence_count\" -ne 6 ]; then",
+    ):
+        if required not in evidence_lines:
+            raise ArtifactContractError(
+                f"release evidence packaging is missing `{required}`"
+            )
+    if any(
+        line.startswith(("if:", "continue-on-error:")) for line in evidence_lines
+    ):
+        raise ArtifactContractError(
+            "release evidence packaging cannot be conditional or continue on error"
+        )
+    for required_text in (
+        "-name 'pg-accel-release-*-pg18-qualified-metal'",
+        'tar -C release-artifacts -czf "release-evidence/${artifact_name}.tar.gz" "$artifact_name"',
+        'sha256sum "${artifact_name}.tar.gz"',
+    ):
+        if required_text not in evidence_step:
+            raise ArtifactContractError(
+                f"release evidence packaging is missing `{required_text}`"
+            )
+
+    publication = _workflow_step(release, "Create GitHub Release")
+    publication_lines = _workflow_step_lines(publication)
+    for required in (
+        "uses: softprops/action-gh-release@v2",
+        "generate_release_notes: true",
+        "prerelease: ${{ contains(github.ref_name, '-') }}",
+        "release-artifacts/pg_accel-pg*/pg_accel-pg*.smoke.txt",
+        "release-evidence/*.tar.gz",
+        "release-evidence/*.tar.gz.sha256",
+    ):
+        if required not in publication_lines:
+            raise ArtifactContractError(
+                f"release publication is missing durable asset `{required}`"
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:

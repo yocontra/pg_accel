@@ -1,8 +1,8 @@
 # Changelog
 
-All notable changes will be documented in this file. The project is currently
-an unreleased `1.0.0-rc1` candidate; no public release or package-availability
-claim is implied by the entries below.
+All notable changes will be documented in this file. The `1.0.0-rc1` section
+describes the candidate published by the matching tag; only archives and
+evidence attached to that GitHub release are package-availability claims.
 
 ## [1.0.0-rc1] - 2026-08-20
 
@@ -56,6 +56,12 @@ claim is implied by the entries below.
   non-NULL count through PostgreSQL NUMERIC arithmetic on the backend thread.
   AVG-only, missing-COUNT, filtered, joined, `HAVING`, int8, numeric, interval,
   and additional-measure shapes remain PostgreSQL-native.
+- A qualified counted-dimension global `COUNT(*)` specialization preserves
+  duplicate dimension-key multiplicity as exact device-side weights, ignores
+  unmatched and NULL fact keys, and uses the `parallel_dense_count` physical
+  lane. Its separate immutable 1M-row release ratchet requires an independent
+  no-join oracle, real dispatch, consumed output, ten steady artifact hits,
+  zero fallback, and at least 1.15x over PostgreSQL parallel.
 - SSBM-, TPC-H-, and ClickBench-style system workload characterization plus an
   eight-backend residency/concurrency proof with exact cluster-byte cleanup.
 
@@ -96,6 +102,12 @@ claim is implied by the entries below.
   prerelease/build identifiers in PostgreSQL extension SQL filenames, including
   the `1.0.0-rc1` candidate, while continuing to reject ambiguous separators
   and unexpected payload names.
+- macOS arm64 and Linux x86_64 release jobs verify each extracted PG18/PG19
+  archive through outer and inner checksums, staged installation, an isolated
+  preloaded cluster, `CREATE EXTENSION`, version/statistics queries, and fatal
+  log auditing. The hosted qualified-Metal jobs also run and upload the separate
+  weighted global-count ratchet, and GitHub releases retain the six sealed
+  coverage/performance/stress evidence bundles as durable assets.
 - Planner declines reuse exact serialized-query fingerprints and dependency
   state without cloning full cache entries or repeating unprofiled telemetry;
   production upper-path hooks also avoid allocating the test-only structured

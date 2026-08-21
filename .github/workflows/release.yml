@@ -9,8 +9,30 @@ permissions:
   contents: write
 
 jobs:
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require the tag to match the extension version
+        shell: bash
+        run: |
+          set -euo pipefail
+          extension_version="$(awk -F"'" \
+            '/^[[:space:]]*default_version[[:space:]]*=/{print $2; exit}' \
+            pg_accel/pg_accel.control)"
+          if [ -z "$extension_version" ]; then
+            echo "error: pg_accel.control has no default_version" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v${extension_version}" ]; then
+            echo "error: release tag $GITHUB_REF_NAME does not match extension version v${extension_version}" >&2
+            exit 1
+          fi
+
   build:
     name: Build (${{ matrix.os }}, PG ${{ matrix.pg }})
+    needs: validate-tag
     env:
       # ACPP_REQUIRED_SHA is loaded from the repo-root .acpp-version file (single
       # source of truth shared with scripts/setup_acpp.sh and ci.yml) by the
@@ -84,6 +106,12 @@ jobs:
             --pg "${{ matrix.pg }}" \
             --pg-config "$(scripts/pg_source.sh pg-config ${{ matrix.pg }})" \
             --acpp-prefix "$PWD/.pgaccel/acpp/current"
+      - name: Verify extracted macOS package in an isolated PostgreSQL cluster
+        if: steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          just package-smoke "${{ matrix.pg }}"
       - name: Upload artifacts
         if: steps.pg-support.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
@@ -92,11 +120,13 @@ jobs:
           path: |
             target/release/pg_accel-pg${{ matrix.pg }}-*.tar.gz
             target/release/pg_accel-pg${{ matrix.pg }}-*.tar.gz.sha256
+            target/release/pg_accel-pg${{ matrix.pg }}-*.smoke.txt
           if-no-files-found: error
 
   linux-package:
     name: Linux generic package (PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
+    needs: validate-tag
     timeout-minutes: 180
     env:
       SOFT_FP64_REQUIRED_TAG: v2.0.1
@@ -223,76 +253,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pg_config="$(scripts/pg_source.sh pg-config "${{ matrix.pg }}")"
-          pg_bindir="$("$pg_config" --bindir)"
-          test_root="$(mktemp -d)"
-          pg_started=0
-          cleanup() {
-            if [ "$pg_started" = 1 ]; then
-              "$pg_bindir/pg_ctl" -D "$test_root/data" -m fast stop >/dev/null 2>&1 || true
-            fi
-            rm -rf "$test_root"
-          }
-          trap cleanup EXIT
-
-          mapfile -t archives < <(
-            find target/release -maxdepth 1 -type f \
-              -name 'pg_accel-pg${{ matrix.pg }}-linux-*.tar.gz' -print
-          )
-          if [ "${#archives[@]}" -ne 1 ]; then
-            printf 'expected one Linux archive, found %s\n' "${#archives[@]}" >&2
-            exit 1
-          fi
-          archive="${archives[0]}"
-          archive_dir="$(dirname "$archive")"
-          archive_name="$(basename "$archive")"
-          (cd "$archive_dir" && sha256sum -c "$archive_name.sha256")
-
-          tar -xzf "$archive" -C "$test_root"
-          package_root="$test_root/pg_accel-pg${{ matrix.pg }}"
-          (cd "$package_root" && sha256sum -c SHA256SUMS)
-
-          stage="$test_root/stage"
-          "$package_root/install.py" \
-            --package-root "$package_root" \
-            --pg-config "$pg_config" \
-            --destdir "$stage"
-          pkglibdir="$stage$("$pg_config" --pkglibdir)"
-          sharedir="$stage$("$pg_config" --sharedir)"
-          socket_dir="$test_root/socket"
-          mkdir -p "$socket_dir"
-
-          "$pg_bindir/initdb" -D "$test_root/data" --no-locale --encoding=UTF8 >/dev/null
-          {
-            printf "dynamic_library_path = '%s'\n" "$pkglibdir"
-            # Retain built-in controls and add the staged share root; PostgreSQL
-            # appends /extension to each custom control-path root.
-            printf "extension_control_path = '\$system:%s'\n" "$sharedir"
-            printf "shared_preload_libraries = 'pg_accel'\n"
-            printf "listen_addresses = ''\n"
-            printf "unix_socket_directories = '%s'\n" "$socket_dir"
-            printf "port = 55432\n"
-          } >> "$test_root/data/postgresql.conf"
-          "$pg_bindir/pg_ctl" \
-            -D "$test_root/data" \
-            -l "$test_root/postgresql.log" \
-            -w start
-          pg_started=1
-          "$pg_bindir/psql" \
-            -h "$socket_dir" \
-            -p 55432 \
-            -d postgres \
-            -v ON_ERROR_STOP=1 \
-            -c "CREATE EXTENSION pg_accel;" \
-            -c "SELECT pg_accel_version();" \
-            -c "SELECT count(*) FROM pg_accel_stats();"
-          "$pg_bindir/pg_ctl" -D "$test_root/data" -m fast -w stop
-          pg_started=0
-          if grep -Eiq '(FATAL|PANIC):|could not load library|undefined symbol' \
-            "$test_root/postgresql.log"; then
-            cat "$test_root/postgresql.log" >&2
-            exit 1
-          fi
+          just package-smoke "${{ matrix.pg }}"
 
       - name: Upload Linux release archive
         uses: actions/upload-artifact@v4
@@ -301,11 +262,13 @@ jobs:
           path: |
             target/release/pg_accel-pg${{ matrix.pg }}-linux-*.tar.gz
             target/release/pg_accel-pg${{ matrix.pg }}-linux-*.tar.gz.sha256
+            target/release/pg_accel-pg${{ matrix.pg }}-*.smoke.txt
           if-no-files-found: error
 
   metal-coverage:
     name: Qualified Metal release gates (PG 18)
     runs-on: macos-26
+    needs: validate-tag
     timeout-minutes: 360
     env:
       SOFT_FP64_REQUIRED_TAG: v2.0.1
@@ -388,6 +351,12 @@ jobs:
           set -euo pipefail
           just metal-warm-benchmark-ship-gate 18 artifacts/warm-benchmark-ship-gate-pg18-qualified-metal
 
+      - name: Run weighted global-count benchmark ship gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          just weighted-count-benchmark-ship-gate 18 artifacts/weighted-count-ship-gate-pg18-qualified-metal
+
       - name: Run broad system workload characterization
         shell: bash
         run: |
@@ -426,6 +395,14 @@ jobs:
           path: artifacts/warm-benchmark-ship-gate-pg18-qualified-metal
           if-no-files-found: error
 
+      - name: Upload release weighted global-count ship-gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-release-weighted-count-ship-gate-pg18-qualified-metal
+          path: artifacts/weighted-count-ship-gate-pg18-qualified-metal
+          if-no-files-found: error
+
       - name: Upload release broad system workload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -459,10 +436,33 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: release-artifacts
+      - name: Package qualified Metal evidence for durable release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-evidence
+          evidence_count=0
+          while IFS= read -r artifact_dir; do
+            [ -n "$artifact_dir" ] || continue
+            artifact_name="$(basename "$artifact_dir")"
+            tar -C release-artifacts -czf "release-evidence/${artifact_name}.tar.gz" "$artifact_name"
+            (cd release-evidence && sha256sum "${artifact_name}.tar.gz" \
+              > "${artifact_name}.tar.gz.sha256")
+            evidence_count=$((evidence_count + 1))
+          done < <(find release-artifacts -mindepth 1 -maxdepth 1 -type d \
+            -name 'pg-accel-release-*-pg18-qualified-metal' -print | LC_ALL=C sort)
+          if [ "$evidence_count" -ne 6 ]; then
+            echo "error: expected six qualified-Metal evidence bundles, found $evidence_count" >&2
+            exit 1
+          fi
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             release-artifacts/pg_accel-pg*/*.tar.gz
             release-artifacts/pg_accel-pg*/*.tar.gz.sha256
+            release-artifacts/pg_accel-pg*/pg_accel-pg*.smoke.txt
+            release-evidence/*.tar.gz
+            release-evidence/*.tar.gz.sha256

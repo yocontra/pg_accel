@@ -314,6 +314,12 @@ jobs:
           set -euo pipefail
           just metal-warm-benchmark-ship-gate 18 artifacts/warm-benchmark-ship-gate-pg18-qualified-metal
 
+      - name: Run weighted global-count benchmark ship gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          just weighted-count-benchmark-ship-gate 18 artifacts/weighted-count-ship-gate-pg18-qualified-metal
+
       - name: Run broad system workload characterization
         shell: bash
         run: |
@@ -350,6 +356,14 @@ jobs:
         with:
           name: pg-accel-warm-benchmark-ship-gate-pg18-qualified-metal
           path: artifacts/warm-benchmark-ship-gate-pg18-qualified-metal
+          if-no-files-found: error
+
+      - name: Upload weighted global-count ship-gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-weighted-count-ship-gate-pg18-qualified-metal
+          path: artifacts/weighted-count-ship-gate-pg18-qualified-metal
           if-no-files-found: error
 
       - name: Upload broad system workload artifacts
