@@ -555,6 +555,12 @@ pub struct WorkloadResult {
     /// this workload/scale, when artifact capture was enabled.
     #[serde(default)]
     pub correctness_diff_artifact: Option<String>,
+    /// Fail-closed proof that bulk fixture setup was forced through a
+    /// completed PostgreSQL checkpoint and that the checkpointer stayed idle
+    /// throughout the measured interval. This prevents asynchronous setup
+    /// writes from contaminating low-latency native-parity tails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_quiescence: Option<SetupQuiescenceAudit>,
     /// Thermal state captured immediately before this workload ran.
     /// `None` on platforms where capture is unavailable.
     #[serde(default)]
@@ -1145,6 +1151,37 @@ pub struct TableStats {
     pub max_n_distinct: f64,
 }
 
+/// Cumulative counters from PostgreSQL's `pg_stat_checkpointer` view.
+/// Exact equality across a measured interval proves that no timed or
+/// requested checkpoint started or completed while timings were collected.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CheckpointerSnapshot {
+    pub num_timed: u64,
+    pub num_requested: u64,
+    pub num_done: u64,
+    pub restartpoints_timed: u64,
+    pub restartpoints_requested: u64,
+    pub restartpoints_done: u64,
+    pub write_time_ms: f64,
+    pub sync_time_ms: f64,
+    pub buffers_written: u64,
+    pub slru_written: u64,
+}
+
+/// Database-I/O quiescence proof surrounding one workload's timed interval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetupQuiescenceAudit {
+    pub schema_version: u32,
+    pub checkpoint_completed: bool,
+    pub checkpoint_completed_at: String,
+    pub checkpoint_wal_lsn: String,
+    pub measurement_completed_at: String,
+    pub measurement_completed_wal_lsn: String,
+    pub checkpointer_before: CheckpointerSnapshot,
+    pub checkpointer_after: CheckpointerSnapshot,
+    pub checkpointer_unchanged: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SanityCheck {
     pub label: String,
@@ -1287,6 +1324,7 @@ impl WorkloadResult {
             plan_snippet: None,
             baseline_plan_snippet: None,
             correctness_diff_artifact: None,
+            setup_quiescence: None,
             thermal: None,
             table_stats: Vec::new(),
             sanity_checks: Vec::new(),

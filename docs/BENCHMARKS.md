@@ -116,6 +116,10 @@ The complete inventory, defaults, contexts, and ranges are in
 
 ## Running the harness
 
+Configured timing runs require a connection role with `CHECKPOINT` privilege
+(a superuser or a member of `pg_checkpoint`). The harness fails closed if it
+cannot establish the post-setup quiescence boundary.
+
 First validate workload definitions without connecting:
 
 ```bash
@@ -295,6 +299,10 @@ artifact URLs and the separate qualified-hardware bundles are durable.
 - Consume complete query output in both arms.
 - Keep raw wall-clock and instrumented EXPLAIN timing distinct when capturing
   both.
+- After bulk fixture setup and `VACUUM ANALYZE`, force a synchronous
+  `CHECKPOINT` outside the timed region. Reject the cell if any cumulative
+  `pg_stat_checkpointer` counter changes before measurement completes; setup
+  writes still draining in the background are timing contamination.
 - Record warmups separately and exclude them from measured statistics.
 - Preserve every raw sample; summary statistics alone are not reproducible.
 - Treat cancellation, timeout warnings, backend restarts, and kernel failures as
@@ -311,6 +319,8 @@ Every result intended for review must include:
 - workload, setup scale, seed, command line, cache mode, timing mode, warmups,
   and measured-iteration count;
 - resident status/live-byte snapshots and explicit load/refresh actions;
+- the completed setup-checkpoint boundary plus identical before/after
+  `pg_stat_checkpointer` snapshots;
 - raw samples and arm ordering;
 - correctness output/diff;
 - full EXPLAIN evidence and planner rejection reason where applicable;
