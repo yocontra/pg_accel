@@ -71,7 +71,16 @@ enum DescriptorSpecializationFamily {
     HashCount,
     DenseCount,
     DenseBoolCount,
+    DenseInt2Count,
+    DenseInt8Count,
+    DenseDateCount,
+    DenseTimestampCount,
+    DenseFloat4Count,
+    DenseFloat8Count,
+    DenseInt2SumAvg,
+    DenseInt4SumAvg,
     DenseIntegerColumn,
+    DenseIntegerColumnMeasureRange,
     DenseIntegerMultiply,
     DenseIntegerMultiplyRange,
     SerialGeneric,
@@ -112,6 +121,102 @@ impl DescriptorSpecialization {
             (DescriptorSpecializationFamily::DenseBoolCount, true, true) => {
                 "dense_bool_count_membership_sql_mask"
             }
+            (DescriptorSpecializationFamily::DenseInt2Count, false, false) => {
+                "dense_int2_count_plain"
+            }
+            (DescriptorSpecializationFamily::DenseInt2Count, false, true) => {
+                "dense_int2_count_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseInt2Count, true, false) => {
+                "dense_int2_count_membership"
+            }
+            (DescriptorSpecializationFamily::DenseInt2Count, true, true) => {
+                "dense_int2_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseInt8Count, false, false) => {
+                "dense_int8_count_plain"
+            }
+            (DescriptorSpecializationFamily::DenseInt8Count, false, true) => {
+                "dense_int8_count_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseInt8Count, true, false) => {
+                "dense_int8_count_membership"
+            }
+            (DescriptorSpecializationFamily::DenseInt8Count, true, true) => {
+                "dense_int8_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseDateCount, false, false) => {
+                "dense_date_count_plain"
+            }
+            (DescriptorSpecializationFamily::DenseDateCount, false, true) => {
+                "dense_date_count_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseDateCount, true, false) => {
+                "dense_date_count_membership"
+            }
+            (DescriptorSpecializationFamily::DenseDateCount, true, true) => {
+                "dense_date_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseTimestampCount, false, false) => {
+                "dense_timestamp_count_plain"
+            }
+            (DescriptorSpecializationFamily::DenseTimestampCount, false, true) => {
+                "dense_timestamp_count_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseTimestampCount, true, false) => {
+                "dense_timestamp_count_membership"
+            }
+            (DescriptorSpecializationFamily::DenseTimestampCount, true, true) => {
+                "dense_timestamp_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseFloat4Count, false, false) => {
+                "dense_float4_count_plain"
+            }
+            (DescriptorSpecializationFamily::DenseFloat4Count, false, true) => {
+                "dense_float4_count_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseFloat4Count, true, false) => {
+                "dense_float4_count_membership"
+            }
+            (DescriptorSpecializationFamily::DenseFloat4Count, true, true) => {
+                "dense_float4_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseFloat8Count, false, false) => {
+                "dense_float8_count_plain"
+            }
+            (DescriptorSpecializationFamily::DenseFloat8Count, false, true) => {
+                "dense_float8_count_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseFloat8Count, true, false) => {
+                "dense_float8_count_membership"
+            }
+            (DescriptorSpecializationFamily::DenseFloat8Count, true, true) => {
+                "dense_float8_count_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseInt2SumAvg, false, false) => {
+                "dense_int2_sum_avg_plain"
+            }
+            (DescriptorSpecializationFamily::DenseInt2SumAvg, false, true) => {
+                "dense_int2_sum_avg_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseInt2SumAvg, true, false) => {
+                "dense_int2_sum_avg_membership"
+            }
+            (DescriptorSpecializationFamily::DenseInt2SumAvg, true, true) => {
+                "dense_int2_sum_avg_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseInt4SumAvg, false, false) => {
+                "dense_int4_sum_avg_plain"
+            }
+            (DescriptorSpecializationFamily::DenseInt4SumAvg, false, true) => {
+                "dense_int4_sum_avg_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseInt4SumAvg, true, false) => {
+                "dense_int4_sum_avg_membership"
+            }
+            (DescriptorSpecializationFamily::DenseInt4SumAvg, true, true) => {
+                "dense_int4_sum_avg_membership_sql_mask"
+            }
             (DescriptorSpecializationFamily::DenseIntegerColumn, false, false) => {
                 "dense_integer_column_plain"
             }
@@ -123,6 +228,9 @@ impl DescriptorSpecialization {
             }
             (DescriptorSpecializationFamily::DenseIntegerColumn, true, true) => {
                 "dense_integer_column_membership_sql_mask"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerColumnMeasureRange, false, false) => {
+                "dense_integer_column_measure_range"
             }
             (DescriptorSpecializationFamily::DenseIntegerMultiply, false, false) => {
                 "dense_integer_multiply_plain"
@@ -145,6 +253,9 @@ impl DescriptorSpecialization {
             (DescriptorSpecializationFamily::HashCount, _, _) => "invalid_hash_specialization",
             (DescriptorSpecializationFamily::DenseIntegerMultiplyRange, _, _) => {
                 "invalid_dense_integer_range_specialization"
+            }
+            (DescriptorSpecializationFamily::DenseIntegerColumnMeasureRange, _, _) => {
+                "invalid_dense_integer_measure_range_specialization"
             }
         }
     }
@@ -189,6 +300,20 @@ fn unique_dimension_inputs(spec: &AggQuerySpec) -> bool {
         .all(|dimension| dimension.multiplicity == JoinMultiplicity::Unique)
 }
 
+pub(super) fn weighted_global_count_inputs(spec: &AggQuerySpec) -> bool {
+    let [dimension] = spec.star_dims.as_slice() else {
+        return false;
+    };
+    dimension.multiplicity == JoinMultiplicity::Counted
+        && dimension.fact_key.type_oid == INT4OID
+        && dimension.dim_key.type_oid == INT4OID
+        && dimension.collation_oid == 0
+        && dimension.filter == FilterSpec::None
+        && spec.group_keys.is_empty()
+        && spec.fact_filter == FilterSpec::None
+        && spec.having.is_none()
+}
+
 fn parallel_dense_fact_filter(filter: &FilterSpec) -> bool {
     matches!(
         filter,
@@ -211,9 +336,10 @@ fn canonical_count_measure(measure: &crate::engine::spec::MeasureSpec) -> bool {
             }]
 }
 
-fn canonical_dense_bool_count_measure(
+fn canonical_dense_typed_count_measure(
     spec: &AggQuerySpec,
     measure: &crate::engine::spec::MeasureSpec,
+    measure_type_oid: u32,
 ) -> bool {
     let [group_key] = spec.group_keys.as_slice() else {
         return false;
@@ -226,7 +352,7 @@ fn canonical_dense_bool_count_measure(
     };
     group_key.type_oid == BOOLOID
         && group_column.type_oid == BOOLOID
-        && measure_column.type_oid == BOOLOID
+        && measure_column.type_oid == measure_type_oid
         && group_column.relation_oid == spec.fact_rel
         && measure_column.relation_oid == spec.fact_rel
         && (group_column.relation_oid, group_column.attno)
@@ -240,6 +366,94 @@ fn canonical_dense_bool_count_measure(
                 source: AggregateSource::Value,
                 kind: AggregateKind::Count,
             }]
+}
+
+fn canonical_dense_bool_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_typed_count_measure(spec, measure, BOOLOID)
+}
+
+fn canonical_dense_int2_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_typed_count_measure(spec, measure, INT2OID)
+}
+
+fn canonical_dense_int8_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_typed_count_measure(spec, measure, INT8OID)
+}
+
+fn canonical_dense_date_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_typed_count_measure(spec, measure, DATEOID)
+}
+
+fn canonical_dense_timestamp_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_typed_count_measure(spec, measure, TIMESTAMPOID)
+        || canonical_dense_typed_count_measure(spec, measure, TIMESTAMPTZOID)
+}
+
+fn canonical_dense_float4_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_typed_count_measure(spec, measure, FLOAT4OID)
+}
+
+fn canonical_dense_float8_count_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    canonical_dense_typed_count_measure(spec, measure, FLOAT8OID)
+}
+
+fn canonical_dense_integer_sum_avg_measure(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+    measure_type_oid: u32,
+) -> bool {
+    if !matches!(measure_type_oid, INT2OID | INT4OID) {
+        return false;
+    }
+    let [group_key] = spec.group_keys.as_slice() else {
+        return false;
+    };
+    let GroupKeySource::FactColumn(group_column) = &group_key.source else {
+        return false;
+    };
+    let MeasureExpr::Column(measure_column) = &measure.expression else {
+        return false;
+    };
+    let outputs = measure.outputs.as_slice();
+    group_key.type_oid == BOOLOID
+        && group_column.type_oid == BOOLOID
+        && measure_column.type_oid == measure_type_oid
+        && group_column.relation_oid == spec.fact_rel
+        && measure_column.relation_oid == spec.fact_rel
+        && (group_column.relation_oid, group_column.attno)
+            != (measure_column.relation_oid, measure_column.attno)
+        && spec.star_dims.is_empty()
+        && spec.fact_filter == FilterSpec::None
+        && spec.having.is_none()
+        && measure.filter == FilterSpec::None
+        && outputs.len() == 2
+        && outputs.iter().any(|output| {
+            output.source == AggregateSource::Value && output.kind == AggregateKind::Sum
+        })
+        && outputs.iter().any(|output| {
+            output.source == AggregateSource::Value && output.kind == AggregateKind::Avg
+        })
 }
 
 fn canonical_dense_integer_value_measure(measure: &crate::engine::spec::MeasureSpec) -> bool {
@@ -283,6 +497,48 @@ fn canonical_dense_integer_value_measure(measure: &crate::engine::spec::MeasureS
         }
         _ => false,
     }
+}
+
+fn canonical_dense_integer_measure_range(
+    spec: &AggQuerySpec,
+    measure: &crate::engine::spec::MeasureSpec,
+) -> bool {
+    let MeasureExpr::Column(value) = &measure.expression else {
+        return false;
+    };
+    let FilterSpec::Ranges { input, ranges } = &measure.filter else {
+        return false;
+    };
+    let [range] = ranges.as_slice() else {
+        return false;
+    };
+    let (ScalarValue::I32(lo), ScalarValue::I32(hi)) = (range.lo, range.hi) else {
+        return false;
+    };
+    let [group_key] = spec.group_keys.as_slice() else {
+        return false;
+    };
+    let GroupKeySource::FactColumn(group_column) = &group_key.source else {
+        return false;
+    };
+    value.type_oid == INT4OID
+        && input == value
+        && lo != i32::MIN
+        && hi != i32::MAX
+        && lo < hi
+        && value.relation_oid == spec.fact_rel
+        && group_key.type_oid == INT4OID
+        && group_column.type_oid == INT4OID
+        && group_column.relation_oid == spec.fact_rel
+        && group_column != value
+        && spec.star_dims.is_empty()
+        && spec.fact_filter == FilterSpec::None
+        && spec.having.is_none()
+        && measure.outputs.as_slice()
+            == [crate::engine::spec::AggregateOutput {
+                source: AggregateSource::Value,
+                kind: AggregateKind::Sum,
+            }]
 }
 
 fn canonical_dense_integer_range_intersection(
@@ -344,23 +600,33 @@ pub fn planned_descriptor_kernel_mode(
             GroupedAggKernelMode::SerialGeneric
         };
     }
+    if matches!(spec.measures.as_slice(), [count] if canonical_count_measure(count))
+        && ((unique_dimension_inputs(spec) && parallel_dense_fact_filter(&spec.fact_filter))
+            || weighted_global_count_inputs(spec))
+    {
+        return GroupedAggKernelMode::ParallelDenseCount;
+    }
     if !unique_dimension_inputs(spec) {
         return GroupedAggKernelMode::SerialGeneric;
     }
     match spec.measures.as_slice() {
         [count]
-            if parallel_dense_fact_filter(&spec.fact_filter) && canonical_count_measure(count) =>
-        {
-            GroupedAggKernelMode::ParallelDenseCount
-        }
-        [count]
             if parallel_dense_fact_filter(&spec.fact_filter)
-                && canonical_dense_bool_count_measure(spec, count) =>
+                && (canonical_dense_bool_count_measure(spec, count)
+                    || canonical_dense_int2_count_measure(spec, count)
+                    || canonical_dense_int8_count_measure(spec, count)
+                    || canonical_dense_date_count_measure(spec, count)
+                    || canonical_dense_timestamp_count_measure(spec, count)
+                    || canonical_dense_float4_count_measure(spec, count)
+                    || canonical_dense_float8_count_measure(spec, count)) =>
         {
             GroupedAggKernelMode::ParallelDenseCount
         }
         [value, count]
-            if canonical_dense_integer_value_measure(value)
+            if (canonical_dense_integer_value_measure(value)
+                || canonical_dense_integer_measure_range(spec, value)
+                || canonical_dense_integer_sum_avg_measure(spec, value, INT2OID)
+                || canonical_dense_integer_sum_avg_measure(spec, value, INT4OID))
                 && canonical_count_measure(count)
                 && (parallel_dense_fact_filter(&spec.fact_filter)
                     || canonical_dense_integer_range_intersection(spec, value)) =>
@@ -389,9 +655,36 @@ fn classify_descriptor_specialization(
             Some(measure) if canonical_dense_bool_count_measure(spec, measure) => {
                 DescriptorSpecializationFamily::DenseBoolCount
             }
+            Some(measure) if canonical_dense_int2_count_measure(spec, measure) => {
+                DescriptorSpecializationFamily::DenseInt2Count
+            }
+            Some(measure) if canonical_dense_int8_count_measure(spec, measure) => {
+                DescriptorSpecializationFamily::DenseInt8Count
+            }
+            Some(measure) if canonical_dense_date_count_measure(spec, measure) => {
+                DescriptorSpecializationFamily::DenseDateCount
+            }
+            Some(measure) if canonical_dense_timestamp_count_measure(spec, measure) => {
+                DescriptorSpecializationFamily::DenseTimestampCount
+            }
+            Some(measure) if canonical_dense_float4_count_measure(spec, measure) => {
+                DescriptorSpecializationFamily::DenseFloat4Count
+            }
+            Some(measure) if canonical_dense_float8_count_measure(spec, measure) => {
+                DescriptorSpecializationFamily::DenseFloat8Count
+            }
             _ => DescriptorSpecializationFamily::DenseCount,
         },
         GroupedAggKernelMode::ParallelDenseInteger => match spec.measures.first() {
+            Some(measure) if canonical_dense_integer_sum_avg_measure(spec, measure, INT2OID) => {
+                DescriptorSpecializationFamily::DenseInt2SumAvg
+            }
+            Some(measure) if canonical_dense_integer_sum_avg_measure(spec, measure, INT4OID) => {
+                DescriptorSpecializationFamily::DenseInt4SumAvg
+            }
+            Some(measure) if canonical_dense_integer_measure_range(spec, measure) => {
+                DescriptorSpecializationFamily::DenseIntegerColumnMeasureRange
+            }
             Some(measure) if canonical_dense_integer_range_intersection(spec, measure) => {
                 DescriptorSpecializationFamily::DenseIntegerMultiplyRange
             }
@@ -552,12 +845,13 @@ fn validate_measure_outputs(
             AggregateKind::Sum | AggregateKind::Count | AggregateKind::Min | AggregateKind::Max
         )
     };
+    let widened_integer = |kind: AggregateKind| basic(kind) || kind == AggregateKind::Avg;
     match expression {
         MeasureExpr::CountStar if outputs.len() == 1 && outputs[0].kind == AggregateKind::Count => {
             Ok(())
         }
         MeasureExpr::Column(column) if column.type_oid == INT4OID => {
-            if outputs.iter().all(|output| basic(output.kind)) {
+            if outputs.iter().all(|output| widened_integer(output.kind)) {
                 Ok(())
             } else {
                 Err("INT4 descriptor measure requests an unsupported aggregate lane".into())
@@ -566,8 +860,14 @@ fn validate_measure_outputs(
         MeasureExpr::Column(column)
             if matches!(
                 column.type_oid,
-                INT2OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID
+                INT8OID | FLOAT4OID | FLOAT8OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID
             ) && count_min_max() =>
+        {
+            Ok(())
+        }
+        MeasureExpr::Column(column)
+            if column.type_oid == INT2OID
+                && outputs.iter().all(|output| widened_integer(output.kind)) =>
         {
             Ok(())
         }
@@ -745,7 +1045,9 @@ fn validate_runtime_capability_with_spatial(
         allow_internal_spatial,
     )?;
     for measure in &spec.measures {
-        if !matches!(measure.filter, FilterSpec::None) {
+        if !matches!(measure.filter, FilterSpec::None)
+            && !canonical_dense_integer_measure_range(spec, measure)
+        {
             return Err("aggregate FILTER is not implemented by Phase 5D".into());
         }
         validate_measure_outputs(&measure.expression, &measure.outputs)?;
@@ -2588,11 +2890,11 @@ fn measure_column(
 fn lane_mask(outputs: &[crate::engine::spec::AggregateOutput]) -> u32 {
     outputs.iter().fold(0, |mask, output| {
         mask | match output.kind {
-            AggregateKind::Sum => abi::PGACCEL_GROUPED_AGG_LANE_SUM,
+            AggregateKind::Sum | AggregateKind::Avg => abi::PGACCEL_GROUPED_AGG_LANE_SUM,
             AggregateKind::Count => abi::PGACCEL_GROUPED_AGG_LANE_COUNT,
             AggregateKind::Min => abi::PGACCEL_GROUPED_AGG_LANE_MIN,
             AggregateKind::Max => abi::PGACCEL_GROUPED_AGG_LANE_MAX,
-            AggregateKind::Avg | AggregateKind::StddevSamp => 0,
+            AggregateKind::StddevSamp => 0,
         }
     })
 }
@@ -2664,6 +2966,9 @@ fn build_filter(
         }
         | FilterSpec::Spatial { .. } => build_sql_mask_filter(fact_rows, fact_mask),
         FilterSpec::Ranges { input, ranges } => {
+            if ranges.len() > abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES {
+                return Err("fact filter range count exceeds descriptor capacity".to_owned());
+            }
             let mut filter = disabled_filter();
             filter.predicate_measure_slot = i32::try_from(filter_measure_binding(spec, *input)?)
                 .map_err(|_| "filter measure index exceeds i32".to_owned())?;
@@ -2677,6 +2982,32 @@ fn build_filter(
             Ok(filter)
         }
         _ => Err("fact filter escaped the Phase 5D capability backstop".into()),
+    }
+}
+
+fn build_measure_filter(
+    spec: &AggQuerySpec,
+    filter: &FilterSpec,
+) -> Result<abi::PgaccelGroupedAggFilter, String> {
+    match filter {
+        FilterSpec::None => Ok(disabled_filter()),
+        FilterSpec::Ranges { input, ranges } => {
+            if ranges.len() > abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES {
+                return Err("measure filter range count exceeds descriptor capacity".to_owned());
+            }
+            let mut filter = disabled_filter();
+            filter.predicate_measure_slot = i32::try_from(filter_measure_binding(spec, *input)?)
+                .map_err(|_| "measure filter input index exceeds i32".to_owned())?;
+            filter.predicate_source = abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+            filter.predicate_range_count = i32::try_from(ranges.len())
+                .map_err(|_| "measure filter range count exceeds i32".to_owned())?;
+            for (index, range) in ranges.iter().enumerate() {
+                filter.predicate_lo[index] = scalar_value(range.lo);
+                filter.predicate_hi[index] = scalar_value(range.hi);
+            }
+            Ok(filter)
+        }
+        _ => Err("measure filter escaped the Phase 5D capability backstop".into()),
     }
 }
 
@@ -2760,6 +3091,7 @@ fn build_descriptor_with_fact_mask(
     desc.measure_count =
         u32::try_from(spec.measures.len()).map_err(|_| "measure count exceeds u32".to_owned())?;
     for (index, measure) in spec.measures.iter().enumerate() {
+        let agg_mask = lane_mask(&measure.outputs);
         let (op, value, rhs, accumulator_kind) = match &measure.expression {
             MeasureExpr::CountStar => (
                 abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR,
@@ -2778,7 +3110,9 @@ fn build_descriptor_with_fact_mask(
                     // SAFETY: a unary column measure has no right-hand input;
                     // the ABI requires that inactive descriptor to be zeroed.
                     unsafe { std::mem::zeroed() },
-                    if matches!(column.type_oid, FLOAT4OID | FLOAT8OID) {
+                    if matches!(column.type_oid, FLOAT4OID | FLOAT8OID)
+                        && agg_mask != abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+                    {
                         abi::PGACCEL_GROUPED_AGG_ACCUM_F64
                     } else {
                         abi::PGACCEL_GROUPED_AGG_ACCUM_I64
@@ -2806,7 +3140,7 @@ fn build_descriptor_with_fact_mask(
             value,
             rhs,
             op,
-            agg_mask: lane_mask(&measure.outputs),
+            agg_mask,
             accumulator_kind,
             state_bytes: 8,
             flags: 0,
@@ -2814,8 +3148,12 @@ fn build_descriptor_with_fact_mask(
         };
     }
     desc.where_filter = build_filter(spec, artifact.fact_rows, fact_mask)?;
-    for filter in &mut desc.measure_filters {
-        *filter = disabled_filter();
+    for (index, filter) in desc.measure_filters.iter_mut().enumerate() {
+        *filter = if let Some(measure) = spec.measures.get(index) {
+            build_measure_filter(spec, &measure.filter)?
+        } else {
+            disabled_filter()
+        };
     }
     desc.dim_count = u32::try_from(artifact.dimensions.len())
         .map_err(|_| "dimension count exceeds u32".to_owned())?;
@@ -3406,32 +3744,54 @@ fn parallel_dense_count_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
         || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
         || desc.measure_count != 1
         || !parallel_dense_filter_kind(&desc.where_filter)
-        || !parallel_dense_unique_dimensions(desc)
         || !canonical_disabled_filter(&desc.measure_filters[0])
     {
         return false;
     }
     let count = &desc.measures[0];
     let count_star = count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COUNT_STAR;
-    let count_bool_column = count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
-        && count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
-        && count.value.element_bytes == 1;
-    (count_star || count_bool_column)
+    let count_typed_column = count.op == abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN
+        && ((count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
+            && count.value.element_bytes == 1)
+            || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+                && count.value.element_bytes == 4)
+            || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64
+                && count.value.element_bytes == 8)
+            || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE
+                && count.value.element_bytes == 4)
+            || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP
+                && count.value.element_bytes == 8)
+            || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32
+                && count.value.element_bytes == 4)
+            || (count.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64
+                && count.value.element_bytes == 8));
+    let canonical_count = (count_star || count_typed_column)
         && count.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_COUNT
         && count.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
-        && count.state_bytes == 8
+        && count.state_bytes == 8;
+    if !canonical_count {
+        return false;
+    }
+    if parallel_dense_unique_dimensions(desc) {
+        return true;
+    }
+    count_star
+        && desc.key_count == 0
+        && desc.group_capacity == 1
+        && desc.dim_count != 0
+        && canonical_disabled_filter(&desc.where_filter)
 }
 
 fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
+    let measure_range = canonical_dense_integer_range_filter(&desc.measure_filters[0]);
     if desc.grouping_mode != abi::PGACCEL_GROUPED_AGG_GROUPING_DENSE_RADIX
         || desc.output_mode != abi::PGACCEL_GROUPED_AGG_OUTPUT_DENSE
         || desc.group_capacity == 0
         || desc.measure_count != 2
         || !parallel_dense_integer_filter_kind(&desc.where_filter)
         || !parallel_dense_unique_dimensions(desc)
-        || desc.measure_filters[..2]
-            .iter()
-            .any(|filter| !canonical_disabled_filter(filter))
+        || (!canonical_disabled_filter(&desc.measure_filters[0]) && !measure_range)
+        || !canonical_disabled_filter(&desc.measure_filters[1])
     {
         return false;
     }
@@ -3450,6 +3810,12 @@ fn parallel_dense_integer_shape(desc: &abi::PgaccelGroupedAggDesc) -> bool {
     (direct_sum || product_sum)
         && (!canonical_dense_integer_range_filter(&desc.where_filter)
             || (product_sum && desc.key_count == 1 && desc.dim_count == 0))
+        && (!measure_range
+            || (direct_sum
+                && value.agg_mask == abi::PGACCEL_GROUPED_AGG_LANE_SUM
+                && canonical_disabled_filter(&desc.where_filter)
+                && desc.key_count == 1
+                && desc.dim_count == 0))
         && value.value.physical_type == abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
         && value.value.element_bytes == 4
         && value.accumulator_kind == abi::PGACCEL_GROUPED_AGG_ACCUM_I64
@@ -3969,6 +4335,7 @@ mod tests {
     };
 
     const TEST_GEOMETRY_OID: u32 = 60_001;
+    const NUMERICOID: u32 = 1700;
     const TEST_SRID: i32 = 4_326;
 
     fn policy_input() -> ArtifactPolicyInput {
@@ -4174,6 +4541,23 @@ mod tests {
         range.where_filter.predicate_lo[1] = scalar_value(ScalarValue::I32(300));
         range.where_filter.predicate_hi[1] = scalar_value(ScalarValue::I32(700));
         assert!(!parallel_dense_integer_shape(&range));
+
+        let mut measure_range = release_shape;
+        measure_range.key_count = 1;
+        measure_range.measure_filters[0].predicate_source =
+            abi::PGACCEL_GROUPED_AGG_PRED_SOURCE_VALUE;
+        measure_range.measure_filters[0].predicate_measure_slot = 0;
+        measure_range.measure_filters[0].predicate_range_count = 1;
+        measure_range.measure_filters[0].predicate_lo[0] = scalar_value(ScalarValue::I32(200));
+        measure_range.measure_filters[0].predicate_hi[0] = scalar_value(ScalarValue::I32(800));
+        assert!(parallel_dense_integer_shape(&measure_range));
+        assert!(dense_one_shot_eligible(
+            &measure_range,
+            GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
+        ));
+        measure_range.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        measure_range.where_filter.mask = mask.as_ptr();
+        assert!(!parallel_dense_integer_shape(&measure_range));
     }
 
     #[test]
@@ -4184,6 +4568,21 @@ mod tests {
         assert!(dense_one_shot_eligible(&desc, 10));
         assert!(!dense_one_shot_eligible(&desc, 4));
 
+        let multiplicity = [2_u64];
+        let mut weighted = desc;
+        weighted.dim_count = 1;
+        weighted.dims[0].multiplicity_by_key = multiplicity.as_ptr();
+        assert!(parallel_dense_count_shape(&weighted));
+        assert!(dense_one_shot_eligible(&weighted, 10));
+
+        weighted.key_count = 1;
+        assert!(!parallel_dense_count_shape(&weighted));
+        weighted.key_count = 0;
+        let mask = [1_i8];
+        weighted.where_filter.kind = abi::PGACCEL_GROUPED_AGG_FILTER_SQL;
+        weighted.where_filter.mask = mask.as_ptr();
+        assert!(!parallel_dense_count_shape(&weighted));
+
         desc.measures[0].op = abi::PGACCEL_GROUPED_AGG_MEASURE_COLUMN;
         desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL;
         desc.measures[0].value.element_bytes = 1;
@@ -4191,6 +4590,29 @@ mod tests {
         assert!(dense_one_shot_eligible(&desc, 10));
 
         desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32;
+        desc.measures[0].value.element_bytes = 4;
+        assert!(parallel_dense_count_shape(&desc));
+
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64;
+        desc.measures[0].value.element_bytes = 8;
+        assert!(parallel_dense_count_shape(&desc));
+
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE;
+        desc.measures[0].value.element_bytes = 4;
+        assert!(parallel_dense_count_shape(&desc));
+
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP;
+        desc.measures[0].value.element_bytes = 8;
+        assert!(parallel_dense_count_shape(&desc));
+
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32;
+        desc.measures[0].value.element_bytes = 4;
+        assert!(parallel_dense_count_shape(&desc));
+
+        desc.measures[0].value.physical_type = abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64;
+        desc.measures[0].value.element_bytes = 8;
+        assert!(parallel_dense_count_shape(&desc));
+
         desc.measures[0].value.element_bytes = 4;
         assert!(!parallel_dense_count_shape(&desc));
     }
@@ -4302,6 +4724,92 @@ mod tests {
         count
     }
 
+    fn dense_int2_count_spec() -> AggQuerySpec {
+        let mut count = dense_bool_count_spec();
+        count.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: INT2OID,
+        });
+        count
+    }
+
+    fn dense_int8_count_spec() -> AggQuerySpec {
+        let mut count = dense_bool_count_spec();
+        count.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: INT8OID,
+        });
+        count
+    }
+
+    fn dense_date_count_spec() -> AggQuerySpec {
+        let mut count = dense_bool_count_spec();
+        count.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: DATEOID,
+        });
+        count
+    }
+
+    fn dense_timestamp_count_spec(type_oid: u32) -> AggQuerySpec {
+        assert!(matches!(type_oid, TIMESTAMPOID | TIMESTAMPTZOID));
+        let mut count = dense_bool_count_spec();
+        count.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid,
+        });
+        count
+    }
+
+    fn dense_float_count_spec(type_oid: u32) -> AggQuerySpec {
+        assert!(matches!(type_oid, FLOAT4OID | FLOAT8OID));
+        let mut count = dense_bool_count_spec();
+        count.measures[0].expression = MeasureExpr::Column(ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid,
+        });
+        count
+    }
+
+    fn dense_integer_sum_avg_spec(type_oid: u32) -> AggQuerySpec {
+        assert!(matches!(type_oid, INT2OID | INT4OID));
+        let mut spec = dense_bool_count_spec();
+        spec.measures = vec![
+            MeasureSpec {
+                expression: MeasureExpr::Column(ColumnRef {
+                    relation_oid: 42,
+                    attno: 2,
+                    type_oid,
+                }),
+                outputs: vec![
+                    AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Sum,
+                    },
+                    AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Avg,
+                    },
+                ],
+                filter: FilterSpec::None,
+            },
+            MeasureSpec {
+                expression: MeasureExpr::CountStar,
+                outputs: vec![AggregateOutput {
+                    source: AggregateSource::Value,
+                    kind: AggregateKind::Count,
+                }],
+                filter: FilterSpec::None,
+            },
+        ];
+        spec
+    }
+
     fn dense_integer_range_spec() -> AggQuerySpec {
         let group = ColumnRef {
             relation_oid: 42,
@@ -4363,6 +4871,81 @@ mod tests {
         }
     }
 
+    fn dense_integer_measure_range_spec() -> AggQuerySpec {
+        let group = ColumnRef {
+            relation_oid: 42,
+            attno: 1,
+            type_oid: INT4OID,
+        };
+        let value = ColumnRef {
+            relation_oid: 42,
+            attno: 2,
+            type_oid: INT4OID,
+        };
+        AggQuerySpec {
+            fact_rel: 42,
+            group_keys: vec![GroupKeyRef {
+                source: GroupKeySource::FactColumn(group),
+                type_oid: INT4OID,
+                collation_oid: 0,
+                encoding: GroupKeyEncoding::DictionaryI32 {
+                    cardinality: 256,
+                    null_code: None,
+                },
+            }],
+            measures: vec![
+                MeasureSpec {
+                    expression: MeasureExpr::Column(value),
+                    outputs: vec![AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Sum,
+                    }],
+                    filter: FilterSpec::Ranges {
+                        input: value,
+                        ranges: vec![ScalarRange {
+                            lo: ScalarValue::I32(200),
+                            hi: ScalarValue::I32(800),
+                        }],
+                    },
+                },
+                MeasureSpec {
+                    expression: MeasureExpr::CountStar,
+                    outputs: vec![AggregateOutput {
+                        source: AggregateSource::Value,
+                        kind: AggregateKind::Count,
+                    }],
+                    filter: FilterSpec::None,
+                },
+            ],
+            fact_filter: FilterSpec::None,
+            star_dims: Vec::new(),
+            having: None,
+        }
+    }
+
+    #[test]
+    fn measure_filter_builder_rejects_ranges_beyond_the_frozen_abi_capacity() {
+        let spec = dense_integer_measure_range_spec();
+        let value = match spec.measures[0].expression {
+            MeasureExpr::Column(value) => value,
+            ref expression => panic!("expected direct column measure, got {expression:?}"),
+        };
+        let filter = FilterSpec::Ranges {
+            input: value,
+            ranges: vec![
+                ScalarRange {
+                    lo: ScalarValue::I32(1),
+                    hi: ScalarValue::I32(2),
+                };
+                abi::PGACCEL_GROUPED_AGG_MAX_FILTER_RANGES + 1
+            ],
+        };
+        assert!(matches!(
+            build_measure_filter(&spec, &filter),
+            Err(error) if error == "measure filter range count exceeds descriptor capacity"
+        ));
+    }
+
     #[test]
     fn planned_kernel_mode_is_stable_and_rejects_serial_shapes() {
         let count = spec(MeasureExpr::CountStar, AggregateKind::Count);
@@ -4375,6 +4958,100 @@ mod tests {
             GroupedAggKernelMode::ParallelHash
         );
 
+        let counted_dimension = DimSpec {
+            relation_oid: 99,
+            fact_key: ColumnRef {
+                relation_oid: 42,
+                attno: 1,
+                type_oid: INT4OID,
+            },
+            dim_key: ColumnRef {
+                relation_oid: 99,
+                attno: 1,
+                type_oid: INT4OID,
+            },
+            collation_oid: 0,
+            multiplicity: JoinMultiplicity::Counted,
+            filter: FilterSpec::None,
+        };
+        let mut weighted_count = count;
+        weighted_count.star_dims.push(counted_dimension.clone());
+        assert_eq!(
+            planned_descriptor_kernel_mode(&weighted_count, false),
+            GroupedAggKernelMode::ParallelDenseCount,
+            "an exact unfiltered global COUNT(*) uses the weighted parallel lane"
+        );
+
+        let mut grouped_weighted_count = weighted_count.clone();
+        grouped_weighted_count.group_keys.push(GroupKeyRef {
+            source: GroupKeySource::FactColumn(ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: INT4OID,
+            }),
+            type_oid: INT4OID,
+            collation_oid: 0,
+            encoding: GroupKeyEncoding::DictionaryI32 {
+                cardinality: 2,
+                null_code: None,
+            },
+        });
+        assert_eq!(
+            planned_descriptor_kernel_mode(&grouped_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "grouped fanout has no released weighted kernel"
+        );
+
+        let mut filtered_weighted_count = weighted_count.clone();
+        filtered_weighted_count.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 3,
+                type_oid: BOOLOID,
+            },
+            kind: MaskKind::Sql,
+        };
+        assert_eq!(
+            planned_descriptor_kernel_mode(&filtered_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "filtered fanout has no released weighted kernel"
+        );
+
+        let mut multiple_weighted_count = weighted_count.clone();
+        let mut second_dimension = counted_dimension.clone();
+        second_dimension.relation_oid = 100;
+        second_dimension.dim_key.relation_oid = 100;
+        multiple_weighted_count.star_dims.push(second_dimension);
+        assert_eq!(
+            planned_descriptor_kernel_mode(&multiple_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "multi-dimension fanout has no independently qualified planner lane"
+        );
+
+        let mut int8_weighted_count = weighted_count.clone();
+        int8_weighted_count.star_dims[0].fact_key.type_oid = INT8OID;
+        int8_weighted_count.star_dims[0].dim_key.type_oid = INT8OID;
+        assert_eq!(
+            planned_descriptor_kernel_mode(&int8_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "counted INT8 membership has no independently qualified planner lane"
+        );
+
+        let mut typed_weighted_count = spec(
+            MeasureExpr::Column(ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: INT4OID,
+            }),
+            AggregateKind::Count,
+        );
+        typed_weighted_count.star_dims.push(counted_dimension);
+        assert_eq!(
+            planned_descriptor_kernel_mode(&typed_weighted_count, false),
+            GroupedAggKernelMode::SerialGeneric,
+            "COUNT(column) fanout has no released weighted kernel"
+        );
+
         let bool_count = dense_bool_count_spec();
         assert_eq!(
             planned_descriptor_kernel_mode(&bool_count, false),
@@ -4385,6 +5062,77 @@ mod tests {
             GroupedAggKernelMode::SerialGeneric,
             "a bool column count is not silently routed through COUNT(*) hash semantics"
         );
+        let int2_count = dense_int2_count_spec();
+        assert_eq!(
+            planned_descriptor_kernel_mode(&int2_count, false),
+            GroupedAggKernelMode::ParallelDenseCount
+        );
+        assert_eq!(
+            planned_descriptor_kernel_mode(&int2_count, true),
+            GroupedAggKernelMode::SerialGeneric,
+            "an INT2 column count is not silently routed through COUNT(*) hash semantics"
+        );
+        let int8_count = dense_int8_count_spec();
+        assert_eq!(
+            planned_descriptor_kernel_mode(&int8_count, false),
+            GroupedAggKernelMode::ParallelDenseCount
+        );
+        assert_eq!(
+            planned_descriptor_kernel_mode(&int8_count, true),
+            GroupedAggKernelMode::SerialGeneric,
+            "an INT8 column count is not silently routed through COUNT(*) hash semantics"
+        );
+        let date_count = dense_date_count_spec();
+        assert_eq!(
+            planned_descriptor_kernel_mode(&date_count, false),
+            GroupedAggKernelMode::ParallelDenseCount
+        );
+        assert_eq!(
+            planned_descriptor_kernel_mode(&date_count, true),
+            GroupedAggKernelMode::SerialGeneric,
+            "a DATE column count is not silently routed through COUNT(*) hash semantics"
+        );
+        for (type_oid, type_name) in [(TIMESTAMPOID, "TIMESTAMP"), (TIMESTAMPTZOID, "TIMESTAMPTZ")]
+        {
+            let timestamp_count = dense_timestamp_count_spec(type_oid);
+            assert_eq!(
+                planned_descriptor_kernel_mode(&timestamp_count, false),
+                GroupedAggKernelMode::ParallelDenseCount
+            );
+            assert_eq!(
+                planned_descriptor_kernel_mode(&timestamp_count, true),
+                GroupedAggKernelMode::SerialGeneric,
+                "a {type_name} column count is not silently routed through COUNT(*) hash semantics"
+            );
+        }
+        for (type_oid, type_name) in [(FLOAT4OID, "FLOAT4"), (FLOAT8OID, "FLOAT8")] {
+            let float_count = dense_float_count_spec(type_oid);
+            assert_eq!(
+                planned_descriptor_kernel_mode(&float_count, false),
+                GroupedAggKernelMode::ParallelDenseCount
+            );
+            assert_eq!(
+                planned_descriptor_kernel_mode(&float_count, true),
+                GroupedAggKernelMode::SerialGeneric,
+                "a {type_name} column count is not silently routed through COUNT(*) hash semantics"
+            );
+        }
+        for type_oid in [INT2OID, INT4OID] {
+            let integer_sum_avg = dense_integer_sum_avg_spec(type_oid);
+            assert_eq!(
+                planned_descriptor_kernel_mode(&integer_sum_avg, false),
+                GroupedAggKernelMode::ParallelDenseInteger
+            );
+            let mut avg_only = integer_sum_avg;
+            avg_only.measures[0]
+                .outputs
+                .retain(|output| output.kind == AggregateKind::Avg);
+            assert_eq!(
+                planned_descriptor_kernel_mode(&avg_only, false),
+                GroupedAggKernelMode::SerialGeneric,
+                "the released widened integer lane requires the exact SUM+AVG state contract"
+            );
+        }
         let mut same_column = bool_count.clone();
         same_column.measures[0].expression = MeasureExpr::Column(ColumnRef {
             relation_oid: 42,
@@ -4413,6 +5161,21 @@ mod tests {
         assert_eq!(
             planned_descriptor_kernel_mode(&range_integer, false),
             GroupedAggKernelMode::ParallelDenseInteger
+        );
+        let measure_range = dense_integer_measure_range_spec();
+        assert_eq!(
+            planned_descriptor_kernel_mode(&measure_range, false),
+            GroupedAggKernelMode::ParallelDenseInteger
+        );
+        let mut one_sided_measure_range = measure_range;
+        let FilterSpec::Ranges { ranges, .. } = &mut one_sided_measure_range.measures[0].filter
+        else {
+            unreachable!("measure range fixture")
+        };
+        ranges[0].hi = ScalarValue::I32(i32::MAX);
+        assert_eq!(
+            planned_descriptor_kernel_mode(&one_sided_measure_range, false),
+            GroupedAggKernelMode::SerialGeneric
         );
         let mut one_sided_range = range_integer.clone();
         let FilterSpec::Ranges { ranges, .. } = &mut one_sided_range.fact_filter else {
@@ -4547,6 +5310,108 @@ mod tests {
         assert_eq!(bool_specialization.label(), "dense_bool_count_plain");
         assert_eq!(bool_outcome, DescriptorSpecializationCacheOutcome::Miss);
 
+        let int2_count = dense_int2_count_spec();
+        let int2_identity = DerivedArtifactIdentity::from_canonical_words(vec![17, 18, 19, 20]);
+        let (int2_specialization, int2_outcome) = cached_descriptor_specialization(
+            &int2_identity,
+            &int2_count,
+            GroupedAggKernelMode::ParallelDenseCount,
+        );
+        assert_eq!(int2_specialization.label(), "dense_int2_count_plain");
+        assert_eq!(int2_outcome, DescriptorSpecializationCacheOutcome::Miss);
+
+        let int8_count = dense_int8_count_spec();
+        let int8_identity = DerivedArtifactIdentity::from_canonical_words(vec![21, 22, 23, 24]);
+        let (int8_specialization, int8_outcome) = cached_descriptor_specialization(
+            &int8_identity,
+            &int8_count,
+            GroupedAggKernelMode::ParallelDenseCount,
+        );
+        assert_eq!(int8_specialization.label(), "dense_int8_count_plain");
+        assert_eq!(int8_outcome, DescriptorSpecializationCacheOutcome::Miss);
+
+        let date_count = dense_date_count_spec();
+        let date_identity = DerivedArtifactIdentity::from_canonical_words(vec![25, 26, 27, 28]);
+        let (date_specialization, date_outcome) = cached_descriptor_specialization(
+            &date_identity,
+            &date_count,
+            GroupedAggKernelMode::ParallelDenseCount,
+        );
+        assert_eq!(date_specialization.label(), "dense_date_count_plain");
+        assert_eq!(date_outcome, DescriptorSpecializationCacheOutcome::Miss);
+
+        for (offset, type_oid) in [TIMESTAMPOID, TIMESTAMPTZOID].into_iter().enumerate() {
+            let timestamp_count = dense_timestamp_count_spec(type_oid);
+            let first_word = 29 + i32::try_from(offset).expect("bounded timestamp index") * 4;
+            let timestamp_identity = DerivedArtifactIdentity::from_canonical_words(vec![
+                first_word,
+                first_word + 1,
+                first_word + 2,
+                first_word + 3,
+            ]);
+            let (timestamp_specialization, timestamp_outcome) = cached_descriptor_specialization(
+                &timestamp_identity,
+                &timestamp_count,
+                GroupedAggKernelMode::ParallelDenseCount,
+            );
+            assert_eq!(
+                timestamp_specialization.label(),
+                "dense_timestamp_count_plain"
+            );
+            assert_eq!(
+                timestamp_outcome,
+                DescriptorSpecializationCacheOutcome::Miss
+            );
+        }
+
+        for (offset, (type_oid, expected_label)) in [
+            (FLOAT4OID, "dense_float4_count_plain"),
+            (FLOAT8OID, "dense_float8_count_plain"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let float_count = dense_float_count_spec(type_oid);
+            let first_word = 37 + i32::try_from(offset).expect("bounded float index") * 4;
+            let float_identity = DerivedArtifactIdentity::from_canonical_words(vec![
+                first_word,
+                first_word + 1,
+                first_word + 2,
+                first_word + 3,
+            ]);
+            let (float_specialization, float_outcome) = cached_descriptor_specialization(
+                &float_identity,
+                &float_count,
+                GroupedAggKernelMode::ParallelDenseCount,
+            );
+            assert_eq!(float_specialization.label(), expected_label);
+            assert_eq!(float_outcome, DescriptorSpecializationCacheOutcome::Miss);
+        }
+
+        for (offset, (type_oid, expected_label)) in [
+            (INT2OID, "dense_int2_sum_avg_plain"),
+            (INT4OID, "dense_int4_sum_avg_plain"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let integer_sum_avg = dense_integer_sum_avg_spec(type_oid);
+            let first_word = 45 + i32::try_from(offset).expect("bounded integer index") * 4;
+            let sum_avg_identity = DerivedArtifactIdentity::from_canonical_words(vec![
+                first_word,
+                first_word + 1,
+                first_word + 2,
+                first_word + 3,
+            ]);
+            let (specialization, outcome) = cached_descriptor_specialization(
+                &sum_avg_identity,
+                &integer_sum_avg,
+                GroupedAggKernelMode::ParallelDenseInteger,
+            );
+            assert_eq!(specialization.label(), expected_label);
+            assert_eq!(outcome, DescriptorSpecializationCacheOutcome::Miss);
+        }
+
         let (cached, second) = cached_descriptor_specialization(
             &identity,
             &count,
@@ -4581,9 +5446,25 @@ mod tests {
         );
         assert_eq!(range_variant.label(), "dense_integer_multiply_range");
         assert_eq!(range_outcome, DescriptorSpecializationCacheOutcome::Miss);
+        let measure_range = dense_integer_measure_range_spec();
+        let measure_range_identity =
+            DerivedArtifactIdentity::from_canonical_words(vec![13, 14, 15, 16]);
+        let (measure_range_variant, measure_range_outcome) = cached_descriptor_specialization(
+            &measure_range_identity,
+            &measure_range,
+            GroupedAggKernelMode::ParallelDenseInteger,
+        );
+        assert_eq!(
+            measure_range_variant.label(),
+            "dense_integer_column_measure_range"
+        );
+        assert_eq!(
+            measure_range_outcome,
+            DescriptorSpecializationCacheOutcome::Miss
+        );
         assert_eq!(
             DESCRIPTOR_SPECIALIZATION_CACHE.with(|cache| cache.borrow().len()),
-            4,
+            14,
             "a digest lookup never aliases a different complete canonical identity"
         );
     }
@@ -5296,28 +6177,105 @@ mod tests {
                     });
             }
         }
+        for type_oid in [INT2OID, INT4OID] {
+            for (kind, result_type_oid) in [
+                (AggregateKind::Sum, INT8OID),
+                (AggregateKind::Avg, NUMERICOID),
+            ] {
+                let spec = spec(MeasureExpr::Column(column(type_oid)), kind);
+                validate_runtime_capability(&spec, &projection(kind, type_oid, result_type_oid))
+                    .unwrap_or_else(|error| {
+                        panic!("widened integer type OID {type_oid} {kind:?} should bind: {error}")
+                    });
+            }
+        }
     }
 
     #[test]
-    fn bool_column_count_runtime_contract_matches_the_physical_abi() {
-        let spec = spec(MeasureExpr::Column(column(BOOLOID)), AggregateKind::Count);
-        validate_runtime_capability(&spec, &projection(AggregateKind::Count, BOOLOID, INT8OID))
-            .expect("nullable boolean column COUNT is an exact runtime capability");
+    fn typed_column_count_runtime_contract_matches_the_physical_abi() {
+        for (type_oid, physical_type, element_bytes) in [
+            (BOOLOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL, 1),
+            (INT2OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32, 4),
+            (INT8OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT64, 8),
+            (FLOAT4OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32, 4),
+            (FLOAT8OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64, 8),
+            (DATEOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_DATE, 4),
+            (TIMESTAMPOID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP, 8),
+            (
+                TIMESTAMPTZOID,
+                abi::PGACCEL_GROUPED_AGG_PHYSICAL_TIMESTAMP,
+                8,
+            ),
+        ] {
+            let spec = spec(MeasureExpr::Column(column(type_oid)), AggregateKind::Count);
+            validate_runtime_capability(
+                &spec,
+                &projection(AggregateKind::Count, type_oid, INT8OID),
+            )
+            .unwrap_or_else(|error| {
+                panic!("nullable typed column COUNT OID {type_oid} should bind: {error}")
+            });
 
-        let binding = measure_column(
-            &ResidentColumnView::Empty {
-                type_oid: pg_sys::Oid::from(BOOLOID),
-            },
-            0,
-        )
-        .expect("empty boolean resident column must preserve its ABI shape");
-        assert_eq!(
-            binding.physical_type,
-            abi::PGACCEL_GROUPED_AGG_PHYSICAL_BOOL
-        );
-        assert_eq!(binding.element_bytes, 1);
-        assert!(binding.values.is_null());
-        assert!(binding.nulls.is_null());
+            let binding = measure_column(
+                &ResidentColumnView::Empty {
+                    type_oid: pg_sys::Oid::from(type_oid),
+                },
+                0,
+            )
+            .unwrap_or_else(|error| {
+                panic!("empty resident column OID {type_oid} should preserve its ABI: {error}")
+            });
+            assert_eq!(binding.physical_type, physical_type);
+            assert_eq!(binding.element_bytes, element_bytes);
+            assert!(binding.values.is_null());
+            assert!(binding.nulls.is_null());
+        }
+    }
+
+    #[test]
+    fn float_count_descriptors_use_integer_count_state_without_reading_payloads() {
+        for (type_oid, physical_type, element_bytes) in [
+            (FLOAT4OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT32, 4),
+            (FLOAT8OID, abi::PGACCEL_GROUPED_AGG_PHYSICAL_FLOAT64, 8),
+        ] {
+            let spec = dense_float_count_spec(type_oid);
+            let desc = zero_descriptor(&spec, &[BOOLOID], &[type_oid]);
+            assert_eq!(
+                desc.measures[0].agg_mask,
+                abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+            );
+            assert_eq!(
+                desc.measures[0].accumulator_kind,
+                abi::PGACCEL_GROUPED_AGG_ACCUM_I64
+            );
+            assert_eq!(desc.measures[0].value.physical_type, physical_type);
+            assert_eq!(desc.measures[0].value.element_bytes, element_bytes);
+            assert!(parallel_dense_count_shape(&desc));
+        }
+    }
+
+    #[test]
+    fn widened_integer_sum_avg_descriptors_share_exact_sum_and_nonnull_state() {
+        for type_oid in [INT2OID, INT4OID] {
+            let spec = dense_integer_sum_avg_spec(type_oid);
+            let desc = zero_descriptor(&spec, &[BOOLOID], &[type_oid]);
+            assert_eq!(desc.measure_count, 2);
+            assert_eq!(desc.measures[0].agg_mask, abi::PGACCEL_GROUPED_AGG_LANE_SUM);
+            assert_eq!(
+                desc.measures[0].accumulator_kind,
+                abi::PGACCEL_GROUPED_AGG_ACCUM_I64
+            );
+            assert_eq!(
+                desc.measures[0].value.physical_type,
+                abi::PGACCEL_GROUPED_AGG_PHYSICAL_INT32
+            );
+            assert_eq!(desc.measures[0].value.element_bytes, 4);
+            assert_eq!(
+                desc.measures[1].agg_mask,
+                abi::PGACCEL_GROUPED_AGG_LANE_COUNT
+            );
+            assert!(parallel_dense_integer_shape(&desc));
+        }
     }
 
     #[test]
@@ -5607,7 +6565,7 @@ mod tests {
                 &MeasureExpr::Column(column(INT4OID)),
                 &[output(AggregateSource::Value, AggregateKind::Avg)],
             )
-            .is_err()
+            .is_ok()
         );
         for oid in [
             INT2OID,
@@ -5625,10 +6583,23 @@ mod tests {
                 )
                 .is_ok()
             );
-            assert!(
-                validate_measure_outputs(&MeasureExpr::Column(column(oid)), &all_basic[..1],)
-                    .is_err()
-            );
+            if oid == INT2OID {
+                assert!(
+                    validate_measure_outputs(
+                        &MeasureExpr::Column(column(oid)),
+                        &[
+                            output(AggregateSource::Value, AggregateKind::Sum),
+                            output(AggregateSource::Value, AggregateKind::Avg),
+                        ],
+                    )
+                    .is_ok()
+                );
+            } else {
+                assert!(
+                    validate_measure_outputs(&MeasureExpr::Column(column(oid)), &all_basic[..1],)
+                        .is_err()
+                );
+            }
         }
         assert!(
             validate_measure_outputs(&MeasureExpr::Column(column(BOOLOID)), &all_basic[1..2],)
@@ -5871,6 +6842,12 @@ mod tests {
         let desc = zero_descriptor(&ranged, &[], &[INT4OID]);
         assert_eq!(desc.where_filter.predicate_range_count, 1);
         assert_eq!(desc.where_filter.predicate_measure_slot, 0);
+
+        let measure_filtered = dense_integer_measure_range_spec();
+        let desc = zero_descriptor(&measure_filtered, &[INT4OID], &[INT4OID]);
+        assert_eq!(desc.measure_filters[0].predicate_range_count, 1);
+        assert_eq!(desc.measure_filters[0].predicate_measure_slot, 0);
+        assert!(canonical_disabled_filter(&desc.measure_filters[1]));
 
         let mut masked = global.clone();
         masked.fact_filter = FilterSpec::Mask {

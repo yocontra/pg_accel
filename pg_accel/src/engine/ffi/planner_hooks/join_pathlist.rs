@@ -72,6 +72,29 @@ pub(super) unsafe extern "C-unwind" fn pgaccel_set_join_pathlist(
         return;
     }
 
+    // A reducing aggregate join is admitted (or reason-coded declined) as one
+    // complete descriptor by UPPERREL_GROUP_AGG. The row-returning join
+    // observers below cannot inject a path for that query class and otherwise
+    // rescan every native join path before the aggregate recognizer does its
+    // exact shape work. Preserve the established resident-pipeline counter,
+    // then defer directly to the upper hook.
+    // SAFETY: parse is the non-null planner-owned Query established above.
+    if unsafe { (*parse).hasAggs } {
+        // MergeJoin has a public, reason-specific observer contract. Keep its
+        // single path-tag walk before deferring; the aggregate fast path still
+        // avoids the deeper hash/NLJ key and restrict-list classifiers below.
+        // SAFETY: `joinrel` is the planner-owned relation supplied to this hook.
+        unsafe { observe_mergejoin_opportunity(joinrel) };
+        if gucs::gpu_enabled() {
+            super::record_no_gpu_resident_pipeline_decline(
+                stats::PlannerHookStage::JoinPathlist,
+                "join_pathlist_aggregate_deferred",
+                joinrel,
+            );
+        }
+        return;
+    }
+
     // Preserve operator-specific evidence before the generic resident-pipeline
     // decline. Per-reason counters survive later planner observations that may
     // replace the backend's last-rejection value. A plain row-returning equi

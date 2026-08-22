@@ -12,10 +12,12 @@ unavailable to normal planning until they have a complete resident pipeline.
 
 ## Build from source
 
-There is no prebuilt-package promise in this repository. A development build
-requires Rust, pgrx, CMake, a C/C++ toolchain, and the AdaptiveCpp commit pinned
-by [`.acpp-version`](.acpp-version). The setup and CI recipes read that file
-directly; a branch name alone is not sufficient provenance.
+Tagged releases publish validated tar archives for PostgreSQL 18 and the
+PostgreSQL 19 beta compatibility target; pg_accel is not distributed through an
+OS package manager. A development build requires Rust, pgrx, CMake, a C/C++
+toolchain, and the AdaptiveCpp commit pinned by [`.acpp-version`](.acpp-version).
+The setup and CI recipes read that file directly; a branch name alone is not
+sufficient provenance.
 
 The currently validated GPU development target is Metal on Apple Silicon:
 
@@ -30,11 +32,50 @@ just setup-pgrx
 cargo pgrx install --no-default-features --features pg18
 ```
 
-PostgreSQL 18 is the default extension target. PostgreSQL 19 beta is also a
-build/test target, not a package-availability claim. A build without a usable
-GPU can load the extension, but the planner keeps queries on PostgreSQL-native
-plans. CUDA/NVIDIA validation is owner-deferred in [TODO.md](TODO.md); this
-document makes no support claim for it.
+PostgreSQL 18 is the default extension target. PostgreSQL 19 beta archives are
+preview compatibility artifacts, not a stable-PostgreSQL support promise. A
+build without a usable GPU can load the extension, but the planner keeps queries
+on PostgreSQL-native plans. CUDA/NVIDIA validation is owner-deferred in
+[issue #4](https://github.com/yocontra/pg_accel/issues/4); this document makes
+no support claim for it.
+
+### Install a release archive
+
+Download the archive and adjacent `.sha256` file for the target PostgreSQL
+major and platform from the GitHub release. For example, an Apple Silicon PG18
+release uses `pg_accel-pg18-macos-arm64.tar.gz`; the generic Linux archive uses
+`pg_accel-pg18-linux-x86_64.tar.gz`. Verify both the outer archive and its
+complete inner payload before installing:
+
+```bash
+archive=pg_accel-pg18-macos-arm64.tar.gz
+shasum -a 256 -c "$archive.sha256"       # use sha256sum -c on Linux
+tar -xzf "$archive"
+cd pg_accel-pg18
+shasum -a 256 -c SHA256SUMS              # use sha256sum -c on Linux
+./install.py --pg-config /absolute/path/to/pg_config
+```
+
+The installer validates the PostgreSQL major, package topology, runtime
+dependencies, checksums, and destination paths before writing. Use an account
+with permission to write the directories reported by `pg_config`; do not copy
+individual files out of the archive by hand. On macOS, install the documented
+`llvm@20` and `libomp` runtime prerequisites first.
+
+Add `pg_accel` to `shared_preload_libraries`, restart PostgreSQL, and verify the
+loaded package in the target database:
+
+```sql
+CREATE EXTENSION pg_accel;
+SELECT pg_accel_version();
+SELECT count(*) FROM pg_accel_stats();
+```
+
+Maintainers can exercise the same checksum/staged-install/isolated-cluster path
+against an already-built archive with `just package-smoke 18`; the hosted
+release matrix runs it for PG18 and PG19 on both macOS arm64 and Linux x86_64.
+Each archive's platform-qualified `.smoke.txt` result is attached to the tagged
+release, avoiding ambiguous evidence between operating systems.
 
 ### AdaptiveCpp provenance and installation burden
 
@@ -168,10 +209,10 @@ native and have no registered executor.
 
 | Capability | Implementation surface | Production planner | Current boundary |
 |---|---|---|---|
-| Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. This includes the qualified 250K–1M nullable bool-key / distinct nullable bool `COUNT(column)` envelope; global, same-column, filtered, joined, `HAVING`, and multi-measure bool-count variants remain native. Stored generated columns are physical base attributes and remain selectable when their types and aggregate shape pass those same gates. |
-| Scalar row predicate inside a resident aggregate | Present | Selectable for exact qualified shapes | Two int4 bounds on the left operand of one grouped `SUM(lhs * rhs), COUNT(*)` are fused into one inclusive device interval and reuse the loaded lhs in `parallel_dense_integer`. The released envelope is 250K–1M fact rows with one dense fact key, no joins or `HAVING`, and exact nullable semantics. One-sided, degenerate, RHS-input, joined, and third-bound variants remain PostgreSQL-native; a third same-column bound records `shape_multiple_range_predicates`. |
-| Resident star join plus aggregate | Present | Selectable | The join is represented inside one childless aggregate descriptor; this is not a row-returning join path. |
-| H3-derived group key inside a resident aggregate | Present | Selectable | Production shape extraction selects fused `h3_cell_to_parent`; `h3_latlng_to_cell` descriptor support is not yet reachable from production planning. |
+| Resident reducing or grouped aggregate | Present | Selectable | Covered `AggQuerySpec` shapes become `Custom Scan (GpuAccelAgg)` after shape, type, residency, device, and cost gates. This includes qualified 250K–1M nullable bool-key / distinct nullable bool, int2, int8, float4, float8, date, timestamp, or timestamptz `COUNT(column)` envelopes, plus exact bool-keyed `SUM(value), AVG(value), COUNT(*)` for one nullable int2 or int4 fact value. Integer SUM widens to int8 and AVG is finalized with PostgreSQL NUMERIC division; global, filtered, joined, non-boolean-grouped, `HAVING`, and broader variants remain native. Stored generated columns are physical base attributes and remain selectable when their types and aggregate shape pass those same gates. |
+| Scalar row or aggregate-local predicate inside a resident aggregate | Present | Selectable for exact qualified shapes | Two int4 bounds on the left operand of one grouped `SUM(lhs * rhs), COUNT(*)` are fused into one inclusive device interval and reuse the loaded lhs in `parallel_dense_integer`. One grouped direct-int4 `SUM(value) FILTER (WHERE value BETWEEN lo AND hi), COUNT(*)` applies the proper bounded interval only to SUM. Both released envelopes use 250K–1M fact rows with one distinct dense fact key, no joins or `HAVING`, and exact nullable semantics. One-sided, degenerate, wrong-input, joined, and broader variants remain PostgreSQL-native. |
+| Resident star join plus aggregate | Present | Selectable | The join is represented inside one childless aggregate descriptor; this is not a row-returning join path. Qualified counted-dimension global `COUNT(*)` converts duplicate dimension matches into exact device-side weights and preserves unmatched/NULL fact-key semantics. |
+| H3-derived group key inside a resident aggregate | Present | Selectable | Production shape extraction selects the independently qualified fused `h3_cell_to_parent(cell, 0), COUNT(*)` lane. Other valid parent resolutions decline with `h3_parent_resolution_unqualified`; `h3_latlng_to_cell` descriptor support is not yet reachable from production planning. |
 | PostGIS spatial filter inside a resident aggregate | Present | Selectable | Production selection is limited to resident `ST_Intersects(point_column, one_ring_polygon_constant)` inside an ungrouped `COUNT(*)`, with matching fixed nonzero SRIDs and the qualified cost envelope. |
 | Standalone PostGIS or H3 function/SRF | Aggregate primitives and adapter registry metadata remain; standalone executor removed | Not selectable | PostgreSQL executes standalone calls. Function and target-list SRF hooks record `no_gpu_resident_pipeline`. |
 | Base scan, WHERE filter, or projection | No registered Custom Scan executor; host-staged implementation retired | Not selectable | PostgreSQL executes the base path. The production hook observes and records declines but injects no scan CustomPath. |
@@ -179,6 +220,24 @@ native and have no registered executor.
 | Standalone sort or top-k | Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding | Not selectable | All standalone sort shapes remain PostgreSQL-native. Full-output sorts record `sort_heap_full_output`; bounded top-k records `sort_standalone_topk_no_gpu_kernel`. |
 | Window | Kernel and executor removed; numeric strategy tag and descriptor retained only for fail-closed wire decoding | Not selectable | Full-output and reducing window SQL remains PostgreSQL-native and records `no_gpu_resident_pipeline`. |
 | Raster | Registered childless resident executor | Selectable | Production selection is limited to the qualified three-argument resident `ST_Reclass` shape, canonical singular integer rules, band one, `8BUI` output, and the released pixel-count envelope; other raster shapes remain native. |
+
+### 1.0 scope and explicit deferrals
+
+The capability matrix above is the complete 1.0 planner-support claim. General
+expression, aggregate/type, membership, H3, spatial, raster, and
+cardinality-reducing sort/window expansion is tracked in
+[issue #1](https://github.com/yocontra/pg_accel/issues/1). Those adjacent shapes
+remain PostgreSQL-native until each exact lane has correctness, failure,
+dispatch, and matched-performance evidence; the presence of adapter metadata,
+wire tags, test scaffolding, or a kernel is not support.
+
+The release also makes no 1B-row scale claim; that optional certification is
+tracked in [issue #2](https://github.com/yocontra/pg_accel/issues/2). A
+privileged OS page-cache-purge certification is separately tracked in
+[issue #3](https://github.com/yocontra/pg_accel/issues/3) and is not inferred
+from the mandatory warm matrix or project-owned JIT/archive cold-start proof.
+CUDA/NVIDIA and PG-Strom remain owner-deferred and unvalidated as described in
+[issue #4](https://github.com/yocontra/pg_accel/issues/4).
 
 The extension adapters currently register these names for OID discovery. This
 table is registry metadata, not a standalone SQL support promise:

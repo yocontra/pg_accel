@@ -479,6 +479,30 @@ class CandidateProvenanceTests(unittest.TestCase):
                 ):
                     artifacts.capture_candidate_provenance(root)
 
+    def test_expected_candidate_commit_is_enforced(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._repository(root)
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertEqual(
+                artifacts.capture_candidate_provenance(root, commit)["commit"],
+                commit,
+            )
+            with self.assertRaisesRegex(
+                artifacts.ArtifactContractError, "checkout mismatch"
+            ):
+                artifacts.capture_candidate_provenance(root, "0" * 40)
+            with self.assertRaisesRegex(
+                artifacts.ArtifactContractError, "not a full Git object ID"
+            ):
+                artifacts.capture_candidate_provenance(root, "HEAD")
+
 
 class CrashArtifactTests(unittest.TestCase):
     def test_crash_artifact_accepts_only_the_producer_list_schema(self) -> None:
@@ -570,7 +594,7 @@ class LogAuditTests(unittest.TestCase):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
-    def test_release_workflow_requires_live_gate_upload_and_dependency(self) -> None:
+    def test_release_workflow_requires_hosted_compatibility_and_draft(self) -> None:
         workflow_path = SCRIPT.parents[1] / ".github/workflows/release.yml"
         workflow = workflow_path.read_text(encoding="utf-8")
         artifacts.validate_release_workflow_contract(workflow)
@@ -581,55 +605,77 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 "    runs-on: [self-hosted, macOS, ARM64, metal]",
                 1,
             ),
-            workflow.replace("          just metal-stress 18", "          # just metal-stress 18"),
             workflow.replace(
-                "          just system-workload-gate 18 artifacts/system-workload-gate-pg18-qualified-metal",
-                "          # just system-workload-gate 18 artifacts/system-workload-gate-pg18-qualified-metal",
+                "          ref: ${{ github.sha }}",
+                "          ref: ${{ github.ref }}",
+                1,
             ),
             workflow.replace(
-                '          just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
-                '          # just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
+                '          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
+                '          # CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
+                1,
             ),
             workflow.replace(
-                "          rm -rf target/coverage",
-                "          rm -rf target",
+                '          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"',
+                '          PGACCEL_HOSTED_METAL_COMPATIBILITY: "0"',
+                1,
             ),
             workflow.replace(
-                "          path: artifacts/metal-stress-pg18-qualified-metal",
-                "          # path: artifacts/metal-stress-pg18-qualified-metal",
+                '            --expected-commit "$EXPECTED_CANDIDATE_SHA" \\',
+                '            --expected-commit "0000000000000000000000000000000000000000" \\',
+                1,
             ),
             workflow.replace(
-                "          path: artifacts/native-parity-p0-pg18-qualified-metal",
-                "          # path: artifacts/native-parity-p0-pg18-qualified-metal",
+                "          path: artifacts/coverage-pg18-hosted-metal",
+                "          path: artifacts/coverage-pg18-unbound",
+                1,
             ),
             workflow.replace(
-                "needs: [build, linux-package, metal-coverage]",
+                '          if [ "$evidence_count" -ne 2 ]; then',
+                '          if [ "$evidence_count" -ne 1 ]; then',
+            ),
+            workflow.replace(
+                "-name 'pg-accel-release-*-pg18-hosted-metal'",
+                "-name 'pg-accel-release-*-pg18-qualified-metal'",
+            ),
+            workflow.replace(
+                "          draft: true",
+                "          draft: false",
+            ),
+            workflow.replace(
+                "            release-evidence/*.tar.gz.sha256",
+                "            # release-evidence/*.tar.gz.sha256",
+            ),
+            workflow.replace(
+                "needs: [build, linux-package, metal-compatibility]",
                 "needs: [build, linux-package]",
             ),
             workflow.replace(
-                "        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
-                "        continue-on-error: true\n        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
+                '          prerelease: ${{ contains(github.ref_name, \'-\') }}',
+                "          prerelease: false",
+            ),
+            workflow.replace(
+                '          if [ "$GITHUB_REF_NAME" != "v${extension_version}" ]; then',
+                '          if [ "$GITHUB_REF_NAME" = "v${extension_version}" ]; then',
+            ),
+            workflow.replace("    needs: validate-tag\n", "", 1),
+            workflow.replace(
+                "      - name: Capture hosted runner and exact-candidate provenance\n"
+                "        shell: bash",
+                "      - name: Capture hosted runner and exact-candidate provenance\n"
+                "        continue-on-error: true\n"
+                "        shell: bash",
                 1,
             ),
             workflow.replace(
-                "        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
-                "        if: false\n        shell: bash\n        env:\n          METAL_STRESS_ARTIFACT_DIR",
+                '          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
+                '          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18\n'
+                "          just metal-warm-benchmark-ship-gate 18 fabricated",
                 1,
             ),
             workflow.replace(
-                "          just metal-stress 18",
-                "          exit 0\n          just metal-stress 18",
-                1,
-            ),
-            workflow.replace(
-                "      - name: Upload release Metal stress artifacts\n        if: always()",
-                "      - name: Upload release Metal stress artifacts\n"
-                "        continue-on-error: true\n        if: always()",
-                1,
-            ),
-            workflow.replace(
-                "  metal-coverage:\n    name:",
-                "  metal-coverage:\n    continue-on-error: true\n    name:",
+                "  metal-compatibility:\n    name:",
+                "  metal-compatibility:\n    continue-on-error: true\n    name:",
                 1,
             ),
             workflow.replace(
@@ -653,7 +699,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 with self.assertRaises(artifacts.ArtifactContractError):
                     artifacts.validate_release_workflow_contract(mutant)
 
-    def test_ci_workflow_requires_hosted_gates_and_toolchain_order(self) -> None:
+    def test_ci_workflow_requires_compatibility_install_and_no_gpu_evidence(self) -> None:
         workflow_path = SCRIPT.parents[1] / ".github/workflows/ci.yml"
         workflow = workflow_path.read_text(encoding="utf-8")
         artifacts.validate_ci_workflow_contract(workflow)
@@ -665,43 +711,91 @@ class ReleaseWorkflowTests(unittest.TestCase):
             .replace(audit_name, build_name, 1)
             .replace("      - name: TEMP toolchain step", audit_name, 1)
         )
-        qualified_header = (
-            "  metal-release-gates:\n"
-            "    name: Qualified Metal release gates (PG 18)\n"
+        compatibility_header = (
+            "  metal-compatibility:\n"
+            "    name: Hosted Metal compatibility and coverage (PG 18)\n"
             "    runs-on: macos-26"
         )
         mutants = (
             workflow.replace("    runs-on: macos-26", "    runs-on: macos-14", 1),
             workflow.replace(
-                qualified_header,
-                qualified_header.replace(
+                compatibility_header,
+                compatibility_header.replace(
                     "runs-on: macos-26",
                     "runs-on: [self-hosted, macOS, ARM64, metal]",
                 ),
                 1,
             ),
             workflow.replace(
-                "          just metal-stress 18",
-                "          # just metal-stress 18",
+                "          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+                "          ref: ${{ github.sha }}",
                 1,
             ),
             workflow.replace(
-                '          just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
-                '          # just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
+                '          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
+                '          # CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
                 1,
             ),
             workflow.replace(
-                "          path: artifacts/native-parity-p0-pg18-qualified-metal",
-                "          # path: artifacts/native-parity-p0-pg18-qualified-metal",
+                '          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"',
+                '          PGACCEL_HOSTED_METAL_COMPATIBILITY: "0"',
                 1,
             ),
             workflow.replace(
-                "          rm -rf target/coverage",
-                "          rm -rf target",
+                "          just extension-smoke 18 2>&1 | \\",
+                "          # just extension-smoke 18 2>&1 | \\",
+                1,
+            ),
+            workflow.replace(
+                "          just package-smoke 18 2>&1 | \\",
+                "          # just package-smoke 18 2>&1 | \\",
+                1,
+            ),
+            workflow.replace(
+                "          cp artifacts/hosted-metal-runner-pg18/candidate-provenance.json \\",
+                "          # cp artifacts/hosted-metal-runner-pg18/candidate-provenance.json \\",
+                1,
+            ),
+            workflow.replace(
+                "          path: artifacts/public-install-pg18-hosted-apple-silicon",
+                "          path: artifacts/public-install-unbound",
+                1,
+            ),
+            workflow.replace(
+                "      - name: Prove the hosted runtime exposes no GPU device",
+                "      - name: Skip hosted runner GPU inspection",
+                1,
+            ),
+            workflow.replace(
+                "          if grep -Eq '^[[:space:]]*Is GPU:[[:space:]]*1[[:space:]]*$' \\\n"
+                '              "$runtime_inventory"; then',
+                "          if false; then",
+                1,
+            ),
+            workflow.replace(
+                '          runtime_inventory="$LINUX_NO_GPU_ARTIFACT_DIR/runtime-device-inventory.txt"',
+                "          if [ -e /dev/dri ]; then exit 1; fi\n"
+                '          runtime_inventory="$LINUX_NO_GPU_ARTIFACT_DIR/runtime-device-inventory.txt"',
+                1,
+            ),
+            workflow.replace(
+                "            sha256sum -c SHA256SUMS",
+                "            true # sha256sum -c SHA256SUMS",
+                1,
+            ),
+            workflow.replace(
+                "      - name: Upload Linux no-GPU evidence",
+                "      - name: Discard Linux no-GPU evidence",
                 1,
             ),
             workflow.replace("            libclang-dev \\\n", "", 1),
             swapped_linux_steps,
+            workflow.replace(
+                '          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
+                '          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18\n'
+                "          just metal-stress 18",
+                1,
+            ),
         )
         for index, mutant in enumerate(mutants):
             with self.subTest(mutant=index):

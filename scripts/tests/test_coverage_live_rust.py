@@ -129,9 +129,10 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
                         "disabled_postgresql",
                         "disabled_postgresql",
                         "accel",
-                    ],
-                    "accel_ms": [1.0, 1.0],
-                    "parallel_ms": [1.0, 1.0],
+                    ]
+                    * 2,
+                    "accel_ms": [1.0] * 4,
+                    "parallel_ms": [1.0] * 4,
                 }
             ]
             row["planner_stage_captures"] = [
@@ -229,7 +230,7 @@ def build_live_evidence_fixture(root: pathlib.Path) -> tuple[list[str], dict[str
                     "iterations": iterations,
                     "warmup": warmup,
                     "native_parity_pairing": native_pairing,
-                    "native_parity_repetitions_per_arm": 2 if native_pairing else 1,
+                    "native_parity_repetitions_per_arm": 4 if native_pairing else 1,
                 },
                 "workloads": [row],
             },
@@ -764,7 +765,12 @@ class CoverageLiveRustTests(unittest.TestCase):
                     self.assertIn("forbidden", result.stderr)
 
     def test_unbounded_or_cold_internal_gates_are_not_allowlisted(self) -> None:
-        for command in ("metal-ship-gate", "phase6-gate", "explain-audit"):
+        for command in (
+            "metal-warm-ship-gate",
+            "metal-ship-gate",
+            "phase6-gate",
+            "explain-audit",
+        ):
             with self.subTest(command=command):
                 result = call_library(f"assert_safe_bench_command {command}")
                 self.assertNotEqual(result.returncode, 0)
@@ -817,9 +823,75 @@ class CoverageLiveRustTests(unittest.TestCase):
             validation = json.loads(paths["validation"].read_text(encoding="utf-8"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
+            validation["device_adaptive_cells"],
+            {
+                "grouped_agg_int4@1000000": "selected_dispatch",
+                "h3_cell_to_parent@100000": "selected_dispatch",
+                "hash_join@100000": "selected_dispatch",
+                "mixed_join_agg_int4@100000": "selected_dispatch",
+                "ssbm_resident_int4_star@100000": "selected_dispatch",
+            },
+        )
+        self.assertEqual(
+            validation["mandatory_selected_cells"],
+            ["spatial_resident_agg_candidate@1000000"],
+        )
+        self.assertEqual(
             validation["resident_artifact_reuse_cells"],
             ["raster_resident_exact_reclass@10000"],
         )
+
+    def test_live_evidence_validator_accepts_exact_device_relative_declines(self) -> None:
+        decline_reasons = {
+            "selected": "generic_fact_rows_below_device_minimum",
+            "mixed": "generic_fact_rows_below_device_minimum",
+            "ssbm": "generic_fact_rows_below_device_minimum",
+            "hash": "generic_fact_rows_below_device_minimum",
+            "h3": "h3_rows_below_grouped_agg_min",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            args, paths = build_live_evidence_fixture(pathlib.Path(directory))
+            for key, reason in decline_reasons.items():
+                report = json.loads(paths[key].read_text(encoding="utf-8"))
+                row = report["workloads"][0]
+                row.update(
+                    planner_declined=True,
+                    plan_selected=False,
+                    gpu_kernel_dispatched=False,
+                    gpu_kernel_execution_delta=0,
+                    native_decline_evidence={
+                        "reason": reason,
+                        "source": "planner_reported",
+                    },
+                )
+                write_json(paths[key], report)
+            result = run_live_evidence_validator(args)
+            validation = json.loads(paths["validation"].read_text(encoding="utf-8"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            set(validation["device_adaptive_cells"].values()),
+            {"device_relative_decline"},
+        )
+
+    def test_live_evidence_validator_rejects_wrong_device_relative_decline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            args, paths = build_live_evidence_fixture(pathlib.Path(directory))
+            report = json.loads(paths["selected"].read_text(encoding="utf-8"))
+            row = report["workloads"][0]
+            row.update(
+                planner_declined=True,
+                plan_selected=False,
+                gpu_kernel_dispatched=False,
+                gpu_kernel_execution_delta=0,
+                native_decline_evidence={
+                    "reason": "fabricated_device_reason",
+                    "source": "planner_reported",
+                },
+            )
+            write_json(paths["selected"], report)
+            result = run_live_evidence_validator(args)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected decline reason", result.stderr)
 
     def test_raster_artifact_reuse_probe_requires_expected_gate_failure(self) -> None:
         source = HARNESS.read_text(encoding="utf-8")
@@ -994,6 +1066,23 @@ class CoverageLiveRustTests(unittest.TestCase):
         self.assertLess(live_run, profile_copy)
         self.assertIn("record_stage rust live_cli 0", source[live_run:profile_copy])
         self.assertIn("record_stage rust live_cli 1", source[live_run:profile_copy])
+
+    def test_gate_binds_every_rust_coverage_build_to_exact_pg_config(self) -> None:
+        source = COVERAGE_GATE.read_text(encoding="utf-8")
+        function_start = source.index("rust_coverage()")
+        function_end = source.index("\ncpp_coverage()", function_start)
+        function = source[function_start:function_end]
+
+        resolution = 'pg_config="$(pg_accel_pg_config_for_pg "$pg")"'
+        pg_export = 'export PG_CONFIG="$pg_config"'
+        pgrx_export = 'export PGRX_PG_CONFIG_PATH="$pg_config"'
+        first_cargo = function.index("cargo llvm-cov show-env")
+
+        self.assertIn(resolution, function)
+        self.assertIn(pg_export, function)
+        self.assertIn(pgrx_export, function)
+        self.assertLess(function.index(pg_export), first_cargo)
+        self.assertLess(function.index(pgrx_export), first_cargo)
 
     def test_gate_binds_live_cli_to_exact_instrumented_candidate(self) -> None:
         source = COVERAGE_GATE.read_text(encoding="utf-8")

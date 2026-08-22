@@ -1,9 +1,9 @@
 # Changelog
 
-`pg_accel_bench` follows the workspace version. It has not been released as
-`1.0.0` and is not published as a standalone package.
+`pg_accel_bench` follows the workspace `1.0.0-rc1` candidate version. It has
+not been released as `1.0.0` and is not published as a standalone package.
 
-## [Unreleased]
+## [1.0.0-rc1] - 2026-08-20
 
 ### Added
 

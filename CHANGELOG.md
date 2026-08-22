@@ -1,10 +1,10 @@
 # Changelog
 
-All notable changes will be documented in this file. The project is currently
-an unreleased `0.1.0` prerelease; no public release or package-availability
-claim is implied by the entries below.
+All notable changes will be documented in this file. The `1.0.0-rc1` section
+describes the candidate published by the matching tag; only archives and
+evidence attached to that GitHub release are package-availability claims.
 
-## [Unreleased]
+## [1.0.0-rc1] - 2026-08-20
 
 ### Added
 
@@ -37,6 +37,31 @@ claim is implied by the entries below.
   `SUM(int4_lhs * int4_rhs), COUNT(*)` fuses exactly two same-column bounds on
   the nullable product lhs into one inclusive device range without a derived
   predicate mask; adjacent range shapes remain PostgreSQL-native.
+- A qualified dense-integer specialization for grouped
+  `SUM(int4_value) FILTER (WHERE int4_value BETWEEN lo AND hi), COUNT(*)`
+  applies the bounded aggregate-local predicate only to SUM while retaining
+  every group and unfiltered COUNT row; broader aggregate modifiers remain
+  PostgreSQL-native.
+- Qualified dense-count specializations group one nullable boolean fact column
+  and count one distinct nullable `int2`, `int8`, `float4`, `float8`, `date`,
+  `timestamp`, or `timestamptz` fact column. They use the resident physical
+  representations only for null-sidecar COUNT semantics, preserve active
+  all-NULL groups with count zero, never interpret floating NaN/infinity/signed-
+  zero payloads, and leave global, filtered, joined, non-boolean-grouped, and
+  broader typed COUNT shapes native.
+- Qualified dense-integer specializations group one nullable boolean fact
+  column and compute exact `SUM(value), AVG(value), COUNT(*)` over one distinct
+  nullable `int2` or `int4` fact column. SUM uses the widened int64 device
+  state and PostgreSQL int8 result; AVG divides that state by its exact
+  non-NULL count through PostgreSQL NUMERIC arithmetic on the backend thread.
+  AVG-only, missing-COUNT, filtered, joined, `HAVING`, int8, numeric, interval,
+  and additional-measure shapes remain PostgreSQL-native.
+- A qualified counted-dimension global `COUNT(*)` specialization preserves
+  duplicate dimension-key multiplicity as exact device-side weights, ignores
+  unmatched and NULL fact keys, and uses the `parallel_dense_count` physical
+  lane. Its separate immutable 1M-row release ratchet requires an independent
+  no-join oracle, real dispatch, consumed output, ten steady artifact hits,
+  zero fallback, and at least 1.15x over PostgreSQL parallel.
 - SSBM-, TPC-H-, and ClickBench-style system workload characterization plus an
   eight-backend residency/concurrency proof with exact cluster-byte cleanup.
 
@@ -68,8 +93,26 @@ claim is implied by the entries below.
   candidate binary and environment.
 - Warm performance evidence separates lifecycle construction/rebuild probes
   from artifact-hit steady state while retaining a combined end-to-end view.
+- The immutable nineteen-cell qualified-Metal release ratchet now has a
+  mandatory unprivileged warm gate and a distinct optional privileged OS
+  page-cache certification. It runs on qualified physical M-series hardware;
+  hosted virtual-M1 jobs are explicitly compatibility/coverage-only and cannot
+  be mislabeled as performance or cold-cache evidence.
+- Release packaging and its standalone installer accept strict SemVer
+  prerelease/build identifiers in PostgreSQL extension SQL filenames, including
+  the `1.0.0-rc1` candidate, while continuing to reject ambiguous separators
+  and unexpected payload names.
+- macOS arm64 and Linux x86_64 release jobs verify each extracted PG18/PG19
+  archive through outer and inner checksums, staged installation, an isolated
+  preloaded cluster, `CREATE EXTENSION`, version/statistics queries, and fatal
+  log auditing. Hosted virtual-M1 jobs retain sealed compatibility coverage and
+  runner provenance, and the tag workflow creates a draft release so the six
+  separately qualified physical-M-series coverage/performance/stress bundles
+  can be attached before publication.
 - Planner declines reuse exact serialized-query fingerprints and dependency
-  state without cloning full cache entries or repeating unprofiled telemetry.
+  state without cloning full cache entries or repeating unprofiled telemetry;
+  production upper-path hooks also avoid allocating the test-only structured
+  decision recorder.
 - Metal stress, native-parity, and release-verification artifacts require a
   clean commit/tree, bind reviewed source and toolchain provenance, and seal
   their complete evidence inventories.
@@ -79,8 +122,37 @@ claim is implied by the entries below.
 - CUDA/NVIDIA and PG-Strom validation is explicitly owner-deferred until an
   NVIDIA device is available. No CUDA support or performance claim is made.
 
+### Deferred from 1.0
+
+- Broader expression, aggregate/type, membership, H3, spatial, raster, and
+  cardinality-reducing sort/window lanes are explicitly outside the 1.0
+  support claim and tracked in
+  [issue #1](https://github.com/yocontra/pg_accel/issues/1). PostgreSQL remains
+  the executor for every adjacent shape until that exact lane passes semantic,
+  failure, dispatch, and matched-performance qualification.
+- A true 1,000,000,000-row artifact is optional scale certification tracked in
+  [issue #2](https://github.com/yocontra/pg_accel/issues/2). No smaller fixture
+  substitutes for it and this release makes no 1B-scale claim.
+- Privileged OS page-cache-purge evidence is optional certification tracked in
+  [issue #3](https://github.com/yocontra/pg_accel/issues/3). It is distinct from
+  the mandatory warm matrix and project-owned JIT/archive cold-start evidence.
+- CUDA/NVIDIA and PG-Strom qualification is owner-deferred in
+  [issue #4](https://github.com/yocontra/pg_accel/issues/4). Metal evidence is
+  not portable support evidence for another backend.
+
 ### Fixed
 
+- Dense aggregate-filter kernel tests now cover one-shot atomic,
+  hierarchical, and lifecycle chunked execution, including invalid measure
+  null sidecars, out-of-range dense keys, reset recovery, and the defensive
+  host-helper semantics for reserved value and predicate tags.
+- The release EXPLAIN audit now creates PostgreSQL-supported permanent
+  partitioned fixtures instead of using the rejected `UNLOGGED` form.
+- Dense exact aggregate planning now keeps inputs above the independently
+  qualified one-shot row limit PostgreSQL-native. The bounded multi-call
+  executor remains available for future qualification, while a matrix contract
+  test prevents the 17-cell native-parity gate from silently registering a
+  selected or mismatched workload.
 - macOS postmasters set the fork-safe Objective-C and unified-logging
   environment defaults before creating backends, avoiding the reproduced
   CoreAnalytics crash during lazy Metal initialization while preserving
@@ -119,6 +191,17 @@ claim is implied by the entries below.
 
 ### Verification
 
+- Exact clean candidate `bfa756f` passes the PG18 three-layer coverage gate:
+  Rust 49,120/54,486 lines (90.15%, 210/210 required mappings), C++/SYCL
+  16,738/18,590 lines (90.04%, 32/32 native Metal tests), and SQL 361/361
+  semantic assertions across 67/67 files. The sealed artifact is
+  `.codex/scratch/coverage-exact-bfa756f-pg18-20260819-a`.
+- The same candidate passes all 17 registered native-decline cells with five
+  warmups and 30 exactly balanced pairs per cell. Every cell stays on a
+  comparable PostgreSQL-native plan with zero device dispatch and passes the
+  frozen median, p95, and exact paired non-inferiority gates. The terminal seal
+  for `.codex/scratch/native-parity-p0-bfa756f-pg18-20260819-b` is
+  `14382bbec844aff957cb153092ee83b64f8106635696c7789a20068ef8c99c92`.
 - AdaptiveCpp release provenance is the `fork-safe-metal` commit
   `456ae6910720810f5fe59f160e6707d46bb8e5f0` named by `.acpp-version`. Its
   locally available history incorporates upstream `develop` snapshot
@@ -199,5 +282,6 @@ claim is implied by the entries below.
 - Generated LLVM IR and raw machine-local benchmark logs from the tracked
   source tree. Deliberate verification artifacts belong in ignored artifact
   directories or an external release artifact store.
-- The benchmark crate's premature `1.0.0` changelog entry. The workspace remains
-  version `0.1.0` until release gates are complete.
+- The benchmark crate's premature final `1.0.0` changelog entry. The workspace
+  now carries the explicit `1.0.0-rc1` candidate version; final `1.0.0` remains
+  gated on the one-week candidate observation and final sign-off.

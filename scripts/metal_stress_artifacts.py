@@ -211,7 +211,9 @@ def validate_candidate_provenance(payload: Any) -> dict[str, Any]:
     return payload
 
 
-def capture_candidate_provenance(repo_root: Path) -> dict[str, Any]:
+def capture_candidate_provenance(
+    repo_root: Path, expected_commit: str | None = None
+) -> dict[str, Any]:
     repo_root = repo_root.expanduser().resolve()
     discovered_root = Path(_git(repo_root, "rev-parse", "--show-toplevel")).resolve()
     if discovered_root != repo_root:
@@ -229,6 +231,15 @@ def capture_candidate_provenance(repo_root: Path) -> dict[str, Any]:
         preview = " | ".join(status.splitlines()[:8])
         raise ArtifactContractError(f"exact candidate worktree is dirty: {preview}")
     commit = _git(repo_root, "rev-parse", "--verify", "HEAD^{commit}")
+    if expected_commit is not None:
+        if GIT_OBJECT_RE.fullmatch(expected_commit) is None:
+            raise ArtifactContractError(
+                "exact candidate expected commit is not a full Git object ID"
+            )
+        if commit != expected_commit:
+            raise ArtifactContractError(
+                f"exact candidate checkout mismatch: expected={expected_commit} actual={commit}"
+            )
     tree = _git(repo_root, "rev-parse", "--verify", "HEAD^{tree}")
     head_ref = _git(
         repo_root,
@@ -1417,124 +1428,208 @@ def _validate_workflow_upload(
         )
 
 
-def _validate_qualified_metal_job(
+def _validate_exact_checkout_wiring(workflow: str, expected_ref: str) -> None:
+    lines = workflow.splitlines()
+    checkout_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip() in {
+            "uses: actions/checkout@v4",
+            "- uses: actions/checkout@v4",
+        }
+    ]
+    if not checkout_indexes:
+        raise ArtifactContractError("workflow has no repository checkout")
+    for index in checkout_indexes:
+        nearby = {line.strip() for line in lines[index + 1 : index + 5]}
+        for required in ("with:", "fetch-depth: 0", f"ref: {expected_ref}"):
+            if required not in nearby:
+                raise ArtifactContractError(
+                    f"repository checkout is not bound to the exact candidate: missing `{required}`"
+                )
+
+
+def _validate_hosted_metal_job(
     workflow: str,
     job_name: str,
     coverage_step: str,
-    upload_steps: tuple[str, str, str, str, str],
+    coverage_dir: str,
+    provenance_dir: str,
+    coverage_upload_step: str,
+    provenance_upload_step: str,
 ) -> str:
     metal = _workflow_job_block(workflow, job_name)
     runs_on = re.findall(r"^    runs-on:\s*(.+?)\s*$", metal, re.MULTILINE)
     if runs_on != ["macos-26"]:
         raise ArtifactContractError(
-            f"qualified Metal job must run on the hosted Apple Silicon `macos-26` label, found {runs_on!r}"
+            f"hosted Metal compatibility job must use `macos-26`, found {runs_on!r}"
         )
     if re.search(r"^    (?:if|continue-on-error)\s*:", metal, re.MULTILINE):
         raise ArtifactContractError(
-            "qualified Metal workflow job cannot be conditional or continue on error"
+            "hosted Metal compatibility job cannot be conditional or continue on error"
         )
     if not re.search(r"^    timeout-minutes:\s*360\s*$", metal, re.MULTILINE):
         raise ArtifactContractError(
-            "qualified Metal workflow job requires the hosted-runner 360-minute timeout"
+            "hosted Metal compatibility job requires the 360-minute timeout"
         )
 
-    coverage_dir = "artifacts/coverage-pg18-qualified-metal"
-    benchmark_dir = "artifacts/benchmark-ship-gate-pg18-qualified-metal"
-    system_dir = "artifacts/system-workload-gate-pg18-qualified-metal"
-    stress_dir = "artifacts/metal-stress-pg18-qualified-metal"
-    parity_dir = "artifacts/native-parity-p0-pg18-qualified-metal"
-    gate_specs = (
-        (
-            coverage_step,
-            [
-                "set -euo pipefail",
-                'CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
-            ],
-            (
-                "env:",
-                f"COVERAGE_ARTIFACT_DIR: {coverage_dir}",
-                "COVERAGE_MIN_RUST_LINES: 90",
-                "COVERAGE_MIN_CPP_LINES: 90",
-                "COVERAGE_MIN_SQL_ASSERTIONS: 90",
-            ),
-        ),
-        (
-            "Remove coverage build intermediates",
-            ["set -euo pipefail", "rm -rf target/coverage"],
-            (),
-        ),
-        (
-            "Run live Metal benchmark ship gate",
-            [
-                "set -euo pipefail",
-                f"just metal-benchmark-ship-gate 18 {benchmark_dir}",
-            ],
-            (),
-        ),
-        (
-            "Run broad system workload characterization",
-            [
-                "set -euo pipefail",
-                f"just system-workload-gate 18 {system_dir}",
-            ],
-            (),
-        ),
-        (
-            "Run live Metal stress gate",
-            ["set -euo pipefail", "just metal-stress 18"],
-            ("env:", f"METAL_STRESS_ARTIFACT_DIR: {stress_dir}"),
-        ),
-        (
-            "Run native-decline parity gate",
-            [
-                "set -euo pipefail",
-                'just native-parity-p0 "$NATIVE_PARITY_ARTIFACT_DIR" "postgresql://localhost:28818/postgres" 18',
-            ],
-            ("env:", f"NATIVE_PARITY_ARTIFACT_DIR: {parity_dir}"),
-        ),
+    capture = _workflow_step(
+        metal, "Capture hosted runner and exact-candidate provenance"
     )
-    for name, commands, required_lines in gate_specs:
-        _validate_terminal_workflow_step(
-            metal, name, commands, required_lines
+    for required in (
+        "shell: bash",
+        "EXPECTED_CANDIDATE_SHA:",
+        "capture-candidate",
+        '--expected-commit "$EXPECTED_CANDIDATE_SHA"',
+        f'artifact_dir="{provenance_dir}"',
+        "system_profiler SPDisplaysDataType",
+    ):
+        if required not in capture:
+            raise ArtifactContractError(
+                f"hosted Metal provenance capture is missing `{required}`"
+            )
+    if any(
+        line.startswith(("if:", "continue-on-error:"))
+        for line in _workflow_step_lines(capture)
+    ):
+        raise ArtifactContractError(
+            "hosted Metal provenance capture cannot be conditional or continue on error"
         )
 
-    artifact_dirs = (
-        coverage_dir,
-        benchmark_dir,
-        system_dir,
-        stress_dir,
-        parity_dir,
+    _validate_terminal_workflow_step(
+        metal,
+        coverage_step,
+        [
+            "set -euo pipefail",
+            'CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
+        ],
+        (
+            "env:",
+            f"COVERAGE_ARTIFACT_DIR: {coverage_dir}",
+            "COVERAGE_MIN_RUST_LINES: 90",
+            "COVERAGE_MIN_CPP_LINES: 90",
+            "COVERAGE_MIN_SQL_ASSERTIONS: 90",
+            'PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"',
+        ),
     )
-    for upload_name, artifact_dir in zip(upload_steps, artifact_dirs, strict=True):
-        _validate_workflow_upload(metal, upload_name, artifact_dir)
 
-    gate_markers = [f"      - name: {spec[0]}" for spec in gate_specs]
-    upload_markers = [f"      - name: {name}" for name in upload_steps]
-    indexes = [metal.index(marker) for marker in (*gate_markers, *upload_markers)]
+    seal = _workflow_step(metal, "Seal hosted runner provenance")
+    for required in (
+        "if: always()",
+        "shell: bash",
+        f'artifact_dir="{provenance_dir}"',
+        "find . -type f ! -name SHA256SUMS -print",
+        "shasum -a 256 -c SHA256SUMS",
+    ):
+        if required not in seal:
+            raise ArtifactContractError(
+                f"hosted Metal provenance sealing is missing `{required}`"
+            )
+    if "continue-on-error:" in seal:
+        raise ArtifactContractError(
+            "hosted Metal provenance sealing cannot continue on error"
+        )
+
+    _validate_workflow_upload(metal, coverage_upload_step, coverage_dir)
+    _validate_workflow_upload(metal, provenance_upload_step, provenance_dir)
+
+    for forbidden in (
+        "metal-warm-benchmark-ship-gate",
+        "weighted-count-benchmark-ship-gate",
+        "system-workload-gate",
+        "just metal-stress",
+        "just native-parity-p0",
+        "qualified-metal",
+    ):
+        if forbidden in metal:
+            raise ArtifactContractError(
+                f"hosted virtual Metal job cannot claim hardware qualification via `{forbidden}`"
+            )
+
+    markers = (
+        "      - name: Capture hosted runner and exact-candidate provenance",
+        f"      - name: {coverage_step}",
+        "      - name: Seal hosted runner provenance",
+        f"      - name: {coverage_upload_step}",
+        f"      - name: {provenance_upload_step}",
+    )
+    indexes = [metal.index(marker) for marker in markers]
     if indexes != sorted(indexes):
         raise ArtifactContractError(
-            "qualified Metal gates and durable uploads are not in the required order"
+            "hosted Metal gate and durable provenance uploads are out of order"
         )
     return metal
 
 
 def validate_ci_workflow_contract(workflow: str) -> None:
+    _validate_exact_checkout_wiring(
+        workflow,
+        "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+    )
     mac = _workflow_job_block(workflow, "mac-arm64")
     if not re.search(r"^    runs-on:\s*macos-26\s*$", mac, re.MULTILINE):
         raise ArtifactContractError(
             "macOS arm64 compatibility jobs must use the Apple Silicon `macos-26` label"
         )
-    _validate_qualified_metal_job(
+    metal = _validate_hosted_metal_job(
         workflow,
-        "metal-release-gates",
-        "Run three-layer release coverage gate",
+        "metal-compatibility",
+        "Run three-layer hosted Metal compatibility gate",
+        "artifacts/coverage-pg18-hosted-metal",
+        "artifacts/hosted-metal-runner-pg18",
+        "Upload hosted Metal coverage artifacts",
+        "Upload hosted Metal runner provenance",
+    )
+    public_steps = (
         (
-            "Upload three-layer coverage artifacts",
-            "Upload Metal benchmark ship-gate artifacts",
-            "Upload broad system workload artifacts",
-            "Upload Metal stress artifacts",
-            "Upload native-decline parity artifacts",
+            "Verify public source build, install, and CREATE EXTENSION",
+            ("source-build-create-extension.log",),
+            ("just extension-smoke 18",),
         ),
+        (
+            "Build and verify the public release package",
+            (
+                "scripts/package_extension.py",
+                "package-install-create-extension.log",
+                "candidate-provenance.json",
+                "runner-metadata.txt",
+                'if [ "$count" -ne 1 ]; then',
+            ),
+            (
+                "python3 scripts/package_extension.py",
+                "just package-smoke 18",
+                "cp artifacts/hosted-metal-runner-pg18/candidate-provenance.json",
+                "cp artifacts/hosted-metal-runner-pg18/runner-metadata.txt",
+            ),
+        ),
+        (
+            "Seal public Apple Silicon install evidence",
+            ("SHA256SUMS", "shasum -a 256 -c SHA256SUMS"),
+            (),
+        ),
+    )
+    for step_name, required, required_commands in public_steps:
+        step = _workflow_step(metal, step_name)
+        for fragment in required:
+            if fragment not in step:
+                raise ArtifactContractError(
+                    f"public Apple Silicon install step is missing `{fragment}`"
+                )
+        if "continue-on-error:" in step or "if:" in step:
+            raise ArtifactContractError(
+                "public Apple Silicon install proof cannot be conditional or continue on error"
+            )
+        commands = _workflow_step_commands(step, step_name)
+        for required_command in required_commands:
+            if not any(command.startswith(required_command) for command in commands):
+                raise ArtifactContractError(
+                    "public Apple Silicon install step does not execute "
+                    f"`{required_command}`"
+                )
+    _validate_workflow_upload(
+        metal,
+        "Upload public Apple Silicon install evidence",
+        "artifacts/public-install-pg18-hosted-apple-silicon",
     )
     linux = _workflow_job_block(workflow, "linux-x86")
     build_marker = "      - name: Build pinned AdaptiveCpp generic toolchain"
@@ -1551,28 +1646,125 @@ def validate_ci_workflow_contract(workflow: str) -> None:
         raise ArtifactContractError(
             "Linux AdaptiveCpp setup requires the Clang development headers"
         )
+    for required in (
+        "Capture exact-candidate provenance",
+        '--expected-commit "$EXPECTED_CANDIDATE_SHA"',
+        "Prove the hosted runtime exposes no GPU device",
+        "Seal Linux no-GPU evidence",
+        "Upload Linux no-GPU evidence",
+        "if-no-files-found: error",
+    ):
+        if required not in linux:
+            raise ArtifactContractError(
+                f"Linux no-GPU evidence contract is missing `{required}`"
+            )
+    no_gpu = _workflow_step(linux, "Prove the hosted runtime exposes no GPU device")
+    no_gpu_lines = _workflow_step_lines(no_gpu)
+    for required in (
+        "if: steps.pg-support.outputs.skip != 'true'",
+        "shell: bash",
+        "run: |",
+        "set -euo pipefail",
+    ):
+        if required not in no_gpu_lines:
+            raise ArtifactContractError(
+                f"Linux no-GPU inspection is missing `{required}`"
+            )
+    for required in (
+        "find /dev -maxdepth 2",
+        "-name 'nvidia*'",
+        "-name 'dri'",
+        "-name 'renderD*'",
+        "-name 'card*'",
+        "-name 'kfd'",
+        "-name 'dxg'",
+        "-name 'mali*'",
+        ".pgaccel/acpp/current/bin/acpp-info",
+        "runtime-device-inventory.txt",
+        "Is GPU:[[:space:]]*1",
+        "nvidia-smi -L",
+        "nvidia-smi.txt",
+        'runner-metadata.txt',
+    ):
+        if required not in no_gpu:
+            raise ArtifactContractError(
+                f"Linux no-GPU runtime inspection is missing `{required}`"
+            )
+    for forbidden in (
+        "compgen -G '/dev/nvidia*'",
+        "compgen -G '/dev/mali*'",
+        "[ -e /dev/dri ]",
+        "[ -e /dev/kfd ]",
+        "[ -e /dev/dxg ]",
+    ):
+        if forbidden in no_gpu:
+            raise ArtifactContractError(
+                f"Linux no-GPU inspection cannot reject metadata-only node `{forbidden}`"
+            )
+    if "continue-on-error:" in no_gpu:
+        raise ArtifactContractError(
+            "Linux no-GPU inspection cannot continue on error"
+        )
+    linux_seal = _workflow_step(linux, "Seal Linux no-GPU evidence")
+    linux_seal_lines = _workflow_step_lines(linux_seal)
+    for required in (
+        "if: steps.pg-support.outputs.skip != 'true' && success()",
+        "shell: bash",
+        "run: |",
+        "set -euo pipefail",
+        "sha256sum -c SHA256SUMS",
+    ):
+        if required not in linux_seal_lines:
+            raise ArtifactContractError(
+                f"Linux no-GPU evidence seal is missing `{required}`"
+            )
+    if "continue-on-error:" in linux_seal:
+        raise ArtifactContractError(
+            "Linux no-GPU evidence seal cannot continue on error"
+        )
 
 
 def validate_release_workflow_contract(workflow: str) -> None:
-    _validate_qualified_metal_job(
+    _validate_exact_checkout_wiring(workflow, "${{ github.sha }}")
+    tag_validation = _workflow_job_block(workflow, "validate-tag")
+    tag_lines = _workflow_step_lines(tag_validation)
+    for required in (
+        "runs-on: ubuntu-latest",
+        "- uses: actions/checkout@v4",
+        "set -euo pipefail",
+        'if [ "$GITHUB_REF_NAME" != "v${extension_version}" ]; then',
+        'Cargo.toml)"',
+    ):
+        if required not in tag_lines:
+            raise ArtifactContractError(
+                f"release tag validation is missing `{required}`"
+            )
+
+    for gated_job in ("build", "linux-package", "metal-compatibility"):
+        gated_lines = _workflow_step_lines(
+            _workflow_job_block(workflow, gated_job)
+        )
+        if "needs: validate-tag" not in gated_lines:
+            raise ArtifactContractError(
+                f"release job `{gated_job}` must depend on validate-tag"
+            )
+
+    _validate_hosted_metal_job(
         workflow,
-        "metal-coverage",
-        "Run release coverage gate",
-        (
-            "Upload release coverage artifacts",
-            "Upload release Metal benchmark ship-gate artifacts",
-            "Upload release broad system workload artifacts",
-            "Upload release Metal stress artifacts",
-            "Upload release native-decline parity artifacts",
-        ),
+        "metal-compatibility",
+        "Run release hosted Metal compatibility gate",
+        "artifacts/coverage-pg18-hosted-metal",
+        "artifacts/hosted-metal-runner-pg18",
+        "Upload release hosted Metal coverage artifacts",
+        "Upload release hosted Metal runner provenance",
     )
     release = _workflow_job_block(workflow, "release")
     needs = re.search(r"^    needs:\s*\[([^]]+)\]\s*$", release, re.MULTILINE)
-    if needs is None or "metal-coverage" not in {
+    if needs is None or "metal-compatibility" not in {
         dependency.strip() for dependency in needs.group(1).split(",")
     }:
         raise ArtifactContractError(
-            "release publication does not depend on the qualified Metal gate job"
+            "release draft does not depend on the hosted Metal compatibility job"
         )
     if re.search(r"^    if\s*:", release, re.MULTILINE):
         raise ArtifactContractError(
@@ -1580,6 +1772,53 @@ def validate_release_workflow_contract(workflow: str) -> None:
         )
     if re.search(r"^    continue-on-error\s*:", release, re.MULTILINE):
         raise ArtifactContractError("release publication cannot continue on error")
+
+    evidence_step = _workflow_step(
+        release, "Package hosted Metal evidence for durable release assets"
+    )
+    evidence_lines = _workflow_step_lines(evidence_step)
+    for required in (
+        "shell: bash",
+        "run: |",
+        "set -euo pipefail",
+        "mkdir -p release-evidence",
+        "if [ \"$evidence_count\" -ne 2 ]; then",
+    ):
+        if required not in evidence_lines:
+            raise ArtifactContractError(
+                f"release evidence packaging is missing `{required}`"
+            )
+    if any(
+        line.startswith(("if:", "continue-on-error:")) for line in evidence_lines
+    ):
+        raise ArtifactContractError(
+            "release evidence packaging cannot be conditional or continue on error"
+        )
+    for required_text in (
+        "-name 'pg-accel-release-*-pg18-hosted-metal'",
+        'tar -C release-artifacts -czf "release-evidence/${artifact_name}.tar.gz" "$artifact_name"',
+        'sha256sum "${artifact_name}.tar.gz"',
+    ):
+        if required_text not in evidence_step:
+            raise ArtifactContractError(
+                f"release evidence packaging is missing `{required_text}`"
+            )
+
+    publication = _workflow_step(release, "Create draft GitHub Release")
+    publication_lines = _workflow_step_lines(publication)
+    for required in (
+        "uses: softprops/action-gh-release@v2",
+        "draft: true",
+        "generate_release_notes: true",
+        "prerelease: ${{ contains(github.ref_name, '-') }}",
+        "release-artifacts/pg_accel-pg*/pg_accel-pg*.smoke.txt",
+        "release-evidence/*.tar.gz",
+        "release-evidence/*.tar.gz.sha256",
+    ):
+        if required not in publication_lines:
+            raise ArtifactContractError(
+                f"release publication is missing durable asset `{required}`"
+            )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1599,6 +1838,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     candidate.add_argument("--repo-root", required=True, type=Path)
     candidate.add_argument("--output", required=True, type=Path)
+    candidate.add_argument("--expected-commit")
 
     crash_count = subparsers.add_parser(
         "crash-count", help="validate and count a benchmark crash artifact"
@@ -1638,7 +1878,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_index.add_argument("--artifact-dir", required=True, type=Path)
 
     workflow = subparsers.add_parser(
-        "workflow-audit", help="validate qualified Metal workflow wiring"
+        "workflow-audit", help="validate hosted Metal compatibility workflow wiring"
     )
     workflow.add_argument("--path", required=True, type=Path)
     workflow.add_argument(
@@ -1654,7 +1894,9 @@ def main(argv: list[str] | None = None, stderr: TextIO = sys.stderr) -> int:
             cache_dir = resolve_cache_dir(args.cache_dir)
             _write_json(args.output, measure_cache(cache_dir, args.point))
         elif args.command == "capture-candidate":
-            payload = capture_candidate_provenance(args.repo_root)
+            payload = capture_candidate_provenance(
+                args.repo_root, args.expected_commit
+            )
             _write_json(args.output, payload)
             print(f"commit={payload['commit']}")
             print(f"tree={payload['tree']}")

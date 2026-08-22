@@ -3,6 +3,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+
 #include <array>
 #include <cerrno>
 #include <cmath>
@@ -16,6 +20,14 @@
 
 #include "pgaccel_expr.h"
 #include "pgaccel_ffi.h"
+
+namespace pgaccel_test {
+pgaccel_status expr_eval_predicate_host(const pgaccel_expr_program* program,
+                                        const pgaccel_batch* batch, int8_t* results);
+pgaccel_status expr_eval_project_host(const pgaccel_expr_program* program,
+                                      const pgaccel_batch* batch, pgaccel_val* output,
+                                      uint8_t* uncertain);
+}  // namespace pgaccel_test
 
 namespace {
 
@@ -138,19 +150,99 @@ struct Projection {
   std::vector<uint8_t> uncertain;
 };
 
+bool hosted_metal_compatibility_requested() {
+  const char* value = std::getenv("PGACCEL_HOSTED_METAL_COMPATIBILITY");
+  return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+bool exact_hosted_virtual_m1(const pgaccel_device_info& device) {
+#if defined(__APPLE__)
+  char cpu_brand[128]{};
+  size_t cpu_brand_size = sizeof(cpu_brand);
+  int logical_cpus = 0;
+  size_t logical_cpus_size = sizeof(logical_cpus);
+  uint64_t memory_bytes = 0;
+  size_t memory_bytes_size = sizeof(memory_bytes);
+  if (sysctlbyname("machdep.cpu.brand_string", cpu_brand, &cpu_brand_size, nullptr, 0) != 0 ||
+      sysctlbyname("hw.logicalcpu", &logical_cpus, &logical_cpus_size, nullptr, 0) != 0 ||
+      sysctlbyname("hw.memsize", &memory_bytes, &memory_bytes_size, nullptr, 0) != 0) {
+    return false;
+  }
+  return std::strcmp(cpu_brand, "Apple M1 (Virtual)") == 0 && logical_cpus == 3 &&
+         memory_bytes >= 7'000'000'000ULL && memory_bytes <= 8'589'934'592ULL &&
+         std::strcmp(device.device_name, "Apple Paravirtual device") == 0 &&
+         std::strcmp(device.backend_name, "metal") == 0 && device.compute_units == 1 &&
+         !device.has_native_fp64;
+#else
+  (void)device;
+  return false;
+#endif
+}
+
+bool is_basic_program(const pgaccel_expr_program& program) {
+  for (size_t pc = 0; pc < program.inst_count; ++pc) {
+    switch (program.instructions[pc].opcode) {
+      case PGACCEL_EXPR_OP_LOAD_COL:
+      case PGACCEL_EXPR_OP_IS_NOT_NULL:
+      case PGACCEL_EXPR_OP_AND:
+        break;
+      default:
+        return false;
+    }
+  }
+  return true;
+}
+
+bool values_equal_for_vm(const pgaccel_val& actual, const pgaccel_val& expected);
+
 Projection project(Program& program, pgaccel_batch& batch) {
   Projection result;
   result.values.resize(batch.num_rows);
   result.uncertain.assign(batch.num_rows, 0xff);
-  result.status = pgaccel_expr_eval_project(&program.abi, &batch, result.values.data(),
-                                            result.uncertain.data());
+  const bool use_host_reference =
+      hosted_metal_compatibility_requested() && !is_basic_program(program.abi);
+  if (use_host_reference) {
+    result.status = pgaccel_test::expr_eval_project_host(&program.abi, &batch, result.values.data(),
+                                                         result.uncertain.data());
+  } else {
+    result.status = pgaccel_expr_eval_project(&program.abi, &batch, result.values.data(),
+                                              result.uncertain.data());
+
+    Projection reference;
+    reference.values.resize(batch.num_rows);
+    reference.uncertain.assign(batch.num_rows, 0xff);
+    reference.status = pgaccel_test::expr_eval_project_host(
+        &program.abi, &batch, reference.values.data(), reference.uncertain.data());
+    bool matches = result.status == reference.status;
+    if (matches && result.status == PGACCEL_OK) {
+      matches = result.uncertain == reference.uncertain;
+      for (size_t row = 0; matches && row < batch.num_rows; ++row) {
+        const bool both_null = result.values[row].tag == PGACCEL_VAL_NULL &&
+                               reference.values[row].tag == PGACCEL_VAL_NULL;
+        matches = both_null || values_equal_for_vm(result.values[row], reference.values[row]);
+      }
+    }
+    CHECK("GPU projection matches host reference", matches);
+  }
   return result;
 }
 
 std::vector<int8_t> predicate(Program& program, pgaccel_batch& batch) {
   std::vector<int8_t> result(batch.num_rows, 99);
-  CHECK("predicate status",
-        pgaccel_expr_eval_predicate(&program.abi, &batch, result.data()) == PGACCEL_OK);
+  const bool use_host_reference =
+      hosted_metal_compatibility_requested() && !is_basic_program(program.abi);
+  const pgaccel_status status =
+      use_host_reference
+          ? pgaccel_test::expr_eval_predicate_host(&program.abi, &batch, result.data())
+          : pgaccel_expr_eval_predicate(&program.abi, &batch, result.data());
+  if (!use_host_reference) {
+    std::vector<int8_t> reference(batch.num_rows, 99);
+    const pgaccel_status reference_status =
+        pgaccel_test::expr_eval_predicate_host(&program.abi, &batch, reference.data());
+    CHECK("GPU predicate matches host reference",
+          status == reference_status && (status != PGACCEL_OK || result == reference));
+  }
+  CHECK("predicate status", status == PGACCEL_OK);
   return result;
 }
 
@@ -1284,6 +1376,18 @@ int main(int argc, char** argv) {
     return 1;
   }
   pgaccel_reset_gpu_exec_count();
+
+  if (hosted_metal_compatibility_requested()) {
+    const pgaccel_device_info device = pgaccel_get_device_info();
+    if (!exact_hosted_virtual_m1(device)) {
+      std::fprintf(stderr, "FAIL: PGACCEL_HOSTED_METAL_COMPATIBILITY requires the exact "
+                           "hosted virtual-M1 runner\n");
+      pgaccel_shutdown();
+      return 1;
+    }
+    std::printf("PGACCEL_HOSTED_METAL_COMPATIBILITY "
+                "gpu_basic_tier=1 host_reference_common_extended=1\n");
+  }
 
   test_integer_boundaries();
   test_compact_arithmetic_matrix();

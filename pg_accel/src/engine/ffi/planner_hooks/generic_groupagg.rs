@@ -16,8 +16,9 @@ use super::shape::{
 use super::{PlannerSubstageGuard, add_gpu_path_with_resident_proof, rel_rows_estimate};
 use crate::engine::cost::{self, PgCost, Rows, TypedCostModel};
 use crate::engine::executor::agg::{
-    estimate_descriptor_artifact_bytes_upper_bound, planned_descriptor_kernel_mode,
-    validate_normal_descriptor_capability, validate_normal_spatial_candidate_capability,
+    estimate_descriptor_artifact_bytes_upper_bound, is_weighted_global_count_descriptor,
+    planned_descriptor_kernel_mode, validate_normal_descriptor_capability,
+    validate_normal_spatial_candidate_capability,
 };
 use crate::engine::ffi::custom_scan;
 use crate::engine::gucs;
@@ -34,6 +35,7 @@ use crate::gpu::GroupedAggKernelMode;
 const GENERIC_SHAPE_PATH_CONTEXT: &str = "upper_paths_generic_groupagg";
 const AGG_QUERY_SPEC_SENTINEL: c_int = i32::from_be_bytes(*b"AQS3");
 const AGG_OUTPUT_PROJECTION_SENTINEL: c_int = i32::from_be_bytes(*b"AOP2");
+const WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS: u64 = 1_000_000;
 
 unsafe extern "C" {
     // PostgreSQL declares this in optimizer/prep.h and exports it from the
@@ -71,6 +73,9 @@ enum AdmissionDecline {
     },
     DescriptorCapability {
         detail: String,
+    },
+    H3ParentResolutionUnqualified {
+        resolution: i32,
     },
     SerialGenericKernelMode {
         mode: &'static str,
@@ -114,6 +119,7 @@ impl AdmissionDecline {
             Self::MissingResidencyEstimate { .. } => "generic_residency_estimate_missing",
             Self::UnexpectedResidencyEstimate { .. } => "generic_residency_estimate_unexpected",
             Self::DescriptorCapability { .. } => "generic_descriptor_capability",
+            Self::H3ParentResolutionUnqualified { .. } => "h3_parent_resolution_unqualified",
             Self::SerialGenericKernelMode { .. } => "generic_serial_kernel_mode_unqualified",
             Self::AutoLoadDisabled { .. } => "generic_auto_load_disabled",
             Self::ResidencyBytesOverflow => "generic_residency_bytes_overflow",
@@ -129,6 +135,9 @@ impl AdmissionDecline {
             Self::DeviceCostGate(ShapeCostGate::Eligible) => "generic_invalid_eligible_cost_gate",
             Self::DeviceCostGate(ShapeCostGate::FactRowsBelowDeviceMinimum { .. }) => {
                 "generic_fact_rows_below_device_minimum"
+            }
+            Self::DeviceCostGate(ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum { .. }) => {
+                "generic_fact_rows_exceed_dense_one_shot_maximum"
             }
             Self::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum { .. }) => {
                 "h3_rows_below_grouped_agg_min"
@@ -432,6 +441,11 @@ fn apply_exact_residency(
                 estimated: lifecycle_fact_rows,
                 required,
             }
+        } else if lifecycle_fact_rows > model.executor.gpu_grouped_agg_one_shot_max_rows {
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: lifecycle_fact_rows,
+                maximum: model.executor.gpu_grouped_agg_one_shot_max_rows,
+            }
         } else {
             ShapeCostGate::Eligible
         };
@@ -490,11 +504,52 @@ fn validate_shape_capability(shape: &ShapePlan) -> Result<(), AdmissionDecline> 
         validate_normal_descriptor_capability(&shape.spec, &projection)
     };
     result.map_err(|detail| AdmissionDecline::DescriptorCapability { detail })?;
+    if is_weighted_global_count_descriptor(&shape.spec) {
+        let estimated_fact_rows = shape
+            .residency
+            .relations
+            .iter()
+            .find(|relation| relation.relation_oid == shape.spec.fact_rel)
+            .map_or(0, |relation| relation.estimated_rows);
+        if estimated_fact_rows < WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS {
+            // The physical kernel is exact at every scale, but normal planning
+            // releases this counted-join lane only where it has independent
+            // winning evidence. Preserve the historical structural decline
+            // below that envelope instead of letting a later cost comparison
+            // silently change the registered native-parity reason.
+            return Err(AdmissionDecline::SerialGenericKernelMode {
+                mode: GroupedAggKernelMode::SerialGeneric.label(),
+            });
+        }
+    }
     let mode = shape_kernel_mode(shape);
     if mode == GroupedAggKernelMode::SerialGeneric {
         return Err(AdmissionDecline::SerialGenericKernelMode { mode: mode.label() });
     }
     Ok(())
+}
+
+fn validate_released_h3_parent_envelope(shape: &ShapePlan) -> Result<(), AdmissionDecline> {
+    let resolution = shape
+        .spec
+        .group_keys
+        .iter()
+        .find_map(|key| match key.source {
+            crate::engine::spec::GroupKeySource::H3CellToParent { resolution, .. } => {
+                Some(resolution)
+            }
+            _ => None,
+        });
+    match resolution {
+        // The 1.0 release evidence qualifies only the exact res7-to-res0
+        // grouped COUNT lane. Preserve the broader wire/runtime implementation
+        // for differential and backstop tests, but do not select another
+        // resolution until that exact cell has independent winning evidence.
+        Some(resolution) if resolution != 0 => {
+            Err(AdmissionDecline::H3ParentResolutionUnqualified { resolution })
+        }
+        Some(_) | None => Ok(()),
+    }
 }
 
 const NORMAL_SPATIAL_PROMOTION_ROWS: u64 = 1_000_000;
@@ -1615,6 +1670,7 @@ pub(super) unsafe fn try_inject(
         if let Some(gate) = stable_device_cost_gate_before_residency(&shape, &model) {
             return Err(AdmissionDecline::DeviceCostGate(gate));
         }
+        validate_released_h3_parent_envelope(&shape)?;
         if let Some((gate, dependency)) = cheap_exact_dense_row_gate(&shape, &model)? {
             cache_dependencies.push(dependency);
             return Err(AdmissionDecline::DeviceCostGate(gate));
@@ -1671,6 +1727,7 @@ pub(super) unsafe fn try_inject(
             let cache_key = match &decline {
                 AdmissionDecline::Shape(_)
                 | AdmissionDecline::DescriptorCapability { .. }
+                | AdmissionDecline::H3ParentResolutionUnqualified { .. }
                 | AdmissionDecline::SerialGenericKernelMode { .. } => {
                     structural_cache_key.map(|key| (key, Vec::new()))
                 }
@@ -2456,6 +2513,59 @@ mod tests {
     }
 
     #[test]
+    fn dense_atomic_measure_filter_costs_two_comparisons_and_independent_sum_state() {
+        let model = model();
+        let mut shape = dense_sum_count_shape(1_000_000);
+        let value = match shape.spec.measures[0].expression {
+            MeasureExpr::Column(value) => value,
+            ref expression => panic!("expected direct column measure, got {expression:?}"),
+        };
+        shape.spec.measures[0].filter = FilterSpec::Ranges {
+            input: value,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(200),
+                hi: ScalarValue::I32(800),
+            }],
+        };
+
+        let filtered = dense_atomic_sum_count_cost(
+            &shape.spec,
+            &shape.descriptor_resolution,
+            1_000_000,
+            Some(1_000_000),
+            Some(false),
+            &model,
+        )
+        .expect("exact bounded int4 aggregate FILTER has a dense atomic cost");
+        let expected_per_row = model
+            .coefficients
+            .gpu_op_cost_reduce
+            .get()
+            .mul_add(3.0, model.coefficients.gpu_op_cost_filter.get() * 2.0);
+        assert_eq!(filtered, PgCost::new(1_000_000.0 * expected_per_row));
+
+        shape.spec.measures[0].filter = FilterSpec::Ranges {
+            input: value,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(i32::MIN),
+                hi: ScalarValue::I32(800),
+            }],
+        };
+        assert!(
+            dense_atomic_sum_count_cost(
+                &shape.spec,
+                &shape.descriptor_resolution,
+                1_000_000,
+                Some(1_000_000),
+                Some(false),
+                &model,
+            )
+            .is_none(),
+            "one-sided ranges must not inherit the released filtered cost"
+        );
+    }
+
+    #[test]
     fn dense_atomic_exact_rows_must_clear_the_applicable_shape_floor() {
         let model = model();
         let shape = dense_sum_count_shape(10_000_000);
@@ -2497,7 +2607,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_sum_count_costs_bounded_session_calls_above_the_one_shot_boundary() {
+    fn dense_sum_count_caps_admission_but_costs_bounded_calls_above_one_shot() {
         let model = model();
         let maximum = model.executor.gpu_grouped_agg_one_shot_max_rows;
         let maximum_u64 = u64::try_from(maximum.get()).expect("test row limit fits u64");
@@ -2510,7 +2620,13 @@ mod tests {
         let above_u64 = maximum_u64 + 1;
         let mut above_maximum = dense_sum_count_shape(above_u64);
         apply_resident_evidence(&mut above_maximum, above_u64, true);
-        assert_eq!(above_maximum.cost_gate, ShapeCostGate::Eligible);
+        assert_eq!(
+            above_maximum.cost_gate,
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: Rows::new(maximum.get() + 1),
+                maximum,
+            }
+        );
         assert_eq!(
             planned_dense_lifecycle_calls(&above_maximum, above_u64, &model),
             Some(3),
@@ -2533,7 +2649,13 @@ mod tests {
             &model,
         )
         .expect("first-use estimate fits the unbounded test budget");
-        assert_eq!(first_use.cost_gate, ShapeCostGate::Eligible);
+        assert_eq!(
+            first_use.cost_gate,
+            ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                fact_rows: Rows::new(maximum.get() + 1),
+                maximum,
+            }
+        );
         assert_eq!(
             first_use.cost.additional_aggregate_launches,
             above_maximum.cost.additional_aggregate_launches,
@@ -3388,6 +3510,29 @@ mod tests {
     }
 
     #[test]
+    fn released_h3_parent_envelope_admits_only_resolution_zero() {
+        let nonzero = h3_parent_shape();
+        assert_eq!(
+            validate_released_h3_parent_envelope(&nonzero),
+            Err(AdmissionDecline::H3ParentResolutionUnqualified { resolution: 4 })
+        );
+
+        let mut released = nonzero;
+        let GroupKeySource::H3CellToParent { resolution, .. } =
+            &mut released.spec.group_keys[0].source
+        else {
+            panic!("H3 parent fixture must retain its semantic group key");
+        };
+        *resolution = 0;
+        assert_eq!(validate_released_h3_parent_envelope(&released), Ok(()));
+        assert_eq!(
+            validate_released_h3_parent_envelope(&count_shape()),
+            Ok(()),
+            "the H3 release guard must not affect non-H3 descriptors"
+        );
+    }
+
+    #[test]
     fn global_cost_multiplier_controls_gate_and_scales_auto_load() {
         let mut shape = count_shape();
         shape.cost.amortized_auto_load = PgCost::new(100.0);
@@ -3486,6 +3631,35 @@ mod tests {
 
         validate_shape_capability(&count_shape())
             .expect("canonical COUNT(*) uses the parallel dense-count branch");
+
+        let mut weighted_count = count_shape();
+        add_star_dimension(&mut weighted_count, JoinMultiplicity::Counted);
+        weighted_count.residency.relations[0].estimated_rows =
+            WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS - 1;
+        assert!(matches!(
+            validate_shape_capability(&weighted_count)
+                .expect_err("weighted COUNT(*) below its release floor must remain native"),
+            AdmissionDecline::SerialGenericKernelMode {
+                mode: "serial_generic"
+            }
+        ));
+        weighted_count.residency.relations[0].estimated_rows = WEIGHTED_GLOBAL_COUNT_MIN_FACT_ROWS;
+        validate_shape_capability(&weighted_count)
+            .expect("unfiltered global COUNT(*) uses the weighted parallel dense-count branch");
+
+        weighted_count.spec.fact_filter = FilterSpec::Mask {
+            input: ColumnRef {
+                relation_oid: 42,
+                attno: 2,
+                type_oid: u32::from(pg_sys::BOOLOID),
+            },
+            kind: crate::engine::spec::MaskKind::Sql,
+        };
+        assert!(matches!(
+            validate_shape_capability(&weighted_count)
+                .expect_err("filtered counted COUNT(*) must remain native"),
+            AdmissionDecline::SerialGenericKernelMode { .. }
+        ));
 
         let mut range = dense_sum_count_shape(1_000_000);
         let lhs = ColumnRef {
@@ -3641,6 +3815,10 @@ mod tests {
                 "generic_descriptor_capability",
             ),
             (
+                AdmissionDecline::H3ParentResolutionUnqualified { resolution: 3 },
+                "h3_parent_resolution_unqualified",
+            ),
+            (
                 AdmissionDecline::AutoLoadDisabled {
                     relation_oid: 1,
                     estimated_bytes: 1,
@@ -3691,6 +3869,15 @@ mod tests {
                     required: row_pair.1,
                 }),
                 "generic_fact_rows_below_device_minimum",
+            ),
+            (
+                AdmissionDecline::DeviceCostGate(
+                    ShapeCostGate::DenseOneShotRowsExceedDeviceMaximum {
+                        fact_rows: row_pair.1,
+                        maximum: row_pair.0,
+                    },
+                ),
+                "generic_fact_rows_exceed_dense_one_shot_maximum",
             ),
             (
                 AdmissionDecline::DeviceCostGate(ShapeCostGate::H3RowsBelowDeviceMinimum {

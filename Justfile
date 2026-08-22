@@ -51,7 +51,7 @@ setup-system-deps:
         Linux)
             printf '%s\n' \
                 "Install build prerequisites with your distro package manager. For Ubuntu/Debian:" \
-                "  sudo apt-get install -y build-essential ca-certificates clang cmake curl git libreadline-dev zlib1g-dev flex bison pkg-config postgis" \
+                "  sudo apt-get install -y build-essential ca-certificates clang cmake curl git libclang-dev libomp-dev llvm-dev lld ninja-build libreadline-dev zlib1g-dev flex bison pkg-config postgis" \
                 "" \
                 "For CUDA runs, install the NVIDIA driver + CUDA toolkit, then run:" \
                 "  ACPP_BACKEND=cuda just setup-gpu"
@@ -247,7 +247,9 @@ lint pg="":
     fi
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
-    cargo clippy --workspace --no-default-features --features "pg$pg" --all-targets -- -D warnings
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo clippy --workspace --no-default-features --features "pg$pg" --all-targets -- -D warnings
 
 # Type check one PG major. Defaults to the active supported PostgreSQL major.
 check pg="":
@@ -262,7 +264,9 @@ check pg="":
     fi
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
-    cargo check --workspace --no-default-features --features "pg$pg" --all-targets
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo check --workspace --no-default-features --features "pg$pg" --all-targets
 
 # Type check every supported PostgreSQL major.
 check-matrix:
@@ -272,7 +276,9 @@ check-matrix:
     for pg in $(pg_accel_supported_pg_majors); do
         pg_accel_require_pgrx_support "$pg"
         pg_accel_require_pgrx_pg_config "$pg"
-        cargo check --workspace --no-default-features --features "pg$pg" --all-targets
+        pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+        PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+            cargo check --workspace --no-default-features --features "pg$pg" --all-targets
     done
 
 # Run cargo-deny checks (licenses + advisories)
@@ -317,7 +323,7 @@ doc-parity:
 # Validate that default PG-version plumbing is centralized.
 pg-version-audit:
     ./scripts/pg_version_audit.sh
-    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_pg_source.py scripts/tests/test_setup_pg_extensions.py
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_pg_source.py scripts/tests/test_setup_pg_extensions.py scripts/tests/test_pg_stub_build_wiring.py scripts/tests/test_target_specific_rust.py
 
 # Validate relocatable package layout, loader metadata, and archive preservation.
 package-extension-test:
@@ -330,7 +336,7 @@ upstream-pg-tests-audit:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_upstream_pg_tests.py -v
 
 # Pre-commit checks: fmt, lint, type-check matrix, deny, audits, doc-parity
-pre-commit: fmt-check lint check-matrix deny audit doc-parity pg-version-audit package-extension-test upstream-pg-tests-audit safety-contract-audit audit-cpu-cheats-test metal-stress-artifact-test
+pre-commit: fmt-check lint check-matrix test-standalone deny audit doc-parity pg-version-audit package-extension-test upstream-pg-tests-audit safety-contract-audit audit-cpu-cheats-test metal-stress-artifact-test
     @echo "Pre-commit checks passed."
 
 # Run pgrx unit tests against one PG major. Defaults to the repo target PG major.
@@ -346,8 +352,31 @@ test-unit pg="":
     fi
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
     scripts/setup_pg_extensions.sh "$pg"
-    RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" cargo pgrx test --package pg_accel "pg$pg"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}" \
+        cargo pgrx test --package pg_accel "pg$pg"
+
+# Run the pure Rust library tests as a standalone executable. pgrx references
+# PostgreSQL symbols even when a test never calls PostgreSQL, so the build
+# script generates test-only stubs from this exact selected pg_config.
+test-standalone pg="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo test -p pg_accel --locked --lib \
+        --no-default-features --features "pg$pg"
 
 # Run pgrx unit tests against every supported PG major.
 test-matrix:
@@ -429,7 +458,9 @@ safety-contract-audit:
     python3 scripts/crash_band_audit.py --repo-root .
 
 coverage-audit: safety-contract-audit
-    bash -n scripts/coverage_gate.sh scripts/residency_ledger_integration.sh sql/tests/run_all.sh
+    bash -n scripts/coverage_gate.sh scripts/coverage_metal_mode.sh \
+        scripts/coverage_ooo_overlap.sh \
+        scripts/residency_ledger_integration.sh sql/tests/run_all.sh
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p 'test_coverage*.py'
     python3 scripts/coverage_tools.py audit-scope --scope coverage/scope.json --repo-root .
 
@@ -445,7 +476,7 @@ fuzz-contracts pg="": safety-contract-audit
     else
         pg="${requested#pg}"
     fi
-    cargo test -p pg_accel --lib --no-default-features --features "pg$pg"
+    just test-standalone "$pg"
     just test-unit "$pg"
     just gpu-build
     ctest --test-dir pgaccel-kernels/build --output-on-failure \
@@ -463,16 +494,50 @@ crash-band-contracts pg="": safety-contract-audit
     else
         pg="${requested#pg}"
     fi
-    cargo test -p pg_accel --lib historical_crash
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo test -p pg_accel --locked --lib --no-default-features \
+            --features "pg$pg" historical_crash
     just test-unit "$pg"
     just gpu-build
     ctest --test-dir pgaccel-kernels/build --output-on-failure \
         -R 'test_(grouped_agg_hash|oom_invariant)'
 
-# Run the immutable qualified-Metal performance ratchet. The Rust command fixes
-# the exact 1M-row winner cells, seed, raw timing, cache-mode-both policy,
-# sampling counts, and per-lane thresholds; this recipe supplies only the PG
-# installation and optional deterministic CI artifact path.
+# Run the mandatory immutable qualified-Metal warm performance ratchet. The
+# Rust command fixes the exact 1M-row winner cells, seed, raw timing, warm-cache
+# policy, sampling counts, and per-lane thresholds; this recipe supplies only
+# the PG installation and optional deterministic CI artifact path.
+metal-warm-benchmark-ship-gate pg="" artifacts_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    just audit-cpu-cheats
+    just install-pg-accel "$pg"
+    just log-rails "$pg"
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    artifact_args=()
+    if [ -n "{{artifacts_dir}}" ]; then
+        artifact_args=(--artifacts-dir "{{artifacts_dir}}")
+    fi
+    PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run --release -p pg_accel_bench -- \
+        metal-warm-ship-gate \
+        --connection "host=localhost port=$port dbname=postgres" \
+        "${artifact_args[@]}"
+
+# Run the optional privileged OS page-cache certification. This uses the same
+# immutable winner contract with cache mode both and requires authority to
+# purge the host page cache. It supplements the mandatory warm ratchet above.
 metal-benchmark-ship-gate pg="" artifacts_dir="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -496,6 +561,36 @@ metal-benchmark-ship-gate pg="" artifacts_dir="":
     fi
     PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run --release -p pg_accel_bench -- \
         metal-ship-gate \
+        --connection "host=localhost port=$port dbname=postgres" \
+        "${artifact_args[@]}"
+
+# Run the separately versioned one-cell release ratchet for the counted INT4
+# dimension global COUNT(*) path. The command fixes the deterministic fanout
+# fixture, independent oracle, exact 1M scale, physical kernel, sampling, and
+# warm-speedup floor without changing the sealed nineteen-cell Metal contract.
+weighted-count-benchmark-ship-gate pg="" artifacts_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_buildable_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    just audit-cpu-cheats
+    just install-pg-accel "$pg"
+    just log-rails "$pg"
+    port="$(pg_accel_pgrx_port_for_pg "$pg")"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    artifact_args=()
+    if [ -n "{{artifacts_dir}}" ]; then
+        artifact_args=(--artifacts-dir "{{artifacts_dir}}")
+    fi
+    PG_CONFIG="$pg_config" PG_ACCEL_PG_MAJOR="$pg" cargo run --release -p pg_accel_bench -- \
+        weighted-count-ship-gate \
         --connection "host=localhost port=$port dbname=postgres" \
         "${artifact_args[@]}"
 
@@ -952,7 +1047,9 @@ sql-test pg="":
     port="$(pg_accel_pgrx_port_for_pg "$pg")"
     connection="host=localhost port=$port dbname=postgres"
     "$psql_bin" "$connection" -v ON_ERROR_STOP=1 -f sql/init/01-create-extensions.sql
-    PG_ACCEL_PG_MAJOR="$pg" PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 sql/tests/run_all.sh "$connection"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        PG_ACCEL_PSQL="$psql_bin" PG_ACCEL_PG_MAJOR="$pg" \
+        PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION=1 sql/tests/run_all.sh "$connection"
 
 # Exercise the production shared-memory residency ledger across real backend
 # processes and cloned databases. Unlike cargo-pgrx tests, this uses the
@@ -1047,6 +1144,56 @@ package-matrix:
             --pg "$pg" --pg-config "$pg_config" --acpp-prefix "$acpp_prefix"
     done
 
+# Verify one already-built release archive through checksum validation, staged
+# installation, an isolated PostgreSQL cluster, preload, CREATE EXTENSION,
+# version/stats queries, and a fatal-log audit. The archive selection fails
+# closed when the target directory contains zero or multiple candidates.
+package-smoke pg="" archive="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    requested="{{pg}}"
+    if [ -z "$requested" ]; then
+        pg="$(pg_accel_default_pg_major)"
+    else
+        pg="${requested#pg}"
+    fi
+    pg_accel_require_pgrx_support "$pg"
+    pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    archive="{{archive}}"
+    if [ -z "$archive" ]; then
+        archive_count=0
+        while IFS= read -r candidate; do
+            [ -n "$candidate" ] || continue
+            archive="$candidate"
+            archive_count=$((archive_count + 1))
+        done < <(find target/release -maxdepth 1 -type f \
+            -name "pg_accel-pg${pg}-*.tar.gz" -print | LC_ALL=C sort)
+        if [ "$archive_count" -ne 1 ]; then
+            echo "error: expected one PG${pg} release archive, found $archive_count" >&2
+            exit 1
+        fi
+    fi
+    case "$archive" in
+        *.tar.gz) smoke_evidence="${archive%.tar.gz}.smoke.txt" ;;
+        *)
+            echo "error: release archive must end in .tar.gz: $archive" >&2
+            exit 2
+            ;;
+    esac
+    scripts/verify_release_package.sh \
+        "$pg_config" "$archive" "$smoke_evidence"
+
+# Verify already-built release archives for every supported PostgreSQL major.
+package-smoke-matrix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source scripts/pg_versions.sh
+    for pg in $(pg_accel_supported_pg_majors); do
+        just package-smoke "$pg"
+    done
+
 # Install the current pg_accel release build into the pgrx-managed cluster and
 # restart the cluster so shared_preload_libraries maps the same binary.
 install-pg-accel pg="":
@@ -1083,7 +1230,9 @@ install-pg-accel pg="":
         printf 'unavailable\n'
     }
     cargo pgrx stop --package pg_accel "pg$pg" >/dev/null 2>&1 || true
-    PG_CONFIG="$pg_config" cargo pgrx install --package pg_accel --release --no-default-features --features "pg$pg" --pg-config "$pg_config"
+    PG_CONFIG="$pg_config" PGRX_PG_CONFIG_PATH="$pg_config" \
+        cargo pgrx install --package pg_accel --release --no-default-features \
+            --features "pg$pg" --pg-config "$pg_config"
     module_file=""
     for candidate in "$pkglibdir/pg_accel.so" "$pkglibdir/pg_accel.dylib" "$pkglibdir/pg_accel.bundle"; do
         if [ -f "$candidate" ]; then
@@ -1169,17 +1318,34 @@ extension-smoke pg="":
     fi
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    pg_bindir="$("$pg_config" --bindir)"
+    dropdb_bin="$pg_bindir/dropdb"
+    createdb_bin="$pg_bindir/createdb"
+    psql_bin="$pg_bindir/psql"
+    for postgres_client in "$dropdb_bin" "$createdb_bin" "$psql_bin"; do
+        if [ ! -x "$postgres_client" ]; then
+            echo "error: selected PostgreSQL client is not executable: $postgres_client" >&2
+            exit 1
+        fi
+    done
     just install-pg-accel "$pg"
     port="$(pg_accel_pgrx_port_for_pg "$pg")"
     : "${port:?could not read pgrx PostgreSQL port}"
     db="pg_accel_smoke_$pg"
-    dropdb -h localhost -p "$port" --if-exists "$db"
-    createdb -h localhost -p "$port" "$db"
-    psql -h localhost -p "$port" -d "$db" -v ON_ERROR_STOP=1 \
+    cleanup() {
+        "$dropdb_bin" -h localhost -p "$port" --if-exists "$db" \
+            >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+    "$dropdb_bin" -h localhost -p "$port" --if-exists "$db"
+    "$createdb_bin" -h localhost -p "$port" "$db"
+    "$psql_bin" -h localhost -p "$port" -d "$db" -v ON_ERROR_STOP=1 \
         -c "CREATE EXTENSION pg_accel;" \
         -c "SELECT pg_accel_version();" \
         -c "SELECT * FROM pg_accel_stats();"
-    dropdb -h localhost -p "$port" "$db"
+    "$dropdb_bin" -h localhost -p "$port" "$db"
+    trap - EXIT
 
 # Install into each pgrx-managed cluster and prove fresh CREATE EXTENSION paths.
 extension-smoke-matrix:

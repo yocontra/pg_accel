@@ -18,42 +18,62 @@ fn main() {
     println!("cargo::rerun-if-env-changed=LLVM_PREFIX");
     println!("cargo::rerun-if-env-changed=LIBOMP_PREFIX");
     println!("cargo::rerun-if-env-changed=PGACCEL_PACKAGE_RELOCATABLE");
+    println!("cargo::rerun-if-env-changed=PG_CONFIG");
+    println!("cargo::rerun-if-env-changed=PGRX_PG_CONFIG_PATH");
 
     gpu_build::build_kernels();
 
-    // macOS Sequoia+ (26.x) eagerly resolves undefined symbols in flat
-    // namespace binaries at dyld load time, which breaks pgrx test binaries
-    // that reference PG functions via `-undefined dynamic_lookup`. Generate
-    // a stub dylib exporting all PG symbols and link it into test binaries
-    // only (never the production cdylib) so dyld finds a dummy definition
-    // at load time. The stubs are never called: real implementations come
-    // from postgres itself when the extension .so is dlopened.
-    #[cfg(target_os = "macos")]
+    // Standalone Rust test executables are not loaded by PostgreSQL, so they
+    // need definitions for the PostgreSQL symbols referenced through pgrx.
+    // macOS Sequoia+ resolves those symbols eagerly at load time, while ELF
+    // linkers reject them while producing the Linux test executable. Generate
+    // test-only stubs on both supported host platforms. Production cdylibs do
+    // not compile the stub module and still resolve every symbol from postgres.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pg_stub::build_stub();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod pg_stub {
     use std::path::PathBuf;
     use std::process::Command;
 
-    /// Generate a Rust source file with `#[no_mangle]` stubs for every
-    /// global symbol exported by the `postgres` executable.
+    /// Generate Rust stubs for every referenced global symbol exported by the
+    /// selected `postgres` executable.
     ///
     /// Background: macOS Sequoia+ (26.x) eagerly resolves undefined data
-    /// symbol references at dyld load time, even with `-undefined
-    /// dynamic_lookup` + `-no_fixup_chains`. pgrx lib unit test binaries
-    /// inherit hundreds of PG symbol references (e.g. static data like
-    /// `CheckXidAlive`), and dyld aborts before the test runner starts.
+    /// symbols at dyld load time, even with `-undefined dynamic_lookup` plus
+    /// `-no_fixup_chains`. Linux linkers reject the same unresolved references
+    /// when producing a standalone test executable. pgrx library unit tests
+    /// inherit hundreds of PG function and data references, even though the
+    /// pure tests never call most of them.
     ///
-    /// The generated file is `include!`'d from `src/pg_stubs.rs` under
-    /// `cfg(all(test, target_os = "macos"))`, so the stubs are compiled
-    /// into the test binary only — NEVER into the production cdylib that
-    /// postgres dlopens. Real implementations always come from postgres
-    /// itself at runtime; the stubs exist purely to satisfy the loader.
+    /// The generated file is `include!`'d from `src/pg_stubs.rs` only under
+    /// `cfg(test)` on macOS/Linux, so the stubs are never compiled into the
+    /// production cdylib that postgres loads. `cargo pgrx test` runs inside
+    /// postgres, whose earlier global definitions win symbol resolution; the
+    /// stubs exist for standalone Rust unit-test linking and loading.
     pub fn build_stub() {
-        let pg_config_path = std::env::var("PGRX_PG_CONFIG_PATH")
-            .or_else(|_| std::env::var("PG_CONFIG"))
+        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
+        let stub_rs = out_dir.join("pg_stubs_generated.rs");
+
+        // `cargo clippy/check --all-targets` compiles the test-only module even
+        // when no unversioned `pg_config` exists on PATH. Always publish a
+        // valid include target before attempting PostgreSQL discovery. The
+        // selected pgrx `pg_config` is supplied by project recipes for linked
+        // tests, where the complete symbol inventory is generated below.
+        println!("cargo::rustc-env=PG_STUBS_GENERATED={}", stub_rs.display());
+        std::fs::write(
+            &stub_rs,
+            "// No PostgreSQL binary was discoverable for this compile-only target.\n",
+        )
+        .expect("write fallback pg_stubs_generated.rs");
+
+        // Project recipes bind PG_CONFIG to the exact requested major. Keep
+        // that explicit selection authoritative over any ambient pgrx
+        // override left behind by an enclosing shell.
+        let pg_config_path = std::env::var("PG_CONFIG")
+            .or_else(|_| std::env::var("PGRX_PG_CONFIG_PATH"))
             .unwrap_or_else(|_| "pg_config".to_string());
 
         let Some(bindir) = Command::new(&pg_config_path)
@@ -73,20 +93,19 @@ mod pg_stub {
 
         println!("cargo::rerun-if-changed={}", postgres_bin.display());
 
-        let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
-        let stub_rs = out_dir.join("pg_stubs_generated.rs");
-
-        // Always emit the path so `include!` resolves even if we bail.
-        println!("cargo::rustc-env=PG_STUBS_GENERATED={}", stub_rs.display());
-
         // Extract all global T (text/function), D (data), and S (other)
         // symbols. Skip U (undefined), compiler-internal (leading double
         // underscore), and namespaced (contains '.').
-        let nm = Command::new("nm")
-            .arg("-gP")
-            .arg(&postgres_bin)
-            .output()
-            .expect("nm failed");
+        let mut nm_command = Command::new("nm");
+        nm_command.arg("-gP");
+        // Linux PostgreSQL executables are linked with exported backend
+        // symbols, but distro binaries may have their ordinary symbol table
+        // stripped. The dynamic table is the authoritative extension-facing
+        // inventory and remains available in both source and package builds.
+        if cfg!(target_os = "linux") {
+            nm_command.arg("-D");
+        }
+        let nm = nm_command.arg(&postgres_bin).output().expect("nm failed");
         assert!(nm.status.success(), "nm on postgres binary failed");
         let nm_out = String::from_utf8_lossy(&nm.stdout);
 
@@ -97,9 +116,15 @@ mod pg_stub {
             let (Some(name), Some(ty)) = (parts.next(), parts.next()) else {
                 continue;
             };
-            // macOS nm prefixes with underscore; strip it so our
-            // #[no_mangle] (which re-adds it on mach-o) matches.
-            let clean = name.strip_prefix('_').unwrap_or(name);
+            // Mach-O nm prefixes C symbols with an underscore; strip it so
+            // #[no_mangle] re-adds exactly one. ELF names are already exact,
+            // and stripping their leading underscore would corrupt symbols
+            // such as `_PG_init`.
+            let clean = if cfg!(target_os = "macos") {
+                name.strip_prefix('_').unwrap_or(name)
+            } else {
+                name
+            };
             if clean.is_empty() || clean.starts_with("__") || !is_rust_ident(clean) {
                 continue;
             }
@@ -107,11 +132,20 @@ mod pg_stub {
             if is_rust_keyword(clean) {
                 continue;
             }
-            // Reserved / auto-provided symbols that would clash with the
-            // test binary's own main + mach-o header.
+            // Reserved / auto-provided executable symbols that would clash
+            // with the test binary's own entry point or runtime sections.
             if matches!(
                 clean,
-                "main" | "_main" | "mh_execute_header" | "_mh_execute_header" | "start"
+                "main"
+                    | "_main"
+                    | "mh_execute_header"
+                    | "_mh_execute_header"
+                    | "start"
+                    | "_start"
+                    | "_IO_stdin_used"
+                    | "_edata"
+                    | "_end"
+                    | "data_start"
             ) {
                 continue;
             }
@@ -123,10 +157,19 @@ mod pg_stub {
             }
             match ty {
                 "T" => funcs.push(clean),
-                "D" | "S" => datas.push(clean),
+                // Mach-O uses D/S for exported data. ELF additionally uses B
+                // (BSS), C (common), G (small initialized), R (read-only), and
+                // V (weak object). A writable oversized definition is safe for
+                // the pure unit-test paths and satisfies the symbol resolver.
+                "B" | "C" | "D" | "G" | "R" | "S" | "V" => datas.push(clean),
                 _ => {}
             }
         }
+        assert!(
+            !funcs.is_empty(),
+            "nm found no exported PostgreSQL functions in {}",
+            postgres_bin.display()
+        );
 
         // Stub generation rules:
         //
@@ -146,7 +189,7 @@ mod pg_stub {
         //   might reference.
         let mut rs = String::with_capacity(1 << 20);
         rs.push_str("// AUTO-GENERATED PG symbol stubs. Do not edit.\n");
-        rs.push_str("// Satisfies macOS Sequoia+ dyld at load time; never executed.\n\n");
+        rs.push_str("// Satisfies standalone macOS/Linux test binaries; never shipped.\n\n");
         for f in &funcs {
             rs.push_str("#[unsafe(no_mangle)]\npub extern \"C-unwind\" fn ");
             rs.push_str(f);
@@ -158,10 +201,7 @@ mod pg_stub {
             rs.push_str(": [u64; 16] = [0; 16];\n");
         }
 
-        let needs_write = std::fs::read_to_string(&stub_rs).map_or(true, |e| e != rs);
-        if needs_write {
-            std::fs::write(&stub_rs, &rs).expect("write pg_stubs_generated.rs");
-        }
+        std::fs::write(&stub_rs, &rs).expect("write pg_stubs_generated.rs");
     }
 
     /// True if `s` is a valid Rust identifier (ASCII-only, per PG conventions).
@@ -272,14 +312,8 @@ mod gpu_build {
             "cargo::rerun-if-changed={}",
             kernels_src.join("CMakeLists.txt").display()
         );
-        println!(
-            "cargo::rerun-if-changed={}",
-            kernels_src.join("src").display()
-        );
-        println!(
-            "cargo::rerun-if-changed={}",
-            kernels_src.join("include").display()
-        );
+        emit_rerun_if_changed_tree(&kernels_src.join("src"));
+        emit_rerun_if_changed_tree(&kernels_src.join("include"));
 
         let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
         let build_dir = out_dir.join("pgaccel-kernels-build");
@@ -290,6 +324,52 @@ mod gpu_build {
 
         // The built shared library lives in the build directory.
         emit_link_directives(&build_dir);
+    }
+
+    fn emit_rerun_if_changed_tree(root: &Path) {
+        // Retain the directory watch so additions and removals invalidate the
+        // build, then enumerate files because Cargo does not reliably notice
+        // in-place edits when only a directory path is registered.
+        println!("cargo::rerun-if-changed={}", root.display());
+        let mut pending = vec![root.to_path_buf()];
+        let mut files = Vec::new();
+        while let Some(directory) = pending.pop() {
+            let mut entries = std::fs::read_dir(&directory)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to enumerate kernel dependency directory {}: {error}",
+                        directory.display()
+                    )
+                })
+                .map(|entry| {
+                    entry.unwrap_or_else(|error| {
+                        panic!(
+                            "failed to inspect kernel dependency under {}: {error}",
+                            directory.display()
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            entries.sort_unstable_by_key(std::fs::DirEntry::path);
+            for entry in entries {
+                let path = entry.path();
+                let file_type = entry.file_type().unwrap_or_else(|error| {
+                    panic!(
+                        "failed to identify kernel dependency {}: {error}",
+                        path.display()
+                    )
+                });
+                if file_type.is_dir() {
+                    pending.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort_unstable();
+        for file in files {
+            println!("cargo::rerun-if-changed={}", file.display());
+        }
     }
 
     fn cmake_configure(source_dir: &Path, build_dir: &Path) {

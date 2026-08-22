@@ -108,6 +108,21 @@ fn validate_group_key_type(type_oid: u32) -> Result<(), ShapeDecline> {
     }
 }
 
+fn exact_bounded_int4_filter(filter: &FilterSpec, value: &crate::engine::spec::ColumnRef) -> bool {
+    let FilterSpec::Ranges { input, ranges } = filter else {
+        return false;
+    };
+    let [range] = ranges.as_slice() else {
+        return false;
+    };
+    let (crate::engine::spec::ScalarValue::I32(lo), crate::engine::spec::ScalarValue::I32(hi)) =
+        (range.lo, range.hi)
+    else {
+        return false;
+    };
+    input == value && value.type_oid == 23 && lo != i32::MIN && hi != i32::MAX && lo < hi
+}
+
 fn validate_measure_descriptor_capability(
     aggregate: &super::AggregateExpr,
 ) -> Result<(), ShapeDecline> {
@@ -123,28 +138,38 @@ fn validate_measure_descriptor_capability(
     if matches!(aggregate.filter, FilterSpec::Spatial { .. }) {
         return Err(ShapeDecline::SpatialFilterOutsideFactRelation);
     }
-    if aggregate.filter != FilterSpec::None || aggregate.output.source != AggregateSource::Value {
+    if aggregate.output.source != AggregateSource::Value {
+        return Err(ShapeDecline::UnsupportedAggregateModifier);
+    }
+    if aggregate.filter != FilterSpec::None
+        && !matches!(
+            &aggregate.expression,
+            MeasureExpr::Column(column)
+                if aggregate.output.kind == AggregateKind::Sum
+                    && exact_bounded_int4_filter(&aggregate.filter, column)
+        )
+    {
         return Err(ShapeDecline::UnsupportedAggregateModifier);
     }
     let validate_column =
         |column: &crate::engine::spec::ColumnRef| match (column.type_oid, aggregate.output.kind) {
-            (BOOLOID, AggregateKind::Count) => Ok(()),
             (
                 BOOLOID | INT2OID | FLOAT4OID | DATEOID | TIMESTAMPOID | TIMESTAMPTZOID,
-                AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
+                AggregateKind::Count,
+            ) => Ok(()),
+            (
+                BOOLOID | FLOAT4OID | TIMESTAMPOID | TIMESTAMPTZOID,
+                AggregateKind::Min | AggregateKind::Max,
             ) => Err(ShapeDecline::UnsupportedAggregateInput {
                 kind: aggregate.output.kind,
                 type_oid: column.type_oid,
             }),
             (
-                INT4OID,
-                AggregateKind::Sum | AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
-            )
-            | (
-                INT8OID | FLOAT8OID,
+                INT4OID | INT8OID | FLOAT8OID,
                 AggregateKind::Count | AggregateKind::Min | AggregateKind::Max,
-            ) => Ok(()),
-            (INT4OID | INT8OID, AggregateKind::Avg) | (INT8OID, AggregateKind::Sum) => {
+            )
+            | (INT2OID | INT4OID, AggregateKind::Sum | AggregateKind::Avg) => Ok(()),
+            (INT8OID, AggregateKind::Avg | AggregateKind::Sum) => {
                 Err(ShapeDecline::NumericAccumulatorTypeUnavailable {
                     type_oid: column.type_oid,
                 })
@@ -234,13 +259,15 @@ fn expected_aggregate_result_type(source_type_oid: u32, kind: AggregateKind) -> 
     const DATEOID: u32 = 1082;
     const TIMESTAMPOID: u32 = 1114;
     const TIMESTAMPTZOID: u32 = 1184;
+    const NUMERICOID: u32 = 1700;
     match (source_type_oid, kind) {
         (
             0 | BOOLOID | INT2OID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID
             | TIMESTAMPOID | TIMESTAMPTZOID,
             AggregateKind::Count,
         )
-        | (INT4OID, AggregateKind::Sum) => Some(INT8OID),
+        | (INT2OID | INT4OID, AggregateKind::Sum) => Some(INT8OID),
+        (INT2OID | INT4OID, AggregateKind::Avg) => Some(NUMERICOID),
         (
             source @ (INT2OID | INT4OID | INT8OID | FLOAT4OID | FLOAT8OID | DATEOID | TIMESTAMPOID
             | TIMESTAMPTZOID),
@@ -427,11 +454,28 @@ fn choose_fact_varno(input: &ShapeInput) -> Result<pgrx::pg_sys::Index, ShapeDec
     let right = relation_by_varno(input, join.right.varno)?;
     let left_unique = left.unique_attnos.contains(&join.left.column.attno);
     let right_unique = right.unique_attnos.contains(&join.right.column.attno);
+    let row_estimates_distinguishable = |left_rows: u64, right_rows: u64| {
+        let high = left_rows.max(right_rows);
+        let low = left_rows.min(right_rows);
+        // ANALYZE may produce slightly different estimates for two freshly
+        // populated, equal-size relations. Count-only joins have no measure
+        // relation with which to orient the descriptor, so a one-percent-or-
+        // smaller sampling difference is not semantic evidence of a fact side.
+        high.saturating_sub(low) > high / 100
+    };
     match (left_unique, right_unique) {
         (false, true) => Ok(left.varno),
         (true, false) => Ok(right.varno),
-        _ if left.estimated_rows > right.estimated_rows => Ok(left.varno),
-        _ if right.estimated_rows > left.estimated_rows => Ok(right.varno),
+        _ if left.estimated_rows > right.estimated_rows
+            && row_estimates_distinguishable(left.estimated_rows, right.estimated_rows) =>
+        {
+            Ok(left.varno)
+        }
+        _ if right.estimated_rows > left.estimated_rows
+            && row_estimates_distinguishable(left.estimated_rows, right.estimated_rows) =>
+        {
+            Ok(right.varno)
+        }
         _ => Err(ShapeDecline::AmbiguousFactRelation),
     }
 }
@@ -1313,6 +1357,7 @@ mod tests {
         let float8 = column(100, 3, 701);
         let text = column(100, 4, 25);
         let boolean = column(100, 5, 16);
+        let int2 = column(100, 6, 21);
 
         assert_eq!(
             validate_measure_descriptor_capability(&aggregate(
@@ -1346,6 +1391,26 @@ mod tests {
             )),
             Ok(())
         );
+        assert_eq!(
+            validate_measure_descriptor_capability(&aggregate(
+                MeasureExpr::Column(int2),
+                AggregateKind::Count
+            )),
+            Ok(())
+        );
+        for (input, kind) in [
+            (int2, AggregateKind::Sum),
+            (int2, AggregateKind::Avg),
+            (int4, AggregateKind::Avg),
+        ] {
+            assert_eq!(
+                validate_measure_descriptor_capability(&aggregate(
+                    MeasureExpr::Column(input),
+                    kind
+                )),
+                Ok(())
+            );
+        }
         assert!(matches!(
             validate_measure_descriptor_capability(&aggregate(
                 MeasureExpr::Column(int8),
@@ -1435,6 +1500,29 @@ mod tests {
             input: int4,
             ranges: Vec::new(),
         };
+        assert_eq!(
+            validate_measure_descriptor_capability(&filtered),
+            Err(ShapeDecline::UnsupportedAggregateModifier)
+        );
+        filtered = aggregate(MeasureExpr::Column(int4), AggregateKind::Sum);
+        filtered.filter = FilterSpec::Ranges {
+            input: int4,
+            ranges: vec![ScalarRange {
+                lo: ScalarValue::I32(200),
+                hi: ScalarValue::I32(800),
+            }],
+        };
+        assert_eq!(validate_measure_descriptor_capability(&filtered), Ok(()));
+        filtered.output.kind = AggregateKind::Count;
+        assert_eq!(
+            validate_measure_descriptor_capability(&filtered),
+            Err(ShapeDecline::UnsupportedAggregateModifier)
+        );
+        filtered.output.kind = AggregateKind::Sum;
+        let FilterSpec::Ranges { ranges, .. } = &mut filtered.filter else {
+            unreachable!("bounded filter fixture")
+        };
+        ranges[0].lo = ScalarValue::I32(i32::MIN);
         assert_eq!(
             validate_measure_descriptor_capability(&filtered),
             Err(ShapeDecline::UnsupportedAggregateModifier)

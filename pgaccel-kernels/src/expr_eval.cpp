@@ -1635,3 +1635,61 @@ pgaccel_status pgaccel_expr_eval_project(const pgaccel_expr_program* program,
 }
 
 }  // extern "C"
+
+#if defined(PGACCEL_TEST_HOOKS)
+/*
+ * C++-only test helpers for the constrained hosted-Metal coverage lane. They
+ * are not part of the pgaccel_* C ABI and are omitted from the production
+ * static library. Basic programs continue through the real device entrypoint.
+ */
+namespace pgaccel_test {
+
+pgaccel_status expr_eval_predicate_host(const pgaccel_expr_program* program,
+                                        const pgaccel_batch* batch, int8_t* results) {
+  if (program == nullptr || batch == nullptr || results == nullptr ||
+      !has_valid_host_layout(program, batch))
+    return PGACCEL_ERROR;
+  const ExprProgramTier tier = program_tier(program);
+  if (tier != ExprProgramTier::Basic) {
+    const pgaccel_status validation_status = validate_device_program(program);
+    if (validation_status != PGACCEL_OK)
+      return validation_status;
+  }
+  for (size_t row = 0; row < batch->num_rows; ++row) {
+    const eval_result evaluated =
+        tier == ExprProgramTier::Basic    ? eval_row_basic(program, batch, row)
+        : tier == ExprProgramTier::Common ? eval_row<false>(program, batch, row)
+                                          : eval_row<true>(program, batch, row);
+    results[row] = evaluated.uncertain ? PGACCEL_EXPR_UNCERTAIN
+                   : is_null(evaluated.value) || !val_to_bool(evaluated.value) ? PGACCEL_EXPR_FALSE
+                                                                               : PGACCEL_EXPR_TRUE;
+  }
+  return PGACCEL_OK;
+}
+
+pgaccel_status expr_eval_project_host(const pgaccel_expr_program* program,
+                                      const pgaccel_batch* batch, pgaccel_val* output,
+                                      uint8_t* uncertain) {
+  if (program == nullptr || batch == nullptr || output == nullptr ||
+      !has_valid_host_layout(program, batch))
+    return PGACCEL_ERROR;
+  const ExprProgramTier tier = program_tier(program);
+  if (tier != ExprProgramTier::Basic) {
+    const pgaccel_status validation_status = validate_device_program(program);
+    if (validation_status != PGACCEL_OK)
+      return validation_status;
+  }
+  for (size_t row = 0; row < batch->num_rows; ++row) {
+    const eval_result evaluated =
+        tier == ExprProgramTier::Basic    ? eval_row_basic(program, batch, row)
+        : tier == ExprProgramTier::Common ? eval_row<false>(program, batch, row)
+                                          : eval_row<true>(program, batch, row);
+    output[row] = evaluated.value;
+    if (uncertain != nullptr)
+      uncertain[row] = evaluated.uncertain ? 1 : 0;
+  }
+  return PGACCEL_OK;
+}
+
+}  // namespace pgaccel_test
+#endif

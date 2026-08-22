@@ -22,6 +22,17 @@ class PackageError(RuntimeError):
     pass
 
 
+EXTENSION_VERSION_PATTERN = (
+    r"\d+\.\d+\.\d+"
+    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+    r"(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+)
+EXTENSION_SQL_NAME = re.compile(
+    rf"pg_accel--{EXTENSION_VERSION_PATTERN}"
+    rf"(?:--{EXTENSION_VERSION_PATTERN})?\.sql"
+)
+
+
 def _remove_generated_path(path: pathlib.Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
@@ -69,10 +80,7 @@ def normalize_package_tree(package_root: pathlib.Path, system: str) -> pathlib.P
         for path in package_root.rglob("pg_accel*.sql")
         if path.is_file() and not path.is_symlink()
     ]
-    sql_name = re.compile(
-        r"pg_accel--\d+\.\d+\.\d+(?:--\d+\.\d+\.\d+)?\.sql"
-    )
-    sql_files = [path for path in all_sql_files if sql_name.fullmatch(path.name)]
+    sql_files = [path for path in all_sql_files if EXTENSION_SQL_NAME.fullmatch(path.name)]
     if len(sql_files) != len(all_sql_files):
         raise PackageError("pgrx package contains an unexpected pg_accel SQL filename")
     if len(controls) != 1 or not sql_files:
@@ -482,11 +490,8 @@ def validate_package(
     if {path.name for path in share_root.iterdir()} != {"extension"}:
         raise PackageError("package share directory contains an unexpected payload")
     extension_share = share_root / "extension"
-    sql_name = re.compile(
-        r"pg_accel--\d+\.\d+\.\d+(?:--\d+\.\d+\.\d+)?\.sql"
-    )
     share_names = {path.name for path in extension_share.iterdir()}
-    sql_names = {name for name in share_names if sql_name.fullmatch(name)}
+    sql_names = {name for name in share_names if EXTENSION_SQL_NAME.fullmatch(name)}
     if "pg_accel.control" not in share_names or not sql_names or share_names != {
         "pg_accel.control",
         *sql_names,

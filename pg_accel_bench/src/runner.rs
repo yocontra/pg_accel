@@ -23,6 +23,7 @@ use crate::workloads::{ExpectedResultValue, ResultOracle, Workload};
 
 const PROVENANCE_SCHEMA_VERSION: u32 = 1;
 const CORRECTNESS_DIFF_SCHEMA_VERSION: u32 = 1;
+const SETUP_QUIESCENCE_SCHEMA_VERSION: u32 = 1;
 const EXPECTED_EXTENSION_VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUST_BACKTRACE_ARTIFACT: &str = "rust_backtrace.txt";
 const CRASH_CONTEXT_EMBED_BYTES: usize = 128 * 1024;
@@ -183,6 +184,13 @@ struct DispatchStatsSnapshot {
     gpu_rows_processed: u64,
     gpu_kernel_executions: u64,
     physical_kernel_modes: report::PhysicalKernelModeCounts,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SetupQuiescenceBoundary {
+    captured_at: String,
+    wal_lsn: String,
+    checkpointer: report::CheckpointerSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1271,7 +1279,7 @@ pub fn purge_os_page_cache() -> Result<bool, Box<dyn std::error::Error>> {
 #[allow(unsafe_code, dead_code)]
 unsafe fn libc_geteuid() -> u32 {
     // Avoid pulling in the `libc` crate just for this check.
-    extern "C" {
+    unsafe extern "C" {
         fn geteuid() -> u32;
     }
     unsafe { geteuid() }
@@ -1446,6 +1454,94 @@ fn workload_tables(workload: &dyn Workload, rows: usize) -> Vec<String> {
         }
     }
     tables
+}
+
+fn capture_setup_quiescence_boundary(
+    client: &mut Client,
+) -> Result<SetupQuiescenceBoundary, Box<dyn std::error::Error>> {
+    let row = client.query_one(
+        "SELECT clock_timestamp()::text, pg_current_wal_lsn()::text, \
+                num_timed, num_requested, num_done, \
+                restartpoints_timed, restartpoints_req, restartpoints_done, \
+                write_time, sync_time, buffers_written, slru_written \
+           FROM pg_stat_checkpointer",
+        &[],
+    )?;
+    let counter = |name: &str, index: usize| -> Result<u64, Box<dyn std::error::Error>> {
+        let value = row.get::<_, i64>(index);
+        u64::try_from(value).map_err(|error| {
+            format!("checkpointer counter `{name}` returned negative value {value}: {error}").into()
+        })
+    };
+    Ok(SetupQuiescenceBoundary {
+        captured_at: row.get(0),
+        wal_lsn: row.get(1),
+        checkpointer: report::CheckpointerSnapshot {
+            num_timed: counter("num_timed", 2)?,
+            num_requested: counter("num_requested", 3)?,
+            num_done: counter("num_done", 4)?,
+            restartpoints_timed: counter("restartpoints_timed", 5)?,
+            restartpoints_requested: counter("restartpoints_req", 6)?,
+            restartpoints_done: counter("restartpoints_done", 7)?,
+            write_time_ms: row.get(8),
+            sync_time_ms: row.get(9),
+            buffers_written: counter("buffers_written", 10)?,
+            slru_written: counter("slru_written", 11)?,
+        },
+    })
+}
+
+fn begin_setup_quiescence(
+    client: &mut Client,
+) -> Result<SetupQuiescenceBoundary, Box<dyn std::error::Error>> {
+    // Bulk fixture creation can leave a completion-target checkpoint writing
+    // for minutes after setup returns. CHECKPOINT is deliberately outside the
+    // timed interval and does not return until those writes are durable.
+    client.batch_execute("CHECKPOINT")?;
+    let boundary = capture_setup_quiescence_boundary(client)?;
+    eprintln!(
+        "[quiescence] setup checkpoint completed at {} (wal_lsn={})",
+        boundary.captured_at, boundary.wal_lsn
+    );
+    Ok(boundary)
+}
+
+fn setup_quiescence_audit(
+    before: SetupQuiescenceBoundary,
+    after: SetupQuiescenceBoundary,
+) -> report::SetupQuiescenceAudit {
+    let checkpointer_unchanged = before.checkpointer == after.checkpointer;
+    report::SetupQuiescenceAudit {
+        schema_version: SETUP_QUIESCENCE_SCHEMA_VERSION,
+        checkpoint_completed: true,
+        checkpoint_completed_at: before.captured_at,
+        checkpoint_wal_lsn: before.wal_lsn,
+        measurement_completed_at: after.captured_at,
+        measurement_completed_wal_lsn: after.wal_lsn,
+        checkpointer_before: before.checkpointer,
+        checkpointer_after: after.checkpointer,
+        checkpointer_unchanged,
+    }
+}
+
+fn complete_setup_quiescence(
+    client: &mut Client,
+    before: SetupQuiescenceBoundary,
+) -> Result<report::SetupQuiescenceAudit, Box<dyn std::error::Error>> {
+    let after = capture_setup_quiescence_boundary(client)?;
+    let audit = setup_quiescence_audit(before, after);
+    if !audit.checkpointer_unchanged {
+        return Err(format!(
+            "database checkpointer changed during the measured interval; timing evidence is contaminated: {}",
+            serde_json::to_string(&audit)?
+        )
+        .into());
+    }
+    eprintln!(
+        "[quiescence] checkpointer counters remained unchanged through {}",
+        audit.measurement_completed_at
+    );
+    Ok(audit)
 }
 
 /// Execute setup SQL for a workload against the given connection string.
@@ -1789,11 +1885,7 @@ fn run_with_timing_and_cache_internal(
             measured_accel_first[i - effective_warmup]
         };
         let order: Vec<usize> = if native_parity_pairing && !is_warmup {
-            if accel_first {
-                vec![0, 1, 1, 0]
-            } else {
-                vec![1, 0, 0, 1]
-            }
+            native_parity_execution_order(accel_first)
         } else if accel_first {
             vec![0, 1]
         } else {
@@ -2765,6 +2857,27 @@ enum BenchMode {
     PgParallel,
 }
 
+/// Raw executions retained for each logical arm in one native-parity pair.
+///
+/// Four observations (two mirrored ABBA/BAAB motifs) materially reduce
+/// sub-millisecond scheduler noise while preserving 30 independent balanced
+/// pair blocks. Every raw execution remains in the evidence artifact.
+const NATIVE_PARITY_REPETITIONS_PER_ARM: usize = 4;
+
+fn native_parity_execution_order(accel_first: bool) -> Vec<usize> {
+    debug_assert_eq!(NATIVE_PARITY_REPETITIONS_PER_ARM % 2, 0);
+    let motif = if accel_first {
+        [0, 1, 1, 0]
+    } else {
+        [1, 0, 0, 1]
+    };
+    motif
+        .into_iter()
+        .cycle()
+        .take(NATIVE_PARITY_REPETITIONS_PER_ARM * 2)
+        .collect()
+}
+
 /// Run a single measurement with the given mode and timing strategy.
 fn run_with_mode(
     client: &mut Client,
@@ -3389,10 +3502,13 @@ pub fn run_one_report_with_config(
 fn apply_config_methodology(report: &mut report::BenchReport, config: &BenchConfig) {
     report.headline_speedup_allowed = config.headline_speedup_allowed;
     report.methodology.native_parity_pairing = config.native_parity_pairing;
-    report.methodology.native_parity_repetitions_per_arm =
-        if config.native_parity_pairing { 2 } else { 1 };
+    report.methodology.native_parity_repetitions_per_arm = if config.native_parity_pairing {
+        NATIVE_PARITY_REPETITIONS_PER_ARM
+    } else {
+        1
+    };
     let ordering = if config.native_parity_pairing {
-        "balanced randomized mirrored ABBA/BAAB crossover blocks on one PostgreSQL backend (`DISCARD ALL` before each raw execution)"
+        "balanced randomized replicated mirrored ABBA/BAAB crossover blocks on one PostgreSQL backend (`DISCARD ALL` before each raw execution)"
     } else {
         "balanced randomized AB/BA crossover on distinct persistent PostgreSQL backends (`DISCARD ALL` before each arm)"
     };
@@ -4221,6 +4337,9 @@ fn run_workload_with_config(
             accel_plan.is_some(),
             plan_selected,
         );
+    let mut quiescence_client = Client::connect(connection, NoTls)?;
+    apply_benchmark_safety_settings(&mut quiescence_client)?;
+    let quiescence_before = begin_setup_quiescence(&mut quiescence_client)?;
     let mut result = run_with_timing_and_cache_internal(
         connection,
         workload,
@@ -4233,6 +4352,10 @@ fn run_workload_with_config(
             native_parity_pairing: config.native_parity_pairing,
         },
     )?;
+    result.setup_quiescence = Some(complete_setup_quiescence(
+        &mut quiescence_client,
+        quiescence_before,
+    )?);
     result.rows = rows;
     result.plan_selected = plan_selected;
     let function_kernel_candidate = report::is_function_kernel_candidate(
@@ -4253,7 +4376,11 @@ fn run_workload_with_config(
         measured_iterations: result.iterations.len(),
     });
     result.function_srf_kernel_dispatched = dispatch_classification.function_srf_kernel_dispatched;
-    result.gpu_kernel_dispatched = dispatch_classification.gpu_kernel_dispatched;
+    let lifecycle_artifact_reuse_credited = plan_selected
+        && !plan_explicitly_not_dispatched
+        && report::derived_output_artifact_reuse_evidence_verified(&result);
+    result.gpu_kernel_dispatched =
+        dispatch_classification.gpu_kernel_dispatched || lifecycle_artifact_reuse_credited;
     emit_dispatch_classification_warning(
         DispatchWarningInput {
             workload: workload.name(),
@@ -5287,7 +5414,12 @@ fn emit_dispatch_classification_warning(input: DispatchWarningInput<'_>, result:
         );
         return;
     }
-    if input.plan_selected && result.gpu_kernel_execution_delta == 0 {
+    let lifecycle_artifact_reuse_credited =
+        report::derived_output_artifact_reuse_evidence_verified(result);
+    if input.plan_selected
+        && result.gpu_kernel_execution_delta == 0
+        && !lifecycle_artifact_reuse_credited
+    {
         eprintln!(
             "[dispatch] WARNING: {} @ {}: pg_accel plan selected but runtime \
              kernel counter delta is zero; counting as plan-selected only",
@@ -5325,7 +5457,10 @@ fn emit_dispatch_classification_warning(input: DispatchWarningInput<'_>, result:
             input.workload, input.rows, result.gpu_kernel_execution_delta
         );
     }
-    if input.plan_text_dispatched && result.gpu_kernel_execution_delta == 0 {
+    if input.plan_text_dispatched
+        && result.gpu_kernel_execution_delta == 0
+        && !lifecycle_artifact_reuse_credited
+    {
         eprintln!(
             "[dispatch] WARNING: {} @ {}: plan text claimed GPU dispatch but \
              runtime kernel counter delta is zero",
@@ -5608,6 +5743,61 @@ mod tests {
         let odd = randomized_balanced_arm_order(9, &mut rng);
         let accel_first = odd.iter().filter(|&&value| value).count();
         assert!(matches!(accel_first, 4 | 5));
+    }
+
+    #[test]
+    fn setup_quiescence_requires_unchanged_checkpointer_counters() {
+        let snapshot = report::CheckpointerSnapshot {
+            num_timed: 10,
+            num_requested: 20,
+            num_done: 19,
+            restartpoints_timed: 0,
+            restartpoints_requested: 0,
+            restartpoints_done: 0,
+            write_time_ms: 123.5,
+            sync_time_ms: 4.25,
+            buffers_written: 1_000,
+            slru_written: 2,
+        };
+        let before = SetupQuiescenceBoundary {
+            captured_at: "2026-08-22 00:00:00+00".to_owned(),
+            wal_lsn: "2F9/443DD40".to_owned(),
+            checkpointer: snapshot.clone(),
+        };
+        let after = SetupQuiescenceBoundary {
+            captured_at: "2026-08-22 00:01:00+00".to_owned(),
+            wal_lsn: "2F9/443DDA0".to_owned(),
+            checkpointer: snapshot.clone(),
+        };
+        let clean = setup_quiescence_audit(before.clone(), after);
+        assert!(clean.checkpoint_completed);
+        assert!(clean.checkpointer_unchanged);
+        assert_eq!(clean.schema_version, SETUP_QUIESCENCE_SCHEMA_VERSION);
+
+        let mut changed_snapshot = snapshot;
+        changed_snapshot.buffers_written += 1;
+        let changed = setup_quiescence_audit(
+            before,
+            SetupQuiescenceBoundary {
+                captured_at: "2026-08-22 00:01:00+00".to_owned(),
+                wal_lsn: "2F9/443DDA0".to_owned(),
+                checkpointer: changed_snapshot,
+            },
+        );
+        assert!(!changed.checkpointer_unchanged);
+    }
+
+    #[test]
+    fn native_parity_order_replicates_mirrored_blocks_without_dropping_samples() {
+        let accel_first = native_parity_execution_order(true);
+        let disabled_first = native_parity_execution_order(false);
+        assert_eq!(accel_first, [0, 1, 1, 0, 0, 1, 1, 0]);
+        assert_eq!(disabled_first, [1, 0, 0, 1, 1, 0, 0, 1]);
+        for order in [&accel_first, &disabled_first] {
+            assert_eq!(order.len(), NATIVE_PARITY_REPETITIONS_PER_ARM * 2);
+            assert_eq!(order.iter().filter(|&&arm| arm == 0).count(), 4);
+            assert_eq!(order.iter().filter(|&&arm| arm == 1).count(), 4);
+        }
     }
 
     fn planner_stage_snapshot(
@@ -6354,6 +6544,13 @@ mod tests {
             )]
         );
         assert_eq!(
+            resident_pin_specs("aggregate_filter_grouped_agg_int4"),
+            vec![resident_pin(
+                "bench_aggregate_filter_sales_int4",
+                &["product_id", "price"],
+            )]
+        );
+        assert_eq!(
             resident_pin_specs("and_range_predicate_expression_grouped_agg_int4"),
             vec![resident_pin(
                 "bench_and_range_predicate_expression_sales_int4",
@@ -6743,6 +6940,7 @@ mod tests {
         for name in [
             "grouped_agg_int4",
             "predicate_expression_grouped_agg_int4",
+            "aggregate_filter_grouped_agg_int4",
             "and_range_predicate_expression_grouped_agg_int4",
             "mixed_join_agg_int4",
             "ssbm_resident_int4_star",

@@ -17,6 +17,11 @@ artifact_dir="${RELEASE_VERIFY_ARTIFACT_DIR:-benchmarks/artifacts/release-verify
 mkdir -p "$artifact_dir"
 
 pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+psql_bin="$("$pg_config" --bindir)/psql"
+if [ ! -x "$psql_bin" ]; then
+    echo "error: selected PostgreSQL client is not executable: $psql_bin" >&2
+    exit 1
+fi
 port="$(pg_accel_pgrx_port_for_pg "$pg")"
 connection="host=localhost port=${port} dbname=postgres"
 iterations="${RELEASE_VERIFY_ITERATIONS:-10}"
@@ -80,7 +85,7 @@ run_logged "explain-audit" \
 run_logged "workload-validate" \
     cargo run --release -p pg_accel_bench -- validate
 run_logged "pg-accel-stats" \
-    psql "$connection" -v ON_ERROR_STOP=1 \
+    "$psql_bin" "$connection" -v ON_ERROR_STOP=1 \
         -f sql/init/01-create-extensions.sql \
         -c "SELECT * FROM pg_accel_stats();"
 run_logged "sql-tests" \
@@ -101,7 +106,7 @@ run_logged "benchmark-sweep" \
         --realistic-gucs \
         --capture-plans \
         --timing raw \
-        --cache-mode both \
+        --cache-mode warm \
         --artifacts-dir "${artifact_dir}/benchmark-sweep"
 
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then

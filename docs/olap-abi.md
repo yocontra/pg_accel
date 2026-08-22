@@ -98,7 +98,10 @@ extension-owned `h3_cell_to_parent(h3index, integer)` catalog function, a direct
 base-table h3index `Var`, and a direct non-NULL int4 constant in `[0,15]`. The
 one-argument overload, Params, nonconstant/NULL/out-of-range resolutions, and
 same-signature functions in earlier `search_path` schemas are structural
-declines. The admitted runtime shape is exactly that one group key plus one
+declines. The 1.0 production envelope additionally admits only target resolution
+zero; other valid constant resolutions retain their exact wire/runtime support
+but decline with `h3_parent_resolution_unqualified` until independently proven
+as winners. The admitted runtime shape is exactly that one group key plus one
 unfiltered `COUNT(*)`, with no joins, fact filter, HAVING, or extra projection.
 `H3LatLngToCell` remains a wire-level producer variant and is not admitted by
 this route.
@@ -167,13 +170,18 @@ word/byte boundary, oversized counts, and trailing data are rejected before
 allocation.
 
 The canonical aggregate type mappings represented by AOP2 are `COUNT(*) ->
-int8`; `COUNT(int4|int8|float8) -> int8`; `SUM(int4) -> int8`; `SUM(float8) ->
-float8`; `MIN/MAX(T) -> T` for int4, int8, and float8; and `AVG(float8)` or sample
-`STDDEV_SAMP(float8) -> float8`. AOP2 records PostgreSQL result semantics; it does
-not assert that the current planner, resident producer, or runtime can execute
-every representable mapping. Population stddev and variance are not
-representable because `AggQuerySpec` exposes no corresponding kind, so those
-operations cannot be encoded as the `STDDEV_SAMP` lane.
+int8`; `COUNT(bool|int2|int4|int8|float4|float8|date|timestamp|timestamptz) ->
+int8`; `SUM(int2|int4) -> int8`; `AVG(int2|int4) -> numeric`; `SUM(float8) ->
+float8`; `MIN/MAX(T) -> T` for int2, int4, int8, float4, float8, date,
+timestamp, and timestamptz; and `AVG(float8)` or sample
+`STDDEV_SAMP(float8) -> float8`. The exact released integer AVG lane
+shares an int64 SUM/non-NULL-count device state and performs PostgreSQL NUMERIC
+division during backend-thread output materialization. AOP2 records PostgreSQL
+result semantics; it does not assert that the current planner, resident
+producer, or runtime can execute every representable mapping. Population
+stddev and variance are not representable because `AggQuerySpec` exposes no
+corresponding kind, so those operations cannot be encoded as the
+`STDDEV_SAMP` lane.
 
 The projection's result metadata is expected metadata, not authority. Plan
 creation compares slot count/order and `(type_oid, typmod, collation)` against
@@ -604,7 +612,7 @@ therefore independent from accumulator representation:
 | INT32 | 4 | 0 | checked I64 |
 | INT64 | 8 | 0 | checked I64 |
 | FLOAT32 | 4 | 0 | count-only COLUMN; other F64 lanes may be unsupported |
-| FLOAT64 | 8 | 0 | F64 |
+| FLOAT64 | 8 | 0 | count-only COLUMN with I64; F64 for arithmetic lanes |
 | DATE | 4 | 0 | count-only COLUMN; other I64 lanes may be unsupported |
 | TIMESTAMP | 8 | 0 | count-only COLUMN; other I64 lanes may be unsupported |
 | NUMERIC | fixed producer limb width | decimal scale | NUMERIC state |
@@ -618,8 +626,8 @@ scales, or nonzero view flags are descriptor errors. Represented
 NUMERIC/INTERVAL shapes may return UNSUPPORTED until their kernels land.
 
 A COLUMN measure whose mask is exactly COUNT consumes only nullness and row
-weight. This predicate-source form is supported for BOOL, FLOAT32, DATE, and
-TIMESTAMP without pretending those inputs support SUM/MIN/MAX state.
+weight. This predicate-source form is supported for BOOL, FLOAT32, FLOAT64,
+DATE, and TIMESTAMP without pretending those inputs support SUM/MIN/MAX state.
 
 A measure slot owns one expression and source-aware aggregate outputs. The
 logical-to-ABI mapping is exact:
@@ -745,15 +753,25 @@ The native submission branch selects that template once on the host, so row
 kernels contain no per-row membership/mask/measure-shape branch. EXPLAIN reports
 both the specialization label and whether its identity lookup hit the cache.
 
-`PARALLEL_DENSE_COUNT` accepts canonical `COUNT_STAR` plus a canonical
-COUNT-only BOOL column descriptor. The BOOL specialization maintains separate
-u32 partials for selected rows and non-NULL measure rows: selected rows activate
-the group and update `selected_count`, while non-NULL rows update both COUNT and
-`nonnull_count`. Consequently an all-NULL measure group remains active with a
-zero COUNT. A malformed null sidecar fails before either partial is changed.
-Normal planning exposes this branch only for one nullable boolean fact key and
-one distinct nullable boolean measure, without joins, filters, `HAVING`, or
-additional measures.
+`PARALLEL_DENSE_COUNT` accepts canonical `COUNT_STAR` plus canonical COUNT-only
+BOOL/1-byte, INT32/4-byte, INT64/8-byte, FLOAT32/4-byte, FLOAT64/8-byte,
+DATE/4-byte, and TIMESTAMP/8-byte column descriptors. The typed-column
+specializations maintain separate u32 partials for selected rows and non-NULL
+measure rows: selected rows activate the group and update `selected_count`,
+while non-NULL rows update both COUNT and `nonnull_count`. Consequently an
+all-NULL measure group remains active with a zero COUNT. A malformed null
+sidecar fails before either partial is changed. Normal planning exposes these
+branches only for one nullable boolean fact key and one distinct nullable bool,
+PostgreSQL `int2`, PostgreSQL `int8`, PostgreSQL `float4`, PostgreSQL `float8`,
+PostgreSQL `date`, PostgreSQL `timestamp`, or PostgreSQL `timestamptz` measure,
+without joins, filters, `HAVING`, or additional measures. Although resident
+`int2` is widened to the INT32 physical ABI, normal planning does not use this
+count-only lane for `int4`; EXPLAIN identifies the released variants as
+`dense_bool_count_plain`, `dense_int2_count_plain`, `dense_int8_count_plain`,
+`dense_float4_count_plain`, `dense_float8_count_plain`,
+`dense_date_count_plain`, and `dense_timestamp_count_plain`. The float payloads
+are never interpreted, and the two timestamp OIDs retain distinct logical
+identities while sharing the validated TIMESTAMP physical ABI.
 
 Low-cardinality dense COUNT and exact integer SUM/MIN/MAX use 32-work-item
 groups over 1,024-row tiles. Each work item accumulates multiple rows, the work

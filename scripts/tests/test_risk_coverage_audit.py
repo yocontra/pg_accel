@@ -17,6 +17,22 @@ SPEC.loader.exec_module(risk)
 
 
 class RiskCoverageAuditTests(unittest.TestCase):
+    def test_repository_globs_have_portable_recursive_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            source = repo / "src"
+            nested = source / "nested"
+            nested.mkdir(parents=True)
+            (source / "root.rs").write_text("root\n", encoding="utf-8")
+            (nested / "child.rs").write_text("child\n", encoding="utf-8")
+
+            self.assertEqual(
+                risk._matching_files(repo, "src/**"),
+                ["src/nested/child.rs", "src/root.rs"],
+            )
+            self.assertTrue(risk._glob_matches("src/root.rs", "src/**"))
+            self.assertTrue(risk._glob_matches("src/nested/child.rs", "src/**"))
+
     def test_live_registry_maps_every_production_unsafe_site(self) -> None:
         args = argparse.Namespace(
             repo_root=REPO_ROOT,

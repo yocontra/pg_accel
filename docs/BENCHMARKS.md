@@ -116,6 +116,10 @@ The complete inventory, defaults, contexts, and ranges are in
 
 ## Running the harness
 
+Configured timing runs require a connection role with `CHECKPOINT` privilege
+(a superuser or a member of `pg_checkpoint`). The harness fails closed if it
+cannot establish the post-setup quiescence boundary.
+
 First validate workload definitions without connecting:
 
 ```bash
@@ -152,33 +156,86 @@ local performance gate uses `--cache-mode warm`. Project-owned AdaptiveCpp
 JIT/archive-cache cold-start evidence is captured separately by the Metal
 stress gate and must not be represented as an OS page-cache purge.
 
-## Qualified Metal cold-cache certification
+## Qualified Metal warm ship gate
 
-The full warm-plus-OS-cold certification ratchet is:
+The mandatory unprivileged release ratchet is:
 
 ```bash
-just metal-benchmark-ship-gate 18
+just metal-warm-benchmark-ship-gate 18
 ```
 
 The recipe installs the current release build, runs the CPU-cheat audit and
-provenance checks, and invokes `pg_accel_bench metal-ship-gate`. The command
+provenance checks, and invokes `pg_accel_bench metal-warm-ship-gate`. The command
 does not accept sampling or workload overrides. It fixes seed 42, ten measured
-iterations, five warmups, raw wall-clock timing, cache mode `both`, plan
-capture, and the following exact 1M-row winner cells. Because its cold arm
-purges the OS page cache, this recipe is optional manual certification rather
-than the unprivileged local warm gate:
+iterations, five warmups, raw wall-clock timing, cache mode `warm`, plan
+capture, and the following exact 1M-row winner cells:
 
 | Workload | Protected lane | Minimum warm median vs PostgreSQL parallel |
 |---|---|---:|
 | `grouped_agg_int4` | exact resident grouped SUM(int4)/COUNT | 1.15x |
 | `grouped_count_bool_candidate` | nullable bool-key / distinct nullable bool COUNT(column) | 1.15x |
+| `grouped_count_date_candidate` | nullable bool-key / distinct nullable date COUNT(column) | 1.15x |
+| `grouped_count_float4_candidate` | nullable bool-key / distinct nullable float4 COUNT(column) | 1.15x |
+| `grouped_count_float8_candidate` | nullable bool-key / distinct nullable float8 COUNT(column) | 1.15x |
+| `grouped_count_int2_candidate` | nullable bool-key / distinct nullable int2 COUNT(column) | 1.15x |
+| `grouped_count_int8_candidate` | nullable bool-key / distinct nullable int8 COUNT(column) | 1.15x |
+| `grouped_count_timestamp_candidate` | nullable bool-key / distinct nullable timestamp COUNT(column) | 1.15x |
+| `grouped_count_timestamptz_candidate` | nullable bool-key / distinct nullable timestamptz COUNT(column) | 1.15x |
+| `grouped_int2_sum_avg_candidate` | exact nullable bool-keyed SUM(int2)/NUMERIC AVG(int2)/COUNT(*) | 1.15x |
+| `grouped_int4_sum_avg_candidate` | exact nullable bool-keyed SUM(int4)/NUMERIC AVG(int4)/COUNT(*) | 1.15x |
 | `predicate_expression_grouped_agg_int4` | exact int4 expression aggregate plus row predicate | 1.15x |
 | `and_range_predicate_expression_grouped_agg_int4` | exact int4 product SUM/COUNT with a fused nullable bounded range | 1.15x |
+| `aggregate_filter_grouped_agg_int4` | exact bounded aggregate-local SUM(int4) FILTER plus unfiltered COUNT | 1.15x |
 | `mixed_join_agg_int4` | exact resident hash join plus grouped SUM(int4)/COUNT | 1.15x |
 | `ssbm_resident_int4_star` | exact two-dimension date+part star grouped by year and part size, SUM(int4)/COUNT | 1.15x |
 | `ssbm_resident_int8_star` | exact two-dimension INT8 membership star grouped by year and part size, SUM(int4)/COUNT | 1.15x |
 | `hashjoin_10k_1m` | resident equality hash join COUNT | 1.15x |
 | `h3_cell_to_parent` | fused H3 parent grouped count | 1.15x |
+
+### Optional privileged OS-cold certification
+
+The separate warm-plus-OS-cold certification uses the same immutable cells and
+thresholds:
+
+```bash
+just metal-benchmark-ship-gate 18
+```
+
+It invokes `pg_accel_bench metal-ship-gate` with cache mode `both` and requires
+successful per-iteration OS page-cache purges for operation families whose
+metadata requires bounded cold-start evidence. It is optional manual
+certification: it supplements the mandatory warm artifact and never substitutes
+for it. A host without purge authority must not relabel warm samples as cold.
+
+### Counted-dimension global COUNT release lane
+
+The weighted global-count path has its own immutable warm release ratchet:
+
+```bash
+just weighted-count-benchmark-ship-gate 18
+```
+
+This separate command does not mutate the sealed nineteen-cell matrix above.
+It fixes a deterministic 1M-row INT4 fact table and a seven-row counted
+dimension with weights `{0:2, 1:1, 2:3}`, an unmatched key `3`, and a NULL
+key. Its oracle computes `2*n(k=0) + n(k=1) + 3*n(k=2)` without executing the
+join. Success requires the `descriptor_ungrouped_aggregate` planner strategy,
+the `parallel_dense_count` runtime counter and matching EXPLAIN mode, real
+resident GPU dispatch with consumed output, exact correctness, zero stock
+fallback, ten artifact-hit steady-state pairs, and a warm median of at least
+1.15x PostgreSQL parallel. A separately sealed same-host ABBA comparison must
+also show predecessor-normalized non-regression before the lane is considered
+fully performance-qualified.
+
+The weighted-count ratchet runs on the same exact candidate and qualified
+physical M-series hardware as the nineteen-cell warm matrix. GitHub's hosted
+virtual M1 is a compatibility/coverage runner, not qualified performance
+hardware: it cannot safely compile the Common/Extended expression metallibs
+within the fixed 900 KiB archive guard. Tagged workflows therefore create a
+draft release and retain hosted compatibility evidence; the qualified warm,
+weighted-count, system-workload, Metal-stress, native-parity, and full-device
+coverage bundles must be attached with adjacent SHA-256 files before that draft
+is published.
 
 The similarly named legacy workloads remain in the harness as fail-closed
 coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
@@ -189,6 +246,17 @@ coverage, not release winners. `grouped_agg` and `mixed_join_agg` decline with
 exactly two int4 bounds fuse into one inclusive predicate over the product lhs.
 One-sided, RHS-input, joined, degenerate, and third-bound variants remain
 native; a third same-column bound reports `shape_multiple_range_predicates`.
+The eight typed column-count lanes require one nullable boolean fact key and one
+distinct nullable bool, int2, int8, float4, float8, date, timestamp, or
+timestamptz input;
+global, filtered, joined, non-boolean-grouped, same-column, and broader typed
+COUNT shapes remain native.
+The two widened-integer SUM/AVG lanes require one nullable boolean fact key,
+one distinct nullable int2 or int4 fact measure projected as both SUM and AVG,
+and one COUNT(*). AVG-only, missing-COUNT, filtered, joined, `HAVING`, int8,
+numeric, interval, and additional-measure shapes remain native.
+The aggregate-local FILTER lane accepts only one proper bounded same-column
+int4 interval on SUM paired with one unfiltered COUNT(*).
 The 13 canonical `ssbm_q*` workloads also remain native: Q1.1-Q1.2 report
 `shape_multiple_range_predicates`, Q1.3 reports
 `shape_multi_filter_relation`, Q3.3-Q3.4 report `shape_unsupported_predicate`,
@@ -200,25 +268,28 @@ not make them eligible for the current ship gate.
 
 Any change to a workload SQL contract, fixture, threshold, or candidate tree
 invalidates the predecessor population freeze and random selection for the new
-candidate. Freeze the replacement SHA/tree and nine-cell population, then make a
+candidate. Freeze the replacement SHA/tree and nineteen-cell population, then make a
 fresh independent write-once random selection before executing release gates;
 retained predecessor evidence is transition history only.
 
-The threshold matrix is the executable source of truth. Before timing, the
-command rejects missing, duplicate, unregistered, non-winner, or below-floor
+The threshold matrix is the executable source of truth. Before timing, both
+commands reject missing, duplicate, unregistered, non-winner, or below-floor
 contract entries. After timing, it fails on an incomplete matrix, a debug
 harness, a crash, missing accelerated/native plans or correctness artifacts,
 stock-executor fallback, missed GPU selection or dispatch, absent dispatch
 counters or consumed output, missing resident-plan evidence, a per-lane
-threshold regression, or missing H3 cold/warm evidence.
+threshold regression, or—only for the privileged certification—missing required
+cold/warm purge evidence.
 
-The qualified GitHub-hosted Apple Silicon jobs in both `ci.yml` and
-`release.yml` run the same recipe and upload the deterministic
-`artifacts/benchmark-ship-gate-pg18-qualified-metal` bundle. That bundle is
-OS-cold certification evidence, not a prerequisite for the unprivileged warm
-matrix. Checked-in workflow wiring is not run evidence: the corresponding
-release-checklist row remains open until the exact candidate has a successful
-CI artifact URL.
+The GitHub-hosted Apple Silicon jobs in both `ci.yml` and `release.yml` run the
+three-layer compatibility/coverage gate on the exact virtual-M1 candidate and
+upload its execution-mode and runner-provenance records. They deliberately do
+not run or claim the warm performance ratchet, weighted-count ratchet,
+system-workload characterization, Metal stress, native parity, or privileged
+OS-cold certification. Those gates remain bound to qualified physical M-series
+hardware. Checked-in workflow wiring is not run evidence: the corresponding
+release-checklist row remains open until the exact candidate has successful CI
+artifact URLs and the separate qualified-hardware bundles are durable.
 
 ## Timing and ordering
 
@@ -228,6 +299,10 @@ CI artifact URL.
 - Consume complete query output in both arms.
 - Keep raw wall-clock and instrumented EXPLAIN timing distinct when capturing
   both.
+- After bulk fixture setup and `VACUUM ANALYZE`, force a synchronous
+  `CHECKPOINT` outside the timed region. Reject the cell if any cumulative
+  `pg_stat_checkpointer` counter changes before measurement completes; setup
+  writes still draining in the background are timing contamination.
 - Record warmups separately and exclude them from measured statistics.
 - Preserve every raw sample; summary statistics alone are not reproducible.
 - Treat cancellation, timeout warnings, backend restarts, and kernel failures as
@@ -244,6 +319,8 @@ Every result intended for review must include:
 - workload, setup scale, seed, command line, cache mode, timing mode, warmups,
   and measured-iteration count;
 - resident status/live-byte snapshots and explicit load/refresh actions;
+- the completed setup-checkpoint boundary plus identical before/after
+  `pg_stat_checkpointer` snapshots;
 - raw samples and arm ordering;
 - correctness output/diff;
 - full EXPLAIN evidence and planner rejection reason where applicable;

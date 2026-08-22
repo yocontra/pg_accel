@@ -1143,12 +1143,27 @@ mod tests {
         Spi::run("SET pg_accel.enabled = on").expect("SET ON");
         Spi::run("SET pg_accel.gpu_enabled = on").expect("SET GPU ON");
 
-        for query in [
-            "SELECT avg(i2) FROM t_avg_variants",
-            "SELECT avg(i4) FROM t_avg_variants",
-            "SELECT avg(i8) FROM t_avg_variants",
-            "SELECT avg(n) FROM t_avg_variants",
-            "SELECT avg(d) FROM t_avg_variants",
+        for (query, expected_reason) in [
+            (
+                "SELECT avg(i2) FROM t_avg_variants",
+                "generic_serial_kernel_mode_unqualified",
+            ),
+            (
+                "SELECT avg(i4) FROM t_avg_variants",
+                "generic_serial_kernel_mode_unqualified",
+            ),
+            (
+                "SELECT avg(i8) FROM t_avg_variants",
+                "shape_numeric_accumulator_unavailable",
+            ),
+            (
+                "SELECT avg(n) FROM t_avg_variants",
+                "shape_numeric_accumulator_unavailable",
+            ),
+            (
+                "SELECT avg(d) FROM t_avg_variants",
+                "shape_numeric_accumulator_unavailable",
+            ),
         ] {
             Spi::run("SELECT pg_accel_reset_stats()").expect("reset stats");
             let plan_text = explain_text(query);
@@ -1163,7 +1178,7 @@ mod tests {
                     .expect("last rejection query should succeed")
                     .unwrap_or_else(|| panic!("non-float AVG should record a decline for {query}"));
             assert_eq!(
-                rejection, "shape_numeric_accumulator_unavailable",
+                rejection, expected_reason,
                 "non-float AVG should expose the exact generic accumulator decline; plan:\n{plan_text}"
             );
         }
@@ -2918,8 +2933,15 @@ mod tests {
 
         let mismatch_plan = explain_text(mismatch_query);
         assert!(
-            mismatch_plan.contains("Custom Scan (GpuAccelAgg)"),
-            "resolution mismatch must reach the selected GPU path before failing:\n{mismatch_plan}"
+            !mismatch_plan.contains("Custom Scan (GpuAccelAgg)"),
+            "a nonzero H3 parent resolution lacks 1.0 winning evidence and must stay native:\n{mismatch_plan}"
+        );
+        assert_eq!(
+            Spi::get_one::<String>("SELECT pg_accel_last_planner_rejection_reason()")
+                .expect("H3 release-envelope rejection should be readable")
+                .as_deref(),
+            Some("h3_parent_resolution_unqualified"),
+            "the nonzero H3 parent lane must expose its precise release-envelope decline"
         );
         crate::gpu::reset_gpu_exec_count();
         Spi::run(&format!(
@@ -2936,7 +2958,11 @@ mod tests {
              $h3_error$"
         ))
         .expect("capture accelerated H3 resolution-mismatch SQLSTATE");
-        crate::gpu::assert_gpu_executed(1);
+        assert_eq!(
+            crate::gpu::gpu_exec_count(),
+            0,
+            "the nonzero H3 parent release-envelope decline must not dispatch a GPU kernel"
+        );
         let native_sqlstate = Spi::get_one::<String>(
             "SELECT sqlstate FROM _h3_parent_error_state WHERE mode = 'native'",
         )
@@ -2953,11 +2979,11 @@ mod tests {
         );
         assert_ne!(
             accelerated_sqlstate, "no_error",
-            "selected H3 resolution mismatch must be a hard error, not a zero/NULL result"
+            "native H3 resolution mismatch must remain a hard error, not a zero/NULL result"
         );
         assert_eq!(
             accelerated_sqlstate, native_sqlstate,
-            "selected H3 resolution mismatch must preserve native SQLSTATE"
+            "the release-envelope decline must preserve native H3 SQLSTATE"
         );
 
         Spi::run(

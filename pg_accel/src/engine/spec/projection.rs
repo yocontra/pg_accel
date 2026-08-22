@@ -13,6 +13,7 @@ const FLOAT8_OID: u32 = 701;
 const DATE_OID: u32 = 1082;
 const TIMESTAMP_OID: u32 = 1114;
 const TIMESTAMPTZ_OID: u32 = 1184;
+const NUMERIC_OID: u32 = 1700;
 
 pub const AGG_OUTPUT_PROJECTION_WIRE_MAGIC: i32 = 0x5047_4F32; // "PGO2"
 pub const AGG_OUTPUT_PROJECTION_VERSION: u32 = 2;
@@ -180,7 +181,8 @@ fn aggregate_result_type(source_type_oid: u32, kind: AggregateKind) -> Option<u3
             | TIMESTAMP_OID | TIMESTAMPTZ_OID,
             AggregateKind::Count,
         ) => Some(INT8_OID),
-        (INT4_OID, AggregateKind::Sum) => Some(INT8_OID),
+        (INT2_OID | INT4_OID, AggregateKind::Sum) => Some(INT8_OID),
+        (INT2_OID | INT4_OID, AggregateKind::Avg) => Some(NUMERIC_OID),
         (FLOAT8_OID, AggregateKind::Sum | AggregateKind::Avg | AggregateKind::StddevSamp) => {
             Some(FLOAT8_OID)
         }
@@ -884,7 +886,10 @@ mod tests {
             (DATE_OID, AggregateKind::Count, INT8_OID),
             (TIMESTAMP_OID, AggregateKind::Count, INT8_OID),
             (TIMESTAMPTZ_OID, AggregateKind::Count, INT8_OID),
+            (INT2_OID, AggregateKind::Sum, INT8_OID),
             (INT4_OID, AggregateKind::Sum, INT8_OID),
+            (INT2_OID, AggregateKind::Avg, NUMERIC_OID),
+            (INT4_OID, AggregateKind::Avg, NUMERIC_OID),
             (FLOAT8_OID, AggregateKind::Sum, FLOAT8_OID),
             (INT2_OID, AggregateKind::Min, INT2_OID),
             (INT4_OID, AggregateKind::Min, INT4_OID),
@@ -902,10 +907,8 @@ mod tests {
         for (source, kind) in [
             (0, AggregateKind::Sum),
             (INT8_OID, AggregateKind::Sum),
-            (INT4_OID, AggregateKind::Avg),
             (INT4_OID, AggregateKind::StddevSamp),
             (BOOL_OID, AggregateKind::Min),
-            (INT2_OID, AggregateKind::Sum),
             (FLOAT4_OID, AggregateKind::Sum),
             (DATE_OID, AggregateKind::Sum),
             (25, AggregateKind::Count),

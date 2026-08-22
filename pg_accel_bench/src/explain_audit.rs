@@ -162,16 +162,18 @@ const COMMON_FIXTURES: &[&str] = &[
      SELECT g, random()::real, (g % 16)::int \
      FROM generate_series(1, 1000000) g",
     "ANALYZE bench_isort",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part \
+    // PostgreSQL rejects UNLOGGED partitioned tables. Keep the parent and its
+    // partitions permanent so this audit works on every supported major.
+    "CREATE TABLE IF NOT EXISTS bench_part \
        (id bigint, v real, dim int) \
        PARTITION BY HASH(id)",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part_p0 \
+    "CREATE TABLE IF NOT EXISTS bench_part_p0 \
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 0)",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part_p1 \
+    "CREATE TABLE IF NOT EXISTS bench_part_p1 \
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 1)",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part_p2 \
+    "CREATE TABLE IF NOT EXISTS bench_part_p2 \
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 2)",
-    "CREATE UNLOGGED TABLE IF NOT EXISTS bench_part_p3 \
+    "CREATE TABLE IF NOT EXISTS bench_part_p3 \
        PARTITION OF bench_part FOR VALUES WITH (modulus 4, remainder 3)",
     "TRUNCATE bench_part",
     "INSERT INTO bench_part (id, v, dim) \
@@ -232,9 +234,10 @@ fn build_matrix() -> Vec<AuditRow> {
             // and the planner now intentionally gates it back to PostgreSQL
             // until the GPU full-sort algorithm/materialization path is fixed.
             name: "parallel_orderby",
-            description: "ORDER BY v — full sort",
+            description: "ORDER BY v — full-output sort with parallel-safe projection",
             setup: vec![],
-            query: "SELECT * FROM bench_f32_10m ORDER BY v",
+            query: "SELECT id, v, dim, md5(id::text) AS digest \
+                    FROM bench_f32_10m ORDER BY v",
             expectation: RatchetExpectation::RequiredAfterPhase("full-sort GPU algorithm/costing"),
         },
         AuditRow {
@@ -813,14 +816,41 @@ mod tests {
     }
 
     #[test]
+    fn partition_fixtures_use_postgresql_supported_persistence() {
+        let partition_statements: Vec<_> = COMMON_FIXTURES
+            .iter()
+            .copied()
+            .filter(|statement| statement.starts_with("CREATE") && statement.contains("bench_part"))
+            .collect();
+
+        assert_eq!(partition_statements.len(), 5);
+        assert!(
+            partition_statements
+                .iter()
+                .all(|statement| statement.starts_with("CREATE TABLE"))
+        );
+        assert!(
+            partition_statements
+                .iter()
+                .all(|statement| !statement.starts_with("CREATE UNLOGGED TABLE"))
+        );
+    }
+
+    #[test]
     fn orderby_row_exercises_gated_full_sort_lane() {
         let matrix = build_matrix();
         let row = matrix
             .iter()
             .find(|row| row.name == "parallel_orderby")
             .expect("parallel_orderby row missing");
-        assert_eq!(row.description, "ORDER BY v — full sort");
-        assert_eq!(row.query, "SELECT * FROM bench_f32_10m ORDER BY v");
+        assert_eq!(
+            row.description,
+            "ORDER BY v — full-output sort with parallel-safe projection"
+        );
+        assert_eq!(
+            row.query,
+            "SELECT id, v, dim, md5(id::text) AS digest FROM bench_f32_10m ORDER BY v"
+        );
         assert!(matches!(
             row.expectation,
             RatchetExpectation::RequiredAfterPhase("full-sort GPU algorithm/costing")

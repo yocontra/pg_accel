@@ -154,6 +154,7 @@ impl EvidenceEligibility {
     const CACHE_MODE_BOTH: u8 = 1 << 1;
     const FP64_CALIBRATION: u8 = 1 << 2;
     const H3_RESIDENT_ROLLUP: u8 = 1 << 3;
+    const DERIVED_OUTPUT_ARTIFACT_REUSE: u8 = 1 << 4;
 
     const NONE: Self = Self {
         threshold: ThresholdEvidenceEligibility::NotGated,
@@ -178,6 +179,14 @@ impl EvidenceEligibility {
     #[must_use]
     pub const fn h3_resident_rollup(self) -> bool {
         self.flags & Self::H3_RESIDENT_ROLLUP != 0
+    }
+
+    /// The selected path constructs the exact final output with a GPU kernel
+    /// in a sealed lifecycle probe, then serves measured warm queries from a
+    /// dependency-stamped derived artifact without launching a fresh kernel.
+    #[must_use]
+    pub const fn derived_output_artifact_reuse(self) -> bool {
+        self.flags & Self::DERIVED_OUTPUT_ARTIFACT_REUSE != 0
     }
 }
 
@@ -666,7 +675,8 @@ const RASTER_NATIVE_DECLINE: EvidenceEligibility = EvidenceEligibility {
 };
 const RASTER_WINNER: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::GpuWinner,
-    flags: EvidenceEligibility::CACHE_MODE_BOTH,
+    flags: EvidenceEligibility::CACHE_MODE_BOTH
+        | EvidenceEligibility::DERIVED_OUTPUT_ARTIFACT_REUSE,
 };
 const FP64_CALIBRATION: EvidenceEligibility = EvidenceEligibility {
     threshold: ThresholdEvidenceEligibility::NotGated,
@@ -701,6 +711,28 @@ const PINS_GROUPED_AGG_INT4: &[ResidentPinSpec] =
     &[pin!("bench_employees_agg_int4", ["dept", "salary"])];
 const PINS_GROUPED_COUNT_BOOL: &[ResidentPinSpec] =
     &[pin!("bench_grouped_count_bool", ["bool_key", "observed"])];
+const PINS_GROUPED_COUNT_DATE: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_count_date", ["bool_key", "observed"])];
+const PINS_GROUPED_COUNT_FLOAT4: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_count_float4", ["bool_key", "observed"])];
+const PINS_GROUPED_COUNT_FLOAT8: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_count_float8", ["bool_key", "observed"])];
+const PINS_GROUPED_COUNT_TIMESTAMP: &[ResidentPinSpec] = &[pin!(
+    "bench_grouped_count_timestamp",
+    ["bool_key", "observed"]
+)];
+const PINS_GROUPED_COUNT_TIMESTAMPTZ: &[ResidentPinSpec] = &[pin!(
+    "bench_grouped_count_timestamptz",
+    ["bool_key", "observed"]
+)];
+const PINS_GROUPED_COUNT_INT2: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_count_int2", ["bool_key", "observed"])];
+const PINS_GROUPED_COUNT_INT8: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_count_int8", ["bool_key", "observed"])];
+const PINS_GROUPED_INT2_SUM_AVG: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_int2_sum_avg", ["bool_key", "observed"])];
+const PINS_GROUPED_INT4_SUM_AVG: &[ResidentPinSpec] =
+    &[pin!("bench_grouped_int4_sum_avg", ["bool_key", "observed"])];
 const PINS_GROUPED_AGG_HIGH_CARD: &[ResidentPinSpec] =
     &[pin!("bench_events_agg", ["user_id", "val"])];
 const PINS_TIMESERIES: &[ResidentPinSpec] = &[pin!("sensor_data", ["sensor_id", "value"])];
@@ -716,6 +748,10 @@ const PINS_PREDICATE_EXPRESSION: &[ResidentPinSpec] = &[pin!(
 const PINS_PREDICATE_EXPRESSION_INT4: &[ResidentPinSpec] = &[pin!(
     "bench_predicate_expression_sales_int4",
     ["product_id", "price", "quantity", "active"]
+)];
+const PINS_AGGREGATE_FILTER_INT4: &[ResidentPinSpec] = &[pin!(
+    "bench_aggregate_filter_sales_int4",
+    ["product_id", "price"]
 )];
 const PINS_AND_RANGE_PREDICATE_EXPRESSION_INT4: &[ResidentPinSpec] = &[pin!(
     "bench_and_range_predicate_expression_sales_int4",
@@ -759,6 +795,10 @@ const PINS_SPATIAL_RESIDENT_AGG: &[ResidentPinSpec] =
 const PINS_HASH_JOIN: &[ResidentPinSpec] = &[
     pin!("bench_orders", ["customer_id"]),
     pin!("bench_customers", ["customer_id"]),
+];
+const PINS_WEIGHTED_GLOBAL_COUNT_INT4: &[ResidentPinSpec] = &[
+    pin!("bench_weighted_count_fact", ["k"]),
+    pin!("bench_weighted_count_dim", ["k"]),
 ];
 const PINS_HASHJOIN_SWEEP: &[ResidentPinSpec] = &[
     pin!("bench_hj_outer", ["key"]),
@@ -968,6 +1008,41 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("grouped_count_bool_candidate", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_COUNT_BOOL)
         .evidence(WINNER),
+    workload("grouped_count_date_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_COUNT_DATE)
+        .evidence(WINNER),
+    workload("grouped_count_float4_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_COUNT_FLOAT4)
+        .evidence(WINNER),
+    workload("grouped_count_float8_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_COUNT_FLOAT8)
+        .evidence(WINNER),
+    workload(
+        "grouped_count_timestamp_candidate",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(PINS_GROUPED_COUNT_TIMESTAMP)
+    .evidence(WINNER),
+    workload(
+        "grouped_count_timestamptz_candidate",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(PINS_GROUPED_COUNT_TIMESTAMPTZ)
+    .evidence(WINNER),
+    workload("grouped_count_int2_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_COUNT_INT2)
+        .evidence(WINNER),
+    workload("grouped_count_int8_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_COUNT_INT8)
+        .evidence(WINNER),
+    workload("grouped_int2_sum_avg_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_INT2_SUM_AVG)
+        .evidence(WINNER),
+    workload("grouped_int4_sum_avg_candidate", C::GpuHashAgg, K::HashAgg)
+        .pins(PINS_GROUPED_INT4_SUM_AVG)
+        .evidence(WINNER),
     workload("grouped_agg_high_card", C::GpuHashAgg, K::HashAgg)
         .pins(PINS_GROUPED_AGG_HIGH_CARD)
         .evidence(NATIVE_DECLINE),
@@ -996,6 +1071,13 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
         K::HashAgg,
     )
     .pins(PINS_PREDICATE_EXPRESSION_INT4)
+    .evidence(WINNER),
+    workload(
+        "aggregate_filter_grouped_agg_int4",
+        C::GpuHashAgg,
+        K::HashAgg,
+    )
+    .pins(PINS_AGGREGATE_FILTER_INT4)
     .evidence(WINNER),
     workload(
         "and_range_predicate_expression_grouped_agg_int4",
@@ -1078,6 +1160,13 @@ pub const WORKLOAD_REGISTRY: &[WorkloadMetadata] = &[
     workload("hash_join", C::GpuHashJoin, K::HashJoin)
         .pins(PINS_HASH_JOIN)
         .evidence(WINNER),
+    workload(
+        "weighted_global_count_int4",
+        C::GpuHashJoin,
+        K::ResidentStarGroupAgg,
+    )
+    .pins(PINS_WEIGHTED_GLOBAL_COUNT_INT4)
+    .evidence(WINNER),
     workload("gpu_hashjoin_large_build", C::GpuHashJoin, K::HashJoin)
         .pins(PINS_HASHJOIN_LARGE_BUILD),
     workload(
@@ -1488,6 +1577,18 @@ mod tests {
                     entry
                         .required_extensions
                         .contains(&RequiredExtension::PostgisRaster)
+                );
+                assert_eq!(
+                    entry.name == "raster_resident_exact_reclass",
+                    entry.evidence.derived_output_artifact_reuse(),
+                    "{} derived-output artifact policy",
+                    entry.name
+                );
+            } else {
+                assert!(
+                    !entry.evidence.derived_output_artifact_reuse(),
+                    "{} unexpectedly credits derived-output artifact reuse",
+                    entry.name
                 );
             }
         }
