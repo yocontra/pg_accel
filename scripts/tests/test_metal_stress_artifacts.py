@@ -762,11 +762,22 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 1,
             ),
             workflow.replace(
-                "      - name: Prove the hosted runner has no GPU device",
+                "      - name: Prove the hosted runtime exposes no GPU device",
                 "      - name: Skip hosted runner GPU inspection",
                 1,
             ),
-            workflow.replace("             [ -e /dev/dri ] || ", "             false || ", 1),
+            workflow.replace(
+                "          if grep -Eq '^[[:space:]]*Is GPU:[[:space:]]*1[[:space:]]*$' \\\n"
+                '              "$runtime_inventory"; then',
+                "          if false; then",
+                1,
+            ),
+            workflow.replace(
+                '          runtime_inventory="$LINUX_NO_GPU_ARTIFACT_DIR/runtime-device-inventory.txt"',
+                "          if [ -e /dev/dri ]; then exit 1; fi\n"
+                '          runtime_inventory="$LINUX_NO_GPU_ARTIFACT_DIR/runtime-device-inventory.txt"',
+                1,
+            ),
             workflow.replace(
                 "            sha256sum -c SHA256SUMS",
                 "            true # sha256sum -c SHA256SUMS",

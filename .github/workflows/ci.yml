@@ -563,7 +563,7 @@ jobs:
             python3 -m unittest discover -s scripts/tests -p 'test_cpu_cheat_audit.py' -v \
             2>&1 | tee "$LINUX_NO_GPU_ARTIFACT_DIR/cpu-cheat-analyzer-tests.log"
 
-      - name: Prove the hosted runner has no GPU device
+      - name: Prove the hosted runtime exposes no GPU device
         if: steps.pg-support.outputs.skip != 'true'
         shell: bash
         run: |
@@ -571,20 +571,39 @@ jobs:
           {
             uname -a
             lscpu
+            # Hosted VMs may expose virtual DRM nodes (for example, Hyper-V
+            # card devices) without exposing a compute GPU. Preserve those
+            # nodes as evidence; gate on the runtime inventory below.
             find /dev -maxdepth 2 \
               \( -name 'nvidia*' -o -name 'dri' -o -name 'renderD*' \
                  -o -name 'card*' -o -name 'kfd' -o -name 'dxg' \
                  -o -name 'mali*' \) -print
           } > "$LINUX_NO_GPU_ARTIFACT_DIR/runner-metadata.txt"
-          if compgen -G '/dev/nvidia*' > /dev/null || \
-             compgen -G '/dev/mali*' > /dev/null || \
-             [ -e /dev/dri ] || [ -e /dev/kfd ] || [ -e /dev/dxg ]; then
-            echo "error: Linux no-GPU gate unexpectedly found a GPU device" >&2
+
+          runtime_inventory="$LINUX_NO_GPU_ARTIFACT_DIR/runtime-device-inventory.txt"
+          ./.pgaccel/acpp/current/bin/acpp-info > "$runtime_inventory" 2>&1
+          if ! grep -Eq '^[[:space:]]*Is GPU:[[:space:]]*[01][[:space:]]*$' \
+              "$runtime_inventory"; then
+            echo "error: Linux no-GPU gate could not parse the AdaptiveCpp device inventory" >&2
             exit 1
           fi
-          if command -v nvidia-smi > /dev/null && nvidia-smi -L > /dev/null 2>&1; then
-            echo "error: Linux no-GPU gate unexpectedly reached an NVIDIA GPU" >&2
+          if grep -Eq '^[[:space:]]*Is GPU:[[:space:]]*1[[:space:]]*$' \
+              "$runtime_inventory"; then
+            echo "error: Linux no-GPU gate found a GPU exposed by AdaptiveCpp" >&2
             exit 1
+          fi
+
+          nvidia_probe="$LINUX_NO_GPU_ARTIFACT_DIR/nvidia-smi.txt"
+          if command -v nvidia-smi > /dev/null 2>&1; then
+            if ! nvidia-smi -L > "$nvidia_probe" 2>&1; then
+              printf 'nvidia-smi is installed but no NVIDIA GPU is reachable\n' \
+                >> "$nvidia_probe"
+            else
+              echo "error: Linux no-GPU gate unexpectedly reached an NVIDIA GPU" >&2
+              exit 1
+            fi
+          else
+            printf 'nvidia-smi is not installed\n' > "$nvidia_probe"
           fi
 
       - name: Check without GPU devices

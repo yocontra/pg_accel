@@ -1318,17 +1318,34 @@ extension-smoke pg="":
     fi
     pg_accel_require_pgrx_support "$pg"
     pg_accel_require_pgrx_pg_config "$pg"
+    pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+    pg_bindir="$("$pg_config" --bindir)"
+    dropdb_bin="$pg_bindir/dropdb"
+    createdb_bin="$pg_bindir/createdb"
+    psql_bin="$pg_bindir/psql"
+    for postgres_client in "$dropdb_bin" "$createdb_bin" "$psql_bin"; do
+        if [ ! -x "$postgres_client" ]; then
+            echo "error: selected PostgreSQL client is not executable: $postgres_client" >&2
+            exit 1
+        fi
+    done
     just install-pg-accel "$pg"
     port="$(pg_accel_pgrx_port_for_pg "$pg")"
     : "${port:?could not read pgrx PostgreSQL port}"
     db="pg_accel_smoke_$pg"
-    dropdb -h localhost -p "$port" --if-exists "$db"
-    createdb -h localhost -p "$port" "$db"
-    psql -h localhost -p "$port" -d "$db" -v ON_ERROR_STOP=1 \
+    cleanup() {
+        "$dropdb_bin" -h localhost -p "$port" --if-exists "$db" \
+            >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+    "$dropdb_bin" -h localhost -p "$port" --if-exists "$db"
+    "$createdb_bin" -h localhost -p "$port" "$db"
+    "$psql_bin" -h localhost -p "$port" -d "$db" -v ON_ERROR_STOP=1 \
         -c "CREATE EXTENSION pg_accel;" \
         -c "SELECT pg_accel_version();" \
         -c "SELECT * FROM pg_accel_stats();"
-    dropdb -h localhost -p "$port" "$db"
+    "$dropdb_bin" -h localhost -p "$port" "$db"
+    trap - EXIT
 
 # Install into each pgrx-managed cluster and prove fresh CREATE EXTENSION paths.
 extension-smoke-matrix:

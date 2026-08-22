@@ -21,6 +21,11 @@ artifact_dir="${CUDA_STRESS_ARTIFACT_DIR:-benchmarks/artifacts/cuda-stress-${ts}
 mkdir -p "$artifact_dir"
 
 pg_config="$(pg_accel_pg_config_for_pg "$pg")"
+psql_bin="$("$pg_config" --bindir)/psql"
+if [ ! -x "$psql_bin" ]; then
+    echo "error: selected PostgreSQL client is not executable: $psql_bin" >&2
+    exit 1
+fi
 port="$(pg_accel_pgrx_port_for_pg "$pg")"
 connection="host=localhost port=${port} dbname=postgres"
 data_dir="$(pg_accel_pgrx_data_dir_for_pg "$pg")"
@@ -101,7 +106,7 @@ run_cancellation_probe() {
     local log="${artifact_dir}/cancellation.log"
     echo "=== cancellation probe ===" | tee -a "${artifact_dir}/summary.txt"
     set +e
-    psql "$connection" -v ON_ERROR_STOP=1 > "$log" 2>&1 <<'SQL'
+    "$psql_bin" "$connection" -v ON_ERROR_STOP=1 > "$log" 2>&1 <<'SQL'
 CREATE EXTENSION IF NOT EXISTS h3;
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS postgis_raster;
@@ -124,7 +129,8 @@ SQL
         echo "error: cancellation probe failed for an unexpected reason; see $log" >&2
         return 1
     fi
-    psql "$connection" -v ON_ERROR_STOP=1 -c "RESET statement_timeout; SELECT 1;" >> "$log" 2>&1
+    "$psql_bin" "$connection" -v ON_ERROR_STOP=1 \
+        -c "RESET statement_timeout; SELECT 1;" >> "$log" 2>&1
 }
 
 assert_clean_logs() {

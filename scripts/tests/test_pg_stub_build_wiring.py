@@ -69,6 +69,48 @@ class PgStubBuildWiringTests(unittest.TestCase):
         )
         self.assertIn('RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"', justfile)
 
+    def test_extension_smoke_uses_selected_postgres_clients(self) -> None:
+        justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
+        recipe = justfile[
+            justfile.index('extension-smoke pg="":') : justfile.index(
+                "extension-smoke-matrix:"
+            )
+        ]
+
+        for required in (
+            'pg_config="$(pg_accel_pg_config_for_pg "$pg")"',
+            'pg_bindir="$("$pg_config" --bindir)"',
+            'dropdb_bin="$pg_bindir/dropdb"',
+            'createdb_bin="$pg_bindir/createdb"',
+            'psql_bin="$pg_bindir/psql"',
+            '"$dropdb_bin" -h localhost',
+            '"$createdb_bin" -h localhost',
+            '"$psql_bin" -h localhost',
+            "trap cleanup EXIT",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, recipe)
+        for forbidden in ("\n    dropdb ", "\n    createdb ", "\n    psql "):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, recipe)
+
+    def test_release_gates_use_the_selected_postgres_client(self) -> None:
+        for relative_path in (
+            "scripts/metal_stress_gate.sh",
+            "scripts/cuda_stress_gate.sh",
+            "scripts/release_verification_matrix.sh",
+        ):
+            with self.subTest(path=relative_path):
+                source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+                self.assertIn(
+                    'pg_config="$(pg_accel_pg_config_for_pg "$pg")"', source
+                )
+                self.assertIn('psql_bin="$("$pg_config" --bindir)/psql"', source)
+                self.assertIn(
+                    "selected PostgreSQL client is not executable", source
+                )
+                self.assertNotRegex(source, r"(?m)^[ \t]*psql[ \t]")
+
     def test_auxiliary_test_and_hook_paths_keep_exact_postgres_selection(self) -> None:
         justfile = (REPO_ROOT / "Justfile").read_text(encoding="utf-8")
         hooks = (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")

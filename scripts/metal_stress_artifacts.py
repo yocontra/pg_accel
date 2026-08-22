@@ -1649,7 +1649,7 @@ def validate_ci_workflow_contract(workflow: str) -> None:
     for required in (
         "Capture exact-candidate provenance",
         '--expected-commit "$EXPECTED_CANDIDATE_SHA"',
-        "Prove the hosted runner has no GPU device",
+        "Prove the hosted runtime exposes no GPU device",
         "Seal Linux no-GPU evidence",
         "Upload Linux no-GPU evidence",
         "if-no-files-found: error",
@@ -1658,7 +1658,7 @@ def validate_ci_workflow_contract(workflow: str) -> None:
             raise ArtifactContractError(
                 f"Linux no-GPU evidence contract is missing `{required}`"
             )
-    no_gpu = _workflow_step(linux, "Prove the hosted runner has no GPU device")
+    no_gpu = _workflow_step(linux, "Prove the hosted runtime exposes no GPU device")
     no_gpu_lines = _workflow_step_lines(no_gpu)
     for required in (
         "if: steps.pg-support.outputs.skip != 'true'",
@@ -1671,17 +1671,35 @@ def validate_ci_workflow_contract(workflow: str) -> None:
                 f"Linux no-GPU inspection is missing `{required}`"
             )
     for required in (
-        "/dev/nvidia*",
-        "/dev/dri",
-        "/dev/kfd",
-        "/dev/dxg",
-        "/dev/mali*",
+        "find /dev -maxdepth 2",
+        "-name 'nvidia*'",
+        "-name 'dri'",
+        "-name 'renderD*'",
+        "-name 'card*'",
+        "-name 'kfd'",
+        "-name 'dxg'",
+        "-name 'mali*'",
+        ".pgaccel/acpp/current/bin/acpp-info",
+        "runtime-device-inventory.txt",
+        "Is GPU:[[:space:]]*1",
         "nvidia-smi -L",
+        "nvidia-smi.txt",
         'runner-metadata.txt',
     ):
         if required not in no_gpu:
             raise ArtifactContractError(
-                f"Linux no-GPU inspection does not fail closed on `{required}`"
+                f"Linux no-GPU runtime inspection is missing `{required}`"
+            )
+    for forbidden in (
+        "compgen -G '/dev/nvidia*'",
+        "compgen -G '/dev/mali*'",
+        "[ -e /dev/dri ]",
+        "[ -e /dev/kfd ]",
+        "[ -e /dev/dxg ]",
+    ):
+        if forbidden in no_gpu:
+            raise ArtifactContractError(
+                f"Linux no-GPU inspection cannot reject metadata-only node `{forbidden}`"
             )
     if "continue-on-error:" in no_gpu:
         raise ArtifactContractError(
