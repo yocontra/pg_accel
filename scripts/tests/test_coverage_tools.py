@@ -2928,8 +2928,11 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                     "logical_cpus": 3,
                     "memory_bytes": 7_516_192_768,
                     "gpu_device": "Apple Paravirtual device",
+                    "gpu_backend": "Metal",
+                    "gpu_runtime_probe": "acpp-info",
                     "gpu_basic_tier": True,
                     "host_reference_common_extended": True,
+                    "planner_calibration": "test_only_32_cu_reference",
                     "reason": (
                         "common_extended_metallib_exceeds_900_kib_"
                         "archive_oom_guard"

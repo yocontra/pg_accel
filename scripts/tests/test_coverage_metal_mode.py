@@ -34,9 +34,18 @@ class CoverageMetalModeTests(unittest.TestCase):
             'hw.logicalcpu) echo 3 ;; hw.memsize) echo 7516192768 ;; *) exit 1 ;; esac',
         )
         gpu = "Apple Paravirtual device" if paravirtual else "Apple M2 Max"
-        self.write_command(commands, "system_profiler", f'echo "Chipset Model: {gpu}"')
+        acpp_info = commands / "acpp-info"
+        self.write_command(
+            commands,
+            "acpp-info",
+            'echo "Loaded backend 0: OpenMP"\n'
+            'echo "  Found device: AdaptiveCpp OpenMP host device"\n'
+            'echo "Loaded backend 1: Metal"\n'
+            f'echo "  Found device: {gpu}"',
+        )
         env = os.environ.copy()
         env["PATH"] = f"{commands}:{env['PATH']}"
+        env["PGACCEL_ACPP_INFO"] = str(acpp_info)
         if mode is None:
             env.pop("PGACCEL_HOSTED_METAL_COMPATIBILITY", None)
         else:
@@ -66,6 +75,9 @@ class CoverageMetalModeTests(unittest.TestCase):
             payload = json.loads((root / "mode.json").read_text(encoding="utf-8"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(payload["mode"], "hosted_virtual_m1_compatibility")
+        self.assertEqual(payload["gpu_backend"], "Metal")
+        self.assertEqual(payload["gpu_runtime_probe"], "acpp-info")
+        self.assertEqual(payload["planner_calibration"], "test_only_32_cu_reference")
         self.assertTrue(payload["gpu_basic_tier"])
         self.assertTrue(payload["host_reference_common_extended"])
         self.assertFalse(payload["performance_evidence_eligible"])
@@ -79,6 +91,28 @@ class CoverageMetalModeTests(unittest.TestCase):
             result = self.run_mode(pathlib.Path(temporary), "yes")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be 0 or 1", result.stderr)
+
+    def test_missing_runtime_probe_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            result = self.run_mode(root, "1")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            missing = root / "missing-acpp-info"
+            env = os.environ.copy()
+            env["PGACCEL_HOSTED_METAL_COMPATIBILITY"] = "1"
+            env["PGACCEL_ACPP_INFO"] = str(missing)
+            commands = root / "bin"
+            env["PATH"] = f"{commands}:{env['PATH']}"
+            result = subprocess.run(
+                ["bash", str(SCRIPT), str(root / "missing-mode.json")],
+                cwd=REPO_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("executable AdaptiveCpp acpp-info", result.stderr)
 
     def test_host_reference_is_cpp_only_and_absent_from_production_target(self) -> None:
         cmake = (REPO_ROOT / "pgaccel-kernels/CMakeLists.txt").read_text(

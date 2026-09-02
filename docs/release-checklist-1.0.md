@@ -42,7 +42,13 @@ installation, and three-layer coverage evidence, but it is not qualified
 performance hardware. In that lane the Basic expression tier still dispatches
 on Metal; Common/Extended expression semantics use an explicitly recorded
 test-only host reference because their metallibs exceed the fixed 900 KiB OOM
-guard. The execution-mode artifact is ineligible for performance claims. Warm
+guard. The lane verifies the device through AdaptiveCpp's `acpp-info` runtime
+inventory rather than `system_profiler`. On only the exact macOS arm64,
+3-vCPU, one-CU `Apple Paravirtual device` profile, selected-path coverage uses
+a planner-only 32-CU reference calibration and reports
+`hosted_compatibility_calibrated`; the physical device and kernel execution are
+unchanged. Any profile drift fails closed. The execution-mode artifact and
+benchmark provenance mark this mode ineligible for performance claims. Warm
 ratchets, native parity, system characterization, and Metal stress must pass on
 the exact candidate on qualified physical M-series hardware. The tag workflow
 creates a draft release; those qualified bundles and human sign-off must be

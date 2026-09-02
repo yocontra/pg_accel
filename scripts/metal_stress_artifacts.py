@@ -1482,7 +1482,7 @@ def _validate_hosted_metal_job(
         "capture-candidate",
         '--expected-commit "$EXPECTED_CANDIDATE_SHA"',
         f'artifact_dir="{provenance_dir}"',
-        "system_profiler SPDisplaysDataType",
+        ".pgaccel/acpp/current/bin/acpp-info",
     ):
         if required not in capture:
             raise ArtifactContractError(
@@ -1571,6 +1571,15 @@ def validate_ci_workflow_contract(workflow: str) -> None:
         raise ArtifactContractError(
             "macOS arm64 compatibility jobs must use the Apple Silicon `macos-26` label"
         )
+    for step_name in (
+        "Run PostgreSQL ${{ matrix.pg }} Rust gate",
+        "Run SQL integration tests",
+    ):
+        step = _workflow_step(mac, step_name)
+        if 'PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"' not in step:
+            raise ArtifactContractError(
+                f"macOS virtual-M1 step `{step_name}` is missing the exact hosted planner calibration"
+            )
     metal = _validate_hosted_metal_job(
         workflow,
         "metal-compatibility",

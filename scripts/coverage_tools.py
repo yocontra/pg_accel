@@ -4118,7 +4118,10 @@ def validate_metal_execution_mode(artifact_dir: pathlib.Path) -> list[str]:
         "logical_cpus",
         "memory_bytes",
         "gpu_device",
+        "gpu_backend",
+        "gpu_runtime_probe",
         "gpu_basic_tier",
+        "planner_calibration",
         "reason",
     }
     memory_bytes = document.get("memory_bytes")
@@ -4130,8 +4133,11 @@ def validate_metal_execution_mode(artifact_dir: pathlib.Path) -> list[str]:
         or memory_bytes < 7_000_000_000
         or memory_bytes > 8_589_934_592
         or document.get("gpu_device") != "Apple Paravirtual device"
+        or document.get("gpu_backend") != "Metal"
+        or document.get("gpu_runtime_probe") != "acpp-info"
         or document.get("gpu_basic_tier") is not True
         or document.get("host_reference_common_extended") is not True
+        or document.get("planner_calibration") != "test_only_32_cu_reference"
         or document.get("reason")
         != "common_extended_metallib_exceeds_900_kib_archive_oom_guard"
         or expression_log.count(compatibility_marker) != 1

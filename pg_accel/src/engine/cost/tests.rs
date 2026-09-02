@@ -13,6 +13,8 @@ fn profile_no_gpu() -> PlatformProfile {
         has_gpu: false,
         estimated_gpu_gflops: 0.0,
         compute_units: 0,
+        device_name: String::new(),
+        backend_name: String::new(),
         gpu_max_alloc_bytes: 0,
         has_native_fp64: false,
     }
@@ -24,6 +26,8 @@ fn profile_with_gpu() -> PlatformProfile {
         has_gpu: true,
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
+        device_name: "test-gpu".to_owned(),
+        backend_name: "metal".to_owned(),
         gpu_max_alloc_bytes: 256 * 1024 * 1024, // 256 MB
         has_native_fp64: false,
     }
@@ -153,6 +157,8 @@ fn threads_at_least_one() {
         has_gpu: false,
         estimated_gpu_gflops: 0.0,
         compute_units: 0,
+        device_name: String::new(),
+        backend_name: String::new(),
         gpu_max_alloc_bytes: 0,
         has_native_fp64: false,
     };
@@ -166,6 +172,8 @@ fn threads_single_core_with_budget() {
         has_gpu: false,
         estimated_gpu_gflops: 0.0,
         compute_units: 0,
+        device_name: String::new(),
+        backend_name: String::new(),
         gpu_max_alloc_bytes: 0,
         has_native_fp64: false,
     };
@@ -216,6 +224,8 @@ fn baseline_gpu_matches_defaults() {
         has_gpu: true,
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
+        device_name: "test-gpu".to_owned(),
+        backend_name: "metal".to_owned(),
         gpu_max_alloc_bytes: 256 * 1024 * 1024,
         has_native_fp64: false,
     };
@@ -237,6 +247,8 @@ fn high_cu_gpu_lowers_thresholds() {
         has_gpu: true,
         estimated_gpu_gflops: 500.0,
         compute_units: 8,
+        device_name: "test-gpu".to_owned(),
+        backend_name: "metal".to_owned(),
         gpu_max_alloc_bytes: 64 * 1024 * 1024,
         has_native_fp64: false,
     };
@@ -244,7 +256,7 @@ fn high_cu_gpu_lowers_thresholds() {
         compute_units: 128,
         gpu_max_alloc_bytes: 4096 * 1024 * 1024,
         estimated_gpu_gflops: 8000.0,
-        ..low
+        ..low.clone()
     };
     let ll = DeviceLimits::from_profile(&low);
     let lh = DeviceLimits::from_profile(&high);
@@ -260,12 +272,14 @@ fn spatial_pairwise_chunk_rows_derive_from_max_alloc() {
         has_gpu: true,
         estimated_gpu_gflops: 500.0,
         compute_units: 8,
+        device_name: "test-gpu".to_owned(),
+        backend_name: "metal".to_owned(),
         gpu_max_alloc_bytes: 128 * 1024 * 1024,
         has_native_fp64: false,
     };
     let high = PlatformProfile {
         gpu_max_alloc_bytes: 8 * 1024 * 1024 * 1024,
-        ..low
+        ..low.clone()
     };
 
     let low_rows = DeviceLimits::from_profile(&low).gpu_spatial_pairwise_chunk_rows;
@@ -618,6 +632,8 @@ fn limits_are_clamped() {
         has_gpu: true,
         estimated_gpu_gflops: 50000.0,
         compute_units: 10000,
+        device_name: "test-gpu".to_owned(),
+        backend_name: "metal".to_owned(),
         gpu_max_alloc_bytes: 64 * 1024 * 1024 * 1024, // 64 GB
         has_native_fp64: true,
     };
@@ -758,6 +774,8 @@ fn phase6_per_row_costs_strictly_less_than_old_literals() {
         has_gpu: true,
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
+        device_name: "test-gpu".to_owned(),
+        backend_name: "metal".to_owned(),
         gpu_max_alloc_bytes: 256 * 1024 * 1024,
         has_native_fp64: false,
     };
@@ -883,6 +901,8 @@ fn device_limits_surface_nlj_fields_in_from_profile() {
         has_gpu: true,
         estimated_gpu_gflops: 2000.0,
         compute_units: 32,
+        device_name: "test-gpu".to_owned(),
+        backend_name: "metal".to_owned(),
         gpu_max_alloc_bytes: 64 * 1024 * 1024 * 1024,
         has_native_fp64: false,
     };

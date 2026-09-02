@@ -648,6 +648,8 @@ mod admission_tests {
             has_gpu: true,
             estimated_gpu_gflops: 1.0,
             compute_units: 1,
+            device_name: "test-gpu".to_owned(),
+            backend_name: "metal".to_owned(),
             gpu_max_alloc_bytes: 1,
             has_native_fp64: true,
         };
@@ -894,6 +896,8 @@ mod admission_tests {
             has_gpu: false,
             estimated_gpu_gflops: 0.0,
             compute_units: 0,
+            device_name: String::new(),
+            backend_name: String::new(),
             gpu_max_alloc_bytes: 0,
             has_native_fp64: false,
         };

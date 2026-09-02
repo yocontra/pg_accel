@@ -103,7 +103,9 @@ mod tests {
         Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
             .ok()
             .flatten()
-            .is_some_and(|source| source == "hardware_derived")
+            .is_some_and(|source| {
+                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
+            })
     }
 
     fn qualifying_device_rows(limit_name: &str, floor: i64) -> i64 {

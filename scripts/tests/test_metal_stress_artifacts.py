@@ -626,6 +626,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 1,
             ),
             workflow.replace(
+                "            .pgaccel/acpp/current/bin/acpp-info",
+                "            system_profiler SPDisplaysDataType",
+                1,
+            ),
+            workflow.replace(
                 "          path: artifacts/coverage-pg18-hosted-metal",
                 "          path: artifacts/coverage-pg18-unbound",
                 1,
@@ -739,6 +744,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
             workflow.replace(
                 '          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"',
                 '          PGACCEL_HOSTED_METAL_COMPATIBILITY: "0"',
+                1,
+            ),
+            workflow.replace(
+                "            .pgaccel/acpp/current/bin/acpp-info",
+                "            system_profiler SPDisplaysDataType",
                 1,
             ),
             workflow.replace(

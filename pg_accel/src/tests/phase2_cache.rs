@@ -25,7 +25,9 @@ mod tests {
         Spi::get_one::<String>("SELECT DISTINCT source FROM pg_accel_device_limits()")
             .ok()
             .flatten()
-            .is_some_and(|source| source == "hardware_derived")
+            .is_some_and(|source| {
+                source == "hardware_derived" || source == "hosted_compatibility_calibrated"
+            })
     }
 
     fn serialize_gpu_tests() {

@@ -357,7 +357,7 @@ jobs:
             uname -a
             sysctl -n machdep.cpu.brand_string
             sysctl -n hw.logicalcpu
-            system_profiler SPDisplaysDataType
+            .pgaccel/acpp/current/bin/acpp-info
           } > "$artifact_dir/runner-metadata.txt"
 
       - name: Run release hosted Metal compatibility gate

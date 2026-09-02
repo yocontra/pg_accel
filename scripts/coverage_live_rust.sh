@@ -563,6 +563,7 @@ run_bench() {
     render_command "$bench_bin" "$@"
     set +e
     LLVM_PROFILE_FILE="$profile_dir/${label}-%p-%m.profraw" \
+        PGACCEL_INSTRUMENTED_COVERAGE_ONLY=1 \
         CARGO_TARGET_DIR="$build_dir" "$bench_bin" "$@" 2>&1 | tee "$log"
     rc=${PIPESTATUS[0]}
     set -e
@@ -590,6 +591,7 @@ run_bench_input() {
     rendered_command+=" < $(printf '%q' "$input")"
     set +e
     LLVM_PROFILE_FILE="$profile_dir/${label}-%p-%m.profraw" \
+        PGACCEL_INSTRUMENTED_COVERAGE_ONLY=1 \
         CARGO_TARGET_DIR="$build_dir" "$bench_bin" "$@" < "$input" 2>&1 | tee "$log"
     rc=${PIPESTATUS[0]}
     set -e

@@ -809,6 +809,7 @@ class CoverageLiveRustTests(unittest.TestCase):
     def test_harness_declares_instrumented_timings_ineligible(self) -> None:
         source = HARNESS.read_text(encoding="utf-8")
         self.assertIn('"performance_evidence_eligible": False', source)
+        self.assertEqual(source.count("PGACCEL_INSTRUMENTED_COVERAGE_ONLY=1"), 2)
         self.assertIn('"cache_policy": "warm-only"', source)
         self.assertIn("all_outputs_consumed", source)
         self.assertIn("source-hashes.tsv", source)

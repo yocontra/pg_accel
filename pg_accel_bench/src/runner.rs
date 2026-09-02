@@ -25,6 +25,7 @@ const PROVENANCE_SCHEMA_VERSION: u32 = 1;
 const CORRECTNESS_DIFF_SCHEMA_VERSION: u32 = 1;
 const SETUP_QUIESCENCE_SCHEMA_VERSION: u32 = 1;
 const EXPECTED_EXTENSION_VERSION: &str = env!("CARGO_PKG_VERSION");
+const INSTRUMENTED_COVERAGE_ONLY_ENV: &str = "PGACCEL_INSTRUMENTED_COVERAGE_ONLY";
 const RUST_BACKTRACE_ARTIFACT: &str = "rust_backtrace.txt";
 const CRASH_CONTEXT_EMBED_BYTES: usize = 128 * 1024;
 const CORRECTNESS_DIFF_SAMPLE_LIMIT: i64 = 20;
@@ -964,7 +965,7 @@ fn evaluate_provenance(report: &mut ProvenanceReport) {
     check_extension_versions(report);
     check_live_extension_smoke(report);
     check_control_version(report);
-    check_device_limits(report);
+    check_device_limits(report, instrumented_coverage_only());
     if let Some(warning) =
         file_probe_warning("expected build binary", report.expected_binary.as_ref())
     {
@@ -1072,7 +1073,11 @@ fn check_control_version(report: &mut ProvenanceReport) {
     }
 }
 
-fn check_device_limits(report: &mut ProvenanceReport) {
+fn instrumented_coverage_only() -> bool {
+    std::env::var_os(INSTRUMENTED_COVERAGE_ONLY_ENV).is_some_and(|value| value == "1")
+}
+
+fn check_device_limits(report: &mut ProvenanceReport, allow_hosted_coverage: bool) {
     if report.device_limits_sources.is_empty() {
         report
             .errors
@@ -1080,10 +1085,24 @@ fn check_device_limits(report: &mut ProvenanceReport) {
         return;
     }
     for source in &report.device_limits_sources {
-        if source == "fallback_cpu_only" {
-            report.errors.push(
+        match source.as_str() {
+            "hardware_derived" => {}
+            "hosted_compatibility_calibrated" if allow_hosted_coverage => {
+                report.warnings.push(
+                    "pg_accel reports hosted_compatibility_calibrated device limits; this instrumented coverage run is ineligible for performance evidence"
+                        .to_owned(),
+                );
+            }
+            "hosted_compatibility_calibrated" => report.errors.push(
+                "pg_accel reports hosted_compatibility_calibrated device limits; benchmark/audit results cannot use the hosted coverage calibration"
+                    .to_owned(),
+            ),
+            "fallback_cpu_only" => report.errors.push(
                 "pg_accel reports fallback_cpu_only device limits; benchmark/audit results require a real GPU path or native PostgreSQL plan".to_owned(),
-            );
+            ),
+            other => report.errors.push(format!(
+                "pg_accel reports unknown device-limit source {other:?}"
+            )),
         }
     }
 }
@@ -7206,7 +7225,7 @@ mod tests {
                 mapped_paths: vec!["/pg/lib/pg_accel.dylib".to_owned()],
                 warning: None,
             },
-            device_limits_sources: vec!["metal".to_owned()],
+            device_limits_sources: vec!["hardware_derived".to_owned()],
             warnings: Vec::new(),
             errors: Vec::new(),
         }
@@ -7297,15 +7316,34 @@ mod tests {
         assert!(report.warnings.is_empty());
 
         report.device_limits_sources.clear();
-        check_device_limits(&mut report);
+        check_device_limits(&mut report, false);
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("no source rows"));
 
         report.errors.clear();
-        report.device_limits_sources = vec!["metal".to_owned(), "fallback_cpu_only".to_owned()];
-        check_device_limits(&mut report);
+        report.device_limits_sources = vec![
+            "hardware_derived".to_owned(),
+            "fallback_cpu_only".to_owned(),
+        ];
+        check_device_limits(&mut report, false);
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("real GPU path"));
+
+        report.errors.clear();
+        report.device_limits_sources = vec!["hosted_compatibility_calibrated".to_owned()];
+        check_device_limits(&mut report, false);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("hosted coverage calibration"));
+
+        report.errors.clear();
+        check_device_limits(&mut report, true);
+        assert!(report.errors.is_empty());
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("ineligible for performance evidence"))
+        );
     }
 
     #[test]

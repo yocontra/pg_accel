@@ -291,6 +291,16 @@ hardware. Checked-in workflow wiring is not run evidence: the corresponding
 release-checklist row remains open until the exact candidate has successful CI
 artifact URLs and the separate qualified-hardware bundles are durable.
 
+The hosted lane identifies Metal through AdaptiveCpp's runtime inventory. Its
+explicit `PGACCEL_HOSTED_METAL_COMPATIBILITY=1` mode is accepted only for the
+exact macOS arm64, 3-vCPU, one-CU `Apple Paravirtual device` profile. It leaves
+the physical device unchanged but applies the 32-CU reference planner
+calibration so fixed selected-path fixtures exercise real kernels; SQL reports
+the source as `hosted_compatibility_calibrated`. The coverage harness records
+that source and is performance-ineligible. A physical Mac, another backend,
+another device name/CU count, a missing runtime probe, or a malformed mode
+fails closed.
+
 ## Timing and ordering
 
 - Keep warm and cold samples separate. Do not pool their medians or ratios.

@@ -146,6 +146,8 @@ jobs:
       - name: Run PostgreSQL ${{ matrix.pg }} Rust gate
         if: steps.pg-support.outputs.skip != 'true'
         shell: bash
+        env:
+          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"
         run: |
           set -euo pipefail
           just fmt-check
@@ -179,6 +181,7 @@ jobs:
         shell: bash
         env:
           PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION: "1"
+          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"
         run: |
           set -euo pipefail
           just sql-test ${{ matrix.pg }}
@@ -314,7 +317,7 @@ jobs:
             uname -a
             sysctl -n machdep.cpu.brand_string
             sysctl -n hw.logicalcpu
-            system_profiler SPDisplaysDataType
+            .pgaccel/acpp/current/bin/acpp-info
           } > "$artifact_dir/runner-metadata.txt"
 
       - name: Verify public source build, install, and CREATE EXTENSION
