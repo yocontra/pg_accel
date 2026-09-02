@@ -4251,6 +4251,88 @@ class ResidentV5RegressionTests(unittest.TestCase):
             result.entrypoint_audits[0].classifications,
         )
 
+    def test_proven_device_helper_can_orchestrate_streamed_local_chunks(self) -> None:
+        result = audit_compiling_fixture(
+            self.COPYBACK_PRELUDE
+            + r"""
+            static void device_chunk(int* device_result, size_t count) {
+              sycl::queue q;
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                device_result[i] = 1;
+              }).wait_and_throw();
+            }
+
+            static void host_chunk(int* device_result, size_t) { device_result[0] = 7; }
+
+            extern "C" pgaccel_status pgaccel_streamed_device_chunks(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* streamed = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t start = 0;
+              do {
+                size_t chunk = count - start;
+                if (chunk > 64) chunk = 64;
+                device_chunk(streamed + start, chunk);
+                start += chunk;
+              } while (start < count);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                streamed[i] += 1;
+              }).wait_and_throw();
+              q.memcpy(out, streamed, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_streamed_host_helper(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* streamed = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t start = 0;
+              do {
+                host_chunk(streamed + start, 1);
+                ++start;
+              } while (start < count);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                streamed[i] += 1;
+              }).wait_and_throw();
+              q.memcpy(out, streamed, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+
+            extern "C" pgaccel_status pgaccel_streamed_hidden_host_write(
+                int* out, size_t count) {
+              if (count == 0) return PGACCEL_OK;
+              sycl::queue q;
+              int* streamed = static_cast<int*>(
+                  sycl::malloc_device(count * sizeof(int), q));
+              size_t start = 0;
+              do {
+                device_chunk(streamed + start, 1);
+                out[0] = 9;
+                ++start;
+              } while (start < count);
+              q.parallel_for(sycl::range<1>(count), [=](sycl::id<1> i) {
+                streamed[i] += 1;
+              }).wait_and_throw();
+              q.memcpy(out, streamed, count * sizeof(int)).wait_and_throw();
+              return PGACCEL_OK;
+            }
+            """
+        )
+        entries = {entry.entrypoint: entry for entry in result.entrypoint_audits}
+        streamed = entries["pgaccel_streamed_device_chunks"]
+        self.assertTrue(streamed.ok, streamed.detail)
+        self.assertIn("device_launch_orchestration", streamed.classifications)
+        self.assertFalse(entries["pgaccel_streamed_host_helper"].ok)
+        self.assertFalse(entries["pgaccel_streamed_hidden_host_write"].ok)
+        self.assertIn(
+            "host_computation",
+            entries["pgaccel_streamed_hidden_host_write"].classifications,
+        )
+
     def test_device_launch_orchestration_mutants_fail_closed(self) -> None:
         result = audit_compiling_fixture(
             self.COPYBACK_PRELUDE

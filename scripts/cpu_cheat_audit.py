@@ -4669,7 +4669,13 @@ def _device_orchestration_do_loops(
             allowed_call_indices.add(method_index)
             allowed_call_indices.add(call[1] + 2)
 
-        if not launch_calls:
+        helper_launch_calls = {
+            indexed.index
+            for indexed in indexed_calls
+            if body_start < indexed.index < body_end
+            and indexed.index in proven_helper_calls
+        }
+        if not launch_calls and not helper_launch_calls:
             continue
 
         unsafe = False

@@ -1187,7 +1187,11 @@ void test_control_flow_and_predicate_result_classes() {
 
 void test_public_argument_contracts() {
   OneColumnBatch<int32_t> batch({1}, PGACCEL_VAL_INT32);
-  Program program({instruction(PGACCEL_EXPR_OP_ALWAYS_TRUE)}, {}, 1);
+  // Keep the one positive public-API dispatch in the basic expression tier.
+  // The hosted virtual-M1 profile cannot create the >900 KiB common/extended
+  // Metal pipeline, while physical-device runs still exercise that tier above.
+  Program program(
+      {instruction(PGACCEL_EXPR_OP_LOAD_COL, 0), instruction(PGACCEL_EXPR_OP_IS_NOT_NULL)}, {}, 1);
   int8_t predicate_result = 99;
   pgaccel_val output{};
   uint8_t uncertain = 99;
