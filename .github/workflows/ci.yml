@@ -182,6 +182,12 @@ jobs:
         env:
           PG_ACCEL_SQL_TEST_REQUIRE_EXTENSION: "1"
           PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"
+          # The virtual M1 is a correctness-only compatibility runner. Its
+          # first Metal JIT can exceed the physical-hardware 5s diagnostic
+          # threshold, so pin and verify a compatibility-only warning profile.
+          # This does not alter statement_timeout or suppress SQL errors.
+          PGOPTIONS: "-c pg_accel.kernel_timeout_ms=60000"
+          PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS: "60000"
         run: |
           set -euo pipefail
           just sql-test ${{ matrix.pg }}

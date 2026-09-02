@@ -301,6 +301,13 @@ that source and is performance-ineligible. A physical Mac, another backend,
 another device name/CU count, a missing runtime probe, or a malformed mode
 fails closed.
 
+The virtual-M1 SQL correctness step also pins
+`pg_accel.kernel_timeout_ms=60000` and verifies that exact client-session
+profile before running any file. This accommodates first-use compilation on
+the deliberately performance-ineligible virtual GPU; it does not change
+`statement_timeout`, permit SQL warnings or caught exceptions, or weaken any
+result, plan, dispatch, fallback, crash, or semantic assertion gate.
+
 ## Timing and ordering
 
 - Keep warm and cold samples separate. Do not pool their medians or ratios.

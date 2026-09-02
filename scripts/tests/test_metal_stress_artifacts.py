@@ -747,6 +747,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 1,
             ),
             workflow.replace(
+                '          PGOPTIONS: "-c pg_accel.kernel_timeout_ms=60000"',
+                '          PGOPTIONS: "-c pg_accel.kernel_timeout_ms=5000"',
+                1,
+            ),
+            workflow.replace(
+                '          PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS: "60000"',
+                '          PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS: "5000"',
+                1,
+            ),
+            workflow.replace(
                 "            .pgaccel/acpp/current/bin/acpp-info",
                 "            system_profiler SPDisplaysDataType",
                 1,

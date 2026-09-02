@@ -1580,6 +1580,16 @@ def validate_ci_workflow_contract(workflow: str) -> None:
             raise ArtifactContractError(
                 f"macOS virtual-M1 step `{step_name}` is missing the exact hosted planner calibration"
             )
+    sql_step = _workflow_step(mac, "Run SQL integration tests")
+    for required in (
+        'PGOPTIONS: "-c pg_accel.kernel_timeout_ms=60000"',
+        'PG_ACCEL_SQL_TEST_EXPECT_KERNEL_TIMEOUT_MS: "60000"',
+    ):
+        if required not in sql_step:
+            raise ArtifactContractError(
+                "macOS virtual-M1 SQL correctness step is missing its exact "
+                f"verified warning profile `{required}`"
+            )
     metal = _validate_hosted_metal_job(
         workflow,
         "metal-compatibility",
