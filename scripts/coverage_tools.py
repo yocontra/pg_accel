@@ -5346,15 +5346,19 @@ def inspect_gpu_evidence(
         or set(passed_tests) != set(pinned_tests)
     ):
         errors.append("full pinned CTest inventory did not pass exactly once")
-    expected_summary = f"100% tests passed, 0 tests failed out of {len(pinned_tests)}"
+    expected_summaries = {
+        f"100% tests passed, 0 tests failed out of {len(pinned_tests)}",
+        f"100% tests passed out of {len(pinned_tests)}",
+    }
     ctest_summaries = [
-        line for line in log_text.splitlines() if "tests passed," in line
+        line.strip() for line in log_text.splitlines() if "tests passed" in line
     ]
     total_time_lines = [
         line for line in log_text.splitlines() if "Total Test time (real)" in line
     ]
     if (
-        ctest_summaries != [expected_summary]
+        len(ctest_summaries) != 1
+        or ctest_summaries[0] not in expected_summaries
         or len(total_time_lines) != 1
         or re.fullmatch(
             r"Total Test time \(real\) =\s+[0-9]+(?:\.[0-9]+)? sec",

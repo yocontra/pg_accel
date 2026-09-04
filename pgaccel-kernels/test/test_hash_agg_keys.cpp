@@ -10,6 +10,18 @@
 #include "pgaccel_ffi.h"
 #include "pgaccel_resident_count.h"
 
+extern "C" bool pgacceltest_resident_count_checked_add(size_t a, size_t b, size_t* out);
+extern "C" bool pgacceltest_resident_count_checked_mul(size_t a, size_t b, size_t* out);
+extern "C" bool pgacceltest_resident_count_align_up(size_t value, size_t alignment, size_t* out);
+extern "C" bool pgacceltest_resident_count_next_power_of_two(size_t value, size_t* out);
+extern "C" bool pgacceltest_resident_count_append_region(size_t count, size_t width,
+                                                         size_t alignment, size_t* cursor,
+                                                         size_t* out_offset);
+extern "C" bool pgacceltest_resident_count_null_layout_rejected(size_t capacity,
+                                                                size_t max_distinct);
+extern "C" bool pgacceltest_resident_count_slab_layout(size_t capacity, size_t max_distinct,
+                                                       size_t* offsets_and_bytes);
+
 static int g_checks = 0;
 static int g_failures = 0;
 
@@ -81,20 +93,17 @@ static void test_invalid_and_empty_contract() {
   std::printf("--- resident count invalid/empty contract ---\n");
   pgaccel_reset_gpu_exec_count();
 
-  CHECK("null out-state rejected",
-        pgaccel_hash_count_i64_device_hash_execute_bounded_checked(nullptr, 1, 1, nullptr) ==
-            PGACCEL_INVALID_ARGUMENT);
+  CHECK("null out-state rejected", pgaccel_hash_count_i64_device_hash_execute_bounded_checked(
+                                       nullptr, 1, 1, nullptr) == PGACCEL_INVALID_ARGUMENT);
 
   auto* sentinel = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
-  CHECK("null keys rejected",
-        pgaccel_hash_count_i64_device_hash_execute_bounded_checked(nullptr, 1, 1, &sentinel) ==
-            PGACCEL_INVALID_ARGUMENT);
+  CHECK("null keys rejected", pgaccel_hash_count_i64_device_hash_execute_bounded_checked(
+                                  nullptr, 1, 1, &sentinel) == PGACCEL_INVALID_ARGUMENT);
   CHECK("null keys clear output", sentinel == nullptr);
 
   sentinel = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
-  CHECK("empty input accepted",
-        pgaccel_hash_count_i64_device_hash_execute_bounded_checked(nullptr, 0, 0, &sentinel) ==
-            PGACCEL_OK);
+  CHECK("empty input accepted", pgaccel_hash_count_i64_device_hash_execute_bounded_checked(
+                                    nullptr, 0, 0, &sentinel) == PGACCEL_OK);
   CHECK("empty input returns state", sentinel != nullptr);
   CHECK("empty state has zero groups", pgaccel_agg_group_count(sentinel) == 0);
   CHECK("empty state has no key buffer", pgaccel_agg_get_group_keys(sentinel) == nullptr);
@@ -136,9 +145,8 @@ static void test_duplicate_and_extreme_keys() {
 
   pgaccel_agg_state* state = nullptr;
   pgaccel_reset_gpu_exec_count();
-  const pgaccel_status status =
-      pgaccel_hash_count_i64_device_hash_execute_bounded_checked(
-          device.ptr, keys.size(), expected.size(), &state);
+  const pgaccel_status status = pgaccel_hash_count_i64_device_hash_execute_bounded_checked(
+      device.ptr, keys.size(), expected.size(), &state);
   CHECK("duplicate/extreme status", status == PGACCEL_OK);
   CHECK("duplicate/extreme state", state != nullptr);
   CHECK("duplicate/extreme launches build and compact", pgaccel_gpu_exec_count() == 2);
@@ -161,9 +169,8 @@ static void test_high_cardinality_and_hint_normalization() {
     if (device.ptr == nullptr)
       return;
     pgaccel_agg_state* state = nullptr;
-    const pgaccel_status status =
-        pgaccel_hash_count_i64_device_hash_execute_bounded_checked(
-            device.ptr, keys.size(), hint, &state);
+    const pgaccel_status status = pgaccel_hash_count_i64_device_hash_execute_bounded_checked(
+        device.ptr, keys.size(), hint, &state);
     CHECK("high-cardinality normalized hint status", status == PGACCEL_OK);
     CHECK("high-cardinality normalized hint map", state_matches(state, expected));
     pgaccel_agg_free(state);
@@ -192,12 +199,59 @@ static void test_underestimated_bound_declines() {
 
   auto* state = reinterpret_cast<pgaccel_agg_state*>(uintptr_t{1});
   pgaccel_reset_gpu_exec_count();
-  const pgaccel_status status =
-      pgaccel_hash_count_i64_device_hash_execute_bounded_checked(device.ptr, keys.size(), 4,
-                                                                 &state);
+  const pgaccel_status status = pgaccel_hash_count_i64_device_hash_execute_bounded_checked(
+      device.ptr, keys.size(), 4, &state);
   CHECK("underestimated bound declines", status == PGACCEL_UNSUPPORTED);
   CHECK("underestimated bound publishes no state", state == nullptr);
   CHECK("underestimated bound still used device grouping", pgaccel_gpu_exec_count() == 2);
+}
+
+static void test_checked_layout_contracts() {
+  size_t value = 0;
+  CHECK("checked add rejects null output", !pgacceltest_resident_count_checked_add(1, 1, nullptr));
+  CHECK("checked add rejects overflow",
+        !pgacceltest_resident_count_checked_add(std::numeric_limits<size_t>::max(), 1, &value));
+  CHECK("checked add accepts a bounded sum",
+        pgacceltest_resident_count_checked_add(3, 4, &value) && value == 7);
+
+  CHECK("checked multiply rejects null output",
+        !pgacceltest_resident_count_checked_mul(1, 1, nullptr));
+  CHECK("checked multiply rejects overflow",
+        !pgacceltest_resident_count_checked_mul(2, std::numeric_limits<size_t>::max(), &value));
+  CHECK("checked multiply accepts a bounded product",
+        pgacceltest_resident_count_checked_mul(3, 4, &value) && value == 12);
+
+  CHECK("alignment rejects zero", !pgacceltest_resident_count_align_up(1, 0, &value));
+  CHECK("alignment rejects non-power-of-two values",
+        !pgacceltest_resident_count_align_up(1, 3, &value));
+  CHECK("alignment rounds upward", pgacceltest_resident_count_align_up(5, 8, &value) && value == 8);
+
+  CHECK("power-of-two rejects zero", !pgacceltest_resident_count_next_power_of_two(0, &value));
+  CHECK("power-of-two rejects null output",
+        !pgacceltest_resident_count_next_power_of_two(1, nullptr));
+  CHECK("power-of-two rounds upward",
+        pgacceltest_resident_count_next_power_of_two(17, &value) && value == 32);
+  CHECK("power-of-two rejects overflow",
+        !pgacceltest_resident_count_next_power_of_two(std::numeric_limits<size_t>::max(), &value));
+
+  size_t cursor = 0;
+  size_t offset = 0;
+  CHECK("region append rejects null cursor",
+        !pgacceltest_resident_count_append_region(1, 1, 1, nullptr, &offset));
+  CHECK("region append rejects overflow",
+        !pgacceltest_resident_count_append_region(std::numeric_limits<size_t>::max(), 2, 1, &cursor,
+                                                  &offset));
+
+  CHECK("slab layout rejects null internal output",
+        pgacceltest_resident_count_null_layout_rejected(1, 1));
+  size_t layout[4]{};
+  CHECK("slab layout rejects overflow",
+        !pgacceltest_resident_count_slab_layout(std::numeric_limits<size_t>::max(), 1, layout));
+  CHECK("slab layout rejects null exported output",
+        !pgacceltest_resident_count_slab_layout(16, 4, nullptr));
+  CHECK("slab layout returns aligned offsets",
+        pgacceltest_resident_count_slab_layout(16, 4, layout) && layout[0] == 0 &&
+            layout[1] == 64 && layout[2] == 128 && layout[3] > 128);
 }
 
 int main() {
@@ -206,6 +260,8 @@ int main() {
     std::fprintf(stderr, "FATAL: pgaccel_init failed\n");
     return 1;
   }
+
+  test_checked_layout_contracts();
 
   test_invalid_and_empty_contract();
   test_duplicate_and_extreme_keys();

@@ -1574,6 +1574,7 @@ def validate_ci_workflow_contract(workflow: str) -> None:
     for step_name in (
         "Run PostgreSQL ${{ matrix.pg }} Rust gate",
         "Run SQL integration tests",
+        "Run plan-shape + parallel-stress integration tests",
     ):
         step = _workflow_step(mac, step_name)
         if 'PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"' not in step:

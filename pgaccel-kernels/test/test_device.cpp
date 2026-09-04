@@ -10,12 +10,45 @@ extern sycl::queue* g_ooo_queue;
 #if defined(PGACCEL_TEST_HOOKS)
 extern "C" void pgacceltest_fail_before_ooo_queue_once(void);
 extern "C" unsigned pgacceltest_unpublished_queue_count(void);
+extern "C" bool pgacceltest_backend_name_matches(const char* platform, const char* expected);
+extern "C" int pgacceltest_score_backend(bool is_gpu, const char* backend);
+extern "C" void pgacceltest_seed_foreign_runtime_state(void);
 extern "C" bool pgacceltest_grouped_agg_cleanup_exception_is_caught(void);
 extern "C" bool pgacceltest_grouped_agg_helper_semantics(void);
 #endif
 
+#if defined(PGACCEL_TEST_HOOKS)
+static bool backend_classifier_semantics_hold() {
+  struct NameCase {
+    const char* platform;
+    const char* expected;
+  };
+  const NameCase names[] = {{"NVIDIA CUDA", "cuda"},
+                            {"AMD HIP", "hip"},
+                            {"Intel Level-Zero", "level_zero"},
+                            {"Intel Level Zero", "level_zero"},
+                            {"Intel oneAPI", "level_zero"},
+                            {"Apple Metal", "metal"},
+                            {"unrecognized", "unknown"}};
+  for (const NameCase& item : names) {
+    if (!pgacceltest_backend_name_matches(item.platform, item.expected))
+      return false;
+  }
+  return pgacceltest_score_backend(true, "cuda") == 100 &&
+         pgacceltest_score_backend(true, "hip") == 90 &&
+         pgacceltest_score_backend(true, "level_zero") == 80 &&
+         pgacceltest_score_backend(true, "metal") == 50 &&
+         pgacceltest_score_backend(true, "unknown") == 40 &&
+         pgacceltest_score_backend(false, "cuda") == -1;
+}
+#endif
+
 int main() {
 #if defined(PGACCEL_TEST_HOOKS)
+  if (!backend_classifier_semantics_hold()) {
+    fprintf(stderr, "backend name and device scoring classification regressed\n");
+    return 1;
+  }
   pgacceltest_fail_before_ooo_queue_once();
   if (pgaccel_init() != PGACCEL_ERROR) {
     fprintf(stderr, "injected second-queue construction failure did not fail initialization\n");
@@ -114,6 +147,11 @@ int main() {
     return 1;
   }
 #if defined(PGACCEL_TEST_HOOKS)
+  pgacceltest_seed_foreign_runtime_state();
+  if (pgaccel_shutdown() != PGACCEL_OK || g_queue != nullptr || g_ooo_queue != nullptr) {
+    fprintf(stderr, "foreign-PID shutdown dereferenced or retained inherited queues\n");
+    return 1;
+  }
   if (pgacceltest_unpublished_queue_count() != 0) {
     fprintf(stderr, "shutdown left queue publication ownership outstanding\n");
     return 1;

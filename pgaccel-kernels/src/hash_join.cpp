@@ -471,3 +471,33 @@ pgaccel_status pgaccel_hash_join_count_device(const pgaccel_hash_table* table,
 }
 
 }  // extern "C"
+
+#if defined(PGACCEL_TEST_HOOKS)
+// Thin bridges let the standalone test exercise checked private helpers and
+// the non-Metal build kernel without duplicating test orchestration here.
+extern "C" bool pgacceltest_hash_join_next_power_of_two(size_t value, size_t* out) {
+  return next_power_of_two_checked(value, out);
+}
+
+extern "C" bool pgacceltest_hash_join_capacity(size_t rows, size_t* out) {
+  return hash_join_capacity(rows, out);
+}
+
+extern "C" uint64_t pgacceltest_hash_join_hash_i64(int64_t key) {
+  return hash_key<int64_t>(key);
+}
+
+extern "C" pgaccel_status
+pgacceltest_hash_join_build_parallel_i32(const int32_t* keys, const uint8_t* nulls, int32_t* heads,
+                                         int32_t* next, size_t count, size_t capacity) try {
+  sycl::queue* queue = pgaccel_get_queue();
+  if (queue == nullptr)
+    return PGACCEL_ERROR_NO_DEVICE;
+  build_parallel(*queue, keys, nulls, heads, next, count, capacity);
+  return PGACCEL_OK;
+} catch (const std::exception&) {
+  return PGACCEL_ERROR;
+} catch (...) {
+  return PGACCEL_ERROR;
+}
+#endif

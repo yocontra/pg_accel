@@ -2118,7 +2118,7 @@ impl DescriptorAggPlan {
         let planned_kernel_mode =
             planned_descriptor_kernel_mode(&spec, h3_parent_group(&spec).is_some());
         let limits = crate::engine::cost::device_limits();
-        let executor_limits = ExecutorLimits::from(limits);
+        let executor_limits = ExecutorLimits::from(crate::engine::cost::execution_device_limits());
         let (artifact_kind, catalog_fingerprint) =
             if let Some((cell, resolution, result_type_oid)) = h3_parent_group(&spec) {
                 // SAFETY: executor Begin runs on PostgreSQL's main backend thread.

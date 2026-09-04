@@ -995,6 +995,22 @@ void test_basic_expression_tier() {
             std::vector<int8_t>({PGACCEL_EXPR_TRUE, PGACCEL_EXPR_FALSE, PGACCEL_EXPR_FALSE,
                                  PGACCEL_EXPR_FALSE, PGACCEL_EXPR_FALSE}));
 
+  void* unavailable_data[] = {nullptr};
+  pgaccel_val_tag unavailable_types[] = {static_cast<pgaccel_val_tag>(999)};
+  pgaccel_batch unavailable_batch{1, 1, unavailable_data, nullptr, unavailable_types};
+  Program basic_unavailable(
+      {instruction(PGACCEL_EXPR_OP_LOAD_COL, 0), instruction(PGACCEL_EXPR_OP_IS_NOT_NULL)},
+      {i32_value(7)}, 1);
+  const Projection unavailable_projection = project(basic_unavailable, unavailable_batch);
+  CHECK("basic staging preserves an unavailable column as NULL",
+        unavailable_projection.status == PGACCEL_OK &&
+            unavailable_projection.uncertain == std::vector<uint8_t>({0}) &&
+            unavailable_projection.values[0].tag == PGACCEL_VAL_BOOL &&
+            !unavailable_projection.values[0].data.b);
+  CHECK("basic staging accepts an unused constant pool without changing NULL semantics",
+        predicate(basic_unavailable, unavailable_batch) ==
+            std::vector<int8_t>({PGACCEL_EXPR_FALSE}));
+
   OneColumnBatch<int32_t> one({1}, PGACCEL_VAL_INT32);
   Program malformed({instruction(PGACCEL_EXPR_OP_IS_NOT_NULL)}, {}, 1);
   const Projection malformed_projection = project(malformed, one.abi);

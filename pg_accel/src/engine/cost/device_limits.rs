@@ -1490,6 +1490,13 @@ mod tests {
             limits.gpu_grouped_agg_one_shot_max_rows,
             GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS
         );
+        let physical_limits = DeviceLimits::from_profile(&hosted);
+        assert_eq!(physical_limits.gpu_grouped_agg_one_shot_max_rows, 64_000);
+        assert!(
+            physical_limits.gpu_grouped_agg_one_shot_max_rows
+                < limits.gpu_grouped_agg_one_shot_max_rows,
+            "planner calibration may not become the physical synchronous-work bound"
+        );
     }
 
     #[test]
@@ -1525,6 +1532,12 @@ fn validate_device_limits_for_publication(
 
 /// Cached device limits, initialised on first access after GPU init.
 static DEVICE_LIMITS: std::sync::OnceLock<DeviceLimits> = std::sync::OnceLock::new();
+
+/// Physical executor limits cached alongside [`DEVICE_LIMITS`]. The public
+/// limits may use the exact hosted virtual-M1 planner calibration, but a
+/// synthetic compute-unit count must never enlarge synchronous kernel work on
+/// the real device.
+static EXECUTION_DEVICE_LIMITS: std::sync::OnceLock<DeviceLimits> = std::sync::OnceLock::new();
 
 /// Source of the cached [`DeviceLimits`]. `HardwareDerived` is the normal GPU
 /// profile, `HostedCompatibilityCalibrated` is the exact virtual-M1
@@ -1572,13 +1585,19 @@ static DEVICE_LIMITS_SOURCE: std::sync::OnceLock<DeviceLimitsSource> = std::sync
 pub fn device_limits() -> &'static DeviceLimits {
     DEVICE_LIMITS.get_or_init(|| {
         #[cfg(test)]
-        let (candidate, source) = (
+        let (candidate, execution_candidate, source) = (
+            DeviceLimits::cpu_only(),
             DeviceLimits::cpu_only(),
             DeviceLimitsSource::FallbackCpuOnly,
         );
         #[cfg(not(test))]
-        let (candidate, source) = {
+        let (candidate, execution_candidate, source) = {
             let profile = PlatformProfile::detect();
+            let physical_limits = if profile.has_gpu {
+                DeviceLimits::from_profile(&profile)
+            } else {
+                DeviceLimits::cpu_only()
+            };
             let compatibility_profile = hosted_metal_planner_profile(
                 &profile,
                 std::env::var_os(HOSTED_METAL_COMPATIBILITY_ENV).as_deref(),
@@ -1592,25 +1611,44 @@ pub fn device_limits() -> &'static DeviceLimits {
             if let Some(compatibility_profile) = compatibility_profile {
                 (
                     DeviceLimits::from_profile(&compatibility_profile),
+                    physical_limits,
                     DeviceLimitsSource::HostedCompatibilityCalibrated,
                 )
             } else if profile.has_gpu {
                 (
-                    DeviceLimits::from_profile(&profile),
+                    physical_limits.clone(),
+                    physical_limits,
                     DeviceLimitsSource::HardwareDerived,
                 )
             } else {
                 (
                     DeviceLimits::cpu_only(),
+                    physical_limits,
                     DeviceLimitsSource::FallbackCpuOnly,
                 )
             }
         };
+        let execution_limits = validate_device_limits_for_publication(execution_candidate)
+            .unwrap_or_else(|error| panic!("refusing invalid physical executor limits: {error}"));
         let limits = validate_device_limits_for_publication(candidate)
             .unwrap_or_else(|error| panic!("refusing to publish invalid device limits: {error}"));
+        let _ = EXECUTION_DEVICE_LIMITS.set(execution_limits);
         let _ = DEVICE_LIMITS_SOURCE.set(source);
         limits
     })
+}
+
+/// Get limits derived from the physical device for executor chunking and
+/// synchronous-work bounds. This differs from [`device_limits`] only on the
+/// exact hosted compatibility runner, where planner admission is calibrated
+/// to a reference device while execution must remain bounded by the real
+/// one-CU virtual GPU.
+#[must_use]
+pub(crate) fn execution_device_limits() -> &'static DeviceLimits {
+    let _ = device_limits();
+    EXECUTION_DEVICE_LIMITS
+        .get()
+        .expect("physical executor limits initialize with public device limits")
 }
 
 /// Returns the source of the cached device limits, forcing init if it hasn't

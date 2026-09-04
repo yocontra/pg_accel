@@ -747,6 +747,21 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 1,
             ),
             workflow.replace(
+                "      - name: Run plan-shape + parallel-stress integration tests\n"
+                "        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18\n"
+                "        shell: bash\n"
+                "        env:\n"
+                "          # The virtual M1 has no overlap between the physical one-CU\n"
+                "          # grouped-aggregate admission floor and one-shot safety ceiling.\n"
+                "          # Calibrate planning to the reference profile while the executor\n"
+                "          # continues to derive synchronous-work bounds from the real device.\n"
+                '          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"',
+                "      - name: Run plan-shape + parallel-stress integration tests\n"
+                "        if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18\n"
+                "        shell: bash",
+                1,
+            ),
+            workflow.replace(
                 '          PGOPTIONS: "-c pg_accel.kernel_timeout_ms=60000"',
                 '          PGOPTIONS: "-c pg_accel.kernel_timeout_ms=5000"',
                 1,

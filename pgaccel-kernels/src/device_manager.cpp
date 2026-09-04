@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -108,43 +109,52 @@ extern "C" void pgacceltest_clear_seeded_runtime_state(void) {
   g_initialized.store(false, std::memory_order_release);
   g_test_fail_after_fork_invalidation.store(false, std::memory_order_release);
 }
+
+extern "C" void pgacceltest_seed_foreign_runtime_state(void) {
+  g_device_info.compute_units = 999;
+  g_caps.compute_units = 999;
+  g_queue = reinterpret_cast<sycl::queue*>(uintptr_t{1});
+  g_ooo_queue = reinterpret_cast<sycl::queue*>(uintptr_t{2});
+  g_init_pid = getpid() == std::numeric_limits<pid_t>::max() ? getpid() - 1 : getpid() + 1;
+  g_initialized.store(true, std::memory_order_release);
+}
 #endif
 
 // ---------------------------------------------------------------------------
 // Backend name detection
 // ---------------------------------------------------------------------------
 
-static std::string detect_backend_name(const sycl::device& dev) {
-  // SAFETY: platform name is always available on a valid SYCL device.
-  std::string platform_name = dev.get_platform().get_info<sycl::info::platform::name>();
-
+static std::string backend_name_from_platform(std::string platform_name) {
   // Lowercase for matching.
-  std::string lower = platform_name;
-  std::transform(lower.begin(), lower.end(), lower.begin(),
+  std::transform(platform_name.begin(), platform_name.end(), platform_name.begin(),
                  [](unsigned char c) { return std::tolower(c); });
 
-  if (lower.find("cuda") != std::string::npos)
+  if (platform_name.find("cuda") != std::string::npos)
     return "cuda";
-  if (lower.find("hip") != std::string::npos)
+  if (platform_name.find("hip") != std::string::npos)
     return "hip";
-  if (lower.find("level-zero") != std::string::npos ||
-      lower.find("level zero") != std::string::npos || lower.find("oneapi") != std::string::npos)
+  if (platform_name.find("level-zero") != std::string::npos ||
+      platform_name.find("level zero") != std::string::npos ||
+      platform_name.find("oneapi") != std::string::npos)
     return "level_zero";
-  if (lower.find("metal") != std::string::npos)
+  if (platform_name.find("metal") != std::string::npos)
     return "metal";
 
   return "unknown";
+}
+
+static std::string detect_backend_name(const sycl::device& dev) {
+  // SAFETY: platform name is always available on a valid SYCL device.
+  return backend_name_from_platform(dev.get_platform().get_info<sycl::info::platform::name>());
 }
 
 // ---------------------------------------------------------------------------
 // Device scoring — higher is better
 // ---------------------------------------------------------------------------
 
-static int score_device(const sycl::device& dev) {
-  if (!dev.is_gpu())
+static int score_backend(bool is_gpu, const std::string& backend) {
+  if (!is_gpu)
     return -1;
-
-  std::string backend = detect_backend_name(dev);
 
   // Discrete GPU backends, ranked by maturity.
   if (backend == "cuda")
@@ -159,11 +169,23 @@ static int score_device(const sycl::device& dev) {
     return 50;
 
   // Generic GPU we don't recognize.
-  if (dev.is_gpu())
-    return 40;
-
-  return -1;
+  return 40;
 }
+
+static int score_device(const sycl::device& dev) {
+  return score_backend(dev.is_gpu(), detect_backend_name(dev));
+}
+
+#if defined(PGACCEL_TEST_HOOKS)
+extern "C" bool pgacceltest_backend_name_matches(const char* platform, const char* expected) {
+  return platform != nullptr && expected != nullptr &&
+         backend_name_from_platform(platform) == expected;
+}
+
+extern "C" int pgacceltest_score_backend(bool is_gpu, const char* backend) {
+  return score_backend(is_gpu, backend == nullptr ? "" : backend);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Populate caps from SYCL device

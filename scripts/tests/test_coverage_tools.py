@@ -3452,6 +3452,12 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             valid_ctest = ctest_pass_log(names)
             log.write_text(valid_ctest, encoding="utf-8")
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
+            modern_ctest = valid_ctest.replace(
+                f"100% tests passed, 0 tests failed out of {len(names)}",
+                f"100% tests passed out of {len(names)}",
+            )
+            log.write_text(modern_ctest, encoding="utf-8")
+            self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)
             registration_order = names[7:] + names[:7]
             log.write_text(ctest_pass_log(registration_order), encoding="utf-8")
             self.assertEqual(quiet_call(coverage_tools.gpu_evidence, args), 0)

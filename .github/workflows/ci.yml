@@ -212,6 +212,12 @@ jobs:
       - name: Run plan-shape + parallel-stress integration tests
         if: steps.pg-support.outputs.skip != 'true' && matrix.pg == 18
         shell: bash
+        env:
+          # The virtual M1 has no overlap between the physical one-CU
+          # grouped-aggregate admission floor and one-shot safety ceiling.
+          # Calibrate planning to the reference profile while the executor
+          # continues to derive synchronous-work bounds from the real device.
+          PGACCEL_HOSTED_METAL_COMPATIBILITY: "1"
         run: |
           set -euo pipefail
           just plan-shape-tests ${{ matrix.pg }}

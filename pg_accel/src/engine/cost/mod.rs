@@ -21,6 +21,7 @@ pub use constants::{
     SPATIAL_INDEX_COST_RATIO_THRESHOLD, SPATIAL_INDEX_SELECTIVITY_THRESHOLD,
 };
 pub(crate) use device_limits::GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS;
+pub(crate) use device_limits::execution_device_limits;
 pub use device_limits::{
     DeviceLimits, DeviceLimitsSource, DeviceLimitsValidationError, device_limits,
     device_limits_source,
