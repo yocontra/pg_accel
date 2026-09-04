@@ -2749,6 +2749,50 @@ class HostComputationAndContractTests(unittest.TestCase):
         finding = finding_for(host_work, "pgaccel_shutdown")
         self.assertIn("invalid_lifecycle_contract", finding.classifications)
 
+    def test_native_error_handoff_lifecycle_contracts_are_exact(self) -> None:
+        valid = audit_fixture(
+            r"""
+            extern "C" void pgaccel_clear_last_error() {
+              tl_last_error[0] = 0;
+            }
+            extern "C" size_t pgaccel_copy_last_error(
+                char* buffer, size_t capacity) {
+              const size_t length = 0;
+              if (buffer == nullptr || capacity == 0) return length;
+              std::memcpy(buffer, tl_last_error, length);
+              buffer[length] = 0;
+              return length;
+            }
+            """
+        )
+        self.assertFalse(valid.findings)
+        self.assertEqual(
+            {entry.entrypoint: entry.classifications for entry in valid.entrypoint_audits},
+            {
+                "pgaccel_clear_last_error": ("lifecycle",),
+                "pgaccel_copy_last_error": ("lifecycle",),
+            },
+        )
+
+        invalid = audit_fixture(
+            r"""
+            extern "C" void pgaccel_clear_last_error() {
+              tl_last_error[1] = 0;
+            }
+            extern "C" size_t pgaccel_copy_last_error(
+                char* buffer, size_t capacity) {
+              const size_t length = 0;
+              if (buffer == nullptr || capacity == 0) return length;
+              for (size_t i = 0; i < length; ++i) buffer[i] = tl_last_error[i];
+              buffer[length] = 0;
+              return length;
+            }
+            """
+        )
+        for entry in invalid.entrypoint_audits:
+            self.assertFalse(entry.ok, entry.detail)
+            self.assertIn("invalid_lifecycle_contract", entry.classifications)
+
     def test_failure_only_contract_rejects_new_host_work(self) -> None:
         valid = audit_fixture(
             r"""
@@ -6736,11 +6780,11 @@ class AbiInventoryTests(unittest.TestCase):
 
     def test_checked_in_manifest_has_literal_integrity_anchor(self) -> None:
         manifest = audit.load_abi_manifest(audit.DEFAULT_ABI_MANIFEST)
-        self.assertEqual(manifest.count, 121)
-        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 121)
+        self.assertEqual(manifest.count, 123)
+        self.assertEqual(audit.EXPECTED_ABI_MANIFEST_COUNT, 123)
         self.assertEqual(
             manifest.sha256,
-            "2f0f26de09706713002e2b1c44e2f1db5159ae132b1bec860e69b64bd4f244b8",
+            "6a6871c0f01391606ca77714f03324da4de893766a99d1bf036091b41308b667",
         )
         self.assertEqual(manifest.sha256, audit.EXPECTED_ABI_MANIFEST_SHA256)
 
@@ -6966,15 +7010,15 @@ class ProductionWitnessTests(unittest.TestCase):
         )
 
     def test_complete_real_abi_baseline_and_violation_floor(self) -> None:
-        self.assertEqual(len(self.abi.definitions), 121)
-        self.assertEqual(len({item.name for item in self.abi.definitions}), 121)
-        self.assertEqual(len({item.name for item in self.abi.declarations}), 121)
+        self.assertEqual(len(self.abi.definitions), 123)
+        self.assertEqual(len({item.name for item in self.abi.definitions}), 123)
+        self.assertEqual(len({item.name for item in self.abi.declarations}), 123)
         self.assertFalse(self.abi.findings)
         self.assertEqual(self.abi.definition_hash, self.abi.declaration_hash)
         self.assertEqual(self.abi.source_definition_hash, self.abi.definition_hash)
         self.assertEqual(self.abi.manifest["status"], "verified")
         self.assertEqual(self.abi.compiler["status"], "verified")
-        self.assertEqual(self.abi.compiler["inventory_count"], 121)
+        self.assertEqual(self.abi.compiler["inventory_count"], 123)
         status_names = sorted(
             entry.entrypoint for entry in self.by_name.values() if entry.is_status
         )[:82]

@@ -1665,3 +1665,110 @@ pub fn device_limits_source() -> DeviceLimitsSource {
         .copied()
         .unwrap_or(DeviceLimitsSource::FallbackCpuOnly)
 }
+
+#[cfg(test)]
+mod diagnostic_contract_tests {
+    use super::*;
+
+    #[test]
+    fn validation_errors_render_stable_actionable_messages() {
+        let cases = [
+            (
+                DeviceLimitsValidationError::ZeroCount {
+                    field: "gpu_min_rows",
+                },
+                "device limit gpu_min_rows must be nonzero",
+            ),
+            (
+                DeviceLimitsValidationError::InvertedRange {
+                    lower_field: "minimum",
+                    lower: 11,
+                    upper_field: "maximum",
+                    upper: 10,
+                },
+                "device limit range is inverted: minimum=11 exceeds maximum=10",
+            ),
+            (
+                DeviceLimitsValidationError::InvalidFraction {
+                    field: "fraction",
+                    value: 1.5,
+                },
+                "device limit fraction must be finite and within [0, 1], got 1.5",
+            ),
+            (
+                DeviceLimitsValidationError::InvalidPositiveFloat {
+                    field: "cost",
+                    value: 0.0,
+                },
+                "device limit cost must be finite and positive, got 0",
+            ),
+            (
+                DeviceLimitsValidationError::InvalidSoftFp64Multiplier { value: 65.0 },
+                "device limit soft_fp64_cost_multiplier must be finite and within [1, 64], got 65",
+            ),
+            (
+                DeviceLimitsValidationError::HistoricalCrashBandExposed {
+                    field: "unsafe_rows",
+                    value: 100_001,
+                    exclusive_upper_bound: 100_000,
+                },
+                "device limit unsafe_rows=100001 exposes the historical crash band at 100000 rows",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn hosted_compatibility_errors_render_the_control_and_required_profile() {
+        assert_eq!(
+            HostedMetalCompatibilityError::InvalidMode("yes".to_owned()).to_string(),
+            "PGACCEL_HOSTED_METAL_COMPATIBILITY must be 0 or 1, got \"yes\""
+        );
+        assert_eq!(
+            HostedMetalCompatibilityError::ProfileMismatch.to_string(),
+            "PGACCEL_HOSTED_METAL_COMPATIBILITY=1 requires the exact hosted virtual-M1 Metal profile"
+        );
+    }
+
+    #[test]
+    fn device_limit_source_labels_are_complete_and_stable() {
+        let cases = [
+            (DeviceLimitsSource::HardwareDerived, "hardware_derived"),
+            (
+                DeviceLimitsSource::HostedCompatibilityCalibrated,
+                "hosted_compatibility_calibrated",
+            ),
+            (DeviceLimitsSource::FallbackCpuOnly, "fallback_cpu_only"),
+        ];
+
+        for (source, expected) in cases {
+            assert_eq!(source.as_str(), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_hosted_compatibility_mode_is_rejected_lossily_but_safely() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let profile = PlatformProfile {
+            cpu_cores: 3,
+            has_gpu: true,
+            estimated_gpu_gflops: 2.0,
+            compute_units: 1,
+            device_name: "Apple Paravirtual device".to_owned(),
+            backend_name: "metal".to_owned(),
+            gpu_max_alloc_bytes: 1024,
+            has_native_fp64: false,
+        };
+        let mode = OsStr::from_bytes(b"\xff");
+
+        assert!(matches!(
+            hosted_metal_planner_profile(&profile, Some(mode), true),
+            Err(HostedMetalCompatibilityError::InvalidMode(value)) if value == "\u{fffd}"
+        ));
+    }
+}

@@ -24,6 +24,33 @@
 
 static thread_local uint64_t tl_gpu_exec_count = 0;
 
+namespace {
+constexpr size_t kLastErrorCapacity = 2048;
+thread_local char tl_last_error[kLastErrorCapacity] = {};
+}  // namespace
+
+extern "C" void pgaccel_clear_last_error(void) {
+  tl_last_error[0] = 0;
+}
+
+extern "C" size_t pgaccel_copy_last_error(char* buffer, size_t capacity) {
+  const size_t length = std::strlen(tl_last_error);
+  if (buffer == nullptr || capacity == 0)
+    return length;
+  const size_t copied = std::min(length, capacity - 1);
+  std::memcpy(buffer, tl_last_error, copied);
+  buffer[copied] = 0;
+  return length;
+}
+
+void pgaccel_set_last_error(const char* entry_point, const std::exception* e) noexcept {
+  const char* safe_entry_point = entry_point != nullptr ? entry_point : "<unknown>";
+  const char* message = e != nullptr ? e->what() : "unknown C++ exception";
+  std::snprintf(tl_last_error, sizeof(tl_last_error),
+                "pgaccel: %s: GPU kernel failure: %s", safe_entry_point, message);
+  tl_last_error[sizeof(tl_last_error) - 1] = 0;
+}
+
 extern "C" uint64_t pgaccel_gpu_exec_count(void) {
   return tl_gpu_exec_count;
 }

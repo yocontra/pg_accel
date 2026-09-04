@@ -71,6 +71,7 @@
     "exclude": [],
     "executable_headers": [
       "pgaccel-kernels/include/alloc_helper.h",
+      "pgaccel-kernels/include/pgaccel_error.h",
       "pgaccel-kernels/include/pgaccel_queue.h",
       "pgaccel-kernels/src/h3_exact_device.hpp",
       "pgaccel-kernels/src/h3_float_device.hpp"
@@ -89,6 +90,7 @@
     ],
     "owned_files": [
       "pgaccel-kernels/include/alloc_helper.h",
+      "pgaccel-kernels/include/pgaccel_error.h",
       "pgaccel-kernels/include/pgaccel_expr.h",
       "pgaccel-kernels/include/pgaccel_ffi.h",
       "pgaccel-kernels/include/pgaccel_hash_join.h",
@@ -122,6 +124,7 @@
     ],
     "required_mapping_files": [
       "pgaccel-kernels/include/alloc_helper.h",
+      "pgaccel-kernels/include/pgaccel_error.h",
       "pgaccel-kernels/include/pgaccel_queue.h",
       "pgaccel-kernels/src/archive_stats.cpp",
       "pgaccel-kernels/src/bbox_ops.cpp",

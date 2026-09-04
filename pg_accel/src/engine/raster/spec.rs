@@ -655,3 +655,145 @@ mod tests {
         assert_eq!(std::mem::offset_of!(RasterReclassRule, destination), 8);
     }
 }
+
+#[cfg(test)]
+mod validation_contract_tests {
+    use super::*;
+
+    fn valid_spec() -> RasterQuerySpec {
+        RasterQuerySpec {
+            relation_oid: 1,
+            raster_attno: 1,
+            raster_type_oid: 2,
+            function_oid: 3,
+            as_wkb_fn_oid: 4,
+            rast_from_wkb_fn_oid: 5,
+            catalog_fingerprint: vec![6].into_boxed_slice(),
+            reclass: RasterReclassSpec {
+                output_pixel_type: RasterPixelType::UInt8,
+                rules: vec![RasterReclassRule {
+                    source: 0,
+                    destination: 1,
+                }]
+                .into_boxed_slice(),
+            },
+        }
+    }
+
+    #[test]
+    fn query_identity_validation_rejects_every_missing_or_oversized_field() {
+        let mut candidate = valid_spec();
+        candidate.raster_attno = 0;
+        assert_eq!(
+            candidate.validate(),
+            Err(RasterSpecError::InvalidRasterAttno(0))
+        );
+
+        let mut candidate = valid_spec();
+        candidate.raster_type_oid = 0;
+        assert_eq!(
+            candidate.validate(),
+            Err(RasterSpecError::MissingRasterTypeOid)
+        );
+
+        let mut candidate = valid_spec();
+        candidate.function_oid = 0;
+        assert_eq!(
+            candidate.validate(),
+            Err(RasterSpecError::MissingFunctionOid)
+        );
+
+        let mut candidate = valid_spec();
+        candidate.as_wkb_fn_oid = 0;
+        assert_eq!(
+            candidate.validate(),
+            Err(RasterSpecError::MissingAsWkbFunctionOid)
+        );
+
+        let mut candidate = valid_spec();
+        candidate.rast_from_wkb_fn_oid = 0;
+        assert_eq!(
+            candidate.validate(),
+            Err(RasterSpecError::MissingRastFromWkbFunctionOid)
+        );
+
+        let mut candidate = valid_spec();
+        candidate.catalog_fingerprint =
+            vec![0; MAX_RASTER_CATALOG_FINGERPRINT_WORDS + 1].into_boxed_slice();
+        assert_eq!(
+            candidate.validate(),
+            Err(RasterSpecError::CatalogFingerprintTooLong(
+                MAX_RASTER_CATALOG_FINGERPRINT_WORDS + 1
+            ))
+        );
+    }
+
+    #[test]
+    fn reclass_validation_rejects_empty_oversized_and_out_of_range_outputs() {
+        let empty = RasterReclassSpec {
+            output_pixel_type: RasterPixelType::UInt8,
+            rules: Box::new([]),
+        };
+        assert_eq!(empty.validate(), Err(RasterSpecError::EmptyReclassRules));
+
+        let oversized = RasterReclassSpec {
+            output_pixel_type: RasterPixelType::UInt8,
+            rules: (0..=MAX_RASTER_RECLASS_RULES)
+                .map(|source| RasterReclassRule {
+                    source: source as i64,
+                    destination: 0,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        };
+        assert_eq!(
+            oversized.validate(),
+            Err(RasterSpecError::TooManyReclassRules(
+                MAX_RASTER_RECLASS_RULES + 1
+            ))
+        );
+
+        let bad_destination = RasterReclassSpec {
+            output_pixel_type: RasterPixelType::UInt8,
+            rules: vec![RasterReclassRule {
+                source: 0,
+                destination: 256,
+            }]
+            .into_boxed_slice(),
+        };
+        assert_eq!(
+            bad_destination.validate(),
+            Err(RasterSpecError::ReclassDestinationOutOfRange {
+                destination: 256,
+                output_pixel_type: RasterPixelType::UInt8,
+            })
+        );
+    }
+
+    #[test]
+    fn raster_errors_have_nonempty_variant_specific_display_text() {
+        let spec_error = RasterSpecError::MissingRasterTypeOid.to_string();
+        let parse_error = RasterReclassParseError::EmptyExpression.to_string();
+
+        assert_eq!(spec_error, "MissingRasterTypeOid");
+        assert_eq!(parse_error, "EmptyExpression");
+    }
+
+    #[test]
+    fn empty_and_oversized_reclass_expressions_decline_before_rule_parsing() {
+        assert_eq!(
+            parse_exact_reclass_spec("", "8BUI"),
+            Err(RasterReclassParseError::EmptyExpression)
+        );
+
+        let expression = std::iter::repeat_n("0:0", MAX_RASTER_RECLASS_RULES + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            parse_exact_reclass_spec(&expression, "8BUI"),
+            Err(RasterReclassParseError::TooManyRules(
+                MAX_RASTER_RECLASS_RULES + 1
+            ))
+        );
+    }
+}

@@ -27,8 +27,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 
 #include "pgaccel_expr.h"
+#include "pgaccel_error.h"
 #include "pgaccel_ffi.h"
 #include "pgaccel_olap.h"
 
@@ -116,6 +118,48 @@ int main() {
     if (pgaccel_shutdown() != PGACCEL_OK)
       fprintf(stderr, "FAIL: pgaccel_shutdown() failed after initialization failure\n");
     return 1;
+  }
+
+  // The PostgreSQL test monitor may omit unprefixed native stderr from the
+  // failing backend's report. Pin the allocation-free TLS handoff that lets
+  // Rust carry the caught exception into the structured PostgreSQL error.
+  {
+    char error_text[256] = {'x'};
+    pgaccel_clear_last_error();
+    ASSERT_TRUE("native error handoff starts empty",
+                pgaccel_copy_last_error(error_text, sizeof(error_text)) == 0 &&
+                    error_text[0] == '\0');
+
+    const std::runtime_error sentinel("native error handoff sentinel");
+    const pgaccel_status st = pgaccel_kernel_failure("test_native_error_handoff", &sentinel);
+    const size_t full_length = pgaccel_copy_last_error(error_text, sizeof(error_text));
+    ASSERT_TRUE("native error handoff preserves hard status", st == PGACCEL_ERROR);
+    ASSERT_TRUE("native error handoff preserves entry point",
+                std::strstr(error_text, "test_native_error_handoff") != nullptr);
+    ASSERT_TRUE("native error handoff preserves exception text",
+                std::strstr(error_text, "native error handoff sentinel") != nullptr);
+    ASSERT_TRUE("native error handoff reports exact full length",
+                full_length == std::strlen(error_text));
+
+    char tiny[8] = {};
+    ASSERT_TRUE("native error handoff truncates with a terminator",
+                pgaccel_copy_last_error(tiny, sizeof(tiny)) == full_length &&
+                    tiny[sizeof(tiny) - 1] == '\0');
+    ASSERT_TRUE("native error handoff supports length-only reads",
+                pgaccel_copy_last_error(nullptr, 0) == full_length);
+
+    ASSERT_TRUE("native error handoff accepts missing exception context",
+                pgaccel_kernel_failure(nullptr, nullptr) == PGACCEL_ERROR);
+    pgaccel_copy_last_error(error_text, sizeof(error_text));
+    ASSERT_TRUE("native error handoff labels a missing entry point",
+                std::strstr(error_text, "<unknown>") != nullptr);
+    ASSERT_TRUE("native error handoff labels a missing exception",
+                std::strstr(error_text, "unknown C++ exception") != nullptr);
+
+    pgaccel_clear_last_error();
+    ASSERT_TRUE("native error handoff clear removes stale detail",
+                pgaccel_copy_last_error(error_text, sizeof(error_text)) == 0 &&
+                    error_text[0] == '\0');
   }
 
   // ── Positive control: small-tier GPU entry points succeed ──

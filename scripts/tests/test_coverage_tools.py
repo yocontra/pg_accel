@@ -3205,6 +3205,14 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 "create_pipeline_with_retry(MTL::PipelineOptionNone)",
                 "create_pipeline(MTL::PipelineOptionNone)",
             ),
+            (
+                "[kernel_name = std::string{kernel_name}]",
+                "[=]",
+            ),
+            (
+                'std::string msg = "metal: Kernel \'" + kernel_name +',
+                'std::string msg = "metal: Command buffer failed: "',
+            ),
         ):
             with self.subTest(missing_invariant=original):
                 mutated = patch.replace(original, replacement)

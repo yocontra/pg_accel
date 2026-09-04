@@ -129,6 +129,7 @@ UINT64_MAX = (1 << 64) - 1
 ACCELERATOR_BACKENDS = {"metal", "cuda", "hip", "level_zero"}
 PINNED_CPP_EXECUTABLE_HEADERS = {
     "pgaccel-kernels/include/alloc_helper.h",
+    "pgaccel-kernels/include/pgaccel_error.h",
     "pgaccel-kernels/include/pgaccel_queue.h",
     "pgaccel-kernels/src/h3_exact_device.hpp",
     "pgaccel-kernels/src/h3_float_device.hpp",
@@ -5698,6 +5699,8 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         "MTL::PipelineOptionFailOnBinaryArchiveMiss",
         "MTL::PipelineOptionNone",
         "metal_obj, new_command_buffer(), _allocator, kernel_name",
+        "[kernel_name = std::string{kernel_name}]",
+        'std::string msg = "metal: Kernel \'" + kernel_name +',
     ):
         if required not in added_text:
             errors.append(

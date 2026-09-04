@@ -30,7 +30,7 @@ pub mod polygon;
 pub mod polygon_encoder;
 pub mod wkb;
 
-#[cfg(feature = "pg_test")]
+#[cfg(any(test, feature = "pg_test"))]
 mod tests;
 
 pub use array::{ExtractError, ExtractedGeom, extract_geometry_array};

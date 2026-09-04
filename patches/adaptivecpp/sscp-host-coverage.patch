@@ -1542,6 +1542,17 @@ index c32232fa..ab086cd3 100644
 @@ -221 +219 @@ result launch_kernel_from_library(
 -      encoder, device, allocator, function.get(), args, arg_sizes, num_args, is_pointer_arg, buffers_out, buf_offset);
 +      encoder, device, allocator, function, args, arg_sizes, num_args, is_pointer_arg, buffers_out, buf_offset);
+@@ -251,6 +249,8 @@ result launch_kernel_from_library(
+-  command_buffer->addCompletedHandler([=](MTL::CommandBuffer* command_buffer) {
++  command_buffer->addCompletedHandler(
++      [kernel_name = std::string{kernel_name}](MTL::CommandBuffer* command_buffer) {
+     if (NS::Error* err = command_buffer->error()) {
+-      std::string msg = "metal: Command buffer failed: ";
++      std::string msg = "metal: Kernel '" + kernel_name +
++                        "' command buffer failed: ";
+       if (err->localizedDescription()) {
+         msg += err->localizedDescription()->utf8String();
+       }
 @@ -935 +933 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
 -    library, _device, new_command_buffer(), _allocator, kernel_name,
 +    metal_obj, new_command_buffer(), _allocator, kernel_name,

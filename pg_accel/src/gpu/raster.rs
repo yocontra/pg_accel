@@ -17,6 +17,9 @@ const RASTER_DETAIL_OFFSETS: i32 = 4;
 const RASTER_DETAIL_CAPACITY: i32 = 5;
 const RASTER_DETAIL_BYTE_BUDGET: i32 = 6;
 const RASTER_DETAIL_NUMERIC_OVERFLOW: i32 = 7;
+/// Fixed native diagnostic capacity retained by the raster workspace while a
+/// resident-store borrow prevents heap allocation.
+pub const RASTER_NATIVE_ERROR_CAPACITY: usize = 2048;
 const RASTER_VALIDATION_KNOWN_FAILURES: u32 = PGACCEL_RASTER_VALIDATION_VIEW
     | PGACCEL_RASTER_VALIDATION_RULES
     | PGACCEL_RASTER_VALIDATION_OFFSETS
@@ -42,8 +45,9 @@ pub enum RasterResidentDetail {
 }
 
 /// Allocation-free result retained across the resident-store borrow boundary.
-/// Both fields remain raw until [`raster_reclass_resident_launch_result`] runs
-/// after the borrow has been released.
+/// The caller retains the separate fixed native-error snapshot. Both fields
+/// remain raw until [`raster_reclass_resident_launch_result`] runs after
+/// release.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RasterResidentLaunchOutcome {
@@ -62,6 +66,14 @@ pub const fn injected_raster_resident_failure() -> RasterResidentLaunchOutcome {
 
 const _: [(); 8] = [(); std::mem::size_of::<RasterResidentLaunchOutcome>()];
 const _: [(); 4] = [(); std::mem::align_of::<RasterResidentLaunchOutcome>()];
+
+fn native_error_detail(bytes: &[u8; RASTER_NATIVE_ERROR_CAPACITY]) -> Option<String> {
+    let length = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    (length != 0).then(|| String::from_utf8_lossy(&bytes[..length]).into_owned())
+}
 
 fn host_raster_detail(raw: i32) -> Option<RasterResidentDetail> {
     match raw {
@@ -151,13 +163,24 @@ pub fn prepare_raster_reclass_resident() -> GpuResult<()> {
 /// already have been prepared outside the resident-store borrow.
 pub unsafe fn raster_reclass_resident_launch(
     request: &PgaccelRasterReclassResidentRequest,
+    native_error: &mut [u8; RASTER_NATIVE_ERROR_CAPACITY],
 ) -> RasterResidentLaunchOutcome {
     let mut raw_detail = RASTER_DETAIL_NONE;
+    // SAFETY: this clears only the calling thread's fixed native-error buffer.
+    unsafe { bridge::pgaccel_clear_last_error() };
     // SAFETY: the caller upholds the resident pointer/span and queue contract.
     let status = unsafe {
         bridge::pgaccel_raster_reclass_resident_ex_raw(
             std::ptr::from_ref(request),
             std::ptr::addr_of_mut!(raw_detail),
+        )
+    };
+    // SAFETY: `native_error` is writable for exactly the supplied capacity;
+    // the native copier always NUL-terminates a nonempty destination.
+    let _ = unsafe {
+        bridge::pgaccel_copy_last_error(
+            native_error.as_mut_ptr().cast::<std::ffi::c_char>(),
+            native_error.len(),
         )
     };
     RasterResidentLaunchOutcome {
@@ -171,10 +194,21 @@ pub unsafe fn raster_reclass_resident_launch(
 /// or construct a typed error.
 pub fn raster_reclass_resident_launch_result(
     outcome: RasterResidentLaunchOutcome,
+    native_error: &[u8; RASTER_NATIVE_ERROR_CAPACITY],
 ) -> GpuResult<()> {
     let status = bridge::convert_status("pgaccel_raster_reclass_resident_ex", outcome.status);
     if let Some(detail) = host_raster_detail(outcome.detail) {
         return Err(raster_detail_error(detail));
+    }
+    if !status.is_ok()
+        && let Some(detail) = native_error_detail(native_error)
+    {
+        return Err(GpuError::with_owned_detail(
+            GpuErrorDomain::Raster,
+            GpuOperation::Kernel("raster_reclass_resident"),
+            status.into(),
+            detail,
+        ));
     }
     status_to_result(
         status,
@@ -271,7 +305,148 @@ mod resident_tests {
             status: PgaccelStatus::Ok as i32,
             detail: RASTER_DETAIL_NONE,
         };
-        assert!(raster_reclass_resident_launch_result(outcome).is_ok());
+        assert!(
+            raster_reclass_resident_launch_result(outcome, &[0; RASTER_NATIVE_ERROR_CAPACITY])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn native_runtime_detail_survives_the_post_borrow_mapping_boundary() {
+        let message = b"pgaccel: raster: GPU kernel failure: Metal command buffer failed";
+        let mut native_error = [0u8; RASTER_NATIVE_ERROR_CAPACITY];
+        native_error[..message.len()].copy_from_slice(message);
+        let outcome = RasterResidentLaunchOutcome {
+            status: PgaccelStatus::Error as i32,
+            detail: RASTER_DETAIL_NONE,
+        };
+
+        let error = raster_reclass_resident_launch_result(outcome, &native_error)
+            .expect_err("native runtime failure must remain hard");
+        assert_eq!(error.status, GpuStatusDetail::ExecutionFailed);
+        assert_eq!(
+            error.detail.as_deref(),
+            Some("pgaccel: raster: GPU kernel failure: Metal command buffer failed")
+        );
+        assert!(error.to_string().contains("Metal command buffer failed"));
+
+        let injected = raster_reclass_resident_launch_result(
+            RasterResidentLaunchOutcome {
+                status: PgaccelStatus::Error as i32,
+                detail: RASTER_DETAIL_NONE,
+            },
+            &[0; RASTER_NATIVE_ERROR_CAPACITY],
+        )
+        .expect_err("injected failure must remain hard");
+        assert_eq!(injected.detail, None);
+    }
+
+    #[test]
+    fn native_runtime_detail_is_bounded_lossy_and_never_overrides_semantics() {
+        assert_eq!(
+            native_error_detail(&[0; RASTER_NATIVE_ERROR_CAPACITY]),
+            None
+        );
+
+        let invalid_utf8 = [0xff; RASTER_NATIVE_ERROR_CAPACITY];
+        let detail = native_error_detail(&invalid_utf8)
+            .expect("a full native diagnostic without a terminator remains readable");
+        assert_eq!(detail.chars().count(), RASTER_NATIVE_ERROR_CAPACITY);
+        assert!(detail.chars().all(|character| character == '\u{fffd}'));
+
+        let mut stale = [0u8; RASTER_NATIVE_ERROR_CAPACITY];
+        stale[..5].copy_from_slice(b"stale");
+        assert!(
+            raster_reclass_resident_launch_result(
+                RasterResidentLaunchOutcome {
+                    status: PgaccelStatus::Ok as i32,
+                    detail: RASTER_DETAIL_NONE,
+                },
+                &stale,
+            )
+            .is_ok()
+        );
+
+        let semantic = raster_reclass_resident_launch_result(
+            RasterResidentLaunchOutcome {
+                status: PgaccelStatus::InvalidArgument as i32,
+                detail: RASTER_DETAIL_RULES,
+            },
+            &stale,
+        )
+        .expect_err("structured raster detail must remain authoritative");
+        assert_eq!(semantic.status, GpuStatusDetail::InvalidDescriptor);
+        assert_eq!(
+            semantic.detail.as_deref(),
+            Some("resident raster Reclass rules are invalid")
+        );
+    }
+
+    #[test]
+    fn every_raster_detail_has_a_stable_status_and_message() {
+        let cases = [
+            (
+                RasterResidentDetail::Contract,
+                GpuStatusDetail::InvalidDescriptor,
+                "resident raster request contract is invalid",
+            ),
+            (
+                RasterResidentDetail::View,
+                GpuStatusDetail::InvalidDescriptor,
+                "resident raster device view is invalid",
+            ),
+            (
+                RasterResidentDetail::Rules,
+                GpuStatusDetail::InvalidDescriptor,
+                "resident raster Reclass rules are invalid",
+            ),
+            (
+                RasterResidentDetail::Offsets,
+                GpuStatusDetail::ShapeMismatch,
+                "resident raster output offsets are invalid",
+            ),
+            (
+                RasterResidentDetail::Capacity,
+                GpuStatusDetail::CapacityOverflow,
+                "resident raster output capacity is insufficient",
+            ),
+            (
+                RasterResidentDetail::ByteBudget,
+                GpuStatusDetail::CapacityOverflow,
+                "resident raster exact byte or launch budget is invalid",
+            ),
+            (
+                RasterResidentDetail::NumericOverflow,
+                GpuStatusDetail::NumericOverflow,
+                "resident raster byte arithmetic overflowed",
+            ),
+            (
+                RasterResidentDetail::InvalidScratch,
+                GpuStatusDetail::InvalidDescriptor,
+                "resident raster validation scratch is noncanonical",
+            ),
+            (
+                RasterResidentDetail::UnknownHostDetail(i32::MIN),
+                GpuStatusDetail::ExecutionFailed,
+                "resident raster launch returned an unknown detail",
+            ),
+            (
+                RasterResidentDetail::UnknownFailureBits(u32::MAX),
+                GpuStatusDetail::ExecutionFailed,
+                "resident raster validation returned unknown failure bits",
+            ),
+        ];
+
+        for (detail, expected_status, expected_message) in cases {
+            let error = raster_detail_error(detail);
+            assert_eq!(error.domain, GpuErrorDomain::Raster);
+            assert_eq!(
+                error.operation,
+                GpuOperation::Kernel("raster_reclass_resident")
+            );
+            assert_eq!(error.status, expected_status);
+            assert_eq!(error.detail.as_deref(), Some(expected_message));
+        }
     }
 
     #[test]

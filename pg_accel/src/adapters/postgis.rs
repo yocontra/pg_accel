@@ -74,7 +74,7 @@ fn gpu_spatial_entries() -> Vec<FunctionAccelEntry> {
         .collect()
 }
 
-#[cfg(feature = "pg_test")]
+#[cfg(any(test, feature = "pg_test"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use std::collections::HashSet;

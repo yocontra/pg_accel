@@ -1159,3 +1159,32 @@ mod fp64_penalty_tests {
         assert!(pg > 0.0);
     }
 }
+
+#[cfg(test)]
+mod fp64_wrapper_contract_tests {
+    use super::*;
+
+    #[test]
+    fn active_device_fp64_wrappers_match_the_typed_cost_pipeline_exactly() {
+        let rows = 12_345.0;
+        let extract_columns = 3;
+        let gpu_op_cost = 0.0025;
+
+        for uses_fp64 in [false, true] {
+            let input =
+                SelfScanCostInput::fp64_aware(rows, extract_columns, gpu_op_cost, uses_fp64);
+            assert_eq!(input.rows, rows);
+            assert_eq!(input.extract_columns, extract_columns);
+            assert_eq!(
+                input.gpu_op_cost,
+                apply_fp64_penalty(gpu_op_cost, uses_fp64, device_limits())
+            );
+
+            let expected = estimate_self_scan_cost(input).total().get();
+            assert_eq!(
+                self_scan_cost_fp64_aware(rows, extract_columns, gpu_op_cost, uses_fp64,),
+                expected
+            );
+        }
+    }
+}

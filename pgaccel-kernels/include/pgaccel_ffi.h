@@ -68,6 +68,13 @@ pgaccel_platform_caps pgaccel_get_caps(void);
 uint64_t pgaccel_gpu_exec_count(void);
 void pgaccel_reset_gpu_exec_count(void);
 
+/// Per-thread native kernel-error handoff. Clear immediately before a kernel
+/// dispatch, then copy after a non-OK result. The copy function returns the
+/// full stored length (excluding NUL), always NUL-terminates a nonempty caller
+/// buffer, and permits `(NULL, 0)` as a length-only query.
+void pgaccel_clear_last_error(void);
+size_t pgaccel_copy_last_error(char* buffer, size_t capacity);
+
 /* ── MTLBinaryArchive observability ───────────────────────────────────
  *
  * Phase 2 "Metal pipeline-state XPC edge case" instrumentation. The

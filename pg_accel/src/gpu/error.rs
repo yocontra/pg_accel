@@ -3,6 +3,7 @@
 //! Domain dispatchers use this result when runtime failure must remain
 //! distinct from a successful algorithmic result such as spatial UNCERTAIN.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use super::types::PgaccelStatus;
@@ -140,7 +141,7 @@ pub struct GpuError {
     pub domain: GpuErrorDomain,
     pub operation: GpuOperation,
     pub status: GpuStatusDetail,
-    pub detail: Option<&'static str>,
+    pub detail: Option<Cow<'static, str>>,
 }
 
 impl GpuError {
@@ -171,7 +172,23 @@ impl GpuError {
             domain,
             operation,
             status,
-            detail: Some(detail),
+            detail: Some(Cow::Borrowed(detail)),
+        }
+    }
+
+    /// Build an error with detail captured dynamically from the native runtime.
+    #[must_use]
+    pub fn with_owned_detail(
+        domain: GpuErrorDomain,
+        operation: GpuOperation,
+        status: GpuStatusDetail,
+        detail: String,
+    ) -> Self {
+        Self {
+            domain,
+            operation,
+            status,
+            detail: Some(Cow::Owned(detail)),
         }
     }
 
@@ -188,7 +205,7 @@ impl GpuError {
 
 impl fmt::Display for GpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.detail {
+        match self.detail.as_deref() {
             Some(detail) => write!(
                 f,
                 "GPU {} {} failed with {}: {}",
@@ -375,5 +392,20 @@ mod tests {
             "GPU raster validate_device_output failed with shape_mismatch: row count changed"
         );
         assert!(std::error::Error::source(&detailed).is_none());
+
+        let native = GpuError::with_owned_detail(
+            GpuErrorDomain::Raster,
+            GpuOperation::Kernel("reclass"),
+            GpuStatusDetail::ExecutionFailed,
+            String::from("Metal command buffer failed"),
+        );
+        assert_eq!(
+            native.detail.as_deref(),
+            Some("Metal command buffer failed")
+        );
+        assert_eq!(
+            native.to_string(),
+            "GPU raster kernel(reclass) failed with execution_failed: Metal command buffer failed"
+        );
     }
 }
