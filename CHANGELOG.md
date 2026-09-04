@@ -142,6 +142,10 @@ evidence attached to that GitHub release are package-availability claims.
 
 ### Fixed
 
+- Cargo caches that retain installed binaries now retain Cargo's matching
+  ownership metadata under a fresh cache namespace. Warm macOS CI and Linux
+  release runs therefore recognize pinned tools instead of failing when a
+  restored `cargo-pgrx` executable already exists.
 - Bounded dense grouped aggregation now caps every synchronous ACCUMULATE
   transition by the physical device's compute-derived row envelope as well as
   the allocation-derived reduce limit. This keeps concurrent backend command

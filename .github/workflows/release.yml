@@ -173,14 +173,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
+            ~/.cargo/.crates.toml
+            ~/.cargo/.crates2.json
             ~/.cargo/bin
             ~/.cargo/git
             ~/.cargo/registry
             target
-          key: release-cargo-linux-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}
+          key: release-cargo-install-v2-linux-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}
           restore-keys: |
-            release-cargo-linux-${{ runner.arch }}-pg${{ matrix.pg }}-
-            release-cargo-linux-${{ runner.arch }}-
+            release-cargo-install-v2-linux-${{ runner.arch }}-pg${{ matrix.pg }}-
+            release-cargo-install-v2-linux-${{ runner.arch }}-
 
       - name: Cache AdaptiveCpp generic install
         id: cache-acpp-linux-release

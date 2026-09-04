@@ -617,6 +617,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
         mutants = (
             workflow.replace(
+                "            ~/.cargo/.crates.toml\n",
+                "",
+                1,
+            ),
+            workflow.replace(
+                "release-cargo-install-v2-linux",
+                "release-cargo-linux",
+            ),
+            workflow.replace(
                 "    runs-on: macos-26",
                 "    runs-on: [self-hosted, macOS, ARM64, metal]",
                 1,
@@ -750,6 +759,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "    runs-on: macos-26"
         )
         mutants = (
+            workflow.replace(
+                "            ~/.cargo/.crates2.json\n",
+                "",
+                1,
+            ),
+            workflow.replace(
+                "cargo-install-v2-macos",
+                "cargo-macos",
+            ),
             workflow.replace("    runs-on: macos-26", "    runs-on: macos-14", 1),
             workflow.replace(
                 compatibility_header,

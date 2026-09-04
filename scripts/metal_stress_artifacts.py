@@ -1366,6 +1366,35 @@ def _workflow_step_lines(step: str) -> set[str]:
     }
 
 
+def _validate_cargo_install_cache(
+    job: str,
+    expected_key: str,
+    expected_restore_keys: tuple[str, ...],
+) -> None:
+    step = _workflow_step(job, "Cache Cargo artifacts")
+    lines = _workflow_step_lines(step)
+    for required in (
+        "uses: actions/cache@v4",
+        "with:",
+        "path: |",
+        "~/.cargo/.crates.toml",
+        "~/.cargo/.crates2.json",
+        "~/.cargo/bin",
+        "restore-keys: |",
+        f"key: {expected_key}",
+        *expected_restore_keys,
+    ):
+        if required not in lines:
+            raise ArtifactContractError(
+                "Cargo binary cache must preserve install ownership metadata "
+                f"and use the unpoisoned key contract: missing `{required}`"
+            )
+    if "continue-on-error:" in lines:
+        raise ArtifactContractError(
+            "Cargo binary cache cannot continue on error"
+        )
+
+
 def _workflow_step_commands(step: str, label: str) -> list[str]:
     lines = step.splitlines()
     run_indexes = [
@@ -1611,6 +1640,14 @@ def validate_ci_workflow_contract(workflow: str) -> None:
         "${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
     )
     mac = _workflow_job_block(workflow, "mac-arm64")
+    _validate_cargo_install_cache(
+        mac,
+        "cargo-install-v2-macos-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}",
+        (
+            "cargo-install-v2-macos-${{ runner.arch }}-pg${{ matrix.pg }}-",
+            "cargo-install-v2-macos-${{ runner.arch }}-",
+        ),
+    )
     if not re.search(r"^    runs-on:\s*macos-26\s*$", mac, re.MULTILINE):
         raise ArtifactContractError(
             "macOS arm64 compatibility jobs must use the Apple Silicon `macos-26` label"
@@ -1826,6 +1863,15 @@ def validate_release_workflow_contract(workflow: str) -> None:
             raise ArtifactContractError(
                 f"release job `{gated_job}` must depend on validate-tag"
             )
+
+    _validate_cargo_install_cache(
+        _workflow_job_block(workflow, "linux-package"),
+        "release-cargo-install-v2-linux-${{ runner.arch }}-pg${{ matrix.pg }}-${{ hashFiles('Cargo.lock', '.tool-versions') }}",
+        (
+            "release-cargo-install-v2-linux-${{ runner.arch }}-pg${{ matrix.pg }}-",
+            "release-cargo-install-v2-linux-${{ runner.arch }}-",
+        ),
+    )
 
     metal = _validate_hosted_metal_job(
         workflow,
