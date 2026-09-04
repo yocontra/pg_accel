@@ -875,9 +875,13 @@ kernel's single wait, the native bridge reads coherent completion/output spans
 directly instead of enqueueing a second copy graph; DEVICE scratch retains the
 queued-copy fallback. `pg_accel_grouped_runtime_stats()` separately exposes
 lifecycle transitions, wait count/time, logical published output bytes, and
-shared versus queued copy calls. Dense sessions use at most 1,000,000 rows per
-synchronous accumulate call, so a 10M-row input uses ten accumulates plus one
-finalize while preserving an interrupt boundary between calls.
+shared versus queued copy calls. Dense sessions use the smaller of the
+allocation-derived reduce chunk and the physical device's compute-derived
+grouped-aggregate row envelope, with an absolute ceiling of 1,000,000 rows per
+synchronous accumulate call. A baseline device therefore executes a 10M-row
+input as ten accumulates plus one finalize, while lower-CU devices retain
+shorter watchdog-safe command buffers and an interrupt boundary between each
+call.
 
 Admission prices that exact dense lifecycle: the common path cost contains one
 base launch, and the named `additional_aggregate_launches` component adds one

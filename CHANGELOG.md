@@ -142,6 +142,11 @@ evidence attached to that GitHub release are package-availability claims.
 
 ### Fixed
 
+- Bounded dense grouped aggregation now caps every synchronous ACCUMULATE
+  transition by the physical device's compute-derived row envelope as well as
+  the allocation-derived reduce limit. This keeps concurrent backend command
+  buffers below the Metal watchdog boundary on low-CU devices, while retaining
+  exact eight-backend overlap, result, residency, and fail-closed checks.
 - Metal binary-archive construction now retries transient pipeline-function or
   serialization failures in fresh helper processes with bounded backoff and
   clean staged output. This prevents a hosted Apple Silicon compiler-service

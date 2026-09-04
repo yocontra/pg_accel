@@ -382,8 +382,11 @@ fn h3_transform_chunks(fact_rows: u64, max_chunk_rows: Rows) -> u64 {
 ///
 /// A descriptor at or below the independently proved one-shot boundary uses
 /// one RESET|ACCUMULATE|FINALIZE call. A larger descriptor uses one ACCUMULATE
-/// call per bounded row chunk followed by one FINALIZE call. `None` is a
-/// fail-closed signal for a zero chunk limit or arithmetic overflow.
+/// call per bounded row chunk followed by one FINALIZE call. Bounded chunks
+/// retain the compute-derived synchronous row cap; crossing the one-shot
+/// boundary must not enlarge one native call to the allocation-derived reduce
+/// limit. `None` is a fail-closed signal for a zero bound or arithmetic
+/// overflow.
 pub fn dense_lifecycle_call_count(
     fact_rows: u64,
     one_shot_max_rows: Rows,
@@ -392,7 +395,7 @@ pub fn dense_lifecycle_call_count(
     if fact_rows <= u64::try_from(one_shot_max_rows.get()).ok()? {
         return Some(1);
     }
-    let chunk_rows = u64::try_from(max_chunk_rows.get())
+    let chunk_rows = u64::try_from(max_chunk_rows.get().min(one_shot_max_rows.get()))
         .ok()
         .filter(|rows| *rows > 0)?;
     fact_rows

@@ -2612,6 +2612,12 @@ mod tests {
         let maximum = model.executor.gpu_grouped_agg_one_shot_max_rows;
         let maximum_u64 = u64::try_from(maximum.get()).expect("test row limit fits u64");
 
+        assert_eq!(
+            dense_lifecycle_call_count(312_500, Rows::new(64_000), Rows::new(1_000_000),),
+            Some(6),
+            "costing must retain the one-CU synchronous cap after bounded execution starts"
+        );
+
         let mut at_maximum = dense_sum_count_shape(maximum_u64);
         apply_resident_evidence(&mut at_maximum, maximum_u64, true);
         assert_eq!(at_maximum.cost_gate, ShapeCostGate::Eligible);

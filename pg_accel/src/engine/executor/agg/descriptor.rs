@@ -2159,7 +2159,10 @@ impl DescriptorAggPlan {
         let dispatch_chunk_rows = if h3_parent_group(&spec).is_some() {
             executor_limits.gpu_h3_max_chunk_rows.get()
         } else {
-            executor_limits.gpu_reduce_max_chunk.get()
+            dense_session_chunk_rows(
+                executor_limits.gpu_reduce_max_chunk.get(),
+                executor_limits.gpu_grouped_agg_one_shot_max_rows.get(),
+            )
         };
         Ok(Self {
             spec,
@@ -3658,6 +3661,15 @@ fn effective_dense_chunk_rows(device_limit: usize) -> usize {
     device_limit
 }
 
+/// Bound every synchronous dense aggregate transition by both the allocation-
+/// derived reduce limit and the compute-derived grouped-aggregate limit. The
+/// latter is especially important for a bounded lifecycle: taking the
+/// multi-call path must not let one ACCUMULATE command buffer exceed the same
+/// physical-device work envelope that made the one-shot path ineligible.
+fn dense_session_chunk_rows(max_chunk_rows: usize, synchronous_row_cap: usize) -> usize {
+    max_chunk_rows.min(synchronous_row_cap)
+}
+
 fn clamp_dense_one_shot_row_cap(device_limit: usize, test_override: usize) -> usize {
     let production_limit = device_limit.min(GPU_GROUPED_AGG_ONE_SHOT_ABSOLUTE_MAX_ROWS);
     if test_override == 0 {
@@ -3994,7 +4006,8 @@ fn execute_bounded_dense_with_resolver(
     one_shot_max_rows: usize,
     expected_kernel_mode: GroupedAggKernelMode,
 ) -> Result<DescriptorAggDispatch, DescriptorDispatchFailure> {
-    let bounded_chunk_rows = effective_dense_chunk_rows(max_chunk_rows);
+    let bounded_chunk_rows =
+        effective_dense_chunk_rows(dense_session_chunk_rows(max_chunk_rows, one_shot_max_rows));
     if bounded_chunk_rows == 0 {
         return Err(DescriptorDispatchFailure::Execution(
             DescriptorAggExecutionError::Failure(
@@ -4647,6 +4660,27 @@ mod tests {
             bounded_dispatch_call_count(above_limit.row_count, SESSION_CHUNK_ROWS),
             Some(5),
             "limit+1 must use four bounded calls plus finalize, leaving interrupt boundaries"
+        );
+    }
+
+    #[test]
+    fn bounded_dense_chunks_cannot_bypass_the_physical_synchronous_row_cap() {
+        const HOSTED_FIXTURE_ROWS: usize = 312_500;
+        const MEMORY_DERIVED_CHUNK_ROWS: usize = 1_000_000;
+        const ONE_CU_SYNCHRONOUS_CAP: usize = 64_000;
+
+        let chunk_rows =
+            dense_session_chunk_rows(MEMORY_DERIVED_CHUNK_ROWS, ONE_CU_SYNCHRONOUS_CAP);
+        assert_eq!(chunk_rows, ONE_CU_SYNCHRONOUS_CAP);
+        assert_eq!(
+            bounded_dispatch_call_count(HOSTED_FIXTURE_ROWS, chunk_rows),
+            Some(6),
+            "the hosted resident fixture needs five watchdog-safe accumulates plus finalize"
+        );
+        assert_eq!(
+            dense_session_chunk_rows(65_536, 250_000),
+            65_536,
+            "the allocation-derived bound remains authoritative when it is smaller"
         );
     }
 
