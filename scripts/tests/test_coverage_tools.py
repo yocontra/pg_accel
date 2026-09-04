@@ -3098,18 +3098,32 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             ('os << " [[buffer(30)]]"', 'os << " [[buffer(29)]]"'),
             ("metal_device_profile_buffer_index = 30", "metal_device_profile_buffer_index = 29"),
             (
-                "const uint64_t LowSlot = Slot->getZExtValue() * 2",
-                "const uint64_t LowSlot = Slot->getZExtValue()",
+                "__attribute__((noinline)) void __acpp_sscp_metal_profile_add(",
+                "inline void __acpp_sscp_metal_profile_add(",
             ),
-            ("const uint64_t HighSlot = LowSlot + 1", "const uint64_t HighSlot = LowSlot"),
+            (
+                "const uint low_slot = slot * uint(2);",
+                "const uint low_slot = slot;",
+            ),
+            (
+                "counters + low_slot + uint(1), high_add, memory_order_relaxed",
+                "counters + low_slot, high_add, memory_order_relaxed",
+            ),
             (
                 "static_cast<uint64_t>(deviceProfileCounterCount) * 2",
                 "static_cast<uint64_t>(deviceProfileCounterCount)",
             ),
-            ("__acpp_profile_carry_", "__acpp_profile_no_carry_"),
             (
-                '" < __acpp_profile_high_step_"',
-                '" == __acpp_profile_high_step_"',
+                "const uint carry = old_low > (~uint(0) - low_step)",
+                "const uint carry = uint(0)",
+            ),
+            (
+                "high_add < high_step",
+                "high_add == high_step",
+            ),
+            (
+                "old_high > (~uint(0) - high_add)",
+                "old_high == (~uint(0) - high_add)",
             ),
             (
                 "const std::size_t slots = logical_slots * 2 + 1",
@@ -3166,6 +3180,30 @@ class ArtifactAndToolchainTests(unittest.TestCase):
             (
                 "llvm::Intrinsic::getDeclaration(&M, llvm::Intrinsic::donothing)",
                 "llvm::Intrinsic::getOrInsertDeclaration(&M, llvm::Intrinsic::donothing)",
+            ),
+            (
+                "::flock(_fd, LOCK_EX)",
+                "::flock(_fd, LOCK_SH)",
+            ),
+            (
+                'cache_dir + ".pgaccel-metal-archive-build.lock"',
+                'metalar_path + ".lock"',
+            ),
+            (
+                "spawn_archive_builder(produced_metallib, staged_metalar_path",
+                "spawn_archive_builder(produced_metallib, metalar_path",
+            ),
+            (
+                "sync_archive_file(staged_metalar_path)",
+                "sync_archive_file(metalar_path)",
+            ),
+            (
+                "_pipeline_cache_pid != current_pid",
+                "_pipeline_cache_pid == current_pid",
+            ),
+            (
+                "create_pipeline_with_retry(MTL::PipelineOptionNone)",
+                "create_pipeline(MTL::PipelineOptionNone)",
             ),
         ):
             with self.subTest(missing_invariant=original):

@@ -1428,6 +1428,50 @@ def _validate_workflow_upload(
         )
 
 
+def _validate_diagnostic_workflow_steps(
+    job: str,
+    capture_name: str,
+    upload_name: str,
+    artifact_dir: str,
+    condition: str,
+) -> None:
+    capture = _workflow_step(job, capture_name)
+    capture_lines = _workflow_step_lines(capture)
+    for required in (
+        condition,
+        "shell: bash",
+        "run: |",
+        "scripts/capture_metal_ci_diagnostics.sh \\",
+        artifact_dir,
+    ):
+        if required not in capture_lines and required not in capture:
+            raise ArtifactContractError(
+                f"{capture_name} workflow step is missing `{required}`"
+            )
+    if "continue-on-error:" in capture:
+        raise ArtifactContractError(
+            f"{capture_name} workflow step cannot continue on error"
+        )
+
+    upload = _workflow_step(job, upload_name)
+    upload_lines = _workflow_step_lines(upload)
+    for required in (
+        condition,
+        "uses: actions/upload-artifact@v4",
+        "with:",
+        f"path: {artifact_dir}",
+        "if-no-files-found: error",
+    ):
+        if required not in upload_lines:
+            raise ArtifactContractError(
+                f"{upload_name} workflow upload is missing `{required}`"
+            )
+    if "continue-on-error:" in upload:
+        raise ArtifactContractError(
+            f"{upload_name} workflow upload cannot continue on error"
+        )
+
+
 def _validate_exact_checkout_wiring(workflow: str, expected_ref: str) -> None:
     lines = workflow.splitlines()
     checkout_indexes = [
@@ -1591,6 +1635,13 @@ def validate_ci_workflow_contract(workflow: str) -> None:
                 "macOS virtual-M1 SQL correctness step is missing its exact "
                 f"verified warning profile `{required}`"
             )
+    _validate_diagnostic_workflow_steps(
+        mac,
+        "Capture macOS Metal diagnostics",
+        "Upload macOS Metal diagnostics",
+        "artifacts/macos-metal-diagnostics-pg${{ matrix.pg }}",
+        "if: always() && steps.pg-support.outputs.skip != 'true'",
+    )
     metal = _validate_hosted_metal_job(
         workflow,
         "metal-compatibility",
@@ -1650,6 +1701,13 @@ def validate_ci_workflow_contract(workflow: str) -> None:
         metal,
         "Upload public Apple Silicon install evidence",
         "artifacts/public-install-pg18-hosted-apple-silicon",
+    )
+    _validate_diagnostic_workflow_steps(
+        metal,
+        "Capture hosted Metal diagnostics",
+        "Upload hosted Metal diagnostics",
+        "artifacts/hosted-metal-diagnostics-pg18",
+        "if: always()",
     )
     linux = _workflow_job_block(workflow, "linux-x86")
     build_marker = "      - name: Build pinned AdaptiveCpp generic toolchain"
@@ -1769,7 +1827,7 @@ def validate_release_workflow_contract(workflow: str) -> None:
                 f"release job `{gated_job}` must depend on validate-tag"
             )
 
-    _validate_hosted_metal_job(
+    metal = _validate_hosted_metal_job(
         workflow,
         "metal-compatibility",
         "Run release hosted Metal compatibility gate",
@@ -1777,6 +1835,13 @@ def validate_release_workflow_contract(workflow: str) -> None:
         "artifacts/hosted-metal-runner-pg18",
         "Upload release hosted Metal coverage artifacts",
         "Upload release hosted Metal runner provenance",
+    )
+    _validate_diagnostic_workflow_steps(
+        metal,
+        "Capture release hosted Metal diagnostics",
+        "Upload release hosted Metal diagnostics",
+        "artifacts/release-hosted-metal-diagnostics-pg18",
+        "if: always()",
     )
     release = _workflow_job_block(workflow, "release")
     needs = re.search(r"^    needs:\s*\[([^]]+)\]\s*$", release, re.MULTILINE)

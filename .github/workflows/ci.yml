@@ -144,6 +144,7 @@ jobs:
           just setup-pgrx ${{ matrix.pg }}
 
       - name: Run PostgreSQL ${{ matrix.pg }} Rust gate
+        id: rust-gate
         if: steps.pg-support.outputs.skip != 'true'
         shell: bash
         env:
@@ -193,6 +194,7 @@ jobs:
           just sql-test ${{ matrix.pg }}
 
       - name: Run pristine and pg_accel-loaded PostgreSQL upstream suites
+        id: upstream-pg
         if: steps.pg-support.outputs.skip != 'true'
         shell: bash
         run: |
@@ -202,7 +204,7 @@ jobs:
             "artifacts/upstream-postgresql-pg${{ matrix.pg }}"
 
       - name: Upload PostgreSQL upstream-suite evidence
-        if: always() && steps.pg-support.outputs.skip != 'true'
+        if: always() && steps.upstream-pg.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: upstream-postgresql-pg${{ matrix.pg }}-macos-arm64
@@ -244,6 +246,23 @@ jobs:
         with:
           name: pg-accel-schema-pg${{ matrix.pg }}-macos-arm64
           path: ${{ steps.schema.outputs.path }}
+          if-no-files-found: error
+
+      - name: Capture macOS Metal diagnostics
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        shell: bash
+        run: |
+          scripts/capture_metal_ci_diagnostics.sh \
+            "${{ matrix.pg }}" \
+            "artifacts/macos-metal-diagnostics-pg${{ matrix.pg }}" \
+            "rust=${{ steps.rust-gate.outcome }} upstream=${{ steps.upstream-pg.outcome }}"
+
+      - name: Upload macOS Metal diagnostics
+        if: always() && steps.pg-support.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-macos-metal-diagnostics-pg${{ matrix.pg }}
+          path: artifacts/macos-metal-diagnostics-pg${{ matrix.pg }}
           if-no-files-found: error
 
   metal-compatibility:
@@ -388,6 +407,7 @@ jobs:
           )
 
       - name: Run three-layer hosted Metal compatibility gate
+        id: hosted-coverage
         shell: bash
         env:
           COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18-hosted-metal
@@ -398,6 +418,14 @@ jobs:
         run: |
           set -euo pipefail
           CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18
+
+      - name: Capture hosted Metal diagnostics
+        if: always()
+        shell: bash
+        run: |
+          scripts/capture_metal_ci_diagnostics.sh \
+            18 artifacts/hosted-metal-diagnostics-pg18 \
+            "coverage=${{ steps.hosted-coverage.outcome }}"
 
       - name: Seal hosted runner provenance
         if: always()
@@ -438,6 +466,14 @@ jobs:
         with:
           name: pg-accel-public-install-pg18-hosted-apple-silicon
           path: artifacts/public-install-pg18-hosted-apple-silicon
+          if-no-files-found: error
+
+      - name: Upload hosted Metal diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-hosted-metal-diagnostics-pg18
+          path: artifacts/hosted-metal-diagnostics-pg18
           if-no-files-found: error
 
   linux-x86:

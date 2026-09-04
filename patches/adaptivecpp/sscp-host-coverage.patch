@@ -1,20 +1,32 @@
 diff --git a/include/hipSYCL/runtime/metal/metal_code_object.hpp b/include/hipSYCL/runtime/metal/metal_code_object.hpp
-index 3045348c..2eb2a20e 100644
+index 3045348c..9ca76667 100644
 --- a/include/hipSYCL/runtime/metal/metal_code_object.hpp
 +++ b/include/hipSYCL/runtime/metal/metal_code_object.hpp
-@@ -15,0 +16,2 @@
+@@ -15,0 +16,5 @@
 +#include <cstddef>
 +#include <cstdint>
-@@ -27,0 +30 @@ class BinaryArchive;
++#include <mutex>
++#include <string_view>
++#include <unordered_map>
+@@ -27,0 +33 @@ class BinaryArchive;
 +class Buffer;
-@@ -48,0 +52,3 @@ public:
+@@ -48,0 +55,9 @@ public:
++
++  // Resolve and cache the immutable function/pipeline pair for one exported
++  // kernel. The executable object owns both returned pointers.
++  virtual result get_or_create_kernel_pipeline(
++      std::string_view kernel_name, MTL::Function*& function,
++      MTL::ComputePipelineState*& pipeline_state) const = 0;
 +
 +  virtual MTL::Buffer* get_device_profile_buffer() const = 0;
 +  virtual std::size_t get_device_profile_counter_count() const = 0;
-@@ -86,0 +93,2 @@ public:
+@@ -86,0 +102,5 @@ public:
++  virtual result get_or_create_kernel_pipeline(
++      std::string_view kernel_name, MTL::Function*& function,
++      MTL::ComputePipelineState*& pipeline_state) const override;
 +  virtual MTL::Buffer* get_device_profile_buffer() const override;
 +  virtual std::size_t get_device_profile_counter_count() const override;
-@@ -90,0 +99,7 @@ private:
+@@ -90,0 +111,12 @@ private:
 +  struct device_profile_record {
 +    std::string name;
 +    uint64_t hash = 0;
@@ -22,22 +34,31 @@ index 3045348c..2eb2a20e 100644
 +    uint32_t base_counter = 0;
 +  };
 +
-@@ -91,0 +107,2 @@ private:
++  struct kernel_pipeline_record {
++    MTL::Function* function = nullptr;
++    MTL::ComputePipelineState* pipeline_state = nullptr;
++  };
++
+@@ -91,0 +124,2 @@ private:
 +  result initialize_device_profile(const std::string& source);
 +  void flush_device_profile() const;
-@@ -100,0 +118,3 @@ private:
+@@ -100,0 +135,7 @@ private:
++  mutable std::mutex _pipeline_cache_mutex;
++  mutable std::unordered_map<std::string, kernel_pipeline_record>
++      _pipeline_cache;
++  mutable uint64_t _pipeline_cache_pid = 0;
 +  MTL::Buffer* _device_profile_buffer;
 +  std::vector<device_profile_record> _device_profile_records;
 +  uint32_t _device_profile_counter_count = 0;
 diff --git a/src/compiler/llvm-to-backend/metal/Emitter.cpp b/src/compiler/llvm-to-backend/metal/Emitter.cpp
-index 94a49963..1dd0d8eb 100644
+index 94a49963..f5a8c946 100644
 --- a/src/compiler/llvm-to-backend/metal/Emitter.cpp
 +++ b/src/compiler/llvm-to-backend/metal/Emitter.cpp
 @@ -23,0 +24 @@
 +#include <llvm/IR/IRBuilder.h>
 @@ -24,0 +26 @@
 +#include <llvm/IR/Metadata.h>
-@@ -264,0 +267,251 @@ MetalEmitter::~MetalEmitter() = default;
+@@ -264,0 +267,285 @@ MetalEmitter::~MetalEmitter() = default;
 +bool MetalEmitter::analyzeDeviceProfileMetadata() {
 +  static constexpr const char* MetadataName =
 +      "acpp.metal.device.profile.records";
@@ -117,6 +138,39 @@ index 94a49963..1dd0d8eb 100644
 +  }
 +}
 +
++void MetalEmitter::emitDeviceProfileIncrementHelper() {
++  if (deviceProfileRecords.empty()) {
++    return;
++  }
++
++  // Keep the split 64-bit counter update in one non-inlined MSL helper.
++  // Expanding this sequence at every instrumented basic block made coverage
++  // metallibs several times larger and exhausted the hosted virtual-M1
++  // compiler service before an archive could be produced.
++  os << R"__(
++__attribute__((noinline)) void __acpp_sscp_metal_profile_add(
++    device atomic_uint* counters, uint slot, ulong step,
++    bool intrinsic_overflow) {
++  const uint low_step = uint(step);
++  const uint high_step = uint(step >> 32);
++  const uint low_slot = slot * uint(2);
++  const uint old_low = atomic_fetch_add_explicit(
++      counters + low_slot, low_step, memory_order_relaxed);
++  const uint carry = old_low > (~uint(0) - low_step) ? uint(1) : uint(0);
++  const uint high_add = high_step + carry;
++  const uint old_high = atomic_fetch_add_explicit(
++      counters + low_slot + uint(1), high_add, memory_order_relaxed);
++  if (high_add < high_step || old_high > (~uint(0) - high_add) ||
++      intrinsic_overflow) {
++    atomic_store_explicit(counters + )__"
++     << static_cast<uint64_t>(deviceProfileCounterCount) * 2
++     << R"__(, uint(1), memory_order_relaxed);
++  }
++}
++
++)__";
++}
++
 +int MetalEmitter::flatArgumentLimit() const {
 +  return opt.maxArgsForFlatMode - (deviceProfileRecords.empty() ? 0 : 1);
 +}
@@ -133,8 +187,9 @@ index 94a49963..1dd0d8eb 100644
 +  for (const GlobalValue& GV : M.global_values()) {
 +    StringRef Name = GV.getName();
 +    Name.consume_front("\1");
-+    if (Name == "__acpp_sscp_metal_profile_increment") {
-+      errorMsg = "Reserved Metal device profile hook already exists";
++    if (Name == "__acpp_sscp_metal_profile_increment" ||
++        Name == "__acpp_sscp_metal_profile_add") {
++      errorMsg = "Reserved Metal device profile symbol already exists";
 +      return false;
 +    }
 +  }
@@ -289,7 +344,7 @@ index 94a49963..1dd0d8eb 100644
 +  return false;
 +}
 +
-@@ -277,0 +531,10 @@ bool MetalEmitter::emit(std::string& out) {
+@@ -277,0 +565,10 @@ bool MetalEmitter::emit(std::string& out) {
 +  if (!analyzeDeviceProfileMetadata()) {
 +    return false;
 +  }
@@ -300,29 +355,32 @@ index 94a49963..1dd0d8eb 100644
 +    return false;
 +  }
 +  emitDeviceProfileMetadata();
-@@ -397,0 +661,4 @@ constant long& constant __acpp_sscp_metal_gpu_to_host_addr_diff [[buffer(1)]];
+@@ -362,0 +660,2 @@ constant long& constant __acpp_sscp_metal_gpu_to_host_addr_diff [[buffer(1)]];
++  emitDeviceProfileIncrementHelper();
++
+@@ -397,0 +697,4 @@ constant long& constant __acpp_sscp_metal_gpu_to_host_addr_diff [[buffer(1)]];
 +        if (functionNeedsDeviceProfile(F)) {
 +          if (!first) os << ", ";
 +          os << "device atomic_uint* __acpp_sscp_metal_profile_counters";
 +        }
-@@ -436,0 +704,5 @@ constant long& constant __acpp_sscp_metal_gpu_to_host_addr_diff [[buffer(1)]];
+@@ -436,0 +740,5 @@ constant long& constant __acpp_sscp_metal_gpu_to_host_addr_diff [[buffer(1)]];
 +  if (!deviceProfileRecords.empty() && emittedDeviceProfileHits == 0) {
 +    errorMsg = "Metal device profile metadata has no surviving atomic hit sites";
 +    return false;
 +  }
 +
-@@ -939 +1211 @@ bool MetalEmitter::emitArgStruct(Function& F) {
+@@ -939 +1247 @@ bool MetalEmitter::emitArgStruct(Function& F) {
 -  bool useArgStruct = isKernel && F.arg_size() > opt.maxArgsForFlatMode;
 +  bool useArgStruct = isKernel && F.arg_size() > flatArgumentLimit();
-@@ -959 +1231 @@ bool MetalEmitter::emitSignature(Function& F,
+@@ -959 +1267 @@ bool MetalEmitter::emitSignature(Function& F,
 -  bool useArgStruct = isKernel && F.arg_size() > opt.maxArgsForFlatMode;
 +  bool useArgStruct = isKernel && F.arg_size() > flatArgumentLimit();
-@@ -971 +1243,3 @@ bool MetalEmitter::emitSignature(Function& F,
+@@ -971 +1279,3 @@ bool MetalEmitter::emitSignature(Function& F,
 -  int bufIdx = 2; // index=0 is reserved for dynamic local memory size, index=1 for host-to-device address difference, so start from 2
 +  // Keep user arguments on their established bindings. Device profiling uses
 +  // the reserved high binding 30 and reduces flat mode by one argument.
 +  int bufIdx = 2;
-@@ -992,0 +1267,7 @@ bool MetalEmitter::emitSignature(Function& F,
+@@ -992,0 +1303,7 @@ bool MetalEmitter::emitSignature(Function& F,
 +  if (functionNeedsDeviceProfile(F)) {
 +    if (!first) os << ", ";
 +    os << "device atomic_uint* __acpp_sscp_metal_profile_counters";
@@ -330,7 +388,7 @@ index 94a49963..1dd0d8eb 100644
 +      os << " [[buffer(30)]]";
 +    }
 +  }
-@@ -2120,0 +2402,67 @@ bool MetalEmitter::emitCallInstruction(const CallInst* CI, const std::string& na
+@@ -2120,0 +2438,38 @@ bool MetalEmitter::emitCallInstruction(const CallInst* CI, const std::string& na
 +  if (calleeName == "__acpp_sscp_metal_profile_increment") {
 +    if (deviceProfileRecords.empty() || CI->arg_size() != 3) {
 +      errorMsg = "Metal device profile hit has no matching metadata";
@@ -359,46 +417,17 @@ index 94a49963..1dd0d8eb 100644
 +                 instToString(*CI);
 +      return false;
 +    }
-+    const uint64_t HitId = emittedDeviceProfileHits++;
-+    const uint64_t LowSlot = Slot->getZExtValue() * 2;
-+    const uint64_t HighSlot = LowSlot + 1;
-+    const uint64_t OverflowSlot =
-+        static_cast<uint64_t>(deviceProfileCounterCount) * 2;
-+    os << indent(level) << "{\n";
-+    os << indent(level + 1) << "const ulong __acpp_profile_wide_step_" << HitId
-+       << " = ulong(" << emitExpr(CI->getArgOperand(1)) << ");\n";
-+    os << indent(level + 1) << "const uint __acpp_profile_low_step_" << HitId
-+       << " = uint(__acpp_profile_wide_step_" << HitId << ");\n";
-+    os << indent(level + 1) << "const uint __acpp_profile_high_step_" << HitId
-+       << " = uint(__acpp_profile_wide_step_" << HitId << " >> 32);\n";
-+    os << indent(level + 1) << "const uint __acpp_profile_old_low_" << HitId
-+       << " = atomic_fetch_add_explicit(__acpp_sscp_metal_profile_counters + "
-+       << LowSlot << ", __acpp_profile_low_step_" << HitId
-+       << ", memory_order_relaxed);\n";
-+    os << indent(level + 1) << "const uint __acpp_profile_carry_" << HitId
-+       << " = __acpp_profile_old_low_" << HitId
-+       << " > (~uint(0) - __acpp_profile_low_step_" << HitId
-+       << ") ? uint(1) : uint(0);\n";
-+    os << indent(level + 1) << "const uint __acpp_profile_high_add_" << HitId
-+       << " = __acpp_profile_high_step_" << HitId
-+       << " + __acpp_profile_carry_" << HitId << ";\n";
-+    os << indent(level + 1) << "const uint __acpp_profile_old_high_" << HitId
-+       << " = atomic_fetch_add_explicit(__acpp_sscp_metal_profile_counters + "
-+       << HighSlot << ", __acpp_profile_high_add_" << HitId
-+       << ", memory_order_relaxed);\n";
-+    os << indent(level + 1) << "if (__acpp_profile_high_add_" << HitId
-+       << " < __acpp_profile_high_step_" << HitId
-+       << " || __acpp_profile_old_high_" << HitId
-+       << " > (~uint(0) - __acpp_profile_high_add_" << HitId << ")"
-+       << " || " << emitExpr(CI->getArgOperand(2)) << ")\n";
-+    os << indent(level + 2)
-+       << "atomic_store_explicit(__acpp_sscp_metal_profile_counters + "
-+       << OverflowSlot << ", uint(1), memory_order_relaxed);\n";
-+    os << indent(level) << "}\n";
++    ++emittedDeviceProfileHits;
++    os << indent(level)
++       << "__acpp_sscp_metal_profile_add("
++          "__acpp_sscp_metal_profile_counters, uint("
++       << Slot->getZExtValue() << "), ulong("
++       << emitExpr(CI->getArgOperand(1)) << "), bool("
++       << emitExpr(CI->getArgOperand(2)) << "));\n";
 +    return true;
 +  }
 +
-@@ -2192,0 +2541,6 @@ bool MetalEmitter::emitCallInstruction(const CallInst* CI, const std::string& na
+@@ -2192,0 +2548,6 @@ bool MetalEmitter::emitCallInstruction(const CallInst* CI, const std::string& na
 +  if (!callee->isDeclaration() && functionNeedsDeviceProfile(*callee)) {
 +    if (argsSize > 0) {
 +      callExpr += ", ";
@@ -406,19 +435,20 @@ index 94a49963..1dd0d8eb 100644
 +    callExpr += "__acpp_sscp_metal_profile_counters";
 +  }
 diff --git a/src/compiler/llvm-to-backend/metal/Emitter.hpp b/src/compiler/llvm-to-backend/metal/Emitter.hpp
-index 61b1ae57..88907ab9 100644
+index 61b1ae57..98ef8b9b 100644
 --- a/src/compiler/llvm-to-backend/metal/Emitter.hpp
 +++ b/src/compiler/llvm-to-backend/metal/Emitter.hpp
 @@ -14,0 +15 @@
 +#include <cstdint>
-@@ -108,0 +110,6 @@ private:
+@@ -108,0 +110,7 @@ private:
 +  bool analyzeDeviceProfileMetadata();
 +  bool lowerDeviceProfileIntrinsics();
 +  bool analyzeDeviceProfileFunctions();
 +  bool functionNeedsDeviceProfile(const llvm::Function& F) const;
 +  void emitDeviceProfileMetadata();
++  void emitDeviceProfileIncrementHelper();
 +  int flatArgumentLimit() const;
-@@ -145,0 +153,11 @@ private:
+@@ -145,0 +154,11 @@ private:
 +  struct DeviceProfileRecord {
 +    std::string name;
 +    uint64_t hash = 0;
@@ -431,7 +461,7 @@ index 61b1ae57..88907ab9 100644
 +  uint64_t emittedDeviceProfileHits = 0;
 +
 diff --git a/src/compiler/sscp/TargetSeparationPass.cpp b/src/compiler/sscp/TargetSeparationPass.cpp
-index f3202ceb..7e193c08 100644
+index f3202ceb..57d3b271 100644
 --- a/src/compiler/sscp/TargetSeparationPass.cpp
 +++ b/src/compiler/sscp/TargetSeparationPass.cpp
 @@ -29,0 +30,2 @@
@@ -789,7 +819,7 @@ index f3202ceb..7e193c08 100644
 @@ -645,0 +990 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
 +      restoreHostCoverageMappingNames(M, HasCoverageMappingNames);
 diff --git a/src/runtime/metal/metal_code_object.cpp b/src/runtime/metal/metal_code_object.cpp
-index 49e7d715..cb2267f6 100644
+index 49e7d715..a1e6432c 100644
 --- a/src/runtime/metal/metal_code_object.cpp
 +++ b/src/runtime/metal/metal_code_object.cpp
 @@ -21,0 +22 @@
@@ -799,9 +829,10 @@ index 49e7d715..cb2267f6 100644
 +#include <limits>
 @@ -24,0 +28 @@
 +#include <set>
-@@ -25,0 +30 @@
+@@ -25,0 +30,2 @@
 +#include <sstream>
-@@ -40,0 +46,21 @@ namespace {
++#include <sys/file.h>
+@@ -40,0 +47,21 @@ namespace {
 +bool decode_profile_name(const std::string& hex, std::string& out) {
 +  auto digit = [](char c) -> int {
 +    if (c >= '0' && c <= '9') return c - '0';
@@ -823,7 +854,77 @@ index 49e7d715..cb2267f6 100644
 +  return !out.empty();
 +}
 +
-@@ -444,0 +471,92 @@ MTL::BinaryArchive* load_binary_archive_from_url(MTL::Device* device,
+@@ -106,0 +134,69 @@ std::string private_tmp_suffix() {
++class scoped_archive_build_lock {
++public:
++  explicit scoped_archive_build_lock(const std::string& path) {
++    _fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
++    if (_fd < 0) {
++      HIPSYCL_DEBUG_WARNING
++          << "metal_code_object: cannot open archive-build lock " << path
++          << ": " << std::strerror(errno) << std::endl;
++      return;
++    }
++    while (::flock(_fd, LOCK_EX) != 0) {
++      if (errno == EINTR) {
++        continue;
++      }
++      HIPSYCL_DEBUG_WARNING
++          << "metal_code_object: cannot acquire archive-build lock " << path
++          << ": " << std::strerror(errno) << std::endl;
++      ::close(_fd);
++      _fd = -1;
++      return;
++    }
++  }
++
++  scoped_archive_build_lock(const scoped_archive_build_lock&) = delete;
++  scoped_archive_build_lock&
++  operator=(const scoped_archive_build_lock&) = delete;
++
++  ~scoped_archive_build_lock() {
++    if (_fd >= 0) {
++      while (::flock(_fd, LOCK_UN) != 0 && errno == EINTR) {
++      }
++      ::close(_fd);
++    }
++  }
++
++  bool acquired() const { return _fd >= 0; }
++
++private:
++  int _fd = -1;
++};
++
++bool sync_archive_file(const std::string& path) {
++  int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
++  if (fd < 0) {
++    HIPSYCL_DEBUG_WARNING
++        << "metal_code_object: cannot open staged archive " << path
++        << " for validation: " << std::strerror(errno) << std::endl;
++    return false;
++  }
++  bool ok = true;
++  while (::fsync(fd) != 0) {
++    if (errno == EINTR) {
++      continue;
++    }
++    HIPSYCL_DEBUG_WARNING
++        << "metal_code_object: cannot sync staged archive " << path
++        << ": " << std::strerror(errno) << std::endl;
++    ok = false;
++    break;
++  }
++  if (::close(fd) != 0) {
++    HIPSYCL_DEBUG_WARNING
++        << "metal_code_object: cannot close staged archive " << path
++        << ": " << std::strerror(errno) << std::endl;
++    ok = false;
++  }
++  return ok;
++}
++
+@@ -444,0 +541,92 @@ MTL::BinaryArchive* load_binary_archive_from_url(MTL::Device* device,
 +[[noreturn]] void fail_device_profile_flush(const std::string& message) {
 +  HIPSYCL_DEBUG_ERROR
 +      << "metal_code_object: device profile flush failed: " << message
@@ -916,21 +1017,145 @@ index 49e7d715..cb2267f6 100644
 +  }
 +}
 +
-@@ -453,2 +571,6 @@ metal_sscp_executable_object::metal_sscp_executable_object(
+@@ -453,2 +641,8 @@ metal_sscp_executable_object::metal_sscp_executable_object(
 -      _archive{nullptr}, _msl_source{metal_source} {
 -  _build_result = build(metal_source);
-+      _archive{nullptr}, _device_profile_buffer{nullptr},
++      _archive{nullptr},
++      _pipeline_cache_pid{static_cast<uint64_t>(getpid())},
++      _device_profile_buffer{nullptr},
 +      _msl_source{metal_source} {
 +  _build_result = initialize_device_profile(metal_source);
 +  if (_build_result.is_success()) {
 +    _build_result = build(metal_source);
 +  }
-@@ -457,0 +580,4 @@ metal_sscp_executable_object::~metal_sscp_executable_object() {
+@@ -457,0 +652,12 @@ metal_sscp_executable_object::~metal_sscp_executable_object() {
 +  flush_device_profile();
++  for (auto& [_, record] : _pipeline_cache) {
++    if (record.pipeline_state) {
++      record.pipeline_state->release();
++    }
++    if (record.function) {
++      record.function->release();
++    }
++  }
 +  if (_device_profile_buffer) {
 +    _device_profile_buffer->release();
 +  }
-@@ -507,0 +634,8 @@ MTL::BinaryArchive* metal_sscp_executable_object::get_binary_archive() const {
+@@ -507,0 +714,122 @@ MTL::BinaryArchive* metal_sscp_executable_object::get_binary_archive() const {
++result metal_sscp_executable_object::get_or_create_kernel_pipeline(
++    std::string_view kernel_name, MTL::Function*& function,
++    MTL::ComputePipelineState*& pipeline_state) const {
++  function = nullptr;
++  pipeline_state = nullptr;
++  if (!_library || !_device) {
++    return make_error(__acpp_here(),
++                      error_info{"metal: executable object is incomplete"});
++  }
++
++  std::lock_guard<std::mutex> lock{_pipeline_cache_mutex};
++  const uint64_t current_pid = static_cast<uint64_t>(getpid());
++  if (_pipeline_cache_pid != current_pid) {
++    // Metal objects and their XPC state are not valid after fork. Drop the
++    // inherited raw pointers without messaging the parent process's objects;
++    // the child's fresh entries are released normally at destruction.
++    _pipeline_cache.clear();
++    _pipeline_cache_pid = current_pid;
++  }
++
++  const std::string key{kernel_name};
++  if (auto existing = _pipeline_cache.find(key);
++      existing != _pipeline_cache.end()) {
++    function = existing->second.function;
++    pipeline_state = existing->second.pipeline_state;
++    return make_success();
++  }
++
++  NS::String* function_name =
++      NS::String::string(key.c_str(), NS::UTF8StringEncoding);
++  MTL::Function* created_function = _library->newFunction(function_name);
++  if (!created_function) {
++    return make_error(__acpp_here(),
++                      error_info{"metal: Could not find kernel function: " + key});
++  }
++
++  MTL::ComputePipelineDescriptor* descriptor =
++      MTL::ComputePipelineDescriptor::alloc()->init();
++  descriptor->setComputeFunction(created_function);
++
++  std::string last_error;
++  auto create_pipeline = [&](MTL::PipelineOption options) {
++    last_error.clear();
++    NS::Error* error = nullptr;
++    MTL::ComputePipelineState* state = _device->newComputePipelineState(
++        descriptor, options, /*reflection=*/nullptr, &error);
++    if (!state && error && error->localizedDescription()) {
++      last_error = error->localizedDescription()->utf8String();
++    }
++    return state;
++  };
++  auto create_pipeline_with_retry = [&](MTL::PipelineOption options) {
++    MTL::ComputePipelineState* state = nullptr;
++    for (unsigned attempt = 1; !state && attempt <= 3; ++attempt) {
++      state = create_pipeline(options);
++      if (!state && attempt < 3) {
++        ::usleep(static_cast<useconds_t>(25000 * attempt));
++      }
++    }
++    return state;
++  };
++
++  MTL::ComputePipelineState* created_pipeline = nullptr;
++  NS::Array* archives = nullptr;
++  if (_archive) {
++    const MTL::BinaryArchive* raw_archive = _archive;
++    archives = NS::Array::alloc()->init(
++        reinterpret_cast<const NS::Object* const*>(&raw_archive), 1);
++    descriptor->setBinaryArchives(archives);
++    created_pipeline = create_pipeline_with_retry(
++        MTL::PipelineOptionFailOnBinaryArchiveMiss);
++    if (!created_pipeline) {
++      HIPSYCL_DEBUG_WARNING
++          << "metal_code_object: archive-backed pipeline creation failed for "
++          << key << "; retrying without the archive"
++          << (last_error.empty() ? "" : ": ") << last_error << std::endl;
++      descriptor->setBinaryArchives(nullptr);
++    }
++  }
++
++  // Pipeline creation is side-effect-free until a command is encoded. A
++  // short bounded retry absorbs transient compiler-service pressure on small
++  // hosted Apple Silicon runners while preserving the final error verbatim.
++  if (!created_pipeline) {
++    created_pipeline =
++        create_pipeline_with_retry(MTL::PipelineOptionNone);
++  }
++
++  if (archives) {
++    archives->release();
++  }
++  descriptor->release();
++
++  if (!created_pipeline) {
++    created_function->release();
++    std::string message =
++        "metal: Failed to create compute pipeline state after bounded retries";
++    if (!last_error.empty()) {
++      message += ": " + last_error;
++    }
++    return make_error(__acpp_here(), error_info{message});
++  }
++
++  auto [inserted, did_insert] = _pipeline_cache.emplace(
++      key, kernel_pipeline_record{created_function, created_pipeline});
++  if (!did_insert) {
++    created_pipeline->release();
++    created_function->release();
++  }
++  function = inserted->second.function;
++  pipeline_state = inserted->second.pipeline_state;
++  return make_success();
++}
++
 +MTL::Buffer* metal_sscp_executable_object::get_device_profile_buffer() const {
 +  return _device_profile_buffer;
 +}
@@ -939,7 +1164,7 @@ index 49e7d715..cb2267f6 100644
 +  return _device_profile_counter_count;
 +}
 +
-@@ -511,0 +646,196 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
+@@ -511,0 +840,196 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
 +result metal_sscp_executable_object::initialize_device_profile(
 +    const std::string& source) {
 +  static constexpr const char* Header = "// __ACPP_DEVICE_PROFILE_V1 ";
@@ -1136,18 +1361,146 @@ index 49e7d715..cb2267f6 100644
 +      << std::endl;
 +}
 +
+@@ -523,4 +1047,2 @@ result metal_sscp_executable_object::build(const std::string& source) {
+-    // Load a previously-serialized archive if present; otherwise spawn the
+-    // helper subprocess to produce one and load the result. Failure is
+-    // non-fatal: _archive stays nullptr and the pipeline-state path falls
+-    // through to in-process creation.
++    // Load a previously serialized archive if present. Published archives are
++    // immutable, so an unlocked fast-path read is safe.
+@@ -533 +1055,25 @@ result metal_sscp_executable_object::build(const std::string& source) {
+-          << " failed to load; rebuilding" << std::endl;
++          << " failed to load; waiting to rebuild" << std::endl;
++    }
++
++    // Serialize helper processes across the cache, not only per hash. A
++    // virtual M1 has too little compiler-service headroom for concurrent AGX
++    // archive builds of different kernels. flock is released by the kernel if
++    // a builder process exits or crashes; the persistent lock file is benign.
++    // Keep the lock adjacent to (not inside) jit-cache so cache evidence and
++    // hash-pair accounting continue to describe compiler artifacts only.
++    const std::string lock_path =
++        cache_dir + ".pgaccel-metal-archive-build.lock";
++    scoped_archive_build_lock build_lock{lock_path};
++    if (!build_lock.acquired()) {
++      return;
++    }
++
++    // Another process may have published while this process waited. Recheck
++    // under the lock before spending memory on a duplicate helper.
++    ec.clear();
++    if (std::filesystem::exists(metalar_path, ec) && !ec) {
++      _archive = load_binary_archive_from_url(_device, metalar_path);
++      if (_archive) return;
++      HIPSYCL_DEBUG_WARNING
++          << "metal_code_object: removing invalid metalar at " << metalar_path
++          << " under archive-build lock" << std::endl;
+@@ -535,0 +1082,3 @@ result metal_sscp_executable_object::build(const std::string& source) {
++
++    const std::string staged_metalar_path =
++        metalar_path + "." + private_tmp_suffix() + ".tmp";
+@@ -537 +1086,2 @@ result metal_sscp_executable_object::build(const std::string& source) {
+-        spawn_archive_builder(produced_metallib, metalar_path, _kernel_names);
++        spawn_archive_builder(produced_metallib, staged_metalar_path,
++                              _kernel_names);
+@@ -539,0 +1090,19 @@ result metal_sscp_executable_object::build(const std::string& source) {
++        ec.clear();
++        if (!std::filesystem::is_regular_file(staged_metalar_path, ec) || ec ||
++            std::filesystem::file_size(staged_metalar_path, ec) == 0 || ec) {
++          HIPSYCL_DEBUG_WARNING
++              << "metal_code_object: archive helper produced no valid staged "
++                 "file at "
++              << staged_metalar_path << std::endl;
++          break;
++        }
++        if (!sync_archive_file(staged_metalar_path)) {
++          break;
++        }
++        if (::rename(staged_metalar_path.c_str(), metalar_path.c_str()) != 0) {
++          HIPSYCL_DEBUG_WARNING
++              << "metal_code_object: cannot atomically publish archive "
++              << staged_metalar_path << " -> " << metalar_path << ": "
++              << std::strerror(errno) << std::endl;
++          break;
++        }
+@@ -540,0 +1110,3 @@ result metal_sscp_executable_object::build(const std::string& source) {
++        if (!_archive) {
++          std::remove(metalar_path.c_str());
++        }
+@@ -552,0 +1125 @@ result metal_sscp_executable_object::build(const std::string& source) {
++    std::remove(staged_metalar_path.c_str());
 diff --git a/src/runtime/metal/metal_queue.cpp b/src/runtime/metal/metal_queue.cpp
-index c32232fa..45587faf 100644
+index c32232fa..ab086cd3 100644
 --- a/src/runtime/metal/metal_queue.cpp
 +++ b/src/runtime/metal/metal_queue.cpp
 @@ -20,0 +21 @@
 +#include <limits>
 @@ -38,0 +40 @@ static constexpr int metal_max_args_for_flat_mode =
 +static constexpr NS::UInteger metal_device_profile_buffer_index = 30;
-@@ -121,0 +124,2 @@ result launch_kernel_from_library(
+@@ -109,2 +111 @@ result launch_kernel_from_library(
+-  MTL::Library* library,
+-  MTL::Device* device,
++  const metal_executable_object* executable_object,
+@@ -122 +123,2 @@ result launch_kernel_from_library(
+-  MTL::BinaryArchive* binary_archive)
 +  MTL::Buffer* device_profile_buffer,
-+  std::size_t device_profile_counter_count,
-@@ -181 +185,19 @@ result launch_kernel_from_library(
++  std::size_t device_profile_counter_count)
+@@ -123,0 +126,4 @@ result launch_kernel_from_library(
++  MTL::Library* library =
++      executable_object ? executable_object->get_library() : nullptr;
++  MTL::Device* device =
++      executable_object ? executable_object->get_device() : nullptr;
+@@ -129,43 +135,6 @@ result launch_kernel_from_library(
+-  auto entry = std::string(kernel_name);
+-  // Get the kernel function from library
+-  NS::String* function_name = NS::String::string(entry.c_str(), NS::UTF8StringEncoding);
+-
+-  NS::SharedPtr<MTL::Function> function = NS::TransferPtr(library->newFunction(function_name));
+-
+-  if (!function) {
+-    return make_error(__acpp_here(),
+-                      error_info{"metal: Could not find kernel function: " +
+-                                 std::string(kernel_name)});
+-  }
+-
+-  // Build pipeline via descriptor so we can pass a pre-populated
+-  // MTLBinaryArchive (produced out-of-process by acpp-metal-archive-build)
+-  // together with MTL::PipelineOptionFailOnBinaryArchiveMiss. When the
+-  // archive is present, pipeline creation is a pure deserialization and
+-  // never round-trips to MTLCompilerService.
+-  NS::SharedPtr<MTL::ComputePipelineDescriptor> pipe_desc =
+-      NS::TransferPtr(MTL::ComputePipelineDescriptor::alloc()->init());
+-  pipe_desc->setComputeFunction(function.get());
+-
+-  MTL::PipelineOption pipeline_options = MTL::PipelineOptionNone;
+-  NS::SharedPtr<NS::Array> archives_array;
+-  if (binary_archive) {
+-    const MTL::BinaryArchive* raw = binary_archive;
+-    archives_array = NS::TransferPtr(NS::Array::alloc()->init(
+-        reinterpret_cast<const NS::Object* const*>(&raw), 1));
+-    pipe_desc->setBinaryArchives(archives_array.get());
+-    pipeline_options = MTL::PipelineOptionFailOnBinaryArchiveMiss;
+-  }
+-
+-  NS::Error* error = nullptr;
+-  NS::SharedPtr<MTL::ComputePipelineState> pipeline_state = NS::TransferPtr(
+-      device->newComputePipelineState(pipe_desc.get(), pipeline_options,
+-                                      /*reflection=*/nullptr, &error));
+-
+-  if (error || !pipeline_state) {
+-    std::string error_msg = "metal: Failed to create compute pipeline state";
+-    if (error && error->localizedDescription()) {
+-      error_msg += ": ";
+-      error_msg += error->localizedDescription()->utf8String();
+-    }
+-    return make_error(__acpp_here(), error_info{error_msg});
++  MTL::Function* function = nullptr;
++  MTL::ComputePipelineState* pipeline_state = nullptr;
++  result pipeline_result = executable_object->get_or_create_kernel_pipeline(
++      kernel_name, function, pipeline_state);
++  if (!pipeline_result.is_success()) {
++    return pipeline_result;
+@@ -181 +150,19 @@ result launch_kernel_from_library(
 -  bool arg_buffer_used = static_cast<int>(num_args) > metal_max_args_for_flat_mode;
 +  const bool device_profile_enabled = device_profile_buffer != nullptr;
 +  if (device_profile_enabled != (device_profile_counter_count != 0)) {
@@ -1168,11 +1521,14 @@ index c32232fa..45587faf 100644
 +  const int flat_argument_limit =
 +      metal_max_args_for_flat_mode - (device_profile_enabled ? 1 : 0);
 +  bool arg_buffer_used = static_cast<int>(num_args) > flat_argument_limit;
-@@ -211 +233,2 @@ result launch_kernel_from_library(
+@@ -194 +181 @@ result launch_kernel_from_library(
+-  encoder->setComputePipelineState(pipeline_state.get());
++  encoder->setComputePipelineState(pipeline_state);
+@@ -211 +198,2 @@ result launch_kernel_from_library(
 -  // buffer(0) = dynamic local memory size, buffer(1) = gpu-to-host addr delta for pointer translation
 +  // Preserve the established user ABI at buffer(2). Device coverage uses the
 +  // reserved high binding buffer(30), with flat mode capped at 28 arguments.
-@@ -215,0 +239,10 @@ result launch_kernel_from_library(
+@@ -215,0 +204,10 @@ result launch_kernel_from_library(
 +  if (device_profile_enabled) {
 +    encoder->setBuffer(device_profile_buffer, 0,
 +                       metal_device_profile_buffer_index);
@@ -1183,6 +1539,13 @@ index c32232fa..45587faf 100644
 +    return make_error(__acpp_here(), error_info{
 +        "metal: kernel arguments collide with reserved buffer bindings"});
 +  }
-@@ -941,0 +975,2 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
+@@ -221 +219 @@ result launch_kernel_from_library(
+-      encoder, device, allocator, function.get(), args, arg_sizes, num_args, is_pointer_arg, buffers_out, buf_offset);
++      encoder, device, allocator, function, args, arg_sizes, num_args, is_pointer_arg, buffers_out, buf_offset);
+@@ -935 +933 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
+-    library, _device, new_command_buffer(), _allocator, kernel_name,
++    metal_obj, new_command_buffer(), _allocator, kernel_name,
+@@ -942 +940,2 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
+-    metal_obj->get_binary_archive());
 +    metal_obj->get_device_profile_buffer(),
-+    metal_obj->get_device_profile_counter_count(),
++    metal_obj->get_device_profile_counter_count());

@@ -594,6 +594,22 @@ class LogAuditTests(unittest.TestCase):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_metal_diagnostics_capture_is_failure_safe(self) -> None:
+        script = SCRIPT.parents[1] / "scripts/capture_metal_ci_diagnostics.sh"
+        self.assertTrue(script.stat().st_mode & 0o111)
+        text = script.read_text(encoding="utf-8")
+        for required in (
+            'pgrx_log="$HOME/.pgrx/${pg}.log"',
+            "runner-and-step-metadata.txt",
+            "pg_accel-acpp-provenance.txt",
+            "jit-cache-files.txt",
+            "find \"$cache_dir\" -maxdepth 1 -type f -exec wc -c {} +",
+            "exit 0",
+        ):
+            self.assertIn(required, text)
+        self.assertNotIn("printenv", text)
+        self.assertNotIn("env >", text)
+
     def test_release_workflow_requires_hosted_compatibility_and_draft(self) -> None:
         workflow_path = SCRIPT.parents[1] / ".github/workflows/release.yml"
         workflow = workflow_path.read_text(encoding="utf-8")
@@ -626,7 +642,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 1,
             ),
             workflow.replace(
+                "            sysctl -n hw.logicalcpu\n"
                 "            .pgaccel/acpp/current/bin/acpp-info",
+                "            sysctl -n hw.logicalcpu\n"
                 "            system_profiler SPDisplaysDataType",
                 1,
             ),
@@ -691,6 +709,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
             workflow.replace(
                 "  release:\n    name:",
                 "  release:\n    continue-on-error: true\n    name:",
+                1,
+            ),
+            workflow.replace(
+                "      - name: Capture release hosted Metal diagnostics",
+                "      - name: Drop release hosted Metal diagnostics",
+                1,
+            ),
+            workflow.replace(
+                "      - name: Upload release hosted Metal diagnostics",
+                "      - name: Discard release hosted Metal diagnostics",
                 1,
             ),
         )
@@ -772,7 +800,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 1,
             ),
             workflow.replace(
+                "            sysctl -n hw.logicalcpu\n"
                 "            .pgaccel/acpp/current/bin/acpp-info",
+                "            sysctl -n hw.logicalcpu\n"
                 "            system_profiler SPDisplaysDataType",
                 1,
             ),
@@ -829,6 +859,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 '          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18',
                 '          CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18\n'
                 "          just metal-stress 18",
+                1,
+            ),
+            workflow.replace(
+                "      - name: Capture macOS Metal diagnostics",
+                "      - name: Drop macOS Metal diagnostics",
+                1,
+            ),
+            workflow.replace(
+                "      - name: Upload hosted Metal diagnostics",
+                "      - name: Discard hosted Metal diagnostics",
                 1,
             ),
         )

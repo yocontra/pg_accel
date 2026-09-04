@@ -5606,6 +5606,11 @@ def gpu_evidence(args: argparse.Namespace) -> int:
 
 def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
     errors: list[str] = []
+    added_text = "\n".join(
+        line[1:]
+        for line in text.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
     for required in (
         "lowerDeviceProfileInstrumentation(*DeviceModule);",
         '"__acpp_sscp_metal_profile_increment"',
@@ -5627,19 +5632,21 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         'Name.consume_front("\\1")',
         "functionNeedsDeviceProfile(*Callee)",
         "device atomic_uint* __acpp_sscp_metal_profile_counters",
-        "atomic_fetch_add_explicit(__acpp_sscp_metal_profile_counters",
-        "const uint64_t LowSlot = Slot->getZExtValue() * 2",
-        "const uint64_t HighSlot = LowSlot + 1",
+        "emitDeviceProfileIncrementHelper();",
+        "__attribute__((noinline)) void __acpp_sscp_metal_profile_add(",
+        "const uint low_slot = slot * uint(2);",
+        "counters + low_slot, low_step, memory_order_relaxed",
+        "const uint carry = old_low > (~uint(0) - low_step)",
+        "const uint high_add = high_step + carry;",
+        "counters + low_slot + uint(1), high_add, memory_order_relaxed",
+        "high_add < high_step",
+        "old_high > (~uint(0) - high_add)",
         "static_cast<uint64_t>(deviceProfileCounterCount) * 2",
-        "__acpp_profile_low_step_",
-        "__acpp_profile_high_step_",
-        "__acpp_profile_carry_",
-        "__acpp_profile_high_add_",
+        "++emittedDeviceProfileHits;",
+        '<< "__acpp_sscp_metal_profile_add("',
         "CI->arg_size() != 3",
         "CI->getArgOperand(2)->getType()->isIntegerTy(1)",
         'emitExpr(CI->getArgOperand(2))',
-        '" < __acpp_profile_high_step_"',
-        '" > (~uint(0) - __acpp_profile_high_add_"',
         'os << " [[buffer(30)]]"',
         "metal_device_profile_buffer_index = 30",
         'std::getenv("ACPP_METAL_DEVICE_PROFILE_DIR")',
@@ -5675,6 +5682,63 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
     ):
         if required not in text:
             errors.append(f"AdaptiveCpp coverage patch invariant is absent: {required}")
+    for required in (
+        "class scoped_archive_build_lock",
+        "::flock(_fd, LOCK_EX)",
+        'cache_dir + ".pgaccel-metal-archive-build.lock"',
+        'metalar_path + "." + private_tmp_suffix() + ".tmp"',
+        "spawn_archive_builder(produced_metallib, staged_metalar_path",
+        "sync_archive_file(staged_metalar_path)",
+        "::rename(staged_metalar_path.c_str(), metalar_path.c_str())",
+        "get_or_create_kernel_pipeline(",
+        "_pipeline_cache_pid != current_pid",
+        "_pipeline_cache.clear();",
+        "create_pipeline_with_retry(",
+        "create_pipeline_with_retry(MTL::PipelineOptionNone)",
+        "MTL::PipelineOptionFailOnBinaryArchiveMiss",
+        "MTL::PipelineOptionNone",
+        "metal_obj, new_command_buffer(), _allocator, kernel_name",
+    ):
+        if required not in added_text:
+            errors.append(
+                f"AdaptiveCpp Metal stability invariant is absent: {required}"
+            )
+    if "spawn_archive_builder(produced_metallib, metalar_path" in added_text:
+        errors.append(
+            "AdaptiveCpp archive helper must write a process-private staged path"
+        )
+    for obsolete in (
+        "__acpp_profile_wide_step_",
+        "__acpp_profile_low_step_",
+        "__acpp_profile_high_step_",
+        "__acpp_profile_carry_",
+        "__acpp_profile_high_add_",
+    ):
+        if obsolete in added_text:
+            errors.append(
+                "AdaptiveCpp Metal device profiling still expands per-hit MSL: "
+                f"{obsolete}"
+            )
+    archive_lock = added_text.find("scoped_archive_build_lock build_lock")
+    archive_stage = added_text.find("const std::string staged_metalar_path")
+    archive_spawn = added_text.find(
+        "spawn_archive_builder(produced_metallib, staged_metalar_path"
+    )
+    archive_sync = added_text.find("sync_archive_file(staged_metalar_path)")
+    archive_publish = added_text.find(
+        "::rename(staged_metalar_path.c_str(), metalar_path.c_str())"
+    )
+    if not (
+        0
+        <= archive_lock
+        < archive_stage
+        < archive_spawn
+        < archive_sync
+        < archive_publish
+    ):
+        errors.append(
+            "AdaptiveCpp archive build must lock, stage, sync, then publish"
+        )
     if text.count("requireNoHostProfileInstrumentation(M);") != 2:
         errors.append(
             "AdaptiveCpp coverage patch must reject host profile intrinsics on every lowering exit"

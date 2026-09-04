@@ -361,6 +361,7 @@ jobs:
           } > "$artifact_dir/runner-metadata.txt"
 
       - name: Run release hosted Metal compatibility gate
+        id: hosted-coverage
         shell: bash
         env:
           COVERAGE_ARTIFACT_DIR: artifacts/coverage-pg18-hosted-metal
@@ -371,6 +372,14 @@ jobs:
         run: |
           set -euo pipefail
           CPP_COVERAGE_LLVM_PREFIX="$(brew --prefix llvm@20)" just coverage 18
+
+      - name: Capture release hosted Metal diagnostics
+        if: always()
+        shell: bash
+        run: |
+          scripts/capture_metal_ci_diagnostics.sh \
+            18 artifacts/release-hosted-metal-diagnostics-pg18 \
+            "coverage=${{ steps.hosted-coverage.outcome }}"
 
       - name: Seal hosted runner provenance
         if: always()
@@ -403,6 +412,14 @@ jobs:
         with:
           name: pg-accel-release-runner-provenance-pg18-hosted-metal
           path: artifacts/hosted-metal-runner-pg18
+          if-no-files-found: error
+
+      - name: Upload release hosted Metal diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-accel-release-hosted-metal-diagnostics-pg18
+          path: artifacts/release-hosted-metal-diagnostics-pg18
           if-no-files-found: error
 
   release:
