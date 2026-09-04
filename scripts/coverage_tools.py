@@ -5691,6 +5691,15 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         "spawn_archive_builder(produced_metallib, staged_metalar_path",
         "sync_archive_file(staged_metalar_path)",
         "::rename(staged_metalar_path.c_str(), metalar_path.c_str())",
+        "retryable,",
+        "kArchiveBuilderMaxAttempts = 4",
+        "kArchiveBuilderRetryBaseDelayUs = 100000",
+        "if (exit_status == 6 || exit_status == 8)",
+        "return archive_builder_result::retryable;",
+        "attempt <= kArchiveBuilderMaxAttempts",
+        "rc != archive_builder_result::retryable",
+        "kArchiveBuilderRetryBaseDelayUs << (attempt - 1)",
+        "while (::usleep(delay) != 0 && errno == EINTR)",
         "get_or_create_kernel_pipeline(",
         "_pipeline_cache_pid != current_pid",
         "_pipeline_cache.clear();",
@@ -5727,6 +5736,22 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
     archive_spawn = added_text.find(
         "spawn_archive_builder(produced_metallib, staged_metalar_path"
     )
+    archive_retry_cleanup = added_text.rfind(
+        "std::remove(staged_metalar_path.c_str())", archive_stage, archive_spawn
+    )
+    archive_retry_check = added_text.find(
+        "rc != archive_builder_result::retryable", archive_spawn
+    )
+    archive_retry_exhausted = added_text.find(
+        "attempt == kArchiveBuilderMaxAttempts", archive_retry_check
+    )
+    archive_retry_terminal = added_text.find(
+        "rc = archive_builder_result::failed", archive_retry_exhausted
+    )
+    archive_retry_backoff = added_text.find(
+        "kArchiveBuilderRetryBaseDelayUs << (attempt - 1)",
+        archive_retry_terminal,
+    )
     archive_sync = added_text.find("sync_archive_file(staged_metalar_path)")
     archive_publish = added_text.find(
         "::rename(staged_metalar_path.c_str(), metalar_path.c_str())"
@@ -5735,12 +5760,17 @@ def adaptivecpp_coverage_patch_errors(text: str) -> list[str]:
         0
         <= archive_lock
         < archive_stage
+        < archive_retry_cleanup
         < archive_spawn
+        < archive_retry_check
+        < archive_retry_exhausted
+        < archive_retry_terminal
+        < archive_retry_backoff
         < archive_sync
         < archive_publish
     ):
         errors.append(
-            "AdaptiveCpp archive build must lock, stage, sync, then publish"
+            "AdaptiveCpp archive build must lock, stage, retry safely, sync, then publish"
         )
     if text.count("requireNoHostProfileInstrumentation(M);") != 2:
         errors.append(

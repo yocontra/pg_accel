@@ -819,7 +819,7 @@ index f3202ceb..57d3b271 100644
 @@ -645,0 +990 @@ llvm::PreservedAnalyses TargetSeparationPass::run(llvm::Module &M,
 +      restoreHostCoverageMappingNames(M, HasCoverageMappingNames);
 diff --git a/src/runtime/metal/metal_code_object.cpp b/src/runtime/metal/metal_code_object.cpp
-index 49e7d715..a1e6432c 100644
+index 49e7d715..5eac4bbc 100644
 --- a/src/runtime/metal/metal_code_object.cpp
 +++ b/src/runtime/metal/metal_code_object.cpp
 @@ -21,0 +22 @@
@@ -924,7 +924,28 @@ index 49e7d715..a1e6432c 100644
 +  return ok;
 +}
 +
-@@ -444,0 +541,92 @@ MTL::BinaryArchive* load_binary_archive_from_url(MTL::Device* device,
+@@ -335,0 +432,5 @@ enum class archive_builder_result {
++  // The helper reached Metal's archive materialization API, but the operation
++  // failed in a way that is safe to repeat in a fresh helper process. Hosted
++  // Apple Silicon runners can transiently lose the helper's compiler-service
++  // connection even though the exact same metallib succeeds on a later spawn.
++  retryable,
+@@ -340,0 +442,3 @@ enum class archive_builder_result {
++constexpr unsigned kArchiveBuilderMaxAttempts = 4;
++constexpr useconds_t kArchiveBuilderRetryBaseDelayUs = 100000;
++
+@@ -348,0 +453,2 @@ enum class archive_builder_result {
++//   6 -> addComputePipelineFunctions failed; safe to retry in a fresh helper
++//   8 -> serializeToURL failed; safe to retry in a fresh helper
+@@ -406,0 +513,7 @@ archive_builder_result spawn_archive_builder(
++  if (exit_status == 6 || exit_status == 8) {
++    HIPSYCL_DEBUG_WARNING
++        << "metal_code_object: acpp-metal-archive-build reported retryable "
++           "status "
++        << exit_status << " for " << metallib_path << std::endl;
++    return archive_builder_result::retryable;
++  }
+@@ -444,0 +558,92 @@ MTL::BinaryArchive* load_binary_archive_from_url(MTL::Device* device,
 +[[noreturn]] void fail_device_profile_flush(const std::string& message) {
 +  HIPSYCL_DEBUG_ERROR
 +      << "metal_code_object: device profile flush failed: " << message
@@ -1017,7 +1038,7 @@ index 49e7d715..a1e6432c 100644
 +  }
 +}
 +
-@@ -453,2 +641,8 @@ metal_sscp_executable_object::metal_sscp_executable_object(
+@@ -453,2 +658,8 @@ metal_sscp_executable_object::metal_sscp_executable_object(
 -      _archive{nullptr}, _msl_source{metal_source} {
 -  _build_result = build(metal_source);
 +      _archive{nullptr},
@@ -1028,7 +1049,7 @@ index 49e7d715..a1e6432c 100644
 +  if (_build_result.is_success()) {
 +    _build_result = build(metal_source);
 +  }
-@@ -457,0 +652,12 @@ metal_sscp_executable_object::~metal_sscp_executable_object() {
+@@ -457,0 +669,12 @@ metal_sscp_executable_object::~metal_sscp_executable_object() {
 +  flush_device_profile();
 +  for (auto& [_, record] : _pipeline_cache) {
 +    if (record.pipeline_state) {
@@ -1041,7 +1062,7 @@ index 49e7d715..a1e6432c 100644
 +  if (_device_profile_buffer) {
 +    _device_profile_buffer->release();
 +  }
-@@ -507,0 +714,122 @@ MTL::BinaryArchive* metal_sscp_executable_object::get_binary_archive() const {
+@@ -507,0 +731,122 @@ MTL::BinaryArchive* metal_sscp_executable_object::get_binary_archive() const {
 +result metal_sscp_executable_object::get_or_create_kernel_pipeline(
 +    std::string_view kernel_name, MTL::Function*& function,
 +    MTL::ComputePipelineState*& pipeline_state) const {
@@ -1164,7 +1185,7 @@ index 49e7d715..a1e6432c 100644
 +  return _device_profile_counter_count;
 +}
 +
-@@ -511,0 +840,196 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
+@@ -511,0 +857,196 @@ MTL::Device* metal_sscp_executable_object::get_device() const {
 +result metal_sscp_executable_object::initialize_device_profile(
 +    const std::string& source) {
 +  static constexpr const char* Header = "// __ACPP_DEVICE_PROFILE_V1 ";
@@ -1361,14 +1382,14 @@ index 49e7d715..a1e6432c 100644
 +      << std::endl;
 +}
 +
-@@ -523,4 +1047,2 @@ result metal_sscp_executable_object::build(const std::string& source) {
+@@ -523,4 +1064,2 @@ result metal_sscp_executable_object::build(const std::string& source) {
 -    // Load a previously-serialized archive if present; otherwise spawn the
 -    // helper subprocess to produce one and load the result. Failure is
 -    // non-fatal: _archive stays nullptr and the pipeline-state path falls
 -    // through to in-process creation.
 +    // Load a previously serialized archive if present. Published archives are
 +    // immutable, so an unlocked fast-path read is safe.
-@@ -533 +1055,25 @@ result metal_sscp_executable_object::build(const std::string& source) {
+@@ -533 +1072,25 @@ result metal_sscp_executable_object::build(const std::string& source) {
 -          << " failed to load; rebuilding" << std::endl;
 +          << " failed to load; waiting to rebuild" << std::endl;
 +    }
@@ -1395,15 +1416,47 @@ index 49e7d715..a1e6432c 100644
 +      HIPSYCL_DEBUG_WARNING
 +          << "metal_code_object: removing invalid metalar at " << metalar_path
 +          << " under archive-build lock" << std::endl;
-@@ -535,0 +1082,3 @@ result metal_sscp_executable_object::build(const std::string& source) {
+@@ -536,2 +1099,37 @@ result metal_sscp_executable_object::build(const std::string& source) {
+-    archive_builder_result rc =
+-        spawn_archive_builder(produced_metallib, metalar_path, _kernel_names);
 +
 +    const std::string staged_metalar_path =
 +        metalar_path + "." + private_tmp_suffix() + ".tmp";
-@@ -537 +1086,2 @@ result metal_sscp_executable_object::build(const std::string& source) {
--        spawn_archive_builder(produced_metallib, metalar_path, _kernel_names);
-+        spawn_archive_builder(produced_metallib, staged_metalar_path,
-+                              _kernel_names);
-@@ -539,0 +1090,19 @@ result metal_sscp_executable_object::build(const std::string& source) {
++    archive_builder_result rc = archive_builder_result::failed;
++    for (unsigned attempt = 1; attempt <= kArchiveBuilderMaxAttempts;
++         ++attempt) {
++      // serializeToURL may leave an unusable file behind. Every fresh helper
++      // starts from an absent staged path so a retry cannot accept stale or
++      // partial output from its predecessor.
++      std::remove(staged_metalar_path.c_str());
++      rc = spawn_archive_builder(produced_metallib, staged_metalar_path,
++                                 _kernel_names);
++      if (rc != archive_builder_result::retryable) {
++        break;
++      }
++      if (attempt == kArchiveBuilderMaxAttempts) {
++        HIPSYCL_DEBUG_WARNING
++            << "metal_code_object: archive helper exhausted "
++            << kArchiveBuilderMaxAttempts << " attempts for "
++            << produced_metallib << std::endl;
++        rc = archive_builder_result::failed;
++        break;
++      }
++
++      const useconds_t delay = static_cast<useconds_t>(
++          kArchiveBuilderRetryBaseDelayUs << (attempt - 1));
++      HIPSYCL_DEBUG_WARNING
++          << "metal_code_object: retrying archive helper for "
++          << produced_metallib << " after " << delay
++          << "us (next attempt " << (attempt + 1) << "/"
++          << kArchiveBuilderMaxAttempts << ")" << std::endl;
++      // A retry always creates a new process and therefore a new compiler-
++      // service connection. Complete the bounded backoff even if a signal
++      // interrupts us; this path still holds the cross-process build lock.
++      while (::usleep(delay) != 0 && errno == EINTR) {
++      }
++    }
+@@ -539,0 +1138,19 @@ result metal_sscp_executable_object::build(const std::string& source) {
 +        ec.clear();
 +        if (!std::filesystem::is_regular_file(staged_metalar_path, ec) || ec ||
 +            std::filesystem::file_size(staged_metalar_path, ec) == 0 || ec) {
@@ -1423,14 +1476,22 @@ index 49e7d715..a1e6432c 100644
 +              << std::strerror(errno) << std::endl;
 +          break;
 +        }
-@@ -540,0 +1110,3 @@ result metal_sscp_executable_object::build(const std::string& source) {
+@@ -540,0 +1158,3 @@ result metal_sscp_executable_object::build(const std::string& source) {
 +        if (!_archive) {
 +          std::remove(metalar_path.c_str());
 +        }
-@@ -552,0 +1125 @@ result metal_sscp_executable_object::build(const std::string& source) {
+@@ -546,0 +1167,7 @@ result metal_sscp_executable_object::build(const std::string& source) {
++      case archive_builder_result::retryable:
++        // The bounded loop always converts an exhausted retryable result to a
++        // terminal failure before entering this switch.
++        HIPSYCL_DEBUG_WARNING
++            << "metal_code_object: internal archive retry state escaped for "
++            << produced_metallib << std::endl;
++        break;
+@@ -552,0 +1180 @@ result metal_sscp_executable_object::build(const std::string& source) {
 +    std::remove(staged_metalar_path.c_str());
 diff --git a/src/runtime/metal/metal_queue.cpp b/src/runtime/metal/metal_queue.cpp
-index c32232fa..ab086cd3 100644
+index c32232fa..f5c32c34 100644
 --- a/src/runtime/metal/metal_queue.cpp
 +++ b/src/runtime/metal/metal_queue.cpp
 @@ -20,0 +21 @@
@@ -1542,21 +1603,18 @@ index c32232fa..ab086cd3 100644
 @@ -221 +219 @@ result launch_kernel_from_library(
 -      encoder, device, allocator, function.get(), args, arg_sizes, num_args, is_pointer_arg, buffers_out, buf_offset);
 +      encoder, device, allocator, function, args, arg_sizes, num_args, is_pointer_arg, buffers_out, buf_offset);
-@@ -251,6 +249,8 @@ result launch_kernel_from_library(
+@@ -251 +249,2 @@ result launch_kernel_from_library(
 -  command_buffer->addCompletedHandler([=](MTL::CommandBuffer* command_buffer) {
 +  command_buffer->addCompletedHandler(
 +      [kernel_name = std::string{kernel_name}](MTL::CommandBuffer* command_buffer) {
-     if (NS::Error* err = command_buffer->error()) {
+@@ -253 +252,2 @@ result launch_kernel_from_library(
 -      std::string msg = "metal: Command buffer failed: ";
 +      std::string msg = "metal: Kernel '" + kernel_name +
 +                        "' command buffer failed: ";
-       if (err->localizedDescription()) {
-         msg += err->localizedDescription()->utf8String();
-       }
-@@ -935 +933 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
+@@ -935 +935 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
 -    library, _device, new_command_buffer(), _allocator, kernel_name,
 +    metal_obj, new_command_buffer(), _allocator, kernel_name,
-@@ -942 +940,2 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
+@@ -942 +942,2 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
 -    metal_obj->get_binary_archive());
 +    metal_obj->get_device_profile_buffer(),
 +    metal_obj->get_device_profile_counter_count());

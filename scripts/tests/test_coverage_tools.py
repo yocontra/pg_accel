@@ -3197,6 +3197,53 @@ class ArtifactAndToolchainTests(unittest.TestCase):
                 "sync_archive_file(staged_metalar_path)",
                 "sync_archive_file(metalar_path)",
             ),
+            ("retryable,", "transient,"),
+            (
+                "kArchiveBuilderMaxAttempts = 4",
+                "kArchiveBuilderMaxAttempts = 1",
+            ),
+            (
+                "kArchiveBuilderRetryBaseDelayUs = 100000",
+                "kArchiveBuilderRetryBaseDelayUs = 0",
+            ),
+            (
+                "if (exit_status == 6 || exit_status == 8)",
+                "if (exit_status == 8)",
+            ),
+            (
+                "return archive_builder_result::retryable;",
+                "return archive_builder_result::failed;",
+            ),
+            (
+                "attempt <= kArchiveBuilderMaxAttempts",
+                "attempt < kArchiveBuilderMaxAttempts",
+            ),
+            (
+                "rc != archive_builder_result::retryable",
+                "rc == archive_builder_result::retryable",
+            ),
+            (
+                "kArchiveBuilderRetryBaseDelayUs << (attempt - 1)",
+                "kArchiveBuilderRetryBaseDelayUs",
+            ),
+            (
+                "while (::usleep(delay) != 0 && errno == EINTR)",
+                "if (::usleep(delay) != 0 && errno == EINTR)",
+            ),
+            (
+                "std::remove(staged_metalar_path.c_str());\n"
+                "+      rc = spawn_archive_builder",
+                "rc = spawn_archive_builder",
+            ),
+            (
+                "rc = archive_builder_result::failed;\n"
+                "+        break;\n"
+                "+      }\n+\n"
+                "+      const useconds_t delay",
+                "break;\n"
+                "+      }\n+\n"
+                "+      const useconds_t delay",
+            ),
             (
                 "_pipeline_cache_pid != current_pid",
                 "_pipeline_cache_pid == current_pid",

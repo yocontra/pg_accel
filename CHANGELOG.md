@@ -142,6 +142,12 @@ evidence attached to that GitHub release are package-availability claims.
 
 ### Fixed
 
+- Metal binary-archive construction now retries transient pipeline-function or
+  serialization failures in fresh helper processes with bounded backoff and
+  clean staged output. This prevents a hosted Apple Silicon compiler-service
+  restart from forcing the already-forked PostgreSQL backend onto the unusable
+  in-process pipeline path; deliberate oversized-archive skips and terminal
+  helper failures remain non-retryable and fail closed at dispatch.
 - Dense aggregate-filter kernel tests now cover one-shot atomic,
   hierarchical, and lifecycle chunked execution, including invalid measure
   null sidecars, out-of-range dense keys, reset recovery, and the defensive
