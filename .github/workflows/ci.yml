@@ -688,6 +688,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          just release-checklist-audit-test 2>&1 | \
+            tee "$LINUX_NO_GPU_ARTIFACT_DIR/release-checklist-audit-tests.log"
           cargo test -p pg_accel_bench --locked 2>&1 | \
             tee "$LINUX_NO_GPU_ARTIFACT_DIR/benchmark-harness-tests.log"
 

@@ -27,7 +27,7 @@ class ReleaseChecklistAuditTests(unittest.TestCase):
             text=True,
         )
 
-    def test_external_completed_ledger_passes(self) -> None:
+    def completed_checklist(self) -> str:
         checklist = TRACKED_CHECKLIST.read_text(encoding="utf-8")
         checklist = checklist.replace("- [ ]", "- [x]")
         replacements = {
@@ -39,14 +39,32 @@ class ReleaseChecklistAuditTests(unittest.TestCase):
         }
         for placeholder, evidence in replacements.items():
             checklist = checklist.replace(placeholder, evidence)
+        return checklist
 
+    def test_external_completed_ledger_passes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             ledger = Path(directory) / "tag-pr-checklist.md"
-            ledger.write_text(checklist, encoding="utf-8")
+            ledger.write_text(self.completed_checklist(), encoding="utf-8")
             completed = self.run_audit(ledger)
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn(f"release checklist audit: PASS ({ledger})", completed.stdout)
+
+    def test_completed_ledger_without_hosted_ci_item_fails_closed(self) -> None:
+        required_item = "Required hosted CI ship-bar jobs pass"
+        checklist = self.completed_checklist()
+        self.assertIn(required_item, checklist)
+        checklist = "\n".join(
+            line for line in checklist.splitlines() if required_item not in line
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ledger = Path(directory) / "missing-ci-checklist.md"
+            ledger.write_text(checklist, encoding="utf-8")
+            completed = self.run_audit(ledger)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(f"missing checklist item matching: {required_item}", completed.stderr)
+        self.assertNotIn("release checklist audit: PASS", completed.stdout)
 
     def test_default_tracked_template_remains_red(self) -> None:
         completed = self.run_audit()

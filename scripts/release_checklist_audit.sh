@@ -13,7 +13,7 @@ required_patterns=(
     "PostgreSQL native comparison passes"
     "Coverage reaches at least 90%"
     "Metal stress gate passes"
-    "Required CI ship-bar jobs pass"
+    "Required hosted CI ship-bar jobs pass"
     "Release verification matrix passes"
     "Release checklist synchronization is complete"
 )

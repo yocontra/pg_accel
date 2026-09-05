@@ -336,7 +336,7 @@ upstream-pg-tests-audit:
     PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_upstream_pg_tests.py -v
 
 # Pre-commit checks: fmt, lint, type-check matrix, deny, audits, doc-parity
-pre-commit: fmt-check lint check-matrix test-standalone deny audit doc-parity pg-version-audit package-extension-test upstream-pg-tests-audit safety-contract-audit audit-cpu-cheats-test metal-stress-artifact-test
+pre-commit: fmt-check lint check-matrix test-standalone deny audit doc-parity pg-version-audit package-extension-test upstream-pg-tests-audit safety-contract-audit audit-cpu-cheats-test metal-stress-artifact-test release-checklist-audit-test
     @echo "Pre-commit checks passed."
 
 # Run pgrx unit tests against one PG major. Defaults to the repo target PG major.
@@ -969,6 +969,10 @@ release-verify pg="":
 # RELEASE_CHECKLIST_EVIDENCE_PATH to audit a completed external/tag-PR ledger.
 release-checklist-audit:
     bash scripts/release_checklist_audit.sh
+
+# Test the checker itself; the incomplete release checklist must still fail.
+release-checklist-audit-test:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/tests/test_release_checklist_audit.py -v
 
 # Prove the analyzer against synthetic evasions and the real ABI/witness baseline.
 # Assertions expect the current production audit to be nonzero, so this stays green.
